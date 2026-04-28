@@ -1,0 +1,4 @@
+mcp/crm/crm
+*.db
+*.db-shm
+*.db-wal

@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<!--
+  Contacts panel for the CRM app.
+
+  Loaded by apteva-server's app-proxy at:
+    /api/apps/crm/ui/ContactsPanel.html?install_id=...&instance_id=...&project_id=...
+
+  Same-origin with the dashboard, so cookies + the user's session
+  authenticate every fetch back to /api/apps/crm/contacts/* without
+  any extra plumbing.
+
+  Vanilla HTML + JS for v0.1 — no React build step. We can swap to a
+  bundled UMD when the panel grows.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>CRM · Contacts</title>
+  <link rel="stylesheet" href="ContactsPanel.css" />
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <header class="search">
+        <input id="q" type="search" placeholder="Search contacts…" autofocus />
+        <button id="new" title="Create contact">+ New</button>
+      </header>
+      <ul id="list" class="contact-list" aria-label="Contacts"></ul>
+      <footer id="list-status" class="status-bar"></footer>
+    </aside>
+    <main id="detail" class="detail">
+      <div class="empty-state">
+        <p>Pick a contact, or click <strong>+ New</strong>.</p>
+      </div>
+    </main>
+  </div>
+  <script src="ContactsPanel.js"></script>
+</body>
+</html>

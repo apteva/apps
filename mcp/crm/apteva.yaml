@@ -1,0 +1,82 @@
+schema: apteva-app/v1
+
+name: crm
+display_name: CRM
+version: 0.1.0
+description: |
+  Contacts store for Apteva agents and human teams. Multi-value channels
+  (emails, phones, social), typed custom attributes with provenance,
+  append-only activity log, soft-delete + merge. Agents read/write via
+  MCP tools (find-or-create, search, log activity, set attribute, merge);
+  the dashboard panel renders the same data with a structured detail view.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/crm
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/crm/icon.png
+tags: [crm, contacts, productivity]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.instances.read
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: contacts_search
+      description: Filtered contact search.
+    - name: contacts_get
+      description: Fetch one contact (snapshot only).
+    - name: contacts_get_context
+      description: Snapshot + recent activities + tags + attributes — the agent's pre-flight read.
+    - name: contacts_create
+      description: Create a contact with channels, tags, and attributes.
+    - name: contacts_update
+      description: Partial-patch a contact.
+    - name: contacts_upsert_by_channel
+      description: Find-or-create by email or phone. Returns was_created.
+    - name: contacts_merge
+      description: Merge one contact into another.
+    - name: contacts_log_activity
+      description: Append to a contact's timeline.
+    - name: contacts_set_attribute
+      description: Write one custom-attribute value with provenance.
+    - name: contacts_define_attribute
+      description: Create or update an attribute definition.
+  ui_panels:
+    - slot: instance.tab
+      label: Contacts
+      icon: contacts
+      entry: /ui/ContactsPanel.html
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/crm
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/crm.db
+  migrations: migrations/
+
+config_schema:
+  - name: phone_default_country
+    type: text
+    default: "US"
+    label: Default country for phone normalisation
+    description: ISO-3166 alpha-2. Used when an inbound phone has no country code.
+  - name: email_strip_plus_suffix
+    type: bool
+    default: false
+    label: Strip +suffix on email locals
+    description: Treat alice+work@x and alice@x as the same person. Default off.
+
+upgrade_policy: auto-patch
