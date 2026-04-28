@@ -52,7 +52,7 @@ provides:
     - name: files_from_url
       description: Fetch an external URL into storage in one call. Returns the new file's id.
   ui_panels:
-    - slot: instance.tab
+    - slot: project.page
       label: Files
       icon: folder
       entry: /ui/FilesPanel.html

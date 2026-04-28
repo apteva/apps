@@ -48,7 +48,7 @@ provides:
     - name: contacts_define_attribute
       description: Create or update an attribute definition.
   ui_panels:
-    - slot: instance.tab
+    - slot: project.page
       label: Contacts
       icon: contacts
       entry: /ui/ContactsPanel.html

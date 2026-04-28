@@ -62,7 +62,7 @@ provides:
     - { name: files_delete,           description: "Soft-delete a file." }
     - { name: files_from_url,         description: "Fetch a URL into storage." }
   ui_panels:
-    - slot: instance.tab
+    - slot: project.page
       label: Files
       icon: folder
       entry: /ui/FilesPanel.html
