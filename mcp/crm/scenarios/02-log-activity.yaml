@@ -1,0 +1,31 @@
+name: log-activity
+description: |
+  Agent receives an inbound message about an existing contact and logs
+  it to the CRM as an activity. Verifies upsert-then-log_activity flow.
+
+timeout: 90s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  I just got off a call with Bob Dylan (bob@example.org). We discussed
+  the Q2 roadmap and he's interested in the enterprise tier. Add Bob
+  to the CRM if he's not there, then log a "call" activity with a
+  one-line summary. Then stop.
+
+assert:
+  - tool_called: contacts_upsert_by_channel | contacts_create
+  - tool_called: contacts_log_activity
+  - http: GET /api/apps/crm/contacts
+    expect_status: 200
+    expect_count_at: contacts
+    expect_count: 1
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 12000
+  cost_usd: 0.20

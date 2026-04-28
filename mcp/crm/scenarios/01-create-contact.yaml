@@ -1,0 +1,29 @@
+name: create-contact
+description: |
+  Agent receives a free-form lead and adds it to the CRM. Verifies the
+  basic find-or-create + tag flow works end-to-end with a real LLM.
+
+timeout: 90s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  A new lead came in: Alice Cooper, Marketing Director at Acme Corp,
+  alice@acme.com, +1 415 555 0100. Add her to the CRM and tag her
+  "inbound-2026-q1". Then stop.
+
+assert:
+  - tool_called: contacts_create | contacts_upsert_by_channel
+  - http: GET /api/apps/crm/contacts
+    expect_status: 200
+    expect_count_at: contacts
+    expect_count: 1
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 12000
+  cost_usd: 0.20
