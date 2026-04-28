@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/crm
 go 1.25.0
 
 require (
-	github.com/apteva/app-sdk v0.1.0
+	github.com/apteva/app-sdk v0.1.1
 	modernc.org/sqlite v1.50.0
 )
 
@@ -19,6 +19,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-// Local sibling for in-tree testing — see ../../README.md.
-replace github.com/apteva/app-sdk => ../../../app-sdk

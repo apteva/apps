@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/storage
 go 1.25.0
 
 require (
-	github.com/apteva/app-sdk v0.1.0
+	github.com/apteva/app-sdk v0.1.1
 	github.com/google/uuid v1.6.0
 	modernc.org/sqlite v1.50.0
 )
@@ -19,7 +19,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-// Local sibling for in-tree iteration. Drop at first SDK release that
-// includes everything the storage app needs.
-replace github.com/apteva/app-sdk => ../../../app-sdk
