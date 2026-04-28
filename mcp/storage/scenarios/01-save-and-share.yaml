@@ -1,0 +1,36 @@
+name: save-and-share
+description: |
+  Agent saves a piece of content and mints a shareable URL. The
+  flagship "agent generated this, here's the link" flow.
+
+timeout: 60s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Save this short note to storage as "welcome.txt" in the "/greetings/"
+  folder, then give me a shareable link to it.
+
+  Note content:
+  "Hello from the Apteva agent — this file lives in storage now."
+
+  Use the files_upload tool. The content_base64 arg expects standard
+  base64. After uploading, call files_get_url to get a signed URL.
+  Then stop.
+
+assert:
+  - tool_called: files_upload
+  - tool_called: files_get_url
+  - http: GET /api/apps/storage/files
+    expect_status: 200
+    expect_count_at: files
+    expect_count: 1
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 14000
+  cost_usd: 0.20

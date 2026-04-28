@@ -1,0 +1,36 @@
+name: dedupe-check
+description: |
+  Agent uses files_dedupe_check before uploading to avoid storing
+  duplicates. Exercises the find-or-skip primitive.
+
+timeout: 90s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  First, save "Hello world" as "greeting.txt" to storage at the root
+  folder. Use files_upload with content_base64.
+
+  Then check whether content with sha256
+  "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+  (which is the sha256 of "hello world") already exists by calling
+  files_dedupe_check. Report what you find.
+
+  Then stop.
+
+assert:
+  - tool_called: files_upload
+  - tool_called: files_dedupe_check
+  - http: GET /api/apps/storage/files
+    expect_status: 200
+    expect_count_at: files
+    expect_count: 1
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 14000
+  cost_usd: 0.20

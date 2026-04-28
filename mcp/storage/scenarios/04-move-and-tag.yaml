@@ -1,0 +1,35 @@
+name: move-and-tag
+description: |
+  Agent saves a file, then reorganises it: moves to an archive
+  folder + tags it. Exercises the lifecycle ops.
+
+timeout: 90s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Three steps:
+
+  Step 1: Save "Old draft" as "draft.txt" to storage at folder "/work/".
+  Step 2: Move that file to "/archive/2025/" using files_move.
+  Step 3: Tag it with "archived" and "2025" using files_set_tags.
+
+  Then stop.
+
+assert:
+  - tool_called: files_upload
+  - tool_called: files_move
+  - tool_called: files_set_tags
+  - http: GET /api/apps/storage/files?folder=/archive/2025/
+    expect_status: 200
+    expect_count_at: files
+    expect_count: 1
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 16000
+  cost_usd: 0.25

@@ -1,0 +1,36 @@
+name: folder-organisation
+description: |
+  Agent saves three files into different folders, then lists the
+  folder structure. Exercises folder normalisation + listing.
+
+timeout: 90s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Save three small text files to storage:
+
+    1. "report.txt" with content "Q1 numbers" → folder "/reports/2026/q1/"
+    2. "report.txt" with content "Q2 numbers" → folder "/reports/2026/q2/"
+    3. "todo.txt" with content "buy milk" → folder "/notes/"
+
+  Each one through files_upload (content_base64 = base64-encoded text).
+  Then call files_list_folders with parent="/" to confirm the layout,
+  and stop.
+
+assert:
+  - tool_called: files_upload
+  - tool_called: files_list_folders | files_list
+  - http: GET /api/apps/storage/files?folder=/reports/&recursive=true
+    expect_status: 200
+    expect_count_at: files
+    expect_count: 2
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 18000
+  cost_usd: 0.25

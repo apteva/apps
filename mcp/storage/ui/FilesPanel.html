@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Storage · Files</title>
+  <link rel="stylesheet" href="FilesPanel.css" />
+</head>
+<body>
+  <div class="layout">
+    <header>
+      <nav id="breadcrumb" aria-label="Folder breadcrumb"></nav>
+      <div class="actions">
+        <input id="newfolder" type="text" placeholder="New folder name…" />
+        <button id="mk">+ Folder</button>
+        <label class="upload">
+          <input id="upload" type="file" multiple hidden />
+          <span>+ Upload</span>
+        </label>
+      </div>
+    </header>
+    <section id="folders" class="folders" aria-label="Subfolders"></section>
+    <section id="files" class="files" aria-label="Files"></section>
+    <footer id="status"></footer>
+  </div>
+  <script src="FilesPanel.js"></script>
+</body>
+</html>

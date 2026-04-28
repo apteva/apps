@@ -1,0 +1,32 @@
+name: visibility-flip
+description: |
+  Agent saves a file privately, then flips it to public for sharing.
+  Exercises files_set_visibility.
+
+timeout: 60s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Save "Public announcement" as "news.txt" at folder "/blog/" (default
+  private visibility). Then change its visibility to "public" using
+  the files_set_visibility tool so anyone with the URL can read it.
+
+  Then stop.
+
+assert:
+  - tool_called: files_upload
+  - tool_called: files_set_visibility
+  - http: GET /api/apps/storage/files
+    expect_status: 200
+    expect_count_at: files
+    expect_count: 1
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 12000
+  cost_usd: 0.20
