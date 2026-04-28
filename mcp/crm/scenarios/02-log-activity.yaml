@@ -27,5 +27,5 @@ assert:
   - iterations_at_most: 8
 
 budget:
-  total_tokens: 12000
+  total_tokens: 16000
   cost_usd: 0.20

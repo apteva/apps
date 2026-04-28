@@ -1,0 +1,39 @@
+name: merge-duplicates
+description: |
+  Agent identifies two contacts that are obviously the same person and
+  merges them. Exercises upsert + merge flow.
+
+timeout: 90s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Three steps:
+
+  Step 1: add Charlie Parker with email charlie@personal.com (no
+          company info). Note the contact id from the response — call
+          this contact A.
+  Step 2: add Charlie Parker with email charlie@work.com and company
+          "Acme Corp". Note the contact id — call this contact B.
+  Step 3: these are duplicates. Merge contact A INTO contact B using
+          contacts_merge with loser_id = A's id and winner_id = B's
+          id. Acme Corp wins because it has more info.
+
+  Then stop.
+
+assert:
+  - tool_called: contacts_upsert_by_channel | contacts_create
+  - tool_called: contacts_merge
+  - http: GET /api/apps/crm/contacts
+    expect_status: 200
+    expect_count_at: contacts
+    expect_count: 1
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 18000
+  cost_usd: 0.20

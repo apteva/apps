@@ -1507,14 +1507,22 @@ func intArg(args map[string]any, key string, def int) int {
 }
 
 func int64Arg(args map[string]any, key string) int64 {
-	if v, ok := args[key].(float64); ok {
+	switch v := args[key].(type) {
+	case float64:
 		return int64(v)
-	}
-	if v, ok := args[key].(int); ok {
+	case int:
 		return int64(v)
-	}
-	if v, ok := args[key].(int64); ok {
+	case int64:
 		return v
+	case string:
+		// LLMs frequently emit numeric ids as quoted strings
+		// ("1", "42") even when the schema says integer.
+		// Parse leniently rather than treating as 0.
+		n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			return 0
+		}
+		return n
 	}
 	return 0
 }

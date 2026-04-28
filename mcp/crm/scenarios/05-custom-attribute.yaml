@@ -1,0 +1,42 @@
+name: custom-attribute
+description: |
+  Agent extends the contact schema with a domain-specific attribute,
+  then writes a value to a contact. Exercises define_attribute + set
+  + the snapshot+attribute round-trip.
+
+timeout: 90s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Three steps for the CRM:
+
+  Step 1: define a custom attribute with key "renewal_date", label
+          "Renewal date", type "date" — use the contacts_define_attribute
+          tool.
+  Step 2: add Diana Ross (diana@bigco.com) — use contacts_create or
+          contacts_upsert_by_channel.
+  Step 3: set Diana's "renewal_date" attribute to "2026-12-31" — use
+          contacts_set_attribute (NOT contacts_update; update is for
+          built-in fields like job_title, set_attribute is for custom
+          attributes).
+
+  Then stop.
+
+assert:
+  - tool_called: contacts_define_attribute
+  - tool_called: contacts_create | contacts_upsert_by_channel
+  - tool_called: contacts_set_attribute
+  - http: GET /api/apps/crm/contacts
+    expect_status: 200
+    expect_count_at: contacts
+    expect_count: 1
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 16000
+  cost_usd: 0.25

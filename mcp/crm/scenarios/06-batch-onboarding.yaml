@@ -1,0 +1,34 @@
+name: batch-onboarding
+description: |
+  Agent receives a list of new leads in one directive and creates
+  them all. Exercises the realistic "morning email digest" flow.
+
+timeout: 120s
+max_iterations: 12
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Three new leads came in from yesterday's webinar. Add all three to
+  the CRM:
+
+    - Eve Anderson, eve@startup1.io, CEO at Startup One
+    - Frank Burns, frank@bigco.com, Director of Sales at BigCo
+    - Grace Hopper, grace@navy.mil, Rear Admiral at US Navy
+
+  Tag each one with "webinar-2026-04". Then stop.
+
+assert:
+  - tool_called: contacts_create | contacts_upsert_by_channel
+  - http: GET /api/apps/crm/contacts
+    expect_status: 200
+    expect_count_at: contacts
+    expect_count: 3
+  - iterations_at_most: 12
+
+budget:
+  total_tokens: 22000
+  cost_usd: 0.35
