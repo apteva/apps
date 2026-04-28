@@ -1041,13 +1041,22 @@ func dbSearch(db *sql.DB, pid, q string, filters []any, limit int) ([]*Contact, 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []*Contact{}
+	// Drain ids first, THEN do the per-row dbGetByID calls. Holding
+	// rows open while issuing nested queries on the same *sql.DB
+	// stalls the modernc/sqlite driver — the outer iterator and the
+	// inner QueryRow contend for the same connection.
+	ids := []int64{}
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
 			continue
 		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+
+	out := []*Contact{}
+	for _, id := range ids {
 		c, err := dbGetByID(db, pid, id)
 		if err != nil || c == nil {
 			continue
@@ -1456,7 +1465,15 @@ func loadAttributes(db *sql.DB, c *Contact) error {
 			}
 		case "date":
 			if vd.Valid {
-				v = vd.String
+				// SQLite's date affinity reformats bare YYYY-MM-DD into
+				// YYYY-MM-DDT00:00:00Z on read. Strip the time-of-day
+				// part if it's exactly midnight UTC — preserves the
+				// caller's intent (a date, not a timestamp).
+				s := vd.String
+				if strings.HasSuffix(s, "T00:00:00Z") {
+					s = strings.TrimSuffix(s, "T00:00:00Z")
+				}
+				v = s
 			}
 		case "bool":
 			if vb.Valid {
