@@ -1,4 +1,6 @@
 mcp/crm/crm
+mcp/storage/storage
+mcp/media/media
 *.db
 *.db-shm
 *.db-wal
