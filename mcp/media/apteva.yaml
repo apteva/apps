@@ -1,0 +1,111 @@
+schema: apteva-app/v1
+
+name: media
+display_name: Media
+version: 0.1.0
+description: |
+  Catalog + cheap derivations for audio/video/image files held by the
+  storage app. Probes new files with ffprobe (duration, dimensions,
+  codecs, bitrate, sample rate), generates thumbnails for video/image,
+  waveforms for audio. Read-only over storage — derivations land back
+  in storage as separate files so they get the same visibility +
+  signed-URL machinery for free.
+
+  Scope is "cheap and idempotent." Heavy jobs (transcode, clip, concat)
+  belong in a separate media-jobs companion app.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/media
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/media/icon.png
+tags: [media, video, audio, ffmpeg, catalog]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+  apps:
+    - name: storage
+      version: ">=0.1.0"
+      reason: reads source bytes; writes thumbnails + waveforms back to storage as derivations
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: media_get
+      description: Fetch one media record by storage file_id (probe + derivation pointers).
+    - name: media_search
+      description: Filter by duration / dimensions / codec / has_video / has_audio. Returns joined storage metadata.
+    - name: media_get_thumbnail
+      description: Return the storage file_id (and signed URL) of the cached thumbnail. Generates on demand if missing.
+    - name: media_get_waveform
+      description: Same for the waveform PNG. Audio files only.
+    - name: media_reindex
+      description: Force a re-probe + re-derive — for one file_id or for all failed rows.
+    - name: media_index_status
+      description: Ops summary — counts of pending / ok / failed / unsupported / skipped_size.
+  workers:
+    - name: indexer
+      schedule: "@every 30s"
+  ui_panels:
+    - slot: project.page
+      label: Media
+      icon: video
+      entry: /ui/MediaPanel.html
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/media
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/media.db
+  migrations: migrations/
+
+config_schema:
+  - name: poll_interval_seconds
+    type: text
+    default: "30"
+    label: Poll interval (seconds)
+    description: How often the indexer scans storage for new media files.
+  - name: max_probe_size_mb
+    type: text
+    default: "2048"
+    label: Max probe size (MB)
+    description: Files larger than this are marked skipped_size and not probed automatically. media_reindex with force=true overrides per file.
+  - name: thumbnail_seek_seconds
+    type: text
+    default: "1.0"
+    label: Thumbnail seek (seconds)
+    description: Where in a video to grab the thumbnail. 1.0 lands a stable frame past most fade-ins.
+  - name: thumbnail_width
+    type: text
+    default: "320"
+    label: Thumbnail width (px)
+    description: Generated thumbnails are scaled to this width, height auto.
+  - name: waveform_width
+    type: text
+    default: "800"
+    label: Waveform width (px)
+  - name: waveform_height
+    type: text
+    default: "100"
+    label: Waveform height (px)
+  - name: ffmpeg_path
+    type: text
+    default: "ffmpeg"
+    label: ffmpeg binary
+    description: PATH lookup by default. Override to vendor a static binary.
+  - name: ffprobe_path
+    type: text
+    default: "ffprobe"
+    label: ffprobe binary
+
+upgrade_policy: auto-patch
