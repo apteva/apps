@@ -46,6 +46,7 @@ async function main() {
     console.log("no panels found under mcp/*/ui/");
     return;
   }
+  // Run the build…
   console.log(`Found ${panels.length} panel source(s):`);
   for (const p of panels) console.log("  ", p.replace(ROOT, ""));
 
@@ -81,6 +82,21 @@ async function main() {
     const out = result.outputs.find((o) => o.path.endsWith(".mjs"));
     const size = out ? (out.size / 1024).toFixed(1) + " KB" : "?";
     console.log(`✓ ${src.replace(ROOT, "")} → ${basename(outFile)} (${size})`);
+  }
+
+  // Verification — every named import in every built panel must be
+  // re-exported by the dashboard's vendor/react.entry.ts. Skipping
+  // this check is how we shipped a Storage build that referenced
+  // useCallback against a vendor that only had a default export.
+  console.log("\nVerifying panel imports against host React surface…");
+  const verifyURL = new URL("./verify-panels.ts", import.meta.url).pathname;
+  const proc = Bun.spawn(["bun", "run", verifyURL], {
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  const code = await proc.exited;
+  if (code !== 0) {
+    process.exit(code);
   }
 }
 
