@@ -1,0 +1,37 @@
+name: schedule-and-cancel
+description: |
+  Agent schedules an HTTP-target job, then lists and cancels it in
+  the same session. Covers jobs_schedule + jobs_list + jobs_cancel
+  without relying on any pre-seeded state or platform-injected
+  instance_id.
+
+timeout: 90s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Two steps using the jobs app — call the tools by their exact names.
+
+  Step 1: jobs_schedule with these args:
+    name:     "morning-cleanup"
+    schedule: { kind: "cron", cron: "0 9 * * 1-5" }
+    target:   { kind: "http", method: "POST", url: "https://example.com/cleanup" }
+
+  Step 2: jobs_list (no args), find the entry whose name is
+          "morning-cleanup", then call jobs_cancel with its id.
+
+  Then stop.
+
+assert:
+  - tool_called: jobs_schedule
+  - tool_called: jobs_list
+  - tool_called: jobs_cancel
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 16000
+  cost_usd: 0.25

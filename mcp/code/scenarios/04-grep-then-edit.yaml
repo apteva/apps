@@ -1,0 +1,30 @@
+name: grep-then-edit
+description: |
+  Agent navigates a multi-file repo using code_grep before editing —
+  the realistic "find-then-fix" pattern. Tests that grep returns
+  enough context (path + line) to drive a follow-up edit.
+
+timeout: 120s
+max_iterations: 12
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Create a Next.js repository called "site". The template ships an
+  app/page.tsx whose home page reads "Hello from Apteva." Use
+  code_grep to find that string anywhere in the repo, then use
+  code_edit_file to change it to "Hello from a real LLM." in the
+  exact file grep pointed at. Read the page back to confirm.
+
+assert:
+  - tool_called: repos_create
+  - tool_called: code_grep
+  - tool_called: code_edit_file
+  - iterations_at_most: 12
+
+budget:
+  total_tokens: 16000
+  cost_usd: 0.30

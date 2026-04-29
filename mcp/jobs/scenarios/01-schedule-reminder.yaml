@@ -1,0 +1,36 @@
+name: schedule-reminder
+description: |
+  Agent schedules a recurring HTTP webhook via the jobs app. Verifies
+  the cron + http-target path end-to-end with a real LLM. We use an
+  http target with an example URL (the assertion only checks the job
+  was created — delivery isn't required for the test to pass).
+
+timeout: 90s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Use the jobs_schedule tool exactly as follows (these are the args
+  for the jobs_schedule tool; do not invent other tools):
+
+    name:     "weekly-pulse"
+    schedule: { kind: "cron", cron: "0 9 * * 1" }
+    target:   { kind: "http", method: "POST", url: "https://example.com/weekly-pulse" }
+
+  Then stop.
+
+assert:
+  - tool_called: jobs_schedule
+  - http: GET /api/apps/jobs/jobs
+    expect_status: 200
+    expect_count_at: jobs
+    expect_count: 1
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 12000
+  cost_usd: 0.20

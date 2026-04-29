@@ -1,0 +1,7 @@
+{
+  "framework": "nextjs",
+  "build_cmd": "npm ci && npm run build",
+  "start_cmd": "node server.js",
+  "port": 3000,
+  "node_version": "20"
+}

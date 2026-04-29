@@ -6,3 +6,8 @@ mcp/media/media
 *.db-wal
 MCP local sidecar bin
 _test_sidecar_bin
+mcp/jobs/jobs
+mcp/code/code
+mcp/jobs/data/
+mcp/code/workspace/
+apteva-core.log

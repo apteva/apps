@@ -1,0 +1,38 @@
+name: multi-edit-refactor
+description: |
+  Agent refactors a single file with multiple coordinated edits —
+  must use code_multi_edit so all changes are atomic and the file
+  isn't half-rewritten if one edit fails. Exercises the high-volume
+  editing primitive.
+
+timeout: 90s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Create a blank repository called "refactor". Write a file at
+  "lib.ts" with these exact contents:
+
+      export const greeting = "hi";
+      export const farewell = "bye";
+      export function greet(name: string) {
+        return greeting + ", " + name;
+      }
+
+  Now in a single code_multi_edit call, rename `greeting` to
+  `hello` (replace_all=true), rename `farewell` to `goodbye`
+  (replace_all=true), and change "hi" to "Hello".
+  Read the file back. Stop.
+
+assert:
+  - tool_called: code_multi_edit
+  - tool_called: code_read_file
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 30000
+  cost_usd: 0.30

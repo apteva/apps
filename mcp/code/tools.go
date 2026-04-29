@@ -1,0 +1,569 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	sdk "github.com/apteva/app-sdk"
+)
+
+// MCPTools wires every tool to a handler that resolves the project,
+// validates args, and delegates to the store + edit engine.
+func (a *App) MCPTools() []sdk.Tool {
+	return []sdk.Tool{
+		{
+			Name:        "repos_list",
+			Description: "List repositories in this project. Args: archived?, q?.",
+			InputSchema: schemaObject(map[string]any{
+				"archived": map[string]any{"type": "boolean"},
+				"q":        map[string]any{"type": "string"},
+			}, nil),
+			Handler: a.toolReposList,
+		},
+		{
+			Name: "repos_create",
+			Description: "Create a repository. Args: name (required), framework? (blank | nextjs | static | go | python), " +
+				"description?, slug?. Walks the template tree into the new repo's storage_root.",
+			InputSchema: schemaObject(map[string]any{
+				"name":        map[string]any{"type": "string"},
+				"framework":   map[string]any{"type": "string"},
+				"description": map[string]any{"type": "string"},
+				"slug":        map[string]any{"type": "string"},
+			}, []string{"name"}),
+			Handler: a.toolReposCreate,
+		},
+		{
+			Name:        "repos_get",
+			Description: "Get repository metadata + file count and total size. Args: slug.",
+			InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}}, []string{"slug"}),
+			Handler:     a.toolReposGet,
+		},
+		{
+			Name:        "repos_archive",
+			Description: "Archive a repository (files retained). Pass force=true to hard-delete files and row.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":  map[string]any{"type": "string"},
+				"force": map[string]any{"type": "boolean"},
+			}, []string{"slug"}),
+			Handler: a.toolReposArchive,
+		},
+		{
+			Name:        "repos_set_deploy_hints",
+			Description: "Set build_cmd / start_cmd / port / env_json on a repo. Any field omitted is left unchanged.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":      map[string]any{"type": "string"},
+				"build_cmd": map[string]any{"type": "string"},
+				"start_cmd": map[string]any{"type": "string"},
+				"port":      map[string]any{"type": "integer"},
+				"env_json":  map[string]any{"type": "string"},
+			}, []string{"slug"}),
+			Handler: a.toolReposSetDeployHints,
+		},
+		{
+			Name:        "code_list_files",
+			Description: "List files in a repo. Args: slug, path? (sub-tree prefix), recursive? (default true).",
+			InputSchema: schemaObject(map[string]any{
+				"slug":      map[string]any{"type": "string"},
+				"path":      map[string]any{"type": "string"},
+				"recursive": map[string]any{"type": "boolean"},
+			}, []string{"slug"}),
+			Handler: a.toolListFiles,
+		},
+		{
+			Name:        "code_glob",
+			Description: `Find files by glob (e.g. "**/*.tsx", "app/**/*.ts"). Args: slug, pattern.`,
+			InputSchema: schemaObject(map[string]any{
+				"slug":    map[string]any{"type": "string"},
+				"pattern": map[string]any{"type": "string"},
+			}, []string{"slug", "pattern"}),
+			Handler: a.toolGlob,
+		},
+		{
+			Name: "code_grep",
+			Description: "Search file contents. Args: slug, pattern, regex? (default false), path?, file_pattern?, " +
+				"context? (lines of before/after), ignore_case?, limit?.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":         map[string]any{"type": "string"},
+				"pattern":      map[string]any{"type": "string"},
+				"regex":        map[string]any{"type": "boolean"},
+				"path":         map[string]any{"type": "string"},
+				"file_pattern": map[string]any{"type": "string"},
+				"context":      map[string]any{"type": "integer"},
+				"ignore_case":  map[string]any{"type": "boolean"},
+				"limit":        map[string]any{"type": "integer"},
+			}, []string{"slug", "pattern"}),
+			Handler: a.toolGrep,
+		},
+		{
+			Name: "code_read_file",
+			Description: "Read a file with cat -n line numbers prefixed. Args: slug, path, offset? (1-indexed), " +
+				"limit? (default 2000).",
+			InputSchema: schemaObject(map[string]any{
+				"slug":   map[string]any{"type": "string"},
+				"path":   map[string]any{"type": "string"},
+				"offset": map[string]any{"type": "integer"},
+				"limit":  map[string]any{"type": "integer"},
+			}, []string{"slug", "path"}),
+			Handler: a.toolReadFile,
+		},
+		{
+			Name:        "code_write_file",
+			Description: "Write or overwrite a file with full content. Args: slug, path, content. Creates parent folders.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":    map[string]any{"type": "string"},
+				"path":    map[string]any{"type": "string"},
+				"content": map[string]any{"type": "string"},
+			}, []string{"slug", "path", "content"}),
+			Handler: a.toolWriteFile,
+		},
+		{
+			Name: "code_edit_file",
+			Description: "Exact-string replacement. Args: slug, path, old_string, new_string, replace_all? (default false). " +
+				"Errors if old_string is not unique unless replace_all is set.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":        map[string]any{"type": "string"},
+				"path":        map[string]any{"type": "string"},
+				"old_string":  map[string]any{"type": "string"},
+				"new_string":  map[string]any{"type": "string"},
+				"replace_all": map[string]any{"type": "boolean"},
+			}, []string{"slug", "path", "old_string", "new_string"}),
+			Handler: a.toolEditFile,
+		},
+		{
+			Name: "code_multi_edit",
+			Description: "Apply multiple edits to one file atomically. Args: slug, path, edits (array of " +
+				"{old_string, new_string, replace_all?}). Each edit operates on the state after the previous one. " +
+				"If any edit fails uniqueness, none are applied.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":  map[string]any{"type": "string"},
+				"path":  map[string]any{"type": "string"},
+				"edits": map[string]any{"type": "array"},
+			}, []string{"slug", "path", "edits"}),
+			Handler: a.toolMultiEdit,
+		},
+		{
+			Name:        "code_rename_path",
+			Description: "Move or rename a file or folder. Args: slug, from, to.",
+			InputSchema: schemaObject(map[string]any{
+				"slug": map[string]any{"type": "string"},
+				"from": map[string]any{"type": "string"},
+				"to":   map[string]any{"type": "string"},
+			}, []string{"slug", "from", "to"}),
+			Handler: a.toolRename,
+		},
+		{
+			Name:        "code_delete_file",
+			Description: "Delete a file or folder. Args: slug, path.",
+			InputSchema: schemaObject(map[string]any{
+				"slug": map[string]any{"type": "string"},
+				"path": map[string]any{"type": "string"},
+			}, []string{"slug", "path"}),
+			Handler: a.toolDeleteFile,
+		},
+	}
+}
+
+// ─── repos_* handlers ──────────────────────────────────────────────
+
+func (a *App) toolReposList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	includeArchived := boolArg(args, "archived")
+	q := strArg(args, "q")
+	repos, err := dbListRepos(ctx.AppDB(), pid, includeArchived, q)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"repositories": repos, "count": len(repos)}, nil
+}
+
+func (a *App) toolReposCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	in := CreateRepoInput{
+		Name:        strArg(args, "name"),
+		Slug:        strArg(args, "slug"),
+		Description: strArg(args, "description"),
+		Framework:   strArg(args, "framework"),
+	}
+	r, err := dbCreateRepo(ctx.AppDB(), pid, in)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.store.CreateRepo(r.Slug); err != nil {
+		// Roll back the row to keep DB and disk consistent.
+		_ = dbHardDeleteRepo(ctx.AppDB(), pid, r.Slug)
+		return nil, fmt.Errorf("create repo dir: %w", err)
+	}
+	count, err := applyTemplate(a.store, r.Slug, r.Framework)
+	if err != nil {
+		ctx.Logger().Warn("template apply failed", "slug", r.Slug, "framework", r.Framework, "err", err)
+	}
+	if count > 0 {
+		_ = dbRecordImport(ctx.AppDB(), r.ID, "template:"+r.Framework)
+	}
+	return map[string]any{"repository": r, "files_created": count}, nil
+}
+
+func (a *App) toolReposGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	slug := strArg(args, "slug")
+	if slug == "" {
+		return nil, errors.New("slug required")
+	}
+	r, err := dbGetRepoBySlug(ctx.AppDB(), pid, slug)
+	if err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return map[string]any{"repository": nil, "found": false}, nil
+	}
+	files, _ := a.store.List(slug, "", true)
+	totalSize, _ := a.store.TotalSize(slug)
+	return map[string]any{
+		"repository": r,
+		"found":      true,
+		"file_count": len(files),
+		"total_size": totalSize,
+	}, nil
+}
+
+func (a *App) toolReposArchive(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	slug := strArg(args, "slug")
+	if slug == "" {
+		return nil, errors.New("slug required")
+	}
+	force := boolArg(args, "force")
+	if force {
+		if err := dbHardDeleteRepo(ctx.AppDB(), pid, slug); err != nil {
+			return nil, err
+		}
+		if err := a.store.DropRepo(slug); err != nil {
+			return nil, err
+		}
+		return map[string]any{"slug": slug, "deleted": true}, nil
+	}
+	if err := dbArchiveRepo(ctx.AppDB(), pid, slug); err != nil {
+		return nil, err
+	}
+	return map[string]any{"slug": slug, "archived": true}, nil
+}
+
+func (a *App) toolReposSetDeployHints(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	slug := strArg(args, "slug")
+	if slug == "" {
+		return nil, errors.New("slug required")
+	}
+	h := DeployHints{}
+	if v, ok := args["build_cmd"].(string); ok {
+		h.BuildCmd = &v
+	}
+	if v, ok := args["start_cmd"].(string); ok {
+		h.StartCmd = &v
+	}
+	if v, ok := args["port"].(float64); ok {
+		p := int(v)
+		h.Port = &p
+	}
+	if v, ok := args["env_json"].(string); ok {
+		// Validate that it parses; we store the raw string but reject
+		// obvious garbage so the deploy app doesn't have to.
+		var probe any
+		if err := json.Unmarshal([]byte(v), &probe); err != nil {
+			return nil, fmt.Errorf("env_json is not valid JSON: %w", err)
+		}
+		h.EnvJSON = &v
+	}
+	r, err := dbSetDeployHints(ctx.AppDB(), pid, slug, h)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"repository": r}, nil
+}
+
+// ─── code_* file handlers ──────────────────────────────────────────
+
+func (a *App) toolListFiles(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+		return nil, err
+	}
+	prefix := strArg(args, "path")
+	if prefix != "" {
+		clean, err := normalisePath(prefix)
+		if err != nil {
+			return nil, err
+		}
+		prefix = clean
+	}
+	recursive := true
+	if v, ok := args["recursive"].(bool); ok {
+		recursive = v
+	}
+	files, err := a.store.List(strArg(args, "slug"), prefix, recursive)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"files": files, "count": len(files)}, nil
+}
+
+func (a *App) toolGlob(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+		return nil, err
+	}
+	pattern := strArg(args, "pattern")
+	matches, err := globRepo(a.store, strArg(args, "slug"), pattern)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"paths": matches, "count": len(matches)}, nil
+}
+
+func (a *App) toolGrep(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+		return nil, err
+	}
+	o := GrepOptions{
+		Pattern:     strArg(args, "pattern"),
+		Path:        strArg(args, "path"),
+		FilePattern: strArg(args, "file_pattern"),
+		Regex:       boolArg(args, "regex"),
+		IgnoreCase:  boolArg(args, "ignore_case"),
+		Context:     intArg(args, "context", 0),
+		Limit:       intArg(args, "limit", 0),
+	}
+	if o.Path != "" {
+		clean, err := normalisePath(o.Path)
+		if err != nil {
+			return nil, err
+		}
+		o.Path = clean
+	}
+	matches, err := grepRepo(a.store, strArg(args, "slug"), o)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"matches": matches, "count": len(matches)}, nil
+}
+
+func (a *App) toolReadFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+		return nil, err
+	}
+	rel, err := normalisePath(strArg(args, "path"))
+	if err != nil {
+		return nil, err
+	}
+	res, err := readWithLineNumbers(a.store, strArg(args, "slug"), rel,
+		intArg(args, "offset", 0), intArg(args, "limit", 0))
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+func (a *App) toolWriteFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+		return nil, err
+	}
+	rel, err := normalisePath(strArg(args, "path"))
+	if err != nil {
+		return nil, err
+	}
+	content := strArg(args, "content")
+	meta, err := a.store.Write(strArg(args, "slug"), rel, []byte(content))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"file": meta}, nil
+}
+
+func (a *App) toolEditFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+		return nil, err
+	}
+	rel, err := normalisePath(strArg(args, "path"))
+	if err != nil {
+		return nil, err
+	}
+	res, err := editFile(a.store, strArg(args, "slug"), rel,
+		strArg(args, "old_string"), strArg(args, "new_string"), boolArg(args, "replace_all"))
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+func (a *App) toolMultiEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+		return nil, err
+	}
+	rel, err := normalisePath(strArg(args, "path"))
+	if err != nil {
+		return nil, err
+	}
+	rawEdits, ok := args["edits"].([]any)
+	if !ok {
+		return nil, errors.New("edits must be an array")
+	}
+	ops := make([]EditOp, 0, len(rawEdits))
+	for i, raw := range rawEdits {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("edits[%d] must be an object", i)
+		}
+		op := EditOp{
+			OldString: strArg(m, "old_string"),
+			NewString: strArg(m, "new_string"),
+		}
+		if v, ok := m["replace_all"].(bool); ok {
+			op.ReplaceAll = v
+		}
+		ops = append(ops, op)
+	}
+	res, err := multiEditFile(a.store, strArg(args, "slug"), rel, ops)
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+func (a *App) toolRename(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+		return nil, err
+	}
+	from, err := normalisePath(strArg(args, "from"))
+	if err != nil {
+		return nil, fmt.Errorf("from: %w", err)
+	}
+	to, err := normalisePath(strArg(args, "to"))
+	if err != nil {
+		return nil, fmt.Errorf("to: %w", err)
+	}
+	moved, err := a.store.Move(strArg(args, "slug"), from, to)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"moved": moved, "count": len(moved)}, nil
+}
+
+func (a *App) toolDeleteFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+		return nil, err
+	}
+	rel, err := normalisePath(strArg(args, "path"))
+	if err != nil {
+		return nil, err
+	}
+	// Delete a file or a tree — we don't know which without statting,
+	// and DeleteTree handles both safely (RemoveAll on a single file
+	// works, RemoveAll on a missing path is nil).
+	if err := a.store.DeleteTree(strArg(args, "slug"), rel); err != nil {
+		return nil, err
+	}
+	return map[string]any{"path": rel, "deleted": true}, nil
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────
+
+func requireRepo(ctx *sdk.AppCtx, pid, slug string) (*Repo, error) {
+	if slug == "" {
+		return nil, errors.New("slug required")
+	}
+	r, err := dbGetRepoBySlug(ctx.AppDB(), pid, slug)
+	if err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return nil, fmt.Errorf("repository %q not found in this project", slug)
+	}
+	return r, nil
+}
+
+// ─── Arg helpers (mirror storage's pattern) ───────────────────────
+
+func strArg(args map[string]any, key string) string {
+	if v, ok := args[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func boolArg(args map[string]any, key string) bool {
+	if v, ok := args[key].(bool); ok {
+		return v
+	}
+	return false
+}
+
+func intArg(args map[string]any, key string, def int) int {
+	if v, ok := args[key].(float64); ok {
+		return int(v)
+	}
+	if v, ok := args[key].(int); ok {
+		return v
+	}
+	return def
+}
+
+func schemaObject(props map[string]any, required []string) map[string]any {
+	out := map[string]any{
+		"type":       "object",
+		"properties": props,
+	}
+	if len(required) > 0 {
+		out["required"] = required
+	}
+	return out
+}

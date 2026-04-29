@@ -1,0 +1,37 @@
+name: edit-with-uniqueness
+description: |
+  Agent must use code_edit_file's exact-string semantics correctly:
+  surrounding context is required when the target appears more than
+  once. Exercises the unique-match enforcement that makes editing
+  reliable for LLMs.
+
+timeout: 90s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Create a blank repository called "uniq". Write a file at "site.md"
+  with the following exact contents:
+
+      # My Blog
+      Welcome to my blog.
+      My blog is about food.
+      Bye for now from my blog.
+
+  Now use code_edit_file to change "my blog" (lower-case) to "my site"
+  on the LINE that says "Welcome to my blog." — only that occurrence.
+  Read the file back to verify only one line changed, the other
+  occurrences of "my blog" are unchanged.
+
+assert:
+  - tool_called: code_edit_file
+  - tool_called: code_read_file
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 30000
+  cost_usd: 0.30

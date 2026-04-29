@@ -1,0 +1,53 @@
+/* Jobs panel — keep the visual shape consistent with the CRM panel
+   so users moving between data apps don't trip on different skins. */
+* { box-sizing: border-box; }
+body {
+  margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px; color: #222; background: #fafafa;
+}
+.layout { display: grid; grid-template-columns: 360px 1fr; height: 100vh; }
+.sidebar {
+  border-right: 1px solid #e6e6e6; background: #fff;
+  display: flex; flex-direction: column; min-height: 0;
+}
+.bar { padding: 10px 12px; display: flex; gap: 8px; border-bottom: 1px solid #eee; }
+.bar select, .bar button {
+  font: inherit; padding: 6px 10px; border: 1px solid #ccc;
+  border-radius: 4px; background: #fff;
+}
+.bar select { flex: 1; }
+.bar button { cursor: pointer; }
+.job-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
+.job-row {
+  padding: 10px 12px; border-bottom: 1px solid #f1f1f1; cursor: pointer;
+  display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; align-items: baseline;
+}
+.job-row:hover { background: #f6f8ff; }
+.job-row.selected { background: #eef2ff; }
+.job-name { font-weight: 600; }
+.job-status {
+  font-size: 11px; padding: 2px 6px; border-radius: 3px; text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.job-status.pending   { background: #f5f5f5; color: #555; }
+.job-status.running   { background: #fff7d6; color: #835; }
+.job-status.done      { background: #e3fbe9; color: #066433; }
+.job-status.failed    { background: #fde2e2; color: #8a0a0a; }
+.job-status.cancelled { background: #efefef; color: #777; }
+.job-meta { color: #666; font-size: 12px; grid-column: 1 / -1; }
+.status-bar { padding: 8px 12px; font-size: 12px; color: #777; border-top: 1px solid #eee; }
+.detail { padding: 22px 28px; overflow-y: auto; }
+.detail h2 { margin: 0 0 6px 0; font-size: 18px; }
+.detail .target { font-family: ui-monospace, monospace; font-size: 12px; color: #555;
+  background: #f5f5f5; padding: 8px 10px; border-radius: 4px; margin: 8px 0 16px; white-space: pre-wrap; }
+.runs { width: 100%; border-collapse: collapse; }
+.runs th, .runs td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #eee; vertical-align: top; }
+.runs th { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
+.runs .err { color: #8a0a0a; font-family: ui-monospace, monospace; font-size: 11px; }
+.actions { margin: 12px 0; display: flex; gap: 8px; }
+.actions button {
+  font: inherit; padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px;
+  background: #fff; cursor: pointer;
+}
+.actions button.danger { color: #8a0a0a; border-color: #f0c0c0; }
+.empty-state { color: #888; font-style: italic; }

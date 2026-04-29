@@ -1,0 +1,33 @@
+name: write-and-read
+description: |
+  Agent writes a brand-new file into a blank repo and immediately
+  reads it back to verify. Exercises code_write_file + code_read_file
+  on the basic "agent generated this file" flow.
+
+timeout: 60s
+max_iterations: 6
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Create a blank repository called "scratch". Inside it, write a file
+  at "hello.txt" with the contents:
+
+      hello world
+      from the agent
+
+  Then read the file back with code_read_file and confirm both lines
+  are present. Stop after confirming.
+
+assert:
+  - tool_called: repos_create
+  - tool_called: code_write_file
+  - tool_called: code_read_file
+  - iterations_at_most: 6
+
+budget:
+  total_tokens: 20000
+  cost_usd: 0.20

@@ -1,0 +1,32 @@
+name: create-from-template
+description: |
+  Agent creates a Next.js repo from the template and verifies the
+  skeleton landed. Exercises repos_create + code_list_files end-to-end
+  with a real LLM choosing the right framework.
+
+timeout: 60s
+max_iterations: 6
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Create a new repository called "Marketing Site" using the Next.js
+  template. After creating it, list the files in the repository to
+  confirm the template populated app/page.tsx, package.json, and
+  next.config.js. Then stop.
+
+assert:
+  - tool_called: repos_create
+  - tool_called: code_list_files
+  - http: GET /api/apps/code/api/repos
+    expect_status: 200
+    expect_count_at: repositories
+    expect_count: 1
+  - iterations_at_most: 6
+
+budget:
+  total_tokens: 12000
+  cost_usd: 0.20
