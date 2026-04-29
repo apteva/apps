@@ -36,22 +36,22 @@ async function vendorExports(): Promise<Set<string>> {
   }
   const src = await readFile(DASHBOARD_VENDOR, "utf8");
   const names = new Set<string>();
-  // Match `export const { useFoo, useBar, … } = React;`
+  // Old hand-written format: `export const { useFoo, useBar, … } = React;`
   const destruct = src.match(/export\s+const\s*\{([\s\S]*?)\}\s*=\s*React/);
   if (destruct) {
-    // Strip every `//` line-comment first — the previous version's
-    // /\/\/.*$/ regex didn't span lines without /m, so leading
-    // section-comments stayed glued to the next identifier and the
-    // identifier was lost ("// Hooks…\n  useState" → still has the
-    // comment in front of useState after trim).
     const cleaned = destruct[1].replace(/\/\/[^\n]*/g, "");
     for (const tok of cleaned.split(",")) {
       const name = tok.trim();
       if (/^[A-Za-z_]\w*$/.test(name)) names.add(name);
     }
   }
-  // Pick up `export default React` so default imports verify too.
-  if (/export\s+default\s+React/.test(src)) names.add("default");
+  // Auto-generated format (scripts/gen-vendor-entries.ts): one
+  // `export const X = (Mod as any).X;` per name. Pick those up too —
+  // otherwise the verifier sees an empty surface and aborts.
+  const perName = /export\s+const\s+([A-Za-z_]\w*)\s*=/g;
+  let pm: RegExpExecArray | null;
+  while ((pm = perName.exec(src))) names.add(pm[1]);
+  if (/export\s+default\b/.test(src)) names.add("default");
   return names;
 }
 

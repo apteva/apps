@@ -210,7 +210,7 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
 
       <div className="flex-1 overflow-auto border border-border rounded">
         {folders.length === 0 && files.length === 0 ? (
-          <div className="p-12 text-center text-text-muted text-sm">
+          <div className="px-12 py-24 text-center text-text-muted text-sm">
             {busy ? "Loading…" : "Empty folder. Drop a file or create a sub-folder to get started."}
           </div>
         ) : (
