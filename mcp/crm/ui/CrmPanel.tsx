@@ -72,7 +72,7 @@ function formatTime(s: string | undefined): string {
   try { return new Date(s).toLocaleString(); } catch { return s; }
 }
 
-export function CrmPanel({ projectId, installId }: NativePanelProps) {
+export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<Contact | null>(null);

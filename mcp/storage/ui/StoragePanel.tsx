@@ -33,7 +33,7 @@ function formatSize(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
-export function StoragePanel({ projectId, installId }: NativePanelProps) {
+export default function StoragePanel({ projectId, installId }: NativePanelProps) {
   const [folder, setFolder] = useState("/");
   const [folders, setFolders] = useState<string[]>([]);
   const [files, setFiles] = useState<FileRow[]>([]);

@@ -77,7 +77,7 @@ function formatBitrate(b?: number): string {
   return `${(b / 1_000_000).toFixed(1)} Mbps`;
 }
 
-export function MediaPanel({ projectId, installId }: NativePanelProps) {
+export default function MediaPanel({ projectId, installId }: NativePanelProps) {
   const [rows, setRows] = useState<MediaRow[]>([]);
   const [status, setStatus] = useState<Record<string, number>>({});
   const [kind, setKind] = useState<Kind>("all");

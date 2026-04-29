@@ -70,6 +70,18 @@ function parseImportNames(spec: string): string[] {
 async function checkPanel(file: string, vendor: Set<string>): Promise<string[]> {
   const src = await readFile(file, "utf8");
   const errors: string[] = [];
+  // Every panel must have a default export — that's what the
+  // dashboard's resolvePanelComponent imports and mounts. Bun
+  // minifies `export default function FooPanel(...)` to either
+  // `export{X as default}` or a literal `export default …`.
+  const hasDefault =
+    /export\s*\{[^}]*\bas\s+default\b[^}]*\}/.test(src) ||
+    /export\s+default\b/.test(src);
+  if (!hasDefault) {
+    errors.push(
+      `${file}: no default export. Convert "export function FooPanel(...)" to "export default function FooPanel(...)" — the dashboard's panel loader imports the default.`,
+    );
+  }
   // Parse every `import { … } from "react"` and `… from "react/jsx-runtime"`.
   const reactRe = /import\s*(\{[^}]*\}|\w+)\s*from\s*"react"/g;
   let m: RegExpExecArray | null;
