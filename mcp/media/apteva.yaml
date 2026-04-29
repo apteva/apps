@@ -53,7 +53,10 @@ provides:
     - slot: project.page
       label: Media
       icon: video
-      entry: /ui/MediaPanel.html
+      # ESM module — dashboard dynamically imports it, mounts the
+      # default export as a React component inside its own tree.
+      # Iframe fallback (older platforms) lands on the .html sibling.
+      entry: /ui/MediaPanel.mjs
 
 runtime:
   kind: source

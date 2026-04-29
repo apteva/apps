@@ -65,7 +65,7 @@ provides:
     - slot: project.page
       label: Files
       icon: folder
-      entry: /ui/FilesPanel.html
+      entry: /ui/StoragePanel.mjs
 runtime:
   kind: source
   source:

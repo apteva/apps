@@ -49,7 +49,7 @@ provides:
     - slot: project.page
       label: Media
       icon: video
-      entry: /ui/MediaPanel.html
+      entry: /ui/MediaPanel.mjs
 runtime:
   kind: source
   source:

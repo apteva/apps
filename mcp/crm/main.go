@@ -72,7 +72,7 @@ provides:
     - slot: project.page
       label: Contacts
       icon: contacts
-      entry: /ui/ContactsPanel.html
+      entry: /ui/CrmPanel.mjs
 runtime:
   kind: source
   source:
