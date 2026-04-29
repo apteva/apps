@@ -1,0 +1,40 @@
+name: status-and-search
+description: |
+  Agent inspects an empty media catalog. Exercises the read-side
+  surface (media_index_status + media_search) without any storage
+  files indexed yet. End-to-end probe→derivation flow lives in a
+  follow-up scenario once the runner supports installing dependent
+  apps (storage) alongside the app under test.
+
+timeout: 60s
+max_iterations: 6
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  You have access to the media app. There are no media files in the
+  catalog yet — that's expected.
+
+  Do two things, then stop:
+
+  1. Call media_index_status to report the current count of indexed
+     items by status.
+  2. Call media_search with no filters to list any indexed media.
+
+  Report what you found, then stop.
+
+assert:
+  - tool_called: media_index_status
+  - tool_called: media_search
+  - http: GET /api/apps/media/media
+    expect_status: 200
+    expect_count_at: media
+    expect_count: 0
+  - iterations_at_most: 6
+
+budget:
+  total_tokens: 12000
+  cost_usd: 0.15
