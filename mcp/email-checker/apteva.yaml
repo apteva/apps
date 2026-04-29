@@ -1,0 +1,39 @@
+schema: apteva-app/v1
+
+name: email-checker
+display_name: Email Checker
+version: 0.1.0
+description: |
+  Stateless email validation. Live checks (RFC 5322 syntax, DNS MX
+  lookup, optional SMTP RCPT probe) plus list-based classification
+  (disposable provider, free provider, role account). No DB, no
+  state — every call is a fresh resolution.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/email-checker
+tags: [email, validation, productivity]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - net.egress
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: email_check,       description: "Full check — syntax + MX + classification. Returns {valid, reasons, mx, disposable, role, free}." }
+    - { name: email_check_smtp,  description: "SMTP RCPT TO probe. Slow + unreliable on Google/MS; returns raw status with informative=true only when the response actually tells us something." }
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/email-checker
+  port: 8080
+  health_check: /health
+
+upgrade_policy: auto-patch
