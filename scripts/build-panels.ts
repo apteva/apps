@@ -59,7 +59,18 @@ async function main() {
       format: "esm",
       minify: true,
       sourcemap: "external",
-      external: ["react", "react/jsx-runtime"],
+      // External both prod and dev jsx-runtime — even though we
+      // pin NODE_ENV=production below, anyone re-running this
+      // script in a dev shell shouldn't accidentally bake a
+      // dev-runtime panel that 404s in the dashboard's importmap.
+      external: ["react", "react/jsx-runtime", "react/jsx-dev-runtime"],
+      // Substitute process.env.NODE_ENV so React's package
+      // entrypoint picks the prod jsx-runtime path. Without this
+      // Bun emits `import { jsx } from "react/jsx-dev-runtime"`
+      // which the host importmap doesn't expose.
+      define: {
+        "process.env.NODE_ENV": '"production"',
+      },
       naming: "[name].mjs",
     });
     if (!result.success) {
