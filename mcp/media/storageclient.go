@@ -29,9 +29,19 @@ type storageClient struct {
 }
 
 func newStorageClient() *storageClient {
+	// Outbound token: prefer APTEVA_OUTBOUND_TOKEN (set explicitly
+	// for cross-app HTTP) and fall back to APTEVA_APP_TOKEN. In
+	// production both are the install token; in test mode the
+	// runner sets APP_TOKEN="" (so the sidecar's withTokenAuth
+	// pass-throughs the agent's MCP) and OUTBOUND_TOKEN to the
+	// install token (which authMiddleware now accepts).
+	tok := os.Getenv("APTEVA_OUTBOUND_TOKEN")
+	if tok == "" {
+		tok = os.Getenv("APTEVA_APP_TOKEN")
+	}
 	return &storageClient{
 		base:       os.Getenv("APTEVA_GATEWAY_URL"),
-		token:      os.Getenv("APTEVA_APP_TOKEN"),
+		token:      tok,
 		httpClient: &http.Client{Timeout: 60 * time.Second},
 	}
 }

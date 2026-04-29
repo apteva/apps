@@ -1,0 +1,31 @@
+name: search-empty
+description: |
+  Agent calls media_search against an empty catalog and reports
+  back. Smallest possible exercise of the read surface — no storage
+  dependency required (the worker has nothing to do because nothing
+  is uploaded).
+
+timeout: 60s
+max_iterations: 4
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  You have access to the media app. Call media_search with no
+  filters to list any indexed media. The catalog is empty in this
+  test — report what you got back, then stop.
+
+assert:
+  - tool_called: media_search
+  - http: GET /api/apps/media/media
+    expect_status: 200
+    expect_count_at: media
+    expect_count: 0
+  - iterations_at_most: 4
+
+budget:
+  total_tokens: 8000
+  cost_usd: 0.10

@@ -17,8 +17,11 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Error("db.migrations missing")
 	}
-	if len(m.Provides.MCPTools) != 6 {
-		t.Errorf("expected 6 MCP tools, got %d", len(m.Provides.MCPTools))
+	// Four read-side tools is the contract. Ops endpoints (status,
+	// reindex) live as plain HTTP routes, not MCP — agents query the
+	// catalog, the panel does ops.
+	if len(m.Provides.MCPTools) != 4 {
+		t.Errorf("expected 4 MCP tools, got %d", len(m.Provides.MCPTools))
 	}
 	if len(m.Provides.Workers) != 1 {
 		t.Errorf("expected 1 worker, got %d", len(m.Provides.Workers))

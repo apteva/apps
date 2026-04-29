@@ -2,7 +2,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,8 +42,6 @@ provides:
     - { name: media_search,         description: "Filter by duration / dimensions / codec / has_video / has_audio." }
     - { name: media_get_thumbnail,  description: "Get the thumbnail derivation pointer (storage file_id) — generates if missing." }
     - { name: media_get_waveform,   description: "Get the waveform derivation pointer (audio only)." }
-    - { name: media_reindex,        description: "Force a re-probe + re-derive for one file or all failed rows." }
-    - { name: media_index_status,   description: "Counts of pending / ok / failed / unsupported / skipped_size." }
   workers:
     - name: indexer
       schedule: "@every 30s"
@@ -99,13 +96,43 @@ func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) Workers() []sdk.Worker {
+	// poll_interval_seconds drives the indexer cadence. Read straight
+	// from APTEVA_APP_CONFIG (set at process boot) since the SDK
+	// captures the schedule string before OnMount sets ctx.
+	interval := readConfigInt("poll_interval_seconds", 30)
+	if interval < 1 {
+		interval = 1
+	}
 	return []sdk.Worker{
 		{
 			Name:     "indexer",
-			Schedule: "@every 30s",
+			Schedule: fmt.Sprintf("@every %ds", interval),
 			Run:      runIndexer,
 		},
 	}
+}
+
+// readConfigInt parses APTEVA_APP_CONFIG (a JSON object the platform
+// sets at spawn time) for an int field. Falls back to def when the
+// var is missing, the JSON is malformed, or the field isn't there.
+func readConfigInt(name string, def int) int {
+	raw := os.Getenv("APTEVA_APP_CONFIG")
+	if raw == "" {
+		return def
+	}
+	var cfg map[string]string
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return def
+	}
+	v, ok := cfg[name]
+	if !ok || v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 // ─── HTTP routes ────────────────────────────────────────────────────
@@ -116,6 +143,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/media", Handler: a.handleMediaCollection},
 		{Pattern: "/media/", Handler: a.handleMediaItem},
+		{Pattern: "/status", Handler: a.handleStatus},
+		{Pattern: "/reindex", Handler: a.handleReindex},
 	}
 }
 
@@ -158,21 +187,6 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Return the storage file_id of the cached waveform PNG. Args: file_id.",
 			InputSchema: schemaObject(map[string]any{"file_id": map[string]any{"type": "string"}}, []string{"file_id"}),
 			Handler:     a.toolGetDerivation("waveform"),
-		},
-		{
-			Name:        "media_reindex",
-			Description: "Force a re-probe. Args: file_id? (single file) OR failed_only=true (all failed rows).",
-			InputSchema: schemaObject(map[string]any{
-				"file_id":     map[string]any{"type": "string"},
-				"failed_only": map[string]any{"type": "boolean"},
-			}, nil),
-			Handler: a.toolReindex,
-		},
-		{
-			Name:        "media_index_status",
-			Description: "Counts by probe_status. No args.",
-			InputSchema: schemaObject(map[string]any{}, nil),
-			Handler:     a.toolStatus,
 		},
 	}
 }
@@ -281,61 +295,6 @@ func (a *App) toolGetDerivation(kind string) sdk.ToolHandler {
 	}
 }
 
-func (a *App) toolReindex(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
-	if err != nil {
-		return nil, err
-	}
-	if fid, ok := args["file_id"].(string); ok && fid != "" {
-		// Force a single-file reprobe by clearing the source_sha256 +
-		// flipping status to pending. The next worker tick picks it up.
-		_, err := ctx.AppDB().Exec(
-			`UPDATE media SET probe_status='pending', probe_error='', source_sha256='' WHERE project_id=? AND file_id=?`,
-			pid, fid,
-		)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"queued": 1, "file_id": fid}, nil
-	}
-	if v, _ := args["failed_only"].(bool); v {
-		res, err := ctx.AppDB().Exec(
-			`UPDATE media SET probe_status='pending', probe_error='' WHERE project_id=? AND probe_status IN ('failed','unsupported','skipped_size')`,
-			pid,
-		)
-		if err != nil {
-			return nil, err
-		}
-		n, _ := res.RowsAffected()
-		return map[string]any{"queued": n}, nil
-	}
-	return nil, errors.New("provide file_id or failed_only=true")
-}
-
-func (a *App) toolStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := ctx.AppDB().Query(
-		`SELECT probe_status, COUNT(*) FROM media WHERE project_id=? GROUP BY probe_status`, pid,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]int64{}
-	for rows.Next() {
-		var status string
-		var n int64
-		if err := rows.Scan(&status, &n); err != nil {
-			return nil, err
-		}
-		out[status] = n
-	}
-	return out, nil
-}
-
 // ─── HTTP handlers ─────────────────────────────────────────────────
 
 func (a *App) handleMediaCollection(w http.ResponseWriter, r *http.Request) {
@@ -420,6 +379,81 @@ func (a *App) handleMediaItem(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleStatus returns probe-status counts. Dashboard footer uses
+// it; agents don't — they query results, not ops state.
+func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	rows, err := globalCtx.AppDB().Query(
+		`SELECT probe_status, COUNT(*) FROM media WHERE project_id=? GROUP BY probe_status`, pid,
+	)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var status string
+		var n int64
+		if err := rows.Scan(&status, &n); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		out[status] = n
+	}
+	writeJSON(w, out)
+}
+
+// handleReindex flips one file or all failed rows back to pending so
+// the next worker tick re-probes them. Dashboard panel's "retry
+// failed" button hits this; same with the per-row re-index button.
+func (a *App) handleReindex(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	q := r.URL.Query()
+	if fid := q.Get("file_id"); fid != "" {
+		_, err := globalCtx.AppDB().Exec(
+			`UPDATE media SET probe_status='pending', probe_error='', source_sha256='' WHERE project_id=? AND file_id=?`,
+			pid, fid,
+		)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"queued": 1, "file_id": fid})
+		return
+	}
+	if q.Get("failed_only") == "true" {
+		res, err := globalCtx.AppDB().Exec(
+			`UPDATE media SET probe_status='pending', probe_error='' WHERE project_id=? AND probe_status IN ('failed','unsupported','skipped_size')`,
+			pid,
+		)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		n, _ := res.RowsAffected()
+		writeJSON(w, map[string]any{"queued": n})
+		return
+	}
+	http.Error(w, "provide file_id or failed_only=true", http.StatusBadRequest)
+}
+
 // ─── helpers ───────────────────────────────────────────────────────
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -459,8 +493,3 @@ func int64Arg(v any) int64 {
 	return 0
 }
 
-// _ keeps the fmt import alive when handlers don't all use it.
-var _ = fmt.Sprintf
-
-// _ keeps context alive when handlers don't reach into it directly.
-var _ = context.Background

@@ -50,16 +50,16 @@ func TestSidecar_EmptyCatalog(t *testing.T) {
 	}
 }
 
-func TestSidecar_StatusToolReturnsCounts(t *testing.T) {
+func TestSidecar_StatusEndpoint(t *testing.T) {
+	// Status counts now live on a plain HTTP route — agents don't see
+	// it as an MCP tool. The dashboard footer hits this.
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
-	out := sc.MCP("media_index_status", map[string]any{
-		"_project_id": "test-proj",
-	})
-	// Empty index → empty map (no rows to count). Just verify the
-	// dispatch worked without error.
-	if out == nil {
-		t.Errorf("media_index_status returned nil")
+	var got map[string]any
+	resp := sc.GET("/status?project_id=test-proj", &got)
+	if resp.Status != 200 {
+		t.Fatalf("/status status=%d", resp.Status)
 	}
+	// Empty index → empty map. Just verifying the route works.
 }
 
 func TestSidecar_GetMissingFile(t *testing.T) {
@@ -73,15 +73,20 @@ func TestSidecar_GetMissingFile(t *testing.T) {
 	}
 }
 
-func TestSidecar_ReindexFlagsRow(t *testing.T) {
+func TestSidecar_ReindexEndpoint(t *testing.T) {
+	// Reindex moved off the MCP surface to a plain HTTP route. With
+	// an empty catalog this is a no-op that should still return 200.
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
-	out := sc.MCP("media_reindex", map[string]any{
-		"_project_id": "test-proj",
-		"failed_only": true,
-	})
-	// No rows yet — queued count should be 0, not an error.
-	if _, ok := out["queued"]; !ok {
-		t.Errorf("media_reindex didn't return queued count: %v", out)
+	req, _ := http.NewRequest("POST",
+		sc.URL()+"/reindex?project_id=test-proj&failed_only=true", nil)
+	req.Header.Set("Authorization", "Bearer "+sc.Token())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("reindex status=%d", resp.StatusCode)
 	}
 }
 

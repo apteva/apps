@@ -4,3 +4,5 @@ mcp/media/media
 *.db
 *.db-shm
 *.db-wal
+MCP local sidecar bin
+_test_sidecar_bin
