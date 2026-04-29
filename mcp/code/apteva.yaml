@@ -1,0 +1,93 @@
+schema: apteva-app/v1
+
+name: code
+display_name: Apteva Code
+version: 0.1.0
+description: |
+  Repositories — named, framework-tagged code workspaces scoped under
+  Apteva projects. First-class editing tools modelled on Claude Code:
+  partial reads with line numbers, exact-match string edits with
+  uniqueness checks, atomic multi-edit, repo-wide grep + glob.
+  v0.1 backs files on local disk; v0.2 delegates to the Storage app
+  via the cross-app RPC the SDK is gaining.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/code
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/code/icon.png
+tags: [code, editor, repositories, agent]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: repos_list
+      description: List repositories in this Apteva project.
+    - name: repos_create
+      description: Create a repository from a template (blank | nextjs | static | go | python).
+    - name: repos_get
+      description: Repository metadata and tree summary.
+    - name: repos_archive
+      description: Archive a repository (files retained on disk).
+    - name: repos_set_deploy_hints
+      description: Set build_cmd / start_cmd / port / env_json on a repository.
+    - name: code_list_files
+      description: List files in a repository, optionally recursive.
+    - name: code_glob
+      description: Find files in a repository by glob pattern (e.g. "**/*.tsx").
+    - name: code_grep
+      description: Search file contents with regex or literal text. Returns matches with line and column.
+    - name: code_read_file
+      description: Read a file with line numbers prefixed (cat -n format). Supports offset+limit for partial reads.
+    - name: code_write_file
+      description: Write or overwrite a file with full content (creates parent folders).
+    - name: code_edit_file
+      description: Exact-string replacement. Fails if old_string is not unique unless replace_all is true.
+    - name: code_multi_edit
+      description: Apply multiple edits to one file atomically. Each edit applies to the state after the previous one.
+    - name: code_rename_path
+      description: Move or rename a file or folder.
+    - name: code_delete_file
+      description: Delete a file or folder.
+  ui_panels:
+    - slot: project.page
+      label: Code
+      icon: code
+      entry: /ui/CodePanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/code
+  port: 8080
+  health_check: /health
+  storage:
+    - name: repos
+      mount_path: /data
+
+db:
+  driver: sqlite
+  path: /data/code.db
+  migrations: migrations/
+
+config_schema:
+  - name: max_file_size_mb
+    type: text
+    default: "10"
+    label: Max file size (MB)
+    description: Per-file ceiling for writes and uploads.
+  - name: max_repo_size_mb
+    type: text
+    default: "1024"
+    label: Max repository size (MB)
+    description: Soft ceiling per repository, enforced on write.
+
+upgrade_policy: auto-patch

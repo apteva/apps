@@ -1,0 +1,80 @@
+schema: apteva-app/v1
+
+name: jobs
+display_name: Jobs
+version: 0.1.0
+description: |
+  Scheduled-job runner. Other apps (and agents) enqueue work to be
+  delivered later — once at a future time, on an interval, or on a
+  cron expression. Targets are HTTP routes on other apps or instance
+  events; jobs is the connective tissue that lets every other app
+  schedule without reimplementing a scheduler. At-least-once delivery
+  with idempotency keys, exponential backoff, and a runs log.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/jobs
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/jobs/icon.png
+tags: [jobs, scheduling, cron, infrastructure]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.instances.read
+    - platform.instances.write
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: jobs_schedule
+      description: Schedule a job (once / every / cron) with an HTTP or event target.
+    - name: jobs_cancel
+      description: Cancel a scheduled job. Idempotent.
+    - name: jobs_list
+      description: List jobs filtered by owner_app, owner_instance, status.
+    - name: jobs_get
+      description: Fetch one job by id.
+    - name: jobs_runs
+      description: Fetch recent runs for a job (timestamp, status, duration, error).
+    - name: jobs_run_now
+      description: Trigger an immediate ad-hoc run of a scheduled job.
+  ui_panels:
+    - slot: project.page
+      label: Jobs
+      icon: clock
+      entry: /ui/JobsPanel.mjs
+  workers:
+    - name: dispatcher
+      schedule: "@every 5s"
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/jobs
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/jobs.db
+  migrations: migrations/
+
+config_schema:
+  - name: history_retention_days
+    type: text
+    default: "30"
+    label: Run history retention (days)
+    description: How long to keep entries in job_runs before pruning. 0 disables pruning.
+  - name: dispatch_batch_size
+    type: text
+    default: "20"
+    label: Dispatch batch size
+    description: Maximum jobs claimed per ticker tick. Tune up for very high schedule density.
+
+upgrade_policy: auto-patch
