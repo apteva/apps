@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: image-studio
 display_name: Image Studio
-version: 0.1.0
+version: 0.1.1
 description: |
   Generate images via any compatible provider. Optionally saves outputs
   to the Storage app for permanent references.
@@ -72,7 +72,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: image_generate, description: "Generate an image. Args: prompt, size?, quality?, n?." }
+    - { name: image_generate, description: "Generate an image. Args: prompt, model?, size?, quality?, n?." }
     - { name: image_history,  description: "List recent generations. Args: limit?, since?." }
   ui_panels:
     - slot: project.page
@@ -125,6 +125,7 @@ func (a *App) EventHandlers() []sdk.EventHandler   { return nil }
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/generations", Handler: a.handleListGenerations},
+		{Pattern: "/generate", Handler: a.handleGenerate},
 	}
 }
 
@@ -134,14 +135,29 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "image_generate",
-			Description: "Generate an image from a prompt using the bound provider. Args: prompt (required), size?, quality?, n?. " +
+			Description: "Generate an image from a prompt using the bound provider. Args: prompt (required), model?, size?, quality?, n?. " +
 				"Returns MCP content blocks: image (thumbnail base64), text (summary with storage IDs when storage is bound), resource (apteva://storage/file/<id>). " +
 				"The prompt may be revised by the provider (e.g. DALL·E 3) — the revised version is included in the response.",
 			InputSchema: schemaObject(map[string]any{
-				"prompt":  map[string]any{"type": "string"},
-				"size":    map[string]any{"type": "string", "default": "1024x1024"},
-				"quality": map[string]any{"type": "string", "default": "standard"},
-				"n":       map[string]any{"type": "integer", "default": 1},
+				"prompt": map[string]any{"type": "string", "description": "Text prompt describing the image."},
+				"model": map[string]any{
+					"type":        "string",
+					"description": "Model id. For openai-api: dall-e-3 (default) or dall-e-2.",
+					"enum":        []string{"dall-e-3", "dall-e-2"},
+					"default":     "dall-e-3",
+				},
+				"size": map[string]any{
+					"type":        "string",
+					"description": "Image size. dall-e-3: 1024x1024 | 1792x1024 | 1024x1792. dall-e-2: 256x256 | 512x512 | 1024x1024.",
+					"default":     "1024x1024",
+				},
+				"quality": map[string]any{
+					"type":        "string",
+					"description": "Image quality (dall-e-3 only).",
+					"enum":        []string{"standard", "hd"},
+					"default":     "standard",
+				},
+				"n": map[string]any{"type": "integer", "default": 1, "minimum": 1, "maximum": 10},
 			}, []string{"prompt"}),
 			Handler: a.toolImageGenerate,
 		},
@@ -173,20 +189,28 @@ func (a *App) toolImageGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return mcpError("no provider bound — pick an image-generation integration in app settings"), nil
 	}
 
+	model := strArg(args, "model", "dall-e-3")
 	size := strArg(args, "size", "1024x1024")
 	quality := strArg(args, "quality", "standard")
 	n := intArg(args, "n", 1)
+
+	providerArgs := map[string]any{
+		"prompt":  prompt,
+		"model":   model,
+		"size":    size,
+		"quality": quality,
+		"n":       n,
+	}
+	// dall-e-2 doesn't accept "quality" — drop it to avoid 400s.
+	if model == "dall-e-2" {
+		delete(providerArgs, "quality")
+	}
 
 	// 1. Call the integration via the platform.
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(
 		bound.ConnectionID,
 		bound.ToolFor("image.generate"),
-		map[string]any{
-			"prompt":  prompt,
-			"size":    size,
-			"quality": quality,
-			"n":       n,
-		},
+		providerArgs,
 	)
 	if err != nil {
 		return mcpError("provider call failed: " + err.Error()), nil
@@ -199,8 +223,13 @@ func (a *App) toolImageGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return mcpError("provider returned non-2xx: " + body), nil
 	}
 
-	// 2. Normalize across providers.
-	images, revisedPrompt, model, err := normalizeImageResponse(bound.AppSlug, res.Data)
+	// 2. Normalize across providers. The requested model wins over the
+	// normalizer's default — the upstream response usually doesn't echo
+	// the model back, but we asked for one explicitly.
+	images, revisedPrompt, normalizedModel, err := normalizeImageResponse(bound.AppSlug, res.Data)
+	if model == "" {
+		model = normalizedModel
+	}
 	if err != nil {
 		return mcpError("provider response parse: " + err.Error()), nil
 	}
@@ -318,6 +347,61 @@ func (a *App) toolImageHistory(ctx *sdk.AppCtx, args map[string]any) (any, error
 		})
 	}
 	return map[string]any{"generations": out}, nil
+}
+
+// HTTP variant of image_generate for the panel. Same auth model as
+// /generations: this route is only reachable via the platform's reverse
+// proxy at /api/apps/image-studio/, which adds the install bearer
+// token before forwarding. Direct hits to the sidecar are blocked by
+// the loopback bind in production deployments.
+func (a *App) handleGenerate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if globalCtx == nil {
+		http.Error(w, "app not mounted", http.StatusServiceUnavailable)
+		return
+	}
+	var body struct {
+		Prompt    string `json:"prompt"`
+		Model     string `json:"model"`
+		Size      string `json:"size"`
+		Quality   string `json:"quality"`
+		N         int    `json:"n"`
+		ProjectID string `json:"project_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(body.Prompt) == "" {
+		http.Error(w, "prompt required", http.StatusBadRequest)
+		return
+	}
+	args := map[string]any{"prompt": body.Prompt}
+	if body.Model != "" {
+		args["model"] = body.Model
+	}
+	if body.Size != "" {
+		args["size"] = body.Size
+	}
+	if body.Quality != "" {
+		args["quality"] = body.Quality
+	}
+	if body.N > 0 {
+		args["n"] = body.N
+	}
+	// Project context is fixed by the sidecar's APTEVA_PROJECT_ID env —
+	// each install gets its own sidecar with its own project — so we
+	// ignore body.ProjectID rather than mutating env at request time.
+	out, err := a.toolImageGenerate(globalCtx, args)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 // HTTP variant for the panel.

@@ -82,13 +82,27 @@ interface Generation {
 
 const API = "/api/apps/image-studio";
 
+const MODEL_SIZES: Record<string, string[]> = {
+  "dall-e-3": ["1024x1024", "1792x1024", "1024x1792"],
+  "dall-e-2": ["256x256", "512x512", "1024x1024"],
+};
+
 export default function StudioPanel({ projectId }: NativePanelProps) {
   const [items, setItems] = useState<Generation[]>([]);
   const [prompt, setPrompt] = useState("");
+  const [model, setModel] = useState("dall-e-3");
   const [size, setSize] = useState("1024x1024");
+  const [quality, setQuality] = useState("standard");
   const [generating, setGenerating] = useState(false);
   const [status, setStatus] = useState("");
   const [selected, setSelected] = useState<Generation | null>(null);
+
+  // Keep size valid when the model changes — dall-e-2 doesn't accept
+  // dall-e-3's 1792x1024 / 1024x1792.
+  useEffect(() => {
+    const allowed = MODEL_SIZES[model] || ["1024x1024"];
+    if (!allowed.includes(size)) setSize(allowed[0]);
+  }, [model, size]);
 
   const load = useCallback(async () => {
     try {
@@ -122,22 +136,37 @@ export default function StudioPanel({ projectId }: NativePanelProps) {
     setGenerating(true);
     setStatus("Generating…");
     try {
-      // Trigger via the MCP tool — the dashboard's MCP servers expose
-      // a call-tool endpoint, but image-studio also has an HTTP bridge
-      // at /generations. Simplest: post to /generate which forwards
-      // through the sidecar's MCP handler. For v0.1 we just call MCP
-      // via our parent's tools/call surface using the dashboard's
-      // existing mcpServers.callTool — but the panel is in the app's
-      // own sidecar. Cleanest: have an HTTP /generate route on the
-      // sidecar that wraps toolImageGenerate. Falling back to the
-      // tool-call API the dashboard already has would require the
-      // mcp_servers row id, which we don't carry into the panel.
-      //
-      // For v0.1: just call the storage-style POST — image-studio's
-      // sidecar already exposes /generations as GET. Add POST that
-      // calls toolImageGenerate. For now, this panel triggers via
-      // the agent / chat — direct UI generation is v0.2.
-      setStatus("Direct UI generation lands in v0.2 — for now ask an agent or use the MCP test in Settings → MCP Servers.");
+      const res = await fetch(`${API}/generate`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt,
+          model,
+          size,
+          quality: model === "dall-e-3" ? quality : undefined,
+          n: 1,
+        }),
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        setStatus(`Error ${res.status}: ${text.slice(0, 300)}`);
+        return;
+      }
+      let result: { isError?: boolean; content?: { type: string; text?: string }[] } = {};
+      try { result = JSON.parse(text); } catch {}
+      if (result.isError) {
+        const msg = result.content?.find((c) => c.type === "text")?.text || "generation failed";
+        setStatus(`Error: ${msg}`);
+        return;
+      }
+      // Live event from the sidecar will trigger load() — just clear
+      // the prompt and let the gallery refresh.
+      setPrompt("");
+      setStatus("Done.");
+      load();
+    } catch (e) {
+      setStatus("Error: " + (e as Error).message);
     } finally {
       setGenerating(false);
     }
@@ -146,8 +175,8 @@ export default function StudioPanel({ projectId }: NativePanelProps) {
   return (
     <div className="h-full flex">
       <div className="flex-1 flex flex-col p-6 gap-4 min-w-0">
-        <div className="flex items-end gap-3">
-          <div className="flex-1">
+        <div className="flex items-end gap-3 flex-wrap">
+          <div className="flex-1 min-w-[240px]">
             <label className="text-text-muted text-xs">Prompt</label>
             <input
               type="text"
@@ -158,15 +187,42 @@ export default function StudioPanel({ projectId }: NativePanelProps) {
               className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
             />
           </div>
-          <select
-            value={size}
-            onChange={(e) => setSize(e.target.value)}
-            className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
-          >
-            <option>1024x1024</option>
-            <option>1792x1024</option>
-            <option>1024x1792</option>
-          </select>
+          <div>
+            <label className="text-text-muted text-xs block">Model</label>
+            <select
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+            >
+              <option value="dall-e-3">DALL·E 3</option>
+              <option value="dall-e-2">DALL·E 2</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-text-muted text-xs block">Size</label>
+            <select
+              value={size}
+              onChange={(e) => setSize(e.target.value)}
+              className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+            >
+              {(MODEL_SIZES[model] || ["1024x1024"]).map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          </div>
+          {model === "dall-e-3" && (
+            <div>
+              <label className="text-text-muted text-xs block">Quality</label>
+              <select
+                value={quality}
+                onChange={(e) => setQuality(e.target.value)}
+                className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+              >
+                <option value="standard">Standard</option>
+                <option value="hd">HD</option>
+              </select>
+            </div>
+          )}
           <button
             onClick={generate}
             disabled={!prompt.trim() || generating}
