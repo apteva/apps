@@ -1,0 +1,80 @@
+schema: apteva-app/v1
+
+name: social
+display_name: Social
+version: 0.1.0
+description: |
+  Schedule and publish posts to your social media accounts: X (Twitter),
+  Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
+  Pinterest, and Threads. Connect accounts from inside the app — no
+  separate integration setup. Posts can be triggered from the panel or
+  by an agent via MCP tools; jobs handle scheduling + retry.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/social
+tags: [social-media, publishing, scheduling, productivity]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.connections.execute
+    - platform.connections.manage
+    - platform.oauth.start
+    - platform.apps.call
+  # No required integrations — accounts are connected at runtime via
+  # platform.oauth.start. Storage and jobs are bound by the operator at
+  # install time so the app can persist media and schedule durable
+  # publish jobs.
+  integrations:
+    - role: storage
+      kind: app
+      compatible_app_names: [storage]
+      capabilities: [files.write]
+      required: false
+      label: "Storage (optional)"
+      hint: "Persist uploaded media so posts can reference stable URLs across restarts."
+    - role: jobs
+      kind: app
+      compatible_app_names: [jobs]
+      capabilities: [jobs.schedule]
+      required: false
+      label: "Jobs (optional)"
+      hint: "Without jobs, scheduled posts publish synchronously when the app's worker tick fires; with jobs, scheduling is durable + retried with exponential backoff."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: account_add,                 description: "Begin OAuth for a platform. Returns authorize_url + pending_account_id." }
+    - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable pages/channels (FB pages, IG business accounts, YouTube channels)." }
+    - { name: account_finalize,            description: "Commit a pending account into the active account list. For multi-page platforms, supply page_id." }
+    - { name: account_list,                description: "List connected social accounts in this project." }
+    - { name: account_disconnect,          description: "Revoke a social account (deletes underlying connection too)." }
+    - { name: post_create,                 description: "Create + publish (or schedule) a post across N social_account_ids. Args: body, social_account_ids[], schedule_at?, media_storage_ids?." }
+    - { name: post_list,                   description: "List recent posts with per-target status. Args: limit?, status?." }
+    - { name: post_retry,                  description: "Re-attempt failed targets on a post. Args: post_id." }
+  ui_panels:
+    - slot: project.page
+      label: Social
+      icon: megaphone
+      entry: /ui/SocialPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/social
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/social.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
