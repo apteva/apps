@@ -168,7 +168,9 @@ func (a *App) toolImageGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	bound := ctx.IntegrationFor("provider")
 	if bound == nil {
-		return nil, errors.New("no provider bound — pick an image-generation integration in app settings")
+		// Surface as an MCP error rather than a Go error so the agent
+		// sees a usable message instead of an opaque MCP -32000 wrapper.
+		return mcpError("no provider bound — pick an image-generation integration in app settings"), nil
 	}
 
 	size := strArg(args, "size", "1024x1024")
