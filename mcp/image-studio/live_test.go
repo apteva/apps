@@ -11,7 +11,7 @@ package main
 // Run:
 //   OPENAI_API_KEY=sk-... go test -tags live -v -run TestLive_ ./...
 //
-// Costs ~$0.04 per run (one dall-e-3 standard generation).
+// Costs vary by model (gpt-image-2 medium ~ a few cents per run).
 // CI canary: gate behind a manual workflow + a dedicated key with
 // strict spend caps + per-day rate limits via OpenAI's dashboard.
 //
@@ -49,12 +49,15 @@ func TestLive_OpenAI_GenerateImage(t *testing.T) {
 		t.Skip("OPENAI_API_KEY not set — skipping live test (run with: OPENAI_API_KEY=sk-... go test -tags live)")
 	}
 
+	// gpt-image-2 is the current SOTA. It always returns b64_json
+	// (no URL response option), which is exactly the path
+	// normalizeImageResponse + saveToStorage(files_upload) takes.
 	body := map[string]any{
-		"model":   "dall-e-3",
+		"model":   "gpt-image-2",
 		"prompt":  "minimalist line drawing of a teacup on a saucer, black ink on white",
 		"n":       1,
 		"size":    "1024x1024",
-		"quality": "standard",
+		"quality": "medium",
 	}
 	bodyJSON, _ := json.Marshal(body)
 
@@ -92,28 +95,28 @@ func TestLive_OpenAI_GenerateImage(t *testing.T) {
 	if len(images) != 1 {
 		t.Fatalf("expected 1 image, got %d", len(images))
 	}
-	if images[0].UpstreamURL == "" {
-		t.Fatal("upstream URL empty in response")
+	// gpt-image-2 returns b64_json (never URL). Verify the bytes path
+	// in imageBytes — that's what the production storage handoff uses.
+	if images[0].B64 == "" {
+		t.Fatal("b64_json empty — gpt-image-2 should always inline bytes")
 	}
-	if !strings.HasPrefix(images[0].UpstreamURL, "https://") {
-		t.Errorf("upstream URL should be https://, got %q", images[0].UpstreamURL)
+	if images[0].UpstreamURL != "" {
+		t.Errorf("gpt-image-2 should not return URL, got %q", images[0].UpstreamURL)
 	}
-
-	// Spot-check the URL fetches a real image. We don't decode it to
-	// keep the test fast; just confirm the OpenAI CDN serves bytes.
-	imgResp, err := http.Get(images[0].UpstreamURL)
+	bytes, err := imageBytes(images[0])
 	if err != nil {
-		t.Fatalf("fetch upstream image: %v", err)
+		t.Fatalf("imageBytes decode failed: %v", err)
 	}
-	defer imgResp.Body.Close()
-	if imgResp.StatusCode != 200 {
-		t.Errorf("image URL returned %d", imgResp.StatusCode)
+	if len(bytes) < 1024 {
+		t.Errorf("decoded image suspiciously small: %d bytes", len(bytes))
 	}
-	if ct := imgResp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "image/") {
-		t.Errorf("image URL Content-Type = %q, want image/*", ct)
+	// PNG magic — confirms we got real image bytes back.
+	if len(bytes) >= 8 && string(bytes[:8]) != "\x89PNG\r\n\x1a\n" {
+		t.Logf("note: bytes[:8]=%x (not PNG header — check output_format)", bytes[:8])
 	}
 
-	t.Logf("live OK: model=%s revised_prompt=%q url=%s", model, revised, images[0].UpstreamURL)
+	t.Logf("live OK: model=%s revised_prompt=%q b64_len=%d decoded=%d bytes",
+		model, revised, len(images[0].B64), len(bytes))
 }
 
 // readBody is a tiny helper so the test doesn't sprawl with bytes

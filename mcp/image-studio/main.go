@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: image-studio
 display_name: Image Studio
-version: 0.1.1
+version: 0.2.0
 description: |
   Generate images via any compatible provider. Optionally saves outputs
   to the Storage app for permanent references.
@@ -135,27 +135,36 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "image_generate",
-			Description: "Generate an image from a prompt using the bound provider. Args: prompt (required), model?, size?, quality?, n?. " +
+			Description: "Generate an image from a prompt using the bound provider. Args: prompt (required), model?, size?, quality?, output_format?, background?, n?. " +
 				"Returns MCP content blocks: image (thumbnail base64), text (summary with storage IDs when storage is bound), resource (apteva://storage/file/<id>). " +
-				"The prompt may be revised by the provider (e.g. DALL·E 3) — the revised version is included in the response.",
+				"The prompt may be revised by the provider (DALL·E 3) — the revised version is included in the response.",
 			InputSchema: schemaObject(map[string]any{
 				"prompt": map[string]any{"type": "string", "description": "Text prompt describing the image."},
 				"model": map[string]any{
 					"type":        "string",
-					"description": "Model id. For openai-api: dall-e-3 (default) or dall-e-2.",
-					"enum":        []string{"dall-e-3", "dall-e-2"},
-					"default":     "dall-e-3",
+					"description": "Model id. Default gpt-image-2 (current SOTA). gpt-image-1.5 / gpt-image-1 / gpt-image-1-mini are legacy GPT Image; dall-e-3 / dall-e-2 are the older DALL·E family.",
+					"enum":        []string{"gpt-image-2", "gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini", "dall-e-3", "dall-e-2"},
+					"default":     "gpt-image-2",
 				},
 				"size": map[string]any{
 					"type":        "string",
-					"description": "Image size. dall-e-3: 1024x1024 | 1792x1024 | 1024x1792. dall-e-2: 256x256 | 512x512 | 1024x1024.",
+					"description": "Image size. gpt-image-2 supports flexible WxH (popular: 1024x1024, 1024x1536, 1536x1024, 2048x2048, 3840x2160, auto). gpt-image-1*: 1024x1024 | 1024x1536 | 1536x1024. dall-e-3: 1024x1024 | 1792x1024 | 1024x1792. dall-e-2: 256x256 | 512x512 | 1024x1024.",
 					"default":     "1024x1024",
 				},
 				"quality": map[string]any{
 					"type":        "string",
-					"description": "Image quality (dall-e-3 only).",
-					"enum":        []string{"standard", "hd"},
-					"default":     "standard",
+					"description": "gpt-image-*: low | medium | high | auto. dall-e-3: standard | hd. dall-e-2: not supported.",
+					"default":     "auto",
+				},
+				"output_format": map[string]any{
+					"type":        "string",
+					"description": "gpt-image-* only — png | jpeg | webp.",
+					"enum":        []string{"png", "jpeg", "webp"},
+				},
+				"background": map[string]any{
+					"type":        "string",
+					"description": "gpt-image-* only — auto | transparent | opaque. transparent forces RGBA (png/webp).",
+					"enum":        []string{"auto", "transparent", "opaque"},
 				},
 				"n": map[string]any{"type": "integer", "default": 1, "minimum": 1, "maximum": 10},
 			}, []string{"prompt"}),
@@ -189,22 +198,14 @@ func (a *App) toolImageGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return mcpError("no provider bound — pick an image-generation integration in app settings"), nil
 	}
 
-	model := strArg(args, "model", "dall-e-3")
+	model := strArg(args, "model", "gpt-image-2")
 	size := strArg(args, "size", "1024x1024")
-	quality := strArg(args, "quality", "standard")
+	quality := strArg(args, "quality", "")
 	n := intArg(args, "n", 1)
+	outputFormat := strArg(args, "output_format", "")
+	background := strArg(args, "background", "")
 
-	providerArgs := map[string]any{
-		"prompt":  prompt,
-		"model":   model,
-		"size":    size,
-		"quality": quality,
-		"n":       n,
-	}
-	// dall-e-2 doesn't accept "quality" — drop it to avoid 400s.
-	if model == "dall-e-2" {
-		delete(providerArgs, "quality")
-	}
+	providerArgs := buildProviderArgs(model, prompt, size, quality, outputFormat, background, n)
 
 	// 1. Call the integration via the platform.
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(
@@ -243,13 +244,16 @@ func (a *App) toolImageGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	storageIDs := make([]int64, 0, len(images))
 	upstreamURLs := make([]string, 0, len(images))
 	var firstThumbB64 string
+	ext := pickExt(outputFormat)
+	contentType := "image/" + ext
 	for i, img := range images {
 		upstreamURLs = append(upstreamURLs, img.UpstreamURL)
 
-		// Fetch bytes from the upstream URL (1h TTL is plenty here).
-		body, err := fetchBytes(img.UpstreamURL)
+		// Get the bytes — either decode the inline base64 (gpt-image-*)
+		// or fetch the upstream URL (DALL·E default).
+		body, err := imageBytes(img)
 		if err != nil {
-			ctx.Logger().Warn("fetch upstream image failed", "url", img.UpstreamURL, "err", err)
+			ctx.Logger().Warn("fetch image bytes failed", "url", img.UpstreamURL, "err", err)
 			continue
 		}
 		// Build a thumbnail for the response. Best-effort; if it fails
@@ -260,24 +264,11 @@ func (a *App) toolImageGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		}
 
 		if storage != nil {
-			// Hand off to storage via CallApp. files_from_url accepts
-			// a URL string, not bytes, so we pass the upstream URL —
-			// storage will fetch its own bytes (the URL is still
-			// fresh at this point). When the upstream URL has a short
-			// TTL (OpenAI: 1h) this is fine.
-			res, err := ctx.PlatformAPI().CallApp("storage", "files_from_url", map[string]any{
-				"url":    img.UpstreamURL,
-				"folder": "/generated/",
-				"name":   fmt.Sprintf("img-%d-%d.png", time.Now().Unix(), i),
-				"tags":   []string{"ai", "generated", bound.AppSlug},
-			})
+			id, err := saveToStorage(ctx, img, ext, contentType, bound.AppSlug, i)
 			if err != nil {
 				ctx.Logger().Warn("storage save failed", "err", err)
 				continue
 			}
-			// Storage's MCP response is wrapped in {content:[{text:json}]}.
-			// Extract the inner JSON.
-			id := extractStorageID(res)
 			if id != 0 {
 				storageIDs = append(storageIDs, id)
 			}
@@ -470,23 +461,28 @@ func (a *App) dbInsertGeneration(
 // ─── Provider response normalization ───────────────────────────────
 
 type generatedImage struct {
-	UpstreamURL string
+	UpstreamURL string // populated for DALL·E (URL response) — empty for gpt-image-*
+	B64         string // populated for gpt-image-* (always) and DALL·E with response_format=b64_json
 }
 
 // normalizeImageResponse parses provider-specific shapes into a uniform
-// list. Today only openai-api is supported (compatible_slugs in the
-// manifest); extend as new providers land.
+// list. Today only openai-api is supported; extend as new providers land.
+//
+// OpenAI returns the same envelope ({data:[…], created}) for every model
+// in the family — only the per-item shape differs (url vs b64_json), and
+// gpt-image-* never includes a URL. We surface both fields so the caller
+// can pick the path that matches what was returned.
 func normalizeImageResponse(slug string, raw json.RawMessage) ([]generatedImage, string, string, error) {
 	switch slug {
 	case "openai-api":
-		// {data:[{url, revised_prompt}]}
 		var body struct {
 			Data []struct {
 				URL           string `json:"url"`
 				B64JSON       string `json:"b64_json"`
 				RevisedPrompt string `json:"revised_prompt"`
 			} `json:"data"`
-			Created int64 `json:"created"`
+			Created int64  `json:"created"`
+			Model   string `json:"model"` // gpt-image-2 echoes this; DALL·E doesn't
 		}
 		if err := json.Unmarshal(raw, &body); err != nil {
 			return nil, "", "", err
@@ -494,14 +490,117 @@ func normalizeImageResponse(slug string, raw json.RawMessage) ([]generatedImage,
 		images := make([]generatedImage, 0, len(body.Data))
 		var revised string
 		for i, d := range body.Data {
-			images = append(images, generatedImage{UpstreamURL: d.URL})
+			images = append(images, generatedImage{UpstreamURL: d.URL, B64: d.B64JSON})
 			if i == 0 {
 				revised = d.RevisedPrompt
 			}
 		}
-		return images, revised, "dall-e-3", nil
+		// We don't know the actual model unless it echoes back; the
+		// caller's requested model wins in toolImageGenerate, so the
+		// fallback here is just for the typed-zero case.
+		return images, revised, body.Model, nil
 	}
 	return nil, "", "", fmt.Errorf("unsupported provider slug: %q", slug)
+}
+
+// buildProviderArgs assembles the request body for /v1/images/generations
+// per-model. OpenAI rejects unknown / unsupported fields with 400, so we
+// gate each parameter on the model's accepted set rather than always
+// sending everything.
+func buildProviderArgs(model, prompt, size, quality, outputFormat, background string, n int) map[string]any {
+	args := map[string]any{
+		"model":  model,
+		"prompt": prompt,
+		"n":      n,
+	}
+	if size != "" {
+		args["size"] = size
+	}
+	switch {
+	case strings.HasPrefix(model, "gpt-image"):
+		// gpt-image-*: low | medium | high | auto. Default 'auto' is fine.
+		if quality != "" {
+			args["quality"] = quality
+		}
+		if outputFormat != "" {
+			args["output_format"] = outputFormat
+		}
+		if background != "" {
+			args["background"] = background
+		}
+	case model == "dall-e-3":
+		// standard | hd
+		if quality == "" || quality == "auto" {
+			args["quality"] = "standard"
+		} else {
+			args["quality"] = quality
+		}
+	case model == "dall-e-2":
+		// no quality/format/background — stripped by omission above.
+	}
+	return args
+}
+
+// imageBytes returns the raw bytes for an image regardless of which
+// shape the provider used. b64 wins when both are present (cheaper and
+// avoids a network call against the provider's hosted CDN).
+func imageBytes(img generatedImage) ([]byte, error) {
+	if img.B64 != "" {
+		return base64.StdEncoding.DecodeString(img.B64)
+	}
+	if img.UpstreamURL != "" {
+		return fetchBytes(img.UpstreamURL)
+	}
+	return nil, errors.New("image has neither b64 nor URL")
+}
+
+// saveToStorage hands an image off to the bound storage app. For URL
+// responses we use files_from_url so storage fetches its own bytes
+// (cheaper, no double-buffering); for inline base64 we use files_upload
+// and pass the b64 string through unchanged (storage's tool accepts
+// base64 directly via content_base64).
+func saveToStorage(ctx *sdk.AppCtx, img generatedImage, ext, contentType, providerSlug string, idx int) (int64, error) {
+	name := fmt.Sprintf("img-%d-%d.%s", time.Now().Unix(), idx, ext)
+	tags := []string{"ai", "generated", providerSlug}
+	if img.B64 != "" {
+		res, err := ctx.PlatformAPI().CallApp("storage", "files_upload", map[string]any{
+			"name":           name,
+			"content_base64": img.B64,
+			"folder":         "/generated/",
+			"content_type":   contentType,
+			"tags":           tags,
+		})
+		if err != nil {
+			return 0, err
+		}
+		return extractStorageID(res), nil
+	}
+	if img.UpstreamURL != "" {
+		res, err := ctx.PlatformAPI().CallApp("storage", "files_from_url", map[string]any{
+			"url":    img.UpstreamURL,
+			"folder": "/generated/",
+			"name":   name,
+			"tags":   tags,
+		})
+		if err != nil {
+			return 0, err
+		}
+		return extractStorageID(res), nil
+	}
+	return 0, errors.New("no image source")
+}
+
+// pickExt maps the requested output_format to a file extension. PNG is
+// the universal default; jpeg/webp only ever come back from gpt-image-*
+// when explicitly requested.
+func pickExt(outputFormat string) string {
+	switch outputFormat {
+	case "jpeg", "jpg":
+		return "jpg"
+	case "webp":
+		return "webp"
+	}
+	return "png"
 }
 
 // ─── MCP response builders ────────────────────────────────────────

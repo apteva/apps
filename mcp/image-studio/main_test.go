@@ -137,20 +137,39 @@ func (s *stringWriter) Write(p []byte) (int, error) { return s.b.Write(p) }
 
 // --- normalizeImageResponse ----------------------------------------
 
-func TestNormalizeImageResponse_OpenAI(t *testing.T) {
+func TestNormalizeImageResponse_OpenAI_DALLE_URL(t *testing.T) {
+	// DALL·E shape — URL response, no model echo.
 	body := `{"data":[{"url":"https://upstream/a.png","revised_prompt":"a tabby cat"}]}`
-	imgs, revised, model, err := normalizeImageResponse("openai-api", json.RawMessage(body))
+	imgs, revised, _, err := normalizeImageResponse("openai-api", json.RawMessage(body))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(imgs) != 1 || imgs[0].UpstreamURL != "https://upstream/a.png" {
 		t.Errorf("imgs = %+v", imgs)
 	}
+	if imgs[0].B64 != "" {
+		t.Errorf("B64 should be empty when URL is set, got %q", imgs[0].B64)
+	}
 	if revised != "a tabby cat" {
 		t.Errorf("revised = %q", revised)
 	}
-	if model == "" {
-		t.Error("model empty")
+}
+
+func TestNormalizeImageResponse_OpenAI_GPTImage_B64(t *testing.T) {
+	// gpt-image-* shape — base64 response, model echoed.
+	body := `{"data":[{"b64_json":"AAECAwQ="}],"created":1714000000,"model":"gpt-image-2"}`
+	imgs, _, model, err := normalizeImageResponse("openai-api", json.RawMessage(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imgs) != 1 || imgs[0].B64 != "AAECAwQ=" {
+		t.Errorf("imgs = %+v", imgs)
+	}
+	if imgs[0].UpstreamURL != "" {
+		t.Errorf("UpstreamURL should be empty when only B64 is set, got %q", imgs[0].UpstreamURL)
+	}
+	if model != "gpt-image-2" {
+		t.Errorf("model = %q, want gpt-image-2", model)
 	}
 }
 
@@ -428,5 +447,154 @@ func TestToolImageHistory_LimitCap(t *testing.T) {
 	gens := out.(map[string]any)["generations"].([]map[string]any)
 	if len(gens) != 3 {
 		t.Errorf("expected limit=3, got %d", len(gens))
+	}
+}
+
+// --- buildProviderArgs ---------------------------------------------
+
+func TestBuildProviderArgs_GPTImage2(t *testing.T) {
+	args := buildProviderArgs("gpt-image-2", "p", "1024x1024", "high", "webp", "transparent", 1)
+	if args["model"] != "gpt-image-2" || args["prompt"] != "p" || args["size"] != "1024x1024" {
+		t.Errorf("base fields wrong: %+v", args)
+	}
+	if args["quality"] != "high" || args["output_format"] != "webp" || args["background"] != "transparent" {
+		t.Errorf("gpt-image-2 fields not passed through: %+v", args)
+	}
+}
+
+func TestBuildProviderArgs_GPTImage_DefaultsOmitOptionals(t *testing.T) {
+	args := buildProviderArgs("gpt-image-2", "p", "1024x1024", "", "", "", 1)
+	if _, ok := args["quality"]; ok {
+		t.Error("empty quality should not be sent — let provider default")
+	}
+	if _, ok := args["output_format"]; ok {
+		t.Error("empty output_format should not be sent")
+	}
+	if _, ok := args["background"]; ok {
+		t.Error("empty background should not be sent")
+	}
+}
+
+func TestBuildProviderArgs_DallE3_QualityRemap(t *testing.T) {
+	// "auto" is a gpt-image value; for dall-e-3 we must remap to standard.
+	args := buildProviderArgs("dall-e-3", "p", "1024x1024", "auto", "webp", "", 1)
+	if args["quality"] != "standard" {
+		t.Errorf("dall-e-3 'auto' should remap to standard, got %v", args["quality"])
+	}
+	if _, ok := args["output_format"]; ok {
+		t.Error("dall-e-3 doesn't accept output_format — must be stripped")
+	}
+}
+
+func TestBuildProviderArgs_DallE2_StripsAllExtras(t *testing.T) {
+	args := buildProviderArgs("dall-e-2", "p", "512x512", "high", "webp", "transparent", 2)
+	if _, ok := args["quality"]; ok {
+		t.Error("dall-e-2 doesn't accept quality")
+	}
+	if _, ok := args["output_format"]; ok {
+		t.Error("dall-e-2 doesn't accept output_format")
+	}
+	if _, ok := args["background"]; ok {
+		t.Error("dall-e-2 doesn't accept background")
+	}
+}
+
+// --- imageBytes ----------------------------------------------------
+
+func TestImageBytes_PrefersB64(t *testing.T) {
+	want := []byte("hello")
+	enc := base64.StdEncoding.EncodeToString(want)
+	got, err := imageBytes(generatedImage{B64: enc, UpstreamURL: "http://should-not-be-fetched.invalid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "hello" {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestImageBytes_NoSource(t *testing.T) {
+	if _, err := imageBytes(generatedImage{}); err == nil {
+		t.Fatal("expected error when neither URL nor B64 set")
+	}
+}
+
+// --- toolImageGenerate b64 path ------------------------------------
+
+func TestToolImageGenerate_GPTImage_B64_StorageUpload(t *testing.T) {
+	// gpt-image-* never returns a URL — only b64. Storage handoff must
+	// switch from files_from_url to files_upload with content_base64.
+	pngB64 := base64.StdEncoding.EncodeToString(fakePNG())
+
+	pf := newRecordingPlatform()
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data: json.RawMessage(fmt.Sprintf(
+			`{"data":[{"b64_json":%q}],"created":1714000000,"model":"gpt-image-2"}`,
+			pngB64,
+		)),
+	}
+	pf.nextCallResult = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":7777,\"url\":\"/files/7777\",\"sha256\":\"abc\"}"}]}}`,
+	)
+
+	ctx := newImageStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolImageGenerate(ctx, map[string]any{
+		"prompt":        "moonlit owl",
+		"model":         "gpt-image-2",
+		"output_format": "png",
+	})
+	if err != nil {
+		t.Fatalf("toolImageGenerate: %v", err)
+	}
+
+	if len(pf.callAppCalls) != 1 {
+		t.Fatalf("expected 1 storage call, got %d", len(pf.callAppCalls))
+	}
+	got := pf.callAppCalls[0]
+	if got.Tool != "files_upload" {
+		t.Errorf("for b64 path expected files_upload, got %q", got.Tool)
+	}
+	if cb, _ := got.Input["content_base64"].(string); cb != pngB64 {
+		t.Errorf("content_base64 not passed through: got %q", cb)
+	}
+	if ct, _ := got.Input["content_type"].(string); ct != "image/png" {
+		t.Errorf("content_type = %q, want image/png", ct)
+	}
+
+	// Provider call: model + output_format made it through.
+	if pf.executeCalls[0].Input["model"] != "gpt-image-2" {
+		t.Errorf("model not forwarded: %+v", pf.executeCalls[0].Input)
+	}
+	if pf.executeCalls[0].Input["output_format"] != "png" {
+		t.Errorf("output_format not forwarded: %+v", pf.executeCalls[0].Input)
+	}
+
+	// Result has storage id.
+	res := out.(map[string]any)
+	meta := res["_meta"].(map[string]any)
+	ids := meta["storage_ids"].([]int64)
+	if len(ids) != 1 || ids[0] != 7777 {
+		t.Errorf("storage_ids = %+v", ids)
+	}
+}
+
+// --- pickExt -------------------------------------------------------
+
+func TestPickExt(t *testing.T) {
+	cases := map[string]string{
+		"":     "png",
+		"png":  "png",
+		"jpeg": "jpg",
+		"jpg":  "jpg",
+		"webp": "webp",
+		"gif":  "png", // unknown defaults to png
+	}
+	for in, want := range cases {
+		if got := pickExt(in); got != want {
+			t.Errorf("pickExt(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

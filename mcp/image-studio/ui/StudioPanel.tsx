@@ -82,27 +82,70 @@ interface Generation {
 
 const API = "/api/apps/image-studio";
 
-const MODEL_SIZES: Record<string, string[]> = {
+// Per-model option matrices. The MCP tool schema is the source of truth;
+// the UI mirrors a usable subset (no "auto" / 3840x2160 — those are
+// available to agents via the tool, but the panel offers concrete sizes).
+type ModelId =
+  | "gpt-image-2"
+  | "gpt-image-1.5"
+  | "gpt-image-1"
+  | "gpt-image-1-mini"
+  | "dall-e-3"
+  | "dall-e-2";
+
+const MODEL_LABELS: Record<ModelId, string> = {
+  "gpt-image-2": "GPT Image 2 (current)",
+  "gpt-image-1.5": "GPT Image 1.5",
+  "gpt-image-1": "GPT Image 1",
+  "gpt-image-1-mini": "GPT Image 1 Mini",
+  "dall-e-3": "DALL·E 3 (legacy)",
+  "dall-e-2": "DALL·E 2 (legacy)",
+};
+const MODELS: ModelId[] = [
+  "gpt-image-2",
+  "gpt-image-1.5",
+  "gpt-image-1",
+  "gpt-image-1-mini",
+  "dall-e-3",
+  "dall-e-2",
+];
+
+const MODEL_SIZES: Record<ModelId, string[]> = {
+  "gpt-image-2": ["1024x1024", "1024x1536", "1536x1024", "2048x2048", "3840x2160"],
+  "gpt-image-1.5": ["1024x1024", "1024x1536", "1536x1024"],
+  "gpt-image-1": ["1024x1024", "1024x1536", "1536x1024"],
+  "gpt-image-1-mini": ["1024x1024", "1024x1536", "1536x1024"],
   "dall-e-3": ["1024x1024", "1792x1024", "1024x1792"],
   "dall-e-2": ["256x256", "512x512", "1024x1024"],
 };
 
+const GPT_IMAGE_QUALITIES = ["auto", "low", "medium", "high"];
+const DALLE3_QUALITIES = ["standard", "hd"];
+
+function isGptImage(m: ModelId) { return m.startsWith("gpt-image"); }
+
 export default function StudioPanel({ projectId }: NativePanelProps) {
   const [items, setItems] = useState<Generation[]>([]);
   const [prompt, setPrompt] = useState("");
-  const [model, setModel] = useState("dall-e-3");
+  const [model, setModel] = useState<ModelId>("gpt-image-2");
   const [size, setSize] = useState("1024x1024");
-  const [quality, setQuality] = useState("standard");
+  const [quality, setQuality] = useState("auto");
+  const [outputFormat, setOutputFormat] = useState("png");
   const [generating, setGenerating] = useState(false);
   const [status, setStatus] = useState("");
   const [selected, setSelected] = useState<Generation | null>(null);
 
-  // Keep size valid when the model changes — dall-e-2 doesn't accept
-  // dall-e-3's 1792x1024 / 1024x1792.
+  // Keep size + quality valid when the model changes — dall-e-2 has no
+  // 1792x… and gpt-image's "auto" isn't a dall-e-3 quality.
   useEffect(() => {
-    const allowed = MODEL_SIZES[model] || ["1024x1024"];
-    if (!allowed.includes(size)) setSize(allowed[0]);
-  }, [model, size]);
+    const allowedSizes = MODEL_SIZES[model] || ["1024x1024"];
+    if (!allowedSizes.includes(size)) setSize(allowedSizes[0]);
+    if (isGptImage(model)) {
+      if (!GPT_IMAGE_QUALITIES.includes(quality)) setQuality("auto");
+    } else if (model === "dall-e-3") {
+      if (!DALLE3_QUALITIES.includes(quality)) setQuality("standard");
+    }
+  }, [model, size, quality]);
 
   const load = useCallback(async () => {
     try {
@@ -144,7 +187,11 @@ export default function StudioPanel({ projectId }: NativePanelProps) {
           prompt,
           model,
           size,
-          quality: model === "dall-e-3" ? quality : undefined,
+          // dall-e-2 has no quality; for everything else send what we have.
+          quality: model === "dall-e-2" ? undefined : quality,
+          // gpt-image-* honors output_format; DALL·E ignores it server-side
+          // (we strip it in buildProviderArgs anyway).
+          output_format: isGptImage(model) ? outputFormat : undefined,
           n: 1,
         }),
       });
@@ -191,11 +238,12 @@ export default function StudioPanel({ projectId }: NativePanelProps) {
             <label className="text-text-muted text-xs block">Model</label>
             <select
               value={model}
-              onChange={(e) => setModel(e.target.value)}
+              onChange={(e) => setModel(e.target.value as ModelId)}
               className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
             >
-              <option value="dall-e-3">DALL·E 3</option>
-              <option value="dall-e-2">DALL·E 2</option>
+              {MODELS.map((m) => (
+                <option key={m} value={m}>{MODEL_LABELS[m]}</option>
+              ))}
             </select>
           </div>
           <div>
@@ -210,7 +258,7 @@ export default function StudioPanel({ projectId }: NativePanelProps) {
               ))}
             </select>
           </div>
-          {model === "dall-e-3" && (
+          {model !== "dall-e-2" && (
             <div>
               <label className="text-text-muted text-xs block">Quality</label>
               <select
@@ -218,8 +266,23 @@ export default function StudioPanel({ projectId }: NativePanelProps) {
                 onChange={(e) => setQuality(e.target.value)}
                 className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
               >
-                <option value="standard">Standard</option>
-                <option value="hd">HD</option>
+                {(isGptImage(model) ? GPT_IMAGE_QUALITIES : DALLE3_QUALITIES).map((q) => (
+                  <option key={q} value={q}>{q}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          {isGptImage(model) && (
+            <div>
+              <label className="text-text-muted text-xs block">Format</label>
+              <select
+                value={outputFormat}
+                onChange={(e) => setOutputFormat(e.target.value)}
+                className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+              >
+                <option value="png">PNG</option>
+                <option value="jpeg">JPEG</option>
+                <option value="webp">WebP</option>
               </select>
             </div>
           )}

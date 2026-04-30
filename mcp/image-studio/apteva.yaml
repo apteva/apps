@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: image-studio
 display_name: Image Studio
-version: 0.1.1
+version: 0.2.0
 description: |
   Generate images via any compatible provider (OpenAI today; Replicate /
   Stability / Fal as the integration catalog learns them). Optionally
@@ -44,7 +44,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: image_generate, description: "Generate an image from a prompt. Args: prompt, model?, size?, quality?, n?. Returns thumbnail + storage_id when storage is bound, else inline base64." }
+    - { name: image_generate, description: "Generate an image. Args: prompt, model? (gpt-image-2 default), size?, quality?, output_format?, background?, n?. Returns thumbnail + storage_id when storage is bound, else inline base64." }
     - { name: image_history,  description: "List recent generations for this project. Args: limit?, since?." }
   ui_panels:
     - slot: project.page
