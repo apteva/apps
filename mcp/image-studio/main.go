@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: image-studio
 display_name: Image Studio
-version: 0.2.0
+version: 0.2.1
 description: |
   Generate images via any compatible provider. Optionally saves outputs
   to the Storage app for permanent references.
