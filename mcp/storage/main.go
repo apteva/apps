@@ -585,7 +585,19 @@ func (a *App) toolFromURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if url == "" {
 		return nil, errors.New("url required")
 	}
-	resp, err := http.Get(url)
+	// Many CDNs (vecteezy, cloudfront-fronted hosts, anything behind
+	// Cloudflare's bot scoring) reject requests with Go's default
+	// User-Agent of "Go-http-client/1.1". Spoof a recent Chrome on
+	// macOS — same approach we use elsewhere when fetching public
+	// content. Accept matches what a browser would send.
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "*/*")
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch %s: %w", url, err)
 	}
