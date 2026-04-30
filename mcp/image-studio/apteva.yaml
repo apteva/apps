@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: image-studio
 display_name: Image Studio
-version: 0.2.1
+version: 0.2.2
 description: |
   Generate images via any compatible provider (OpenAI today; Replicate /
   Stability / Fal as the integration catalog learns them). Optionally

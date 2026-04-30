@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: image-studio
 display_name: Image Studio
-version: 0.2.1
+version: 0.2.2
 description: |
   Generate images via any compatible provider. Optionally saves outputs
   to the Storage app for permanent references.
@@ -283,8 +283,20 @@ func (a *App) toolImageGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		"prompt": prompt, "model": model, "count": len(images),
 	})
 
-	// 6. Build MCP response.
-	return buildMCPResult(prompt, revisedPrompt, model, bound.AppSlug, storageIDs, upstreamURLs, firstThumbB64, len(images)), nil
+	// 6. Build MCP response. When storage saved at least one image, the
+	// response carries URLs and skips the inline thumbnail — keeps the
+	// payload tiny and gives consumers a stable, sharable handle.
+	return buildMCPResult(buildResultArgs{
+		Prompt:        prompt,
+		Revised:       revisedPrompt,
+		Model:         model,
+		Provider:      bound.AppSlug,
+		ProjectID:     pid,
+		StorageIDs:    storageIDs,
+		UpstreamURLs:  upstreamURLs,
+		FirstThumbB64: firstThumbB64,
+		Count:         len(images),
+	}), nil
 }
 
 // ─── image_history ─────────────────────────────────────────────────
@@ -323,6 +335,10 @@ func (a *App) toolImageHistory(ctx *sdk.AppCtx, args map[string]any) (any, error
 		_ = json.Unmarshal([]byte(storageIDsJSON), &storageIDs)
 		var upstreamURLs []string
 		_ = json.Unmarshal([]byte(upstreamURLsJSON), &upstreamURLs)
+		storageURLs := make([]string, 0, len(storageIDs))
+		for _, sid := range storageIDs {
+			storageURLs = append(storageURLs, storageContentURL(sid, pid))
+		}
 		out = append(out, map[string]any{
 			"id":             id,
 			"prompt":         prompt,
@@ -331,6 +347,7 @@ func (a *App) toolImageHistory(ctx *sdk.AppCtx, args map[string]any) (any, error
 			"model":          model,
 			"size":           size,
 			"storage_ids":    storageIDs,
+			"storage_urls":   storageURLs,
 			"upstream_urls":  upstreamURLs,
 			"thumbnail_b64":  thumbB64,
 			"count":          count,
@@ -605,47 +622,85 @@ func pickExt(outputFormat string) string {
 
 // ─── MCP response builders ────────────────────────────────────────
 
-func buildMCPResult(prompt, revised, model, provider string, storageIDs []int64, upstreamURLs []string, thumbB64 string, count int) map[string]any {
+type buildResultArgs struct {
+	Prompt        string
+	Revised       string
+	Model         string
+	Provider      string
+	ProjectID     string
+	StorageIDs    []int64
+	UpstreamURLs  []string
+	FirstThumbB64 string
+	Count         int
+}
+
+// storageContentURL returns the relative URL the dashboard / MCP host
+// can fetch to stream the saved bytes back. Routed through the platform
+// proxy at /api/apps/storage/* (auth via the host's session); image-studio
+// itself never needs to mint a signed URL for this path.
+func storageContentURL(id int64, projectID string) string {
+	return fmt.Sprintf("/api/apps/storage/files/%d/content?project_id=%s", id, projectID)
+}
+
+func buildMCPResult(a buildResultArgs) map[string]any {
+	storageURLs := make([]string, 0, len(a.StorageIDs))
+	for _, id := range a.StorageIDs {
+		storageURLs = append(storageURLs, storageContentURL(id, a.ProjectID))
+	}
+	hasStorage := len(a.StorageIDs) > 0
+
 	content := []map[string]any{}
-	if thumbB64 != "" {
+	// Inline thumbnail only when there's no storage URL to point at.
+	// With storage bound, the URL is the carrier — no need to also ship
+	// 30KB of base64 through every tool call.
+	if !hasStorage && a.FirstThumbB64 != "" {
 		content = append(content, map[string]any{
 			"type":     "image",
-			"data":     thumbB64,
+			"data":     a.FirstThumbB64,
 			"mimeType": "image/jpeg",
 		})
 	}
+
 	summary := fmt.Sprintf("Generated %d image(s) via %s (model=%s).\nPrompt: %q",
-		count, provider, model, prompt)
-	if revised != "" && revised != prompt {
-		summary += "\nRevised: " + revised
+		a.Count, a.Provider, a.Model, a.Prompt)
+	if a.Revised != "" && a.Revised != a.Prompt {
+		summary += "\nRevised: " + a.Revised
 	}
-	if len(storageIDs) > 0 {
-		ids := make([]string, len(storageIDs))
-		for i, id := range storageIDs {
-			ids[i] = strconv.FormatInt(id, 10)
+	if hasStorage {
+		summary += "\nSaved to storage:"
+		for i, id := range a.StorageIDs {
+			summary += fmt.Sprintf("\n  - id=%d url=%s", id, storageURLs[i])
 		}
-		summary += "\nSaved to storage: " + strings.Join(ids, ", ")
 	}
 	content = append(content, map[string]any{"type": "text", "text": summary})
-	for _, id := range storageIDs {
+
+	// Resource blocks carry the fetchable URL so MCP-aware UIs can
+	// embed the image without the agent having to construct the URL
+	// themselves. apteva:// URI kept as `uri_alt` for tooling that
+	// recognises it as the canonical handle.
+	for i, id := range a.StorageIDs {
 		content = append(content, map[string]any{
 			"type": "resource",
 			"resource": map[string]any{
-				"uri":      fmt.Sprintf("apteva://storage/file/%d", id),
+				"uri":      storageURLs[i],
 				"mimeType": "image/png",
+				"name":     fmt.Sprintf("storage:%d", id),
 			},
 		})
 	}
+
+	meta := map[string]any{
+		"prompt":         a.Prompt,
+		"revised_prompt": a.Revised,
+		"model":          a.Model,
+		"provider":       a.Provider,
+		"storage_ids":    a.StorageIDs,
+		"storage_urls":   storageURLs,
+		"upstream_urls":  a.UpstreamURLs,
+	}
 	return map[string]any{
 		"content": content,
-		"_meta": map[string]any{
-			"prompt":         prompt,
-			"revised_prompt": revised,
-			"model":          model,
-			"provider":       provider,
-			"storage_ids":    storageIDs,
-			"upstream_urls":  upstreamURLs,
-		},
+		"_meta":   meta,
 	}
 }
 

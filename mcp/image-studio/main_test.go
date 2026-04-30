@@ -583,6 +583,151 @@ func TestToolImageGenerate_GPTImage_B64_StorageUpload(t *testing.T) {
 
 // --- pickExt -------------------------------------------------------
 
+// --- storage URL surfacing -----------------------------------------
+
+func TestToolImageGenerate_WithStorage_OmitsInlineImage_AddsURLs(t *testing.T) {
+	// New contract: when storage saves the image, the response carries
+	// the storage URL (in text + resource + _meta.storage_urls) and
+	// drops the inline base64 image block. Without storage we keep the
+	// inline thumbnail (only way for the agent to see the result).
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(fakePNG())
+	}))
+	defer upstream.Close()
+
+	pf := newRecordingPlatform()
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(fmt.Sprintf(
+			`{"data":[{"url":"%s/img.png"}]}`, upstream.URL,
+		)),
+	}
+	pf.nextCallResult = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":1234}"}]}}`,
+	)
+
+	ctx := newImageStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolImageGenerate(ctx, map[string]any{"prompt": "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(map[string]any)
+
+	// _meta carries storage_urls.
+	meta := res["_meta"].(map[string]any)
+	urls, ok := meta["storage_urls"].([]string)
+	if !ok || len(urls) != 1 {
+		t.Fatalf("storage_urls missing or wrong length: %+v", meta["storage_urls"])
+	}
+	if !strings.Contains(urls[0], "/api/apps/storage/files/1234/content") {
+		t.Errorf("storage URL format unexpected: %q", urls[0])
+	}
+	if !strings.Contains(urls[0], "project_id=test-proj") {
+		t.Errorf("storage URL missing project_id: %q", urls[0])
+	}
+
+	// No inline image content block when storage URLs are available.
+	content := res["content"].([]map[string]any)
+	for _, c := range content {
+		if c["type"] == "image" {
+			t.Errorf("expected NO inline image when storage saved, got %+v", c)
+		}
+	}
+
+	// Text block mentions the URL.
+	var foundURL bool
+	for _, c := range content {
+		if c["type"] == "text" {
+			if s, _ := c["text"].(string); strings.Contains(s, "/api/apps/storage/files/1234/content") {
+				foundURL = true
+			}
+		}
+	}
+	if !foundURL {
+		t.Errorf("text block doesn't reference the storage URL; got %+v", content)
+	}
+
+	// Resource block exposes the fetchable URI (not apteva://).
+	var foundResource bool
+	for _, c := range content {
+		if c["type"] == "resource" {
+			r := c["resource"].(map[string]any)
+			uri, _ := r["uri"].(string)
+			if strings.HasPrefix(uri, "/api/apps/storage/") {
+				foundResource = true
+			}
+		}
+	}
+	if !foundResource {
+		t.Errorf("expected resource block with fetchable URI; got %+v", content)
+	}
+}
+
+func TestToolImageGenerate_NoStorage_KeepsInlineImage(t *testing.T) {
+	// Without storage, the response must still ship the thumbnail b64
+	// so the agent can see what was generated.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(fakePNG())
+	}))
+	defer upstream.Close()
+
+	pf := newRecordingPlatform()
+	pf.identity.Bindings = map[string]any{"provider": float64(42)} // no storage
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(fmt.Sprintf(`{"data":[{"url":"%s/img.png"}]}`, upstream.URL)),
+	}
+
+	ctx := newImageStudioCtx(t, pf)
+	app := &App{}
+	out, _ := app.toolImageGenerate(ctx, map[string]any{"prompt": "x"})
+	res := out.(map[string]any)
+	content := res["content"].([]map[string]any)
+	var hasImage bool
+	for _, c := range content {
+		if c["type"] == "image" {
+			hasImage = true
+		}
+	}
+	if !hasImage {
+		t.Error("expected inline image block when storage is unbound")
+	}
+}
+
+func TestToolImageHistory_IncludesStorageURLs(t *testing.T) {
+	ctx := newImageStudioCtx(t, newRecordingPlatform())
+	app := &App{}
+	app.dbInsertGeneration("test-proj", "p1", "", "openai-api", "gpt-image-2", "1024x1024",
+		[]int64{42, 99}, nil, "", 2)
+	out, err := app.toolImageHistory(ctx, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gens := out.(map[string]any)["generations"].([]map[string]any)
+	if len(gens) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(gens))
+	}
+	urls, ok := gens[0]["storage_urls"].([]string)
+	if !ok || len(urls) != 2 {
+		t.Fatalf("storage_urls = %+v", gens[0]["storage_urls"])
+	}
+	if !strings.Contains(urls[0], "/files/42/content") || !strings.Contains(urls[1], "/files/99/content") {
+		t.Errorf("URLs malformed: %+v", urls)
+	}
+}
+
+// --- storageContentURL ---------------------------------------------
+
+func TestStorageContentURL(t *testing.T) {
+	got := storageContentURL(123, "proj-abc")
+	want := "/api/apps/storage/files/123/content?project_id=proj-abc"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 func TestPickExt(t *testing.T) {
 	cases := map[string]string{
 		"":     "png",

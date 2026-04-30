@@ -74,10 +74,21 @@ interface Generation {
   model: string;
   size: string;
   storage_ids: number[];
+  storage_urls: string[];
   upstream_urls: string[];
   thumbnail_b64: string;
   count: number;
   created_at: string;
+}
+
+// Pick the best image src for a generation: a storage URL (full image,
+// served by the storage app via the platform proxy) when available;
+// otherwise fall back to the inline thumbnail. Returns "" when neither
+// is set so the caller can render a placeholder.
+function imageSrc(g: Generation): string {
+  if (g.storage_urls && g.storage_urls.length > 0) return g.storage_urls[0];
+  if (g.thumbnail_b64) return `data:image/jpeg;base64,${g.thumbnail_b64}`;
+  return "";
 }
 
 const API = "/api/apps/image-studio";
@@ -302,20 +313,18 @@ export default function StudioPanel({ projectId }: NativePanelProps) {
             </div>
           ) : (
             <div className="grid grid-cols-2 gap-2 p-2">
-              {items.map((g) => (
+              {items.map((g) => {
+                const src = imageSrc(g);
+                return (
                 <button
                   key={g.id}
                   onClick={() => setSelected(g)}
                   className="text-left border border-border rounded overflow-hidden hover:border-accent transition-colors"
                 >
-                  {g.thumbnail_b64 ? (
-                    <img
-                      src={`data:image/jpeg;base64,${g.thumbnail_b64}`}
-                      alt=""
-                      className="w-full"
-                    />
+                  {src ? (
+                    <img src={src} alt="" className="w-full" loading="lazy" />
                   ) : (
-                    <div className="bg-bg-input py-12 text-center text-text-muted text-xs">no thumbnail</div>
+                    <div className="bg-bg-input py-12 text-center text-text-muted text-xs">no preview</div>
                   )}
                   <div className="p-2">
                     <div className="text-text text-xs truncate">{g.prompt}</div>
@@ -324,7 +333,8 @@ export default function StudioPanel({ projectId }: NativePanelProps) {
                     </div>
                   </div>
                 </button>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -342,13 +352,10 @@ export default function StudioPanel({ projectId }: NativePanelProps) {
             >×</button>
           </header>
           <div className="flex-1 overflow-auto">
-            {selected.thumbnail_b64 && (
-              <img
-                src={`data:image/jpeg;base64,${selected.thumbnail_b64}`}
-                alt=""
-                className="w-full"
-              />
-            )}
+            {(() => {
+              const src = imageSrc(selected);
+              return src ? <img src={src} alt="" className="w-full" /> : null;
+            })()}
             <dl className="px-4 py-3 text-xs flex flex-col gap-2">
               <Row label="Provider" value={selected.provider} />
               <Row label="Model" value={selected.model || "—"} />
@@ -365,16 +372,19 @@ export default function StudioPanel({ projectId }: NativePanelProps) {
                 />
               )}
             </dl>
-            {selected.storage_ids.length > 0 && (
-              <div className="px-4 pb-3">
-                <a
-                  href={`/api/apps/storage/files/${selected.storage_ids[0]}/content?project_id=${encodeURIComponent(projectId)}`}
-                  target="_blank"
-                  rel="noopener"
-                  className="text-accent text-xs hover:underline"
-                >
-                  Open full image →
-                </a>
+            {selected.storage_urls && selected.storage_urls.length > 0 && (
+              <div className="px-4 pb-3 flex flex-col gap-1">
+                {selected.storage_urls.map((url, i) => (
+                  <a
+                    key={i}
+                    href={url}
+                    target="_blank"
+                    rel="noopener"
+                    className="text-accent text-xs hover:underline"
+                  >
+                    Open image #{selected.storage_ids[i]} →
+                  </a>
+                ))}
               </div>
             )}
           </div>
