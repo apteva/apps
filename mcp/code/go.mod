@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/code
 go 1.25.0
 
 require (
-	github.com/apteva/app-sdk v0.1.1
+	github.com/apteva/app-sdk v0.1.3-0.20260430070155-43f24574d06d
 	github.com/bmatcuk/doublestar/v4 v4.6.1
 	modernc.org/sqlite v1.50.0
 )

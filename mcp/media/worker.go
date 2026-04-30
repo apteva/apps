@@ -137,6 +137,14 @@ func processOne(
 		"duration_ms", probe.DurationMs,
 		"video", probe.HasVideo, "audio", probe.HasAudio, "image", probe.IsImage,
 	)
+	app.Emit("media.indexed", map[string]any{
+		"file_id":     fid,
+		"name":        f.Name,
+		"has_video":   probe.HasVideo,
+		"has_audio":   probe.HasAudio,
+		"is_image":    probe.IsImage,
+		"duration_ms": probe.DurationMs,
+	})
 
 	// Derivations: thumbnail for video/image, waveform for audio.
 	if probe.HasVideo || probe.IsImage {

@@ -19,7 +19,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.1.0
+version: 0.1.1
 description: |
   Indexes audio/video/image files held by storage. Probes new
   uploads with ffprobe and generates thumbnails (video/image) or

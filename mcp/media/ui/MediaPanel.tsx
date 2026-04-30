@@ -9,7 +9,63 @@
 // images live in storage and are fetched at
 // /api/apps/storage/files/<id>/content via same-origin cookies.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+// Inlined SDK app-event subscription. Each app ships its own copy
+// because panels are bundled standalone and apps install independently.
+interface AppEventEnvelope<T = unknown> {
+  topic: string;
+  app: string;
+  project_id: string;
+  install_id: number;
+  seq: number;
+  time: string;
+  data: T;
+}
+function useAppEvents<T = unknown>(
+  app: string,
+  projectId: string | undefined | null,
+  onEvent: (ev: AppEventEnvelope<T>) => void,
+) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+  useEffect(() => {
+    if (!app || !projectId) return;
+    let lastSeq = 0;
+    let es: EventSource | null = null;
+    let cancelled = false;
+    let reconnectTimer: number | null = null;
+    const connect = () => {
+      if (cancelled) return;
+      const url =
+        `/api/app-events/${encodeURIComponent(app)}` +
+        `?project_id=${encodeURIComponent(projectId)}` +
+        (lastSeq > 0 ? `&since=${lastSeq}` : "");
+      es = new EventSource(url, { withCredentials: true });
+      es.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data) as AppEventEnvelope<T>;
+          if (ev.seq <= lastSeq) return;
+          lastSeq = ev.seq;
+          handlerRef.current(ev);
+        } catch {}
+      };
+      es.onerror = () => {
+        if (es && es.readyState === EventSource.CLOSED) {
+          if (reconnectTimer) window.clearTimeout(reconnectTimer);
+          reconnectTimer = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (es) es.close();
+    };
+  }, [app, projectId]);
+}
+
 
 // Host props contract — copy of the dashboard's NativePanelProps.
 // Inlined rather than imported so the panel has no cross-repo build
@@ -143,6 +199,14 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
     const id = setInterval(load, 4000);
     return () => clearInterval(id);
   }, [rows, load]);
+
+  // Live refresh — the indexer worker emits media.indexed when a
+  // newly-seen storage file finishes probing. Cheaper than the
+  // 4s poll above (which stays as a safety net while pending rows
+  // exist) and surfaces the result immediately.
+  useAppEvents("media", projectId, (ev) => {
+    if (ev.topic === "media.indexed") load();
+  });
 
   const counts = useMemo(() => {
     const c = { all: rows.length, video: 0, audio: 0, image: 0 };

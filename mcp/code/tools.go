@@ -207,6 +207,11 @@ func (a *App) toolReposCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if count > 0 {
 		_ = dbRecordImport(ctx.AppDB(), r.ID, "template:"+r.Framework)
 	}
+	if ctx != nil {
+		ctx.Emit("repo.added", map[string]any{
+			"id": r.ID, "slug": r.Slug, "name": r.Name, "framework": r.Framework,
+		})
+	}
 	return map[string]any{"repository": r, "files_created": count}, nil
 }
 
@@ -253,10 +258,16 @@ func (a *App) toolReposArchive(ctx *sdk.AppCtx, args map[string]any) (any, error
 		if err := a.store.DropRepo(slug); err != nil {
 			return nil, err
 		}
+		if ctx != nil {
+			ctx.Emit("repo.deleted", map[string]any{"slug": slug})
+		}
 		return map[string]any{"slug": slug, "deleted": true}, nil
 	}
 	if err := dbArchiveRepo(ctx.AppDB(), pid, slug); err != nil {
 		return nil, err
+	}
+	if ctx != nil {
+		ctx.Emit("repo.archived", map[string]any{"slug": slug})
 	}
 	return map[string]any{"slug": slug, "archived": true}, nil
 }
@@ -406,11 +417,22 @@ func (a *App) toolWriteFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	content := strArg(args, "content")
-	meta, err := a.store.Write(strArg(args, "slug"), rel, []byte(content))
+	slug := strArg(args, "slug")
+	meta, err := a.store.Write(slug, rel, []byte(content))
 	if err != nil {
 		return nil, err
 	}
+	emitFileChange(ctx, "file.changed", slug, rel)
 	return map[string]any{"file": meta}, nil
+}
+
+// emitFileChange broadcasts a per-file mutation. Lightweight payload:
+// the panel re-reads on every event anyway, so just send (slug, path).
+func emitFileChange(ctx *sdk.AppCtx, topic, slug, path string) {
+	if ctx == nil {
+		return
+	}
+	ctx.Emit(topic, map[string]any{"slug": slug, "path": path})
 }
 
 func (a *App) toolEditFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -425,11 +447,13 @@ func (a *App) toolEditFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	res, err := editFile(a.store, strArg(args, "slug"), rel,
+	slug := strArg(args, "slug")
+	res, err := editFile(a.store, slug, rel,
 		strArg(args, "old_string"), strArg(args, "new_string"), boolArg(args, "replace_all"))
 	if err != nil {
 		return nil, err
 	}
+	emitFileChange(ctx, "file.changed", slug, rel)
 	return res, nil
 }
 
@@ -464,10 +488,12 @@ func (a *App) toolMultiEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		ops = append(ops, op)
 	}
-	res, err := multiEditFile(a.store, strArg(args, "slug"), rel, ops)
+	slug := strArg(args, "slug")
+	res, err := multiEditFile(a.store, slug, rel, ops)
 	if err != nil {
 		return nil, err
 	}
+	emitFileChange(ctx, "file.changed", slug, rel)
 	return res, nil
 }
 
@@ -487,9 +513,15 @@ func (a *App) toolRename(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("to: %w", err)
 	}
-	moved, err := a.store.Move(strArg(args, "slug"), from, to)
+	slug := strArg(args, "slug")
+	moved, err := a.store.Move(slug, from, to)
 	if err != nil {
 		return nil, err
+	}
+	if ctx != nil {
+		ctx.Emit("file.renamed", map[string]any{
+			"slug": slug, "from": from, "to": to, "count": len(moved),
+		})
 	}
 	return map[string]any{"moved": moved, "count": len(moved)}, nil
 }
@@ -509,9 +541,11 @@ func (a *App) toolDeleteFile(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	// Delete a file or a tree — we don't know which without statting,
 	// and DeleteTree handles both safely (RemoveAll on a single file
 	// works, RemoveAll on a missing path is nil).
-	if err := a.store.DeleteTree(strArg(args, "slug"), rel); err != nil {
+	slug := strArg(args, "slug")
+	if err := a.store.DeleteTree(slug, rel); err != nil {
 		return nil, err
 	}
+	emitFileChange(ctx, "file.deleted", slug, rel)
 	return map[string]any{"path": rel, "deleted": true}, nil
 }
 

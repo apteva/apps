@@ -5,7 +5,63 @@
 // host React via importmap; talks to the code sidecar through
 // /api/apps/code/api/* with same-origin cookies.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+// Inlined SDK app-event subscription. Each app ships its own copy
+// because panels are bundled standalone and apps install independently.
+interface AppEventEnvelope<T = unknown> {
+  topic: string;
+  app: string;
+  project_id: string;
+  install_id: number;
+  seq: number;
+  time: string;
+  data: T;
+}
+function useAppEvents<T = unknown>(
+  app: string,
+  projectId: string | undefined | null,
+  onEvent: (ev: AppEventEnvelope<T>) => void,
+) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+  useEffect(() => {
+    if (!app || !projectId) return;
+    let lastSeq = 0;
+    let es: EventSource | null = null;
+    let cancelled = false;
+    let reconnectTimer: number | null = null;
+    const connect = () => {
+      if (cancelled) return;
+      const url =
+        `/api/app-events/${encodeURIComponent(app)}` +
+        `?project_id=${encodeURIComponent(projectId)}` +
+        (lastSeq > 0 ? `&since=${lastSeq}` : "");
+      es = new EventSource(url, { withCredentials: true });
+      es.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data) as AppEventEnvelope<T>;
+          if (ev.seq <= lastSeq) return;
+          lastSeq = ev.seq;
+          handlerRef.current(ev);
+        } catch {}
+      };
+      es.onerror = () => {
+        if (es && es.readyState === EventSource.CLOSED) {
+          if (reconnectTimer) window.clearTimeout(reconnectTimer);
+          reconnectTimer = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (es) es.close();
+    };
+  }, [app, projectId]);
+}
+
 
 interface NativePanelProps {
   appName: string;
@@ -136,6 +192,26 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
     setOpenFile(null);
     loadTree(slug);
   };
+
+  // Live refresh — react to repo + file mutations from agents or
+  // other tabs. Repo-level events refresh the left list; file-level
+  // events refresh the tree of the selected repo when it matches.
+  useAppEvents<{ slug?: string }>("code", projectId, (ev) => {
+    switch (ev.topic) {
+      case "repo.added":
+      case "repo.archived":
+      case "repo.deleted":
+        loadRepos();
+        break;
+      case "file.changed":
+      case "file.deleted":
+      case "file.renamed":
+        if (selectedSlug && ev.data?.slug === selectedSlug) {
+          loadTree(selectedSlug);
+        }
+        break;
+    }
+  });
 
   const selectFile = async (path: string) => {
     if (!selectedSlug) return;

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.1.0
+version: 0.1.1
 description: |
   Catalog + cheap derivations for audio/video/image files held by the
   storage app. Probes new files with ffprobe (duration, dimensions,

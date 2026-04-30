@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: jobs
 display_name: Jobs
-version: 0.1.0
+version: 0.1.1
 description: |
   Scheduled-job runner. Other apps and agents enqueue work; jobs
   delivers it later via HTTP or instance events.
@@ -542,6 +542,7 @@ func (a *App) toolSchedule(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	emitJob(ctx, "job.scheduled", job)
 	return map[string]any{"job": job}, nil
 }
 
@@ -557,7 +558,27 @@ func (a *App) toolCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := dbCancelJob(ctx.AppDB(), pid, id); err != nil {
 		return nil, err
 	}
+	if ctx != nil {
+		ctx.Emit("job.cancelled", map[string]any{"id": id})
+	}
 	return map[string]any{"cancelled": true, "id": id}, nil
+}
+
+// emitJob broadcasts a job lifecycle event. Best-effort fire-and-forget.
+// Subscribers re-fetch the row themselves; payload is just enough for
+// optimistic UI.
+func emitJob(ctx *sdk.AppCtx, topic string, j *Job) {
+	if ctx == nil || j == nil {
+		return
+	}
+	ctx.Emit(topic, map[string]any{
+		"id":             j.ID,
+		"name":           j.Name,
+		"status":         j.Status,
+		"owner_app":      j.OwnerApp,
+		"owner_instance": j.OwnerInstance,
+		"run_at":         j.RunAt,
+	})
 }
 
 func (a *App) toolList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -631,6 +652,9 @@ func (a *App) toolRunNow(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	if err := dbRunNow(ctx.AppDB(), pid, id); err != nil {
 		return nil, err
+	}
+	if ctx != nil {
+		ctx.Emit("job.queued", map[string]any{"id": id})
 	}
 	return map[string]any{"queued": true, "id": id}, nil
 }

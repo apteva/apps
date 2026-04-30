@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.1.0
+version: 0.1.1
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -524,6 +524,7 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := loadChannels(ctx.AppDB(), c); err != nil {
 		return nil, err
 	}
+	emitContact(ctx, "contact.added", c)
 	return map[string]any{"contact": c}, nil
 }
 
@@ -545,6 +546,7 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := loadChannels(ctx.AppDB(), c); err != nil {
 		return nil, err
 	}
+	emitContact(ctx, "contact.updated", c)
 	return map[string]any{"contact": c}, nil
 }
 
@@ -567,6 +569,11 @@ func (a *App) toolUpsertByChannel(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err := loadChannels(ctx.AppDB(), c); err != nil {
 		return nil, err
 	}
+	if created {
+		emitContact(ctx, "contact.added", c)
+	} else {
+		emitContact(ctx, "contact.updated", c)
+	}
 	return map[string]any{"contact": c, "was_created": created}, nil
 }
 
@@ -585,7 +592,29 @@ func (a *App) toolMerge(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := dbMerge(ctx.AppDB(), pid, loser, winner, notes, source); err != nil {
 		return nil, err
 	}
+	if ctx != nil {
+		ctx.Emit("contact.merged", map[string]any{
+			"winner_id": winner, "loser_id": loser,
+		})
+	}
 	return map[string]any{"merged": true, "winner_id": winner, "loser_id": loser}, nil
+}
+
+// emitContact broadcasts a contact mutation. Best-effort: ctx.Emit is
+// fire-and-forget and the DB write has already committed. Subscribers
+// re-fetch the row themselves rather than trusting the payload, but
+// id + display_name are useful for optimistic UI.
+func emitContact(ctx *sdk.AppCtx, topic string, c *Contact) {
+	if ctx == nil || c == nil {
+		return
+	}
+	ctx.Emit(topic, map[string]any{
+		"id":           c.ID,
+		"display_name": c.DisplayName,
+		"first_name":   c.FirstName,
+		"last_name":    c.LastName,
+		"archived":     c.Status == "archived",
+	})
 }
 
 func (a *App) toolLogActivity(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -607,6 +636,11 @@ func (a *App) toolLogActivity(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	act, err := dbLogActivity(ctx.AppDB(), pid, cid, kind, body, occurred, source)
 	if err != nil {
 		return nil, err
+	}
+	if ctx != nil {
+		ctx.Emit("contact.activity.added", map[string]any{
+			"contact_id": cid, "kind": kind,
+		})
 	}
 	return map[string]any{"activity": act}, nil
 }
@@ -692,6 +726,7 @@ func (a *App) handleHTTPCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	emitContact(ctx, "contact.added", c)
 	httpJSON(w, map[string]any{"contact": c})
 }
 
@@ -758,6 +793,7 @@ func (a *App) handleHTTPUpdate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	emitContact(ctx, "contact.updated", c)
 	httpJSON(w, map[string]any{"contact": c})
 }
 
@@ -778,6 +814,9 @@ func (a *App) handleHTTPArchive(w http.ResponseWriter, r *http.Request) {
 		 WHERE id = ? AND project_id = ?`, id, pid); err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if ctx != nil {
+		ctx.Emit("contact.deleted", map[string]any{"id": id})
 	}
 	httpJSON(w, map[string]any{"archived": true})
 }
