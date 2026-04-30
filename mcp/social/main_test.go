@@ -32,15 +32,17 @@ import (
 // --- stub PlatformClient -------------------------------------------
 
 type recordingPlatform struct {
-	mu               sync.Mutex
-	executeCalls     []executeCall
-	startOAuthCalls  []sdk.OAuthStartRequest
-	disconnectCalls  []int64
-	nextStartOAuth   *sdk.OAuthStartResult
-	nextStartErr     error
-	executeResponses map[string]*sdk.ExecuteResult // keyed by tool name
-	executeErr       error
-	identity         *sdk.InstallIdentity
+	mu                sync.Mutex
+	executeCalls      []executeCall
+	callAppCalls      []callAppCall
+	startOAuthCalls   []sdk.OAuthStartRequest
+	disconnectCalls   []int64
+	nextStartOAuth    *sdk.OAuthStartResult
+	nextStartErr      error
+	executeResponses  map[string]*sdk.ExecuteResult // keyed by tool name
+	callAppResponses  map[string]json.RawMessage    // keyed by "app:tool"
+	executeErr        error
+	identity          *sdk.InstallIdentity
 }
 
 type executeCall struct {
@@ -57,6 +59,7 @@ func newRecordingPlatform() *recordingPlatform {
 			ProjectID: "test-proj",
 		},
 		executeResponses: map[string]*sdk.ExecuteResult{},
+		callAppResponses: map[string]json.RawMessage{},
 	}
 }
 
@@ -88,8 +91,20 @@ func (p *recordingPlatform) ExecuteIntegrationTool(connID int64, tool string, in
 	return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{}`)}, nil
 }
 
-func (p *recordingPlatform) CallApp(string, string, map[string]any) (json.RawMessage, error) {
-	return nil, nil
+type callAppCall struct {
+	AppName string
+	Tool    string
+	Input   map[string]any
+}
+
+func (p *recordingPlatform) CallApp(appName, tool string, input map[string]any) (json.RawMessage, error) {
+	p.mu.Lock()
+	p.callAppCalls = append(p.callAppCalls, callAppCall{AppName: appName, Tool: tool, Input: input})
+	p.mu.Unlock()
+	if r, ok := p.callAppResponses[appName+":"+tool]; ok {
+		return r, nil
+	}
+	return json.RawMessage(`{}`), nil
 }
 
 func (p *recordingPlatform) StartOAuth(req sdk.OAuthStartRequest) (*sdk.OAuthStartResult, error) {
@@ -546,6 +561,306 @@ func TestPostRetry_RetriesFailedTargets(t *testing.T) {
 }
 
 // --- helpers -------------------------------------------------------
+
+// --- Instagram two-step + storage media URL --------------------
+
+func TestPublishInstagram_TwoStepWithStorageMedia(t *testing.T) {
+	pf := newRecordingPlatform()
+	// Storage hands back a relative signed URL — same shape as
+	// extractStorageGetURL parses (MCP-wrapped JSON in content[]).
+	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"url\":\"/files/77/content?sig=abc&exp=99\",\"file_id\":77}"}]}}`,
+	)
+	pf.executeResponses["create_media_container"] = &sdk.ExecuteResult{
+		Success: true,
+		Data:    json.RawMessage(`{"id":"container_42"}`),
+	}
+	pf.executeResponses["publish_media_container"] = &sdk.ExecuteResult{
+		Success: true,
+		Data:    json.RawMessage(`{"id":"ig_999"}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, status)
+		 VALUES ('test-proj', 'instagram', 42, 'ig-acct-1', 'My Brand', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	out, err := app.toolPostCreate(ctx, map[string]any{
+		"body":               "hello insta",
+		"social_account_ids": []any{acctID},
+		"media_storage_ids":  []any{int64(77)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(map[string]any)
+	postID := res["post_id"].(int64)
+
+	// Both IG steps were called.
+	var sawCreate, sawPublish bool
+	for _, c := range pf.executeCalls {
+		if c.Tool == "create_media_container" {
+			sawCreate = true
+			if c.Input["caption"] != "hello insta" {
+				t.Errorf("caption not body: %+v", c.Input)
+			}
+			if c.Input["instagramAccountId"] != "ig-acct-1" {
+				t.Errorf("instagramAccountId not extID: %+v", c.Input)
+			}
+			imgURL, _ := c.Input["imageUrl"].(string)
+			if !strings.Contains(imgURL, "/files/77/content") {
+				t.Errorf("imageUrl not from storage: %q", imgURL)
+			}
+		}
+		if c.Tool == "publish_media_container" {
+			sawPublish = true
+			if c.Input["containerId"] != "container_42" {
+				t.Errorf("containerId not threaded from step 1: %+v", c.Input)
+			}
+		}
+	}
+	if !sawCreate || !sawPublish {
+		t.Errorf("expected both IG steps; got %+v", pf.executeCalls)
+	}
+
+	// Target row marked published.
+	var status string
+	ctx.AppDB().QueryRow(`SELECT status FROM post_targets WHERE post_id=?`, postID).Scan(&status)
+	if status != "published" {
+		t.Errorf("target status = %q", status)
+	}
+}
+
+func TestPublishInstagram_NoMediaFails(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, status)
+		 VALUES ('test-proj', 'instagram', 42, 'ig-acct-1', 'My Brand', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+	app := &App{}
+	out, _ := app.toolPostCreate(ctx, map[string]any{
+		"body":               "no media",
+		"social_account_ids": []any{acctID},
+	})
+	postID := out.(map[string]any)["post_id"].(int64)
+	var status, lastErr string
+	ctx.AppDB().QueryRow(
+		`SELECT status, COALESCE(last_error,'') FROM post_targets WHERE post_id=?`, postID,
+	).Scan(&status, &lastErr)
+	if status != "failed" {
+		t.Errorf("expected failed, got %q", status)
+	}
+	if !strings.Contains(lastErr, "media") {
+		t.Errorf("error should mention media: %q", lastErr)
+	}
+	// Integration was never called.
+	if len(pf.executeCalls) != 0 {
+		t.Errorf("integration should not be called when media missing: %+v", pf.executeCalls)
+	}
+}
+
+// --- TikTok nested input -----------------------------------------
+
+func TestPublishTikTok_BuildsNestedInput(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"url\":\"https://cdn.test/v.mp4\"}"}]}}`,
+	)
+	pf.executeResponses["post_video"] = &sdk.ExecuteResult{
+		Success: true,
+		Data:    json.RawMessage(`{"data":{"publish_id":"pub_xyz"}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'tiktok', 42, '@tt', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	if _, err := app.toolPostCreate(ctx, map[string]any{
+		"body":               "ride the wave #fyp",
+		"social_account_ids": []any{acctID},
+		"media_storage_ids":  []any{int64(7)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "post_video" {
+		t.Fatalf("expected post_video call: %+v", pf.executeCalls)
+	}
+	in := pf.executeCalls[0].Input
+	postInfo, ok := in["post_info"].(map[string]any)
+	if !ok {
+		t.Fatalf("post_info not nested: %+v", in)
+	}
+	if postInfo["title"] != "ride the wave #fyp" {
+		t.Errorf("title not threaded into post_info: %+v", postInfo)
+	}
+	srcInfo, ok := in["source_info"].(map[string]any)
+	if !ok {
+		t.Fatalf("source_info not nested: %+v", in)
+	}
+	if srcInfo["source"] != "PULL_FROM_URL" {
+		t.Errorf("source = %v", srcInfo["source"])
+	}
+	if srcInfo["video_url"] != "https://cdn.test/v.mp4" {
+		t.Errorf("video_url = %v", srcInfo["video_url"])
+	}
+}
+
+// --- YouTube unsupported -----------------------------------------
+
+func TestPublishYouTube_UnsupportedFails(t *testing.T) {
+	pf := newRecordingPlatform()
+	// Provide a storage URL so we get past the MediaRequired check —
+	// the deferral happens inside the strategy dispatch.
+	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"url\":\"https://cdn.test/v.mp4\"}"}]}}`,
+	)
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'youtube', 42, 'My Channel', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+	app := &App{}
+	out, _ := app.toolPostCreate(ctx, map[string]any{
+		"body":               "skip me",
+		"social_account_ids": []any{acctID},
+		"media_storage_ids":  []any{int64(1)},
+	})
+	postID := out.(map[string]any)["post_id"].(int64)
+	var lastErr string
+	ctx.AppDB().QueryRow(
+		`SELECT COALESCE(last_error,'') FROM post_targets WHERE post_id=?`, postID,
+	).Scan(&lastErr)
+	if !strings.Contains(lastErr, "v0.2") {
+		t.Errorf("expected v0.2 deferral note; got %q", lastErr)
+	}
+}
+
+// --- jobs scheduling ---------------------------------------------
+
+func TestSchedule_DispatchesToJobsApp(t *testing.T) {
+	pf := newRecordingPlatform()
+	// Mark the install as having jobs bound. The testkit's IntegrationFor
+	// reads from the install identity's bindings; set jobs to a non-zero
+	// install id (kind=app bindings store install ids, not conn ids).
+	pf.identity.Bindings = map[string]any{"jobs": float64(101)}
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	out, err := app.toolPostCreate(ctx, map[string]any{
+		"body":               "later",
+		"social_account_ids": []any{acctID},
+		"schedule_at":        "2026-05-01T10:00:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(map[string]any)
+	if res["status"] != "scheduled" {
+		t.Errorf("post status = %v, want scheduled", res["status"])
+	}
+
+	// jobs_schedule was called with run_at + http target back at us.
+	var sawSchedule bool
+	for _, c := range pf.callAppCalls {
+		if c.AppName == "jobs" && c.Tool == "jobs_schedule" {
+			sawSchedule = true
+			schedule, _ := c.Input["schedule"].(map[string]any)
+			if schedule["kind"] != "once" {
+				t.Errorf("schedule.kind = %v", schedule["kind"])
+			}
+			if schedule["run_at"] != "2026-05-01T10:00:00Z" {
+				t.Errorf("run_at = %v", schedule["run_at"])
+			}
+			target, _ := c.Input["target"].(map[string]any)
+			if target["kind"] != "http" {
+				t.Errorf("target.kind = %v", target["kind"])
+			}
+			if !strings.Contains(target["url"].(string), "/jobs/publish_post") {
+				t.Errorf("target.url = %v", target["url"])
+			}
+			if c.Input["idempotency_key"] == "" {
+				t.Errorf("missing idempotency_key")
+			}
+		}
+	}
+	if !sawSchedule {
+		t.Errorf("expected jobs_schedule call; got %+v", pf.callAppCalls)
+	}
+
+	// Integration was NOT called yet — publishing waits for the job
+	// callback.
+	if len(pf.executeCalls) != 0 {
+		t.Errorf("integration should not run until job fires; got %+v", pf.executeCalls)
+	}
+}
+
+func TestSchedule_FailsWhenJobsUnbound(t *testing.T) {
+	pf := newRecordingPlatform()
+	// No jobs binding.
+	pf.identity.Bindings = map[string]any{}
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	out, _ := app.toolPostCreate(ctx, map[string]any{
+		"body":               "later",
+		"social_account_ids": []any{acctID},
+		"schedule_at":        "2026-05-01T10:00:00Z",
+	})
+	res := out.(map[string]any)
+	if res["isError"] != true {
+		t.Errorf("expected isError when jobs unbound; got %+v", res)
+	}
+}
+
+// --- helpers -------------------------------------------------------
+
+func TestExtractStorageGetURL(t *testing.T) {
+	wrapped := json.RawMessage(`{"result":{"content":[{"type":"text","text":"{\"url\":\"/files/1/content?sig=x\",\"file_id\":1}"}]}}`)
+	if got := extractStorageGetURL(wrapped); got != "/files/1/content?sig=x" {
+		t.Errorf("got %q", got)
+	}
+	direct := json.RawMessage(`{"url":"/files/2/content?sig=y","file_id":2}`)
+	if got := extractStorageGetURL(direct); got != "/files/2/content?sig=y" {
+		t.Errorf("direct: got %q", got)
+	}
+}
+
+func TestExtractContainerID(t *testing.T) {
+	if got := extractContainerID(json.RawMessage(`{"id":"c_1"}`)); got != "c_1" {
+		t.Errorf("got %q", got)
+	}
+	if got := extractContainerID(json.RawMessage(`{"containerId":"c_2"}`)); got != "c_2" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestExtractTikTokPublishID(t *testing.T) {
+	if got := extractTikTokPublishID(json.RawMessage(`{"data":{"publish_id":"pub_1"}}`)); got != "pub_1" {
+		t.Errorf("nested: got %q", got)
+	}
+	if got := extractTikTokPublishID(json.RawMessage(`{"publish_id":"pub_2"}`)); got != "pub_2" {
+		t.Errorf("flat: got %q", got)
+	}
+}
 
 func TestWalkPath(t *testing.T) {
 	m := map[string]any{

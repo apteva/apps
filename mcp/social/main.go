@@ -36,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.1.0
+version: 0.2.0
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -106,14 +106,33 @@ type platformDef struct {
 	DisplayName     string
 	// PostTool — integration tool that publishes a post.
 	PostTool string
+	// PublishTool — second-step tool for two-step flows (Instagram).
+	// Empty for single-step platforms.
+	PublishTool string
+	// Strategy — how the publish flow runs. "single" (default) calls
+	// PostTool with a flat body+media+external_id; "instagram_two_step"
+	// runs create_media_container then publish_media_container; "tiktok"
+	// uses the nested {post_info, source_info} shape.
+	Strategy string
 	// BodyField — name the post tool's input schema uses for the post
 	// body (Twitter: "text", Facebook: "message", LinkedIn: "commentary"…).
 	BodyField string
+	// MediaURLField — where to put a media URL in the post-tool input.
+	// Empty when the platform's flow doesn't take a URL parameter
+	// (TikTok nests it under source_info.video_url; handled by Strategy).
+	MediaURLField string
 	// ExternalIDField — name the post tool's input schema uses for the
 	// destination id when applicable. Empty when the platform has no
 	// destination concept (Twitter personal). Examples: "pageId" (FB),
-	// "ig_user_id" (Instagram).
+	// "instagramAccountId" (Instagram).
 	ExternalIDField string
+	// MediaRequired — when true, the platform refuses text-only posts
+	// (TikTok, Instagram, YouTube). Targets without media_storage_ids
+	// are marked failed up-front with a clear message.
+	MediaRequired bool
+	// MediaType — "image", "video", or "any". Used by validation +
+	// future per-platform media-prep (resize, transcode, etc).
+	MediaType string
 	// ListPagesTool — integration tool that lists destinations after
 	// OAuth completes. Empty when the platform has only one possible
 	// destination (Twitter, LinkedIn personal). When set, the panel
@@ -143,8 +162,10 @@ var platforms = map[string]platformDef{
 		Platform:           "twitter",
 		IntegrationSlug:    "twitter-api",
 		DisplayName:        "X (Twitter)",
+		Strategy:           "single",
 		PostTool:           "post_tweet",
 		BodyField:          "text",
+		MediaType:          "any",
 		ProfileTool:        "get_me",
 		ProfileNameField:   "username",
 		ProfileAvatarField: "profile_image_url",
@@ -153,13 +174,70 @@ var platforms = map[string]platformDef{
 		Platform:        "facebook",
 		IntegrationSlug: "facebook-api",
 		DisplayName:     "Facebook Page",
+		Strategy:        "single",
 		PostTool:        "post_to_page",
 		BodyField:       "message",
+		MediaURLField:   "image", // post_to_page accepts {message, image} for photo posts
 		ExternalIDField: "pageId",
+		MediaType:       "image",
 		ListPagesTool:   "list_pages",
 		PageIDField:     "id",
 		PageNameField:   "name",
 		PageAvatarField: "picture.data.url",
+	},
+	"instagram": {
+		Platform:        "instagram",
+		IntegrationSlug: "instagram-api",
+		DisplayName:     "Instagram Business",
+		// Two-step: create_media_container({imageUrl|videoUrl, caption,
+		// instagramAccountId}) then publish_media_container({containerId,
+		// instagramAccountId}). Caption is the body; media required.
+		Strategy:        "instagram_two_step",
+		PostTool:        "create_media_container",
+		PublishTool:     "publish_media_container",
+		BodyField:       "caption",
+		MediaURLField:   "imageUrl",
+		ExternalIDField: "instagramAccountId",
+		MediaRequired:   true,
+		MediaType:       "image",
+		ListPagesTool:   "list_accounts",
+		PageIDField:     "instagramAccountId",
+		PageNameField:   "username",
+		PageAvatarField: "profile_picture_url",
+	},
+	"tiktok": {
+		Platform:        "tiktok",
+		IntegrationSlug: "tiktok-api",
+		DisplayName:     "TikTok",
+		// TikTok's input is nested: {post_info: {title}, source_info:
+		// {source: "PULL_FROM_URL", video_url}}. The "tiktok" strategy
+		// builds that shape from our flat (body, media_url) inputs.
+		Strategy:           "tiktok",
+		PostTool:           "post_video",
+		BodyField:          "title", // logical, lifted into post_info.title
+		MediaRequired:      true,
+		MediaType:          "video",
+		ProfileTool:        "get_creator_info",
+		ProfileNameField:   "creator_username",
+		ProfileAvatarField: "creator_avatar_url",
+	},
+	"youtube": {
+		Platform:        "youtube",
+		IntegrationSlug: "youtube-api",
+		DisplayName:     "YouTube",
+		// YouTube's upload_video uses a resumable session — we'd need a
+		// multi-call dance the integration doesn't expose as a single
+		// tool. v0.1 surfaces YouTube as a connectable account so the
+		// channel-picker flow is testable, but post_create returns a
+		// clear "video upload coming in v0.2" error for now.
+		Strategy:           "youtube_unsupported",
+		PostTool:           "upload_video",
+		MediaRequired:      true,
+		MediaType:          "video",
+		ListPagesTool:      "list_channels",
+		PageIDField:        "id",
+		PageNameField:      "snippet.title",
+		PageAvatarField:    "snippet.thumbnails.default.url",
 	},
 }
 
@@ -204,6 +282,11 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/posts/", Handler: a.handlePostsItem}, // /posts/:id and /posts/:id/retry
 		// Static info
 		{Pattern: "/platforms", Handler: a.handlePlatforms},
+		// Jobs callback — the jobs app POSTs here when a scheduled
+		// publish fires. Body: {"post_id": N}. Idempotent per post:
+		// running it twice on a published post is a no-op (publishPostTargets
+		// only acts on status='pending' targets).
+		{Pattern: "/jobs/publish_post", Handler: a.handleJobPublishPost},
 	}
 }
 
@@ -628,12 +711,20 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 	}
 
-	// If publishing immediately and the agent didn't schedule it,
-	// dispatch the publish synchronously per-target. v0.1 does this
-	// inline (simple, debuggable); v0.2 will hand off to the jobs app
-	// when bound, so each target gets at-least-once + backoff.
+	// Two execution paths:
+	//   - schedule_at empty → publish inline now.
+	//   - schedule_at set → schedule a job via the jobs app (when bound)
+	//     so the publish is durable. If jobs isn't bound, fall back to
+	//     inline now-publish with a clear message in the response.
 	if scheduleAt == "" {
 		a.publishPostTargets(ctx, postID)
+	} else {
+		if err := a.scheduleJob(ctx, postID, scheduleAt); err != nil {
+			ctx.Logger().Warn("schedule via jobs failed", "post", postID, "err", err)
+			// Roll the post back to draft so the operator can retry.
+			_, _ = ctx.AppDB().Exec(`UPDATE posts SET status='failed' WHERE id=?`, postID)
+			return mcpError("scheduling failed (is the jobs app bound?): " + err.Error()), nil
+		}
 	}
 
 	ctx.Emit("post.created", map[string]any{
@@ -648,10 +739,31 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}, nil
 }
 
+// publishJob is the unit of work for one (post, social_account)
+// combination. Built once from the post + post_target row and passed
+// to the platform-specific publish strategy.
+type publishJob struct {
+	targetID, connID int64
+	platform, extID  string
+	body             string
+	mediaURLs        []string // already-resolved public URLs
+}
+
 // publishPostTargets walks every pending target on a post and tries to
-// publish it. Synchronous v0.1 implementation; per-target retry/backoff
-// will move to the jobs app in v0.2.
+// publish it. Each target runs through the platform-specific strategy
+// (single, instagram_two_step, tiktok, …). Media URLs are resolved up
+// front via storage.files_get_url so each strategy gets a flat list.
 func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
+	// Load the post's media ids once — every target gets the same media.
+	mediaIDs := a.loadPostMedia(ctx, postID)
+	mediaURLs, mediaErr := a.resolveMediaURLs(ctx, mediaIDs)
+	if mediaErr != nil {
+		ctx.Logger().Warn("resolve media urls", "post", postID, "err", mediaErr)
+		// Don't abort — text-only platforms can still publish; media-
+		// required platforms will fall through to the strategy's own
+		// "no media" branch and surface the error per-target.
+	}
+
 	rows, err := ctx.AppDB().Query(
 		`SELECT t.id, t.social_account_id, a.platform, a.connection_id,
 		        COALESCE(a.external_account_id,''), p.body
@@ -665,16 +777,12 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 		ctx.Logger().Warn("query targets", "err", err)
 		return
 	}
-	type job struct {
-		targetID, connID int64
-		platform, extID  string
-		body             string
-	}
-	var jobs []job
+	var jobs []publishJob
 	for rows.Next() {
-		var j job
+		var j publishJob
 		var acctID int64
 		if err := rows.Scan(&j.targetID, &acctID, &j.platform, &j.connID, &j.extID, &j.body); err == nil {
+			j.mediaURLs = mediaURLs
 			jobs = append(jobs, j)
 		}
 	}
@@ -689,48 +797,31 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 			failures++
 			continue
 		}
-		// Per-platform field naming. BodyField is required; ExternalIDField
-		// only when the platform has a destination concept (FB Page,
-		// IG business account, YouTube channel).
-		bodyField := def.BodyField
-		if bodyField == "" {
-			bodyField = "text" // sensible default
-		}
-		input := map[string]any{
-			bodyField: j.body,
-		}
-		if def.ExternalIDField != "" && j.extID != "" {
-			input[def.ExternalIDField] = j.extID
+		if def.MediaRequired && len(j.mediaURLs) == 0 {
+			a.markTargetFailed(ctx, j.targetID,
+				fmt.Sprintf("%s requires at least one media file (image or video). Pass media_storage_ids in post_create or attach media in the panel.", def.DisplayName))
+			failures++
+			continue
 		}
 		_, _ = ctx.AppDB().Exec(
 			`UPDATE post_targets SET status='publishing', attempts=attempts+1, last_attempt_at=CURRENT_TIMESTAMP WHERE id=?`,
 			j.targetID,
 		)
-		out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, input)
-		if err != nil || out == nil || !out.Success {
-			msg := "unknown error"
-			if err != nil {
-				msg = err.Error()
-			} else if out != nil && len(out.Data) > 0 {
-				msg = string(out.Data)
-				if len(msg) > 500 {
-					msg = msg[:500] + "…"
-				}
-			}
-			a.markTargetFailed(ctx, j.targetID, msg)
+		platformPostID, platformURL, err := a.runStrategy(ctx, def, j)
+		if err != nil {
+			a.markTargetFailed(ctx, j.targetID, err.Error())
 			failures++
 			continue
 		}
-		platformPostID, platformURL := extractPostIdentity(j.platform, out.Data)
 		_, _ = ctx.AppDB().Exec(
 			`UPDATE post_targets SET status='published', platform_post_id=?, platform_url=?, published_at=CURRENT_TIMESTAMP, last_error=NULL WHERE id=?`,
 			nullable(platformPostID), nullable(platformURL), j.targetID,
 		)
 		ctx.Emit("target.published", map[string]any{
-			"target_id":         j.targetID,
-			"platform":          j.platform,
-			"platform_post_id":  platformPostID,
-			"platform_url":      platformURL,
+			"target_id":        j.targetID,
+			"platform":         j.platform,
+			"platform_post_id": platformPostID,
+			"platform_url":     platformURL,
 		})
 		successes++
 	}
@@ -747,11 +838,295 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 		finalStatus, postID,
 	)
 	ctx.Emit("post.completed", map[string]any{
-		"post_id":   postID,
-		"status":    finalStatus,
-		"success":   successes,
-		"failures":  failures,
+		"post_id":  postID,
+		"status":   finalStatus,
+		"success":  successes,
+		"failures": failures,
 	})
+}
+
+// runStrategy dispatches to the platform's publish flow. Returns the
+// platform-side post id + URL on success, or an error to record on the
+// target row.
+func (a *App) runStrategy(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+	switch def.Strategy {
+	case "instagram_two_step":
+		return a.publishInstagram(ctx, def, j)
+	case "tiktok":
+		return a.publishTikTok(ctx, def, j)
+	case "youtube_unsupported":
+		return "", "", errors.New("YouTube video upload via the resumable-upload protocol lands in v0.2 — connect the channel and we'll wire it up")
+	default: // "single" or empty
+		return a.publishSingle(ctx, def, j)
+	}
+}
+
+// publishSingle covers Twitter / Facebook / LinkedIn — a single
+// integration tool call with a flat input shape.
+func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+	bodyField := def.BodyField
+	if bodyField == "" {
+		bodyField = "text"
+	}
+	input := map[string]any{bodyField: j.body}
+	if def.ExternalIDField != "" && j.extID != "" {
+		input[def.ExternalIDField] = j.extID
+	}
+	if def.MediaURLField != "" && len(j.mediaURLs) > 0 {
+		input[def.MediaURLField] = j.mediaURLs[0]
+	}
+	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, input)
+	if err != nil {
+		return "", "", err
+	}
+	if out == nil || !out.Success {
+		return "", "", upstreamError(out)
+	}
+	id, url := extractPostIdentity(def.Platform, out.Data)
+	return id, url, nil
+}
+
+// publishInstagram runs the two-step IG dance: create_media_container
+// (with imageUrl + caption) → publish_media_container (with the
+// containerId returned by step 1).
+func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+	if len(j.mediaURLs) == 0 {
+		return "", "", errors.New("instagram requires media")
+	}
+	// Step 1: create_media_container.
+	containerInput := map[string]any{
+		"caption":            j.body,
+		"imageUrl":           j.mediaURLs[0],
+		"instagramAccountId": j.extID,
+	}
+	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, containerInput)
+	if err != nil {
+		return "", "", fmt.Errorf("create_media_container: %w", err)
+	}
+	if out == nil || !out.Success {
+		return "", "", upstreamError(out)
+	}
+	containerID := extractContainerID(out.Data)
+	if containerID == "" {
+		return "", "", fmt.Errorf("create_media_container returned no containerId: %s", string(out.Data))
+	}
+	// Step 2: publish_media_container.
+	publishInput := map[string]any{
+		"containerId":        containerID,
+		"instagramAccountId": j.extID,
+	}
+	out2, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PublishTool, publishInput)
+	if err != nil {
+		return "", "", fmt.Errorf("publish_media_container: %w", err)
+	}
+	if out2 == nil || !out2.Success {
+		return "", "", upstreamError(out2)
+	}
+	id, _ := extractPostIdentity("instagram", out2.Data)
+	url := ""
+	if id != "" {
+		url = "https://www.instagram.com/p/" + id // best-effort; real shortcode may differ
+	}
+	return id, url, nil
+}
+
+// publishTikTok builds the nested {post_info, source_info} shape from
+// our flat (body, media_url) inputs. Caption goes to post_info.title;
+// media goes to source_info.video_url with PULL_FROM_URL.
+func (a *App) publishTikTok(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+	if len(j.mediaURLs) == 0 {
+		return "", "", errors.New("tiktok requires a video URL")
+	}
+	input := map[string]any{
+		"post_info": map[string]any{
+			"title":         j.body,
+			"privacy_level": "PUBLIC_TO_EVERYONE", // sensible default; future: per-target override
+		},
+		"source_info": map[string]any{
+			"source":    "PULL_FROM_URL",
+			"video_url": j.mediaURLs[0],
+		},
+	}
+	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, input)
+	if err != nil {
+		return "", "", err
+	}
+	if out == nil || !out.Success {
+		return "", "", upstreamError(out)
+	}
+	// TikTok returns a publish_id (async processing); the actual post
+	// URL isn't known until the worker polls get_publish_status. v0.1
+	// records the publish_id; v0.2 schedules a follow-up status check.
+	pubID := extractTikTokPublishID(out.Data)
+	return pubID, "", nil
+}
+
+// loadPostMedia reads the post's media_storage_ids JSON column.
+func (a *App) loadPostMedia(ctx *sdk.AppCtx, postID int64) []int64 {
+	var raw string
+	_ = ctx.AppDB().QueryRow(
+		`SELECT COALESCE(media_storage_ids,'[]') FROM posts WHERE id=?`,
+		postID,
+	).Scan(&raw)
+	var out []int64
+	_ = json.Unmarshal([]byte(raw), &out)
+	return out
+}
+
+// resolveMediaURLs turns storage file ids into absolute, publicly
+// fetchable URLs. Calls storage.files_get_url for each id, gets a
+// signed relative URL, and prefixes APTEVA_PUBLIC_URL (or, for local
+// dev, http://127.0.0.1:5280). The URL must be reachable from the
+// social platform's servers — for local dev, point APTEVA_PUBLIC_URL
+// at an ngrok tunnel.
+func (a *App) resolveMediaURLs(ctx *sdk.AppCtx, ids []int64) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	publicBase := os.Getenv("APTEVA_PUBLIC_URL")
+	if publicBase == "" {
+		publicBase = "http://127.0.0.1:5280"
+	}
+	publicBase = strings.TrimRight(publicBase, "/")
+
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		res, err := ctx.PlatformAPI().CallApp("storage", "files_get_url", map[string]any{
+			"id":          id,
+			"ttl_seconds": 3600,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("storage files_get_url(%d): %w", id, err)
+		}
+		// Storage's MCP response is wrapped in {content:[{type:text, text:json}]}.
+		// The inner JSON is {url, expires_at, file_id}.
+		rel := extractStorageGetURL(res)
+		if rel == "" {
+			return nil, fmt.Errorf("storage files_get_url(%d) returned no url: %s", id, string(res))
+		}
+		// Storage returns a relative path — combine with the platform
+		// proxy prefix and the public base.
+		if strings.HasPrefix(rel, "http://") || strings.HasPrefix(rel, "https://") {
+			out = append(out, rel)
+		} else if strings.HasPrefix(rel, "/api/apps/storage/") {
+			out = append(out, publicBase+rel)
+		} else {
+			// Path is /files/<id>/content?…  — prefix with the proxy path.
+			out = append(out, publicBase+"/api/apps/storage"+rel)
+		}
+	}
+	return out, nil
+}
+
+// extractStorageGetURL pulls the .url field out of storage's
+// files_get_url response. Same wrapping shape as extractStorageID.
+func extractStorageGetURL(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var direct struct {
+		URL string `json:"url"`
+	}
+	if json.Unmarshal(raw, &direct) == nil && direct.URL != "" {
+		return direct.URL
+	}
+	var wrapped struct {
+		Result struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(raw, &wrapped) == nil {
+		for _, c := range wrapped.Result.Content {
+			if c.Type == "text" && c.Text != "" {
+				var inner struct {
+					URL string `json:"url"`
+				}
+				if json.Unmarshal([]byte(c.Text), &inner) == nil && inner.URL != "" {
+					return inner.URL
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// extractContainerID pulls the IG containerId from create_media_container.
+// IG returns either {id: "<container>"} or {containerId: "..."}.
+func extractContainerID(raw json.RawMessage) string {
+	var obj map[string]any
+	if json.Unmarshal(raw, &obj) != nil {
+		return ""
+	}
+	if id := toString(obj["containerId"]); id != "" {
+		return id
+	}
+	if id := toString(obj["id"]); id != "" {
+		return id
+	}
+	return ""
+}
+
+// extractTikTokPublishID pulls publish_id from {data: {publish_id}, …}.
+func extractTikTokPublishID(raw json.RawMessage) string {
+	var obj map[string]any
+	if json.Unmarshal(raw, &obj) != nil {
+		return ""
+	}
+	if data, ok := obj["data"].(map[string]any); ok {
+		if id := toString(data["publish_id"]); id != "" {
+			return id
+		}
+	}
+	return toString(obj["publish_id"])
+}
+
+// upstreamError formats a non-2xx integration response into a single
+// error. Truncates long payloads so the error column doesn't blow up.
+func upstreamError(out *sdk.ExecuteResult) error {
+	if out == nil {
+		return errors.New("upstream call returned nil")
+	}
+	body := string(out.Data)
+	if len(body) > 500 {
+		body = body[:500] + "…"
+	}
+	return fmt.Errorf("upstream %d: %s", out.Status, body)
+}
+
+// scheduleJob hands off to the jobs app: register an HTTP-target job
+// that calls back into /api/apps/social/jobs/publish_post when its
+// scheduled time arrives. Idempotency keyed on post_id so dupes coalesce.
+func (a *App) scheduleJob(ctx *sdk.AppCtx, postID int64, scheduleAt string) error {
+	jobsBound := ctx.IntegrationFor("jobs")
+	if jobsBound == nil {
+		return errors.New("jobs app not bound — bind it at install time to enable durable scheduling")
+	}
+	payload := map[string]any{"post_id": postID}
+	payloadJSON, _ := json.Marshal(payload)
+	res, err := ctx.PlatformAPI().CallApp("jobs", "jobs_schedule", map[string]any{
+		"name": fmt.Sprintf("social.publish_post.%d", postID),
+		"schedule": map[string]any{
+			"kind":   "once",
+			"run_at": scheduleAt,
+		},
+		"target": map[string]any{
+			"kind": "http",
+			"url":  "/api/apps/social/jobs/publish_post",
+			"body": string(payloadJSON),
+		},
+		"idempotency_key": fmt.Sprintf("social.post.%d", postID),
+		"max_retries":     3,
+		"backoff_seconds": 60,
+		"owner_app":       "social",
+	})
+	if err != nil {
+		return err
+	}
+	_ = res // best-effort; the job's id isn't tracked in our DB today
+	return nil
 }
 
 func (a *App) markTargetFailed(ctx *sdk.AppCtx, targetID int64, msg string) {
@@ -1069,6 +1444,35 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Error(w, "not found", http.StatusNotFound)
+}
+
+// handleJobPublishPost is the callback the jobs app fires when a
+// scheduled post's run_at arrives. Idempotent: re-running on an
+// already-published post is a no-op (publishPostTargets only touches
+// status='pending' targets).
+func (a *App) handleJobPublishPost(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		PostID int64 `json:"post_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if body.PostID <= 0 {
+		http.Error(w, "post_id required", http.StatusBadRequest)
+		return
+	}
+	// Move from 'scheduled' → 'publishing' before fanning out.
+	_, _ = globalCtx.AppDB().Exec(
+		`UPDATE posts SET status='publishing' WHERE id=? AND status='scheduled'`,
+		body.PostID,
+	)
+	a.publishPostTargets(globalCtx, body.PostID)
+	writeJSON(w, map[string]any{"published": body.PostID})
 }
 
 func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
