@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/storage
 go 1.25.0
 
 require (
-	github.com/apteva/app-sdk v0.1.3-0.20260429132915-f9e9ea887b25
+	github.com/apteva/app-sdk v0.1.3-0.20260429160430-6243adbc9d48
 	github.com/google/uuid v1.6.0
 	modernc.org/sqlite v1.50.0
 )

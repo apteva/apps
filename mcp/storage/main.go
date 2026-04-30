@@ -36,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: storage
 display_name: Storage
-version: 0.1.4
+version: 0.1.5
 description: |
   File storage with virtual folders, signed URLs, dedup. Local-disk
   backend; cloud backend slot reserved for v0.2.
@@ -363,6 +363,7 @@ func (a *App) toolUpload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	emitFileEvent(ctx, "file.added", f, existed)
 	return map[string]any{
 		"id":           f.ID,
 		"url":          buildContentURL(f),
@@ -567,9 +568,11 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
+	prior, _ := dbGetByID(ctx.AppDB(), pid, id)
 	if err := dbSoftDelete(ctx.AppDB(), pid, id); err != nil {
 		return nil, err
 	}
+	emitFileEvent(ctx, "file.deleted", prior, false)
 	return map[string]any{"deleted": true}, nil
 }
 
@@ -610,6 +613,7 @@ func (a *App) toolFromURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	emitFileEvent(ctx, "file.added", f, existed)
 	return map[string]any{
 		"id":           f.ID,
 		"url":          buildContentURL(f),
@@ -769,6 +773,7 @@ func (a *App) httpUpload(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	emitFileEvent(ctx, "file.added", f, existed)
 	httpJSON(w, map[string]any{
 		"id": f.ID, "url": buildContentURL(f), "sha256": f.SHA256,
 		"size_bytes": f.SizeBytes, "name": f.Name, "folder": f.Folder,
@@ -920,11 +925,37 @@ func (a *App) httpDelete(w http.ResponseWriter, r *http.Request, id int64) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Snapshot the row before deleting so we can broadcast the
+	// folder/name to subscribers without a second lookup.
+	prior, _ := dbGetByID(ctx.AppDB(), pid, id)
 	if err := dbSoftDelete(ctx.AppDB(), pid, id); err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	emitFileEvent(ctx, "file.deleted", prior, false)
 	httpJSON(w, map[string]any{"deleted": true})
+}
+
+// emitFileEvent broadcasts a single file change onto the platform's
+// app-event bus. Best-effort: ctx.Emit is fire-and-forget, so a
+// flapping platform can't slow down the upload/delete handler.
+// Pass `existed=true` for dedup-resolved uploads so subscribers can
+// skip a duplicate row in the UI when the same content was already
+// present (the file is reused, not re-added).
+func emitFileEvent(ctx *sdk.AppCtx, topic string, f *File, existed bool) {
+	if ctx == nil || f == nil {
+		return
+	}
+	ctx.Emit(topic, map[string]any{
+		"id":           f.ID,
+		"name":         f.Name,
+		"folder":       f.Folder,
+		"size_bytes":   f.SizeBytes,
+		"content_type": f.ContentType,
+		"sha256":       f.SHA256,
+		"visibility":   f.Visibility,
+		"was_existing": existed,
+	})
 }
 
 // ─── Disk + DB helpers ─────────────────────────────────────────────
