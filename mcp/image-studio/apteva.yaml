@@ -1,0 +1,69 @@
+schema: apteva-app/v1
+
+name: image-studio
+display_name: Image Studio
+version: 0.1.0
+description: |
+  Generate images via any compatible provider (OpenAI today; Replicate /
+  Stability / Fal as the integration catalog learns them). Optionally
+  saves outputs to the Storage app for permanent, shareable references.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/image-studio
+tags: [ai, image-generation, productivity]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.connections.execute
+    - platform.apps.call
+  integrations:
+    # REQUIRED: must have a provider to do anything.
+    - role: provider
+      kind: integration
+      compatible_slugs: [openai-api]
+      capabilities: [image.generate]
+      tools:
+        image.generate: generate_image
+      required: true
+      label: "Image-generation provider"
+    # OPTIONAL: persist outputs.
+    - role: storage
+      kind: app
+      compatible_app_names: [storage]
+      capabilities: [files.write]
+      required: false
+      label: "Storage (optional)"
+      hint: "Save generated images permanently and share them across instances. Without this, generations are returned inline only."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: image_generate, description: "Generate an image from a prompt. Args: prompt, size?, quality?, n?. Returns thumbnail + storage_id when storage is bound, else inline base64." }
+    - { name: image_history,  description: "List recent generations for this project. Args: limit?, since?." }
+  ui_panels:
+    - slot: project.page
+      label: Studio
+      icon: image
+      entry: /ui/StudioPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/image-studio
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/image-studio.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
