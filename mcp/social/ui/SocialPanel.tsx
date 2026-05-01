@@ -129,11 +129,16 @@ function useAppEvents<T = unknown>(
 // --- Panel ---------------------------------------------------------
 
 export default function SocialPanel({ projectId }: NativePanelProps) {
-  const [tab, setTab] = useState<"accounts" | "compose" | "posts">("accounts");
+  const [tab, setTab] = useState<"accounts" | "posts">("posts");
   const [accounts, setAccounts] = useState<SocialAccount[]>([]);
   const [posts, setPosts] = useState<Post[]>([]);
   const [platforms, setPlatforms] = useState<PlatformInfo[]>([]);
   const [status, setStatus] = useState("");
+  // Compose used to be its own tab. It's now a centred modal opened
+  // from the Posts tab (+ New post button) so creating a post happens
+  // in a focused dialog instead of swapping the right pane — same
+  // pattern as the jobs panel's "+ New job" → CreateJobDialog flow.
+  const [composeOpen, setComposeOpen] = useState(false);
 
   const loadAccounts = useCallback(async () => {
     try {
@@ -203,10 +208,17 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   return (
     <div className="h-full flex flex-col">
       <header className="flex items-center gap-1 border-b border-border px-4 py-2">
-        <Tab label="Accounts" value="accounts" current={tab} onClick={setTab} count={accounts.length} />
-        <Tab label="Compose" value="compose" current={tab} onClick={setTab} />
         <Tab label="Posts" value="posts" current={tab} onClick={setTab} count={posts.length} />
-        <span className="ml-auto text-text-dim text-xs">{status}</span>
+        <Tab label="Accounts" value="accounts" current={tab} onClick={setTab} count={accounts.length} />
+        <button
+          onClick={() => setComposeOpen(true)}
+          disabled={accounts.length === 0}
+          className="ml-auto px-3 py-1 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+          title={accounts.length === 0 ? "Connect at least one social account first" : "New post"}
+        >
+          + New post
+        </button>
+        <span className="text-text-dim text-xs ml-2">{status}</span>
       </header>
 
       <div className="flex-1 overflow-auto">
@@ -220,17 +232,19 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
             setStatus={setStatus}
           />
         )}
-        {tab === "compose" && (
-          <ComposeView
-            accounts={accounts}
-            onCreated={() => { loadPosts(); setTab("posts"); }}
-            setStatus={setStatus}
-          />
-        )}
         {tab === "posts" && (
           <PostsView posts={posts} onChange={loadPosts} setStatus={setStatus} />
         )}
       </div>
+
+      {composeOpen && (
+        <ComposeDialog
+          accounts={accounts}
+          onClose={() => setComposeOpen(false)}
+          onCreated={() => { loadPosts(); setComposeOpen(false); setTab("posts"); }}
+          setStatus={setStatus}
+        />
+      )}
     </div>
   );
 }
@@ -238,7 +252,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
 function Tab({
   label, value, current, onClick, count,
 }: {
-  label: string; value: "accounts" | "compose" | "posts";
+  label: string; value: "accounts" | "posts";
   current: string; onClick: (v: any) => void; count?: number;
 }) {
   const active = value === current;
@@ -520,12 +534,20 @@ function PagePicker({
   );
 }
 
-// --- ComposeView --------------------------------------------------
+// --- ComposeDialog ------------------------------------------------
+//
+// Centred modal triggered by the Posts tab's "+ New post" button.
+// Replaces the old ComposeView tab — same form, same submit handler;
+// just shown as an overlay instead of swapping the tab body. Matches
+// the pattern apps/mcp/jobs uses for "+ New job" → CreateJobDialog.
 
-function ComposeView({
-  accounts, onCreated, setStatus,
+function ComposeDialog({
+  accounts, onClose, onCreated, setStatus,
 }: {
-  accounts: SocialAccount[]; onCreated: () => void; setStatus: (s: string) => void;
+  accounts: SocialAccount[];
+  onClose: () => void;
+  onCreated: () => void;
+  setStatus: (s: string) => void;
 }) {
   const [body, setBody] = useState("");
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -572,75 +594,85 @@ function ComposeView({
     }
   };
 
-  if (accounts.length === 0) {
-    return (
-      <div className="py-12 px-6 text-center text-text-muted text-sm">
-        Connect at least one social account first.
-      </div>
-    );
-  }
-
   return (
-    <div className="p-4 flex flex-col gap-4 max-w-3xl">
-      <div>
-        <label className="text-text-muted text-xs">What's on your mind?</label>
-        <textarea
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          placeholder="Compose your post…"
-          className="w-full mt-1 bg-bg-input border border-border rounded px-3 py-2 text-sm min-h-[120px] resize-y"
-        />
-        <div className="text-text-dim text-xs mt-1">{body.length} characters</div>
-      </div>
-
-      <div>
-        <div className="text-text-muted text-xs mb-2">Post to:</div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-          {accounts.map((a) => (
-            <label
-              key={a.id}
-              className={
-                "flex items-center gap-3 px-3 py-2 border rounded cursor-pointer transition-colors " +
-                (selected.has(a.id) ? "border-accent bg-bg-card" : "border-border hover:border-text-dim")
-              }
-            >
-              <input
-                type="checkbox"
-                checked={selected.has(a.id)}
-                onChange={() => toggle(a.id)}
-                className="accent-accent"
-              />
-              {a.avatar_url ? (
-                <img src={a.avatar_url} alt="" className="w-6 h-6 rounded-full" />
-              ) : (
-                <div className="w-6 h-6 rounded-full bg-bg-input" />
-              )}
-              <div className="flex-1 min-w-0">
-                <div className="text-text text-sm truncate">{a.display_name}</div>
-                <div className="text-text-dim text-xs">{a.platform}</div>
-              </div>
-            </label>
-          ))}
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      onClick={onClose}
+    >
+      <div className="absolute inset-0 bg-bg/80 backdrop-blur-sm" />
+      <div
+        className="relative bg-bg-card border border-border rounded-lg shadow-lg max-w-2xl w-full mx-4 overflow-auto flex flex-col max-h-[90vh] p-4 gap-3"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <div className="text-text font-medium">New post</div>
+          <button onClick={onClose} className="text-text-muted hover:text-text">×</button>
         </div>
-      </div>
 
-      <div className="flex items-end gap-3">
-        <div>
-          <label className="text-text-muted text-xs block">Schedule (optional)</label>
-          <input
-            type="datetime-local"
-            value={scheduleAt}
-            onChange={(e) => setScheduleAt(e.target.value)}
-            className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+        <div className="flex flex-col gap-1">
+          <label className="text-xs uppercase tracking-wide text-text-dim">Body</label>
+          <textarea
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            placeholder="Compose your post…"
+            autoFocus
+            className="w-full bg-bg-input border border-border rounded px-3 py-2 text-sm min-h-[120px] resize-y"
           />
+          <div className="text-text-dim text-xs">{body.length} characters</div>
         </div>
-        <button
-          onClick={submit}
-          disabled={!body.trim() || selected.size === 0 || busy}
-          className="px-4 py-2 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
-        >
-          {busy ? "…" : scheduleAt ? "Schedule" : "Post now"}
-        </button>
+
+        <div className="flex flex-col gap-1">
+          <label className="text-xs uppercase tracking-wide text-text-dim">Post to</label>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {accounts.map((a) => (
+              <label
+                key={a.id}
+                className={
+                  "flex items-center gap-3 px-3 py-2 border rounded cursor-pointer transition-colors " +
+                  (selected.has(a.id) ? "border-accent bg-bg-card" : "border-border hover:border-text-dim")
+                }
+              >
+                <input
+                  type="checkbox"
+                  checked={selected.has(a.id)}
+                  onChange={() => toggle(a.id)}
+                  className="accent-accent"
+                />
+                {a.avatar_url ? (
+                  <img src={a.avatar_url} alt="" className="w-6 h-6 rounded-full" />
+                ) : (
+                  <div className="w-6 h-6 rounded-full bg-bg-input" />
+                )}
+                <div className="flex-1 min-w-0">
+                  <div className="text-text text-sm truncate">{a.display_name}</div>
+                  <div className="text-text-dim text-xs">{a.platform}</div>
+                </div>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex items-end gap-3 mt-1">
+          <div className="flex flex-col gap-1">
+            <label className="text-xs uppercase tracking-wide text-text-dim">Schedule (optional)</label>
+            <input
+              type="datetime-local"
+              value={scheduleAt}
+              onChange={(e) => setScheduleAt(e.target.value)}
+              className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+            />
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            <button onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted">Cancel</button>
+            <button
+              onClick={submit}
+              disabled={!body.trim() || selected.size === 0 || busy}
+              className="px-4 py-2 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+            >
+              {busy ? "…" : scheduleAt ? "Schedule" : "Post now"}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
