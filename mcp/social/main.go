@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.3.3
+version: 0.3.4
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -153,6 +153,16 @@ type platformDef struct {
 	// (e.g. Facebook's /me/accounts only returns id+name unless we
 	// ask for picture explicitly via fields=...). Nil → empty map.
 	ListPagesArgs map[string]any
+	// PageAccessTokenField — JSONPath in the list_pages response that
+	// holds a page-level access token. Facebook rejects user-level
+	// tokens for /feed writes (error 210), so we capture the per-page
+	// token at finalize time and re-send it on every publish via
+	// PostTokenInputField. Empty when the platform reuses the user
+	// token for writes (Twitter, TikTok).
+	PageAccessTokenField string
+	// PostTokenInputField — name of the input field on PostTool that
+	// carries the page access token. Empty when not needed.
+	PostTokenInputField string
 	// ProfileTool — integration tool that returns the authorising
 	// user's own identity (used to seed display_name/avatar for
 	// platforms without page-selection). Empty = use a default label.
@@ -194,10 +204,14 @@ var platforms = map[string]platformDef{
 		PageNameField:   "name",
 		PageAvatarField: "picture.data.url",
 		// /me/accounts defaults to id+name. Ask for the page logo
-		// (picture nested under data.url) and category for context.
+		// (picture nested under data.url), category for context, and
+		// access_token because Facebook rejects user-level tokens for
+		// /feed writes (error 210, A page access token is required).
 		ListPagesArgs: map[string]any{
-			"fields": "id,name,category,picture{url}",
+			"fields": "id,name,category,picture{url},access_token",
 		},
+		PageAccessTokenField: "access_token",
+		PostTokenInputField:  "access_token",
 	},
 	"instagram": {
 		Platform:        "instagram",
@@ -613,6 +627,7 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	pageID, _ := args["page_id"].(string)
 	displayName, _ := args["name"].(string)
 	avatar := ""
+	pageCredsJSON := ""
 
 	if def.ListPagesTool != "" {
 		// Multi-page platform — page_id is required; resolve display
@@ -639,6 +654,15 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 			displayName = found.Name
 		}
 		avatar = found.Avatar
+		// Capture the page-level access token for write operations.
+		// For Facebook this is mandatory — /feed writes with the user
+		// token return error 210.
+		if found.AccessToken != "" {
+			pageCreds, _ := json.Marshal(map[string]string{
+				def.PageAccessTokenField: found.AccessToken,
+			})
+			pageCredsJSON = string(pageCreds)
+		}
 	} else if def.ProfileTool != "" {
 		// Single-account platform — pull profile via the integration so
 		// the panel has something nicer than "social:twitter:42".
@@ -662,9 +686,9 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	// Insert the finalized social_account row.
 	pid := os.Getenv("APTEVA_PROJECT_ID")
 	res, err := ctx.AppDB().Exec(
-		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, avatar_url, status)
-		 VALUES (?, ?, ?, ?, ?, ?, 'active')`,
-		pid, def.Platform, row.connectionID, nullable(pageID), displayName, nullable(avatar),
+		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, avatar_url, status, page_credentials)
+		 VALUES (?, ?, ?, ?, ?, ?, 'active', ?)`,
+		pid, def.Platform, row.connectionID, nullable(pageID), displayName, nullable(avatar), pageCredsJSON,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert social_account: %w", err)
@@ -872,6 +896,10 @@ type publishJob struct {
 	platform, extID  string
 	body             string
 	mediaURLs        []string // already-resolved public URLs
+	// pageCreds — JSON map of per-destination credentials populated at
+	// finalize time (e.g. Facebook's page-level access_token). Empty
+	// for platforms that reuse the user-level token for writes.
+	pageCreds string
 }
 
 // publishPostTargets walks every pending target on a post and tries to
@@ -891,7 +919,8 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 
 	rows, err := ctx.AppDB().Query(
 		`SELECT t.id, t.social_account_id, a.platform, a.connection_id,
-		        COALESCE(a.external_account_id,''), p.body
+		        COALESCE(a.external_account_id,''), p.body,
+		        COALESCE(a.page_credentials,'')
 		 FROM post_targets t
 		 JOIN social_accounts a ON a.id=t.social_account_id
 		 JOIN posts p ON p.id=t.post_id
@@ -906,7 +935,7 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 	for rows.Next() {
 		var j publishJob
 		var acctID int64
-		if err := rows.Scan(&j.targetID, &acctID, &j.platform, &j.connID, &j.extID, &j.body); err == nil {
+		if err := rows.Scan(&j.targetID, &acctID, &j.platform, &j.connID, &j.extID, &j.body, &j.pageCreds); err == nil {
 			j.mediaURLs = mediaURLs
 			jobs = append(jobs, j)
 		}
@@ -1000,14 +1029,35 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 	if def.MediaURLField != "" && len(j.mediaURLs) > 0 {
 		input[def.MediaURLField] = j.mediaURLs[0]
 	}
+	// Inject per-destination credentials (Facebook page access token,
+	// etc.). The integration tool's input_schema declares the field
+	// (access_token for facebook-api/post_to_page); the executor
+	// merges it into the request.
+	if def.PostTokenInputField != "" && j.pageCreds != "" {
+		var creds map[string]string
+		_ = json.Unmarshal([]byte(j.pageCreds), &creds)
+		if tok, ok := creds[def.PageAccessTokenField]; ok && tok != "" {
+			input[def.PostTokenInputField] = tok
+		}
+	}
+	ctx.Logger().Info("publishSingle: calling PostTool",
+		"platform", def.Platform, "tool", def.PostTool, "ext_id", j.extID,
+		"has_media", len(j.mediaURLs) > 0, "has_page_token", input[def.PostTokenInputField] != nil)
 	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, input)
 	if err != nil {
+		ctx.Logger().Error("publishSingle: ExecuteIntegrationTool err",
+			"platform", def.Platform, "tool", def.PostTool, "err", err)
 		return "", "", err
 	}
 	if out == nil || !out.Success {
-		return "", "", upstreamError(out)
+		ue := upstreamError(out)
+		ctx.Logger().Error("publishSingle: upstream non-2xx",
+			"platform", def.Platform, "tool", def.PostTool, "err", ue)
+		return "", "", ue
 	}
 	id, url := extractPostIdentity(def.Platform, out.Data)
+	ctx.Logger().Info("publishSingle: published",
+		"platform", def.Platform, "platform_post_id", id, "platform_url", url)
 	return id, url, nil
 }
 
@@ -1657,6 +1707,14 @@ type pageEntry struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
 	Avatar string `json:"avatar_url"`
+	// AccessToken — page-level OAuth token, populated only when the
+	// upstream returns it in the list_pages payload (Facebook does
+	// under data[].access_token; Twitter/TikTok don't have the
+	// concept). Held in memory through finalize, then persisted to
+	// social_accounts.page_credentials so publishSingle can pass it
+	// when posting. Never returned to the panel — the page picker UI
+	// only sees ID/Name/Avatar.
+	AccessToken string `json:"-"`
 }
 
 // fetchPages calls the integration's list_pages tool and normalises the
@@ -1716,20 +1774,28 @@ func (a *App) fetchPages(ctx *sdk.AppCtx, connID int64, def platformDef) ([]page
 				return nil, fmt.Errorf("parse list_pages response: %w", err)
 			}
 			for _, p := range raw {
-				pages = append(pages, pageEntry{
+				entry := pageEntry{
 					ID:     toString(walkPath(p, def.PageIDField)),
 					Name:   toString(walkPath(p, def.PageNameField)),
 					Avatar: toString(walkPath(p, def.PageAvatarField)),
-				})
+				}
+				if def.PageAccessTokenField != "" {
+					entry.AccessToken = toString(walkPath(p, def.PageAccessTokenField))
+				}
+				pages = append(pages, entry)
 			}
 			return pages, nil
 		}
 		for _, p := range envelope.Data {
-			pages = append(pages, pageEntry{
+			entry := pageEntry{
 				ID:     toString(walkPath(p, def.PageIDField)),
 				Name:   toString(walkPath(p, def.PageNameField)),
 				Avatar: toString(walkPath(p, def.PageAvatarField)),
-			})
+			}
+			if def.PageAccessTokenField != "" {
+				entry.AccessToken = toString(walkPath(p, def.PageAccessTokenField))
+			}
+			pages = append(pages, entry)
 		}
 		// Done when neither paging.cursors.after nor paging.next is set.
 		// Some shapes use one or the other — Facebook tends to give both;
