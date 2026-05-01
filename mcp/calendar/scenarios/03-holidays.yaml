@@ -1,0 +1,30 @@
+name: holidays
+description: |
+  Agent loads holidays for a country and confirms they're on the
+  calendar. Validates the holidays_set helper + the auto-created
+  kind=holidays calendar.
+
+timeout: 60s
+max_iterations: 6
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Load French public holidays for 2026 into my calendar using the
+  holidays_set tool (year=2026, country="FR"). Then call
+  calendars_list to confirm a holidays calendar was created, and
+  stop.
+
+assert:
+  - tool_called: holidays_set
+  - tool_called: calendars_list
+  - http: GET /api/apps/calendar/calendars
+    expect_status: 200
+  - iterations_at_most: 6
+
+budget:
+  total_tokens: 20000
+  cost_usd: 0.10

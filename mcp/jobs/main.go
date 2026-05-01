@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: jobs
 display_name: Jobs
-version: 0.1.3
+version: 0.1.4
 description: |
   Scheduled-job runner. Other apps and agents enqueue work; jobs
   delivers it later via HTTP or instance events.

@@ -1,0 +1,37 @@
+name: find-slot
+description: |
+  Agent has to find an open 30-minute window inside a busy day.
+  Validates events_find_slot (the engine future booking-link
+  availability rides on).
+
+timeout: 90s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Set up a Work calendar with two existing meetings:
+  - Team standup — 2026-05-04 09:00–09:30 UTC
+  - Design review — 2026-05-04 14:00–15:00 UTC
+
+  Then use events_find_slot to find me a 30-minute open window on
+  2026-05-04 between 09:00 and 18:00 UTC, with working hours
+  09:00–18:00 on Monday. Limit to 3 candidate slots and report them.
+  Stop after that.
+
+assert:
+  - tool_called: calendars_create
+  - tool_called: events_create
+  - tool_called: events_find_slot
+  - http: GET /api/apps/calendar/items?from=2026-05-04T00:00:00Z&to=2026-05-05T00:00:00Z
+    expect_status: 200
+    expect_count_at: events
+    expect_count: 2
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 30000
+  cost_usd: 0.30

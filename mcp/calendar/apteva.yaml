@@ -1,0 +1,61 @@
+schema: apteva-app/v1
+
+name: calendar
+display_name: Calendar
+version: 0.1.0
+description: |
+  Self-contained calendar — multiple calendars per project, events with
+  recurrence, holidays helper. Agents read + write via MCP tools; the
+  panel renders week / day / agenda views. v0.2 will add public sharing
+  + booking links + Google/Outlook sync (the schema already supports
+  those without changes).
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/calendar
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/calendar/icon.png
+tags: [calendar, scheduling, productivity, time]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+  integrations: []
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: calendars_list,        description: "List enabled calendars in this project." }
+    - { name: calendars_create,      description: "Create a calendar. Args: name, color?, kind?." }
+    - { name: calendars_update,      description: "Update calendar fields. Args: id, name?, color?, kind?, enabled?." }
+    - { name: calendars_delete,      description: "Delete a calendar and all its events. Args: id." }
+    - { name: events_list,           description: "List event occurrences in a window, expanding recurrence. Args: from, to, calendar_ids?." }
+    - { name: events_get,            description: "Read a single event row. Args: event_id." }
+    - { name: events_create,         description: "Create an event. Args: calendar_id, title, start_at, end_at, all_day?, description?, location?, rrule?." }
+    - { name: events_update,         description: "Update an event. Args: event_id, scope? (this|this_and_following|all), fields…" }
+    - { name: events_delete,         description: "Delete an event. Args: event_id, scope? (this|this_and_following|all)." }
+    - { name: events_find_slot,      description: "Find open slots. Args: duration_minutes, window_start, window_end, calendar_ids?, working_hours?, buffer_before_minutes?, buffer_after_minutes?." }
+    - { name: holidays_set,          description: "Bulk-load common holidays for a country into a holidays calendar. Args: year, country (FR|US|GB)." }
+  ui_panels:
+    - slot: project.page
+      label: Calendar
+      icon: calendar
+      entry: /ui/CalendarPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/calendar
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/calendar.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch

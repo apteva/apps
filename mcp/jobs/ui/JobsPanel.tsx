@@ -292,12 +292,12 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
         {error ? (
           <div className="p-6 text-red text-sm">{error}</div>
         ) : jobs.length === 0 ? (
-          <div className="p-12 text-center text-text-muted text-sm">
+          <div className="py-12 px-6 text-center text-text-muted text-sm">
             No jobs scheduled.{" "}
             <button
               type="button"
               onClick={() => setCreating(true)}
-              className="text-accent hover:underline"
+              className="text-accent"
             >Schedule one</button>
             .
           </div>

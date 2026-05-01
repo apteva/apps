@@ -1,0 +1,37 @@
+name: create-and-list
+description: |
+  Agent receives a small calendar setup task. Validates the flagship
+  calendars_create + events_create + events_list loop with a real LLM.
+
+timeout: 90s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  I need a Personal calendar with three events on it. Add these (UTC,
+  RFC3339 format):
+
+  - Lunch with Anna — 2026-05-04 12:00–13:00
+  - Dentist — 2026-05-05 09:30–10:00
+  - Yoga class — 2026-05-07 18:00–19:00
+
+  When everything is in, list the events from 2026-05-04T00:00:00Z to
+  2026-05-08T00:00:00Z to confirm. Then stop.
+
+assert:
+  - tool_called: calendars_create
+  - tool_called: events_create
+  - tool_called: events_list
+  - http: GET /api/apps/calendar/items?from=2026-05-04T00:00:00Z&to=2026-05-08T00:00:00Z
+    expect_status: 200
+    expect_count_at: events
+    expect_count: 3
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 50000
+  cost_usd: 0.30
