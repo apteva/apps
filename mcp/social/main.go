@@ -36,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.2.8
+version: 0.2.9
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -424,25 +424,37 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		// Social panel and clicks Add Account. Without #2 we'd force a
 		// pointless re-auth before showing pages they could already see.
 		var existingConnID int64
+		var reuseSrc string
 		err := ctx.AppDB().QueryRow(
 			`SELECT connection_id FROM social_accounts
 			 WHERE project_id=? AND platform=? AND status='active'
 			 ORDER BY id DESC LIMIT 1`,
 			pid, def.Platform,
 		).Scan(&existingConnID)
-		if err != nil || existingConnID == 0 {
-			if conns, lerr := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{
+		if err == nil && existingConnID > 0 {
+			reuseSrc = "social_accounts"
+		} else {
+			conns, lerr := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{
 				ProjectID: pid,
 				AppSlug:   def.IntegrationSlug,
-			}); lerr == nil {
+			})
+			ctx.Logger().Info("account_add: probing operator connections",
+				"platform", plat, "slug", def.IntegrationSlug, "project_id", pid,
+				"count", len(conns), "list_err", lerr)
+			if lerr == nil {
 				for _, c := range conns {
+					ctx.Logger().Info("account_add: candidate connection",
+						"id", c.ID, "slug", c.AppSlug, "status", c.Status, "project_id", c.ProjectID)
 					if c.Status == "active" {
 						existingConnID = c.ID
+						reuseSrc = "operator"
 						break
 					}
 				}
 			}
 		}
+		ctx.Logger().Info("account_add: reuse decision",
+			"platform", plat, "existing_conn_id", existingConnID, "reuse_source", reuseSrc)
 		if existingConnID > 0 {
 			res, err := ctx.AppDB().Exec(
 				`INSERT INTO pending_accounts (project_id, platform, integration_slug, connection_id, status, expires_at)
@@ -531,24 +543,33 @@ func (a *App) toolAccountListPendingPages(ctx *sdk.AppCtx, args map[string]any) 
 	}
 	row, err := a.getPending(int64(pendingID))
 	if err != nil {
+		ctx.Logger().Warn("list_pending_pages: pending row missing", "pending_id", pendingID, "err", err)
 		return mcpError("pending account not found: " + err.Error()), nil
 	}
 	if row.connectionID == 0 {
+		ctx.Logger().Warn("list_pending_pages: connection_id=0", "pending_id", pendingID, "platform", row.platform)
 		return mcpError("OAuth not yet complete — open the authorize_url first, then re-call this tool"), nil
 	}
 	def := platforms[row.platform]
 	if def.ListPagesTool == "" {
-		// Platforms without setup step: signal "ready, no picker needed".
+		ctx.Logger().Info("list_pending_pages: no picker required",
+			"pending_id", pendingID, "platform", row.platform, "conn_id", row.connectionID)
 		return map[string]any{
 			"pages":           []any{},
 			"requires_picker": false,
 			"hint":            fmt.Sprintf("%s has no page-selection step — call account_finalize with this pending_account_id (no page_id needed)", def.DisplayName),
 		}, nil
 	}
+	ctx.Logger().Info("list_pending_pages: calling fetchPages",
+		"pending_id", pendingID, "platform", row.platform, "conn_id", row.connectionID, "tool", def.ListPagesTool)
 	pages, err := a.fetchPages(ctx, row.connectionID, def)
 	if err != nil {
+		ctx.Logger().Error("list_pending_pages: fetchPages failed",
+			"pending_id", pendingID, "platform", row.platform, "conn_id", row.connectionID, "err", err)
 		return mcpError("fetch pages failed: " + err.Error()), nil
 	}
+	ctx.Logger().Info("list_pending_pages: returning pages",
+		"pending_id", pendingID, "platform", row.platform, "page_count", len(pages))
 	return map[string]any{
 		"pages":           pages,
 		"requires_picker": true,
