@@ -1,0 +1,36 @@
+name: tone-discipline
+description: |
+  Agent picks the right tone for a multi-stage operation: "working"
+  during, "success" or "error" at the end. Validates the tone enum
+  is honored and that status_set's upsert overwrites prior rows.
+
+timeout: 60s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  You are agent on instance 2. You have been asked to deploy the
+  staging environment. Walk through these stages, updating the
+  status line for each:
+
+    1. Set status "Deploying staging" with tone "working".
+    2. (Pretend the deploy succeeded.) Update status to
+       "Deploy succeeded — smoke tests passing" with tone "success".
+
+  Then stop. Use status_set for each stage.
+
+assert:
+  - tool_called: status_set
+  - http: GET /api/apps/status/instances/2
+    expect_status: 200
+    expect_field_at: tone
+    expect_field_eq: success
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 8000
+  cost_usd: 0.10

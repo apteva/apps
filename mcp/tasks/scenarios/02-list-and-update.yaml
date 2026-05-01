@@ -1,0 +1,38 @@
+name: list-and-update
+description: |
+  Agent creates a couple of tasks, lists them back, then updates one.
+  Validates tasks_list returns shapes the agent can reason over, and
+  tasks_update accepts partial field updates (status + notes change
+  on a row identified by id from the list response).
+
+timeout: 90s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  You are managing the mission board for instance 5. Add two tasks:
+
+    1. "Triage incoming reports"
+    2. "Write weekly summary"
+
+  Then call tasks_list to confirm they're there. Pick the first one
+  in the response and call tasks_update on it: change status to
+  "in_progress" and set notes to "started — checking inbox". Stop
+  after that.
+
+assert:
+  - tool_called: tasks_create
+  - tool_called: tasks_list
+  - tool_called: tasks_update
+  - http: GET /api/apps/tasks/instances/5?status=in_progress
+    expect_status: 200
+    expect_count: 1
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 12000
+  cost_usd: 0.20

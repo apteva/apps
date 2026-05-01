@@ -1,0 +1,69 @@
+schema: apteva-app/v1
+
+name: tasks
+display_name: Tasks
+version: 1.0.0
+description: Mission board for an Apteva instance. Agents create and complete tasks via MCP tools; the dashboard tracks progress live.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/tasks
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/tasks/icon.png
+tags: [productivity, agent, mission-board]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.instances.read
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: tasks_create
+      description: Create a new task on this instance's mission board.
+    - name: tasks_update
+      description: Update a task's status, title, or notes.
+    - name: tasks_complete
+      description: Mark a task as done.
+    - name: tasks_list
+      description: List the open or recent tasks for this instance.
+  ui_panels:
+    - slot: project.page
+      label: Tasks
+      icon: list-checks
+      entry: /ui/TasksPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/tasks
+  image: ghcr.io/apteva/app-tasks:0.1.0
+  port: 8080
+  health_check: /health
+  resources:
+    cpu: 0.05
+    memory: 64
+    cpu_limit: 1
+    memory_limit: 256
+  storage:
+    - name: data
+      mount_path: /data
+  env:
+    APTEVA_GATEWAY_URL: { from: platform }
+    APTEVA_APP_TOKEN:   { from: platform }
+    APTEVA_INSTALL_ID:  { from: platform }
+    APTEVA_PROJECT_ID:  { from: platform }
+    APTEVA_APP_CONFIG:  { from: platform }
+
+db:
+  driver: sqlite
+  path: /data/tasks.db
+  migrations: migrations/
+
+config_schema: []
+
+upgrade_policy: auto-patch

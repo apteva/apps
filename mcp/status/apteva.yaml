@@ -1,0 +1,62 @@
+schema: apteva-app/v1
+
+name: status
+display_name: Status
+version: 1.0.0
+description: Per-instance status line. Agent writes "what I'm on right now" via MCP; dashboard reads it live. Short-horizon counterpart to the long-lived directive.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/status
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/status/icon.png
+tags: [observability, agent, telemetry]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.instances.read
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: status_set
+      description: Set the instance's status line — message, optional emoji, tone (info|working|warn|error|success|idle).
+    - name: status_get
+      description: Read the instance's current status line.
+    - name: status_clear
+      description: Clear the instance's status line.
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/status
+  image: ghcr.io/apteva/app-status:0.1.0
+  port: 8080
+  health_check: /health
+  resources:
+    cpu: 0.05
+    memory: 64
+    cpu_limit: 1
+    memory_limit: 256
+  storage:
+    - name: data
+      mount_path: /data
+  env:
+    APTEVA_GATEWAY_URL: { from: platform }
+    APTEVA_APP_TOKEN:   { from: platform }
+    APTEVA_INSTALL_ID:  { from: platform }
+    APTEVA_PROJECT_ID:  { from: platform }
+    APTEVA_APP_CONFIG:  { from: platform }
+
+db:
+  driver: sqlite
+  path: /data/status.db
+  migrations: migrations/
+
+config_schema: []
+
+upgrade_policy: auto-patch

@@ -1,0 +1,37 @@
+name: create-and-complete
+description: |
+  Agent receives a directive with a small to-do list, creates one
+  task per item, then completes the second one. Verifies the flagship
+  create + complete loop works against a real LLM.
+
+timeout: 90s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  You are managing the mission board for instance 1. Add three tasks
+  to it:
+
+    1. "Buy oat milk"
+    2. "Reply to Anna about the meeting"
+    3. "Review the design doc"
+
+  Then mark task #2 (the reply to Anna) as complete. Use tasks_create
+  for each one and tasks_complete for the one you finish. After that,
+  stop.
+
+assert:
+  - tool_called: tasks_create
+  - tool_called: tasks_complete
+  - http: GET /api/apps/tasks/instances/1?status=all
+    expect_status: 200
+    expect_count: 3
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 12000
+  cost_usd: 0.20
