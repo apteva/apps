@@ -398,35 +398,60 @@ function AddAccountDialog({
 }: { platforms: PlatformInfo[]; onClose: () => void; setStatus: (s: string) => void }) {
   const [busy, setBusy] = useState<string | null>(null);
 
-  const start = async (p: PlatformInfo) => {
+  const start = (p: PlatformInfo) => {
+    // Open the popup SYNCHRONOUSLY in the click handler. Browsers
+    // block window.open() when called from an async continuation
+    // because the user-gesture context is gone by the time the fetch
+    // resolves — the popup gets silently dropped, no error surfaces,
+    // and from the user's perspective "nothing happens" when they
+    // click the platform button.
+    //
+    // Pattern: open the popup right away pointing at about:blank,
+    // then await the /accounts/start call and navigate the existing
+    // popup to the authorize URL once we have it. The popup carries
+    // the user gesture from the click; redirecting it later is fine.
+    const popup = window.open("about:blank", "social_oauth", "width=600,height=700");
+    if (!popup) {
+      setStatus("Popup blocked. Allow pop-ups for this site and try again.");
+      return;
+    }
     setBusy(p.platform);
     setStatus("Starting OAuth for " + p.display_name + "…");
-    try {
-      const res = await fetch(`${API}/accounts/start`, {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ platform: p.platform }),
-      });
-      if (!res.ok) {
-        setStatus("Start failed: " + (await res.text()));
+    (async () => {
+      try {
+        const res = await fetch(`${API}/accounts/start`, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ platform: p.platform }),
+        });
+        if (!res.ok) {
+          setStatus("Start failed: " + (await res.text()));
+          setBusy(null);
+          popup.close();
+          return;
+        }
+        const data = await res.json();
+        if (!data.authorize_url) {
+          setStatus("Server didn't return authorize_url");
+          setBusy(null);
+          popup.close();
+          return;
+        }
+        // Navigate the already-open popup to the upstream authorize URL.
+        // Most identity providers refuse to load inside a popup that was
+        // opened from a different origin via location.replace, but the
+        // standard `popup.location.href = url` works in every browser
+        // I've tested (Chrome, Firefox, Safari) since the popup is
+        // same-origin until we navigate it.
+        popup.location.href = data.authorize_url;
+        onClose();
+      } catch (e) {
+        setStatus("Start failed: " + (e as Error).message);
         setBusy(null);
-        return;
+        try { popup.close(); } catch {}
       }
-      const data = await res.json();
-      if (!data.authorize_url) {
-        setStatus("Server didn't return authorize_url");
-        setBusy(null);
-        return;
-      }
-      // Open the authorize URL in a popup. The OAuth callback will
-      // postMessage back to us via the oauth_done landing page.
-      window.open(data.authorize_url, "social_oauth", "width=600,height=700");
-      onClose();
-    } catch (e) {
-      setStatus("Start failed: " + (e as Error).message);
-      setBusy(null);
-    }
+    })();
   };
 
   return (
