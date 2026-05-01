@@ -64,6 +64,11 @@ interface PlatformInfo {
   display_name: string;
   integration_slug: string;
   requires_picker: boolean;
+  // available — true when the operator has seeded an integration
+  // connection for this platform (Settings → Integrations). Without
+  // it, OAuth start would fail with "missing client_id" — we gray
+  // out the button instead of letting the user click into an error.
+  available: boolean;
 }
 
 interface PageEntry {
@@ -413,13 +418,9 @@ function AddAccountDialog({
   // sits on top of the header — so users never saw the message and
   // it looked like 'popup flashed and closed for no reason'.
   const [err, setErr] = useState<string>("");
-  // 'Use a different account' toggle. When true, the next platform
-  // click sends force_new=true, which makes the backend skip the
-  // existing-connection reuse path and run a fresh OAuth dance even
-  // when a connection is already stored. Resets after each click.
-  const [forceNew, setForceNew] = useState(false);
 
   const start = (p: PlatformInfo) => {
+    if (!p.available) return;
     setErr("");
     // Reuse-existing path: backend skips OAuth when a connection for
     // this platform already exists. Detect that ahead of opening the
@@ -444,7 +445,6 @@ function AddAccountDialog({
     }
     setBusy(p.platform);
     setStatus("Starting OAuth for " + p.display_name + "…");
-    const reqForceNew = forceNew;
     (async () => {
       const fail = (msg: string) => {
         setErr(msg);
@@ -457,10 +457,7 @@ function AddAccountDialog({
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            platform: p.platform,
-            ...(reqForceNew ? { force_new: true } : {}),
-          }),
+          body: JSON.stringify({ platform: p.platform }),
         });
         if (!res.ok) {
           fail(`Start failed (HTTP ${res.status}): ${await res.text()}`);
@@ -526,32 +523,31 @@ function AddAccountDialog({
           </div>
         )}
         <div className="flex flex-col gap-1">
-          {platforms.map((p) => (
-            <button
-              key={p.platform}
-              onClick={() => start(p)}
-              disabled={busy === p.platform}
-              className="text-left px-3 py-2 border border-border rounded hover:border-accent text-sm disabled:opacity-50"
-            >
-              <span className="text-text">{p.display_name}</span>
-              {p.requires_picker && (
-                <span className="text-text-dim text-xs ml-2">(page picker after auth)</span>
-              )}
-            </button>
-          ))}
+          {platforms.map((p) => {
+            const disabled = !p.available || busy === p.platform;
+            return (
+              <button
+                key={p.platform}
+                onClick={() => start(p)}
+                disabled={disabled}
+                title={
+                  !p.available
+                    ? `No ${p.display_name} integration installed. Add one in Settings → Integrations to enable this.`
+                    : undefined
+                }
+                className="text-left px-3 py-2 border border-border rounded hover:border-accent text-sm disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-border"
+              >
+                <span className="text-text">{p.display_name}</span>
+                {p.requires_picker && p.available && (
+                  <span className="text-text-dim text-xs ml-2">(page picker after auth)</span>
+                )}
+                {!p.available && (
+                  <span className="text-text-dim text-xs ml-2">— integration not installed</span>
+                )}
+              </button>
+            );
+          })}
         </div>
-        <label className="flex items-center gap-2 mt-3 text-text-dim text-xs cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={forceNew}
-            onChange={(e) => setForceNew(e.target.checked)}
-            className="accent-accent"
-          />
-          <span>
-            Use a different provider-side account
-            <span className="ml-1 text-text-dim">— forces a fresh OAuth dance instead of reusing the existing connection</span>
-          </span>
-        </label>
       </div>
     </div>
   );

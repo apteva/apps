@@ -36,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.2.4
+version: 0.2.5
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -1529,13 +1529,27 @@ func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
+	pid := os.Getenv("APTEVA_PROJECT_ID")
 	out := make([]map[string]any, 0, len(platforms))
 	for _, def := range platforms {
+		// available — a platform's "Add account" button only makes
+		// sense when the operator has seeded an integration connection
+		// for it (Settings → Integrations). Without that, OAuth start
+		// fails with "missing client_id". Probe per-platform so the UI
+		// can gray out buttons we know will fail.
+		available := false
+		if conns, err := globalCtx.PlatformAPI().ListConnections(sdk.ConnectionFilter{
+			ProjectID: pid,
+			AppSlug:   def.IntegrationSlug,
+		}); err == nil && len(conns) > 0 {
+			available = true
+		}
 		out = append(out, map[string]any{
 			"platform":         def.Platform,
 			"display_name":     def.DisplayName,
 			"integration_slug": def.IntegrationSlug,
 			"requires_picker":  def.ListPagesTool != "",
+			"available":        available,
 		})
 	}
 	writeJSON(w, map[string]any{"platforms": out})
