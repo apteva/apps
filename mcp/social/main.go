@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.3.5
+version: 0.4.0
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -163,6 +163,13 @@ type platformDef struct {
 	// PostTokenInputField — name of the input field on PostTool that
 	// carries the page access token. Empty when not needed.
 	PostTokenInputField string
+	// VideoPostTool / VideoMediaURLField — when the platform splits
+	// image and video posting across two tools (Facebook: post_to_page
+	// vs post_video), set these so publishSingle can switch on the
+	// media MIME. Empty means "use PostTool for everything"
+	// (Twitter: text-only or any-MIME via the same tool).
+	VideoPostTool      string
+	VideoMediaURLField string
 	// ProfileTool — integration tool that returns the authorising
 	// user's own identity (used to seed display_name/avatar for
 	// platforms without page-selection). Empty = use a default label.
@@ -212,6 +219,10 @@ var platforms = map[string]platformDef{
 		},
 		PageAccessTokenField: "access_token",
 		PostTokenInputField:  "access_token",
+		// Video posting is a separate Graph endpoint
+		// (POST /{pageId}/videos with file_url=...).
+		VideoPostTool:      "post_video",
+		VideoMediaURLField: "file_url",
 	},
 	"instagram": {
 		Platform:        "instagram",
@@ -227,11 +238,23 @@ var platforms = map[string]platformDef{
 		MediaURLField:   "imageUrl",
 		ExternalIDField: "instagramAccountId",
 		MediaRequired:   true,
-		MediaType:       "image",
+		MediaType:       "any", // images + REELS via same two-step
 		ListPagesTool:   "list_accounts",
-		PageIDField:     "instagramAccountId",
-		PageNameField:   "username",
-		PageAvatarField: "profile_picture_url",
+		// /me/accounts on the FB Graph base returns Pages with their
+		// linked instagram_business_account nested. PageIDField walks
+		// into that — list_accounts response is filtered+flattened
+		// in publishInstagram for IG-Business-account-id semantics.
+		PageIDField:     "instagram_business_account.id",
+		PageNameField:   "instagram_business_account.username",
+		PageAvatarField: "instagram_business_account.profile_picture_url",
+		ListPagesArgs: map[string]any{
+			"fields": "name,access_token,instagram_business_account{id,username,profile_picture_url}",
+		},
+		// IG Business writes also need the page-level access_token
+		// (the token belongs to the Facebook Page that owns the IG
+		// account, not the user-level token).
+		PageAccessTokenField: "access_token",
+		PostTokenInputField:  "access_token",
 	},
 	"tiktok": {
 		Platform:        "tiktok",
@@ -895,7 +918,7 @@ type publishJob struct {
 	targetID, connID int64
 	platform, extID  string
 	body             string
-	mediaURLs        []string // already-resolved public URLs
+	media            []mediaItem // resolved (URL + MIME) so strategies can branch image/video
 	// pageCreds — JSON map of per-destination credentials populated at
 	// finalize time (e.g. Facebook's page-level access_token). Empty
 	// for platforms that reuse the user-level token for writes.
@@ -909,7 +932,7 @@ type publishJob struct {
 func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 	// Load the post's media ids once — every target gets the same media.
 	mediaIDs := a.loadPostMedia(ctx, postID)
-	mediaURLs, mediaErr := a.resolveMediaURLs(ctx, mediaIDs)
+	media, mediaErr := a.resolveMedia(ctx, mediaIDs)
 	if mediaErr != nil {
 		ctx.Logger().Warn("resolve media urls", "post", postID, "err", mediaErr)
 		// Don't abort — text-only platforms can still publish; media-
@@ -936,7 +959,7 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 		var j publishJob
 		var acctID int64
 		if err := rows.Scan(&j.targetID, &acctID, &j.platform, &j.connID, &j.extID, &j.body, &j.pageCreds); err == nil {
-			j.mediaURLs = mediaURLs
+			j.media = media
 			jobs = append(jobs, j)
 		}
 	}
@@ -951,7 +974,7 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 			failures++
 			continue
 		}
-		if def.MediaRequired && len(j.mediaURLs) == 0 {
+		if def.MediaRequired && len(j.media) == 0 {
 			a.markTargetFailed(ctx, j.targetID,
 				fmt.Sprintf("%s requires at least one media file (image or video). Pass media_storage_ids in post_create or attach media in the panel.", def.DisplayName))
 			failures++
@@ -1016,23 +1039,39 @@ func (a *App) runStrategy(ctx *sdk.AppCtx, def platformDef, j publishJob) (strin
 }
 
 // publishSingle covers Twitter / Facebook / LinkedIn — a single
-// integration tool call with a flat input shape.
+// integration tool call with a flat input shape. Switches between
+// the platform's image PostTool and VideoPostTool based on the first
+// media item's MIME (Facebook splits POST /feed for photos and POST
+// /videos for video; same token, different endpoint).
 func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
 	bodyField := def.BodyField
 	if bodyField == "" {
 		bodyField = "text"
 	}
+	// Pick the tool + media field based on whether we have a video.
+	tool := def.PostTool
+	mediaField := def.MediaURLField
+	isVideo := len(j.media) > 0 && j.media[0].IsVideo()
+	if isVideo && def.VideoPostTool != "" {
+		tool = def.VideoPostTool
+		mediaField = def.VideoMediaURLField
+		// Facebook /videos uses 'description' as the post caption,
+		// not 'message' (that's only on /feed). Map our body to the
+		// right field for the video tool.
+		if def.Platform == "facebook" {
+			bodyField = "description"
+		}
+	}
 	input := map[string]any{bodyField: j.body}
 	if def.ExternalIDField != "" && j.extID != "" {
 		input[def.ExternalIDField] = j.extID
 	}
-	if def.MediaURLField != "" && len(j.mediaURLs) > 0 {
-		input[def.MediaURLField] = j.mediaURLs[0]
+	if mediaField != "" && len(j.media) > 0 {
+		input[mediaField] = j.media[0].URL
 	}
 	// Inject per-destination credentials (Facebook page access token,
 	// etc.). The integration tool's input_schema declares the field
-	// (access_token for facebook-api/post_to_page); the executor
-	// merges it into the request.
+	// (access_token); the executor merges it into the request.
 	if def.PostTokenInputField != "" && j.pageCreds != "" {
 		var creds map[string]string
 		_ = json.Unmarshal([]byte(j.pageCreds), &creds)
@@ -1041,18 +1080,18 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 		}
 	}
 	ctx.Logger().Info("publishSingle: calling PostTool",
-		"platform", def.Platform, "tool", def.PostTool, "ext_id", j.extID,
-		"has_media", len(j.mediaURLs) > 0, "has_page_token", input[def.PostTokenInputField] != nil)
-	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, input)
+		"platform", def.Platform, "tool", tool, "ext_id", j.extID,
+		"is_video", isVideo, "has_page_token", input[def.PostTokenInputField] != nil)
+	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, tool, input)
 	if err != nil {
 		ctx.Logger().Error("publishSingle: ExecuteIntegrationTool err",
-			"platform", def.Platform, "tool", def.PostTool, "err", err)
+			"platform", def.Platform, "tool", tool, "err", err)
 		return "", "", err
 	}
 	if out == nil || !out.Success {
 		ue := upstreamError(out)
 		ctx.Logger().Error("publishSingle: upstream non-2xx",
-			"platform", def.Platform, "tool", def.PostTool, "err", ue)
+			"platform", def.Platform, "tool", tool, "err", ue)
 		return "", "", ue
 	}
 	id, url := extractPostIdentity(def.Platform, out.Data)
@@ -1062,18 +1101,43 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 }
 
 // publishInstagram runs the two-step IG dance: create_media_container
-// (with imageUrl + caption) → publish_media_container (with the
-// containerId returned by step 1).
+// (with imageUrl OR videoUrl+REELS + caption) → publish_media_container
+// (with the containerId returned by step 1). IG Business writes need
+// the page-level access_token same as Facebook.
 func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
-	if len(j.mediaURLs) == 0 {
+	if len(j.media) == 0 {
 		return "", "", errors.New("instagram requires media")
 	}
-	// Step 1: create_media_container.
+	// Resolve page access_token once — both steps need it.
+	pageToken := ""
+	if def.PostTokenInputField != "" && j.pageCreds != "" {
+		var creds map[string]string
+		_ = json.Unmarshal([]byte(j.pageCreds), &creds)
+		pageToken = creds[def.PageAccessTokenField]
+	}
+
+	// Step 1: create_media_container. Branch on MIME — IG videos go
+	// in as REELS now (the legacy VIDEO type is deprecated). sync=true
+	// makes the integration block until processing finishes so step 2
+	// doesn't race the upstream pipeline.
+	first := j.media[0]
 	containerInput := map[string]any{
 		"caption":            j.body,
-		"imageUrl":           j.mediaURLs[0],
 		"instagramAccountId": j.extID,
 	}
+	if first.IsVideo() {
+		containerInput["videoUrl"] = first.URL
+		containerInput["mediaType"] = "REELS"
+		containerInput["sync"] = true
+	} else {
+		containerInput["imageUrl"] = first.URL
+		containerInput["mediaType"] = "IMAGE"
+	}
+	if pageToken != "" {
+		containerInput["access_token"] = pageToken
+	}
+	ctx.Logger().Info("publishInstagram: create container",
+		"is_video", first.IsVideo(), "ig_account", j.extID, "has_token", pageToken != "")
 	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, containerInput)
 	if err != nil {
 		return "", "", fmt.Errorf("create_media_container: %w", err)
@@ -1085,11 +1149,19 @@ func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (
 	if containerID == "" {
 		return "", "", fmt.Errorf("create_media_container returned no containerId: %s", string(out.Data))
 	}
-	// Step 2: publish_media_container.
+	// Step 2: publish_media_container. Graph API expects
+	// creation_id; we send both names so the integration's input
+	// schema doesn't have to translate.
 	publishInput := map[string]any{
 		"containerId":        containerID,
+		"creation_id":        containerID,
 		"instagramAccountId": j.extID,
 	}
+	if pageToken != "" {
+		publishInput["access_token"] = pageToken
+	}
+	ctx.Logger().Info("publishInstagram: publish container",
+		"container_id", containerID, "ig_account", j.extID)
 	out2, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PublishTool, publishInput)
 	if err != nil {
 		return "", "", fmt.Errorf("publish_media_container: %w", err)
@@ -1109,7 +1181,7 @@ func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (
 // our flat (body, media_url) inputs. Caption goes to post_info.title;
 // media goes to source_info.video_url with PULL_FROM_URL.
 func (a *App) publishTikTok(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
-	if len(j.mediaURLs) == 0 {
+	if len(j.media) == 0 {
 		return "", "", errors.New("tiktok requires a video URL")
 	}
 	input := map[string]any{
@@ -1119,7 +1191,7 @@ func (a *App) publishTikTok(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 		},
 		"source_info": map[string]any{
 			"source":    "PULL_FROM_URL",
-			"video_url": j.mediaURLs[0],
+			"video_url": j.media[0].URL,
 		},
 	}
 	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, input)
@@ -1148,13 +1220,22 @@ func (a *App) loadPostMedia(ctx *sdk.AppCtx, postID int64) []int64 {
 	return out
 }
 
-// resolveMediaURLs turns storage file ids into absolute, publicly
-// fetchable URLs. Calls storage.files_get_url for each id, gets a
-// signed relative URL, and prefixes APTEVA_PUBLIC_URL (or, for local
-// dev, http://127.0.0.1:5280). The URL must be reachable from the
-// social platform's servers — for local dev, point APTEVA_PUBLIC_URL
-// at an ngrok tunnel.
-func (a *App) resolveMediaURLs(ctx *sdk.AppCtx, ids []int64) ([]string, error) {
+// mediaItem is a resolved media file — public URL + MIME so callers
+// can branch image vs video without a second round-trip.
+type mediaItem struct {
+	URL  string
+	Mime string
+}
+
+// IsVideo reports whether this is a video MIME type.
+func (m mediaItem) IsVideo() bool { return strings.HasPrefix(m.Mime, "video/") }
+
+// resolveMedia turns storage file ids into absolute, publicly fetchable
+// URLs paired with the file's content_type. Calls storage.files_get
+// for the metadata and storage.files_get_url for the signed URL.
+// The URL must be reachable from the social platform's servers — for
+// local dev, point APTEVA_PUBLIC_URL at an ngrok tunnel.
+func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64) ([]mediaItem, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -1164,9 +1245,21 @@ func (a *App) resolveMediaURLs(ctx *sdk.AppCtx, ids []int64) ([]string, error) {
 	}
 	publicBase = strings.TrimRight(publicBase, "/")
 
-	out := make([]string, 0, len(ids))
+	out := make([]mediaItem, 0, len(ids))
 	for _, id := range ids {
-		res, err := ctx.PlatformAPI().CallApp("storage", "files_get_url", map[string]any{
+		// Metadata first — content_type drives the publish strategy
+		// (image → /feed; video → /videos for FB; REELS for IG).
+		metaRes, err := ctx.PlatformAPI().CallApp("storage", "files_get", map[string]any{
+			"id": id,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("storage files_get(%d): %w", id, err)
+		}
+		mime := extractStorageContentType(metaRes)
+
+		// Signed URL — separate call because files_get_url is the
+		// canonical way to mint a TTL'd link.
+		urlRes, err := ctx.PlatformAPI().CallApp("storage", "files_get_url", map[string]any{
 			"id":          id,
 			"ttl_seconds": 3600,
 		})
@@ -1175,22 +1268,59 @@ func (a *App) resolveMediaURLs(ctx *sdk.AppCtx, ids []int64) ([]string, error) {
 		}
 		// Storage's MCP response is wrapped in {content:[{type:text, text:json}]}.
 		// The inner JSON is {url, expires_at, file_id}.
-		rel := extractStorageGetURL(res)
+		rel := extractStorageGetURL(urlRes)
 		if rel == "" {
-			return nil, fmt.Errorf("storage files_get_url(%d) returned no url: %s", id, string(res))
+			return nil, fmt.Errorf("storage files_get_url(%d) returned no url: %s", id, string(urlRes))
 		}
-		// Storage returns a relative path — combine with the platform
-		// proxy prefix and the public base.
+		var fullURL string
 		if strings.HasPrefix(rel, "http://") || strings.HasPrefix(rel, "https://") {
-			out = append(out, rel)
+			fullURL = rel
 		} else if strings.HasPrefix(rel, "/api/apps/storage/") {
-			out = append(out, publicBase+rel)
+			fullURL = publicBase + rel
 		} else {
-			// Path is /files/<id>/content?…  — prefix with the proxy path.
-			out = append(out, publicBase+"/api/apps/storage"+rel)
+			fullURL = publicBase + "/api/apps/storage" + rel
 		}
+		out = append(out, mediaItem{URL: fullURL, Mime: mime})
 	}
 	return out, nil
+}
+
+// extractStorageContentType pulls the file's content_type out of
+// storage's files_get response. The shape is {file: {...}} or the
+// row at the top level depending on storage version — handle both.
+func extractStorageContentType(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	// MCP envelope first: {content:[{type:text, text:<json>}]}.
+	var env struct {
+		Content []struct {
+			Type, Text string
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &env); err == nil {
+		for _, c := range env.Content {
+			if c.Type == "text" && c.Text != "" {
+				return extractStorageContentType(json.RawMessage(c.Text))
+			}
+		}
+	}
+	// Direct shapes: {file: {content_type}} or {content_type}.
+	var nested struct {
+		File struct {
+			ContentType string `json:"content_type"`
+		} `json:"file"`
+		ContentType string `json:"content_type"`
+	}
+	if json.Unmarshal(raw, &nested) == nil {
+		if nested.File.ContentType != "" {
+			return nested.File.ContentType
+		}
+		if nested.ContentType != "" {
+			return nested.ContentType
+		}
+	}
+	return ""
 }
 
 // extractStorageGetURL pulls the .url field out of storage's
@@ -1794,6 +1924,14 @@ func (a *App) fetchPages(ctx *sdk.AppCtx, connID int64, def platformDef) ([]page
 			}
 			if def.PageAccessTokenField != "" {
 				entry.AccessToken = toString(walkPath(p, def.PageAccessTokenField))
+			}
+			// Skip entries the platform returned but where the
+			// destination ID couldn't be resolved (e.g. Instagram
+			// /me/accounts returns FB Pages without a linked
+			// instagram_business_account — those rows have no IG ID
+			// and aren't postable).
+			if entry.ID == "" {
+				continue
 			}
 			pages = append(pages, entry)
 		}
