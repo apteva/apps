@@ -996,6 +996,29 @@ function PostsView({
               </button>
             )}
           </div>
+          {p.media_storage_ids && p.media_storage_ids.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {p.media_storage_ids.map((id) => (
+                // Storage's content endpoint trusts the dashboard
+                // proxy's cookie auth — no sig required for our own
+                // user's files. Fixed-size thumbnails kept simple;
+                // <video> + poster stays on the roadmap.
+                <a
+                  key={id}
+                  href={`/api/apps/storage/files/${id}/content`}
+                  target="_blank"
+                  rel="noopener"
+                  className="block w-20 h-20 rounded border border-border overflow-hidden bg-bg-input flex-shrink-0"
+                >
+                  <img
+                    src={`/api/apps/storage/files/${id}/content`}
+                    alt=""
+                    className="w-full h-full object-cover"
+                  />
+                </a>
+              ))}
+            </div>
+          )}
           {p.targets.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
               {p.targets.map((t) => (

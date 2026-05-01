@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.4.0
+version: 0.4.1
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -164,12 +164,17 @@ type platformDef struct {
 	// carries the page access token. Empty when not needed.
 	PostTokenInputField string
 	// VideoPostTool / VideoMediaURLField — when the platform splits
-	// image and video posting across two tools (Facebook: post_to_page
-	// vs post_video), set these so publishSingle can switch on the
-	// media MIME. Empty means "use PostTool for everything"
-	// (Twitter: text-only or any-MIME via the same tool).
+	// image and video posting across separate tools (Facebook: text →
+	// post_to_page on /feed, photo → post_photo_to_page on /photos,
+	// video → post_video on /videos), set these so publishSingle can
+	// switch on the media MIME. Empty means "use PostTool for
+	// everything" (Twitter: text-only or any-MIME via the same tool).
+	PhotoPostTool      string
+	PhotoMediaURLField string
+	PhotoBodyField     string // overrides BodyField when posting a photo
 	VideoPostTool      string
 	VideoMediaURLField string
+	VideoBodyField     string // overrides BodyField when posting a video
 	// ProfileTool — integration tool that returns the authorising
 	// user's own identity (used to seed display_name/avatar for
 	// platforms without page-selection). Empty = use a default label.
@@ -219,10 +224,19 @@ var platforms = map[string]platformDef{
 		},
 		PageAccessTokenField: "access_token",
 		PostTokenInputField:  "access_token",
-		// Video posting is a separate Graph endpoint
-		// (POST /{pageId}/videos with file_url=...).
+		// Three Graph endpoints, one per media kind:
+		//   - text/link posts → /{pageId}/feed       ('message')
+		//   - photo posts     → /{pageId}/photos     ('caption' + 'url')
+		//   - video posts     → /{pageId}/videos     ('description' + 'file_url')
+		// /feed silently ignores 'image' fields, which is why a
+		// photo attached via post_to_page would publish without the
+		// image attached — switching to post_photo_to_page fixes that.
+		PhotoPostTool:      "post_photo_to_page",
+		PhotoMediaURLField: "url",
+		PhotoBodyField:     "caption",
 		VideoPostTool:      "post_video",
 		VideoMediaURLField: "file_url",
+		VideoBodyField:     "description",
 	},
 	"instagram": {
 		Platform:        "instagram",
@@ -1048,18 +1062,27 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 	if bodyField == "" {
 		bodyField = "text"
 	}
-	// Pick the tool + media field based on whether we have a video.
+	// Pick the tool + media field + body field based on whether we
+	// have a photo or video. Each branch is a self-contained
+	// override; falls back to the default text/link tool when there's
+	// no media or the platform doesn't declare a media-specific tool.
 	tool := def.PostTool
 	mediaField := def.MediaURLField
-	isVideo := len(j.media) > 0 && j.media[0].IsVideo()
-	if isVideo && def.VideoPostTool != "" {
+	hasMedia := len(j.media) > 0
+	isVideo := hasMedia && j.media[0].IsVideo()
+	isImage := hasMedia && !isVideo
+	switch {
+	case isVideo && def.VideoPostTool != "":
 		tool = def.VideoPostTool
 		mediaField = def.VideoMediaURLField
-		// Facebook /videos uses 'description' as the post caption,
-		// not 'message' (that's only on /feed). Map our body to the
-		// right field for the video tool.
-		if def.Platform == "facebook" {
-			bodyField = "description"
+		if def.VideoBodyField != "" {
+			bodyField = def.VideoBodyField
+		}
+	case isImage && def.PhotoPostTool != "":
+		tool = def.PhotoPostTool
+		mediaField = def.PhotoMediaURLField
+		if def.PhotoBodyField != "" {
+			bodyField = def.PhotoBodyField
 		}
 	}
 	input := map[string]any{bodyField: j.body}
