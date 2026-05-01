@@ -397,8 +397,14 @@ function AddAccountDialog({
   platforms, onClose, setStatus,
 }: { platforms: PlatformInfo[]; onClose: () => void; setStatus: (s: string) => void }) {
   const [busy, setBusy] = useState<string | null>(null);
+  // Inline error inside the modal. The panel-header status used to
+  // be the only failure surface, but the modal's fixed-inset overlay
+  // sits on top of the header — so users never saw the message and
+  // it looked like 'popup flashed and closed for no reason'.
+  const [err, setErr] = useState<string>("");
 
   const start = (p: PlatformInfo) => {
+    setErr("");
     // Open the popup SYNCHRONOUSLY in the click handler. Browsers
     // block window.open() when called from an async continuation
     // because the user-gesture context is gone by the time the fetch
@@ -418,6 +424,12 @@ function AddAccountDialog({
     setBusy(p.platform);
     setStatus("Starting OAuth for " + p.display_name + "…");
     (async () => {
+      const fail = (msg: string) => {
+        setErr(msg);
+        setStatus(msg);
+        setBusy(null);
+        try { popup.close(); } catch {}
+      };
       try {
         const res = await fetch(`${API}/accounts/start`, {
           method: "POST",
@@ -426,30 +438,30 @@ function AddAccountDialog({
           body: JSON.stringify({ platform: p.platform }),
         });
         if (!res.ok) {
-          setStatus("Start failed: " + (await res.text()));
-          setBusy(null);
-          popup.close();
+          fail(`Start failed (HTTP ${res.status}): ${await res.text()}`);
           return;
         }
         const data = await res.json();
+        // The backend tool returns MCP-shaped errors as 200 with
+        // {isError: true, content: [{type: "text", text: "..."}]}
+        // because the same handler serves agent MCP calls. Detect
+        // that envelope and surface the inner message — otherwise
+        // the failure looks like 'no authorize_url' and the user
+        // has no idea what went wrong.
+        if (data?.isError) {
+          const inner = (data.content || []).find((c: any) => c.type === "text")?.text;
+          fail(inner || "OAuth start returned an error envelope");
+          return;
+        }
         if (!data.authorize_url) {
-          setStatus("Server didn't return authorize_url");
-          setBusy(null);
-          popup.close();
+          fail("Server didn't return authorize_url");
           return;
         }
         // Navigate the already-open popup to the upstream authorize URL.
-        // Most identity providers refuse to load inside a popup that was
-        // opened from a different origin via location.replace, but the
-        // standard `popup.location.href = url` works in every browser
-        // I've tested (Chrome, Firefox, Safari) since the popup is
-        // same-origin until we navigate it.
         popup.location.href = data.authorize_url;
         onClose();
       } catch (e) {
-        setStatus("Start failed: " + (e as Error).message);
-        setBusy(null);
-        try { popup.close(); } catch {}
+        fail("Start failed: " + (e as Error).message);
       }
     })();
   };
@@ -467,6 +479,17 @@ function AddAccountDialog({
         <div className="text-text-dim text-xs mb-3">
           You'll be redirected to authorize. The access token is held by the platform; this app sees only opaque IDs.
         </div>
+        {err && (
+          <div className="mb-3 border border-error rounded p-2 bg-error/10">
+            <div className="text-error text-xs font-medium mb-1">Couldn't start OAuth</div>
+            <div className="text-text-muted text-xs whitespace-pre-wrap break-words">{err}</div>
+            {/missing client_id/i.test(err) && (
+              <div className="text-text-dim text-[11px] mt-2">
+                This integration requires a per-deployment OAuth app. Register one with the platform (e.g. developers.facebook.com) and either set <code className="text-text">OAUTH_FACEBOOK_API_CLIENT_ID</code> + <code className="text-text">OAUTH_FACEBOOK_API_CLIENT_SECRET</code> as environment variables on apteva-server, or connect the integration once via Settings → Integrations to seed the credentials.
+              </div>
+            )}
+          </div>
+        )}
         <div className="flex flex-col gap-1">
           {platforms.map((p) => (
             <button
