@@ -370,7 +370,7 @@ function AccountCard({
       </div>
       <button
         onClick={remove}
-        className="text-text-muted hover:text-red-400 text-xs"
+        className="text-text-muted hover:text-error text-xs"
         title="Disconnect"
       >
         ×
@@ -706,10 +706,10 @@ function PostsView({
 
 function StatusPill({ status }: { status: string }) {
   const tone =
-    status === "published" ? "text-green-400" :
-    status === "failed" ? "text-red-400" :
-    status === "partial" ? "text-yellow-400" :
-    status === "scheduled" ? "text-blue-400" :
+    status === "published" ? "text-success" :
+    status === "failed" ? "text-error" :
+    status === "partial" ? "text-warn" :
+    status === "scheduled" ? "text-info" :
     "text-text-dim";
   return <span className={"text-xs uppercase " + tone}>{status}</span>;
 }
@@ -725,8 +725,8 @@ function TargetChip({ target }: { target: PostTarget }) {
       title={target.last_error || ""}
       className={
         "inline-flex items-center gap-1 px-2 py-1 border rounded text-xs " +
-        (ok ? "border-green-700 text-green-300" :
-         failed ? "border-red-800 text-red-300" :
+        (ok ? "border-success text-success" :
+         failed ? "border-error text-error" :
          "border-border text-text-dim")
       }
     >

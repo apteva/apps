@@ -630,7 +630,7 @@ function CalendarDialog({
       </div>
       <div className="flex gap-2 justify-end items-center">
         {existing && (
-          <button onClick={remove} className="px-3 py-1.5 text-sm text-red-400 hover:text-red-300 mr-auto">
+          <button onClick={remove} className="px-3 py-1.5 text-sm text-error hover:text-error mr-auto">
             Delete
           </button>
         )}
@@ -774,7 +774,7 @@ function EventDialog({
       />
       <div className="flex gap-2 justify-end items-center">
         {existing && (
-          <button onClick={remove} className="px-3 py-1.5 text-sm text-red-400 hover:text-red-300 mr-auto">
+          <button onClick={remove} className="px-3 py-1.5 text-sm text-error hover:text-error mr-auto">
             Delete
           </button>
         )}

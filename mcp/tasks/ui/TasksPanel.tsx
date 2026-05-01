@@ -33,9 +33,9 @@ interface Task {
 
 const STATUSES: { key: string; label: string; tone: string }[] = [
   { key: "open",        label: "Open",        tone: "text-text" },
-  { key: "in_progress", label: "In progress", tone: "text-blue-400" },
-  { key: "blocked",     label: "Blocked",     tone: "text-yellow-400" },
-  { key: "done",        label: "Done",        tone: "text-green-400" },
+  { key: "in_progress", label: "In progress", tone: "text-info" },
+  { key: "blocked",     label: "Blocked",     tone: "text-warn" },
+  { key: "done",        label: "Done",        tone: "text-success" },
   { key: "cancelled",   label: "Cancelled",   tone: "text-text-dim" },
 ];
 
@@ -237,7 +237,7 @@ function TaskCard({
         </button>
         <button
           onClick={onDelete}
-          className="opacity-0 group-hover:opacity-100 text-text-muted hover:text-red-400 text-xs"
+          className="opacity-0 group-hover:opacity-100 text-text-muted hover:text-error text-xs"
           title="Delete"
         >
           ×
