@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: jobs
 display_name: Jobs
-version: 0.1.1
+version: 0.1.2
 description: |
   Scheduled-job runner. Other apps and agents enqueue work; jobs
   delivers it later via HTTP or instance events.
@@ -222,6 +222,7 @@ func (a *App) handleHTTPCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	emitJob(ctx, "job.scheduled", job)
 	httpJSON(w, map[string]any{"job": job})
 }
 
@@ -287,6 +288,9 @@ func (a *App) handleHTTPCancel(w http.ResponseWriter, r *http.Request, idStr str
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if ctx != nil {
+		ctx.Emit("job.cancelled", map[string]any{"id": id})
+	}
 	httpJSON(w, map[string]any{"cancelled": true, "id": id})
 }
 
@@ -326,6 +330,9 @@ func (a *App) handleHTTPRunNow(w http.ResponseWriter, r *http.Request, idStr str
 	if err := dbRunNow(ctx.AppDB(), pid, id); err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if ctx != nil {
+		ctx.Emit("job.queued", map[string]any{"id": id})
 	}
 	httpJSON(w, map[string]any{"queued": true, "id": id})
 }

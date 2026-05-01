@@ -140,6 +140,7 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
   const [detail, setDetail] = useState<Job | null>(null);
   const [runs, setRuns] = useState<JobRun[]>([]);
   const [error, setError] = useState("");
+  const [creating, setCreating] = useState(false);
 
   const withParams = useCallback(
     (extra: Record<string, string> = {}) => {
@@ -270,6 +271,11 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
             onClick={loadList}
             className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input"
           >Refresh</button>
+          <button
+            type="button"
+            onClick={() => setCreating(true)}
+            className="ml-auto px-2 py-1 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+          >+ New job</button>
         </div>
         <div className="flex-1 overflow-auto">
           {error ? (
@@ -304,6 +310,18 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
           {jobs.length} job{jobs.length !== 1 ? "s" : ""}
         </div>
       </aside>
+
+      {/* Create dialog */}
+      {creating && (
+        <CreateJobDialog
+          onClose={() => setCreating(false)}
+          onCreated={async () => {
+            setCreating(false);
+            await loadList();
+          }}
+          api={api}
+        />
+      )}
 
       {/* Detail */}
       <main className="flex-1 overflow-auto p-6">
@@ -393,6 +411,288 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
           </div>
         )}
       </main>
+    </div>
+  );
+}
+
+// ─── Create-job dialog ────────────────────────────────────────────────
+// Inline modal modeled on TasksPanel.Dialog. Posts to /jobs with the
+// schema dbScheduleJob expects: { name, schedule:{kind,...}, target:{kind,...} }.
+// Kept deliberately small — advanced fields (timezone, max_retries) are
+// omitted; defaults on the backend are sane.
+
+type ApiFn = <T,>(method: string, path: string, body?: unknown, extra?: Record<string, string>) => Promise<T>;
+
+function CreateJobDialog({
+  onClose, onCreated, api,
+}: {
+  onClose: () => void;
+  onCreated: () => void;
+  api: ApiFn;
+}) {
+  const [name, setName] = useState("");
+  const [scheduleKind, setScheduleKind] = useState<ScheduleKind>("once");
+  // once: a datetime-local string (browser local TZ). Default = now+5min.
+  const [runAtLocal, setRunAtLocal] = useState(() => {
+    const d = new Date(Date.now() + 5 * 60 * 1000);
+    // toISOString → 'YYYY-MM-DDTHH:mm:ss.sssZ'; <input type=datetime-local>
+    // wants 'YYYY-MM-DDTHH:mm' in local time.
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  });
+  // every: store amount + unit, convert to seconds at submit time.
+  const [everyAmount, setEveryAmount] = useState("5");
+  const [everyUnit, setEveryUnit] = useState<"s" | "m" | "h">("m");
+  const [cronExpr, setCronExpr] = useState("*/5 * * * *");
+
+  const [targetKind, setTargetKind] = useState<"event" | "http">("event");
+  const [agentId, setAgentId] = useState("self");
+  const [eventMessage, setEventMessage] = useState("");
+  const [httpApp, setHttpApp] = useState("");
+  const [httpPath, setHttpPath] = useState("");
+  const [httpUrl, setHttpUrl] = useState("");
+  const [httpMethod, setHttpMethod] = useState("POST");
+  const [httpBodyText, setHttpBodyText] = useState("");
+
+  const [submitting, setSubmitting] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async () => {
+    setErr("");
+    if (!name.trim()) { setErr("Name is required."); return; }
+
+    const schedule: Record<string, unknown> = { kind: scheduleKind };
+    if (scheduleKind === "once") {
+      const d = new Date(runAtLocal);
+      if (isNaN(d.getTime())) { setErr("Invalid run-at time."); return; }
+      schedule.run_at = d.toISOString();
+    } else if (scheduleKind === "every") {
+      const n = Number(everyAmount);
+      if (!Number.isFinite(n) || n <= 0) { setErr("Interval must be > 0."); return; }
+      const mult = everyUnit === "h" ? 3600 : everyUnit === "m" ? 60 : 1;
+      schedule.every_seconds = Math.round(n * mult);
+    } else {
+      if (!cronExpr.trim()) { setErr("Cron expression required."); return; }
+      schedule.cron = cronExpr.trim();
+    }
+
+    const target: Record<string, unknown> = { kind: targetKind };
+    if (targetKind === "event") {
+      if (!eventMessage.trim()) { setErr("Event message required."); return; }
+      target.agent_id = agentId.trim() || "self";
+      target.message = eventMessage;
+    } else {
+      // http: either {app, path} or {url}
+      if (httpUrl.trim()) {
+        target.url = httpUrl.trim();
+      } else if (httpApp.trim() && httpPath.trim()) {
+        target.app = httpApp.trim();
+        target.path = httpPath.trim().startsWith("/") ? httpPath.trim() : "/" + httpPath.trim();
+      } else {
+        setErr("HTTP target needs either url, or both app and path.");
+        return;
+      }
+      target.method = httpMethod;
+      if (httpBodyText.trim()) {
+        try {
+          target.body = JSON.parse(httpBodyText);
+        } catch {
+          setErr("Body must be valid JSON (or leave blank).");
+          return;
+        }
+      }
+    }
+
+    setSubmitting(true);
+    try {
+      await api("POST", "/jobs", { name: name.trim(), schedule, target });
+      onCreated();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const inputCls = "w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm";
+  const labelCls = "text-xs uppercase tracking-wide text-text-dim";
+
+  return (
+    <div className="fixed inset-0 bg-black/60 grid place-items-center z-50" onClick={onClose}>
+      <div
+        className="bg-bg-card border border-border rounded p-4 w-[520px] max-w-[92vw] max-h-[90vh] overflow-auto flex flex-col gap-3"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <div className="text-text font-medium">New job</div>
+          <button onClick={onClose} className="text-text-muted hover:text-text">×</button>
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <label className={labelCls}>Name</label>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Nightly digest"
+            autoFocus
+            className={inputCls}
+          />
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <label className={labelCls}>Schedule</label>
+          <div className="flex gap-1">
+            {(["once", "every", "cron"] as ScheduleKind[]).map((k) => (
+              <button
+                key={k}
+                type="button"
+                onClick={() => setScheduleKind(k)}
+                className={`flex-1 px-2 py-1 text-xs border rounded ${
+                  scheduleKind === k
+                    ? "border-accent text-accent bg-accent/10"
+                    : "border-border text-text-muted hover:bg-bg-input"
+                }`}
+              >{k}</button>
+            ))}
+          </div>
+          {scheduleKind === "once" && (
+            <input
+              type="datetime-local"
+              value={runAtLocal}
+              onChange={(e) => setRunAtLocal(e.target.value)}
+              className={inputCls + " mt-1"}
+            />
+          )}
+          {scheduleKind === "every" && (
+            <div className="flex gap-2 mt-1">
+              <input
+                type="number"
+                min="1"
+                value={everyAmount}
+                onChange={(e) => setEveryAmount(e.target.value)}
+                className={inputCls + " flex-1"}
+              />
+              <select
+                value={everyUnit}
+                onChange={(e) => setEveryUnit(e.target.value as "s" | "m" | "h")}
+                className={inputCls + " w-24"}
+              >
+                <option value="s">seconds</option>
+                <option value="m">minutes</option>
+                <option value="h">hours</option>
+              </select>
+            </div>
+          )}
+          {scheduleKind === "cron" && (
+            <input
+              type="text"
+              value={cronExpr}
+              onChange={(e) => setCronExpr(e.target.value)}
+              placeholder="M H DOM MON DOW (e.g. */5 * * * *)"
+              className={inputCls + " mt-1 font-mono"}
+            />
+          )}
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <label className={labelCls}>Target</label>
+          <div className="flex gap-1">
+            {(["event", "http"] as const).map((k) => (
+              <button
+                key={k}
+                type="button"
+                onClick={() => setTargetKind(k)}
+                className={`flex-1 px-2 py-1 text-xs border rounded ${
+                  targetKind === k
+                    ? "border-accent text-accent bg-accent/10"
+                    : "border-border text-text-muted hover:bg-bg-input"
+                }`}
+              >{k}</button>
+            ))}
+          </div>
+          {targetKind === "event" ? (
+            <div className="flex flex-col gap-2 mt-1">
+              <input
+                type="text"
+                value={agentId}
+                onChange={(e) => setAgentId(e.target.value)}
+                placeholder="agent id (or 'self')"
+                className={inputCls}
+              />
+              <textarea
+                value={eventMessage}
+                onChange={(e) => setEventMessage(e.target.value)}
+                placeholder="Message to deliver to the agent"
+                className={inputCls + " min-h-[64px]"}
+              />
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2 mt-1">
+              <input
+                type="text"
+                value={httpUrl}
+                onChange={(e) => setHttpUrl(e.target.value)}
+                placeholder="absolute URL (requires net.egress) — leave blank to use app+path"
+                className={inputCls}
+              />
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={httpApp}
+                  onChange={(e) => setHttpApp(e.target.value)}
+                  placeholder="app slug (e.g. crm)"
+                  className={inputCls + " flex-1"}
+                  disabled={!!httpUrl.trim()}
+                />
+                <input
+                  type="text"
+                  value={httpPath}
+                  onChange={(e) => setHttpPath(e.target.value)}
+                  placeholder="/path"
+                  className={inputCls + " flex-1"}
+                  disabled={!!httpUrl.trim()}
+                />
+              </div>
+              <div className="flex gap-2">
+                <select
+                  value={httpMethod}
+                  onChange={(e) => setHttpMethod(e.target.value)}
+                  className={inputCls + " w-28"}
+                >
+                  <option>POST</option>
+                  <option>GET</option>
+                  <option>PUT</option>
+                  <option>PATCH</option>
+                  <option>DELETE</option>
+                </select>
+                <textarea
+                  value={httpBodyText}
+                  onChange={(e) => setHttpBodyText(e.target.value)}
+                  placeholder='JSON body (optional, e.g. {"x":1})'
+                  className={inputCls + " flex-1 font-mono min-h-[48px]"}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {err && <div className="text-red text-xs">{err}</div>}
+
+        <div className="flex gap-2 justify-end mt-1">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3 py-1.5 text-sm text-text-muted"
+          >Cancel</button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={submitting || !name.trim()}
+            className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+          >{submitting ? "Creating…" : "Create"}</button>
+        </div>
+      </div>
     </div>
   );
 }
