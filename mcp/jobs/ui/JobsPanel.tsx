@@ -626,12 +626,12 @@ function CreateJobDialog({
                 min="1"
                 value={everyAmount}
                 onChange={(e) => setEveryAmount(e.target.value)}
-                className={inputCls + " flex-1"}
+                className="flex-1 min-w-0 bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
               />
               <select
                 value={everyUnit}
                 onChange={(e) => setEveryUnit(e.target.value as "s" | "m" | "h")}
-                className={inputCls + " w-24"}
+                className="w-24 bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
               >
                 <option value="s">seconds</option>
                 <option value="m">minutes</option>
@@ -697,7 +697,7 @@ function CreateJobDialog({
                   value={httpApp}
                   onChange={(e) => setHttpApp(e.target.value)}
                   placeholder="app slug (e.g. crm)"
-                  className={inputCls + " flex-1"}
+                  className="flex-1 min-w-0 bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
                   disabled={!!httpUrl.trim()}
                 />
                 <input
@@ -705,7 +705,7 @@ function CreateJobDialog({
                   value={httpPath}
                   onChange={(e) => setHttpPath(e.target.value)}
                   placeholder="/path"
-                  className={inputCls + " flex-1"}
+                  className="flex-1 min-w-0 bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
                   disabled={!!httpUrl.trim()}
                 />
               </div>
@@ -713,7 +713,7 @@ function CreateJobDialog({
                 <select
                   value={httpMethod}
                   onChange={(e) => setHttpMethod(e.target.value)}
-                  className={inputCls + " w-28"}
+                  className="w-24 bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
                 >
                   <option>POST</option>
                   <option>GET</option>
@@ -725,7 +725,7 @@ function CreateJobDialog({
                   value={httpBodyText}
                   onChange={(e) => setHttpBodyText(e.target.value)}
                   placeholder='JSON body (optional, e.g. {"x":1})'
-                  className={inputCls + " flex-1 font-mono min-h-[48px]"}
+                  className="flex-1 min-w-0 bg-bg-input border border-border rounded px-2 py-1.5 text-sm font-mono"
                 />
               </div>
             </div>
