@@ -378,9 +378,10 @@ function DetailDialog({
   onCancel: () => void;
 }) {
   return (
-    <div className="fixed inset-0 bg-black/60 grid place-items-center z-40" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
+      <div className="absolute inset-0 bg-bg/80 backdrop-blur-sm" />
       <div
-        className="bg-bg-card border border-border rounded p-5 w-[720px] max-w-[92vw] max-h-[88vh] overflow-auto flex flex-col gap-4"
+        className="relative bg-bg-card border border-border rounded-lg shadow-lg max-w-4xl w-full mx-4 overflow-auto flex flex-col max-h-[90vh] p-5 gap-4"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex items-start gap-3">
@@ -571,9 +572,10 @@ function CreateJobDialog({
   const labelCls = "text-xs uppercase tracking-wide text-text-dim";
 
   return (
-    <div className="fixed inset-0 bg-black/60 grid place-items-center z-50" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
+      <div className="absolute inset-0 bg-bg/80 backdrop-blur-sm" />
       <div
-        className="bg-bg-card border border-border rounded p-4 w-[520px] max-w-[92vw] max-h-[90vh] overflow-auto flex flex-col gap-3"
+        className="relative bg-bg-card border border-border rounded-lg shadow-lg max-w-2xl w-full mx-4 overflow-auto flex flex-col max-h-[90vh] p-4 gap-3"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
