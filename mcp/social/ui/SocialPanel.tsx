@@ -233,6 +233,9 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
             platforms={platforms}
             oauthLanding={oauthLanding}
             onClearLanding={() => setOauthLanding(null)}
+            onSetLanding={(pendingId, connId) =>
+              setOauthLanding({ pendingId, connectionId: connId })
+            }
             onChange={loadAccounts}
             setStatus={setStatus}
           />
@@ -280,11 +283,12 @@ function Tab({
 // --- AccountsView -------------------------------------------------
 
 function AccountsView({
-  accounts, platforms, oauthLanding, onClearLanding, onChange, setStatus,
+  accounts, platforms, oauthLanding, onClearLanding, onSetLanding, onChange, setStatus,
 }: {
   accounts: SocialAccount[]; platforms: PlatformInfo[];
   oauthLanding: { pendingId: number; connectionId: number } | null;
   onClearLanding: () => void;
+  onSetLanding: (pendingId: number, connectionId: number) => void;
   onChange: () => void; setStatus: (s: string) => void;
 }) {
   const [adding, setAdding] = useState(false);
@@ -350,7 +354,7 @@ function AccountsView({
           onReuseExisting={(pendingId, connId) => {
             // Backend returned 'reusing existing connection' — skip the
             // OAuth popup entirely, jump straight into the page picker.
-            setOauthLanding({ pendingId, connectionId: connId });
+            onSetLanding(pendingId, connId);
             setAdding(false);
           }}
         />
