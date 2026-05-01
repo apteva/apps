@@ -36,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.2.6
+version: 0.2.7
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -228,16 +228,21 @@ var platforms = map[string]platformDef{
 		// YouTube's upload_video uses a resumable session — we'd need a
 		// multi-call dance the integration doesn't expose as a single
 		// tool. v0.1 surfaces YouTube as a connectable account so the
-		// channel-picker flow is testable, but post_create returns a
-		// clear "video upload coming in v0.2" error for now.
+		// channel flow is testable, but post_create returns a clear
+		// "video upload coming in v0.2" error for now.
+		//
+		// No page picker: the youtube-api integration only exposes
+		// get_my_channel (singular) — there's no list_channels tool
+		// to drive a picker against. One Google OAuth = one channel
+		// under the standard scope, so YT behaves like Twitter/TikTok
+		// (single-account, always fresh OAuth, no picker step).
 		Strategy:           "youtube_unsupported",
 		PostTool:           "upload_video",
 		MediaRequired:      true,
 		MediaType:          "video",
-		ListPagesTool:      "list_channels",
-		PageIDField:        "id",
-		PageNameField:      "snippet.title",
-		PageAvatarField:    "snippet.thumbnails.default.url",
+		ProfileTool:        "get_my_channel",
+		ProfileNameField:   "snippet.title",
+		ProfileAvatarField: "snippet.thumbnails.default.url",
 	},
 }
 
