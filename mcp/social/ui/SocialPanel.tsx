@@ -703,6 +703,22 @@ function ComposeDialog({
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [scheduleAt, setScheduleAt] = useState("");
   const [busy, setBusy] = useState(false);
+  // Media attached to the post. We upload immediately to the storage app
+  // (so the post_create call only carries IDs, not bytes) and remember the
+  // returned id + a local preview URL. The previewURL is a local
+  // ObjectURL — cheap, but we revoke it on remove + unmount so the
+  // browser doesn't keep the bytes around forever.
+  const [media, setMedia] = useState<{ id: number; name: string; mime: string; previewURL: string }[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Revoke any object URLs we created when the modal closes.
+  useEffect(() => {
+    return () => {
+      for (const m of media) URL.revokeObjectURL(m.previewURL);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const toggle = (id: number) => {
     setSelected((s) => {
@@ -710,6 +726,58 @@ function ComposeDialog({
       if (n.has(id)) n.delete(id);
       else n.add(id);
       return n;
+    });
+  };
+
+  const handleAttach = async (ev: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = Array.from(ev.target.files || []);
+    if (fileList.length === 0) return;
+    setUploading(true);
+    setStatus(`Uploading ${fileList.length} file${fileList.length !== 1 ? "s" : ""}…`);
+    try {
+      const uploaded: typeof media = [];
+      for (const file of fileList) {
+        const fd = new FormData();
+        fd.append("file", file);
+        // Drop into a "social/" folder so users can find them later
+        // in Storage. The folder doesn't have to pre-exist; storage
+        // creates it on demand.
+        fd.append("folder", "social/");
+        const res = await fetch("/api/apps/storage/files", {
+          method: "POST",
+          credentials: "same-origin",
+          body: fd,
+        });
+        if (!res.ok) {
+          throw new Error(`upload failed (${res.status}): ${await res.text()}`);
+        }
+        const data = await res.json();
+        const id = data?.file?.id;
+        if (typeof id !== "number") {
+          throw new Error("storage didn't return a file id: " + JSON.stringify(data));
+        }
+        uploaded.push({
+          id,
+          name: file.name,
+          mime: file.type,
+          previewURL: URL.createObjectURL(file),
+        });
+      }
+      setMedia((prev) => [...prev, ...uploaded]);
+      setStatus(`Attached ${uploaded.length} file${uploaded.length !== 1 ? "s" : ""}.`);
+    } catch (e) {
+      setStatus("Upload failed: " + (e as Error).message);
+    } finally {
+      setUploading(false);
+      ev.target.value = "";
+    }
+  };
+
+  const removeMedia = (id: number) => {
+    setMedia((prev) => {
+      const dropped = prev.find((m) => m.id === id);
+      if (dropped) URL.revokeObjectURL(dropped.previewURL);
+      return prev.filter((m) => m.id !== id);
     });
   };
 
@@ -726,6 +794,7 @@ function ComposeDialog({
           body,
           social_account_ids: Array.from(selected),
           schedule_at: scheduleAt || undefined,
+          media_storage_ids: media.length > 0 ? media.map((m) => m.id) : undefined,
         }),
       });
       if (!res.ok) {
@@ -735,6 +804,9 @@ function ComposeDialog({
       setBody("");
       setSelected(new Set());
       setScheduleAt("");
+      // Don't revoke the object URLs here — the cleanup effect handles
+      // them on unmount. Just clear the list visually.
+      setMedia([]);
       setStatus("Done.");
       onCreated();
     } catch (e) {
@@ -769,6 +841,53 @@ function ComposeDialog({
             className="w-full bg-bg-input border border-border rounded px-3 py-2 text-sm min-h-[120px] resize-y"
           />
           <div className="text-text-dim text-xs">{body.length} characters</div>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <label className="text-xs uppercase tracking-wide text-text-dim">Media (optional)</label>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+              className="text-xs text-accent hover:underline disabled:opacity-50"
+            >
+              {uploading ? "Uploading…" : "+ Attach image / video"}
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept="image/*,video/*"
+              onChange={handleAttach}
+              className="hidden"
+            />
+          </div>
+          {media.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {media.map((m) => (
+                <div
+                  key={m.id}
+                  className="relative w-20 h-20 rounded border border-border overflow-hidden bg-bg-input flex-shrink-0 group"
+                  title={m.name}
+                >
+                  {m.mime.startsWith("video/") ? (
+                    <video src={m.previewURL} className="w-full h-full object-cover" muted />
+                  ) : (
+                    <img src={m.previewURL} alt={m.name} className="w-full h-full object-cover" />
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => removeMedia(m.id)}
+                    className="absolute top-0.5 right-0.5 w-5 h-5 rounded-full bg-bg/80 text-text hover:bg-bg flex items-center justify-center text-xs leading-none"
+                    aria-label={`Remove ${m.name}`}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="flex flex-col gap-1">
