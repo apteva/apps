@@ -36,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.2.9
+version: 0.3.0
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -144,6 +144,11 @@ type platformDef struct {
 	PageIDField     string
 	PageNameField   string
 	PageAvatarField string
+	// ListPagesArgs — optional input passed to ListPagesTool. Lets
+	// each platform request the upstream-specific fields it needs
+	// (e.g. Facebook's /me/accounts only returns id+name unless we
+	// ask for picture explicitly via fields=...). Nil → empty map.
+	ListPagesArgs map[string]any
 	// ProfileTool — integration tool that returns the authorising
 	// user's own identity (used to seed display_name/avatar for
 	// platforms without page-selection). Empty = use a default label.
@@ -184,6 +189,11 @@ var platforms = map[string]platformDef{
 		PageIDField:     "id",
 		PageNameField:   "name",
 		PageAvatarField: "picture.data.url",
+		// /me/accounts defaults to id+name. Ask for the page logo
+		// (picture nested under data.url) and category for context.
+		ListPagesArgs: map[string]any{
+			"fields": "id,name,category,picture{url}",
+		},
 	},
 	"instagram": {
 		Platform:        "instagram",
@@ -1639,7 +1649,11 @@ type pageEntry struct {
 // result via the platformDef's PageIDField / PageNameField / PageAvatarField.
 // Supports dotted paths in field names ("picture.data.url" → walk objects).
 func (a *App) fetchPages(ctx *sdk.AppCtx, connID int64, def platformDef) ([]pageEntry, error) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, def.ListPagesTool, map[string]any{})
+	args := def.ListPagesArgs
+	if args == nil {
+		args = map[string]any{}
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, def.ListPagesTool, args)
 	if err != nil {
 		return nil, err
 	}

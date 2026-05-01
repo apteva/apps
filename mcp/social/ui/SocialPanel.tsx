@@ -562,6 +562,8 @@ function PagePicker({
 }: { pendingId: number; onClose: () => void; setStatus: (s: string) => void }) {
   const [pages, setPages] = useState<PageEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState("");
+  const [busyID, setBusyID] = useState<string>("");
 
   useEffect(() => {
     fetch(`${API}/accounts/${pendingId}/pages`, { credentials: "same-origin" })
@@ -577,6 +579,7 @@ function PagePicker({
   }, [pendingId, onClose]);
 
   const pick = async (page: PageEntry) => {
+    setBusyID(page.id);
     try {
       await fetch(`${API}/accounts/finalize`, {
         method: "POST",
@@ -592,38 +595,90 @@ function PagePicker({
       onClose();
     } catch (e) {
       setStatus("Finalize failed: " + (e as Error).message);
+      setBusyID("");
     }
   };
+
+  // Case-insensitive substring match against page name. Plenty for
+  // typical fan-page lists; if it ever needs to scale further this is
+  // the place to swap in a token-based ranker.
+  const filtered = filter.trim()
+    ? pages.filter((p) => p.name.toLowerCase().includes(filter.toLowerCase()))
+    : pages;
 
   return (
     <div className="fixed inset-0 bg-black/60 grid place-items-center z-50" onClick={onClose}>
       <div
-        className="bg-bg-card border border-border rounded p-4 w-[420px] max-w-[90vw]"
+        className="bg-bg-card border border-border rounded-lg shadow-lg w-[560px] max-w-[92vw] max-h-[80vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="text-text font-medium mb-3">Pick which page to connect</div>
-        {loading ? (
-          <div className="text-text-dim text-sm py-6 text-center">Loading…</div>
-        ) : pages.length === 0 ? (
-          <div className="text-text-dim text-sm py-6 text-center">No pages found.</div>
-        ) : (
-          <div className="flex flex-col gap-1">
-            {pages.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => pick(p)}
-                className="flex items-center gap-3 px-3 py-2 border border-border rounded hover:border-accent text-sm"
-              >
-                {p.avatar_url ? (
-                  <img src={p.avatar_url} alt="" className="w-8 h-8 rounded-full" />
-                ) : (
-                  <div className="w-8 h-8 rounded-full bg-bg-input" />
-                )}
-                <span className="text-text flex-1 text-left truncate">{p.name}</span>
-              </button>
-            ))}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <div>
+            <div className="text-text font-medium">Pick which page to connect</div>
+            {!loading && pages.length > 0 && (
+              <div className="text-text-dim text-xs mt-0.5">
+                {filtered.length === pages.length
+                  ? `${pages.length} page${pages.length === 1 ? "" : "s"}`
+                  : `${filtered.length} of ${pages.length}`}
+              </div>
+            )}
+          </div>
+          <button
+            onClick={onClose}
+            className="text-text-muted hover:text-text px-2 leading-none text-lg"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+
+        {!loading && pages.length > 5 && (
+          <div className="px-4 pt-3">
+            <input
+              type="text"
+              autoFocus
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="Search pages…"
+              className="w-full bg-bg-input border border-border rounded px-3 py-2 text-sm text-text focus:outline-none focus:border-accent"
+            />
           </div>
         )}
+
+        <div className="flex-1 overflow-y-auto p-3">
+          {loading ? (
+            <div className="text-text-dim text-sm py-8 text-center">Loading…</div>
+          ) : pages.length === 0 ? (
+            <div className="text-text-dim text-sm py-8 text-center">No pages found.</div>
+          ) : filtered.length === 0 ? (
+            <div className="text-text-dim text-sm py-8 text-center">
+              No pages match "{filter}".
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1">
+              {filtered.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => pick(p)}
+                  disabled={busyID !== ""}
+                  className="flex items-center gap-3 px-3 py-2 border border-border rounded hover:border-accent hover:bg-bg-input/40 text-sm disabled:opacity-50 disabled:cursor-not-allowed text-left transition-colors"
+                >
+                  {p.avatar_url ? (
+                    <img src={p.avatar_url} alt="" className="w-9 h-9 rounded-full flex-shrink-0 object-cover" />
+                  ) : (
+                    <div className="w-9 h-9 rounded-full bg-bg-input flex-shrink-0 grid place-items-center text-text-dim text-xs font-medium">
+                      {p.name.slice(0, 2).toUpperCase()}
+                    </div>
+                  )}
+                  <span className="text-text flex-1 truncate">{p.name}</span>
+                  {busyID === p.id && (
+                    <span className="text-text-dim text-xs">connecting…</span>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
