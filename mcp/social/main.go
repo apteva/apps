@@ -19,12 +19,16 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -36,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.3.2
+version: 0.3.3
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -297,6 +301,11 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/posts/", Handler: a.handlePostsItem}, // /posts/:id and /posts/:id/retry
 		// Static info
 		{Pattern: "/platforms", Handler: a.handlePlatforms},
+		// Avatar cache — content-addressed by sha256 so we can serve
+		// without a DB lookup. Lives next to the sidecar's sqlite at
+		// data/avatars/. Invisible to users + agents (no list / search
+		// route). Cleaned up on account_disconnect.
+		{Pattern: "/avatars/", Handler: a.handleAvatar},
 		// Jobs callback — the jobs app POSTs here when a scheduled
 		// publish fires. Body: {"post_id": N}. Idempotent per post:
 		// running it twice on a published post is a no-op (publishPostTargets
@@ -644,6 +653,11 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if displayName == "" {
 		displayName = def.DisplayName
 	}
+	// Replace the upstream signed URL with our content-addressed local
+	// cache. cacheAvatar falls back to the upstream URL on any error
+	// so finalize never breaks here — broken thumbnails are recoverable
+	// by reconnecting; a failed finalize isn't.
+	avatar = a.cacheAvatar(ctx, avatar)
 
 	// Insert the finalized social_account row.
 	pid := os.Getenv("APTEVA_PROJECT_ID")
@@ -1760,6 +1774,164 @@ func (a *App) fetchProfile(ctx *sdk.AppCtx, connID int64, def platformDef) (*pro
 		Name:   toString(walkPath(raw, def.ProfileNameField)),
 		Avatar: toString(walkPath(raw, def.ProfileAvatarField)),
 	}, nil
+}
+
+// ─── avatar cache ──────────────────────────────────────────────────
+//
+// Upstream avatar URLs (Facebook CDN, IG, X, YT) are signed and rotate
+// on a schedule we don't control. Storing them straight into
+// social_accounts.avatar_url means panel thumbnails break a few hours
+// later. Solution: download once at finalize time, write to
+// data/avatars/<sha256><ext>, store the local URL. Content-addressed
+// so the same upstream image (or two pages sharing one logo) costs
+// one file.
+//
+// Lives entirely in the social app's data dir — never enters the
+// storage app, never appears in any tool listing. Cleaned up
+// alongside the social_account row in account_disconnect.
+
+// avatarsDir returns the on-disk directory where avatar bytes live,
+// derived from DB_PATH (the SDK's per-install data dir). Falls back to
+// "./avatars" so unit tests that don't set DB_PATH still work.
+func avatarsDir() string {
+	if v := os.Getenv("DB_PATH"); v != "" {
+		return filepath.Join(filepath.Dir(v), "avatars")
+	}
+	return "avatars"
+}
+
+// extFromContentType picks a sensible extension from the upstream
+// Content-Type header. Empty string when we can't recognise it — the
+// caller decides whether to keep the file extensionless or skip the
+// cache. Restricted to image MIME types we know browsers render.
+func extFromContentType(ct string) string {
+	ct = strings.ToLower(strings.TrimSpace(strings.SplitN(ct, ";", 2)[0]))
+	switch ct {
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "image/svg+xml":
+		return ".svg"
+	}
+	return ""
+}
+
+// cacheAvatar fetches an upstream avatar URL and writes it under
+// data/avatars/<sha256><ext>, returning the panel-ready local URL
+// "/api/apps/social/avatars/<filename>". Idempotent: same upstream
+// content → same on-disk filename, second call is a near-no-op.
+//
+// Failures are logged but never bubble up — the caller stays
+// resilient and falls back to the upstream URL if cache fails.
+func (a *App) cacheAvatar(ctx *sdk.AppCtx, upstreamURL string) string {
+	if upstreamURL == "" {
+		return ""
+	}
+	if strings.HasPrefix(upstreamURL, "/api/apps/social/avatars/") {
+		// Already cached (e.g. account_disconnect → reconnect on the
+		// same connection re-runs finalize with our own URL).
+		return upstreamURL
+	}
+	cli := &http.Client{Timeout: 15 * time.Second}
+	resp, err := cli.Get(upstreamURL)
+	if err != nil {
+		ctx.Logger().Warn("avatar fetch failed", "url", upstreamURL, "err", err)
+		return upstreamURL
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		ctx.Logger().Warn("avatar fetch non-2xx", "url", upstreamURL, "status", resp.StatusCode)
+		return upstreamURL
+	}
+	// 2 MB cap — avatars are typically <50KB. A pathological response
+	// stops getting copied past the cap; we'll see a truncated file
+	// and the browser will drop it cleanly.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		ctx.Logger().Warn("avatar read failed", "url", upstreamURL, "err", err)
+		return upstreamURL
+	}
+	ext := extFromContentType(resp.Header.Get("Content-Type"))
+	if ext == "" {
+		ctx.Logger().Warn("avatar unknown content-type", "url", upstreamURL, "ct", resp.Header.Get("Content-Type"))
+		return upstreamURL
+	}
+	sum := sha256.Sum256(body)
+	name := hex.EncodeToString(sum[:]) + ext
+	dir := avatarsDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		ctx.Logger().Warn("avatar mkdir failed", "dir", dir, "err", err)
+		return upstreamURL
+	}
+	path := filepath.Join(dir, name)
+	// Skip the write if the file already exists with the right size.
+	if st, err := os.Stat(path); err == nil && st.Size() == int64(len(body)) {
+		return "/api/apps/social/avatars/" + name
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, body, 0644); err != nil {
+		ctx.Logger().Warn("avatar write failed", "path", tmp, "err", err)
+		return upstreamURL
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		ctx.Logger().Warn("avatar rename failed", "from", tmp, "to", path, "err", err)
+		_ = os.Remove(tmp)
+		return upstreamURL
+	}
+	ctx.Logger().Info("avatar cached", "url", upstreamURL, "name", name, "bytes", len(body))
+	return "/api/apps/social/avatars/" + name
+}
+
+// handleAvatar serves a previously-cached avatar from disk. The URL
+// path under the SDK is /avatars/<filename>; we sanitise to a single
+// path component (no subdirs, no traversal) so a malicious request
+// can't read arbitrary files. Returns 404 for missing files; the
+// browser will fall back to its alt text.
+func (a *App) handleAvatar(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/avatars/")
+	// Path-traversal defence: only one component, only [a-f0-9]+.<ext>.
+	if rest == "" || strings.Contains(rest, "/") || strings.Contains(rest, "\\") || strings.Contains(rest, "..") {
+		http.Error(w, "bad name", http.StatusBadRequest)
+		return
+	}
+	path := filepath.Join(avatarsDir(), rest)
+	f, err := os.Open(path)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	// Long cache: filenames are content-addressed, so the bytes for a
+	// given URL never change. The dashboard just re-renders the new
+	// URL when the avatar refreshes.
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	switch {
+	case strings.HasSuffix(rest, ".jpg"):
+		w.Header().Set("Content-Type", "image/jpeg")
+	case strings.HasSuffix(rest, ".png"):
+		w.Header().Set("Content-Type", "image/png")
+	case strings.HasSuffix(rest, ".gif"):
+		w.Header().Set("Content-Type", "image/gif")
+	case strings.HasSuffix(rest, ".webp"):
+		w.Header().Set("Content-Type", "image/webp")
+	case strings.HasSuffix(rest, ".svg"):
+		w.Header().Set("Content-Type", "image/svg+xml")
+	}
+	http.ServeContent(w, r, rest, st.ModTime(), f)
 }
 
 // extractPostIdentity tries to pull a stable id + URL out of the

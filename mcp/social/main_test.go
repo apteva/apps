@@ -21,6 +21,9 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -890,5 +893,79 @@ func TestExtractPostIdentity(t *testing.T) {
 	id, url = extractPostIdentity("facebook", json.RawMessage(`{"id":"100_500"}`))
 	if id != "100_500" || !strings.Contains(url, "100_500") {
 		t.Errorf("facebook: id=%q url=%q", id, url)
+	}
+}
+
+func TestCacheAvatar_WritesContentAddressedFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DB_PATH", dir+"/app.db")
+
+	// Stub upstream returning a small JPEG. The body bytes drive the
+	// content-addressed filename, so any deterministic payload works.
+	body := []byte{0xff, 0xd8, 0xff, 0xe0, 0x42}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write(body)
+	}))
+	defer srv.Close()
+
+	app := &App{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	got := app.cacheAvatar(ctx, srv.URL+"/avatar.jpg")
+	wantPrefix := "/api/apps/social/avatars/"
+	if !strings.HasPrefix(got, wantPrefix) {
+		t.Fatalf("expected local URL with prefix %q, got %q", wantPrefix, got)
+	}
+	name := strings.TrimPrefix(got, wantPrefix)
+	if !strings.HasSuffix(name, ".jpg") {
+		t.Errorf("expected .jpg ext, got %q", name)
+	}
+	// File should exist on disk under data/avatars/.
+	avatarPath := dir + "/avatars/" + name
+	read, err := os.ReadFile(avatarPath)
+	if err != nil {
+		t.Fatalf("avatar not written: %v", err)
+	}
+	if string(read) != string(body) {
+		t.Errorf("disk bytes diverged from upstream")
+	}
+
+	// Idempotent: same upstream URL → same filename, no second write.
+	got2 := app.cacheAvatar(ctx, srv.URL+"/avatar.jpg")
+	if got2 != got {
+		t.Errorf("not idempotent: %q vs %q", got2, got)
+	}
+
+	// Already-cached URL is returned unchanged (no re-fetch).
+	already := "/api/apps/social/avatars/abc.png"
+	if app.cacheAvatar(ctx, already) != already {
+		t.Errorf("already-cached URL should pass through")
+	}
+}
+
+func TestCacheAvatar_FailsOpenOnUpstreamError(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DB_PATH", dir+"/app.db")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", 500)
+	}))
+	defer srv.Close()
+	app := &App{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	upstream := srv.URL + "/img"
+	if got := app.cacheAvatar(ctx, upstream); got != upstream {
+		t.Errorf("expected fallback to upstream URL on 5xx, got %q", got)
+	}
+}
+
+func TestHandleAvatar_RejectsTraversal(t *testing.T) {
+	app := &App{}
+	for _, name := range []string{"..", "../etc/passwd", "a/b", `a\b`, ""} {
+		req := httptest.NewRequest("GET", "/avatars/"+name, nil)
+		rec := httptest.NewRecorder()
+		app.handleAvatar(rec, req)
+		if rec.Code == http.StatusOK {
+			t.Errorf("traversal name %q should not 200", name)
+		}
 	}
 }
