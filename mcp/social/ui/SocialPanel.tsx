@@ -752,7 +752,11 @@ function ComposeDialog({
           throw new Error(`upload failed (${res.status}): ${await res.text()}`);
         }
         const data = await res.json();
-        const id = data?.file?.id;
+        // Storage returns the file row at the top level: {id, name,
+        // sha256, size_bytes, url, …}. Older versions wrapped it
+        // under .file — accept either shape so we don't break if
+        // storage adds the wrapper back.
+        const id = typeof data?.id === "number" ? data.id : data?.file?.id;
         if (typeof id !== "number") {
           throw new Error("storage didn't return a file id: " + JSON.stringify(data));
         }
