@@ -233,13 +233,12 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
 
   const handleCancel = async () => {
     if (!detail) return;
-    if (!confirm("Cancel this job?")) return;
     try {
       await api("DELETE", `/jobs/${detail.id}`);
       await loadDetail(detail.id);
       await loadList();
     } catch (e) {
-      alert("Cancel failed: " + (e as Error).message);
+      setError("Cancel failed: " + (e as Error).message);
     }
   };
 
@@ -374,9 +373,17 @@ function DetailDialog({
   job: Job;
   runs: JobRun[];
   onClose: () => void;
-  onRunNow: () => void;
-  onCancel: () => void;
+  onRunNow: () => void | Promise<void>;
+  onCancel: () => void | Promise<void>;
 }) {
+  const [confirming, setConfirming] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const cancelled = job.status === "cancelled";
+  const handleConfirmCancel = async () => {
+    setCancelling(true);
+    try { await onCancel(); }
+    finally { setCancelling(false); setConfirming(false); }
+  };
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
       <div className="absolute inset-0 bg-bg/80 backdrop-blur-sm" />
@@ -416,13 +423,34 @@ function DetailDialog({
           <button
             type="button"
             onClick={onRunNow}
-            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+            disabled={cancelled || cancelling}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded disabled:opacity-50"
           >Run now</button>
-          <button
-            type="button"
-            onClick={onCancel}
-            className="px-3 py-1 text-sm text-red border border-red/50 rounded hover:bg-red/10 ml-auto"
-          >Cancel job</button>
+          {cancelled ? (
+            <span className="ml-auto text-text-dim text-xs">Job cancelled</span>
+          ) : confirming ? (
+            <div className="ml-auto flex items-center gap-2">
+              <span className="text-text-muted text-xs">Cancel this job?</span>
+              <button
+                type="button"
+                onClick={() => setConfirming(false)}
+                disabled={cancelling}
+                className="px-3 py-1 text-sm border border-border text-text-muted rounded"
+              >Keep</button>
+              <button
+                type="button"
+                onClick={handleConfirmCancel}
+                disabled={cancelling}
+                className="px-3 py-1 text-sm bg-red text-white rounded font-bold disabled:opacity-50"
+              >{cancelling ? "Cancelling…" : "Yes, cancel"}</button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setConfirming(true)}
+              className="px-3 py-1 text-sm text-red border border-red rounded ml-auto"
+            >Cancel job</button>
+          )}
         </div>
 
         <section>
