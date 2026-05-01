@@ -36,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.3.0
+version: 0.3.1
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -1648,42 +1648,92 @@ type pageEntry struct {
 // fetchPages calls the integration's list_pages tool and normalises the
 // result via the platformDef's PageIDField / PageNameField / PageAvatarField.
 // Supports dotted paths in field names ("picture.data.url" → walk objects).
+//
+// Pagination: Graph-style APIs return {data:[...], paging:{cursors:{after}}}
+// and only include 25 items per page by default. We walk paging.cursors.after
+// (or paging.next when present) until exhausted, capped at maxPagePages
+// iterations so a runaway upstream can't OOM us. Limit per call is set high
+// up-front to minimise round-trips.
 func (a *App) fetchPages(ctx *sdk.AppCtx, connID int64, def platformDef) ([]pageEntry, error) {
-	args := def.ListPagesArgs
-	if args == nil {
-		args = map[string]any{}
+	const maxPagePages = 10 // 10 × 100 = 1000 destinations is a lot for social
+	const perPage = 100
+
+	// Start with the platform-supplied args and a reasonably high limit.
+	// The integration tool ignores unknown keys for GETs (they pass
+	// through as query params), so adding limit is safe even if the
+	// tool's input_schema doesn't declare it.
+	args := map[string]any{}
+	for k, v := range def.ListPagesArgs {
+		args[k] = v
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, def.ListPagesTool, args)
-	if err != nil {
-		return nil, err
+	if _, hasLimit := args["limit"]; !hasLimit {
+		args["limit"] = perPage
 	}
-	if res == nil || !res.Success {
-		body := ""
-		if res != nil {
-			body = string(res.Data)
+
+	pages := make([]pageEntry, 0, perPage)
+	for iter := 0; iter < maxPagePages; iter++ {
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, def.ListPagesTool, args)
+		if err != nil {
+			return nil, err
 		}
-		return nil, fmt.Errorf("upstream non-2xx: %s", body)
-	}
-	// Most integrations return {data: [...]} — common Graph/Twitter shape.
-	var envelope struct {
-		Data []map[string]any `json:"data"`
-	}
-	if err := json.Unmarshal(res.Data, &envelope); err != nil || envelope.Data == nil {
-		// Fall back to "raw is the array".
-		var raw []map[string]any
-		if err2 := json.Unmarshal(res.Data, &raw); err2 != nil {
-			return nil, fmt.Errorf("parse list_pages response: %w", err)
+		if res == nil || !res.Success {
+			body := ""
+			if res != nil {
+				body = string(res.Data)
+			}
+			return nil, fmt.Errorf("upstream non-2xx: %s", body)
 		}
-		envelope.Data = raw
+		// Graph/Twitter shape: {data:[...], paging:{...}}.
+		var envelope struct {
+			Data   []map[string]any `json:"data"`
+			Paging struct {
+				Cursors struct {
+					After string `json:"after"`
+				} `json:"cursors"`
+				Next string `json:"next"`
+			} `json:"paging"`
+		}
+		if err := json.Unmarshal(res.Data, &envelope); err != nil || envelope.Data == nil {
+			// Fall back to "raw is the array" — no pagination possible
+			// without a paging envelope, so this is necessarily the last
+			// (and only) call.
+			var raw []map[string]any
+			if err2 := json.Unmarshal(res.Data, &raw); err2 != nil {
+				return nil, fmt.Errorf("parse list_pages response: %w", err)
+			}
+			for _, p := range raw {
+				pages = append(pages, pageEntry{
+					ID:     toString(walkPath(p, def.PageIDField)),
+					Name:   toString(walkPath(p, def.PageNameField)),
+					Avatar: toString(walkPath(p, def.PageAvatarField)),
+				})
+			}
+			return pages, nil
+		}
+		for _, p := range envelope.Data {
+			pages = append(pages, pageEntry{
+				ID:     toString(walkPath(p, def.PageIDField)),
+				Name:   toString(walkPath(p, def.PageNameField)),
+				Avatar: toString(walkPath(p, def.PageAvatarField)),
+			})
+		}
+		// Done when neither paging.cursors.after nor paging.next is set.
+		// Some shapes use one or the other — Facebook tends to give both;
+		// IG sometimes only `next`. Either signals "more is available".
+		if envelope.Paging.Cursors.After == "" && envelope.Paging.Next == "" {
+			break
+		}
+		// Prefer cursor-based continuation (works with our static path);
+		// `paging.next` is a full URL we'd have to call directly which
+		// the integration tool layer doesn't support.
+		if envelope.Paging.Cursors.After == "" {
+			ctx.Logger().Warn("fetchPages: paging.next set but no cursor — stopping",
+				"platform", def.Platform, "fetched", len(pages))
+			break
+		}
+		args["after"] = envelope.Paging.Cursors.After
 	}
-	pages := make([]pageEntry, 0, len(envelope.Data))
-	for _, p := range envelope.Data {
-		pages = append(pages, pageEntry{
-			ID:     toString(walkPath(p, def.PageIDField)),
-			Name:   toString(walkPath(p, def.PageNameField)),
-			Avatar: toString(walkPath(p, def.PageAvatarField)),
-		})
-	}
+	ctx.Logger().Info("fetchPages: done", "platform", def.Platform, "total", len(pages))
 	return pages, nil
 }
 
