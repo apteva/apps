@@ -342,6 +342,12 @@ function AccountsView({
           platforms={platforms}
           onClose={() => setAdding(false)}
           setStatus={setStatus}
+          onReuseExisting={(pendingId, connId) => {
+            // Backend returned 'reusing existing connection' — skip the
+            // OAuth popup entirely, jump straight into the page picker.
+            setOauthLanding({ pendingId, connectionId: connId });
+            setAdding(false);
+          }}
         />
       )}
 
@@ -394,17 +400,32 @@ function AccountCard({
 }
 
 function AddAccountDialog({
-  platforms, onClose, setStatus,
-}: { platforms: PlatformInfo[]; onClose: () => void; setStatus: (s: string) => void }) {
+  platforms, onClose, setStatus, onReuseExisting,
+}: {
+  platforms: PlatformInfo[];
+  onClose: () => void;
+  setStatus: (s: string) => void;
+  onReuseExisting: (pendingId: number, connectionId: number) => void;
+}) {
   const [busy, setBusy] = useState<string | null>(null);
   // Inline error inside the modal. The panel-header status used to
   // be the only failure surface, but the modal's fixed-inset overlay
   // sits on top of the header — so users never saw the message and
   // it looked like 'popup flashed and closed for no reason'.
   const [err, setErr] = useState<string>("");
+  // 'Use a different account' toggle. When true, the next platform
+  // click sends force_new=true, which makes the backend skip the
+  // existing-connection reuse path and run a fresh OAuth dance even
+  // when a connection is already stored. Resets after each click.
+  const [forceNew, setForceNew] = useState(false);
 
   const start = (p: PlatformInfo) => {
     setErr("");
+    // Reuse-existing path: backend skips OAuth when a connection for
+    // this platform already exists. Detect that ahead of opening the
+    // popup so we don't pop a window only to immediately close it.
+    // We always open the popup synchronously below to dodge the
+    // popup-blocker; we close it without navigating in the reuse case.
     // Open the popup SYNCHRONOUSLY in the click handler. Browsers
     // block window.open() when called from an async continuation
     // because the user-gesture context is gone by the time the fetch
@@ -423,6 +444,7 @@ function AddAccountDialog({
     }
     setBusy(p.platform);
     setStatus("Starting OAuth for " + p.display_name + "…");
+    const reqForceNew = forceNew;
     (async () => {
       const fail = (msg: string) => {
         setErr(msg);
@@ -435,7 +457,10 @@ function AddAccountDialog({
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ platform: p.platform }),
+          body: JSON.stringify({
+            platform: p.platform,
+            ...(reqForceNew ? { force_new: true } : {}),
+          }),
         });
         if (!res.ok) {
           fail(`Start failed (HTTP ${res.status}): ${await res.text()}`);
@@ -451,6 +476,16 @@ function AddAccountDialog({
         if (data?.isError) {
           const inner = (data.content || []).find((c: any) => c.type === "text")?.text;
           fail(inner || "OAuth start returned an error envelope");
+          return;
+        }
+        // Reuse-existing path: backend signals 'no OAuth needed' by
+        // omitting authorize_url and including reused_connection. Skip
+        // the popup, hand control back to the parent so it opens the
+        // page picker against the existing connection.
+        if (!data.authorize_url && data.pending_account_id && data.reused_connection) {
+          try { popup.close(); } catch {}
+          setBusy(null);
+          onReuseExisting(data.pending_account_id, data.reused_connection);
           return;
         }
         if (!data.authorize_url) {
@@ -505,6 +540,18 @@ function AddAccountDialog({
             </button>
           ))}
         </div>
+        <label className="flex items-center gap-2 mt-3 text-text-dim text-xs cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={forceNew}
+            onChange={(e) => setForceNew(e.target.checked)}
+            className="accent-accent"
+          />
+          <span>
+            Use a different provider-side account
+            <span className="ml-1 text-text-dim">— forces a fresh OAuth dance instead of reusing the existing connection</span>
+          </span>
+        </label>
       </div>
     </div>
   );

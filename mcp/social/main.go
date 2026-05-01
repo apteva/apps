@@ -36,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.2.3
+version: 0.2.4
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -296,12 +296,14 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "account_add",
-			Description: "Begin connecting a social account. Returns an authorize_url the human must visit, " +
-				"and a pending_account_id to poll once they've completed the OAuth dance. " +
+			Description: "Begin connecting a social account. " +
+				"For multi-page platforms (Facebook, Instagram, YouTube) with an existing active connection in this project, the call SKIPS OAuth — the existing access token already covers all the user's pages/channels — and returns a pending_account_id directly. The caller goes straight to account_list_pending_pages without opening a browser. " +
+				"Otherwise returns authorize_url + pending_account_id and the human must visit the URL. " +
 				"The integrations system handles token exchange + refresh; this app never sees the access token. " +
-				"Args: platform (twitter|facebook|instagram|linkedin|tiktok|youtube|reddit|pinterest|threads).",
+				"Args: platform (twitter|facebook|instagram|linkedin|tiktok|youtube|reddit|pinterest|threads), force_new? (default false; set true to force a fresh OAuth dance even when an existing connection is available, e.g. to switch to a different provider-side account).",
 			InputSchema: schemaObject(map[string]any{
-				"platform": map[string]any{"type": "string", "enum": platformKeys()},
+				"platform":  map[string]any{"type": "string", "enum": platformKeys()},
+				"force_new": map[string]any{"type": "boolean"},
 				"return_to": map[string]any{
 					"type":        "string",
 					"description": "Where to redirect the browser after OAuth. Defaults to the social app's panel.",
@@ -386,6 +388,53 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return mcpError(fmt.Sprintf("unsupported platform %q — available: %s", plat, strings.Join(platformKeys(), ", "))), nil
 	}
 	pid := os.Getenv("APTEVA_PROJECT_ID")
+	forceNew, _ := args["force_new"].(bool)
+
+	// Reuse path: if there's already an active social_account for this
+	// platform in this project, the underlying connection's access
+	// token already grants what we need (Facebook covers all the
+	// user's Pages, Google all the channels, etc.). Skip the OAuth
+	// dance entirely — create a pending_accounts row pre-linked to
+	// the existing connection, mark it ready, return without an
+	// authorize_url. The panel goes straight to the page picker.
+	//
+	// Skipped when:
+	//   - force_new=true (operator wants to switch to a different
+	//     provider-side account)
+	//   - the platform has no picker step (Twitter, LinkedIn-personal)
+	//     because reusing a connection doesn't add anything there;
+	//     a fresh OAuth is the right thing
+	if !forceNew && def.ListPagesTool != "" {
+		var existingConnID int64
+		err := ctx.AppDB().QueryRow(
+			`SELECT connection_id FROM social_accounts
+			 WHERE project_id=? AND platform=? AND status='active'
+			 ORDER BY id DESC LIMIT 1`,
+			pid, def.Platform,
+		).Scan(&existingConnID)
+		if err == nil && existingConnID > 0 {
+			res, err := ctx.AppDB().Exec(
+				`INSERT INTO pending_accounts (project_id, platform, integration_slug, connection_id, status, expires_at)
+				 VALUES (?, ?, ?, ?, 'ready', ?)`,
+				pid, def.Platform, def.IntegrationSlug, existingConnID,
+				time.Now().UTC().Add(10*time.Minute),
+			)
+			if err != nil {
+				return nil, fmt.Errorf("create pending account (reuse path): %w", err)
+			}
+			pendingID, _ := res.LastInsertId()
+			return map[string]any{
+				"pending_account_id": pendingID,
+				"platform":           def.Platform,
+				"reused_connection":  existingConnID,
+				"instructions": fmt.Sprintf(
+					"Reusing the existing %s connection — no new OAuth needed. Call account_list_pending_pages with pending_account_id=%d to see selectable items.",
+					def.DisplayName, pendingID,
+				),
+			}, nil
+		}
+		// fall through to fresh OAuth path
+	}
 
 	// Build the panel landing URL. Whether the request came from an
 	// agent (MCP tool) or from the panel's "Add account" button, the
