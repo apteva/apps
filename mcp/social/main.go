@@ -36,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.2.5
+version: 0.2.6
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -405,6 +405,19 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	//     because reusing a connection doesn't add anything there;
 	//     a fresh OAuth is the right thing
 	if !forceNew && def.ListPagesTool != "" {
+		// Two reuse sources, in order:
+		//   1. A prior social_account in this project — its connection
+		//      was already vetted, just open the picker against it.
+		//   2. An operator-installed integration connection for this
+		//      platform's app_slug. The access token already grants
+		//      list_pages / list_channels / list_accounts, so there's
+		//      no point running another OAuth dance — fresh OAuth would
+		//      just produce a second connection with the same scope.
+		//
+		// Source #2 is critical for first-time use: the operator
+		// installs Facebook in Settings → Integrations, then opens the
+		// Social panel and clicks Add Account. Without #2 we'd force a
+		// pointless re-auth before showing pages they could already see.
 		var existingConnID int64
 		err := ctx.AppDB().QueryRow(
 			`SELECT connection_id FROM social_accounts
@@ -412,7 +425,20 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			 ORDER BY id DESC LIMIT 1`,
 			pid, def.Platform,
 		).Scan(&existingConnID)
-		if err == nil && existingConnID > 0 {
+		if err != nil || existingConnID == 0 {
+			if conns, lerr := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{
+				ProjectID: pid,
+				AppSlug:   def.IntegrationSlug,
+			}); lerr == nil {
+				for _, c := range conns {
+					if c.Status == "active" {
+						existingConnID = c.ID
+						break
+					}
+				}
+			}
+		}
+		if existingConnID > 0 {
 			res, err := ctx.AppDB().Exec(
 				`INSERT INTO pending_accounts (project_id, platform, integration_slug, connection_id, status, expires_at)
 				 VALUES (?, ?, ?, ?, 'ready', ?)`,
