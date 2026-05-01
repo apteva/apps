@@ -248,68 +248,95 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
     loadDetail(id);
   };
 
+  const closeDetail = () => {
+    setSelectedId(null);
+    setDetail(null);
+    setRuns([]);
+  };
+
   return (
-    <div className="h-full flex">
+    <div className="h-full flex flex-col">
+      {/* Header */}
+      <header className="px-6 py-3 border-b border-border flex items-center gap-3">
+        <h1 className="text-text font-medium">Jobs</h1>
+        <span className="text-text-dim text-xs">
+          {jobs.length} job{jobs.length !== 1 ? "s" : ""}
+        </span>
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value as Status | "")}
+          className="bg-bg-input border border-border rounded px-2 py-1 text-sm ml-4"
+        >
+          <option value="">all</option>
+          <option value="scheduled">scheduled</option>
+          <option value="running">running</option>
+          <option value="succeeded">succeeded</option>
+          <option value="failed">failed</option>
+          <option value="paused">paused</option>
+          <option value="cancelled">cancelled</option>
+        </select>
+        <button
+          type="button"
+          onClick={loadList}
+          className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input"
+        >Refresh</button>
+        <button
+          type="button"
+          onClick={() => setCreating(true)}
+          className="ml-auto px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+        >+ New job</button>
+      </header>
+
       {/* List */}
-      <aside className="w-96 border-r border-border flex flex-col">
-        <div className="p-3 border-b border-border flex items-center gap-2">
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as Status | "")}
-            className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
-          >
-            <option value="">all</option>
-            <option value="scheduled">scheduled</option>
-            <option value="running">running</option>
-            <option value="succeeded">succeeded</option>
-            <option value="failed">failed</option>
-            <option value="paused">paused</option>
-            <option value="cancelled">cancelled</option>
-          </select>
-          <button
-            type="button"
-            onClick={loadList}
-            className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input"
-          >Refresh</button>
-          <button
-            type="button"
-            onClick={() => setCreating(true)}
-            className="ml-auto px-2 py-1 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg"
-          >+ New job</button>
-        </div>
-        <div className="flex-1 overflow-auto">
-          {error ? (
-            <div className="p-4 text-red text-xs">{error}</div>
-          ) : jobs.length === 0 ? (
-            <div className="p-4 text-text-muted text-sm">No jobs scheduled.</div>
-          ) : (
-            <ul>
+      <main className="flex-1 overflow-auto">
+        {error ? (
+          <div className="p-6 text-red text-sm">{error}</div>
+        ) : jobs.length === 0 ? (
+          <div className="p-12 text-center text-text-muted text-sm">
+            No jobs scheduled.{" "}
+            <button
+              type="button"
+              onClick={() => setCreating(true)}
+              className="text-accent hover:underline"
+            >Schedule one</button>
+            .
+          </div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="text-text-dim text-xs uppercase tracking-wide bg-bg-input/50 sticky top-0">
+              <tr>
+                <th className="text-left px-4 py-2 font-normal">Name</th>
+                <th className="text-left px-4 py-2 font-normal w-48">Schedule</th>
+                <th className="text-left px-4 py-2 font-normal w-32">Status</th>
+                <th className="text-left px-4 py-2 font-normal w-40">Next run</th>
+                <th className="text-left px-4 py-2 font-normal w-40">Owner</th>
+              </tr>
+            </thead>
+            <tbody>
               {jobs.map((j) => (
-                <li
+                <tr
                   key={j.id}
                   onClick={() => select(j.id)}
-                  className={`px-3 py-2 cursor-pointer border-b border-border hover:bg-bg-input/50 ${
-                    j.id === selectedId ? "bg-bg-input" : ""
-                  }`}
+                  className="border-t border-border cursor-pointer hover:bg-bg-input/50"
                 >
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm text-text font-medium truncate flex-1">{j.name}</span>
+                  <td className="px-4 py-2 text-text font-medium truncate max-w-md">{j.name}</td>
+                  <td className="px-4 py-2 text-text-muted">{humaniseSchedule(j)}</td>
+                  <td className="px-4 py-2">
                     <span className={`text-[10px] px-1.5 py-0.5 rounded ${statusTone(j.status)}`}>
                       {j.status}
                     </span>
-                  </div>
-                  <div className="text-xs text-text-muted truncate mt-0.5">
-                    {humaniseSchedule(j)} · next {relTime(j.next_run_at)}
-                  </div>
-                </li>
+                  </td>
+                  <td className="px-4 py-2 text-text-muted">{relTime(j.next_run_at)}</td>
+                  <td className="px-4 py-2 text-text-dim text-xs truncate">
+                    {j.owner_app || "—"}
+                    {j.owner_instance ? ` · #${j.owner_instance}` : ""}
+                  </td>
+                </tr>
               ))}
-            </ul>
-          )}
-        </div>
-        <div className="p-2 text-xs text-text-dim border-t border-border">
-          {jobs.length} job{jobs.length !== 1 ? "s" : ""}
-        </div>
-      </aside>
+            </tbody>
+          </table>
+        )}
+      </main>
 
       {/* Create dialog */}
       {creating && (
@@ -323,94 +350,120 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
         />
       )}
 
-      {/* Detail */}
-      <main className="flex-1 overflow-auto p-6">
-        {!detail ? (
-          <div className="text-text-muted text-sm text-center mt-12">
-            Select a job to see details and recent runs.
-          </div>
-        ) : (
-          <div className="max-w-3xl space-y-5">
-            <header>
-              <div className="flex items-center gap-2 mb-1">
-                <h1 className="text-xl text-text font-semibold">{detail.name}</h1>
-                <span className={`text-[11px] px-2 py-0.5 rounded ${statusTone(detail.status)}`}>
-                  {detail.status}
-                </span>
-              </div>
-              <p className="text-text-muted text-sm">
-                {humaniseSchedule(detail)} · next {relTime(detail.next_run_at)}
-              </p>
-              {detail.owner_app && (
-                <p className="text-text-dim text-xs mt-1">
-                  scheduled by <span className="text-text-muted">{detail.owner_app}</span>
-                  {detail.owner_instance ? ` · instance ${detail.owner_instance}` : ""}
-                </p>
-              )}
-            </header>
+      {/* Detail dialog */}
+      {detail && (
+        <DetailDialog
+          job={detail}
+          runs={runs}
+          onClose={closeDetail}
+          onRunNow={handleRunNow}
+          onCancel={handleCancel}
+        />
+      )}
+    </div>
+  );
+}
 
-            <section>
-              <h2 className="text-xs uppercase tracking-wide text-text-dim mb-2">Target</h2>
-              <pre className="text-[11px] bg-bg-input border border-border rounded p-3 overflow-auto whitespace-pre-wrap">
-                {JSON.stringify(detail.target, null, 2)}
-              </pre>
-            </section>
+// ─── Detail dialog ────────────────────────────────────────────────────
+// Modal showing one job's metadata, target, recent runs, and the
+// run-now / cancel actions. Replaces the old right-pane detail view.
 
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleRunNow}
-                className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg"
-              >Run now</button>
-              <button
-                type="button"
-                onClick={handleCancel}
-                className="px-3 py-1 text-sm text-red border border-red/50 rounded hover:bg-red/10 ml-auto"
-              >Cancel job</button>
+function DetailDialog({
+  job, runs, onClose, onRunNow, onCancel,
+}: {
+  job: Job;
+  runs: JobRun[];
+  onClose: () => void;
+  onRunNow: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 bg-black/60 grid place-items-center z-40" onClick={onClose}>
+      <div
+        className="bg-bg-card border border-border rounded p-5 w-[720px] max-w-[92vw] max-h-[88vh] overflow-auto flex flex-col gap-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="flex items-start gap-3">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 mb-1">
+              <h2 className="text-lg text-text font-semibold truncate">{job.name}</h2>
+              <span className={`text-[11px] px-2 py-0.5 rounded ${statusTone(job.status)}`}>
+                {job.status}
+              </span>
             </div>
-
-            <section>
-              <h2 className="text-xs uppercase tracking-wide text-text-dim mb-2">
-                Recent runs ({runs.length})
-              </h2>
-              {runs.length === 0 ? (
-                <p className="text-text-muted text-sm">No runs yet.</p>
-              ) : (
-                <table className="w-full text-sm">
-                  <thead className="text-text-dim text-xs uppercase tracking-wide bg-bg-input/50">
-                    <tr>
-                      <th className="text-left px-3 py-2 font-normal">Started</th>
-                      <th className="text-left px-3 py-2 font-normal w-20">Duration</th>
-                      <th className="text-left px-3 py-2 font-normal w-24">Status</th>
-                      <th className="text-left px-3 py-2 font-normal w-16">HTTP</th>
-                      <th className="text-left px-3 py-2 font-normal">Error</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {runs.map((r) => (
-                      <tr key={r.id} className="border-t border-border">
-                        <td className="px-3 py-2 text-text-muted">{relTime(r.started_at)}</td>
-                        <td className="px-3 py-2 text-text-muted">{r.duration_ms} ms</td>
-                        <td className="px-3 py-2">
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${
-                            r.status === "succeeded" ? "bg-green/15 text-green" :
-                            r.status === "failed" ? "bg-red/15 text-red" :
-                            "bg-border text-text-muted"
-                          }`}>{r.status}</span>
-                        </td>
-                        <td className="px-3 py-2 text-text-muted">{r.http_status ?? "—"}</td>
-                        <td className="px-3 py-2 text-red text-xs truncate max-w-md" title={r.error}>
-                          {r.error || ""}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </section>
+            <p className="text-text-muted text-sm">
+              {humaniseSchedule(job)} · next {relTime(job.next_run_at)}
+            </p>
+            {job.owner_app && (
+              <p className="text-text-dim text-xs mt-1">
+                scheduled by <span className="text-text-muted">{job.owner_app}</span>
+                {job.owner_instance ? ` · instance ${job.owner_instance}` : ""}
+              </p>
+            )}
           </div>
-        )}
-      </main>
+          <button onClick={onClose} className="text-text-muted hover:text-text text-xl leading-none">×</button>
+        </header>
+
+        <section>
+          <h3 className="text-xs uppercase tracking-wide text-text-dim mb-2">Target</h3>
+          <pre className="text-[11px] bg-bg-input border border-border rounded p-3 overflow-auto whitespace-pre-wrap">
+            {JSON.stringify(job.target, null, 2)}
+          </pre>
+        </section>
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onRunNow}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+          >Run now</button>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-3 py-1 text-sm text-red border border-red/50 rounded hover:bg-red/10 ml-auto"
+          >Cancel job</button>
+        </div>
+
+        <section>
+          <h3 className="text-xs uppercase tracking-wide text-text-dim mb-2">
+            Recent runs ({runs.length})
+          </h3>
+          {runs.length === 0 ? (
+            <p className="text-text-muted text-sm">No runs yet.</p>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="text-text-dim text-xs uppercase tracking-wide bg-bg-input/50">
+                <tr>
+                  <th className="text-left px-3 py-2 font-normal">Started</th>
+                  <th className="text-left px-3 py-2 font-normal w-20">Duration</th>
+                  <th className="text-left px-3 py-2 font-normal w-24">Status</th>
+                  <th className="text-left px-3 py-2 font-normal w-16">HTTP</th>
+                  <th className="text-left px-3 py-2 font-normal">Error</th>
+                </tr>
+              </thead>
+              <tbody>
+                {runs.map((r) => (
+                  <tr key={r.id} className="border-t border-border">
+                    <td className="px-3 py-2 text-text-muted">{relTime(r.started_at)}</td>
+                    <td className="px-3 py-2 text-text-muted">{r.duration_ms} ms</td>
+                    <td className="px-3 py-2">
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                        r.status === "succeeded" ? "bg-green/15 text-green" :
+                        r.status === "failed" ? "bg-red/15 text-red" :
+                        "bg-border text-text-muted"
+                      }`}>{r.status}</span>
+                    </td>
+                    <td className="px-3 py-2 text-text-muted">{r.http_status ?? "—"}</td>
+                    <td className="px-3 py-2 text-red text-xs truncate max-w-md" title={r.error}>
+                      {r.error || ""}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+      </div>
     </div>
   );
 }
