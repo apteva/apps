@@ -36,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: storage
 display_name: Storage
-version: 0.4.0
+version: 0.4.1
 description: |
   File storage with virtual folders, signed URLs, dedup. Local-disk
   backend; cloud backend slot reserved for v0.2.
@@ -267,6 +267,37 @@ func (a *App) MCPTools() []sdk.Tool {
 
 func main() { sdk.Run(&App{}) }
 
+// ─── Upload payload decoding ───────────────────────────────────────
+
+// decodeUploadPayload accepts either a plain base64 string (legacy
+// path — direct base64 from the agent or an HTTP client) or a
+// {"_binary": true, "base64": ..., ...} envelope. The envelope is
+// what apteva-core's MCP proxy substitutes when the agent passes a
+// blobref://<id> file handle as the argument value (see
+// blobs.go RehydrateFileRefs); without unwrapping it here, the
+// JSON would fail base64 decode and reject the upload.
+func decodeUploadPayload(raw string) ([]byte, error) {
+	trimmed := strings.TrimSpace(raw)
+	if strings.HasPrefix(trimmed, "{") && strings.Contains(trimmed, `"_binary"`) {
+		var env struct {
+			Binary bool   `json:"_binary"`
+			Base64 string `json:"base64"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &env); err == nil && env.Binary && env.Base64 != "" {
+			body, err := base64.StdEncoding.DecodeString(env.Base64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid base64 in _binary envelope: %w", err)
+			}
+			return body, nil
+		}
+	}
+	body, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid base64: %w", err)
+	}
+	return body, nil
+}
+
 // ─── Project resolution ────────────────────────────────────────────
 
 func resolveProjectFromArgs(args map[string]any) (string, error) {
@@ -367,9 +398,9 @@ func (a *App) toolUpload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if b64 == "" {
 		return nil, errors.New("content_base64 required")
 	}
-	body, err := base64.StdEncoding.DecodeString(b64)
+	body, err := decodeUploadPayload(b64)
 	if err != nil {
-		return nil, fmt.Errorf("invalid base64: %w", err)
+		return nil, err
 	}
 	if maxBytes := maxUploadBytes(ctx); int64(len(body)) > maxBytes {
 		return nil, fmt.Errorf("upload exceeds max_upload_size_mb (%d bytes > %d)", len(body), maxBytes)

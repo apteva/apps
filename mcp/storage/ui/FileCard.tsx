@@ -33,7 +33,24 @@ interface Props {
   /** Injected by the host so we can scope event subscription to the
    *  right project. */
   projectId?: string;
+  /** Soft convention: when true, render synthetic sample data
+   *  instead of fetching. Used by the dashboard's app detail panel
+   *  to preview a brand-new install before any real files exist.
+   *  Components author whatever sample state best advertises what
+   *  they look like in chat. */
+  preview?: boolean;
 }
+
+// Synthetic sample row. Shape matches FileMeta so the same render
+// path covers both real and preview data — no separate JSX tree.
+const previewSample: FileMeta = {
+  id: 0,
+  name: "vacation-shot.jpg",
+  folder: "/inbox/",
+  content_type: "image/jpeg",
+  size_bytes: 1_842_000,
+  sha256: "—",
+};
 
 // Inlined event-subscription pattern. The dashboard already provides
 // the canonical hook, but components can't import from the host
@@ -61,11 +78,12 @@ function useStorageEvents(
   }, [projectId]);
 }
 
-export default function FileCard({ file_id, compact, projectId }: Props) {
-  const [meta, setMeta] = useState<FileMeta | null>(null);
+export default function FileCard({ file_id, compact, projectId, preview }: Props) {
+  const [meta, setMeta] = useState<FileMeta | null>(preview ? previewSample : null);
   const [missing, setMissing] = useState(false);
 
   const refetch = () => {
+    if (preview) return; // synthetic data; nothing to fetch
     fetch(`/api/apps/storage/files/${file_id}`, { credentials: "same-origin" })
       .then((r) => {
         if (r.status === 404) {
@@ -99,7 +117,9 @@ export default function FileCard({ file_id, compact, projectId }: Props) {
 
   // Live updates: refetch when our specific file is touched, and
   // mark missing on a delete event so the card flips to a tombstone.
-  useStorageEvents(projectId, (ev) => {
+  // Skipped in preview mode — synthetic data isn't tied to real
+  // events.
+  useStorageEvents(preview ? undefined : projectId, (ev) => {
     const id = ev?.data?.id;
     if (id !== file_id) return;
     if (ev.topic === "file.deleted") {
@@ -112,7 +132,18 @@ export default function FileCard({ file_id, compact, projectId }: Props) {
   if (missing) return <Tombstone fileId={file_id} compact={compact} />;
   if (!meta) return <Skeleton compact={compact} />;
 
-  const url = `/api/apps/storage/files/${file_id}/content`;
+  // Preview mode uses an inline SVG so the tile renders without any
+  // network round-trip. Real cards point at the storage content
+  // endpoint.
+  const url = preview
+    ? "data:image/svg+xml;utf8," +
+      encodeURIComponent(
+        `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 160'>` +
+          `<rect width='160' height='160' fill='%23334155'/>` +
+          `<text x='50%' y='50%' fill='%2394a3b8' font-family='sans-serif' font-size='20' text-anchor='middle' dy='.3em'>preview</text>` +
+        `</svg>`
+      )
+    : `/api/apps/storage/files/${file_id}/content`;
   const isImage = meta.content_type.startsWith("image/");
   const isVideo = meta.content_type.startsWith("video/");
 
