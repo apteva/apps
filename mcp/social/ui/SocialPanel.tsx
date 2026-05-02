@@ -993,23 +993,7 @@ function PostsView({
           {p.media_storage_ids && p.media_storage_ids.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
               {p.media_storage_ids.map((id) => (
-                // Storage's content endpoint trusts the dashboard
-                // proxy's cookie auth — no sig required for our own
-                // user's files. Fixed-size thumbnails kept simple;
-                // <video> + poster stays on the roadmap.
-                <a
-                  key={id}
-                  href={`/api/apps/storage/files/${id}/content`}
-                  target="_blank"
-                  rel="noopener"
-                  className="block w-20 h-20 rounded border border-border overflow-hidden bg-bg-input flex-shrink-0"
-                >
-                  <img
-                    src={`/api/apps/storage/files/${id}/content`}
-                    alt=""
-                    className="w-full h-full object-cover"
-                  />
-                </a>
+                <MediaThumb key={id} fileId={id} />
               ))}
             </div>
           )}
@@ -1023,6 +1007,137 @@ function PostsView({
         </div>
       ))}
     </div>
+  );
+}
+
+// MediaThumb renders a single attached-media tile. We don't get the
+// MIME from post_list (it'd cost a storage round-trip per id at list
+// time), so the component fetches metadata via files_get on mount —
+// images render with <img>, videos render with <video preload=
+// "metadata"> so the browser fetches just the moov atom + first
+// keyframe, not the whole file. Click expands to a full-screen
+// modal with playback controls / open-in-new-tab.
+//
+// Cache is process-wide: the same fileId rendered in five posts
+// only triggers one /files/<id> fetch, even before React Query.
+const mediaMetaCache = new Map<number, { mime: string; name: string } | "loading" | "error">();
+const mediaMetaWaiters = new Map<number, ((m: { mime: string; name: string } | null) => void)[]>();
+
+async function loadMediaMeta(fileId: number): Promise<{ mime: string; name: string } | null> {
+  const cached = mediaMetaCache.get(fileId);
+  if (cached && cached !== "loading" && cached !== "error") return cached;
+  if (cached === "loading") {
+    return new Promise((resolve) => {
+      const w = mediaMetaWaiters.get(fileId) ?? [];
+      w.push(resolve);
+      mediaMetaWaiters.set(fileId, w);
+    });
+  }
+  mediaMetaCache.set(fileId, "loading");
+  try {
+    const res = await fetch(`/api/apps/storage/files/${fileId}`, { credentials: "same-origin" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = (await res.json()) as { file?: { content_type?: string; name?: string } };
+    const meta = {
+      mime: data?.file?.content_type ?? "",
+      name: data?.file?.name ?? "",
+    };
+    mediaMetaCache.set(fileId, meta);
+    const waiters = mediaMetaWaiters.get(fileId) ?? [];
+    mediaMetaWaiters.delete(fileId);
+    for (const w of waiters) w(meta);
+    return meta;
+  } catch {
+    mediaMetaCache.set(fileId, "error");
+    const waiters = mediaMetaWaiters.get(fileId) ?? [];
+    mediaMetaWaiters.delete(fileId);
+    for (const w of waiters) w(null);
+    return null;
+  }
+}
+
+function MediaThumb({ fileId }: { fileId: number }) {
+  const [meta, setMeta] = useState<{ mime: string; name: string } | null>(null);
+  const [open, setOpen] = useState(false);
+  const url = `/api/apps/storage/files/${fileId}/content`;
+  useEffect(() => {
+    let alive = true;
+    loadMediaMeta(fileId).then((m) => { if (alive) setMeta(m); });
+    return () => { alive = false; };
+  }, [fileId]);
+  const isVideo = meta?.mime.startsWith("video/") ?? false;
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        className="block w-20 h-20 rounded border border-border overflow-hidden bg-bg-input flex-shrink-0 relative group"
+        title={meta?.name || `file #${fileId}`}
+      >
+        {isVideo ? (
+          // preload="metadata" → browser pulls just the container
+          // header + first keyframe for the still, not the whole
+          // file. <video muted> with no controls renders as a
+          // single-frame poster in this size.
+          <>
+            <video
+              src={url}
+              preload="metadata"
+              muted
+              playsInline
+              className="w-full h-full object-cover"
+            />
+            <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/50 transition-colors">
+              <div className="w-8 h-8 rounded-full bg-bg/80 grid place-items-center">
+                <span className="text-text text-xs leading-none">▶</span>
+              </div>
+            </div>
+          </>
+        ) : (
+          <img src={url} alt={meta?.name || ""} className="w-full h-full object-cover" />
+        )}
+      </button>
+      {open && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 grid place-items-center p-6"
+          onClick={() => setOpen(false)}
+        >
+          <div className="relative max-w-5xl max-h-full" onClick={(e) => e.stopPropagation()}>
+            {isVideo ? (
+              <video
+                src={url}
+                controls
+                autoPlay
+                className="max-w-full max-h-[85vh] rounded"
+              />
+            ) : (
+              <img
+                src={url}
+                alt={meta?.name || ""}
+                className="max-w-full max-h-[85vh] rounded"
+              />
+            )}
+            <div className="mt-2 flex items-center justify-between gap-3">
+              <span className="text-text-dim text-xs truncate">{meta?.name || `file #${fileId}`}</span>
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener"
+                className="text-accent text-xs hover:underline"
+              >
+                Open in new tab ↗
+              </a>
+            </div>
+            <button
+              onClick={() => setOpen(false)}
+              className="absolute -top-3 -right-3 w-8 h-8 rounded-full bg-bg-card border border-border text-text"
+              aria-label="Close"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
