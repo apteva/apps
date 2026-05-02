@@ -1,0 +1,684 @@
+// DeployPanel — control surface for the deploy app. Two-pane:
+// left = deployment list + create button, right = detail (status,
+// build/release history, env editor, log tail). Mirrors the Code
+// panel's interaction model so users moving between them feel
+// consistent.
+
+import { useCallback, useEffect, useRef, useState } from "react";
+
+interface AppEventEnvelope<T = unknown> {
+  topic: string;
+  app: string;
+  project_id: string;
+  install_id: number;
+  seq: number;
+  time: string;
+  data: T;
+}
+function useAppEvents<T = unknown>(
+  app: string,
+  projectId: string | undefined | null,
+  onEvent: (ev: AppEventEnvelope<T>) => void,
+) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+  useEffect(() => {
+    if (!app || !projectId) return;
+    let lastSeq = 0;
+    let es: EventSource | null = null;
+    let cancelled = false;
+    let reconnectTimer: number | null = null;
+    const connect = () => {
+      if (cancelled) return;
+      const url =
+        `/api/app-events/${encodeURIComponent(app)}` +
+        `?project_id=${encodeURIComponent(projectId)}` +
+        (lastSeq > 0 ? `&since=${lastSeq}` : "");
+      es = new EventSource(url, { withCredentials: true });
+      es.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data) as AppEventEnvelope<T>;
+          if (ev.seq <= lastSeq) return;
+          lastSeq = ev.seq;
+          handlerRef.current(ev);
+        } catch {}
+      };
+      es.onerror = () => {
+        if (es && es.readyState === EventSource.CLOSED) {
+          if (reconnectTimer) window.clearTimeout(reconnectTimer);
+          reconnectTimer = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (es) es.close();
+    };
+  }, [app, projectId]);
+}
+
+interface NativePanelProps {
+  appName: string;
+  installId: number;
+  projectId: string;
+  instanceId?: number;
+}
+
+interface Deployment {
+  id: number;
+  name: string;
+  description?: string;
+  source_kind: string;
+  source_ref: string;
+  framework: string;
+  build_cmd: string;
+  start_cmd: string;
+  port_hint: number;
+  env_json: string;
+  domain: string;
+  current_release_id?: number | null;
+  archived_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface Build {
+  id: number;
+  deployment_id: number;
+  source_sha: string;
+  framework: string;
+  status: "pending" | "running" | "succeeded" | "failed" | "cancelled";
+  duration_ms: number;
+  exit_code: number;
+  artifact_path: string;
+  artifact_size: number;
+  log_path: string;
+  error: string;
+  created_at: string;
+  started_at?: string;
+  finished_at?: string;
+}
+
+interface Release {
+  id: number;
+  deployment_id: number;
+  build_id: number;
+  status: "starting" | "live" | "stopped" | "crashed" | "failed";
+  port: number;
+  pid: number;
+  started_at?: string;
+  stopped_at?: string;
+  restart_count: number;
+  log_path: string;
+  error: string;
+  created_at: string;
+}
+
+interface DeploymentDetail {
+  deployment: Deployment;
+  builds: Build[];
+  releases: Release[];
+  current_release: Release | null;
+  url: string;
+}
+
+const API = "/api/apps/deploy/api";
+
+const FRAMEWORKS = ["", "go", "static", "blank"] as const;
+const SOURCE_KINDS = ["code", "local"] as const;
+
+function statusColor(s: string): string {
+  if (s === "live" || s === "succeeded") return "text-green";
+  if (s === "running" || s === "starting" || s === "pending") return "text-blue";
+  if (s === "stopped") return "text-text-dim";
+  return "text-red";
+}
+
+function formatSize(n: number): string {
+  if (!n) return "—";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} kB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatDuration(ms: number): string {
+  if (!ms) return "—";
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+export default function DeployPanel({ projectId, installId }: NativePanelProps) {
+  const [deployments, setDeployments] = useState<Deployment[]>([]);
+  const [selected, setSelected] = useState<number | null>(null);
+  const [detail, setDetail] = useState<DeploymentDetail | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+  const [logs, setLogs] = useState("");
+  const [logKind, setLogKind] = useState<"build" | "release">("release");
+  const [logTargetId, setLogTargetId] = useState<number | null>(null);
+
+  const withParams = useCallback(
+    (extra: Record<string, string> = {}) =>
+      new URLSearchParams({
+        project_id: projectId,
+        install_id: String(installId),
+        ...extra,
+      }).toString(),
+    [projectId, installId],
+  );
+
+  const api = useCallback(
+    async <T,>(method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<T> => {
+      const res = await fetch(`${API}${path}?${withParams(extra)}`, {
+        method,
+        credentials: "same-origin",
+        headers: body ? { "Content-Type": "application/json" } : {},
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+      return res.json();
+    },
+    [withParams],
+  );
+
+  const apiText = useCallback(
+    async (path: string, extra: Record<string, string> = {}): Promise<string> => {
+      const res = await fetch(`${API}${path}?${withParams(extra)}`, { credentials: "same-origin" });
+      if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+      return res.text();
+    },
+    [withParams],
+  );
+
+  const loadDeployments = useCallback(async () => {
+    try {
+      const r = await api<{ deployments?: Deployment[] }>("GET", "/deployments");
+      setDeployments(r.deployments || []);
+      setError("");
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, [api]);
+
+  const loadDetail = useCallback(
+    async (id: number) => {
+      try {
+        const d = await api<DeploymentDetail>("GET", `/deployments/${id}`);
+        setDetail(d);
+        if (d.current_release) {
+          setLogKind("release");
+          setLogTargetId(d.current_release.id);
+        }
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    },
+    [api],
+  );
+
+  useEffect(() => { loadDeployments(); }, [loadDeployments]);
+
+  // Refresh on relevant events.
+  useAppEvents<{ deployment_id?: number; build_id?: number; release_id?: number }>("deploy", projectId, (ev) => {
+    if (ev.topic.startsWith("deploy.")) {
+      loadDeployments();
+      if (selected != null && ev.data?.deployment_id === selected) {
+        loadDetail(selected);
+      }
+    }
+  });
+
+  // Auto-tail logs every 2s when there's an active build or live release.
+  useEffect(() => {
+    if (logTargetId == null) return;
+    let alive = true;
+    const tick = async () => {
+      try {
+        const txt = await apiText(`/${logKind === "build" ? "builds" : "releases"}/${logTargetId}/log`, { tail: "300" });
+        if (alive) setLogs(txt);
+      } catch {/* swallow — endpoint may 404 briefly */}
+    };
+    tick();
+    const handle = window.setInterval(tick, 2000);
+    return () => { alive = false; window.clearInterval(handle); };
+  }, [logKind, logTargetId, apiText]);
+
+  const selectDeployment = (id: number) => {
+    setSelected(id);
+    setLogs("");
+    loadDetail(id);
+  };
+
+  const handleBuild = async (release: boolean) => {
+    if (!detail) return;
+    setBusy(true);
+    try {
+      const r = await api<{ build: Build; release?: Release; release_error?: string }>(
+        "POST", `/deployments/${detail.deployment.id}/build`, { release },
+      );
+      // Switch log target to the freshly-created build first.
+      setLogKind("build");
+      setLogTargetId(r.build.id);
+      if (r.release_error) setError("Release: " + r.release_error);
+    } catch (e) {
+      setError("Build failed: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleReleaseBuild = async (buildId: number) => {
+    if (!detail) return;
+    try {
+      const r = await api<{ release: Release }>(
+        "POST", `/deployments/${detail.deployment.id}/release`, { build_id: buildId },
+      );
+      setLogKind("release");
+      setLogTargetId(r.release.id);
+    } catch (e) {
+      setError("Release failed: " + (e as Error).message);
+    }
+  };
+
+  const handleStop = async () => {
+    if (!detail) return;
+    if (!confirm("Stop the live release?")) return;
+    try {
+      await api("POST", `/deployments/${detail.deployment.id}/stop`);
+    } catch (e) {
+      alert("Stop failed: " + (e as Error).message);
+    }
+  };
+
+  const handleDestroy = async () => {
+    if (!detail) return;
+    if (!confirm(`Destroy deployment "${detail.deployment.name}"? This stops it and deletes all builds.`)) return;
+    try {
+      await api("DELETE", `/deployments/${detail.deployment.id}`);
+      setSelected(null);
+      setDetail(null);
+    } catch (e) {
+      alert("Destroy failed: " + (e as Error).message);
+    }
+  };
+
+  return (
+    <div className="h-full flex">
+      {/* Deployments list */}
+      <aside className="w-72 border-r border-border flex flex-col">
+        <div className="p-3 border-b border-border flex items-center gap-2">
+          <span className="text-xs uppercase tracking-wide text-text-dim flex-1">deployments</span>
+          <button
+            type="button"
+            onClick={() => setShowCreate(true)}
+            className="px-2 py-0.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+          >+ New</button>
+        </div>
+        <div className="flex-1 overflow-auto">
+          {error && <div className="p-3 text-red text-xs">{error}</div>}
+          {deployments.length === 0 ? (
+            <div className="p-3 text-text-muted text-sm">No deployments yet.</div>
+          ) : (
+            <ul>
+              {deployments.map((d) => (
+                <li
+                  key={d.id}
+                  onClick={() => selectDeployment(d.id)}
+                  className={`px-3 py-2 cursor-pointer border-b border-border hover:bg-bg-input/50 ${
+                    d.id === selected ? "bg-bg-input" : ""
+                  }`}
+                >
+                  <div className="flex items-center gap-1">
+                    <span className="text-sm text-text font-medium truncate flex-1">{d.name}</span>
+                    {d.framework && (
+                      <span className="text-[10px] px-1 py-0.5 rounded bg-blue/15 text-blue">
+                        {d.framework}
+                      </span>
+                    )}
+                    {d.current_release_id ? (
+                      <span className="text-[10px] px-1 py-0.5 rounded bg-green/15 text-green">live</span>
+                    ) : (
+                      <span className="text-[10px] px-1 py-0.5 rounded bg-border text-text-dim">idle</span>
+                    )}
+                  </div>
+                  <div className="text-xs text-text-muted truncate">
+                    {d.source_kind}:{d.source_ref}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </aside>
+
+      {/* Detail */}
+      <main className="flex-1 overflow-hidden flex flex-col">
+        {!detail ? (
+          <div className="p-8 text-text-muted text-sm text-center mt-12">
+            {deployments.length === 0
+              ? "Click + New to wire up your first deployment."
+              : "Pick a deployment on the left."}
+          </div>
+        ) : (
+          <>
+            <header className="p-4 border-b border-border flex items-center gap-3 flex-wrap">
+              <div className="flex-1 min-w-0">
+                <div className="text-text font-semibold text-lg truncate">
+                  {detail.deployment.name}
+                </div>
+                <div className="text-xs text-text-dim truncate">
+                  {detail.deployment.source_kind}:{detail.deployment.source_ref}
+                  {detail.deployment.framework ? ` · ${detail.deployment.framework}` : ""}
+                </div>
+              </div>
+              {detail.url && (
+                <a
+                  href={detail.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-xs text-accent hover:underline truncate max-w-[260px]"
+                >{detail.url} ↗</a>
+              )}
+              <button
+                type="button"
+                onClick={() => handleBuild(true)}
+                disabled={busy}
+                className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-40"
+              >{busy ? "Building…" : "Build & Release"}</button>
+              <button
+                type="button"
+                onClick={() => handleBuild(false)}
+                disabled={busy}
+                className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-40"
+              >Build only</button>
+              {detail.current_release && detail.current_release.status === "live" && (
+                <button
+                  type="button"
+                  onClick={handleStop}
+                  className="px-2 py-1 text-xs border border-red text-red/80 rounded hover:bg-red/10"
+                >Stop</button>
+              )}
+              <button
+                type="button"
+                onClick={handleDestroy}
+                className="px-2 py-1 text-xs border border-red text-red/70 rounded hover:bg-red/10"
+              >Destroy</button>
+            </header>
+
+            <section className="grid grid-cols-2 gap-4 p-4 border-b border-border text-xs">
+              <div>
+                <div className="text-text-dim uppercase mb-1">Current release</div>
+                {detail.current_release ? (
+                  <div className="space-y-1">
+                    <div>
+                      <span className={statusColor(detail.current_release.status) + " font-medium"}>
+                        {detail.current_release.status}
+                      </span>
+                      <span className="text-text-dim"> · port {detail.current_release.port} · pid {detail.current_release.pid}</span>
+                    </div>
+                    <div className="text-text-dim">
+                      build #{detail.current_release.build_id}
+                      {detail.current_release.started_at && ` · started ${detail.current_release.started_at}`}
+                    </div>
+                    {detail.current_release.error && (
+                      <div className="text-red truncate" title={detail.current_release.error}>
+                        {detail.current_release.error}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-text-muted">No live release.</div>
+                )}
+              </div>
+              <div>
+                <div className="text-text-dim uppercase mb-1">Latest build</div>
+                {detail.builds[0] ? (
+                  <div className="space-y-1">
+                    <div>
+                      <span className={statusColor(detail.builds[0].status) + " font-medium"}>
+                        #{detail.builds[0].id} {detail.builds[0].status}
+                      </span>
+                      <span className="text-text-dim">
+                        {" "}· {formatDuration(detail.builds[0].duration_ms)} · {formatSize(detail.builds[0].artifact_size)}
+                      </span>
+                    </div>
+                    <div className="text-text-dim truncate">framework: {detail.builds[0].framework}</div>
+                    {detail.builds[0].error && (
+                      <div className="text-red truncate" title={detail.builds[0].error}>
+                        {detail.builds[0].error}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-text-muted">No builds yet.</div>
+                )}
+              </div>
+            </section>
+
+            <section className="px-4 py-2 border-b border-border flex items-center gap-2 text-xs">
+              <span className="text-text-dim uppercase">logs</span>
+              <button
+                type="button"
+                onClick={() => detail.current_release && (setLogKind("release"), setLogTargetId(detail.current_release!.id))}
+                className={`px-2 py-0.5 rounded border ${logKind === "release" ? "border-accent text-accent" : "border-border text-text-dim hover:bg-bg-input"}`}
+              >Runtime</button>
+              <button
+                type="button"
+                onClick={() => detail.builds[0] && (setLogKind("build"), setLogTargetId(detail.builds[0].id))}
+                className={`px-2 py-0.5 rounded border ${logKind === "build" ? "border-accent text-accent" : "border-border text-text-dim hover:bg-bg-input"}`}
+              >Latest build</button>
+              <span className="text-text-dim ml-auto">
+                {logKind} #{logTargetId ?? "-"}
+              </span>
+            </section>
+
+            <div className="flex-1 overflow-auto bg-bg">
+              <pre className="text-[11px] font-mono p-4 text-text whitespace-pre">
+                {logs || (logTargetId == null ? "(no log target — build something)" : "(empty)")}
+              </pre>
+            </div>
+
+            <section className="border-t border-border p-3 max-h-44 overflow-auto">
+              <div className="text-xs text-text-dim uppercase mb-2">Builds</div>
+              <table className="w-full text-xs">
+                <thead className="text-text-dim">
+                  <tr>
+                    <th className="text-left font-normal">#</th>
+                    <th className="text-left font-normal">Status</th>
+                    <th className="text-left font-normal">Duration</th>
+                    <th className="text-left font-normal">Size</th>
+                    <th className="text-left font-normal">Created</th>
+                    <th className="text-right font-normal">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {detail.builds.map((b) => (
+                    <tr key={b.id} className="border-t border-border/40">
+                      <td className="py-1">{b.id}</td>
+                      <td className={statusColor(b.status)}>{b.status}</td>
+                      <td>{formatDuration(b.duration_ms)}</td>
+                      <td>{formatSize(b.artifact_size)}</td>
+                      <td className="text-text-dim truncate">{b.created_at}</td>
+                      <td className="text-right space-x-2">
+                        <button
+                          type="button"
+                          onClick={() => { setLogKind("build"); setLogTargetId(b.id); }}
+                          className="text-text-dim hover:text-text"
+                        >log</button>
+                        {b.status === "succeeded" && (
+                          <button
+                            type="button"
+                            onClick={() => handleReleaseBuild(b.id)}
+                            className="text-accent hover:underline"
+                          >release</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          </>
+        )}
+      </main>
+
+      {showCreate && (
+        <CreateDeploymentDialog
+          onClose={() => setShowCreate(false)}
+          onCreated={(d) => {
+            setShowCreate(false);
+            loadDeployments().then(() => selectDeployment(d.id));
+          }}
+          api={api}
+        />
+      )}
+    </div>
+  );
+}
+
+function CreateDeploymentDialog({
+  onClose,
+  onCreated,
+  api,
+}: {
+  onClose: () => void;
+  onCreated: (d: Deployment) => void;
+  api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
+}) {
+  const [name, setName] = useState("");
+  const [sourceKind, setSourceKind] = useState<(typeof SOURCE_KINDS)[number]>("code");
+  const [sourceRef, setSourceRef] = useState("");
+  const [framework, setFramework] = useState<(typeof FRAMEWORKS)[number]>("");
+  const [buildCmd, setBuildCmd] = useState("");
+  const [startCmd, setStartCmd] = useState("");
+  const [env, setEnv] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async () => {
+    if (!name.trim() || !sourceRef.trim()) {
+      setErr("name and source_ref required");
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await api<{ deployment: Deployment }>("POST", "/deployments", {
+        name: name.trim(),
+        source_kind: sourceKind,
+        source_ref: sourceRef.trim(),
+        framework,
+        build_cmd: buildCmd.trim(),
+        start_cmd: startCmd.trim(),
+        env_json: env.trim() || "{}",
+      });
+      onCreated(r.deployment);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <form
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={(e) => { e.preventDefault(); submit(); }}
+        className="w-[480px] bg-bg border border-border rounded p-5 space-y-4"
+      >
+        <h2 className="text-text font-semibold">New deployment</h2>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="col-span-2">
+            <label className="text-xs text-text-muted block mb-1">Name (slug)</label>
+            <input
+              autoFocus
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="my-api"
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-text-muted block mb-1">Source</label>
+            <select
+              value={sourceKind}
+              onChange={(e) => setSourceKind(e.target.value as (typeof SOURCE_KINDS)[number])}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            >
+              {SOURCE_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-text-muted block mb-1">Framework</label>
+            <select
+              value={framework}
+              onChange={(e) => setFramework(e.target.value as (typeof FRAMEWORKS)[number])}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            >
+              {FRAMEWORKS.map((f) => (
+                <option key={f} value={f}>{f === "" ? "(auto-detect)" : f}</option>
+              ))}
+            </select>
+          </div>
+          <div className="col-span-2">
+            <label className="text-xs text-text-muted block mb-1">
+              Source ref ({sourceKind === "code" ? "repo slug from Code app" : "absolute path on host"})
+            </label>
+            <input
+              type="text"
+              value={sourceRef}
+              onChange={(e) => setSourceRef(e.target.value)}
+              placeholder={sourceKind === "code" ? "my-api" : "/abs/path/to/repo"}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-text-muted block mb-1">Build cmd (optional)</label>
+            <input
+              type="text"
+              value={buildCmd}
+              onChange={(e) => setBuildCmd(e.target.value)}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-text-muted block mb-1">Start cmd (optional)</label>
+            <input
+              type="text"
+              value={startCmd}
+              onChange={(e) => setStartCmd(e.target.value)}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+            />
+          </div>
+          <div className="col-span-2">
+            <label className="text-xs text-text-muted block mb-1">Env (JSON object, optional)</label>
+            <textarea
+              value={env}
+              onChange={(e) => setEnv(e.target.value)}
+              placeholder='{"LOG_LEVEL":"info"}'
+              rows={2}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+            />
+          </div>
+        </div>
+        {err && <div className="text-red text-xs">{err}</div>}
+        <div className="flex items-center justify-end gap-2 pt-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input"
+          >Cancel</button>
+          <button
+            type="submit"
+            disabled={busy}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+          >{busy ? "Creating…" : "Create"}</button>
+        </div>
+      </form>
+    </div>
+  );
+}

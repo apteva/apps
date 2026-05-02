@@ -1,0 +1,96 @@
+schema: apteva-app/v1
+
+name: deploy
+display_name: Deploy
+version: 0.1.0
+description: |
+  Local-first builds and runtime supervision for Apteva projects.
+  Takes a code repo (from the Code app, a local path, or a git URL),
+  builds it with the framework's toolchain, and runs the result as
+  a supervised child process bound to a local port. The Apteva
+  server proxies traffic to live deployments under /_deploy/<slug>/.
+
+  v0.1 supports source kinds {code, local} and frameworks {go, static}.
+  Future runtimes (Docker, SSH-to-VPS) plug in behind the same
+  Runtime interface — no schema or surface changes required.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/deploy
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/deploy/icon.png
+tags: [deploy, build, runtime, agent]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: deploy_init
+      description: Bind a source (code repo / local path / git URL) to a new deployment.
+    - name: deploy_list
+      description: List deployments in this project with current build/release status.
+    - name: deploy_get
+      description: Full detail for one deployment — last builds, current release, URL.
+    - name: deploy_build
+      description: Fetch source, run the framework build; returns a build_id.
+    - name: deploy_release
+      description: Promote a build to live (starts the supervised process, swaps the proxy route).
+    - name: deploy_status
+      description: Current build + release state, URL, last 10 builds.
+    - name: deploy_logs
+      description: Tail build logs (build_id) or runtime logs (release_id).
+    - name: deploy_stop
+      description: Stop the live release (process killed, port freed).
+    - name: deploy_destroy
+      description: Stop, drop deployment, delete builds and artifacts on disk.
+  ui_panels:
+    - slot: project.page
+      label: Deploy
+      icon: rocket
+      entry: /ui/DeployPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/deploy
+  port: 8080
+  health_check: /health
+  storage:
+    - name: deploy
+      mount_path: /data
+
+db:
+  driver: sqlite
+  path: /data/deploy.db
+  migrations: migrations/
+
+config_schema:
+  - name: port_range_start
+    type: text
+    default: "7000"
+    label: Port range start
+    description: First port the runtime supervisor may assign to a release.
+  - name: port_range_end
+    type: text
+    default: "7999"
+    label: Port range end
+    description: Last port the runtime supervisor may assign to a release.
+  - name: code_app_url
+    type: text
+    default: "http://localhost:8080"
+    label: Code app base URL
+    description: Where to reach the Code app's REST surface for source kind=code.
+  - name: max_build_concurrency
+    type: text
+    default: "2"
+    label: Max concurrent builds
+    description: Hard cap on simultaneous build processes per host.
+
+upgrade_policy: auto-patch
