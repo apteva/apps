@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.2.3
+version: 0.3.0
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES; SMS and push are reserved channel namespaces. Tracks
@@ -40,6 +40,16 @@ requires:
       required: true
       label: "Email provider (AWS SES)"
       hint: "Verifies the sender domain and delivers outbound mail. Bounce/complaint webhook target lives in app config."
+    - role: phone_provider
+      kind: integration
+      compatible_slugs: [twilio]
+      capabilities: [sms.send, whatsapp.send]
+      tools:
+        sms.send: send_sms
+        whatsapp.send: send_whatsapp
+      required: false
+      label: "Phone provider (SMS + WhatsApp via Twilio)"
+      hint: "Required for channel=sms or channel=whatsapp sends. Without this binding, send_message returns a clear error on phone channels."
     - role: storage
       kind: app
       compatible_app_names: [storage]

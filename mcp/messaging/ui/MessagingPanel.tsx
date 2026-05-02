@@ -127,8 +127,9 @@ interface SuppressionRow {
   last_seen?: string;
 }
 interface SenderRow {
+  channel: "email" | "sms" | "whatsapp";
   address: string;
-  kind: "email" | "domain";
+  kind: "email" | "domain" | "phone";
   verified: boolean;
   dkim_status?: string;
   dkim_tokens?: string[];
@@ -513,10 +514,20 @@ function ComposeView({
     setErr("");
     try {
       const recipients = to.split(",").map((s) => s.trim()).filter(Boolean);
-      await api("POST", "/tools/call", {}, {
-        tool: "send_message",
-        args: { from: computedFrom, to: recipients, subject, body },
-      });
+      const channel = selectedSender?.channel || "email";
+      const args: Record<string, unknown> = {
+        channel,
+        from: computedFrom,
+        to: recipients,
+        body,
+      };
+      // Email-only fields — included only when relevant so the
+      // server's "irrelevant fields warned + dropped" pathway
+      // doesn't fire on every SMS send.
+      if (channel === "email") {
+        if (subject) args.subject = subject;
+      }
+      await api("POST", "/tools/call", {}, { tool: "send_message", args });
       setTo(""); setSubject(""); setBody("");
       onSent();
     } catch (e) {
@@ -529,7 +540,7 @@ function ComposeView({
   return (
     <form onSubmit={send} className="p-6 max-w-2xl space-y-3">
       <h2 className="text-lg font-semibold mb-1">Compose message</h2>
-      <p className="text-xs text-text-dim mb-3">Pick a verified sender, comma-separate recipients. v0.2 sends over email; SMS and push come later.</p>
+      <p className="text-xs text-text-dim mb-3">Pick a verified sender; the channel comes from the sender. Comma-separate recipients.</p>
 
       {noVerifiedSenders ? (
         <div className="rounded border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm text-yellow-300">
@@ -543,17 +554,23 @@ function ComposeView({
               value={selectedAddress}
               onChange={(e) => {
                 setSelectedAddress(e.target.value);
-                const next = verified.find((s) => stripScheme(s.address) === e.target.value);
+                const next = verified.find((s) => s.address === e.target.value);
                 if (next?.kind === "domain" && !localPart) setLocalPart("noreply");
               }}
               required
             >
-              {verified.map((s) => {
-                const addr = stripScheme(s.address);
+              {(["email", "sms", "whatsapp"] as const).map((ch) => {
+                const inCh = verified.filter((s) => s.channel === ch);
+                if (inCh.length === 0) return null;
+                const groupLabel = ch === "email" ? "Email (SES)" : ch === "sms" ? "SMS (Twilio)" : "WhatsApp (Twilio)";
                 return (
-                  <option key={addr} value={addr}>
-                    {s.kind === "domain" ? `@${addr} (domain)` : addr}
-                  </option>
+                  <optgroup key={ch} label={groupLabel}>
+                    {inCh.map((s) => (
+                      <option key={s.address} value={s.address}>
+                        {s.kind === "domain" ? `@${s.address} (any local-part)` : s.address}
+                      </option>
+                    ))}
+                  </optgroup>
                 );
               })}
             </select>
@@ -572,17 +589,32 @@ function ComposeView({
             )}
           </div>
           {computedFrom && (
-            <div className="text-xs text-text-dim mt-1">Will send as <code>{computedFrom}</code></div>
+            <div className="text-xs text-text-dim mt-1">
+              Will send via <strong>{selectedSender?.channel || "email"}</strong> from <code>{computedFrom}</code>
+            </div>
           )}
         </Field>
       )}
 
       <Field label="To">
-        <input className={inputCls} value={to} onChange={(e) => setTo(e.target.value)} placeholder="alice@example.com, bob@x.io" required disabled={noVerifiedSenders} />
+        <input
+          className={inputCls}
+          value={to}
+          onChange={(e) => setTo(e.target.value)}
+          placeholder={
+            selectedSender?.channel === "email" || !selectedSender
+              ? "alice@example.com, bob@x.io"
+              : "+15551234567"
+          }
+          required
+          disabled={noVerifiedSenders}
+        />
       </Field>
-      <Field label="Subject">
-        <input className={inputCls} value={subject} onChange={(e) => setSubject(e.target.value)} disabled={noVerifiedSenders} />
-      </Field>
+      {(selectedSender?.channel || "email") === "email" && (
+        <Field label="Subject">
+          <input className={inputCls} value={subject} onChange={(e) => setSubject(e.target.value)} disabled={noVerifiedSenders} />
+        </Field>
+      )}
       <Field label="Body">
         <textarea className={inputCls + " font-mono text-sm"} rows={10} value={body} onChange={(e) => setBody(e.target.value)} required disabled={noVerifiedSenders} />
       </Field>

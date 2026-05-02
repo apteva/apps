@@ -64,6 +64,15 @@ requires:
         email.send: send_email
       required: true
       label: "Email provider (AWS SES)"
+    - role: phone_provider
+      kind: integration
+      compatible_slugs: [twilio]
+      capabilities: [sms.send, whatsapp.send]
+      tools:
+        sms.send: send_sms
+        whatsapp.send: send_whatsapp
+      required: false
+      label: "Phone provider (SMS + WhatsApp via Twilio)"
     - role: storage
       kind: app
       compatible_app_names: [storage]
@@ -74,7 +83,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: send_message,           description: "Send a message. URI scheme picks the channel." }
+    - { name: send_message,           description: "Send a message. Channel is an explicit arg (email|sms|whatsapp)." }
     - { name: send_message_template,  description: "Render a saved template + send." }
     - { name: message_get,            description: "Fetch one message by id." }
     - { name: message_list,           description: "List messages with filters." }
@@ -166,41 +175,45 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "send_message",
-			Description: "Send a message. The recipient URI scheme picks the channel " +
-				"(mailto: → email; tel: and apteva://contact/N reserved for future channels). " +
-				"Bare email strings are auto-coerced to mailto:. " +
-				"Args: to (string|string[]), body, subject?, body_html?, from?, reply_to?, " +
-				"cc?, bcc?, headers?, attachment_storage_ids?, template_id?, vars?, " +
-				"prefer_channel?, idempotency_key?. " +
+			Description: "Send a message. Args: channel (email|sms|whatsapp), from, to (string|string[]), body. " +
+				"Email-only fields: subject, body_html, cc, bcc, reply_to, headers, attachment_storage_ids. " +
+				"SMS/WhatsApp-only fields: media_url, content_sid, content_variables. " +
+				"Common: template_id, vars, idempotency_key. " +
+				"Addresses are plain — emails (alice@x.com) and E.164 phone numbers (+15551234567), no scheme prefix. " +
 				"Returns {id, channel, status, recipients:[{address, status}], provider_message_id?}.",
 			InputSchema: schemaObject(map[string]any{
+				"channel":                map[string]any{"type": "string", "enum": []string{"email", "sms", "whatsapp"}},
+				"from":                   map[string]any{"type": "string"},
 				"to":                     map[string]any{},
 				"body":                   map[string]any{"type": "string"},
 				"subject":                map[string]any{"type": "string"},
 				"body_html":              map[string]any{"type": "string"},
-				"from":                   map[string]any{"type": "string"},
 				"reply_to":               map[string]any{"type": "string"},
 				"cc":                     map[string]any{},
 				"bcc":                    map[string]any{},
 				"headers":                map[string]any{"type": "object"},
 				"attachment_storage_ids": map[string]any{"type": "array"},
+				"media_url":              map[string]any{"type": "string"},
+				"content_sid":            map[string]any{"type": "string"},
+				"content_variables":      map[string]any{"type": "string"},
 				"template_id":            map[string]any{"type": "integer"},
 				"vars":                   map[string]any{"type": "object"},
-				"prefer_channel":         map[string]any{"type": "string"},
 				"idempotency_key":        map[string]any{"type": "string"},
-			}, []string{"to"}),
+			}, []string{"channel", "from", "to"}),
 			Handler: a.toolSendMessage,
 		},
 		{
 			Name:        "send_message_template",
-			Description: "Render a saved template and send. Args: template_id, to, vars?, attachment_storage_ids?, idempotency_key?.",
+			Description: "Render a saved template and send. Args: template_id, channel, from, to, vars?, idempotency_key?.",
 			InputSchema: schemaObject(map[string]any{
 				"template_id":            map[string]any{"type": "integer"},
+				"channel":                map[string]any{"type": "string", "enum": []string{"email", "sms", "whatsapp"}},
+				"from":                   map[string]any{"type": "string"},
 				"to":                     map[string]any{},
 				"vars":                   map[string]any{"type": "object"},
 				"attachment_storage_ids": map[string]any{"type": "array"},
 				"idempotency_key":        map[string]any{"type": "string"},
-			}, []string{"template_id", "to"}),
+			}, []string{"template_id", "channel", "from", "to"}),
 			Handler: a.toolSendMessageTemplate,
 		},
 		{
@@ -230,9 +243,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "inbound_route_set",
-			Description: "Bind a recipient URI pattern to a target app+route. Idempotent on (pattern, target_app, target_route). " +
-				"Args: pattern (e.g. 'mailto:support+*@acme.com'), target_app, target_route, priority?.",
+			Description: "Bind a recipient pattern (per channel) to a target app+route. Idempotent on (channel, pattern, target_app, target_route). " +
+				"Args: channel (default email), pattern (e.g. 'support+*@acme.com'), target_app, target_route, priority?.",
 			InputSchema: schemaObject(map[string]any{
+				"channel":      map[string]any{"type": "string"},
 				"pattern":      map[string]any{"type": "string"},
 				"target_app":   map[string]any{"type": "string"},
 				"target_route": map[string]any{"type": "string"},
@@ -311,18 +325,22 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "suppression_add",
-			Description: "Manually suppress an address. Args: address (URI), reason.",
+			Description: "Manually suppress an address. Args: address, channel? (auto-detected from address shape if omitted), reason.",
 			InputSchema: schemaObject(map[string]any{
 				"address": map[string]any{"type": "string"},
+				"channel": map[string]any{"type": "string"},
 				"reason":  map[string]any{"type": "string"},
 			}, []string{"address", "reason"}),
 			Handler: a.toolSuppressionAdd,
 		},
 		{
 			Name:        "suppression_remove",
-			Description: "Remove an address from suppression. Args: address (URI).",
-			InputSchema: schemaObject(map[string]any{"address": map[string]any{"type": "string"}}, []string{"address"}),
-			Handler:     a.toolSuppressionRemove,
+			Description: "Remove an address from suppression. Args: address, channel? (auto-detected if omitted).",
+			InputSchema: schemaObject(map[string]any{
+				"address": map[string]any{"type": "string"},
+				"channel": map[string]any{"type": "string"},
+			}, []string{"address"}),
+			Handler: a.toolSuppressionRemove,
 		},
 		{
 			Name: "senders_list",
@@ -387,89 +405,118 @@ func resolveProjectFromRequest(r *http.Request) (string, error) {
 	return "", errors.New("project_id required in query string when install scope=global")
 }
 
-// ─── URI / address normalisation ───────────────────────────────────
+// ─── Address normalisation ────────────────────────────────────────
 //
-// We normalise *to canonical URI form* on the way in and store that.
-// Email addresses are lowercased (RFC 5321 mailbox-local-part
-// case-sensitivity is technically unspecified but in practice every
-// MTA folds it). Phone numbers are kept as-is for now; SMS isn't in
-// v0.1. apteva://contact/N is normalised to a clean integer id.
+// v0.3 takes channel as an explicit send_message argument and stores
+// plain addresses — no URI scheme prefixes anywhere in the data path
+// or on the wire. validation is per-channel:
 //
-// Schemes recognised:
-//   - "mailto:foo@bar.com"
-//   - "tel:+15551234"            (reserved; v0.1 errors)
-//   - "apteva://contact/42"      (reserved; v0.1 errors)
+//   email           — lowercased local-part-and-domain, must look
+//                     like an email (one '@', dot in domain)
+//   sms / whatsapp  — E.164 phone number (^\+[1-9]\d{6,14}$)
 //
-// Bare strings are auto-coerced: anything containing "@" with no
-// scheme becomes "mailto:<lower>". This keeps the agent ergonomics
-// good without ambiguous parsing.
+// Twilio's "whatsapp:+1..." prefix is added internally just before
+// the wire call (sendViaTwilio); callers never see or pass it.
+//
+// For tolerance, we accept a leading mailto:/tel:/whatsapp: on the
+// way in and strip it — old data and habit-typing both keep working
+// — but the canonical stored form is always plain.
 
 const (
-	channelEmail = "email"
+	channelEmail    = "email"
+	channelSMS      = "sms"
+	channelWhatsApp = "whatsapp"
 )
 
-func normaliseURI(s string) (string, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
+// validChannel reports whether c is a known channel name.
+func validChannel(c string) bool {
+	switch c {
+	case channelEmail, channelSMS, channelWhatsApp:
+		return true
+	}
+	return false
+}
+
+// stripScheme removes a leading scheme prefix if present. Used
+// defensively on inputs and on rows migrated from v0.2 (the 002
+// migration normally strips them, but a partial run shouldn't break
+// reads).
+func stripScheme(s string) string {
+	for _, p := range []string{"mailto:", "tel:", "whatsapp:"} {
+		if l := len(p); len(s) >= l && strings.EqualFold(s[:l], p) {
+			return s[l:]
+		}
+	}
+	return s
+}
+
+// normaliseAddress validates and canonicalises a single address for
+// the given channel. Returns the plain-form address ready to store.
+func normaliseAddress(channel, raw string) (string, error) {
+	raw = strings.TrimSpace(stripScheme(strings.TrimSpace(raw)))
+	if raw == "" {
 		return "", errors.New("empty address")
 	}
-	low := strings.ToLower(s)
-	switch {
-	case strings.HasPrefix(low, "mailto:"):
-		addr := strings.TrimPrefix(s, s[:7]) // preserve case for the local part during validation
-		addr = strings.ToLower(strings.TrimSpace(addr))
+	switch channel {
+	case channelEmail:
+		addr := strings.ToLower(raw)
 		if !looksLikeEmail(addr) {
-			return "", fmt.Errorf("invalid email in mailto: %q", addr)
+			return "", fmt.Errorf("invalid email %q", raw)
 		}
-		return "mailto:" + addr, nil
-	case strings.HasPrefix(low, "tel:"):
-		// reserved
-		return "", errors.New("tel: addresses are not supported in v0.1 (sms channel pending)")
-	case strings.HasPrefix(low, "apteva://contact/"):
-		return "", errors.New("apteva://contact/N addresses are not supported in v0.1 (CRM resolver pending)")
-	}
-	// Bare string with @ → coerce to mailto:.
-	if strings.Contains(s, "@") && !strings.Contains(s, " ") {
-		addr := strings.ToLower(s)
-		if !looksLikeEmail(addr) {
-			return "", fmt.Errorf("invalid email: %q", addr)
+		return addr, nil
+	case channelSMS, channelWhatsApp:
+		if !looksLikeE164(raw) {
+			return "", fmt.Errorf("invalid phone number %q (expected E.164, e.g. +15551234567)", raw)
 		}
-		return "mailto:" + addr, nil
+		return raw, nil
 	}
-	return "", fmt.Errorf("unrecognised address %q (expected mailto:, tel:, or bare email)", s)
+	return "", fmt.Errorf("unsupported channel %q", channel)
 }
 
-func channelOfURI(uri string) (string, error) {
-	low := strings.ToLower(uri)
-	switch {
-	case strings.HasPrefix(low, "mailto:"):
-		return channelEmail, nil
+// normaliseAddressList accepts a string or []any/[]string and
+// returns a deduped, validated list for the given channel.
+func normaliseAddressList(channel string, v any) ([]string, error) {
+	out := []string{}
+	add := func(s string) error {
+		if s == "" {
+			return nil
+		}
+		a, err := normaliseAddress(channel, s)
+		if err != nil {
+			return err
+		}
+		for _, e := range out {
+			if e == a {
+				return nil
+			}
+		}
+		out = append(out, a)
+		return nil
 	}
-	return "", fmt.Errorf("cannot determine channel for %q", uri)
-}
-
-func bareAddress(uri string) string {
-	if strings.HasPrefix(strings.ToLower(uri), "mailto:") {
-		return uri[7:]
+	switch x := v.(type) {
+	case nil:
+		return out, nil
+	case string:
+		if err := add(x); err != nil {
+			return nil, err
+		}
+	case []any:
+		for _, it := range x {
+			s, _ := it.(string)
+			if err := add(s); err != nil {
+				return nil, err
+			}
+		}
+	case []string:
+		for _, s := range x {
+			if err := add(s); err != nil {
+				return nil, err
+			}
+		}
+	default:
+		return nil, fmt.Errorf("expected string or string[], got %T", v)
 	}
-	return uri
-}
-
-// extractSubaddress returns the "+tag" portion of an email's local
-// part if present, else the empty string. e.g.
-// "support+T-1234@acme.com" → "T-1234".
-func extractSubaddress(uri string) string {
-	addr := bareAddress(uri)
-	at := strings.IndexByte(addr, '@')
-	if at < 0 {
-		return ""
-	}
-	local := addr[:at]
-	plus := strings.IndexByte(local, '+')
-	if plus < 0 {
-		return ""
-	}
-	return local[plus+1:]
+	return out, nil
 }
 
 func looksLikeEmail(s string) bool {
@@ -486,57 +533,39 @@ func looksLikeEmail(s string) bool {
 	return true
 }
 
-// normaliseURIList accepts a string or []any/[]string and returns
-// a deduped list of canonical URIs.
-func normaliseURIList(v any) ([]string, error) {
-	out := []string{}
-	switch x := v.(type) {
-	case nil:
-		return out, nil
-	case string:
-		if x == "" {
-			return out, nil
-		}
-		u, err := normaliseURI(x)
-		if err != nil {
-			return nil, err
-		}
-		return []string{u}, nil
-	case []any:
-		seen := map[string]bool{}
-		for _, it := range x {
-			s, ok := it.(string)
-			if !ok || s == "" {
-				continue
-			}
-			u, err := normaliseURI(s)
-			if err != nil {
-				return nil, err
-			}
-			if !seen[u] {
-				seen[u] = true
-				out = append(out, u)
-			}
-		}
-	case []string:
-		seen := map[string]bool{}
-		for _, s := range x {
-			if s == "" {
-				continue
-			}
-			u, err := normaliseURI(s)
-			if err != nil {
-				return nil, err
-			}
-			if !seen[u] {
-				seen[u] = true
-				out = append(out, u)
-			}
-		}
-	default:
-		return nil, fmt.Errorf("expected string or string[], got %T", v)
+// looksLikeE164: '+' then 7..15 digits, leading digit 1-9.
+// Twilio is stricter about the upstream API but this is good enough
+// to reject obvious typos before paying for a request.
+func looksLikeE164(s string) bool {
+	if len(s) < 8 || len(s) > 16 || s[0] != '+' {
+		return false
 	}
-	return out, nil
+	if s[1] < '1' || s[1] > '9' {
+		return false
+	}
+	for i := 2; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// extractSubaddress returns the "+tag" portion of an email's local
+// part if present, else the empty string. e.g.
+// "support+T-1234@acme.com" → "T-1234". Email-only.
+func extractSubaddress(addr string) string {
+	addr = stripScheme(addr)
+	at := strings.IndexByte(addr, '@')
+	if at < 0 {
+		return ""
+	}
+	local := addr[:at]
+	plus := strings.IndexByte(local, '+')
+	if plus < 0 {
+		return ""
+	}
+	return local[plus+1:]
 }
 
 // ─── Domain types ──────────────────────────────────────────────────
@@ -593,6 +622,7 @@ type Template struct {
 type InboundRoute struct {
 	ID          int64  `json:"id"`
 	ProjectID   string `json:"project_id,omitempty"`
+	Channel     string `json:"channel"`
 	Pattern     string `json:"pattern"`
 	TargetApp   string `json:"target_app"`
 	TargetRoute string `json:"target_route"`
@@ -635,35 +665,35 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 	}
 
-	to, err := normaliseURIList(args["to"])
+	channel := strings.ToLower(strings.TrimSpace(strArg(args, "channel")))
+	if channel == "" {
+		return nil, errors.New("channel: required (one of email, sms, whatsapp)")
+	}
+	if !validChannel(channel) {
+		return nil, fmt.Errorf("channel: unsupported value %q (one of email, sms, whatsapp)", channel)
+	}
+
+	to, err := normaliseAddressList(channel, args["to"])
 	if err != nil {
 		return nil, fmt.Errorf("to: %w", err)
 	}
 	if len(to) == 0 {
 		return nil, errors.New("to: at least one recipient required")
 	}
-	cc, err := normaliseURIList(args["cc"])
+	cc, err := normaliseAddressList(channel, args["cc"])
 	if err != nil {
 		return nil, fmt.Errorf("cc: %w", err)
 	}
-	bcc, err := normaliseURIList(args["bcc"])
+	bcc, err := normaliseAddressList(channel, args["bcc"])
 	if err != nil {
 		return nil, fmt.Errorf("bcc: %w", err)
 	}
-
-	// Channel must be uniform across all recipients in v0.1.
-	channel, err := channelOfURI(to[0])
-	if err != nil {
-		return nil, err
-	}
-	for _, r := range append(append([]string{}, cc...), bcc...) {
-		ch, err := channelOfURI(r)
-		if err != nil {
-			return nil, err
-		}
-		if ch != channel {
-			return nil, fmt.Errorf("mixed channels not supported: %s vs %s", channel, ch)
-		}
+	// cc/bcc on phone channels make no sense — warn and discard rather
+	// than reject, so a generic compose form doesn't have to know.
+	if (channel == channelSMS || channel == channelWhatsApp) && (len(cc) > 0 || len(bcc) > 0) {
+		ctx.Logger().Warn("messaging: cc/bcc ignored on phone channels", "channel", channel)
+		cc = nil
+		bcc = nil
 	}
 
 	// Optional template render.
@@ -699,13 +729,13 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if from == "" {
 		return nil, errors.New("from: required (pick a verified sender via senders_list)")
 	}
-	from, err = normaliseURI(from)
+	from, err = normaliseAddress(channel, from)
 	if err != nil {
 		return nil, fmt.Errorf("from: %w", err)
 	}
 	replyTo := strArg(args, "reply_to")
 	if replyTo != "" {
-		replyTo, err = normaliseURI(replyTo)
+		replyTo, err = normaliseAddress(channel, replyTo)
 		if err != nil {
 			return nil, fmt.Errorf("reply_to: %w", err)
 		}
@@ -756,12 +786,23 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	id, _ := res.LastInsertId()
 
-	// Provider call.
-	providerMessageID, providerErr := sendViaProvider(ctx, providerSendInput{
-		From: from, To: allowedTo, CC: allowedCC, BCC: allowedBCC,
+	// Provider call — dispatch by channel.
+	in := providerSendInput{
+		Channel: channel,
+		From:    from, To: allowedTo, CC: allowedCC, BCC: allowedBCC,
 		Subject: subject, BodyText: body, BodyHTML: bodyHTML,
 		ReplyTo: replyTo, Headers: headers,
-	})
+		MediaURL: strArg(args, "media_url"), ContentSid: strArg(args, "content_sid"),
+		ContentVariables: strArg(args, "content_variables"),
+	}
+	var providerMessageID string
+	var providerErr error
+	switch channel {
+	case channelEmail:
+		providerMessageID, providerErr = sendViaSES(ctx, in)
+	case channelSMS, channelWhatsApp:
+		providerMessageID, providerErr = sendViaTwilio(ctx, in)
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	if providerErr != nil {
 		_, _ = ctx.AppDB().Exec(
@@ -819,23 +860,28 @@ func (a *App) toolSendMessageTemplate(ctx *sdk.AppCtx, args map[string]any) (any
 // ─── Provider invocation ───────────────────────────────────────────
 
 type providerSendInput struct {
+	Channel       string
 	From, ReplyTo string
 	To, CC, BCC   []string
 	Subject       string
 	BodyText      string
 	BodyHTML      string
 	Headers       map[string]any
+	// SMS / WhatsApp only:
+	MediaURL         string
+	ContentSid       string
+	ContentVariables string
 }
 
-// sendViaProvider invokes the bound email_provider integration's
-// send_email tool, mapping our flat input to AWS SES v2's nested
-// SendEmail payload (FromEmailAddress / Destination / Content.Simple).
-// We strip the mailto: prefix from addresses — SES expects bare addrs.
+// sendViaSES maps our flat input to AWS SES v2's nested SendEmail
+// payload (FromEmailAddress / Destination / Content.Simple). All
+// addresses are already plain (no scheme prefix) — that's the v0.3
+// contract — so we hand them straight to SES.
 //
-// Custom headers are silently dropped in v0.1: SES Simple content
-// doesn't accept arbitrary headers. Setting them requires switching to
-// send_raw_email with a fully-built MIME blob, which is a v0.2 feature.
-func sendViaProvider(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
+// Custom headers are silently dropped: SES Simple content doesn't
+// accept arbitrary headers. Setting them requires send_raw_email
+// with a fully-built MIME blob (v0.4+).
+func sendViaSES(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 	bound := ctx.IntegrationFor("email_provider")
 	if bound == nil {
 		return "", errors.New("no email_provider bound — install/select an aws-ses connection")
@@ -845,16 +891,15 @@ func sendViaProvider(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 		tool = "send_email"
 	}
 
-	// SES v2 SendEmail — nested shape per integrations/src/apps/aws-ses.json.
 	dest := map[string]any{}
-	if to := stripMailto(in.To); len(to) > 0 {
-		dest["ToAddresses"] = to
+	if len(in.To) > 0 {
+		dest["ToAddresses"] = in.To
 	}
-	if cc := stripMailto(in.CC); len(cc) > 0 {
-		dest["CcAddresses"] = cc
+	if len(in.CC) > 0 {
+		dest["CcAddresses"] = in.CC
 	}
-	if bcc := stripMailto(in.BCC); len(bcc) > 0 {
-		dest["BccAddresses"] = bcc
+	if len(in.BCC) > 0 {
+		dest["BccAddresses"] = in.BCC
 	}
 
 	body := map[string]any{}
@@ -866,11 +911,10 @@ func sendViaProvider(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 	}
 	subj := in.Subject
 	if subj == "" {
-		// SES requires a Subject; default rather than reject.
 		subj = "(no subject)"
 	}
 	payload := map[string]any{
-		"FromEmailAddress": bareAddress(in.From),
+		"FromEmailAddress": in.From,
 		"Destination":      dest,
 		"Content": map[string]any{
 			"Simple": map[string]any{
@@ -880,10 +924,10 @@ func sendViaProvider(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 		},
 	}
 	if in.ReplyTo != "" {
-		payload["ReplyToAddresses"] = []string{bareAddress(in.ReplyTo)}
+		payload["ReplyToAddresses"] = []string{in.ReplyTo}
 	}
 	if len(in.Headers) > 0 {
-		ctx.Logger().Warn("messaging: custom headers ignored — SES v2 Simple content doesn't carry them. Use raw mode in v0.2.")
+		ctx.Logger().Warn("messaging: custom headers ignored — SES v2 Simple content doesn't carry them. Use raw mode in v0.4.")
 	}
 
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, tool, payload)
@@ -897,8 +941,6 @@ func sendViaProvider(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 		}
 		return "", fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
 	}
-	// Try to pull a MessageId out of the response. SES returns
-	// {"MessageId": "..."} or similar; we hunt for a few common keys.
 	var probe map[string]any
 	_ = json.Unmarshal(res.Data, &probe)
 	for _, key := range []string{"MessageId", "message_id", "messageId", "id"} {
@@ -909,12 +951,90 @@ func sendViaProvider(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 	return "", nil
 }
 
-func stripMailto(uris []string) []string {
-	out := make([]string, 0, len(uris))
-	for _, u := range uris {
-		out = append(out, bareAddress(u))
+// sendViaTwilio invokes the bound phone_provider for SMS or WhatsApp.
+// One Twilio request per recipient (the API takes one To at a time).
+// Returns the SID of the first successful send; if all fail, returns
+// the first error.
+//
+// WhatsApp wire-form prefix: Twilio's API expects "whatsapp:+1..." on
+// both From and To. We add that prefix here so messaging callers and
+// stored rows stay scheme-free.
+func sendViaTwilio(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
+	bound := ctx.IntegrationFor("phone_provider")
+	if bound == nil {
+		return "", errors.New("no phone_provider bound — install/select a Twilio connection for SMS/WhatsApp")
 	}
-	return out
+	capability := "sms.send"
+	if in.Channel == channelWhatsApp {
+		capability = "whatsapp.send"
+	}
+	tool := bound.ToolFor(capability)
+	if tool == "" {
+		if in.Channel == channelWhatsApp {
+			tool = "send_whatsapp"
+		} else {
+			tool = "send_sms"
+		}
+	}
+
+	prefix := ""
+	if in.Channel == channelWhatsApp {
+		prefix = "whatsapp:"
+	}
+	if in.BodyText == "" {
+		return "", errors.New("body required for sms/whatsapp")
+	}
+
+	var firstSID string
+	var firstErr error
+	for _, to := range in.To {
+		payload := map[string]any{
+			"From": prefix + in.From,
+			"To":   prefix + to,
+			"Body": in.BodyText,
+		}
+		if in.MediaURL != "" {
+			payload["MediaUrl"] = in.MediaURL
+		}
+		if in.ContentSid != "" {
+			payload["ContentSid"] = in.ContentSid
+			if in.ContentVariables != "" {
+				payload["ContentVariables"] = in.ContentVariables
+			}
+		}
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, tool, payload)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if res == nil || !res.Success {
+			body := ""
+			if res != nil {
+				body = string(res.Data)
+			}
+			if firstErr == nil {
+				firstErr = fmt.Errorf("twilio non-2xx: %s", truncate(body, 400))
+			}
+			continue
+		}
+		// Twilio Messages.create returns { sid: "SMxxx", ... }.
+		var probe map[string]any
+		_ = json.Unmarshal(res.Data, &probe)
+		if firstSID == "" {
+			for _, key := range []string{"sid", "Sid", "SID"} {
+				if v, ok := probe[key].(string); ok && v != "" {
+					firstSID = v
+					break
+				}
+			}
+		}
+	}
+	if firstSID == "" && firstErr != nil {
+		return "", firstErr
+	}
+	return firstSID, nil
 }
 
 // ─── message_get / message_list ────────────────────────────────────
@@ -953,9 +1073,12 @@ func (a *App) toolMessageList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		Limit:     intArg(args, "limit", 50),
 	}
 	if opts.Address != "" {
-		// best-effort normalise so callers can pass bare emails.
-		if u, err := normaliseURI(opts.Address); err == nil {
-			opts.Address = u
+		// Best-effort normalise; callers may pass mailto:foo@bar.com
+		// or +1555... — strip the prefix and lowercase emails so the
+		// LIKE search works whether the row is plain or legacy URI.
+		opts.Address = strings.TrimSpace(stripScheme(opts.Address))
+		if strings.Contains(opts.Address, "@") {
+			opts.Address = strings.ToLower(opts.Address)
 		}
 	}
 	if opts.Limit <= 0 || opts.Limit > 200 {
@@ -1004,21 +1127,29 @@ func (a *App) toolInboundRouteSet(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if pattern == "" {
 		return nil, errors.New("pattern required")
 	}
-	// Light validation — must be a recognisable URI scheme. Wildcards
-	// (`*`) are allowed in the local part, so we replace them with
-	// "x" before normalising for a syntax check.
+	// Patterns are now plain addresses with optional '*' wildcards
+	// in the local part (email) or matching the whole address. We do
+	// a light syntax check by replacing '*' with 'x' and validating
+	// against the supplied channel.
+	channel := strArg(args, "channel")
+	if channel == "" {
+		channel = channelEmail
+	}
+	if !validChannel(channel) {
+		return nil, fmt.Errorf("channel: unsupported value %q", channel)
+	}
 	probe := strings.ReplaceAll(pattern, "*", "x")
-	if _, err := normaliseURI(probe); err != nil {
+	if _, err := normaliseAddress(channel, probe); err != nil {
 		return nil, fmt.Errorf("pattern: %w", err)
 	}
-	pattern = strings.ToLower(strings.TrimSpace(pattern))
+	pattern = strings.ToLower(strings.TrimSpace(stripScheme(pattern)))
 	targetApp := strArg(args, "target_app")
 	targetRoute := strArg(args, "target_route")
 	if targetApp == "" || targetRoute == "" {
 		return nil, errors.New("target_app and target_route required")
 	}
 	priority := intArg(args, "priority", 100)
-	id, err := dbInboundRouteUpsert(ctx.AppDB(), pid, pattern, targetApp, targetRoute, priority)
+	id, err := dbInboundRouteUpsert(ctx.AppDB(), pid, channel, pattern, targetApp, targetRoute, priority)
 	if err != nil {
 		return nil, err
 	}
@@ -1219,11 +1350,14 @@ func (a *App) toolSuppressionAdd(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if addrRaw == "" {
 		return nil, errors.New("address required")
 	}
-	addr, err := normaliseURI(addrRaw)
-	if err != nil {
-		return nil, err
+	channel := strArg(args, "channel")
+	if channel == "" {
+		channel = guessChannelFromAddress(addrRaw)
 	}
-	channel, err := channelOfURI(addr)
+	if !validChannel(channel) {
+		return nil, errors.New("channel: required for suppression_add (one of email, sms, whatsapp)")
+	}
+	addr, err := normaliseAddress(channel, addrRaw)
 	if err != nil {
 		return nil, err
 	}
@@ -1243,11 +1377,14 @@ func (a *App) toolSuppressionRemove(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, err
 	}
 	addrRaw := strArg(args, "address")
-	addr, err := normaliseURI(addrRaw)
-	if err != nil {
-		return nil, err
+	channel := strArg(args, "channel")
+	if channel == "" {
+		channel = guessChannelFromAddress(addrRaw)
 	}
-	channel, err := channelOfURI(addr)
+	if !validChannel(channel) {
+		return nil, errors.New("channel: required for suppression_remove (one of email, sms, whatsapp)")
+	}
+	addr, err := normaliseAddress(channel, addrRaw)
 	if err != nil {
 		return nil, err
 	}
@@ -1258,7 +1395,22 @@ func (a *App) toolSuppressionRemove(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"removed": true, "address": addr}, nil
+	return map[string]any{"removed": true, "address": addr, "channel": channel}, nil
+}
+
+// guessChannelFromAddress returns the most likely channel for a
+// given address shape — email if it has '@', sms if it's an E.164
+// phone, else "" (caller must supply channel explicitly). Used to
+// keep panel UX terse for the common single-channel cases.
+func guessChannelFromAddress(s string) string {
+	s = strings.TrimSpace(stripScheme(s))
+	if strings.Contains(s, "@") {
+		return channelEmail
+	}
+	if looksLikeE164(s) {
+		return channelSMS
+	}
+	return ""
 }
 
 // ─── senders_* tools ───────────────────────────────────────────────
@@ -1271,12 +1423,13 @@ func (a *App) toolSuppressionRemove(ctx *sdk.AppCtx, args map[string]any) (any, 
 // Domains are detected by absence of "@".
 
 type Sender struct {
-	Address     string   `json:"address"`               // canonical URI
-	Kind        string   `json:"kind"`                  // "email" | "domain" (channel-specific)
-	Verified    bool     `json:"verified"`
-	DKIMStatus  string   `json:"dkim_status,omitempty"` // "SUCCESS"|"PENDING"|"FAILED"|"NOT_STARTED"
-	DKIMTokens  []string `json:"dkim_tokens,omitempty"` // populated by senders_get for domain identities
-	Sending     bool     `json:"sending_enabled"`
+	Channel    string   `json:"channel"`               // "email" | "sms" | "whatsapp"
+	Address    string   `json:"address"`               // plain (alice@x.com or +15551234567)
+	Kind       string   `json:"kind"`                  // "email" | "domain" | "phone"
+	Verified   bool     `json:"verified"`
+	DKIMStatus string   `json:"dkim_status,omitempty"` // email-only — "SUCCESS"|"PENDING"|"FAILED"|"NOT_STARTED"
+	DKIMTokens []string `json:"dkim_tokens,omitempty"` // populated by senders_get for domain identities
+	Sending    bool     `json:"sending_enabled"`
 }
 
 // classifyEmailIdentity returns ("domain", "bar.com") or ("email",
@@ -1302,15 +1455,12 @@ func classifyEmailIdentity(s string) (kind, raw string, err error) {
 	return "domain", strings.ToLower(s), nil
 }
 
-// canonicalSenderURI returns the URI form for a bare SES identity.
-// Domains and addresses both fold under the mailto: scheme — the
-// scheme is "messaging-channel," not "RFC mailbox" — i.e., a
-// "mailto:bar.com" sender means "this domain can send email," not a
-// receivable mailbox. v0.2 keeps it simple; an explicit mailto:domain://
-// scheme would be more correct but adds parser complexity for no
-// callee win today.
-func canonicalSenderURI(kind, raw string) string {
-	return "mailto:" + raw
+// canonicalSenderAddress returns the plain stored form for a sender
+// identity. v0.3 dropped scheme prefixes; the lowercased raw value
+// IS the canonical form. Kept as a wrapper so the call sites read
+// like a deliberate canonicalisation step.
+func canonicalSenderAddress(_ string, raw string) string {
+	return strings.ToLower(strings.TrimSpace(raw))
 }
 
 // emailProviderTool resolves the bound email_provider's tool name
@@ -1376,7 +1526,8 @@ func (a *App) toolSendersList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 				continue
 			}
 			out = append(out, Sender{
-				Address:  canonicalSenderURI(kind, strings.ToLower(id.IdentityName)),
+				Channel:  channelEmail,
+				Address:  canonicalSenderAddress(kind, id.IdentityName),
 				Kind:     kind,
 				Verified: verified,
 				Sending:  id.SendingEnabled,
@@ -1431,7 +1582,8 @@ func (a *App) toolSendersGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		kind = "domain"
 	}
 	out := Sender{
-		Address:    canonicalSenderURI(kind, raw),
+		Channel:    channelEmail,
+		Address:    canonicalSenderAddress(kind, raw),
 		Kind:       kind,
 		Verified:   inner.VerifiedForSendingStatus,
 		DKIMStatus: inner.DkimAttributes.Status,
@@ -1465,7 +1617,7 @@ func (a *App) toolSendersDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		}
 		return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
 	}
-	return map[string]any{"deleted": true, "address": canonicalSenderURI("", raw)}, nil
+	return map[string]any{"deleted": true, "address": canonicalSenderAddress("", raw)}, nil
 }
 
 // toolSendersVerifyEmail picks verify_email vs verify_domain from
@@ -1498,7 +1650,7 @@ func (a *App) toolSendersVerifyEmail(ctx *sdk.AppCtx, args map[string]any) (any,
 	}
 	// verify_email has empty body. verify_domain returns DkimAttributes.Tokens.
 	out := map[string]any{
-		"address":          canonicalSenderURI(kind, raw),
+		"address":          canonicalSenderAddress(kind, raw),
 		"kind":             normaliseSenderKind(kind),
 		"pending":          true,
 		"next_step":        verifyNextStepHint(kind),
@@ -1736,11 +1888,11 @@ func (a *App) handleInboundWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	to := normaliseEmailList(parsed.To)
-	cc := normaliseEmailList(parsed.Cc)
-	from := normaliseEmailURI(parsed.From)
+	to := normaliseEmailListPlain(parsed.To)
+	cc := normaliseEmailListPlain(parsed.Cc)
+	from := normaliseEmailFromHeader(parsed.From)
 	if from == "" {
-		from = "mailto:unknown@invalid"
+		from = "unknown@invalid"
 	}
 	hdrJSON, _ := json.Marshal(parsed.Headers)
 	toJSON, _ := json.Marshal(to)
@@ -1799,7 +1951,10 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 	for _, recip := range append(append([]string{}, m.To...), m.CC...) {
 		for i := range routes {
 			r := &routes[i]
-			ok, sub := patternMatches(r.Pattern, recip)
+			if r.Channel != "" && r.Channel != m.Channel {
+				continue
+			}
+			ok, sub := patternMatches(m.Channel, r.Pattern, recip)
 			if !ok {
 				continue
 			}
@@ -1868,40 +2023,50 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 // email pattern only — the domain and scheme must match exactly.
 // Returns (matched, subaddress) — subaddress is the captured "+tag"
 // when the pattern contains a literal "+*" marker.
-func patternMatches(pattern, addr string) (bool, string) {
-	pattern = strings.ToLower(pattern)
-	addr = strings.ToLower(addr)
-	// Both must be mailto: in v0.1.
-	if !strings.HasPrefix(pattern, "mailto:") || !strings.HasPrefix(addr, "mailto:") {
-		return pattern == addr, ""
-	}
-	pAddr := pattern[7:]
-	aAddr := addr[7:]
-	pAt := strings.IndexByte(pAddr, '@')
-	aAt := strings.IndexByte(aAddr, '@')
-	if pAt < 0 || aAt < 0 {
-		return false, ""
-	}
-	pLocal, pDomain := pAddr[:pAt], pAddr[pAt+1:]
-	aLocal, aDomain := aAddr[:aAt], aAddr[aAt+1:]
-	if pDomain != aDomain {
-		return false, ""
-	}
-	// Domain wildcard not supported in v0.1.
-	// Local-part: support exact, "*" (full-local wildcard), and
-	// "<prefix>+*" (subaddress wildcard).
-	switch {
-	case pLocal == aLocal:
+// patternMatches checks whether `addr` matches `pattern` for the
+// given channel. Both inputs are plain addresses (no scheme prefix).
+//
+// Email patterns support local-part wildcards:
+//   - exact:        "support@acme.com"
+//   - full-local:   "*@acme.com" (any local part) — captures full local in subaddress slot
+//   - subaddress:   "support+*@acme.com" (any +tag) — captures the tag
+//
+// SMS / WhatsApp patterns support exact match or "*" for any number;
+// no subaddress concept on phone channels.
+func patternMatches(channel, pattern, addr string) (bool, string) {
+	pattern = strings.ToLower(strings.TrimSpace(pattern))
+	addr = strings.ToLower(strings.TrimSpace(addr))
+	if pattern == addr {
 		return true, ""
-	case pLocal == "*":
-		return true, extractSubaddress(addr)
-	case strings.HasSuffix(pLocal, "+*"):
-		prefix := strings.TrimSuffix(pLocal, "+*")
-		// "support+T-1234" matches "support+*"
-		if !strings.HasPrefix(aLocal, prefix+"+") {
+	}
+	switch channel {
+	case channelEmail:
+		pAt := strings.IndexByte(pattern, '@')
+		aAt := strings.IndexByte(addr, '@')
+		if pAt < 0 || aAt < 0 {
 			return false, ""
 		}
-		return true, aLocal[len(prefix)+1:]
+		pLocal, pDomain := pattern[:pAt], pattern[pAt+1:]
+		aLocal, aDomain := addr[:aAt], addr[aAt+1:]
+		if pDomain != aDomain {
+			return false, ""
+		}
+		switch {
+		case pLocal == aLocal:
+			return true, ""
+		case pLocal == "*":
+			return true, extractSubaddress(addr)
+		case strings.HasSuffix(pLocal, "+*"):
+			prefix := strings.TrimSuffix(pLocal, "+*")
+			if !strings.HasPrefix(aLocal, prefix+"+") {
+				return false, ""
+			}
+			return true, aLocal[len(prefix)+1:]
+		}
+	case channelSMS, channelWhatsApp:
+		if pattern == "*" {
+			return true, ""
+		}
 	}
 	return false, ""
 }
@@ -2227,25 +2392,29 @@ func splitRefs(s string) []string {
 	return out
 }
 
-func normaliseEmailURI(s string) string {
+// normaliseEmailFromHeader parses an RFC 5322-shaped header value
+// ("Foo <foo@bar.com>") and returns the plain lowercased address.
+// Renamed in v0.3 — used by SES inbound parsing only — and no longer
+// returns a URI form.
+func normaliseEmailFromHeader(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return ""
 	}
 	addr, err := mail.ParseAddress(s)
 	if err == nil {
-		return "mailto:" + strings.ToLower(addr.Address)
+		return strings.ToLower(addr.Address)
 	}
-	if u, err := normaliseURI(s); err == nil {
-		return u
+	if a, err := normaliseAddress(channelEmail, s); err == nil {
+		return a
 	}
 	return ""
 }
 
-func normaliseEmailList(addrs []string) []string {
+func normaliseEmailListPlain(addrs []string) []string {
 	out := make([]string, 0, len(addrs))
 	for _, a := range addrs {
-		if u := normaliseEmailURI(a); u != "" {
+		if u := normaliseEmailFromHeader(a); u != "" {
 			out = append(out, u)
 		}
 	}
@@ -2253,9 +2422,10 @@ func normaliseEmailList(addrs []string) []string {
 }
 
 func canonicalAddrForChannel(channel, addr string) string {
+	addr = strings.TrimSpace(stripScheme(addr))
 	switch channel {
 	case channelEmail:
-		return "mailto:" + strings.ToLower(strings.TrimSpace(addr))
+		return strings.ToLower(addr)
 	}
 	return addr
 }
@@ -2681,12 +2851,12 @@ func dbTemplateList(db *sql.DB, pid, channel string, limit int) ([]*Template, er
 	return out, nil
 }
 
-func dbInboundRouteUpsert(db *sql.DB, pid, pattern, app, route string, priority int) (int64, error) {
+func dbInboundRouteUpsert(db *sql.DB, pid, channel, pattern, app, route string, priority int) (int64, error) {
 	var id int64
 	err := db.QueryRow(
 		`SELECT id FROM inbound_routes
-		 WHERE project_id = ? AND pattern = ? AND target_app = ? AND target_route = ?`,
-		pid, pattern, app, route,
+		 WHERE project_id = ? AND channel = ? AND pattern = ? AND target_app = ? AND target_route = ?`,
+		pid, channel, pattern, app, route,
 	).Scan(&id)
 	if err == nil {
 		_, err = db.Exec(`UPDATE inbound_routes SET priority = ? WHERE id = ?`, priority, id)
@@ -2696,9 +2866,9 @@ func dbInboundRouteUpsert(db *sql.DB, pid, pattern, app, route string, priority 
 		return 0, err
 	}
 	res, err := db.Exec(
-		`INSERT INTO inbound_routes (project_id, pattern, target_app, target_route, priority)
-		 VALUES (?, ?, ?, ?, ?)`,
-		pid, pattern, app, route, priority,
+		`INSERT INTO inbound_routes (project_id, channel, pattern, target_app, target_route, priority)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		pid, channel, pattern, app, route, priority,
 	)
 	if err != nil {
 		return 0, err
@@ -2708,10 +2878,10 @@ func dbInboundRouteUpsert(db *sql.DB, pid, pattern, app, route string, priority 
 
 func dbInboundRouteGet(db *sql.DB, pid string, id int64) (*InboundRoute, error) {
 	row := db.QueryRow(
-		`SELECT id, project_id, pattern, target_app, target_route, priority, COALESCE(created_at,'')
+		`SELECT id, project_id, COALESCE(channel,'email'), pattern, target_app, target_route, priority, COALESCE(created_at,'')
 		 FROM inbound_routes WHERE id = ? AND project_id = ?`, id, pid)
 	r := &InboundRoute{}
-	err := row.Scan(&r.ID, &r.ProjectID, &r.Pattern, &r.TargetApp, &r.TargetRoute, &r.Priority, &r.CreatedAt)
+	err := row.Scan(&r.ID, &r.ProjectID, &r.Channel, &r.Pattern, &r.TargetApp, &r.TargetRoute, &r.Priority, &r.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -2723,7 +2893,7 @@ func dbInboundRouteGet(db *sql.DB, pid string, id int64) (*InboundRoute, error) 
 
 func dbInboundRouteList(db *sql.DB, pid string) ([]InboundRoute, error) {
 	rows, err := db.Query(
-		`SELECT id, project_id, pattern, target_app, target_route, priority, COALESCE(created_at,'')
+		`SELECT id, project_id, COALESCE(channel,'email'), pattern, target_app, target_route, priority, COALESCE(created_at,'')
 		 FROM inbound_routes WHERE project_id = ?
 		 ORDER BY priority DESC, length(pattern) DESC`, pid)
 	if err != nil {
@@ -2733,7 +2903,7 @@ func dbInboundRouteList(db *sql.DB, pid string) ([]InboundRoute, error) {
 	out := []InboundRoute{}
 	for rows.Next() {
 		r := InboundRoute{}
-		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Pattern, &r.TargetApp, &r.TargetRoute, &r.Priority, &r.CreatedAt); err == nil {
+		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Channel, &r.Pattern, &r.TargetApp, &r.TargetRoute, &r.Priority, &r.CreatedAt); err == nil {
 			out = append(out, r)
 		}
 	}

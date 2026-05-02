@@ -70,19 +70,19 @@ func TestSidecar_InboundRouteCRUD(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
 
 	out := sc.MCP("inbound_route_set", map[string]any{
-		"pattern":      "mailto:support+*@acme.com",
+		"pattern":      "support+*@acme.com",
 		"target_app":   "support",
 		"target_route": "/inbound",
 	})
 	r := out["route"].(map[string]any)
 	id := int64(r["id"].(float64))
-	if r["pattern"] != "mailto:support+*@acme.com" {
+	if r["pattern"] != "support+*@acme.com" {
 		t.Errorf("pattern=%v", r["pattern"])
 	}
 
 	// Idempotent — same payload returns same id.
 	out2 := sc.MCP("inbound_route_set", map[string]any{
-		"pattern":      "mailto:support+*@acme.com",
+		"pattern":      "support+*@acme.com",
 		"target_app":   "support",
 		"target_route": "/inbound",
 	})
@@ -118,7 +118,7 @@ func TestSidecar_SuppressionFlow(t *testing.T) {
 		t.Fatalf("expected 1 row, got %d", len(rows))
 	}
 	first := rows[0].(map[string]any)
-	if first["address"] != "mailto:blocked@example.com" {
+	if first["address"] != "blocked@example.com" {
 		t.Errorf("address=%v", first["address"])
 	}
 	if first["source"] != "manual" {
@@ -140,7 +140,7 @@ func TestSidecar_HTTPListEndpoints(t *testing.T) {
 	// Pre-seed via MCP so the HTTP read shows non-empty.
 	sc.MCP("template_create", map[string]any{"name": "t1"})
 	sc.MCP("inbound_route_set", map[string]any{
-		"pattern": "mailto:support@acme.com", "target_app": "support", "target_route": "/inbound",
+		"pattern": "support@acme.com", "target_app": "support", "target_route": "/inbound",
 	})
 	sc.MCP("suppression_add", map[string]any{"address": "x@y.com", "reason": "test"})
 
@@ -222,7 +222,7 @@ func TestSidecar_InboundWebhook_PersistsAndAttemptsDispatch(t *testing.T) {
 
 	// Register a route first so the dispatcher has a target.
 	sc.MCP("inbound_route_set", map[string]any{
-		"pattern":      "mailto:support+*@acme.com",
+		"pattern":      "support+*@acme.com",
 		"target_app":   "support",
 		"target_route": "/inbound",
 	})
@@ -267,10 +267,10 @@ func TestSidecar_InboundWebhook_PersistsAndAttemptsDispatch(t *testing.T) {
 	if !strings.Contains(m["subject"].(string), "Order #9001") {
 		t.Errorf("subject=%v", m["subject"])
 	}
-	if m["from"] != "mailto:customer@example.com" {
+	if m["from"] != "customer@example.com" {
 		t.Errorf("from=%v", m["from"])
 	}
-	if m["matched_pattern"] != "mailto:support+*@acme.com" {
+	if m["matched_pattern"] != "support+*@acme.com" {
 		t.Errorf("matched_pattern=%v", m["matched_pattern"])
 	}
 	// In tier 2 there's no real platform, so CallApp will fail and
@@ -311,8 +311,9 @@ func TestSidecar_SendMessage_RequiresFrom(t *testing.T) {
 	_, err := sc.MCPRaw("tools/call", map[string]any{
 		"name": "send_message",
 		"arguments": map[string]any{
-			"to":   "alice@example.com",
-			"body": "hi",
+			"channel": "email",
+			"to":      "alice@example.com",
+			"body":    "hi",
 		},
 	})
 	if err == nil {

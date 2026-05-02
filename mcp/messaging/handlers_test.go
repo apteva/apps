@@ -132,6 +132,7 @@ func TestSendMessage_PersistsAndCallsProvider(t *testing.T) {
 	app := &App{}
 
 	out, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "email",
 		"from":    fromAcme,
 		"to":      "alice@example.com",
 		"subject": "hello",
@@ -180,6 +181,7 @@ func TestSendMessage_RequiresBodyOrTemplate(t *testing.T) {
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 	_, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "email",
 		"from":    fromAcme,
 		"to":      "alice@example.com",
 		"subject": "hello",
@@ -194,8 +196,9 @@ func TestSendMessage_RequiresFrom(t *testing.T) {
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 	_, err := app.toolSendMessage(ctx, map[string]any{
-		"to":   "alice@example.com",
-		"body": "hi",
+		"channel": "email",
+		"to":      "alice@example.com",
+		"body":    "hi",
 	})
 	if err == nil || !strings.Contains(err.Error(), "from: required") {
 		t.Errorf("expected from-required error, got %v", err)
@@ -205,12 +208,46 @@ func TestSendMessage_RequiresFrom(t *testing.T) {
 	}
 }
 
+func TestSendMessage_RequiresChannel(t *testing.T) {
+	plat := &stubPlatform{}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"from": fromAcme,
+		"to":   "alice@example.com",
+		"body": "hi",
+	})
+	if err == nil || !strings.Contains(err.Error(), "channel: required") {
+		t.Errorf("expected channel-required error, got %v", err)
+	}
+}
+
+func TestSendMessage_PhoneProviderNotBound(t *testing.T) {
+	plat := &stubPlatform{} // default bindings expose only email_provider
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "sms",
+		"from":    "+15551112222",
+		"to":      "+15553334444",
+		"body":    "hi",
+	})
+	if err != nil {
+		t.Fatalf("send_message returned go error %v (expected the failure to surface in the persisted row)", err)
+	}
+	// Row persisted as failed; no provider call recorded.
+	if len(plat.executeCalls) != 0 {
+		t.Errorf("expected zero provider calls (no phone_provider bound), got %d", len(plat.executeCalls))
+	}
+}
+
 func TestSendMessage_Idempotency(t *testing.T) {
 	plat := &stubPlatform{}
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 
 	args := map[string]any{
+		"channel":         "email",
 		"from":            fromAcme,
 		"to":              "bob@example.com",
 		"body":            "yo",
@@ -237,11 +274,12 @@ func TestSendMessage_RespectsSuppression(t *testing.T) {
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 
-	if err := dbSuppressionUpsert(ctx.AppDB(), "test-proj", "email", "mailto:bad@example.com", "hard-bounce", "auto"); err != nil {
+	if err := dbSuppressionUpsert(ctx.AppDB(), "test-proj", "email", "bad@example.com", "hard-bounce", "auto"); err != nil {
 		t.Fatal(err)
 	}
 	_, err := app.toolSendMessage(ctx, map[string]any{
-		"from": fromAcme,
+		"channel": "email",
+		"from":    fromAcme,
 		"to":   "bad@example.com",
 		"body": "you'll never see this",
 	})
@@ -264,7 +302,8 @@ func TestSendMessage_ProviderErrorMarksFailed(t *testing.T) {
 	app := &App{}
 
 	out, err := app.toolSendMessage(ctx, map[string]any{
-		"from": fromAcme,
+		"channel": "email",
+		"from":    fromAcme,
 		"to":   "carol@example.com",
 		"body": "ping",
 	})
@@ -335,6 +374,7 @@ func TestSendMessage_TemplateRender(t *testing.T) {
 	tplID := createOut.(map[string]any)["template"].(*Template).ID
 
 	_, err = app.toolSendMessage(ctx, map[string]any{
+		"channel":     "email",
 		"from":        fromAcme,
 		"to":          "user@example.com",
 		"template_id": tplID,
@@ -362,7 +402,7 @@ func TestInboundRoute_SetIdempotent(t *testing.T) {
 	ctx := newTestCtx(t, nil)
 	app := &App{}
 	args := map[string]any{
-		"pattern":      "mailto:support+*@acme.com",
+		"pattern":      "support+*@acme.com",
 		"target_app":   "support",
 		"target_route": "/inbound",
 	}
@@ -434,10 +474,10 @@ func TestSenders_List_NormalisesShape(t *testing.T) {
 		t.Errorf("count=%v", r["count"])
 	}
 	rows := r["senders"].([]Sender)
-	if rows[0].Address != "mailto:notifications@acme.com" || !rows[0].Verified || rows[0].Kind != "email" {
+	if rows[0].Address != "notifications@acme.com" || !rows[0].Verified || rows[0].Kind != "email" || rows[0].Channel != "email" {
 		t.Errorf("row 0: %+v", rows[0])
 	}
-	if rows[1].Address != "mailto:acme.com" || rows[1].Kind != "domain" {
+	if rows[1].Address != "acme.com" || rows[1].Kind != "domain" || rows[1].Channel != "email" {
 		t.Errorf("row 1: %+v", rows[1])
 	}
 	if rows[2].Verified {

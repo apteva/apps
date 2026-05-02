@@ -19,8 +19,8 @@ func TestBounceWebhook_HardBounceSuppresses(t *testing.T) {
 		`INSERT INTO messages
 			(project_id, channel, direction, from_addr, to_addrs,
 			 status, provider_message_id)
-		 VALUES ('test-proj', 'email', 'out', 'mailto:noreply@acme.com',
-		         '["mailto:bouncy@example.com"]', 'sent', 'ses-msg-bounce-1')`,
+		 VALUES ('test-proj', 'email', 'out', 'noreply@acme.com',
+		         '["bouncy@example.com"]', 'sent', 'ses-msg-bounce-1')`,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +70,7 @@ func TestBounceWebhook_HardBounceSuppresses(t *testing.T) {
 	if len(supp) != 1 {
 		t.Fatalf("expected 1 suppression, got %d", len(supp))
 	}
-	if supp[0].Address != "mailto:bouncy@example.com" {
+	if supp[0].Address != "bouncy@example.com" {
 		t.Errorf("suppressed addr=%q", supp[0].Address)
 	}
 	if supp[0].Reason != "hard-bounce" {
@@ -84,7 +84,7 @@ func TestBounceWebhook_ComplaintSuppresses(t *testing.T) {
 
 	_, err := ctx.AppDB().Exec(
 		`INSERT INTO messages (project_id, channel, direction, from_addr, to_addrs, status, provider_message_id)
-		 VALUES ('test-proj', 'email', 'out', 'mailto:noreply@acme.com', '["mailto:angry@example.com"]', 'sent', 'ses-c-1')`,
+		 VALUES ('test-proj', 'email', 'out', 'noreply@acme.com', '["angry@example.com"]', 'sent', 'ses-c-1')`,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -138,7 +138,7 @@ func TestInboundWebhook_PersistsAndDispatches(t *testing.T) {
 
 	// Register an inbound route so dispatch has a target.
 	if _, err := app.toolInboundRouteSet(ctx, map[string]any{
-		"pattern":      "mailto:support+*@acme.com",
+		"pattern":      "support+*@acme.com",
 		"target_app":   "support",
 		"target_route": "/inbound",
 	}); err != nil {
@@ -176,7 +176,7 @@ func TestInboundWebhook_PersistsAndDispatches(t *testing.T) {
 	if m.Subject != "Re: Order #1234" {
 		t.Errorf("subject=%q", m.Subject)
 	}
-	if m.From != "mailto:customer@example.com" {
+	if m.From != "customer@example.com" {
 		t.Errorf("from=%q", m.From)
 	}
 	if m.MessageIDHeader != "<abc123@example.com>" {
@@ -201,7 +201,7 @@ func TestInboundWebhook_PersistsAndDispatches(t *testing.T) {
 	if call.App != "support" || call.Tool != "/inbound" {
 		t.Errorf("call=%+v", call)
 	}
-	if call.Input["matched_recipient"] != "mailto:support+t-1234@acme.com" {
+	if call.Input["matched_recipient"] != "support+t-1234@acme.com" {
 		t.Errorf("matched=%v", call.Input["matched_recipient"])
 	}
 	if call.Input["to_subaddress"] != "t-1234" {

@@ -155,12 +155,12 @@ func TestLive_SES_NormalisesThroughOurParser(t *testing.T) {
 		if id.IdentityType == "DOMAIN" || id.IdentityType == "MANAGED_DOMAIN" {
 			kind = "domain"
 		}
-		uri := canonicalSenderURI(kind, strings.ToLower(id.IdentityName))
-		if !strings.HasPrefix(uri, "mailto:") {
-			t.Errorf("normalised URI lost scheme: %q", uri)
+		addr := canonicalSenderAddress(kind, strings.ToLower(id.IdentityName))
+		if addr == "" {
+			t.Errorf("normalised address empty for %q", id.IdentityName)
 		}
 	}
-	t.Logf("live OK: normalised %d identities through canonicalSenderURI", len(inner.EmailIdentities))
+	t.Logf("live OK: normalised %d identities through canonicalSenderAddress", len(inner.EmailIdentities))
 }
 
 // ─── Minimal SigV4 GET signer ──────────────────────────────────────
