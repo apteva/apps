@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/media
 go 1.25.0
 
 require (
-	github.com/apteva/app-sdk v0.1.3-0.20260430070155-43f24574d06d
+	github.com/apteva/app-sdk v0.1.3
 	modernc.org/sqlite v1.50.0
 )
 
@@ -19,5 +19,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-replace github.com/apteva/app-sdk => ../../../app-sdk
