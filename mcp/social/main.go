@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.5.1
+version: 0.6.0
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -451,6 +451,23 @@ func (a *App) MCPTools() []sdk.Tool {
 				"post_id": map[string]any{"type": "integer"},
 			}, []string{"post_id"}),
 			Handler: a.toolPostRetry,
+		},
+		{
+			Name:        "post_reschedule",
+			Description: "Change a scheduled post's run time. Cancels the existing jobs row and creates a fresh one — only valid while status='scheduled' (already-published or in-flight posts are immutable). Args: post_id, schedule_at (RFC3339 or datetime-local).",
+			InputSchema: schemaObject(map[string]any{
+				"post_id":     map[string]any{"type": "integer"},
+				"schedule_at": map[string]any{"type": "string"},
+			}, []string{"post_id", "schedule_at"}),
+			Handler: a.toolPostReschedule,
+		},
+		{
+			Name:        "post_delete",
+			Description: "Delete a post + its post_targets locally. If the post is currently scheduled, cancels the corresponding jobs row first. Does NOT delete the post from the upstream platform — Facebook/Instagram/etc keep their copy of any already-published content. Args: post_id.",
+			InputSchema: schemaObject(map[string]any{
+				"post_id": map[string]any{"type": "integer"},
+			}, []string{"post_id"}),
+			Handler: a.toolPostDelete,
 		},
 	}
 	tools = append(tools, a.profileTools()...)
@@ -973,11 +990,21 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if scheduleAt == "" {
 		a.publishPostTargets(ctx, postID)
 	} else {
-		if err := a.scheduleJob(ctx, postID, scheduleAt); err != nil {
+		jobID, err := a.scheduleJob(ctx, postID, scheduleAt)
+		if err != nil {
 			ctx.Logger().Warn("schedule via jobs failed", "post", postID, "err", err)
-			// Roll the post back to draft so the operator can retry.
 			_, _ = ctx.AppDB().Exec(`UPDATE posts SET status='failed' WHERE id=?`, postID)
 			return mcpError("scheduling failed (is the jobs app bound?): " + err.Error()), nil
+		}
+		// Persist the jobs.id so post_reschedule + post_delete can
+		// cancel the right job later. Failure here is non-fatal —
+		// the post is scheduled even if we can't track the link;
+		// worst case the job lapses on time without an explicit
+		// cancel call.
+		if jobID > 0 {
+			_, _ = ctx.AppDB().Exec(
+				`UPDATE posts SET job_id=? WHERE id=?`, jobID, postID,
+			)
 		}
 	}
 
@@ -1520,23 +1547,17 @@ func upstreamError(out *sdk.ExecuteResult) error {
 
 // scheduleJob hands off to the jobs app: register an event-style job
 // that POSTs back into /api/apps/social/jobs/publish_post when its
-// scheduled time arrives. Uses the cross-app {app, path} target
-// shape rather than a raw url= so jobs' dispatcher resolves the
-// platform-internal path correctly. Idempotency keyed on post_id
-// so dupes coalesce.
-func (a *App) scheduleJob(ctx *sdk.AppCtx, postID int64, scheduleAt string) error {
+// scheduled time arrives. Returns the job id so the caller can
+// persist it on the post row — post_reschedule / post_delete need
+// it to cancel the right job later.
+func (a *App) scheduleJob(ctx *sdk.AppCtx, postID int64, scheduleAt string) (int64, error) {
 	jobsBound := ctx.IntegrationFor("jobs")
 	if jobsBound == nil {
-		return errors.New("jobs app not bound — bind it at install time to enable durable scheduling")
+		return 0, errors.New("jobs app not bound — bind it at install time to enable durable scheduling")
 	}
-	// Normalise the schedule_at — the panel's <input type=datetime-
-	// local> emits "2006-01-02T15:04" (no seconds, no timezone),
-	// which jobs.parseTime doesn't accept. Reinterpret it as the
-	// server's local time and re-emit RFC3339 with offset so the
-	// jobs app gets an unambiguous instant.
 	rfc3339, err := normaliseScheduleAt(scheduleAt)
 	if err != nil {
-		return fmt.Errorf("invalid schedule_at %q: %w", scheduleAt, err)
+		return 0, fmt.Errorf("invalid schedule_at %q: %w", scheduleAt, err)
 	}
 	res, err := ctx.PlatformAPI().CallApp("jobs", "jobs_schedule", map[string]any{
 		"name": fmt.Sprintf("social.publish_post.%d", postID),
@@ -1557,18 +1578,73 @@ func (a *App) scheduleJob(ctx *sdk.AppCtx, postID int64, scheduleAt string) erro
 		"owner_app":       "social",
 	})
 	if err != nil {
-		return err
+		return 0, err
 	}
-	// CallApp returns nil error on HTTP 2xx — but jobs may have
-	// rejected the request via an MCP error envelope (`{result:
-	// {isError:true, content:[{text:"…"}]}}` at HTTP 200). Detect
-	// that and surface the inner message; otherwise the post stays
-	// in 'scheduled' status while no job actually exists.
 	if msg := mcpErrorMessage(res); msg != "" {
-		return fmt.Errorf("jobs_schedule: %s", msg)
+		return 0, fmt.Errorf("jobs_schedule: %s", msg)
 	}
-	ctx.Logger().Info("scheduleJob: created", "post_id", postID, "run_at", rfc3339)
-	return nil
+	jobID := extractJobID(res)
+	ctx.Logger().Info("scheduleJob: created", "post_id", postID, "job_id", jobID, "run_at", rfc3339)
+	return jobID, nil
+}
+
+// extractJobID pulls the new job's id out of a jobs_schedule
+// response. Both shapes appear: direct `{job:{id}}` (in-process
+// tests) and the JSON-RPC-wrapped `result.content[].text` form
+// CallApp returns over HTTP. Returns 0 when the response doesn't
+// match — caller stores 0 and post_delete falls back to letting
+// the run_at lapse without a cancel.
+func extractJobID(raw json.RawMessage) int64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var direct struct {
+		Job struct {
+			ID int64 `json:"id"`
+		} `json:"job"`
+	}
+	if json.Unmarshal(raw, &direct) == nil && direct.Job.ID != 0 {
+		return direct.Job.ID
+	}
+	var wrapped struct {
+		Result struct {
+			Content []struct {
+				Type, Text string
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(raw, &wrapped) == nil {
+		for _, c := range wrapped.Result.Content {
+			if c.Type == "text" && c.Text != "" {
+				if id := extractJobID(json.RawMessage(c.Text)); id != 0 {
+					return id
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// cancelJob asks jobs to cancel a previously-created job. Quiet on
+// failure — post_delete proceeds regardless so a stale jobs row
+// doesn't block deletion.
+func (a *App) cancelJob(ctx *sdk.AppCtx, jobID int64) {
+	if jobID <= 0 {
+		return
+	}
+	if ctx.IntegrationFor("jobs") == nil {
+		return
+	}
+	res, err := ctx.PlatformAPI().CallApp("jobs", "jobs_cancel", map[string]any{
+		"id": jobID,
+	})
+	if err != nil {
+		ctx.Logger().Warn("cancelJob failed", "job_id", jobID, "err", err)
+		return
+	}
+	if msg := mcpErrorMessage(res); msg != "" {
+		ctx.Logger().Warn("cancelJob envelope error", "job_id", jobID, "err", msg)
+	}
 }
 
 // normaliseScheduleAt accepts the formats the panel + agents send and
@@ -1776,6 +1852,112 @@ func (a *App) toolPostRetry(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{"retried": n}, nil
 }
 
+// ─── post_reschedule ──────────────────────────────────────────────
+
+func (a *App) toolPostReschedule(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	postID := int64(intArg(args, "post_id", 0))
+	scheduleAt, _ := args["schedule_at"].(string)
+	if postID <= 0 {
+		return mcpError("post_id required"), nil
+	}
+	if scheduleAt == "" {
+		return mcpError("schedule_at required"), nil
+	}
+	pid := os.Getenv("APTEVA_PROJECT_ID")
+	var status string
+	var jobID int64
+	err := ctx.AppDB().QueryRow(
+		`SELECT status, COALESCE(job_id,0) FROM posts WHERE id=? AND project_id=?`,
+		postID, pid,
+	).Scan(&status, &jobID)
+	if err != nil {
+		return mcpError("post not found"), nil
+	}
+	if status != "scheduled" {
+		return mcpError(fmt.Sprintf(
+			"post status=%q can't be rescheduled (only 'scheduled' posts are reschedulable)", status,
+		)), nil
+	}
+	// Cancel the old job FIRST. If the new schedule fails we end up
+	// with a post in 'scheduled' but no job — caught by the rollback
+	// below: the post status is flipped to 'failed' so the operator
+	// notices.
+	a.cancelJob(ctx, jobID)
+
+	newJobID, err := a.scheduleJob(ctx, postID, scheduleAt)
+	if err != nil {
+		_, _ = ctx.AppDB().Exec(
+			`UPDATE posts SET status='failed', job_id=0 WHERE id=?`, postID,
+		)
+		return mcpError("reschedule failed: " + err.Error()), nil
+	}
+	rfc, _ := normaliseScheduleAt(scheduleAt)
+	_, _ = ctx.AppDB().Exec(
+		`UPDATE posts SET schedule_at=?, job_id=? WHERE id=?`,
+		rfc, newJobID, postID,
+	)
+	ctx.Emit("post.rescheduled", map[string]any{
+		"post_id":  postID,
+		"job_id":   newJobID,
+		"run_at":   rfc,
+	})
+	return map[string]any{
+		"post_id":     postID,
+		"schedule_at": rfc,
+		"job_id":      newJobID,
+	}, nil
+}
+
+// ─── post_delete ───────────────────────────────────────────────────
+
+func (a *App) toolPostDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	postID := int64(intArg(args, "post_id", 0))
+	if postID <= 0 {
+		return mcpError("post_id required"), nil
+	}
+	pid := os.Getenv("APTEVA_PROJECT_ID")
+	var status string
+	var jobID int64
+	err := ctx.AppDB().QueryRow(
+		`SELECT status, COALESCE(job_id,0) FROM posts WHERE id=? AND project_id=?`,
+		postID, pid,
+	).Scan(&status, &jobID)
+	if err != nil {
+		return mcpError("post not found"), nil
+	}
+	// Cancel the upstream jobs row first (best-effort — if the post
+	// already fired, jobs treats the cancel as a no-op).
+	if status == "scheduled" && jobID > 0 {
+		a.cancelJob(ctx, jobID)
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM post_targets WHERE post_id=?`, postID); err != nil {
+		return nil, fmt.Errorf("delete targets: %w", err)
+	}
+	if _, err := tx.Exec(
+		`DELETE FROM posts WHERE id=? AND project_id=?`, postID, pid,
+	); err != nil {
+		return nil, fmt.Errorf("delete post: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	ctx.Emit("post.deleted", map[string]any{
+		"post_id":            postID,
+		"prior_status":       status,
+		"cancelled_job_id":   jobID,
+	})
+	return map[string]any{
+		"deleted":          postID,
+		"prior_status":     status,
+		"cancelled_job_id": jobID,
+	}, nil
+}
+
 // ─── HTTP handlers (panel) ────────────────────────────────────────
 
 func (a *App) handleAccountsAPI(w http.ResponseWriter, r *http.Request) {
@@ -1958,8 +2140,44 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
+	if len(parts) == 1 {
+		// /posts/:id — only DELETE for now (no GET on a single
+		// post; post_list is granular enough).
+		switch r.Method {
+		case http.MethodDelete:
+			out, err := a.toolPostDelete(globalCtx, map[string]any{"post_id": id})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, out)
+			return
+		default:
+			http.Error(w, "DELETE only at this path", http.StatusMethodNotAllowed)
+			return
+		}
+	}
 	if len(parts) == 2 && parts[1] == "retry" && r.Method == http.MethodPost {
 		out, err := a.toolPostRetry(globalCtx, map[string]any{"post_id": id})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, out)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "reschedule" && r.Method == http.MethodPost {
+		var body struct {
+			ScheduleAt string `json:"schedule_at"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		out, err := a.toolPostReschedule(globalCtx, map[string]any{
+			"post_id":     id,
+			"schedule_at": body.ScheduleAt,
+		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

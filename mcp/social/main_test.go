@@ -1051,3 +1051,189 @@ func TestMcpErrorMessage(t *testing.T) {
 		}
 	}
 }
+
+func TestExtractJobID(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+	}{
+		{"", 0},
+		{`{"job":{"id":42,"name":"x"}}`, 42},
+		{`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"job\":{\"id\":99}}"}]}}`, 99},
+		{`{"unrelated":true}`, 0},
+	}
+	for _, c := range cases {
+		if got := extractJobID(json.RawMessage(c.in)); got != c.want {
+			t.Errorf("extractJobID(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+func TestPostCreate_PersistsJobID(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.identity.Bindings = map[string]any{"jobs": float64(101)}
+	pf.callAppResponses["jobs:jobs_schedule"] = json.RawMessage(`{"job":{"id":777,"name":"x"}}`)
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+	app := &App{}
+	out, err := app.toolPostCreate(ctx, map[string]any{
+		"body":               "later",
+		"social_account_ids": []any{acctID},
+		"schedule_at":        "2026-05-10T10:00:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	postID := out.(map[string]any)["post_id"].(int64)
+	var jobID int64
+	ctx.AppDB().QueryRow(`SELECT job_id FROM posts WHERE id=?`, postID).Scan(&jobID)
+	if jobID != 777 {
+		t.Errorf("expected post.job_id=777 (from extracted response), got %d", jobID)
+	}
+}
+
+func TestPostReschedule_CancelsOldAndCreatesNew(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.identity.Bindings = map[string]any{"jobs": float64(101)}
+	// First schedule returns id=100, second returns id=200.
+	pf.callAppResponses["jobs:jobs_schedule"] = json.RawMessage(`{"job":{"id":100}}`)
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+	app := &App{}
+	created, _ := app.toolPostCreate(ctx, map[string]any{
+		"body":               "later",
+		"social_account_ids": []any{acctID},
+		"schedule_at":        "2026-05-10T10:00:00Z",
+	})
+	postID := created.(map[string]any)["post_id"].(int64)
+
+	// Swap the response for the second call.
+	pf.callAppResponses["jobs:jobs_schedule"] = json.RawMessage(`{"job":{"id":200}}`)
+
+	out, err := app.toolPostReschedule(ctx, map[string]any{
+		"post_id":     postID,
+		"schedule_at": "2026-05-15T14:00:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(map[string]any)
+	if res["job_id"] != int64(200) {
+		t.Errorf("new job_id = %v, want 200", res["job_id"])
+	}
+	// We expect: jobs_cancel(100) + jobs_schedule(new). Plus the
+	// original jobs_schedule from create.
+	var cancelCalled bool
+	for _, c := range pf.callAppCalls {
+		if c.AppName == "jobs" && c.Tool == "jobs_cancel" {
+			cancelCalled = true
+			// JSON unmarshalled args may arrive as float64 or int64
+			// depending on whether the test passed the literal or it
+			// round-tripped through json.Marshal. Normalise.
+			var got int64
+			switch v := c.Input["id"].(type) {
+			case float64:
+				got = int64(v)
+			case int64:
+				got = v
+			case int:
+				got = int64(v)
+			}
+			if got != 100 {
+				t.Errorf("jobs_cancel called with %v, want 100", c.Input["id"])
+			}
+		}
+	}
+	if !cancelCalled {
+		t.Errorf("jobs_cancel was not called for the prior job")
+	}
+	// Post row should reflect the new job_id + new schedule_at.
+	var jid int64
+	var when string
+	ctx.AppDB().QueryRow(
+		`SELECT job_id, COALESCE(schedule_at,'') FROM posts WHERE id=?`, postID,
+	).Scan(&jid, &when)
+	if jid != 200 {
+		t.Errorf("post.job_id=%d, want 200", jid)
+	}
+	if !strings.Contains(when, "2026-05-15") {
+		t.Errorf("post.schedule_at=%q, want a 2026-05-15 timestamp", when)
+	}
+}
+
+func TestPostReschedule_RefusesPublishedPosts(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.identity.Bindings = map[string]any{"jobs": float64(101)}
+	ctx := newSocialCtx(t, pf)
+	app := &App{}
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, status) VALUES ('test-proj', 'hi', 'published')`,
+	)
+	postID, _ := r.LastInsertId()
+	out, _ := app.toolPostReschedule(ctx, map[string]any{
+		"post_id":     postID,
+		"schedule_at": "2026-06-01T10:00:00Z",
+	})
+	if out.(map[string]any)["isError"] != true {
+		t.Errorf("expected isError on published post, got %+v", out)
+	}
+}
+
+func TestPostDelete_CancelsJobAndRemovesRows(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.identity.Bindings = map[string]any{"jobs": float64(101)}
+	pf.callAppResponses["jobs:jobs_schedule"] = json.RawMessage(`{"job":{"id":555}}`)
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+	app := &App{}
+	created, _ := app.toolPostCreate(ctx, map[string]any{
+		"body":               "later",
+		"social_account_ids": []any{acctID},
+		"schedule_at":        "2026-05-10T10:00:00Z",
+	})
+	postID := created.(map[string]any)["post_id"].(int64)
+
+	out, err := app.toolPostDelete(ctx, map[string]any{"post_id": postID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(map[string]any)
+	if res["deleted"] != postID {
+		t.Errorf("delete result: %+v", res)
+	}
+	if res["cancelled_job_id"] != int64(555) {
+		t.Errorf("expected cancelled_job_id=555, got %v", res["cancelled_job_id"])
+	}
+	// Rows actually gone.
+	var n int
+	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts WHERE id=?`, postID).Scan(&n)
+	if n != 0 {
+		t.Errorf("post row still present")
+	}
+	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM post_targets WHERE post_id=?`, postID).Scan(&n)
+	if n != 0 {
+		t.Errorf("post_targets still present")
+	}
+	// jobs_cancel call recorded.
+	var sawCancel bool
+	for _, c := range pf.callAppCalls {
+		if c.AppName == "jobs" && c.Tool == "jobs_cancel" {
+			sawCancel = true
+		}
+	}
+	if !sawCancel {
+		t.Errorf("expected jobs_cancel call before delete")
+	}
+}

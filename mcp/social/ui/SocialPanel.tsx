@@ -1356,6 +1356,9 @@ function ComposeDialog({
 function PostsView({
   posts, onChange, setStatus,
 }: { posts: Post[]; onChange: () => void; setStatus: (s: string) => void }) {
+  // Open reschedule dialog for a specific post (null = closed).
+  const [rescheduleFor, setRescheduleFor] = useState<Post | null>(null);
+
   const retry = async (postId: number) => {
     try {
       await fetch(`${API}/posts/${postId}/retry`, { method: "POST", credentials: "same-origin" });
@@ -1363,6 +1366,24 @@ function PostsView({
       onChange();
     } catch (e) {
       setStatus("Retry failed: " + (e as Error).message);
+    }
+  };
+
+  const remove = async (post: Post) => {
+    const what =
+      post.status === "scheduled" ? "Cancel this scheduled post?" :
+      post.status === "published" ? "Delete this post locally? (Won't unpublish from upstream platforms.)" :
+      "Delete this post?";
+    if (!confirm(what)) return;
+    try {
+      const res = await fetch(`${API}/posts/${post.id}`, {
+        method: "DELETE", credentials: "same-origin",
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setStatus("Deleted.");
+      onChange();
+    } catch (e) {
+      setStatus("Delete failed: " + (e as Error).message);
     }
   };
 
@@ -1395,6 +1416,22 @@ function PostsView({
                 Retry
               </button>
             )}
+            {p.status === "scheduled" && (
+              <button
+                onClick={() => setRescheduleFor(p)}
+                className="text-xs text-accent hover:underline"
+                title="Pick a new run time"
+              >
+                Reschedule
+              </button>
+            )}
+            <button
+              onClick={() => remove(p)}
+              className="text-xs text-text-muted hover:text-red"
+              title={p.status === "scheduled" ? "Cancel + delete" : "Delete"}
+            >
+              {p.status === "scheduled" ? "Cancel" : "Delete"}
+            </button>
           </div>
           {p.media_storage_ids && p.media_storage_ids.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
@@ -1412,6 +1449,83 @@ function PostsView({
           )}
         </div>
       ))}
+      {rescheduleFor && (
+        <RescheduleDialog
+          post={rescheduleFor}
+          onClose={() => setRescheduleFor(null)}
+          onChanged={() => { setRescheduleFor(null); onChange(); }}
+          setStatus={setStatus}
+        />
+      )}
+    </div>
+  );
+}
+
+function RescheduleDialog({
+  post, onClose, onChanged, setStatus,
+}: {
+  post: Post;
+  onClose: () => void;
+  onChanged: () => void;
+  setStatus: (s: string) => void;
+}) {
+  // Seed the input with the post's current schedule_at as a
+  // datetime-local value (the input wants "YYYY-MM-DDTHH:MM",
+  // sliced from the ISO/RFC3339 string the server stored).
+  const seed = (post.schedule_at || "").slice(0, 16);
+  const [when, setWhen] = useState(seed);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (!when) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`${API}/posts/${post.id}/reschedule`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ schedule_at: when }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setStatus("Rescheduled.");
+      onChanged();
+    } catch (e) {
+      setStatus("Reschedule failed: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60" onClick={onClose}>
+      <div
+        className="bg-bg-card border border-border rounded-lg shadow-lg w-[420px] max-w-[92vw] p-4 flex flex-col gap-3"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <div className="text-text font-medium">Reschedule post #{post.id}</div>
+          <button onClick={onClose} className="text-text-muted hover:text-text">×</button>
+        </div>
+        <div className="text-text-dim text-xs whitespace-pre-wrap">{post.body}</div>
+        <label className="text-xs uppercase tracking-wide text-text-dim">New run time</label>
+        <input
+          type="datetime-local"
+          value={when}
+          onChange={(e) => setWhen(e.target.value)}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+          autoFocus
+        />
+        <div className="flex items-center justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted">Cancel</button>
+          <button
+            onClick={submit}
+            disabled={!when || busy || when === seed}
+            className="px-4 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+          >
+            {busy ? "…" : "Reschedule"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
