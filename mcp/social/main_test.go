@@ -969,3 +969,28 @@ func TestHandleAvatar_RejectsTraversal(t *testing.T) {
 		}
 	}
 }
+
+func TestExtractStorageContentType(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"direct file wrapper", `{"file":{"content_type":"video/mp4","id":1}}`, "video/mp4"},
+		{"direct flat", `{"content_type":"image/png"}`, "image/png"},
+		{"jsonrpc wrapped — the CallApp shape that v0.4.3 missed",
+			`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"file\":{\"content_type\":\"video/mp4\",\"id\":5},\"found\":true}"}]}}`,
+			"video/mp4"},
+		{"flat content (no jsonrpc layer)",
+			`{"content":[{"type":"text","text":"{\"content_type\":\"image/jpeg\"}"}]}`,
+			"image/jpeg"},
+		{"empty payload", "", ""},
+		{"unrecognised shape", `{"something":"else"}`, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := extractStorageContentType(json.RawMessage(c.in))
+			if got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}

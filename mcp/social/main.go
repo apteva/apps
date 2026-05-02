@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.4.3
+version: 0.4.4
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -1303,6 +1303,8 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64) ([]mediaItem, error) {
 		} else {
 			fullURL = publicBase + "/api/apps/storage" + rel
 		}
+		ctx.Logger().Info("resolveMedia: item",
+			"id", id, "mime", mime, "is_video", strings.HasPrefix(mime, "video/"))
 		out = append(out, mediaItem{URL: fullURL, Mime: mime})
 	}
 	return out, nil
@@ -1315,32 +1317,56 @@ func extractStorageContentType(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
-	// MCP envelope first: {content:[{type:text, text:<json>}]}.
-	var env struct {
-		Content []struct {
-			Type, Text string
-		} `json:"content"`
-	}
-	if err := json.Unmarshal(raw, &env); err == nil {
-		for _, c := range env.Content {
-			if c.Type == "text" && c.Text != "" {
-				return extractStorageContentType(json.RawMessage(c.Text))
-			}
-		}
-	}
-	// Direct shapes: {file: {content_type}} or {content_type}.
-	var nested struct {
+	// Direct shapes first: {file: {content_type}} or {content_type}.
+	var direct struct {
 		File struct {
 			ContentType string `json:"content_type"`
 		} `json:"file"`
 		ContentType string `json:"content_type"`
 	}
-	if json.Unmarshal(raw, &nested) == nil {
-		if nested.File.ContentType != "" {
-			return nested.File.ContentType
+	if json.Unmarshal(raw, &direct) == nil {
+		if direct.File.ContentType != "" {
+			return direct.File.ContentType
 		}
-		if nested.ContentType != "" {
-			return nested.ContentType
+		if direct.ContentType != "" {
+			return direct.ContentType
+		}
+	}
+	// JSON-RPC wrapper from CallApp: {result:{content:[{type,text}]}}.
+	// Mirrors extractStorageGetURL — unwrap result.content[].text and
+	// recurse into the inner JSON to pick up the file/content_type.
+	var wrapped struct {
+		Result struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(raw, &wrapped) == nil {
+		for _, c := range wrapped.Result.Content {
+			if c.Type == "text" && c.Text != "" {
+				if got := extractStorageContentType(json.RawMessage(c.Text)); got != "" {
+					return got
+				}
+			}
+		}
+	}
+	// MCP-flat shape (no jsonrpc wrapper): {content:[...]}. Some
+	// transports unwrap one layer for us.
+	var flat struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if json.Unmarshal(raw, &flat) == nil {
+		for _, c := range flat.Content {
+			if c.Type == "text" && c.Text != "" {
+				if got := extractStorageContentType(json.RawMessage(c.Text)); got != "" {
+					return got
+				}
+			}
 		}
 	}
 	return ""
