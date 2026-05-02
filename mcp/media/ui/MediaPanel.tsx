@@ -112,7 +112,23 @@ interface MediaRow {
   title?: string;
   description?: string;
   alt_text?: string;
+  // v0.4 — transcript status, surfaced via LEFT JOIN so the tile can
+  // show an icon without a second roundtrip. "" when no transcript.
+  transcript_status?: "" | "pending" | "running" | "ok" | "failed" | "skipped";
   derivations?: Derivation[];
+}
+
+interface Transcript {
+  file_id: string;
+  status: "pending" | "running" | "ok" | "failed" | "skipped";
+  language?: string;
+  text?: string;
+  segments?: Array<{ start_ms: number; end_ms: number; text: string; speaker?: string }>;
+  provider?: string;
+  model?: string;
+  duration_ms?: number;
+  error?: string;
+  source_kind?: "auto" | "manual" | "imported";
 }
 
 const API = "/api/apps/media";
@@ -230,6 +246,41 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
     setTimeout(load, 500);
   };
 
+  // queueTranscribe POSTs /media/{id}/transcribe; force=true wipes the
+  // existing row first (matches the MCP tool's force semantics). The
+  // transcriber goroutine in the sidecar drains the queue async.
+  const queueTranscribe = useCallback(
+    async (fileId: string, force = false) => {
+      const params = withParams(force ? { force: "true" } : {});
+      const res = await fetch(`${API}/media/${fileId}/transcribe?${params}`, {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      if (!res.ok) {
+        throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+      }
+      // Patch in-place so the drawer/tile reflect the new pending status
+      // immediately without waiting for the next refresh.
+      setRows((prev) =>
+        prev.map((r) =>
+          r.file_id === fileId ? { ...r, transcript_status: "pending" as const } : r,
+        ),
+      );
+      setSelected((prev) =>
+        prev && prev.file_id === fileId
+          ? { ...prev, transcript_status: "pending" as const }
+          : prev,
+      );
+    },
+    [withParams],
+  );
+
+  // Live refresh on transcript completion — the worker emits
+  // media.transcribed with {file_id} so we can patch + reload.
+  useAppEvents<{ file_id?: string }>("media", projectId, (ev) => {
+    if (ev.topic === "media.transcribed") load();
+  });
+
   // saveDescription writes prose via PUT /media/{id}/description (which
   // wraps the same setDescription used by the MCP tool). On success we
   // patch the row in-place so the drawer reflects the save without
@@ -267,14 +318,22 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
         onClick={() => setSelected(r)}
         className="text-left bg-bg-input/40 border border-border rounded overflow-hidden hover:border-accent/50 transition-colors flex flex-col"
       >
-        <div className="aspect-video bg-bg-input flex items-center justify-center">
+        <div className="aspect-video bg-bg-input flex items-center justify-center relative">
           {previewURL ? (
             <img src={previewURL} alt="" className="w-full h-full object-cover" />
           ) : (
-            <span className="text-text-dim text-2xl">
-              {r.is_image ? "🖼" : r.has_video ? "🎞" : r.has_audio ? "🔊" : "?"}
+            <span className="text-text-dim">
+              <KindIcon row={r} className="w-8 h-8" />
             </span>
           )}
+          {r.transcript_status ? (
+            <span
+              className={`absolute top-1 right-1 ${transcriptBadgeClass(r.transcript_status)}`}
+              title={`Transcript: ${r.transcript_status}`}
+            >
+              <TranscriptStatusIcon status={r.transcript_status} className="w-3.5 h-3.5" />
+            </span>
+          ) : null}
         </div>
         <div className="p-2 flex flex-col gap-0.5">
           <div className="text-xs text-text font-medium truncate" title={r.file_id}>
@@ -380,7 +439,9 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
           onClose={() => setSelected(null)}
           onReindex={() => handleReindex(selected.file_id)}
           onSaveDescription={(fields) => saveDescription(selected.file_id, fields)}
+          onTranscribe={(force) => queueTranscribe(selected.file_id, force)}
           previewBase={`${STORAGE}/files`}
+          apiBase={API}
           query={withParams()}
         />
       )}
@@ -393,14 +454,18 @@ function DetailDrawer({
   onClose,
   onReindex,
   onSaveDescription,
+  onTranscribe,
   previewBase,
+  apiBase,
   query,
 }: {
   row: MediaRow;
   onClose: () => void;
   onReindex: () => void;
   onSaveDescription: (fields: { title?: string; description?: string; alt_text?: string }) => Promise<void>;
+  onTranscribe: (force: boolean) => Promise<void>;
   previewBase: string;
+  apiBase: string;
   query: string;
 }) {
   const thumb = row.derivations?.find((d) => d.kind === "thumbnail");
@@ -490,6 +555,14 @@ function DetailDrawer({
             Open source file ↗
           </a>
           <DescriptionEditor row={row} onSave={onSaveDescription} />
+          {row.has_audio ? (
+            <TranscriptSection
+              row={row}
+              apiBase={apiBase}
+              query={query}
+              onTranscribe={onTranscribe}
+            />
+          ) : null}
           <Section title="Container">
             <Field label="format" value={row.format_name} />
             <Field label="duration" value={formatDuration(row.duration_ms)} />
@@ -718,5 +791,363 @@ function DescriptionEditor({
         </div>
       </div>
     </section>
+  );
+}
+
+// ─── Transcripts ───────────────────────────────────────────────────
+
+// TranscriptSection — collapsible transcript view in the drawer.
+// Lazy-fetches /media/{id}/transcript on mount because transcripts
+// can be large (KB to MB) and most files won't have one open.
+//
+// Status display:
+//   - none yet → "No transcript yet" + "Transcribe" button
+//   - pending|running → spinner + "queued / running on Deepgram"
+//   - ok → language + text in <details> (first ~250 chars
+//     visible by default, expand to see full)
+//   - failed → error + "Retry" button (force=true)
+//   - skipped → reason + "Re-queue" button (force=true)
+function TranscriptSection({
+  row,
+  apiBase,
+  query,
+  onTranscribe,
+}: {
+  row: MediaRow;
+  apiBase: string;
+  query: string;
+  onTranscribe: (force: boolean) => Promise<void>;
+}) {
+  const [transcript, setTranscript] = useState<Transcript | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const fetchTranscript = useCallback(async () => {
+    setLoading(true);
+    setErr("");
+    try {
+      const res = await fetch(`${apiBase}/media/${row.file_id}/transcript?${query}`, {
+        credentials: "same-origin",
+      });
+      if (!res.ok) {
+        // 404 / not-found is not an error here — it just means no row.
+        setTranscript(null);
+        return;
+      }
+      const data = await res.json();
+      if (data.found) {
+        setTranscript(data.transcript as Transcript);
+      } else {
+        setTranscript(null);
+      }
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, [apiBase, row.file_id, query]);
+
+  useEffect(() => {
+    fetchTranscript();
+  }, [fetchTranscript]);
+
+  // Re-fetch when status flips to terminal (the parent's
+  // media.transcribed event reload doesn't include the text).
+  useEffect(() => {
+    if (transcript?.status === "pending" || transcript?.status === "running") {
+      const id = setInterval(fetchTranscript, 4000);
+      return () => clearInterval(id);
+    }
+  }, [transcript?.status, fetchTranscript]);
+
+  const handleQueue = async (force: boolean) => {
+    setSubmitting(true);
+    setErr("");
+    try {
+      await onTranscribe(force);
+      // Optimistic — flip our local view to pending so the UI doesn't
+      // sit on stale state while the next poll arrives.
+      setTranscript({
+        file_id: row.file_id,
+        status: "pending",
+        source_kind: "manual",
+      });
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-1">
+        <h3 className="text-xs uppercase tracking-wide text-text-dim">Transcript</h3>
+        {transcript ? (
+          <span className={`inline-flex items-center gap-1 text-xs ${transcriptStatusTextClass(transcript.status)}`}>
+            <TranscriptStatusIcon status={transcript.status} className="w-3.5 h-3.5" />
+            {transcript.status}
+            {transcript.language ? <span className="text-text-dim">· {transcript.language}</span> : null}
+          </span>
+        ) : null}
+      </div>
+
+      {err ? <div className="text-red text-xs mb-1">{err}</div> : null}
+
+      {loading ? (
+        <div className="text-xs text-text-dim">Loading…</div>
+      ) : !transcript ? (
+        <div className="space-y-2">
+          <div className="text-xs text-text-dim italic">
+            No transcript yet. Queue one to have Deepgram transcribe this file.
+          </div>
+          <button
+            type="button"
+            onClick={() => handleQueue(false)}
+            disabled={submitting}
+            className="px-3 py-1 text-sm bg-accent text-bg rounded hover:opacity-90 disabled:opacity-40"
+          >
+            {submitting ? "Queueing…" : "Transcribe"}
+          </button>
+        </div>
+      ) : transcript.status === "pending" || transcript.status === "running" ? (
+        <div className="text-xs text-text-muted">
+          {transcript.status === "pending"
+            ? "Queued — the transcriber picks this up on its next sweep."
+            : "Running on Deepgram. Refreshing automatically every few seconds."}
+        </div>
+      ) : transcript.status === "ok" ? (
+        <details className="text-sm">
+          <summary className="text-text cursor-pointer hover:text-accent">
+            {snippet(transcript.text, 200)}
+          </summary>
+          <div className="mt-2 whitespace-pre-wrap text-text-muted text-sm font-mono leading-relaxed">
+            {transcript.text || "(empty)"}
+          </div>
+          <div className="mt-3 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => handleQueue(true)}
+              disabled={submitting}
+              className="px-3 py-1 text-xs border border-border text-text-muted rounded hover:bg-bg-input"
+            >
+              {submitting ? "Re-queueing…" : "Re-transcribe"}
+            </button>
+            {transcript.provider ? (
+              <span className="text-xs text-text-dim">
+                {transcript.provider}
+                {transcript.model ? `:${transcript.model}` : ""}
+              </span>
+            ) : null}
+          </div>
+        </details>
+      ) : transcript.status === "failed" ? (
+        <div className="space-y-2">
+          <div className="text-xs text-red whitespace-pre-wrap">
+            {transcript.error || "Transcription failed."}
+          </div>
+          <button
+            type="button"
+            onClick={() => handleQueue(true)}
+            disabled={submitting}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-40"
+          >
+            {submitting ? "Retrying…" : "Retry"}
+          </button>
+        </div>
+      ) : transcript.status === "skipped" ? (
+        <div className="space-y-2">
+          <div className="text-xs text-text-muted">
+            Skipped — {transcript.error || "no reason recorded"}.
+          </div>
+          <button
+            type="button"
+            onClick={() => handleQueue(true)}
+            disabled={submitting}
+            className="px-3 py-1 text-sm border border-border text-text rounded hover:bg-bg-input disabled:opacity-40"
+          >
+            {submitting ? "Queueing…" : "Queue anyway"}
+          </button>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function snippet(text: string | undefined, n: number): string {
+  if (!text) return "(empty transcript)";
+  const trimmed = text.trim();
+  if (trimmed.length <= n) return trimmed;
+  return trimmed.slice(0, n).replace(/\s+\S*$/, "") + "…";
+}
+
+function transcriptStatusTextClass(status: string): string {
+  switch (status) {
+    case "ok":
+      return "text-text";
+    case "pending":
+    case "running":
+      return "text-accent";
+    case "failed":
+      return "text-red";
+    case "skipped":
+      return "text-text-muted";
+    default:
+      return "text-text-dim";
+  }
+}
+
+function transcriptBadgeClass(status: string): string {
+  // Pill badge in the corner of the tile thumbnail. The colour class
+  // also drives the icon stroke via currentColor.
+  const base = "inline-flex items-center justify-center rounded-full border bg-bg/80 backdrop-blur p-0.5";
+  switch (status) {
+    case "ok":
+      return `${base} border-accent/40 text-accent`;
+    case "pending":
+    case "running":
+      return `${base} border-border text-accent animate-pulse`;
+    case "failed":
+      return `${base} border-red/40 text-red`;
+    case "skipped":
+      return `${base} border-border text-text-muted`;
+    default:
+      return `${base} border-border text-text-dim`;
+  }
+}
+
+// ─── Icons ─────────────────────────────────────────────────────────
+//
+// Inline SVG icons — no external icon library dependency. Lucide-
+// style strokes (24-grid, 2px stroke, round caps/joins). All driven
+// by currentColor so the surrounding text colour controls them.
+
+function KindIcon({ row, className }: { row: MediaRow; className?: string }) {
+  if (row.is_image) return <ImageIcon className={className} />;
+  if (row.has_video) return <VideoIcon className={className} />;
+  if (row.has_audio) return <AudioIcon className={className} />;
+  return <FileIcon className={className} />;
+}
+
+function TranscriptStatusIcon({ status, className }: { status: string; className?: string }) {
+  switch (status) {
+    case "ok":
+      return <MicCheckIcon className={className} />;
+    case "running":
+    case "pending":
+      return <MicProgressIcon className={className} />;
+    case "failed":
+      return <MicXIcon className={className} />;
+    case "skipped":
+      return <MicSlashIcon className={className} />;
+    default:
+      return <MicIcon className={className} />;
+  }
+}
+
+const svgProps = {
+  xmlns: "http://www.w3.org/2000/svg",
+  viewBox: "0 0 24 24",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 2,
+  strokeLinecap: "round",
+  strokeLinejoin: "round",
+} as const;
+
+function ImageIcon({ className }: { className?: string }) {
+  return (
+    <svg {...svgProps} className={className}>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <circle cx="9" cy="9" r="2" />
+      <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+    </svg>
+  );
+}
+
+function VideoIcon({ className }: { className?: string }) {
+  return (
+    <svg {...svgProps} className={className}>
+      <path d="m22 8-6 4 6 4V8Z" />
+      <rect x="2" y="6" width="14" height="12" rx="2" />
+    </svg>
+  );
+}
+
+function AudioIcon({ className }: { className?: string }) {
+  return (
+    <svg {...svgProps} className={className}>
+      <path d="M9 18V5l12-2v13" />
+      <circle cx="6" cy="18" r="3" />
+      <circle cx="18" cy="16" r="3" />
+    </svg>
+  );
+}
+
+function FileIcon({ className }: { className?: string }) {
+  return (
+    <svg {...svgProps} className={className}>
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+    </svg>
+  );
+}
+
+function MicIcon({ className }: { className?: string }) {
+  return (
+    <svg {...svgProps} className={className}>
+      <rect x="9" y="2" width="6" height="12" rx="3" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <line x1="12" y1="19" x2="12" y2="23" />
+      <line x1="8" y1="23" x2="16" y2="23" />
+    </svg>
+  );
+}
+
+function MicCheckIcon({ className }: { className?: string }) {
+  // Mic with a tick overlay — denotes a completed transcript.
+  return (
+    <svg {...svgProps} className={className}>
+      <rect x="6" y="2" width="6" height="12" rx="3" />
+      <path d="M16 10v2a7 7 0 0 1-13.93 1" />
+      <polyline points="14 19 17 22 22 16" />
+    </svg>
+  );
+}
+
+function MicProgressIcon({ className }: { className?: string }) {
+  // Mic with three pulse arcs — the parent's animate-pulse on the
+  // badge does the actual movement; this icon just looks like
+  // sound waves emanating from the mic.
+  return (
+    <svg {...svgProps} className={className}>
+      <rect x="9" y="2" width="6" height="12" rx="3" />
+      <path d="M5 10v2a7 7 0 0 0 14 0v-2" />
+      <path d="M19 19h2" opacity="0.6" />
+    </svg>
+  );
+}
+
+function MicXIcon({ className }: { className?: string }) {
+  // Mic with an X — failed transcript.
+  return (
+    <svg {...svgProps} className={className}>
+      <rect x="6" y="2" width="6" height="12" rx="3" />
+      <path d="M16 10v2a7 7 0 0 1-13.93 1" />
+      <line x1="15" y1="17" x2="21" y2="23" />
+      <line x1="21" y1="17" x2="15" y2="23" />
+    </svg>
+  );
+}
+
+function MicSlashIcon({ className }: { className?: string }) {
+  // Mic with a slash — skipped (file too long, integration absent, etc.)
+  return (
+    <svg {...svgProps} className={className}>
+      <rect x="9" y="2" width="6" height="12" rx="3" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <line x1="2" y1="2" x2="22" y2="22" />
+    </svg>
   );
 }

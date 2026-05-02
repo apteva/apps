@@ -716,6 +716,75 @@ func (a *App) handleMediaItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, map[string]any{"queued": 1})
+	case tail == "transcript" && r.Method == http.MethodGet:
+		// Lazy-fetch for the panel's drawer. Returns found:false when
+		// no row yet (file is queued or pre-transcribe).
+		tr, err := getTranscript(globalCtx.AppDB(), pid, fid)
+		if err != nil {
+			if notFound(err) {
+				writeJSON(w, map[string]any{"found": false})
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"found": true, "transcript": tr})
+	case tail == "transcript" && r.Method == http.MethodPut:
+		// Imported / manual transcript upload. Same partial-update
+		// shape as media_set_transcript MCP tool.
+		var body struct {
+			Text     string              `json:"text"`
+			Language string              `json:"language"`
+			Provider string              `json:"provider"`
+			Segments []TranscriptSegment `json:"segments"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if body.Text == "" {
+			http.Error(w, "text required", http.StatusBadRequest)
+			return
+		}
+		t := &TranscriptRow{
+			FileID: fid, ProjectID: pid,
+			Text:       body.Text,
+			Language:   body.Language,
+			Provider:   firstNonEmpty(body.Provider, "imported"),
+			SourceKind: "imported",
+		}
+		if len(body.Segments) > 0 {
+			segsJSON, err := formatSegments(body.Segments)
+			if err != nil {
+				http.Error(w, "segments: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			t.Segments = segsJSON
+		}
+		if media, mErr := getMedia(globalCtx.AppDB(), pid, fid); mErr == nil {
+			t.DurationMs = media.DurationMs
+			t.SourceSHA256 = media.SourceSHA256
+		}
+		if err := upsertTranscript(globalCtx.AppDB(), t); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"file_id": fid, "status": "ok"})
+	case tail == "transcribe" && r.Method == http.MethodPost:
+		// Queue a transcript (or force-requeue when ?force=true).
+		// Mirrors the media_transcribe MCP tool.
+		if r.URL.Query().Get("force") == "true" {
+			if _, err := globalCtx.AppDB().Exec(`DELETE FROM transcripts WHERE project_id=? AND file_id=?`, pid, fid); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		if err := insertPendingTranscript(globalCtx.AppDB(), pid, fid, "manual"); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		writeJSON(w, map[string]any{"file_id": fid, "status": "pending"})
 	case tail == "description" && r.Method == http.MethodPut:
 		// Panel + agent use this to set/update prose. Same partial-
 		// update semantics as the MCP tool: pointer-distinguished
@@ -824,6 +893,15 @@ func (a *App) handleReindex(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─── helpers ───────────────────────────────────────────────────────
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")

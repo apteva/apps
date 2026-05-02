@@ -51,6 +51,11 @@ type MediaRow struct {
 	Description string `json:"description,omitempty"`
 	AltText     string `json:"alt_text,omitempty"`
 
+	// Lifted from the transcripts table via LEFT JOIN so the row
+	// carries enough state for the panel to render a status icon
+	// without a second roundtrip. Empty when no transcript exists.
+	TranscriptStatus string `json:"transcript_status,omitempty"`
+
 	CreatedAt string `json:"created_at,omitempty"`
 	UpdatedAt string `json:"updated_at,omitempty"`
 
@@ -211,14 +216,18 @@ func setDescription(db *sql.DB, projectID, fileID string, f DescriptionFields) e
 
 func getMedia(db *sql.DB, projectID, fileID string) (*MediaRow, error) {
 	row := db.QueryRow(`
-		SELECT file_id, project_id, source_sha256, format_name, duration_ms, bitrate,
-			has_video, has_audio, is_image,
-			width, height, fps, video_codec,
-			channels, sample_rate, audio_codec,
-			probe_status, probe_error, probe_at, raw_probe,
-			title, description, alt_text,
-			created_at, updated_at
-		FROM media WHERE project_id=? AND file_id=?`, projectID, fileID)
+		SELECT m.file_id, m.project_id, m.source_sha256, m.format_name, m.duration_ms, m.bitrate,
+			m.has_video, m.has_audio, m.is_image,
+			m.width, m.height, m.fps, m.video_codec,
+			m.channels, m.sample_rate, m.audio_codec,
+			m.probe_status, m.probe_error, m.probe_at, m.raw_probe,
+			m.title, m.description, m.alt_text,
+			COALESCE(t.status, ''),
+			m.created_at, m.updated_at
+		FROM media m
+		LEFT JOIN transcripts t
+		  ON t.file_id = m.file_id AND t.project_id = m.project_id
+		WHERE m.project_id=? AND m.file_id=?`, projectID, fileID)
 	m, err := scanMedia(row)
 	if err != nil {
 		return nil, err
@@ -239,6 +248,7 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 		hasVideo, hasAudio, isImage    int
 		rawProbe                       string
 		title, description, altText    string
+		transcriptStatus               string
 	)
 	err := row.Scan(
 		&m.FileID, &m.ProjectID, &m.SourceSHA256,
@@ -248,6 +258,7 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 		&channels, &srate, &acodec,
 		&m.ProbeStatus, &probeError, &probeAt, &rawProbe,
 		&title, &description, &altText,
+		&transcriptStatus,
 		&createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -271,6 +282,7 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 	m.Title = title
 	m.Description = description
 	m.AltText = altText
+	m.TranscriptStatus = transcriptStatus
 	m.CreatedAt = createdAt.String
 	m.UpdatedAt = updatedAt.String
 	if rawProbe != "" {
@@ -352,14 +364,22 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 		limit = f.Limit
 	}
 
-	query := `SELECT file_id, project_id, source_sha256, format_name, duration_ms, bitrate,
-		has_video, has_audio, is_image,
-		width, height, fps, video_codec,
-		channels, sample_rate, audio_codec,
-		probe_status, probe_error, probe_at, raw_probe,
-		title, description, alt_text,
-		created_at, updated_at
-	FROM media WHERE ` + strings.Join(clauses, " AND ") + " ORDER BY " + order + " LIMIT ?"
+	// Project-scope every clause to the m. alias since we now join.
+	for i, c := range clauses {
+		clauses[i] = strings.ReplaceAll(c, "project_id =", "m.project_id =")
+	}
+	query := `SELECT m.file_id, m.project_id, m.source_sha256, m.format_name, m.duration_ms, m.bitrate,
+		m.has_video, m.has_audio, m.is_image,
+		m.width, m.height, m.fps, m.video_codec,
+		m.channels, m.sample_rate, m.audio_codec,
+		m.probe_status, m.probe_error, m.probe_at, m.raw_probe,
+		m.title, m.description, m.alt_text,
+		COALESCE(t.status, ''),
+		m.created_at, m.updated_at
+	FROM media m
+	LEFT JOIN transcripts t
+	  ON t.file_id = m.file_id AND t.project_id = m.project_id
+	WHERE ` + strings.Join(clauses, " AND ") + " ORDER BY m." + order + " LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := db.Query(query, args...)
