@@ -69,7 +69,12 @@ async function main() {
       // pin NODE_ENV=production below, anyone re-running this
       // script in a dev shell shouldn't accidentally bake a
       // dev-runtime panel that 404s in the dashboard's importmap.
-      external: ["react", "react/jsx-runtime", "react/jsx-dev-runtime"],
+      // External React + the ui-kit. Both are served by the dashboard
+      // host at fixed importmap paths (/vendor/react.mjs,
+      // /vendor/ui-kit.mjs). Keeping them external means panels load
+      // cheaply and every panel sees the same React instance + the
+      // same Card / CardHeader / StatusPill primitives.
+      external: ["react", "react/jsx-runtime", "react/jsx-dev-runtime", "@apteva/ui-kit"],
       // Substitute process.env.NODE_ENV so React's package
       // entrypoint picks the prod jsx-runtime path. Without this
       // Bun emits `import { jsx } from "react/jsx-dev-runtime"`

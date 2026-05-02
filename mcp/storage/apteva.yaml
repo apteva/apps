@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: storage
 display_name: Storage
-version: 0.4.2
+version: 0.5.0
 description: |
   File storage for Apteva agents and human teams. Upload bytes,
   organise into folders, share via signed URLs. Backed by local disk
@@ -71,9 +71,6 @@ provides:
         properties:
           file_id:
             type: integer
-          compact:
-            type: boolean
-            default: false
       # Soft-convention preview prop: FileCard recognizes preview:true
       # and renders synthetic sample data instead of fetching, so the
       # dashboard's app-detail preview always shows a real-looking

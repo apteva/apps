@@ -2,21 +2,13 @@
 // respond(components=[{app:"storage", name:"file-card", props:{file_id:N}}])
 // and the dashboard mounts this under the agent's message bubble.
 //
-// Self-fetches metadata via /api/apps/storage/files/<id> on mount,
-// subscribes to the storage app's event bus for live updates (file
-// deleted / replaced / re-tagged → re-fetch), renders one of three
-// previews based on MIME:
-//
-//   image/*  →  <img>
-//   video/*  →  <video preload="metadata"> (first keyframe only)
-//   other    →  generic icon + extension
-//
-// Click → open the source bytes in a new tab. The cookie auth on the
-// dashboard origin covers the GET on /content; for shared / external
-// hot-link cases the storage app's signed URL flow is the answer
-// (out of scope here).
+// Composes @apteva/ui-kit primitives — Card, CardHeader, DataList — so
+// it inherits the same look as every other chat card on the platform.
+// The only storage-specific code is the thumbnail preview (image /
+// video / icon by MIME) and the metadata fetch.
 
 import { useEffect, useState } from "react";
+import { Card, CardHeader, DataList } from "@apteva/ui-kit";
 
 interface FileMeta {
   id: number;
@@ -29,20 +21,15 @@ interface FileMeta {
 
 interface Props {
   file_id: number;
-  compact?: boolean;
-  /** Injected by the host so we can scope event subscription to the
-   *  right project. */
+  /** Injected by the host — scopes the metadata fetch and the event
+   *  subscription to the right project. */
   projectId?: string;
   /** Soft convention: when true, render synthetic sample data
    *  instead of fetching. Used by the dashboard's app detail panel
-   *  to preview a brand-new install before any real files exist.
-   *  Components author whatever sample state best advertises what
-   *  they look like in chat. */
+   *  to preview a brand-new install before any real files exist. */
   preview?: boolean;
 }
 
-// Synthetic sample row. Shape matches FileMeta so the same render
-// path covers both real and preview data — no separate JSX tree.
 const previewSample: FileMeta = {
   id: 0,
   name: "vacation-shot.jpg",
@@ -52,11 +39,10 @@ const previewSample: FileMeta = {
   sha256: "—",
 };
 
-// Inlined event-subscription pattern. The dashboard already provides
-// the canonical hook, but components can't import from the host
-// dashboard tree (each app's bundle is independent). The helper
-// hits the same /api/app-events SSE endpoint and is small enough
-// (~30 lines) to copy here.
+// Inlined event-subscription pattern. The dashboard owns the
+// canonical hook, but app bundles can't import from the host
+// dashboard tree; the helper hits the same /api/app-events SSE
+// endpoint and is small enough to keep here.
 function useStorageEvents(
   projectId: string | undefined,
   onEvent: (ev: { topic: string; data: { id?: number } }) => void,
@@ -67,8 +53,7 @@ function useStorageEvents(
     const es = new EventSource(url, { withCredentials: true });
     es.onmessage = (e) => {
       try {
-        const ev = JSON.parse(e.data);
-        onEvent(ev);
+        onEvent(JSON.parse(e.data));
       } catch {
         /* ignore malformed frames */
       }
@@ -78,13 +63,13 @@ function useStorageEvents(
   }, [projectId]);
 }
 
-export default function FileCard({ file_id, compact, projectId, preview }: Props) {
+export default function FileCard({ file_id, projectId, preview }: Props) {
   const [meta, setMeta] = useState<FileMeta | null>(preview ? previewSample : null);
   const [missing, setMissing] = useState(false);
 
   const refetch = () => {
-    if (preview) return; // synthetic data; nothing to fetch
-    if (!projectId) return; // wait for the host to inject the project scope
+    if (preview) return;
+    if (!projectId) return;
     const url =
       `/api/apps/storage/files/${file_id}` +
       `?project_id=${encodeURIComponent(projectId)}`;
@@ -98,8 +83,6 @@ export default function FileCard({ file_id, compact, projectId, preview }: Props
       })
       .then((data) => {
         if (!data) return;
-        // Storage returns either {file: {...}} or the row at the
-        // top level depending on version — accept both.
         const file =
           (data.file as FileMeta | undefined) ??
           (data.id ? (data as FileMeta) : null);
@@ -109,8 +92,8 @@ export default function FileCard({ file_id, compact, projectId, preview }: Props
         }
       })
       .catch(() => {
-        // Leave the previous meta in place; we'll get another shot
-        // on the next event.
+        // Leave previous meta in place; we'll get another shot on
+        // the next event.
       });
   };
 
@@ -119,116 +102,77 @@ export default function FileCard({ file_id, compact, projectId, preview }: Props
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file_id, projectId]);
 
-  // Live updates: refetch when our specific file is touched, and
-  // mark missing on a delete event so the card flips to a tombstone.
-  // Skipped in preview mode — synthetic data isn't tied to real
-  // events.
   useStorageEvents(preview ? undefined : projectId, (ev) => {
-    const id = ev?.data?.id;
-    if (id !== file_id) return;
-    if (ev.topic === "file.deleted") {
-      setMissing(true);
-    } else {
-      refetch();
-    }
+    if (ev?.data?.id !== file_id) return;
+    if (ev.topic === "file.deleted") setMissing(true);
+    else refetch();
   });
 
-  if (missing) return <Tombstone fileId={file_id} compact={compact} />;
-  if (!meta) return <Skeleton compact={compact} />;
+  if (missing) {
+    return (
+      <Card>
+        <CardHeader title={`File #${file_id}`} status={{ label: "deleted", variant: "muted" }} />
+      </Card>
+    );
+  }
 
-  // Preview mode uses an inline SVG so the tile renders without any
-  // network round-trip. Real cards point at the storage content
-  // endpoint.
-  const url = preview
+  if (!meta) {
+    return (
+      <Card>
+        <CardHeader title={`File #${file_id}`} status={{ label: "loading", variant: "muted" }} />
+      </Card>
+    );
+  }
+
+  const contentURL = preview
     ? "data:image/svg+xml;utf8," +
       encodeURIComponent(
-        `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 160'>` +
-          `<rect width='160' height='160' fill='%23334155'/>` +
+        `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 240 160'>` +
+          `<rect width='240' height='160' fill='%23334155'/>` +
           `<text x='50%' y='50%' fill='%2394a3b8' font-family='sans-serif' font-size='20' text-anchor='middle' dy='.3em'>preview</text>` +
-        `</svg>`
+          `</svg>`
       )
     : `/api/apps/storage/files/${file_id}/content`;
-  const isImage = meta.content_type.startsWith("image/");
-  const isVideo = meta.content_type.startsWith("video/");
 
   return (
-    <a
-      href={url}
-      target="_blank"
-      rel="noopener"
-      className={
-        compact
-          ? "flex items-center gap-2 p-2 border border-border rounded hover:border-accent transition-colors max-w-md"
-          : "flex flex-col gap-0 border border-border rounded overflow-hidden hover:border-accent transition-colors max-w-md w-fit"
-      }
-      title={`${meta.name} · ${prettySize(meta.size_bytes)}`}
-    >
-      {!compact && (
-        <div className="bg-bg-input flex items-center justify-center" style={{ height: 160 }}>
-          <Preview url={url} mime={meta.content_type} />
-        </div>
-      )}
-      {compact && <Preview url={url} mime={meta.content_type} compact />}
-      <div className={compact ? "flex-1 min-w-0" : "p-2"}>
-        <div className="text-text text-xs font-medium truncate">{meta.name}</div>
-        <div className="text-text-dim text-[10px] flex items-center gap-1.5">
-          <span>{prettySize(meta.size_bytes)}</span>
-          <span>·</span>
-          <span className="truncate">{meta.content_type || "binary"}</span>
-          {(isImage || isVideo) && (
-            <>
-              <span className="ml-auto text-accent">Open ↗</span>
-            </>
-          )}
-        </div>
+    <Card href={contentURL}>
+      <CardHeader
+        title={meta.name}
+        subtitle={meta.folder}
+        action={{ label: "Open", href: contentURL }}
+      />
+      <FilePreview url={contentURL} mime={meta.content_type} />
+      <div className="px-3 py-2 border-t border-border">
+        <DataList
+          items={[
+            { label: "Type", value: meta.content_type || "binary" },
+            { label: "Size", value: prettySize(meta.size_bytes) },
+          ]}
+        />
       </div>
-    </a>
+    </Card>
   );
 }
 
-function Preview({ url, mime, compact }: { url: string; mime: string; compact?: boolean }) {
-  const cls = compact
-    ? "w-12 h-12 rounded object-cover flex-shrink-0 bg-bg-input"
-    : "w-full h-full object-cover";
+function FilePreview({ url, mime }: { url: string; mime: string }) {
+  const wrap = "bg-bg-input flex items-center justify-center";
   if (mime.startsWith("image/")) {
-    return <img src={url} alt="" className={cls} />;
+    return (
+      <div className={wrap} style={{ height: 160 }}>
+        <img src={url} alt="" className="w-full h-full object-cover" />
+      </div>
+    );
   }
   if (mime.startsWith("video/")) {
-    return <video src={url} preload="metadata" muted playsInline className={cls} />;
+    return (
+      <div className={wrap} style={{ height: 160 }}>
+        <video src={url} preload="metadata" muted playsInline className="w-full h-full object-cover" />
+      </div>
+    );
   }
-  // Generic icon — kept tiny so we don't ship lucide etc.
   return (
-    <div
-      className={
-        (compact ? "w-12 h-12 " : "w-full h-full ") +
-        "flex items-center justify-center text-text-dim text-xs"
-      }
-    >
+    <div className={`${wrap} text-text-dim text-2xl`} style={{ height: 96 }}>
       📄
-    </div>
-  );
-}
-
-function Skeleton({ compact }: { compact?: boolean }) {
-  return (
-    <div
-      className={
-        (compact ? "h-12 w-64 " : "h-40 w-64 ") +
-        "border border-border rounded animate-pulse bg-bg-input"
-      }
-    />
-  );
-}
-
-function Tombstone({ fileId, compact }: { fileId: number; compact?: boolean }) {
-  return (
-    <div
-      className={
-        (compact ? "p-2 " : "p-3 ") +
-        "border border-border/40 rounded text-text-dim text-xs italic"
-      }
-    >
-      File #{fileId} no longer exists.
     </div>
   );
 }
