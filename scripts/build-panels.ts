@@ -32,7 +32,12 @@ async function findPanels(): Promise<string[]> {
     if (!existsSync(uiDir)) continue;
     const entries = await readdir(uiDir);
     for (const f of entries) {
-      if (f.endsWith("Panel.tsx") || f.endsWith("Widget.tsx")) {
+      // Panel = full-pane dashboard surface; Widget = small slot
+      // surface; Card = chat-attached UIComponent (file-card,
+      // post-card, …). All bundle the same way — just different
+      // naming conventions so the discovery glob is explicit
+      // about what counts as bundleable UI.
+      if (f.endsWith("Panel.tsx") || f.endsWith("Widget.tsx") || f.endsWith("Card.tsx")) {
         out.push(join(uiDir, f));
       }
     }

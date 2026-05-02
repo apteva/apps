@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: storage
 display_name: Storage
-version: 0.3.0
+version: 0.4.0
 description: |
   File storage for Apteva agents and human teams. Upload bytes,
   organise into folders, share via signed URLs. Backed by local disk
@@ -56,6 +56,24 @@ provides:
       label: Files
       icon: folder
       entry: /ui/StoragePanel.mjs
+  ui_components:
+    # Inline file tile the agent can attach to chat messages via
+    # respond(components=[{app:"storage", name:"file-card", props:{file_id:N}}]).
+    # Renders a thumbnail + name + size + Open link; live-updates on
+    # storage events (file deleted, etc).
+    - name: file-card
+      entry: /ui/FileCard.mjs
+      slots:
+        - chat.message_attachment
+      props_schema:
+        type: object
+        required: [file_id]
+        properties:
+          file_id:
+            type: integer
+          compact:
+            type: boolean
+            default: false
 
 runtime:
   kind: source
