@@ -51,6 +51,50 @@ func TestFilterMediaFiles(t *testing.T) {
 	}
 }
 
+// TestFilterMediaFiles_SkipsOwnDerivations is the regression test
+// for the indexer loop bug — files in /.media/ subfolders must
+// never be returned as candidates. Without this filter, every
+// 30-second sweep generated a thumbnail of the previous thumbnail,
+// growing storage by one file per source per tick forever.
+func TestFilterMediaFiles_SkipsOwnDerivations(t *testing.T) {
+	in := []StorageFile{
+		// Real user uploads — eligible.
+		{ID: 1, Folder: "/photos/", Name: "cat.jpg", ContentType: "image/jpeg"},
+		{ID: 2, Folder: "/audio/", Name: "song.mp3", ContentType: "audio/mpeg"},
+		// The indexer's own outputs — must be skipped on every sweep.
+		{ID: 100, Folder: "/.media/thumbnail/", Name: "1.jpg", ContentType: "image/jpeg"},
+		{ID: 101, Folder: "/.media/waveform/", Name: "2.png", ContentType: "image/png"},
+		{ID: 102, Folder: "/.media/thumbnail/sub/", Name: "3.jpg", ContentType: "image/jpeg"},
+	}
+	got := filterMediaFiles(in)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 user files, got %d: %+v", len(got), got)
+	}
+	for _, f := range got {
+		if f.ID == 100 || f.ID == 101 || f.ID == 102 {
+			t.Errorf("derivation leaked into indexer: %+v", f)
+		}
+	}
+}
+
+func TestIsOwnDerivation(t *testing.T) {
+	cases := map[string]bool{
+		"/.media/thumbnail/":    true,
+		"/.media/waveform/":     true,
+		"/.media/thumbnail/x/":  true,  // sub-folders match
+		"/.media":               false, // no trailing slash — leave it
+		"/photos/.media/":       false, // dot folder must be top-level
+		"/":                     false,
+		"/photos/":              false,
+		"":                      false,
+	}
+	for in, want := range cases {
+		if got := isOwnDerivation(in); got != want {
+			t.Errorf("isOwnDerivation(%q)=%v want %v", in, got, want)
+		}
+	}
+}
+
 func TestSanitizeName(t *testing.T) {
 	cases := map[string]string{
 		"":           "file.bin",

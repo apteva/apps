@@ -190,14 +190,30 @@ func uploadAndRecord(
 // filterMediaFiles keeps the subset whose content_type starts with a
 // media prefix. Storage may not always have a content_type set — for
 // those, fall back to the file extension.
+//
+// Hard skip: anything under /.media/ — that's where this app writes
+// its own thumbnails + waveforms. Indexing them would create a tight
+// loop (probe a thumbnail, generate a thumbnail of the thumbnail,
+// repeat every sweep) and pollute both the catalog and storage.
 func filterMediaFiles(files []StorageFile) []StorageFile {
 	out := make([]StorageFile, 0, len(files))
 	for _, f := range files {
+		if isOwnDerivation(f.Folder) {
+			continue
+		}
 		if isMediaContentType(f.ContentType) || isMediaByExt(f.Name) {
 			out = append(out, f)
 		}
 	}
 	return out
+}
+
+// isOwnDerivation reports whether a storage folder path holds files
+// the media indexer wrote (thumbnails, waveforms). They live under
+// /.media/<kind>/ and must never be re-indexed. The leading dot
+// matches the storage app's "hidden folder" convention.
+func isOwnDerivation(folder string) bool {
+	return strings.HasPrefix(folder, "/.media/")
 }
 
 func isMediaContentType(ct string) bool {
