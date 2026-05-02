@@ -13,6 +13,7 @@
 // this file uses the same useAppEvents pattern as image-studio.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { uploadResumable } from "./uploadResumable";
 
 const API = "/api/apps/social";
 
@@ -733,35 +734,28 @@ function ComposeDialog({
     const fileList = Array.from(ev.target.files || []);
     if (fileList.length === 0) return;
     setUploading(true);
-    setStatus(`Uploading ${fileList.length} file${fileList.length !== 1 ? "s" : ""}…`);
     try {
       const uploaded: typeof media = [];
+      let i = 0;
       for (const file of fileList) {
-        const fd = new FormData();
-        fd.append("file", file);
-        // Drop into a "social/" folder so users can find them later
-        // in Storage. The folder doesn't have to pre-exist; storage
-        // creates it on demand.
-        fd.append("folder", "social/");
-        const res = await fetch("/api/apps/storage/files", {
-          method: "POST",
-          credentials: "same-origin",
-          body: fd,
+        i += 1;
+        const label = `(${i}/${fileList.length}) ${file.name}`;
+        // uploadResumable picks single-shot for ≤25 MB, chunked
+        // resumable above that — multi-GB videos no longer crash
+        // the storage sidecar, and a network blip mid-upload
+        // resumes from the server-known offset.
+        const row = await uploadResumable(file, {
+          folder: "social/",
+          onProgress: (bytes, total) => {
+            const pct = total > 0 ? Math.floor((bytes / total) * 100) : 0;
+            setStatus(`Uploading ${label} — ${pct}%`);
+          },
         });
-        if (!res.ok) {
-          throw new Error(`upload failed (${res.status}): ${await res.text()}`);
-        }
-        const data = await res.json();
-        // Storage returns the file row at the top level: {id, name,
-        // sha256, size_bytes, url, …}. Older versions wrapped it
-        // under .file — accept either shape so we don't break if
-        // storage adds the wrapper back.
-        const id = typeof data?.id === "number" ? data.id : data?.file?.id;
-        if (typeof id !== "number") {
-          throw new Error("storage didn't return a file id: " + JSON.stringify(data));
+        if (typeof row.id !== "number") {
+          throw new Error("storage didn't return a file id");
         }
         uploaded.push({
-          id,
+          id: row.id,
           name: file.name,
           mime: file.type,
           previewURL: URL.createObjectURL(file),

@@ -4,14 +4,14 @@
 // theme via Tailwind tokens.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { uploadResumable } from "./uploadResumable";
 
-// Inlined SDK app-event subscription. The platform exposes
-// /api/app-events/<app>?project_id=<x>&since=<seq> as an SSE stream;
-// this hook owns the connection, reconnects with the latest seq on
-// transient failures, and dedups by seq. Lives inside the panel
-// because panels are runtime-bundled and the dashboard's hook isn't
-// in the importmap. When the SDK ships an official client bundle,
-// every panel migrates onto that.
+// Inlined SDK app-event subscription. Panels are runtime-bundled
+// standalone .mjs files and each app is independently installable
+// from its own source — sharing across app directories would break
+// the install when an app is cloned alone. The hook is small enough
+// (~40 lines) that copy-and-paste is the right call until the SDK
+// ships an official TS client bundle the importmap can resolve.
 interface AppEventEnvelope<T = unknown> {
   topic: string;
   app: string;
@@ -21,7 +21,6 @@ interface AppEventEnvelope<T = unknown> {
   time: string;
   data: T;
 }
-
 function useAppEvents<T = unknown>(
   app: string,
   projectId: string | undefined | null,
@@ -156,17 +155,31 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
   const handleUpload = async (ev: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = Array.from(ev.target.files || []);
     if (fileList.length === 0) return;
-    setStatus(`Uploading ${fileList.length} file${fileList.length !== 1 ? "s" : ""}…`);
     setBusy(true);
     try {
+      let i = 0;
       for (const file of fileList) {
-        const fd = new FormData();
-        fd.append("file", file);
-        fd.append("folder", folder);
-        await fetch(`${API}/files?${withParams({})}`, {
-          method: "POST", credentials: "same-origin", body: fd,
+        i += 1;
+        // The resumable helper auto-chooses single-shot vs chunked
+        // based on size. onProgress drives a status banner so the
+        // user sees throughput on the multi-GB videos that would
+        // otherwise look stuck.
+        const label = `(${i}/${fileList.length}) ${file.name}`;
+        await uploadResumable(file, {
+          folder,
+          onProgress: (bytes, total) => {
+            const pct = total > 0 ? Math.floor((bytes / total) * 100) : 0;
+            setStatus(`Uploading ${label} — ${pct}%`);
+          },
         });
       }
+      setStatus(
+        fileList.length === 1
+          ? `Uploaded ${fileList[0].name}.`
+          : `Uploaded ${fileList.length} files.`,
+      );
+    } catch (e) {
+      setStatus("Upload failed: " + (e as Error).message);
     } finally {
       ev.target.value = "";
       setBusy(false);

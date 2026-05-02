@@ -36,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: storage
 display_name: Storage
-version: 0.1.6
+version: 0.2.0
 description: |
   File storage with virtual folders, signed URLs, dedup. Local-disk
   backend; cloud backend slot reserved for v0.2.
@@ -99,9 +99,28 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := os.MkdirAll(blobsDir(ctx), 0755); err != nil {
 		return fmt.Errorf("mkdir blobs: %w", err)
 	}
+	if err := os.MkdirAll(uploadsDir(ctx), 0755); err != nil {
+		return fmt.Errorf("mkdir uploads: %w", err)
+	}
 	ctx.Logger().Info("storage mounted",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
-		"blobs_dir", blobsDir(ctx))
+		"blobs_dir", blobsDir(ctx),
+		"uploads_dir", uploadsDir(ctx))
+
+	// Background sweeper for stale upload sessions. Runs once on
+	// boot (so a restart immediately reclaims anything older than
+	// 24h) and then hourly. Goroutine has no shutdown — apps don't
+	// have a clean teardown signal in v0.1, but the sweeper does
+	// nothing destructive past the TTL gate so an abrupt exit is
+	// fine.
+	go func() {
+		sweepStaleUploads(ctx)
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for range t.C {
+			sweepStaleUploads(ctx)
+		}
+	}()
 	return nil
 }
 
@@ -118,6 +137,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/files", Handler: a.handleFilesCollection},
 		{Pattern: "/files/", Handler: a.handleFilesItem},
 		{Pattern: "/folders", Handler: a.handleFolders},
+		// Resumable upload protocol (browser-only — not in MCP). See
+		// uploads.go for the on-disk session layout + endpoint shapes.
+		{Pattern: "/uploads", Handler: a.handleUploadsCollection},
+		{Pattern: "/uploads/", Handler: a.handleUploadsItem},
 	}
 }
 
