@@ -792,8 +792,14 @@ func TestSchedule_DispatchesToJobsApp(t *testing.T) {
 			if target["kind"] != "http" {
 				t.Errorf("target.kind = %v", target["kind"])
 			}
-			if !strings.Contains(target["url"].(string), "/jobs/publish_post") {
-				t.Errorf("target.url = %v", target["url"])
+			// v0.5.1+: cross-app {app, path} shape (the old `url`
+			// was a relative path that the jobs dispatcher couldn't
+			// resolve at fire time).
+			if target["app"] != "social" {
+				t.Errorf("target.app = %v, want social", target["app"])
+			}
+			if path, _ := target["path"].(string); path != "/jobs/publish_post" {
+				t.Errorf("target.path = %v, want /jobs/publish_post", target["path"])
 			}
 			if c.Input["idempotency_key"] == "" {
 				t.Errorf("missing idempotency_key")
@@ -992,5 +998,56 @@ func TestExtractStorageContentType(t *testing.T) {
 				t.Errorf("got %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+func TestNormaliseScheduleAt(t *testing.T) {
+	cases := []struct {
+		name, in     string
+		wantContains string // RFC3339 substring (timezone offset varies by host)
+		wantErr      bool
+	}{
+		{"datetime-local (panel format)", "2026-05-03T10:30", "2026-05-03T10:30:00", false},
+		{"RFC3339 with Z", "2026-05-03T10:30:00Z", "2026-05-03T10:30:00Z", false},
+		{"RFC3339 with offset", "2026-05-03T10:30:00+02:00", "2026-05-03T10:30:00", false},
+		{"date only", "2026-05-03", "2026-05-03T00:00:00", false},
+		{"sql-ish", "2026-05-03 10:30:00", "2026-05-03T10:30:00", false},
+		{"garbage", "tomorrow at noon", "", true},
+		{"empty", "", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := normaliseScheduleAt(c.in)
+			if c.wantErr {
+				if err == nil {
+					t.Errorf("expected error for %q, got %q", c.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", c.in, err)
+			}
+			if !strings.Contains(got, c.wantContains) {
+				t.Errorf("normaliseScheduleAt(%q) = %q, want substring %q", c.in, got, c.wantContains)
+			}
+		})
+	}
+}
+
+func TestMcpErrorMessage(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{`{"job":{"id":1}}`, ""},
+		{`{"isError":true,"content":[{"type":"text","text":"schedule.run_at: unrecognised time format"}]}`,
+			"schedule.run_at: unrecognised time format"},
+		{`{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"jobs not bound"}]}}`,
+			"jobs not bound"},
+		{`{"isError":true,"content":[]}`, "tool returned an error envelope"},
+	}
+	for _, c := range cases {
+		got := mcpErrorMessage(json.RawMessage(c.in))
+		if got != c.want {
+			t.Errorf("mcpErrorMessage(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

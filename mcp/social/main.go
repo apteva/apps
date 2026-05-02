@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.5.0
+version: 0.5.1
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -1518,26 +1518,38 @@ func upstreamError(out *sdk.ExecuteResult) error {
 	return fmt.Errorf("upstream %d: %s", out.Status, body)
 }
 
-// scheduleJob hands off to the jobs app: register an HTTP-target job
-// that calls back into /api/apps/social/jobs/publish_post when its
-// scheduled time arrives. Idempotency keyed on post_id so dupes coalesce.
+// scheduleJob hands off to the jobs app: register an event-style job
+// that POSTs back into /api/apps/social/jobs/publish_post when its
+// scheduled time arrives. Uses the cross-app {app, path} target
+// shape rather than a raw url= so jobs' dispatcher resolves the
+// platform-internal path correctly. Idempotency keyed on post_id
+// so dupes coalesce.
 func (a *App) scheduleJob(ctx *sdk.AppCtx, postID int64, scheduleAt string) error {
 	jobsBound := ctx.IntegrationFor("jobs")
 	if jobsBound == nil {
 		return errors.New("jobs app not bound — bind it at install time to enable durable scheduling")
 	}
-	payload := map[string]any{"post_id": postID}
-	payloadJSON, _ := json.Marshal(payload)
+	// Normalise the schedule_at — the panel's <input type=datetime-
+	// local> emits "2006-01-02T15:04" (no seconds, no timezone),
+	// which jobs.parseTime doesn't accept. Reinterpret it as the
+	// server's local time and re-emit RFC3339 with offset so the
+	// jobs app gets an unambiguous instant.
+	rfc3339, err := normaliseScheduleAt(scheduleAt)
+	if err != nil {
+		return fmt.Errorf("invalid schedule_at %q: %w", scheduleAt, err)
+	}
 	res, err := ctx.PlatformAPI().CallApp("jobs", "jobs_schedule", map[string]any{
 		"name": fmt.Sprintf("social.publish_post.%d", postID),
 		"schedule": map[string]any{
 			"kind":   "once",
-			"run_at": scheduleAt,
+			"run_at": rfc3339,
 		},
 		"target": map[string]any{
-			"kind": "http",
-			"url":  "/api/apps/social/jobs/publish_post",
-			"body": string(payloadJSON),
+			"kind":   "http",
+			"app":    "social",
+			"path":   "/jobs/publish_post",
+			"method": "POST",
+			"body":   map[string]any{"post_id": postID},
 		},
 		"idempotency_key": fmt.Sprintf("social.post.%d", postID),
 		"max_retries":     3,
@@ -1547,8 +1559,89 @@ func (a *App) scheduleJob(ctx *sdk.AppCtx, postID int64, scheduleAt string) erro
 	if err != nil {
 		return err
 	}
-	_ = res // best-effort; the job's id isn't tracked in our DB today
+	// CallApp returns nil error on HTTP 2xx — but jobs may have
+	// rejected the request via an MCP error envelope (`{result:
+	// {isError:true, content:[{text:"…"}]}}` at HTTP 200). Detect
+	// that and surface the inner message; otherwise the post stays
+	// in 'scheduled' status while no job actually exists.
+	if msg := mcpErrorMessage(res); msg != "" {
+		return fmt.Errorf("jobs_schedule: %s", msg)
+	}
+	ctx.Logger().Info("scheduleJob: created", "post_id", postID, "run_at", rfc3339)
 	return nil
+}
+
+// normaliseScheduleAt accepts the formats the panel + agents send and
+// returns a canonical RFC3339 string. Order:
+//   - already RFC3339 / RFC3339Nano → pass through
+//   - "2006-01-02 15:04:05" → reinterpret as local
+//   - "2006-01-02T15:04" (HTML datetime-local) → reinterpret as local,
+//     append :00 + offset
+//   - "2006-01-02" → midnight local
+func normaliseScheduleAt(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", errors.New("empty")
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.Format(time.RFC3339), nil
+		}
+	}
+	for _, layout := range []string{
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+		"2006-01-02T15:04", // datetime-local
+		"2006-01-02",
+	} {
+		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+			return t.Format(time.RFC3339), nil
+		}
+	}
+	return "", fmt.Errorf("unrecognised time format")
+}
+
+// mcpErrorMessage extracts the inner text from an MCP-shaped error
+// response. Returns "" when the response is a normal success — used
+// by callers of CallApp to detect tool-level errors that came back
+// at HTTP 200. Mirrors the envelope check in fetchPages.
+func mcpErrorMessage(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	// Direct: {isError:true, content:[{type,text}]}.
+	var direct struct {
+		IsError bool `json:"isError"`
+		Content []struct {
+			Type, Text string
+		} `json:"content"`
+	}
+	if json.Unmarshal(raw, &direct) == nil && direct.IsError {
+		for _, c := range direct.Content {
+			if c.Type == "text" && c.Text != "" {
+				return c.Text
+			}
+		}
+		return "tool returned an error envelope"
+	}
+	// JSON-RPC wrapper: {jsonrpc, id, result:{isError, content}}.
+	var wrapped struct {
+		Result struct {
+			IsError bool `json:"isError"`
+			Content []struct {
+				Type, Text string
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(raw, &wrapped) == nil && wrapped.Result.IsError {
+		for _, c := range wrapped.Result.Content {
+			if c.Type == "text" && c.Text != "" {
+				return c.Text
+			}
+		}
+		return "tool returned an error envelope"
+	}
+	return ""
 }
 
 func (a *App) markTargetFailed(ctx *sdk.AppCtx, targetID int64, msg string) {
