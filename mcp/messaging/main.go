@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.2.2
+version: 0.2.3
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -155,6 +155,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/suppressions", Handler: a.handleSuppressionsList},
 		{Pattern: "/senders", Handler: a.handleSendersList},
 		{Pattern: "/senders/quota", Handler: a.handleSendersQuota},
+		// Generic dispatcher so the panel can invoke any MCP tool via
+		// HTTP — saves declaring a per-tool route for every mutation.
+		// Body: {"tool": "<name>", "args": {...}}.
+		{Pattern: "/tools/call", Handler: a.handleToolsCall},
 	}
 }
 
@@ -2372,6 +2376,54 @@ func (a *App) handleSendersList(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleSendersQuota(w http.ResponseWriter, r *http.Request) {
 	out, err := a.toolSendersGetQuota(globalCtx, map[string]any{})
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	httpJSON(w, out)
+}
+
+// handleToolsCall lets the panel invoke any registered MCP tool via
+// HTTP. The shape is {"tool": "send_message", "args": {...}} — same
+// surface MCP exposes over JSON-RPC, but as plain REST so the panel
+// can use its existing api() helper instead of building MCP framing.
+//
+// Auth: the platform proxy puts the install's bearer token on the
+// request before forwarding; sdk.Run's withTokenAuth gates everything
+// except /health, so unauthenticated callers can't reach this route
+// in production.
+func (a *App) handleToolsCall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	var body struct {
+		Tool string         `json:"tool"`
+		Args map[string]any `json:"args"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.Tool == "" {
+		httpErr(w, http.StatusBadRequest, "tool required")
+		return
+	}
+	if body.Args == nil {
+		body.Args = map[string]any{}
+	}
+	var handler sdk.ToolHandler
+	for _, t := range a.MCPTools() {
+		if t.Name == body.Tool {
+			handler = t.Handler
+			break
+		}
+	}
+	if handler == nil {
+		httpErr(w, http.StatusNotFound, "unknown tool: "+body.Tool)
+		return
+	}
+	out, err := handler(globalCtx, body.Args)
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
 		return

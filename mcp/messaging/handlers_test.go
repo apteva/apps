@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -536,5 +539,52 @@ func TestSenders_NoBoundProvider(t *testing.T) {
 	_, err := app.toolSendersList(ctx, map[string]any{})
 	if err == nil || !strings.Contains(err.Error(), "no email_provider bound") {
 		t.Errorf("expected unbound error, got %v", err)
+	}
+}
+
+// ─── /tools/call HTTP dispatcher ───────────────────────────────────
+
+func TestHandleToolsCall_DispatchesByName(t *testing.T) {
+	_ = newTestCtx(t, &stubPlatform{})
+	app := &App{}
+
+	body := bytes.NewBufferString(`{"tool":"template_create","args":{"name":"hello"}}`)
+	r := httptest.NewRequest("POST", "/tools/call", body)
+	w := httptest.NewRecorder()
+	app.handleToolsCall(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var out map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	if out["template"] == nil {
+		t.Errorf("expected template in response, got %v", out)
+	}
+}
+
+func TestHandleToolsCall_UnknownTool404(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+	_ = ctx
+	app := &App{}
+
+	r := httptest.NewRequest("POST", "/tools/call", bytes.NewBufferString(`{"tool":"does_not_exist","args":{}}`))
+	w := httptest.NewRecorder()
+	app.handleToolsCall(w, r)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestHandleToolsCall_RejectsGET(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+	_ = ctx
+	app := &App{}
+
+	r := httptest.NewRequest("GET", "/tools/call", nil)
+	w := httptest.NewRecorder()
+	app.handleToolsCall(w, r)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
 	}
 }
