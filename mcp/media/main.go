@@ -570,6 +570,33 @@ func (a *App) handleMediaItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, map[string]any{"queued": 1})
+	case tail == "description" && r.Method == http.MethodPut:
+		// Panel + agent use this to set/update prose. Same partial-
+		// update semantics as the MCP tool: pointer-distinguished
+		// fields so {"description":""} clears, missing keys preserve.
+		var body struct {
+			Title       *string `json:"title"`
+			Description *string `json:"description"`
+			AltText     *string `json:"alt_text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		f := DescriptionFields{Title: body.Title, Description: body.Description, AltText: body.AltText}
+		if f.Title == nil && f.Description == nil && f.AltText == nil {
+			http.Error(w, "provide at least one of title, description, alt_text", http.StatusBadRequest)
+			return
+		}
+		if err := setDescription(globalCtx.AppDB(), pid, fid, f); err != nil {
+			if notFound(err) {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"file_id": fid, "updated": true})
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}

@@ -108,6 +108,10 @@ interface MediaRow {
   probe_status: "pending" | "ok" | "failed" | "unsupported" | "skipped_size";
   probe_error?: string;
   raw_probe?: unknown;
+  // v0.3 — user/agent-supplied prose. Survives reprobe.
+  title?: string;
+  description?: string;
+  alt_text?: string;
   derivations?: Derivation[];
 }
 
@@ -226,6 +230,29 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
     setTimeout(load, 500);
   };
 
+  // saveDescription writes prose via PUT /media/{id}/description (which
+  // wraps the same setDescription used by the MCP tool). On success we
+  // patch the row in-place so the drawer reflects the save without
+  // waiting for a full refresh.
+  const saveDescription = useCallback(
+    async (fileId: string, fields: { title?: string; description?: string; alt_text?: string }) => {
+      const res = await fetch(`${API}/media/${fileId}/description?${withParams()}`, {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(fields),
+      });
+      if (!res.ok) {
+        throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+      }
+      setRows((prev) =>
+        prev.map((r) => (r.file_id === fileId ? { ...r, ...fields } : r)),
+      );
+      setSelected((prev) => (prev && prev.file_id === fileId ? { ...prev, ...fields } : prev));
+    },
+    [withParams],
+  );
+
   const renderTile = (r: MediaRow) => {
     const thumb = r.derivations?.find((d) => d.kind === "thumbnail" && d.status === "ok");
     const wave = r.derivations?.find((d) => d.kind === "waveform" && d.status === "ok");
@@ -251,8 +278,16 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
         </div>
         <div className="p-2 flex flex-col gap-0.5">
           <div className="text-xs text-text font-medium truncate" title={r.file_id}>
-            #{r.file_id}
+            {r.title || `#${r.file_id}`}
           </div>
+          {r.description ? (
+            <div
+              className="text-[11px] text-text-muted line-clamp-2"
+              title={r.description}
+            >
+              {r.description}
+            </div>
+          ) : null}
           <div className="text-[11px] text-text-muted flex flex-wrap gap-1">
             {r.duration_ms ? <span>{formatDuration(r.duration_ms)}</span> : null}
             {r.width && r.height ? <span>· {r.width}×{r.height}</span> : null}
@@ -344,6 +379,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
           row={selected}
           onClose={() => setSelected(null)}
           onReindex={() => handleReindex(selected.file_id)}
+          onSaveDescription={(fields) => saveDescription(selected.file_id, fields)}
           previewBase={`${STORAGE}/files`}
           query={withParams()}
         />
@@ -356,12 +392,14 @@ function DetailDrawer({
   row,
   onClose,
   onReindex,
+  onSaveDescription,
   previewBase,
   query,
 }: {
   row: MediaRow;
   onClose: () => void;
   onReindex: () => void;
+  onSaveDescription: (fields: { title?: string; description?: string; alt_text?: string }) => Promise<void>;
   previewBase: string;
   query: string;
 }) {
@@ -451,6 +489,7 @@ function DetailDrawer({
           >
             Open source file ↗
           </a>
+          <DescriptionEditor row={row} onSave={onSaveDescription} />
           <Section title="Container">
             <Field label="format" value={row.format_name} />
             <Field label="duration" value={formatDuration(row.duration_ms)} />
@@ -517,5 +556,167 @@ function Field({ label, value }: { label: string; value?: string | number }) {
       <span className="text-text-muted">{label}</span>
       <span className="text-text">{String(value)}</span>
     </>
+  );
+}
+
+// DescriptionEditor — collapsible inline edit of title / description /
+// alt_text for one media row. View mode renders the prose read-only;
+// edit mode shows three inputs + Save/Cancel. Saves go through the
+// parent's onSave callback (which calls PUT /media/{id}/description),
+// so the same path the agent uses also writes from the panel.
+function DescriptionEditor({
+  row,
+  onSave,
+}: {
+  row: MediaRow;
+  onSave: (fields: { title?: string; description?: string; alt_text?: string }) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(row.title || "");
+  const [desc, setDesc] = useState(row.description || "");
+  const [alt, setAlt] = useState(row.alt_text || "");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+
+  // Reset local state when the selected row changes (the drawer is
+  // reused for different files via key={row.file_id} on selection).
+  useEffect(() => {
+    setTitle(row.title || "");
+    setDesc(row.description || "");
+    setAlt(row.alt_text || "");
+    setEditing(false);
+    setErr("");
+  }, [row.file_id]);
+
+  const dirty =
+    (row.title || "") !== title ||
+    (row.description || "") !== desc ||
+    (row.alt_text || "") !== alt;
+
+  const handleSave = async () => {
+    setSaving(true);
+    setErr("");
+    try {
+      // Send only fields that actually changed — server treats missing
+      // keys as "preserve", empty string as "clear", which is exactly
+      // what we want.
+      const fields: { title?: string; description?: string; alt_text?: string } = {};
+      if ((row.title || "") !== title) fields.title = title;
+      if ((row.description || "") !== desc) fields.description = desc;
+      if ((row.alt_text || "") !== alt) fields.alt_text = alt;
+      await onSave(fields);
+      setEditing(false);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleCancel = () => {
+    setTitle(row.title || "");
+    setDesc(row.description || "");
+    setAlt(row.alt_text || "");
+    setEditing(false);
+    setErr("");
+  };
+
+  const empty = !row.title && !row.description && !row.alt_text;
+
+  if (!editing) {
+    return (
+      <section>
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="text-xs uppercase tracking-wide text-text-dim">Description</h3>
+          <button
+            type="button"
+            onClick={() => setEditing(true)}
+            className="text-xs text-accent hover:underline"
+          >
+            {empty ? "Add description" : "Edit"}
+          </button>
+        </div>
+        {empty ? (
+          <div className="text-xs text-text-dim italic">
+            No description set. Add one to give agents and viewers context.
+          </div>
+        ) : (
+          <div className="space-y-1 text-sm">
+            {row.title ? <div className="text-text font-medium">{row.title}</div> : null}
+            {row.description ? (
+              <div className="text-text-muted whitespace-pre-wrap">{row.description}</div>
+            ) : null}
+            {row.alt_text ? (
+              <div className="text-xs text-text-dim">
+                <span className="text-text-muted">alt: </span>
+                {row.alt_text}
+              </div>
+            ) : null}
+          </div>
+        )}
+      </section>
+    );
+  }
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-1">
+        <h3 className="text-xs uppercase tracking-wide text-text-dim">Description</h3>
+      </div>
+      <div className="space-y-2 text-sm">
+        <label className="block">
+          <span className="text-xs text-text-muted block mb-0.5">Title</span>
+          <input
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            placeholder="Short label, e.g. Q3 board sync"
+            disabled={saving}
+          />
+        </label>
+        <label className="block">
+          <span className="text-xs text-text-muted block mb-0.5">Description</span>
+          <textarea
+            value={desc}
+            onChange={(e) => setDesc(e.target.value)}
+            rows={4}
+            className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+            placeholder="What's in this clip — couple of sentences."
+            disabled={saving}
+          />
+        </label>
+        <label className="block">
+          <span className="text-xs text-text-muted block mb-0.5">Alt text</span>
+          <input
+            type="text"
+            value={alt}
+            onChange={(e) => setAlt(e.target.value)}
+            className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            placeholder="Accessibility / screen-reader text (esp. for images)"
+            disabled={saving}
+          />
+        </label>
+        {err ? <div className="text-red text-xs">{err}</div> : null}
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={saving || !dirty}
+            className="px-3 py-1 text-sm bg-accent text-bg rounded hover:opacity-90 disabled:opacity-40"
+          >
+            {saving ? "Saving…" : "Save"}
+          </button>
+          <button
+            type="button"
+            onClick={handleCancel}
+            disabled={saving}
+            className="px-3 py-1 text-sm border border-border text-text-muted rounded hover:bg-bg-input"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
