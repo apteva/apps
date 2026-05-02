@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.4.0
+version: 0.5.0
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -49,6 +49,16 @@ requires:
       required: false
       label: "Speech-to-text provider"
       hint: "Connect Deepgram to auto-transcribe audio + video. Without it, transcripts stay manual."
+    - role: descriptions
+      kind: integration
+      compatible_slugs: [opencode-go]
+      capabilities: [chat.complete, vision.describe]
+      tools:
+        chat.complete: chat_completion
+        vision.describe: chat_completion
+      required: false
+      label: "Auto-description provider"
+      hint: "Connect OpenCode Go for kimi-k2.6 (vision-capable) auto-descriptions of images, video frames, and audio transcripts."
 
 provides:
   http_routes:
@@ -103,6 +113,10 @@ provides:
       description: Status / language / text / segments for one file's transcript.
     - name: media_set_transcript
       description: Upsert a hand-supplied transcript (imported / manual). Bypasses the auto pipeline entirely.
+
+    # Auto-description — generates 2-3 sentence descriptions via the LLM integration.
+    - name: media_describe
+      description: Queue an auto-description for one media file. force=true clears the cooldown so the next sweep re-attempts.
 
   workers:
     - name: indexer
@@ -238,5 +252,43 @@ config_schema:
     default: "600"
     label: Transcription timeout (seconds)
     description: Hard wall-clock cap per Deepgram call. Failed mid-call rows are marked failed.
+
+  # Auto-description (new in v0.5)
+  - name: auto_describe_enabled
+    type: text
+    default: "true"
+    label: Auto-describe
+    description: Master switch for the auto-describer. When false, the worker doesn't sweep — manual media_describe still works.
+  - name: describe_model
+    type: text
+    default: "kimi-k2.6"
+    label: Description model
+    description: |
+      Model slug from the OpenCode Go catalog. kimi-k2.6 is the default (vision-capable, 256K context, reasoning model). Faster non-reasoning options like glm-5.1 / qwen3.6-plus may work depending on vision support.
+  - name: describe_max_tokens
+    type: text
+    default: "1500"
+    label: Description max_tokens
+    description: Token budget per call. Reasoning models (Kimi, DeepSeek) need ~1000+ to leave room for both reasoning and the visible answer; non-reasoning models can run on ~200.
+  - name: describe_poll_seconds
+    type: text
+    default: "60"
+    label: Describer poll interval (seconds)
+    description: Sweep interval. Each sweep handles up to describe_batch_size files.
+  - name: describe_batch_size
+    type: text
+    default: "5"
+    label: Describer batch size
+    description: Maximum candidate rows processed per sweep tick. Workers run sequentially within a sweep — Kimi is slow.
+  - name: describe_retry_cooldown_seconds
+    type: text
+    default: "600"
+    label: Describer retry cooldown (seconds)
+    description: After a failed attempt, wait at least this long before re-queueing a row. Prevents tight retry loops against a misconfigured integration.
+  - name: describe_timeout_seconds
+    type: text
+    default: "120"
+    label: Describer call timeout (seconds)
+    description: Hard wall-clock cap per LLM call. Reasoning models can be slow on vision; bump this if you see widespread timeouts.
 
 upgrade_policy: auto-patch

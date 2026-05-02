@@ -20,14 +20,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.4.0
+version: 0.5.0
 description: |
-  Catalog + derivations + renders + transcripts for media files in
-  storage. Indexes uploads (probe, thumbnail, waveform), runs
-  on-demand edits (trim, resize, transcode, concat, crop,
-  extract_frame, audio_extract), and auto-transcribes audio + video
-  via Deepgram when the integration is bound. Outputs all flow
-  through storage.
+  Catalog + derivations + renders + transcripts + auto-descriptions
+  for media files in storage. Indexes uploads (probe, thumbnail,
+  waveform), runs on-demand edits (trim/resize/transcode/concat/
+  crop/extract_frame/audio_extract), auto-transcribes audio + video
+  via Deepgram, and auto-generates descriptions via OpenCode Go
+  (Kimi K2.6 default — vision-capable) when integrations are bound.
+  Outputs all flow through storage.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -54,6 +55,16 @@ requires:
       required: false
       label: "Speech-to-text provider"
       hint: "Connect Deepgram to auto-transcribe audio + video. Without it, transcripts stay manual (media_set_transcript)."
+    - role: descriptions
+      kind: integration
+      compatible_slugs: [opencode-go]
+      capabilities: [chat.complete, vision.describe]
+      tools:
+        chat.complete: chat_completion
+        vision.describe: chat_completion
+      required: false
+      label: "Auto-description provider"
+      hint: "Connect OpenCode Go to auto-generate descriptions from thumbnails + transcripts. Default model: kimi-k2.6 (vision-capable). Without it, descriptions stay manual."
 provides:
   http_routes:
     - prefix: /
@@ -78,6 +89,7 @@ provides:
     - { name: media_transcribe,      description: "Queue a transcription for one media file. Returns transcript_id; poll media_get_transcript." }
     - { name: media_get_transcript,  description: "Status + text + segments of one file's transcript." }
     - { name: media_set_transcript,  description: "Upsert an externally-produced transcript (imported / manual). Skips the auto pipeline." }
+    - { name: media_describe,        description: "Queue an auto-generated description for one media file. force=true reattempts even after success / cooldown." }
   workers:
     - name: indexer
       schedule: "@every 30s"
@@ -133,6 +145,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// render pool. Skips itself if transcribe_auto=false; degrades
 	// gracefully when the deepgram integration isn't bound.
 	startTranscriber(ctx)
+	// Auto-describer: another isolated goroutine. Reads transcripts
+	// + thumbnails when present, calls opencode-go (Kimi K2.6 by
+	// default), writes the description back via setDescription.
+	startDescriber(ctx)
 	return nil
 }
 
@@ -396,6 +412,15 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"file_id", "text"}),
 			Handler: a.toolSetTranscript,
 		},
+		{
+			Name:        "media_describe",
+			Description: "Queue an auto-generated description for one media file. The describer worker picks it up on its next sweep, calls the bound LLM integration (OpenCode Go default), and writes the result via media_set_description with description_source='ai-generated'. force=true ignores both the cooldown and any existing ai-generated description. Won't overwrite human-set descriptions in any case. Args: file_id, force?.",
+			InputSchema: schemaObject(map[string]any{
+				"file_id": map[string]any{"type": "string"},
+				"force":   map[string]any{"type": "boolean"},
+			}, []string{"file_id"}),
+			Handler: a.toolDescribe,
+		},
 	}
 }
 
@@ -478,6 +503,49 @@ func (a *App) toolSetDescription(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	return map[string]any{"found": true, "file_id": fid, "updated": true}, nil
+}
+
+// toolDescribe queues a media row for auto-description on the next
+// describer sweep. force=true clears the cooldown so a manually-
+// triggered retry doesn't have to wait describe_retry_cooldown_seconds.
+// Will not overwrite human-set descriptions — the worker's candidate
+// query filters those out unconditionally.
+func (a *App) toolDescribe(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	fid, _ := args["file_id"].(string)
+	if fid == "" {
+		return nil, errors.New("file_id required")
+	}
+	media, err := getMedia(ctx.AppDB(), pid, fid)
+	if err != nil {
+		if notFound(err) {
+			return map[string]any{"found": false}, nil
+		}
+		return nil, err
+	}
+	if media.DescriptionSource == "human" || media.DescriptionSource == "agent" {
+		return map[string]any{
+			"found":  true,
+			"queued": false,
+			"reason": "description is human-set; clear it via media_set_description first if you want auto-generation",
+		}, nil
+	}
+	force, _ := args["force"].(bool)
+	if force {
+		// Wipe both the existing description and the cooldown so the
+		// next sweep re-attempts. Targeted UPDATE keeps the rest of
+		// the row intact (probe data, transcript pointer, etc.).
+		if _, err := ctx.AppDB().Exec(
+			`UPDATE media SET description='', description_source='', description_attempted_at=NULL, description_error=''
+			   WHERE project_id=? AND file_id=?`, pid, fid,
+		); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"found": true, "queued": true}, nil
 }
 
 // toolTranscribe queues a pending transcript row. force=true also

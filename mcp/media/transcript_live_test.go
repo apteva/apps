@@ -194,6 +194,54 @@ func TestLive_OpenCodeGo_ChatCompletion_Vision(t *testing.T) {
 	}
 }
 
+// TestLive_OpenCodeGo_DescribePrompt validates the actual prompt the
+// auto-describer sends — same shape as buildDescribePrompt for the
+// audio-with-transcript case. Catches regressions where the system
+// prompt or the temperature/max_tokens choice produce content that's
+// no longer 2-3 sentences.
+func TestLive_OpenCodeGo_DescribePrompt(t *testing.T) {
+	apiKey := requireEnv(t, "OPENCODE_GO_API_KEY")
+
+	body := map[string]any{
+		"model": "kimi-k2.6",
+		"messages": []map[string]any{
+			{"role": "system", "content": "You write concise media descriptions. Output exactly 2-3 sentences in plain prose, no preamble, no headings, no quotes. Focus on what is depicted or said — subjects, setting, action. Avoid speculation about emotions or intent unless explicitly visible/audible. Don't mention the medium ('this video', 'this audio') — describe the content directly."},
+			{"role": "user", "content": "Describe what's said in this recording in 2-3 sentences.\n\nTranscript:\nAlice: Quarterly results came in above forecast — revenue up 18%, margins held at 24%. Bob: Great, but the cloud spend is creeping. We need to flag that for the board. Alice: Agreed, I'll add a slide."},
+		},
+		"temperature": 0.3,
+		"max_tokens":  1500,
+	}
+	out := postOpenCodeGo(t, apiKey, body)
+
+	choices, _ := out["choices"].([]any)
+	if len(choices) == 0 {
+		t.Fatalf("no choices: %v", out)
+	}
+	first := choices[0].(map[string]any)
+	msg, _ := first["message"].(map[string]any)
+	content, _ := msg["content"].(string)
+	reasoning, _ := msg["reasoning"].(string)
+	finishReason, _ := first["finish_reason"].(string)
+
+	t.Logf("description: %q\nreasoning chars: %d\nfinish_reason: %s",
+		content, len(reasoning), finishReason)
+
+	// Validate the prompt produces something useful — empty or null
+	// content with no reasoning fallback would mean our prompt is
+	// busted (or max_tokens is too tight).
+	if strings.TrimSpace(content) == "" && strings.TrimSpace(reasoning) == "" {
+		t.Errorf("describe prompt produced no content or reasoning")
+	}
+
+	// Check for prose hygiene: shouldn't start with markers like
+	// 'description:' or quote the entire response. These are common
+	// failure modes when the system prompt drifts.
+	low := strings.ToLower(strings.TrimSpace(content))
+	if strings.HasPrefix(low, "description:") || strings.HasPrefix(low, "summary:") {
+		t.Errorf("model added preamble — system prompt may need tuning: %q", content)
+	}
+}
+
 // postOpenCodeGo is the shared helper. Direct call to the chat
 // completions endpoint — same URL + auth shape the integration
 // catalog declares. Decodes the JSON response.

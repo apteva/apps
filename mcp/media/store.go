@@ -51,6 +51,14 @@ type MediaRow struct {
 	Description string `json:"description,omitempty"`
 	AltText     string `json:"alt_text,omitempty"`
 
+	// Description provenance (v0.5). Lets agents + the panel tell
+	// human-set descriptions from ai-generated ones, and lets the
+	// auto-describer respect cooldown after a failed attempt.
+	DescriptionSource      string `json:"description_source,omitempty"`       // human|ai-generated|imported|''
+	DescriptionUpdatedAt   string `json:"description_updated_at,omitempty"`
+	DescriptionAttemptedAt string `json:"description_attempted_at,omitempty"`
+	DescriptionError       string `json:"description_error,omitempty"`
+
 	// Lifted from the transcripts table via LEFT JOIN so the row
 	// carries enough state for the panel to render a status icon
 	// without a second roundtrip. Empty when no transcript exists.
@@ -167,6 +175,12 @@ type DescriptionFields struct {
 	Title       *string
 	Description *string
 	AltText     *string
+	// Source defaults to "human" when empty — covers the common case
+	// of an agent / panel write. Auto-describer writes 'ai-generated'
+	// so subsequent sweeps don't try to overwrite themselves; the
+	// auto-describer's gate explicitly skips rows where source
+	// is 'human' or 'agent', so re-running is safe.
+	Source string
 }
 
 // setDescription writes only the description columns. Probe state
@@ -197,9 +211,21 @@ func setDescription(db *sql.DB, projectID, fileID string, f DescriptionFields) e
 	if len(sets) == 0 {
 		return nil // nothing to do; not an error
 	}
-	// Bump updated_at so panels sorting by recently-described work.
-	sets = append(sets, "updated_at = ?")
-	args = append(args, time.Now().UTC().Format(time.RFC3339))
+	// Stamp provenance so the auto-describer can tell ai-generated
+	// from human-set rows. Default 'human' covers the panel + tool
+	// path; the auto-describer passes 'ai-generated' explicitly.
+	source := f.Source
+	if source == "" {
+		source = "human"
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	sets = append(sets,
+		"description_source = ?",
+		"description_updated_at = ?",
+		"description_error = ''", // a successful write clears any prior error
+		"updated_at = ?",
+	)
+	args = append(args, source, now, now)
 
 	args = append(args, projectID, fileID)
 	q := "UPDATE media SET " + strings.Join(sets, ", ") + " WHERE project_id=? AND file_id=?"
@@ -214,6 +240,59 @@ func setDescription(db *sql.DB, projectID, fileID string, f DescriptionFields) e
 	return nil
 }
 
+// describeCandidates returns media file_ids the auto-describer
+// should consider this tick: probed-ok rows with no description and
+// no human/agent override, where the last attempt (if any) is older
+// than cooldownSeconds. Caller queues each one through the LLM.
+func describeCandidates(db *sql.DB, projectID string, limit int, cooldownSeconds int) ([]string, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(cooldownSeconds) * time.Second).Format(time.RFC3339)
+	rows, err := db.Query(`
+		SELECT file_id
+		  FROM media
+		 WHERE project_id = ?
+		   AND probe_status = 'ok'
+		   AND description = ''
+		   AND description_source NOT IN ('human','agent')
+		   AND (description_attempted_at IS NULL OR description_attempted_at <= ?)
+		 ORDER BY created_at DESC
+		 LIMIT ?`,
+		projectID, cutoff, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// markDescribeAttempt stamps the attempt timestamp + error so the
+// cooldown gate works on the next sweep. Doesn't touch description
+// itself — only the bookkeeping columns. Use after a failed attempt;
+// successful writes go through setDescription which clears error
+// and stamps updated_at instead.
+func markDescribeAttempt(db *sql.DB, projectID, fileID, errMsg string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(`
+		UPDATE media
+		   SET description_attempted_at = ?,
+		       description_error        = ?
+		 WHERE project_id = ? AND file_id = ?`,
+		now, errMsg, projectID, fileID,
+	)
+	return err
+}
+
 func getMedia(db *sql.DB, projectID, fileID string) (*MediaRow, error) {
 	row := db.QueryRow(`
 		SELECT m.file_id, m.project_id, m.source_sha256, m.format_name, m.duration_ms, m.bitrate,
@@ -222,6 +301,8 @@ func getMedia(db *sql.DB, projectID, fileID string) (*MediaRow, error) {
 			m.channels, m.sample_rate, m.audio_codec,
 			m.probe_status, m.probe_error, m.probe_at, m.raw_probe,
 			m.title, m.description, m.alt_text,
+			m.description_source, COALESCE(m.description_updated_at, ''),
+			COALESCE(m.description_attempted_at, ''), m.description_error,
 			COALESCE(t.status, ''),
 			m.created_at, m.updated_at
 		FROM media m
@@ -248,6 +329,8 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 		hasVideo, hasAudio, isImage    int
 		rawProbe                       string
 		title, description, altText    string
+		descSource, descUpdatedAt      string
+		descAttemptedAt, descError     string
 		transcriptStatus               string
 	)
 	err := row.Scan(
@@ -258,6 +341,7 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 		&channels, &srate, &acodec,
 		&m.ProbeStatus, &probeError, &probeAt, &rawProbe,
 		&title, &description, &altText,
+		&descSource, &descUpdatedAt, &descAttemptedAt, &descError,
 		&transcriptStatus,
 		&createdAt, &updatedAt,
 	)
@@ -282,6 +366,10 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 	m.Title = title
 	m.Description = description
 	m.AltText = altText
+	m.DescriptionSource = descSource
+	m.DescriptionUpdatedAt = descUpdatedAt
+	m.DescriptionAttemptedAt = descAttemptedAt
+	m.DescriptionError = descError
 	m.TranscriptStatus = transcriptStatus
 	m.CreatedAt = createdAt.String
 	m.UpdatedAt = updatedAt.String
@@ -374,6 +462,8 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 		m.channels, m.sample_rate, m.audio_codec,
 		m.probe_status, m.probe_error, m.probe_at, m.raw_probe,
 		m.title, m.description, m.alt_text,
+		m.description_source, COALESCE(m.description_updated_at, ''),
+		COALESCE(m.description_attempted_at, ''), m.description_error,
 		COALESCE(t.status, ''),
 		m.created_at, m.updated_at
 	FROM media m

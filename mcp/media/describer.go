@@ -1,0 +1,327 @@
+package main
+
+// Auto-describer worker. Generates a 2-3 sentence description for
+// every media file that doesn't have one yet, using the opencode-go
+// integration (Kimi K2.6 by default — vision-capable reasoning model).
+//
+// Three input paths, picked per file:
+//
+//   image / silent video → vision call with a thumbnail image_url
+//   audio with transcript → text call with the transcript
+//   video with both       → multimodal: thumbnail + transcript
+//
+// The worker is single-threaded by design — Kimi spends tokens
+// thinking before answering, so parallelism would just delay the
+// queue without saving wall-clock. Cooldown prevents tight retry
+// loops when an integration is misconfigured.
+//
+// Output writes through setDescription with source='ai-generated' so
+// human-set descriptions stay sticky (the candidate query filters
+// them out). Failures land on description_attempted_at +
+// description_error via markDescribeAttempt; the cooldown gate keeps
+// us from hammering the API after a 401 / 429.
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	sdk "github.com/apteva/app-sdk"
+)
+
+// startDescriber starts the auto-describer goroutine. Honours
+// auto_describe_enabled — when false, manual media_describe still
+// works but the sweep doesn't run.
+func startDescriber(app *sdk.AppCtx) {
+	cfg := app.Config()
+	if !configBool(cfg.Get("auto_describe_enabled"), true) {
+		app.Logger().Info("auto_describe_enabled=false — auto-describer disabled (manual still works)")
+		return
+	}
+	go describerLoop(app)
+	app.Logger().Info("auto-describer started")
+}
+
+func describerLoop(app *sdk.AppCtx) {
+	log := app.Logger()
+	cfg := app.Config()
+	interval := parseConfigIntFallback(cfg.Get("describe_poll_seconds"), 60)
+	tick := time.NewTicker(time.Duration(interval) * time.Second)
+	defer tick.Stop()
+
+	describerSweep(app)
+
+	for {
+		select {
+		case <-app.Done():
+			log.Info("auto-describer stopping")
+			return
+		case <-tick.C:
+			describerSweep(app)
+		}
+	}
+}
+
+func describerSweep(app *sdk.AppCtx) {
+	log := app.Logger()
+	db := app.AppDB()
+	cfg := app.Config()
+	pid := os.Getenv("APTEVA_PROJECT_ID")
+	if pid == "" {
+		log.Info("describer: no APTEVA_PROJECT_ID; skipping sweep")
+		return
+	}
+
+	bound := app.IntegrationFor("descriptions")
+	if bound == nil {
+		// Surface once per sweep — same gentle-degrade pattern as the
+		// transcriber. Don't write to rows; they'll be picked up next
+		// sweep when an integration is bound. This avoids polluting
+		// description_error with "no integration" noise that gets
+		// confusing if the integration is connected later.
+		return
+	}
+
+	batch := parseConfigIntFallback(cfg.Get("describe_batch_size"), 5)
+	cooldown := parseConfigIntFallback(cfg.Get("describe_retry_cooldown_seconds"), 600)
+
+	candidates, err := describeCandidates(db, pid, batch, cooldown)
+	if err != nil {
+		log.Error("describe candidates failed", "err", err)
+		return
+	}
+	for _, fid := range candidates {
+		select {
+		case <-app.Done():
+			return
+		default:
+		}
+		runOneDescription(app, bound, pid, fid)
+	}
+}
+
+// runOneDescription is the per-row lifecycle. Builds a prompt based
+// on what's available (transcript? image? both?), calls opencode-go,
+// writes the response back as the description.
+func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, fileID string) {
+	log := app.Logger()
+	db := app.AppDB()
+	cfg := app.Config()
+
+	media, err := getMedia(db, projectID, fileID)
+	if err != nil {
+		_ = markDescribeAttempt(db, projectID, fileID, "media row missing: "+err.Error())
+		return
+	}
+
+	// Defence in depth — the candidate query filters human/agent rows
+	// already, but a race between a manual write and the worker's
+	// claim could theoretically slip through. Skip without marking.
+	if media.DescriptionSource == "human" || media.DescriptionSource == "agent" {
+		return
+	}
+
+	// Build the prompt + optional image_url. Three branches map onto
+	// the three input paths. Each returns the messages array we POST
+	// to opencode-go's chat_completion endpoint.
+	messages, err := buildDescribePrompt(app, projectID, media)
+	if err != nil {
+		_ = markDescribeAttempt(db, projectID, fileID, "build prompt: "+err.Error())
+		return
+	}
+	if messages == nil {
+		// No usable input (e.g. silent video without a thumbnail yet).
+		// Don't mark error — try again on the next sweep when the
+		// indexer might have produced a thumbnail.
+		return
+	}
+
+	model := strings.TrimSpace(cfg.Get("describe_model"))
+	if model == "" {
+		model = "kimi-k2.6"
+	}
+	maxTokens := parseConfigIntFallback(cfg.Get("describe_max_tokens"), 1500)
+	timeout := time.Duration(parseConfigIntFallback(cfg.Get("describe_timeout_seconds"), 120)) * time.Second
+	_ = timeout // timeout is enforced by the platform's HTTP client; reserved for future per-call override.
+
+	args := map[string]any{
+		"model":       model,
+		"messages":    messages,
+		"temperature": 0.3, // mostly factual; a hair of creativity for nicer prose
+		"max_tokens":  maxTokens,
+	}
+
+	res, err := app.PlatformAPI().ExecuteIntegrationTool(
+		bound.ConnectionID,
+		bound.ToolFor("chat.complete"),
+		args,
+	)
+	if err != nil {
+		_ = markDescribeAttempt(db, projectID, fileID, "describe call: "+err.Error())
+		return
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		_ = markDescribeAttempt(db, projectID, fileID, "describe non-2xx: "+truncate(body, 500))
+		return
+	}
+
+	desc, err := extractChatContent(res.Data)
+	if err != nil {
+		_ = markDescribeAttempt(db, projectID, fileID, "parse describe: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(desc) == "" {
+		// The reasoning model can come back empty when max_tokens was
+		// too tight to fit reasoning + answer. Treat as a soft failure
+		// — cooldown applies, we'll retry next sweep.
+		_ = markDescribeAttempt(db, projectID, fileID, "describe returned empty content (reasoning may have consumed token budget)")
+		return
+	}
+
+	if err := setDescription(db, projectID, fileID, DescriptionFields{
+		Description: &desc,
+		Source:      "ai-generated",
+	}); err != nil {
+		log.Error("describe setDescription failed", "file_id", fileID, "err", err)
+		return
+	}
+	log.Info("auto-described", "file_id", fileID, "model", model, "chars", len(desc))
+	app.Emit("media.described", map[string]any{
+		"file_id": fileID,
+		"chars":   len(desc),
+		"source":  "ai-generated",
+	})
+}
+
+// ─── prompt building ───────────────────────────────────────────────
+
+const describeSystemPrompt = "You write concise media descriptions. Output exactly 2-3 sentences in plain prose, no preamble, no headings, no quotes. Focus on what is depicted or said — subjects, setting, action. Avoid speculation about emotions or intent unless explicitly visible/audible. Don't mention the medium ('this video', 'this audio') — describe the content directly."
+
+// buildDescribePrompt assembles the messages array for the chat call
+// based on what's available for the file. Returns nil (no error) when
+// there's nothing usable to describe yet — caller skips without
+// marking, so the next sweep gets another shot.
+func buildDescribePrompt(app *sdk.AppCtx, projectID string, media *MediaRow) ([]map[string]any, error) {
+	transcript, _ := getTranscript(app.AppDB(), projectID, media.FileID)
+	hasTranscript := transcript != nil && transcript.Status == "ok" && strings.TrimSpace(transcript.Text) != ""
+
+	var thumbURL string
+	if media.HasVideo || media.IsImage {
+		// Use thumbnail for video, the file itself for image. Fall
+		// back to nothing when not available — vision models can't
+		// describe what they can't see.
+		var ref *DerivationRow
+		for i := range media.Derivations {
+			if media.Derivations[i].Kind == "thumbnail" && media.Derivations[i].Status == "ok" {
+				ref = &media.Derivations[i]
+				break
+			}
+		}
+		if ref != nil {
+			sc := newStorageClient()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			ref64, _ := strconv.ParseInt(ref.StorageFileID, 10, 64)
+			if u, err := sc.GetSignedURL(ctx, projectID, ref64, 30*60); err == nil {
+				thumbURL = u
+			}
+		} else if media.IsImage {
+			// Images: the file itself is the input.
+			sc := newStorageClient()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			fid, _ := strconv.ParseInt(media.FileID, 10, 64)
+			if u, err := sc.GetSignedURL(ctx, projectID, fid, 30*60); err == nil {
+				thumbURL = u
+			}
+		}
+	}
+
+	switch {
+	case thumbURL != "" && hasTranscript:
+		// Multimodal: video frame + transcript. Best signal.
+		return []map[string]any{
+			{"role": "system", "content": describeSystemPrompt},
+			{"role": "user", "content": []map[string]any{
+				{"type": "text", "text": "A representative frame and the transcript follow. Describe the content in 2-3 sentences.\n\nTranscript:\n" + transcript.Text},
+				{"type": "image_url", "image_url": map[string]any{"url": thumbURL}},
+			}},
+		}, nil
+
+	case thumbURL != "":
+		// Vision-only: image or silent video.
+		return []map[string]any{
+			{"role": "system", "content": describeSystemPrompt},
+			{"role": "user", "content": []map[string]any{
+				{"type": "text", "text": "Describe the content of this image in 2-3 sentences."},
+				{"type": "image_url", "image_url": map[string]any{"url": thumbURL}},
+			}},
+		}, nil
+
+	case hasTranscript:
+		// Audio-only: transcript is all we have.
+		return []map[string]any{
+			{"role": "system", "content": describeSystemPrompt},
+			{"role": "user", "content": "Describe what's said in this recording in 2-3 sentences.\n\nTranscript:\n" + transcript.Text},
+		}, nil
+	}
+
+	// Nothing usable yet — silent video without a thumbnail derivation,
+	// or an image where the file isn't readable. Skip without marking.
+	return nil, nil
+}
+
+// ─── chat-completion response parser ───────────────────────────────
+
+// extractChatContent pulls the assistant message's content out of a
+// chat_completion response. Falls back to the `reasoning` field
+// when content is null — opencode-go's reasoning models (Kimi K2.6,
+// DeepSeek V4 Pro) put their visible answer there if max_tokens is
+// tight. We log this case and use it; the agent gets the trace
+// instead of nothing.
+func extractChatContent(data json.RawMessage) (string, error) {
+	var env struct {
+		Choices []struct {
+			Message struct {
+				// Content is `string | null` in OpenAI's schema; we
+				// decode as RawMessage so we can distinguish the two.
+				Content   json.RawMessage `json:"content"`
+				Reasoning string          `json:"reasoning"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		return "", fmt.Errorf("decode chat envelope: %w", err)
+	}
+	if len(env.Choices) == 0 {
+		return "", errors.New("response has no choices")
+	}
+	msg := env.Choices[0].Message
+
+	// Try content first.
+	if len(msg.Content) > 0 && string(msg.Content) != "null" {
+		var s string
+		if err := json.Unmarshal(msg.Content, &s); err == nil {
+			if strings.TrimSpace(s) != "" {
+				return s, nil
+			}
+		}
+	}
+	// Fall back to reasoning when the model exhausted the budget on
+	// thinking. Surface a hint so the auto-describer's caller can
+	// decide whether to bump max_tokens.
+	if strings.TrimSpace(msg.Reasoning) != "" {
+		return msg.Reasoning, nil
+	}
+	return "", fmt.Errorf("empty content and reasoning (finish_reason=%s)", env.Choices[0].FinishReason)
+}
