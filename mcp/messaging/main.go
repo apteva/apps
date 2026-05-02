@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.4.0
+version: 0.4.1
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -105,8 +105,6 @@ provides:
     - { name: senders_delete,         description: "Remove a sending identity from the provider." }
     - { name: senders_verify_email,   description: "Verify an email or domain. Domain returns DKIM CNAMEs." }
     - { name: senders_get_quota,      description: "Provider sandbox + send-quota status." }
-    - { name: templates_sync_provider,   description: "Pull provider-managed templates (Twilio Content) into messaging." }
-    - { name: templates_refresh_status,  description: "Refresh approval status for one provider-mirrored template." }
   ui_panels:
     - slot: project.page
       label: Messaging
@@ -167,6 +165,11 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/suppressions", Handler: a.handleSuppressionsList},
 		{Pattern: "/senders", Handler: a.handleSendersList},
 		{Pattern: "/senders/quota", Handler: a.handleSendersQuota},
+		// Internal/panel routes for provider-template sync. Not MCP —
+		// the panel hits these from a button + per-row action; agents
+		// don't trigger Twilio list calls.
+		{Pattern: "/templates/sync", Handler: a.handleTemplatesSync},
+		{Pattern: "/templates/", Handler: a.handleTemplateItem}, // /templates/<id>/refresh-status
 		// Generic dispatcher so the panel can invoke any MCP tool via
 		// HTTP — saves declaring a per-tool route for every mutation.
 		// Body: {"tool": "<name>", "args": {...}}.
@@ -317,20 +320,12 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			Handler:     a.toolTemplateDelete,
 		},
-		{
-			Name: "templates_sync_provider",
-			Description: "Pull provider-managed templates into messaging.templates. Today: WhatsApp Content templates from Twilio. Idempotent — upserts by provider_template_id (ContentSid). Returns {synced: N, sync_state}.",
-			InputSchema: schemaObject(map[string]any{
-				"channel": map[string]any{"type": "string"},
-			}, []string{"channel"}),
-			Handler: a.toolTemplatesSyncProvider,
-		},
-		{
-			Name: "templates_refresh_status",
-			Description: "Refresh approval status for one provider-mirrored template (Meta approval flips from pending → approved on its own clock, no webhook). Args: id.",
-			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
-			Handler:     a.toolTemplatesRefreshStatus,
-		},
+		// templates_sync_provider + templates_refresh_status are NOT
+		// MCP tools — agents should never trigger a Twilio list call;
+		// sync is operator-driven (panel button) or automatic (TTL on
+		// template_list). The handlers live as plain methods and are
+		// reachable only via the internal HTTP routes
+		// /templates/sync + /templates/<id>/refresh-status.
 		{
 			Name:        "suppression_list",
 			Description: "List suppressed addresses. Args: channel?, limit?.",
@@ -2766,6 +2761,60 @@ func (a *App) handleSendersQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpJSON(w, out)
+}
+
+// handleTemplatesSync — panel "Sync templates" button. Pulls Twilio
+// Content templates into messaging.templates for the requested
+// channel. Pulled out of the MCP tool surface deliberately: agents
+// shouldn't be triggering provider list calls; sync is either
+// operator-driven (this route) or automatic (template_list TTL).
+func (a *App) handleTemplatesSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	channel := r.URL.Query().Get("channel")
+	if channel == "" {
+		channel = channelWhatsApp
+	}
+	out, err := a.toolTemplatesSyncProvider(globalCtx, map[string]any{"channel": channel})
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	httpJSON(w, out)
+}
+
+// handleTemplateItem dispatches /templates/<id>/<action>. Today the
+// only action is refresh-status; future actions (preview, force-resync)
+// land here.
+func (a *App) handleTemplateItem(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/templates/")
+	parts := strings.SplitN(rest, "/", 2)
+	id, _ := strconv.ParseInt(parts[0], 10, 64)
+	if id == 0 {
+		httpErr(w, http.StatusBadRequest, "id required")
+		return
+	}
+	action := ""
+	if len(parts) == 2 {
+		action = parts[1]
+	}
+	switch action {
+	case "refresh-status":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		out, err := a.toolTemplatesRefreshStatus(globalCtx, map[string]any{"id": id})
+		if err != nil {
+			httpErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		httpJSON(w, out)
+	default:
+		httpErr(w, http.StatusNotFound, "unknown action")
+	}
 }
 
 // handleToolsCall lets the panel invoke any registered MCP tool via
