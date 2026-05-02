@@ -284,3 +284,41 @@ func TestSidecar_InboundWebhook_PersistsAndAttemptsDispatch(t *testing.T) {
 		t.Errorf("to_subaddress=%v (canonicalised lowercase)", m["to_subaddress"])
 	}
 }
+
+// ─── senders + send_message contract ──────────────────────────────
+//
+// Without a real SES binding we can't roundtrip through the provider,
+// but we can assert the pre-provider contract: "no provider bound"
+// and "from required" surface as MCP errors before any HTTP call.
+
+func TestSidecar_Senders_NoProviderBound(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	_, err := sc.MCPRaw("tools/call", map[string]any{
+		"name":      "senders_list",
+		"arguments": map[string]any{},
+	})
+	if err == nil {
+		t.Fatalf("expected error from senders_list with no provider bound")
+	}
+	low := strings.ToLower(err.Error())
+	if !strings.Contains(low, "no email_provider") && !strings.Contains(low, "unbound") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestSidecar_SendMessage_RequiresFrom(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	_, err := sc.MCPRaw("tools/call", map[string]any{
+		"name": "send_message",
+		"arguments": map[string]any{
+			"to":   "alice@example.com",
+			"body": "hi",
+		},
+	})
+	if err == nil {
+		t.Fatalf("expected error from send_message without 'from'")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "from") {
+		t.Errorf("error should mention 'from': %v", err)
+	}
+}

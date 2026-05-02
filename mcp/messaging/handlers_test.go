@@ -16,13 +16,15 @@ import (
 // and returns a canned response. Only the methods we actually use in
 // tests are non-nil; everything else panics so failures are loud.
 type stubPlatform struct {
-	mu             sync.Mutex
-	executeCalls   []executeCall
-	callAppCalls   []callAppCall
-	executeReply   *sdk.ExecuteResult
-	executeErr     error
-	callAppReply   json.RawMessage
-	callAppErr     error
+	mu               sync.Mutex
+	executeCalls     []executeCall
+	callAppCalls     []callAppCall
+	executeReply     *sdk.ExecuteResult
+	replyByTool      map[string]*sdk.ExecuteResult
+	executeErr       error
+	callAppReply     json.RawMessage
+	callAppErr       error
+	bindingsOverride map[string]any // when non-nil, replaces the default email_provider binding
 }
 
 type executeCall struct {
@@ -44,10 +46,24 @@ func (s *stubPlatform) ExecuteIntegrationTool(connID int64, tool string, input m
 	if s.executeErr != nil {
 		return nil, s.executeErr
 	}
+	// Per-tool reply override wins; otherwise fall back to a sane default.
+	if s.replyByTool != nil {
+		if r, ok := s.replyByTool[tool]; ok {
+			return r, nil
+		}
+	}
 	if s.executeReply != nil {
 		return s.executeReply, nil
 	}
-	return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"MessageId":"ses-msg-123"}`)}, nil
+	switch tool {
+	case "send_email":
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"MessageId":"ses-msg-123"}`)}, nil
+	case "list_identities":
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"Identities":[]}`)}, nil
+	case "get_quota":
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"SendQuota":{"Max24HourSend":200,"MaxSendRate":1,"SentLast24Hours":0},"SendingEnabled":true,"ProductionAccessEnabled":false,"EnforcementStatus":"HEALTHY"}`)}, nil
+	}
+	return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{}`)}, nil
 }
 
 func (s *stubPlatform) CallApp(app, tool string, input map[string]any) (json.RawMessage, error) {
@@ -73,10 +89,14 @@ func (s *stubPlatform) SendEvent(int64, string) error                           
 func (s *stubPlatform) SendToChannel(string, string, string) error              { return nil }
 func (s *stubPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
 	// Provide a binding for the email_provider role so IntegrationFor returns non-nil.
+	bindings := map[string]any{"email_provider": float64(1)}
+	if s.bindingsOverride != nil {
+		bindings = s.bindingsOverride
+	}
 	return &sdk.InstallIdentity{
 		AppName:   "messaging",
 		ProjectID: "test-proj",
-		Bindings:  map[string]any{"email_provider": float64(1)},
+		Bindings:  bindings,
 	}, nil
 }
 // Older PlatformClient interfaces (pre-StartOAuth) require neither
@@ -89,9 +109,6 @@ func newTestCtx(t *testing.T, plat *stubPlatform, opts ...tk.Option) *sdk.AppCtx
 	t.Helper()
 	full := append([]tk.Option{
 		tk.WithProjectID("test-proj"),
-		tk.WithConfig(map[string]string{
-			"default_from_address": "notifications@acme.com",
-		}),
 	}, opts...)
 	if plat != nil {
 		full = append(full, tk.WithPlatform(plat))
@@ -101,6 +118,9 @@ func newTestCtx(t *testing.T, plat *stubPlatform, opts ...tk.Option) *sdk.AppCtx
 	return ctx
 }
 
+// fromAcme is a stable test sender to keep send_message calls terse.
+const fromAcme = "notifications@acme.com"
+
 // ─── send_message ─────────────────────────────────────────────────
 
 func TestSendMessage_PersistsAndCallsProvider(t *testing.T) {
@@ -109,6 +129,7 @@ func TestSendMessage_PersistsAndCallsProvider(t *testing.T) {
 	app := &App{}
 
 	out, err := app.toolSendMessage(ctx, map[string]any{
+		"from":    fromAcme,
 		"to":      "alice@example.com",
 		"subject": "hello",
 		"body":    "hi there",
@@ -156,11 +177,28 @@ func TestSendMessage_RequiresBodyOrTemplate(t *testing.T) {
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 	_, err := app.toolSendMessage(ctx, map[string]any{
+		"from":    fromAcme,
 		"to":      "alice@example.com",
 		"subject": "hello",
 	})
 	if err == nil || !strings.Contains(err.Error(), "body") {
 		t.Errorf("expected body-required error, got %v", err)
+	}
+}
+
+func TestSendMessage_RequiresFrom(t *testing.T) {
+	plat := &stubPlatform{}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"to":   "alice@example.com",
+		"body": "hi",
+	})
+	if err == nil || !strings.Contains(err.Error(), "from: required") {
+		t.Errorf("expected from-required error, got %v", err)
+	}
+	if len(plat.executeCalls) != 0 {
+		t.Errorf("provider should not have been called")
 	}
 }
 
@@ -170,6 +208,7 @@ func TestSendMessage_Idempotency(t *testing.T) {
 	app := &App{}
 
 	args := map[string]any{
+		"from":            fromAcme,
 		"to":              "bob@example.com",
 		"body":            "yo",
 		"idempotency_key": "abc-123",
@@ -199,6 +238,7 @@ func TestSendMessage_RespectsSuppression(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := app.toolSendMessage(ctx, map[string]any{
+		"from": fromAcme,
 		"to":   "bad@example.com",
 		"body": "you'll never see this",
 	})
@@ -221,6 +261,7 @@ func TestSendMessage_ProviderErrorMarksFailed(t *testing.T) {
 	app := &App{}
 
 	out, err := app.toolSendMessage(ctx, map[string]any{
+		"from": fromAcme,
 		"to":   "carol@example.com",
 		"body": "ping",
 	})
@@ -291,6 +332,7 @@ func TestSendMessage_TemplateRender(t *testing.T) {
 	tplID := createOut.(map[string]any)["template"].(*Template).ID
 
 	_, err = app.toolSendMessage(ctx, map[string]any{
+		"from":        fromAcme,
 		"to":          "user@example.com",
 		"template_id": tplID,
 		"vars":        map[string]any{"name": "Alice", "code": "X-42"},
@@ -360,5 +402,139 @@ func TestSuppression_AddRemove(t *testing.T) {
 	out, _ = app.toolSuppressionList(ctx, map[string]any{})
 	if out.(map[string]any)["count"].(int) != 0 {
 		t.Errorf("expected 0 after remove, got %v", out)
+	}
+}
+
+// ─── senders ──────────────────────────────────────────────────────
+
+func TestSenders_List_NormalisesShape(t *testing.T) {
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"list_identities": {Success: true, Status: 200, Data: json.RawMessage(`{
+				"Identities":[
+					{"IdentityName":"notifications@acme.com","IdentityType":"EMAIL_ADDRESS","SendingEnabled":true,"VerificationStatus":"SUCCESS"},
+					{"IdentityName":"acme.com","IdentityType":"DOMAIN","SendingEnabled":true,"VerificationStatus":"SUCCESS"},
+					{"IdentityName":"pending@acme.com","IdentityType":"EMAIL_ADDRESS","SendingEnabled":false,"VerificationStatus":"PENDING"}
+				]
+			}`)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolSendersList(ctx, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := out.(map[string]any)
+	if r["count"].(int) != 3 {
+		t.Errorf("count=%v", r["count"])
+	}
+	rows := r["senders"].([]Sender)
+	if rows[0].Address != "mailto:notifications@acme.com" || !rows[0].Verified || rows[0].Kind != "email" {
+		t.Errorf("row 0: %+v", rows[0])
+	}
+	if rows[1].Address != "mailto:acme.com" || rows[1].Kind != "domain" {
+		t.Errorf("row 1: %+v", rows[1])
+	}
+	if rows[2].Verified {
+		t.Errorf("pending row should not be verified: %+v", rows[2])
+	}
+}
+
+func TestSenders_List_VerifiedOnly(t *testing.T) {
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"list_identities": {Success: true, Status: 200, Data: json.RawMessage(`{
+				"Identities":[
+					{"IdentityName":"good@x.com","IdentityType":"EMAIL_ADDRESS","SendingEnabled":true,"VerificationStatus":"SUCCESS"},
+					{"IdentityName":"pending@x.com","IdentityType":"EMAIL_ADDRESS","SendingEnabled":false,"VerificationStatus":"PENDING"}
+				]
+			}`)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+	out, err := app.toolSendersList(ctx, map[string]any{"verified_only": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["count"].(int) != 1 {
+		t.Errorf("verified_only filter broken: %+v", out)
+	}
+}
+
+func TestSenders_VerifyEmail_DispatchesByShape(t *testing.T) {
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"verify_email":  {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"verify_domain": {Success: true, Status: 200, Data: json.RawMessage(`{"DkimAttributes":{"Tokens":["aaa","bbb","ccc"],"Status":"PENDING"}}`)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	// email → verify_email
+	emailOut, err := app.toolSendersVerifyEmail(ctx, map[string]any{"address": "new@acme.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emailOut.(map[string]any)["kind"] != "email" {
+		t.Errorf("email kind=%v", emailOut.(map[string]any)["kind"])
+	}
+
+	// domain → verify_domain + DKIM tokens
+	domainOut, err := app.toolSendersVerifyEmail(ctx, map[string]any{"address": "newdomain.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := domainOut.(map[string]any)
+	if d["kind"] != "domain" {
+		t.Errorf("domain kind=%v", d["kind"])
+	}
+	tokens := d["dkim_tokens"].([]string)
+	if len(tokens) != 3 || tokens[0] != "aaa" {
+		t.Errorf("dkim_tokens=%v", tokens)
+	}
+	records := d["dns_records"].([]map[string]string)
+	if records[0]["name"] != "aaa._domainkey.newdomain.com" || records[0]["value"] != "aaa.dkim.amazonses.com" {
+		t.Errorf("dns_records[0]=%+v", records[0])
+	}
+
+	// Confirm dispatch by tool name.
+	tools := []string{}
+	for _, c := range plat.executeCalls {
+		tools = append(tools, c.Tool)
+	}
+	if len(tools) != 2 || tools[0] != "verify_email" || tools[1] != "verify_domain" {
+		t.Errorf("tool dispatch=%v", tools)
+	}
+}
+
+func TestSenders_GetQuota_ReportsSandboxFlag(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{}) // default get_quota stub: ProductionAccessEnabled=false
+	app := &App{}
+	out, err := app.toolSendersGetQuota(ctx, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := out.(map[string]any)
+	if r["sandboxed"] != true {
+		t.Errorf("expected sandboxed=true, got %+v", r)
+	}
+	if r["send_quota_24h"].(float64) != 200 {
+		t.Errorf("quota=%v", r["send_quota_24h"])
+	}
+}
+
+func TestSenders_NoBoundProvider(t *testing.T) {
+	// stubPlatform with WhoAmI bindings *empty* — no email_provider.
+	plat := &stubPlatform{}
+	plat.bindingsOverride = map[string]any{} // explicit empty
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+	_, err := app.toolSendersList(ctx, map[string]any{})
+	if err == nil || !strings.Contains(err.Error(), "no email_provider bound") {
+		t.Errorf("expected unbound error, got %v", err)
 	}
 }

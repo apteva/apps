@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.1.0
+version: 0.2.0
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -90,6 +90,11 @@ provides:
     - { name: suppression_list,       description: "List suppressed addresses." }
     - { name: suppression_add,        description: "Suppress a recipient." }
     - { name: suppression_remove,     description: "Remove an address from suppression." }
+    - { name: senders_list,           description: "List sending identities. Returns canonical URI rows." }
+    - { name: senders_get,            description: "Get one identity's verification + DKIM state." }
+    - { name: senders_delete,         description: "Remove a sending identity from the provider." }
+    - { name: senders_verify_email,   description: "Verify an email or domain. Domain returns DKIM CNAMEs." }
+    - { name: senders_get_quota,      description: "Provider sandbox + send-quota status." }
   ui_panels:
     - slot: project.page
       label: Messaging
@@ -148,6 +153,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/templates", Handler: a.handleTemplatesList},
 		{Pattern: "/inbound-routes", Handler: a.handleInboundRoutesList},
 		{Pattern: "/suppressions", Handler: a.handleSuppressionsList},
+		{Pattern: "/senders", Handler: a.handleSendersList},
+		{Pattern: "/senders/quota", Handler: a.handleSendersQuota},
 	}
 }
 
@@ -312,6 +319,42 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Remove an address from suppression. Args: address (URI).",
 			InputSchema: schemaObject(map[string]any{"address": map[string]any{"type": "string"}}, []string{"address"}),
 			Handler:     a.toolSuppressionRemove,
+		},
+		{
+			Name: "senders_list",
+			Description: "List sending identities. Returns canonical URI rows (mailto: today; tel: when SMS lands). " +
+				"Args: channel? (default 'email'), verified_only? (default false). Returns {senders: [{address, kind, verified, dkim_status?}]}.",
+			InputSchema: schemaObject(map[string]any{
+				"channel":        map[string]any{"type": "string"},
+				"verified_only":  map[string]any{"type": "boolean"},
+			}, nil),
+			Handler: a.toolSendersList,
+		},
+		{
+			Name: "senders_get",
+			Description: "Fetch one sending identity's verification + DKIM state. Args: address (URI or bare email/domain). " +
+				"For domains, response includes dkim_tokens — three CNAMEs that must be published in DNS to complete verification.",
+			InputSchema: schemaObject(map[string]any{"address": map[string]any{"type": "string"}}, []string{"address"}),
+			Handler:     a.toolSendersGet,
+		},
+		{
+			Name:        "senders_delete",
+			Description: "Remove a sending identity from the provider. Args: address (URI or bare email/domain). Future sends from this identity will fail.",
+			InputSchema: schemaObject(map[string]any{"address": map[string]any{"type": "string"}}, []string{"address"}),
+			Handler:     a.toolSendersDelete,
+		},
+		{
+			Name: "senders_verify_email",
+			Description: "Verify an email address or domain with the email provider. The shape of the input picks the operation: " +
+				"\"foo@bar.com\" verifies an address (provider sends a confirmation link); \"bar.com\" verifies a domain (returns DKIM CNAME records to publish in DNS).",
+			InputSchema: schemaObject(map[string]any{"address": map[string]any{"type": "string"}}, []string{"address"}),
+			Handler:     a.toolSendersVerifyEmail,
+		},
+		{
+			Name:        "senders_get_quota",
+			Description: "Provider-account stats: sandbox flag, 24h send quota, current usage, sending-enabled flag. Drives the sandbox banner.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler:     a.toolSendersGetQuota,
 		},
 	}
 }
@@ -650,18 +693,11 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 
 	from := strArg(args, "from")
 	if from == "" {
-		from = strings.TrimSpace(ctx.Config().Get("default_from_address"))
-		if from != "" && !strings.HasPrefix(strings.ToLower(from), "mailto:") {
-			from = "mailto:" + strings.ToLower(from)
-		}
-	} else {
-		from, err = normaliseURI(from)
-		if err != nil {
-			return nil, fmt.Errorf("from: %w", err)
-		}
+		return nil, errors.New("from: required (pick a verified sender via senders_list)")
 	}
-	if from == "" {
-		return nil, errors.New("from: required (no default_from_address configured)")
+	from, err = normaliseURI(from)
+	if err != nil {
+		return nil, fmt.Errorf("from: %w", err)
 	}
 	replyTo := strArg(args, "reply_to")
 	if replyTo != "" {
@@ -1219,6 +1255,314 @@ func (a *App) toolSuppressionRemove(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, err
 	}
 	return map[string]any{"removed": true, "address": addr}, nil
+}
+
+// ─── senders_* tools ───────────────────────────────────────────────
+//
+// Thin proxies over the bound email_provider integration's SES v2
+// surface, with response normalisation so panel + agents see a
+// uniform shape across channels (only mailto: today; tel:/etc when
+// SMS arrives). The address argument accepts either a canonical URI
+// ("mailto:foo@bar.com") or a bare value ("foo@bar.com" / "bar.com").
+// Domains are detected by absence of "@".
+
+type Sender struct {
+	Address     string   `json:"address"`               // canonical URI
+	Kind        string   `json:"kind"`                  // "email" | "domain" (channel-specific)
+	Verified    bool     `json:"verified"`
+	DKIMStatus  string   `json:"dkim_status,omitempty"` // "SUCCESS"|"PENDING"|"FAILED"|"NOT_STARTED"
+	DKIMTokens  []string `json:"dkim_tokens,omitempty"` // populated by senders_get for domain identities
+	Sending     bool     `json:"sending_enabled"`
+}
+
+// classifyEmailIdentity returns ("domain", "bar.com") or ("email",
+// "foo@bar.com") given a free-form input. Bare; URI prefix is stripped.
+func classifyEmailIdentity(s string) (kind, raw string, err error) {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(strings.ToLower(s), "mailto:") {
+		s = s[7:]
+	}
+	if s == "" {
+		return "", "", errors.New("address required")
+	}
+	if strings.Contains(s, "@") {
+		if !looksLikeEmail(strings.ToLower(s)) {
+			return "", "", fmt.Errorf("invalid email: %q", s)
+		}
+		return "domain_member_email", strings.ToLower(s), nil
+	}
+	// crude domain check: at least one dot, no spaces, no slashes.
+	if strings.IndexByte(s, '.') < 0 || strings.ContainsAny(s, " /\t\r\n") {
+		return "", "", fmt.Errorf("not an email or domain: %q", s)
+	}
+	return "domain", strings.ToLower(s), nil
+}
+
+// canonicalSenderURI returns the URI form for a bare SES identity.
+// Domains and addresses both fold under the mailto: scheme — the
+// scheme is "messaging-channel," not "RFC mailbox" — i.e., a
+// "mailto:bar.com" sender means "this domain can send email," not a
+// receivable mailbox. v0.2 keeps it simple; an explicit mailto:domain://
+// scheme would be more correct but adds parser complexity for no
+// callee win today.
+func canonicalSenderURI(kind, raw string) string {
+	return "mailto:" + raw
+}
+
+// emailProviderTool resolves the bound email_provider's tool name
+// for a given capability, returning the failure string the panel
+// understands when no provider is bound.
+func emailProviderConn(ctx *sdk.AppCtx) (connID int64, toolFor func(string) string, err error) {
+	bound := ctx.IntegrationFor("email_provider")
+	if bound == nil {
+		return 0, nil, errors.New("no email_provider bound — install/select an aws-ses connection in app settings")
+	}
+	return bound.ConnectionID, bound.ToolFor, nil
+}
+
+func (a *App) toolSendersList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	connID, _, err := emailProviderConn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	verifiedOnly, _ := args["verified_only"].(bool)
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_identities", map[string]any{"PageSize": 100})
+	if err != nil {
+		return nil, fmt.Errorf("list_identities: %w", err)
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
+	}
+	// SES v2 ListEmailIdentities response:
+	//   { Identities: [{ IdentityName, IdentityType, SendingEnabled, VerificationStatus }], NextToken? }
+	var raw struct {
+		Identities []struct {
+			IdentityName       string `json:"IdentityName"`
+			IdentityType       string `json:"IdentityType"`       // EMAIL_ADDRESS | DOMAIN | MANAGED_DOMAIN
+			SendingEnabled     bool   `json:"SendingEnabled"`
+			VerificationStatus string `json:"VerificationStatus"` // SUCCESS | PENDING | FAILED | TEMPORARY_FAILURE | NOT_STARTED
+		} `json:"Identities"`
+	}
+	_ = json.Unmarshal(res.Data, &raw)
+	out := make([]Sender, 0, len(raw.Identities))
+	for _, id := range raw.Identities {
+		kind := "email"
+		if id.IdentityType == "DOMAIN" || id.IdentityType == "MANAGED_DOMAIN" {
+			kind = "domain"
+		}
+		verified := strings.EqualFold(id.VerificationStatus, "SUCCESS")
+		if verifiedOnly && !verified {
+			continue
+		}
+		out = append(out, Sender{
+			Address:  canonicalSenderURI(kind, strings.ToLower(id.IdentityName)),
+			Kind:     kind,
+			Verified: verified,
+			Sending:  id.SendingEnabled,
+		})
+	}
+	return map[string]any{"senders": out, "count": len(out)}, nil
+}
+
+func (a *App) toolSendersGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	connID, _, err := emailProviderConn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	_, raw, err := classifyEmailIdentity(strArg(args, "address"))
+	if err != nil {
+		return nil, err
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_identity_verification", map[string]any{
+		"EmailIdentity": raw,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get_identity_verification: %w", err)
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
+	}
+	// SES v2 GetEmailIdentity:
+	//   { IdentityType, VerifiedForSendingStatus, DkimAttributes:{Status, Tokens, SigningEnabled},
+	//     FeedbackForwardingStatus, Policies, ConfigurationSetName? }
+	var inner struct {
+		IdentityType             string   `json:"IdentityType"`
+		VerifiedForSendingStatus bool     `json:"VerifiedForSendingStatus"`
+		DkimAttributes           struct {
+			Status         string   `json:"Status"`
+			Tokens         []string `json:"Tokens"`
+			SigningEnabled bool     `json:"SigningEnabled"`
+		} `json:"DkimAttributes"`
+		FeedbackForwardingStatus bool `json:"FeedbackForwardingStatus"`
+	}
+	_ = json.Unmarshal(res.Data, &inner)
+	kind := "email"
+	if inner.IdentityType == "DOMAIN" || inner.IdentityType == "MANAGED_DOMAIN" {
+		kind = "domain"
+	}
+	out := Sender{
+		Address:    canonicalSenderURI(kind, raw),
+		Kind:       kind,
+		Verified:   inner.VerifiedForSendingStatus,
+		DKIMStatus: inner.DkimAttributes.Status,
+		DKIMTokens: inner.DkimAttributes.Tokens,
+	}
+	return map[string]any{
+		"sender":                     out,
+		"feedback_forwarding_enabled": inner.FeedbackForwardingStatus,
+	}, nil
+}
+
+func (a *App) toolSendersDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	connID, _, err := emailProviderConn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	_, raw, err := classifyEmailIdentity(strArg(args, "address"))
+	if err != nil {
+		return nil, err
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "delete_identity", map[string]any{
+		"EmailIdentity": raw,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("delete_identity: %w", err)
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
+	}
+	return map[string]any{"deleted": true, "address": canonicalSenderURI("", raw)}, nil
+}
+
+// toolSendersVerifyEmail picks verify_email vs verify_domain from
+// the address shape. Domains return DKIM CNAME tokens for DNS.
+func (a *App) toolSendersVerifyEmail(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	connID, _, err := emailProviderConn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	kind, raw, err := classifyEmailIdentity(strArg(args, "address"))
+	if err != nil {
+		return nil, err
+	}
+	tool := "verify_email"
+	if kind == "domain" {
+		tool = "verify_domain"
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, map[string]any{
+		"EmailIdentity": raw,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", tool, err)
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
+	}
+	// verify_email has empty body. verify_domain returns DkimAttributes.Tokens.
+	out := map[string]any{
+		"address":          canonicalSenderURI(kind, raw),
+		"kind":             normaliseSenderKind(kind),
+		"pending":          true,
+		"next_step":        verifyNextStepHint(kind),
+	}
+	if kind == "domain" {
+		var inner struct {
+			DkimAttributes struct {
+				Tokens []string `json:"Tokens"`
+				Status string   `json:"Status"`
+			} `json:"DkimAttributes"`
+		}
+		_ = json.Unmarshal(res.Data, &inner)
+		out["dkim_tokens"] = inner.DkimAttributes.Tokens
+		out["dkim_status"] = inner.DkimAttributes.Status
+		out["dns_records"] = dkimCNAMERecords(raw, inner.DkimAttributes.Tokens)
+	}
+	return out, nil
+}
+
+// dkimCNAMERecords formats SES's three DKIM tokens as ready-to-paste
+// CNAME records: <token>._domainkey.<domain>  CNAME  <token>.dkim.amazonses.com
+func dkimCNAMERecords(domain string, tokens []string) []map[string]string {
+	out := make([]map[string]string, 0, len(tokens))
+	for _, t := range tokens {
+		out = append(out, map[string]string{
+			"name":  t + "._domainkey." + domain,
+			"type":  "CNAME",
+			"value": t + ".dkim.amazonses.com",
+		})
+	}
+	return out
+}
+
+func normaliseSenderKind(k string) string {
+	if k == "domain" {
+		return "domain"
+	}
+	return "email"
+}
+
+func verifyNextStepHint(kind string) string {
+	if kind == "domain" {
+		return "Publish the three CNAME records in your DNS, then call senders_get to re-check status."
+	}
+	return "Click the verification link the provider just emailed to that address, then call senders_get to re-check status."
+}
+
+func (a *App) toolSendersGetQuota(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	connID, _, err := emailProviderConn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_quota", map[string]any{})
+	if err != nil {
+		return nil, fmt.Errorf("get_quota: %w", err)
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
+	}
+	// SES v2 GetAccount:
+	//   { SendQuota:{Max24HourSend, MaxSendRate, SentLast24Hours},
+	//     SendingEnabled, ProductionAccessEnabled, EnforcementStatus, ... }
+	var inner struct {
+		SendQuota struct {
+			Max24HourSend    float64 `json:"Max24HourSend"`
+			MaxSendRate      float64 `json:"MaxSendRate"`
+			SentLast24Hours  float64 `json:"SentLast24Hours"`
+		} `json:"SendQuota"`
+		SendingEnabled           bool   `json:"SendingEnabled"`
+		ProductionAccessEnabled  bool   `json:"ProductionAccessEnabled"`
+		EnforcementStatus        string `json:"EnforcementStatus"`
+	}
+	_ = json.Unmarshal(res.Data, &inner)
+	return map[string]any{
+		"sandboxed":                !inner.ProductionAccessEnabled,
+		"sending_enabled":          inner.SendingEnabled,
+		"production_access":        inner.ProductionAccessEnabled,
+		"enforcement_status":       inner.EnforcementStatus,
+		"send_quota_24h":           inner.SendQuota.Max24HourSend,
+		"send_rate_per_second":     inner.SendQuota.MaxSendRate,
+		"sent_last_24h":            inner.SendQuota.SentLast24Hours,
+	}, nil
 }
 
 // ─── Bounce / complaint webhook ────────────────────────────────────
@@ -1991,6 +2335,30 @@ func (a *App) handleSuppressionsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpJSON(w, map[string]any{"suppressions": out})
+}
+
+// /senders proxies senders_list — straight pass-through to the tool.
+// Errors (no provider bound, provider 5xx) surface as JSON {error}.
+func (a *App) handleSendersList(w http.ResponseWriter, r *http.Request) {
+	args := map[string]any{}
+	if r.URL.Query().Get("verified_only") == "true" {
+		args["verified_only"] = true
+	}
+	out, err := a.toolSendersList(globalCtx, args)
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	httpJSON(w, out)
+}
+
+func (a *App) handleSendersQuota(w http.ResponseWriter, r *http.Request) {
+	out, err := a.toolSendersGetQuota(globalCtx, map[string]any{})
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	httpJSON(w, out)
 }
 
 // ─── DB helpers ────────────────────────────────────────────────────

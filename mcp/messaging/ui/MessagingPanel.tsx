@@ -126,10 +126,26 @@ interface SuppressionRow {
   source: string;
   last_seen?: string;
 }
+interface SenderRow {
+  address: string;
+  kind: "email" | "domain";
+  verified: boolean;
+  dkim_status?: string;
+  dkim_tokens?: string[];
+  sending_enabled: boolean;
+}
+interface QuotaInfo {
+  sandboxed: boolean;
+  sending_enabled: boolean;
+  production_access: boolean;
+  send_quota_24h: number;
+  send_rate_per_second: number;
+  sent_last_24h: number;
+}
 
 const API = "/api/apps/messaging";
 
-type Tab = "outbox" | "inbox" | "templates" | "routes" | "suppressions" | "compose";
+type Tab = "outbox" | "inbox" | "templates" | "routes" | "suppressions" | "senders" | "compose";
 
 // ─── Component ────────────────────────────────────────────────────
 export default function MessagingPanel({ projectId, installId }: NativePanelProps) {
@@ -142,6 +158,8 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
   const [templates, setTemplates] = useState<TemplateRow[]>([]);
   const [routes, setRoutes] = useState<InboundRoute[]>([]);
   const [suppressions, setSuppressions] = useState<SuppressionRow[]>([]);
+  const [senders, setSenders] = useState<SenderRow[]>([]);
+  const [quota, setQuota] = useState<QuotaInfo | null>(null);
 
   const [selected, setSelected] = useState<MessageRow | null>(null);
   const [selectedEvents, setSelectedEvents] = useState<DeliveryEvent[]>([]);
@@ -182,18 +200,40 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
     const r = await api<{ suppressions: SuppressionRow[] }>("GET", "/suppressions", {});
     setSuppressions(r.suppressions || []);
   }, [api]);
+  // Senders + quota are best-effort: they call the bound SES integration and
+  // can fail (no provider bound, sandbox, transient SES error). A failure
+  // here shouldn't break the rest of the panel — null values are fine.
+  const loadSenders = useCallback(async () => {
+    try {
+      const r = await api<{ senders: SenderRow[] }>("GET", "/senders", {});
+      setSenders(r.senders || []);
+    } catch {
+      setSenders([]);
+    }
+  }, [api]);
+  const loadQuota = useCallback(async () => {
+    try {
+      const q = await api<QuotaInfo>("GET", "/senders/quota", {});
+      setQuota(q);
+    } catch {
+      setQuota(null);
+    }
+  }, [api]);
 
   const reload = useCallback(async () => {
     setBusy(true);
     try {
-      await Promise.all([loadOutbox(), loadInbox(), loadTemplates(), loadRoutes(), loadSuppressions()]);
+      await Promise.all([
+        loadOutbox(), loadInbox(), loadTemplates(), loadRoutes(),
+        loadSuppressions(), loadSenders(), loadQuota(),
+      ]);
       setStatus("");
     } catch (e) {
       setStatus("Error: " + (e as Error).message);
     } finally {
       setBusy(false);
     }
-  }, [loadOutbox, loadInbox, loadTemplates, loadRoutes, loadSuppressions]);
+  }, [loadOutbox, loadInbox, loadTemplates, loadRoutes, loadSuppressions, loadSenders, loadQuota]);
 
   useEffect(() => { reload(); }, [reload]);
 
@@ -220,17 +260,28 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
     templates: templates.length,
     routes: routes.length,
     suppressions: suppressions.length,
-  }), [outbox, inbox, templates, routes, suppressions]);
+    senders: senders.length,
+  }), [outbox, inbox, templates, routes, suppressions, senders]);
+
+  const verifiedSenders = useMemo(() => senders.filter((s) => s.verified), [senders]);
 
   return (
     <div className="h-full flex flex-col">
+      {/* Sandbox banner — only when SES reports we're sandboxed. */}
+      {quota && quota.sandboxed && (
+        <div className="px-6 py-2 bg-yellow-500/10 border-b border-yellow-500/30 text-xs text-yellow-300">
+          <strong>SES sandbox</strong> — only verified recipients receive mail. Sent {quota.sent_last_24h.toFixed(0)}/{quota.send_quota_24h.toFixed(0)} in the last 24h. To lift the limit, request production access in the AWS console.
+        </div>
+      )}
+
       {/* Header */}
       <div className="px-6 pt-6 pb-3 flex items-center justify-between gap-4 border-b border-border">
-        <div className="flex items-center gap-1 text-sm">
+        <div className="flex items-center gap-1 text-sm flex-wrap">
           {([
             ["outbox", `Outbox (${counts.outbox})`],
             ["inbox", `Inbox (${counts.inbox})`],
             ["compose", "Compose"],
+            ["senders", `Senders (${counts.senders})`],
             ["templates", `Templates (${counts.templates})`],
             ["routes", `Routes (${counts.routes})`],
             ["suppressions", `Suppressions (${counts.suppressions})`],
@@ -260,7 +311,16 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
         <div className="flex-1 min-w-0 overflow-auto">
           {tab === "outbox" && <MessageList rows={outbox} onSelect={openMessage} selectedId={selected?.id} />}
           {tab === "inbox" && <MessageList rows={inbox} onSelect={openMessage} selectedId={selected?.id} />}
-          {tab === "compose" && <ComposeView api={api} onSent={() => { reload(); setTab("outbox"); }} />}
+          {tab === "compose" && (
+            <ComposeView
+              api={api}
+              senders={verifiedSenders}
+              quota={quota}
+              onSent={() => { reload(); setTab("outbox"); }}
+              gotoSenders={() => setTab("senders")}
+            />
+          )}
+          {tab === "senders" && <SendersView rows={senders} quota={quota} api={api} reload={reload} />}
           {tab === "templates" && <TemplatesView rows={templates} api={api} reload={reload} />}
           {tab === "routes" && <RoutesView rows={routes} api={api} reload={reload} />}
           {tab === "suppressions" && <SuppressionsView rows={suppressions} api={api} reload={reload} />}
@@ -377,27 +437,54 @@ function MessageDetail({ m, events, onClose }: { m: MessageRow; events: Delivery
   );
 }
 
-function ComposeView({ api, onSent }: { api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>; onSent: () => void }) {
+function ComposeView({
+  api, senders, quota, onSent, gotoSenders,
+}: {
+  api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
+  senders: SenderRow[];
+  quota: QuotaInfo | null;
+  onSent: () => void;
+  gotoSenders: () => void;
+}) {
+  // Verified email/domain identities the operator can send from.
+  // For domains we suggest <user>@<domain> in placeholder UX; for v0.2
+  // we just expose the domain itself — operator types the local-part
+  // when they pick the domain row. Email rows go in directly.
+  const fromOptions = useMemo(() => {
+    return senders.map((s) => stripScheme(s.address));
+  }, [senders]);
+
+  const [from, setFrom] = useState<string>("");
   const [to, setTo] = useState("");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
+  // Default From to the first verified email identity (not domain),
+  // or the first option overall. Updates whenever senders refreshes.
+  useEffect(() => {
+    if (from) return;
+    const firstEmail = senders.find((s) => s.kind === "email" && s.verified);
+    if (firstEmail) setFrom(stripScheme(firstEmail.address));
+    else if (fromOptions.length > 0) setFrom(fromOptions[0]);
+  }, [senders, fromOptions, from]);
+
+  const noVerifiedSenders = fromOptions.length === 0;
+
   const send = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!from) {
+      setErr("Pick a From address.");
+      return;
+    }
     setBusy(true);
     setErr("");
     try {
       const recipients = to.split(",").map((s) => s.trim()).filter(Boolean);
-      // The send_message tool isn't an HTTP route by default; the panel
-      // would talk through the platform's tools/call endpoint. v0.1 we
-      // expose a tiny HTTP shim by POSTing to /messages — which we
-      // haven't built. So for v0.1 the compose form is wired to the
-      // tool dispatch endpoint via /api/apps/messaging/tools/call.
       await api("POST", "/tools/call", {}, {
         tool: "send_message",
-        args: { to: recipients, subject, body },
+        args: { from, to: recipients, subject, body },
       });
       setTo(""); setSubject(""); setBody("");
       onSent();
@@ -411,23 +498,197 @@ function ComposeView({ api, onSent }: { api: <T,>(m: string, p: string, q?: Reco
   return (
     <form onSubmit={send} className="p-6 max-w-2xl space-y-3">
       <h2 className="text-lg font-semibold mb-1">Compose email</h2>
-      <p className="text-xs text-text-dim mb-3">Comma-separate multiple recipients. Plain email addresses work; URIs (mailto:…) accepted.</p>
+      <p className="text-xs text-text-dim mb-3">Pick a verified From, comma-separate recipients.</p>
+
+      {noVerifiedSenders ? (
+        <div className="rounded border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm text-yellow-300">
+          No verified senders. <button type="button" className="underline" onClick={gotoSenders}>Verify one in the Senders tab →</button>
+        </div>
+      ) : (
+        <Field label="From">
+          {senders.some((s) => s.kind === "domain") ? (
+            // If any domain identity exists, free-text + datalist is
+            // friendlier than a strict select — operator can type
+            // alice@verified-domain.com without us pre-enumerating.
+            <>
+              <input
+                className="input w-full"
+                list="from-options"
+                value={from}
+                onChange={(e) => setFrom(e.target.value)}
+                placeholder="alice@your-verified-domain.com"
+                required
+              />
+              <datalist id="from-options">
+                {fromOptions.map((opt) => <option key={opt} value={opt} />)}
+              </datalist>
+            </>
+          ) : (
+            <select
+              className="input w-full"
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+              required
+            >
+              {fromOptions.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+            </select>
+          )}
+        </Field>
+      )}
+
       <Field label="To">
-        <input className="input w-full" value={to} onChange={(e) => setTo(e.target.value)} placeholder="alice@example.com, bob@x.io" required />
+        <input className="input w-full" value={to} onChange={(e) => setTo(e.target.value)} placeholder="alice@example.com, bob@x.io" required disabled={noVerifiedSenders} />
       </Field>
       <Field label="Subject">
-        <input className="input w-full" value={subject} onChange={(e) => setSubject(e.target.value)} />
+        <input className="input w-full" value={subject} onChange={(e) => setSubject(e.target.value)} disabled={noVerifiedSenders} />
       </Field>
       <Field label="Body">
-        <textarea className="input w-full font-mono text-sm" rows={10} value={body} onChange={(e) => setBody(e.target.value)} required />
+        <textarea className="input w-full font-mono text-sm" rows={10} value={body} onChange={(e) => setBody(e.target.value)} required disabled={noVerifiedSenders} />
       </Field>
+
+      {quota && quota.sandboxed && (
+        <p className="text-xs text-yellow-400/80">
+          Sandbox: only recipients you've verified in SES will receive this mail.
+        </p>
+      )}
       {err && <div className="text-red-500 text-sm">{err}</div>}
+
       <div className="flex justify-end gap-2 pt-2">
-        <button type="submit" disabled={busy} className="px-4 py-1.5 bg-accent text-white rounded disabled:opacity-50">
+        <button type="submit" disabled={busy || noVerifiedSenders} className="px-4 py-1.5 bg-accent text-white rounded disabled:opacity-50">
           {busy ? "Sending…" : "Send"}
         </button>
       </div>
     </form>
+  );
+}
+
+function SendersView({
+  rows, quota, api, reload,
+}: {
+  rows: SenderRow[];
+  quota: QuotaInfo | null;
+  api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
+  reload: () => void;
+}) {
+  const [verifyAddr, setVerifyAddr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<{
+    address: string;
+    kind: string;
+    dns_records?: { name: string; type: string; value: string }[];
+    next_step?: string;
+  } | null>(null);
+  const [err, setErr] = useState("");
+
+  const onVerify = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true); setErr(""); setVerifyResult(null);
+    try {
+      const out = await api<typeof verifyResult>("POST", "/tools/call", {}, {
+        tool: "senders_verify_email",
+        args: { address: verifyAddr },
+      });
+      setVerifyResult(out);
+      setVerifyAddr("");
+      reload();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const recheck = async (address: string) => {
+    try {
+      await api("POST", "/tools/call", {}, { tool: "senders_get", args: { address } });
+      reload();
+    } catch (e) { alert((e as Error).message); }
+  };
+
+  const remove = async (address: string) => {
+    if (!confirm(`Delete ${stripScheme(address)} from SES? Future sends from this identity will fail.`)) return;
+    try {
+      await api("POST", "/tools/call", {}, { tool: "senders_delete", args: { address } });
+      reload();
+    } catch (e) { alert((e as Error).message); }
+  };
+
+  return (
+    <div>
+      <form onSubmit={onVerify} className="p-4 flex gap-2 items-end border-b border-border flex-wrap">
+        <Field label="Verify email or domain" hint="alice@acme.com or acme.com">
+          <input className="input w-72" value={verifyAddr} onChange={(e) => setVerifyAddr(e.target.value)} required />
+        </Field>
+        <button type="submit" disabled={busy} className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50">
+          {busy ? "Verifying…" : "Verify"}
+        </button>
+      </form>
+
+      {err && <div className="p-4 text-red-500 text-sm">{err}</div>}
+      {verifyResult && (
+        <div className="m-4 p-3 rounded border border-border bg-surface-2 text-sm space-y-2">
+          <div>
+            <strong>{stripScheme(verifyResult.address)}</strong> — verification pending.
+            {verifyResult.next_step && <span className="text-text-dim ml-1">{verifyResult.next_step}</span>}
+          </div>
+          {verifyResult.dns_records && verifyResult.dns_records.length > 0 && (
+            <div>
+              <div className="text-xs uppercase tracking-wide text-text-dim mb-1">Publish these CNAME records</div>
+              <table className="text-xs font-mono">
+                <tbody>
+                  {verifyResult.dns_records.map((r, i) => (
+                    <tr key={i}>
+                      <td className="px-2 py-0.5">{r.name}</td>
+                      <td className="px-2 py-0.5 text-text-dim">{r.type}</td>
+                      <td className="px-2 py-0.5">{r.value}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {rows.length === 0 ? (
+        <div className="p-6 text-text-dim text-sm">No senders configured. Verify an email or domain above.</div>
+      ) : (
+        <table className="w-full text-sm">
+          <thead className="text-xs text-text-dim">
+            <tr className="border-b border-border">
+              <th className="text-left px-4 py-2">Address</th>
+              <th className="text-left px-4 py-2">Kind</th>
+              <th className="text-left px-4 py-2">Verified</th>
+              <th className="text-left px-4 py-2">DKIM</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((s) => (
+              <tr key={s.address} className="border-b border-border">
+                <td className="px-4 py-2">{stripScheme(s.address)}</td>
+                <td className="px-4 py-2 text-text-dim">{s.kind}</td>
+                <td className="px-4 py-2"><StatusPill status={s.verified ? "verified" : "pending"} /></td>
+                <td className="px-4 py-2 text-text-dim">{s.dkim_status || "—"}</td>
+                <td className="px-4 py-2 text-right space-x-3">
+                  <button type="button" className="text-text-dim hover:text-text text-xs" onClick={() => recheck(s.address)}>Re-check</button>
+                  <button type="button" className="text-text-dim hover:text-red-500 text-xs" onClick={() => remove(s.address)}>Delete</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {quota && (
+        <div className="p-4 text-xs text-text-dim border-t border-border mt-4">
+          24h quota: {quota.sent_last_24h.toFixed(0)} / {quota.send_quota_24h.toFixed(0)} ·
+          rate: {quota.send_rate_per_second}/s ·
+          {quota.sandboxed ? " sandboxed" : " production"}
+          {!quota.sending_enabled && <span className="text-red-400"> · sending disabled</span>}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -593,9 +854,12 @@ function StatusPill({ status }: { status: string }) {
       case "delivered":
       case "ok":
       case "received":
+      case "verified":
+      case "SUCCESS":
         return "bg-green-500/20 text-green-400";
       case "pending":
       case "no_match":
+      case "PENDING":
         return "bg-yellow-500/20 text-yellow-400";
       case "bounced":
       case "complained":

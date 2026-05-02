@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.1.0
+version: 0.2.0
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES; SMS and push are reserved channel namespaces. Tracks
@@ -72,6 +72,12 @@ provides:
     - { name: suppression_list,       description: "List suppressed addresses. Args: channel?, limit?." }
     - { name: suppression_add,        description: "Suppress a recipient. Args: address (URI), reason." }
     - { name: suppression_remove,     description: "Remove an address from suppression. Args: address (URI)." }
+    # senders (outbound identities — channel-agnostic list/get/delete; channel-specific onboarding)
+    - { name: senders_list,           description: "List sending identities (verified emails, domains; later phones, push apps). Args: channel?, verified_only?. Returns [{address, kind, verified, dkim_status?}]." }
+    - { name: senders_get,            description: "Get a single identity's status — verification, DKIM, feedback forwarding. Args: address (URI or bare)." }
+    - { name: senders_delete,         description: "Remove a sending identity from the provider. Args: address." }
+    - { name: senders_verify_email,   description: "Verify an email address or domain with the email provider. Args: address. Email: provider sends a confirmation link. Domain: returns 3 DKIM CNAMEs to publish in DNS." }
+    - { name: senders_get_quota,      description: "Provider account stats — sandbox flag, 24h send quota, current usage. Powers the sandbox banner." }
   ui_panels:
     - slot: project.page
       label: Messaging
@@ -93,10 +99,6 @@ db:
   migrations: migrations/
 
 config_schema:
-  - name: default_from_address
-    type: text
-    label: Default From address
-    description: Used when send_message omits 'from'. Must be SES-verified. e.g. notifications@acme.com.
   - name: ses_bounce_topic_arn
     type: text
     label: SES bounce/complaint SNS topic ARN
