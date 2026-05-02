@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+)
 
 // TestEmbeddedManifest_Valid sanity-checks the YAML the binary
 // embeds — same shape we ship in apteva.yaml. If they drift, this
@@ -17,11 +21,9 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Error("db.migrations missing")
 	}
-	// Four read-side tools is the contract. Ops endpoints (status,
-	// reindex) live as plain HTTP routes, not MCP — agents query the
-	// catalog, the panel does ops.
-	if len(m.Provides.MCPTools) != 4 {
-		t.Errorf("expected 4 MCP tools, got %d", len(m.Provides.MCPTools))
+	// v0.2 surface: 6 catalog tools + 7 render submit + 3 render manage = 16.
+	if len(m.Provides.MCPTools) != 16 {
+		t.Errorf("expected 16 MCP tools, got %d", len(m.Provides.MCPTools))
 	}
 	if len(m.Provides.Workers) != 1 {
 		t.Errorf("expected 1 worker, got %d", len(m.Provides.Workers))
@@ -29,8 +31,16 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Provides.Workers[0].Schedule == "" {
 		t.Error("indexer worker missing schedule")
 	}
-	if len(m.Requires.Apps) != 1 || m.Requires.Apps[0].Name != "storage" {
-		t.Errorf("expected requires.apps=[storage], got %#v", m.Requires.Apps)
+	// Storage is required; jobs is an optional companion for scheduled renders.
+	gotApps := map[string]sdk.RequiredAppRef{}
+	for _, a := range m.Requires.Apps {
+		gotApps[a.Name] = a
+	}
+	if _, ok := gotApps["storage"]; !ok {
+		t.Errorf("expected requires.apps to include storage, got %#v", m.Requires.Apps)
+	}
+	if jobs, ok := gotApps["jobs"]; !ok || !jobs.Optional {
+		t.Errorf("expected requires.apps to include optional jobs, got %#v", m.Requires.Apps)
 	}
 }
 

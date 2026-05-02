@@ -1,0 +1,81 @@
+name: trim-video
+description: |
+  End-to-end render pipeline. The runner uploads a real 5-second
+  h264/aac mp4 into storage; the media indexer picks it up; the
+  agent searches for it via media_search, calls media_trim to cut
+  a 2-second clip, polls media_get_render until the render
+  completes, and reports the output file_id.
+
+  Validates the full cross-app render flow:
+    storage upload → media indexer probes → agent submits trim
+    → render pool downloads source from storage → ffmpeg runs
+    → output uploaded back to storage → row marked ok →
+    indexer picks up the new file as well.
+
+timeout: 180s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    config:
+      # Tight polling so the source mp4 is indexed before the agent's
+      # first media_search call.
+      poll_interval_seconds: "1"
+      render_pool_size: "1"
+      render_timeout_seconds: "60"
+  fixtures:
+    - app: storage
+      tool: files_upload
+      file: ./fixtures/sample-5s.mp4
+      args:
+        folder: "/tests/"
+        content_type: "video/mp4"
+
+directive: |
+  You have access to the media app and the storage app. There is
+  one short test video in storage. Your job:
+
+    1. Find the video using media_search with has_video=true.
+    2. Call media_trim on it with start_ms=1000 and end_ms=3000.
+       Capture the render_id from the response.
+    3. Poll media_get_render every few seconds until status is
+       "ok" (or "failed" — in which case stop and report).
+    4. Report the output_file_id from the completed render.
+
+  Do not call media_trim more than once. Do not poll faster than
+  every 2 seconds.
+
+assert:
+  # Source mp4 landed in storage.
+  - http: GET /api/apps/storage/files?folder=/tests/
+    expect_status: 200
+    expect_count_at: files
+    expect_count: 1
+  # Indexer probed the source — has_video=true filter returns it.
+  - http: GET /api/apps/media/media?has_video=true
+    expect_status: 200
+    expect_count_at: media
+    expect_count: 1
+  # Render reached ok status (means: source downloaded, ffmpeg ran,
+  # output uploaded back, row marked ok). At this scale there should
+  # be exactly one render row.
+  - http: GET /api/apps/media/renders?status=ok
+    expect_status: 200
+    expect_count_at: renders
+    expect_count: 1
+  # Trimmed output landed in the renders folder in storage.
+  - http: GET /api/apps/storage/files?folder=/renders/
+    expect_status: 200
+    expect_count_at: files
+    expect_count: 1
+  # Required tools were called.
+  - tool_called: media_search
+  - tool_called: media_trim
+  - tool_called: media_get_render
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 20000
+  cost_usd: 0.40
