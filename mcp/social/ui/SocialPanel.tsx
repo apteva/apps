@@ -33,6 +33,7 @@ interface SocialAccount {
   avatar_url: string;
   status: string;
   created_at: string;
+  profile_id?: number;
 }
 
 interface PostTarget {
@@ -58,6 +59,23 @@ interface Post {
   created_at: string;
   published_at: string;
   targets: PostTarget[];
+  profile_id?: number;
+}
+
+// Profile = brand/client/site container (see profiles.go). One
+// project, one social install, many profiles, each grouping a
+// set of social_accounts. profile_id=0 means "unassigned" (legacy
+// rows pre-003_profiles migration).
+interface Profile {
+  id: number;
+  project_id: string;
+  name: string;
+  slug: string;
+  description: string;
+  color: string;
+  is_default: boolean;
+  account_count?: number;
+  post_count?: number;
 }
 
 interface PlatformInfo {
@@ -140,31 +158,67 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   const [posts, setPosts] = useState<Post[]>([]);
   const [platforms, setPlatforms] = useState<PlatformInfo[]>([]);
   const [status, setStatus] = useState("");
-  // Compose used to be its own tab. It's now a centred modal opened
-  // from the Posts tab (+ New post button) so creating a post happens
-  // in a focused dialog instead of swapping the right pane — same
-  // pattern as the jobs panel's "+ New job" → CreateJobDialog flow.
   const [composeOpen, setComposeOpen] = useState(false);
+  // Profile filter — null = "All profiles" (project-wide view).
+  // Persists per-project so refreshing the page keeps the user's
+  // last-selected brand context.
+  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [activeProfileId, setActiveProfileId] = useState<number | null>(() => {
+    try {
+      const raw = localStorage.getItem(`social.activeProfile.${projectId || ""}`);
+      return raw ? Number(raw) || null : null;
+    } catch {
+      return null;
+    }
+  });
+  const [manageOpen, setManageOpen] = useState(false);
+  useEffect(() => {
+    try {
+      if (activeProfileId == null) {
+        localStorage.removeItem(`social.activeProfile.${projectId || ""}`);
+      } else {
+        localStorage.setItem(`social.activeProfile.${projectId || ""}`, String(activeProfileId));
+      }
+    } catch {}
+  }, [activeProfileId, projectId]);
+
+  const loadProfiles = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/profiles`, { credentials: "same-origin" });
+      const data = await res.json();
+      setProfiles(data.profiles || []);
+    } catch (e) {
+      setStatus("Load profiles: " + (e as Error).message);
+    }
+  }, []);
+
+  // Profile-scoped fetches — when activeProfileId is set, the
+  // accounts/posts queries pass profile_id and the panel only sees
+  // that brand's rows. activeProfileId=null = project-wide.
+  const profileQuery = useCallback(() => {
+    if (activeProfileId == null) return "";
+    return `?profile_id=${activeProfileId}`;
+  }, [activeProfileId]);
 
   const loadAccounts = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/accounts`, { credentials: "same-origin" });
+      const res = await fetch(`${API}/accounts${profileQuery()}`, { credentials: "same-origin" });
       const data = await res.json();
       setAccounts(data.accounts || []);
     } catch (e) {
       setStatus("Load accounts: " + (e as Error).message);
     }
-  }, []);
+  }, [profileQuery]);
 
   const loadPosts = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/posts`, { credentials: "same-origin" });
+      const res = await fetch(`${API}/posts${profileQuery()}`, { credentials: "same-origin" });
       const data = await res.json();
       setPosts(data.posts || []);
     } catch (e) {
       setStatus("Load posts: " + (e as Error).message);
     }
-  }, []);
+  }, [profileQuery]);
 
   const loadPlatforms = useCallback(async () => {
     try {
@@ -175,12 +229,14 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   }, []);
 
   useEffect(() => {
+    loadProfiles();
     loadAccounts();
     loadPosts();
     loadPlatforms();
-  }, [loadAccounts, loadPosts, loadPlatforms]);
+  }, [loadProfiles, loadAccounts, loadPosts, loadPlatforms]);
 
-  // Live updates — account adds/removals + per-target publish events.
+  // Live updates — account adds/removals + per-target publish events
+  // + profile CRUD.
   useAppEvents("social", projectId, (ev) => {
     if (ev.topic === "account.added" || ev.topic === "account.removed") {
       loadAccounts();
@@ -188,6 +244,13 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
     if (ev.topic === "post.created" || ev.topic === "post.completed" ||
         ev.topic === "target.published" || ev.topic === "target.failed") {
       loadPosts();
+    }
+    if (ev.topic === "profile.created" || ev.topic === "profile.updated" ||
+        ev.topic === "profile.deleted" || ev.topic === "profile.accounts_moved") {
+      loadProfiles();
+      // Account counts on the profile pills change — also refresh
+      // the active scope's accounts list.
+      loadAccounts();
     }
   });
 
@@ -211,9 +274,18 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
     return () => window.removeEventListener("message", onMsg);
   }, []);
 
+  const activeProfile = profiles.find((p) => p.id === activeProfileId) || null;
+
   return (
     <div className="h-full flex flex-col">
       <header className="flex items-center gap-1 border-b border-border px-4 py-2">
+        <ProfileSwitcher
+          profiles={profiles}
+          activeId={activeProfileId}
+          onSelect={setActiveProfileId}
+          onManage={() => setManageOpen(true)}
+        />
+        <span className="w-px h-5 bg-border mx-2" />
         <Tab label="Posts" value="posts" current={tab} onClick={setTab} count={posts.length} />
         <Tab label="Accounts" value="accounts" current={tab} onClick={setTab} count={accounts.length} />
         <button
@@ -249,11 +321,338 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
       {composeOpen && (
         <ComposeDialog
           accounts={accounts}
+          activeProfile={activeProfile}
           onClose={() => setComposeOpen(false)}
           onCreated={() => { loadPosts(); setComposeOpen(false); setTab("posts"); }}
           setStatus={setStatus}
         />
       )}
+      {manageOpen && (
+        <ProfileManageModal
+          profiles={profiles}
+          accounts={accounts}
+          onClose={() => setManageOpen(false)}
+          onChanged={() => { loadProfiles(); loadAccounts(); }}
+          setStatus={setStatus}
+        />
+      )}
+    </div>
+  );
+}
+
+// --- ProfileSwitcher: header dropdown ----------------------------
+
+function ProfileSwitcher({
+  profiles, activeId, onSelect, onManage,
+}: {
+  profiles: Profile[];
+  activeId: number | null;
+  onSelect: (id: number | null) => void;
+  onManage: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  // Outside-click close.
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener("mousedown", onDoc);
+    return () => window.removeEventListener("mousedown", onDoc);
+  }, [open]);
+  const active = profiles.find((p) => p.id === activeId) || null;
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-2 px-2 py-1 text-sm rounded hover:bg-bg-card transition-colors"
+        title={active ? `Profile: ${active.name}` : "All profiles"}
+      >
+        <span
+          className="w-2 h-2 rounded-full"
+          style={{ backgroundColor: active?.color || "#94a3b8" }}
+        />
+        <span className="text-text font-medium">{active ? active.name : "All profiles"}</span>
+        <span className="text-text-dim text-xs">▾</span>
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full mt-1 w-64 z-40 bg-bg-card border border-border rounded shadow-lg py-1">
+          <button
+            onClick={() => { onSelect(null); setOpen(false); }}
+            className={
+              "w-full text-left flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-bg-input/50 " +
+              (activeId == null ? "text-accent" : "text-text")
+            }
+          >
+            <span className="w-2 h-2 rounded-full bg-text-dim" />
+            <span className="flex-1">All profiles</span>
+          </button>
+          {profiles.length > 0 && <div className="border-t border-border my-1" />}
+          {profiles.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => { onSelect(p.id); setOpen(false); }}
+              className={
+                "w-full text-left flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-bg-input/50 " +
+                (p.id === activeId ? "text-accent" : "text-text")
+              }
+              title={p.description}
+            >
+              <span
+                className="w-2 h-2 rounded-full flex-shrink-0"
+                style={{ backgroundColor: p.color || "#94a3b8" }}
+              />
+              <span className="flex-1 truncate">{p.name}</span>
+              {p.is_default && <span className="text-text-dim text-xs">default</span>}
+              <span className="text-text-dim text-xs">{p.account_count ?? 0}</span>
+            </button>
+          ))}
+          <div className="border-t border-border my-1" />
+          <button
+            onClick={() => { onManage(); setOpen(false); }}
+            className="w-full text-left px-3 py-1.5 text-sm text-text-muted hover:bg-bg-input/50 hover:text-text"
+          >
+            Manage profiles…
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- ProfileManageModal: create / rename / set-default / delete ---
+
+function ProfileManageModal({
+  profiles, accounts, onClose, onChanged, setStatus,
+}: {
+  profiles: Profile[];
+  accounts: SocialAccount[];
+  onClose: () => void;
+  onChanged: () => void;
+  setStatus: (s: string) => void;
+}) {
+  const [newName, setNewName] = useState("");
+  const [newColor, setNewColor] = useState("#3b82f6");
+  const [busy, setBusy] = useState(false);
+
+  const create = async () => {
+    const name = newName.trim();
+    if (!name) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`${API}/profiles`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, color: newColor }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setNewName("");
+      onChanged();
+    } catch (e) {
+      setStatus("Create profile: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const promote = async (id: number) => {
+    try {
+      await fetch(`${API}/profiles/${id}`, {
+        method: "PATCH",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_default: true }),
+      });
+      onChanged();
+    } catch (e) {
+      setStatus("Promote: " + (e as Error).message);
+    }
+  };
+
+  const rename = async (id: number, name: string) => {
+    try {
+      await fetch(`${API}/profiles/${id}`, {
+        method: "PATCH",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      onChanged();
+    } catch (e) {
+      setStatus("Rename: " + (e as Error).message);
+    }
+  };
+
+  const recolor = async (id: number, color: string) => {
+    try {
+      await fetch(`${API}/profiles/${id}`, {
+        method: "PATCH",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ color }),
+      });
+      onChanged();
+    } catch (e) {
+      setStatus("Recolor: " + (e as Error).message);
+    }
+  };
+
+  const removeProfile = async (id: number) => {
+    if (!confirm("Delete this profile? Accounts and posts will become unassigned.")) return;
+    try {
+      const res = await fetch(`${API}/profiles/${id}`, {
+        method: "DELETE",
+        credentials: "same-origin",
+      });
+      if (!res.ok) throw new Error(await res.text());
+      onChanged();
+    } catch (e) {
+      setStatus("Delete: " + (e as Error).message);
+    }
+  };
+
+  const moveAccount = async (accountId: number, profileId: number) => {
+    try {
+      await fetch(`${API}/profiles/${profileId}/move`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ account_ids: [accountId] }),
+      });
+      onChanged();
+    } catch (e) {
+      setStatus("Move: " + (e as Error).message);
+    }
+  };
+
+  // Unassigned accounts (profile_id=0) get their own group at the
+  // bottom — they're a migration relic or a deletion fallback. The
+  // user wants to see them so they can re-home each one.
+  const unassigned = accounts.filter((a) => !a.profile_id);
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60" onClick={onClose}>
+      <div
+        className="bg-bg-card border border-border rounded-lg shadow-lg w-[640px] max-w-[92vw] max-h-[85vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+          <div className="text-text font-medium">Manage profiles</div>
+          <button onClick={onClose} className="text-text-muted hover:text-text">×</button>
+        </div>
+        <div className="p-4 flex-1 overflow-y-auto space-y-4">
+          {/* Create */}
+          <div className="border border-border rounded p-3 flex items-center gap-2">
+            <input
+              type="color"
+              value={newColor}
+              onChange={(e) => setNewColor(e.target.value)}
+              className="w-9 h-9 rounded border border-border cursor-pointer"
+            />
+            <input
+              type="text"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder="New profile name (e.g. SocialCast, PaidKit, Personal)"
+              className="flex-1 bg-bg-input border border-border rounded px-3 py-1.5 text-sm"
+              onKeyDown={(e) => { if (e.key === "Enter") create(); }}
+            />
+            <button
+              onClick={create}
+              disabled={!newName.trim() || busy}
+              className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+            >
+              Create
+            </button>
+          </div>
+
+          {/* Existing */}
+          <div className="space-y-2">
+            {profiles.map((p) => (
+              <div key={p.id} className="border border-border rounded p-3 flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="color"
+                    value={p.color || "#94a3b8"}
+                    onChange={(e) => recolor(p.id, e.target.value)}
+                    className="w-7 h-7 rounded border border-border cursor-pointer"
+                  />
+                  <input
+                    type="text"
+                    defaultValue={p.name}
+                    onBlur={(e) => {
+                      const v = e.target.value.trim();
+                      if (v && v !== p.name) rename(p.id, v);
+                    }}
+                    className="flex-1 bg-transparent border-b border-transparent hover:border-border focus:border-accent outline-none text-text font-medium"
+                  />
+                  <span className="text-text-dim text-xs">{p.account_count ?? 0} accounts</span>
+                  {!p.is_default && (
+                    <button
+                      onClick={() => promote(p.id)}
+                      className="text-xs text-accent hover:underline"
+                    >
+                      Set default
+                    </button>
+                  )}
+                  {p.is_default && <span className="text-text-dim text-xs">default</span>}
+                  <button
+                    onClick={() => removeProfile(p.id)}
+                    className="text-xs text-text-muted hover:text-red"
+                  >
+                    Delete
+                  </button>
+                </div>
+                <div className="text-text-dim text-xs">
+                  slug: <code>{p.slug}</code>
+                </div>
+              </div>
+            ))}
+            {profiles.length === 0 && (
+              <div className="text-text-dim text-sm py-6 text-center">
+                No profiles yet. Create one above.
+              </div>
+            )}
+          </div>
+
+          {/* Unassigned accounts — move them into a profile */}
+          {unassigned.length > 0 && profiles.length > 0 && (
+            <div className="border border-border rounded p-3">
+              <div className="text-text-muted text-xs uppercase tracking-wide mb-2">
+                Unassigned accounts ({unassigned.length})
+              </div>
+              <div className="space-y-1">
+                {unassigned.map((a) => (
+                  <div key={a.id} className="flex items-center gap-2">
+                    {a.avatar_url ? (
+                      <img src={a.avatar_url} alt="" className="w-6 h-6 rounded-full" />
+                    ) : (
+                      <div className="w-6 h-6 rounded-full bg-bg-input" />
+                    )}
+                    <span className="text-text text-sm flex-1 truncate">{a.display_name}</span>
+                    <span className="text-text-dim text-xs">{a.platform}</span>
+                    <select
+                      defaultValue=""
+                      onChange={(e) => {
+                        const id = Number(e.target.value);
+                        if (id) moveAccount(a.id, id);
+                      }}
+                      className="text-xs bg-bg-input border border-border rounded px-1 py-0.5"
+                    >
+                      <option value="">Move to…</option>
+                      {profiles.map((p) => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -693,9 +1092,10 @@ function PagePicker({
 // the pattern apps/mcp/jobs uses for "+ New job" → CreateJobDialog.
 
 function ComposeDialog({
-  accounts, onClose, onCreated, setStatus,
+  accounts, activeProfile, onClose, onCreated, setStatus,
 }: {
   accounts: SocialAccount[];
+  activeProfile: Profile | null;
   onClose: () => void;
   onCreated: () => void;
   setStatus: (s: string) => void;
@@ -793,6 +1193,12 @@ function ComposeDialog({
           social_account_ids: Array.from(selected),
           schedule_at: scheduleAt || undefined,
           media_storage_ids: media.length > 0 ? media.map((m) => m.id) : undefined,
+          // When the panel is scoped to one profile, tag the post
+          // with that profile_id so post_list filtering keeps it
+          // visible. Without this, mixed-profile sessions could
+          // create "no profile" posts that disappear from filtered
+          // views even though their accounts are tagged.
+          profile_id: activeProfile?.id,
         }),
       });
       if (!res.ok) {

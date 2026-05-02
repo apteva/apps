@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.4.5
+version: 0.5.0
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -352,6 +352,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/posts/", Handler: a.handlePostsItem}, // /posts/:id and /posts/:id/retry
 		// Static info
 		{Pattern: "/platforms", Handler: a.handlePlatforms},
+		// Profiles (brand/client/site containers — see profiles.go)
+		{Pattern: "/profiles", Handler: a.handleProfilesCollection},
+		{Pattern: "/profiles/", Handler: a.handleProfilesItem},
 		// Avatar cache — content-addressed by sha256 so we can serve
 		// without a DB lookup. Lives next to the sidecar's sqlite at
 		// data/avatars/. Invisible to users + agents (no list / search
@@ -368,7 +371,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 // ─── MCP tools ─────────────────────────────────────────────────────
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		{
 			Name: "account_add",
 			Description: "Begin connecting a social account. " +
@@ -450,6 +453,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolPostRetry,
 		},
 	}
+	tools = append(tools, a.profileTools()...)
+	return tools
 }
 
 func main() { sdk.Run(&App{}) }
@@ -464,6 +469,17 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	pid := os.Getenv("APTEVA_PROJECT_ID")
 	forceNew, _ := args["force_new"].(bool)
+	// Profile assignment for the new account. resolveProfileArg
+	// returns -1 if a non-empty slug doesn't resolve; that's a
+	// caller error (typo / wrong project) — surface it loudly
+	// instead of silently widening to "unassigned".
+	profileID := resolveProfileArg(ctx, pid, args)
+	if profileID < 0 {
+		return mcpError(fmt.Sprintf("profile %q not found in this project — call profile_list to see available slugs", args["profile"])), nil
+	}
+	if profileID == 0 {
+		profileID = projectDefaultProfileID(ctx, pid) // 0 if no default = leaves account unassigned
+	}
 
 	// Reuse path: if there's already an active social_account for this
 	// platform in this project, the underlying connection's access
@@ -527,10 +543,10 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			"platform", plat, "existing_conn_id", existingConnID, "reuse_source", reuseSrc)
 		if existingConnID > 0 {
 			res, err := ctx.AppDB().Exec(
-				`INSERT INTO pending_accounts (project_id, platform, integration_slug, connection_id, status, expires_at)
-				 VALUES (?, ?, ?, ?, 'ready', ?)`,
+				`INSERT INTO pending_accounts (project_id, platform, integration_slug, connection_id, status, expires_at, profile_id)
+				 VALUES (?, ?, ?, ?, 'ready', ?, ?)`,
 				pid, def.Platform, def.IntegrationSlug, existingConnID,
-				time.Now().UTC().Add(10*time.Minute),
+				time.Now().UTC().Add(10*time.Minute), profileID,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("create pending account (reuse path): %w", err)
@@ -562,9 +578,9 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	// the agent. It'll be linked to the connection once OAuth completes.
 	now := time.Now().UTC()
 	res, err := ctx.AppDB().Exec(
-		`INSERT INTO pending_accounts (project_id, platform, integration_slug, status, expires_at)
-		 VALUES (?, ?, ?, 'pending_oauth', ?)`,
-		pid, def.Platform, def.IntegrationSlug, now.Add(10*time.Minute),
+		`INSERT INTO pending_accounts (project_id, platform, integration_slug, status, expires_at, profile_id)
+		 VALUES (?, ?, ?, 'pending_oauth', ?, ?)`,
+		pid, def.Platform, def.IntegrationSlug, now.Add(10*time.Minute), profileID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create pending account: %w", err)
@@ -722,10 +738,18 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 
 	// Insert the finalized social_account row.
 	pid := os.Getenv("APTEVA_PROJECT_ID")
+	// Profile assignment: use the value the operator set on the
+	// pending row at account_add time, falling back to the project's
+	// current default if 0. Resolves the case where the default was
+	// promoted between account_add and finalize.
+	profileID := row.profileID
+	if profileID == 0 {
+		profileID = projectDefaultProfileID(ctx, pid)
+	}
 	res, err := ctx.AppDB().Exec(
-		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, avatar_url, status, page_credentials)
-		 VALUES (?, ?, ?, ?, ?, ?, 'active', ?)`,
-		pid, def.Platform, row.connectionID, nullable(pageID), displayName, nullable(avatar), pageCredsJSON,
+		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, avatar_url, status, page_credentials, profile_id)
+		 VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+		pid, def.Platform, row.connectionID, nullable(pageID), displayName, nullable(avatar), pageCredsJSON, profileID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert social_account: %w", err)
@@ -754,8 +778,12 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	pid := os.Getenv("APTEVA_PROJECT_ID")
 	platformFilter, _ := args["platform"].(string)
 	statusFilter, _ := args["status"].(string)
+	profileID := resolveProfileArg(ctx, pid, args)
+	if profileID < 0 {
+		return mcpError(fmt.Sprintf("profile %q not found in this project", args["profile"])), nil
+	}
 	q := `SELECT id, platform, connection_id, COALESCE(external_account_id,''), display_name,
-	             COALESCE(avatar_url,''), status, created_at
+	             COALESCE(avatar_url,''), status, created_at, COALESCE(profile_id,0)
 	      FROM social_accounts WHERE project_id=?`
 	qArgs := []any{pid}
 	if platformFilter != "" {
@@ -766,6 +794,10 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		q += " AND status=?"
 		qArgs = append(qArgs, statusFilter)
 	}
+	if profileID > 0 {
+		q += " AND profile_id=?"
+		qArgs = append(qArgs, profileID)
+	}
 	q += " ORDER BY id DESC"
 	rows, err := ctx.AppDB().Query(q, qArgs...)
 	if err != nil {
@@ -775,10 +807,10 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id, connID                                            int64
+			id, connID, profID                                    int64
 			platform, externalID, name, avatar, status, createdAt string
 		)
-		if err := rows.Scan(&id, &platform, &connID, &externalID, &name, &avatar, &status, &createdAt); err != nil {
+		if err := rows.Scan(&id, &platform, &connID, &externalID, &name, &avatar, &status, &createdAt, &profID); err != nil {
 			continue
 		}
 		out = append(out, map[string]any{
@@ -790,6 +822,7 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			"avatar_url":          avatar,
 			"status":              status,
 			"created_at":          createdAt,
+			"profile_id":          profID,
 		})
 	}
 	return map[string]any{"accounts": out}, nil
@@ -876,10 +909,45 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if scheduleAt != "" {
 		status = "scheduled"
 	}
+	// Resolve the post's profile_id. Order:
+	//   1. explicit `profile` / `profile_id` arg
+	//   2. unique profile_id shared by all selected accounts
+	//   3. project default
+	// If accounts span multiple profiles AND no explicit arg, refuse
+	// — silently picking one would lose information; the caller
+	// should split into per-profile posts or pass profile_id.
+	profileID := resolveProfileArg(ctx, pid, args)
+	if profileID < 0 {
+		return nil, fmt.Errorf("profile %q not found in this project", args["profile"])
+	}
+	if profileID == 0 {
+		spanned := map[int64]bool{}
+		for _, aid := range acctIDs {
+			var p int64
+			_ = ctx.AppDB().QueryRow(
+				`SELECT COALESCE(profile_id,0) FROM social_accounts WHERE id=? AND project_id=?`,
+				aid, pid,
+			).Scan(&p)
+			spanned[p] = true
+		}
+		switch len(spanned) {
+		case 0:
+			profileID = projectDefaultProfileID(ctx, pid)
+		case 1:
+			for k := range spanned {
+				profileID = k
+			}
+			if profileID == 0 {
+				profileID = projectDefaultProfileID(ctx, pid)
+			}
+		default:
+			return nil, errors.New("selected accounts span multiple profiles — pass profile_id explicitly or split into per-profile post_create calls")
+		}
+	}
 	res, err := ctx.AppDB().Exec(
-		`INSERT INTO posts (project_id, body, media_storage_ids, schedule_at, status)
-		 VALUES (?, ?, ?, ?, ?)`,
-		pid, body, string(mediaJSON), nullable(scheduleAt), status,
+		`INSERT INTO posts (project_id, body, media_storage_ids, schedule_at, status, profile_id)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		pid, body, string(mediaJSON), nullable(scheduleAt), status, profileID,
 	)
 	if err != nil {
 		return nil, err
@@ -1503,13 +1571,21 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		limit = 200
 	}
 	statusFilter, _ := args["status"].(string)
+	profileID := resolveProfileArg(ctx, pid, args)
+	if profileID < 0 {
+		return mcpError(fmt.Sprintf("profile %q not found in this project", args["profile"])), nil
+	}
 	q := `SELECT id, body, COALESCE(media_storage_ids,'[]'), COALESCE(schedule_at,''),
-	             status, created_at, COALESCE(published_at,'')
+	             status, created_at, COALESCE(published_at,''), COALESCE(profile_id,0)
 	      FROM posts WHERE project_id=?`
 	qArgs := []any{pid}
 	if statusFilter != "" {
 		q += " AND status=?"
 		qArgs = append(qArgs, statusFilter)
+	}
+	if profileID > 0 {
+		q += " AND profile_id=?"
+		qArgs = append(qArgs, profileID)
 	}
 	q += " ORDER BY id DESC LIMIT ?"
 	qArgs = append(qArgs, limit)
@@ -1521,10 +1597,10 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id                                                   int64
+			id, profID                                           int64
 			body, mediaJSON, schedAt, status, createdAt, pubAt   string
 		)
-		if err := rows.Scan(&id, &body, &mediaJSON, &schedAt, &status, &createdAt, &pubAt); err != nil {
+		if err := rows.Scan(&id, &body, &mediaJSON, &schedAt, &status, &createdAt, &pubAt, &profID); err != nil {
 			continue
 		}
 		var mediaIDs []int64
@@ -1534,6 +1610,7 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			"id":                id,
 			"body":              body,
 			"media_storage_ids": mediaIDs,
+			"profile_id":        profID,
 			"schedule_at":       schedAt,
 			"status":            status,
 			"created_at":        createdAt,
@@ -1868,14 +1945,16 @@ type pendingRow struct {
 	integrationSlug string
 	connectionID    int64
 	status          string
+	profileID       int64
 }
 
 func (a *App) getPending(id int64) (*pendingRow, error) {
 	var row pendingRow
 	err := globalCtx.AppDB().QueryRow(
-		`SELECT id, platform, integration_slug, COALESCE(connection_id,0), status
+		`SELECT id, platform, integration_slug, COALESCE(connection_id,0), status,
+		        COALESCE(profile_id,0)
 		 FROM pending_accounts WHERE id=?`, id,
-	).Scan(&row.id, &row.platform, &row.integrationSlug, &row.connectionID, &row.status)
+	).Scan(&row.id, &row.platform, &row.integrationSlug, &row.connectionID, &row.status, &row.profileID)
 	if err != nil {
 		return nil, err
 	}
