@@ -119,7 +119,11 @@ func TestLive_OpenCodeGo_ChatCompletion_Text(t *testing.T) {
 			{"role": "user", "content": "Reply with exactly one word: pong"},
 		},
 		"temperature": 0,
-		"max_tokens":  10,
+		// Kimi K2.6 is a reasoning model — it spends tokens thinking
+		// before producing visible output. With a tight cap the
+		// response comes back content=null, finish_reason=length, and
+		// only `reasoning` is populated. 200 leaves room for both.
+		"max_tokens": 200,
 	}
 	out := postOpenCodeGo(t, apiKey, body)
 
@@ -130,12 +134,21 @@ func TestLive_OpenCodeGo_ChatCompletion_Text(t *testing.T) {
 	first := choices[0].(map[string]any)
 	msg, _ := first["message"].(map[string]any)
 	content, _ := msg["content"].(string)
-	t.Logf("model said: %q", content)
-	if !strings.Contains(strings.ToLower(content), "pong") {
-		// We log instead of failing — a non-zero-temperature decode
-		// could drift, but the catalog's job is to forward the call
-		// correctly, not police output content.
-		t.Logf("warning: response didn't contain 'pong' — model may have ignored the directive")
+	reasoning, _ := msg["reasoning"].(string)
+	finishReason, _ := first["finish_reason"].(string)
+	t.Logf("content=%q reasoning=%q finish_reason=%q", content, reasoning, finishReason)
+
+	// The catalog's job is to forward the call correctly — proof of
+	// that is content OR reasoning being non-empty. Asserting on
+	// specific text would punish model drift that has nothing to do
+	// with the integration.
+	if strings.TrimSpace(content) == "" && strings.TrimSpace(reasoning) == "" {
+		t.Errorf("response had no content and no reasoning — call likely didn't reach the model: %v", out)
+	}
+	if strings.Contains(strings.ToLower(content), "pong") {
+		t.Logf("model produced visible output ✓")
+	} else if reasoning != "" {
+		t.Logf("model is reasoning — that's fine, the integration shape works")
 	}
 }
 
@@ -156,7 +169,10 @@ func TestLive_OpenCodeGo_ChatCompletion_Vision(t *testing.T) {
 			}},
 		},
 		"temperature": 0,
-		"max_tokens":  10,
+		// Same reasoning-budget reasoning as the text test — Kimi
+		// thinks before answering, vision adds extra reasoning, give
+		// it room.
+		"max_tokens": 300,
 	}
 	out := postOpenCodeGo(t, apiKey, body)
 
@@ -167,12 +183,14 @@ func TestLive_OpenCodeGo_ChatCompletion_Vision(t *testing.T) {
 	first := choices[0].(map[string]any)
 	msg, _ := first["message"].(map[string]any)
 	content, _ := msg["content"].(string)
-	t.Logf("vision model said: %q", content)
-	// Don't assert "white" — model accuracy on a 1px PNG isn't the
-	// point. Empty content would mean the multimodal shape was
-	// rejected, which IS the point.
-	if strings.TrimSpace(content) == "" {
-		t.Errorf("multimodal call returned empty content — opencode-go may not be forwarding image_url parts")
+	reasoning, _ := msg["reasoning"].(string)
+	t.Logf("vision: content=%q reasoning=%q", content, reasoning)
+
+	// The integration's job is to forward image_url parts intact and
+	// get a valid response back. Empty everything would mean the
+	// multimodal shape was rejected before reaching the model.
+	if strings.TrimSpace(content) == "" && strings.TrimSpace(reasoning) == "" {
+		t.Errorf("multimodal call returned empty content + reasoning — opencode-go may not be forwarding image_url parts: %v", out)
 	}
 }
 
