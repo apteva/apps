@@ -628,3 +628,240 @@ func TestHandleToolsCall_RejectsGET(t *testing.T) {
 		t.Errorf("expected 405, got %d", w.Code)
 	}
 }
+
+// ─── v0.4 provider-mirrored templates ─────────────────────────────
+
+// stubPlatform with phone_provider bound, returning Twilio-shaped
+// content_template responses for sync flow.
+func newPhoneStub(reply *sdk.ExecuteResult) *stubPlatform {
+	p := &stubPlatform{
+		bindingsOverride: map[string]any{
+			"email_provider": float64(1),
+			"phone_provider": float64(2),
+		},
+	}
+	if reply != nil {
+		p.replyByTool = map[string]*sdk.ExecuteResult{
+			"list_content_templates": reply,
+		}
+	}
+	return p
+}
+
+func TestTemplatesSyncProvider_UpsertsTwilioContent(t *testing.T) {
+	twilioReply := &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+		"contents": [
+			{
+				"sid": "HX0000000000000000000000000000aa",
+				"friendly_name": "order_confirmation",
+				"language": "en",
+				"variables": {"1":"name","2":"order_id"},
+				"types": {"twilio/text": {"body": "Hi {{1}}, order #{{2}}"}},
+				"approval_requests": [{"status": "approved"}]
+			},
+			{
+				"sid": "HX0000000000000000000000000000bb",
+				"friendly_name": "shipping_update",
+				"variables": {"1":"name"},
+				"types": {"twilio/text": {"body": "Hi {{1}}"}},
+				"approval_requests": [{"status": "pending"}]
+			}
+		]
+	}`)}
+	plat := newPhoneStub(twilioReply)
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolTemplatesSyncProvider(ctx, map[string]any{"channel": "whatsapp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["synced"] != 2 {
+		t.Errorf("synced count: %+v", out)
+	}
+
+	// Templates appear in template_list.
+	listed, err := app.toolTemplateList(ctx, map[string]any{"channel": "whatsapp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tpls := listed.(map[string]any)["templates"].([]*Template)
+	if len(tpls) != 2 {
+		t.Fatalf("expected 2 templates, got %d", len(tpls))
+	}
+	byName := map[string]*Template{}
+	for _, tpl := range tpls {
+		byName[tpl.Name] = tpl
+	}
+	if byName["order_confirmation"].ProviderStatus != "approved" {
+		t.Errorf("status=%q", byName["order_confirmation"].ProviderStatus)
+	}
+	if byName["shipping_update"].ProviderStatus != "pending" {
+		t.Errorf("status=%q", byName["shipping_update"].ProviderStatus)
+	}
+	for _, tpl := range tpls {
+		if tpl.ProviderTemplateID == "" {
+			t.Errorf("missing ContentSid: %+v", tpl)
+		}
+		if tpl.VarStyle != "numbered" {
+			t.Errorf("var_style=%q", tpl.VarStyle)
+		}
+	}
+}
+
+func TestTemplatesSyncProvider_IdempotentOnRerun(t *testing.T) {
+	twilioReply := &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+		"contents": [{
+			"sid": "HX111", "friendly_name": "welcome",
+			"types": {"twilio/text": {"body": "Hi"}},
+			"approval_requests": [{"status": "approved"}]
+		}]
+	}`)}
+	plat := newPhoneStub(twilioReply)
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	_, _ = app.toolTemplatesSyncProvider(ctx, map[string]any{"channel": "whatsapp"})
+	_, _ = app.toolTemplatesSyncProvider(ctx, map[string]any{"channel": "whatsapp"})
+
+	listed, _ := app.toolTemplateList(ctx, map[string]any{"channel": "whatsapp"})
+	tpls := listed.(map[string]any)["templates"].([]*Template)
+	if len(tpls) != 1 {
+		t.Errorf("expected 1 row after dedup, got %d", len(tpls))
+	}
+}
+
+func TestTemplatesSyncProvider_NoOpForEmail(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolTemplatesSyncProvider(ctx, map[string]any{"channel": "email"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := out.(map[string]any)
+	if r["skipped"] != true {
+		t.Errorf("expected skipped, got %+v", r)
+	}
+	// Should not have called the provider.
+	if len(plat.executeCalls) != 0 {
+		t.Errorf("expected zero provider calls for email channel, got %d", len(plat.executeCalls))
+	}
+}
+
+func TestSendMessageTemplate_UsesContentSidWhenProviderTemplate(t *testing.T) {
+	twilioListReply := &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+		"contents": [{
+			"sid": "HXabc",
+			"friendly_name": "promo",
+			"variables": {"1":"name"},
+			"types": {"twilio/text": {"body": "Hi {{1}}"}},
+			"approval_requests": [{"status": "approved"}]
+		}]
+	}`)}
+	plat := newPhoneStub(twilioListReply)
+	plat.replyByTool["send_whatsapp"] = &sdk.ExecuteResult{
+		Success: true, Status: 201,
+		Data: json.RawMessage(`{"sid":"SMxxxx"}`),
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	// Sync first.
+	if _, err := app.toolTemplatesSyncProvider(ctx, map[string]any{"channel": "whatsapp"}); err != nil {
+		t.Fatal(err)
+	}
+	listed, _ := app.toolTemplateList(ctx, map[string]any{"channel": "whatsapp"})
+	tpls := listed.(map[string]any)["templates"].([]*Template)
+	tplID := tpls[0].ID
+
+	// Send via provider template.
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"channel":     "whatsapp",
+		"from":        "+15551112222",
+		"to":          "+15553334444",
+		"template_id": tplID,
+		"vars":        map[string]any{"1": "Alice"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The send_whatsapp call must include ContentSid + ContentVariables,
+	// NOT a Body — Twilio renders server-side.
+	var sendCall *executeCall
+	for i := range plat.executeCalls {
+		if plat.executeCalls[i].Tool == "send_whatsapp" {
+			sendCall = &plat.executeCalls[i]
+			break
+		}
+	}
+	if sendCall == nil {
+		t.Fatal("send_whatsapp was not called")
+	}
+	if sendCall.Input["ContentSid"] != "HXabc" {
+		t.Errorf("ContentSid=%v, want HXabc", sendCall.Input["ContentSid"])
+	}
+	cv, _ := sendCall.Input["ContentVariables"].(string)
+	if !strings.Contains(cv, `"1"`) || !strings.Contains(cv, "Alice") {
+		t.Errorf("ContentVariables=%q (expected JSON with name)", cv)
+	}
+	if _, hasBody := sendCall.Input["Body"]; hasBody {
+		t.Errorf("Body should be omitted on ContentSid sends, got %v", sendCall.Input["Body"])
+	}
+	if sendCall.Input["From"] != "whatsapp:+15551112222" {
+		t.Errorf("From=%v (expected whatsapp: prefix)", sendCall.Input["From"])
+	}
+}
+
+func TestSendMessageTemplate_RejectsPendingApproval(t *testing.T) {
+	twilioListReply := &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+		"contents": [{
+			"sid": "HXpending",
+			"friendly_name": "draft",
+			"types": {"twilio/text": {"body": "..."}},
+			"approval_requests": [{"status": "pending"}]
+		}]
+	}`)}
+	plat := newPhoneStub(twilioListReply)
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	_, _ = app.toolTemplatesSyncProvider(ctx, map[string]any{"channel": "whatsapp"})
+	listed, _ := app.toolTemplateList(ctx, map[string]any{"channel": "whatsapp"})
+	tplID := listed.(map[string]any)["templates"].([]*Template)[0].ID
+
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"channel":     "whatsapp",
+		"from":        "+15551112222",
+		"to":          "+15553334444",
+		"template_id": tplID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "provider_status") {
+		t.Errorf("expected pending-approval error, got %v", err)
+	}
+}
+
+func TestSendMessageTemplate_RejectsCrossChannelMismatch(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	// Local SMS template.
+	create, _ := app.toolTemplateCreate(ctx, map[string]any{
+		"name":      "alert",
+		"channel":   "sms",
+		"body_text": "Heads up",
+	})
+	tplID := create.(map[string]any)["template"].(*Template).ID
+
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"channel":     "email", // mismatch
+		"from":        "noreply@x.com",
+		"to":          "alice@x.com",
+		"template_id": tplID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "channel") {
+		t.Errorf("expected channel-mismatch error, got %v", err)
+	}
+}

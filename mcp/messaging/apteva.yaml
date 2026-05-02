@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.3.0
+version: 0.4.0
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES; SMS and push are reserved channel namespaces. Tracks
@@ -78,6 +78,8 @@ provides:
     - { name: template_get,           description: "Fetch one template by id." }
     - { name: template_list,          description: "List templates. Args: channel?, limit?." }
     - { name: template_delete,        description: "Delete a template. Args: id." }
+    - { name: templates_sync_provider, description: "Pull provider-managed templates (Twilio Content for WhatsApp) into messaging.templates. Idempotent; upserts by ContentSid. Args: channel (whatsapp). Returns {synced: N}." }
+    - { name: templates_refresh_status,description: "Refresh approval status for one provider-mirrored template. Useful while waiting for Meta approval to flip pending→approved. Args: id." }
     # suppression
     - { name: suppression_list,       description: "List suppressed addresses. Args: channel?, limit?." }
     - { name: suppression_add,        description: "Suppress a recipient. Args: address (URI), reason." }
