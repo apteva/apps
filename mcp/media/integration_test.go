@@ -314,6 +314,146 @@ func TestSidecar_SetDescription_RequiresFileID(t *testing.T) {
 	}
 }
 
+// ─── Transcript surface (v0.4) ─────────────────────────────────────
+//
+// Sidecar-only — no storage / Deepgram. Verifies the MCP surface
+// behaves the way agents expect (arg validation, found flag,
+// round-trip via media_set_transcript). The full cross-app + real
+// Deepgram path is covered by transcript_worker_test.go (Tier 1
+// with stubs) and transcript_live_test.go (gated on DEEPGRAM_API_KEY).
+
+func TestSidecar_TranscribeRequiresFileID(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	_, err := sc.MCPRaw("tools/call", map[string]any{
+		"name":      "media_transcribe",
+		"arguments": map[string]any{"_project_id": "test-proj"},
+	})
+	if err == nil {
+		t.Error("expected error when file_id missing")
+	}
+}
+
+func TestSidecar_TranscribeQueuesPending(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	out := sc.MCP("media_transcribe", map[string]any{
+		"_project_id": "test-proj",
+		"file_id":     "1",
+	})
+	if out["status"] != "pending" {
+		t.Errorf("status=%v want pending", out["status"])
+	}
+	got := sc.MCP("media_get_transcript", map[string]any{
+		"_project_id": "test-proj",
+		"file_id":     "1",
+	})
+	if !got["found"].(bool) {
+		t.Fatalf("expected found=true after queue: %v", got)
+	}
+	tr := got["transcript"].(map[string]any)
+	if tr["status"] != "pending" || tr["source_kind"] != "manual" {
+		t.Errorf("unexpected transcript: %+v", tr)
+	}
+}
+
+func TestSidecar_GetTranscriptNotFound(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	out := sc.MCP("media_get_transcript", map[string]any{
+		"_project_id": "test-proj",
+		"file_id":     "999",
+	})
+	if found, _ := out["found"].(bool); found {
+		t.Errorf("expected found=false: %v", out)
+	}
+}
+
+func TestSidecar_SetTranscriptRequiresText(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	_, err := sc.MCPRaw("tools/call", map[string]any{
+		"name": "media_set_transcript",
+		"arguments": map[string]any{
+			"_project_id": "test-proj",
+			"file_id":     "1",
+			// no text
+		},
+	})
+	if err == nil {
+		t.Error("expected error when text missing")
+	}
+}
+
+func TestSidecar_SetTranscriptRoundTrip(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+
+	res := sc.MCP("media_set_transcript", map[string]any{
+		"_project_id": "test-proj",
+		"file_id":     "1",
+		"text":        "Imported transcript via MCP.",
+		"language":    "en",
+		"segments": []any{
+			map[string]any{"start_ms": 0, "end_ms": 1500, "text": "Imported transcript via MCP."},
+		},
+	})
+	if res["status"] != "ok" {
+		t.Fatalf("set_transcript: %v", res)
+	}
+
+	got := sc.MCP("media_get_transcript", map[string]any{
+		"_project_id": "test-proj",
+		"file_id":     "1",
+	})
+	tr := got["transcript"].(map[string]any)
+	if tr["text"] != "Imported transcript via MCP." {
+		t.Errorf("text round-trip lost: %v", tr["text"])
+	}
+	if tr["language"] != "en" {
+		t.Errorf("language round-trip lost: %v", tr["language"])
+	}
+	if tr["status"] != "ok" {
+		t.Errorf("status=%v want ok", tr["status"])
+	}
+}
+
+func TestSidecar_TranscribeForceRequeuesOk(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+
+	// Seed an ok row via set_transcript.
+	sc.MCP("media_set_transcript", map[string]any{
+		"_project_id": "test-proj",
+		"file_id":     "1",
+		"text":        "old",
+	})
+
+	// Without force: pending stays as ok (insertPending's ON CONFLICT
+	// only flips failed/skipped).
+	sc.MCP("media_transcribe", map[string]any{
+		"_project_id": "test-proj",
+		"file_id":     "1",
+	})
+	got := sc.MCP("media_get_transcript", map[string]any{
+		"_project_id": "test-proj",
+		"file_id":     "1",
+	})
+	tr := got["transcript"].(map[string]any)
+	if tr["status"] != "ok" {
+		t.Errorf("non-force flipped ok row: %v", tr["status"])
+	}
+
+	// With force: row resets to pending.
+	sc.MCP("media_transcribe", map[string]any{
+		"_project_id": "test-proj",
+		"file_id":     "1",
+		"force":       true,
+	})
+	got = sc.MCP("media_get_transcript", map[string]any{
+		"_project_id": "test-proj",
+		"file_id":     "1",
+	})
+	tr = got["transcript"].(map[string]any)
+	if tr["status"] != "pending" {
+		t.Errorf("force should requeue → pending: %v", tr["status"])
+	}
+}
+
 func TestSidecar_RenderHTTPRoutes(t *testing.T) {
 	// /renders supports POST (jobs-app callback shape) + GET (panel
 	// listing). Exercise both.
