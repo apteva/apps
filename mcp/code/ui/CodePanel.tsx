@@ -1,8 +1,7 @@
 // CodePanel — native React panel for the code app. Three-pane:
 // left = repo list, middle = file tree of the selected repo,
-// right = file content viewer (read-only for v0.1; the agent does
-// edits via MCP). Loaded by the dashboard via dynamic import; uses
-// host React via importmap; talks to the code sidecar through
+// right = file editor. Loaded by the dashboard via dynamic import;
+// uses host React via importmap; talks to the code sidecar through
 // /api/apps/code/api/* with same-origin cookies.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -92,6 +91,13 @@ interface FileMeta {
   sha256?: string;
 }
 
+interface FileEventData {
+  slug?: string;
+  path?: string;
+  from?: string;
+  to?: string;
+}
+
 const API = "/api/apps/code/api";
 
 const FRAMEWORKS = ["blank", "nextjs", "static", "go", "python"] as const;
@@ -118,6 +124,12 @@ function isLikelyText(path: string): boolean {
   return true;
 }
 
+// Strip leading slashes / collapse "./" — the backend normalises too
+// but matching here keeps optimistic UI in sync with the eventual path.
+function cleanRel(p: string): string {
+  return p.replace(/^\.?\/+/, "").replace(/\/+/g, "/").replace(/\/$/, "");
+}
+
 export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [repos, setRepos] = useState<Repo[]>([]);
   const [includeArchived, setIncludeArchived] = useState(false);
@@ -125,10 +137,20 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
   const [tree, setTree] = useState<FileMeta[]>([]);
   const [openFile, setOpenFile] = useState<{ path: string; content: string } | null>(null);
+  const [draft, setDraft] = useState<string>("");
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [loadingTree, setLoadingTree] = useState(false);
   const [loadingFile, setLoadingFile] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
+  const [showNewFile, setShowNewFile] = useState(false);
+  const [showNewFolder, setShowNewFolder] = useState(false);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameTo, setRenameTo] = useState("");
+  const uploadRef = useRef<HTMLInputElement | null>(null);
+
+  const dirty = editing && openFile !== null && draft !== openFile.content;
 
   const withParams = useCallback(
     (extra: Record<string, string> = {}) => {
@@ -152,6 +174,23 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
       });
       if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
       return res.json();
+    },
+    [withParams],
+  );
+
+  // PUT /files/<path> takes raw bytes, not JSON — the api() helper
+  // would coerce the body so we hand-roll the fetch.
+  const putFile = useCallback(
+    async (slug: string, path: string, body: BodyInit, contentType = "application/octet-stream") => {
+      const url = `${API}/repos/${slug}/files/${path}?${withParams()}`;
+      const res = await fetch(url, {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { "Content-Type": contentType },
+        body,
+      });
+      if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+      return res.json() as Promise<{ file: FileMeta }>;
     },
     [withParams],
   );
@@ -188,15 +227,46 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   );
 
   const selectRepo = (slug: string) => {
+    if (dirty && !confirm("Unsaved changes will be lost. Switch repo anyway?")) return;
     setSelectedSlug(slug);
     setOpenFile(null);
+    setEditing(false);
+    setDraft("");
     loadTree(slug);
   };
 
-  // Live refresh — react to repo + file mutations from agents or
-  // other tabs. Repo-level events refresh the left list; file-level
-  // events refresh the tree of the selected repo when it matches.
-  useAppEvents<{ slug?: string }>("code", projectId, (ev) => {
+  const openPath = useCallback(
+    async (slug: string, path: string) => {
+      if (!isLikelyText(path)) {
+        setOpenFile({ path, content: "(binary file — preview not supported)" });
+        setDraft("");
+        setEditing(false);
+        return;
+      }
+      setLoadingFile(true);
+      try {
+        const url = `${API}/repos/${slug}/files/${path}?${withParams()}`;
+        const res = await fetch(url, { credentials: "same-origin" });
+        if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+        const text = await res.text();
+        setOpenFile({ path, content: text });
+        setDraft(text);
+        setEditing(false);
+      } catch (e) {
+        setOpenFile({ path, content: "Error: " + (e as Error).message });
+        setDraft("");
+        setEditing(false);
+      } finally {
+        setLoadingFile(false);
+      }
+    },
+    [withParams],
+  );
+
+  // Live refresh — react to repo + file mutations from agents, other
+  // tabs, AND this panel's own writes (the backend emits on every
+  // mutation, REST-driven or MCP-driven).
+  useAppEvents<FileEventData>("code", projectId, (ev) => {
     switch (ev.topic) {
       case "repo.added":
       case "repo.archived":
@@ -204,50 +274,150 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
         loadRepos();
         break;
       case "file.changed":
+        if (selectedSlug && ev.data?.slug === selectedSlug) {
+          loadTree(selectedSlug);
+          // Re-fetch the open file when it's the one that changed and
+          // the user isn't mid-edit. If they are, leave the buffer
+          // alone — clobbering would lose work.
+          if (openFile && ev.data?.path === openFile.path && !dirty) {
+            openPath(selectedSlug, openFile.path);
+          }
+        }
+        break;
       case "file.deleted":
+        if (selectedSlug && ev.data?.slug === selectedSlug) {
+          loadTree(selectedSlug);
+          if (openFile && ev.data?.path === openFile.path) {
+            setOpenFile(null);
+            setDraft("");
+            setEditing(false);
+          }
+        }
+        break;
       case "file.renamed":
         if (selectedSlug && ev.data?.slug === selectedSlug) {
           loadTree(selectedSlug);
+          if (openFile && ev.data?.from && openFile.path === ev.data.from && ev.data.to) {
+            // Follow the rename so the editor stays on the same content.
+            openPath(selectedSlug, ev.data.to);
+          }
         }
         break;
     }
   });
 
-  const selectFile = async (path: string) => {
+  const selectFile = (path: string) => {
     if (!selectedSlug) return;
-    if (!isLikelyText(path)) {
-      setOpenFile({ path, content: "(binary file — preview not supported)" });
-      return;
-    }
-    setLoadingFile(true);
-    try {
-      // The /files/<path> route returns raw bytes, not JSON, so we
-      // bypass the api() helper and do a plain fetch. Same auth flows
-      // through cookies.
-      const url = `${API}/repos/${selectedSlug}/files/${path}?${withParams()}`;
-      const res = await fetch(url, { credentials: "same-origin" });
-      if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
-      const text = await res.text();
-      setOpenFile({ path, content: text });
-    } catch (e) {
-      setOpenFile({ path, content: "Error: " + (e as Error).message });
-    } finally {
-      setLoadingFile(false);
-    }
+    if (dirty && !confirm("Unsaved changes will be lost. Open another file anyway?")) return;
+    openPath(selectedSlug, path);
   };
 
   const handleArchive = async (slug: string) => {
     if (!confirm(`Archive repo "${slug}"? Files stay on disk.`)) return;
     try {
-      await api("POST", `/repos/${slug}/archive`);
+      await api("DELETE", `/repos/${slug}`);
       if (selectedSlug === slug) {
         setSelectedSlug(null);
         setTree([]);
         setOpenFile(null);
       }
-      await loadRepos();
     } catch (e) {
       alert("Archive failed: " + (e as Error).message);
+    }
+  };
+
+  const handleSave = async () => {
+    if (!selectedSlug || !openFile) return;
+    setSaving(true);
+    try {
+      await putFile(selectedSlug, openFile.path, draft, "text/plain");
+      setOpenFile({ path: openFile.path, content: draft });
+      setEditing(false);
+    } catch (e) {
+      alert("Save failed: " + (e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDiscard = () => {
+    if (!openFile) return;
+    if (dirty && !confirm("Discard unsaved changes?")) return;
+    setDraft(openFile.content);
+    setEditing(false);
+  };
+
+  const handleCreateFile = async (rawPath: string, content: string) => {
+    if (!selectedSlug) return;
+    const path = cleanRel(rawPath);
+    if (!path) throw new Error("path required");
+    await putFile(selectedSlug, path, content, "text/plain");
+    setShowNewFile(false);
+    // The event will refresh the tree; open the new file immediately
+    // for a snappier feel.
+    openPath(selectedSlug, path);
+  };
+
+  const handleCreateFolder = async (rawPath: string) => {
+    if (!selectedSlug) return;
+    let path = cleanRel(rawPath);
+    if (!path) throw new Error("folder required");
+    // S3-style: a folder exists when a file is in it. Drop a hidden
+    // placeholder so the tree shows the path immediately.
+    path = path + "/.gitkeep";
+    await putFile(selectedSlug, path, "", "text/plain");
+    setShowNewFolder(false);
+  };
+
+  const handleRename = async (from: string, to: string) => {
+    if (!selectedSlug) return;
+    const cleanTo = cleanRel(to);
+    if (!cleanTo || cleanTo === from) {
+      setRenaming(null);
+      return;
+    }
+    try {
+      await api("POST", `/repos/${selectedSlug}/move`, { from, to: cleanTo });
+      setRenaming(null);
+      setRenameTo("");
+      // Optimistic: if the renamed file is open, follow it. The event
+      // handler does this too, but doing it here avoids a flash.
+      if (openFile?.path === from) {
+        openPath(selectedSlug, cleanTo);
+      }
+    } catch (e) {
+      alert("Rename failed: " + (e as Error).message);
+    }
+  };
+
+  const handleDeleteFile = async (path: string) => {
+    if (!selectedSlug) return;
+    if (!confirm(`Delete "${path}"? This can't be undone.`)) return;
+    try {
+      await fetch(`${API}/repos/${selectedSlug}/files/${path}?${withParams()}`, {
+        method: "DELETE",
+        credentials: "same-origin",
+      }).then(async (res) => {
+        if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+      });
+    } catch (e) {
+      alert("Delete failed: " + (e as Error).message);
+    }
+  };
+
+  const handleUpload = async (ev: React.ChangeEvent<HTMLInputElement>) => {
+    if (!selectedSlug) return;
+    const files = Array.from(ev.target.files || []);
+    if (files.length === 0) return;
+    try {
+      for (const f of files) {
+        const buf = await f.arrayBuffer();
+        await putFile(selectedSlug, cleanRel(f.name), buf);
+      }
+    } catch (e) {
+      alert("Upload failed: " + (e as Error).message);
+    } finally {
+      ev.target.value = "";
     }
   };
 
@@ -326,10 +496,35 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
           <div className="p-4 text-text-muted text-sm">Select a repo on the left.</div>
         ) : (
           <>
-            <div className="p-3 border-b border-border flex items-center gap-2">
+            <div className="p-3 border-b border-border flex items-center gap-1">
               <span className="text-xs uppercase tracking-wide text-text-dim flex-1 truncate">
                 {selectedSlug}
               </span>
+              <button
+                type="button"
+                onClick={() => setShowNewFile(true)}
+                className="px-1 py-0.5 text-xs text-accent hover:text-accent/80"
+                title="New file"
+              >+ File</button>
+              <button
+                type="button"
+                onClick={() => setShowNewFolder(true)}
+                className="px-1 py-0.5 text-xs text-accent hover:text-accent/80"
+                title="New folder"
+              >+ Dir</button>
+              <button
+                type="button"
+                onClick={() => uploadRef.current?.click()}
+                className="px-1 py-0.5 text-xs text-accent hover:text-accent/80"
+                title="Upload files"
+              >↑</button>
+              <input
+                ref={uploadRef}
+                type="file"
+                multiple
+                onChange={handleUpload}
+                className="hidden"
+              />
               <button
                 type="button"
                 onClick={() => loadTree(selectedSlug)}
@@ -350,20 +545,64 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
                 <div className="p-3 text-text-muted text-sm">Empty repo.</div>
               ) : (
                 <ul>
-                  {tree.map((f) => (
-                    <li
-                      key={f.path}
-                      onClick={() => selectFile(f.path)}
-                      className={`px-3 py-1 cursor-pointer text-xs hover:bg-bg-input/50 ${
-                        openFile?.path === f.path ? "bg-bg-input" : ""
-                      }`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="text-text truncate flex-1" title={f.path}>{f.path}</span>
-                        <span className="text-text-dim text-[10px]">{formatSize(f.size)}</span>
-                      </div>
-                    </li>
-                  ))}
+                  {tree.map((f) => {
+                    const isOpen = openFile?.path === f.path;
+                    const isRenaming = renaming === f.path;
+                    return (
+                      <li
+                        key={f.path}
+                        className={`group px-3 py-1 text-xs border-b border-border/40 ${
+                          isOpen ? "bg-bg-input" : "hover:bg-bg-input/50"
+                        }`}
+                      >
+                        {isRenaming ? (
+                          <form
+                            onSubmit={(e) => {
+                              e.preventDefault();
+                              handleRename(f.path, renameTo);
+                            }}
+                            className="flex items-center gap-1"
+                          >
+                            <input
+                              autoFocus
+                              type="text"
+                              value={renameTo}
+                              onChange={(e) => setRenameTo(e.target.value)}
+                              onBlur={() => { setRenaming(null); setRenameTo(""); }}
+                              onKeyDown={(e) => { if (e.key === "Escape") { setRenaming(null); setRenameTo(""); } }}
+                              className="flex-1 bg-bg-input border border-border rounded px-1 py-0.5 text-xs"
+                            />
+                          </form>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => selectFile(f.path)}
+                              className="text-text truncate flex-1 text-left"
+                              title={f.path}
+                            >{f.path}</button>
+                            <span className="text-text-dim text-[10px] group-hover:hidden">
+                              {formatSize(f.size)}
+                            </span>
+                            <span className="hidden group-hover:flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); setRenaming(f.path); setRenameTo(f.path); }}
+                                className="text-text-dim hover:text-text px-1"
+                                title="Rename"
+                              >✎</button>
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); handleDeleteFile(f.path); }}
+                                className="text-red/70 hover:text-red px-1"
+                                title="Delete"
+                              >🗑</button>
+                            </span>
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>
@@ -374,30 +613,69 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
         )}
       </aside>
 
-      {/* File content */}
-      <main className="flex-1 overflow-auto">
+      {/* File content / editor */}
+      <main className="flex-1 overflow-hidden flex flex-col">
         {!openFile ? (
           <div className="p-8 text-text-muted text-sm text-center mt-12">
             {selectedSlug
-              ? "Click a file in the tree to view it."
+              ? "Click a file in the tree to view it. + File to create one."
               : "Pick a repo, then a file."}
           </div>
         ) : (
-          <div className="h-full flex flex-col">
+          <>
             <header className="p-3 border-b border-border flex items-center gap-2">
               <span className="text-xs uppercase tracking-wide text-text-dim">file</span>
-              <span className="text-text font-mono text-sm truncate flex-1">{openFile.path}</span>
+              <span className="text-text font-mono text-sm truncate flex-1">
+                {openFile.path}{dirty ? " •" : ""}
+              </span>
+              {isLikelyText(openFile.path) && (
+                editing ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleSave}
+                      disabled={saving || !dirty}
+                      className="px-2 py-0.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-40"
+                    >{saving ? "Saving…" : "Save"}</button>
+                    <button
+                      type="button"
+                      onClick={handleDiscard}
+                      disabled={saving}
+                      className="px-2 py-0.5 text-xs border border-border rounded hover:bg-bg-input"
+                    >Cancel</button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => { setDraft(openFile.content); setEditing(true); }}
+                    className="px-2 py-0.5 text-xs border border-border rounded hover:bg-bg-input"
+                  >Edit</button>
+                )
+              )}
             </header>
             <div className="flex-1 overflow-auto">
               {loadingFile ? (
                 <div className="p-4 text-text-muted text-sm">Loading…</div>
+              ) : editing ? (
+                <textarea
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  spellCheck={false}
+                  className="w-full h-full bg-bg text-text font-mono text-[11px] p-4 border-0 outline-none resize-none whitespace-pre"
+                  onKeyDown={(e) => {
+                    if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+                      e.preventDefault();
+                      handleSave();
+                    }
+                  }}
+                />
               ) : (
                 <pre className="text-[11px] font-mono p-4 text-text whitespace-pre overflow-auto">
                   {openFile.content}
                 </pre>
               )}
             </div>
-          </div>
+          </>
         )}
       </main>
 
@@ -409,6 +687,29 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
             loadRepos().then(() => selectRepo(slug));
           }}
           api={api}
+        />
+      )}
+
+      {showNewFile && selectedSlug && (
+        <PromptDialog
+          title="New file"
+          label="Path"
+          placeholder="src/index.ts"
+          submitLabel="Create"
+          onClose={() => setShowNewFile(false)}
+          onSubmit={(path) => handleCreateFile(path, "")}
+        />
+      )}
+
+      {showNewFolder && selectedSlug && (
+        <PromptDialog
+          title="New folder"
+          label="Folder path"
+          placeholder="src/components"
+          submitLabel="Create"
+          onClose={() => setShowNewFolder(false)}
+          onSubmit={handleCreateFolder}
+          hint="A hidden .gitkeep is added so the folder shows up in the tree."
         />
       )}
     </div>
@@ -506,6 +807,83 @@ function CreateRepoDialog({
           >{busy ? "Creating…" : "Create"}</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Generic single-input dialog used for "new file" and "new folder".
+// onSubmit may throw — the dialog surfaces the error and stays open.
+function PromptDialog({
+  title,
+  label,
+  placeholder,
+  submitLabel,
+  hint,
+  onClose,
+  onSubmit,
+}: {
+  title: string;
+  label: string;
+  placeholder?: string;
+  submitLabel: string;
+  hint?: string;
+  onClose: () => void;
+  onSubmit: (value: string) => void | Promise<void>;
+}) {
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async () => {
+    if (!value.trim()) {
+      setErr("required");
+      return;
+    }
+    setBusy(true);
+    setErr("");
+    try {
+      await onSubmit(value.trim());
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <form
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={(e) => { e.preventDefault(); submit(); }}
+        className="w-[420px] bg-bg border border-border rounded p-5 space-y-4"
+      >
+        <h2 className="text-text font-semibold">{title}</h2>
+        <div>
+          <label className="text-xs text-text-muted block mb-1">{label}</label>
+          <input
+            autoFocus
+            type="text"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder={placeholder}
+            className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+          />
+          {hint && <div className="text-[11px] text-text-dim mt-1">{hint}</div>}
+        </div>
+        {err && <div className="text-red text-xs">{err}</div>}
+        <div className="flex items-center justify-end gap-2 pt-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input"
+          >Cancel</button>
+          <button
+            type="submit"
+            disabled={busy}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+          >{busy ? "…" : submitLabel}</button>
+        </div>
+      </form>
     </div>
   );
 }

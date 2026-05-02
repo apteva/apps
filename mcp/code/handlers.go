@@ -133,6 +133,11 @@ func (a *App) httpCreateRepo(w http.ResponseWriter, r *http.Request) {
 	if count > 0 {
 		_ = dbRecordImport(globalCtx.AppDB(), repo.ID, "template:"+repo.Framework)
 	}
+	if globalCtx != nil {
+		globalCtx.Emit("repo.added", map[string]any{
+			"id": repo.ID, "slug": repo.Slug, "name": repo.Name, "framework": repo.Framework,
+		})
+	}
 	httpJSON(w, map[string]any{"repository": repo, "files_created": count})
 }
 
@@ -193,10 +198,16 @@ func (a *App) httpRepoMeta(w http.ResponseWriter, r *http.Request, slug string) 
 		if force {
 			_ = dbHardDeleteRepo(globalCtx.AppDB(), pid, slug)
 			_ = a.store.DropRepo(slug)
+			if globalCtx != nil {
+				globalCtx.Emit("repo.deleted", map[string]any{"slug": slug})
+			}
 			httpJSON(w, map[string]any{"slug": slug, "deleted": true})
 			return
 		}
 		_ = dbArchiveRepo(globalCtx.AppDB(), pid, slug)
+		if globalCtx != nil {
+			globalCtx.Emit("repo.archived", map[string]any{"slug": slug})
+		}
 		httpJSON(w, map[string]any{"slug": slug, "archived": true})
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "GET, PATCH, or DELETE")
@@ -277,6 +288,7 @@ func (a *App) httpRepoFile(w http.ResponseWriter, r *http.Request, slug, rawPath
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		emitFileChange(globalCtx, "file.changed", slug, rel)
 		httpJSON(w, map[string]any{"file": meta})
 
 	case http.MethodDelete:
@@ -284,6 +296,7 @@ func (a *App) httpRepoFile(w http.ResponseWriter, r *http.Request, slug, rawPath
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		emitFileChange(globalCtx, "file.deleted", slug, rel)
 		httpJSON(w, map[string]any{"path": rel, "deleted": true})
 
 	default:
@@ -327,6 +340,7 @@ func (a *App) httpRepoEdit(w http.ResponseWriter, r *http.Request, slug string) 
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	emitFileChange(globalCtx, "file.changed", slug, rel)
 	httpJSON(w, res)
 }
 
@@ -362,6 +376,7 @@ func (a *App) httpRepoMultiEdit(w http.ResponseWriter, r *http.Request, slug str
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	emitFileChange(globalCtx, "file.changed", slug, rel)
 	httpJSON(w, res)
 }
 
@@ -400,6 +415,11 @@ func (a *App) httpRepoMove(w http.ResponseWriter, r *http.Request, slug string) 
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if globalCtx != nil {
+		globalCtx.Emit("file.renamed", map[string]any{
+			"slug": slug, "from": from, "to": to, "count": len(moved),
+		})
 	}
 	httpJSON(w, map[string]any{"moved": moved, "count": len(moved)})
 }
