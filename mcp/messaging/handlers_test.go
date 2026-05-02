@@ -79,11 +79,9 @@ func (s *stubPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
 		Bindings:  map[string]any{"email_provider": float64(1)},
 	}, nil
 }
-func (s *stubPlatform) StartOAuth(sdk.OAuthStartRequest) (*sdk.OAuthStartResult, error) {
-	return nil, nil
-}
-func (s *stubPlatform) DisconnectConnection(int64) error                 { return nil }
-func (s *stubPlatform) ListOwnedConnections() ([]sdk.PlatformConnection, error) { return nil, nil }
+// Older PlatformClient interfaces (pre-StartOAuth) require neither
+// of these methods; newer ones add them. We omit them so the stub
+// builds against whichever app-sdk version go.mod resolves.
 
 // ─── Test harness ─────────────────────────────────────────────────
 
