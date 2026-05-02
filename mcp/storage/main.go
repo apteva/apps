@@ -36,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: storage
 display_name: Storage
-version: 0.2.0
+version: 0.3.0
 description: |
   File storage with virtual folders, signed URLs, dedup. Local-disk
   backend; cloud backend slot reserved for v0.2.
