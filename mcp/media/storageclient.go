@@ -133,17 +133,20 @@ func (c *storageClient) DownloadContent(ctx context.Context, projectID string, i
 }
 
 // UploadDerivation pushes a derivation file (thumbnail, waveform)
-// back into the storage app under a hidden "/.media/<kind>/" folder,
-// visibility=signed so the dashboard can render via signed URL. The
-// agent calling files_upload uses a base64 body — same shape here so
-// the Content-Type negotiation is consistent.
+// back into the storage app under a hidden "/.media/<kind>/" folder.
+// visibility=private so the dashboard's cookie-authenticated
+// /api/apps/storage/files/<id>/content fetch passes — derivations
+// are an internal implementation detail of the media app, not
+// hot-linkable from outside. (Earlier versions wrote 'signed' with
+// the intent of having the panel mint a signed URL per fetch — the
+// panel never did, so every thumbnail 403'd.)
 func (c *storageClient) UploadDerivation(ctx context.Context, projectID, name, folder, contentType string, bytes []byte) (int64, error) {
 	body := map[string]any{
 		"name":           name,
 		"folder":         folder,
 		"content_type":   contentType,
 		"content_base64": base64.StdEncoding.EncodeToString(bytes),
-		"visibility":     "signed",
+		"visibility":     "private",
 		"source":         "media-derivation",
 		"tags":           []string{"derivation"},
 	}
@@ -167,6 +170,57 @@ func (c *storageClient) UploadDerivation(ctx context.Context, projectID, name, f
 	return out.ID, nil
 }
 
+// UploadRender pushes a finished render output back to storage. The
+// shape mirrors UploadDerivationMultipart but tags the file as a
+// render output (separate from indexer-created derivations) so the
+// catalog can tell them apart and panels can filter accordingly.
+func (c *storageClient) UploadRender(ctx context.Context, projectID, folder, filename, contentType string, r io.Reader) (int64, error) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if err := mw.WriteField("folder", folder); err != nil {
+		return 0, err
+	}
+	if err := mw.WriteField("visibility", "private"); err != nil {
+		return 0, err
+	}
+	if err := mw.WriteField("source", "media-render"); err != nil {
+		return 0, err
+	}
+	if err := mw.WriteField("tags", "render"); err != nil {
+		return 0, err
+	}
+	part, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := io.Copy(part, r); err != nil {
+		return 0, err
+	}
+	if err := mw.Close(); err != nil {
+		return 0, err
+	}
+
+	q := url.Values{}
+	if projectID != "" {
+		q.Set("project_id", projectID)
+	}
+	respBody, err := c.do(ctx, http.MethodPost, "/files?"+q.Encode(), nil, mw.FormDataContentType(), withBody(buf.Bytes()))
+	if err != nil {
+		return 0, err
+	}
+	var out struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return 0, fmt.Errorf("parse upload: %w (body=%s)", err, string(respBody))
+	}
+	_ = contentType // reserved for future header injection
+	if out.ID == 0 {
+		return 0, errors.New("storage returned id=0 for render upload")
+	}
+	return out.ID, nil
+}
+
 // UploadDerivationMultipart is the multipart variant — used when the
 // derivation file is already on disk and we'd rather stream it than
 // base64-encode in memory. Storage accepts multipart on POST /files
@@ -177,7 +231,7 @@ func (c *storageClient) UploadDerivationMultipart(ctx context.Context, projectID
 	if err := mw.WriteField("folder", folder); err != nil {
 		return 0, err
 	}
-	if err := mw.WriteField("visibility", "signed"); err != nil {
+	if err := mw.WriteField("visibility", "private"); err != nil {
 		return 0, err
 	}
 	part, err := mw.CreateFormFile("file", filename)

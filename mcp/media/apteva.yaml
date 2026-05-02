@@ -2,22 +2,25 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.1.1
+version: 0.2.1
 description: |
-  Catalog + cheap derivations for audio/video/image files held by the
-  storage app. Probes new files with ffprobe (duration, dimensions,
-  codecs, bitrate, sample rate), generates thumbnails for video/image,
-  waveforms for audio. Read-only over storage — derivations land back
-  in storage as separate files so they get the same visibility +
-  signed-URL machinery for free.
+  Catalog + cheap derivations + parameterised renders for media files
+  in storage. Probes uploads with ffprobe (duration, dimensions,
+  codecs, bitrate, sample rate), generates canonical thumbnails for
+  video/image and waveforms for audio, and runs on-demand edits
+  (trim, resize, transcode, concat, crop, extract_frame,
+  audio_extract). Outputs land back in storage as new files so they
+  inherit the same visibility + signed-URL machinery.
 
-  Scope is "cheap and idempotent." Heavy jobs (transcode, clip, concat)
-  belong in a separate media-jobs companion app.
+  Two independent workstreams share the process: a light indexer
+  that sweeps storage for new media, and a bounded ffmpeg render
+  pool with per-job timeouts + cancellation. A wedged encode
+  releases its slot without disturbing the indexer.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/media/icon.png
-tags: [media, video, audio, ffmpeg, catalog]
+tags: [media, video, audio, ffmpeg, catalog, edit, render]
 
 scopes: [project, global]
 min_apteva_version: "0.10.0"
@@ -28,12 +31,17 @@ requires:
   apps:
     - name: storage
       version: ">=0.1.0"
-      reason: reads source bytes; writes thumbnails + waveforms back to storage as derivations
+      reason: reads source bytes; writes thumbnails, waveforms, and render outputs back to storage
+    - name: jobs
+      version: ">=0.1.0"
+      optional: true
+      reason: optional — recurring or delayed renders schedule via jobs against media's HTTP routes
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    # Catalog (existing)
     - name: media_get
       description: Fetch one media record by storage file_id (probe + derivation pointers).
     - name: media_search
@@ -46,6 +54,31 @@ provides:
       description: Force a re-probe + re-derive — for one file_id or for all failed rows.
     - name: media_index_status
       description: Ops summary — counts of pending / ok / failed / unsupported / skipped_size.
+
+    # Renders — submit (returns render_id; poll media_get_render for status)
+    - name: media_trim
+      description: Cut a clip from a video/audio source. Args — file_id, start_ms, end_ms, output_name?.
+    - name: media_resize
+      description: Scale a video/image to new dimensions. Args — file_id, width, height, keep_aspect?, output_name?.
+    - name: media_transcode
+      description: Re-encode a media file to a new container/codec. Args — file_id, format, video_codec?, audio_codec?, bitrate?.
+    - name: media_concat
+      description: Join multiple sources end-to-end. Args — file_ids[], output_name. Inputs must share codec/format.
+    - name: media_crop
+      description: Crop a video or image to a rectangular region. Args — file_id, x, y, width, height.
+    - name: media_extract_frame
+      description: Save a single frame from a video at a specific timestamp as PNG. Distinct from media_get_thumbnail (parameterised, multi-output). Args — file_id, at_ms, width?.
+    - name: media_audio_extract
+      description: Strip the audio track from a video into a standalone file. Args — file_id, format (mp3|wav|m4a|opus).
+
+    # Renders — manage
+    - name: media_get_render
+      description: Status of one render (pending|running|ok|failed|cancelled), progress_pct, output_file_id when ready.
+    - name: media_list_renders
+      description: Filter renders by status, operation, or limit.
+    - name: media_cancel_render
+      description: Cancel a pending or running render. Idempotent — already-terminal rows are no-ops.
+
   workers:
     - name: indexer
       schedule: "@every 30s"
@@ -73,6 +106,7 @@ db:
   migrations: migrations/
 
 config_schema:
+  # Indexer (existing)
   - name: poll_interval_seconds
     type: text
     default: "30"
@@ -110,5 +144,32 @@ config_schema:
     type: text
     default: "ffprobe"
     label: ffprobe binary
+
+  # Renders (new in v0.2)
+  - name: render_pool_size
+    type: text
+    default: "2"
+    label: Render pool size
+    description: Concurrent ffmpeg renders. Each render can use multiple CPU cores; size for available CPUs.
+  - name: render_timeout_seconds
+    type: text
+    default: "1800"
+    label: Render timeout (seconds)
+    description: Hard wall-clock cap per render. Wedged ffmpeg children are killed and the row marked failed.
+  - name: render_max_output_size_mb
+    type: text
+    default: "4096"
+    label: Render max output size (MB)
+    description: Refuse renders whose output exceeds this (post-encode size check). Guards disk + storage upload.
+  - name: render_scratch_dir
+    type: text
+    default: "/data/renders"
+    label: Render scratch dir
+    description: Working directory for downloaded sources + ffmpeg outputs. Cleaned per render on terminal status.
+  - name: render_output_folder
+    type: text
+    default: "/renders/"
+    label: Render output folder
+    description: Storage folder where finished renders are uploaded.
 
 upgrade_policy: auto-patch
