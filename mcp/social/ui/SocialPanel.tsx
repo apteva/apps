@@ -236,20 +236,19 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   }, [loadProfiles, loadAccounts, loadPosts, loadPlatforms]);
 
   // Live updates — account adds/removals + per-target publish events
-  // + profile CRUD.
+  // + profile CRUD + post lifecycle (reschedule/delete from agent).
   useAppEvents("social", projectId, (ev) => {
     if (ev.topic === "account.added" || ev.topic === "account.removed") {
       loadAccounts();
     }
     if (ev.topic === "post.created" || ev.topic === "post.completed" ||
+        ev.topic === "post.rescheduled" || ev.topic === "post.deleted" ||
         ev.topic === "target.published" || ev.topic === "target.failed") {
       loadPosts();
     }
     if (ev.topic === "profile.created" || ev.topic === "profile.updated" ||
         ev.topic === "profile.deleted" || ev.topic === "profile.accounts_moved") {
       loadProfiles();
-      // Account counts on the profile pills change — also refresh
-      // the active scope's accounts list.
       loadAccounts();
     }
   });

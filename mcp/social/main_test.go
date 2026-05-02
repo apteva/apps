@@ -21,6 +21,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1235,5 +1236,57 @@ func TestPostDelete_CancelsJobAndRemovesRows(t *testing.T) {
 	}
 	if !sawCancel {
 		t.Errorf("expected jobs_cancel call before delete")
+	}
+}
+
+func TestIntArg_AcceptsStringNumbers(t *testing.T) {
+	// Smaller models often pass numeric ids as JSON strings.
+	// intArg must coerce these so post_delete + post_reschedule
+	// don't return "post_id required" on otherwise-valid calls.
+	cases := []struct {
+		in   map[string]any
+		want int
+	}{
+		{map[string]any{"x": 12}, 12},
+		{map[string]any{"x": int64(12)}, 12},
+		{map[string]any{"x": float64(12)}, 12},
+		{map[string]any{"x": "12"}, 12},
+		{map[string]any{"x": "  12 "}, 12},
+		{map[string]any{"x": ""}, 0},
+		{map[string]any{"x": "abc"}, 0},
+		{map[string]any{}, 0},
+	}
+	for _, c := range cases {
+		if got := intArg(c.in, "x", 0); got != c.want {
+			t.Errorf("intArg(%v) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+func TestPostDelete_AcceptsStringPostID(t *testing.T) {
+	// Agent simulation: pass post_id as a JSON string.
+	pf := newRecordingPlatform()
+	pf.identity.Bindings = map[string]any{"jobs": float64(101)}
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, status) VALUES ('test-proj', 'x', 'failed')`,
+	)
+	postID, _ := r.LastInsertId()
+	app := &App{}
+	out, err := app.toolPostDelete(ctx, map[string]any{
+		"post_id": fmt.Sprintf("%d", postID), // string!
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, ok := out.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected response type: %T", out)
+	}
+	if res["isError"] == true {
+		t.Errorf("expected success on string post_id, got %+v", res)
+	}
+	if res["deleted"] != postID {
+		t.Errorf("delete id mismatch: %v vs %d", res["deleted"], postID)
 	}
 }

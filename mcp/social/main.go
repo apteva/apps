@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.6.0
+version: 0.6.1
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -897,26 +897,19 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	acctIDs := make([]int64, 0, len(rawAccts))
 	for _, v := range rawAccts {
-		switch n := v.(type) {
-		case float64:
-			acctIDs = append(acctIDs, int64(n))
-		case int64:
-			acctIDs = append(acctIDs, n)
-		case int:
-			acctIDs = append(acctIDs, int64(n))
+		if id := toInt64Loose(v); id > 0 {
+			acctIDs = append(acctIDs, id)
 		}
+	}
+	if len(acctIDs) == 0 {
+		return nil, errors.New("social_account_ids required (at least one)")
 	}
 	scheduleAt, _ := args["schedule_at"].(string)
 	mediaIDsRaw, _ := args["media_storage_ids"].([]any)
 	mediaIDs := []int64{}
 	for _, v := range mediaIDsRaw {
-		switch n := v.(type) {
-		case float64:
-			mediaIDs = append(mediaIDs, int64(n))
-		case int64:
-			mediaIDs = append(mediaIDs, n)
-		case int:
-			mediaIDs = append(mediaIDs, int64(n))
+		if id := toInt64Loose(v); id > 0 {
+			mediaIDs = append(mediaIDs, id)
 		}
 	}
 	mediaJSON, _ := json.Marshal(mediaIDs)
@@ -2682,6 +2675,31 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 	return s
 }
 
+// toInt64Loose accepts any of the JSON shapes a tool argument can
+// arrive as (float64 from generic decode, int / int64 from typed
+// callers, "12" from agents that JSON-encode numeric ids as strings)
+// and returns the int64 value or 0 on no-match. Used by tool
+// argument coercion for things like account_ids and media_ids.
+func toInt64Loose(v any) int64 {
+	switch n := v.(type) {
+	case float64:
+		return int64(n)
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case string:
+		s := strings.TrimSpace(n)
+		if s == "" {
+			return 0
+		}
+		if x, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return x
+		}
+	}
+	return 0
+}
+
 func intArg(m map[string]any, key string, def int) int {
 	switch v := m[key].(type) {
 	case float64:
@@ -2690,6 +2708,17 @@ func intArg(m map[string]any, key string, def int) int {
 		return v
 	case int64:
 		return int(v)
+	case string:
+		// Smaller models often pass numeric ids as JSON strings
+		// ({post_id: "12"}) rather than numbers ({post_id: 12}).
+		// Accept both; reject non-numeric strings via the default.
+		// Mirrors jobs.intArg's behavior.
+		if v == "" {
+			return def
+		}
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return n
+		}
 	}
 	return def
 }
