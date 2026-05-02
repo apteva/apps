@@ -160,6 +160,10 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
   const [suppressions, setSuppressions] = useState<SuppressionRow[]>([]);
   const [senders, setSenders] = useState<SenderRow[]>([]);
   const [quota, setQuota] = useState<QuotaInfo | null>(null);
+  // Surface the SES-side failure rather than silently rendering an
+  // empty Senders tab — most often this means the email_provider
+  // role isn't bound to an aws-ses connection on the install.
+  const [sendersError, setSendersError] = useState<string>("");
 
   const [selected, setSelected] = useState<MessageRow | null>(null);
   const [selectedEvents, setSelectedEvents] = useState<DeliveryEvent[]>([]);
@@ -200,15 +204,18 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
     const r = await api<{ suppressions: SuppressionRow[] }>("GET", "/suppressions", {});
     setSuppressions(r.suppressions || []);
   }, [api]);
-  // Senders + quota are best-effort: they call the bound SES integration and
-  // can fail (no provider bound, sandbox, transient SES error). A failure
-  // here shouldn't break the rest of the panel — null values are fine.
+  // Senders + quota call the bound SES integration. We capture the
+  // error rather than silently swallowing it — the most common cause
+  // is "no email_provider bound", which the operator needs to fix in
+  // app settings → integrations.
   const loadSenders = useCallback(async () => {
     try {
       const r = await api<{ senders: SenderRow[] }>("GET", "/senders", {});
       setSenders(r.senders || []);
-    } catch {
+      setSendersError("");
+    } catch (e) {
       setSenders([]);
+      setSendersError(parseSendersError((e as Error).message));
     }
   }, [api]);
   const loadQuota = useCallback(async () => {
@@ -320,7 +327,7 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
               gotoSenders={() => setTab("senders")}
             />
           )}
-          {tab === "senders" && <SendersView rows={senders} quota={quota} api={api} reload={reload} />}
+          {tab === "senders" && <SendersView rows={senders} quota={quota} api={api} reload={reload} error={sendersError} />}
           {tab === "templates" && <TemplatesView rows={templates} api={api} reload={reload} />}
           {tab === "routes" && <RoutesView rows={routes} api={api} reload={reload} />}
           {tab === "suppressions" && <SuppressionsView rows={suppressions} api={api} reload={reload} />}
@@ -563,12 +570,13 @@ function ComposeView({
 }
 
 function SendersView({
-  rows, quota, api, reload,
+  rows, quota, api, reload, error,
 }: {
   rows: SenderRow[];
   quota: QuotaInfo | null;
   api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
   reload: () => void;
+  error: string;
 }) {
   const [verifyAddr, setVerifyAddr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -615,6 +623,17 @@ function SendersView({
 
   return (
     <div>
+      {error && (
+        <div className="m-4 p-3 rounded border border-red-500/30 bg-red-500/10 text-sm text-red-300 space-y-1">
+          <div className="font-medium">SES not reachable</div>
+          <div className="text-xs whitespace-pre-wrap">{error}</div>
+          {error.toLowerCase().includes("no email_provider") && (
+            <div className="text-xs text-text-dim">
+              Open this app's settings → Integrations and bind your aws-ses connection to the <code>email_provider</code> role, then refresh.
+            </div>
+          )}
+        </div>
+      )}
       <form onSubmit={onVerify} className="p-4 flex gap-2 items-end border-b border-border flex-wrap">
         <Field label="Verify email or domain" hint="alice@acme.com or acme.com">
           <input className="input w-72" value={verifyAddr} onChange={(e) => setVerifyAddr(e.target.value)} required />
@@ -900,6 +919,21 @@ function stripScheme(s: string): string {
   if (s.startsWith("mailto:")) return s.slice(7);
   if (s.startsWith("tel:")) return s.slice(4);
   return s;
+}
+
+// parseSendersError unwraps the "<status>: <body>" shape that api()
+// throws so the panel shows just the meaningful bit. The body is
+// usually `{"error":"..."}` JSON from the Go side.
+function parseSendersError(raw: string): string {
+  if (!raw) return "";
+  // raw is like "502: {\"error\":\"no email_provider bound — install/select…\"}"
+  const colon = raw.indexOf(": ");
+  const body = colon >= 0 ? raw.slice(colon + 2) : raw;
+  try {
+    const parsed = JSON.parse(body);
+    if (typeof parsed.error === "string") return parsed.error;
+  } catch {}
+  return body;
 }
 
 function shortTime(s?: string): string {
