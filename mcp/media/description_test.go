@@ -44,7 +44,7 @@ func TestSetDescription_RoundTrip(t *testing.T) {
 	title := "Q3 board meeting"
 	desc := "Recording of the quarterly board sync, ~5 minutes opener."
 	alt := "talking head, wide shot"
-	if err := setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{
+	if _, err := setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{
 		Title: &title, Description: &desc, AltText: &alt,
 	}); err != nil {
 		t.Fatal(err)
@@ -75,7 +75,7 @@ func TestSetDescription_PartialUpdatePreservesOthers(t *testing.T) {
 	})
 
 	d2 := "D2-new"
-	if err := setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{
+	if _, err := setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{
 		Description: &d2,
 	}); err != nil {
 		t.Fatal(err)
@@ -102,7 +102,7 @@ func TestSetDescription_EmptyStringClears(t *testing.T) {
 	setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{Description: &d})
 
 	empty := ""
-	if err := setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{Description: &empty}); err != nil {
+	if _, err := setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{Description: &empty}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := getMedia(ctx.AppDB(), testProj, "1")
@@ -119,7 +119,7 @@ func TestSetDescription_NoOpWithEmptyFields(t *testing.T) {
 	d := "untouched"
 	setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{Description: &d})
 
-	if err := setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{}); err != nil {
+	if _, err := setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := getMedia(ctx.AppDB(), testProj, "1")
@@ -160,15 +160,81 @@ func TestSetDescription_ReprobeDoesNotWipeDescription(t *testing.T) {
 	}
 }
 
-func TestSetDescription_NotFound(t *testing.T) {
+// TestSetDescription_UpsertsStubWhenNoRow — agents calling
+// media_set_description on a brand-new file_id (e.g. immediately
+// after media_extract_frame finishes) must NOT get a not-found
+// error. setDescription upserts a stub flagged probe_status='pending'
+// so the description sticks now and the indexer fills in the rest
+// on its next sweep.
+func TestSetDescription_UpsertsStubWhenNoRow(t *testing.T) {
 	ctx := newTestCtx(t)
-	d := "x"
-	err := setDescription(ctx.AppDB(), testProj, "999", DescriptionFields{Description: &d})
-	if err == nil {
-		t.Fatal("expected error on missing row")
+	d := "freshly attached"
+	created, err := setDescription(ctx.AppDB(), testProj, "999",
+		DescriptionFields{Description: &d})
+	if err != nil {
+		t.Fatalf("expected success on missing row (upsert), got %v", err)
 	}
-	if !notFound(err) {
-		t.Errorf("expected sql.ErrNoRows, got %v", err)
+	if !created {
+		t.Errorf("expected created=true on first-time write")
+	}
+	got, err := getMedia(ctx.AppDB(), testProj, "999")
+	if err != nil {
+		t.Fatalf("stub row missing: %v", err)
+	}
+	if got.Description != "freshly attached" {
+		t.Errorf("description not persisted: %q", got.Description)
+	}
+	if got.ProbeStatus != "pending" {
+		t.Errorf("stub should be pending, got %q (so indexer picks it up)", got.ProbeStatus)
+	}
+	if got.SourceSHA256 != "" {
+		t.Errorf("stub should have empty sha to flag for probing, got %q", got.SourceSHA256)
+	}
+}
+
+func TestSetDescription_StubSurvivesIndexerProbe(t *testing.T) {
+	// Once the indexer probes the file, the description must stay
+	// — upsertMedia only writes probe columns. The stub flow
+	// validated end-to-end.
+	ctx := newTestCtx(t)
+	d := "set before probe"
+	if _, err := setDescription(ctx.AppDB(), testProj, "1",
+		DescriptionFields{Description: &d}); err != nil {
+		t.Fatal(err)
+	}
+	// Indexer probes — same call upsertMedia makes after ffprobe.
+	if err := upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "sha-real"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := getMedia(ctx.AppDB(), testProj, "1")
+	if got.Description != "set before probe" {
+		t.Errorf("description wiped by probe: %q", got.Description)
+	}
+	if got.ProbeStatus != "ok" {
+		t.Errorf("probe didn't update status: %q", got.ProbeStatus)
+	}
+	if got.DurationMs != 5000 {
+		t.Errorf("probe didn't update duration: %d", got.DurationMs)
+	}
+}
+
+func TestSetDescription_SecondCallDoesntRecreate(t *testing.T) {
+	// First call: created=true. Second call on the same file_id:
+	// created=false (just an UPDATE).
+	ctx := newTestCtx(t)
+	d1 := "first"
+	d2 := "second"
+	c1, _ := setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{Description: &d1})
+	c2, _ := setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{Description: &d2})
+	if !c1 {
+		t.Errorf("first write should report created=true")
+	}
+	if c2 {
+		t.Errorf("second write should report created=false")
+	}
+	got, _ := getMedia(ctx.AppDB(), testProj, "1")
+	if got.Description != "second" {
+		t.Errorf("second write didn't overwrite: %q", got.Description)
 	}
 }
 
@@ -252,7 +318,12 @@ func TestToolSetDescription_RequiresAtLeastOneField(t *testing.T) {
 	}
 }
 
-func TestToolSetDescription_NotFoundReturnsFlag(t *testing.T) {
+// TestToolSetDescription_UpsertsNewFile — what used to be a
+// "not found" path now upserts a stub. Agents calling this tool
+// the moment a file lands in storage (e.g. after media_extract_frame)
+// get instant persistence; the indexer's next sweep fills in the
+// rest of the metadata.
+func TestToolSetDescription_UpsertsNewFile(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}
 	out, err := app.toolSetDescription(ctx, map[string]any{
@@ -263,7 +334,11 @@ func TestToolSetDescription_NotFoundReturnsFlag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if found, _ := out.(map[string]any)["found"].(bool); found {
-		t.Errorf("expected found=false on missing row: %v", out)
+	m := out.(map[string]any)
+	if found, _ := m["found"].(bool); !found {
+		t.Errorf("expected found=true after upsert: %v", out)
+	}
+	if created, _ := m["created"].(bool); !created {
+		t.Errorf("expected created=true on first-time write: %v", out)
 	}
 }

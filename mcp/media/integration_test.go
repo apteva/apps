@@ -288,15 +288,21 @@ func TestSidecar_SubmitInvalidParamsFailsFast(t *testing.T) {
 // the description Tier 1 tests; the cross-app version is covered
 // by the Tier 3 scenario.
 
-func TestSidecar_SetDescription_NotFound(t *testing.T) {
+// TestSidecar_SetDescription_UpsertsStub — first-call-on-fresh-file
+// path. Used to return found:false; now upserts a stub row so
+// agents can describe a file the moment it lands in storage.
+func TestSidecar_SetDescription_UpsertsStub(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
 	out := sc.MCP("media_set_description", map[string]any{
 		"_project_id": "test-proj",
 		"file_id":     "999",
 		"description": "anything",
 	})
-	if found, _ := out["found"].(bool); found {
-		t.Errorf("expected found=false on missing row: %v", out)
+	if found, _ := out["found"].(bool); !found {
+		t.Errorf("expected found=true after upsert: %v", out)
+	}
+	if created, _ := out["created"].(bool); !created {
+		t.Errorf("expected created=true on stub insert: %v", out)
 	}
 }
 

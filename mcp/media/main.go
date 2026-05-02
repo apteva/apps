@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.5.2
+version: 0.5.3
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -496,13 +496,18 @@ func (a *App) toolSetDescription(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if f.Title == nil && f.Description == nil && f.AltText == nil {
 		return nil, errors.New("provide at least one of title, description, alt_text")
 	}
-	if err := setDescription(ctx.AppDB(), pid, fid, f); err != nil {
-		if notFound(err) {
-			return map[string]any{"found": false}, nil
-		}
+	created, err := setDescription(ctx.AppDB(), pid, fid, f)
+	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"found": true, "file_id": fid, "updated": true}, nil
+	// Always found:true now — setDescription upserts a stub when
+	// the row doesn't exist yet, so the description sticks even
+	// before the indexer has probed the file.
+	resp := map[string]any{"found": true, "file_id": fid, "updated": true}
+	if created {
+		resp["created"] = true
+	}
+	return resp, nil
 }
 
 // toolDescribe queues a media row for auto-description on the next
@@ -871,15 +876,16 @@ func (a *App) handleMediaItem(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "provide at least one of title, description, alt_text", http.StatusBadRequest)
 			return
 		}
-		if err := setDescription(globalCtx.AppDB(), pid, fid, f); err != nil {
-			if notFound(err) {
-				http.Error(w, "not found", http.StatusNotFound)
-				return
-			}
+		created, err := setDescription(globalCtx.AppDB(), pid, fid, f)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, map[string]any{"file_id": fid, "updated": true})
+		resp := map[string]any{"file_id": fid, "updated": true}
+		if created {
+			resp["created"] = true
+		}
+		writeJSON(w, resp)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}

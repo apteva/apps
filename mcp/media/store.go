@@ -183,15 +183,24 @@ type DescriptionFields struct {
 	Source string
 }
 
-// setDescription writes only the description columns. Probe state
+// setDescription writes the description columns. Probe state
 // (status, codecs, duration, etc.) is never touched here, and the
 // indexer's upsertMedia never touches these columns — so a reprobe
 // preserves any prose written by the agent.
 //
-// Returns sql.ErrNoRows when the file_id has no media row yet
-// (call media_reindex first, or wait for the indexer to pick up
-// the upload). Callers turn that into a 404 / found:false.
-func setDescription(db *sql.DB, projectID, fileID string, f DescriptionFields) error {
+// UPSERT semantics: when no media row exists for (project_id,
+// file_id) yet, a stub row is inserted with probe_status='pending'
+// + source_sha256=''. The indexer's next sweep treats it like any
+// other unprobed row and fills in the metadata via upsertMedia,
+// which leaves the description columns alone. This lets agents
+// attach a description to a file the moment it lands in storage
+// (e.g. right after media_extract_frame completes) without
+// waiting for the indexer's 30s tick or calling media_reindex.
+//
+// Returns (created bool, err error). created=true when a stub was
+// inserted, false when an existing row was updated. nil err on a
+// successful no-op (empty DescriptionFields).
+func setDescription(db *sql.DB, projectID, fileID string, f DescriptionFields) (created bool, err error) {
 	// Build a partial UPDATE; sqlite happily accepts an empty SET
 	// list when nothing is provided, so guard against that.
 	sets := []string{}
@@ -209,7 +218,7 @@ func setDescription(db *sql.DB, projectID, fileID string, f DescriptionFields) e
 		args = append(args, *f.AltText)
 	}
 	if len(sets) == 0 {
-		return nil // nothing to do; not an error
+		return false, nil // nothing to do; not an error
 	}
 	// Stamp provenance so the auto-describer can tell ai-generated
 	// from human-set rows. Default 'human' covers the panel + tool
@@ -226,18 +235,32 @@ func setDescription(db *sql.DB, projectID, fileID string, f DescriptionFields) e
 		"updated_at = ?",
 	)
 	args = append(args, source, now, now)
-
 	args = append(args, projectID, fileID)
 	q := "UPDATE media SET " + strings.Join(sets, ", ") + " WHERE project_id=? AND file_id=?"
 	res, err := db.Exec(q, args...)
 	if err != nil {
-		return err
+		return false, err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return sql.ErrNoRows
+	if n, _ := res.RowsAffected(); n > 0 {
+		return false, nil
 	}
-	return nil
+
+	// No row to update — create a stub flagged for probing, then
+	// re-run the UPDATE. We don't use INSERT...ON CONFLICT here
+	// because we want the stub to carry probe_status='pending' +
+	// empty sha so the indexer treats it as fresh, regardless of
+	// what columns the description SET was about to write.
+	if _, err := db.Exec(`
+		INSERT INTO media (file_id, project_id, source_sha256, probe_status, raw_probe, created_at, updated_at)
+		VALUES (?, ?, '', 'pending', '{}', ?, ?)`,
+		fileID, projectID, now, now,
+	); err != nil {
+		return false, fmt.Errorf("insert stub media row: %w", err)
+	}
+	if _, err := db.Exec(q, args...); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // describeCandidates returns media file_ids the auto-describer

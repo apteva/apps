@@ -119,9 +119,16 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 		return
 	}
 
-	// Defence in depth — the candidate query filters human/agent rows
-	// already, but a race between a manual write and the worker's
-	// claim could theoretically slip through. Skip without marking.
+	// Defence in depth — the candidate query filters by both
+	// description='' and source NOT IN ('human','agent'), but a
+	// race between a manual write and the worker's claim could
+	// theoretically slip a real description past the query. Skip
+	// without marking, regardless of source: any non-empty
+	// description (human, agent, ai-generated, imported) means
+	// someone has already filled this in and we don't overwrite.
+	if strings.TrimSpace(media.Description) != "" {
+		return
+	}
 	if media.DescriptionSource == "human" || media.DescriptionSource == "agent" {
 		return
 	}
@@ -187,7 +194,7 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 		return
 	}
 
-	if err := setDescription(db, projectID, fileID, DescriptionFields{
+	if _, err := setDescription(db, projectID, fileID, DescriptionFields{
 		Description: &desc,
 		Source:      "ai-generated",
 	}); err != nil {
