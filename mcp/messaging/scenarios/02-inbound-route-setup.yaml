@@ -1,0 +1,39 @@
+name: inbound-route-setup
+description: |
+  Agent registers an inbound mail route so support+TICKET@acme.com
+  addresses dispatch to a hypothetical "support" app's /inbound HTTP
+  route. Exercises inbound_route_set + inbound_route_list — the
+  declarative half of the inbound-mail wiring.
+
+timeout: 60s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Configure inbound mail routing:
+
+  1. Use inbound_route_set to map every recipient matching
+       mailto:support+*@acme.com
+     to the "support" app's "/inbound" HTTP route. Priority: 100.
+
+  2. Confirm via inbound_route_list that exactly one route is
+     registered, with that pattern.
+
+  Then stop.
+
+assert:
+  - tool_called: inbound_route_set
+  - tool_called: inbound_route_list
+  - http: GET /api/apps/messaging/inbound-routes
+    expect_status: 200
+    expect_count_at: routes
+    expect_count: 1
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 10000
+  cost_usd: 0.15

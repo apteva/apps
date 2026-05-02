@@ -1,0 +1,44 @@
+name: suppression-management
+description: |
+  Agent manually suppresses an address (operator request — "stop
+  emailing this person"), confirms it landed on the list, then
+  removes it. Exercises suppression_add / suppression_list /
+  suppression_remove. No SES connection required.
+
+timeout: 60s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  A user has asked us to stop sending them email. Their address is
+  unsubscribed@example.com.
+
+  1. Add them to the suppression list with reason "user-requested"
+     using suppression_add.
+
+  2. Call suppression_list and verify the address is on it. The
+     address comes back as a URI ("mailto:unsubscribed@example.com");
+     that's expected.
+
+  3. The user changed their mind — they want emails again. Remove
+     them with suppression_remove.
+
+  Then stop.
+
+assert:
+  - tool_called: suppression_add
+  - tool_called: suppression_list
+  - tool_called: suppression_remove
+  - http: GET /api/apps/messaging/suppressions
+    expect_status: 200
+    expect_count_at: suppressions
+    expect_count: 0
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 10000
+  cost_usd: 0.15

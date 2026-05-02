@@ -1,0 +1,117 @@
+schema: apteva-app/v1
+
+name: messaging
+display_name: Messaging
+version: 0.1.0
+description: |
+  Send and receive messages across channels. v0.1 ships email via
+  AWS SES; SMS and push are reserved channel namespaces. Tracks
+  delivery state, maintains a per-channel suppression list from
+  bounces and complaints, and routes inbound mail to other apps'
+  HTTP routes via a small pattern table.
+
+  The shape is channel-agnostic: addresses are URIs (mailto:, tel:,
+  apteva://contact/N) and a single `send_message` tool dispatches
+  on the URI scheme. Per-channel fields (subject, body_html for
+  email) are optional and ignored when the resolved channel is not
+  email.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/messaging
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/messaging/icon.png
+tags: [messaging, email, ses, inbox]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.connections.execute
+    - platform.apps.call
+  integrations:
+    - role: email_provider
+      kind: integration
+      compatible_slugs: [aws-ses]
+      capabilities: [email.send]
+      tools:
+        email.send: send_email
+      required: true
+      label: "Email provider (AWS SES)"
+      hint: "Verifies the sender domain and delivers outbound mail. Bounce/complaint webhook target lives in app config."
+    - role: storage
+      kind: app
+      compatible_app_names: [storage]
+      capabilities: [files.write]
+      required: false
+      label: "Storage (optional)"
+      hint: "Persists outbound attachments and parsed inbound parts. Without this, attachments on outbound must be base64-inline and inbound attachments are dropped."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    # outbound
+    - { name: send_message,           description: "Send a message. Args: to (URI or URI[]), body, subject?, body_html?, from?, reply_to?, headers?, attachment_storage_ids?, template_id?, vars?, prefer_channel?, idempotency_key?. URI scheme picks the channel (mailto:, tel:, apteva://contact/N). Bare email strings are coerced to mailto:." }
+    - { name: send_message_template,  description: "Render a saved template + send. Args: template_id, to, vars?, attachment_storage_ids?, idempotency_key?. Convenience over send_message with template_id." }
+    - { name: message_get,            description: "Fetch one message by id — headers, status, channel, direction, delivery events." }
+    - { name: message_list,           description: "List messages. Filters: direction? (in|out), channel?, status?, since?, address? (canonical URI), limit?." }
+    - { name: inbound_redispatch,     description: "Re-attempt routing for an inbound message that previously failed or had no_match. Args: id." }
+    # routing config
+    - { name: inbound_route_set,      description: "Bind a recipient URI pattern to a target app+route. Idempotent. Args: pattern (e.g. mailto:support+*@acme.com), target_app, target_route, priority?." }
+    - { name: inbound_route_list,     description: "List configured inbound routes." }
+    - { name: inbound_route_delete,   description: "Remove an inbound route. Args: id." }
+    # templates
+    - { name: template_create,        description: "Create a template. Args: name, channel (default 'email'), subject?, body_text?, body_html?, vars_schema?." }
+    - { name: template_update,        description: "Update a template (partial). Args: id, fields…" }
+    - { name: template_get,           description: "Fetch one template by id." }
+    - { name: template_list,          description: "List templates. Args: channel?, limit?." }
+    - { name: template_delete,        description: "Delete a template. Args: id." }
+    # suppression
+    - { name: suppression_list,       description: "List suppressed addresses. Args: channel?, limit?." }
+    - { name: suppression_add,        description: "Suppress a recipient. Args: address (URI), reason." }
+    - { name: suppression_remove,     description: "Remove an address from suppression. Args: address (URI)." }
+  ui_panels:
+    - slot: project.page
+      label: Messaging
+      icon: mail
+      entry: /ui/MessagingPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/messaging
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/messaging.db
+  migrations: migrations/
+
+config_schema:
+  - name: default_from_address
+    type: text
+    label: Default From address
+    description: Used when send_message omits 'from'. Must be SES-verified. e.g. notifications@acme.com.
+  - name: ses_bounce_topic_arn
+    type: text
+    label: SES bounce/complaint SNS topic ARN
+    description: Optional. SNS topic that publishes Delivery/Bounce/Complaint notifications for outbound mail. Subscribe it to /webhooks/ses-bounces.
+  - name: ses_inbound_topic_arn
+    type: text
+    label: SES inbound SNS topic ARN
+    description: Optional. SNS topic that publishes Received notifications for inbound mail. Subscribe it to /webhooks/ses-inbound.
+  - name: ses_inbound_bucket
+    type: text
+    label: SES inbound S3 bucket
+    description: Bucket name where SES stores raw .eml for inbound mail. Required if ses_inbound_topic_arn is set.
+  - name: webhook_signing_secret
+    type: text
+    label: Webhook shared secret
+    description: Optional shared secret for HMAC-validating SNS posts in addition to the standard SNS signature check.
+
+upgrade_policy: auto-patch

@@ -1,0 +1,42 @@
+name: template-lifecycle
+description: |
+  Agent creates an email template, verifies it shows up in the
+  template list, and then deletes it. Exercises template_create,
+  template_list, template_delete — no SES connection required.
+
+timeout: 60s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  We need a reusable email template for new-user welcome emails.
+
+  1. Create a template named "welcome" with:
+       subject: "Welcome to Acme, {{name}}"
+       body_text: "Hi {{name}}, your sign-up code is {{code}}. — The Acme team"
+     Use the template_create tool.
+
+  2. Call template_list with no args and verify exactly one template
+     comes back.
+
+  3. Delete the template with template_delete.
+
+  Then stop.
+
+assert:
+  - tool_called: template_create
+  - tool_called: template_list
+  - tool_called: template_delete
+  - http: GET /api/apps/messaging/templates
+    expect_status: 200
+    expect_count_at: templates
+    expect_count: 0
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 12000
+  cost_usd: 0.18
