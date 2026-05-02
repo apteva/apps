@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.2.0
+version: 0.2.1
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -1326,44 +1326,62 @@ func (a *App) toolSendersList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	verifiedOnly, _ := args["verified_only"].(bool)
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_identities", map[string]any{"PageSize": 100})
-	if err != nil {
-		return nil, fmt.Errorf("list_identities: %w", err)
-	}
-	if res == nil || !res.Success {
-		body := ""
-		if res != nil {
-			body = string(res.Data)
+	// PageSize is capped at 100 by SES; for accounts with many identities
+	// we follow NextToken until exhausted. Practical ceiling: 1000 to
+	// keep the panel snappy and bound memory.
+	const maxIdentitiesToList = 1000
+	out := make([]Sender, 0, 64)
+	nextToken := ""
+	for {
+		args := map[string]any{"PageSize": 100}
+		if nextToken != "" {
+			args["NextToken"] = nextToken
 		}
-		return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
-	}
-	// SES v2 ListEmailIdentities response:
-	//   { Identities: [{ IdentityName, IdentityType, SendingEnabled, VerificationStatus }], NextToken? }
-	var raw struct {
-		Identities []struct {
-			IdentityName       string `json:"IdentityName"`
-			IdentityType       string `json:"IdentityType"`       // EMAIL_ADDRESS | DOMAIN | MANAGED_DOMAIN
-			SendingEnabled     bool   `json:"SendingEnabled"`
-			VerificationStatus string `json:"VerificationStatus"` // SUCCESS | PENDING | FAILED | TEMPORARY_FAILURE | NOT_STARTED
-		} `json:"Identities"`
-	}
-	_ = json.Unmarshal(res.Data, &raw)
-	out := make([]Sender, 0, len(raw.Identities))
-	for _, id := range raw.Identities {
-		kind := "email"
-		if id.IdentityType == "DOMAIN" || id.IdentityType == "MANAGED_DOMAIN" {
-			kind = "domain"
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_identities", args)
+		if err != nil {
+			return nil, fmt.Errorf("list_identities: %w", err)
 		}
-		verified := strings.EqualFold(id.VerificationStatus, "SUCCESS")
-		if verifiedOnly && !verified {
-			continue
+		if res == nil || !res.Success {
+			body := ""
+			if res != nil {
+				body = string(res.Data)
+			}
+			return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
 		}
-		out = append(out, Sender{
-			Address:  canonicalSenderURI(kind, strings.ToLower(id.IdentityName)),
-			Kind:     kind,
-			Verified: verified,
-			Sending:  id.SendingEnabled,
-		})
+		// SES v2 ListEmailIdentities response shape (the JSON key is
+		// `EmailIdentities`, NOT `Identities` — that's the v1/legacy
+		// API; we hit v2 via /v2/email/identities):
+		//   { EmailIdentities: [{ IdentityName, IdentityType, SendingEnabled, VerificationStatus }], NextToken? }
+		var raw struct {
+			EmailIdentities []struct {
+				IdentityName       string `json:"IdentityName"`
+				IdentityType       string `json:"IdentityType"`       // EMAIL_ADDRESS | DOMAIN | MANAGED_DOMAIN
+				SendingEnabled     bool   `json:"SendingEnabled"`
+				VerificationStatus string `json:"VerificationStatus"` // SUCCESS | PENDING | FAILED | TEMPORARY_FAILURE | NOT_STARTED
+			} `json:"EmailIdentities"`
+			NextToken string `json:"NextToken"`
+		}
+		_ = json.Unmarshal(res.Data, &raw)
+		for _, id := range raw.EmailIdentities {
+			kind := "email"
+			if id.IdentityType == "DOMAIN" || id.IdentityType == "MANAGED_DOMAIN" {
+				kind = "domain"
+			}
+			verified := strings.EqualFold(id.VerificationStatus, "SUCCESS")
+			if verifiedOnly && !verified {
+				continue
+			}
+			out = append(out, Sender{
+				Address:  canonicalSenderURI(kind, strings.ToLower(id.IdentityName)),
+				Kind:     kind,
+				Verified: verified,
+				Sending:  id.SendingEnabled,
+			})
+		}
+		if raw.NextToken == "" || len(out) >= maxIdentitiesToList {
+			break
+		}
+		nextToken = raw.NextToken
 	}
 	return map[string]any{"senders": out, "count": len(out)}, nil
 }

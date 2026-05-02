@@ -59,7 +59,7 @@ func (s *stubPlatform) ExecuteIntegrationTool(connID int64, tool string, input m
 	case "send_email":
 		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"MessageId":"ses-msg-123"}`)}, nil
 	case "list_identities":
-		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"Identities":[]}`)}, nil
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"EmailIdentities":[],"NextToken":""}`)}, nil
 	case "get_quota":
 		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"SendQuota":{"Max24HourSend":200,"MaxSendRate":1,"SentLast24Hours":0},"SendingEnabled":true,"ProductionAccessEnabled":false,"EnforcementStatus":"HEALTHY"}`)}, nil
 	}
@@ -411,7 +411,7 @@ func TestSenders_List_NormalisesShape(t *testing.T) {
 	plat := &stubPlatform{
 		replyByTool: map[string]*sdk.ExecuteResult{
 			"list_identities": {Success: true, Status: 200, Data: json.RawMessage(`{
-				"Identities":[
+				"EmailIdentities":[
 					{"IdentityName":"notifications@acme.com","IdentityType":"EMAIL_ADDRESS","SendingEnabled":true,"VerificationStatus":"SUCCESS"},
 					{"IdentityName":"acme.com","IdentityType":"DOMAIN","SendingEnabled":true,"VerificationStatus":"SUCCESS"},
 					{"IdentityName":"pending@acme.com","IdentityType":"EMAIL_ADDRESS","SendingEnabled":false,"VerificationStatus":"PENDING"}
@@ -446,7 +446,7 @@ func TestSenders_List_VerifiedOnly(t *testing.T) {
 	plat := &stubPlatform{
 		replyByTool: map[string]*sdk.ExecuteResult{
 			"list_identities": {Success: true, Status: 200, Data: json.RawMessage(`{
-				"Identities":[
+				"EmailIdentities":[
 					{"IdentityName":"good@x.com","IdentityType":"EMAIL_ADDRESS","SendingEnabled":true,"VerificationStatus":"SUCCESS"},
 					{"IdentityName":"pending@x.com","IdentityType":"EMAIL_ADDRESS","SendingEnabled":false,"VerificationStatus":"PENDING"}
 				]

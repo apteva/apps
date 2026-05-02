@@ -99,18 +99,18 @@ func TestLive_SES_ListIdentities(t *testing.T) {
 		t.Fatalf("GET /v2/email/identities → %d, body=%s", status, raw)
 	}
 	var got struct {
-		Identities []struct {
+		EmailIdentities []struct {
 			IdentityName       string `json:"IdentityName"`
 			IdentityType       string `json:"IdentityType"`
 			SendingEnabled     bool   `json:"SendingEnabled"`
 			VerificationStatus string `json:"VerificationStatus"`
-		} `json:"Identities"`
+		} `json:"EmailIdentities"`
 		NextToken string `json:"NextToken,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode identities body: %v\nraw: %s", err, raw)
 	}
-	for i, id := range got.Identities {
+	for i, id := range got.EmailIdentities {
 		if id.IdentityName == "" {
 			t.Errorf("identity[%d] has empty IdentityName: %+v", i, id)
 		}
@@ -121,7 +121,8 @@ func TestLive_SES_ListIdentities(t *testing.T) {
 			t.Errorf("identity[%d] unknown IdentityType %q (catalog drift?)", i, id.IdentityType)
 		}
 	}
-	t.Logf("live OK: %d identities (region=%s)", len(got.Identities), region)
+	t.Logf("live OK: %d identities first-page (region=%s, more=%v)",
+		len(got.EmailIdentities), region, got.NextToken != "")
 }
 
 // TestLive_SES_NormalisesThroughOurParser feeds the live response
@@ -136,17 +137,20 @@ func TestLive_SES_NormalisesThroughOurParser(t *testing.T) {
 	}
 	// Mirror toolSendersList's parsing block exactly.
 	var inner struct {
-		Identities []struct {
+		EmailIdentities []struct {
 			IdentityName       string `json:"IdentityName"`
 			IdentityType       string `json:"IdentityType"`
 			SendingEnabled     bool   `json:"SendingEnabled"`
 			VerificationStatus string `json:"VerificationStatus"`
-		} `json:"Identities"`
+		} `json:"EmailIdentities"`
 	}
 	if err := json.Unmarshal(raw, &inner); err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range inner.Identities {
+	if len(inner.EmailIdentities) == 0 {
+		t.Skip("no identities in this region — skipping normalisation roundtrip")
+	}
+	for _, id := range inner.EmailIdentities {
 		kind := "email"
 		if id.IdentityType == "DOMAIN" || id.IdentityType == "MANAGED_DOMAIN" {
 			kind = "domain"
@@ -156,6 +160,7 @@ func TestLive_SES_NormalisesThroughOurParser(t *testing.T) {
 			t.Errorf("normalised URI lost scheme: %q", uri)
 		}
 	}
+	t.Logf("live OK: normalised %d identities through canonicalSenderURI", len(inner.EmailIdentities))
 }
 
 // ─── Minimal SigV4 GET signer ──────────────────────────────────────
