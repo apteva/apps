@@ -204,7 +204,7 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 
 // ─── prompt building ───────────────────────────────────────────────
 
-const describeSystemPrompt = "You write concise media descriptions. Output exactly 2-3 sentences in plain prose, no preamble, no headings, no quotes. Focus on what is depicted or said — subjects, setting, action. Avoid speculation about emotions or intent unless explicitly visible/audible. Don't mention the medium ('this video', 'this audio') — describe the content directly."
+const describeSystemPrompt = "You write very brief media descriptions. Output 1-2 short sentences, ~200 characters maximum. Plain prose, no preamble, no headings, no quotes. Focus on subjects, setting, and action — concrete what's-there observations only. No speculation about emotion or intent. Don't mention the medium ('this video', 'this image', 'this audio') — describe the content directly."
 
 // buildDescribePrompt assembles the messages array for the chat call
 // based on what's available for the file. Returns nil (no error) when
@@ -252,7 +252,7 @@ func buildDescribePrompt(app *sdk.AppCtx, projectID string, media *MediaRow) ([]
 		return []map[string]any{
 			{"role": "system", "content": describeSystemPrompt},
 			{"role": "user", "content": []map[string]any{
-				{"type": "text", "text": "A representative frame and the transcript follow. Describe the content in 2-3 sentences.\n\nTranscript:\n" + transcript.Text},
+				{"type": "text", "text": "A representative frame and the transcript follow. Describe the content in 1-2 short sentences (under ~200 chars).\n\nTranscript:\n" + transcript.Text},
 				{"type": "image_url", "image_url": map[string]any{"url": thumbURL}},
 			}},
 		}, nil
@@ -262,7 +262,7 @@ func buildDescribePrompt(app *sdk.AppCtx, projectID string, media *MediaRow) ([]
 		return []map[string]any{
 			{"role": "system", "content": describeSystemPrompt},
 			{"role": "user", "content": []map[string]any{
-				{"type": "text", "text": "Describe the content of this image in 2-3 sentences."},
+				{"type": "text", "text": "Describe the content of this image in 1-2 short sentences (under ~200 chars)."},
 				{"type": "image_url", "image_url": map[string]any{"url": thumbURL}},
 			}},
 		}, nil
@@ -271,7 +271,7 @@ func buildDescribePrompt(app *sdk.AppCtx, projectID string, media *MediaRow) ([]
 		// Audio-only: transcript is all we have.
 		return []map[string]any{
 			{"role": "system", "content": describeSystemPrompt},
-			{"role": "user", "content": "Describe what's said in this recording in 2-3 sentences.\n\nTranscript:\n" + transcript.Text},
+			{"role": "user", "content": "Summarise what's said in 1-2 short sentences (under ~200 chars).\n\nTranscript:\n" + transcript.Text},
 		}, nil
 	}
 

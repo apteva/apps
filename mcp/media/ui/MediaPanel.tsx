@@ -491,7 +491,28 @@ function DetailDrawer({
           </button>
         </div>
         <div className="p-4 space-y-4">
-          {row.has_video ? (
+          {row.is_image ? (
+            // Image first — ffprobe reports images as a single-frame
+            // video stream (has_video=true), so the video branch
+            // would mis-render an image as a player. is_image is set
+            // by the prober when codec_type is image-shaped; trust
+            // it over has_video for the rendering decision.
+            //
+            // Click to open full-resolution in a new tab; the inline
+            // preview keeps the drawer compact.
+            <a
+              href={`${previewBase}/${row.file_id}/content?${query}`}
+              target="_blank"
+              rel="noopener"
+              title="Open full image"
+            >
+              <img
+                src={`${previewBase}/${row.file_id}/content?${query}`}
+                alt={row.alt_text || row.title || ""}
+                className="w-full rounded border border-border"
+              />
+            </a>
+          ) : row.has_video ? (
             // Native player against the source. preload="metadata"
             // means the browser fetches just the moov atom + first
             // keyframe for the poster — opening the drawer is fast
@@ -524,21 +545,6 @@ function DetailDrawer({
                 className="w-full"
               />
             </>
-          ) : row.is_image ? (
-            // Click to open full-resolution in a new tab; the inline
-            // preview keeps the drawer compact.
-            <a
-              href={`${previewBase}/${row.file_id}/content?${query}`}
-              target="_blank"
-              rel="noopener"
-              title="Open full image"
-            >
-              <img
-                src={`${previewBase}/${row.file_id}/content?${query}`}
-                alt=""
-                className="w-full rounded border border-border"
-              />
-            </a>
           ) : (thumb || wave) ? (
             <img
               src={`${previewBase}/${(thumb || wave)!.storage_file_id}/content?${query}`}
