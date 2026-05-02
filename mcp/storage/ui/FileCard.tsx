@@ -84,7 +84,11 @@ export default function FileCard({ file_id, compact, projectId, preview }: Props
 
   const refetch = () => {
     if (preview) return; // synthetic data; nothing to fetch
-    fetch(`/api/apps/storage/files/${file_id}`, { credentials: "same-origin" })
+    if (!projectId) return; // wait for the host to inject the project scope
+    const url =
+      `/api/apps/storage/files/${file_id}` +
+      `?project_id=${encodeURIComponent(projectId)}`;
+    fetch(url, { credentials: "same-origin" })
       .then((r) => {
         if (r.status === 404) {
           setMissing(true);
@@ -113,7 +117,7 @@ export default function FileCard({ file_id, compact, projectId, preview }: Props
   useEffect(() => {
     refetch();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file_id]);
+  }, [file_id, projectId]);
 
   // Live updates: refetch when our specific file is touched, and
   // mark missing on a delete event so the card flips to a tombstone.
