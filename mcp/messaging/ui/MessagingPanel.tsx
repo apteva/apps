@@ -453,36 +453,60 @@ function ComposeView({
   onSent: () => void;
   gotoSenders: () => void;
 }) {
-  // Verified email/domain identities the operator can send from.
-  // For domains we suggest <user>@<domain> in placeholder UX; for v0.2
-  // we just expose the domain itself — operator types the local-part
-  // when they pick the domain row. Email rows go in directly.
-  const fromOptions = useMemo(() => {
-    return senders.map((s) => stripScheme(s.address));
-  }, [senders]);
+  // Verified senders: a unified select with two kinds. Email rows
+  // expose the full address as the value; domain rows expose just
+  // the domain — when picked, a local-part input appears so the
+  // operator can compose addr@domain explicitly.
+  const verified = useMemo(() => senders.filter((s) => s.verified), [senders]);
 
-  const [from, setFrom] = useState<string>("");
+  // selectedAddress is what's chosen in the dropdown — either a full
+  // email or a bare domain. selectedKind tracks which (drives the
+  // local-part field).
+  const [selectedAddress, setSelectedAddress] = useState<string>("");
+  const [localPart, setLocalPart] = useState("");
   const [to, setTo] = useState("");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  // Default From to the first verified email identity (not domain),
-  // or the first option overall. Updates whenever senders refreshes.
+  // Default selection: first verified email, otherwise first verified domain.
   useEffect(() => {
-    if (from) return;
-    const firstEmail = senders.find((s) => s.kind === "email" && s.verified);
-    if (firstEmail) setFrom(stripScheme(firstEmail.address));
-    else if (fromOptions.length > 0) setFrom(fromOptions[0]);
-  }, [senders, fromOptions, from]);
+    if (selectedAddress) return;
+    const firstEmail = verified.find((s) => s.kind === "email");
+    if (firstEmail) {
+      setSelectedAddress(stripScheme(firstEmail.address));
+      return;
+    }
+    const firstDomain = verified.find((s) => s.kind === "domain");
+    if (firstDomain) {
+      setSelectedAddress(stripScheme(firstDomain.address));
+      setLocalPart("noreply");
+    }
+  }, [verified, selectedAddress]);
 
-  const noVerifiedSenders = fromOptions.length === 0;
+  const selectedSender = useMemo(
+    () => verified.find((s) => stripScheme(s.address) === selectedAddress),
+    [verified, selectedAddress],
+  );
+  const isDomain = selectedSender?.kind === "domain";
+
+  // The actual From string handed to send_message.
+  const computedFrom = useMemo(() => {
+    if (!selectedAddress) return "";
+    if (isDomain) {
+      const lp = localPart.trim();
+      return lp ? `${lp}@${selectedAddress}` : "";
+    }
+    return selectedAddress;
+  }, [selectedAddress, localPart, isDomain]);
+
+  const noVerifiedSenders = verified.length === 0;
 
   const send = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!from) {
-      setErr("Pick a From address.");
+    if (!computedFrom) {
+      setErr(isDomain ? "Enter a local-part for the domain sender." : "Pick a sender.");
       return;
     }
     setBusy(true);
@@ -491,7 +515,7 @@ function ComposeView({
       const recipients = to.split(",").map((s) => s.trim()).filter(Boolean);
       await api("POST", "/tools/call", {}, {
         tool: "send_message",
-        args: { from, to: recipients, subject, body },
+        args: { from: computedFrom, to: recipients, subject, body },
       });
       setTo(""); setSubject(""); setBody("");
       onSent();
@@ -504,58 +528,68 @@ function ComposeView({
 
   return (
     <form onSubmit={send} className="p-6 max-w-2xl space-y-3">
-      <h2 className="text-lg font-semibold mb-1">Compose email</h2>
-      <p className="text-xs text-text-dim mb-3">Pick a verified From, comma-separate recipients.</p>
+      <h2 className="text-lg font-semibold mb-1">Compose message</h2>
+      <p className="text-xs text-text-dim mb-3">Pick a verified sender, comma-separate recipients. v0.2 sends over email; SMS and push come later.</p>
 
       {noVerifiedSenders ? (
         <div className="rounded border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm text-yellow-300">
           No verified senders. <button type="button" className="underline" onClick={gotoSenders}>Verify one in the Senders tab →</button>
         </div>
       ) : (
-        <Field label="From">
-          {senders.some((s) => s.kind === "domain") ? (
-            // If any domain identity exists, free-text + datalist is
-            // friendlier than a strict select — operator can type
-            // alice@verified-domain.com without us pre-enumerating.
-            <>
-              <input
-                className="input w-full"
-                list="from-options"
-                value={from}
-                onChange={(e) => setFrom(e.target.value)}
-                placeholder="alice@your-verified-domain.com"
-                required
-              />
-              <datalist id="from-options">
-                {fromOptions.map((opt) => <option key={opt} value={opt} />)}
-              </datalist>
-            </>
-          ) : (
+        <Field label="Sender">
+          <div className="flex gap-2 items-stretch">
             <select
-              className="input w-full"
-              value={from}
-              onChange={(e) => setFrom(e.target.value)}
+              className={inputCls + " flex-1"}
+              value={selectedAddress}
+              onChange={(e) => {
+                setSelectedAddress(e.target.value);
+                const next = verified.find((s) => stripScheme(s.address) === e.target.value);
+                if (next?.kind === "domain" && !localPart) setLocalPart("noreply");
+              }}
               required
             >
-              {fromOptions.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+              {verified.map((s) => {
+                const addr = stripScheme(s.address);
+                return (
+                  <option key={addr} value={addr}>
+                    {s.kind === "domain" ? `@${addr} (domain)` : addr}
+                  </option>
+                );
+              })}
             </select>
+            {isDomain && (
+              <>
+                <input
+                  className={inputCls + " w-44"}
+                  value={localPart}
+                  onChange={(e) => setLocalPart(e.target.value)}
+                  placeholder="noreply"
+                  aria-label="Local-part"
+                  required
+                />
+                <span className="self-center text-text-dim text-sm whitespace-nowrap">@{selectedAddress}</span>
+              </>
+            )}
+          </div>
+          {computedFrom && (
+            <div className="text-xs text-text-dim mt-1">Will send as <code>{computedFrom}</code></div>
           )}
         </Field>
       )}
 
       <Field label="To">
-        <input className="input w-full" value={to} onChange={(e) => setTo(e.target.value)} placeholder="alice@example.com, bob@x.io" required disabled={noVerifiedSenders} />
+        <input className={inputCls} value={to} onChange={(e) => setTo(e.target.value)} placeholder="alice@example.com, bob@x.io" required disabled={noVerifiedSenders} />
       </Field>
       <Field label="Subject">
-        <input className="input w-full" value={subject} onChange={(e) => setSubject(e.target.value)} disabled={noVerifiedSenders} />
+        <input className={inputCls} value={subject} onChange={(e) => setSubject(e.target.value)} disabled={noVerifiedSenders} />
       </Field>
       <Field label="Body">
-        <textarea className="input w-full font-mono text-sm" rows={10} value={body} onChange={(e) => setBody(e.target.value)} required disabled={noVerifiedSenders} />
+        <textarea className={inputCls + " font-mono text-sm"} rows={10} value={body} onChange={(e) => setBody(e.target.value)} required disabled={noVerifiedSenders} />
       </Field>
 
       {quota && quota.sandboxed && (
         <p className="text-xs text-yellow-400/80">
-          Sandbox: only recipients you've verified in SES will receive this mail.
+          Sandbox: only recipients you've verified in SES will receive this message.
         </p>
       )}
       {err && <div className="text-red-500 text-sm">{err}</div>}
@@ -636,7 +670,7 @@ function SendersView({
       )}
       <form onSubmit={onVerify} className="p-4 flex gap-2 items-end border-b border-border flex-wrap">
         <Field label="Verify email or domain" hint="alice@acme.com or acme.com">
-          <input className="input w-72" value={verifyAddr} onChange={(e) => setVerifyAddr(e.target.value)} required />
+          <input className={inputCls + " w-72"} value={verifyAddr} onChange={(e) => setVerifyAddr(e.target.value)} required />
         </Field>
         <button type="submit" disabled={busy} className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50">
           {busy ? "Verifying…" : "Verify"}
@@ -783,13 +817,13 @@ function RoutesView({ rows, api, reload }: { rows: InboundRoute[]; api: <T,>(m: 
     <div>
       <form onSubmit={add} className="p-4 flex gap-2 items-end border-b border-border flex-wrap">
         <Field label="Pattern" hint="e.g. mailto:support+*@acme.com">
-          <input className="input w-72" value={pattern} onChange={(e) => setPattern(e.target.value)} required />
+          <input className={inputCls + " w-72"} value={pattern} onChange={(e) => setPattern(e.target.value)} required />
         </Field>
         <Field label="Target app">
-          <input className="input w-40" value={targetApp} onChange={(e) => setTargetApp(e.target.value)} required placeholder="support" />
+          <input className={inputCls + " w-40"} value={targetApp} onChange={(e) => setTargetApp(e.target.value)} required placeholder="support" />
         </Field>
         <Field label="Target route">
-          <input className="input w-40" value={targetRoute} onChange={(e) => setTargetRoute(e.target.value)} required />
+          <input className={inputCls + " w-40"} value={targetRoute} onChange={(e) => setTargetRoute(e.target.value)} required />
         </Field>
         <button type="submit" className="px-3 py-1.5 bg-accent text-white rounded">Add</button>
       </form>
@@ -913,6 +947,16 @@ function DL({ label, value }: { label: string; value: React.ReactNode }) {
     </div>
   );
 }
+
+// inputCls is the shared style for every text/select/textarea control
+// in this panel. The dashboard ships an `.input` utility class but its
+// default uses light-mode colours that wash out in dark themes. We
+// define our own with the panel's own design tokens (bg-surface-2,
+// text-text, border-border) so contrast stays correct in both modes.
+const inputCls =
+  "w-full bg-surface-2 text-text border border-border rounded px-3 py-1.5 " +
+  "placeholder:text-text-dim/70 focus:outline-none focus:ring-1 focus:ring-accent " +
+  "disabled:opacity-50 disabled:cursor-not-allowed";
 
 function stripScheme(s: string): string {
   if (!s) return "";
