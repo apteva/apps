@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.2.2
+version: 0.3.0
 description: |
   Catalog + cheap derivations + parameterised renders for media
   files in storage. Indexes uploads (probe, thumbnail, waveform)
@@ -60,6 +60,7 @@ provides:
     - { name: media_get_render,      description: "Status of one render — progress + output_file_id when ready." }
     - { name: media_list_renders,    description: "List renders filtered by status / operation." }
     - { name: media_cancel_render,   description: "Cancel a pending or running render. Idempotent." }
+    - { name: media_set_description, description: "Set title / description / alt_text on a media row. Partial update; omitted fields preserved." }
   workers:
     - name: indexer
       schedule: "@every 30s"
@@ -336,6 +337,17 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"render_id": map[string]any{"type": "integer"}}, []string{"render_id"}),
 			Handler:     a.toolCancelRender,
 		},
+		{
+			Name:        "media_set_description",
+			Description: "Set title / description / alt_text on a media row. Partial update — omitted fields preserved, empty string clears. Requires the media row to already exist (the indexer creates it on probe). Args: file_id (required), title (optional), description (optional), alt_text (optional).",
+			InputSchema: schemaObject(map[string]any{
+				"file_id":     map[string]any{"type": "string"},
+				"title":       map[string]any{"type": "string"},
+				"description": map[string]any{"type": "string"},
+				"alt_text":    map[string]any{"type": "string"},
+			}, []string{"file_id"}),
+			Handler: a.toolSetDescription,
+		},
 	}
 }
 
@@ -382,6 +394,42 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"found": true, "media": m}, nil
+}
+
+// toolSetDescription writes prose columns on the media row. Partial
+// update: pointer-distinguishes "preserve" (key not in args) from
+// "clear" (key set to ""). Returns found=false when the file_id
+// has no media row yet — agents should call media_reindex first or
+// wait for the next indexer tick.
+func (a *App) toolSetDescription(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	fid, _ := args["file_id"].(string)
+	if fid == "" {
+		return nil, errors.New("file_id required")
+	}
+	f := DescriptionFields{}
+	if v, ok := args["title"].(string); ok {
+		f.Title = &v
+	}
+	if v, ok := args["description"].(string); ok {
+		f.Description = &v
+	}
+	if v, ok := args["alt_text"].(string); ok {
+		f.AltText = &v
+	}
+	if f.Title == nil && f.Description == nil && f.AltText == nil {
+		return nil, errors.New("provide at least one of title, description, alt_text")
+	}
+	if err := setDescription(ctx.AppDB(), pid, fid, f); err != nil {
+		if notFound(err) {
+			return map[string]any{"found": false}, nil
+		}
+		return nil, err
+	}
+	return map[string]any{"found": true, "file_id": fid, "updated": true}, nil
 }
 
 func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {

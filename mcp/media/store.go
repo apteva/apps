@@ -44,6 +44,13 @@ type MediaRow struct {
 
 	RawProbe json.RawMessage `json:"raw_probe,omitempty"`
 
+	// User/agent-supplied prose. Written via media_set_description;
+	// never touched by upsertMedia (the indexer's probe upsert) so a
+	// reprobe never wipes them.
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	AltText     string `json:"alt_text,omitempty"`
+
 	CreatedAt string `json:"created_at,omitempty"`
 	UpdatedAt string `json:"updated_at,omitempty"`
 
@@ -146,13 +153,71 @@ func upsertDerivation(db *sql.DB, projectID, fileID, kind string, storageFileID 
 }
 
 // getMedia loads one row + its derivations.
+// DescriptionFields carries a partial-update payload for a media
+// row's prose columns. Pointer types let callers distinguish
+// "preserve existing value" from "clear to empty string". Empty-
+// string pointers explicitly clear; nil pointers leave the column
+// untouched.
+type DescriptionFields struct {
+	Title       *string
+	Description *string
+	AltText     *string
+}
+
+// setDescription writes only the description columns. Probe state
+// (status, codecs, duration, etc.) is never touched here, and the
+// indexer's upsertMedia never touches these columns — so a reprobe
+// preserves any prose written by the agent.
+//
+// Returns sql.ErrNoRows when the file_id has no media row yet
+// (call media_reindex first, or wait for the indexer to pick up
+// the upload). Callers turn that into a 404 / found:false.
+func setDescription(db *sql.DB, projectID, fileID string, f DescriptionFields) error {
+	// Build a partial UPDATE; sqlite happily accepts an empty SET
+	// list when nothing is provided, so guard against that.
+	sets := []string{}
+	args := []any{}
+	if f.Title != nil {
+		sets = append(sets, "title = ?")
+		args = append(args, *f.Title)
+	}
+	if f.Description != nil {
+		sets = append(sets, "description = ?")
+		args = append(args, *f.Description)
+	}
+	if f.AltText != nil {
+		sets = append(sets, "alt_text = ?")
+		args = append(args, *f.AltText)
+	}
+	if len(sets) == 0 {
+		return nil // nothing to do; not an error
+	}
+	// Bump updated_at so panels sorting by recently-described work.
+	sets = append(sets, "updated_at = ?")
+	args = append(args, time.Now().UTC().Format(time.RFC3339))
+
+	args = append(args, projectID, fileID)
+	q := "UPDATE media SET " + strings.Join(sets, ", ") + " WHERE project_id=? AND file_id=?"
+	res, err := db.Exec(q, args...)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func getMedia(db *sql.DB, projectID, fileID string) (*MediaRow, error) {
 	row := db.QueryRow(`
 		SELECT file_id, project_id, source_sha256, format_name, duration_ms, bitrate,
 			has_video, has_audio, is_image,
 			width, height, fps, video_codec,
 			channels, sample_rate, audio_codec,
-			probe_status, probe_error, probe_at, raw_probe, created_at, updated_at
+			probe_status, probe_error, probe_at, raw_probe,
+			title, description, alt_text,
+			created_at, updated_at
 		FROM media WHERE project_id=? AND file_id=?`, projectID, fileID)
 	m, err := scanMedia(row)
 	if err != nil {
@@ -173,6 +238,7 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 		probeError                     sql.NullString
 		hasVideo, hasAudio, isImage    int
 		rawProbe                       string
+		title, description, altText    string
 	)
 	err := row.Scan(
 		&m.FileID, &m.ProjectID, &m.SourceSHA256,
@@ -180,7 +246,9 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 		&hasVideo, &hasAudio, &isImage,
 		&width, &height, &fps, &vcodec,
 		&channels, &srate, &acodec,
-		&m.ProbeStatus, &probeError, &probeAt, &rawProbe, &createdAt, &updatedAt,
+		&m.ProbeStatus, &probeError, &probeAt, &rawProbe,
+		&title, &description, &altText,
+		&createdAt, &updatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -200,6 +268,9 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 	m.AudioCodec = acodec.String
 	m.ProbeError = probeError.String
 	m.ProbeAt = probeAt.String
+	m.Title = title
+	m.Description = description
+	m.AltText = altText
 	m.CreatedAt = createdAt.String
 	m.UpdatedAt = updatedAt.String
 	if rawProbe != "" {
@@ -285,7 +356,9 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 		has_video, has_audio, is_image,
 		width, height, fps, video_codec,
 		channels, sample_rate, audio_codec,
-		probe_status, probe_error, probe_at, raw_probe, created_at, updated_at
+		probe_status, probe_error, probe_at, raw_probe,
+		title, description, alt_text,
+		created_at, updated_at
 	FROM media WHERE ` + strings.Join(clauses, " AND ") + " ORDER BY " + order + " LIMIT ?"
 	args = append(args, limit)
 

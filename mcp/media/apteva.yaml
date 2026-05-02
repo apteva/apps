@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.2.2
+version: 0.3.0
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -78,6 +78,10 @@ provides:
       description: Filter renders by status, operation, or limit.
     - name: media_cancel_render
       description: Cancel a pending or running render. Idempotent — already-terminal rows are no-ops.
+
+    # Catalog metadata — agent/user-supplied prose on media rows.
+    - name: media_set_description
+      description: Set title / description / alt_text on a media row. Partial update (omitted fields preserved). Empty string clears.
 
   workers:
     - name: indexer

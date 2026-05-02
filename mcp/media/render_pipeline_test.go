@@ -437,3 +437,140 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// ─── Description (v0.3) — full cross-app round-trip ────────────────
+//
+// Spawns media + real storage, uploads a fixture, waits for the
+// indexer to probe + create the media row, sets a description via
+// MCP, reads it back via media_get + media_search, asserts both
+// surfaces carry the description.
+
+// spawnMediaWithStorageFastIndexer is the same as spawnMediaWithStorage
+// but with a 1-second indexer poll so tests don't wait 30s for a row.
+func spawnMediaWithStorageFastIndexer(t *testing.T) *tk.Sidecar {
+	t.Helper()
+	return tk.SpawnSidecar(t, ".",
+		tk.WithProjectID("test-proj"),
+		tk.WithDependency("storage", "../storage"),
+		tk.WithConfig(map[string]string{
+			"render_pool_size":       "1",
+			"render_timeout_seconds": "30",
+			"poll_interval_seconds":  "1",
+		}),
+	)
+}
+
+// waitForIndexed polls media_get until a row exists with probe_status
+// ok or fails the test on timeout.
+func waitForIndexed(t *testing.T, sc *tk.Sidecar, projectID, fileID string, timeout time.Duration) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		out := sc.MCP("media_get", map[string]any{
+			"_project_id": projectID,
+			"file_id":     fileID,
+		})
+		if found, _ := out["found"].(bool); found {
+			row, _ := out["media"].(map[string]any)
+			if status, _ := row["probe_status"].(string); status == "ok" {
+				return row
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatalf("file_id %s never reached probe_status=ok within %v", fileID, timeout)
+	return nil
+}
+
+func TestSidecar_SetDescription_FullFlow(t *testing.T) {
+	skipIfNoFFmpeg(t)
+	sc := spawnMediaWithStorageFastIndexer(t)
+
+	// 1. Upload fixture mp4 to real storage.
+	srcID := uploadFixtureToStorage(t, sc, "test-proj",
+		"sample-5s.mp4", "video/mp4", "/tests/", fixtureBytes(t))
+	srcStr := strconv.FormatInt(srcID, 10)
+
+	// 2. Wait for the indexer to create a media row.
+	waitForIndexed(t, sc, "test-proj", srcStr, 15*time.Second)
+
+	// 3. Set description via MCP.
+	res := sc.MCP("media_set_description", map[string]any{
+		"_project_id": "test-proj",
+		"file_id":     srcStr,
+		"title":       "Q3 board sync",
+		"description": "Five seconds of testsrc + 1kHz tone — fixture for media v0.3.",
+		"alt_text":    "synthetic test pattern with audio",
+	})
+	if res["updated"] != true {
+		t.Fatalf("set_description not acknowledged: %v", res)
+	}
+
+	// 4. media_get returns the description fields.
+	got := sc.MCP("media_get", map[string]any{
+		"_project_id": "test-proj",
+		"file_id":     srcStr,
+	})
+	row := got["media"].(map[string]any)
+	if row["title"] != "Q3 board sync" {
+		t.Errorf("title=%v want 'Q3 board sync'", row["title"])
+	}
+	if !strings.Contains(row["description"].(string), "fixture for media v0.3") {
+		t.Errorf("description not stored: %v", row["description"])
+	}
+
+	// 5. media_search also returns description fields.
+	search := sc.MCP("media_search", map[string]any{
+		"_project_id": "test-proj",
+		"has_video":   true,
+	})
+	results := search["media"].([]any)
+	if len(results) == 0 {
+		t.Fatal("search returned no rows")
+	}
+	first := results[0].(map[string]any)
+	if first["title"] != "Q3 board sync" {
+		t.Errorf("search row dropped title: %v", first["title"])
+	}
+}
+
+func TestSidecar_SetDescription_PartialUpdate(t *testing.T) {
+	// Set all three, then update only description; title + alt_text
+	// must persist. Catches regressions where the partial-update
+	// SQL accidentally overwrites unrelated columns.
+	skipIfNoFFmpeg(t)
+	sc := spawnMediaWithStorageFastIndexer(t)
+
+	srcID := uploadFixtureToStorage(t, sc, "test-proj",
+		"sample-5s.mp4", "video/mp4", "/tests/", fixtureBytes(t))
+	srcStr := strconv.FormatInt(srcID, 10)
+	waitForIndexed(t, sc, "test-proj", srcStr, 15*time.Second)
+
+	sc.MCP("media_set_description", map[string]any{
+		"_project_id": "test-proj",
+		"file_id":     srcStr,
+		"title":       "T1",
+		"description": "D1",
+		"alt_text":    "A1",
+	})
+	sc.MCP("media_set_description", map[string]any{
+		"_project_id": "test-proj",
+		"file_id":     srcStr,
+		"description": "D2",
+	})
+
+	got := sc.MCP("media_get", map[string]any{
+		"_project_id": "test-proj",
+		"file_id":     srcStr,
+	})
+	row := got["media"].(map[string]any)
+	if row["title"] != "T1" {
+		t.Errorf("title clobbered: %v", row["title"])
+	}
+	if row["description"] != "D2" {
+		t.Errorf("description=%v want D2", row["description"])
+	}
+	if row["alt_text"] != "A1" {
+		t.Errorf("alt_text clobbered: %v", row["alt_text"])
+	}
+}

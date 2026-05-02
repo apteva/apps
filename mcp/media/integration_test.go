@@ -279,6 +279,41 @@ func TestSidecar_SubmitInvalidParamsFailsFast(t *testing.T) {
 	}
 }
 
+// ─── Description surface (v0.3) ────────────────────────────────────
+//
+// We can't seed a media row through the sidecar's MCP — only the
+// indexer creates rows, and it needs storage to do that. So this
+// test asserts the not-found path (no row → found:false) and the
+// argument validation path. The full set+get round-trip lives in
+// the description Tier 1 tests; the cross-app version is covered
+// by the Tier 3 scenario.
+
+func TestSidecar_SetDescription_NotFound(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	out := sc.MCP("media_set_description", map[string]any{
+		"_project_id": "test-proj",
+		"file_id":     "999",
+		"description": "anything",
+	})
+	if found, _ := out["found"].(bool); found {
+		t.Errorf("expected found=false on missing row: %v", out)
+	}
+}
+
+func TestSidecar_SetDescription_RequiresFileID(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	_, err := sc.MCPRaw("tools/call", map[string]any{
+		"name": "media_set_description",
+		"arguments": map[string]any{
+			"_project_id": "test-proj",
+			"description": "x",
+		},
+	})
+	if err == nil {
+		t.Error("expected JSON-RPC error when file_id missing")
+	}
+}
+
 func TestSidecar_RenderHTTPRoutes(t *testing.T) {
 	// /renders supports POST (jobs-app callback shape) + GET (panel
 	// listing). Exercise both.
