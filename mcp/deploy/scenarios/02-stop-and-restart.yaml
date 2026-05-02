@@ -1,0 +1,75 @@
+name: stop-and-restart
+description: |
+  Agent stops a live deployment, then re-releases the previous build
+  to bring it back up. Exercises the stop/release flow without a
+  rebuild — the rollback-style path.
+
+timeout: 180s
+max_iterations: 14
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  dependencies:
+    - name: code
+      path: ../code
+  fixtures:
+    - kind: code_repo
+      slug: ping
+      framework: go
+      files:
+        go.mod: |
+          module ping
+
+          go 1.21
+        main.go: |
+          package main
+          import (
+            "fmt"
+            "net/http"
+            "os"
+          )
+          func main() {
+            port := os.Getenv("PORT")
+            if port == "" { port = "9001" }
+            http.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+              fmt.Fprintln(w, "pong")
+            })
+            _ = http.ListenAndServe(":"+port, nil)
+          }
+  preconditions:
+    # Already-running deployment as a starting point so the scenario
+    # focuses on stop/restart, not the initial bring-up.
+    - kind: deployment
+      name: ping
+      source_kind: code
+      source_ref: ping
+      framework: go
+      build: true
+      release: true
+
+directive: |
+  The "ping" deployment is currently live. We need to take it down
+  briefly for a maintenance window and then bring it back up using
+  the same build (no rebuild needed).
+
+  Concretely:
+    1. Call deploy_status with name="ping" and note the current
+       release_id and build_id.
+    2. Call deploy_stop with name="ping" to take it down.
+    3. Confirm with deploy_status that current_release is null (or
+       its status is "stopped").
+    4. Call deploy_release with the build_id from step 1 to bring
+       it back.
+    5. Stop.
+
+assert:
+  - tool_called: deploy_status
+  - tool_called: deploy_stop
+  - tool_called: deploy_release
+  - iterations_at_most: 14
+
+budget:
+  total_tokens: 22000
+  cost_usd: 0.30

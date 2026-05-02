@@ -1,0 +1,71 @@
+name: build-and-release
+description: |
+  Agent wires up a deployment pointed at a code-app repo, builds it,
+  releases it live, and confirms the URL. The flagship "ship this
+  thing" flow.
+
+timeout: 180s
+max_iterations: 12
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  dependencies:
+    # The deploy app's `kind: code` source path needs the Code app
+    # alive and serving the export endpoint.
+    - name: code
+      path: ../code
+  fixtures:
+    # Pre-create a tiny Go repo via the Code app so the agent has
+    # something to deploy.
+    - kind: code_repo
+      slug: hello-go
+      framework: go
+      files:
+        go.mod: |
+          module hello
+
+          go 1.21
+        main.go: |
+          package main
+          import (
+            "fmt"
+            "net/http"
+            "os"
+          )
+          func main() {
+            port := os.Getenv("PORT")
+            if port == "" { port = "9000" }
+            http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+              fmt.Fprintln(w, "hello deploy")
+            })
+            _ = http.ListenAndServe(":"+port, nil)
+          }
+
+directive: |
+  We have a Code-app repo named "hello-go" with a tiny Go HTTP server
+  in it. Wire up a deployment for it called "hello" using the deploy
+  app, build the code, and release it live. Then confirm the URL.
+
+  Concretely:
+    1. Call deploy_init with name="hello", source_kind="code",
+       source_ref="hello-go", framework="go".
+    2. Call deploy_build with name="hello", release=true.
+    3. Call deploy_status with name="hello" and confirm the
+       current_release status is "live" and there's a URL.
+    4. Stop.
+
+assert:
+  - tool_called: deploy_init
+  - tool_called: deploy_build
+  - tool_called: deploy_status
+  - http: GET /api/apps/deploy/api/deployments
+    expect_status: 200
+    expect_count_at: deployments
+    expect_count_min: 1
+  - iterations_at_most: 12
+
+budget:
+  total_tokens: 22000
+  cost_usd: 0.30
