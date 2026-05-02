@@ -388,13 +388,69 @@ function DetailDrawer({
           </button>
         </div>
         <div className="p-4 space-y-4">
-          {(thumb || wave) && (
+          {row.has_video ? (
+            // Native player against the source. preload="metadata"
+            // means the browser fetches just the moov atom + first
+            // keyframe for the poster — opening the drawer is fast
+            // even on a multi-GB clip; clicking play streams the rest.
+            <video
+              src={`${previewBase}/${row.file_id}/content?${query}`}
+              poster={
+                thumb
+                  ? `${previewBase}/${thumb.storage_file_id}/content?${query}`
+                  : undefined
+              }
+              controls
+              preload="metadata"
+              playsInline
+              className="w-full rounded border border-border bg-black"
+            />
+          ) : row.has_audio ? (
+            <>
+              {wave && (
+                <img
+                  src={`${previewBase}/${wave.storage_file_id}/content?${query}`}
+                  alt="waveform"
+                  className="w-full rounded border border-border"
+                />
+              )}
+              <audio
+                src={`${previewBase}/${row.file_id}/content?${query}`}
+                controls
+                preload="metadata"
+                className="w-full"
+              />
+            </>
+          ) : row.is_image ? (
+            // Click to open full-resolution in a new tab; the inline
+            // preview keeps the drawer compact.
+            <a
+              href={`${previewBase}/${row.file_id}/content?${query}`}
+              target="_blank"
+              rel="noopener"
+              title="Open full image"
+            >
+              <img
+                src={`${previewBase}/${row.file_id}/content?${query}`}
+                alt=""
+                className="w-full rounded border border-border"
+              />
+            </a>
+          ) : (thumb || wave) ? (
             <img
               src={`${previewBase}/${(thumb || wave)!.storage_file_id}/content?${query}`}
               alt=""
               className="w-full rounded border border-border"
             />
-          )}
+          ) : null}
+          <a
+            href={`${previewBase}/${row.file_id}/content?${query}`}
+            target="_blank"
+            rel="noopener"
+            className="block text-xs text-accent hover:underline truncate"
+          >
+            Open source file ↗
+          </a>
           <Section title="Container">
             <Field label="format" value={row.format_name} />
             <Field label="duration" value={formatDuration(row.duration_ms)} />
