@@ -21,10 +21,10 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Error("db.migrations missing")
 	}
-	// v0.3 surface: 6 catalog read + 7 render submit + 3 render manage
-	// + 1 description setter = 17.
-	if len(m.Provides.MCPTools) != 17 {
-		t.Errorf("expected 17 MCP tools, got %d", len(m.Provides.MCPTools))
+	// v0.4 surface: 6 catalog read + 7 render submit + 3 render manage
+	// + 1 description setter + 3 transcript tools = 20.
+	if len(m.Provides.MCPTools) != 20 {
+		t.Errorf("expected 20 MCP tools, got %d", len(m.Provides.MCPTools))
 	}
 	if len(m.Provides.Workers) != 1 {
 		t.Errorf("expected 1 worker, got %d", len(m.Provides.Workers))

@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -105,6 +106,100 @@ func (c *storageClient) GetFile(ctx context.Context, projectID string, id int64)
 		return nil, fmt.Errorf("storage returned empty file row")
 	}
 	return &resp.File, nil
+}
+
+// GetSignedURL asks storage to mint a time-limited signed URL for a
+// file. Returned absolute URL is reachable from outside the cluster
+// (it embeds APTEVA_PUBLIC_URL); callers hand it to third-party
+// services like Deepgram that need to fetch the bytes themselves.
+//
+// Storage's files_get_url HTTP endpoint returns a path-only URL
+// (e.g. "/files/42/content?sig=..."). We prepend the platform's
+// public host so it's a real https:// URL.
+func (c *storageClient) GetSignedURL(ctx context.Context, projectID string, id int64, ttlSeconds int) (string, error) {
+	publicURL := strings.TrimRight(os.Getenv("APTEVA_PUBLIC_URL"), "/")
+	if publicURL == "" {
+		return "", errors.New("APTEVA_PUBLIC_URL not set — cannot mint a signed URL reachable from outside the cluster")
+	}
+	body, err := c.do(ctx, http.MethodPost, "/files/"+strconv.FormatInt(id, 10)+"/url",
+		map[string]any{"project_id": projectID, "ttl_seconds": ttlSeconds}, "application/json")
+	if err != nil {
+		// Older storage versions might not have the HTTP route; fall
+		// back to the MCP tool via the same gateway.
+		return c.signedURLViaMCP(ctx, projectID, id, ttlSeconds, publicURL)
+	}
+	var resp struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", fmt.Errorf("parse get_url: %w (body=%s)", err, string(body))
+	}
+	if resp.URL == "" {
+		return "", errors.New("storage returned empty url")
+	}
+	if strings.HasPrefix(resp.URL, "/") {
+		return publicURL + "/api/apps/storage" + resp.URL, nil
+	}
+	return resp.URL, nil
+}
+
+// signedURLViaMCP is the fallback when storage doesn't expose a
+// dedicated HTTP route for url-minting. Hits files_get_url via the
+// MCP endpoint — same gateway, JSON-RPC envelope.
+func (c *storageClient) signedURLViaMCP(ctx context.Context, projectID string, id int64, ttlSeconds int, publicURL string) (string, error) {
+	rpc := map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{
+			"name": "files_get_url",
+			"arguments": map[string]any{
+				"_project_id": projectID,
+				"id":          id,
+				"ttl_seconds": ttlSeconds,
+			},
+		},
+	}
+	if c.base == "" {
+		return "", errors.New("APTEVA_GATEWAY_URL not set")
+	}
+	raw, _ := json.Marshal(rpc)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.base+"/api/apps/storage/mcp", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("files_get_url: %d: %s", resp.StatusCode, body)
+	}
+	var env struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return "", fmt.Errorf("decode mcp envelope: %w", err)
+	}
+	if len(env.Result.Content) == 0 {
+		return "", errors.New("files_get_url returned empty result")
+	}
+	var inner map[string]any
+	if err := json.Unmarshal([]byte(env.Result.Content[0].Text), &inner); err != nil {
+		return "", fmt.Errorf("decode inner: %w", err)
+	}
+	urlStr, _ := inner["url"].(string)
+	if urlStr == "" {
+		return "", errors.New("files_get_url returned no url")
+	}
+	if strings.HasPrefix(urlStr, "/") {
+		return publicURL + "/api/apps/storage" + urlStr, nil
+	}
+	return urlStr, nil
 }
 
 // DownloadContent streams the raw bytes of a file to dst. Used by the

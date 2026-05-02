@@ -20,18 +20,21 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.3.0
+version: 0.4.0
 description: |
-  Catalog + cheap derivations + parameterised renders for media
-  files in storage. Indexes uploads (probe, thumbnail, waveform)
-  and runs on-demand edits (trim, resize, transcode, concat, crop,
-  extract_frame, audio_extract). Render outputs land back in
-  storage so they inherit signed-URL + visibility for free.
+  Catalog + derivations + renders + transcripts for media files in
+  storage. Indexes uploads (probe, thumbnail, waveform), runs
+  on-demand edits (trim, resize, transcode, concat, crop,
+  extract_frame, audio_extract), and auto-transcribes audio + video
+  via Deepgram when the integration is bound. Outputs all flow
+  through storage.
 author: Apteva
 scopes: [project, global]
 requires:
   permissions:
     - db.write.app
+    - net.egress
+    - platform.connections.execute
   apps:
     - name: storage
       version: ">=0.1.0"
@@ -40,6 +43,17 @@ requires:
       version: ">=0.1.0"
       optional: true
       reason: optional — schedule recurring or delayed renders against media's HTTP routes
+  integrations:
+    - role: transcripts
+      kind: integration
+      compatible_slugs: [deepgram]
+      capabilities: [audio.transcribe]
+      tools:
+        audio.transcribe: listen
+        transcribe: listen
+      required: false
+      label: "Speech-to-text provider"
+      hint: "Connect Deepgram to auto-transcribe audio + video. Without it, transcripts stay manual (media_set_transcript)."
 provides:
   http_routes:
     - prefix: /
@@ -61,6 +75,9 @@ provides:
     - { name: media_list_renders,    description: "List renders filtered by status / operation." }
     - { name: media_cancel_render,   description: "Cancel a pending or running render. Idempotent." }
     - { name: media_set_description, description: "Set title / description / alt_text on a media row. Partial update; omitted fields preserved." }
+    - { name: media_transcribe,      description: "Queue a transcription for one media file. Returns transcript_id; poll media_get_transcript." }
+    - { name: media_get_transcript,  description: "Status + text + segments of one file's transcript." }
+    - { name: media_set_transcript,  description: "Upsert an externally-produced transcript (imported / manual). Skips the auto pipeline." }
   workers:
     - name: indexer
       schedule: "@every 30s"
@@ -112,6 +129,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// is N hot goroutines.
 	poolSize := readConfigInt("render_pool_size", 2)
 	startRenderPool(ctx, poolSize)
+	// Auto-transcriber: separate goroutine, isolated from indexer +
+	// render pool. Skips itself if transcribe_auto=false; degrades
+	// gracefully when the deepgram integration isn't bound.
+	startTranscriber(ctx)
 	return nil
 }
 
@@ -348,6 +369,33 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"file_id"}),
 			Handler: a.toolSetDescription,
 		},
+		{
+			Name:        "media_transcribe",
+			Description: "Queue a transcription for one media file. Inserts a pending row that the transcriber picks up on its next tick. force=true also re-queues already-ok rows (useful when you want a re-run after model upgrades or to retry a failed attempt). Args: file_id, force?.",
+			InputSchema: schemaObject(map[string]any{
+				"file_id": map[string]any{"type": "string"},
+				"force":   map[string]any{"type": "boolean"},
+			}, []string{"file_id"}),
+			Handler: a.toolTranscribe,
+		},
+		{
+			Name:        "media_get_transcript",
+			Description: "Fetch one file's transcript (status, language, full text, segments).",
+			InputSchema: schemaObject(map[string]any{"file_id": map[string]any{"type": "string"}}, []string{"file_id"}),
+			Handler:     a.toolGetTranscript,
+		},
+		{
+			Name:        "media_set_transcript",
+			Description: "Upsert an externally-produced transcript (e.g. uploaded captions, third-party tool). Bypasses the auto pipeline. Args: file_id, text, language?, segments? (array of {start_ms, end_ms, text, speaker?}), provider?.",
+			InputSchema: schemaObject(map[string]any{
+				"file_id":  map[string]any{"type": "string"},
+				"text":     map[string]any{"type": "string"},
+				"language": map[string]any{"type": "string"},
+				"segments": map[string]any{"type": "array"},
+				"provider": map[string]any{"type": "string"},
+			}, []string{"file_id", "text"}),
+			Handler: a.toolSetTranscript,
+		},
 	}
 }
 
@@ -430,6 +478,104 @@ func (a *App) toolSetDescription(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	return map[string]any{"found": true, "file_id": fid, "updated": true}, nil
+}
+
+// toolTranscribe queues a pending transcript row. force=true also
+// re-queues rows that are already ok (useful for retries / model
+// upgrades). The actual work happens in the transcriber goroutine.
+func (a *App) toolTranscribe(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	fid, _ := args["file_id"].(string)
+	if fid == "" {
+		return nil, errors.New("file_id required")
+	}
+	force, _ := args["force"].(bool)
+	if force {
+		// Wipe any existing row so insertPendingTranscript treats this
+		// as a fresh queue entry. The auto-policy uses ON CONFLICT to
+		// avoid disturbing in-flight rows; manual force is the explicit
+		// override.
+		if _, err := ctx.AppDB().Exec(`DELETE FROM transcripts WHERE project_id=? AND file_id=?`, pid, fid); err != nil {
+			return nil, err
+		}
+	}
+	if err := insertPendingTranscript(ctx.AppDB(), pid, fid, "manual"); err != nil {
+		return nil, err
+	}
+	return map[string]any{"file_id": fid, "status": "pending"}, nil
+}
+
+func (a *App) toolGetTranscript(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	fid, _ := args["file_id"].(string)
+	if fid == "" {
+		return nil, errors.New("file_id required")
+	}
+	t, err := getTranscript(ctx.AppDB(), pid, fid)
+	if err != nil {
+		if notFound(err) {
+			return map[string]any{"found": false}, nil
+		}
+		return nil, err
+	}
+	return map[string]any{"found": true, "transcript": t}, nil
+}
+
+// toolSetTranscript installs a pre-made transcript without going
+// through Deepgram. Use case: imported captions, manual upload from
+// the panel, or testing. Marks the row as ok directly.
+func (a *App) toolSetTranscript(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	fid, _ := args["file_id"].(string)
+	if fid == "" {
+		return nil, errors.New("file_id required")
+	}
+	text, _ := args["text"].(string)
+	if text == "" {
+		return nil, errors.New("text required")
+	}
+	provider, _ := args["provider"].(string)
+	if provider == "" {
+		provider = "imported"
+	}
+	t := &TranscriptRow{
+		FileID:     fid,
+		ProjectID:  pid,
+		Status:     "ok",
+		Text:       text,
+		Provider:   provider,
+		SourceKind: "imported",
+	}
+	if v, ok := args["language"].(string); ok {
+		t.Language = v
+	}
+	// Segments come over the wire as []any of map[string]any; round-
+	// trip through json so the persisted JSON matches our shape.
+	if raw, ok := args["segments"]; ok && raw != nil {
+		bb, err := json.Marshal(raw)
+		if err == nil && len(bb) > 0 {
+			t.Segments = bb
+		}
+	}
+	// Snapshot media duration when we can — keeps the row coherent
+	// with the catalog without forcing the caller to provide it.
+	if media, mErr := getMedia(ctx.AppDB(), pid, fid); mErr == nil {
+		t.DurationMs = media.DurationMs
+		t.SourceSHA256 = media.SourceSHA256
+	}
+	if err := upsertTranscript(ctx.AppDB(), t); err != nil {
+		return nil, err
+	}
+	return map[string]any{"file_id": fid, "status": "ok"}, nil
 }
 
 func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {

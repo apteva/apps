@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.3.0
+version: 0.4.0
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -28,6 +28,8 @@ min_apteva_version: "0.10.0"
 requires:
   permissions:
     - db.write.app
+    - net.egress
+    - platform.connections.execute
   apps:
     - name: storage
       version: ">=0.1.0"
@@ -36,6 +38,17 @@ requires:
       version: ">=0.1.0"
       optional: true
       reason: optional — recurring or delayed renders schedule via jobs against media's HTTP routes
+  integrations:
+    - role: transcripts
+      kind: integration
+      compatible_slugs: [deepgram]
+      capabilities: [audio.transcribe]
+      tools:
+        audio.transcribe: listen
+        transcribe: listen
+      required: false
+      label: "Speech-to-text provider"
+      hint: "Connect Deepgram to auto-transcribe audio + video. Without it, transcripts stay manual."
 
 provides:
   http_routes:
@@ -82,6 +95,14 @@ provides:
     # Catalog metadata — agent/user-supplied prose on media rows.
     - name: media_set_description
       description: Set title / description / alt_text on a media row. Partial update (omitted fields preserved). Empty string clears.
+
+    # Transcripts — speech-to-text for audio + video (Deepgram-powered).
+    - name: media_transcribe
+      description: Queue a transcription. force=true re-queues already-ok rows. Returns immediately; transcriber drains the queue async.
+    - name: media_get_transcript
+      description: Status / language / text / segments for one file's transcript.
+    - name: media_set_transcript
+      description: Upsert a hand-supplied transcript (imported / manual). Bypasses the auto pipeline entirely.
 
   workers:
     - name: indexer
@@ -175,5 +196,47 @@ config_schema:
     default: "/renders/"
     label: Render output folder
     description: Storage folder where finished renders are uploaded.
+
+  # Transcripts (new in v0.4)
+  - name: transcribe_auto
+    type: text
+    default: "true"
+    label: Auto-transcribe
+    description: When true, the transcriber sweeps every transcribe_poll_seconds and queues new audio/video files. Set false for manual-only (media_transcribe still works).
+  - name: transcribe_poll_seconds
+    type: text
+    default: "60"
+    label: Transcriber poll interval (seconds)
+    description: How often to scan media for new candidates. Don't set under 30s — Deepgram bills per request.
+  - name: transcribe_batch_size
+    type: text
+    default: "10"
+    label: Transcriber batch size
+    description: Maximum new pending rows queued per sweep tick. Drains the queue one row at a time afterwards.
+  - name: transcribe_model
+    type: text
+    default: "nova-3"
+    label: Deepgram model
+    description: Speech-to-text model. nova-3 = latest, nova-2 = cheaper, whisper-cloud = OpenAI Whisper via Deepgram. See https://developers.deepgram.com/docs/models-languages-overview.
+  - name: transcribe_language
+    type: text
+    default: "auto"
+    label: Language
+    description: BCP-47 language tag (en, fr, es, de, ja, zh, …) or "auto" to detect.
+  - name: transcribe_diarize
+    type: text
+    default: "false"
+    label: Speaker diarisation
+    description: Mark each segment with a speaker number. Useful for multi-speaker content but bloats the response — leave off otherwise.
+  - name: transcribe_max_duration_minutes
+    type: text
+    default: "120"
+    label: Max source duration (minutes)
+    description: Files longer than this are marked status=skipped, not transcribed automatically. Manual media_transcribe ignores this cap.
+  - name: transcribe_timeout_seconds
+    type: text
+    default: "600"
+    label: Transcription timeout (seconds)
+    description: Hard wall-clock cap per Deepgram call. Failed mid-call rows are marked failed.
 
 upgrade_policy: auto-patch
