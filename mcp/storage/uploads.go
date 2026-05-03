@@ -453,16 +453,17 @@ func (a *App) handleUploadComplete(w http.ResponseWriter, r *http.Request, id st
 	}
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&body)
 
-	// Stream-concat parts into the canonical content path, hashing
-	// as we go. We don't know the SHA256 yet, so write to a temp
-	// file and rename after we know the hash + dedup answer.
+	// Stream-concat parts into a local scratch file, hashing as we
+	// go. We don't know the SHA256 yet, so we can't compute the
+	// final object key — write to scratch first, hand the bytes to
+	// the backend after the hash is known.
 	tmpKey := newUploadID() + extOf(meta.Filename, meta.ContentType)
-	tmpDir := blobsDir(ctx)
+	tmpDir := uploadsDir(ctx)
 	if err := os.MkdirAll(tmpDir, 0755); err != nil {
-		httpErr(w, http.StatusInternalServerError, "mkdir blobs: "+err.Error())
+		httpErr(w, http.StatusInternalServerError, "mkdir scratch: "+err.Error())
 		return
 	}
-	tmpPath := filepath.Join(tmpDir, tmpKey+".tmp")
+	tmpPath := filepath.Join(tmpDir, tmpKey+".stitch")
 	out, err := os.Create(tmpPath)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, "create blob: "+err.Error())
@@ -517,21 +518,32 @@ func (a *App) handleUploadComplete(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
-	// Move the temp blob into the canonical sha-prefixed location.
-	finalDir := filepath.Join(blobsDir(ctx), finalSHA[:2])
-	if err := os.MkdirAll(finalDir, 0755); err != nil {
+	// Hand the stitched scratch file to the backend. Disk does an
+	// io.Copy into its canonical layout; s3 streams the PUT. Either
+	// way, the scratch file is removed once the backend has the bytes.
+	stitched, err := os.Open(tmpPath)
+	if err != nil {
 		_ = os.Remove(tmpPath)
-		httpErr(w, http.StatusInternalServerError, "mkdir final: "+err.Error())
+		httpErr(w, http.StatusInternalServerError, "reopen stitch: "+err.Error())
 		return
 	}
-	finalPath := filepath.Join(finalDir, tmpKey)
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		if cerr := copyAndRemove(tmpPath, finalPath); cerr != nil {
-			_ = os.Remove(tmpPath)
-			httpErr(w, http.StatusInternalServerError, "rename: "+err.Error())
-			return
-		}
+	st, err := stitched.Stat()
+	if err != nil {
+		stitched.Close()
+		_ = os.Remove(tmpPath)
+		httpErr(w, http.StatusInternalServerError, "stat stitch: "+err.Error())
+		return
 	}
+	finalKey := objectKey(finalSHA, tmpKey)
+	if err := backend().Put(r.Context(), finalKey, meta.ContentType, stitched, st.Size()); err != nil {
+		stitched.Close()
+		_ = os.Remove(tmpPath)
+		httpErr(w, http.StatusInternalServerError, "backend put: "+err.Error())
+		return
+	}
+	stitched.Close()
+	_ = os.Remove(tmpPath)
+
 	tagsJSON, _ := json.Marshal(meta.Tags)
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO files
@@ -542,7 +554,7 @@ func (a *App) handleUploadComplete(w http.ResponseWriter, r *http.Request, id st
 		finalSHA, callerLabel(), "human", string(tagsJSON), meta.Visibility,
 	)
 	if err != nil {
-		_ = os.Remove(finalPath)
+		_ = backend().Delete(r.Context(), finalKey)
 		httpErr(w, http.StatusInternalServerError, "insert: "+err.Error())
 		return
 	}

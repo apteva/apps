@@ -1,15 +1,22 @@
-// Storage v0.1 — file storage with virtual folders, signed URLs, dedup hints.
+// Storage v0.6 — file storage with pluggable backend (disk or
+// S3-compatible), virtual folders, signed URLs, dedup.
 //
-// Disk layout:
+// Blob layout (key, identical on both backends):
 //
-//   <STORAGE_BLOBS_DIR>/<sha256[:2]>/<storage_key>
+//   <sha256[:2]>/<storage_key>
+//
+// Disk: relative to blobsDir (filesystem path). S3: bucket-relative
+// object key. The two-byte hex prefix exists for the disk's benefit
+// (avoids 1M files in one directory) and is harmless on S3.
 //
 // Each upload writes a fresh storage_key; sha256 is recorded for ETag
-// and dedup checks but bytes are not yet shared between rows. v0.2
+// and dedup checks but bytes are not yet shared between rows. v0.7
 // reference-counts and reclaims.
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
@@ -36,10 +43,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: storage
 display_name: Storage
-version: 0.5.2
+version: 0.6.0
 description: |
-  File storage with virtual folders, signed URLs, dedup. Local-disk
-  backend; cloud backend slot reserved for v0.2.
+  File storage with virtual folders, signed URLs, dedup. Pluggable
+  backend: local disk by default, S3-compatible (AWS / R2 / B2 /
+  Wasabi / MinIO) when configured. Direct presigned uploads +
+  downloads when on S3 — bytes never touch the storage container.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -96,6 +105,22 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("storage requires a db block")
 	}
 	globalCtx = ctx
+
+	// Resolve the configured backend (disk by default, s3 when wired
+	// via the install's config_schema). Boot fails loud here when s3
+	// creds are missing — better than silently routing writes to the
+	// wrong place.
+	be, err := initBackend(ctx)
+	if err != nil {
+		return fmt.Errorf("init backend: %w", err)
+	}
+	globalBackend = be
+
+	// uploads scratch + (for disk) blobs root always live on the
+	// local FS — uploads.go stitches parts there before handing the
+	// final blob to the backend. On s3 installs the blobs dir is
+	// effectively empty (only used as a transient stitch target);
+	// keeping the mkdir keeps boot simple.
 	if err := os.MkdirAll(blobsDir(ctx), 0755); err != nil {
 		return fmt.Errorf("mkdir blobs: %w", err)
 	}
@@ -104,6 +129,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	ctx.Logger().Info("storage mounted",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
+		"backend", be.Kind(),
 		"blobs_dir", blobsDir(ctx),
 		"uploads_dir", uploadsDir(ctx))
 
@@ -115,10 +141,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// fine.
 	go func() {
 		sweepStaleUploads(ctx)
+		sweepStalePendingUploads(ctx)
 		t := time.NewTicker(time.Hour)
 		defer t.Stop()
 		for range t.C {
 			sweepStaleUploads(ctx)
+			sweepStalePendingUploads(ctx)
 		}
 	}()
 	return nil
@@ -472,6 +500,27 @@ func (a *App) toolGetURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		ttl = defaultSignedTTL(ctx)
 	}
 	exp := time.Now().Add(time.Duration(ttl) * time.Second).Unix()
+
+	// On s3-backed installs, mint a presigned S3 URL directly so
+	// downstream consumers (Deepgram, Cloudinary, Mux, browser
+	// players) fetch bytes from the bucket without bouncing through
+	// our gateway. Disk falls back to the HMAC path-style URL the
+	// gateway resolves locally — same as pre-v0.6.
+	if be := backend(); be.Kind() == "s3" {
+		key := objectKey(f.SHA256, f.StorageKey)
+		url, err := be.PresignGet(context.Background(), key, f.Name, f.ContentType,
+			time.Duration(ttl)*time.Second)
+		if err != nil {
+			return nil, fmt.Errorf("presign: %w", err)
+		}
+		return map[string]any{
+			"url":        url,
+			"expires_at": exp,
+			"file_id":    f.ID,
+			"presigned":  true,
+		}, nil
+	}
+
 	sig := signFile(f.ID, exp)
 	url := fmt.Sprintf("/files/%d/content?sig=%s&exp=%d", f.ID, sig, exp)
 	return map[string]any{"url": url, "expires_at": exp, "file_id": f.ID}, nil
@@ -712,6 +761,15 @@ func (a *App) handleFilesCollection(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleFilesItem(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/files/")
+
+	// Direct presigned-upload protocol (Phase 3): /files/init and
+	// /files/{upload_id}/finalize live in this path namespace alongside
+	// the numeric file_id routes. Try those first; on miss, fall
+	// through to the per-file routes below.
+	if a.dispatchDirectUpload(w, r, rest) {
+		return
+	}
+
 	parts := strings.SplitN(rest, "/", 2)
 	id, _ := strconv.ParseInt(parts[0], 10, 64)
 	if id == 0 {
@@ -948,9 +1006,23 @@ func (a *App) httpServeContent(w http.ResponseWriter, r *http.Request, id int64)
 		w.Header().Set("Content-Type", ct)
 	}
 
-	// http.ServeFile gives us Range + Last-Modified + 200 OK for free.
-	path := blobPath(ctx, f.SHA256, f.StorageKey)
-	http.ServeFile(w, r, path)
+	key := objectKey(f.SHA256, f.StorageKey)
+
+	// Disk: serve via http.ServeFile (Range + Last-Modified + 304 for
+	// free). S3 / remote: 302-redirect to a freshly-minted presigned
+	// URL so bytes never proxy through us. The TTL is short — long
+	// enough to cover slow downloads, short enough that the URL
+	// shouldn't be useful past the request that minted it.
+	if path, ok := backend().LocalPath(key); ok {
+		http.ServeFile(w, r, path)
+		return
+	}
+	url, err := backend().PresignGet(r.Context(), key, f.Name, f.ContentType, 15*time.Minute)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, "presign: "+err.Error())
+		return
+	}
+	http.Redirect(w, r, url, http.StatusFound)
 }
 
 func (a *App) httpPatch(w http.ResponseWriter, r *http.Request, id int64) {
@@ -1065,12 +1137,14 @@ func saveBytes(ctx *sdk.AppCtx, pid string, in uploadInput, body []byte) (*File,
 	}
 
 	key := uuid.NewString() + extOf(in.Name, in.ContentType)
-	dir := filepath.Join(blobsDir(ctx), hex[:2])
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, false, err
-	}
-	if err := os.WriteFile(filepath.Join(dir, key), body, 0644); err != nil {
-		return nil, false, err
+	if err := backend().Put(
+		context.Background(),
+		objectKey(hex, key),
+		in.ContentType,
+		bytes.NewReader(body),
+		int64(len(body)),
+	); err != nil {
+		return nil, false, fmt.Errorf("backend put: %w", err)
 	}
 	tagsJSON, _ := json.Marshal(in.Tags)
 	if in.Visibility == "" {
@@ -1382,15 +1456,14 @@ func deleteFile(ctx *sdk.AppCtx, pid string, id int64, keepRecord bool) (bool, e
 	if err := dbHardDelete(ctx.AppDB(), pid, id); err != nil {
 		return false, err
 	}
-	// Best-effort blob removal. Failure here doesn't roll back the
-	// row deletion (rolling back would re-introduce a row pointing
-	// at potentially-already-gone bytes — worse). The blob becomes
-	// an orphan a future sweep can reclaim.
-	if path := blobPath(ctx, prior.SHA256, prior.StorageKey); path != "" {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			ctx.Logger().Warn("blob removal failed; row deleted but bytes remain",
-				"id", id, "path", path, "err", err)
-		}
+	// Best-effort blob removal via the backend. Failure here doesn't
+	// roll back the row deletion (rolling back would re-introduce a
+	// row pointing at potentially-already-gone bytes — worse). The
+	// blob becomes an orphan a future sweep can reclaim.
+	key := objectKey(prior.SHA256, prior.StorageKey)
+	if err := backend().Delete(context.Background(), key); err != nil {
+		ctx.Logger().Warn("blob removal failed; row deleted but bytes remain",
+			"id", id, "key", key, "err", err)
 	}
 	emitFileEvent(ctx, "file.deleted", prior, false)
 	return true, nil

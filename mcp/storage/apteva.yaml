@@ -2,14 +2,16 @@ schema: apteva-app/v1
 
 name: storage
 display_name: Storage
-version: 0.5.2
+version: 0.6.0
 description: |
   File storage for Apteva agents and human teams. Upload bytes,
-  organise into folders, share via signed URLs. Backed by local disk
-  in v0.1; the storage_key abstraction leaves room for an S3 / R2 /
-  MinIO backend later. Three visibility tiers: private (auth-only),
-  signed (HMAC URL with expiry), public (open). Range requests, ETag,
-  Cache-Control all set per file.
+  organise into folders, share via signed URLs. Pluggable backend:
+  local disk by default, S3-compatible (AWS / R2 / B2 / Wasabi /
+  MinIO) when configured. On S3, presigned upload + download URLs
+  let clients transfer bytes directly to/from the bucket — bytes
+  never proxy through this container. Three visibility tiers:
+  private (auth-only), signed (time-limited URL), public (open).
+  Range requests, ETag, Cache-Control all set per file.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/storage
@@ -77,6 +79,24 @@ provides:
       # tile — even on a brand-new install with zero files.
       preview_props:
         preview: true
+  skills:
+    # Foundational "how this app thinks" skill the agent loads
+    # whenever it's working with storage at all. Folder conventions,
+    # visibility tiers, dedup model, soft/hard delete defaults — the
+    # things tool descriptions can't carry. body_file is parsed at
+    # install time as canonical SKILL.md (frontmatter + body); the
+    # frontmatter fields here are kept as a sanity-check / preview
+    # for the dashboard.
+    - name: how-to-use-storage
+      command: /storage
+      body_file: skills/how-to-use-storage.md
+      description: |
+        Storage's mental model + conventions. Load when working
+        with files at all. Triggers on: "upload", "find a file",
+        "share", "organise files", or any storage tool call.
+      metadata:
+        category: storage
+        icon: 🗂️
 
 runtime:
   kind: source
@@ -109,5 +129,52 @@ config_schema:
     default: "100"
     label: Max upload size (MB)
     description: Hard ceiling for files_upload + multipart uploads. v0.1 stores in memory before write — keep it modest.
+
+  # Backend (new in v0.6) ─ leave at "disk" for the local filesystem
+  # default. Switching to "s3" requires the s3_* fields below; boot
+  # fails if any are missing.
+  - name: backend
+    type: select
+    options: [disk, s3]
+    default: disk
+    label: Backend
+    description: Where blob bytes live. "disk" = local filesystem (default). "s3" = any S3-compatible service (AWS S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, …). Switch only on a freshly-deployed install — existing blobs are not migrated automatically.
+  - name: s3_endpoint
+    type: text
+    default: ""
+    label: S3 endpoint
+    description: Hostname of the S3 endpoint (no scheme). AWS = "s3.amazonaws.com" or region-specific "s3.<region>.amazonaws.com". R2 = "<account-id>.r2.cloudflarestorage.com". MinIO = "minio.example.com:9000". Required when backend=s3.
+  - name: s3_region
+    type: text
+    default: "us-east-1"
+    label: S3 region
+    description: SigV4 signing region. AWS uses the bucket's region; R2 = "auto"; B2 = "us-east-005" (or your region); MinIO ignores it but a value is still required.
+  - name: s3_bucket
+    type: text
+    default: ""
+    label: S3 bucket
+    description: Bucket name. Must exist before storage starts — we don't auto-create.
+  - name: s3_access_key
+    type: text
+    default: ""
+    label: S3 access key
+    description: Access key ID. R2 = the API token's "Access Key ID"; B2 = "keyID"; AWS = IAM access key. Use a key scoped to this single bucket.
+  - name: s3_secret_key
+    type: password
+    default: ""
+    label: S3 secret key
+    description: Paired secret. Stored in the install's encrypted config blob, never logged.
+  - name: s3_use_ssl
+    type: select
+    options: ["true", "false"]
+    default: "true"
+    label: S3 over HTTPS
+    description: Set false only for plain-HTTP MinIO in dev. Production must stay true.
+  - name: s3_force_path_style
+    type: select
+    options: ["false", "true"]
+    default: "false"
+    label: Force path-style addressing
+    description: AWS + R2 + B2 use virtual-host style ("bucket.endpoint/key") and want this false. MinIO and some custom Ceph deployments need true ("endpoint/bucket/key").
 
 upgrade_policy: auto-patch
