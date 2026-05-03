@@ -187,6 +187,17 @@ func processOne(
 			logger.Warn("waveform upload failed", "err", err)
 		}
 	}
+
+	// Wake the describer NOW for files that don't need a transcript
+	// — image, silent video, anything without audio. Files with
+	// audio get described later by the transcriber's notify (after
+	// the transcript lands), so the LLM call gets the richer
+	// multimodal {thumbnail + transcript} input instead of a
+	// vision-only call we'd later overwrite. Periodic sweep is the
+	// safety net for both paths.
+	if !probe.HasAudio {
+		notifyDescriber(fid)
+	}
 }
 
 // uploadAndRecord pushes the derivation file to storage and records

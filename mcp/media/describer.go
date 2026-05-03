@@ -34,6 +34,32 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+// describerNotify carries file_ids that need a describer pass NOW
+// rather than waiting for the next periodic tick. Buffered so a
+// burst of indexer/transcriber writes never blocks the producer;
+// notifyDescriber drops on overflow because the periodic sweep is
+// the safety net for anything we miss.
+//
+// Set in startDescriber; nil otherwise (auto_describe_enabled=false
+// installs don't run the loop). notifyDescriber is a no-op then.
+var describerNotify chan string
+
+// notifyDescriber is called by the indexer + transcriber when a
+// file might be newly eligible for description (probe just
+// completed, transcript just landed, etc.). Non-blocking — the
+// channel buffer is bounded so a backlog falls back to the
+// periodic sweep.
+func notifyDescriber(fileID string) {
+	if describerNotify == nil || fileID == "" {
+		return
+	}
+	select {
+	case describerNotify <- fileID:
+	default:
+		// queue full — periodic sweep will pick it up on the next tick
+	}
+}
+
 // startDescriber starts the auto-describer goroutine. Honours
 // auto_describe_enabled — when false, manual media_describe still
 // works but the sweep doesn't run.
@@ -43,6 +69,7 @@ func startDescriber(app *sdk.AppCtx) {
 		app.Logger().Info("auto_describe_enabled=false — auto-describer disabled (manual still works)")
 		return
 	}
+	describerNotify = make(chan string, 100)
 	go describerLoop(app)
 	app.Logger().Info("auto-describer started")
 }
@@ -62,9 +89,33 @@ func describerLoop(app *sdk.AppCtx) {
 			log.Info("auto-describer stopping")
 			return
 		case <-tick.C:
+			// Periodic safety-net sweep. Picks up rows the
+			// notify path missed (channel overflow, app restart
+			// while file was queued, integration newly bound, etc).
 			describerSweep(app)
+		case fid := <-describerNotify:
+			// Indexer or transcriber just made this file eligible.
+			// Process just THIS row immediately rather than wait
+			// up to interval seconds for the next tick.
+			describerOne(app, fid)
 		}
 	}
+}
+
+// describerOne runs the describer for a single file_id signalled
+// via notifyDescriber. Goes through runOneDescription so all the
+// normal guards (human-set check, cooldown, integration binding,
+// no-input skip) still apply.
+func describerOne(app *sdk.AppCtx, fileID string) {
+	pid := os.Getenv("APTEVA_PROJECT_ID")
+	if pid == "" || fileID == "" {
+		return
+	}
+	bound := app.IntegrationFor("descriptions")
+	if bound == nil {
+		return
+	}
+	runOneDescription(app, bound, pid, fileID)
 }
 
 func describerSweep(app *sdk.AppCtx) {

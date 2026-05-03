@@ -243,6 +243,12 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 		"language": parsed.Language,
 		"chars":    len(parsed.Text),
 	})
+
+	// Wake the describer immediately — for audio + video files we
+	// deliberately wait for the transcript before describing so the
+	// LLM call gets the multimodal {thumbnail + transcript} input.
+	// No-op when describer isn't running or queue is full.
+	notifyDescriber(row.FileID)
 }
 
 // ─── Deepgram response parsing ─────────────────────────────────────

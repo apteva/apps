@@ -10,9 +10,14 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
+
+func timeAfter50ms() <-chan time.Time {
+	return time.After(50 * time.Millisecond)
+}
 
 // boundOpencodeGo is the describer's equivalent of boundDeepgram —
 // stub a connection bound to the descriptions role.
@@ -364,6 +369,73 @@ func TestRunOneDescription_NoUsableInput_SkipsWithoutMarking(t *testing.T) {
 	}
 	if len(stub.ExecuteCalls) != 0 {
 		t.Errorf("Execute called when there's nothing to describe: %v", stub.ExecuteCalls)
+	}
+}
+
+// TestNotifyDescriber_RunsImmediately — the event-driven trigger
+// path. Pushing a file_id onto describerNotify causes describerOne
+// to run that single row without waiting for the periodic tick.
+func TestNotifyDescriber_RunsImmediately(t *testing.T) {
+	stub := boundOpencodeGo()
+	stub.executeResp = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: canonOK("a hot description"),
+	}
+	ctx := newTestCtxWithPlatform(t, stub)
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha")
+	upsertTranscript(ctx.AppDB(), &TranscriptRow{
+		FileID: "1", ProjectID: testProj, Status: "ok",
+		Text: "hello there",
+	})
+
+	// Drive describerOne directly — what describerLoop does on
+	// a notify. No goroutine, no waiting on a real channel.
+	app := &App{}
+	_ = app
+	describerOne(ctx, "1")
+
+	got, _ := getMedia(ctx.AppDB(), testProj, "1")
+	if got.Description == "" {
+		t.Errorf("notify path didn't write description: %+v", got)
+	}
+	if len(stub.ExecuteCalls) != 1 {
+		t.Errorf("expected 1 LLM call from notify, got %d", len(stub.ExecuteCalls))
+	}
+}
+
+func TestNotifyDescriber_NoOpsWhenNotStarted(t *testing.T) {
+	// describerNotify is nil before startDescriber runs. Calling
+	// notifyDescriber must not panic — indexer/transcriber call it
+	// unconditionally. Save + restore in case any other test set
+	// it (test order independence).
+	saved := describerNotify
+	describerNotify = nil
+	defer func() { describerNotify = saved }()
+	notifyDescriber("anything") // should silently no-op
+}
+
+func TestNotifyDescriber_DropsOnFullQueue(t *testing.T) {
+	// Channel is buffered (capacity 100). Producer must not block
+	// when consumer is slow / queue full — we'd rather drop and
+	// let the periodic sweep catch up than wedge the indexer.
+	saved := describerNotify
+	describerNotify = make(chan string, 1)
+	defer func() {
+		describerNotify = saved
+	}()
+
+	notifyDescriber("1") // fills the buffer
+	// Second call must not block (no consumer drained the channel).
+	done := make(chan struct{})
+	go func() {
+		notifyDescriber("2")
+		close(done)
+	}()
+	select {
+	case <-done:
+		// correct: dropped, didn't block
+	case <-timeAfter50ms():
+		t.Errorf("notifyDescriber blocked when queue was full")
 	}
 }
 
