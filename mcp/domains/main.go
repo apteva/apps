@@ -19,6 +19,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"net/http"
@@ -35,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: domains
 display_name: Domains
-version: 0.1.0
+version: 0.2.0
 description: |
   DNS + domain inventory. Other apps call this for record CRUD
   instead of talking to registrars directly. v0.1: Porkbun.
@@ -419,17 +420,34 @@ func (a *App) toolDomainGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{"domain": d, "found": true}, nil
 }
 
-// ─── DNS record CRUD via dns_provider ──────────────────────────────
+// ─── DNS provider abstraction ──────────────────────────────────────
+//
+// dnsProviderImpl hides per-provider differences (Porkbun's per-record
+// CRUD vs Namecheap's "set all hosts at once" model) behind a uniform
+// shape. The toolDomainRecords* handlers go through this interface;
+// new providers add a dnsProviderImpl and a slug case below.
 
-func providerCall(ctx *sdk.AppCtx, capability string, payload map[string]any) (json.RawMessage, error) {
+type dnsProviderImpl interface {
+	List(ctx *sdk.AppCtx, domain string) ([]DNSRecord, error)
+	Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value string, ttl int) (action string, err error)
+	Delete(ctx *sdk.AppCtx, domain, sub, rtype string) error
+}
+
+func (a *App) provider(ctx *sdk.AppCtx) (dnsProviderImpl, *sdk.BoundIntegration, error) {
 	bound := ctx.IntegrationFor("dns_provider")
 	if bound == nil {
-		return nil, errors.New("no dns_provider bound — install/select a Porkbun or Namecheap connection")
+		return nil, nil, errors.New("no dns_provider bound — install/select a Porkbun or Namecheap connection")
 	}
-	tool := bound.ToolFor(capability)
-	if tool == "" {
-		return nil, fmt.Errorf("dns_provider doesn't expose %q", capability)
+	switch bound.AppSlug {
+	case "porkbun":
+		return &porkbunProvider{bound: bound}, bound, nil
+	case "namecheap":
+		return &namecheapProvider{bound: bound}, bound, nil
 	}
+	return nil, bound, fmt.Errorf("unsupported dns_provider slug %q (compatible: porkbun, namecheap)", bound.AppSlug)
+}
+
+func providerCall(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, tool string, payload map[string]any) (json.RawMessage, error) {
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, tool, payload)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", tool, err)
@@ -444,17 +462,342 @@ func providerCall(ctx *sdk.AppCtx, capability string, payload map[string]any) (j
 	return res.Data, nil
 }
 
+// ─── Porkbun provider ──────────────────────────────────────────────
+
+type porkbunProvider struct{ bound *sdk.BoundIntegration }
+
+func (p *porkbunProvider) List(ctx *sdk.AppCtx, domain string) ([]DNSRecord, error) {
+	raw, err := providerCall(ctx, p.bound, "list_dns_records", map[string]any{"domain": domain})
+	if err != nil {
+		return nil, err
+	}
+	return parsePorkbunRecords(raw), nil
+}
+
+func (p *porkbunProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value string, ttl int) (string, error) {
+	existing, err := p.List(ctx, domain)
+	if err != nil {
+		return "", fmt.Errorf("list before upsert: %w", err)
+	}
+	wantFQ := domain
+	if sub != "" {
+		wantFQ = sub + "." + domain
+	}
+	matches := filterRecords(existing, func(r DNSRecord) bool {
+		if !strings.EqualFold(r.Type, rtype) {
+			return false
+		}
+		return strings.EqualFold(r.Name, wantFQ) || strings.EqualFold(r.Name, sub)
+	})
+
+	prio := ""
+	content := value
+	if rtype == "MX" {
+		parts := strings.SplitN(value, " ", 2)
+		if len(parts) == 2 {
+			prio = parts[0]
+			content = parts[1]
+		}
+	}
+
+	if len(matches) > 0 {
+		payload := map[string]any{
+			"domain":    domain,
+			"type":      rtype,
+			"subdomain": sub,
+			"content":   content,
+			"ttl":       fmt.Sprintf("%d", ttl),
+		}
+		if prio != "" {
+			payload["prio"] = prio
+		}
+		if _, err := providerCall(ctx, p.bound, "edit_dns_records_by_type", payload); err != nil {
+			return "", fmt.Errorf("edit: %w", err)
+		}
+		return "updated", nil
+	}
+	createPayload := map[string]any{
+		"domain":  domain,
+		"name":    sub,
+		"type":    rtype,
+		"content": content,
+		"ttl":     fmt.Sprintf("%d", ttl),
+	}
+	if prio != "" {
+		createPayload["prio"] = prio
+	}
+	if _, err := providerCall(ctx, p.bound, "create_dns_record", createPayload); err != nil {
+		return "", fmt.Errorf("create: %w", err)
+	}
+	return "created", nil
+}
+
+func (p *porkbunProvider) Delete(ctx *sdk.AppCtx, domain, sub, rtype string) error {
+	_, err := providerCall(ctx, p.bound, "delete_dns_records_by_type", map[string]any{
+		"domain":    domain,
+		"type":      rtype,
+		"subdomain": sub,
+	})
+	return err
+}
+
+// ─── Namecheap provider ────────────────────────────────────────────
+//
+// Namecheap's API model is read-modify-write: getHosts returns the
+// full list of records as XML; setHosts replaces them all atomically.
+// So upsert is "list, modify in memory, write back the full set" —
+// expensive (one round-trip per write) but correct.
+//
+// Namecheap also requires (a) IP whitelisting on the API key and
+// (b) the domain to be split into SLD ("acme") + TLD ("com").
+//
+// XML responses come back as JSON-encoded strings (the platform
+// runner falls through non-JSON Content-Type to string).
+
+type namecheapProvider struct{ bound *sdk.BoundIntegration }
+
+type namecheapHost struct {
+	HostID  string `xml:"HostId,attr" json:"-"`
+	Name    string `xml:"Name,attr"`
+	Type    string `xml:"Type,attr"`
+	Address string `xml:"Address,attr"`
+	TTL     string `xml:"TTL,attr"`
+	MXPref  string `xml:"MXPref,attr"`
+}
+
+type namecheapHostsResponse struct {
+	XMLName xml.Name `xml:"ApiResponse"`
+	Status  string   `xml:"Status,attr"`
+	Errors  struct {
+		Errors []struct {
+			Number string `xml:"Number,attr"`
+			Text   string `xml:",chardata"`
+		} `xml:"Error"`
+	} `xml:"Errors"`
+	CommandResponse struct {
+		Hosts struct {
+			Domain string          `xml:"Domain,attr"`
+			Hosts  []namecheapHost `xml:"host"`
+		} `xml:"DomainDNSGetHostsResult"`
+	} `xml:"CommandResponse"`
+}
+
+// xmlDataToString unwraps the runner's response shape: when the
+// integration's response Content-Type isn't JSON, the runner stores
+// the raw body as a JSON-encoded string. Strip the JSON quoting to
+// get the original XML bytes.
+func xmlDataToString(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 {
+		return "", errors.New("empty response")
+	}
+	if raw[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil {
+			return s, nil
+		}
+	}
+	return string(raw), nil
+}
+
+func (n *namecheapProvider) callGetHosts(ctx *sdk.AppCtx, domain string) (*namecheapHostsResponse, error) {
+	sld, tld := splitSLDTLD(domain)
+	if sld == "" || tld == "" {
+		return nil, fmt.Errorf("namecheap requires a 2-label domain (got %q)", domain)
+	}
+	raw, err := providerCall(ctx, n.bound, "get_dns_hosts", map[string]any{
+		"SLD": sld,
+		"TLD": tld,
+	})
+	if err != nil {
+		return nil, err
+	}
+	body, err := xmlDataToString(raw)
+	if err != nil {
+		return nil, err
+	}
+	var parsed namecheapHostsResponse
+	if err := xml.Unmarshal([]byte(body), &parsed); err != nil {
+		return nil, fmt.Errorf("parse namecheap XML: %w", err)
+	}
+	if strings.EqualFold(parsed.Status, "ERROR") || len(parsed.Errors.Errors) > 0 {
+		var msgs []string
+		for _, e := range parsed.Errors.Errors {
+			msgs = append(msgs, fmt.Sprintf("[%s] %s", e.Number, strings.TrimSpace(e.Text)))
+		}
+		return nil, fmt.Errorf("namecheap error: %s", strings.Join(msgs, "; "))
+	}
+	return &parsed, nil
+}
+
+func (n *namecheapProvider) List(ctx *sdk.AppCtx, domain string) ([]DNSRecord, error) {
+	parsed, err := n.callGetHosts(ctx, domain)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]DNSRecord, 0, len(parsed.CommandResponse.Hosts.Hosts))
+	for _, h := range parsed.CommandResponse.Hosts.Hosts {
+		ttl, _ := strconv.Atoi(h.TTL)
+		prio, _ := strconv.Atoi(h.MXPref)
+		out = append(out, DNSRecord{
+			ID:    h.HostID,
+			Name:  h.Name, // Namecheap returns the local part only ("@", "www", "mail")
+			Type:  strings.ToUpper(h.Type),
+			Value: h.Address,
+			TTL:   ttl,
+			Prio:  prio,
+		})
+	}
+	return out, nil
+}
+
+func (n *namecheapProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value string, ttl int) (string, error) {
+	parsed, err := n.callGetHosts(ctx, domain)
+	if err != nil {
+		return "", err
+	}
+	hosts := parsed.CommandResponse.Hosts.Hosts
+	wantName := sub
+	if wantName == "" {
+		wantName = "@"
+	}
+
+	prio := ""
+	content := value
+	if rtype == "MX" {
+		parts := strings.SplitN(value, " ", 2)
+		if len(parts) == 2 {
+			prio = parts[0]
+			content = parts[1]
+		}
+	}
+
+	// Find matching host(s) by (Name, Type) — Namecheap allows multiple
+	// records under the same name+type (round-robin A records, multi-MX),
+	// but our upsert deliberately collapses to one canonical record per
+	// (name, type). v0.2 can split this if needed.
+	keep := make([]namecheapHost, 0, len(hosts)+1)
+	matched := false
+	for _, h := range hosts {
+		if !matched && strings.EqualFold(h.Name, wantName) && strings.EqualFold(h.Type, rtype) {
+			matched = true
+			h.Address = content
+			h.TTL = fmt.Sprintf("%d", ttl)
+			if prio != "" {
+				h.MXPref = prio
+			}
+			keep = append(keep, h)
+			continue
+		}
+		// Drop additional duplicates so the canonical record wins.
+		if matched && strings.EqualFold(h.Name, wantName) && strings.EqualFold(h.Type, rtype) {
+			continue
+		}
+		keep = append(keep, h)
+	}
+	action := "updated"
+	if !matched {
+		newHost := namecheapHost{
+			Name:    wantName,
+			Type:    rtype,
+			Address: content,
+			TTL:     fmt.Sprintf("%d", ttl),
+		}
+		if prio != "" {
+			newHost.MXPref = prio
+		}
+		keep = append(keep, newHost)
+		action = "created"
+	}
+	if err := n.writeHosts(ctx, domain, keep); err != nil {
+		return "", err
+	}
+	return action, nil
+}
+
+func (n *namecheapProvider) Delete(ctx *sdk.AppCtx, domain, sub, rtype string) error {
+	parsed, err := n.callGetHosts(ctx, domain)
+	if err != nil {
+		return err
+	}
+	hosts := parsed.CommandResponse.Hosts.Hosts
+	wantName := sub
+	if wantName == "" {
+		wantName = "@"
+	}
+	keep := make([]namecheapHost, 0, len(hosts))
+	for _, h := range hosts {
+		if strings.EqualFold(h.Name, wantName) && strings.EqualFold(h.Type, rtype) {
+			continue
+		}
+		keep = append(keep, h)
+	}
+	return n.writeHosts(ctx, domain, keep)
+}
+
+// writeHosts replaces the entire DNS host list for a domain via
+// Namecheap's setHosts. Builds the numbered-form-param payload
+// (HostName1, RecordType1, Address1, TTL1, MXPref1, …).
+func (n *namecheapProvider) writeHosts(ctx *sdk.AppCtx, domain string, hosts []namecheapHost) error {
+	sld, tld := splitSLDTLD(domain)
+	if sld == "" || tld == "" {
+		return fmt.Errorf("namecheap requires a 2-label domain (got %q)", domain)
+	}
+	payload := map[string]any{
+		"SLD": sld,
+		"TLD": tld,
+	}
+	for i, h := range hosts {
+		idx := i + 1
+		payload[fmt.Sprintf("HostName%d", idx)] = h.Name
+		payload[fmt.Sprintf("RecordType%d", idx)] = h.Type
+		payload[fmt.Sprintf("Address%d", idx)] = h.Address
+		if h.TTL != "" {
+			payload[fmt.Sprintf("TTL%d", idx)] = h.TTL
+		}
+		if h.MXPref != "" {
+			payload[fmt.Sprintf("MXPref%d", idx)] = h.MXPref
+		}
+	}
+	raw, err := providerCall(ctx, n.bound, "set_dns_hosts", payload)
+	if err != nil {
+		return err
+	}
+	body, _ := xmlDataToString(raw)
+	if strings.Contains(body, "<Status>ERROR") || strings.Contains(strings.ToLower(body), "error") && strings.Contains(body, "<Number>") {
+		return fmt.Errorf("namecheap setHosts error: %s", truncate(body, 400))
+	}
+	return nil
+}
+
+// splitSLDTLD splits "acme.com" into ("acme", "com"). Subdomains are
+// rejected — Namecheap's API operates at the registered-domain level
+// and treats subdomains as host records (Name="mail" within domain
+// "acme.com"). For domains with multi-label TLDs ("acme.co.uk") this
+// splits at the first dot which is wrong — v0.1 returns an error
+// telling the operator to use the registered domain explicitly.
+func splitSLDTLD(domain string) (sld, tld string) {
+	idx := strings.IndexByte(domain, '.')
+	if idx <= 0 {
+		return "", ""
+	}
+	return domain[:idx], domain[idx+1:]
+}
+
+// ─── Tool handlers (use dnsProviderImpl) ───────────────────────────
+
 func (a *App) toolDomainRecordsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	domain, err := normaliseDomainName(strArg(args, "domain"))
 	if err != nil {
 		return nil, fmt.Errorf("domain: %w", err)
 	}
-	raw, err := providerCall(ctx, "dns.list_records", map[string]any{"domain": domain})
+	prov, _, err := a.provider(ctx)
 	if err != nil {
 		return nil, err
 	}
-	records := parsePorkbunRecords(raw)
-	// Optional filtering by type/name.
+	records, err := prov.List(ctx, domain)
+	if err != nil {
+		return nil, err
+	}
 	if t := strings.ToUpper(strArg(args, "type")); t != "" {
 		records = filterRecords(records, func(r DNSRecord) bool { return r.Type == t })
 	}
@@ -483,87 +826,21 @@ func (a *App) toolDomainRecordsSet(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}
 	ttl := intArg(args, "ttl", 600)
 
-	// Step 1: list existing records of this name+type to decide
-	// upsert path. Porkbun's GET /dns/retrieveByNameType/{domain}/{type}/{subdomain}
-	// returns either an existing record or empty.
-	existingRaw, err := providerCall(ctx, "dns.list_records", map[string]any{"domain": domain})
+	prov, _, err := a.provider(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list before upsert: %w", err)
+		return nil, err
 	}
-	existing := parsePorkbunRecords(existingRaw)
-	wantFQ := sub
-	if sub != "" {
-		wantFQ = sub + "." + domain
-	} else {
-		wantFQ = domain
-	}
-	matches := filterRecords(existing, func(r DNSRecord) bool {
-		if !strings.EqualFold(r.Type, rtype) {
-			return false
-		}
-		// Match either FQDN form or short form depending on what the
-		// provider returned.
-		return strings.EqualFold(r.Name, wantFQ) || strings.EqualFold(r.Name, sub)
-	})
-
-	if len(matches) > 0 {
-		// Edit by name+type — replaces all records of that name+type
-		// with the single new value. v0.1 deliberately rewrites rather
-		// than tracks per-id; matches the natural semantics for MX/TXT
-		// where multiple values are conceptual variants of one setting.
-		payload := map[string]any{
-			"domain":  domain,
-			"type":    rtype,
-			"subdomain": sub,
-			"content": value,
-			"ttl":     fmt.Sprintf("%d", ttl),
-		}
-		if rtype == "MX" {
-			parts := strings.SplitN(value, " ", 2)
-			if len(parts) == 2 {
-				payload["prio"] = parts[0]
-				payload["content"] = parts[1]
-			}
-		}
-		if _, err := providerCall(ctx, "dns.edit_records_by_type", payload); err != nil {
-			return nil, fmt.Errorf("edit: %w", err)
-		}
-		return map[string]any{
-			"action":  "updated",
-			"domain":  domain,
-			"name":    sub,
-			"type":    rtype,
-			"value":   value,
-			"ttl":     ttl,
-			"matched": len(matches),
-		}, nil
-	}
-
-	// Create a new record.
-	createPayload := map[string]any{
-		"domain":  domain,
-		"name":    sub,
-		"type":    rtype,
-		"content": value,
-		"ttl":     fmt.Sprintf("%d", ttl),
-	}
-	if rtype == "MX" {
-		parts := strings.SplitN(value, " ", 2)
-		if len(parts) == 2 {
-			createPayload["prio"] = parts[0]
-			createPayload["content"] = parts[1]
-		}
-	}
-	if _, err := providerCall(ctx, "dns.create_record", createPayload); err != nil {
-		return nil, fmt.Errorf("create: %w", err)
+	action, err := prov.Upsert(ctx, domain, sub, rtype, value, ttl)
+	if err != nil {
+		return nil, err
 	}
 	return map[string]any{
-		"action":  "created",
-		"domain":  domain,
-		"name":    sub,
-		"type":    rtype,
-		"value":   value,
-		"ttl":     ttl,
+		"action": action,
+		"domain": domain,
+		"name":   sub,
+		"type":   rtype,
+		"value":  value,
+		"ttl":    ttl,
 	}, nil
 }
 
@@ -577,12 +854,11 @@ func (a *App) toolDomainRecordsDelete(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	_, err = providerCall(ctx, "dns.delete_records_by_type", map[string]any{
-		"domain":    domain,
-		"type":      rtype,
-		"subdomain": sub,
-	})
+	prov, _, err := a.provider(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if err := prov.Delete(ctx, domain, sub, rtype); err != nil {
 		return nil, err
 	}
 	return map[string]any{"deleted": true, "domain": domain, "name": sub, "type": rtype}, nil
@@ -590,10 +866,6 @@ func (a *App) toolDomainRecordsDelete(ctx *sdk.AppCtx, args map[string]any) (any
 
 // ─── Provider response normalisation ──────────────────────────────
 
-// parsePorkbunRecords reads the Porkbun /dns/retrieve response shape:
-//   { status: "SUCCESS", records: [{id, name, type, content, ttl, prio, notes}] }
-// Returns the canonical DNSRecord slice. Other providers (Namecheap)
-// would have their own parser here.
 func parsePorkbunRecords(raw json.RawMessage) []DNSRecord {
 	var probe struct {
 		Status  string `json:"status"`
