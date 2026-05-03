@@ -653,6 +653,7 @@ function SendersView({
     next_step?: string;
   } | null>(null);
   const [err, setErr] = useState("");
+  const [setupDomain, setSetupDomain] = useState<string | null>(null);
 
   const onVerify = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -756,6 +757,13 @@ function SendersView({
                 <td className="px-4 py-2"><StatusPill status={s.verified ? "verified" : "pending"} /></td>
                 <td className="px-4 py-2 text-text-dim">{s.dkim_status || "—"}</td>
                 <td className="px-4 py-2 text-right space-x-3">
+                  {s.kind === "domain" && (
+                    <button
+                      type="button"
+                      className="text-accent hover:underline text-xs"
+                      onClick={() => setSetupDomain(stripScheme(s.address))}
+                    >Setup DNS</button>
+                  )}
                   <button type="button" className="text-text-dim hover:text-text text-xs" onClick={() => recheck(s.address)}>Re-check</button>
                   <button type="button" className="text-text-dim hover:text-red-500 text-xs" onClick={() => remove(s.address)}>Delete</button>
                 </td>
@@ -763,6 +771,15 @@ function SendersView({
             ))}
           </tbody>
         </table>
+      )}
+
+      {setupDomain && (
+        <SetupDomainDialog
+          domain={setupDomain}
+          api={api}
+          onClose={() => setSetupDomain(null)}
+          onDone={() => { setSetupDomain(null); reload(); }}
+        />
       )}
 
       {quota && (
@@ -927,6 +944,164 @@ function SuppressionsView({ rows, api, reload }: { rows: SuppressionRow[]; api: 
         ))}
       </tbody>
     </table>
+  );
+}
+
+// ─── Setup-domain dialog ─────────────────────────────────────────
+
+interface SetupResponse {
+  domain: string;
+  region: string;
+  ses_dkim_status: string;
+  domains_app_used: boolean;
+  records: { step: string; name: string; type: string; value: string }[];
+  actions?: { step: string; ok: boolean; action?: string; error?: string }[];
+  next_step: string;
+}
+
+function SetupDomainDialog({
+  domain, api, onClose, onDone,
+}: {
+  domain: string;
+  api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [dkim, setDkim] = useState(true);
+  const [inbound, setInbound] = useState(false);
+  const [spf, setSpf] = useState(false);
+  const [region, setRegion] = useState("eu-west-1");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<SetupResponse | null>(null);
+  const [err, setErr] = useState("");
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true); setErr(""); setResult(null);
+    try {
+      const out = await api<SetupResponse>("POST", "/senders/setup-domain", {}, {
+        domain,
+        outbound_dkim: dkim,
+        inbound,
+        spf,
+        region,
+      });
+      setResult(out);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div className="bg-surface w-[44rem] max-h-[90vh] overflow-auto rounded border border-border p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="font-semibold">Set up DNS for {domain}</h3>
+          <button type="button" className="text-text-dim hover:text-text" onClick={onClose}>×</button>
+        </div>
+        <p className="text-xs text-text-dim">
+          Verifies the domain in SES, then publishes the necessary DNS records via the <code>domains</code> app
+          (when bound) or returns them for you to paste into your registrar manually.
+        </p>
+
+        <form onSubmit={submit} className="space-y-2">
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={dkim} onChange={(e) => setDkim(e.target.checked)} />
+            <span>DKIM CNAMEs <span className="text-text-dim text-xs">(3 records — required for SES outbound + inbound auth)</span></span>
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={inbound} onChange={(e) => setInbound(e.target.checked)} />
+            <span>MX record for SES inbound <span className="text-text-dim text-xs">(only if you want this domain to receive mail)</span></span>
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={spf} onChange={(e) => setSpf(e.target.checked)} />
+            <span>SPF TXT record <span className="text-text-dim text-xs">(<code>v=spf1 include:amazonses.com ~all</code>)</span></span>
+          </label>
+          {inbound && (
+            <Field label="SES region (for the MX target)">
+              <select className={inputCls + " w-44"} value={region} onChange={(e) => setRegion(e.target.value)}>
+                <option value="eu-west-1">eu-west-1</option>
+                <option value="us-east-1">us-east-1</option>
+                <option value="us-west-2">us-west-2</option>
+                <option value="eu-central-1">eu-central-1</option>
+                <option value="ap-southeast-1">ap-southeast-1</option>
+                <option value="ap-southeast-2">ap-southeast-2</option>
+                <option value="ap-south-1">ap-south-1</option>
+                <option value="ap-northeast-1">ap-northeast-1</option>
+                <option value="ca-central-1">ca-central-1</option>
+                <option value="eu-north-1">eu-north-1</option>
+              </select>
+            </Field>
+          )}
+          {err && <div className="text-red-400 text-sm">{err}</div>}
+          <div className="flex justify-end gap-2 pt-2">
+            <button type="button" className="px-3 py-1.5 border border-border rounded" onClick={onClose}>Cancel</button>
+            <button type="submit" disabled={busy} className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50">
+              {busy ? "Working…" : "Set up"}
+            </button>
+          </div>
+        </form>
+
+        {result && (
+          <div className="mt-3 pt-3 border-t border-border space-y-2 text-sm">
+            {result.domains_app_used ? (
+              <>
+                <div className="text-text">
+                  <strong>{result.actions?.filter(a => a.ok).length}</strong> of {result.actions?.length} records published via the domains app.
+                </div>
+                <table className="w-full text-xs font-mono">
+                  <tbody>
+                    {result.actions?.map((a, i) => (
+                      <tr key={i} className="border-b border-border">
+                        <td className="px-2 py-1">
+                          <StatusPill status={a.ok ? "ok" : "failed"} />
+                        </td>
+                        <td className="px-2 py-1 text-text-dim">{a.step}</td>
+                        <td className="px-2 py-1 text-text-dim">{a.action || a.error || ""}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            ) : (
+              <>
+                <div className="rounded border border-yellow-500/30 bg-yellow-500/10 p-2 text-xs text-yellow-300">
+                  <strong>domains app not bound.</strong> The records below need to be pasted manually
+                  into your registrar. Install + bind the <code>domains</code> app to automate this next time.
+                </div>
+                <div className="text-text-dim text-xs uppercase tracking-wide">Records to publish manually</div>
+                <table className="w-full text-xs font-mono">
+                  <thead>
+                    <tr className="border-b border-border text-text-dim">
+                      <th className="text-left px-2 py-1">Name</th>
+                      <th className="text-left px-2 py-1">Type</th>
+                      <th className="text-left px-2 py-1">Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.records.map((r, i) => (
+                      <tr key={i} className="border-b border-border">
+                        <td className="px-2 py-1">{r.name}</td>
+                        <td className="px-2 py-1 text-text-dim">{r.type}</td>
+                        <td className="px-2 py-1 break-all">{r.value}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )}
+            {result.next_step && (
+              <div className="text-xs text-text-dim mt-2">{result.next_step}</div>
+            )}
+            <div className="flex justify-end gap-2 pt-2">
+              <button type="button" className="px-3 py-1.5 bg-accent text-white rounded" onClick={onDone}>Done</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

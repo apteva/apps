@@ -1143,3 +1143,178 @@ func TestSESInbound_PersistsVerdicts(t *testing.T) {
 		t.Errorf("verdicts wrong: %+v", v)
 	}
 }
+
+// ─── /senders/setup-domain orchestration ──────────────────────────
+
+func TestSetupDomain_DKIMOnly_DomainsBound(t *testing.T) {
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{
+			"email_provider": float64(1),
+			"domains":        float64(2),
+		},
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"verify_domain": {Success: true, Status: 200, Data: json.RawMessage(`{
+				"DkimAttributes": {"Status": "PENDING", "Tokens": ["t1", "t2", "t3"]}
+			}`)},
+		},
+	}
+	plat.callAppReply = json.RawMessage(`{"action":"created","domain":"acme.com"}`)
+	_ = newTestCtx(t, plat)
+	app := &App{}
+
+	body := bytes.NewBufferString(`{"domain": "acme.com"}`)
+	r := httptest.NewRequest("POST", "/senders/setup-domain?project_id=test-proj", body)
+	w := httptest.NewRecorder()
+	app.handleSetupDomain(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var out map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	if out["domains_app_used"] != true {
+		t.Errorf("domains_app_used=%v, want true", out["domains_app_used"])
+	}
+	// 3 DKIM CNAMEs by default; no MX or SPF.
+	specs := out["records"].([]any)
+	if len(specs) != 3 {
+		t.Errorf("expected 3 dkim records, got %d", len(specs))
+	}
+	// CallApp should have been called 3 times to domains.
+	domCalls := 0
+	for _, c := range plat.callAppCalls {
+		if c.App == "domains" && c.Tool == "domain_records_set" {
+			domCalls++
+		}
+	}
+	if domCalls != 3 {
+		t.Errorf("expected 3 CallApp domains calls, got %d", domCalls)
+	}
+}
+
+func TestSetupDomain_FullStack_WritesAllRecords(t *testing.T) {
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{
+			"email_provider": float64(1),
+			"domains":        float64(2),
+		},
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"verify_domain": {Success: true, Status: 200, Data: json.RawMessage(`{
+				"DkimAttributes": {"Status": "PENDING", "Tokens": ["aa", "bb", "cc"]}
+			}`)},
+		},
+	}
+	plat.callAppReply = json.RawMessage(`{"action":"created"}`)
+	_ = newTestCtx(t, plat)
+	app := &App{}
+
+	body := bytes.NewBufferString(`{"domain": "inbound.acme.com", "inbound": true, "spf": true, "region": "eu-west-1"}`)
+	r := httptest.NewRequest("POST", "/senders/setup-domain?project_id=test-proj", body)
+	w := httptest.NewRecorder()
+	app.handleSetupDomain(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	domCalls := []string{}
+	domCallArgs := []map[string]any{}
+	for _, c := range plat.callAppCalls {
+		if c.App == "domains" && c.Tool == "domain_records_set" {
+			t := ""
+			if v, ok := c.Input["type"].(string); ok {
+				t = v
+			}
+			domCalls = append(domCalls, t)
+			domCallArgs = append(domCallArgs, c.Input)
+		}
+	}
+	// 3 CNAME (DKIM) + 1 MX + 1 TXT (SPF).
+	if len(domCalls) != 5 {
+		t.Errorf("expected 5 domains calls, got %d: %v", len(domCalls), domCalls)
+	}
+	// MX record should target SES inbound for the requested region.
+	for _, args := range domCallArgs {
+		if args["type"] == "MX" {
+			if !strings.Contains(args["value"].(string), "inbound-smtp.eu-west-1.amazonaws.com") {
+				t.Errorf("MX value wrong: %v", args["value"])
+			}
+		}
+		if args["type"] == "TXT" {
+			if !strings.Contains(args["value"].(string), "spf1") {
+				t.Errorf("SPF value wrong: %v", args["value"])
+			}
+		}
+	}
+}
+
+func TestSetupDomain_NoDomainsBound_ReturnsRecordsForManualPaste(t *testing.T) {
+	plat := &stubPlatform{
+		// Only email_provider; domains NOT bound.
+		bindingsOverride: map[string]any{
+			"email_provider": float64(1),
+		},
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"verify_domain": {Success: true, Status: 200, Data: json.RawMessage(`{
+				"DkimAttributes": {"Status": "PENDING", "Tokens": ["aa", "bb", "cc"]}
+			}`)},
+		},
+	}
+	_ = newTestCtx(t, plat)
+	app := &App{}
+
+	body := bytes.NewBufferString(`{"domain": "acme.com", "inbound": true}`)
+	r := httptest.NewRequest("POST", "/senders/setup-domain?project_id=test-proj", body)
+	w := httptest.NewRecorder()
+	app.handleSetupDomain(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var out map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	if out["domains_app_used"] != false {
+		t.Errorf("domains_app_used=%v, want false", out["domains_app_used"])
+	}
+	specs := out["records"].([]any)
+	if len(specs) != 4 { // 3 DKIM + 1 MX
+		t.Errorf("expected 4 records, got %d", len(specs))
+	}
+	// No CallApp invocations.
+	for _, c := range plat.callAppCalls {
+		if c.App == "domains" {
+			t.Errorf("CallApp(domains) shouldn't have fired when not bound: %+v", c)
+		}
+	}
+	// next_step should mention manual.
+	if step, _ := out["next_step"].(string); !strings.Contains(strings.ToLower(step), "manual") {
+		t.Errorf("next_step doesn't mention manual paste: %q", step)
+	}
+}
+
+func TestSetupDomain_NoEmailProvider_503(t *testing.T) {
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{}, // no email_provider
+	}
+	ctx := newTestCtx(t, plat)
+	_ = ctx
+	app := &App{}
+
+	body := bytes.NewBufferString(`{"domain": "acme.com"}`)
+	r := httptest.NewRequest("POST", "/senders/setup-domain?project_id=test-proj", body)
+	w := httptest.NewRecorder()
+	app.handleSetupDomain(w, r)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
+func TestShortNameFor(t *testing.T) {
+	cases := []struct{ domain, fqdn, want string }{
+		{"acme.com", "acme.com", "@"},
+		{"acme.com", "www.acme.com", "www"},
+		{"acme.com", "abc._domainkey.acme.com", "abc._domainkey"},
+		{"acme.com", "other.com", "other.com"}, // not a subdomain — pass through
+	}
+	for _, c := range cases {
+		if got := shortNameFor(c.domain, c.fqdn); got != c.want {
+			t.Errorf("shortNameFor(%q, %q) = %q, want %q", c.domain, c.fqdn, got, c.want)
+		}
+	}
+}

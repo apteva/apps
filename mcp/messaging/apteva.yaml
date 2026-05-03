@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.5.0
+version: 0.6.0
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES; SMS and push are reserved channel namespaces. Tracks
@@ -57,6 +57,13 @@ requires:
       required: false
       label: "Storage (optional)"
       hint: "Persists outbound attachments and parsed inbound parts. Without this, attachments on outbound must be base64-inline and inbound attachments are dropped."
+    - role: domains
+      kind: app
+      compatible_app_names: [domains]
+      capabilities: [dns.upsert_record]
+      required: false
+      label: "Domains (optional)"
+      hint: "When bound, /senders/setup-domain auto-publishes DKIM CNAMEs + MX + SPF records via the domains app. Without it, the setup endpoint returns the records as JSON for manual paste into the registrar."
 
 provides:
   http_routes:
