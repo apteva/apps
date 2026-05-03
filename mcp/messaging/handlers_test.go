@@ -2,9 +2,13 @@ package main
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -863,5 +867,279 @@ func TestSendMessageTemplate_RejectsCrossChannelMismatch(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "channel") {
 		t.Errorf("expected channel-mismatch error, got %v", err)
+	}
+}
+
+// ─── v0.5 inbound: Twilio + STOP + verdicts ───────────────────────
+
+func TestVerifyTwilioSignature_HappyPath(t *testing.T) {
+	// Twilio's exact algorithm: HMAC-SHA1 of (URL + sorted KV pairs).
+	// We replicate it once to compute the expected sig, then check
+	// that verifyTwilioSignature accepts it.
+	form := url.Values{
+		"From":       []string{"+15551112222"},
+		"To":         []string{"+15553334444"},
+		"Body":       []string{"hi there"},
+		"MessageSid": []string{"SMabc"},
+	}
+	publicURL := "https://test.apteva.ai/api/apps/messaging/webhooks/twilio-inbound"
+	authToken := "supersecret"
+
+	keys := []string{"Body", "From", "MessageSid", "To"}
+	var b strings.Builder
+	b.WriteString(publicURL)
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteString(form.Get(k))
+	}
+	mac := hmac.New(sha1.New, []byte(authToken))
+	mac.Write([]byte(b.String()))
+	expected := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+
+	if !verifyTwilioSignature(publicURL, form, authToken, expected) {
+		t.Errorf("expected signature to verify")
+	}
+	if verifyTwilioSignature(publicURL, form, "wrongtoken", expected) {
+		t.Errorf("verification should fail for wrong token")
+	}
+	if verifyTwilioSignature(publicURL, form, authToken, "AAAA") {
+		t.Errorf("verification should fail for tampered signature")
+	}
+}
+
+func TestIsStopKeyword(t *testing.T) {
+	for _, body := range []string{"STOP", "stop", " STOP ", "Unsubscribe", "QUIT", "OPT-OUT"} {
+		if !isStopKeyword(body) {
+			t.Errorf("isStopKeyword(%q) = false, want true", body)
+		}
+	}
+	for _, body := range []string{"hello", "stop the train", "no thanks", ""} {
+		if isStopKeyword(body) {
+			t.Errorf("isStopKeyword(%q) = true, want false", body)
+		}
+	}
+}
+
+func TestTwilioInboundWebhook_PersistsSMSAndDispatches(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat, tk.WithConfig(map[string]string{
+		"twilio_auth_token": "secret",
+	}))
+	app := &App{}
+
+	// Register a route so dispatch has a target.
+	if _, err := app.toolInboundRouteSet(ctx, map[string]any{
+		"channel":      "sms",
+		"pattern":      "+15553334444",
+		"target_app":   "support",
+		"target_route": "/inbound",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a Twilio-shaped form POST.
+	form := url.Values{
+		"From":        []string{"+15551112222"},
+		"To":          []string{"+15553334444"},
+		"Body":        []string{"need help with order #1234"},
+		"MessageSid":  []string{"SMtest1"},
+		"AccountSid":  []string{"ACtest"},
+		"NumMedia":    []string{"0"},
+	}
+	publicURL := "https://test.apteva.ai/webhooks/twilio-inbound?project_id=test-proj"
+	keys := []string{"AccountSid", "Body", "From", "MessageSid", "NumMedia", "To"}
+	var b strings.Builder
+	b.WriteString(publicURL)
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteString(form.Get(k))
+	}
+	mac := hmac.New(sha1.New, []byte("secret"))
+	mac.Write([]byte(b.String()))
+	sig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+
+	r := httptest.NewRequest("POST", "/webhooks/twilio-inbound?project_id=test-proj", strings.NewReader(form.Encode()))
+	r.Host = "test.apteva.ai"
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("X-Forwarded-Host", "test.apteva.ai")
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("X-Twilio-Signature", sig)
+	w := httptest.NewRecorder()
+	app.handleTwilioInboundWebhook(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	rows, _ := dbMessageList(ctx.AppDB(), "test-proj", messageListOpts{Direction: "in", Limit: 10})
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 inbound row, got %d", len(rows))
+	}
+	m := rows[0]
+	if m.Channel != "sms" || m.From != "+15551112222" || m.BodyText != "need help with order #1234" {
+		t.Errorf("row: %+v", m)
+	}
+	if m.RouteStatus != "ok" || m.RouteTargetApp != "support" {
+		t.Errorf("dispatch: status=%q app=%q", m.RouteStatus, m.RouteTargetApp)
+	}
+}
+
+func TestTwilioInboundWebhook_DetectsWhatsAppByPrefix(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat, tk.WithConfig(map[string]string{
+		"twilio_auth_token": "secret",
+	}))
+	app := &App{}
+
+	form := url.Values{
+		"From":       []string{"whatsapp:+15551112222"},
+		"To":         []string{"whatsapp:+15553334444"},
+		"Body":       []string{"hello over WA"},
+		"MessageSid": []string{"SMwa1"},
+		"AccountSid": []string{"ACtest"},
+	}
+	publicURL := "https://test.apteva.ai/webhooks/twilio-inbound?project_id=test-proj"
+	keys := []string{"AccountSid", "Body", "From", "MessageSid", "To"}
+	var b strings.Builder
+	b.WriteString(publicURL)
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteString(form.Get(k))
+	}
+	mac := hmac.New(sha1.New, []byte("secret"))
+	mac.Write([]byte(b.String()))
+	sig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+
+	r := httptest.NewRequest("POST", "/webhooks/twilio-inbound?project_id=test-proj", strings.NewReader(form.Encode()))
+	r.Host = "test.apteva.ai"
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("X-Forwarded-Host", "test.apteva.ai")
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("X-Twilio-Signature", sig)
+	w := httptest.NewRecorder()
+	app.handleTwilioInboundWebhook(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	rows, _ := dbMessageList(ctx.AppDB(), "test-proj", messageListOpts{Direction: "in", Channel: "whatsapp", Limit: 10})
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 whatsapp row, got %d", len(rows))
+	}
+	if rows[0].From != "+15551112222" {
+		t.Errorf("From should be stripped of whatsapp: prefix; got %q", rows[0].From)
+	}
+}
+
+func TestTwilioInboundWebhook_AutoSuppressesOnSTOP(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat, tk.WithConfig(map[string]string{
+		"twilio_auth_token": "secret",
+	}))
+	app := &App{}
+
+	form := url.Values{
+		"From":       []string{"+15551112222"},
+		"To":         []string{"+15553334444"},
+		"Body":       []string{"STOP"},
+		"MessageSid": []string{"SMstop"},
+		"AccountSid": []string{"ACtest"},
+	}
+	publicURL := "https://test.apteva.ai/webhooks/twilio-inbound?project_id=test-proj"
+	keys := []string{"AccountSid", "Body", "From", "MessageSid", "To"}
+	var b strings.Builder
+	b.WriteString(publicURL)
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteString(form.Get(k))
+	}
+	mac := hmac.New(sha1.New, []byte("secret"))
+	mac.Write([]byte(b.String()))
+	sig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+
+	r := httptest.NewRequest("POST", "/webhooks/twilio-inbound?project_id=test-proj", strings.NewReader(form.Encode()))
+	r.Host = "test.apteva.ai"
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("X-Forwarded-Host", "test.apteva.ai")
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("X-Twilio-Signature", sig)
+	w := httptest.NewRecorder()
+	app.handleTwilioInboundWebhook(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d", w.Code)
+	}
+	supps, _ := dbSuppressionList(ctx.AppDB(), "test-proj", "sms", 100)
+	if len(supps) != 1 {
+		t.Fatalf("expected 1 suppression, got %d: %+v", len(supps), supps)
+	}
+	if supps[0].Address != "+15551112222" || supps[0].Reason != "stop-keyword" {
+		t.Errorf("suppression: %+v", supps[0])
+	}
+}
+
+func TestTwilioInboundWebhook_RejectsBadSignature(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat, tk.WithConfig(map[string]string{
+		"twilio_auth_token": "secret",
+	}))
+	_ = ctx
+	app := &App{}
+
+	form := url.Values{"From": []string{"+1"}, "To": []string{"+1"}, "Body": []string{"hi"}}
+	r := httptest.NewRequest("POST", "/webhooks/twilio-inbound?project_id=test-proj", strings.NewReader(form.Encode()))
+	r.Host = "test.apteva.ai"
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("X-Forwarded-Host", "test.apteva.ai")
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("X-Twilio-Signature", "AAAA")
+	w := httptest.NewRecorder()
+	app.handleTwilioInboundWebhook(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestSESInbound_PersistsVerdicts(t *testing.T) {
+	plat := &stubPlatform{}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	// SES Received notification with a verdicts block.
+	innerSES := map[string]any{
+		"notificationType": "Received",
+		"content":          sampleEml,
+		"mail":             map[string]any{"messageId": "ses-verdicts"},
+		"receipt": map[string]any{
+			"spamVerdict":  map[string]any{"status": "PASS"},
+			"virusVerdict": map[string]any{"status": "PASS"},
+			"dkimVerdict":  map[string]any{"status": "FAIL"},
+			"spfVerdict":   map[string]any{"status": "PASS"},
+		},
+	}
+	innerJSON, _ := json.Marshal(innerSES)
+	envelope := map[string]any{
+		"Type":           "Notification",
+		"Message":        string(innerJSON),
+		"SigningCertURL": "https://sns.us-east-1.amazonaws.com/cert.pem",
+	}
+	body, _ := json.Marshal(envelope)
+
+	r := httptest.NewRequest("POST", "/webhooks/ses-inbound?project_id=test-proj", strings.NewReader(string(body)))
+	r.Header.Set("X-Amz-Sns-Message-Type", "Notification")
+	w := httptest.NewRecorder()
+	app.handleInboundWebhook(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d", w.Code)
+	}
+	rows, _ := dbMessageList(ctx.AppDB(), "test-proj", messageListOpts{Direction: "in", Limit: 10})
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row")
+	}
+	var v map[string]string
+	_ = json.Unmarshal(rows[0].Verdicts, &v)
+	if v["dkim"] != "FAIL" || v["spam"] != "PASS" {
+		t.Errorf("verdicts wrong: %+v", v)
 	}
 }

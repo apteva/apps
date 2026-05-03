@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.4.2
+version: 0.5.0
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES; SMS and push are reserved channel namespaces. Tracks
@@ -125,5 +125,9 @@ config_schema:
     type: text
     label: Webhook shared secret
     description: Optional shared secret for HMAC-validating SNS posts in addition to the standard SNS signature check.
+  - name: twilio_auth_token
+    type: text
+    label: Twilio Auth Token (for inbound signature verification)
+    description: Optional. When set, inbound webhooks at /webhooks/twilio-inbound have their X-Twilio-Signature verified using this token. Without it, inbound is accepted without signature check (relies on the URL being unguessable). Use only if PlatformClient.GetConnection can't expose the bound aws-twilio connection's auth_token in your deployment.
 
 upgrade_policy: auto-patch

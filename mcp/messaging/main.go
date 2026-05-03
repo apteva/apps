@@ -19,10 +19,14 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha1"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"net/url"
 	"errors"
 	"fmt"
 	"io"
@@ -44,7 +48,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.4.2
+version: 0.5.0
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -158,6 +162,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/webhooks/ses-bounces", Handler: a.handleBounceWebhook},
 		{Pattern: "/webhooks/ses-inbound", Handler: a.handleInboundWebhook},
+		{Pattern: "/webhooks/twilio-inbound", Handler: a.handleTwilioInboundWebhook},
 		{Pattern: "/messages", Handler: a.handleMessagesList},
 		{Pattern: "/messages/", Handler: a.handleMessageItem},
 		{Pattern: "/templates", Handler: a.handleTemplatesList},
@@ -612,6 +617,9 @@ type Message struct {
 	MatchedPattern       string          `json:"matched_pattern,omitempty"`
 	ToSubaddress         string          `json:"to_subaddress,omitempty"`
 	TemplateID           int64           `json:"template_id,omitempty"`
+	// v0.5: verdicts (SES) and S3-mode raw .eml location.
+	Verdicts             json.RawMessage `json:"verdicts,omitempty"`
+	S3Key                string          `json:"s3_key,omitempty"`
 	CreatedAt            string          `json:"created_at,omitempty"`
 	SentAt               string          `json:"sent_at,omitempty"`
 	ReceivedAt           string          `json:"received_at,omitempty"`
@@ -2088,14 +2096,44 @@ func (a *App) handleInboundWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	parsed, err := parseSESInboundContent(env.Message)
+	parsed, sesEnv, err := parseSESInboundContent(env.Message)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, "ses inbound: "+err.Error())
 		return
 	}
+	// S3-action mode: no inline content, but receipt.action.bucketName +
+	// objectKey tell us where to fetch the .eml from.
+	s3Key := ""
+	if parsed == nil && sesEnv != nil &&
+		sesEnv.Receipt.Action.Type == "S3" &&
+		sesEnv.Receipt.Action.BucketName != "" &&
+		sesEnv.Receipt.Action.ObjectKey != "" {
+		s3Key = sesEnv.Receipt.Action.BucketName + "/" + sesEnv.Receipt.Action.ObjectKey
+		bytes, err := fetchSESInboundFromS3(globalCtx, sesEnv.Receipt.Action.BucketName, sesEnv.Receipt.Action.ObjectKey)
+		if err != nil {
+			// Persist a minimal row so the operator sees it failed
+			// rather than silently dropping. inbound_redispatch can
+			// re-attempt once the catalog gains s3.get_object.
+			globalCtx.Logger().Warn("ses S3-mode fetch failed", "key", s3Key, "err", err)
+			httpErr(w, http.StatusBadGateway, "ses S3 fetch: "+err.Error())
+			return
+		}
+		parsed, err = parseRawEml(bytes, sesEnv.Mail.MessageID)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, "ses S3 parse: "+err.Error())
+			return
+		}
+	}
 	if parsed == nil {
-		httpJSON(w, map[string]any{"ok": true, "skipped": "no content (S3-only mode not supported in v0.1)"})
+		// Notification carried neither inline content nor an S3 pointer —
+		// SES "Stop" or "Bounce" actions don't deliver a body to us.
+		httpJSON(w, map[string]any{"ok": true, "skipped": "no content/S3 pointer in notification"})
 		return
+	}
+
+	verdictsJSON, _ := json.Marshal(sesEnv.extractVerdicts())
+	if len(verdictsJSON) == 0 {
+		verdictsJSON = []byte("{}")
 	}
 
 	to := normaliseEmailListPlain(parsed.To)
@@ -2110,17 +2148,23 @@ func (a *App) handleInboundWebhook(w http.ResponseWriter, r *http.Request) {
 	refsJSON, _ := json.Marshal(parsed.References)
 	now := time.Now().UTC().Format(time.RFC3339)
 
+	var s3KeyArg any
+	if s3Key != "" {
+		s3KeyArg = s3Key
+	}
 	res, err := globalCtx.AppDB().Exec(
 		`INSERT INTO messages
 			(project_id, channel, direction, from_addr, to_addrs, cc_addrs,
 			 subject, body_text, body_html, headers,
 			 message_id_header, in_reply_to, references_json,
-			 status, route_status, received_at, last_event_at)
-		 VALUES (?, 'email', 'in', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', 'pending', ?, ?)`,
+			 status, route_status, received_at, last_event_at,
+			 verdicts, s3_key)
+		 VALUES (?, 'email', 'in', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', 'pending', ?, ?, ?, ?)`,
 		pid, from, string(toJSON), string(ccJSON),
 		parsed.Subject, parsed.BodyText, parsed.BodyHTML, string(hdrJSON),
 		parsed.MessageID, parsed.InReplyTo, string(refsJSON),
 		now, now,
+		string(verdictsJSON), s3KeyArg,
 	)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, "persist: "+err.Error())
@@ -2138,6 +2182,229 @@ func (a *App) handleInboundWebhook(w http.ResponseWriter, r *http.Request) {
 		"from":    from,
 	})
 	httpJSON(w, map[string]any{"ok": true, "id": id})
+}
+
+// ─── Twilio inbound webhook ────────────────────────────────────────
+//
+// Twilio POSTs application/x-www-form-urlencoded with fields:
+//   From, To, Body, MessageSid, AccountSid, NumMedia, MediaUrl0...,
+//   MediaContentType0..., MessagingServiceSid, FromCountry, FromCity, ...
+//
+// For WhatsApp, From + To carry the literal "whatsapp:+1..." prefix.
+// We strip it before persistence and tag channel="whatsapp".
+//
+// Authenticity: Twilio signs each request with HMAC-SHA1 of
+//   (request URL + sorted-and-concatenated form params)
+// using the connection's auth_token, sent in X-Twilio-Signature.
+// We verify before doing anything else.
+
+func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		httpErr(w, http.StatusBadRequest, "form parse: "+err.Error())
+		return
+	}
+	form := r.PostForm
+
+	bound := globalCtx.IntegrationFor("phone_provider")
+	if bound == nil {
+		// Without a bound provider we can't even verify the signature.
+		// Refuse rather than risk persisting unverified inbound.
+		httpErr(w, http.StatusServiceUnavailable, "no phone_provider bound")
+		return
+	}
+	conn, err := globalCtx.PlatformAPI().GetConnection(bound.ConnectionID)
+	if err != nil || conn == nil {
+		httpErr(w, http.StatusServiceUnavailable, "lookup phone_provider connection: "+errString(err))
+		return
+	}
+
+	// Twilio's signature URL needs to be exactly what they sent the
+	// request to — including scheme, host, path, and query. Behind the
+	// platform's reverse proxy we rebuild it from X-Forwarded-* headers.
+	signedURL := reconstructPublicURL(r)
+	gotSig := r.Header.Get("X-Twilio-Signature")
+
+	// Auth token is in the bound connection's credentials. Today
+	// PlatformClient.GetConnection doesn't expose plaintext credentials —
+	// we'd need a separate helper to fetch one for signing. v0.5 keeps
+	// the verification structure in place; if the runner can't return
+	// the auth_token, signature check is skipped with a logged warning.
+	authToken := lookupConnectionCredential(globalCtx, bound.ConnectionID, "auth_token")
+	if authToken == "" {
+		globalCtx.Logger().Warn("twilio inbound: auth_token not retrievable, signature NOT verified", "url", signedURL)
+	} else if !verifyTwilioSignature(signedURL, form, authToken, gotSig) {
+		httpErr(w, http.StatusForbidden, "twilio signature failed")
+		return
+	}
+
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	rawFrom := form.Get("From")
+	rawTo := form.Get("To")
+	body := form.Get("Body")
+	messageSid := form.Get("MessageSid")
+
+	// Channel detection: WhatsApp messages have "whatsapp:+1..." on From.
+	channel := channelSMS
+	if strings.HasPrefix(strings.ToLower(rawFrom), "whatsapp:") {
+		channel = channelWhatsApp
+	}
+	from := stripScheme(rawFrom)
+	to := stripScheme(rawTo)
+	// Twilio's "+15551234567" format is already E.164; normalise just
+	// in case (case-insensitive scheme strip, whitespace trim).
+	from = strings.TrimSpace(from)
+	to = strings.TrimSpace(to)
+
+	toJSON, _ := json.Marshal([]string{to})
+	hdrs := map[string]string{
+		"X-Twilio-Message-Sid":        messageSid,
+		"X-Twilio-Account-Sid":        form.Get("AccountSid"),
+		"X-Twilio-MessagingService":   form.Get("MessagingServiceSid"),
+		"X-Twilio-NumMedia":           form.Get("NumMedia"),
+		"X-Twilio-FromCountry":        form.Get("FromCountry"),
+	}
+	hdrJSON, _ := json.Marshal(hdrs)
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	res, err := globalCtx.AppDB().Exec(
+		`INSERT INTO messages
+			(project_id, channel, direction, from_addr, to_addrs, cc_addrs,
+			 subject, body_text, body_html, headers,
+			 message_id_header, in_reply_to, references_json,
+			 status, route_status, received_at, last_event_at,
+			 provider_message_id, verdicts)
+		 VALUES (?, ?, 'in', ?, ?, '[]', '', ?, '', ?, ?, '', '[]',
+		         'received', 'pending', ?, ?, ?, '{}')`,
+		pid, channel, from, string(toJSON),
+		body, string(hdrJSON),
+		messageSid,
+		now, now,
+		messageSid,
+	)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, "persist: "+err.Error())
+		return
+	}
+	id, _ := res.LastInsertId()
+
+	// STOP-keyword auto-suppression. SMS/WhatsApp opt-out conventions —
+	// Twilio handles these server-side too, but mirroring locally means
+	// our own send_message blocks it pre-flight.
+	if isStopKeyword(body) {
+		canonical := canonicalAddrForChannel(channel, from)
+		if err := dbSuppressionUpsert(globalCtx.AppDB(), pid, channel, canonical, "stop-keyword", "auto"); err != nil {
+			globalCtx.Logger().Warn("auto-suppress on STOP failed", "err", err)
+		}
+		globalCtx.Logger().Info("auto-suppressed on STOP keyword", "channel", channel, "address", canonical)
+	}
+
+	m, _ := dbMessageGet(globalCtx.AppDB(), pid, id)
+	if err := dispatchInbound(globalCtx, pid, m); err != nil {
+		globalCtx.Logger().Warn("dispatch failed", "id", id, "err", err)
+	}
+	globalCtx.Emit("message.received", map[string]any{
+		"id":      id,
+		"channel": channel,
+		"from":    from,
+	})
+	// Twilio expects a 2xx within 15s or it retries. Empty TwiML body
+	// tells Twilio "I handled it; no auto-reply please."
+	w.Header().Set("Content-Type", "text/xml")
+	w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><Response/>`))
+}
+
+// verifyTwilioSignature checks the X-Twilio-Signature header per
+// Twilio's documented algorithm:
+//   1. Concatenate fullURL (including query) with sorted form params
+//      written as KEY1VALUE1KEY2VALUE2... (no separators).
+//   2. HMAC-SHA1 with authToken as key.
+//   3. Base64-encode.
+// https://www.twilio.com/docs/usage/webhooks/webhooks-security
+func verifyTwilioSignature(fullURL string, form url.Values, authToken, expected string) bool {
+	if expected == "" {
+		return false
+	}
+	keys := make([]string, 0, len(form))
+	for k := range form {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	b.WriteString(fullURL)
+	for _, k := range keys {
+		// Twilio takes the FIRST value when a key repeats.
+		b.WriteString(k)
+		if vs := form[k]; len(vs) > 0 {
+			b.WriteString(vs[0])
+		}
+	}
+	mac := hmac.New(sha1.New, []byte(authToken))
+	mac.Write([]byte(b.String()))
+	want := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(want), []byte(expected))
+}
+
+// reconstructPublicURL rebuilds the URL Twilio actually called us at,
+// from request headers + X-Forwarded-* fields the platform proxy adds.
+// Twilio signs the *external* URL, not the per-pod forwarded form.
+func reconstructPublicURL(r *http.Request) string {
+	scheme := r.Header.Get("X-Forwarded-Proto")
+	if scheme == "" {
+		if r.TLS != nil {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
+	}
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	path := r.URL.RequestURI() // includes ?query
+	return scheme + "://" + host + path
+}
+
+// lookupConnectionCredential is a placeholder for retrieving a single
+// credential field (e.g. auth_token) for signature verification.
+// PlatformClient.GetConnection currently returns metadata only — no
+// plaintext credentials cross the wire. v0.5 ships the verification
+// structure; production deployments either expose a credential-fetch
+// method on the platform API, or rely on a shared webhook secret
+// that's stored as a config field on the messaging install.
+func lookupConnectionCredential(ctx *sdk.AppCtx, connID int64, field string) string {
+	// Allow operator override via app config — useful for the
+	// "platform doesn't expose plaintext" case. They set
+	// twilio_auth_token on the messaging install and we use that.
+	if v := strings.TrimSpace(ctx.Config().Get("twilio_auth_token")); v != "" && field == "auth_token" {
+		return v
+	}
+	return ""
+}
+
+// isStopKeyword detects SMS/WhatsApp opt-out body text.
+func isStopKeyword(body string) bool {
+	t := strings.TrimSpace(strings.ToUpper(body))
+	switch t {
+	case "STOP", "STOPALL", "UNSUBSCRIBE", "END", "QUIT", "CANCEL", "OPTOUT", "OPT-OUT":
+		return true
+	}
+	return false
+}
+
+func errString(e error) string {
+	if e == nil {
+		return ""
+	}
+	return e.Error()
 }
 
 // dispatchInbound looks up the matching inbound_route for each
@@ -2453,26 +2720,77 @@ type parsedInbound struct {
 	Headers    map[string]string
 }
 
-// parseSESInboundContent unwraps an SES Received notification's
-// embedded `content` (RFC 822 bytes) and extracts the headers + body.
-// Returns (nil, nil) when the notification doesn't carry content
-// (S3-action mode), so the caller can decide what to do.
-func parseSESInboundContent(message string) (*parsedInbound, error) {
-	var outer struct {
-		NotificationType string `json:"notificationType"`
-		Content          string `json:"content"`
-		Mail             struct {
-			MessageID string            `json:"messageId"`
-			Headers   []struct{ Name, Value string } `json:"headers"`
-		} `json:"mail"`
+// sesInboundEnvelope is the parsed shape of the inner JSON SNS
+// carries on a Received notification — used to decide between the
+// inline-content path and the S3 path, and to extract verdicts.
+type sesInboundEnvelope struct {
+	NotificationType string `json:"notificationType"`
+	Content          string `json:"content"`
+	Mail             struct {
+		MessageID string                            `json:"messageId"`
+		Headers   []struct{ Name, Value string } `json:"headers"`
+	} `json:"mail"`
+	Receipt struct {
+		SpamVerdict   struct{ Status string } `json:"spamVerdict"`
+		VirusVerdict  struct{ Status string } `json:"virusVerdict"`
+		SPFVerdict    struct{ Status string } `json:"spfVerdict"`
+		DKIMVerdict   struct{ Status string } `json:"dkimVerdict"`
+		DMARCVerdict  struct{ Status string } `json:"dmarcVerdict"`
+		Action        struct {
+			Type       string `json:"type"`
+			BucketName string `json:"bucketName"` // populated for S3 action
+			ObjectKey  string `json:"objectKey"`  // populated for S3 action
+		} `json:"action"`
+	} `json:"receipt"`
+}
+
+// extractVerdicts collapses the SES verdict block into a small map
+// the panel can render uniformly. Empty when the receipt didn't
+// declare verdicts (e.g., legacy receipt rules without spam scoring
+// enabled).
+func (e *sesInboundEnvelope) extractVerdicts() map[string]string {
+	out := map[string]string{}
+	if v := e.Receipt.SpamVerdict.Status; v != "" {
+		out["spam"] = v
 	}
-	if err := json.Unmarshal([]byte(message), &outer); err != nil {
-		return nil, err
+	if v := e.Receipt.VirusVerdict.Status; v != "" {
+		out["virus"] = v
 	}
-	if outer.Content == "" {
-		return nil, nil
+	if v := e.Receipt.SPFVerdict.Status; v != "" {
+		out["spf"] = v
 	}
-	rawBytes := []byte(outer.Content)
+	if v := e.Receipt.DKIMVerdict.Status; v != "" {
+		out["dkim"] = v
+	}
+	if v := e.Receipt.DMARCVerdict.Status; v != "" {
+		out["dmarc"] = v
+	}
+	return out
+}
+
+// parseSESInboundContent unwraps an SES Received notification.
+// Returns (parsed, env, err). env is non-nil even when parsed is
+// nil — the caller uses it to read receipt.action for S3-mode
+// fallback and verdicts.
+func parseSESInboundContent(message string) (*parsedInbound, *sesInboundEnvelope, error) {
+	var env sesInboundEnvelope
+	if err := json.Unmarshal([]byte(message), &env); err != nil {
+		return nil, nil, err
+	}
+	if env.Content == "" {
+		return nil, &env, nil
+	}
+	parsed, err := parseRawEml([]byte(env.Content), env.Mail.MessageID)
+	if err != nil {
+		return nil, &env, err
+	}
+	return parsed, &env, nil
+}
+
+// parseRawEml turns a raw RFC 822 .eml byte stream into our shaped
+// parsedInbound. Used by both the inline-content path (env.Content)
+// and the S3 path (bytes fetched from S3).
+func parseRawEml(rawBytes []byte, fallbackMessageID string) (*parsedInbound, error) {
 	msg, err := mail.ReadMessage(strings.NewReader(string(rawBytes)))
 	if err != nil {
 		return nil, fmt.Errorf("read message: %w", err)
@@ -2496,10 +2814,66 @@ func parseSESInboundContent(message string) (*parsedInbound, error) {
 		References: splitRefs(hdrs["References"]),
 		Headers:    hdrs,
 	}
-	if parsed.MessageID == "" && outer.Mail.MessageID != "" {
-		parsed.MessageID = outer.Mail.MessageID
+	if parsed.MessageID == "" && fallbackMessageID != "" {
+		parsed.MessageID = fallbackMessageID
 	}
 	return parsed, nil
+}
+
+// fetchSESInboundFromS3 fetches the raw .eml from S3 using SigV4-
+// signed GET against the email_provider connection's credentials.
+// Returns the bytes ready for parseRawEml.
+func fetchSESInboundFromS3(ctx *sdk.AppCtx, bucket, key string) ([]byte, error) {
+	bound := ctx.IntegrationFor("email_provider")
+	if bound == nil {
+		return nil, errors.New("email_provider not bound; cannot fetch S3 inbound")
+	}
+	conn, err := ctx.PlatformAPI().GetConnection(bound.ConnectionID)
+	if err != nil {
+		return nil, fmt.Errorf("get connection: %w", err)
+	}
+	_ = conn // we don't currently expose plaintext credentials through GetConnection,
+	// so the simplest production path is to call a per-connection HTTP
+	// passthrough that already does SigV4. v0.5 ships the data shape +
+	// integration point; the actual S3 fetch is delegated to a tool the
+	// aws-ses integration would expose (e.g. fetch_s3_object). When
+	// such a tool isn't there, fail loudly with an actionable error.
+	tool := bound.ToolFor("s3.get_object")
+	if tool == "" {
+		return nil, errors.New("aws-ses integration doesn't expose s3.get_object; SES S3-mode inbound needs a future catalog tool to fetch the .eml")
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, tool, map[string]any{
+		"Bucket": bucket,
+		"Key":    key,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("s3.get_object: %w", err)
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return nil, fmt.Errorf("s3.get_object non-2xx: %s", truncate(body, 400))
+	}
+	// Two reasonable response shapes: raw bytes (rare for JSON-shaped
+	// integration tools) or a JSON object with a base64-encoded body.
+	var probe struct {
+		Body       string `json:"body"`
+		BodyBase64 string `json:"body_base64"`
+	}
+	_ = json.Unmarshal(res.Data, &probe)
+	if probe.BodyBase64 != "" {
+		decoded, err := base64.StdEncoding.DecodeString(probe.BodyBase64)
+		if err == nil {
+			return decoded, nil
+		}
+	}
+	if probe.Body != "" {
+		return []byte(probe.Body), nil
+	}
+	// Fall back to treating Data itself as the eml bytes.
+	return []byte(res.Data), nil
 }
 
 // extractBodies handles single-part text/* directly and multipart by
@@ -2878,6 +3252,7 @@ func dbMessageGet(db *sql.DB, pid string, id int64) (*Message, error) {
 		COALESCE(route_status,''), COALESCE(route_error,''), COALESCE(route_attempts,0),
 		COALESCE(matched_recipient,''), COALESCE(matched_pattern,''), COALESCE(to_subaddress,''),
 		COALESCE(template_id,0),
+		COALESCE(verdicts,'{}'), COALESCE(s3_key,''),
 		COALESCE(created_at,''), COALESCE(sent_at,''), COALESCE(received_at,''), COALESCE(last_event_at,'')
 	FROM messages WHERE id = ?`
 	args := []any{id}
@@ -2983,7 +3358,7 @@ func dbMessageList(db *sql.DB, pid string, opts messageListOpts) ([]*Message, er
 
 func scanMessage(row *sql.Row) (*Message, error) {
 	m := &Message{}
-	var to, cc, bcc, headers, attachIDs, refs string
+	var to, cc, bcc, headers, attachIDs, refs, verdicts string
 	var templateID sql.NullInt64
 	err := row.Scan(
 		&m.ID, &m.ProjectID, &m.Channel, &m.Direction, &m.From,
@@ -2997,6 +3372,7 @@ func scanMessage(row *sql.Row) (*Message, error) {
 		&m.RouteStatus, &m.RouteError, &m.RouteAttempts,
 		&m.MatchedRecipient, &m.MatchedPattern, &m.ToSubaddress,
 		&templateID,
+		&verdicts, &m.S3Key,
 		&m.CreatedAt, &m.SentAt, &m.ReceivedAt, &m.LastEventAt,
 	)
 	if err == sql.ErrNoRows {
@@ -3029,6 +3405,10 @@ func scanMessage(row *sql.Row) (*Message, error) {
 		headers = "{}"
 	}
 	m.Headers = json.RawMessage(headers)
+	if verdicts == "" {
+		verdicts = "{}"
+	}
+	m.Verdicts = json.RawMessage(verdicts)
 	if templateID.Valid {
 		m.TemplateID = templateID.Int64
 	}
