@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.5.6
+version: 0.5.7
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -149,6 +149,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// + thumbnails when present, calls opencode-go (Kimi K2.6 by
 	// default), writes the description back via setDescription.
 	startDescriber(ctx)
+	// Storage event subscriber — listens for storage.file.deleted
+	// over SSE and cascades cleanup immediately. Indexer's 30s
+	// orphan sweep stays as the safety net.
+	startStorageEventSubscriber(ctx)
 	return nil
 }
 

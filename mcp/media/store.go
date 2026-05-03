@@ -263,6 +263,36 @@ func setDescription(db *sql.DB, projectID, fileID string, f DescriptionFields) (
 	return true, nil
 }
 
+// cascadeDeleteOne removes one media row + its derivations + its
+// transcript. Used by the SSE event handler when storage emits a
+// file.deleted for a row we have. Same shape as purgeOrphans but
+// targeted at a single file_id, no diff against current storage
+// list needed.
+//
+// Rows that don't exist are no-ops. Cascade order matches
+// purgeOrphans: derivations → transcripts → media.
+func cascadeDeleteOne(db *sql.DB, projectID, fileID string) error {
+	if _, err := db.Exec(
+		`DELETE FROM derivations WHERE project_id = ? AND file_id = ?`,
+		projectID, fileID,
+	); err != nil {
+		return fmt.Errorf("delete derivations: %w", err)
+	}
+	if _, err := db.Exec(
+		`DELETE FROM transcripts WHERE project_id = ? AND file_id = ?`,
+		projectID, fileID,
+	); err != nil {
+		return fmt.Errorf("delete transcripts: %w", err)
+	}
+	if _, err := db.Exec(
+		`DELETE FROM media WHERE project_id = ? AND file_id = ?`,
+		projectID, fileID,
+	); err != nil {
+		return fmt.Errorf("delete media: %w", err)
+	}
+	return nil
+}
+
 // purgeOrphans removes media rows (and their derivations + transcripts)
 // whose storage file is no longer present in the current storage
 // listing — typically because the user soft-deleted the file via the

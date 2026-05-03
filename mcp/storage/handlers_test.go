@@ -1,7 +1,9 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/base64"
+	"os"
 	"strings"
 	"testing"
 
@@ -216,18 +218,101 @@ func TestSearch_FilterByContentTypePrefix(t *testing.T) {
 	}
 }
 
-func TestSoftDelete_HidesFromList(t *testing.T) {
+func TestDelete_DefaultHardDelete(t *testing.T) {
+	// Default behaviour (no keep_record): row is gone, blob is gone,
+	// listing + get both miss. The response indicates hard=true.
 	ctx := newTestCtx(t)
 	f := mustUpload(t, ctx, "x.txt", "/", "x")
 	app := &App{}
-	app.toolDelete(ctx, map[string]any{"id": f.ID})
-	out, _ := app.toolList(ctx, map[string]any{})
-	if out.(map[string]any)["count"].(int) != 0 {
-		t.Errorf("soft-deleted file should not list")
+	out, err := app.toolDelete(ctx, map[string]any{"id": f.ID})
+	if err != nil {
+		t.Fatal(err)
 	}
+	resp := out.(map[string]any)
+	if resp["deleted"] != true {
+		t.Errorf("expected deleted=true, got %v", resp)
+	}
+	if resp["hard"] != true {
+		t.Errorf("expected hard=true on default delete, got %v", resp["hard"])
+	}
+
+	// Row gone — verify by direct DB query (bypasses the deleted_at filter).
+	var count int64
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM files WHERE id=?`, f.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("hard delete should remove the row, found %d", count)
+	}
+
+	// Blob gone too.
+	blobP := blobPath(ctx, f.SHA256, f.StorageKey)
+	if _, err := os.Stat(blobP); !os.IsNotExist(err) {
+		t.Errorf("hard delete should remove the blob at %s, stat err=%v", blobP, err)
+	}
+
+	// Public surfaces miss.
 	got, _ := app.toolGet(ctx, map[string]any{"id": f.ID})
 	if got.(map[string]any)["found"] != false {
-		t.Errorf("soft-deleted file should not be retrievable by get")
+		t.Errorf("hard-deleted file should not be retrievable by get")
+	}
+	listed, _ := app.toolList(ctx, map[string]any{})
+	if listed.(map[string]any)["count"].(int) != 0 {
+		t.Errorf("hard-deleted file should not list")
+	}
+}
+
+func TestDelete_KeepRecordSoftDeletes(t *testing.T) {
+	// keep_record=true preserves the historical soft-delete: row
+	// stays (with deleted_at set), bytes stay on disk, listing
+	// hides them. Audit-history use cases.
+	ctx := newTestCtx(t)
+	f := mustUpload(t, ctx, "x.txt", "/", "x")
+	app := &App{}
+	out, _ := app.toolDelete(ctx, map[string]any{
+		"id":          f.ID,
+		"keep_record": true,
+	})
+	resp := out.(map[string]any)
+	if resp["hard"] != false {
+		t.Errorf("expected hard=false with keep_record, got %v", resp["hard"])
+	}
+
+	// Row still exists with deleted_at populated.
+	var deletedAt sql.NullString
+	if err := ctx.AppDB().QueryRow(
+		`SELECT deleted_at FROM files WHERE id=?`, f.ID,
+	).Scan(&deletedAt); err != nil {
+		t.Fatalf("row should still exist: %v", err)
+	}
+	if !deletedAt.Valid || deletedAt.String == "" {
+		t.Errorf("deleted_at should be set, got %v", deletedAt)
+	}
+
+	// Blob stays on disk — that's the whole point of keep_record.
+	blobP := blobPath(ctx, f.SHA256, f.StorageKey)
+	if _, err := os.Stat(blobP); err != nil {
+		t.Errorf("keep_record should leave bytes on disk, stat err=%v", err)
+	}
+
+	// Public surfaces still hide it.
+	got, _ := app.toolGet(ctx, map[string]any{"id": f.ID})
+	if got.(map[string]any)["found"] != false {
+		t.Errorf("soft-deleted file should still be hidden from get")
+	}
+}
+
+func TestDelete_AlreadyGoneIsNoOp(t *testing.T) {
+	// Calling delete on a non-existent id must not error — caller
+	// might be racing against another deletion.
+	ctx := newTestCtx(t)
+	app := &App{}
+	out, err := app.toolDelete(ctx, map[string]any{"id": int64(999999)})
+	if err != nil {
+		t.Errorf("delete of missing id shouldn't error: %v", err)
+	}
+	if out.(map[string]any)["deleted"] != true {
+		t.Errorf("expected deleted=true even for missing id (idempotent)")
 	}
 }
 

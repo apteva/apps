@@ -36,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: storage
 display_name: Storage
-version: 0.4.1
+version: 0.5.2
 description: |
   File storage with virtual folders, signed URLs, dedup. Local-disk
   backend; cloud backend slot reserved for v0.2.
@@ -247,9 +247,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "files_delete",
-			Description: "Soft-delete a file. Args: id.",
-			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
-			Handler:     a.toolDelete,
+			Description: "Delete a file. Default is hard delete: row removed from the database AND bytes removed from disk. Pass keep_record=true to soft-delete instead — sets deleted_at on the row, leaves bytes on disk (audit-history use cases). Either path emits file.deleted with the pre-delete metadata so subscribers see what went. Args: id, keep_record? (default false).",
+			InputSchema: schemaObject(map[string]any{
+				"id":          map[string]any{"type": "integer"},
+				"keep_record": map[string]any{"type": "boolean"},
+			}, []string{"id"}),
+			Handler: a.toolDelete,
 		},
 		{
 			Name:        "files_from_url",
@@ -625,12 +628,15 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	prior, _ := dbGetByID(ctx.AppDB(), pid, id)
-	if err := dbSoftDelete(ctx.AppDB(), pid, id); err != nil {
+	keepRecord := false
+	if v, ok := args["keep_record"].(bool); ok {
+		keepRecord = v
+	}
+	hard, err := deleteFile(ctx, pid, id, keepRecord)
+	if err != nil {
 		return nil, err
 	}
-	emitFileEvent(ctx, "file.deleted", prior, false)
-	return map[string]any{"deleted": true}, nil
+	return map[string]any{"deleted": true, "hard": hard}, nil
 }
 
 func (a *App) toolFromURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -999,15 +1005,13 @@ func (a *App) httpDelete(w http.ResponseWriter, r *http.Request, id int64) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// Snapshot the row before deleting so we can broadcast the
-	// folder/name to subscribers without a second lookup.
-	prior, _ := dbGetByID(ctx.AppDB(), pid, id)
-	if err := dbSoftDelete(ctx.AppDB(), pid, id); err != nil {
+	keepRecord := r.URL.Query().Get("keep_record") == "true"
+	hard, err := deleteFile(ctx, pid, id, keepRecord)
+	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	emitFileEvent(ctx, "file.deleted", prior, false)
-	httpJSON(w, map[string]any{"deleted": true})
+	httpJSON(w, map[string]any{"deleted": true, "hard": hard})
 }
 
 // emitFileEvent broadcasts a single file change onto the platform's
@@ -1338,6 +1342,58 @@ func dbSoftDelete(db *sql.DB, pid string, id int64) error {
 		 WHERE id = ? AND project_id = ?`,
 		id, pid)
 	return err
+}
+
+// dbHardDelete removes the row entirely. Caller is responsible for
+// removing the blob bytes from disk separately — order matters
+// (row first, then blob; if blob removal fails we log + continue,
+// leaving an orphan blob recoverable via a sweep, vs the inverse
+// where the row points at missing bytes).
+func dbHardDelete(db *sql.DB, pid string, id int64) error {
+	_, err := db.Exec(
+		`DELETE FROM files WHERE id = ? AND project_id = ?`,
+		id, pid)
+	return err
+}
+
+// deleteFile is the unified delete path used by both the MCP tool
+// and the HTTP route. keepRecord=true preserves the soft-delete
+// behaviour (audit history, dangling bytes); default = hard delete
+// (row gone + blob removed). Either way emits file.deleted with
+// the pre-delete row so subscribers see the metadata.
+//
+// Returns hard=true when bytes were physically removed.
+func deleteFile(ctx *sdk.AppCtx, pid string, id int64, keepRecord bool) (bool, error) {
+	prior, _ := dbGetByID(ctx.AppDB(), pid, id)
+	if prior == nil {
+		// Already gone; treat as success so the caller doesn't
+		// loop on a stale view of the catalog.
+		return false, nil
+	}
+
+	if keepRecord {
+		if err := dbSoftDelete(ctx.AppDB(), pid, id); err != nil {
+			return false, err
+		}
+		emitFileEvent(ctx, "file.deleted", prior, false)
+		return false, nil
+	}
+
+	if err := dbHardDelete(ctx.AppDB(), pid, id); err != nil {
+		return false, err
+	}
+	// Best-effort blob removal. Failure here doesn't roll back the
+	// row deletion (rolling back would re-introduce a row pointing
+	// at potentially-already-gone bytes — worse). The blob becomes
+	// an orphan a future sweep can reclaim.
+	if path := blobPath(ctx, prior.SHA256, prior.StorageKey); path != "" {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			ctx.Logger().Warn("blob removal failed; row deleted but bytes remain",
+				"id", id, "path", path, "err", err)
+		}
+	}
+	emitFileEvent(ctx, "file.deleted", prior, false)
+	return true, nil
 }
 
 // ─── Signed URL ────────────────────────────────────────────────────

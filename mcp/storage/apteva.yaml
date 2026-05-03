@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: storage
 display_name: Storage
-version: 0.5.1
+version: 0.5.2
 description: |
   File storage for Apteva agents and human teams. Upload bytes,
   organise into folders, share via signed URLs. Backed by local disk
@@ -48,7 +48,7 @@ provides:
     - name: files_dedupe_check
       description: Look up an existing file by sha256 — the agent's "have I seen this already?" primitive.
     - name: files_delete
-      description: Soft-delete a file (the bytes stay on disk; reclamation is a future cron).
+      description: Delete a file. Default is hard delete — row removed AND bytes removed from disk. Pass keep_record=true for soft-delete (audit history; bytes stay).
     - name: files_from_url
       description: Fetch an external URL into storage in one call. Returns the new file's id.
   ui_panels:
