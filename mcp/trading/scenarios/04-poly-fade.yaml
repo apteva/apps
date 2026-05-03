@@ -1,0 +1,44 @@
+name: poly-fade
+description: |
+  Agent surveys polymarket prediction markets, identifies one
+  where consensus has gapped past 75% on one side, and builds a
+  small fading position. Exercises polymarket flow end-to-end.
+
+timeout: 180s
+max_iterations: 12
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    config:
+      tick_seconds: "2"
+      bootstrap_demo: "false"
+      pricing_provider: "mock"
+
+directive: |
+  Bootstrap a paper-trading book called "Macro Predictions" —
+  fade overconfident polymarket consensus (YES > 75% or NO > 75%),
+  max 5% per market, allowed classes ["polymarket"].
+
+  Survey the markets POLY:btc-100k-2026, POLY:fed-cut-march, and
+  POLY:openai-ipo-2026 by quoting each. Pick the one with the most
+  overconfident consensus. Build a small fading position on the
+  side you believe is mispriced — a limit order at the current
+  price, sized at roughly 4% of your equity. Once it fills, write
+  a thesis explaining the fade. Then stop.
+
+assert:
+  - tool_called: portfolio_create
+  - tool_called: market_quote
+  - tool_called: order_place
+  - tool_called: journal_write
+  - http: GET /api/apps/trading/portfolios/1/orders?status=filled
+    expect_status: 200
+    expect_count_at: orders
+    expect_count: 1
+  - iterations_at_most: 12
+
+budget:
+  total_tokens: 100000
+  cost_usd: 0.60

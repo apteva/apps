@@ -1,0 +1,172 @@
+schema: apteva-app/v1
+
+name: trading
+display_name: Trading
+version: 0.2.0
+description: |
+  Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
+  crypto, polymarket prediction markets). Each portfolio runs in one of
+  two modes:
+
+    paper — deterministic in-process execution engine; no broker, no
+            real money. The default. Useful for strategy work and dry
+            runs.
+    live  — orders route through a bound broker integration (v0.2 ships
+            with Binance). Real fills, real cash, real positions. Live
+            requires the operator to bind a connection to the `broker`
+            role; without one, all portfolios stay paper and existing
+            behaviour is unchanged.
+
+  Each portfolio has its own mandate, allowed asset classes, and
+  daily-loss halt. Approval flow lives in the agent's directive (via
+  channel-chat), not in this sidecar — keeps the trading surface
+  focused on state, execution, market data, and audit log.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/trading
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/trading/icon.png
+tags: [trading, finance, agent, polymarket, crypto]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.instances.read
+    - net.egress                  # public market-data endpoints (Binance, Polymarket gamma-api)
+    - platform.connections.execute # broker calls (live mode)
+  integrations:
+    # Optional. Bind a broker to enable mode=live on new portfolios.
+    # Without a binding, every portfolio stays paper — existing v0.1
+    # installs see no behaviour change. v0.2 ships Binance only; new
+    # brokers (alpaca, ig-trading, kraken) slot in here as a one-line
+    # addition to compatible_slugs once their adapter is implemented.
+    - role: broker
+      kind: integration
+      required: false
+      compatible_slugs: [binance-trading]
+      capabilities:
+        - order.place
+        - order.cancel
+        - order.status
+        - account.summary
+        - market.quote
+      tools:
+        order.place:     create_order
+        order.cancel:    cancel_order
+        order.status:    get_order
+        account.summary: get_account
+        market.quote:    get_price
+      label: "Broker (optional — enables live trading)"
+      hint: "Bind a Binance connection to enable mode=live on new portfolios. Unbound = everything stays paper."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: portfolio_create
+      description: "Create a new paper portfolio with mandate, allowed asset classes, and starting cash."
+    - name: portfolio_list
+      description: "List portfolios visible to this agent."
+    - name: portfolio_get
+      description: "Snapshot of one portfolio (mandate, equity, cash, status, watchlist)."
+    - name: account_summary
+      description: "Equity, cash, buying power, day and open P&L for one portfolio."
+    - name: positions_list
+      description: "Open positions for one portfolio."
+    - name: orders_list
+      description: "Working / filled / cancelled orders for one portfolio."
+    - name: order_place
+      description: "Place a paper order. Required rationale; subject to mandate + size cap + daily-loss halt."
+    - name: order_cancel
+      description: "Cancel a working order."
+    - name: market_quote
+      description: "Latest mark for a symbol — equity/crypto USD or polymarket YES/NO probabilities."
+    - name: market_history
+      description: "OHLCV bars or probability history for a symbol."
+    - name: market_source
+      description: "Report the live data source per asset class — provider name, errors_60s, staleness."
+    - name: watchlist_add
+      description: "Track a symbol on a portfolio."
+    - name: watchlist_remove
+      description: "Stop tracking a symbol."
+    - name: alert_create
+      description: "Create a price/probability/PNL alert that wakes the agent on match."
+    - name: journal_write
+      description: "Append a thesis/rationale/note to a portfolio's journal."
+    - name: journal_read
+      description: "Read journal entries for a portfolio (recent or filtered by kind)."
+    - name: portfolio_pause
+      description: "Pause this portfolio (no new orders). Self-only — resume is human-only via REST."
+  # Same shape as crm + storage: a panel mounted in the dashboard's
+  # project page slot. The rich desk SPA at /ui/desk/dist/ is also
+  # served through the platform proxy at
+  # /api/apps/trading/ui/desk/dist/index.html — operators can link to
+  # it directly; the SDK doesn't yet ship a `ui_pages` slot to surface
+  # iframe-mounted top-level nav entries from `kind: source` apps.
+  # When that lands the desk gets a one-line declaration here.
+  ui_panels:
+    - slot: project.page
+      label: Trading
+      icon: trending-up
+      entry: /ui/panel/TradingPanel.html
+  # No prompt_fragments. Trading policy (approval gates, position-sizing
+  # opinions) belongs in the operator's per-instance directive, not
+  # baked into every install. The MCP tool descriptions carry the
+  # platform contract (rationale length, rejection codes, status
+  # semantics); the agent learns the rest from structured rejections.
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/trading
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/trading.db
+  migrations: migrations/
+
+config_schema:
+  - name: starting_cash
+    type: text
+    default: "100000"
+    label: Starting paper cash (USD)
+    description: Issued to every new portfolio at creation.
+  - name: daily_loss_halt_pct
+    type: text
+    default: "5"
+    label: Daily-loss halt %
+    description: Portfolio is auto-paused when day P&L drops below −X%.
+  - name: tick_seconds
+    type: text
+    default: "5"
+    label: Mark refresh cadence (seconds)
+    description: How often the paper engine re-marks open positions and tries to fill working orders.
+  - name: pricing_provider
+    type: text
+    default: "live"
+    label: Pricing provider
+    description: |
+      live — Binance public REST for crypto + Polymarket gamma-api for prediction markets.
+             Equity/etf use deterministic mock walks (no free no-auth feed worth depending on yet).
+      mock — fully offline; deterministic walks for everything. Used by tests + air-gapped demos.
+  - name: bootstrap_demo
+    type: text
+    default: "true"
+    label: Auto-create a demo paper portfolio on first install
+    description: |
+      When true, on first boot of a project with zero portfolios, the app creates a "Demo Crypto"
+      paper book with a starter watchlist + welcome journal entry. Set to "false" to keep the
+      install empty (operator or agent creates everything by hand).
+  - name: bootstrap_watchlist
+    type: text
+    default: "BTC-USD,ETH-USD,SOL-USD,POLY:btc-100k-2026"
+    label: Bootstrap watchlist (comma-separated)
+    description: Symbols added to the demo book's watchlist when bootstrap_demo is on.
+
+upgrade_policy: auto-patch

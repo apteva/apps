@@ -8,6 +8,8 @@ MCP local sidecar bin
 _test_sidecar_bin
 mcp/jobs/jobs
 mcp/code/code
+mcp/trading/trading
 mcp/jobs/data/
 mcp/code/workspace/
+node_modules/
 apteva-core.log

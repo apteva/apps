@@ -1,0 +1,37 @@
+name: create-portfolio
+description: |
+  First-run flow: agent bootstraps a fresh portfolio, picks a few
+  symbols to watch, writes a starter thesis. Verifies the basic
+  create + watchlist + journal round-trip works end-to-end with a
+  real LLM.
+
+timeout: 90s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    config:
+      bootstrap_demo: "false"   # scenarios test agent-driven state, not auto-fill
+      pricing_provider: "mock"  # deterministic for tests
+
+directive: |
+  Bootstrap a new paper-trading book. Create a portfolio called
+  "Momentum Demo" — long-only equity trend-following, max 25% per
+  name. Add NVDA, AAPL and SPY to its watchlist. Write a one-line
+  thesis explaining the book's intent. Then stop.
+
+assert:
+  - tool_called: portfolio_create
+  - tool_called: watchlist_add
+  - tool_called: journal_write
+  - http: GET /api/apps/trading/portfolios
+    expect_status: 200
+    expect_count_at: portfolios
+    expect_count: 1
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 80000
+  cost_usd: 0.50
