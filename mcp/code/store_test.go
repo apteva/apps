@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -23,12 +24,25 @@ func openTestDB(t *testing.T) *sql.DB {
 	if err := db.Ping(); err != nil {
 		t.Fatal(err)
 	}
-	body, err := os.ReadFile("migrations/001_init.sql")
+	entries, err := os.ReadDir("migrations")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(string(body)); err != nil {
-		t.Fatal(err)
+	var files []string
+	for _, e := range entries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".sql" {
+			files = append(files, e.Name())
+		}
+	}
+	sort.Strings(files)
+	for _, f := range files {
+		body, err := os.ReadFile(filepath.Join("migrations", f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(body)); err != nil {
+			t.Fatalf("apply %s: %v", f, err)
+		}
 	}
 	return db
 }

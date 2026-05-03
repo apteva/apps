@@ -81,6 +81,21 @@ interface Repo {
   archived?: boolean;
   created_at?: string;
   updated_at?: string;
+  is_template?: boolean;
+  template_scope?: "private" | "project" | "global";
+  template_tagline?: string;
+  template_icon?: string;
+}
+
+interface TemplateEntry {
+  kind: "user" | "embedded";
+  name: string;
+  slug: string;
+  tagline?: string;
+  icon?: string;
+  scope?: string;
+  file_count: number;
+  project_id?: string;
 }
 
 interface FileMeta {
@@ -100,8 +115,12 @@ interface FileEventData {
 
 const API = "/api/apps/code/api";
 
-const FRAMEWORKS = ["blank", "nextjs", "static", "go", "python"] as const;
-type Framework = (typeof FRAMEWORKS)[number];
+// Always-on fallback so the picker still works if the templates fetch
+// fails (e.g. the sidecar is mid-restart). Embedded names beyond
+// "blank" are discovered at runtime via /api/templates.
+const FALLBACK_TEMPLATES: TemplateEntry[] = [
+  { kind: "embedded", name: "blank", slug: "blank", tagline: "Empty repo", file_count: 0 },
+];
 
 function formatSize(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -148,7 +167,10 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameTo, setRenameTo] = useState("");
+  const [forkSlug, setForkSlug] = useState<string | null>(null);
   const uploadRef = useRef<HTMLInputElement | null>(null);
+
+  const selectedRepo = repos.find((r) => r.slug === selectedSlug);
 
   const dirty = editing && openFile !== null && draft !== openFile.content;
 
@@ -326,6 +348,36 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
     }
   };
 
+  const handleToggleTemplate = async (slug: string) => {
+    const repo = repos.find((r) => r.slug === slug);
+    if (!repo) return;
+    if (repo.is_template) {
+      try {
+        await api("POST", `/repos/${slug}/unmark-template`);
+        await loadRepos();
+      } catch (e) {
+        alert("Unmark failed: " + (e as Error).message);
+      }
+      return;
+    }
+    const scope = prompt(
+      "Template scope: 'private' (this project only), 'project' (anyone in this project), or 'global' (every project)",
+      "private",
+    );
+    if (!scope) return;
+    if (!["private", "project", "global"].includes(scope)) {
+      alert("scope must be one of: private, project, global");
+      return;
+    }
+    const tagline = prompt("Short tagline for the picker (optional)", "") ?? "";
+    try {
+      await api("POST", `/repos/${slug}/mark-template`, { scope, tagline });
+      await loadRepos();
+    } catch (e) {
+      alert("Mark failed: " + (e as Error).message);
+    }
+  };
+
   const handleSave = async () => {
     if (!selectedSlug || !openFile) return;
     setSaving(true);
@@ -476,6 +528,12 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
                         {r.framework}
                       </span>
                     )}
+                    {r.is_template && (
+                      <span
+                        className="text-[10px] px-1 py-0.5 rounded bg-yellow/15 text-yellow"
+                        title={`template — ${r.template_scope ?? "private"}`}
+                      >★ template</span>
+                    )}
                     {r.archived && (
                       <span className="text-[10px] px-1 py-0.5 rounded bg-border text-text-muted">
                         archived
@@ -531,6 +589,18 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
                 className="px-1 py-0.5 text-xs text-text-dim hover:text-text"
                 title="Refresh"
               >↻</button>
+              <button
+                type="button"
+                onClick={() => handleToggleTemplate(selectedSlug)}
+                className="px-1 py-0.5 text-xs text-yellow/80 hover:text-yellow"
+                title={selectedRepo?.is_template ? "Unmark as template" : "Save as template"}
+              >★</button>
+              <button
+                type="button"
+                onClick={() => setForkSlug(selectedSlug)}
+                className="px-1 py-0.5 text-xs text-accent/80 hover:text-accent"
+                title="Fork into a new repo"
+              >⑂</button>
               <button
                 type="button"
                 onClick={() => handleArchive(selectedSlug)}
@@ -712,6 +782,18 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
           hint="A hidden .gitkeep is added so the folder shows up in the tree."
         />
       )}
+
+      {forkSlug && (
+        <ForkRepoDialog
+          parentSlug={forkSlug}
+          onClose={() => setForkSlug(null)}
+          onCreated={(slug) => {
+            setForkSlug(null);
+            loadRepos().then(() => selectRepo(slug));
+          }}
+          api={api}
+        />
+      )}
     </div>
   );
 }
@@ -726,7 +808,146 @@ function CreateRepoDialog({
   api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
 }) {
   const [name, setName] = useState("");
-  const [framework, setFramework] = useState<Framework>("blank");
+  const [description, setDescription] = useState("");
+  const [templates, setTemplates] = useState<TemplateEntry[]>(FALLBACK_TEMPLATES);
+  // Selection is encoded as "<kind>:<slug>" so we can round-trip both
+  // kinds through one piece of state without tracking them separately.
+  const [picked, setPicked] = useState<string>("embedded:blank");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    api<{ templates: TemplateEntry[] }>("GET", "/templates")
+      .then((r) => {
+        if (r.templates && r.templates.length) setTemplates(r.templates);
+      })
+      .catch(() => { /* keep fallback */ });
+  }, [api]);
+
+  const submit = async () => {
+    if (!name.trim()) {
+      setErr("name required");
+      return;
+    }
+    const [kind, slug] = picked.split(":", 2);
+    setBusy(true);
+    try {
+      let created: { repository: Repo };
+      if (kind === "user") {
+        created = await api<{ repository: Repo }>("POST", `/repos/${slug}/fork`, {
+          name: name.trim(),
+          description: description.trim(),
+        });
+      } else {
+        // embedded — keeps the framework column populated for the badge
+        created = await api<{ repository: Repo }>("POST", "/repos", {
+          name: name.trim(),
+          framework: slug,
+          description: description.trim(),
+        });
+      }
+      onCreated(created.repository.slug);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-[560px] max-h-[80vh] bg-bg border border-border rounded p-5 space-y-4 flex flex-col"
+      >
+        <h2 className="text-text font-semibold">New repository</h2>
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs text-text-muted block mb-1">Name</label>
+            <input
+              autoFocus
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              placeholder="my-app"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-text-muted block mb-1">Description (optional)</label>
+            <input
+              type="text"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-text-muted block mb-1">Template</label>
+            <div className="grid grid-cols-2 gap-2 overflow-auto max-h-64 p-1">
+              {templates.map((t) => {
+                const id = `${t.kind}:${t.slug}`;
+                const sel = picked === id;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setPicked(id)}
+                    className={`text-left p-2 rounded border ${
+                      sel ? "border-accent bg-accent/10" : "border-border hover:bg-bg-input/50"
+                    }`}
+                  >
+                    <div className="flex items-center gap-1">
+                      <span className="text-sm text-text font-medium truncate flex-1">
+                        {t.icon ? `${t.icon} ` : ""}{t.name}
+                      </span>
+                      <span
+                        className={`text-[10px] px-1 py-0.5 rounded ${
+                          t.kind === "embedded" ? "bg-blue/15 text-blue" : "bg-yellow/15 text-yellow"
+                        }`}
+                      >{t.kind === "embedded" ? "system" : (t.scope ?? "yours")}</span>
+                    </div>
+                    {t.tagline && (
+                      <div className="text-[11px] text-text-muted truncate mt-0.5">{t.tagline}</div>
+                    )}
+                    <div className="text-[10px] text-text-dim mt-0.5">{t.file_count} files</div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+        {err && <div className="text-red text-xs">{err}</div>}
+        <div className="flex items-center justify-end gap-2 pt-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input"
+          >Cancel</button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={busy}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+          >{busy ? "Creating…" : "Create"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ForkRepoDialog({
+  parentSlug,
+  onClose,
+  onCreated,
+  api,
+}: {
+  parentSlug: string;
+  onClose: () => void;
+  onCreated: (slug: string) => void;
+  api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
+}) {
+  const [name, setName] = useState(`${parentSlug}-fork`);
   const [description, setDescription] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -738,9 +959,8 @@ function CreateRepoDialog({
     }
     setBusy(true);
     try {
-      const r = await api<{ repository: Repo }>("POST", "/repos", {
+      const r = await api<{ repository: Repo }>("POST", `/repos/${parentSlug}/fork`, {
         name: name.trim(),
-        framework,
         description: description.trim(),
       });
       onCreated(r.repository.slug);
@@ -757,30 +977,21 @@ function CreateRepoDialog({
         onClick={(e) => e.stopPropagation()}
         className="w-[420px] bg-bg border border-border rounded p-5 space-y-4"
       >
-        <h2 className="text-text font-semibold">New repository</h2>
+        <h2 className="text-text font-semibold">Fork {parentSlug}</h2>
+        <p className="text-xs text-text-muted">
+          Snapshots every file from <span className="font-mono">{parentSlug}</span> into a fresh repo.
+          Edits to the new repo don't affect the source.
+        </p>
         <div className="space-y-3">
           <div>
-            <label className="text-xs text-text-muted block mb-1">Name</label>
+            <label className="text-xs text-text-muted block mb-1">New name</label>
             <input
               autoFocus
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
               className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
-              placeholder="my-app"
             />
-          </div>
-          <div>
-            <label className="text-xs text-text-muted block mb-1">Framework</label>
-            <select
-              value={framework}
-              onChange={(e) => setFramework(e.target.value as Framework)}
-              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
-            >
-              {FRAMEWORKS.map((f) => (
-                <option key={f} value={f}>{f}</option>
-              ))}
-            </select>
           </div>
           <div>
             <label className="text-xs text-text-muted block mb-1">Description (optional)</label>
@@ -804,7 +1015,7 @@ function CreateRepoDialog({
             onClick={submit}
             disabled={busy}
             className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
-          >{busy ? "Creating…" : "Create"}</button>
+          >{busy ? "Forking…" : "Fork"}</button>
         </div>
       </div>
     </div>

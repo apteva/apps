@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -161,7 +162,231 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"slug", "path"}),
 			Handler: a.toolDeleteFile,
 		},
+		{
+			Name: "repos_mark_template",
+			Description: "Mark a repo as a template so others can fork it. Args: slug, " +
+				"scope? ('private' | 'project' | 'global', default 'private'), tagline?, icon?.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":    map[string]any{"type": "string"},
+				"scope":   map[string]any{"type": "string"},
+				"tagline": map[string]any{"type": "string"},
+				"icon":    map[string]any{"type": "string"},
+			}, []string{"slug"}),
+			Handler: a.toolMarkTemplate,
+		},
+		{
+			Name:        "repos_unmark_template",
+			Description: "Clear the template flag on a repo. Existing forks are unaffected.",
+			InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}}, []string{"slug"}),
+			Handler:     a.toolUnmarkTemplate,
+		},
+		{
+			Name: "templates_list",
+			Description: "List templates available in this project: user templates (private to project + " +
+				"globally-shared) and the embedded system templates baked into the binary. " +
+				"Args: include_embedded? (default true).",
+			InputSchema: schemaObject(map[string]any{
+				"include_embedded": map[string]any{"type": "boolean"},
+			}, nil),
+			Handler: a.toolTemplatesList,
+		},
+		{
+			Name: "repos_fork",
+			Description: "Create a new repo by copying every file from a source. Source is either a user " +
+				"repo/template (from_slug) or an embedded template name (from_template). Args: name (required), " +
+				"slug?, description?, from_slug? (mutually exclusive with from_template), from_template?.",
+			InputSchema: schemaObject(map[string]any{
+				"name":          map[string]any{"type": "string"},
+				"slug":          map[string]any{"type": "string"},
+				"description":   map[string]any{"type": "string"},
+				"from_slug":     map[string]any{"type": "string"},
+				"from_template": map[string]any{"type": "string"},
+			}, []string{"name"}),
+			Handler: a.toolReposFork,
+		},
 	}
+}
+
+// ─── Template / fork handlers ──────────────────────────────────────
+
+func (a *App) toolMarkTemplate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	slug := strArg(args, "slug")
+	if slug == "" {
+		return nil, errors.New("slug required")
+	}
+	r, err := dbSetTemplate(ctx.AppDB(), pid, slug, true,
+		strArg(args, "scope"), strArg(args, "tagline"), strArg(args, "icon"))
+	if err != nil {
+		return nil, err
+	}
+	if ctx != nil {
+		ctx.Emit("template.marked", map[string]any{"slug": slug, "scope": r.TemplateScope})
+	}
+	return map[string]any{"repository": r}, nil
+}
+
+func (a *App) toolUnmarkTemplate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	slug := strArg(args, "slug")
+	if slug == "" {
+		return nil, errors.New("slug required")
+	}
+	r, err := dbSetTemplate(ctx.AppDB(), pid, slug, false, "", "", "")
+	if err != nil {
+		return nil, err
+	}
+	if ctx != nil {
+		ctx.Emit("template.unmarked", map[string]any{"slug": slug})
+	}
+	return map[string]any{"repository": r}, nil
+}
+
+// TemplateEntry is the unified shape used by templates_list. `kind`
+// distinguishes user templates (forkable via from_slug) from embedded
+// ones (forkable via from_template).
+type TemplateEntry struct {
+	Kind      string `json:"kind"` // 'user' | 'embedded'
+	Name      string `json:"name"`
+	Slug      string `json:"slug"`              // user: repo slug; embedded: framework name
+	Tagline   string `json:"tagline,omitempty"`
+	Icon      string `json:"icon,omitempty"`
+	Scope     string `json:"scope,omitempty"`   // user only
+	FileCount int    `json:"file_count"`
+	ProjectID string `json:"project_id,omitempty"` // user only
+}
+
+func (a *App) toolTemplatesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	includeEmbedded := true
+	if v, ok := args["include_embedded"].(bool); ok {
+		includeEmbedded = v
+	}
+	out := []TemplateEntry{}
+
+	repos, err := dbListUserTemplates(ctx.AppDB(), pid)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range repos {
+		files, _ := a.store.List(r.Slug, "", true)
+		out = append(out, TemplateEntry{
+			Kind: "user", Name: r.Name, Slug: r.Slug,
+			Tagline: r.TemplateTagline, Icon: r.TemplateIcon,
+			Scope: r.TemplateScope, FileCount: len(files),
+			ProjectID: r.ProjectID,
+		})
+	}
+	if includeEmbedded {
+		for _, name := range embeddedTemplateNames() {
+			paths, _ := embeddedReader{}.ListPaths(name)
+			out = append(out, TemplateEntry{
+				Kind: "embedded", Name: name, Slug: name,
+				Tagline: "Built-in " + name + " starter", FileCount: len(paths),
+			})
+		}
+	}
+	return map[string]any{"templates": out, "count": len(out)}, nil
+}
+
+func (a *App) toolReposFork(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	name := strArg(args, "name")
+	if name == "" {
+		return nil, errors.New("name required")
+	}
+	fromSlug := strArg(args, "from_slug")
+	fromTemplate := strArg(args, "from_template")
+	if (fromSlug == "") == (fromTemplate == "") {
+		return nil, errors.New("exactly one of from_slug or from_template must be set")
+	}
+
+	// Resolve the source tree first so a missing source fails before we
+	// allocate a new slug + disk root.
+	var src treeReader
+	var srcID, parentKind string
+	if fromSlug != "" {
+		parent, err := dbGetRepoBySlug(ctx.AppDB(), pid, fromSlug)
+		if err != nil {
+			return nil, err
+		}
+		if parent == nil {
+			// Fall back to globally-scoped templates from other projects —
+			// the only cross-project read the fork path allows.
+			gp, err := findGlobalTemplate(ctx.AppDB(), fromSlug)
+			if err != nil {
+				return nil, err
+			}
+			if gp == nil {
+				return nil, fmt.Errorf("source repo %q not found in this project", fromSlug)
+			}
+			parent = gp
+		}
+		src = storeReader{s: a.store}
+		srcID = parent.Slug
+		parentKind = "user"
+	} else {
+		// embedded
+		src = embeddedReader{}
+		srcID = fromTemplate
+		parentKind = "embedded"
+	}
+
+	in := CreateRepoInput{
+		Name:        name,
+		Slug:        strArg(args, "slug"),
+		Description: strArg(args, "description"),
+		Framework:   "blank", // forks always start as blank — files come from the source tree
+	}
+	r, err := dbCreateRepo(ctx.AppDB(), pid, in)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.store.CreateRepo(r.Slug); err != nil {
+		_ = dbHardDeleteRepo(ctx.AppDB(), pid, r.Slug)
+		return nil, fmt.Errorf("create repo dir: %w", err)
+	}
+	count, err := fork(src, srcID, a.store, r.Slug)
+	if err != nil {
+		// Roll back so the user doesn't end up with a half-copied repo
+		// that they then have to clean up manually.
+		_ = a.store.DropRepo(r.Slug)
+		_ = dbHardDeleteRepo(ctx.AppDB(), pid, r.Slug)
+		return nil, fmt.Errorf("copy from %s: %w", parentKind, err)
+	}
+	_ = dbRecordFork(ctx.AppDB(), r.ID, srcID, parentKind)
+	_ = dbRecordImport(ctx.AppDB(), r.ID, "fork:"+parentKind+":"+srcID)
+	if ctx != nil {
+		ctx.Emit("repo.added", map[string]any{
+			"id": r.ID, "slug": r.Slug, "name": r.Name,
+			"forked_from": map[string]any{"slug": srcID, "kind": parentKind},
+		})
+	}
+	return map[string]any{"repository": r, "files_created": count,
+		"forked_from": map[string]any{"slug": srcID, "kind": parentKind}}, nil
+}
+
+// findGlobalTemplate looks up a template by slug across all projects,
+// returning it only if it's marked global. Used by repos_fork so users
+// can fork shared templates without having to know which project owns
+// them.
+func findGlobalTemplate(db *sql.DB, slug string) (*Repo, error) {
+	row := db.QueryRow(`SELECT `+repoColumns+` FROM repositories
+		WHERE slug = ? AND is_template = 1 AND template_scope = 'global' AND archived_at IS NULL
+		LIMIT 1`, slug)
+	return scanRepoRow(row)
 }
 
 // ─── repos_* handlers ──────────────────────────────────────────────

@@ -29,6 +29,11 @@ type Repo struct {
 	CreatedAt      string `json:"created_at,omitempty"`
 	UpdatedAt      string `json:"updated_at,omitempty"`
 	ArchivedAt     string `json:"archived_at,omitempty"`
+
+	IsTemplate      bool   `json:"is_template,omitempty"`
+	TemplateScope   string `json:"template_scope,omitempty"`   // 'private' | 'project' | 'global'
+	TemplateTagline string `json:"template_tagline,omitempty"`
+	TemplateIcon    string `json:"template_icon,omitempty"`
 }
 
 // IsArchived is true when archived_at is non-empty.
@@ -120,37 +125,30 @@ func dbCreateRepo(db *sql.DB, projectID string, in CreateRepoInput) (*Repo, erro
 	return dbGetRepoByID(db, projectID, id)
 }
 
-func dbGetRepoByID(db *sql.DB, projectID string, id int64) (*Repo, error) {
-	row := db.QueryRow(`
-		SELECT id, project_id, slug, name, description, framework, storage_root, owner,
-		       build_cmd, start_cmd, port, env_json,
-		       deploy_service, IFNULL(last_deployed_at,''),
-		       created_at, updated_at, IFNULL(archived_at,'')
-		FROM repositories
-		WHERE project_id = ? AND id = ?
-	`, projectID, id)
-	return scanRepo(row)
+// repoColumns is the canonical column list for SELECTs. Kept in one
+// place so adding a column means touching one constant + scanRepoRow.
+const repoColumns = `
+	id, project_id, slug, name, description, framework, storage_root, owner,
+	build_cmd, start_cmd, port, env_json,
+	deploy_service, IFNULL(last_deployed_at,''),
+	created_at, updated_at, IFNULL(archived_at,''),
+	is_template, IFNULL(template_scope,''), IFNULL(template_tagline,''), IFNULL(template_icon,'')
+`
+
+// rowScanner abstracts *sql.Row and *sql.Rows so one Scan helper covers
+// both single-row queries and Rows.Next loops.
+type rowScanner interface {
+	Scan(dest ...any) error
 }
 
-func dbGetRepoBySlug(db *sql.DB, projectID, slug string) (*Repo, error) {
-	row := db.QueryRow(`
-		SELECT id, project_id, slug, name, description, framework, storage_root, owner,
-		       build_cmd, start_cmd, port, env_json,
-		       deploy_service, IFNULL(last_deployed_at,''),
-		       created_at, updated_at, IFNULL(archived_at,'')
-		FROM repositories
-		WHERE project_id = ? AND slug = ?
-	`, projectID, slug)
-	return scanRepo(row)
-}
-
-func scanRepo(row *sql.Row) (*Repo, error) {
+func scanRepoRow(s rowScanner) (*Repo, error) {
 	var r Repo
-	err := row.Scan(
+	err := s.Scan(
 		&r.ID, &r.ProjectID, &r.Slug, &r.Name, &r.Description, &r.Framework, &r.StorageRoot, &r.Owner,
 		&r.BuildCmd, &r.StartCmd, &r.Port, &r.EnvJSON,
 		&r.DeployService, &r.LastDeployedAt,
 		&r.CreatedAt, &r.UpdatedAt, &r.ArchivedAt,
+		&r.IsTemplate, &r.TemplateScope, &r.TemplateTagline, &r.TemplateIcon,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -161,15 +159,18 @@ func scanRepo(row *sql.Row) (*Repo, error) {
 	return &r, nil
 }
 
+func dbGetRepoByID(db *sql.DB, projectID string, id int64) (*Repo, error) {
+	row := db.QueryRow(`SELECT `+repoColumns+` FROM repositories WHERE project_id = ? AND id = ?`, projectID, id)
+	return scanRepoRow(row)
+}
+
+func dbGetRepoBySlug(db *sql.DB, projectID, slug string) (*Repo, error) {
+	row := db.QueryRow(`SELECT `+repoColumns+` FROM repositories WHERE project_id = ? AND slug = ?`, projectID, slug)
+	return scanRepoRow(row)
+}
+
 func dbListRepos(db *sql.DB, projectID string, includeArchived bool, q string) ([]*Repo, error) {
-	query := `
-		SELECT id, project_id, slug, name, description, framework, storage_root, owner,
-		       build_cmd, start_cmd, port, env_json,
-		       deploy_service, IFNULL(last_deployed_at,''),
-		       created_at, updated_at, IFNULL(archived_at,'')
-		FROM repositories
-		WHERE project_id = ?
-	`
+	query := `SELECT ` + repoColumns + ` FROM repositories WHERE project_id = ?`
 	args := []any{projectID}
 	if !includeArchived {
 		query += ` AND archived_at IS NULL`
@@ -189,16 +190,11 @@ func dbListRepos(db *sql.DB, projectID string, includeArchived bool, q string) (
 
 	var out []*Repo
 	for rows.Next() {
-		var r Repo
-		if err := rows.Scan(
-			&r.ID, &r.ProjectID, &r.Slug, &r.Name, &r.Description, &r.Framework, &r.StorageRoot, &r.Owner,
-			&r.BuildCmd, &r.StartCmd, &r.Port, &r.EnvJSON,
-			&r.DeployService, &r.LastDeployedAt,
-			&r.CreatedAt, &r.UpdatedAt, &r.ArchivedAt,
-		); err != nil {
+		r, err := scanRepoRow(rows)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, &r)
+		out = append(out, r)
 	}
 	return out, rows.Err()
 }
@@ -276,4 +272,109 @@ func dbHardDeleteRepo(db *sql.DB, projectID, slug string) error {
 func dbRecordImport(db *sql.DB, repoID int64, source string) error {
 	_, err := db.Exec(`INSERT INTO repo_imports (repo_id, source) VALUES (?, ?)`, repoID, source)
 	return err
+}
+
+// ─── Templates ─────────────────────────────────────────────────────
+
+func validTemplateScope(s string) bool {
+	switch s {
+	case "private", "project", "global":
+		return true
+	}
+	return false
+}
+
+// dbSetTemplate flips a repo into (or out of) being a template.
+// Passing on=false clears the template fields so it goes back to a
+// regular repo. Existing forks are unaffected either way.
+func dbSetTemplate(db *sql.DB, projectID, slug string, on bool, scope, tagline, icon string) (*Repo, error) {
+	r, err := dbGetRepoBySlug(db, projectID, slug)
+	if err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return nil, errors.New("repo not found")
+	}
+	if on {
+		if scope == "" {
+			scope = "private"
+		}
+		if !validTemplateScope(scope) {
+			return nil, fmt.Errorf("invalid template_scope %q", scope)
+		}
+		if _, err := db.Exec(`
+			UPDATE repositories
+			   SET is_template = 1, template_scope = ?, template_tagline = ?, template_icon = ?,
+			       updated_at = CURRENT_TIMESTAMP
+			 WHERE project_id = ? AND slug = ?
+		`, scope, tagline, icon, projectID, slug); err != nil {
+			return nil, err
+		}
+	} else {
+		if _, err := db.Exec(`
+			UPDATE repositories
+			   SET is_template = 0, template_scope = NULL, template_tagline = NULL, template_icon = NULL,
+			       updated_at = CURRENT_TIMESTAMP
+			 WHERE project_id = ? AND slug = ?
+		`, projectID, slug); err != nil {
+			return nil, err
+		}
+	}
+	return dbGetRepoBySlug(db, projectID, slug)
+}
+
+// dbListUserTemplates returns templates visible to the given project:
+// every template in this project (any scope) plus globally-scoped
+// templates from any project. Project-scoped templates from *other*
+// projects are intentionally hidden — that's what makes 'project'
+// distinct from 'global'.
+func dbListUserTemplates(db *sql.DB, projectID string) ([]*Repo, error) {
+	query := `SELECT ` + repoColumns + ` FROM repositories
+		WHERE is_template = 1 AND archived_at IS NULL
+		  AND (project_id = ? OR template_scope = 'global')
+		ORDER BY updated_at DESC`
+	rows, err := db.Query(query, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Repo
+	for rows.Next() {
+		r, err := scanRepoRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// dbRecordFork pins a child repo to its parent for "forked from"
+// provenance. parentKind is 'user' (a slug in repositories) or
+// 'embedded' (a name in templatesFS).
+func dbRecordFork(db *sql.DB, childID int64, parentSlug, parentKind string) error {
+	_, err := db.Exec(`
+		INSERT INTO repo_forks (child_id, parent_slug, parent_kind) VALUES (?, ?, ?)
+		ON CONFLICT(child_id) DO UPDATE SET parent_slug=excluded.parent_slug, parent_kind=excluded.parent_kind
+	`, childID, parentSlug, parentKind)
+	return err
+}
+
+// ForkInfo is what the UI shows on a forked repo card.
+type ForkInfo struct {
+	ParentSlug string `json:"parent_slug"`
+	ParentKind string `json:"parent_kind"`
+	ForkedAt   string `json:"forked_at"`
+}
+
+func dbGetFork(db *sql.DB, childID int64) (*ForkInfo, error) {
+	row := db.QueryRow(`SELECT parent_slug, parent_kind, forked_at FROM repo_forks WHERE child_id = ?`, childID)
+	var f ForkInfo
+	if err := row.Scan(&f.ParentSlug, &f.ParentKind, &f.ForkedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &f, nil
 }

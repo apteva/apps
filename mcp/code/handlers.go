@@ -72,6 +72,12 @@ func (a *App) handleRepoItem(w http.ResponseWriter, r *http.Request) {
 		a.httpRepoImport(w, r, slug)
 	case tail == "export":
 		a.httpRepoExport(w, r, slug)
+	case tail == "mark-template":
+		a.httpRepoMarkTemplate(w, r, slug)
+	case tail == "unmark-template":
+		a.httpRepoUnmarkTemplate(w, r, slug)
+	case tail == "fork":
+		a.httpRepoFork(w, r, slug)
 	default:
 		httpErr(w, http.StatusNotFound, "no such resource")
 	}
@@ -584,4 +590,137 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": msg})
+}
+
+// ─── Templates / fork ─────────────────────────────────────────────
+
+func (a *App) handleTemplatesList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET")
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	includeEmbedded := true
+	if v := r.URL.Query().Get("include_embedded"); v == "0" || v == "false" {
+		includeEmbedded = false
+	}
+	out := []TemplateEntry{}
+	repos, err := dbListUserTemplates(globalCtx.AppDB(), pid)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, repo := range repos {
+		files, _ := a.store.List(repo.Slug, "", true)
+		out = append(out, TemplateEntry{
+			Kind: "user", Name: repo.Name, Slug: repo.Slug,
+			Tagline: repo.TemplateTagline, Icon: repo.TemplateIcon,
+			Scope: repo.TemplateScope, FileCount: len(files),
+			ProjectID: repo.ProjectID,
+		})
+	}
+	if includeEmbedded {
+		for _, name := range embeddedTemplateNames() {
+			paths, _ := embeddedReader{}.ListPaths(name)
+			out = append(out, TemplateEntry{
+				Kind: "embedded", Name: name, Slug: name,
+				Tagline: "Built-in " + name + " starter", FileCount: len(paths),
+			})
+		}
+	}
+	httpJSON(w, map[string]any{"templates": out, "count": len(out)})
+}
+
+func (a *App) httpRepoMarkTemplate(w http.ResponseWriter, r *http.Request, slug string) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var body struct {
+		Scope   string `json:"scope"`
+		Tagline string `json:"tagline"`
+		Icon    string `json:"icon"`
+	}
+	if r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+	}
+	repo, err := dbSetTemplate(globalCtx.AppDB(), pid, slug, true, body.Scope, body.Tagline, body.Icon)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if globalCtx != nil {
+		globalCtx.Emit("template.marked", map[string]any{"slug": slug, "scope": repo.TemplateScope})
+	}
+	httpJSON(w, map[string]any{"repository": repo})
+}
+
+func (a *App) httpRepoUnmarkTemplate(w http.ResponseWriter, r *http.Request, slug string) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	repo, err := dbSetTemplate(globalCtx.AppDB(), pid, slug, false, "", "", "")
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if globalCtx != nil {
+		globalCtx.Emit("template.unmarked", map[string]any{"slug": slug})
+	}
+	httpJSON(w, map[string]any{"repository": repo})
+}
+
+func (a *App) httpRepoFork(w http.ResponseWriter, r *http.Request, slug string) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var body struct {
+		Name        string `json:"name"`
+		Slug        string `json:"slug"`
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if body.Name == "" {
+		httpErr(w, http.StatusBadRequest, "name required")
+		return
+	}
+	res, err := a.toolReposFork(globalCtx, map[string]any{
+		"name":        body.Name,
+		"slug":        body.Slug,
+		"description": body.Description,
+		"from_slug":   slug,
+		"_project_id": pid,
+	})
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpJSON(w, res)
 }

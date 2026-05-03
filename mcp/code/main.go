@@ -16,7 +16,6 @@ import (
 	"embed"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -34,7 +33,7 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.1.2
+version: 0.2.0
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code.
@@ -61,6 +60,10 @@ provides:
     - { name: code_multi_edit,        description: "Multiple edits to one file, atomic." }
     - { name: code_rename_path,       description: "Move or rename a file or folder." }
     - { name: code_delete_file,       description: "Delete a file or folder." }
+    - { name: repos_mark_template,    description: "Flip a repo into being a template (and set scope)." }
+    - { name: repos_unmark_template,  description: "Clear template flag on a repo. Existing forks unaffected." }
+    - { name: templates_list,         description: "List user templates visible to this project + embedded ones." }
+    - { name: repos_fork,             description: "Create a new repo by snapshot-copying a template or another repo." }
   ui_panels:
     - { slot: project.page, label: "Code", icon: code, entry: /ui/CodePanel.mjs }
 runtime:
@@ -145,38 +148,10 @@ func resolveProjectFromRequest(r *http.Request) (string, error) {
 // ─── Template materialisation ──────────────────────────────────────
 
 // applyTemplate copies an embedded template's tree into a freshly-
-// created repo via the FileStore. Empty tree (template not found)
-// is fine — the repo just starts blank.
+// created repo via the FileStore. Thin wrapper over fork() — kept
+// because both the create-repo paths still call it by name.
 func applyTemplate(store FileStore, slug, framework string) (int, error) {
-	if framework == "" || framework == "blank" {
-		return 0, nil
-	}
-	root := "templates/" + framework
-	count := 0
-	err := fs.WalkDir(templatesFS, root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			// templates/<framework>/ doesn't exist — leave the repo
-			// empty and let the caller carry on.
-			if errors.Is(err, fs.ErrNotExist) {
-				return fs.SkipAll
-			}
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		body, e := templatesFS.ReadFile(p)
-		if e != nil {
-			return e
-		}
-		rel := strings.TrimPrefix(p, root+"/")
-		if _, e := store.Write(slug, rel, body); e != nil {
-			return e
-		}
-		count++
-		return nil
-	})
-	return count, err
+	return fork(embeddedReader{}, framework, store, slug)
 }
 
 // ─── HTTP routes ────────────────────────────────────────────────────
@@ -186,6 +161,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// /api/repos and /api/repos/<slug>/... — handled in handlers.go.
 		{Pattern: "/api/repos", Handler: a.handleReposCollection},
 		{Pattern: "/api/repos/", Handler: a.handleRepoItem},
+		{Pattern: "/api/templates", Handler: a.handleTemplatesList},
 	}
 }
 
