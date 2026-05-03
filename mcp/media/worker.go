@@ -149,7 +149,7 @@ func processOne(
 	// Derivations: thumbnail for video/image, waveform for audio.
 	if probe.HasVideo || probe.IsImage {
 		thumbPath := filepath.Join(tmpDir, "thumb.jpg")
-		if err := makeThumbnail(ctx, ffmpegPath, srcPath, thumbPath, toFloat(thumbSeek), toInt(thumbWidth), probe.IsImage); err != nil {
+		if err := makeThumbnail(ctx, ffmpegPath, srcPath, thumbPath, toFloat(thumbSeek), toInt(thumbWidth), probe.IsImage, probe.DurationMs); err != nil {
 			logger.Warn("thumbnail failed", "err", err)
 		} else if err := uploadAndRecord(ctx, app, sc, projectID, fid, "thumbnail", thumbPath, "image/jpeg", toInt(thumbWidth), 0); err != nil {
 			logger.Warn("thumbnail upload failed", "err", err)
