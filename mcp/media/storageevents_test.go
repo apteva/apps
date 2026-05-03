@@ -45,6 +45,51 @@ func TestCascadeDeleteOne_NoOpOnMissing(t *testing.T) {
 	}
 }
 
+// ─── storageFileFromEvent ───────────────────────────────────────────
+
+func TestStorageFileFromEvent_AllFields(t *testing.T) {
+	data := map[string]any{
+		"id":           float64(42),
+		"name":         "cat.jpg",
+		"folder":       "/photos/",
+		"content_type": "image/jpeg",
+		"sha256":       "deadbeef",
+		"size_bytes":   float64(1024),
+		"visibility":   "private",
+	}
+	f := storageFileFromEvent(data)
+	if f == nil {
+		t.Fatal("expected non-nil StorageFile")
+	}
+	if f.ID != 42 {
+		t.Errorf("id=%d", f.ID)
+	}
+	if f.Name != "cat.jpg" || f.Folder != "/photos/" || f.ContentType != "image/jpeg" {
+		t.Errorf("metadata not lifted: %+v", f)
+	}
+	if f.SHA256 != "deadbeef" || f.SizeBytes != 1024 || f.Visibility != "private" {
+		t.Errorf("metadata not lifted: %+v", f)
+	}
+}
+
+func TestStorageFileFromEvent_StringID(t *testing.T) {
+	// JSON numbers usually decode as float64, but defensively
+	// support string ids too.
+	f := storageFileFromEvent(map[string]any{"id": "42", "name": "x.png"})
+	if f == nil || f.ID != 42 {
+		t.Errorf("string id should parse: %+v", f)
+	}
+}
+
+func TestStorageFileFromEvent_RejectsMissingID(t *testing.T) {
+	if f := storageFileFromEvent(map[string]any{"name": "x"}); f != nil {
+		t.Errorf("expected nil for missing id: %+v", f)
+	}
+	if f := storageFileFromEvent(map[string]any{"id": float64(0)}); f != nil {
+		t.Errorf("expected nil for id=0: %+v", f)
+	}
+}
+
 func TestCascadeDeleteOne_OtherProjectUntouched(t *testing.T) {
 	// Cross-tenant safety: deleting file_id 1 in project A must
 	// not touch project B's row with the same file_id.

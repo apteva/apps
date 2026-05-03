@@ -32,21 +32,47 @@ const (
 
 // runIndexer is the worker body. The framework calls it on the
 // schedule declared in apteva.yaml.
-func runIndexer(ctx context.Context, app *sdk.AppCtx) error {
+// indexerConfig captures the per-tick configuration the indexer +
+// event-driven indexOneFile both consume. Read once via readIndexerConfig
+// rather than parsing the same env on every call.
+type indexerConfig struct {
+	maxSizeMB   any
+	thumbSeek   any
+	thumbWidth  any
+	waveW, waveH any
+	ffmpegPath  string
+	ffprobePath string
+}
+
+func readIndexerConfig(app *sdk.AppCtx) indexerConfig {
 	cfg := app.Config()
-	maxSizeMB := parseConfigInt(cfg.Get("max_probe_size_mb"), 2048)
-	thumbSeek := parseConfigFloat(cfg.Get("thumbnail_seek_seconds"), 1.0)
-	thumbWidth := parseConfigInt(cfg.Get("thumbnail_width"), 320)
-	waveW := parseConfigInt(cfg.Get("waveform_width"), 800)
-	waveH := parseConfigInt(cfg.Get("waveform_height"), 100)
-	ffmpegPath := strings.TrimSpace(cfg.Get("ffmpeg_path"))
-	if ffmpegPath == "" {
-		ffmpegPath = "ffmpeg"
+	c := indexerConfig{
+		maxSizeMB:   parseConfigInt(cfg.Get("max_probe_size_mb"), 2048),
+		thumbSeek:   parseConfigFloat(cfg.Get("thumbnail_seek_seconds"), 1.0),
+		thumbWidth:  parseConfigInt(cfg.Get("thumbnail_width"), 320),
+		waveW:       parseConfigInt(cfg.Get("waveform_width"), 800),
+		waveH:       parseConfigInt(cfg.Get("waveform_height"), 100),
+		ffmpegPath:  strings.TrimSpace(cfg.Get("ffmpeg_path")),
+		ffprobePath: strings.TrimSpace(cfg.Get("ffprobe_path")),
 	}
-	ffprobePath := strings.TrimSpace(cfg.Get("ffprobe_path"))
-	if ffprobePath == "" {
-		ffprobePath = "ffprobe"
+	if c.ffmpegPath == "" {
+		c.ffmpegPath = "ffmpeg"
 	}
+	if c.ffprobePath == "" {
+		c.ffprobePath = "ffprobe"
+	}
+	return c
+}
+
+func runIndexer(ctx context.Context, app *sdk.AppCtx) error {
+	c := readIndexerConfig(app)
+	maxSizeMB := c.maxSizeMB
+	thumbSeek := c.thumbSeek
+	thumbWidth := c.thumbWidth
+	waveW := c.waveW
+	waveH := c.waveH
+	ffmpegPath := c.ffmpegPath
+	ffprobePath := c.ffprobePath
 
 	projectID := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
 	sc := newStorageClient()
@@ -102,6 +128,40 @@ func runIndexer(ctx context.Context, app *sdk.AppCtx) error {
 			maxSizeMB, thumbSeek, thumbWidth, waveW, waveH)
 	}
 	return nil
+}
+
+// indexOneFile runs the indexer pipeline for a single file —
+// triggered by the storage.file.added event handler so newly-uploaded
+// media gets probed + thumbnailed within a fraction of a second
+// instead of waiting up to 30s for the indexer's tick.
+//
+// Skips with no error when:
+//   - the file lives under /.media/ (our own derivation)
+//   - the file isn't a media type (text, archives, …)
+//   - the media row already exists with a matching sha (idempotent
+//     re-event from a flapping connection / event replay)
+//
+// Wraps processOne with the same config setup runIndexer uses so
+// the two entry points produce identical results.
+func indexOneFile(ctx context.Context, app *sdk.AppCtx, projectID string, f StorageFile) {
+	if isOwnDerivation(f.Folder) {
+		return
+	}
+	if !isMediaContentType(f.ContentType) && !isMediaByExt(f.Name) {
+		return
+	}
+	// Skip if already indexed at this sha — events can replay from
+	// the platform's ring buffer, and the sweep may have raced us.
+	fid := strconv.FormatInt(f.ID, 10)
+	if existing, err := getMedia(app.AppDB(), projectID, fid); err == nil &&
+		existing.SourceSHA256 == f.SHA256 && existing.ProbeStatus == "ok" {
+		return
+	}
+
+	c := readIndexerConfig(app)
+	sc := newStorageClient()
+	processOne(ctx, app, sc, projectID, f, c.ffmpegPath, c.ffprobePath,
+		c.maxSizeMB, c.thumbSeek, c.thumbWidth, c.waveW, c.waveH)
 }
 
 func processOne(

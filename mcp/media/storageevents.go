@@ -188,7 +188,87 @@ func handleStorageEvent(app *sdk.AppCtx, raw []byte) {
 	switch ev.Topic {
 	case "file.deleted":
 		cascadeDeleteFromEvent(app, ev.Data, ev.ProjectID)
+	case "file.added":
+		indexFromEvent(app, ev.Data, ev.ProjectID)
 	}
+}
+
+// indexFromEvent triggers a single-file indexing pass off the
+// file.added event payload. Skips when:
+//   - the upload was dedup-resolved (was_existing=true) — the
+//     existing row didn't change, no point re-probing
+//   - the file lives under /.media/ — our own derivations
+//   - content_type / extension isn't a media type
+//
+// The actual probe + thumbnail + waveform work happens in
+// indexOneFile; this is just the event-payload → StorageFile
+// adapter.
+func indexFromEvent(app *sdk.AppCtx, data map[string]any, projectID string) {
+	if existed, _ := data["was_existing"].(bool); existed {
+		return
+	}
+	if projectID == "" {
+		projectID = strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
+	}
+	if projectID == "" {
+		return
+	}
+
+	f := storageFileFromEvent(data)
+	if f == nil {
+		return
+	}
+
+	// Spawn a goroutine: indexOneFile downloads bytes, runs ffprobe,
+	// generates derivations — all of which can take seconds. We
+	// don't want to block the SSE reader from picking up the next
+	// event while one file is being processed.
+	go indexOneFile(context.Background(), app, projectID, *f)
+}
+
+// storageFileFromEvent reconstructs a StorageFile from the event's
+// data payload. Returns nil on missing required fields.
+func storageFileFromEvent(data map[string]any) *StorageFile {
+	idVal, ok := data["id"]
+	if !ok {
+		return nil
+	}
+	var id int64
+	switch v := idVal.(type) {
+	case float64:
+		id = int64(v)
+	case string:
+		var err error
+		id, err = strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return nil
+		}
+	default:
+		return nil
+	}
+	if id == 0 {
+		return nil
+	}
+	out := &StorageFile{ID: id}
+	if v, ok := data["name"].(string); ok {
+		out.Name = v
+	}
+	if v, ok := data["folder"].(string); ok {
+		out.Folder = v
+	}
+	if v, ok := data["content_type"].(string); ok {
+		out.ContentType = v
+	}
+	if v, ok := data["sha256"].(string); ok {
+		out.SHA256 = v
+	}
+	if v, ok := data["size_bytes"].(float64); ok {
+		out.SizeBytes = int64(v)
+	}
+	if v, ok := data["visibility"].(string); ok {
+		out.Visibility = v
+	}
+	return out
 }
 
 // cascadeDeleteFromEvent extracts the file id from the storage event
