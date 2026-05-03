@@ -1,0 +1,82 @@
+schema: apteva-app/v1
+
+name: domains
+display_name: Domains
+version: 0.1.0
+description: |
+  DNS + domain inventory for Apteva projects. Other apps that need
+  to write DNS records (messaging for SES MX/DKIM, storage for CDN
+  CNAMEs, future certs app for ACME challenges) call this app
+  instead of speaking each registrar's API directly.
+
+  v0.1 supports Porkbun end-to-end. Namecheap is declared as a
+  compatible provider but its XML response shape isn't parseable
+  by the platform runner today — works for tools that don't need
+  to read response data; record CRUD will need the runner's XML
+  support to land first.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/domains
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/domains/icon.png
+tags: [domains, dns, infrastructure, registrar]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.connections.execute
+  integrations:
+    - role: dns_provider
+      kind: integration
+      compatible_slugs: [porkbun, namecheap]
+      capabilities:
+        - dns.list_records
+        - dns.create_record
+        - dns.edit_records_by_type
+        - dns.delete_records_by_type
+      tools:
+        dns.list_records:        list_dns_records
+        dns.create_record:       create_dns_record
+        dns.edit_records_by_type: edit_dns_records_by_type
+        dns.delete_records_by_type: delete_dns_records_by_type
+      required: true
+      label: "DNS provider (Porkbun, Namecheap)"
+      hint: "Connect a Porkbun or Namecheap account; the domains app uses that connection's API to read and write DNS records on the domains it manages."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    # local inventory
+    - { name: domain_add,            description: "Register a domain with this app. Args: name (e.g. acme.com), registrar?, dns_provider?. The domain itself must already be registered with the bound provider — this just records it locally so other apps can reference it." }
+    - { name: domain_remove,         description: "Soft-delete a domain from this app's inventory. Doesn't touch the actual registration. Args: name." }
+    - { name: domain_list,           description: "List domains registered with this app for the current project." }
+    - { name: domain_get,            description: "Fetch one domain's local record. Args: name." }
+    # DNS record CRUD via the bound provider
+    - { name: domain_records_list,   description: "List DNS records on a domain via the bound dns_provider. Args: domain, type? (filter by record type)." }
+    - { name: domain_records_set,    description: "Upsert a DNS record. Composes list-then-create-or-edit since most providers' upsert is two-step. Args: domain, name (subdomain or @ for apex), type (A|AAAA|CNAME|MX|TXT|...), value, ttl?." }
+    - { name: domain_records_delete, description: "Delete all records matching (domain, name, type). Args: domain, name, type." }
+  ui_panels:
+    - slot: project.page
+      label: Domains
+      icon: globe
+      entry: /ui/DomainsPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/domains
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/domains.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
