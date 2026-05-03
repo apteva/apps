@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.5.8
+version: 0.6.0
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -13,9 +13,11 @@ description: |
   inherit the same visibility + signed-URL machinery.
 
   Two independent workstreams share the process: a light indexer
-  that sweeps storage for new media, and a bounded ffmpeg render
-  pool with per-job timeouts + cancellation. A wedged encode
-  releases its slot without disturbing the indexer.
+  that sweeps storage for new media, and a bounded render pool with
+  per-job timeouts + cancellation. The render backend is pluggable
+  via the optional `render_executor` integration role — local ffmpeg
+  by default, Cloudinary when bound. A wedged encode releases its
+  slot without disturbing the indexer.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media
@@ -59,6 +61,16 @@ requires:
       required: false
       label: "Auto-description provider"
       hint: "Connect OpenCode Go for kimi-k2.6 (vision-capable) auto-descriptions of images, video frames, and audio transcripts."
+    - role: render_executor
+      kind: integration
+      compatible_slugs: [cloudinary]
+      capabilities: [video.transform, image.transform]
+      tools:
+        video.transform: upload
+        image.transform: upload
+      required: false
+      label: "Cloud render backend"
+      hint: "Optional. Connect Cloudinary to offload trim/resize/transcode/crop/extract_frame to the cloud — useful on Pi-class hosts. Without it (the default), renders run on local ffmpeg. concat + audio_extract always stay local."
 
 provides:
   http_routes:

@@ -20,15 +20,16 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.5.8
+version: 0.6.0
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
   waveform), runs on-demand edits (trim/resize/transcode/concat/
-  crop/extract_frame/audio_extract), auto-transcribes audio + video
-  via Deepgram, and auto-generates descriptions via OpenCode Go
-  (Kimi K2.6 default — vision-capable) when integrations are bound.
-  Outputs all flow through storage.
+  crop/extract_frame/audio_extract) via local ffmpeg by default or
+  Cloudinary when bound, auto-transcribes audio + video via Deepgram,
+  and auto-generates descriptions via OpenCode Go (Kimi K2.6 default
+  — vision-capable) when integrations are bound. Outputs all flow
+  through storage.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -65,6 +66,16 @@ requires:
       required: false
       label: "Auto-description provider"
       hint: "Connect OpenCode Go to auto-generate descriptions from thumbnails + transcripts. Default model: kimi-k2.6 (vision-capable). Without it, descriptions stay manual."
+    - role: render_executor
+      kind: integration
+      compatible_slugs: [cloudinary]
+      capabilities: [video.transform, image.transform]
+      tools:
+        video.transform: upload
+        image.transform: upload
+      required: false
+      label: "Cloud render backend"
+      hint: "Optional. Connect Cloudinary to offload trim/resize/transcode/crop/extract_frame to the cloud — useful on Pi-class hosts. Without it (the default), renders run on local ffmpeg. concat + audio_extract always stay local."
 provides:
   http_routes:
     - prefix: /
