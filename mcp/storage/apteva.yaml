@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: storage
 display_name: Storage
-version: 0.5.0
+version: 0.5.1
 description: |
   File storage for Apteva agents and human teams. Upload bytes,
   organise into folders, share via signed URLs. Backed by local disk
@@ -93,6 +93,12 @@ db:
   migrations: migrations/
 
 config_schema:
+  - name: default_visibility
+    type: select
+    options: [private, signed, public]
+    default: private
+    label: Default visibility
+    description: Visibility applied to new uploads when files_upload doesn't specify one. private = auth-only, signed = HMAC URL with expiry, public = open.
   - name: signed_url_default_ttl_seconds
     type: text
     default: "86400"

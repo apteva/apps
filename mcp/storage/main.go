@@ -411,7 +411,7 @@ func (a *App) toolUpload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		ContentType: strArg(args, "content_type"),
 		Tags:        strArrayArg(args, "tags"),
 		Source:      strArg(args, "source"),
-		Visibility:  visibilityOrDefault(strArg(args, "visibility")),
+		Visibility:  effectiveVisibility(ctx, strArg(args, "visibility")),
 	}
 	f, existed, err := saveBytes(ctx, pid, in, body)
 	if err != nil {
@@ -587,6 +587,9 @@ func (a *App) toolSetVisibility(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return nil, errors.New("id required")
 	}
 	vis := visibilityOrDefault(strArg(args, "visibility"))
+	if vis == "" {
+		return nil, errors.New("visibility must be one of: private, signed, public")
+	}
 	f, err := dbUpdate(ctx.AppDB(), pid, id, map[string]any{"visibility": vis})
 	if err != nil {
 		return nil, err
@@ -673,7 +676,7 @@ func (a *App) toolFromURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		ContentType: resp.Header.Get("Content-Type"),
 		Tags:        strArrayArg(args, "tags"),
 		Source:      "imported",
-		Visibility:  "private",
+		Visibility:  configuredDefaultVisibility(ctx),
 	}
 	f, existed, err := saveBytes(ctx, pid, in, body)
 	if err != nil {
@@ -827,7 +830,7 @@ func (a *App) httpUpload(w http.ResponseWriter, r *http.Request) {
 		Folder:      normaliseFolder(r.FormValue("folder")),
 		ContentType: header.Header.Get("Content-Type"),
 		Source:      "human",
-		Visibility:  visibilityOrDefault(r.FormValue("visibility")),
+		Visibility:  effectiveVisibility(ctx, r.FormValue("visibility")),
 	}
 	if t := r.FormValue("tags"); t != "" {
 		var tags []string
@@ -964,7 +967,12 @@ func (a *App) httpPatch(w http.ResponseWriter, r *http.Request, id int64) {
 		updates["name"] = normaliseFilename(v)
 	}
 	if v, ok := body["visibility"].(string); ok {
-		updates["visibility"] = visibilityOrDefault(v)
+		vis := visibilityOrDefault(v)
+		if vis == "" {
+			httpErr(w, http.StatusBadRequest, "visibility must be one of: private, signed, public")
+			return
+		}
+		updates["visibility"] = vis
 	}
 	if v, ok := body["tags"].([]any); ok {
 		strs := []string{}
@@ -1413,14 +1421,44 @@ func extOf(name, contentType string) string {
 	return ".bin"
 }
 
+// visibilityOrDefault normalises an explicit visibility arg. Returns
+// "" when the arg is empty / unknown so callers can fall back to the
+// install's configured default via configuredDefaultVisibility.
 func visibilityOrDefault(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "public":
 		return "public"
 	case "signed":
 		return "signed"
+	case "private":
+		return "private"
 	}
-	return "private"
+	return ""
+}
+
+// configuredDefaultVisibility reads the install's default_visibility
+// setting (operator-set via the dashboard's settings panel) and falls
+// back to "private" when unset or invalid. Source-of-truth is the
+// install's config_encrypted blob, surfaced by the framework as
+// AppCtx.Config().
+func configuredDefaultVisibility(ctx *sdk.AppCtx) string {
+	v := visibilityOrDefault(ctx.Config().Get("default_visibility"))
+	if v == "" {
+		return "private"
+	}
+	return v
+}
+
+// effectiveVisibility picks the visibility for a new upload: the
+// explicit arg if it's a valid value, otherwise the install's
+// configured default. Used by files_upload + the multipart upload
+// route so settings changes take effect immediately without
+// per-tool plumbing.
+func effectiveVisibility(ctx *sdk.AppCtx, s string) string {
+	if v := visibilityOrDefault(s); v != "" {
+		return v
+	}
+	return configuredDefaultVisibility(ctx)
 }
 
 func defaultSignedTTL(ctx *sdk.AppCtx) int {
