@@ -263,6 +263,80 @@ func setDescription(db *sql.DB, projectID, fileID string, f DescriptionFields) (
 	return true, nil
 }
 
+// purgeOrphans removes media rows (and their derivations + transcripts)
+// whose storage file is no longer present in the current storage
+// listing — typically because the user soft-deleted the file via the
+// storage app.
+//
+// Cascade order: derivations → transcripts → media. Renders are NOT
+// touched (the renders table is the audit log of operations attempted;
+// a render row with a now-dangling output_file_id surfaces as a 404
+// when the agent tries to fetch it, which is the right signal —
+// dropping renders silently would lose history).
+//
+// SAFETY: callers MUST pass a complete file list. A partial list (e.g.
+// pagination cap hit) would false-positive orphan files that legit-
+// imately exist. The indexer guards by only calling when its storage
+// query returned strictly fewer than the safety limit.
+//
+// currentFileIDs are storage.files.id values stringified to match
+// media.file_id storage. A nil slice is treated as "no files exist"
+// and will purge every media row in the project — a deliberate way
+// to wipe a project's catalog without dropping the DB.
+func purgeOrphans(db *sql.DB, projectID string, currentFileIDs []string) (int64, error) {
+	seen := make(map[string]bool, len(currentFileIDs))
+	for _, fid := range currentFileIDs {
+		seen[fid] = true
+	}
+
+	rows, err := db.Query(`SELECT file_id FROM media WHERE project_id = ?`, projectID)
+	if err != nil {
+		return 0, err
+	}
+	var orphans []any
+	placeholders := make([]string, 0)
+	for rows.Next() {
+		var fid string
+		if err := rows.Scan(&fid); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if !seen[fid] {
+			orphans = append(orphans, fid)
+			placeholders = append(placeholders, "?")
+		}
+	}
+	rows.Close()
+	if len(orphans) == 0 {
+		return 0, nil
+	}
+
+	in := strings.Join(placeholders, ",")
+	args := append([]any{projectID}, orphans...)
+
+	if _, err := db.Exec(
+		`DELETE FROM derivations WHERE project_id = ? AND file_id IN (`+in+`)`,
+		args...,
+	); err != nil {
+		return 0, fmt.Errorf("delete orphan derivations: %w", err)
+	}
+	if _, err := db.Exec(
+		`DELETE FROM transcripts WHERE project_id = ? AND file_id IN (`+in+`)`,
+		args...,
+	); err != nil {
+		return 0, fmt.Errorf("delete orphan transcripts: %w", err)
+	}
+	res, err := db.Exec(
+		`DELETE FROM media WHERE project_id = ? AND file_id IN (`+in+`)`,
+		args...,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("delete orphan media: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // describeCandidates returns media file_ids the auto-describer
 // should consider this tick: probed-ok rows with no description and
 // no human/agent override, where the last attempt (if any) is older

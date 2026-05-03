@@ -52,13 +52,37 @@ func runIndexer(ctx context.Context, app *sdk.AppCtx) error {
 	sc := newStorageClient()
 
 	// Pull the file inventory once per tick. Storage's /files paginates;
-	// for v0.1 we ask for a generous slab and let later pagination land
-	// in v0.2 alongside the storage-event push.
-	files, err := sc.SearchFiles(ctx, projectID, 500)
+	// we ask for a generous slab on the assumption most projects sit
+	// well under a few thousand. The exact limit also gates the orphan
+	// cleanup below — only safe when we know we got a complete view.
+	const storageListLimit = 5000
+	files, err := sc.SearchFiles(ctx, projectID, storageListLimit)
 	if err != nil {
 		app.Logger().Warn("storage search failed", "err", err)
 		return nil
 	}
+
+	// Cascade-cleanup: any media row whose source file is no longer
+	// in storage (soft-deleted, re-uploaded under a new id, etc.)
+	// gets dropped along with its derivations + transcripts. Skipped
+	// when the storage listing might be incomplete — the safety guard
+	// is "did we hit the page limit". Storage soft-deletes by default
+	// so re-creation later just re-indexes the file fresh.
+	if len(files) < storageListLimit {
+		fileIDs := make([]string, 0, len(files))
+		for _, f := range files {
+			fileIDs = append(fileIDs, strconv.FormatInt(f.ID, 10))
+		}
+		if n, err := purgeOrphans(app.AppDB(), projectID, fileIDs); err != nil {
+			app.Logger().Warn("purge orphan media failed", "err", err)
+		} else if n > 0 {
+			app.Logger().Info("purged orphan media", "count", n)
+		}
+	} else {
+		app.Logger().Warn("storage listing hit page limit; orphan cleanup skipped this tick",
+			"limit", storageListLimit)
+	}
+
 	media := filterMediaFiles(files)
 	candidates := indexerCandidates(app.AppDB(), projectID, media, indexerBatchSize)
 	if len(candidates) == 0 {
