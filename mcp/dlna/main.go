@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: dlna
 display_name: DLNA Server
-version: 0.1.4
+version: 0.1.5
 description: Local-LAN UPnP/DLNA MediaServer for Apteva.
 author: Apteva
 scopes: [project, global]
@@ -69,9 +69,24 @@ db:
 `
 
 const (
-	httpPort       = 8200
-	clientPruneInt = 1 * time.Hour
+	defaultHTTPPort = 8200
+	clientPruneInt  = 1 * time.Hour
 )
+
+// resolveHTTPPort returns the port the SDK actually bound this sidecar
+// to. APTEVA_APP_PORT is the platform-injected override (a free port
+// per install on shared hosts); without it the SDK falls back to the
+// manifest's runtime.port. SSDP advertisements have to use the *real*
+// port — TVs reach this app directly on the LAN, not through the
+// platform proxy, so a stale 8200 leaves clients GET'ing nothing.
+func resolveHTTPPort() int {
+	if v := os.Getenv("APTEVA_APP_PORT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultHTTPPort
+}
 
 var (
 	globalApp *App
@@ -79,6 +94,7 @@ var (
 )
 
 type App struct {
+	httpPort int
 	mu       sync.RWMutex
 	ctx      *sdk.AppCtx
 	ssdp     *SSDPServer
@@ -109,14 +125,15 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.deviceID = a.resolveDeviceUUID()
 	a.lanIP = a.resolveLANIP()
 	a.cfgFriendlyName = a.resolveFriendlyName()
+	a.httpPort = resolveHTTPPort()
 
 	a.ssdp = newSSDPServer(
-		a.deviceID, httpPort, a.lanIP,
+		a.deviceID, a.httpPort, a.lanIP,
 		func() string { return a.friendlyName() },
 		func(scope, msg string) { ctx.Logger().Info(scope, "msg", msg) },
 	)
 	ctx.Logger().Info("dlna mounted",
-		"uuid", a.deviceID, "lan_ip", a.lanIP, "port", httpPort,
+		"uuid", a.deviceID, "lan_ip", a.lanIP, "port", a.httpPort,
 		"friendly", a.cfgFriendlyName)
 	return nil
 }
@@ -439,7 +456,7 @@ func (a *App) statusSnapshot() (*Status, error) {
 		FriendlyName:     a.friendlyName(),
 		UUID:             a.deviceID,
 		LANIP:            a.lanIP,
-		HTTPPort:         httpPort,
+		HTTPPort:         a.httpPort,
 		Broadcasting:     a.ssdp != nil && a.ssdp.IsRunning(),
 		PublishedFolders: pubs,
 		RecentClients:    clis,
@@ -846,7 +863,7 @@ func (a *App) publishedFolderPaths() []string {
 // a media-app outage.
 func (a *App) fileToDIDL(ctx context.Context, f storageFile, parent string) didlItem {
 	class := classFor(f.ContentType)
-	mediaURL := fmt.Sprintf("http://%s:%d/media/%d", a.lanIP, httpPort, f.ID)
+	mediaURL := fmt.Sprintf("http://%s:%d/media/%d", a.lanIP, a.httpPort, f.ID)
 	it := didlItem{
 		ID:          fmt.Sprintf("i:%d", f.ID),
 		ParentID:    parent,
