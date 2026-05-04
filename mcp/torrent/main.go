@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: torrent
 display_name: Torrent
-version: 0.1.11
+version: 0.1.12
 description: BitTorrent client + indexer-search frontend.
 author: Apteva
 scopes: [project, global]
@@ -698,8 +698,13 @@ func (a *App) combinedTorrentList(stateFilter string) ([]combinedView, error) {
 	for _, r := range rows {
 		s := a.engine.Snapshot(r.Infohash)
 		if s == nil {
+			// Engine doesn't have this torrent in memory (e.g. across
+			// restarts before the resume path picks it up). Surface the
+			// row's stored state so the panel shows it in the right
+			// bucket and the operator sees any persisted error.
 			s = &TorrentSnapshot{Infohash: r.Infohash, Name: r.Name, State: r.State,
-				Length: r.TotalBytes, BytesCompleted: r.DownloadedBytes}
+				Length: r.TotalBytes, BytesCompleted: r.DownloadedBytes,
+				LastError: r.LastError}
 		}
 		if stateFilter != "" && stateFilter != "all" && s.State != stateFilter {
 			continue

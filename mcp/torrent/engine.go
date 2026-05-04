@@ -187,6 +187,19 @@ func (e *Engine) Run(ctx context.Context) error {
 
 func (e *Engine) Close() { e.cli.Close() }
 
+// MarkError stamps an error on the in-memory torrent so the next
+// snapshot computes state="error". Without this the post-completion
+// upload-failure path could persist state=error to the DB while the
+// engine kept reporting "queued" or "completed", and the panel would
+// show the wrong bucket. Idempotent — calling with msg="" clears.
+func (e *Engine) MarkError(infohash, msg string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if mt, ok := e.torrents[infohash]; ok {
+		mt.lastErr = msg
+	}
+}
+
 // AddMagnet starts a new torrent from a magnet URI. Idempotent on
 // infohash — re-adding an existing torrent returns the existing
 // handle and snapshot.

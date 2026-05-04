@@ -117,6 +117,7 @@ func (a *App) handleCompletion(infohash string, snap TorrentSnapshot) {
 	}
 
 	uploaded := []int64{}
+	uploadErrors := []string{}
 	for _, f := range files {
 		if f.Priority == "skip" {
 			continue
@@ -127,12 +128,29 @@ func (a *App) handleCompletion(infohash string, snap TorrentSnapshot) {
 		}
 		fileID, err := a.uploadOneFile(a.ctx, root, f)
 		if err != nil {
-			a.markError(infohash, "upload "+f.Path+": "+err.Error())
+			uploadErrors = append(uploadErrors, f.Path+": "+err.Error())
 			a.ctx.Logger().Warn("completion upload", "path", f.Path, "err", err.Error())
 			continue
 		}
 		uploaded = append(uploaded, fileID)
 		a.maybeProbeMedia(fileID, f.Path)
+	}
+
+	// Bail-out path. If any file failed to upload, leave the working
+	// copy on disk (the operator may want it), keep the row marked
+	// 'error' with the combined reason, and emit torrent.error so
+	// subscribers can react. Don't fake a torrent.completed when bytes
+	// never made it to storage — earlier versions did exactly that
+	// and the panel ended up showing a half-finished torrent as
+	// "Fetching metadata".
+	if len(uploadErrors) > 0 {
+		msg := "upload to storage failed: " + strings.Join(uploadErrors, "; ")
+		a.markError(infohash, msg)
+		a.ctx.Emit("torrent.error", map[string]any{
+			"id": row.ID, "infohash": infohash, "name": snap.Name,
+			"error": msg, "phase": "completion-upload",
+		})
+		return
 	}
 
 	idsJSON, _ := json.Marshal(uploaded)
@@ -161,6 +179,13 @@ func (a *App) markError(infohash, msg string) {
 		`UPDATE torrents SET state = 'error', last_error = ?
 		  WHERE project_id = ? AND infohash = ?`,
 		msg, projectScope(), infohash)
+	// Mirror onto the engine's in-memory record so its next snapshot()
+	// call returns state="error" too. Without this the engine could
+	// re-overwrite our DB state on the next poll (it wins because
+	// onTransition runs after our UPDATE).
+	if a.engine != nil {
+		a.engine.MarkError(infohash, msg)
+	}
 }
 
 // uploadOneFile reads one local file and pushes it into storage via

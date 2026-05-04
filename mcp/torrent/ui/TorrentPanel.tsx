@@ -5,7 +5,7 @@
 // + Add torrent opens a modal with three input modes: paste magnet,
 // paste .torrent URL, or run an inline search and click a result.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const API = "/api/apps/torrent";
 
@@ -13,6 +13,61 @@ interface NativePanelProps {
   appName: string;
   installId: number;
   projectId: string;
+}
+
+// useAppEvents — SSE subscription for the platform's app event bus.
+// Lifted from the jobs/code/storage panels; kept inline so the
+// torrent panel doesn't depend on a UI-kit not yet in place.
+interface AppEventEnvelope<T = unknown> {
+  app: string;
+  topic: string;
+  install_id: number;
+  seq: number;
+  time: string;
+  data: T;
+}
+function useAppEvents<T = unknown>(
+  app: string,
+  projectId: string | undefined | null,
+  onEvent: (ev: AppEventEnvelope<T>) => void,
+) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+  useEffect(() => {
+    if (!app || !projectId) return;
+    let lastSeq = 0;
+    let es: EventSource | null = null;
+    let cancelled = false;
+    let reconnectTimer: number | null = null;
+    const connect = () => {
+      if (cancelled) return;
+      const url =
+        `/api/app-events/${encodeURIComponent(app)}` +
+        `?project_id=${encodeURIComponent(projectId)}` +
+        (lastSeq > 0 ? `&since=${lastSeq}` : "");
+      es = new EventSource(url, { withCredentials: true });
+      es.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data) as AppEventEnvelope<T>;
+          if (ev.seq <= lastSeq) return;
+          lastSeq = ev.seq;
+          handlerRef.current(ev);
+        } catch {}
+      };
+      es.onerror = () => {
+        if (es && es.readyState === EventSource.CLOSED) {
+          if (reconnectTimer) window.clearTimeout(reconnectTimer);
+          reconnectTimer = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (es) es.close();
+    };
+  }, [app, projectId]);
 }
 
 interface TorrentRow {
@@ -80,7 +135,7 @@ interface Indexer {
 
 type Tab = "downloads" | "searches" | "indexers";
 
-export default function TorrentPanel({}: NativePanelProps) {
+export default function TorrentPanel({ projectId }: NativePanelProps) {
   const [tab, setTab] = useState<Tab>("downloads");
 
   return (
@@ -97,7 +152,7 @@ export default function TorrentPanel({}: NativePanelProps) {
         ))}
       </div>
       <div className="flex-1 overflow-auto">
-        {tab === "downloads" && <DownloadsTab />}
+        {tab === "downloads" && <DownloadsTab projectId={projectId} />}
         {tab === "searches" && <SearchesTab />}
         {tab === "indexers" && <IndexersTab />}
       </div>
@@ -107,7 +162,7 @@ export default function TorrentPanel({}: NativePanelProps) {
 
 // ─── Downloads ──────────────────────────────────────────────────────
 
-function DownloadsTab() {
+function DownloadsTab({ projectId }: { projectId: string }) {
   const [rows, setRows] = useState<TorrentRow[]>([]);
   const [stats, setStats] = useState<any>(null);
   const [showAdd, setShowAdd] = useState(false);
@@ -129,9 +184,23 @@ function DownloadsTab() {
 
   useEffect(() => {
     refresh();
+    // Slow background poll keeps progress bars moving for active
+    // downloads; the events-bus subscription below covers state
+    // transitions (added / completed / errored) live.
     const t = setInterval(refresh, 2_000);
     return () => clearInterval(t);
   }, [refresh]);
+
+  // Live updates: refresh whenever the sidecar emits a torrent.* event.
+  // The platform delivers these via SSE so the panel reflects state
+  // changes the moment the engine sees them, not on the next poll tick.
+  useAppEvents("torrent", projectId, (ev) => {
+    if (ev.topic === "torrent.added" ||
+        ev.topic === "torrent.completed" ||
+        ev.topic === "torrent.error") {
+      refresh();
+    }
+  });
 
   // Engine states (engine.go:489): downloading | seeding | paused |
   // completed | error | queued. The "queued" state covers magnets that
