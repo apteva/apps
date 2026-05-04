@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.3.1
+version: 0.3.2
 description: |
   Local-first builds and runtime supervision for Apteva projects.
   Takes a code repo (from the Code app, a local path, or a git URL),
@@ -82,9 +82,9 @@ db:
 config_schema:
   - name: port_range_start
     type: text
-    default: "7000"
+    default: "7100"
     label: Port range start
-    description: First port the runtime supervisor may assign to a release.
+    description: First port the runtime supervisor may assign to a release. Defaults to 7100 to skip macOS AirPlay (5000) and AirPlay Receiver (7000), which silently coexist with 127.0.0.1-only binds and cause EADDRINUSE at process start.
   - name: port_range_end
     type: text
     default: "7999"

@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -351,6 +352,61 @@ func TestBuildUpdate_PersistsFramework(t *testing.T) {
 	if got.Framework != "node" {
 		t.Fatalf("framework after update = %q, want node — dbUpdateBuild's allowlist must include 'framework'", got.Framework)
 	}
+}
+
+// TestPortFreeForServer_RejectsWildcardSquatter pins the v0.3.2
+// allocator fix: when a foreign listener holds [::]:p (the wildcard
+// IPv6 bind real servers like next start use), the older 127.0.0.1
+// smoke test would say "free" and the supervised process would crash
+// with EADDRINUSE on its own bind. The new probe binds both wildcards
+// so this can't slip through again.
+func TestPortFreeForServer_RejectsWildcardSquatter(t *testing.T) {
+	// Free port from the OS so the test isn't tied to a hardcoded
+	// number that another process might have grabbed.
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	probe.Close()
+
+	if !portFreeForServer(port) {
+		t.Skipf("port %d became unavailable before the test could grab it", port)
+	}
+
+	squatter, err := net.Listen("tcp", "[::]:"+itoa(port))
+	if err != nil {
+		t.Skipf("can't bind [::]:%d on this host (%v); skipping", port, err)
+	}
+	defer squatter.Close()
+
+	if portFreeForServer(port) {
+		t.Fatalf("portFreeForServer(%d) said free with [::] squatter held — wildcard probe regressed", port)
+	}
+}
+
+// itoa is a tiny strconv-free int → string used only by the port
+// probe test above; lets the test stay self-contained.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
 }
 
 // openSchemaDB opens an in-memory SQLite and applies the v1 migration

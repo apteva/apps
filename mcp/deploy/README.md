@@ -91,7 +91,7 @@ PATH (the build step shells out to it).
 
 | Key                     | Default                  | Notes                                   |
 |-------------------------|--------------------------|-----------------------------------------|
-| `port_range_start`      | `7000`                   | First port the supervisor may assign    |
+| `port_range_start`      | `7100`                   | First port the supervisor may assign (skips macOS AirPlay on 5000/7000) |
 | `port_range_end`        | `7999`                   | Last port the supervisor may assign     |
 | `max_build_concurrency` | `2`                      | Hard cap on simultaneous builds         |
 

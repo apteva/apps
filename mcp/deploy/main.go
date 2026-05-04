@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.3.1
+version: 0.3.2
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
@@ -140,7 +140,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.cfg = sourceConfig{
 		ProjectID: os.Getenv("APTEVA_PROJECT_ID"),
 	}
-	a.portRangeStart = atoiOr(configOr(ctx, "port_range_start", "7000"), 7000)
+	a.portRangeStart = atoiOr(configOr(ctx, "port_range_start", "7100"), 7100)
 	a.portRangeEnd = atoiOr(configOr(ctx, "port_range_end", "7999"), 7999)
 	a.maxBuilds = atoiOr(configOr(ctx, "max_build_concurrency", "2"), 2)
 	if a.maxBuilds < 1 {
@@ -535,13 +535,9 @@ func (a *App) allocatePort(hint int, releaseID int64) (int, error) {
 		if held[p] {
 			continue
 		}
-		// Smoke test: actually bind to ensure nothing else (a foreign
-		// process) is squatting on the port.
-		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
-		if err != nil {
+		if !portFreeForServer(p) {
 			continue
 		}
-		ln.Close()
 		ok, err := dbAcquirePortLease(globalCtx.AppDB(), p, releaseID)
 		if err != nil {
 			return 0, err
@@ -551,6 +547,33 @@ func (a *App) allocatePort(hint int, releaseID int64) (int, error) {
 		}
 	}
 	return 0, errors.New("no free port in configured range")
+}
+
+// portFreeForServer probes whether a port is genuinely free for an
+// HTTP server to bind to. Binding `127.0.0.1:p` alone is not enough:
+// many real servers (Next.js, Express, Python http.server, …) bind
+// to the wildcards 0.0.0.0 and/or [::], and macOS holds *:7000 and
+// *:5000 for AirPlay Receiver — those listeners can coexist with a
+// 127.0.0.1-only bind on the same kernel, so the older smoke test
+// said "free" and our supervised process then crashed with
+// EADDRINUSE.
+//
+// We test both wildcards. If either bind fails, the port can't be
+// trusted, so skip it. SO_REUSEADDR is left at Go's default (off on
+// macOS for tcp), so this matches the strictness real servers see.
+func portFreeForServer(p int) bool {
+	addrs := []string{
+		fmt.Sprintf("0.0.0.0:%d", p),
+		fmt.Sprintf("[::]:%d", p),
+	}
+	for _, addr := range addrs {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			return false
+		}
+		_ = ln.Close()
+	}
+	return true
 }
 
 // ─── Misc helpers ─────────────────────────────────────────────────
