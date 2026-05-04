@@ -283,26 +283,42 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
     }
   };
 
-  const handleStop = async () => {
+  const [confirmState, setConfirmState] = useState<ConfirmRequest | null>(null);
+
+  const handleStop = () => {
     if (!detail) return;
-    if (!confirm("Stop the live release?")) return;
-    try {
-      await api("POST", `/deployments/${detail.deployment.id}/stop`);
-    } catch (e) {
-      alert("Stop failed: " + (e as Error).message);
-    }
+    setConfirmState({
+      title: "Stop release",
+      body: "Stop the live release? The supervised process will be terminated.",
+      confirmLabel: "Stop",
+      tone: "warning",
+      onConfirm: async () => {
+        try {
+          await api("POST", `/deployments/${detail.deployment.id}/stop`);
+        } catch (e) {
+          setError("Stop failed: " + (e as Error).message);
+        }
+      },
+    });
   };
 
-  const handleDestroy = async () => {
+  const handleDestroy = () => {
     if (!detail) return;
-    if (!confirm(`Destroy deployment "${detail.deployment.name}"? This stops it and deletes all builds.`)) return;
-    try {
-      await api("DELETE", `/deployments/${detail.deployment.id}`);
-      setSelected(null);
-      setDetail(null);
-    } catch (e) {
-      alert("Destroy failed: " + (e as Error).message);
-    }
+    setConfirmState({
+      title: "Destroy deployment",
+      body: `Destroy deployment "${detail.deployment.name}"? This stops the live release and deletes all builds and artifacts on disk. This can't be undone.`,
+      confirmLabel: "Destroy",
+      tone: "danger",
+      onConfirm: async () => {
+        try {
+          await api("DELETE", `/deployments/${detail.deployment.id}`);
+          setSelected(null);
+          setDetail(null);
+        } catch (e) {
+          setError("Destroy failed: " + (e as Error).message);
+        }
+      },
+    });
   };
 
   return (
@@ -536,6 +552,80 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
           projectId={projectId}
         />
       )}
+
+      {confirmState && (
+        <ConfirmDialog
+          request={confirmState}
+          onClose={() => setConfirmState(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── ConfirmDialog ─────────────────────────────────────────────────
+//
+// Drop-in replacement for window.confirm: a centred modal with title,
+// body, and two action buttons. The "danger" tone is used for
+// destructive actions (Destroy); "warning" for reversible interrupts
+// (Stop). Spawned by setting confirmState — the dialog clears its own
+// state through onClose so callers don't have to.
+
+interface ConfirmRequest {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  tone?: "warning" | "danger";
+  onConfirm: () => void | Promise<void>;
+}
+
+function ConfirmDialog({ request, onClose }: { request: ConfirmRequest; onClose: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const accent =
+    request.tone === "danger"
+      ? "bg-red text-white hover:bg-red/90"
+      : "bg-blue text-white hover:bg-blue/90";
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      await request.onConfirm();
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-[420px] bg-bg border border-border rounded p-5 space-y-4"
+        role="dialog"
+        aria-modal="true"
+      >
+        <h2 className="text-text font-semibold">{request.title}</h2>
+        <p className="text-text-muted text-sm">{request.body}</p>
+        <div className="flex justify-end gap-2 pt-1">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="px-3 py-1.5 text-sm rounded border border-border text-text-muted hover:text-text disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={busy}
+            autoFocus
+            className={`px-3 py-1.5 text-sm rounded ${accent} disabled:opacity-50`}
+          >
+            {busy ? "Working…" : request.confirmLabel}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
