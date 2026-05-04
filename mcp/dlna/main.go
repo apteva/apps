@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: dlna
 display_name: DLNA Server
-version: 0.1.3
+version: 0.1.4
 description: Local-LAN UPnP/DLNA MediaServer for Apteva.
 author: Apteva
 scopes: [project, global]
@@ -56,6 +56,10 @@ provides:
       entry: /ui/DLNAPanel.mjs
 runtime:
   kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/dlna
   port: 8200
   health_check: /health
 db:
