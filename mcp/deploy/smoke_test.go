@@ -125,6 +125,195 @@ func TestDetectFramework(t *testing.T) {
 	}
 }
 
+// TestDetectFramework_Node guards the package.json → "node" branch
+// that v0.3.0 turned from a stub into a real builder. Also covers
+// static (index.html) and python (requirements.txt) so refactors of
+// the detect order can't silently regress.
+func TestDetectFramework_Node(t *testing.T) {
+	cases := []struct {
+		file string
+		body string
+		want string
+	}{
+		{"package.json", `{"name":"x"}`, "node"},
+		{"index.html", "<html></html>", "static"},
+		{"requirements.txt", "flask\n", "python"},
+		{"pyproject.toml", "[project]\n", "python"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.file, func(t *testing.T) {
+			tmp := t.TempDir()
+			if err := os.WriteFile(filepath.Join(tmp, tc.file), []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if got := detectFramework(tmp); got != tc.want {
+				t.Fatalf("detectFramework(%s) = %q, want %q", tc.file, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDetectPackageManager pins the lockfile precedence: bun.lockb
+// outranks pnpm-lock.yaml outranks yarn.lock outranks npm-default.
+// If this order shifts, both builder and runtime would silently pick
+// different tools and `<pm> install` could collide with the wrong
+// lockfile.
+func TestDetectPackageManager(t *testing.T) {
+	cases := []struct {
+		name      string
+		lockfiles []string
+		want      string
+	}{
+		{"empty dir → npm fallback", nil, "npm"},
+		{"bun lockfile → bun", []string{"bun.lockb"}, "bun"},
+		{"pnpm lockfile → pnpm", []string{"pnpm-lock.yaml"}, "pnpm"},
+		{"yarn lockfile → yarn", []string{"yarn.lock"}, "yarn"},
+		{"npm lockfile → npm", []string{"package-lock.json"}, "npm"},
+		{"bun wins over pnpm", []string{"pnpm-lock.yaml", "bun.lockb"}, "bun"},
+		{"pnpm wins over yarn", []string{"yarn.lock", "pnpm-lock.yaml"}, "pnpm"},
+		{"yarn wins over package-lock", []string{"package-lock.json", "yarn.lock"}, "yarn"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			for _, f := range tc.lockfiles {
+				if err := os.WriteFile(filepath.Join(tmp, f), []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := detectPackageManager(tmp); got != tc.want {
+				t.Fatalf("detectPackageManager() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHasNpmScript ensures the build / start auto-detect logic only
+// fires when the script is actually declared. Missing package.json,
+// invalid JSON, and absent script must all return false (otherwise
+// the runtime would try to exec `<pm> run start` against nothing).
+func TestHasNpmScript(t *testing.T) {
+	t.Run("missing package.json", func(t *testing.T) {
+		if hasNpmScript(t.TempDir(), "build") {
+			t.Fatal("missing package.json should report no script")
+		}
+	})
+	t.Run("invalid json", func(t *testing.T) {
+		tmp := t.TempDir()
+		if err := os.WriteFile(filepath.Join(tmp, "package.json"), []byte("not json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if hasNpmScript(tmp, "build") {
+			t.Fatal("invalid package.json should report no script")
+		}
+	})
+	t.Run("script absent", func(t *testing.T) {
+		tmp := t.TempDir()
+		if err := os.WriteFile(filepath.Join(tmp, "package.json"), []byte(`{"scripts":{"test":"x"}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if hasNpmScript(tmp, "build") {
+			t.Fatal("absent script should report false")
+		}
+	})
+	t.Run("script present", func(t *testing.T) {
+		tmp := t.TempDir()
+		if err := os.WriteFile(filepath.Join(tmp, "package.json"), []byte(`{"scripts":{"build":"next build","start":"next start"}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if !hasNpmScript(tmp, "build") || !hasNpmScript(tmp, "start") {
+			t.Fatal("declared scripts should report true")
+		}
+	})
+}
+
+// TestBuilderFor pins the framework → builder dispatch. The error
+// message lists the supported set; the test asserts the new "node"
+// case is wired in alongside the existing ones.
+func TestBuilderFor(t *testing.T) {
+	cases := map[string]string{
+		"go":     "go",
+		"node":   "node",
+		"static": "static",
+		"blank":  "blank",
+	}
+	for input, wantFramework := range cases {
+		b, err := builderFor(input)
+		if err != nil {
+			t.Errorf("builderFor(%q) err = %v", input, err)
+			continue
+		}
+		if b.Framework() != wantFramework {
+			t.Errorf("builderFor(%q).Framework() = %q", input, b.Framework())
+		}
+	}
+	if _, err := builderFor("rust"); err == nil {
+		t.Error("builderFor(rust) should error")
+	} else if !strings.Contains(err.Error(), "node") {
+		t.Errorf("error should advertise node as supported; got %q", err.Error())
+	}
+	if _, err := builderFor(""); err == nil {
+		t.Error("builderFor(empty) should error with detection hint")
+	}
+}
+
+// TestResolveCommand_Node verifies the node default-start path:
+//
+//	package.json with start script  → <pm> run start
+//	package.json without start      → error (set start_cmd)
+//	start_cmd override               → sh -c <override>
+//
+// Mirrors the lockfile-precedence test by using bun.lockb so we know
+// the "<pm>" detection actually fires and the runtime + builder are
+// in sync.
+func TestResolveCommand_Node(t *testing.T) {
+	t.Run("with start script picks pm", func(t *testing.T) {
+		tmp := t.TempDir()
+		if err := os.WriteFile(filepath.Join(tmp, "package.json"),
+			[]byte(`{"scripts":{"start":"next start"}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, "bun.lockb"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		bin, args, err := resolveCommand(ReleaseSpec{Framework: "node", ArtifactDir: tmp})
+		if err != nil {
+			t.Fatalf("resolveCommand: %v", err)
+		}
+		if bin != "bun" || len(args) != 2 || args[0] != "run" || args[1] != "start" {
+			t.Fatalf("got bin=%q args=%v, want bun run start", bin, args)
+		}
+	})
+
+	t.Run("missing start script errors", func(t *testing.T) {
+		tmp := t.TempDir()
+		if err := os.WriteFile(filepath.Join(tmp, "package.json"),
+			[]byte(`{"scripts":{"build":"x"}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := resolveCommand(ReleaseSpec{Framework: "node", ArtifactDir: tmp})
+		if err == nil || !strings.Contains(err.Error(), "start_cmd") {
+			t.Fatalf("err = %v, want hint about start_cmd", err)
+		}
+	})
+
+	t.Run("start_cmd override wins", func(t *testing.T) {
+		bin, args, err := resolveCommand(ReleaseSpec{
+			Framework:   "node",
+			ArtifactDir: t.TempDir(), // no package.json — override skips detection
+			StartCmd:    "node server.js",
+		})
+		if err != nil {
+			t.Fatalf("resolveCommand: %v", err)
+		}
+		if bin != "sh" || len(args) != 2 || args[0] != "-c" || args[1] != "node server.js" {
+			t.Fatalf("got bin=%q args=%v, want sh -c \"node server.js\"", bin, args)
+		}
+	})
+}
+
 // openSchemaDB opens an in-memory SQLite and applies the v1 migration
 // inline. Simpler than wiring the SDK's migration runner for unit
 // tests; just keep them in sync.

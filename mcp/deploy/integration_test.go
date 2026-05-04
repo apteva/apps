@@ -172,6 +172,131 @@ func TestSidecar_FullFlow_BuildReleaseStopDestroy(t *testing.T) {
 	}
 }
 
+// ─── node framework full-flow ─────────────────────────────────────
+
+const fixtureNodeServer = `const http = require("http");
+const port = process.env.PORT || "9000";
+http.createServer((_, res) => res.end("hello node deploy from port " + port + "\n"))
+    .listen(port);
+`
+
+const fixtureNodePackageJSON = `{
+  "name": "fixture-node",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": { "start": "node server.js" }
+}
+`
+
+func writeNodeFixture(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "server.js"), []byte(fixtureNodeServer), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(fixtureNodePackageJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestSidecar_FullFlow_Node mirrors the go full-flow test for the
+// node framework. Skipped when no Node toolchain is on PATH.
+//
+// Deps are intentionally empty so `<pm> install` is near-instant
+// (~1s on cold cache). The fixture's `start` script runs a stdlib
+// http server on $PORT — same shape as a Next.js app for the parts
+// the runtime cares about (PORT env, child process, listener
+// readiness probe).
+func TestSidecar_FullFlow_Node(t *testing.T) {
+	pm := ""
+	for _, candidate := range []string{"bun", "npm"} {
+		if _, err := execLookPath(candidate); err == nil {
+			pm = candidate
+			break
+		}
+	}
+	if pm == "" {
+		t.Skip("no node package manager (bun/npm) on PATH; skipping integration test")
+	}
+
+	src := writeNodeFixture(t)
+	// Disjoint port range from the go full-flow test so a child
+	// process leaking past its sidecar's shutdown can't poison this
+	// run with a stale 9300-bound listener.
+	dataDir := t.TempDir()
+	sc := tk.SpawnSidecar(t, ".",
+		tk.WithProjectID("test-proj"),
+		tk.WithEnv("DEPLOY_DATA_DIR", dataDir),
+		tk.WithConfig(map[string]string{
+			"port_range_start": "9400",
+			"port_range_end":   "9499",
+		}),
+	)
+
+	// 1. Init.
+	out := sc.MCP("deploy_init", map[string]any{
+		"name":        "node-fixture",
+		"source_kind": "local",
+		"source_ref":  src,
+		"framework":   "node",
+	})
+	dep, ok := out["deployment"].(map[string]any)
+	if !ok {
+		t.Fatalf("deploy_init: %v", out)
+	}
+	depID := int64(dep["id"].(float64))
+
+	// 2. Build + release. npm install with zero deps + the artifact
+	// copy can take a few seconds; the call is synchronous so this
+	// just blocks until done.
+	out = sc.MCP("deploy_build", map[string]any{
+		"id":      depID,
+		"release": true,
+	})
+	build, ok := out["build"].(map[string]any)
+	if !ok || build["status"] != "succeeded" {
+		t.Fatalf("build did not succeed: %v", out)
+	}
+	rel, ok := out["release"].(map[string]any)
+	if !ok || rel["status"] != "live" {
+		t.Fatalf("release not live: %v", out)
+	}
+	port := int(rel["port"].(float64))
+
+	// 3. Hit the running node server. Node start is slower to listen
+	// than a Go binary; allow a longer probe budget.
+	url := "http://127.0.0.1:" + strconv.Itoa(port) + "/"
+	body, err := getWithRetry(url, 10*time.Second)
+	if err != nil {
+		t.Fatalf("fetch %s: %v", url, err)
+	}
+	if want := "hello node deploy"; !contains(body, want) {
+		t.Fatalf("response body %q missing %q", body, want)
+	}
+
+	// 4. Stop and verify the listener goes away. Node child takes
+	// longer to TERM than a tiny Go binary (event-loop teardown);
+	// give it the full 5s before declaring the supervisor stuck.
+	out = sc.MCP("deploy_stop", map[string]any{"id": depID})
+	if out["stopped"] != true {
+		t.Fatalf("stop: %v", out)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := http.Get(url); err != nil {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	// 5. Destroy.
+	out = sc.MCP("deploy_destroy", map[string]any{"id": depID})
+	if out["destroyed"] != true {
+		t.Fatalf("destroy: %v", out)
+	}
+}
+
 func TestSidecar_BuildFailure_SetsStatus(t *testing.T) {
 	// Source ref points at a non-existent path → fetch fails, build
 	// row should land in 'failed' with a useful error.
