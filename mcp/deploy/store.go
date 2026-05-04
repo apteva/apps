@@ -199,7 +199,7 @@ func dbUpdateBuild(db *sql.DB, id int64, fields map[string]any) error {
 	}
 	cols := []string{}
 	args := []any{}
-	for _, k := range []string{"source_sha", "status", "started_at", "finished_at", "duration_ms", "exit_code", "artifact_path", "artifact_size", "log_path", "error"} {
+	for _, k := range []string{"source_sha", "status", "started_at", "finished_at", "duration_ms", "exit_code", "artifact_path", "artifact_size", "log_path", "error", "framework"} {
 		if v, ok := fields[k]; ok {
 			cols = append(cols, k+" = ?")
 			args = append(args, v)

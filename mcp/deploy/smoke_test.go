@@ -314,6 +314,45 @@ func TestResolveCommand_Node(t *testing.T) {
 	})
 }
 
+// TestBuildUpdate_PersistsFramework guards against the "auto-detected
+// framework silently dropped" regression: dbCreateBuild stores
+// whatever the deployment had (often empty for auto-detect), and the
+// build runner only learns the real framework after fetching source.
+// The post-success update has to include framework — otherwise the
+// release path's resolveCommand falls through default with "no
+// default start command for framework \"\"".
+func TestBuildUpdate_PersistsFramework(t *testing.T) {
+	db := openSchemaDB(t)
+	defer db.Close()
+
+	d, err := dbCreateDeployment(db, "p1", CreateDeploymentInput{
+		Name: "auto", SourceKind: "local", SourceRef: "/tmp/x", Framework: "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := dbCreateBuild(db, d.ID, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Framework != "" {
+		t.Fatalf("create with empty framework leaked %q", b.Framework)
+	}
+	if err := dbUpdateBuild(db, b.ID, map[string]any{
+		"status":    "succeeded",
+		"framework": "node",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := dbGetBuild(db, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Framework != "node" {
+		t.Fatalf("framework after update = %q, want node — dbUpdateBuild's allowlist must include 'framework'", got.Framework)
+	}
+}
+
 // openSchemaDB opens an in-memory SQLite and applies the v1 migration
 // inline. Simpler than wiring the SDK's migration runner for unit
 // tests; just keep them in sync.

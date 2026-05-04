@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.3.0
+version: 0.3.1
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
@@ -343,6 +343,11 @@ func (a *App) runBuild(d *Deployment) (*Build, error) {
 		"source_sha":    sha,
 		"artifact_path": distDir,
 		"artifact_size": size,
+		// fw may have been auto-detected after the row was created
+		// with the deployment's empty framework field — without
+		// persisting it here, runRelease's resolveCommand falls into
+		// the default case and fails with "no default start command".
+		"framework": fw,
 	})
 	// Stash entrypoint via the build's (framework-chosen) BuildCmd
 	// metadata is not enough — the runtime needs entrypoint at
