@@ -656,14 +656,15 @@ func listIndexers(db *sql.DB, pid string, onlyEnabled bool) ([]Indexer, error) {
 	out := []Indexer{}
 	for rows.Next() {
 		var ix Indexer
-		var catsJSON, lastOK string
+		var catsJSON string
+		var lastOK sql.NullString
 		var en int
 		if err := rows.Scan(&ix.ID, &ix.ProjectID, &ix.Name, &ix.Kind, &ix.BaseURL,
 			&ix.APIKeyEnc, &catsJSON, &ix.Priority, &en, &lastOK, &ix.LastError); err != nil {
 			return nil, err
 		}
 		ix.Enabled = en == 1
-		ix.LastOKAt = lastOK
+		ix.LastOKAt = lastOK.String
 		_ = json.Unmarshal([]byte(catsJSON), &ix.Categories)
 		out = append(out, ix)
 	}
