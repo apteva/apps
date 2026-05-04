@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: torrent
 display_name: Torrent
-version: 0.1.4
+version: 0.1.5
 description: |
   BitTorrent client + indexer-search frontend. Search across
   configured Jackett / Prowlarr / RSS sources, add downloads by
@@ -78,9 +78,9 @@ db:
 config_schema:
   - name: working_dir
     type: text
-    default: /data/torrents
+    default: ""
     label: Working directory
-    description: Engine scratch space. In-flight downloads live here until completion-mover uploads them to storage.
+    description: Engine scratch space. In-flight downloads live here until completion-mover uploads them to storage. Empty → $APTEVA_DATA_DIR/torrents (the install's persistent data dir).
   - name: keep_working_copy
     type: select
     options: ["true", "false"]

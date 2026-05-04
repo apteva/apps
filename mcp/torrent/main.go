@@ -30,6 +30,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: torrent
 display_name: Torrent
-version: 0.1.4
+version: 0.1.5
 description: BitTorrent client + indexer-search frontend.
 author: Apteva
 scopes: [project, global]
@@ -110,7 +111,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	globalApp = a
 
 	cfg := EngineConfig{
-		WorkingDir:       configString(ctx, "working_dir", "/data/torrents"),
+		WorkingDir:       resolveWorkingDir(ctx),
 		ListenPort:       configInt(ctx, "listen_port", 6881),
 		BindInterface:    configString(ctx, "bind_interface", ""),
 		DHTEnabled:       configFlag(ctx, "dht_enabled", true),
@@ -709,7 +710,7 @@ type GlobalStats struct {
 
 func (a *App) globalStats() *GlobalStats {
 	agg := a.engine.AggregateStats()
-	wd := configString(a.ctx, "working_dir", "/data/torrents")
+	wd := resolveWorkingDir(a.ctx)
 	used, _ := dirSize(wd)
 	free := freeDiskMB(wd)
 	ix, _ := listIndexers(a.ctx.AppDB(), projectScope(), false)
@@ -1187,6 +1188,21 @@ func toInt64(v any) int64 {
 		return n
 	}
 	return 0
+}
+
+// resolveWorkingDir picks the engine scratch directory in this order:
+// explicit working_dir config → APTEVA_DATA_DIR/torrents → ./torrents.
+// Hardcoding /data/torrents only worked inside the container layout
+// where /data is a writable mount; on a macOS dev host the root is
+// read-only and OnMount panicked.
+func resolveWorkingDir(ctx *sdk.AppCtx) string {
+	if v := configString(ctx, "working_dir", ""); v != "" {
+		return v
+	}
+	if d := ctx.DataDir(); d != "" {
+		return filepath.Join(d, "torrents")
+	}
+	return "torrents"
 }
 
 func configString(ctx *sdk.AppCtx, key, def string) string {
