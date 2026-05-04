@@ -42,12 +42,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: torrent
 display_name: Torrent
-version: 0.1.0
+version: 0.1.3
 description: BitTorrent client + indexer-search frontend.
 author: Apteva
 scopes: [project, global]
 requires:
-  permissions: [db.write.app, network.lan, network.outbound]
+  permissions: [db.write.app, net.egress]
 provides:
   http_routes:
     - prefix: /

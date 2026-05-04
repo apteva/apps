@@ -34,12 +34,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: dlna
 display_name: DLNA Server
-version: 0.1.0
+version: 0.1.3
 description: Local-LAN UPnP/DLNA MediaServer for Apteva.
 author: Apteva
 scopes: [project, global]
 requires:
-  permissions: [db.write.app, network.lan, network.multicast]
+  permissions: [db.write.app, net.egress]
 provides:
   http_routes:
     - prefix: /
@@ -58,7 +58,6 @@ runtime:
   kind: source
   port: 8200
   health_check: /health
-  network_mode: host
 db:
   driver: sqlite
   path: /data/dlna.db

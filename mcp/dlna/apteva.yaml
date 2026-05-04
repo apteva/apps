@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: dlna
 display_name: DLNA Server
-version: 0.1.2
+version: 0.1.3
 description: |
   Publishes a UPnP/DLNA MediaServer on the LAN. Smart TVs, game
   consoles, Sonos, VLC, and other AV clients discover this app via
@@ -63,10 +63,6 @@ runtime:
     entry: mcp/dlna
   port: 8200
   health_check: /health
-  # SSDP requires multicast on UDP/1900. The orchestrator must place
-  # this container with host networking (or at least with a multicast
-  # bridge) — see README "Open questions" before rolling out.
-  network_mode: host
 
 db:
   driver: sqlite
