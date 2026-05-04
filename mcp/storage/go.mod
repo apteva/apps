@@ -1,13 +1,10 @@
 module github.com/apteva/apps/mcp/storage
-
 go 1.25.0
-
 require (
 	github.com/apteva/app-sdk v0.1.3-0.20260430070155-43f24574d06d
 	github.com/google/uuid v1.6.0
 	modernc.org/sqlite v1.50.0
 )
-
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
@@ -35,5 +32,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-replace github.com/apteva/app-sdk => ../../../app-sdk

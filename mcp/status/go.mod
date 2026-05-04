@@ -1,12 +1,9 @@
 module github.com/apteva/apps/mcp/status
-
 go 1.25.0
-
 require (
 	github.com/apteva/app-sdk v0.1.3-0.20260430141540-81bd7335a818
 	modernc.org/sqlite v1.50.0
 )
-
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -19,5 +16,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-replace github.com/apteva/app-sdk => ../../../app-sdk
