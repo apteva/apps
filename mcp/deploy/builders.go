@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -34,8 +35,6 @@ func detectFramework(srcDir string) string {
 		return "go"
 	}
 	if exists(filepath.Join(srcDir, "package.json")) {
-		// We don't ship a node builder yet; flag explicitly so the
-		// caller can refuse with a clear error.
 		return "node"
 	}
 	if exists(filepath.Join(srcDir, "requirements.txt")) || exists(filepath.Join(srcDir, "pyproject.toml")) {
@@ -53,12 +52,14 @@ func builderFor(framework string) (Builder, error) {
 		return &goBuilder{}, nil
 	case "static":
 		return &staticBuilder{}, nil
+	case "node":
+		return &nodeBuilder{}, nil
 	case "blank":
 		return &blankBuilder{}, nil
 	case "":
 		return nil, errors.New("framework not detected; set framework explicitly on the deployment")
 	default:
-		return nil, fmt.Errorf("framework %q not supported in v0.1 (supported: go, static, blank)", framework)
+		return nil, fmt.Errorf("framework %q not supported (supported: go, node, static, blank)", framework)
 	}
 }
 
@@ -120,6 +121,137 @@ func (*staticBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW 
 		return "", err
 	}
 	return "", nil // empty entrypoint = runtime serves files from artifactDir
+}
+
+// ─── node ─────────────────────────────────────────────────────────
+
+type nodeBuilder struct{}
+
+func (*nodeBuilder) Framework() string { return "node" }
+
+// Build installs dependencies and runs an optional build script, then
+// copies the full source tree (including node_modules and any build
+// output like .next/) into artifactDir so the runtime can exec
+// `<pm> start` against it.
+//
+// Package manager picked by lockfile: bun.lockb → bun, pnpm-lock.yaml
+// → pnpm, yarn.lock → yarn, otherwise npm. The runtime side mirrors
+// this so build and start use the same tool.
+func (*nodeBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.Writer) (string, error) {
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		return "", err
+	}
+	pm := detectPackageManager(srcDir)
+	if _, err := exec.LookPath(pm); err != nil {
+		return "", fmt.Errorf("%s not found on PATH; install it or set start_cmd / build_cmd to use a different toolchain", pm)
+	}
+	if ov.BuildCmd != "" {
+		fmt.Fprintf(logW, "+ %s (cwd=%s)\n", ov.BuildCmd, srcDir)
+		c := exec.Command("sh", "-c", ov.BuildCmd)
+		c.Dir = srcDir
+		c.Stdout = logW
+		c.Stderr = logW
+		if err := c.Run(); err != nil {
+			return "", fmt.Errorf("node build_cmd: %w", err)
+		}
+	} else {
+		fmt.Fprintf(logW, "+ %s install (cwd=%s)\n", pm, srcDir)
+		ic := exec.Command(pm, "install")
+		ic.Dir = srcDir
+		ic.Stdout = logW
+		ic.Stderr = logW
+		if err := ic.Run(); err != nil {
+			return "", fmt.Errorf("%s install: %w", pm, err)
+		}
+		if hasNpmScript(srcDir, "build") {
+			fmt.Fprintf(logW, "+ %s run build (cwd=%s)\n", pm, srcDir)
+			bc := exec.Command(pm, "run", "build")
+			bc.Dir = srcDir
+			bc.Stdout = logW
+			bc.Stderr = logW
+			if err := bc.Run(); err != nil {
+				return "", fmt.Errorf("%s run build: %w", pm, err)
+			}
+		}
+	}
+	if err := copyTreeAll(srcDir, artifactDir); err != nil {
+		return "", fmt.Errorf("stage artifact: %w", err)
+	}
+	return "", nil
+}
+
+// detectPackageManager picks a Node toolchain from lockfiles in dir.
+// Order matters: bun first to honour the workspace's bun-by-default
+// convention, then pnpm/yarn for explicit declarations, npm last as
+// the default for vanilla create-next-app.
+func detectPackageManager(dir string) string {
+	switch {
+	case exists(filepath.Join(dir, "bun.lockb")):
+		return "bun"
+	case exists(filepath.Join(dir, "pnpm-lock.yaml")):
+		return "pnpm"
+	case exists(filepath.Join(dir, "yarn.lock")):
+		return "yarn"
+	default:
+		return "npm"
+	}
+}
+
+func hasNpmScript(dir, name string) bool {
+	body, err := os.ReadFile(filepath.Join(dir, "package.json"))
+	if err != nil {
+		return false
+	}
+	var pkg struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	if err := json.Unmarshal(body, &pkg); err != nil {
+		return false
+	}
+	_, ok := pkg.Scripts[name]
+	return ok
+}
+
+// copyTreeAll mirrors src into dst with no skip list — used by the
+// node builder so node_modules and build output (.next, dist, build)
+// land in the artifact dir alongside the source. Plain copyTree would
+// drop them via shouldSkipForBuild.
+func copyTreeAll(src, dst string) error {
+	src = filepath.Clean(src)
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		out := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(out, info.Mode())
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(target, out)
+		}
+		in, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		w, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(w, in); err != nil {
+			w.Close()
+			return err
+		}
+		return w.Close()
+	})
 }
 
 // ─── blank (BYO build_cmd / start_cmd) ────────────────────────────

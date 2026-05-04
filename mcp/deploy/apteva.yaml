@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.2.0
+version: 0.3.0
 description: |
   Local-first builds and runtime supervision for Apteva projects.
   Takes a code repo (from the Code app, a local path, or a git URL),
@@ -10,7 +10,7 @@ description: |
   a supervised child process bound to a local port. The Apteva
   server proxies traffic to live deployments under /_deploy/<slug>/.
 
-  v0.1 supports source kinds {code, local} and frameworks {go, static}.
+  v0.1 supports source kinds {code, local} and frameworks {go, node, static}.
   Future runtimes (Docker, SSH-to-VPS) plug in behind the same
   Runtime interface — no schema or surface changes required.
 

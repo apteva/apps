@@ -34,7 +34,7 @@ type ReleaseSpec struct {
 	ReleaseID    int64
 	DeploymentID int64
 	Name         string  // for log/process labels
-	Framework    string  // 'go' | 'static' | 'blank'
+	Framework    string  // 'go' | 'node' | 'static' | 'blank'
 	ArtifactDir  string  // /data/builds/<id>/dist/
 	Entrypoint   string  // relative path within ArtifactDir; "" = static FileServer
 	StartCmd     string  // override; if non-empty wins over framework default
@@ -213,6 +213,16 @@ func resolveCommand(spec ReleaseSpec) (string, []string, error) {
 		}
 		// Entrypoint is absolute (build wrote it under artifactDir).
 		return spec.Entrypoint, nil, nil
+	case "node":
+		// Default: detect the package manager from the staged
+		// artifact (mirror of what the builder picked) and run its
+		// start script. Users can override via start_cmd if their app
+		// doesn't have a "start" script or wants a custom invocation.
+		pm := detectPackageManager(spec.ArtifactDir)
+		if !hasNpmScript(spec.ArtifactDir, "start") {
+			return "", nil, fmt.Errorf("node release has no \"start\" script in package.json; set start_cmd explicitly")
+		}
+		return pm, []string{"run", "start"}, nil
 	case "blank":
 		return "", nil, errors.New("blank framework requires start_cmd")
 	default:

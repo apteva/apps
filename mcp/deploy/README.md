@@ -30,14 +30,18 @@ no Docker required.
 
 ## Frameworks (pluggable)
 
-| Framework | Build                                  | Runtime                          |
-|-----------|----------------------------------------|----------------------------------|
-| `go`      | `go build -o app . ` (CGO disabled)    | exec the compiled binary         |
-| `static`  | (none) or `build_cmd` → `dist/`        | in-process `http.FileServer`     |
-| `blank`   | optional `build_cmd`                   | requires `start_cmd`             |
+| Framework | Build                                                  | Runtime                                  |
+|-----------|--------------------------------------------------------|------------------------------------------|
+| `go`      | `go build -o app . ` (CGO disabled)                    | exec the compiled binary                 |
+| `node`    | `<pm> install` + `<pm> run build` (if defined)         | `<pm> run start` (override via start_cmd) |
+| `static`  | (none) or `build_cmd` → `dist/`                        | in-process `http.FileServer`             |
+| `blank`   | optional `build_cmd`                                   | requires `start_cmd`                     |
 
-Auto-detected from the source tree (`go.mod` → `go`, `index.html` →
-`static`, etc.) when `framework` is empty.
+Auto-detected from the source tree (`go.mod` → `go`, `package.json` →
+`node`, `index.html` → `static`, etc.) when `framework` is empty. The
+node builder picks `<pm>` from lockfiles in priority order:
+`bun.lockb` → bun, `pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn,
+otherwise npm.
 
 ## Runtime targets (pluggable)
 
