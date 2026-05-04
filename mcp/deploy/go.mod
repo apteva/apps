@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/deploy
 go 1.25.0
 
 require (
-	github.com/apteva/app-sdk v0.1.3-0.20260430141540-81bd7335a818
+	github.com/apteva/app-sdk v0.1.4
 	modernc.org/sqlite v1.50.0
 )
 

@@ -108,9 +108,20 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	globalCtx = ctx
 
-	a.dataDir = "/data"
+	// Resolution order:
+	//   1. DEPLOY_DATA_DIR — explicit operator override.
+	//   2. ctx.DataDir() — preferred; the platform's writable per-install
+	//      dir (also where AppDB lives). Works on every host the SDK
+	//      supports, container or not.
+	//   3. "/data" — legacy container default. Reached only when running
+	//      against an old platform that hasn't been upgraded; mkdir will
+	//      fail with a clear error elsewhere if /data isn't writable.
 	if env := os.Getenv("DEPLOY_DATA_DIR"); env != "" {
 		a.dataDir = env
+	} else if dd := ctx.DataDir(); dd != "" {
+		a.dataDir = dd
+	} else {
+		a.dataDir = "/data"
 	}
 	for _, sub := range []string{"builds", "releases"} {
 		if err := os.MkdirAll(filepath.Join(a.dataDir, sub), 0o755); err != nil {
