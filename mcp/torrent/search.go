@@ -133,8 +133,115 @@ func (a *App) queryIndexer(ctx context.Context, ix Indexer, query, category stri
 		return queryProwlarr(ctx, httpc, ix.BaseURL, apiKey, query, category, ix.Name)
 	case "rss":
 		return queryTorznabRSS(ctx, httpc, ix.BaseURL, apiKey, query, category, ix.Name)
+	case "apibay":
+		return queryApibay(ctx, httpc, ix.BaseURL, query, ix.Name)
 	default:
 		return nil, fmt.Errorf("unknown indexer kind: %s", ix.Kind)
+	}
+}
+
+// ─── Apibay (TPB public JSON) ───────────────────────────────────────
+//
+// apibay.org/q.php is The Pirate Bay's public JSON search frontend.
+// No API key, no self-hosting — used as the zero-config default so a
+// fresh torrent install can search out of the box. The tradeoff is a
+// single point of failure: if apibay is down or blocked on the user's
+// network, search returns nothing until they add a Jackett/Prowlarr.
+
+type apibayItem struct {
+	Name     string `json:"name"`
+	InfoHash string `json:"info_hash"`
+	Seeders  string `json:"seeders"`
+	Leechers string `json:"leechers"`
+	NumFiles string `json:"num_files"`
+	Size     string `json:"size"`
+	Added    string `json:"added"`
+	Category string `json:"category"`
+	Username string `json:"username"`
+}
+
+// publicTrackers — UDP tracker list grafted onto apibay magnets.
+// apibay returns infohashes only; without trackers the swarm is hard
+// to find. Same set the legacy code-old/dlna project used.
+var publicTrackers = []string{
+	"udp://tracker.opentrackr.org:1337/announce",
+	"udp://open.stealth.si:80/announce",
+	"udp://tracker.openbittorrent.com:6969/announce",
+	"udp://exodus.desync.com:6969/announce",
+	"udp://tracker.torrent.eu.org:451/announce",
+	"udp://open.demonii.com:1337/announce",
+}
+
+func queryApibay(ctx context.Context, httpc *http.Client, baseURL, query, indexer string) ([]SearchResult, error) {
+	if baseURL == "" {
+		baseURL = "https://apibay.org"
+	}
+	u := strings.TrimRight(baseURL, "/") + "/q.php?cat=0&q=" + url.QueryEscape(query)
+	req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
+	resp, err := httpc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("apibay status %d", resp.StatusCode)
+	}
+	var items []apibayItem
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		return nil, err
+	}
+	out := make([]SearchResult, 0, len(items))
+	for _, it := range items {
+		// apibay returns one synthetic row when there are no matches.
+		if it.Name == "No results returned" || it.InfoHash == "" || it.InfoHash == "0000000000000000000000000000000000000000" {
+			break
+		}
+		seeders, _ := strconv.Atoi(it.Seeders)
+		leechers, _ := strconv.Atoi(it.Leechers)
+		size, _ := strconv.ParseInt(it.Size, 10, 64)
+		published := ""
+		if ts, err := strconv.ParseInt(it.Added, 10, 64); err == nil && ts > 0 {
+			published = time.Unix(ts, 0).UTC().Format(time.RFC3339)
+		}
+		out = append(out, SearchResult{
+			Name:        it.Name,
+			Infohash:    it.InfoHash,
+			Magnet:      buildApibayMagnet(it.InfoHash, it.Name),
+			SizeBytes:   size,
+			Seeders:     seeders,
+			Leechers:    leechers,
+			PublishedAt: published,
+			Category:    apibayCategory(it.Category),
+			Indexer:     indexer,
+		})
+	}
+	return out, nil
+}
+
+func buildApibayMagnet(infoHash, name string) string {
+	m := "magnet:?xt=urn:btih:" + infoHash + "&dn=" + url.QueryEscape(name)
+	for _, tr := range publicTrackers {
+		m += "&tr=" + url.QueryEscape(tr)
+	}
+	return m
+}
+
+// apibayCategory normalises TPB's numeric categories into the app's
+// shared category enum. First digit determines the bucket; subcats
+// are ignored. 100=audio, 200=video, 300=apps, 400=games, 600=other.
+func apibayCategory(cat string) string {
+	if cat == "" {
+		return ""
+	}
+	switch cat[0] {
+	case '1':
+		return "music"
+	case '2':
+		return "video"
+	case '3', '4':
+		return "software"
+	default:
+		return ""
 	}
 }
 

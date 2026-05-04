@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: torrent
 display_name: Torrent
-version: 0.1.6
+version: 0.1.7
 description: BitTorrent client + indexer-search frontend.
 author: Apteva
 scopes: [project, global]
@@ -127,9 +127,30 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	eng.SetTransitionHandler(a.onTransition)
 	a.engine = eng
+	a.seedDefaultIndexer()
 	ctx.Logger().Info("torrent mounted",
 		"working_dir", cfg.WorkingDir, "port", cfg.ListenPort)
 	return nil
+}
+
+// seedDefaultIndexer adds an apibay indexer row on first mount so a
+// fresh install can search out of the box. addIndexer's ON CONFLICT
+// makes this idempotent — running it every mount is fine and lets
+// the row come back if someone deletes it but reinstalls.
+func (a *App) seedDefaultIndexer() {
+	existing, err := listIndexers(a.ctx.AppDB(), projectScope(), false)
+	if err != nil {
+		return
+	}
+	for _, ix := range existing {
+		if ix.Kind == "apibay" {
+			return
+		}
+	}
+	if _, err := addIndexer(a.ctx.AppDB(), projectScope(),
+		"apibay", "apibay", "https://apibay.org", "", nil, 50); err != nil {
+		a.ctx.Logger().Warn("seed apibay indexer", "err", err.Error())
+	}
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error {
