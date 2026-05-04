@@ -248,13 +248,28 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
     [api],
   );
 
-  const selectRepo = (slug: string) => {
-    if (dirty && !confirm("Unsaved changes will be lost. Switch repo anyway?")) return;
+  const [confirmState, setConfirmState] = useState<ConfirmRequest | null>(null);
+  const [markTemplateFor, setMarkTemplateFor] = useState<string | null>(null);
+
+  const doSelectRepo = (slug: string) => {
     setSelectedSlug(slug);
     setOpenFile(null);
     setEditing(false);
     setDraft("");
     loadTree(slug);
+  };
+  const selectRepo = (slug: string) => {
+    if (dirty) {
+      setConfirmState({
+        title: "Discard unsaved changes?",
+        body: "Unsaved changes in the current file will be lost. Switch repo anyway?",
+        confirmLabel: "Switch repo",
+        tone: "warning",
+        onConfirm: () => doSelectRepo(slug),
+      });
+      return;
+    }
+    doSelectRepo(slug);
   };
 
   const openPath = useCallback(
@@ -330,22 +345,38 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
 
   const selectFile = (path: string) => {
     if (!selectedSlug) return;
-    if (dirty && !confirm("Unsaved changes will be lost. Open another file anyway?")) return;
+    if (dirty) {
+      setConfirmState({
+        title: "Discard unsaved changes?",
+        body: "Unsaved changes in the current file will be lost. Open another file anyway?",
+        confirmLabel: "Open file",
+        tone: "warning",
+        onConfirm: () => openPath(selectedSlug, path),
+      });
+      return;
+    }
     openPath(selectedSlug, path);
   };
 
-  const handleArchive = async (slug: string) => {
-    if (!confirm(`Archive repo "${slug}"? Files stay on disk.`)) return;
-    try {
-      await api("DELETE", `/repos/${slug}`);
-      if (selectedSlug === slug) {
-        setSelectedSlug(null);
-        setTree([]);
-        setOpenFile(null);
-      }
-    } catch (e) {
-      alert("Archive failed: " + (e as Error).message);
-    }
+  const handleArchive = (slug: string) => {
+    setConfirmState({
+      title: `Archive "${slug}"`,
+      body: "Archive this repository? Files stay on disk and the row is hidden — you can hard-delete later from the dashboard.",
+      confirmLabel: "Archive",
+      tone: "warning",
+      onConfirm: async () => {
+        try {
+          await api("DELETE", `/repos/${slug}`);
+          if (selectedSlug === slug) {
+            setSelectedSlug(null);
+            setTree([]);
+            setOpenFile(null);
+          }
+        } catch (e) {
+          setError("Archive failed: " + (e as Error).message);
+        }
+      },
+    });
   };
 
   const handleToggleTemplate = async (slug: string) => {
@@ -356,25 +387,22 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
         await api("POST", `/repos/${slug}/unmark-template`);
         await loadRepos();
       } catch (e) {
-        alert("Unmark failed: " + (e as Error).message);
+        setError("Unmark failed: " + (e as Error).message);
       }
       return;
     }
-    const scope = prompt(
-      "Template scope: 'private' (this project only), 'project' (anyone in this project), or 'global' (every project)",
-      "private",
-    );
-    if (!scope) return;
-    if (!["private", "project", "global"].includes(scope)) {
-      alert("scope must be one of: private, project, global");
-      return;
-    }
-    const tagline = prompt("Short tagline for the picker (optional)", "") ?? "";
+    setMarkTemplateFor(slug);
+  };
+
+  const submitMarkTemplate = async (scope: string, tagline: string) => {
+    if (!markTemplateFor) return;
     try {
-      await api("POST", `/repos/${slug}/mark-template`, { scope, tagline });
+      await api("POST", `/repos/${markTemplateFor}/mark-template`, { scope, tagline });
       await loadRepos();
+      setMarkTemplateFor(null);
     } catch (e) {
-      alert("Mark failed: " + (e as Error).message);
+      setError("Mark failed: " + (e as Error).message);
+      throw e;
     }
   };
 
@@ -386,7 +414,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
       setOpenFile({ path: openFile.path, content: draft });
       setEditing(false);
     } catch (e) {
-      alert("Save failed: " + (e as Error).message);
+      setError("Save failed: " + (e as Error).message);
     } finally {
       setSaving(false);
     }
@@ -394,7 +422,19 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
 
   const handleDiscard = () => {
     if (!openFile) return;
-    if (dirty && !confirm("Discard unsaved changes?")) return;
+    if (dirty) {
+      setConfirmState({
+        title: "Discard unsaved changes?",
+        body: "Your edits to this file will be reverted to the last saved version.",
+        confirmLabel: "Discard",
+        tone: "warning",
+        onConfirm: () => {
+          setDraft(openFile.content);
+          setEditing(false);
+        },
+      });
+      return;
+    }
     setDraft(openFile.content);
     setEditing(false);
   };
@@ -438,23 +478,29 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
         openPath(selectedSlug, cleanTo);
       }
     } catch (e) {
-      alert("Rename failed: " + (e as Error).message);
+      setError("Rename failed: " + (e as Error).message);
     }
   };
 
-  const handleDeleteFile = async (path: string) => {
+  const handleDeleteFile = (path: string) => {
     if (!selectedSlug) return;
-    if (!confirm(`Delete "${path}"? This can't be undone.`)) return;
-    try {
-      await fetch(`${API}/repos/${selectedSlug}/files/${path}?${withParams()}`, {
-        method: "DELETE",
-        credentials: "same-origin",
-      }).then(async (res) => {
-        if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
-      });
-    } catch (e) {
-      alert("Delete failed: " + (e as Error).message);
-    }
+    setConfirmState({
+      title: `Delete "${path}"`,
+      body: "This file will be removed from the repository. This can't be undone.",
+      confirmLabel: "Delete",
+      tone: "danger",
+      onConfirm: async () => {
+        try {
+          const res = await fetch(`${API}/repos/${selectedSlug}/files/${path}?${withParams()}`, {
+            method: "DELETE",
+            credentials: "same-origin",
+          });
+          if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+        } catch (e) {
+          setError("Delete failed: " + (e as Error).message);
+        }
+      },
+    });
   };
 
   const handleUpload = async (ev: React.ChangeEvent<HTMLInputElement>) => {
@@ -467,7 +513,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
         await putFile(selectedSlug, cleanRel(f.name), buf);
       }
     } catch (e) {
-      alert("Upload failed: " + (e as Error).message);
+      setError("Upload failed: " + (e as Error).message);
     } finally {
       ev.target.value = "";
     }
@@ -794,6 +840,21 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
           api={api}
         />
       )}
+
+      {confirmState && (
+        <ConfirmDialog
+          request={confirmState}
+          onClose={() => setConfirmState(null)}
+        />
+      )}
+
+      {markTemplateFor && (
+        <MarkTemplateDialog
+          slug={markTemplateFor}
+          onClose={() => setMarkTemplateFor(null)}
+          onSubmit={submitMarkTemplate}
+        />
+      )}
     </div>
   );
 }
@@ -1093,6 +1154,168 @@ function PromptDialog({
             disabled={busy}
             className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
           >{busy ? "…" : submitLabel}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// ─── ConfirmDialog ─────────────────────────────────────────────────
+//
+// Drop-in replacement for window.confirm. Centred modal with title,
+// body, two action buttons. Tone "danger" for destructive actions
+// (Delete file), "warning" for reversible interrupts (Discard, Switch
+// repo). Spawned by setting confirmState; the dialog clears its own
+// state through onClose.
+
+interface ConfirmRequest {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  tone?: "warning" | "danger";
+  onConfirm: () => void | Promise<void>;
+}
+
+function ConfirmDialog({ request, onClose }: { request: ConfirmRequest; onClose: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const accent =
+    request.tone === "danger"
+      ? "bg-red text-white hover:bg-red/90"
+      : "bg-blue text-white hover:bg-blue/90";
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      await request.onConfirm();
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-[420px] bg-bg border border-border rounded p-5 space-y-4"
+        role="dialog"
+        aria-modal="true"
+      >
+        <h2 className="text-text font-semibold">{request.title}</h2>
+        <p className="text-text-muted text-sm">{request.body}</p>
+        <div className="flex justify-end gap-2 pt-1">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="px-3 py-1.5 text-sm rounded border border-border text-text-muted hover:text-text disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={busy}
+            autoFocus
+            className={`px-3 py-1.5 text-sm rounded ${accent} disabled:opacity-50`}
+          >
+            {busy ? "Working…" : request.confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── MarkTemplateDialog ────────────────────────────────────────────
+//
+// Replaces the two stacked window.prompt() calls (scope + tagline).
+// Scope is a constrained <select> so users can't type "publik" — the
+// old prompt accepted free text and rejected after the fact.
+
+const TEMPLATE_SCOPES = [
+  { value: "private", label: "Private — only this project sees it" },
+  { value: "project", label: "Project — anyone in this project" },
+  { value: "global", label: "Global — every project on this install" },
+] as const;
+
+function MarkTemplateDialog({
+  slug,
+  onClose,
+  onSubmit,
+}: {
+  slug: string;
+  onClose: () => void;
+  onSubmit: (scope: string, tagline: string) => Promise<void>;
+}) {
+  const [scope, setScope] = useState<(typeof TEMPLATE_SCOPES)[number]["value"]>("private");
+  const [tagline, setTagline] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setErr("");
+    try {
+      await onSubmit(scope, tagline.trim());
+    } catch (e2) {
+      setErr((e2 as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <form
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={submit}
+        className="w-[480px] bg-bg border border-border rounded p-5 space-y-4"
+      >
+        <h2 className="text-text font-semibold">Mark "{slug}" as a template</h2>
+        <p className="text-xs text-text-muted">
+          Templates appear in the picker when creating a new repo. Forks copy the file tree at the moment of fork.
+        </p>
+        <div>
+          <label className="text-xs text-text-muted block mb-1">Scope</label>
+          <select
+            value={scope}
+            onChange={(e) => setScope(e.target.value as typeof scope)}
+            className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+          >
+            {TEMPLATE_SCOPES.map((s) => (
+              <option key={s.value} value={s.value}>{s.label}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="text-xs text-text-muted block mb-1">Tagline (optional)</label>
+          <input
+            type="text"
+            value={tagline}
+            onChange={(e) => setTagline(e.target.value)}
+            placeholder="One-line description shown in the picker"
+            className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+          />
+        </div>
+        {err && <div className="text-red text-xs">{err}</div>}
+        <div className="flex justify-end gap-2 pt-1">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="px-3 py-1.5 text-sm rounded border border-border text-text-muted hover:text-text disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={busy}
+            className="px-3 py-1.5 text-sm rounded bg-blue text-white hover:bg-blue/90 disabled:opacity-50"
+          >
+            {busy ? "Working…" : "Mark as template"}
+          </button>
         </div>
       </form>
     </div>
