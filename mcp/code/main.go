@@ -104,7 +104,19 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	globalCtx = ctx
 	root := os.Getenv("CODE_REPOS_DIR")
 	if root == "" {
-		root = "/data/repos"
+		// ctx.DataDir() points at the writable per-install directory the
+		// platform reserved for this app (same dir AppDB lives in).
+		// Falls back to dirname(DB_PATH) on older platforms via the SDK.
+		// Only when neither is available do we use the legacy "/data/repos"
+		// container default — and at that point the app is almost certainly
+		// running on a host that doesn't have /data writable, so MkdirAll
+		// will fail with a clear error rather than silently picking a
+		// useless directory.
+		if dd := ctx.DataDir(); dd != "" {
+			root = filepath.Join(dd, "repos")
+		} else {
+			root = "/data/repos"
+		}
 	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return fmt.Errorf("mkdir repos root: %w", err)
