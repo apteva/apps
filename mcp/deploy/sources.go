@@ -4,17 +4,18 @@ import (
 	"archive/zip"
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 // SourceFetcher unpacks a Deployment's source spec into a working
@@ -26,13 +27,13 @@ type SourceFetcher interface {
 }
 
 // fetchSource is the dispatch point. Adds new kinds here as they ship.
-func fetchSource(d *Deployment, destDir string, cfg sourceConfig) error {
+func fetchSource(ctx *sdk.AppCtx, d *Deployment, destDir string, cfg sourceConfig) error {
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return err
 	}
 	switch d.SourceKind {
 	case "code":
-		return (&codeFetcher{baseURL: cfg.CodeAppURL}).Fetch(d, destDir)
+		return (&codeFetcher{platform: ctx.PlatformAPI()}).Fetch(d, destDir)
 	case "local":
 		return (&localFetcher{}).Fetch(d, destDir)
 	default:
@@ -41,59 +42,99 @@ func fetchSource(d *Deployment, destDir string, cfg sourceConfig) error {
 }
 
 type sourceConfig struct {
-	CodeAppURL string
-	ProjectID  string
-	InstallID  string
+	ProjectID string
+	InstallID string
 }
 
 // ─── code source ──────────────────────────────────────────────────
 
 type codeFetcher struct {
-	baseURL string
+	platform sdk.PlatformClient
 }
 
 func (f *codeFetcher) Kind() string { return "code" }
 
-// Fetch hits the Code app's REST surface to download the repo zip
-// and extract it into destDir. SourceRef is the repo slug.
+// Fetch reaches the Code app over the platform's cross-app RPC
+// (PlatformClient.CallApp → /api/apps/callback/apps/code/call), which
+// proxies an MCP tools/call to the bound code install with the right
+// token swapped in. The repo zip comes back base64-encoded inside the
+// tool result; we decode and unpack it into destDir. SourceRef is the
+// repo slug.
 func (f *codeFetcher) Fetch(d *Deployment, destDir string) error {
 	if d.SourceRef == "" {
 		return errors.New("source_ref (repo slug) required for kind=code")
 	}
-	if f.baseURL == "" {
-		return errors.New("code app URL not configured (set deploy.code_app_url)")
+	if f.platform == nil {
+		return errors.New("platform client unavailable; deploy app not fully mounted")
 	}
-	exportURL, err := url.Parse(strings.TrimRight(f.baseURL, "/") + "/api/repos/" + d.SourceRef + "/export")
+	args := map[string]any{
+		"slug":        d.SourceRef,
+		"_project_id": d.ProjectID,
+	}
+	raw, err := f.platform.CallApp("code", "repos_export", args)
 	if err != nil {
-		return fmt.Errorf("bad code app URL: %w", err)
+		return fmt.Errorf("call code.repos_export: %w", err)
 	}
-	q := exportURL.Query()
-	q.Set("project_id", d.ProjectID)
-	exportURL.RawQuery = q.Encode()
-
-	req, err := http.NewRequest(http.MethodGet, exportURL.String(), nil)
-	if err != nil {
-		return err
-	}
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("fetch code export: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("code export %s: %s", resp.Status, strings.TrimSpace(string(body)))
-	}
-	body, err := io.ReadAll(resp.Body)
+	zipBytes, err := decodeRepoExport(raw)
 	if err != nil {
 		return err
 	}
-	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	zr, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
 	if err != nil {
-		return fmt.Errorf("not a valid zip: %w", err)
+		return fmt.Errorf("code export: not a valid zip: %w", err)
 	}
 	return unpackZip(zr, destDir)
+}
+
+// decodeRepoExport unwraps the JSON-RPC envelope CallApp returned and
+// pulls the repo zip out of the tool's `zip_b64` field. The full path
+// is: JSON-RPC response → result.content[0].text → JSON object with
+// {slug, size, sha256, zip_b64}.
+func decodeRepoExport(raw json.RawMessage) ([]byte, error) {
+	var env struct {
+		Result map[string]any `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, fmt.Errorf("decode mcp envelope: %w", err)
+	}
+	if env.Error != nil {
+		return nil, fmt.Errorf("code.repos_export error %d: %s", env.Error.Code, env.Error.Message)
+	}
+	content, _ := env.Result["content"].([]any)
+	if len(content) == 0 {
+		return nil, errors.New("code.repos_export returned empty content")
+	}
+	first, _ := content[0].(map[string]any)
+	text, _ := first["text"].(string)
+	if text == "" {
+		return nil, errors.New("code.repos_export returned no text payload")
+	}
+	var payload struct {
+		ZipB64 string `json:"zip_b64"`
+		SHA256 string `json:"sha256"`
+		Size   int    `json:"size"`
+	}
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		return nil, fmt.Errorf("decode export payload: %w", err)
+	}
+	if payload.ZipB64 == "" {
+		return nil, errors.New("code.repos_export returned no zip_b64")
+	}
+	zipBytes, err := base64.StdEncoding.DecodeString(payload.ZipB64)
+	if err != nil {
+		return nil, fmt.Errorf("base64 decode zip: %w", err)
+	}
+	if payload.SHA256 != "" {
+		got := sha256.Sum256(zipBytes)
+		if hex.EncodeToString(got[:]) != payload.SHA256 {
+			return nil, errors.New("code.repos_export sha256 mismatch")
+		}
+	}
+	return zipBytes, nil
 }
 
 // ─── local source ─────────────────────────────────────────────────

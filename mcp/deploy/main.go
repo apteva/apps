@@ -39,13 +39,21 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.1.0
+version: 0.2.0
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
 requires:
   permissions:
     - db.write.app
+    - platform.apps.call
+  integrations:
+    - role: code
+      kind: app
+      required: true
+      compatible_app_names: [code]
+      label: Code app
+      hint: Install the Code app to host repositories the Deploy app builds.
 provides:
   http_routes:
     - prefix: /
@@ -130,8 +138,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	a.cfg = sourceConfig{
-		CodeAppURL: configOr(ctx, "code_app_url", "http://localhost:8080"),
-		ProjectID:  os.Getenv("APTEVA_PROJECT_ID"),
+		ProjectID: os.Getenv("APTEVA_PROJECT_ID"),
 	}
 	a.portRangeStart = atoiOr(configOr(ctx, "port_range_start", "7000"), 7000)
 	a.portRangeEnd = atoiOr(configOr(ctx, "port_range_end", "7999"), 7999)
@@ -146,7 +153,6 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	ctx.Logger().Info("deploy mounted",
 		"data_dir", a.dataDir,
 		"port_range", fmt.Sprintf("%d-%d", a.portRangeStart, a.portRangeEnd),
-		"code_app_url", a.cfg.CodeAppURL,
 		"max_build_concurrency", a.maxBuilds,
 	)
 
@@ -293,7 +299,7 @@ func (a *App) runBuild(d *Deployment) (*Build, error) {
 	// Fetch source.
 	cfg := a.cfg
 	cfg.ProjectID = d.ProjectID
-	if err := fetchSource(d, srcDir, cfg); err != nil {
+	if err := fetchSource(globalCtx, d, srcDir, cfg); err != nil {
 		fmt.Fprintf(logF, "fetch source failed: %v\n", err)
 		return a.failBuild(build, "fetch source: "+err.Error()), nil
 	}

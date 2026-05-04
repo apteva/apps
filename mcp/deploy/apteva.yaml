@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.1.0
+version: 0.2.0
 description: |
   Local-first builds and runtime supervision for Apteva projects.
   Takes a code repo (from the Code app, a local path, or a git URL),
@@ -25,6 +25,14 @@ min_apteva_version: "0.10.0"
 requires:
   permissions:
     - db.write.app
+    - platform.apps.call
+  integrations:
+    - role: code
+      kind: app
+      required: true
+      compatible_app_names: [code]
+      label: Code app
+      hint: Install the Code app to host repositories the Deploy app builds.
 
 provides:
   http_routes:
@@ -82,11 +90,6 @@ config_schema:
     default: "7999"
     label: Port range end
     description: Last port the runtime supervisor may assign to a release.
-  - name: code_app_url
-    type: text
-    default: "http://localhost:8080"
-    label: Code app base URL
-    description: Where to reach the Code app's REST surface for source kind=code.
   - name: max_build_concurrency
     type: text
     default: "2"

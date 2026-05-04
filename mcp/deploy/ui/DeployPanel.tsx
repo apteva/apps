@@ -533,20 +533,30 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
             loadDeployments().then(() => selectDeployment(d.id));
           }}
           api={api}
+          projectId={projectId}
         />
       )}
     </div>
   );
 }
 
+interface CodeRepo {
+  slug: string;
+  name?: string;
+  framework?: string;
+  archived?: boolean;
+}
+
 function CreateDeploymentDialog({
   onClose,
   onCreated,
   api,
+  projectId,
 }: {
   onClose: () => void;
   onCreated: (d: Deployment) => void;
   api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
+  projectId: string;
 }) {
   const [name, setName] = useState("");
   const [sourceKind, setSourceKind] = useState<(typeof SOURCE_KINDS)[number]>("code");
@@ -557,6 +567,33 @@ function CreateDeploymentDialog({
   const [env, setEnv] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+
+  const [repos, setRepos] = useState<CodeRepo[] | null>(null);
+  const [reposErr, setReposErr] = useState("");
+  useEffect(() => {
+    if (sourceKind !== "code") return;
+    if (repos !== null) return;
+    let cancelled = false;
+    fetch(`/api/apps/code/api/repos?project_id=${encodeURIComponent(projectId)}`, {
+      credentials: "same-origin",
+    })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
+        return r.json() as Promise<{ repositories?: CodeRepo[] }>;
+      })
+      .then((j) => {
+        if (cancelled) return;
+        setRepos((j.repositories || []).filter((r) => !r.archived));
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setReposErr((e as Error).message);
+        setRepos([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sourceKind, projectId, repos]);
 
   const submit = async () => {
     if (!name.trim() || !sourceRef.trim()) {
@@ -626,15 +663,50 @@ function CreateDeploymentDialog({
           </div>
           <div className="col-span-2">
             <label className="text-xs text-text-muted block mb-1">
-              Source ref ({sourceKind === "code" ? "repo slug from Code app" : "absolute path on host"})
+              Source ref ({sourceKind === "code" ? "repository from Code app" : "absolute path on host"})
             </label>
-            <input
-              type="text"
-              value={sourceRef}
-              onChange={(e) => setSourceRef(e.target.value)}
-              placeholder={sourceKind === "code" ? "my-api" : "/abs/path/to/repo"}
-              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
-            />
+            {sourceKind === "code" ? (
+              repos === null ? (
+                <div className="w-full text-xs text-text-dim px-2 py-1.5">Loading repositories…</div>
+              ) : repos.length === 0 ? (
+                <div className="text-xs text-text-dim space-y-1">
+                  <div>{reposErr ? `Couldn't load repos: ${reposErr}` : "No repositories in this project yet."}</div>
+                  <div>Open the Code panel to create one, then return here.</div>
+                </div>
+              ) : (
+                <select
+                  value={sourceRef}
+                  onChange={(e) => {
+                    setSourceRef(e.target.value);
+                    if (framework === "") {
+                      const r = repos.find((x) => x.slug === e.target.value);
+                      const f = (r?.framework || "").toLowerCase();
+                      if ((FRAMEWORKS as readonly string[]).includes(f)) {
+                        setFramework(f as (typeof FRAMEWORKS)[number]);
+                      }
+                    }
+                  }}
+                  className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+                >
+                  <option value="">— select a repository —</option>
+                  {repos.map((r) => (
+                    <option key={r.slug} value={r.slug}>
+                      {r.slug}
+                      {r.framework ? ` · ${r.framework}` : ""}
+                      {r.name && r.name !== r.slug ? ` (${r.name})` : ""}
+                    </option>
+                  ))}
+                </select>
+              )
+            ) : (
+              <input
+                type="text"
+                value={sourceRef}
+                onChange={(e) => setSourceRef(e.target.value)}
+                placeholder="/abs/path/to/repo"
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+              />
+            )}
           </div>
           <div>
             <label className="text-xs text-text-muted block mb-1">Build cmd (optional)</label>

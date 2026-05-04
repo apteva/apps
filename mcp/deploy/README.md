@@ -89,8 +89,11 @@ PATH (the build step shells out to it).
 |-------------------------|--------------------------|-----------------------------------------|
 | `port_range_start`      | `7000`                   | First port the supervisor may assign    |
 | `port_range_end`        | `7999`                   | Last port the supervisor may assign     |
-| `code_app_url`          | `http://localhost:8080`  | Where to reach the Code app's REST      |
 | `max_build_concurrency` | `2`                      | Hard cap on simultaneous builds         |
+
+The `code` source kind reaches the Code app over `PlatformClient.CallApp`
+(MCP `repos_export`); install-time binding to a code app fills the
+`code` role declared in this app's manifest.
 
 ## Out of scope for v0.1
 
