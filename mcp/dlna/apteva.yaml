@@ -37,10 +37,9 @@ requires:
   apps:
     - name: storage
       reason: "Folder listing, file metadata, signed byte URLs."
-      required: true
     - name: media
       reason: "Duration / codec / resolution enrichment for video & audio."
-      required: false
+      optional: true
 
 provides:
   http_routes:

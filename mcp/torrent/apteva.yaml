@@ -35,10 +35,9 @@ requires:
   apps:
     - name: storage
       reason: "Final destination for completed downloads."
-      required: true
     - name: media
       reason: "Probe video/audio leaves on completion for duration / codec metadata."
-      required: false
+      optional: true
 
 provides:
   http_routes:
