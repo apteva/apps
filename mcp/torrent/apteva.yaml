@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: torrent
 display_name: Torrent
-version: 0.1.7
+version: 0.1.8
 description: |
   BitTorrent client + indexer-search frontend. Search across
   configured Jackett / Prowlarr / RSS sources, add downloads by
@@ -128,9 +128,9 @@ config_schema:
     label: Require peer encryption
   - name: listen_port
     type: text
-    default: "6881"
+    default: "0"
     label: Listen port
-    description: Inbound peer port. Forward this on the LAN router for healthier swarm participation.
+    description: Inbound peer port. 0 = kernel-assigned (default) — works everywhere, but LAN port-forwarding becomes pointless. Set explicitly (e.g. 6881) when you can forward the port on your router for healthier swarm participation.
   - name: bind_interface
     type: text
     default: ""

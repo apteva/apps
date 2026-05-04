@@ -139,6 +139,15 @@ func NewEngine(cfg EngineConfig, log func(string, string)) (*Engine, error) {
 	tcfg.DefaultStorage = storage.NewFile(cfg.WorkingDir)
 
 	cli, err := torrent.NewClient(tcfg)
+	if err != nil && cfg.ListenPort != 0 {
+		// Configured port is busy (orphaned sidecar after crash, another
+		// BT client on the host, …). Fall back to a kernel-assigned port
+		// so the engine still comes up — users wanting deterministic LAN
+		// port-forwarding can pick a free one explicitly.
+		log("engine", fmt.Sprintf("listen :%d busy (%v); falling back to random port", cfg.ListenPort, err))
+		tcfg.ListenPort = 0
+		cli, err = torrent.NewClient(tcfg)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("torrent client: %w", err)
 	}

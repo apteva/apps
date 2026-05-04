@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: torrent
 display_name: Torrent
-version: 0.1.7
+version: 0.1.8
 description: BitTorrent client + indexer-search frontend.
 author: Apteva
 scopes: [project, global]
@@ -112,7 +112,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 
 	cfg := EngineConfig{
 		WorkingDir:       resolveWorkingDir(ctx),
-		ListenPort:       configInt(ctx, "listen_port", 6881),
+		ListenPort:       configInt(ctx, "listen_port", 0),
 		BindInterface:    configString(ctx, "bind_interface", ""),
 		DHTEnabled:       configFlag(ctx, "dht_enabled", true),
 		EncryptionForced: configFlag(ctx, "peer_encryption_required", true),
