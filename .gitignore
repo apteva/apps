@@ -1,15 +1,42 @@
+# Compiled Go sidecar binaries — `go build .` in mcp/<name>/ produces
+# a binary named after the directory. One entry per app keeps the list
+# explicit; gitignore globs can't match "file with same name as parent
+# dir" cleanly, so we enumerate.
+mcp/auth/auth
+mcp/backup/backup
+mcp/calendar/calendar
+mcp/code/code
 mcp/crm/crm
-mcp/storage/storage
+mcp/deploy/deploy
+mcp/dlna/dlna
+mcp/domains/domains
+mcp/email-checker/email-checker
+mcp/health/health
+mcp/image-studio/image-studio
+mcp/jobs/jobs
 mcp/media/media
+mcp/messaging/messaging
+mcp/social/social
+mcp/status/status
+mcp/storage/storage
+mcp/tapo/tapo
+mcp/tasks/tasks
+mcp/todo/todo
+mcp/torrent/torrent
+mcp/trading/trading
+
+# Per-app runtime data dirs that get created when sidecars run locally.
+mcp/jobs/data/
+mcp/code/workspace/
+
+# SQLite files left behind by local test runs.
 *.db
 *.db-shm
 *.db-wal
-MCP local sidecar bin
+
+# Test sidecar staging dir from sdk testkit.
 _test_sidecar_bin
-mcp/jobs/jobs
-mcp/code/code
-mcp/trading/trading
-mcp/jobs/data/
-mcp/code/workspace/
+
+# Local-dev noise.
 node_modules/
 apteva-core.log
