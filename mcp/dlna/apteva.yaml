@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: dlna
 display_name: DLNA Server
-version: 0.1.1
+version: 0.1.2
 description: |
   Publishes a UPnP/DLNA MediaServer on the LAN. Smart TVs, game
   consoles, Sonos, VLC, and other AV clients discover this app via
@@ -31,8 +31,7 @@ min_apteva_version: "0.10.0"
 requires:
   permissions:
     - db.write.app
-    - network.lan
-    - network.multicast
+    - net.egress
   integrations: []
   apps:
     - name: storage
