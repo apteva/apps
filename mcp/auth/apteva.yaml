@@ -1,0 +1,146 @@
+schema: apteva-app/v1
+
+name: auth
+display_name: Auth
+version: 0.1.0
+description: |
+  Identity layer for Apteva-deployed SaaS. Email + password signup/login,
+  asymmetric (EdDSA) JWT issuance with rotating signing keys + JWKS,
+  refresh-token sessions with rotation, OAuth client registry (one user
+  pool, many clients), email verification, password reset, magic links,
+  and TOTP MFA. Agents administer the user pool via MCP tools; the
+  deployed SaaS frontend hits the HTTP routes; the dashboard renders
+  Users / Clients / Settings panels.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/auth
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/auth/icon.png
+tags: [auth, identity, jwt, oauth, mfa, saas]
+
+scopes: [project]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.instances.read
+    - platform.apps.call    # call the messaging app to send transactional email
+    - net.egress            # OAuth provider callbacks (google, github, apple)
+  apps:
+    - name: messaging
+      optional: true
+      reason: Sends verification, password-reset, magic-link, and invite emails. Without it, links are written to the audit log only — fine for development, not for production.
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    # v0.1 surface — minimum useful set for an admin to operate the user pool.
+    # Deferred to v0.1.1 (when password-reset / invite / soft-delete flows
+    # land): auth_users_create, _invite, _delete, _set_email,
+    # _send_password_reset.
+    - name: auth_users_search
+      description: Filtered user search (email, status, created window, MFA on/off).
+    - name: auth_users_get
+      description: Snapshot of one user.
+    - name: auth_users_get_context
+      description: Snapshot + active sessions + MFA factors + last 20 audit events — agent's pre-flight read.
+    - name: auth_users_disable
+      description: Disable a user and revoke all their sessions.
+    - name: auth_users_enable
+      description: Re-enable a disabled user.
+    - name: auth_users_revoke_sessions
+      description: Force-logout one user across all sessions.
+    - name: auth_audit_search
+      description: Time-window + event-type filter over the audit log.
+    - name: auth_stats
+      description: Counts (active users, signups_7d, logins_24h, locked) for status reports.
+    - name: auth_clients_list
+      description: List registered OAuth clients (frontends/services that consume auth).
+    - name: auth_clients_create
+      description: Register a new OAuth client. Returns client_id + (for confidential clients) one-time client_secret.
+    - name: auth_clients_rotate_secret
+      description: Rotate a client's secret. Returns the new value once.
+    - name: auth_clients_disable
+      description: Disable a client. Existing access tokens remain valid until expiry; refresh tokens stop working.
+  ui_panels:
+    - slot: project.page
+      label: Users
+      icon: users
+      entry: /ui/UsersPanel.mjs
+    - slot: project.page
+      label: Auth Clients
+      icon: key
+      entry: /ui/ClientsPanel.mjs
+    - slot: project.page
+      label: Auth Settings
+      icon: settings
+      entry: /ui/SettingsPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/auth
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/auth.db
+  migrations: migrations/
+
+config_schema:
+  - name: app_url
+    type: text
+    required: true
+    label: Public app URL
+    description: Used in email verification, reset, magic-link, and OAuth redirect URLs. e.g. https://app.example.com
+  - name: from_email
+    type: text
+    required: true
+    label: Outbound from-address
+    description: Sender address for transactional emails. Must be verified in the messaging app.
+  - name: jwt_access_ttl_seconds
+    type: text
+    default: "900"
+    label: Access token TTL (seconds)
+    description: Default 15 minutes. Per-client overrides supported.
+  - name: jwt_refresh_ttl_days
+    type: text
+    default: "30"
+    label: Refresh token TTL (days)
+    description: Default 30. Per-client overrides supported.
+  - name: password_min_length
+    type: text
+    default: "12"
+    label: Password minimum length
+    description: Minimum character count for new passwords.
+  - name: password_classes_required
+    type: text
+    default: "2"
+    label: Password classes required
+    description: Of [lower, upper, digit, symbol], how many must appear. 0–4.
+  - name: lockout_threshold
+    type: text
+    default: "5"
+    label: Failed-login lockout threshold
+    description: Consecutive failures before the account locks. 0 disables lockout.
+  - name: lockout_initial_minutes
+    type: text
+    default: "15"
+    label: Initial lockout duration (minutes)
+    description: Doubles on each subsequent lockout while the failure streak persists.
+  - name: email_verification_required
+    type: text
+    default: "true"
+    label: Require verified email to log in
+    description: When true, /login refuses unverified accounts. true | false.
+  - name: magic_link_enabled
+    type: text
+    default: "true"
+    label: Enable magic-link login
+    description: Allows /magic-link/request — passwordless login by emailed token. true | false.
+
+upgrade_policy: auto-patch

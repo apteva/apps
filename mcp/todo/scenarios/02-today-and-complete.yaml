@@ -1,0 +1,30 @@
+name: today-and-complete
+description: |
+  Agent lists today's todos, picks one, and completes it. Validates
+  todos_list returns shapes the agent can reason over and that
+  todos_complete flips status to done (or rolls a recurring item).
+
+timeout: 90s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  You're helping me triage my todos for today.
+
+    1. Call todos_list with view='today'.
+    2. Pick the highest-priority item (lowest priority number).
+    3. Call todos_complete with its id.
+    4. Stop.
+
+assert:
+  - tool_called: todos_list
+  - tool_called: todos_complete
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 10000
+  cost_usd: 0.15

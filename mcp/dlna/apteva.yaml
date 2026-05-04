@@ -1,0 +1,117 @@
+schema: apteva-app/v1
+
+name: dlna
+display_name: DLNA Server
+version: 0.1.0
+description: |
+  Publishes a UPnP/DLNA MediaServer on the LAN. Smart TVs, game
+  consoles, Sonos, VLC, and other AV clients discover this app via
+  SSDP and browse a virtual library backed by the `storage` app for
+  bytes + folder structure, and the `media` app for duration / codec
+  / resolution metadata.
+
+  This sidecar holds almost no state of its own — the only owned
+  tables are an allowlist of which storage folders to expose
+  (`published_folders`) and a rolling 24h client-access log
+  (`client_log`). Every Browse SOAP call is computed live from
+  storage queries.
+
+  No transcoding in v0.1: clients that can't decode the source codec
+  see the file in the listing but won't play it. Add ffmpeg + an
+  on-demand transcoder pipeline for v0.2 if needed.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/dlna
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/dlna/icon.png
+tags: [dlna, upnp, media, lan, tv, streaming]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - network.lan
+    - network.multicast
+  integrations: []
+  apps:
+    - name: storage
+      reason: "Folder listing, file metadata, signed byte URLs."
+      required: true
+    - name: media
+      reason: "Duration / codec / resolution enrichment for video & audio."
+      required: false
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: dlna_status,             description: "Status of the DLNA broadcaster: friendly_name, uuid, port, broadcasting flag, published-folder count, recent-client count." }
+    - { name: dlna_set_friendly_name,  description: "Rename the device. The new name shows on TV input pickers after the next SSDP NOTIFY (≤30s). Args: name." }
+    - { name: dlna_publish_folder,     description: "Add a storage folder to the published library. Args: folder (path in storage), label?." }
+    - { name: dlna_unpublish_folder,   description: "Stop exposing a storage folder. Args: folder." }
+    - { name: dlna_clients_recent,     description: "List clients that browsed in the last 24h: ip, user_agent, last_action_at, browse_count. Args: limit?." }
+  ui_panels:
+    - slot: project.page
+      label: DLNA
+      icon: tv
+      entry: /ui/DLNAPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/dlna
+  port: 8200
+  health_check: /health
+  # SSDP requires multicast on UDP/1900. The orchestrator must place
+  # this container with host networking (or at least with a multicast
+  # bridge) — see README "Open questions" before rolling out.
+  network_mode: host
+
+db:
+  driver: sqlite
+  path: /data/dlna.db
+  migrations: migrations/
+
+config_schema:
+  - name: friendly_name
+    type: text
+    default: ""
+    label: Friendly name
+    description: What clients see on input pickers. Empty → "Apteva ({hostname})".
+  - name: device_uuid
+    type: text
+    default: ""
+    label: Device UUID
+    description: Auto-generated on first start. Rotating this resets pairing on every TV that has bookmarked the server.
+  - name: lan_ip
+    type: text
+    default: ""
+    label: LAN IP override
+    description: Pin the device descriptor's URL host to this IP. Empty → auto-detect from the first non-loopback IPv4 interface.
+  - name: publish_root_by_default
+    type: select
+    options: ["true", "false"]
+    default: "false"
+    label: Publish all storage folders by default
+    description: If false (recommended), nothing is exposed until dlna_publish_folder adds a folder. If true, every storage folder is browseable — fine on a private LAN, dangerous everywhere else.
+  - name: media_metadata
+    type: select
+    options: ["true", "false"]
+    default: "true"
+    label: Enrich items with `media` metadata
+    description: Call into the media app for duration / codec / resolution. Disable on installs without media to skip the cross-app calls.
+  - name: client_log_retention_hours
+    type: text
+    default: "24"
+    label: Client log retention (hours)
+    description: How long to keep rows in client_log before pruning.
+  - name: signed_url_ttl_seconds
+    type: text
+    default: "60"
+    label: Signed URL TTL (seconds)
+    description: Lifetime of the storage-signed URLs returned in the 302 from /media/{id}. Short is fine; clients re-request whenever they reseek.
+
+upgrade_policy: auto-patch

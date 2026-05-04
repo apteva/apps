@@ -1,0 +1,33 @@
+name: register-client
+description: |
+  Agent registers a new OAuth client for a frontend. Verifies the
+  basic auth_clients_create flow works end-to-end with a real LLM
+  and that the client shows up in subsequent listings.
+
+timeout: 90s
+max_iterations: 6
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    config:
+      email_verification_required: "false"
+      app_url: "http://localhost:8080"
+
+directive: |
+  We're launching a new SaaS frontend at https://app.example.com.
+  Register an OAuth client for it: type "spa", name "example-saas",
+  redirect URI "https://app.example.com/callback". Then stop.
+
+assert:
+  - tool_called: auth_clients_create
+  - http: GET /api/apps/auth/admin/clients
+    expect_status: 200
+    expect_count_at: clients
+    expect_count: 1
+  - iterations_at_most: 6
+
+budget:
+  total_tokens: 10000
+  cost_usd: 0.15

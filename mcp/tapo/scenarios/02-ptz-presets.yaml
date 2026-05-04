@@ -1,0 +1,33 @@
+name: ptz-and-presets
+description: |
+  Agent uses PTZ controls to move a camera, saves two presets at
+  different positions, then recalls one of them. Skipped automatically
+  if the registered camera reports capabilities.ptz=false.
+
+timeout: 90s
+max_iterations: 8
+
+setup:
+  mode: cautious
+  app:
+    path: ./
+  requires:
+    capability: ptz
+
+directive: |
+  Using camera id=1 (the porch camera registered in scenario 01),
+  pan to the left for 500ms with ptz_move, save the resulting pose as
+  a preset called "left-watch" via ptz_preset_save. Then pan right
+  for 500ms, save another preset "right-watch". Finally call
+  ptz_preset_recall with preset_name="left-watch" to return to the
+  first preset. Stop after the recall.
+
+assert:
+  - tool_called: ptz_move
+  - tool_called: ptz_preset_save
+  - tool_called: ptz_preset_recall
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 12000
+  cost_usd: 0.20

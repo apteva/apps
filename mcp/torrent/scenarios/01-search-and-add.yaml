@@ -1,0 +1,38 @@
+name: search-and-add
+description: |
+  Agent searches for a public-domain test torrent (Big Buck Bunny —
+  the canonical test corpus in this space, available on archive.org
+  and most public indexers), picks the result with the most seeders,
+  and starts the download. Then polls torrent_get until progress is
+  visible, and stops.
+
+timeout: 180s
+max_iterations: 8
+
+setup:
+  mode: cautious
+  app:
+    path: ./
+  fixtures:
+    indexers:
+      - name: archive-org-test
+        kind: jackett
+        base_url: https://test-jackett.invalid/api/v2.0/indexers/all
+        api_key: test-key
+
+directive: |
+  Run torrent_search with query="big buck bunny" and min_seeders=1.
+  Pick the highest-seeded result and call torrent_add with its magnet
+  link. Poll torrent_get on the returned id once. Stop after that.
+
+assert:
+  - tool_called: torrent_search
+  - tool_called: torrent_add
+  - tool_called: torrent_get
+  - http: GET /api/apps/torrent/torrents
+    expect_status: 200
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 14000
+  cost_usd: 0.25

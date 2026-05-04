@@ -1,0 +1,82 @@
+schema: apteva-app/v1
+
+name: backup
+display_name: Backup
+version: 0.1.0
+description: |
+  Periodic backups of your Apteva instance — server DB plus every
+  installed app's data. Captured via the platform snapshot endpoint
+  (online, consistent, non-blocking) and shipped to a destination of
+  your choice: local disk for self-hosters, or any S3-compatible
+  bucket (AWS, Cloudflare R2, Backblaze B2, Wasabi, MinIO).
+
+  Schedules are driven by the jobs app so cron behaviour, retries,
+  and run history all live in one familiar place. Restores stream
+  back through /api/platform/restore — app DBs are swapped live;
+  the platform DB is staged and applied on the next server boot.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/backup
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/backup/icon.png
+tags: [backup, infrastructure, ops, snapshot, restore]
+
+scopes: [global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.apps.call
+  apps:
+    - name: jobs
+      version: ">=0.1.7"
+      reason: Cron scheduling for periodic backup runs.
+    - name: storage
+      optional: true
+      reason: Optional destination — store backups inside the storage app's blob store.
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: backup_now
+      description: Run a backup immediately against a chosen destination.
+    - name: backup_list
+      description: List past backup runs with size, destination, status.
+    - name: backup_restore
+      description: Restore a past backup. App DBs swap live; the platform DB is staged for the next server boot.
+  ui_panels:
+    - slot: project.page
+      label: Backup
+      icon: archive
+      entry: /ui/BackupPanel.mjs
+  workers: []
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/backup
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/backup.db
+  migrations: migrations/
+
+config_schema:
+  - name: keep_last_n
+    type: text
+    default: "14"
+    label: Default retention (last N runs)
+    description: How many runs to keep per destination. Older runs are pruned after each successful backup. 0 disables pruning.
+  - name: encryption_passphrase
+    type: text
+    default: ""
+    label: Encryption passphrase (optional)
+    description: When set, backups are age-encrypted before upload. Restore needs the same passphrase. Empty means plain tar.gz.
+
+upgrade_policy: auto-patch

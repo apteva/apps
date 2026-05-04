@@ -1,0 +1,68 @@
+schema: apteva-app/v1
+
+name: health
+display_name: Health
+version: 0.1.0
+description: |
+  Personal health log — weight, sleep, mood, heart rate, blood
+  pressure, workouts. One flexible time-series table for any numeric
+  metric ('kind' is open-ended); a separate list table for workouts.
+  Agent ingests natural-language one-liners ('weight 78.4',
+  'ran 5k 26min', 'slept 7h tossing') via health_log; the panel
+  charts pinned kinds and lists recent workouts. v0.2 adds device
+  sync (Apple Health, Oura, Garmin) — same tables, source='device'.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/health
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/health/icon.png
+tags: [health, fitness, personal, metrics, workouts]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+  integrations: []
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: health_log,        description: "Log a NL one-liner ('weight 78.4', 'ran 5k 26min', 'bp 122/78'). Routes to metrics or workouts." }
+    - { name: metrics_record,    description: "Structured metric insert. Args: kind, value, unit?, recorded_at?, notes?, source?." }
+    - { name: metrics_list,      description: "Window query for one kind. Args: kind, from?, to?, agg? (none|daily|weekly), limit?." }
+    - { name: metrics_kinds,     description: "List the metric kinds you've logged with most-recent value + count." }
+    - { name: metrics_summary,   description: "Per-kind avg/min/max/last/streak in a window. Args: window? (today|week|month|90d|all), kinds?." }
+    - { name: metrics_delete,    description: "Delete a single metric row. Args: id." }
+    - { name: workouts_log,      description: "Structured workout insert. Args: kind, started_at?, duration_min, distance_km?, avg_hr?, perceived?, notes?." }
+    - { name: workouts_list,     description: "Recent workouts. Args: from?, to?, limit?." }
+    - { name: workouts_delete,   description: "Delete a workout. Args: id." }
+    - { name: goals_set,         description: "Upsert a goal. Args: kind, op (gte|lte|eq), target, cadence (daily|weekly)." }
+    - { name: goals_list,        description: "List configured goals." }
+    - { name: goals_status,      description: "Per-goal pass/fail for the current period." }
+    - { name: goals_delete,      description: "Delete a goal. Args: id." }
+    - { name: pins_set,          description: "Pin kinds for the panel sidebar. Args: kinds (array of kind names)." }
+    - { name: pins_get,          description: "Read the current pinned-kinds list." }
+    - { name: health_summary,    description: "Free-text rollup over a window. Args: window (today|week|month). Returns a short markdown brief — used by the Sunday-night recap and the panel header." }
+  ui_panels:
+    - slot: project.page
+      label: Health
+      icon: heart
+      entry: /ui/HealthPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/health
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/health.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch

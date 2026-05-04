@@ -1,0 +1,34 @@
+name: log-and-list
+description: |
+  Agent receives a directive to log a few different metric kinds via
+  health_log (NL one-liners), then lists them back. Verifies the
+  parser routes weight, sleep, and BP to the right kinds and units.
+
+timeout: 90s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Log these readings on my behalf using health_log — one tool call
+  per line, exactly as written:
+
+    1. "weight 78.4"
+    2. "slept 7h30 light night"
+    3. "bp 122/78"
+
+  Then call metrics_kinds once and stop.
+
+assert:
+  - tool_called: health_log
+  - tool_called: metrics_kinds
+  - http: GET /api/apps/health/kinds
+    expect_status: 200
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 12000
+  cost_usd: 0.20

@@ -1,0 +1,38 @@
+name: publish-and-browse
+description: |
+  Agent publishes one storage folder, confirms the SSDP broadcaster
+  is up, and verifies the ContentDirectory tree is reachable. The
+  framework's SOAP smoke-checker hits Browse(ObjectID="0") to ensure
+  the published folder appears under "Folders".
+
+timeout: 60s
+max_iterations: 6
+
+setup:
+  mode: cautious
+  app:
+    path: ./
+  fixtures:
+    storage_folders:
+      - /movies/kids
+      - /family/2024-summer
+
+directive: |
+  Call dlna_status once to confirm broadcasting is on. Then call
+  dlna_publish_folder twice — first with folder="/movies/kids" and
+  label="Kids' movies", then with folder="/family/2024-summer" and
+  label="Summer 2024". Confirm with dlna_status that
+  published-folder count is now 2. Stop.
+
+assert:
+  - tool_called: dlna_status
+  - tool_called: dlna_publish_folder
+  - http: GET /api/apps/dlna/published_folders
+    expect_status: 200
+  - soap: Browse ObjectID="0/folders"
+    expect_contains: "Kids' movies"
+  - iterations_at_most: 6
+
+budget:
+  total_tokens: 10000
+  cost_usd: 0.18

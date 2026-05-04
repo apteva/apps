@@ -1,0 +1,53 @@
+name: audit-trail-investigation
+description: |
+  Read-only investigation. Agent looks at the audit log, identifies
+  a suspicious pattern (failed logins followed by a successful one),
+  and reports back. Verifies auth_audit_search + auth_users_get_context
+  without any state-changing tool calls.
+
+timeout: 90s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    config:
+      email_verification_required: "false"
+      app_url: "http://localhost:8080"
+      lockout_threshold: "20"  # disable lockout for the seed; we want failures, not locks
+  seed:
+    - mcp: auth_clients_create
+      args: { name: seed-client, type: spa, redirect_uris: ["http://localhost:3000/callback"] }
+      capture: client.client_id
+    - http:
+        method: POST
+        path: /api/apps/auth/signup
+        body:
+          email: "target@example.com"
+          password: "VerySafe!Pw#12345"
+          client_id: "{{ client.client_id }}"
+    # Five failed logins, then one successful — looks like a brute-force.
+    - http: { method: POST, path: /api/apps/auth/login, body: { email: "target@example.com", password: "wrong-1!", client_id: "{{ client.client_id }}" }, expect_status: 401 }
+    - http: { method: POST, path: /api/apps/auth/login, body: { email: "target@example.com", password: "wrong-2!", client_id: "{{ client.client_id }}" }, expect_status: 401 }
+    - http: { method: POST, path: /api/apps/auth/login, body: { email: "target@example.com", password: "wrong-3!", client_id: "{{ client.client_id }}" }, expect_status: 401 }
+    - http: { method: POST, path: /api/apps/auth/login, body: { email: "target@example.com", password: "wrong-4!", client_id: "{{ client.client_id }}" }, expect_status: 401 }
+    - http: { method: POST, path: /api/apps/auth/login, body: { email: "target@example.com", password: "wrong-5!", client_id: "{{ client.client_id }}" }, expect_status: 401 }
+    - http: { method: POST, path: /api/apps/auth/login, body: { email: "target@example.com", password: "VerySafe!Pw#12345", client_id: "{{ client.client_id }}" } }
+
+directive: |
+  Look at the audit log for target@example.com. I want to know:
+  did they have any failed login attempts in the last hour, and did
+  any login eventually succeed? Don't change anything — just report.
+  Then stop.
+
+assert:
+  - tool_called: auth_audit_search | auth_users_get_context
+  # No state-changing tools should fire — this is read-only.
+  - tool_not_called: auth_users_disable
+  - tool_not_called: auth_users_revoke_sessions
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 12000
+  cost_usd: 0.20

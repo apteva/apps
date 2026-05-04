@@ -1,0 +1,68 @@
+name: revoke-sessions
+description: |
+  Credential-leak incident response. Agent revokes all active
+  sessions for a specific user without disabling the account itself
+  (the user will keep the account, just needs to log in again with
+  a new password). Verifies auth_users_revoke_sessions in isolation.
+
+timeout: 60s
+max_iterations: 6
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    config:
+      email_verification_required: "false"
+      app_url: "http://localhost:8080"
+  seed:
+    - mcp: auth_clients_create
+      args: { name: seed-client, type: spa, redirect_uris: ["http://localhost:3000/callback"] }
+      capture: client.client_id
+    - http:
+        method: POST
+        path: /api/apps/auth/signup
+        body:
+          email: "leaked@example.com"
+          password: "VerySafe!Pw#12345"
+          client_id: "{{ client.client_id }}"
+    # Log in twice more to seed multiple sessions.
+    - http:
+        method: POST
+        path: /api/apps/auth/login
+        body:
+          email: "leaked@example.com"
+          password: "VerySafe!Pw#12345"
+          client_id: "{{ client.client_id }}"
+    - http:
+        method: POST
+        path: /api/apps/auth/login
+        body:
+          email: "leaked@example.com"
+          password: "VerySafe!Pw#12345"
+          client_id: "{{ client.client_id }}"
+
+directive: |
+  Security incident: leaked@example.com's password leaked in a
+  credential dump. Don't disable the account — they're a paying
+  customer — but kill every active session right now so attackers
+  can't use the leaked refresh tokens. They'll get a password reset
+  email separately. Then stop.
+
+assert:
+  - tool_called: auth_users_revoke_sessions
+  - mcp: auth_users_get
+    args: { email: "leaked@example.com" }
+    expect_at: user.status
+    expect: "active"   # account NOT disabled
+  - mcp: auth_users_get_context
+    args: { email: "leaked@example.com" }
+    # Every session should now have revoked_at set. The runner can
+    # check this by counting unrevoked sessions in the response.
+    expect_at: sessions
+    expect_all_have: revoked_at
+  - iterations_at_most: 6
+
+budget:
+  total_tokens: 10000
+  cost_usd: 0.18

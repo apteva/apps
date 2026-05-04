@@ -1,0 +1,119 @@
+schema: apteva-app/v1
+
+name: tapo
+display_name: Tapo Cameras
+version: 0.1.0
+description: |
+  Local-LAN control of TP-Link Tapo cameras. Pan/tilt/zoom, snapshots,
+  RTSP streams, motion events, privacy + LED + night-mode toggles,
+  presets. Talks the camera's HTTPS JSON-RPC protocol directly — no
+  cloud dependency, no Tapo account required (only a "Camera Account"
+  set in the Tapo mobile app).
+
+  v0.1 scope: legacy MD5+stok auth (firmware ≤1.3.x). KLAP handshake
+  for newer firmware is scaffolded but not wired — pin Tapo firmware
+  to a known-working version, or contribute the KLAP path.
+
+  Composition: snapshots can be pushed straight into the `storage`
+  app via `files_upload` so the agent can hand out signed URLs in
+  chat. Motion events are emitted on the platform event bus so other
+  apps (`todo`, messaging) can react.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/tapo
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/tapo/icon.png
+tags: [home, cameras, tapo, ptz, surveillance, local-lan]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - network.lan
+  integrations: []
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: cameras_add,            description: "Register a Tapo camera. Probes capabilities and verifies credentials. Args: name, ip, username, password, room?." }
+    - { name: cameras_list,           description: "List registered cameras with online status, model, room, and probed capabilities." }
+    - { name: cameras_get,            description: "Read one camera (metadata + capabilities). Args: id." }
+    - { name: cameras_test,           description: "Re-probe a camera to refresh online status, firmware, and capability flags. Args: id." }
+    - { name: cameras_rename,         description: "Rename a camera or change its room. Args: id, name?, room?." }
+    - { name: cameras_remove,         description: "Delete a camera registration. Args: id." }
+    - { name: snapshot_capture,       description: "Grab a still frame from the camera. Args: id, save_to_storage? (default false). When save_to_storage=true, returns the storage app file_id; otherwise base64 JPEG." }
+    - { name: stream_get_url,         description: "Mint a streaming URL the agent can hand out. Args: id, quality? (hd|sd, default hd), protocol? (rtsp|hls, default rtsp)." }
+    - { name: ptz_move,               description: "Pan/tilt the camera. Args: id, direction (up|down|left|right|stop) and duration_ms?, OR pan_degrees + tilt_degrees for absolute moves." }
+    - { name: ptz_calibrate,          description: "Recenter the camera (factory zero). Args: id." }
+    - { name: ptz_preset_save,        description: "Save the current pose as a named preset. Args: id, name." }
+    - { name: ptz_preset_recall,      description: "Move to a saved preset. Args: id, preset_id (numeric on-camera id) or preset_name." }
+    - { name: ptz_preset_list,        description: "List on-camera presets. Args: id." }
+    - { name: ptz_preset_delete,      description: "Delete an on-camera preset. Args: id, preset_id." }
+    - { name: privacy_set,            description: "Toggle the privacy lens cover (or software blackout on models without a physical cover). Args: id, enabled (bool)." }
+    - { name: led_set,                description: "Toggle the camera status LED. Args: id, enabled (bool)." }
+    - { name: night_mode_set,         description: "Set night vision mode. Args: id, mode (auto|on|off)." }
+    - { name: motion_detection_set,   description: "Toggle on-camera motion detection and tune sensitivity. Args: id, enabled (bool), sensitivity? (low|med|high)." }
+    - { name: motion_events_recent,   description: "Return cached motion events. Args: camera_id?, since? (RFC3339), limit? (default 100)." }
+    - { name: siren_trigger,          description: "Trigger the camera siren (where supported). Args: id, duration_seconds? (default 5)." }
+  ui_panels:
+    - slot: project.page
+      label: Cameras
+      icon: video
+      entry: /ui/CamerasPanel.mjs
+  ui_components:
+    # Inline live-snapshot tile the agent can attach to chat messages
+    # via respond(components=[{app:"tapo", name:"camera-tile", props:{camera_id:N}}]).
+    # Auto-refreshes every 5s, click opens the detail view.
+    - name: camera-tile
+      entry: /ui/CameraTile.mjs
+      slots:
+        - chat.message_attachment
+      props_schema:
+        type: object
+        required: [camera_id]
+        properties:
+          camera_id:
+            type: integer
+      preview_props:
+        preview: true
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/tapo
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/tapo.db
+  migrations: migrations/
+
+config_schema:
+  - name: default_snapshot_on_motion
+    type: select
+    options: ["true", "false"]
+    default: "true"
+    label: Auto-snapshot on motion
+    description: When a camera reports motion, automatically grab a still and push it to the storage app. The motion event row keeps the snapshot file_id so the panel can show it inline.
+  - name: motion_event_retention_days
+    type: text
+    default: "7"
+    label: Motion event retention (days)
+    description: How long the local motion_events cache keeps rows before pruning. The camera's own event log is unaffected.
+  - name: stream_url_default_ttl_seconds
+    type: text
+    default: "3600"
+    label: Stream URL TTL (seconds)
+    description: Default expiry for URLs returned by stream_get_url. Override per-call via the ttl_seconds arg.
+  - name: shared_secret
+    type: text
+    default: ""
+    label: Credential encryption secret
+    description: Optional 32-byte base64 secret used to AES-GCM encrypt camera passwords at rest. If empty, passwords are stored plaintext in the app's private DB — fine for trusted hosts; set this on shared infra.
+
+upgrade_policy: auto-patch

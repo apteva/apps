@@ -1,0 +1,156 @@
+schema: apteva-app/v1
+
+name: torrent
+display_name: Torrent
+version: 0.1.0
+description: |
+  BitTorrent client + indexer-search frontend. Search across
+  configured Jackett / Prowlarr / RSS sources, add downloads by
+  magnet or .torrent URL, and on completion the resulting files are
+  uploaded to the `storage` app and probed by `media`.
+
+  This is a generic BitTorrent client. The user supplies search
+  sources and is responsible for what they download. The app ships
+  with no indexers preconfigured.
+
+  v0.1 is library-side functional but not battle-tested at high
+  concurrency: large downloads should ride out, but expect to tune
+  max_concurrent_downloads if your storage app's upload pipe is
+  thinner than your bittorrent ingress.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/torrent
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/torrent/icon.png
+tags: [torrent, bittorrent, downloads, media, search, jackett]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - network.lan
+    - network.outbound
+  integrations: []
+  apps:
+    - name: storage
+      reason: "Final destination for completed downloads."
+      required: true
+    - name: media
+      reason: "Probe video/audio leaves on completion for duration / codec metadata."
+      required: false
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: torrent_search,            description: "Fan-out search across configured indexers; dedupe by infohash; rank by seeders. Args: query, category?, min_seeders?, sort?." }
+    - { name: torrent_search_save,       description: "Save a recurring search. Matching results auto-add to the queue if auto_add_top_n>0; otherwise just emit torrent.search_match. Args: name?, query, category?, min_seeders?, max_size_bytes?, exclude_terms?, auto_add_top_n?, run_interval_minutes?." }
+    - { name: torrent_search_save_list,  description: "List saved searches." }
+    - { name: torrent_search_save_delete,description: "Delete a saved search by id." }
+    - { name: torrent_add,               description: "Start a download. One of magnet | infohash | torrent_url required. target_folder is a storage path (default from config)." }
+    - { name: torrent_list,              description: "List downloads. state: downloading | seeding | paused | completed | error | all (default 'all')." }
+    - { name: torrent_get,               description: "Read one download by id including per-file progress + tracker / peer status." }
+    - { name: torrent_pause,             description: "Pause a download." }
+    - { name: torrent_resume,            description: "Resume a paused download." }
+    - { name: torrent_remove,            description: "Remove a download. delete_files=true also drops the storage rows uploaded on completion." }
+    - { name: torrent_set_priority,      description: "Set per-file priority on a multi-file torrent. priority: skip | low | normal | high. Args: id, file_index, priority." }
+    - { name: torrent_stats,             description: "Global stats: down/up rate, active count, free disk, working-dir bytes, queue depth." }
+    - { name: torrent_indexers_test,     description: "Health-check each configured indexer; return latency + last-error per source." }
+  ui_panels:
+    - slot: project.page
+      label: Torrent
+      icon: download
+      entry: /ui/TorrentPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/torrent
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/torrent.db
+  migrations: migrations/
+
+config_schema:
+  - name: working_dir
+    type: text
+    default: /data/torrents
+    label: Working directory
+    description: Engine scratch space. In-flight downloads live here until completion-mover uploads them to storage.
+  - name: keep_working_copy
+    type: select
+    options: ["true", "false"]
+    default: "false"
+    label: Keep working-dir copy after upload
+    description: When true, files stay on local disk after being uploaded to storage. Useful for fast re-seeding without round-tripping through storage. Defaults to false to keep disk pressure bounded.
+  - name: default_target_folder
+    type: text
+    default: /downloads
+    label: Default target folder in storage
+    description: Where torrent_add puts files when no target_folder is given. Folder layout is preserved one level deep.
+  - name: max_concurrent_downloads
+    type: text
+    default: "3"
+    label: Max concurrent downloads
+    description: Beyond this, new torrent_add calls queue. Ongoing seeds don't count.
+  - name: max_global_down_kibps
+    type: text
+    default: "0"
+    label: Global download rate limit (KiB/s)
+    description: 0 = unlimited.
+  - name: max_global_up_kibps
+    type: text
+    default: "0"
+    label: Global upload rate limit (KiB/s)
+  - name: seed_ratio_target
+    type: text
+    default: "1.0"
+    label: Seed ratio target
+    description: Stop seeding once this ratio is hit (or seed_time_target_minutes elapses). 0 = stop immediately on completion.
+  - name: seed_time_target_minutes
+    type: text
+    default: "60"
+    label: Seed time target (minutes)
+  - name: dht_enabled
+    type: select
+    options: ["true", "false"]
+    default: "true"
+    label: Enable DHT
+    description: Distributed hash table peer discovery.
+  - name: peer_encryption_required
+    type: select
+    options: ["true", "false"]
+    default: "true"
+    label: Require peer encryption
+  - name: listen_port
+    type: text
+    default: "6881"
+    label: Listen port
+    description: Inbound peer port. Forward this on the LAN router for healthier swarm participation.
+  - name: bind_interface
+    type: text
+    default: ""
+    label: Bind interface
+    description: Pin outbound traffic to this network interface (e.g. tun0 for a system VPN). Empty = OS default.
+  - name: shared_secret
+    type: text
+    default: ""
+    label: Indexer credential encryption secret
+    description: 32-byte base64 secret used to AES-GCM encrypt indexer API keys. Empty = plaintext (fine on a single-tenant trusted host).
+  - name: indexer_query_timeout_seconds
+    type: text
+    default: "8"
+    label: Per-indexer query timeout (seconds)
+  - name: free_disk_safety_pct
+    type: text
+    default: "20"
+    label: Free disk safety margin (%)
+    description: Refuse to start a torrent that would consume more than (1 − this/100) of working_dir's free space.
+
+upgrade_policy: auto-patch

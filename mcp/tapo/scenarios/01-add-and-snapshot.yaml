@@ -1,0 +1,40 @@
+name: add-and-snapshot
+description: |
+  Agent registers a Tapo camera using the credentials stored in the
+  scenario fixture, then captures a snapshot and pushes it to the
+  storage app. Verifies the cross-app handoff works end-to-end and
+  that capabilities were probed during cameras_add.
+
+timeout: 120s
+max_iterations: 6
+
+setup:
+  mode: cautious
+  app:
+    path: ./
+  fixtures:
+    cameras:
+      - name: porch
+        ip: 192.168.86.42
+        username: apteva
+        password: test-password
+        room: outside
+
+directive: |
+  Register the porch camera using cameras_add (name="porch", room="outside",
+  ip from the fixture, username/password from the fixture). Then call
+  cameras_get to confirm capabilities were detected, then call
+  snapshot_capture with save_to_storage=true and report the resulting
+  file_id. Stop after that.
+
+assert:
+  - tool_called: cameras_add
+  - tool_called: cameras_get
+  - tool_called: snapshot_capture
+  - http: GET /api/apps/tapo/cameras
+    expect_status: 200
+  - iterations_at_most: 6
+
+budget:
+  total_tokens: 14000
+  cost_usd: 0.25

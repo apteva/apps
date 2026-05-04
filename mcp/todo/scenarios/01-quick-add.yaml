@@ -1,0 +1,35 @@
+name: quick-add
+description: |
+  Agent receives a directive to capture three NL todos into the
+  personal list using todos_quick_add. Verifies the parser picks up
+  priorities, due hints, projects and tags from a single line.
+
+timeout: 90s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Add these three todos to my personal list using todos_quick_add —
+  one tool call per line, exactly as written:
+
+    1. "Call the plumber tomorrow p1 #home"
+    2. "Reply to Anna p2 today @reply"
+    3. "Plan Q3 review next monday p3 #work"
+
+  After all three are added, call todos_list with view='today' once
+  and stop.
+
+assert:
+  - tool_called: todos_quick_add
+  - tool_called: todos_list
+  - http: GET /api/apps/todo/todos?view=today
+    expect_status: 200
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 12000
+  cost_usd: 0.20

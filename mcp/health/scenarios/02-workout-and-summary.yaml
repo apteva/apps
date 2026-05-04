@@ -1,0 +1,29 @@
+name: workout-and-summary
+description: |
+  Agent logs a workout, then produces a weekly summary. Validates
+  the run/distance/duration parser and that health_summary returns
+  a usable markdown brief for thread posting.
+
+timeout: 90s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Help me close out the week.
+
+    1. Log my workout with health_log: "ran 5k 26min easy pace".
+    2. Call health_summary with window='week'.
+    3. Reply with the summary's `markdown` field, then stop.
+
+assert:
+  - tool_called: health_log
+  - tool_called: health_summary
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 10000
+  cost_usd: 0.15

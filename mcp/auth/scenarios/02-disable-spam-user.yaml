@@ -1,0 +1,60 @@
+name: disable-spam-user
+description: |
+  Agent receives a free-text complaint, looks up the offending user
+  by email, and disables them. Verifies search + disable flow with a
+  real LLM. Setup pre-seeds two users so search has to actually
+  filter, not just return everything.
+
+timeout: 90s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    config:
+      email_verification_required: "false"
+      app_url: "http://localhost:8080"
+  # Two users, one client. Agent must pick the right one.
+  seed:
+    - mcp: auth_clients_create
+      args:
+        name: seed-client
+        type: spa
+        redirect_uris: ["http://localhost:3000/callback"]
+      capture: client.client_id
+    - http:
+        method: POST
+        path: /api/apps/auth/signup
+        body:
+          email: "alice@example.com"
+          password: "VerySafe!Pw#12345"
+          client_id: "{{ client.client_id }}"
+    - http:
+        method: POST
+        path: /api/apps/auth/signup
+        body:
+          email: "spammer@example.com"
+          password: "VerySafe!Pw#12345"
+          client_id: "{{ client.client_id }}"
+
+directive: |
+  We've had abuse reports against the user spammer@example.com — they
+  posted spam in three threads this morning. Disable the account so
+  they can't sign in, and revoke any active sessions. Then stop.
+
+assert:
+  - tool_called: auth_users_disable
+  - mcp: auth_users_get
+    args: { email: "spammer@example.com" }
+    expect_at: user.status
+    expect: "disabled"
+  - mcp: auth_users_get
+    args: { email: "alice@example.com" }
+    expect_at: user.status
+    expect: "active"   # untouched
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 14000
+  cost_usd: 0.25
