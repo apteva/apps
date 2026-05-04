@@ -133,11 +133,17 @@ function DownloadsTab() {
     return () => clearInterval(t);
   }, [refresh]);
 
-  const active = rows.filter((r) => r.snapshot.state === "downloading");
-  const seeding = rows.filter((r) => r.snapshot.state === "seeding");
-  const paused = rows.filter((r) => r.snapshot.state === "paused");
+  // Engine states (engine.go:489): downloading | seeding | paused |
+  // completed | error | queued. The "queued" state covers magnets that
+  // haven't fetched .torrent metadata yet — they MUST appear somewhere
+  // or freshly-added torrents look like the click did nothing.
+  const KNOWN_STATES = new Set(["downloading", "seeding", "paused", "completed", "error", "queued"]);
+  const active    = rows.filter((r) => r.snapshot.state === "downloading");
+  const seeding   = rows.filter((r) => r.snapshot.state === "seeding");
+  const paused    = rows.filter((r) => r.snapshot.state === "paused");
   const completed = rows.filter((r) => r.snapshot.state === "completed");
-  const errored = rows.filter((r) => r.snapshot.state === "error");
+  const errored   = rows.filter((r) => r.snapshot.state === "error");
+  const queued    = rows.filter((r) => r.snapshot.state === "queued" || !KNOWN_STATES.has(r.snapshot.state));
 
   return (
     <div>
@@ -160,8 +166,13 @@ function DownloadsTab() {
 
       {error && <div className="px-4 py-2 text-error text-sm">{error}</div>}
 
+      {queued.length > 0 && (
+        <Section title={`Fetching metadata (${queued.length})`}>
+          {queued.map((r) => <DownloadRow key={r.id} row={r} onChanged={refresh} />)}
+        </Section>
+      )}
       <Section title={`Active (${active.length})`}>
-        {active.length === 0 ? <Empty hint="No active downloads." /> : active.map((r) => <DownloadRow key={r.id} row={r} onChanged={refresh} />)}
+        {active.length === 0 && queued.length === 0 ? <Empty hint="No active downloads." /> : active.map((r) => <DownloadRow key={r.id} row={r} onChanged={refresh} />)}
       </Section>
       <Section title={`Seeding (${seeding.length})`} dim>
         {seeding.map((r) => <DownloadRow key={r.id} row={r} onChanged={refresh} />)}
