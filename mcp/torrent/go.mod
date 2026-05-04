@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/anacrolix/torrent v1.58.0
-	github.com/apteva/app-sdk v0.1.3
+	github.com/apteva/app-sdk v0.1.4
 	modernc.org/sqlite v1.50.0
 )
 
