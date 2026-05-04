@@ -16,6 +16,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -33,7 +34,7 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.2.0
+version: 0.3.0
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code.
@@ -51,6 +52,7 @@ provides:
     - { name: repos_get,              description: "Repository metadata + tree summary." }
     - { name: repos_archive,          description: "Archive (or hard-delete) a repository." }
     - { name: repos_set_deploy_hints, description: "Set build_cmd / start_cmd / port / env_json." }
+    - { name: repos_export,           description: "Export a repo as a zip; returns base64 bytes for cross-app calls." }
     - { name: code_list_files,        description: "List files in a repository." }
     - { name: code_glob,              description: "Find files by glob pattern." }
     - { name: code_grep,              description: "Search file contents with regex or literal text." }
@@ -180,12 +182,19 @@ func (a *App) HTTPRoutes() []sdk.Route {
 // ─── Zip export helper used by both REST and (future) deploy app ───
 
 func writeZip(w http.ResponseWriter, store FileStore, slug string) error {
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", slug+".zip"))
+	return zipRepo(w, store, slug)
+}
+
+// zipRepo streams a repo zip into any io.Writer. Used by the HTTP
+// export handler (writes to the response) and by the repos_export MCP
+// tool (writes to a bytes.Buffer for base64 envelope).
+func zipRepo(w io.Writer, store FileStore, slug string) error {
 	files, err := store.List(slug, "", true)
 	if err != nil {
 		return err
 	}
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", slug+".zip"))
 	zw := zip.NewWriter(w)
 	defer zw.Close()
 	for _, f := range files {

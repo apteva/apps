@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.1.2
+version: 0.3.0
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -37,6 +37,8 @@ provides:
       description: Archive a repository (files retained on disk).
     - name: repos_set_deploy_hints
       description: Set build_cmd / start_cmd / port / env_json on a repository.
+    - name: repos_export
+      description: Export a repo as a zip archive — base64-encoded bytes for cross-app calls (used by deploy).
     - name: code_list_files
       description: List files in a repository, optionally recursive.
     - name: code_glob

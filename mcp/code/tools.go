@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,6 +64,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"env_json":  map[string]any{"type": "string"},
 			}, []string{"slug"}),
 			Handler: a.toolReposSetDeployHints,
+		},
+		{
+			Name: "repos_export",
+			Description: "Export a repo as a zip archive. Returns {slug, sha256, size, zip_b64} where zip_b64 is the " +
+				"base64-encoded zip bytes — used by the deploy app over PlatformAPI.CallApp.",
+			InputSchema: schemaObject(map[string]any{
+				"slug": map[string]any{"type": "string"},
+			}, []string{"slug"}),
+			Handler: a.toolReposExport,
 		},
 		{
 			Name:        "code_list_files",
@@ -531,6 +544,31 @@ func (a *App) toolReposSetDeployHints(ctx *sdk.AppCtx, args map[string]any) (any
 		return nil, err
 	}
 	return map[string]any{"repository": r}, nil
+}
+
+func (a *App) toolReposExport(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	slug := strArg(args, "slug")
+	if slug == "" {
+		return nil, errors.New("slug required")
+	}
+	if _, err := requireRepoSlug(ctx, pid, slug); err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	if err := zipRepo(&buf, a.store, slug); err != nil {
+		return nil, fmt.Errorf("zip repo: %w", err)
+	}
+	sum := sha256.Sum256(buf.Bytes())
+	return map[string]any{
+		"slug":    slug,
+		"size":    buf.Len(),
+		"sha256":  hex.EncodeToString(sum[:]),
+		"zip_b64": base64.StdEncoding.EncodeToString(buf.Bytes()),
+	}, nil
 }
 
 // ─── code_* file handlers ──────────────────────────────────────────
