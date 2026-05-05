@@ -34,8 +34,8 @@ requires:
     - platform.connections.execute
   apps:
     - name: storage
-      version: ">=0.1.0"
-      reason: reads source bytes; writes thumbnails, waveforms, and render outputs back to storage
+      version: ">=0.8.1"
+      reason: reads source bytes, writes thumbnails/waveforms/render outputs, and batch-resolves URLs via GET /files?ids= for response enrichment (added in storage v0.8.1)
     - name: jobs
       version: ">=0.1.0"
       optional: true
