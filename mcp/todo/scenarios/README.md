@@ -5,7 +5,7 @@ LLM via the standard scenario harness (same one calendar/tasks use).
 
 | File | What it exercises |
 |------|-------------------|
-| `01-quick-add.yaml`         | NL parser via `todos_quick_add` (priority, due hints, project, tag) |
+| `01-quick-add.yaml`         | NL parser via `todos_quick_add` (priority, due hints, list, tag) |
 | `02-today-and-complete.yaml`| Triage loop: `todos_list` → pick by priority → `todos_complete` |
 
 Run a single scenario:

@@ -5,10 +5,20 @@
 // human-first: the human types into the panel, the agent helps via
 // MCP tools (quick-add, list, snooze, complete).
 //
-// Recurrence in v0.1 supports FREQ=DAILY|WEEKLY|MONTHLY with an
+// Organisation:
+//   * project_id (column on every table) is the apteva project scope;
+//     it never changes for a given install and is set from
+//     APTEVA_PROJECT_ID at runtime.
+//   * lists are the user-facing buckets ("Home", "Work"…). One todo
+//     belongs to at most one list (list_id, nullable → inbox).
+//   * tags are an orthogonal many-to-many concept for cross-cutting
+//     context (#errand, #waiting…); use them when categorisation
+//     spans lists.
+//
+// Recurrence in v0.2 supports FREQ=DAILY|WEEKLY|MONTHLY with an
 // optional INTERVAL=. On complete of a recurring todo we don't mark
 // done — we roll due_at forward and leave status=open. Anything more
-// elaborate (BYDAY, COUNT, UNTIL) is a v0.2 problem.
+// elaborate (BYDAY, COUNT, UNTIL) is a v0.3 problem.
 package main
 
 import (
@@ -30,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: todo
 display_name: Todo
-version: 0.1.0
+version: 0.2.0
 description: Personal todo list — human-first, agent-helpful.
 author: Apteva
 scopes: [project, global]
@@ -43,17 +53,17 @@ provides:
   mcp_tools:
     - { name: todos_quick_add,  description: "Create a todo from one NL line." }
     - { name: todos_create,     description: "Create a todo with structured fields." }
-    - { name: todos_list,       description: "List todos with view/project/tag filters." }
+    - { name: todos_list,       description: "List todos with view/list/tag filters." }
     - { name: todos_get,        description: "Read one todo." }
     - { name: todos_update,     description: "Update a todo." }
     - { name: todos_complete,   description: "Complete (or roll-forward, if recurring)." }
     - { name: todos_uncomplete, description: "Re-open a completed todo." }
     - { name: todos_snooze,     description: "Push due_at out." }
     - { name: todos_delete,     description: "Delete a todo." }
-    - { name: projects_list,    description: "List projects." }
-    - { name: projects_create,  description: "Create a project." }
-    - { name: projects_update,  description: "Update a project." }
-    - { name: projects_delete,  description: "Delete a project (todos move to inbox)." }
+    - { name: lists_list,       description: "List the user-facing buckets." }
+    - { name: lists_create,     description: "Create a list." }
+    - { name: lists_update,     description: "Update a list." }
+    - { name: lists_delete,     description: "Delete a list (todos move to inbox)." }
     - { name: tags_list,        description: "List tags with usage counts." }
   ui_panels:
     - slot: project.page
@@ -105,8 +115,8 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
-		{Pattern: "/projects", Handler: a.handleProjects},
-		{Pattern: "/projects/", Handler: a.handleProjectsItem},
+		{Pattern: "/lists", Handler: a.handleLists},
+		{Pattern: "/lists/", Handler: a.handleListsItem},
 		{Pattern: "/todos", Handler: a.handleTodos},
 		{Pattern: "/todos/", Handler: a.handleTodosItem},
 		{Pattern: "/quick_add", Handler: a.handleQuickAdd},
@@ -119,32 +129,32 @@ func (a *App) HTTPRoutes() []sdk.Route {
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{Name: "todos_quick_add",
-			Description: "Create a todo from one natural-language line. Hints recognised inline: priority via 'p1'..'p4', due via 'today'/'tomorrow'/'mon'..'sun'/'next week', project via '#name' (created if missing), tags via '@name'. Args: text (required), source? (human|agent, default 'agent').",
+			Description: "Create a todo from one natural-language line. Hints recognised inline: priority via 'p1'..'p4', due via 'today'/'tomorrow'/'mon'..'sun'/'next week', list via '#name' (created if missing), tags via '@name'. Args: text (required), source? (human|agent, default 'agent').",
 			InputSchema: schemaObject(map[string]any{
 				"text":   map[string]any{"type": "string"},
 				"source": map[string]any{"type": "string", "enum": []string{"human", "agent"}},
 			}, []string{"text"}),
 			Handler: a.toolQuickAdd},
 		{Name: "todos_create",
-			Description: "Create a todo with structured fields. Args: title (required), notes?, project_id? (numeric), priority? (1-4, 4=lowest default), due_at? (RFC3339 or YYYY-MM-DD), rrule? (e.g. 'FREQ=DAILY' or 'FREQ=WEEKLY;INTERVAL=2'), tags? (array of names), source?.",
+			Description: "Create a todo with structured fields. Args: title (required), notes?, list_id? (numeric), priority? (1-4, 4=lowest default), due_at? (RFC3339 or YYYY-MM-DD), rrule? (e.g. 'FREQ=DAILY' or 'FREQ=WEEKLY;INTERVAL=2'), tags? (array of names), source?.",
 			InputSchema: schemaObject(map[string]any{
-				"title":      map[string]any{"type": "string"},
-				"notes":      map[string]any{"type": "string"},
-				"project_id": map[string]any{"type": "integer"},
-				"priority":   map[string]any{"type": "integer"},
-				"due_at":     map[string]any{"type": "string"},
-				"rrule":      map[string]any{"type": "string"},
-				"tags":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"source":     map[string]any{"type": "string"},
+				"title":    map[string]any{"type": "string"},
+				"notes":    map[string]any{"type": "string"},
+				"list_id":  map[string]any{"type": "integer"},
+				"priority": map[string]any{"type": "integer"},
+				"due_at":   map[string]any{"type": "string"},
+				"rrule":    map[string]any{"type": "string"},
+				"tags":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"source":   map[string]any{"type": "string"},
 			}, []string{"title"}),
 			Handler: a.toolTodosCreate},
 		{Name: "todos_list",
-			Description: "List todos. Args: view? (inbox|today|upcoming|overdue|all|done; default 'today'), project_id? (numeric), tag? (name), limit? (default 200).",
+			Description: "List todos. Args: view? (inbox|today|upcoming|overdue|all|done; default 'today'), list_id? (numeric), tag? (name), limit? (default 200).",
 			InputSchema: schemaObject(map[string]any{
-				"view":       map[string]any{"type": "string"},
-				"project_id": map[string]any{"type": "integer"},
-				"tag":        map[string]any{"type": "string"},
-				"limit":      map[string]any{"type": "integer"},
+				"view":    map[string]any{"type": "string"},
+				"list_id": map[string]any{"type": "integer"},
+				"tag":     map[string]any{"type": "string"},
+				"limit":   map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolTodosList},
 		{Name: "todos_get",
@@ -152,16 +162,16 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			Handler:     a.toolTodosGet},
 		{Name: "todos_update",
-			Description: "Update a todo. Pass any subset of: title, notes, priority, due_at, project_id, rrule, tags. To clear due_at pass empty string. tags replaces the full set.",
+			Description: "Update a todo. Pass any subset of: title, notes, priority, due_at, list_id, rrule, tags. To clear due_at pass empty string. tags replaces the full set.",
 			InputSchema: schemaObject(map[string]any{
-				"id":         map[string]any{"type": "integer"},
-				"title":      map[string]any{"type": "string"},
-				"notes":      map[string]any{"type": "string"},
-				"priority":   map[string]any{"type": "integer"},
-				"due_at":     map[string]any{"type": "string"},
-				"project_id": map[string]any{"type": "integer"},
-				"rrule":      map[string]any{"type": "string"},
-				"tags":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"id":       map[string]any{"type": "integer"},
+				"title":    map[string]any{"type": "string"},
+				"notes":    map[string]any{"type": "string"},
+				"priority": map[string]any{"type": "integer"},
+				"due_at":   map[string]any{"type": "string"},
+				"list_id":  map[string]any{"type": "integer"},
+				"rrule":    map[string]any{"type": "string"},
+				"tags":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			}, []string{"id"}),
 			Handler: a.toolTodosUpdate},
 		{Name: "todos_complete",
@@ -184,30 +194,30 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Delete a todo permanently.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			Handler:     a.toolTodosDelete},
-		{Name: "projects_list",
-			Description: "List projects in this scope (archived included; filter client-side).",
+		{Name: "lists_list",
+			Description: "List the user-facing buckets in this scope (archived included; filter client-side).",
 			InputSchema: schemaObject(map[string]any{}, nil),
-			Handler:     a.toolProjectsList},
-		{Name: "projects_create",
-			Description: "Create a project. Args: name (required), color? (#hex).",
+			Handler:     a.toolListsList},
+		{Name: "lists_create",
+			Description: "Create a list. Args: name (required), color? (#hex).",
 			InputSchema: schemaObject(map[string]any{
 				"name":  map[string]any{"type": "string"},
 				"color": map[string]any{"type": "string"},
 			}, []string{"name"}),
-			Handler: a.toolProjectsCreate},
-		{Name: "projects_update",
-			Description: "Update a project. Args: id (required), name?, color?, archived?.",
+			Handler: a.toolListsCreate},
+		{Name: "lists_update",
+			Description: "Update a list. Args: id (required), name?, color?, archived?.",
 			InputSchema: schemaObject(map[string]any{
 				"id":       map[string]any{"type": "integer"},
 				"name":     map[string]any{"type": "string"},
 				"color":    map[string]any{"type": "string"},
 				"archived": map[string]any{"type": "boolean"},
 			}, []string{"id"}),
-			Handler: a.toolProjectsUpdate},
-		{Name: "projects_delete",
-			Description: "Delete a project. Existing todos drop project_ref to NULL (move to inbox). Args: id.",
+			Handler: a.toolListsUpdate},
+		{Name: "lists_delete",
+			Description: "Delete a list. Existing todos drop list_id to NULL (move to inbox). Args: id.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
-			Handler:     a.toolProjectsDelete},
+			Handler:     a.toolListsDelete},
 		{Name: "tags_list",
 			Description: "List tags in this scope with usage counts.",
 			InputSchema: schemaObject(map[string]any{}, nil),
@@ -217,20 +227,20 @@ func (a *App) MCPTools() []sdk.Tool {
 
 // ─── Models ──────────────────────────────────────────────────────
 
-type Project struct {
-	ID         int64  `json:"id"`
-	ProjectID  string `json:"project_id"`
-	Name       string `json:"name"`
-	Color      string `json:"color"`
-	Archived   bool   `json:"archived"`
-	SortOrder  int64  `json:"sort_order"`
-	CreatedAt  string `json:"created_at"`
+type List struct {
+	ID        int64  `json:"id"`
+	ProjectID string `json:"project_id"`
+	Name      string `json:"name"`
+	Color     string `json:"color"`
+	Archived  bool   `json:"archived"`
+	SortOrder int64  `json:"sort_order"`
+	CreatedAt string `json:"created_at"`
 }
 
 type Todo struct {
 	ID           int64    `json:"id"`
 	ProjectID    string   `json:"project_id"`
-	ProjectRef   *int64   `json:"project_ref"`
+	ListID       *int64   `json:"list_id"`
 	Title        string   `json:"title"`
 	Notes        string   `json:"notes"`
 	Priority     int      `json:"priority"`
@@ -254,71 +264,71 @@ func projectScope() string {
 	return "default"
 }
 
-func listProjects(db *sql.DB, pid string) ([]Project, error) {
+func listLists(db *sql.DB, pid string) ([]List, error) {
 	rows, err := db.Query(
 		`SELECT id, project_id, name, color, archived, sort_order, created_at
-		   FROM projects WHERE project_id = ? ORDER BY sort_order, id`, pid)
+		   FROM lists WHERE project_id = ? ORDER BY sort_order, id`, pid)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []Project{}
+	out := []List{}
 	for rows.Next() {
-		var p Project
+		var l List
 		var arch int
-		if err := rows.Scan(&p.ID, &p.ProjectID, &p.Name, &p.Color, &arch, &p.SortOrder, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&l.ID, &l.ProjectID, &l.Name, &l.Color, &arch, &l.SortOrder, &l.CreatedAt); err != nil {
 			return nil, err
 		}
-		p.Archived = arch == 1
-		out = append(out, p)
+		l.Archived = arch == 1
+		out = append(out, l)
 	}
 	return out, nil
 }
 
-func getProject(db *sql.DB, pid string, id int64) (*Project, error) {
-	var p Project
+func getList(db *sql.DB, pid string, id int64) (*List, error) {
+	var l List
 	var arch int
 	err := db.QueryRow(
 		`SELECT id, project_id, name, color, archived, sort_order, created_at
-		   FROM projects WHERE id = ? AND project_id = ?`, id, pid,
-	).Scan(&p.ID, &p.ProjectID, &p.Name, &p.Color, &arch, &p.SortOrder, &p.CreatedAt)
+		   FROM lists WHERE id = ? AND project_id = ?`, id, pid,
+	).Scan(&l.ID, &l.ProjectID, &l.Name, &l.Color, &arch, &l.SortOrder, &l.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
-	p.Archived = arch == 1
-	return &p, nil
+	l.Archived = arch == 1
+	return &l, nil
 }
 
-func findProjectByName(db *sql.DB, pid, name string) (*Project, error) {
-	var p Project
+func findListByName(db *sql.DB, pid, name string) (*List, error) {
+	var l List
 	var arch int
 	err := db.QueryRow(
 		`SELECT id, project_id, name, color, archived, sort_order, created_at
-		   FROM projects WHERE project_id = ? AND lower(name) = lower(?) LIMIT 1`,
+		   FROM lists WHERE project_id = ? AND lower(name) = lower(?) LIMIT 1`,
 		pid, name,
-	).Scan(&p.ID, &p.ProjectID, &p.Name, &p.Color, &arch, &p.SortOrder, &p.CreatedAt)
+	).Scan(&l.ID, &l.ProjectID, &l.Name, &l.Color, &arch, &l.SortOrder, &l.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	p.Archived = arch == 1
-	return &p, nil
+	l.Archived = arch == 1
+	return &l, nil
 }
 
-func insertProject(db *sql.DB, pid, name, color string) (*Project, error) {
+func insertList(db *sql.DB, pid, name, color string) (*List, error) {
 	if color == "" {
 		color = "#3b82f6"
 	}
 	res, err := db.Exec(
-		`INSERT INTO projects (project_id, name, color) VALUES (?, ?, ?)`,
+		`INSERT INTO lists (project_id, name, color) VALUES (?, ?, ?)`,
 		pid, name, color)
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	return getProject(db, pid, id)
+	return getList(db, pid, id)
 }
 
 func upsertTag(db *sql.DB, pid, name string) (int64, error) {
@@ -394,7 +404,7 @@ func scanTodo(db *sql.DB, row *sql.Row) (*Todo, error) {
 	}
 	if ref.Valid {
 		v := ref.Int64
-		t.ProjectRef = &v
+		t.ListID = &v
 	}
 	t.DueAt = due.String
 	t.SnoozedUntil = snz.String
@@ -407,7 +417,7 @@ func scanTodo(db *sql.DB, row *sql.Row) (*Todo, error) {
 	return &t, nil
 }
 
-const todoCols = `id, project_id, project_ref, title, notes, priority,
+const todoCols = `id, project_id, list_id, title, notes, priority,
 	due_at, snoozed_until, rrule, status, completed_at, source,
 	created_at, updated_at`
 
@@ -427,10 +437,10 @@ func insertTodo(db *sql.DB, pid string, t *Todo) (*Todo, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := db.Exec(
 		`INSERT INTO todos
-		  (project_id, project_ref, title, notes, priority, due_at,
+		  (project_id, list_id, title, notes, priority, due_at,
 		   rrule, source, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, nullInt(t.ProjectRef), t.Title, t.Notes, t.Priority,
+		pid, nullInt(t.ListID), t.Title, t.Notes, t.Priority,
 		nullStr(t.DueAt), t.RRule, t.Source, now, now,
 	)
 	if err != nil {
@@ -447,7 +457,7 @@ func insertTodo(db *sql.DB, pid string, t *Todo) (*Todo, error) {
 
 // listTodos resolves a view shorthand into a SQL query. Snoozed
 // todos hide from today/upcoming/overdue until snoozed_until passes.
-func listTodos(db *sql.DB, pid, view string, projectRef *int64, tag string, limit int) ([]Todo, error) {
+func listTodos(db *sql.DB, pid, view string, listID *int64, tag string, limit int) ([]Todo, error) {
 	if limit <= 0 {
 		limit = 200
 	}
@@ -464,7 +474,7 @@ func listTodos(db *sql.DB, pid, view string, projectRef *int64, tag string, limi
 
 	switch view {
 	case "inbox":
-		q += ` AND status = 'open' AND project_ref IS NULL AND (due_at IS NULL OR due_at = '')`
+		q += ` AND status = 'open' AND list_id IS NULL AND (due_at IS NULL OR due_at = '')`
 	case "today":
 		q += ` AND status = 'open'
 		   AND (snoozed_until IS NULL OR snoozed_until = '' OR snoozed_until <= ?)
@@ -488,9 +498,9 @@ func listTodos(db *sql.DB, pid, view string, projectRef *int64, tag string, limi
 		return nil, fmt.Errorf("unknown view: %s", view)
 	}
 
-	if projectRef != nil {
-		q += ` AND project_ref = ?`
-		args = append(args, *projectRef)
+	if listID != nil {
+		q += ` AND list_id = ?`
+		args = append(args, *listID)
 	}
 	if tag != "" {
 		q += ` AND id IN (SELECT tt.todo_id FROM todo_tags tt
@@ -527,7 +537,7 @@ func listTodos(db *sql.DB, pid, view string, projectRef *int64, tag string, limi
 		}
 		if ref.Valid {
 			v := ref.Int64
-			t.ProjectRef = &v
+			t.ListID = &v
 		}
 		t.DueAt, t.SnoozedUntil, t.CompletedAt = due.String, snz.String, comp.String
 		out = append(out, t)
@@ -573,15 +583,15 @@ func updateTodoFields(db *sql.DB, pid string, id int64, fields map[string]any) e
 	if v, ok := fields["rrule"]; ok {
 		push("rrule", fmt.Sprint(v))
 	}
-	if v, ok := fields["project_id"]; ok {
+	if v, ok := fields["list_id"]; ok {
 		ref := toInt64(v)
 		if ref == 0 {
-			push("project_ref", nil)
+			push("list_id", nil)
 		} else {
-			if _, err := getProject(db, pid, ref); err != nil {
-				return fmt.Errorf("project %d not found in scope", ref)
+			if _, err := getList(db, pid, ref); err != nil {
+				return fmt.Errorf("list %d not found in scope", ref)
 			}
-			push("project_ref", ref)
+			push("list_id", ref)
 		}
 	}
 	if v, ok := fields["snoozed_until"]; ok {
@@ -669,16 +679,16 @@ func rollRecurring(rrule, currentDue string) string {
 
 // ─── HTTP handlers ───────────────────────────────────────────────
 
-func (a *App) handleProjects(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleLists(w http.ResponseWriter, r *http.Request) {
 	ctx := mustCtx(r)
 	switch r.Method {
 	case http.MethodGet:
-		list, err := listProjects(ctx.AppDB(), projectScope())
+		out, err := listLists(ctx.AppDB(), projectScope())
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		writeJSON(w, list)
+		writeJSON(w, out)
 	case http.MethodPost:
 		var body struct{ Name, Color string }
 		json.NewDecoder(r.Body).Decode(&body)
@@ -686,20 +696,20 @@ func (a *App) handleProjects(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "name required", 400)
 			return
 		}
-		p, err := insertProject(ctx.AppDB(), projectScope(), body.Name, body.Color)
+		l, err := insertList(ctx.AppDB(), projectScope(), body.Name, body.Color)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		writeJSON(w, p)
+		writeJSON(w, l)
 	default:
 		http.Error(w, "GET or POST", 405)
 	}
 }
 
-func (a *App) handleProjectsItem(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleListsItem(w http.ResponseWriter, r *http.Request) {
 	ctx := mustCtx(r)
-	id := pathSuffixInt(r.URL.Path, "/projects/")
+	id := pathSuffixInt(r.URL.Path, "/lists/")
 	pid := projectScope()
 	switch r.Method {
 	case http.MethodPut:
@@ -728,14 +738,14 @@ func (a *App) handleProjectsItem(w http.ResponseWriter, r *http.Request) {
 		}
 		args = append(args, id, pid)
 		if _, err := ctx.AppDB().Exec(
-			`UPDATE projects SET `+strings.Join(cols, ", ")+` WHERE id = ? AND project_id = ?`,
+			`UPDATE lists SET `+strings.Join(cols, ", ")+` WHERE id = ? AND project_id = ?`,
 			args...,
 		); err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		p, _ := getProject(ctx.AppDB(), pid, id)
-		writeJSON(w, p)
+		l, _ := getList(ctx.AppDB(), pid, id)
+		writeJSON(w, l)
 	case http.MethodDelete:
 		// Detach todos first, then drop the row.
 		tx, err := ctx.AppDB().Begin()
@@ -744,7 +754,7 @@ func (a *App) handleProjectsItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if _, err := tx.Exec(
-			`UPDATE todos SET project_ref = NULL WHERE project_ref = ? AND project_id = ?`,
+			`UPDATE todos SET list_id = NULL WHERE list_id = ? AND project_id = ?`,
 			id, pid,
 		); err != nil {
 			tx.Rollback()
@@ -752,7 +762,7 @@ func (a *App) handleProjectsItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if _, err := tx.Exec(
-			`DELETE FROM projects WHERE id = ? AND project_id = ?`, id, pid,
+			`DELETE FROM lists WHERE id = ? AND project_id = ?`, id, pid,
 		); err != nil {
 			tx.Rollback()
 			http.Error(w, err.Error(), 500)
@@ -774,7 +784,7 @@ func (a *App) handleTodos(w http.ResponseWriter, r *http.Request) {
 		tag := r.URL.Query().Get("tag")
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		var ref *int64
-		if s := r.URL.Query().Get("project_id"); s != "" {
+		if s := r.URL.Query().Get("list_id"); s != "" {
 			n, _ := strconv.ParseInt(s, 10, 64)
 			ref = &n
 		}
@@ -786,14 +796,14 @@ func (a *App) handleTodos(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, out)
 	case http.MethodPost:
 		var body struct {
-			Title     string   `json:"title"`
-			Notes     string   `json:"notes"`
-			ProjectID int64    `json:"project_id"`
-			Priority  int      `json:"priority"`
-			DueAt     string   `json:"due_at"`
-			RRule     string   `json:"rrule"`
-			Tags      []string `json:"tags"`
-			Source    string   `json:"source"`
+			Title    string   `json:"title"`
+			Notes    string   `json:"notes"`
+			ListID   int64    `json:"list_id"`
+			Priority int      `json:"priority"`
+			DueAt    string   `json:"due_at"`
+			RRule    string   `json:"rrule"`
+			Tags     []string `json:"tags"`
+			Source   string   `json:"source"`
 		}
 		json.NewDecoder(r.Body).Decode(&body)
 		if strings.TrimSpace(body.Title) == "" {
@@ -809,8 +819,8 @@ func (a *App) handleTodos(w http.ResponseWriter, r *http.Request) {
 			Tags:     body.Tags,
 			Source:   body.Source,
 		}
-		if body.ProjectID != 0 {
-			t.ProjectRef = &body.ProjectID
+		if body.ListID != 0 {
+			t.ListID = &body.ListID
 		}
 		out, err := insertTodo(ctx.AppDB(), pid, t)
 		if err != nil {
@@ -974,11 +984,11 @@ func listTagsWithCounts(db *sql.DB, pid string) ([]map[string]any, error) {
 //
 // Recognised tokens (anywhere in the line, removed before storing):
 //   p1 p2 p3 p4         priority (1=highest)
-//   today               today 17:00 local-noon-ish (RFC3339 UTC end-of-today)
+//   today               today end-of-day (RFC3339 UTC)
 //   tomorrow            +1 day at 09:00
 //   mon..sun            next occurrence of that weekday at 09:00
 //   next week           +7 days at 09:00
-//   #project-name       project (created if missing); first match wins
+//   #list-name          list (created if missing); first match wins
 //   @tag                tag (lowercased); repeat for multiple
 //
 // The remaining text becomes the title. Trim is aggressive — multiple
@@ -993,7 +1003,7 @@ func quickAdd(db *sql.DB, pid, text, source string) (*Todo, error) {
 	}
 	priority := 4
 	var dueAt string
-	var projectRef *int64
+	var listID *int64
 	tags := []string{}
 
 	tokens := strings.Fields(text)
@@ -1014,18 +1024,18 @@ func quickAdd(db *sql.DB, pid, text, source string) (*Todo, error) {
 			dueAt = atNineAM(nextWeekday(time.Now().UTC(), weekdayOf(low)))
 		case strings.HasPrefix(tok, "#") && len(tok) > 1:
 			name := tok[1:]
-			p, err := findProjectByName(db, pid, name)
+			l, err := findListByName(db, pid, name)
 			if err != nil {
 				return nil, err
 			}
-			if p == nil {
-				p, err = insertProject(db, pid, name, "")
+			if l == nil {
+				l, err = insertList(db, pid, name, "")
 				if err != nil {
 					return nil, err
 				}
 			}
-			id := p.ID
-			projectRef = &id
+			id := l.ID
+			listID = &id
 		case strings.HasPrefix(tok, "@") && len(tok) > 1:
 			tags = append(tags, strings.ToLower(tok[1:]))
 		default:
@@ -1061,12 +1071,12 @@ func quickAdd(db *sql.DB, pid, text, source string) (*Todo, error) {
 		return nil, errors.New("title empty after parsing")
 	}
 	t := &Todo{
-		Title:      title,
-		Priority:   priority,
-		DueAt:      dueAt,
-		ProjectRef: projectRef,
-		Tags:       tags,
-		Source:     source,
+		Title:    title,
+		Priority: priority,
+		DueAt:    dueAt,
+		ListID:   listID,
+		Tags:     tags,
+		Source:   source,
 	}
 	return insertTodo(db, pid, t)
 }
@@ -1185,8 +1195,8 @@ func (a *App) toolTodosCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		RRule:    strArg(args, "rrule", ""),
 		Source:   strArg(args, "source", "agent"),
 	}
-	if v := toInt64(args["project_id"]); v != 0 {
-		t.ProjectRef = &v
+	if v := toInt64(args["list_id"]); v != 0 {
+		t.ListID = &v
 	}
 	if v, ok := args["tags"]; ok {
 		names, err := toStringSlice(v)
@@ -1203,7 +1213,7 @@ func (a *App) toolTodosList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	tag := strArg(args, "tag", "")
 	limit := int(toInt64(args["limit"]))
 	var ref *int64
-	if v := toInt64(args["project_id"]); v != 0 {
+	if v := toInt64(args["list_id"]); v != 0 {
 		ref = &v
 	}
 	return listTodos(ctx.AppDB(), projectScope(), view, ref, tag, limit)
@@ -1277,19 +1287,19 @@ func (a *App) toolTodosDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	return map[string]any{"status": "deleted", "id": id}, nil
 }
 
-func (a *App) toolProjectsList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
-	return listProjects(ctx.AppDB(), projectScope())
+func (a *App) toolListsList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	return listLists(ctx.AppDB(), projectScope())
 }
 
-func (a *App) toolProjectsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolListsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	name, _ := args["name"].(string)
 	if name == "" {
 		return nil, errors.New("name required")
 	}
-	return insertProject(ctx.AppDB(), projectScope(), name, strArg(args, "color", ""))
+	return insertList(ctx.AppDB(), projectScope(), name, strArg(args, "color", ""))
 }
 
-func (a *App) toolProjectsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolListsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := toInt64(args["id"])
 	if id == 0 {
 		return nil, errors.New("id required")
@@ -1315,15 +1325,15 @@ func (a *App) toolProjectsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if len(cols) > 0 {
 		qa = append(qa, id, pid)
 		if _, err := ctx.AppDB().Exec(
-			`UPDATE projects SET `+strings.Join(cols, ", ")+` WHERE id = ? AND project_id = ?`, qa...,
+			`UPDATE lists SET `+strings.Join(cols, ", ")+` WHERE id = ? AND project_id = ?`, qa...,
 		); err != nil {
 			return nil, err
 		}
 	}
-	return getProject(ctx.AppDB(), pid, id)
+	return getList(ctx.AppDB(), pid, id)
 }
 
-func (a *App) toolProjectsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolListsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := toInt64(args["id"])
 	if id == 0 {
 		return nil, errors.New("id required")
@@ -1334,12 +1344,12 @@ func (a *App) toolProjectsDelete(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	if _, err := tx.Exec(
-		`UPDATE todos SET project_ref = NULL WHERE project_ref = ? AND project_id = ?`, id, pid,
+		`UPDATE todos SET list_id = NULL WHERE list_id = ? AND project_id = ?`, id, pid,
 	); err != nil {
 		tx.Rollback()
 		return nil, err
 	}
-	if _, err := tx.Exec(`DELETE FROM projects WHERE id = ? AND project_id = ?`, id, pid); err != nil {
+	if _, err := tx.Exec(`DELETE FROM lists WHERE id = ? AND project_id = ?`, id, pid); err != nil {
 		tx.Rollback()
 		return nil, err
 	}

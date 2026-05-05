@@ -2,7 +2,7 @@ name: quick-add
 description: |
   Agent receives a directive to capture three NL todos into the
   personal list using todos_quick_add. Verifies the parser picks up
-  priorities, due hints, projects and tags from a single line.
+  priorities, due hints, lists and tags from a single line.
 
 timeout: 90s
 max_iterations: 8

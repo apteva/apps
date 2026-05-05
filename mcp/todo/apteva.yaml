@@ -2,14 +2,15 @@ schema: apteva-app/v1
 
 name: todo
 display_name: Todo
-version: 0.1.0
+version: 0.2.0
 description: |
   Personal todo list — human-first counterpart to the agent mission
-  board (`tasks`). Inbox / Today / Upcoming views, projects, tags,
-  priorities, due dates, snooze, and daily recurrence. The agent gets
-  MCP tools for natural-language quick-add, triage, and follow-through
-  on its own work; the operator gets a panel they actually want to
-  open in the morning.
+  board (`tasks`). Inbox / Today / Upcoming views, lists (the
+  user-facing buckets), tags (cross-cutting context), priorities, due
+  dates, snooze, and daily recurrence. The agent gets MCP tools for
+  natural-language quick-add, triage, and follow-through on its own
+  work; the operator gets a panel they actually want to open in the
+  morning.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/todo
@@ -29,18 +30,18 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: todos_quick_add,   description: "Create a todo from a single natural-language line ('call the plumber tomorrow p1 #home'). Returns the parsed row." }
-    - { name: todos_create,      description: "Create a todo with structured fields. Args: title, project_id?, priority?, due_at?, notes?, tags?, rrule?." }
-    - { name: todos_list,        description: "List todos. Args: view? (inbox|today|upcoming|overdue|all|done), project_id?, tag?, limit?." }
+    - { name: todos_create,      description: "Create a todo with structured fields. Args: title, list_id?, priority?, due_at?, notes?, tags?, rrule?." }
+    - { name: todos_list,        description: "List todos. Args: view? (inbox|today|upcoming|overdue|all|done), list_id?, tag?, limit?." }
     - { name: todos_get,         description: "Read a single todo. Args: id." }
-    - { name: todos_update,      description: "Update a todo. Args: id, title?, notes?, priority?, due_at?, project_id?, rrule?, tags?." }
+    - { name: todos_update,      description: "Update a todo. Args: id, title?, notes?, priority?, due_at?, list_id?, rrule?, tags?." }
     - { name: todos_complete,    description: "Mark a todo as done. For recurring todos, rolls the next occurrence forward. Args: id." }
     - { name: todos_uncomplete,  description: "Re-open a completed todo. Args: id." }
     - { name: todos_snooze,      description: "Push a todo's due_at out. Args: id, until (RFC3339) or for ('1h'|'tomorrow'|'next_week')." }
     - { name: todos_delete,      description: "Delete a todo. Args: id." }
-    - { name: projects_list,     description: "List projects in this scope." }
-    - { name: projects_create,   description: "Create a project. Args: name, color?." }
-    - { name: projects_update,   description: "Update a project. Args: id, name?, color?, archived?." }
-    - { name: projects_delete,   description: "Delete a project. Todos in it move to inbox. Args: id." }
+    - { name: lists_list,        description: "List the user-facing buckets in this scope." }
+    - { name: lists_create,      description: "Create a list. Args: name, color?." }
+    - { name: lists_update,      description: "Update a list. Args: id, name?, color?, archived?." }
+    - { name: lists_delete,      description: "Delete a list. Todos in it move to inbox. Args: id." }
     - { name: tags_list,         description: "List tags in this scope with usage counts." }
   ui_panels:
     - slot: project.page

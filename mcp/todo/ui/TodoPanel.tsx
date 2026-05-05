@@ -7,13 +7,14 @@
 //   │ Upcoming  │ │ todo rows (checkbox · title · due · tags)    │
 //   │ Overdue   │ │                                              │
 //   │ Done      │ │                                              │
-//   │ ── projects ─                                              │
+//   │ ── lists ─                                                 │
 //   │ #home     │ │                                              │
 //   │ #work     │ │                                              │
 //   └───────────┘ └────────────────────────────────────────────-─┘
 //
 // Quick-add box accepts the same NL grammar as the MCP tool:
 //   "call the plumber tomorrow p1 #home @errand"
+// where #name resolves to a list (created if missing) and @name is a tag.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -35,12 +36,12 @@ interface Todo {
   rrule?: string;
   status: string;
   source: string;
-  project_ref: number | null;
+  list_id: number | null;
   tags: string[];
   created_at: string;
 }
 
-interface Project {
+interface List {
   id: number;
   name: string;
   color: string;
@@ -66,9 +67,9 @@ const PRIORITY_TONE: Record<number, string> = {
 
 export default function TodoPanel({}: NativePanelProps) {
   const [view, setView] = useState<View>("today");
-  const [pickedProject, setPickedProject] = useState<number | null>(null);
+  const [pickedList, setPickedList] = useState<number | null>(null);
   const [todos, setTodos] = useState<Todo[]>([]);
-  const [projects, setProjects] = useState<Project[]>([]);
+  const [lists, setLists] = useState<List[]>([]);
   const [quick, setQuick] = useState("");
   const [status, setStatus] = useState("");
   const [editing, setEditing] = useState<Todo | null>(null);
@@ -76,9 +77,9 @@ export default function TodoPanel({}: NativePanelProps) {
   const params = useMemo(() => {
     const p = new URLSearchParams();
     p.set("view", view);
-    if (pickedProject) p.set("project_id", String(pickedProject));
+    if (pickedList) p.set("list_id", String(pickedList));
     return p.toString();
-  }, [view, pickedProject]);
+  }, [view, pickedList]);
 
   const loadTodos = useCallback(async () => {
     try {
@@ -92,15 +93,15 @@ export default function TodoPanel({}: NativePanelProps) {
     }
   }, [params]);
 
-  const loadProjects = useCallback(async () => {
+  const loadLists = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/projects`, { credentials: "same-origin" });
-      if (res.ok) setProjects(await res.json() || []);
+      const res = await fetch(`${API}/lists`, { credentials: "same-origin" });
+      if (res.ok) setLists(await res.json() || []);
     } catch {}
   }, []);
 
   useEffect(() => { loadTodos(); }, [loadTodos]);
-  useEffect(() => { loadProjects(); }, [loadProjects]);
+  useEffect(() => { loadLists(); }, [loadLists]);
 
   const submitQuick = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -115,7 +116,7 @@ export default function TodoPanel({}: NativePanelProps) {
       if (!res.ok) { setStatus("Add: " + (await res.text())); return; }
       setQuick("");
       loadTodos();
-      loadProjects();
+      loadLists();
     } catch (e) {
       setStatus("Add: " + (e as Error).message);
     }
@@ -152,9 +153,9 @@ export default function TodoPanel({}: NativePanelProps) {
         {VIEWS.map((v) => (
           <button
             key={v.key}
-            onClick={() => { setView(v.key); setPickedProject(null); }}
+            onClick={() => { setView(v.key); setPickedList(null); }}
             className={`text-left px-2 py-1 rounded ${
-              view === v.key && !pickedProject
+              view === v.key && !pickedList
                 ? "bg-bg-card text-text"
                 : "text-text-muted hover:text-text"
             }`}
@@ -162,19 +163,19 @@ export default function TodoPanel({}: NativePanelProps) {
             {v.label}
           </button>
         ))}
-        <div className="text-xs uppercase text-text-dim px-2 mt-3 mb-1">Projects</div>
-        {projects.filter((p) => !p.archived).map((p) => (
+        <div className="text-xs uppercase text-text-dim px-2 mt-3 mb-1">Lists</div>
+        {lists.filter((l) => !l.archived).map((l) => (
           <button
-            key={p.id}
-            onClick={() => { setPickedProject(p.id); setView("today"); }}
+            key={l.id}
+            onClick={() => { setPickedList(l.id); setView("today"); }}
             className={`text-left px-2 py-1 rounded flex items-center gap-2 ${
-              pickedProject === p.id
+              pickedList === l.id
                 ? "bg-bg-card text-text"
                 : "text-text-muted hover:text-text"
             }`}
           >
-            <span className="w-2 h-2 rounded-full" style={{ background: p.color }} />
-            {p.name}
+            <span className="w-2 h-2 rounded-full" style={{ background: l.color }} />
+            {l.name}
           </button>
         ))}
       </aside>
@@ -182,8 +183,8 @@ export default function TodoPanel({}: NativePanelProps) {
       <main className="flex-1 flex flex-col">
         <header className="flex items-center gap-3 border-b border-border px-4 py-2">
           <div className="text-text font-medium">
-            {pickedProject
-              ? projects.find((p) => p.id === pickedProject)?.name ?? "Project"
+            {pickedList
+              ? lists.find((l) => l.id === pickedList)?.name ?? "List"
               : VIEWS.find((v) => v.key === view)?.label}
           </div>
           <span className="ml-auto text-text-dim text-xs">{status}</span>
@@ -210,7 +211,7 @@ export default function TodoPanel({}: NativePanelProps) {
                 <TodoRow
                   key={t.id}
                   t={t}
-                  project={projects.find((p) => p.id === t.project_ref)}
+                  list={lists.find((l) => l.id === t.list_id)}
                   onToggle={() => toggle(t)}
                   onSnooze={(k) => snooze(t, k)}
                   onEdit={() => setEditing(t)}
@@ -225,7 +226,7 @@ export default function TodoPanel({}: NativePanelProps) {
       {editing && (
         <EditDialog
           todo={editing}
-          projects={projects}
+          lists={lists}
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); loadTodos(); }}
         />
@@ -235,10 +236,10 @@ export default function TodoPanel({}: NativePanelProps) {
 }
 
 function TodoRow({
-  t, project, onToggle, onSnooze, onEdit, onDelete,
+  t, list, onToggle, onSnooze, onEdit, onDelete,
 }: {
   t: Todo;
-  project?: Project;
+  list?: List;
   onToggle: () => void;
   onSnooze: (k: string) => void;
   onEdit: () => void;
@@ -271,10 +272,10 @@ function TodoRow({
               {formatDue(due)}
             </span>
           )}
-          {project && (
+          {list && (
             <span className="flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full" style={{ background: project.color }} />
-              {project.name}
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: list.color }} />
+              {list.name}
             </span>
           )}
           {t.tags.map((tag) => (
@@ -292,10 +293,10 @@ function TodoRow({
 }
 
 function EditDialog({
-  todo, projects, onClose, onSaved,
+  todo, lists, onClose, onSaved,
 }: {
   todo: Todo;
-  projects: Project[];
+  lists: List[];
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -303,7 +304,7 @@ function EditDialog({
   const [notes, setNotes] = useState(todo.notes);
   const [priority, setPriority] = useState(todo.priority);
   const [dueAt, setDueAt] = useState(todo.due_at?.slice(0, 16) ?? "");
-  const [projectRef, setProjectRef] = useState<number | "">(todo.project_ref ?? "");
+  const [listID, setListID] = useState<number | "">(todo.list_id ?? "");
   const [rrule, setRRule] = useState(todo.rrule ?? "");
   const [tags, setTags] = useState(todo.tags.join(" "));
 
@@ -313,7 +314,7 @@ function EditDialog({
       tags: tags.split(/\s+/).filter(Boolean).map((s) => s.replace(/^@/, "")),
     };
     body.due_at = dueAt ? new Date(dueAt).toISOString() : "";
-    body.project_id = projectRef === "" ? 0 : projectRef;
+    body.list_id = listID === "" ? 0 : listID;
     await fetch(`${API}/todos/${todo.id}`, {
       method: "PUT",
       credentials: "same-origin",
@@ -362,17 +363,17 @@ function EditDialog({
             </select>
           </label>
           <label className="text-xs text-text-dim flex flex-col gap-1">
-            Project
+            List
             <select
-              value={projectRef}
+              value={listID}
               onChange={(e) =>
-                setProjectRef(e.target.value === "" ? "" : parseInt(e.target.value))
+                setListID(e.target.value === "" ? "" : parseInt(e.target.value))
               }
               className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
             >
               <option value="">— inbox —</option>
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>{p.name}</option>
+              {lists.map((l) => (
+                <option key={l.id} value={l.id}>{l.name}</option>
               ))}
             </select>
           </label>
