@@ -268,6 +268,22 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
     } finally { setBusy(null); }
   };
 
+  // "Switch to temporary URL" — destroys the named tunnel on Cloudflare
+  // (CNAME + tunnel) and drops the local row, demoting the install
+  // back to quick mode. Restartable: panel refresh picks up the new mode.
+  const switchToQuick = async () => {
+    if (!window.confirm(
+      `Delete the named tunnel for ${status.hostname} on Cloudflare and switch to temporary URLs?`
+    )) return;
+    setBusy("configure"); setError("");
+    try {
+      await api("POST", "/destroy", {});
+      await refresh();
+    } catch (e: unknown) {
+      setError("Switch failed: " + (e instanceof Error ? e.message : String(e)));
+    } finally { setBusy(null); }
+  };
+
   const isRunning = status.status === "running";
   const isStarting = isRunning && !status.public_url;
   const isNamed = status.mode === "named";
@@ -307,21 +323,19 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
         </div>
       )}
 
-      {/* ─── Named-mode hostname management ─────────────────────── */}
-      {isNamed && (
+      {/* ─── Custom-domain section ──────────────────────────────────
+          Only renders when cloudflare is bound (binding is an
+          install-time concern, not a panel one). Three states:
+            cfBound, no hostname, form closed  → "Configure hostname" CTA
+            cfBound, hostname set, form closed → hostname row + Change / Switch
+            cfBound, form open                 → zone picker + subdomain input */}
+      {cfBound && (
         <section className="border border-border rounded-lg p-4 bg-bg-card space-y-3">
-          {!cfBound ? (
-            <div className="text-text-muted text-sm">
-              <div className="text-text font-bold mb-1">Cloudflare not connected</div>
-              Named mode needs the cloudflare integration. Open this app's
-              settings and bind a connection (one API token with
-              Cloudflare Tunnel:Edit + DNS:Edit), then come back.
-            </div>
-          ) : !hasNamedHostname && !showConfigure ? (
+          {!showConfigure && !hasNamedHostname && (
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div className="text-text-muted text-sm">
-                <span className="text-text font-bold">No hostname configured.</span>{" "}
-                Pick a zone and a subdomain to get a stable URL.
+                <span className="text-text font-bold">Use a stable URL on your domain.</span>{" "}
+                Pick a Cloudflare zone and a subdomain — the URL persists across restarts.
               </div>
               <button
                 onClick={openConfigure}
@@ -330,7 +344,9 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
                 Configure hostname
               </button>
             </div>
-          ) : showConfigure ? (
+          )}
+
+          {showConfigure ? (
             <div className="space-y-3">
               <div className="text-text font-bold text-sm">Configure named tunnel</div>
               {zones === null ? (
@@ -388,23 +404,33 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
                 </>
               )}
             </div>
-          ) : (
-            // Configured: small hostname row with a Change affordance.
+          ) : hasNamedHostname ? (
+            // Configured: hostname + change / switch-back affordances.
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div className="text-sm">
                 <span className="text-text-muted">Hostname:</span>{" "}
                 <code className="font-mono text-text">{status.hostname}</code>
               </div>
-              <button
-                onClick={openConfigure}
-                disabled={isRunning}
-                title={isRunning ? "Stop the tunnel before changing hostname" : ""}
-                className="text-text-muted text-xs underline hover:text-text disabled:opacity-50"
-              >
-                Change
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={openConfigure}
+                  disabled={isRunning || busy !== null}
+                  title={isRunning ? "Stop the tunnel before changing hostname" : ""}
+                  className="text-text-muted text-xs underline hover:text-text disabled:opacity-50"
+                >
+                  Change
+                </button>
+                <button
+                  onClick={switchToQuick}
+                  disabled={isRunning || busy !== null}
+                  title={isRunning ? "Stop the tunnel before switching" : "Delete the CF tunnel and revert to temporary trycloudflare.com URLs"}
+                  className="text-text-muted text-xs underline hover:text-text disabled:opacity-50"
+                >
+                  {busy === "configure" ? "Switching…" : "Switch to temporary URL"}
+                </button>
+              </div>
             </div>
-          )}
+          ) : null}
         </section>
       )}
 

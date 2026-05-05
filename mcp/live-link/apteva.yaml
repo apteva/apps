@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: live-link
 display_name: Live Link
-version: 0.3.0
+version: 0.3.1
 description: |
   Public HTTPS URL for a locally-installed Apteva instance. Two modes:
 
@@ -99,16 +99,6 @@ config_schema:
     default: cloudflared
     label: Tunnel provider
     description: Cloudflare is the only provider in v0.2; ngrok and tailscale-funnel arrive in v0.3.
-  - name: mode
-    type: select
-    options: [quick, named]
-    default: quick
-    label: URL stability
-    description: |
-      "quick" mints a fresh trycloudflare.com URL on every start — zero
-      config, no account. "named" gives you a stable URL on a hostname
-      you control (bind the cloudflare integration above and pick a
-      zone in the panel).
   - name: target_url
     type: text
     default: ""

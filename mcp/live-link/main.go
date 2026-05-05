@@ -1,7 +1,7 @@
 // Live Link app — give a locally-installed Apteva instance a public
 // HTTPS URL.
 //
-// Two modes, picked via the `mode` config field:
+// Two modes, switched in-panel — no config knob needed:
 //
 //   - quick  (v0.1, default): Cloudflare Quick Tunnel. Anonymous, free,
 //     fresh https://<random>.trycloudflare.com URL on every start. No
@@ -9,14 +9,17 @@
 //
 //   - named  (v0.3): a stable URL on a Cloudflare zone the operator
 //     owns (e.g. https://tunnel.example.com). Requires the cloudflare
-//     integration to be bound at install time (operator pastes one CF
-//     API token into the connection form). The panel calls list_zones
-//     via the integration to populate a zone picker; the operator
-//     enters a subdomain; /named/configure asks the platform proxy to
-//     create-or-adopt a cfd_tunnel, configure ingress, and upsert a
-//     proxied CNAME at <hostname> → <tunnel_id>.cfargotunnel.com.
-//     The platform handles credential injection — the app never sees
-//     a raw token. Restarts reuse the same tunnel + URL.
+//     integration to be bound at install time. The panel calls
+//     list_zones via the integration to populate a zone picker; the
+//     operator enters a subdomain; /named/configure asks the platform
+//     proxy to create-or-adopt a cfd_tunnel, configure ingress, and
+//     upsert a proxied CNAME → <tunnel_id>.cfargotunnel.com. The
+//     platform handles credential injection — the app never sees a
+//     raw token. Restarts reuse the same tunnel + URL.
+//
+// Mode is determined by DB state: if a row exists in named_tunnels,
+// the app is in named mode; otherwise quick. Switching is panel-driven
+// (configure → named, destroy → quick); no install-time config field.
 //
 // In both modes, runs are persisted to runs(...) for "was the tunnel
 // up at X?" history, with a mode column so the UI can render the
@@ -166,16 +169,16 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// Surface the resolved target + mode so the UI can show the
 	// pre-flight state before the user clicks start.
 	out["resolved_target"] = a.resolveTargetURL(ctx)
-	mode := a.resolveMode(ctx)
+	mode := a.currentMode(ctx)
 	out["mode"] = string(mode)
-	if mode == ModeNamed {
-		// Surface the configured hostname (from named_tunnels) and
-		// whether the cloudflare integration is bound, so the panel
-		// knows whether to render the configure form vs the live URL.
-		if nt, _ := dbFirstNamedTunnel(ctx.AppDB()); nt != nil {
-			out["hostname"] = nt.Hostname
-		}
-		out["cloudflare_bound"] = ctx.IntegrationFor("cloudflare") != nil
+	// Always surface cloudflare_bound + the configured hostname (if
+	// any), regardless of mode, so the panel can render its
+	// "promote to named" CTA without a separate roundtrip — and so
+	// the CTA can disable itself with an actionable hint when the
+	// integration isn't bound yet.
+	out["cloudflare_bound"] = ctx.IntegrationFor("cloudflare") != nil
+	if nt, _ := dbFirstNamedTunnel(ctx.AppDB()); nt != nil {
+		out["hostname"] = nt.Hostname
 	}
 	httpJSON(w, out)
 }
@@ -336,7 +339,7 @@ func (a *App) toolStatus(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 		"target_url": snap.TargetURL,
 		"run_id":     snap.RunID,
 		"last_error": snap.LastError,
-		"mode":       string(a.resolveMode(ctx)),
+		"mode":       string(a.currentMode(ctx)),
 	}, nil
 }
 
@@ -399,7 +402,7 @@ func (a *App) start(ctx *sdk.AppCtx) (string, error) {
 		return "", err
 	}
 
-	mode := a.resolveMode(ctx)
+	mode := a.currentMode(ctx)
 	params := StartParams{Binary: binary, Target: target, Mode: mode}
 
 	if mode == ModeNamed {
@@ -434,25 +437,23 @@ func (a *App) start(ctx *sdk.AppCtx) (string, error) {
 	return target, nil
 }
 
-// resolveMode picks quick vs named, defaulting to quick when the
-// `mode` config field is empty or unset. Anything else is rejected at
-// start time (we don't silently fall back).
-func (a *App) resolveMode(ctx *sdk.AppCtx) Mode {
-	if ctx == nil {
+// currentMode reports which mode is active. Mode is implicit in v0.3:
+// if a hostname has been configured (named_tunnels row exists), we're
+// in named mode; otherwise quick. The panel flips between the two by
+// calling /named/configure (→ named) or /destroy (→ back to quick).
+//
+// This replaces the v0.2 `mode` config field — having a config knob
+// AND a DB row was redundant and made the panel UX awkward (the panel
+// couldn't change config). DB-as-source-of-truth means the panel
+// owns the flip.
+func (a *App) currentMode(ctx *sdk.AppCtx) Mode {
+	if ctx == nil || ctx.AppDB() == nil {
 		return ModeQuick
 	}
-	v := strings.ToLower(strings.TrimSpace(ctx.Config().Get("mode")))
-	switch v {
-	case "", "quick":
-		return ModeQuick
-	case "named":
+	if nt, _ := dbFirstNamedTunnel(ctx.AppDB()); nt != nil {
 		return ModeNamed
-	default:
-		// Unknown value — fall back to quick rather than 500ing on a
-		// typo. The status endpoint shows the resolved mode so the
-		// operator can tell something didn't take.
-		return ModeQuick
 	}
+	return ModeQuick
 }
 
 // cfConnectionID returns the bound cloudflare integration's

@@ -290,13 +290,28 @@ func TestDestroyNamedTunnel_HitsCFAndDropsRow(t *testing.T) {
 	}
 }
 
-func TestStart_NamedMode_RequiresConfiguredTunnel(t *testing.T) {
+// Mode is derived from DB state (presence of named_tunnels row), not
+// from a config knob. Empty DB → quick; row → named.
+func TestCurrentMode_TracksDBState(t *testing.T) {
 	ctx, _ := newTestCtxWithCF(t)
-	ctx.Config()["mode"] = "named"
-	app := &App{mgr: NewManager(nil, nil)}
-	_, err := app.start(ctx)
-	if err == nil || !strings.Contains(err.Error(), "no tunnel configured") {
-		t.Fatalf("expected 'no tunnel configured' error, got %v", err)
+	app := &App{}
+	if got := app.currentMode(ctx); got != ModeQuick {
+		t.Errorf("empty DB: got %q, want quick", got)
+	}
+	if err := dbInsertNamedTunnel(ctx.AppDB(), &NamedTunnel{
+		Hostname: "h.example.com", TunnelID: "T", TunnelToken: "K",
+		ZoneID: "Z", DNSRecordID: "R",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := app.currentMode(ctx); got != ModeNamed {
+		t.Errorf("with row: got %q, want named", got)
+	}
+	if err := dbDeleteNamedTunnel(ctx.AppDB(), "h.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if got := app.currentMode(ctx); got != ModeQuick {
+		t.Errorf("after delete: got %q, want quick", got)
 	}
 }
 
