@@ -1,0 +1,150 @@
+schema: apteva-app/v1
+
+name: computer
+display_name: Computer
+version: 0.1.0
+description: |
+  Watch and steer the agent's browser. Operator panel for browsing
+  live sessions across instances, taking control of one, and reading
+  the agent's chat. Inline chat components the agent attaches so
+  its work surfaces visually instead of as plain text.
+
+  v0.1 is UI-only — the browser backends (local Chrome, Browserbase,
+  Steel) and the browser_session / computer_use tools remain built
+  into the agent loop. They will be promoted into this app's
+  mcp_tools in a later release; the manifest will gain entries then
+  with no rename or install-path change.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/computer
+tags: [browser, observability, ui]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+provides:
+  http_routes:
+    - prefix: /
+
+  ui_panels:
+    - slot: project.page
+      label: Browsers
+      icon: monitor
+      entry: /ui/ComputerPanel.mjs
+
+  ui_components:
+    # Inline browser-session card — agent attaches after a successful
+    # browser_session(open). Carries enough context (backend, URL,
+    # status) to identify the session at a glance + a deep-link to
+    # the operator panel for live watching.
+    - name: browser-card
+      entry: /ui/BrowserCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [instance_id, backend, url]
+        properties:
+          instance_id: { type: string }
+          backend:     { type: string, enum: [local, browserbase, steel] }
+          url:         { type: string }
+          status:      { type: string }
+      preview_props:
+        preview: true
+        instance_id: "demo-instance"
+        backend: "local"
+        url: "https://example.com"
+        status: "active"
+
+    # Annotated screenshot — agent attaches after computer_use(screenshot)
+    # when SoM is on. Renders the image with SoM badges as an SVG
+    # overlay so the operator sees what the agent sees AND what it's
+    # about to act on.
+    - name: screenshot-with-som
+      entry: /ui/ScreenshotCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [screenshot_url]
+        properties:
+          screenshot_url: { type: string }
+          som:
+            type: array
+            items:
+              type: object
+              properties:
+                label: { type: integer }
+                x:     { type: number }
+                y:     { type: number }
+                w:     { type: number }
+                h:     { type: number }
+                kind:  { type: string }
+          caption: { type: string }
+      preview_props:
+        preview: true
+
+    # Live screencast — defaults to a polled thumbnail (cheap on
+    # long transcripts), upgrades to full CDP screencast canvas when
+    # the operator clicks expand or the agent passes mode:"live".
+    - name: live-view
+      entry: /ui/LiveCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [instance_id]
+        properties:
+          instance_id: { type: string }
+          height:      { type: integer, default: 360 }
+          mode:
+            type: string
+            enum: [thumb, live]
+            default: thumb
+      preview_props:
+        preview: true
+        instance_id: "demo-instance"
+
+    # Multi-step browse summary — horizontal strip of recently visited
+    # pages with thumbnails and titles. Saves the agent from listing
+    # eight URLs in prose.
+    - name: navigation-timeline
+      entry: /ui/TimelineCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [steps]
+        properties:
+          steps:
+            type: array
+            items:
+              type: object
+              properties:
+                url:       { type: string }
+                title:     { type: string }
+                thumbnail: { type: string }
+                ts:        { type: string }
+      preview_props:
+        preview: true
+
+  skills:
+    - name: how-to-use-computer
+      command: /computer
+      body_file: skills/how-to-use-computer.md
+      description: |
+        Teaches the agent which chat component to attach for which
+        browser action. Loads on browser_session and computer_use
+        tool calls. Render-only attachments — for human-in-the-loop
+        questions, use the existing pace() + console-injection
+        pattern instead.
+      metadata:
+        category: browsing
+        icon: 🖥️
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/computer
+  port: 8080
+  health_check: /health
+
+upgrade_policy: auto-patch
