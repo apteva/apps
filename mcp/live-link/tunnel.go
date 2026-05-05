@@ -1,10 +1,15 @@
 // tunnel.go — manage the lifecycle of a cloudflared subprocess.
 //
-// The whole "expose" feature reduces to:
+// Two modes:
 //
-//   1. spawn `cloudflared tunnel --url <target> --no-autoupdate`
-//   2. tail its stderr until we see https://*.trycloudflare.com
-//   3. hold the cmd handle so we can SIGTERM it on stop
+//   Quick (v0.1, default): `cloudflared tunnel --url <target> --no-autoupdate`,
+//   tail stderr for https://*.trycloudflare.com, fresh URL every run.
+//
+//   Named (v0.2): `cloudflared tunnel --no-autoupdate run --token <token>`,
+//   URL is the operator-chosen hostname and known up-front (the API
+//   call that minted the token also configured ingress + DNS), so
+//   there's nothing to scrape. publicURL is populated at Start time
+//   and onURLAssigned fires synchronously before Start returns.
 //
 // State is held in a single in-process Manager guarded by a mutex.
 // Persistence (the runs table) is owned by main.go — this file only
@@ -41,6 +46,27 @@ const (
 	StatusFailed  Status = "failed"
 )
 
+// Mode picks between Quick (anonymous, ephemeral) and Named (stable
+// hostname on a CF zone the operator owns).
+type Mode string
+
+const (
+	ModeQuick Mode = "quick"
+	ModeNamed Mode = "named"
+)
+
+// StartParams bundles everything the Manager needs to spawn cloudflared.
+// Quick mode populates Binary/Target/RunID; Named mode also sets Token
+// + Hostname so the manager can skip stderr URL scraping.
+type StartParams struct {
+	Binary   string
+	Target   string // local URL to forward to (used as label in named mode)
+	RunID    int64
+	Mode     Mode
+	Token    string // named mode: connector token from `cfd_tunnel` create
+	Hostname string // named mode: e.g. "tunnel.example.com"; pre-known public host
+}
+
 // Manager owns the cloudflared subprocess for one app install.
 // Goroutine-safe; all public methods take the mutex.
 type Manager struct {
@@ -73,31 +99,54 @@ func NewManager(onURLAssigned func(int64, string), onExit func(int64, string, St
 }
 
 // Start spawns cloudflared and returns once the subprocess is launched
-// (not once the URL is assigned — that arrives async via onURLAssigned).
+// (in quick mode the URL is assigned async via onURLAssigned; in named
+// mode the URL is known up-front so onURLAssigned fires synchronously).
 // Returns ErrAlreadyRunning if a tunnel is already up.
-func (m *Manager) Start(binary, target string, runID int64) error {
+func (m *Manager) Start(p StartParams) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.status == StatusRunning {
 		return ErrAlreadyRunning
 	}
+	binary := p.Binary
 	if binary == "" {
 		binary = "cloudflared"
 	}
-	if target == "" {
-		return errors.New("target URL is empty")
+	if p.Mode == "" {
+		p.Mode = ModeQuick
+	}
+
+	switch p.Mode {
+	case ModeQuick:
+		if p.Target == "" {
+			return errors.New("target URL is empty")
+		}
+	case ModeNamed:
+		if p.Token == "" {
+			return errors.New("named mode: tunnel token is empty")
+		}
+		if p.Hostname == "" {
+			return errors.New("named mode: hostname is empty")
+		}
+	default:
+		return fmt.Errorf("unknown mode %q", p.Mode)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, binary,
-		"tunnel",
-		"--url", target,
-		"--no-autoupdate",
-	)
+	args := []string{"tunnel", "--no-autoupdate"}
+	switch p.Mode {
+	case ModeQuick:
+		args = append(args, "--url", p.Target)
+	case ModeNamed:
+		// Ingress was configured server-side via the API; the connector
+		// just needs the token to dial home.
+		args = append(args, "run", "--token", p.Token)
+	}
+	cmd := exec.CommandContext(ctx, binary, args...)
 	// Combined stderr is where cloudflared writes the assigned URL.
-	// Stdout is mostly empty in --url mode but we read it anyway so
-	// the pipe doesn't fill and block the child.
+	// Stdout is mostly empty but we read it anyway so the pipe doesn't
+	// fill and block the child.
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		cancel()
@@ -121,9 +170,9 @@ func (m *Manager) Start(binary, target string, runID int64) error {
 
 	m.cmd = cmd
 	m.cancel = cancel
-	m.targetURL = target
+	m.targetURL = p.Target
 	m.startedAt = time.Now()
-	m.runID = runID
+	m.runID = p.RunID
 	m.status = StatusRunning
 	m.lastError = ""
 	m.publicURL = ""
@@ -131,11 +180,24 @@ func (m *Manager) Start(binary, target string, runID int64) error {
 	// Drain stdout to avoid back-pressure. Discard contents.
 	go io.Copy(io.Discard, stdout)
 
-	// Tail stderr, scan for the URL, persist when we see it.
-	go m.scanStderr(stderr, runID)
-
 	// Wait for exit in the background; clean up when it ends.
-	go m.waitForExit(runID)
+	go m.waitForExit(p.RunID)
+
+	switch p.Mode {
+	case ModeQuick:
+		// Tail stderr, scan for the URL, persist when we see it.
+		go m.scanStderr(stderr, p.RunID)
+	case ModeNamed:
+		// URL is known up-front; just discard stderr so the pipe
+		// doesn't block, and fire onURLAssigned async (mirrors quick
+		// mode's "callback runs outside the lock" contract).
+		go io.Copy(io.Discard, stderr)
+		m.publicURL = "https://" + p.Hostname
+		url, runID, cb := m.publicURL, p.RunID, m.onURLAssigned
+		if cb != nil {
+			go cb(runID, url)
+		}
+	}
 
 	return nil
 }

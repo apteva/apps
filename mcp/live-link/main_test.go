@@ -44,21 +44,41 @@ func openTestDB(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	migration, err := os.ReadFile("migrations/001_init.sql")
+	// Apply every migration in lexical order — matches what the SDK
+	// runs on a fresh install. Easier than maintaining a list each
+	// time we add a new file.
+	files, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(string(migration)); err != nil {
-		t.Fatalf("migration: %v", err)
+	for _, f := range files {
+		sql, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		if _, err := db.Exec(string(sql)); err != nil {
+			t.Fatalf("migration %s: %v", f, err)
+		}
 	}
 	return db
 }
 
 func newTestCtx(t *testing.T) *sdk.AppCtx {
 	t.Helper()
+	return newTestCtxWithConfig(t, nil)
+}
+
+// newTestCtxWithConfig builds a fresh test context with the given
+// install-config values pre-populated. Pass nil for an empty config.
+func newTestCtxWithConfig(t *testing.T, cfg map[string]string) *sdk.AppCtx {
+	t.Helper()
 	db := openTestDB(t)
 	m := (&App{}).Manifest()
-	ctx := sdk.NewAppCtxForTest(&m, db, sdk.Config{}, nil, &silentLogger{})
+	c := sdk.Config{}
+	for k, v := range cfg {
+		c[k] = v
+	}
+	ctx := sdk.NewAppCtxForTest(&m, db, c, nil, &silentLogger{})
 	globalCtx = ctx
 	return ctx
 }
@@ -232,11 +252,11 @@ func TestTryCloudflareRegex_MatchesRealLogShapes(t *testing.T) {
 
 func TestDB_RunsRoundTrip(t *testing.T) {
 	ctx := newTestCtx(t)
-	id1, err := dbInsertRun(ctx.AppDB(), "cloudflared", "http://localhost:5280")
+	id1, err := dbInsertRun(ctx.AppDB(), "cloudflared", "http://localhost:5280", "quick")
 	if err != nil {
 		t.Fatal(err)
 	}
-	id2, _ := dbInsertRun(ctx.AppDB(), "cloudflared", "http://localhost:8080")
+	id2, _ := dbInsertRun(ctx.AppDB(), "cloudflared", "http://localhost:8080", "quick")
 	if id1 == 0 || id2 == 0 || id1 == id2 {
 		t.Errorf("ids look wrong: %d %d", id1, id2)
 	}
@@ -441,7 +461,7 @@ func TestManager_StartCapturesURL_StopExitsCleanly(t *testing.T) {
 	)
 
 	binary := fakeCloudflared(t)
-	if err := mgr.Start(binary, "http://localhost:5280", 42); err != nil {
+	if err := mgr.Start(StartParams{Binary: binary, Target: "http://localhost:5280", RunID: 42, Mode: ModeQuick}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -488,12 +508,12 @@ func TestManager_StartTwiceReturnsAlreadyRunning(t *testing.T) {
 		func(int64, string, Status) {},
 	)
 	binary := fakeCloudflared(t)
-	if err := mgr.Start(binary, "http://localhost:5280", 1); err != nil {
+	if err := mgr.Start(StartParams{Binary: binary, Target: "http://localhost:5280", RunID: 1, Mode: ModeQuick}); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = mgr.Stop() })
 
-	err := mgr.Start(binary, "http://localhost:5280", 2)
+	err := mgr.Start(StartParams{Binary: binary, Target: "http://localhost:5280", RunID: 2, Mode: ModeQuick})
 	if err != ErrAlreadyRunning {
 		t.Errorf("second Start: got %v, want ErrAlreadyRunning", err)
 	}
@@ -504,7 +524,7 @@ func TestManager_MissingBinarySurfacesCleanError(t *testing.T) {
 		func(int64, string) {},
 		func(int64, string, Status) {},
 	)
-	err := mgr.Start("/no/such/path/to/cloudflared", "http://localhost:5280", 1)
+	err := mgr.Start(StartParams{Binary: "/no/such/path/to/cloudflared", Target: "http://localhost:5280", RunID: 1, Mode: ModeQuick})
 	if err == nil {
 		t.Fatal("expected error for missing binary")
 	}

@@ -1,22 +1,24 @@
-// Live Link app v0.1 — give a locally-installed Apteva instance a
-// public HTTPS URL.
+// Live Link app — give a locally-installed Apteva instance a public
+// HTTPS URL.
 //
-//   ┌──────────────┐  POST /start   ┌──────────────────────┐
-//   │  dashboard   │ ─────────────► │  live-link app       │
-//   │  (toggle)    │                │   spawns cloudflared │
-//   └──────────────┘                │   parses public URL  │
-//                                   └──────┬───────────────┘
-//                                          │
-//                                          ▼
-//                                  https://<random>.trycloudflare.com
-//                                          │
-//                                          ▼
-//                                  Cloudflare edge → user's apteva-server
+// Two modes, picked via the `mode` config field:
 //
-// v0.1 ships a single provider (Cloudflare Quick Tunnel) so the
-// experience is "install → click → public URL", with no account or
-// token. Future versions add named tunnels, ngrok, and automatic
-// PUBLIC_URL rewrite for OAuth callbacks.
+//   - quick  (v0.1, default): Cloudflare Quick Tunnel. Anonymous, free,
+//     fresh https://<random>.trycloudflare.com URL on every start. No
+//     account or token required. Best for dev and one-off shares.
+//
+//   - named  (v0.2): a stable URL on a Cloudflare zone the operator
+//     owns (e.g. https://tunnel.example.com). Requires an API token
+//     with Cloudflare Tunnel:Edit + DNS:Edit, an account_id, and a
+//     zone_id. The app uses those to create-or-adopt a cfd_tunnel,
+//     PUT its ingress to point hostname → target_url, and upsert a
+//     proxied CNAME → <tunnel_id>.cfargotunnel.com. Restarts reuse
+//     the same tunnel + URL; uninstall reverses both steps via the
+//     expose_destroy tool.
+//
+// In both modes, runs are persisted to runs(...) for "was the tunnel
+// up at X?" history, with a mode column so the UI can render the
+// distinction.
 package main
 
 import (
@@ -48,6 +50,11 @@ var manifestYAML string
 // Matches apteva-server's default port. The platform also injects
 // APTEVA_GATEWAY_URL pointing at itself, which we prefer when set.
 const defaultTargetURL = "http://localhost:5280"
+
+// namedTunnelPrefix scopes the auto-generated CF tunnel name so an
+// operator running multiple Apteva installs doesn't collide. The
+// install-id-or-host suffix is appended at create time.
+const namedTunnelPrefix = "apteva-live-link-"
 
 type App struct {
 	mgr *Manager
@@ -130,6 +137,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/stop", Handler: a.handleStop},
 		{Pattern: "/runs", Handler: a.handleRuns},
 		{Pattern: "/install", Handler: a.handleInstall},
+		{Pattern: "/destroy", Handler: a.handleDestroy},
 	}
 }
 
@@ -150,9 +158,15 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if !snap.StartedAt.IsZero() {
 		out["started_at"] = snap.StartedAt.UTC().Format(time.RFC3339)
 	}
-	// Surface the resolved target so the UI can show it pre-flight,
-	// even before the user clicks start.
+	// Surface the resolved target + mode so the UI can show the
+	// pre-flight state before the user clicks start.
 	out["resolved_target"] = a.resolveTargetURL(ctx)
+	mode := a.resolveMode(ctx)
+	out["mode"] = string(mode)
+	if mode == ModeNamed {
+		// hostname is non-secret operator config — safe to surface.
+		out["hostname"] = strings.TrimSpace(ctx.Config().Get("hostname"))
+	}
 	httpJSON(w, out)
 }
 
@@ -207,6 +221,28 @@ func (a *App) handleInstall(w http.ResponseWriter, r *http.Request) {
 	httpJSON(w, map[string]any{"installed": true, "path": path})
 }
 
+// handleDestroy tears down the named tunnel: deletes the CF-side
+// tunnel + DNS record, then drops the local row. Refuses while a
+// tunnel is up — operator must stop it first. No-op for installs
+// that never created a named tunnel.
+func (a *App) handleDestroy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if a.mgr.Snapshot().Status == StatusRunning {
+		httpErr(w, http.StatusConflict, "stop the tunnel before destroying it")
+		return
+	}
+	ctx := getAppCtx(r)
+	destroyed, err := a.destroyNamedTunnel(ctx)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"destroyed": destroyed})
+}
+
 func (a *App) handleRuns(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -231,21 +267,27 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "expose_start",
-			Description: "Start a public tunnel and return the assigned trycloudflare.com URL. Idempotent — if a tunnel is already running, returns the existing one.",
+			Description: "Start a public tunnel and return its URL. In quick mode the URL is a fresh trycloudflare.com subdomain; in named mode it's the configured stable hostname. Idempotent — if a tunnel is already running, returns the existing one.",
 			InputSchema: schemaObject(nil, nil),
 			Handler:     a.toolStart,
 		},
 		{
 			Name:        "expose_stop",
-			Description: "Stop the running tunnel, if any. No-op when idle.",
+			Description: "Stop the running tunnel, if any. No-op when idle. Named tunnels persist on Cloudflare — only the local connector stops; use expose_destroy to remove them entirely.",
 			InputSchema: schemaObject(nil, nil),
 			Handler:     a.toolStop,
 		},
 		{
 			Name:        "expose_status",
-			Description: "Report whether a tunnel is currently running and its public URL.",
+			Description: "Report whether a tunnel is currently running, its public URL, and which mode (quick/named) is configured.",
 			InputSchema: schemaObject(nil, nil),
 			Handler:     a.toolStatus,
+		},
+		{
+			Name:        "expose_destroy",
+			Description: "Tear down the named tunnel: delete it on Cloudflare and remove the CNAME record. Refuses while the tunnel is running. No-op when no named tunnel was ever created. Quick-mode tunnels have nothing to destroy.",
+			InputSchema: schemaObject(nil, nil),
+			Handler:     a.toolDestroy,
 		},
 	}
 }
@@ -276,7 +318,7 @@ func (a *App) toolStop(_ *sdk.AppCtx, _ map[string]any) (any, error) {
 	return map[string]any{"stopped": true}, nil
 }
 
-func (a *App) toolStatus(_ *sdk.AppCtx, _ map[string]any) (any, error) {
+func (a *App) toolStatus(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 	snap := a.mgr.Snapshot()
 	return map[string]any{
 		"status":     snap.Status,
@@ -284,7 +326,19 @@ func (a *App) toolStatus(_ *sdk.AppCtx, _ map[string]any) (any, error) {
 		"target_url": snap.TargetURL,
 		"run_id":     snap.RunID,
 		"last_error": snap.LastError,
+		"mode":       string(a.resolveMode(ctx)),
 	}, nil
+}
+
+func (a *App) toolDestroy(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	if a.mgr.Snapshot().Status == StatusRunning {
+		return nil, errors.New("stop the tunnel before destroying it")
+	}
+	destroyed, err := a.destroyNamedTunnel(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"destroyed": destroyed}, nil
 }
 
 // waitForURL polls the manager for up to 15s, hoping cloudflared
@@ -335,12 +389,29 @@ func (a *App) start(ctx *sdk.AppCtx) (string, error) {
 		return "", err
 	}
 
-	runID, err := dbInsertRun(ctx.AppDB(), "cloudflared", target)
+	mode := a.resolveMode(ctx)
+	params := StartParams{Binary: binary, Target: target, Mode: mode}
+
+	if mode == ModeNamed {
+		// Idempotent: creates the tunnel + DNS record on first start,
+		// adopts the existing pair on subsequent starts. The CF API
+		// calls happen *before* we insert the run row, so a config
+		// error doesn't leave a "failed before launch" row behind.
+		nt, err := a.ensureNamedTunnel(ctx)
+		if err != nil {
+			return "", err
+		}
+		params.Token = nt.TunnelToken
+		params.Hostname = nt.Hostname
+	}
+
+	runID, err := dbInsertRun(ctx.AppDB(), "cloudflared", target, string(mode))
 	if err != nil {
 		return "", fmt.Errorf("insert run: %w", err)
 	}
+	params.RunID = runID
 
-	if err := a.mgr.Start(binary, target, runID); err != nil {
+	if err := a.mgr.Start(params); err != nil {
 		// Surface the reason in the run row so history shows *why*
 		// the start attempt failed.
 		_, _ = ctx.AppDB().Exec(
@@ -349,6 +420,144 @@ func (a *App) start(ctx *sdk.AppCtx) (string, error) {
 		return "", err
 	}
 	return target, nil
+}
+
+// resolveMode picks quick vs named, defaulting to quick when the
+// `mode` config field is empty or unset. Anything else is rejected at
+// start time (we don't silently fall back).
+func (a *App) resolveMode(ctx *sdk.AppCtx) Mode {
+	if ctx == nil {
+		return ModeQuick
+	}
+	v := strings.ToLower(strings.TrimSpace(ctx.Config().Get("mode")))
+	switch v {
+	case "", "quick":
+		return ModeQuick
+	case "named":
+		return ModeNamed
+	default:
+		// Unknown value — fall back to quick rather than 500ing on a
+		// typo. The status endpoint shows the resolved mode so the
+		// operator can tell something didn't take.
+		return ModeQuick
+	}
+}
+
+// ensureNamedTunnel returns a usable named tunnel: from the local DB
+// if one already exists for the configured hostname, otherwise creates
+// it on Cloudflare (or adopts an existing CF tunnel with the same
+// name) and persists the credentials. Idempotent — safe to call on
+// every start.
+func (a *App) ensureNamedTunnel(ctx *sdk.AppCtx) (*NamedTunnel, error) {
+	cfg := ctx.Config()
+	hostname := strings.TrimSpace(cfg.Get("hostname"))
+	apiToken := strings.TrimSpace(cfg.Get("cf_api_token"))
+	accountID := strings.TrimSpace(cfg.Get("cf_account_id"))
+	zoneID := strings.TrimSpace(cfg.Get("cf_zone_id"))
+	if hostname == "" || apiToken == "" || accountID == "" || zoneID == "" {
+		return nil, errors.New("named mode requires hostname, cf_api_token, cf_account_id, and cf_zone_id in app config")
+	}
+
+	// Local cache hit: nothing to call CF for.
+	if existing, err := dbGetNamedTunnel(ctx.AppDB(), hostname); err == nil && existing != nil {
+		return existing, nil
+	}
+
+	cf := newCFClient(apiToken)
+	name := namedTunnelPrefix + sanitizeForTunnelName(hostname)
+
+	tun, err := cf.findTunnelByName(accountID, name)
+	if err != nil {
+		return nil, fmt.Errorf("cf find tunnel: %w", err)
+	}
+	if tun == nil {
+		tun, err = cf.createTunnel(accountID, name)
+		if err != nil {
+			return nil, fmt.Errorf("cf create tunnel: %w", err)
+		}
+	} else if tun.Token == "" {
+		// Adopting an existing tunnel: CF's list endpoint doesn't
+		// return the connector token. Without it we can't `run`, so
+		// fail loudly rather than silently re-creating (which would
+		// abandon the old tunnel and need a manual cleanup).
+		return nil, fmt.Errorf("a tunnel named %q already exists in this account but its connector token isn't available via the API; delete it in the Cloudflare dashboard or pick a different hostname", name)
+	}
+
+	target := a.resolveTargetURL(ctx)
+	if err := cf.putTunnelConfig(accountID, tun.ID, hostname, target); err != nil {
+		return nil, fmt.Errorf("cf put tunnel config: %w", err)
+	}
+	dnsRecordID, err := cf.upsertDNSCNAME(zoneID, hostname, tun.ID)
+	if err != nil {
+		return nil, fmt.Errorf("cf upsert dns: %w", err)
+	}
+
+	nt := &NamedTunnel{
+		Hostname:    hostname,
+		TunnelID:    tun.ID,
+		TunnelToken: tun.Token,
+		AccountID:   accountID,
+		ZoneID:      zoneID,
+		DNSRecordID: dnsRecordID,
+	}
+	if err := dbInsertNamedTunnel(ctx.AppDB(), nt); err != nil {
+		return nil, fmt.Errorf("persist named tunnel: %w", err)
+	}
+	return nt, nil
+}
+
+// destroyNamedTunnel reverses ensureNamedTunnel: delete CNAME, delete
+// CF tunnel, drop the local row. Returns whether anything was
+// destroyed (false = no named tunnel to destroy). CF errors are
+// returned as-is; callers can retry, since the local row only gets
+// dropped after CF acknowledges both deletes.
+func (a *App) destroyNamedTunnel(ctx *sdk.AppCtx) (bool, error) {
+	cfg := ctx.Config()
+	hostname := strings.TrimSpace(cfg.Get("hostname"))
+	if hostname == "" {
+		return false, nil
+	}
+	nt, err := dbGetNamedTunnel(ctx.AppDB(), hostname)
+	if err != nil || nt == nil {
+		return false, nil
+	}
+	apiToken := strings.TrimSpace(cfg.Get("cf_api_token"))
+	if apiToken == "" {
+		return false, errors.New("cf_api_token missing — cannot reach Cloudflare to destroy the tunnel")
+	}
+	cf := newCFClient(apiToken)
+	if err := cf.deleteDNSRecord(nt.ZoneID, nt.DNSRecordID); err != nil {
+		return false, fmt.Errorf("cf delete dns: %w", err)
+	}
+	if err := cf.deleteTunnel(nt.AccountID, nt.TunnelID); err != nil {
+		return false, fmt.Errorf("cf delete tunnel: %w", err)
+	}
+	if err := dbDeleteNamedTunnel(ctx.AppDB(), hostname); err != nil {
+		return false, fmt.Errorf("drop named tunnel row: %w", err)
+	}
+	return true, nil
+}
+
+// sanitizeForTunnelName turns a hostname into a CF-tunnel-name-safe
+// suffix: lowercase, dots → hyphens, drop anything that's not
+// alphanumeric or hyphen. CF tunnel names must be 1-32 chars; we trim
+// to 24 to leave room for the prefix.
+func sanitizeForTunnelName(s string) string {
+	s = strings.ToLower(s)
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.', r == '-', r == '_':
+			b.WriteRune('-')
+		}
+	}
+	out := b.String()
+	if len(out) > 24 {
+		out = out[:24]
+	}
+	return out
 }
 
 // resolveTargetURL picks the URL cloudflared should forward to, in
@@ -374,6 +583,7 @@ func (a *App) resolveTargetURL(ctx *sdk.AppCtx) string {
 type Run struct {
 	ID         int64  `json:"id"`
 	Provider   string `json:"provider"`
+	Mode       string `json:"mode"`
 	TargetURL  string `json:"target_url"`
 	PublicURL  string `json:"public_url"`
 	StartedAt  string `json:"started_at"`
@@ -382,12 +592,26 @@ type Run struct {
 	ExitReason string `json:"exit_reason,omitempty"`
 }
 
+// NamedTunnel mirrors a row in the named_tunnels table — the
+// persistent CF-side state for one stable hostname.
+type NamedTunnel struct {
+	ID          int64
+	Hostname    string
+	TunnelID    string
+	TunnelToken string
+	AccountID   string
+	ZoneID      string
+	DNSRecordID string
+	CreatedAt   string
+}
+
 // ─── DB helpers ────────────────────────────────────────────────────
 
-func dbInsertRun(db *sql.DB, provider, target string) (int64, error) {
+func dbInsertRun(db *sql.DB, provider, target, mode string) (int64, error) {
 	res, err := db.Exec(
-		`INSERT INTO runs (provider, target_url, status) VALUES (?, ?, 'running')`,
-		provider, target)
+		`INSERT INTO runs (provider, target_url, status, mode)
+		 VALUES (?, ?, 'running', ?)`,
+		provider, target, mode)
 	if err != nil {
 		return 0, err
 	}
@@ -398,7 +622,7 @@ func dbInsertRun(db *sql.DB, provider, target string) (int64, error) {
 func dbListRuns(db *sql.DB, limit int) ([]*Run, error) {
 	rows, err := db.Query(
 		`SELECT id, provider, target_url, public_url, started_at,
-		        COALESCE(finished_at,''), status, exit_reason
+		        COALESCE(finished_at,''), status, exit_reason, mode
 		 FROM runs ORDER BY started_at DESC, id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -408,12 +632,43 @@ func dbListRuns(db *sql.DB, limit int) ([]*Run, error) {
 	for rows.Next() {
 		r := &Run{}
 		if err := rows.Scan(&r.ID, &r.Provider, &r.TargetURL, &r.PublicURL,
-			&r.StartedAt, &r.FinishedAt, &r.Status, &r.ExitReason); err != nil {
+			&r.StartedAt, &r.FinishedAt, &r.Status, &r.ExitReason, &r.Mode); err != nil {
 			continue
 		}
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+func dbGetNamedTunnel(db *sql.DB, hostname string) (*NamedTunnel, error) {
+	row := db.QueryRow(
+		`SELECT id, hostname, tunnel_id, tunnel_token, account_id, zone_id,
+		        dns_record_id, created_at
+		 FROM named_tunnels WHERE hostname = ?`, hostname)
+	nt := &NamedTunnel{}
+	if err := row.Scan(&nt.ID, &nt.Hostname, &nt.TunnelID, &nt.TunnelToken,
+		&nt.AccountID, &nt.ZoneID, &nt.DNSRecordID, &nt.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return nt, nil
+}
+
+func dbInsertNamedTunnel(db *sql.DB, nt *NamedTunnel) error {
+	_, err := db.Exec(
+		`INSERT INTO named_tunnels (hostname, tunnel_id, tunnel_token,
+		                            account_id, zone_id, dns_record_id)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		nt.Hostname, nt.TunnelID, nt.TunnelToken,
+		nt.AccountID, nt.ZoneID, nt.DNSRecordID)
+	return err
+}
+
+func dbDeleteNamedTunnel(db *sql.DB, hostname string) error {
+	_, err := db.Exec(`DELETE FROM named_tunnels WHERE hostname = ?`, hostname)
+	return err
 }
 
 // ─── globalCtx + http helpers (mirrors backup app's pattern) ───────

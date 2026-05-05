@@ -2,18 +2,21 @@ schema: apteva-app/v1
 
 name: live-link
 display_name: Live Link
-version: 0.1.1
+version: 0.2.0
 description: |
-  One-click public HTTPS URL for a locally-installed Apteva instance.
-  Spawns a Cloudflare Quick Tunnel under the hood — anonymous, free,
-  no account required — and surfaces the assigned trycloudflare.com
-  URL in the dashboard so the operator can share it, test webhooks
-  against it, or hit it from a phone on a different network.
+  Public HTTPS URL for a locally-installed Apteva instance. Two modes:
 
-  v0.1 is intentionally one-knob: install the app, click "Go live",
-  copy the URL. Future versions add named cloudflared tunnels (custom
-  domain), ngrok as an alternative provider, and automatic rewrite of
-  PUBLIC_URL so OAuth callbacks resolve through the tunnel.
+  - quick (default): Cloudflare Quick Tunnel. Anonymous, free, fresh
+    *.trycloudflare.com URL on every start. Zero config — install the
+    app, click "Go live", copy the URL.
+
+  - named (v0.2): a stable URL on a Cloudflare zone you own (e.g.
+    https://tunnel.example.com). Requires a Cloudflare API token with
+    Cloudflare Tunnel:Edit + DNS:Edit, plus account_id and zone_id.
+    The app creates-or-adopts a cfd_tunnel, configures ingress to
+    point hostname → target_url, and upserts a proxied CNAME pointing
+    your hostname at <tunnel_id>.cfargotunnel.com. Restarts reuse the
+    same URL; expose_destroy reverses both steps.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/live-link
@@ -33,11 +36,13 @@ provides:
     - prefix: /
   mcp_tools:
     - name: expose_start
-      description: Start a public tunnel to this Apteva instance and return the assigned URL.
+      description: Start a public tunnel and return its URL. Quick-mode URLs are fresh per start; named-mode URLs are stable.
     - name: expose_stop
-      description: Stop the running tunnel, if any.
+      description: Stop the running tunnel, if any. Named tunnels persist on Cloudflare — use expose_destroy to remove them.
     - name: expose_status
-      description: Report whether a tunnel is currently running and its public URL.
+      description: Report whether a tunnel is currently running, its public URL, and which mode is configured.
+    - name: expose_destroy
+      description: Tear down the named tunnel on Cloudflare (delete CNAME + tunnel). Refuses while running.
   ui_panels:
     - slot: project.page
       label: Live Link
@@ -65,7 +70,16 @@ config_schema:
     options: [cloudflared]
     default: cloudflared
     label: Tunnel provider
-    description: v0.1 supports Cloudflare Quick Tunnels only. ngrok / tailscale-funnel arrive in v0.2.
+    description: Cloudflare is the only provider in v0.2; ngrok and tailscale-funnel arrive in v0.3.
+  - name: mode
+    type: select
+    options: [quick, named]
+    default: quick
+    label: URL stability
+    description: |
+      "quick" mints a fresh trycloudflare.com URL on every start — zero
+      config, no account. "named" gives you a stable URL on a hostname
+      you control (requires the cf_* fields below).
   - name: target_url
     type: text
     default: ""
@@ -85,5 +99,34 @@ config_schema:
       previously auto-installed copy in the install's data dir, and as a
       last resort download the latest release from github.com/cloudflare/cloudflared
       (~30MB, one-time, on the first "Go live" click).
+  - name: hostname
+    type: text
+    default: ""
+    label: Hostname (named mode)
+    description: |
+      The stable public hostname, e.g. tunnel.example.com. Must be a
+      subdomain of a zone you own on Cloudflare. The app creates a
+      proxied CNAME at this name pointing at the tunnel; restarts
+      keep the same URL.
+  - name: cf_api_token
+    type: secret
+    default: ""
+    label: Cloudflare API token (named mode)
+    description: |
+      API token with Cloudflare Tunnel:Edit + DNS:Edit scopes. Created
+      at https://dash.cloudflare.com/profile/api-tokens. Stored
+      encrypted in the install's data dir; never logged.
+  - name: cf_account_id
+    type: text
+    default: ""
+    label: Cloudflare account ID (named mode)
+    description: Numeric/hex account id, visible in the URL of any page in the Cloudflare dashboard.
+  - name: cf_zone_id
+    type: text
+    default: ""
+    label: Cloudflare zone ID (named mode)
+    description: |
+      Zone ID for the domain hosting the hostname above. Visible on the
+      zone's overview page in the Cloudflare dashboard.
 
 upgrade_policy: auto-patch

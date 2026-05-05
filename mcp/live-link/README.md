@@ -1,22 +1,40 @@
-# Live Link (v0.1)
+# Live Link (v0.2)
 
-One-click public HTTPS URL for a locally-installed Apteva instance,
-via Cloudflare Quick Tunnels — anonymous, free, no account.
+Public HTTPS URL for a locally-installed Apteva instance. Two modes:
 
-## What's in v0.1
+- **Quick** (default): Cloudflare Quick Tunnel. Anonymous, free,
+  fresh `*.trycloudflare.com` URL on every start. Zero config.
+- **Named**: a stable URL on a Cloudflare zone you own
+  (`https://tunnel.example.com`). Requires a CF API token + account
+  ID + zone ID. Restarts reuse the same URL.
 
-- **One provider, zero config**: spawns `cloudflared tunnel --url <target>`
-  and parses the assigned `*.trycloudflare.com` URL out of stderr.
+## What's in v0.2
+
+- **Mode switch** via the `mode` config field (`quick` | `named`).
+- **Quick mode** (unchanged from v0.1): spawns
+  `cloudflared tunnel --url <target>` and parses the assigned
+  `*.trycloudflare.com` URL out of stderr.
+- **Named mode**: on first start the app calls Cloudflare's API to
+  - create a `cfd_tunnel` (or adopt an existing one with the same name)
+  - PUT its ingress to point `hostname → target_url`
+  - upsert a proxied CNAME at `hostname → <tunnel_id>.cfargotunnel.com`
+  Connector is run with `tunnel run --token <token>`; URL is known
+  up-front, so the runs row gets populated immediately. State (tunnel
+  UUID, connector token, DNS record id) lives in `named_tunnels` so
+  restarts skip the API roundtrip.
 - **One UI toggle** at `project.page` slot: status pill, the live URL
-  with a Copy button, a Stop button, and a run history.
-- **3 MCP tools** for agent-driven operation:
+  with a Copy button, a Stop button, and a run history. Status now
+  surfaces the configured mode.
+- **4 MCP tools**:
   - `expose_start` — idempotent; if a tunnel is already up, returns it.
     Blocks up to 15s for the URL to be assigned before returning.
   - `expose_stop` — sends SIGTERM, falls back to SIGKILL after 5s.
-  - `expose_status` — current state + last error.
-- **Run history** in the app's own SQLite (`runs` table): provider,
-  target URL, public URL, start/end times, exit reason. Good enough
-  to answer "was the tunnel up at 14:00?" without external logs.
+    Named tunnels persist on Cloudflare; only the local connector stops.
+  - `expose_status` — current state, last error, mode.
+  - `expose_destroy` — named-mode only: delete CNAME + tunnel on CF
+    and drop the local row. Refuses while running.
+- **Run history** in the app's own SQLite (`runs` table) now tagged
+  with the mode it ran in.
 - **Crash-safe**: on sidecar boot, any leftover `running` rows from a
   previous process life are marked `orphaned` so the UI doesn't lie.
 
@@ -24,16 +42,12 @@ via Cloudflare Quick Tunnels — anonymous, free, no account.
 
 | Capability                                | When  |
 |-------------------------------------------|-------|
-| Auto-rewrite of `PUBLIC_URL`              | v0.2 — needs a new `POST /api/platform/config` endpoint on apteva-server |
-| Named cloudflared tunnels (custom domain) | v0.2 — piggybacks on the `cloudflare` integration's API token |
-| ngrok provider                            | v0.2 — adds a new `ngrok` integration to the catalog |
-| Tailscale Funnel provider                 | v0.3 |
-| Edge HTTP basic auth                      | v0.2 — cloudflared supports it natively |
-| Auto-restart on tunnel drop with backoff  | v0.2 |
-
-The v0.1 shape is deliberately the smallest thing that's useful: hit
-"Go live", copy the URL, share it. OAuth callbacks and webhooks pointed
-at `localhost` won't auto-rewire — that's the v0.2 work.
+| Auto-rewrite of `PUBLIC_URL`              | v0.3 — needs a new `POST /api/platform/config` endpoint on apteva-server |
+| Pull CF creds from the `cloudflare` integration | v0.3 — once the SDK exposes integration credential reads; for now use the `cf_*` config fields |
+| ngrok provider                            | v0.3 — adds a new `ngrok` integration to the catalog |
+| Tailscale Funnel provider                 | v0.4 |
+| Edge HTTP basic auth                      | v0.3 — cloudflared supports it natively |
+| Auto-restart on tunnel drop with backoff  | v0.3 |
 
 ## Why this is cleaner for Apteva than for WordPress
 
@@ -49,11 +63,12 @@ This app installs as `scope: global` and the operator must be admin.
 
 Declared permissions:
 
-- `db.write.app` — for the runs table
-- `net.egress` — cloudflared dials Cloudflare's edge
+- `db.write.app` — for the `runs` and `named_tunnels` tables
+- `net.egress` — cloudflared dials Cloudflare's edge; the app calls
+  `api.cloudflare.com` directly in named mode
 
 No `platform.config.write` yet — that permission ships alongside the
-v0.2 server endpoint.
+v0.3 PUBLIC_URL auto-rewrite work.
 
 ## Prerequisites
 
