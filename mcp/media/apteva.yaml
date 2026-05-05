@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.8.4
+version: 0.8.5
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -167,9 +167,9 @@ config_schema:
     description: How often the indexer scans storage for new media files.
   - name: max_probe_size_mb
     type: text
-    default: "8192"
+    default: "0"
     label: Max probe size (MB)
-    description: Files larger than this are marked skipped_size and not probed automatically — current implementation downloads the full file before running ffprobe/ffmpeg, so the cap protects against runaway local-disk fill on multi-GB sources. Bump per host. Pass force=true to media_reindex (or via the panel) to override per file regardless of size.
+    description: Files larger than this are marked skipped_size and not probed automatically — current implementation downloads the full file before running ffprobe/ffmpeg, so the cap protects against runaway local-disk fill on multi-GB sources. 0 = unlimited (default — most installs prefer "always index" over disk safety). Set per host if your scratch volume is small. Pass force=true to media_reindex (or via the panel) to override per file regardless of size.
   - name: thumbnail_seek_seconds
     type: text
     default: "1.0"
