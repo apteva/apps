@@ -1,0 +1,89 @@
+schema: apteva-app/v1
+
+name: live-link
+display_name: Live Link
+version: 0.1.0
+description: |
+  One-click public HTTPS URL for a locally-installed Apteva instance.
+  Spawns a Cloudflare Quick Tunnel under the hood — anonymous, free,
+  no account required — and surfaces the assigned trycloudflare.com
+  URL in the dashboard so the operator can share it, test webhooks
+  against it, or hit it from a phone on a different network.
+
+  v0.1 is intentionally one-knob: install the app, click "Go live",
+  copy the URL. Future versions add named cloudflared tunnels (custom
+  domain), ngrok as an alternative provider, and automatic rewrite of
+  PUBLIC_URL so OAuth callbacks resolve through the tunnel.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/live-link
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/live-link/icon.png
+tags: [tunnel, expose, public-url, cloudflared, infrastructure, dev]
+
+scopes: [global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: expose_start
+      description: Start a public tunnel to this Apteva instance and return the assigned URL.
+    - name: expose_stop
+      description: Stop the running tunnel, if any.
+    - name: expose_status
+      description: Report whether a tunnel is currently running and its public URL.
+  ui_panels:
+    - slot: project.page
+      label: Live Link
+      icon: globe
+      entry: /ui/LiveLinkPanel.mjs
+  workers: []
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/live-link
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/live-link.db
+  migrations: migrations/
+
+config_schema:
+  - name: provider
+    type: select
+    options: [cloudflared]
+    default: cloudflared
+    label: Tunnel provider
+    description: v0.1 supports Cloudflare Quick Tunnels only. ngrok / tailscale-funnel arrive in v0.2.
+  - name: target_url
+    type: text
+    default: ""
+    label: Target URL (optional)
+    description: |
+      The local URL the tunnel should forward to. Leave empty to use
+      APTEVA_GATEWAY_URL (the platform's own URL), which is the right
+      answer for almost every install. Override only if you want to
+      tunnel a different local service running on the same host.
+  - name: cloudflared_path
+    type: text
+    default: ""
+    label: cloudflared binary (override)
+    description: |
+      Optional path to a cloudflared binary you already manage. Leave empty
+      to let the app handle it: it will look on $PATH first, fall back to a
+      previously auto-installed copy in the install's data dir, and as a
+      last resort download the latest release from github.com/cloudflare/cloudflared
+      (~30MB, one-time, on the first "Go live" click).
+
+upgrade_policy: auto-patch
