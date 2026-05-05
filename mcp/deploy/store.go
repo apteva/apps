@@ -25,6 +25,8 @@ type Deployment struct {
 	PortHint          int    `json:"port_hint"`
 	EnvJSON           string `json:"env_json"`
 	Domain            string `json:"domain"`
+	DomainRecordID    string `json:"domain_record_id,omitempty"`
+	DomainAttachedAt  string `json:"domain_attached_at,omitempty"`
 	CurrentReleaseID  *int64 `json:"current_release_id,omitempty"`
 	ArchivedAt        string `json:"archived_at,omitempty"`
 	CreatedAt         string `json:"created_at"`
@@ -157,8 +159,27 @@ func dbDeleteDeployment(db *sql.DB, projectID string, id int64) error {
 	return err
 }
 
+// dbSetDeploymentDomain updates the domain link fields atomically.
+// Pass empty strings + nil time to clear (detach). recordID is the
+// stable handle returned by the domains app's records_set call so
+// detach can target the right record.
+func dbSetDeploymentDomain(db *sql.DB, id int64, domain, recordID, attachedAt string) error {
+	var attached any = attachedAt
+	if attachedAt == "" {
+		attached = nil
+	}
+	_, err := db.Exec(
+		`UPDATE deployments
+		   SET domain = ?, domain_record_id = ?, domain_attached_at = ?, updated_at = ?
+		 WHERE id = ?`,
+		domain, recordID, attached, nowUTC(), id,
+	)
+	return err
+}
+
 const deploymentColumns = `id, project_id, name, description, source_kind, source_ref, source_extra_json,
 		framework, build_cmd, start_cmd, port_hint, env_json, domain,
+		domain_record_id, COALESCE(domain_attached_at,''),
 		current_release_id, COALESCE(archived_at,''), created_at, updated_at`
 
 type rowScanner interface{ Scan(...any) error }
@@ -169,6 +190,7 @@ func scanDeployment(r rowScanner) (*Deployment, error) {
 	if err := r.Scan(
 		&d.ID, &d.ProjectID, &d.Name, &d.Description, &d.SourceKind, &d.SourceRef, &d.SourceExtraJSON,
 		&d.Framework, &d.BuildCmd, &d.StartCmd, &d.PortHint, &d.EnvJSON, &d.Domain,
+		&d.DomainRecordID, &d.DomainAttachedAt,
 		&current, &d.ArchivedAt, &d.CreatedAt, &d.UpdatedAt,
 	); err != nil {
 		return nil, err

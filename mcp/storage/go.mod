@@ -1,12 +1,17 @@
 module github.com/apteva/apps/mcp/storage
+
 go 1.25.0
+
 require (
-	github.com/apteva/app-sdk v0.1.3-0.20260430070155-43f24574d06d
+	github.com/apteva/app-sdk v0.2.0
 	github.com/google/uuid v1.6.0
+	github.com/minio/minio-go/v7 v7.1.0
 	modernc.org/sqlite v1.50.0
 )
+
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-ini/ini v1.67.0 // indirect
 	github.com/klauspost/compress v1.18.2 // indirect
@@ -15,9 +20,9 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
-	github.com/minio/minio-go/v7 v7.1.0 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/tinylib/msgp v1.6.1 // indirect

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -123,6 +124,33 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 			},
 		},
+		{
+			Name: "deploy_attach_domain", Handler: a.toolAttachDomain,
+			Description: "Attach an FQDN to a deployment via the Domains app. Validates the FQDN sits under a registered domain, then upserts a DNS record (CNAME by default) pointing at the deploy's public_host. Args: name OR id, fqdn, target?, type? (CNAME|A, default CNAME), ttl?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":   map[string]any{"type": "string"},
+					"id":     map[string]any{"type": "integer"},
+					"fqdn":   map[string]any{"type": "string"},
+					"target": map[string]any{"type": "string"},
+					"type":   map[string]any{"type": "string", "enum": []string{"CNAME", "A"}},
+					"ttl":    map[string]any{"type": "integer"},
+				},
+				"required": []string{"fqdn"},
+			},
+		},
+		{
+			Name: "deploy_detach_domain", Handler: a.toolDetachDomain,
+			Description: "Clear a deployment's domain link. Best-effort deletes the DNS record via the Domains app and clears the deployment's domain field. Args: name OR id.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name": map[string]any{"type": "string"},
+					"id":   map[string]any{"type": "integer"},
+				},
+			},
+		},
 	}
 }
 
@@ -133,6 +161,12 @@ func (a *App) toolInit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	domainArg := strings.TrimSpace(strArg(args, "domain"))
+	// When the Domains app is installed, route the inline `domain` arg
+	// through the attach flow (validates ownership, writes DNS). When
+	// it isn't, fall through to the historical free-text behavior so
+	// installs without Domains still work.
+	domainsOn := domainArg != "" && a.domainsAvailable(ctx)
 	in := CreateDeploymentInput{
 		Name:        strArg(args, "name"),
 		Description: strArg(args, "description"),
@@ -143,7 +177,9 @@ func (a *App) toolInit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		StartCmd:    strArg(args, "start_cmd"),
 		PortHint:    intArg(args, "port_hint"),
 		EnvJSON:     strArg(args, "env_json"),
-		Domain:      strArg(args, "domain"),
+	}
+	if !domainsOn {
+		in.Domain = domainArg
 	}
 	if err := validateName(in.Name); err != nil {
 		return nil, err
@@ -155,6 +191,14 @@ func (a *App) toolInit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	emit("deploy.created", map[string]any{
 		"deployment_id": d.ID, "name": d.Name, "source_kind": d.SourceKind,
 	})
+	if domainsOn {
+		if err := a.attachDomain(ctx, d, attachDomainSpec{FQDN: domainArg}); err != nil {
+			// Don't roll back the deployment — the user can fix the
+			// domain wiring (or detach) without losing the binding.
+			return map[string]any{"deployment": d, "domain_error": err.Error()}, nil
+		}
+		d, _ = dbGetDeployment(ctx.AppDB(), pid, d.ID)
+	}
 	return map[string]any{"deployment": d}, nil
 }
 
@@ -313,6 +357,11 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Drop the DNS record before deleting the row so the deployment's
+	// link metadata is still around for detach to work.
+	if d.DomainRecordID != "" {
+		_ = a.detachDomain(ctx, d)
+	}
 	// Stop any live release first.
 	if d.CurrentReleaseID != nil {
 		if rr := a.registry.Get(*d.CurrentReleaseID); rr != nil {
@@ -334,6 +383,39 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	emit("deploy.destroyed", map[string]any{"deployment_id": d.ID, "name": d.Name})
 	return map[string]any{"destroyed": true, "id": d.ID}, nil
+}
+
+func (a *App) toolAttachDomain(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	d, err := a.lookupDeployment(args)
+	if err != nil {
+		return nil, err
+	}
+	spec := attachDomainSpec{
+		FQDN:   strArg(args, "fqdn"),
+		Target: strArg(args, "target"),
+		Type:   strArg(args, "type"),
+		TTL:    intArg(args, "ttl"),
+	}
+	if err := a.attachDomain(ctx, d, spec); err != nil {
+		return nil, err
+	}
+	pid, _ := resolveProjectFromArgs(args)
+	out, _ := dbGetDeployment(ctx.AppDB(), pid, d.ID)
+	return map[string]any{"deployment": out}, nil
+}
+
+func (a *App) toolDetachDomain(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	d, err := a.lookupDeployment(args)
+	if err != nil {
+		return nil, err
+	}
+	res := map[string]any{"detached": true, "id": d.ID, "fqdn": d.Domain}
+	if err := a.detachDomain(ctx, d); err != nil {
+		// Domain row was cleared either way; surface the registrar
+		// error so the user can clean it up manually if needed.
+		res["registrar_error"] = err.Error()
+	}
+	return res, nil
 }
 
 // ─── helpers ──────────────────────────────────────────────────────

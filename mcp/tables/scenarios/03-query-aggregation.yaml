@@ -1,0 +1,48 @@
+name: query-aggregation
+description: |
+  Agent answers an analytics question that the typed tools can't
+  express directly — must drop to tables_query (read-only SELECT
+  escape hatch) with a GROUP BY. Tests that the agent picks the right
+  tool when faced with an aggregation request.
+
+timeout: 60s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  fixture:
+    tools:
+      - tables_create:
+          name: expenses
+          columns:
+            - { name: category, type: text, nullable: false }
+            - { name: amount, type: number, nullable: false }
+            - { name: note, type: text }
+      - rows_insert:
+          table: expenses
+          rows:
+            - { category: "groceries", amount: 42.10, note: "weekly shop" }
+            - { category: "groceries", amount: 18.50, note: "milk + eggs" }
+            - { category: "rent", amount: 1200.00 }
+            - { category: "transport", amount: 25.00, note: "train" }
+            - { category: "transport", amount: 12.00, note: "bus pass" }
+            - { category: "groceries", amount: 7.30, note: "snacks" }
+
+directive: |
+  In the "expenses" table, tell me the total amount spent per
+  category, sorted from highest to lowest. The named row tools can't
+  express GROUP BY directly — use tables_query with a SELECT statement
+  and the {expenses} placeholder for the table name.
+
+assert:
+  - tool_called: tables_query
+  - iterations_at_most: 8
+  # The query should produce three category buckets with rent at the top.
+  - response_contains: "rent"
+  - response_contains: "1200"
+
+budget:
+  total_tokens: 14000
+  cost_usd: 0.20

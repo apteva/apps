@@ -78,10 +78,18 @@ interface Deployment {
   port_hint: number;
   env_json: string;
   domain: string;
+  domain_record_id?: string;
+  domain_attached_at?: string;
   current_release_id?: number | null;
   archived_at?: string;
   created_at: string;
   updated_at: string;
+}
+
+interface MetaInfo {
+  domains_available: boolean;
+  domains: { name: string }[];
+  public_host: string;
 }
 
 interface Build {
@@ -159,6 +167,8 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   const [logs, setLogs] = useState("");
   const [logKind, setLogKind] = useState<"build" | "release">("release");
   const [logTargetId, setLogTargetId] = useState<number | null>(null);
+  const [meta, setMeta] = useState<MetaInfo | null>(null);
+  const [showAttachDomain, setShowAttachDomain] = useState(false);
 
   const withParams = useCallback(
     (extra: Record<string, string> = {}) =>
@@ -220,6 +230,16 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   );
 
   useEffect(() => { loadDeployments(); }, [loadDeployments]);
+
+  // Capabilities: whether the optional Domains app is installed +
+  // the registered domains for the picker. Cheap one-shot per mount.
+  useEffect(() => {
+    let cancelled = false;
+    api<MetaInfo>("GET", "/_meta")
+      .then((m) => { if (!cancelled) setMeta(m); })
+      .catch(() => { if (!cancelled) setMeta({ domains_available: false, domains: [], public_host: "" }); });
+    return () => { cancelled = true; };
+  }, [api]);
 
   // Refresh on relevant events.
   useAppEvents<{ deployment_id?: number; build_id?: number; release_id?: number }>("deploy", projectId, (ev) => {
@@ -297,6 +317,24 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
           await api("POST", `/deployments/${detail.deployment.id}/stop`);
         } catch (e) {
           setError("Stop failed: " + (e as Error).message);
+        }
+      },
+    });
+  };
+
+  const handleDetachDomain = () => {
+    if (!detail) return;
+    setConfirmState({
+      title: "Detach domain",
+      body: `Remove the domain "${detail.deployment.domain}" from this deployment? The DNS record will be deleted via the Domains app.`,
+      confirmLabel: "Detach",
+      tone: "warning",
+      onConfirm: async () => {
+        try {
+          await api("POST", `/deployments/${detail.deployment.id}/detach-domain`);
+          loadDetail(detail.deployment.id);
+        } catch (e) {
+          setError("Detach failed: " + (e as Error).message);
         }
       },
     });
@@ -397,6 +435,22 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                   rel="noreferrer"
                   className="text-xs text-accent hover:underline truncate max-w-[260px]"
                 >{detail.url} ↗</a>
+              )}
+              {detail.deployment.domain ? (
+                <button
+                  type="button"
+                  onClick={handleDetachDomain}
+                  title={detail.deployment.domain_attached_at ? `Attached ${detail.deployment.domain_attached_at}` : "Free-text domain (no DNS managed)"}
+                  className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input"
+                >
+                  {detail.deployment.domain_attached_at ? "Detach" : "Clear"} {detail.deployment.domain}
+                </button>
+              ) : meta?.domains_available && (
+                <button
+                  type="button"
+                  onClick={() => setShowAttachDomain(true)}
+                  className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input"
+                >+ Attach domain</button>
               )}
               <button
                 type="button"
@@ -550,6 +604,20 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
           }}
           api={api}
           projectId={projectId}
+          meta={meta}
+        />
+      )}
+
+      {showAttachDomain && detail && (
+        <AttachDomainDialog
+          deployment={detail.deployment}
+          meta={meta}
+          onClose={() => setShowAttachDomain(false)}
+          onAttached={() => {
+            setShowAttachDomain(false);
+            loadDetail(detail.deployment.id);
+          }}
+          api={api}
         />
       )}
 
@@ -642,11 +710,13 @@ function CreateDeploymentDialog({
   onCreated,
   api,
   projectId,
+  meta,
 }: {
   onClose: () => void;
   onCreated: (d: Deployment) => void;
   api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
   projectId: string;
+  meta: MetaInfo | null;
 }) {
   const [name, setName] = useState("");
   const [sourceKind, setSourceKind] = useState<(typeof SOURCE_KINDS)[number]>("code");
@@ -655,6 +725,9 @@ function CreateDeploymentDialog({
   const [buildCmd, setBuildCmd] = useState("");
   const [startCmd, setStartCmd] = useState("");
   const [env, setEnv] = useState("");
+  const [domainApex, setDomainApex] = useState("");
+  const [domainSub, setDomainSub] = useState("");
+  const [domainText, setDomainText] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -692,7 +765,13 @@ function CreateDeploymentDialog({
     }
     setBusy(true);
     try {
-      const r = await api<{ deployment: Deployment }>("POST", "/deployments", {
+      let domain = "";
+      if (meta?.domains_available && domainApex) {
+        domain = domainSub.trim() ? `${domainSub.trim()}.${domainApex}` : domainApex;
+      } else if (!meta?.domains_available && domainText.trim()) {
+        domain = domainText.trim();
+      }
+      const r = await api<{ deployment: Deployment; domain_error?: string }>("POST", "/deployments", {
         name: name.trim(),
         source_kind: sourceKind,
         source_ref: sourceRef.trim(),
@@ -700,7 +779,14 @@ function CreateDeploymentDialog({
         build_cmd: buildCmd.trim(),
         start_cmd: startCmd.trim(),
         env_json: env.trim() || "{}",
+        domain,
       });
+      if (r.domain_error) {
+        // Deployment was created; only the DNS step failed. Surface
+        // it without aborting so the user can retry attach later.
+        setErr("Created, but domain attach failed: " + r.domain_error);
+        return;
+      }
       onCreated(r.deployment);
     } catch (e) {
       setErr((e as Error).message);
@@ -826,6 +912,50 @@ function CreateDeploymentDialog({
               className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
             />
           </div>
+          <div className="col-span-2">
+            <label className="text-xs text-text-muted block mb-1">
+              Domain (optional)
+              {meta?.domains_available
+                ? meta.public_host
+                  ? <span className="text-text-dim"> · CNAME → {meta.public_host}</span>
+                  : <span className="text-yellow"> · public_host not configured</span>
+                : <span className="text-text-dim"> · free-text (Domains app not installed)</span>}
+            </label>
+            {meta?.domains_available ? (
+              meta.domains.length === 0 ? (
+                <div className="text-xs text-text-dim">No domains registered. Open the Domains panel to add one.</div>
+              ) : (
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={domainSub}
+                    onChange={(e) => setDomainSub(e.target.value)}
+                    placeholder="app (or empty for apex)"
+                    className="w-32 bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+                  />
+                  <span className="self-center text-text-dim">.</span>
+                  <select
+                    value={domainApex}
+                    onChange={(e) => setDomainApex(e.target.value)}
+                    className="flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+                  >
+                    <option value="">— pick a domain —</option>
+                    {meta.domains.map((d) => (
+                      <option key={d.name} value={d.name}>{d.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )
+            ) : (
+              <input
+                type="text"
+                value={domainText}
+                onChange={(e) => setDomainText(e.target.value)}
+                placeholder="app.acme.com"
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+              />
+            )}
+          </div>
         </div>
         {err && <div className="text-red text-xs">{err}</div>}
         <div className="flex items-center justify-end gap-2 pt-2">
@@ -839,6 +969,143 @@ function CreateDeploymentDialog({
             disabled={busy}
             className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
           >{busy ? "Creating…" : "Create"}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// ─── AttachDomainDialog ───────────────────────────────────────────
+//
+// Picker for an existing deployment: choose a registered apex +
+// subdomain, optionally override target/type, submit. Surfaces the
+// same domain_error path as deploy_init when DNS write fails.
+
+function AttachDomainDialog({
+  deployment,
+  meta,
+  onClose,
+  onAttached,
+  api,
+}: {
+  deployment: Deployment;
+  meta: MetaInfo | null;
+  onClose: () => void;
+  onAttached: () => void;
+  api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
+}) {
+  const [apex, setApex] = useState("");
+  const [sub, setSub] = useState("");
+  const [target, setTarget] = useState("");
+  const [recordType, setRecordType] = useState<"CNAME" | "A">("CNAME");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const canSubmit = !!apex && (recordType === "CNAME" ? !!sub : true);
+
+  const submit = async () => {
+    if (!canSubmit) {
+      setErr(recordType === "CNAME" ? "Apex CNAME isn't allowed; pick a subdomain or switch to A." : "Pick a domain.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const fqdn = sub.trim() ? `${sub.trim()}.${apex}` : apex;
+      await api("POST", `/deployments/${deployment.id}/attach-domain`, {
+        fqdn,
+        target: target.trim(),
+        type: recordType,
+      });
+      onAttached();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <form
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={(e) => { e.preventDefault(); submit(); }}
+        className="w-[480px] bg-bg border border-border rounded p-5 space-y-4"
+      >
+        <h2 className="text-text font-semibold">Attach domain</h2>
+        {(!meta || meta.domains.length === 0) ? (
+          <div className="text-xs text-text-dim">No domains registered. Open the Domains panel to add one first.</div>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-text-muted block mb-1">Type</label>
+                <select
+                  value={recordType}
+                  onChange={(e) => setRecordType(e.target.value as "CNAME" | "A")}
+                  className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                >
+                  <option value="CNAME">CNAME</option>
+                  <option value="A">A</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-text-muted block mb-1">Apex domain</label>
+                <select
+                  value={apex}
+                  onChange={(e) => setApex(e.target.value)}
+                  className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+                >
+                  <option value="">— pick —</option>
+                  {meta.domains.map((d) => (
+                    <option key={d.name} value={d.name}>{d.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="col-span-2">
+                <label className="text-xs text-text-muted block mb-1">
+                  Subdomain {recordType === "CNAME" && <span className="text-text-dim">(required for CNAME)</span>}
+                </label>
+                <input
+                  type="text"
+                  value={sub}
+                  onChange={(e) => setSub(e.target.value)}
+                  placeholder="app"
+                  className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+                />
+              </div>
+              <div className="col-span-2">
+                <label className="text-xs text-text-muted block mb-1">
+                  Target
+                  <span className="text-text-dim">
+                    {" · "}
+                    {meta.public_host
+                      ? `defaults to public_host: ${meta.public_host}`
+                      : "public_host not configured — required"}
+                  </span>
+                </label>
+                <input
+                  type="text"
+                  value={target}
+                  onChange={(e) => setTarget(e.target.value)}
+                  placeholder={recordType === "A" ? "1.2.3.4" : "edge.acme.com"}
+                  className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+                />
+              </div>
+            </div>
+            {err && <div className="text-red text-xs">{err}</div>}
+          </>
+        )}
+        <div className="flex items-center justify-end gap-2 pt-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input"
+          >Cancel</button>
+          <button
+            type="submit"
+            disabled={busy || !canSubmit || !meta || meta.domains.length === 0}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+          >{busy ? "Attaching…" : "Attach"}</button>
         </div>
       </form>
     </div>

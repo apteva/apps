@@ -1,0 +1,39 @@
+name: typed-rows
+description: |
+  Agent defines a typed table from scratch and inserts a few rows. The
+  flagship "I just need to track this" flow — exercises tables_create
+  + rows_insert + rows_search end to end.
+
+timeout: 60s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  I want to start tracking the books I'm reading. Make a "books" table
+  with columns: title (text, required), author (text), rating (number,
+  1–5), finished (bool). Then add these three rows:
+
+    1. "The Three-Body Problem" by Liu Cixin, rating 5, finished
+    2. "Project Hail Mary" by Andy Weir, rating 4, not finished
+    3. "The Martian" by Andy Weir, rating 4, finished
+
+  Finally, list all the finished books. Use the tables app's MCP
+  tools.
+
+assert:
+  - tool_called: tables_create
+  - tool_called: rows_insert
+  - tool_called: rows_search
+  - http: GET /api/apps/tables/tables
+    expect_status: 200
+    expect_count_at: tables
+    expect_count: 1
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 14000
+  cost_usd: 0.20

@@ -1,0 +1,103 @@
+schema: apteva-app/v1
+
+name: tables
+display_name: Tables
+version: 0.1.0
+description: |
+  Typed-row database for Apteva agents and human teams. The row-shaped
+  sibling to the storage app: define typed tables, insert rows, query
+  with typed predicates, paginate. Strict schemas — every row's keys
+  and value types are validated against the table's column definitions
+  before insert. Columns can reference storage files via the file_id
+  type. Project-scoped by default; opt-in global tables for shared
+  lookup data.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/tables
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/tables/icon.png
+tags: [database, storage, records, sql]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: tables_create
+      description: 'Create a new table with typed columns. Args: name, columns (array of {name, type, nullable?, default?}). Returns the created table''s id + name.'
+    - name: tables_list
+      description: 'List tables visible to this install. No args. Returns [{id, name, scope, columns, row_count, created_at}].'
+    - name: tables_describe
+      description: 'Full schema + row count for one table. Args: name. Returns {id, name, scope, columns, row_count}.'
+    - name: tables_alter
+      description: 'Add, rename, or drop columns. Args: name, add? / rename? / drop?. Adding a non-nullable column requires a default. Returns the new schema.'
+    - name: tables_drop
+      description: 'Delete a table and all its rows. Args: name, confirm. Idempotent only when confirm=true.'
+    - name: rows_insert
+      description: 'Insert one or many rows. Args: table, rows (array of objects keyed by column name). Atomic — first failing row aborts the whole call. Returns {ids, inserted}.'
+    - name: rows_get
+      description: 'Fetch one row by id. Args: table, id, hydrate_files? (resolve file_id columns to signed URLs via the storage app). Returns {row, found}.'
+    - name: rows_update
+      description: 'Patch fields on a row. Args: table, id, fields (object). Touches updated_at. Returns the new row.'
+    - name: rows_delete
+      description: 'Delete by id, or by filter when filter is supplied + confirm=true. Returns {deleted}.'
+    - name: rows_search
+      description: 'Filter, sort, paginate. Args: table, where? (array of {col, op, value}), order_by?, limit?, offset?. Ops: eq, neq, lt, lte, gt, gte, contains, in, between, is_null, is_not_null. Returns {rows, total}.'
+    - name: rows_count
+      description: 'Count rows matching a filter. Args: table, where?. Returns {count}.'
+    - name: tables_query
+      description: 'Read-only SELECT escape hatch. Args: sql, params? (array of bound values). Refused on any non-SELECT keyword; row + bytes caps enforced. Returns {columns, rows, truncated}.'
+  ui_panels:
+    - slot: project.page
+      label: Tables
+      icon: database
+      entry: /ui/TablesPanel.mjs
+  skills:
+    - name: how-to-use-tables
+      command: /tables
+      body_file: skills/how-to-use-tables.md
+      description: |
+        Tables' mental model — when to pick tables vs storage vs the
+        domain-specific apps (crm, todo, tasks). Schema discipline,
+        the file_id ↔ storage bridge, query predicates.
+      metadata:
+        category: storage
+        icon: 🗃️
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/tables
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/tables.db
+  migrations: migrations/
+
+config_schema:
+  - name: max_rows_per_table
+    type: text
+    default: "1000000"
+    label: Max rows per table
+    description: Hard ceiling per user-table. Insert is refused once a table reaches this many live rows. Set to 0 to disable the cap.
+  - name: max_query_rows
+    type: text
+    default: "1000"
+    label: Max rows returned by tables_query
+    description: Read-only SELECT escape hatch row cap. Results past this point are truncated and the response sets truncated=true.
+  - name: max_query_ms
+    type: text
+    default: "2000"
+    label: Max tables_query duration (ms)
+    description: tables_query timeout. The query is cancelled and an error returned if it runs longer.
+
+upgrade_policy: auto-patch

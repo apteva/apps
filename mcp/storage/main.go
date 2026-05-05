@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -43,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: storage
 display_name: Storage
-version: 0.6.0
+version: 0.7.0
 description: |
   File storage with virtual folders, signed URLs, dedup. Pluggable
   backend: local disk by default, S3-compatible (AWS / R2 / B2 /
@@ -57,19 +58,30 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  resources:
+    - name: folder
+      label: "Folder"
+      list_endpoint: /folders
+      matcher: glob
+      picker: tree
+      listing_visibility: navigable
+  permissions:
+    - { name: files.read,   resource: folder, description: "List + download files" }
+    - { name: files.write,  resource: folder, description: "Upload, move, rename, set tags + visibility" }
+    - { name: files.delete, resource: folder, description: "Hard-delete or soft-delete files" }
   mcp_tools:
-    - { name: files_upload,           description: "Upload bytes (base64). Returns id, url, sha256." }
-    - { name: files_get,              description: "Metadata for one file." }
-    - { name: files_get_url,          description: "Mint a signed time-limited URL." }
-    - { name: files_search,           description: "Filtered file list." }
-    - { name: files_list,             description: "List files in one folder." }
-    - { name: files_list_folders,     description: "List immediate child folders." }
-    - { name: files_move,             description: "Move + optionally rename a file." }
-    - { name: files_set_tags,         description: "Append/remove tags." }
-    - { name: files_set_visibility,   description: "private | signed | public." }
-    - { name: files_dedupe_check,     description: "Find an existing file by sha256." }
-    - { name: files_delete,           description: "Soft-delete a file." }
-    - { name: files_from_url,         description: "Fetch a URL into storage." }
+    - { name: files_upload,         description: "Upload bytes (base64). Returns id, url, sha256.", requires: files.write,  resource_from: "folder/{arg.folder?}" }
+    - { name: files_get,            description: "Metadata for one file." }
+    - { name: files_get_url,        description: "Mint a signed time-limited URL." }
+    - { name: files_search,         description: "Filtered file list." }
+    - { name: files_list,           description: "List files in one folder." }
+    - { name: files_list_folders,   description: "List immediate child folders." }
+    - { name: files_move,           description: "Move + optionally rename a file.", requires: files.write,  resource_from: "folder/{arg.folder?}" }
+    - { name: files_set_tags,       description: "Append/remove tags." }
+    - { name: files_set_visibility, description: "private | signed | public." }
+    - { name: files_dedupe_check,   description: "Find an existing file by sha256." }
+    - { name: files_delete,         description: "Delete a file (hard or soft)." }
+    - { name: files_from_url,       description: "Fetch a URL into storage.", requires: files.write, resource_from: "folder/{arg.folder?}" }
   ui_panels:
     - slot: project.page
       label: Files
@@ -194,7 +206,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "files_get",
 			Description: "Fetch metadata for one file. Args: id.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
-			Handler:     a.toolGet,
+			HandlerCtx:  a.toolGetCtx,
 		},
 		{
 			Name:        "files_get_url",
@@ -203,7 +215,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"id":          map[string]any{"type": "integer"},
 				"ttl_seconds": map[string]any{"type": "integer"},
 			}, []string{"id"}),
-			Handler: a.toolGetURL,
+			HandlerCtx: a.toolGetURLCtx,
 		},
 		{
 			Name:        "files_search",
@@ -217,7 +229,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"source":       map[string]any{"type": "string"},
 				"limit":        map[string]any{"type": "integer"},
 			}, nil),
-			Handler: a.toolSearch,
+			HandlerCtx: a.toolSearchCtx,
 		},
 		{
 			Name:        "files_list",
@@ -227,7 +239,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"recursive": map[string]any{"type": "boolean"},
 				"limit":     map[string]any{"type": "integer"},
 			}, nil),
-			Handler: a.toolList,
+			HandlerCtx: a.toolListCtx,
 		},
 		{
 			Name:        "files_list_folders",
@@ -235,7 +247,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"parent": map[string]any{"type": "string"},
 			}, nil),
-			Handler: a.toolListFolders,
+			HandlerCtx: a.toolListFoldersCtx,
 		},
 		{
 			Name:        "files_move",
@@ -254,7 +266,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"id":   map[string]any{"type": "integer"},
 				"tags": map[string]any{"type": "array"},
 			}, []string{"id", "tags"}),
-			Handler: a.toolSetTags,
+			HandlerCtx: a.toolSetTagsCtx,
 		},
 		{
 			Name:        "files_set_visibility",
@@ -263,7 +275,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"id":         map[string]any{"type": "integer"},
 				"visibility": map[string]any{"type": "string"},
 			}, []string{"id", "visibility"}),
-			Handler: a.toolSetVisibility,
+			HandlerCtx: a.toolSetVisibilityCtx,
 		},
 		{
 			Name:        "files_dedupe_check",
@@ -280,7 +292,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"id":          map[string]any{"type": "integer"},
 				"keep_record": map[string]any{"type": "boolean"},
 			}, []string{"id"}),
-			Handler: a.toolDelete,
+			HandlerCtx: a.toolDeleteCtx,
 		},
 		{
 			Name:        "files_from_url",
@@ -810,6 +822,20 @@ func (a *App) handleFolders(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// format=picker returns the {items:[{id,label,parent}]} envelope
+	// the dashboard's permission tree-picker expects (per the
+	// list_endpoint convention in app-sdk's ResourceDecl). Without
+	// the param, behavior is the original "list child folders of
+	// `parent`" — used by the storage-panel UI.
+	if r.URL.Query().Get("format") == "picker" {
+		items, err := dbAllFoldersAsPickerTree(ctx.AppDB(), pid)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"items": items})
+		return
+	}
 	parent := normaliseFolder(r.URL.Query().Get("parent"))
 	folders, err := dbListChildFolders(ctx.AppDB(), pid, parent)
 	if err != nil {
@@ -817,6 +843,67 @@ func (a *App) handleFolders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpJSON(w, map[string]any{"folders": folders, "parent": parent})
+}
+
+// dbAllFoldersAsPickerTree returns every folder in the project as a
+// flat list of {id, label, parent} rows the dashboard's tree picker
+// stitches into a tree. ID is a complete resource string ("folder/x/y")
+// so the operator's selection becomes a grant.resource directly.
+//
+// Folders are derived from files.folder; we don't store empty folders
+// today, which is fine — operators don't need to grant access to a
+// folder that doesn't yet contain anything.
+func dbAllFoldersAsPickerTree(db *sql.DB, pid string) ([]map[string]any, error) {
+	rows, err := db.Query(
+		`SELECT DISTINCT folder FROM files
+		 WHERE project_id = ? AND deleted_at IS NULL
+		 ORDER BY folder`, pid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	var paths []string
+	for rows.Next() {
+		var f string
+		if err := rows.Scan(&f); err != nil {
+			continue
+		}
+		// Decompose into ancestors so intermediate folders surface
+		// even if no file is at that level. Trailing-slash form
+		// throughout — matches normaliseFolder.
+		f = strings.TrimSuffix(f, "/")
+		for f != "" {
+			if !seen[f] {
+				paths = append(paths, f)
+				seen[f] = true
+			}
+			i := strings.LastIndexByte(f, '/')
+			if i < 0 {
+				break
+			}
+			f = f[:i]
+		}
+	}
+	sort.Strings(paths)
+	items := make([]map[string]any, 0, len(paths))
+	for _, p := range paths {
+		// p is "/invoices/q3" form. Strip leading slash for the ID
+		// (resources don't double-slash the namespace separator).
+		stripped := strings.TrimPrefix(p, "/")
+		if stripped == "" {
+			continue
+		}
+		entry := map[string]any{
+			"id":    "folder/" + stripped,
+			"label": stripped,
+		}
+		if i := strings.LastIndexByte(stripped, '/'); i > 0 {
+			entry["parent"] = "folder/" + stripped[:i]
+		}
+		items = append(items, entry)
+	}
+	return items, nil
 }
 
 func (a *App) httpListOrSearch(w http.ResponseWriter, r *http.Request) {

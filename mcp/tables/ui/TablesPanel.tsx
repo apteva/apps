@@ -1,0 +1,869 @@
+// TablesPanel — dashboard surface for the tables app. Talks to the
+// tables sidecar via /api/apps/tables/* (the platform proxy injects
+// the per-install bearer token). Inherits the dashboard theme via
+// Tailwind tokens.
+//
+// Layout: left rail = list of tables (with row counts), main area =
+// selected table's row grid, bottom drawer = SELECT escape hatch.
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+interface NativePanelProps {
+  appName: string;
+  installId: number;
+  projectId: string;
+  instanceId?: number;
+}
+
+type ColumnType = "text" | "number" | "bool" | "datetime" | "json" | "file_id";
+
+interface ColumnDef {
+  name: string;
+  type: ColumnType;
+  nullable: boolean;
+  default?: unknown;
+}
+
+interface TableMeta {
+  id: number;
+  name: string;
+  scope: "project" | "global";
+  columns: ColumnDef[];
+  row_count: number;
+  created_at: string;
+}
+
+interface RowsResponse {
+  rows: Record<string, unknown>[];
+  total: number;
+}
+
+interface QueryResponse {
+  columns: string[];
+  rows: Record<string, unknown>[];
+  truncated: boolean;
+}
+
+const API = "/api/apps/tables";
+const PAGE_SIZE = 50;
+
+export default function TablesPanel({ projectId, installId }: NativePanelProps) {
+  const [tables, setTables] = useState<TableMeta[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [rows, setRows] = useState<Record<string, unknown>[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [showInsert, setShowInsert] = useState(false);
+  const [showQuery, setShowQuery] = useState(false);
+  const [editingRow, setEditingRow] = useState<Record<string, unknown> | null>(null);
+
+  const withParams = useCallback(
+    (extra: Record<string, string>) =>
+      new URLSearchParams({ project_id: projectId, install_id: String(installId), ...extra }).toString(),
+    [projectId, installId],
+  );
+
+  const api = useCallback(
+    async <T,>(
+      method: string,
+      path: string,
+      params: Record<string, string> = {},
+      body?: unknown,
+    ): Promise<T> => {
+      const opts: RequestInit = { method, credentials: "same-origin", headers: {} };
+      if (body !== undefined) {
+        (opts.headers as Record<string, string>)["Content-Type"] = "application/json";
+        opts.body = JSON.stringify(body);
+      }
+      const res = await fetch(`${API}${path}?${withParams(params)}`, opts);
+      if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+      return res.json();
+    },
+    [withParams],
+  );
+
+  const loadTables = useCallback(async () => {
+    setBusy(true);
+    try {
+      const resp = await api<{ tables: TableMeta[] }>("GET", "/tables");
+      const list = resp.tables || [];
+      setTables(list);
+      if (!selected && list.length > 0) setSelected(list[0].name);
+      setStatus(`${list.length} table${list.length !== 1 ? "s" : ""}`);
+    } catch (e) {
+      setStatus(`Error: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [api, selected]);
+
+  const loadRows = useCallback(async () => {
+    if (!selected) return;
+    setBusy(true);
+    try {
+      const resp = await api<RowsResponse>("GET", `/tables/${selected}/rows`, {
+        limit: String(PAGE_SIZE),
+        offset: String(page * PAGE_SIZE),
+      });
+      setRows(resp.rows || []);
+      setTotal(resp.total || 0);
+    } catch (e) {
+      setStatus(`Error: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [api, selected, page]);
+
+  useEffect(() => {
+    loadTables();
+  }, [loadTables]);
+
+  useEffect(() => {
+    setPage(0);
+    setEditingRow(null);
+  }, [selected]);
+
+  useEffect(() => {
+    loadRows();
+  }, [loadRows]);
+
+  const selectedTable = useMemo(
+    () => tables.find((t) => t.name === selected) || null,
+    [tables, selected],
+  );
+
+  const onCreate = async (name: string, columns: ColumnDef[]) => {
+    try {
+      await api("POST", "/tables", {}, { name, columns });
+      setShowCreate(false);
+      await loadTables();
+      setSelected(name);
+    } catch (e) {
+      alert(`Create failed: ${(e as Error).message}`);
+    }
+  };
+
+  const onInsert = async (row: Record<string, unknown>) => {
+    if (!selectedTable) return;
+    try {
+      await api("POST", `/tables/${selectedTable.name}/rows`, {}, { row });
+      setShowInsert(false);
+      await Promise.all([loadTables(), loadRows()]);
+    } catch (e) {
+      alert(`Insert failed: ${(e as Error).message}`);
+    }
+  };
+
+  const onUpdate = async (id: number, fields: Record<string, unknown>) => {
+    if (!selectedTable) return;
+    try {
+      await api("PATCH", `/tables/${selectedTable.name}/rows/${id}`, {}, fields);
+      setEditingRow(null);
+      await loadRows();
+    } catch (e) {
+      alert(`Update failed: ${(e as Error).message}`);
+    }
+  };
+
+  const onDeleteRow = async (id: number) => {
+    if (!selectedTable) return;
+    if (!confirm(`Delete row ${id} from ${selectedTable.name}?`)) return;
+    try {
+      await api("DELETE", `/tables/${selectedTable.name}/rows/${id}`);
+      setEditingRow(null);
+      await Promise.all([loadTables(), loadRows()]);
+    } catch (e) {
+      alert(`Delete failed: ${(e as Error).message}`);
+    }
+  };
+
+  const onDropTable = async () => {
+    if (!selectedTable) return;
+    if (!confirm(`Drop table "${selectedTable.name}" and all its rows? This cannot be undone.`)) return;
+    try {
+      await api("DELETE", `/tables/${selectedTable.name}`, { confirm: "true" });
+      setSelected(null);
+      await loadTables();
+    } catch (e) {
+      alert(`Drop failed: ${(e as Error).message}`);
+    }
+  };
+
+  const lastPage = Math.max(0, Math.ceil(total / PAGE_SIZE) - 1);
+
+  return (
+    <div className="h-full flex">
+      {/* Left rail */}
+      <aside className="w-64 border-r border-border bg-bg-card flex flex-col">
+        <header className="p-3 border-b border-border flex items-center justify-between">
+          <h2 className="text-sm font-medium text-text">Tables</h2>
+          <button
+            type="button"
+            onClick={() => setShowCreate(true)}
+            className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+          >
+            + New
+          </button>
+        </header>
+        <ul className="flex-1 overflow-auto">
+          {tables.length === 0 && !busy && (
+            <li className="p-4 text-xs text-text-muted">
+              No tables yet. Click "+ New" to create one.
+            </li>
+          )}
+          {tables.map((t) => (
+            <li key={t.id}>
+              <button
+                type="button"
+                onClick={() => setSelected(t.name)}
+                className={`w-full text-left px-3 py-2 text-sm border-l-2 ${
+                  selected === t.name
+                    ? "bg-accent/10 border-accent text-text"
+                    : "border-transparent text-text-muted hover:bg-bg-input/50 hover:text-text"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="truncate font-mono text-xs">{t.name}</span>
+                  <span className="text-[10px] text-text-dim ml-2">{t.row_count}</span>
+                </div>
+                {t.scope === "global" && (
+                  <span className="text-[10px] text-text-dim">global</span>
+                )}
+              </button>
+            </li>
+          ))}
+        </ul>
+      </aside>
+
+      {/* Main area */}
+      <main className="flex-1 flex flex-col min-w-0">
+        {selectedTable ? (
+          <>
+            <header className="border-b border-border p-3 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="font-mono text-sm text-text truncate">{selectedTable.name}</span>
+                <span className="text-xs text-text-dim">
+                  {selectedTable.columns.length} cols · {selectedTable.row_count} rows
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowInsert(true)}
+                  className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+                >
+                  + Insert
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowQuery((v) => !v)}
+                  className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
+                >
+                  Query
+                </button>
+                <button
+                  type="button"
+                  onClick={onDropTable}
+                  className="text-xs px-2 py-1 text-red border border-red/40 rounded hover:bg-red/10"
+                >
+                  Drop
+                </button>
+              </div>
+            </header>
+            <div className="flex-1 overflow-auto">
+              {rows.length === 0 ? (
+                <div className="p-12 text-center text-text-muted text-sm">
+                  {busy ? "Loading…" : "No rows. Click + Insert to add the first one."}
+                </div>
+              ) : (
+                <RowsTable
+                  table={selectedTable}
+                  rows={rows}
+                  editingRow={editingRow}
+                  onEditStart={(r) => setEditingRow(r)}
+                  onEditCancel={() => setEditingRow(null)}
+                  onEditSave={onUpdate}
+                  onDelete={onDeleteRow}
+                />
+              )}
+            </div>
+            <footer className="border-t border-border p-2 flex items-center justify-between text-xs text-text-dim">
+              <span>{status}</span>
+              <Pager
+                page={page}
+                lastPage={lastPage}
+                total={total}
+                onChange={setPage}
+              />
+            </footer>
+            {showQuery && (
+              <QueryDrawer
+                api={api}
+                onClose={() => setShowQuery(false)}
+              />
+            )}
+            {showInsert && (
+              <InsertDialog
+                table={selectedTable}
+                onCancel={() => setShowInsert(false)}
+                onSubmit={onInsert}
+              />
+            )}
+          </>
+        ) : (
+          <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
+            Select or create a table.
+          </div>
+        )}
+        {showCreate && (
+          <CreateDialog onCancel={() => setShowCreate(false)} onSubmit={onCreate} />
+        )}
+      </main>
+    </div>
+  );
+}
+
+// ─── rows table ─────────────────────────────────────────────────────
+
+function RowsTable({
+  table,
+  rows,
+  editingRow,
+  onEditStart,
+  onEditCancel,
+  onEditSave,
+  onDelete,
+}: {
+  table: TableMeta;
+  rows: Record<string, unknown>[];
+  editingRow: Record<string, unknown> | null;
+  onEditStart: (r: Record<string, unknown>) => void;
+  onEditCancel: () => void;
+  onEditSave: (id: number, fields: Record<string, unknown>) => void;
+  onDelete: (id: number) => void;
+}) {
+  return (
+    <table className="w-full text-xs font-mono">
+      <thead className="bg-bg-input/50 text-text-dim text-[10px] uppercase">
+        <tr>
+          <th className="text-left px-2 py-1.5 w-16">id</th>
+          {table.columns.map((c) => (
+            <th key={c.name} className="text-left px-2 py-1.5">
+              <span className="text-text">{c.name}</span>{" "}
+              <span className="text-text-dim normal-case">{c.type}</span>
+            </th>
+          ))}
+          <th className="text-left px-2 py-1.5 w-32">updated_at</th>
+          <th className="w-20" />
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => {
+          const id = Number(r.id);
+          const editing = editingRow && Number(editingRow.id) === id;
+          return editing ? (
+            <RowEditor
+              key={id}
+              table={table}
+              row={editingRow!}
+              onCancel={onEditCancel}
+              onSave={(fields) => onEditSave(id, fields)}
+              onDelete={() => onDelete(id)}
+            />
+          ) : (
+            <tr
+              key={id}
+              onClick={() => onEditStart(r)}
+              className="border-t border-border cursor-pointer hover:bg-bg-input/30"
+            >
+              <td className="px-2 py-1.5 text-text-dim">{id}</td>
+              {table.columns.map((c) => (
+                <td key={c.name} className="px-2 py-1.5 text-text truncate max-w-xs">
+                  {renderCell(c, r[c.name])}
+                </td>
+              ))}
+              <td className="px-2 py-1.5 text-text-dim">
+                {String(r.updated_at || "").slice(0, 16)}
+              </td>
+              <td className="px-2 py-1.5 text-right text-text-dim">edit</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+function renderCell(c: ColumnDef, v: unknown): string {
+  if (v === null || v === undefined) return "—";
+  if (c.type === "bool") return v ? "true" : "false";
+  if (c.type === "json") return JSON.stringify(v);
+  return String(v);
+}
+
+function RowEditor({
+  table,
+  row,
+  onCancel,
+  onSave,
+  onDelete,
+}: {
+  table: TableMeta;
+  row: Record<string, unknown>;
+  onCancel: () => void;
+  onSave: (fields: Record<string, unknown>) => void;
+  onDelete: () => void;
+}) {
+  const [fields, setFields] = useState<Record<string, string>>(() => {
+    const out: Record<string, string> = {};
+    for (const c of table.columns) {
+      const v = row[c.name];
+      if (v === null || v === undefined) out[c.name] = "";
+      else if (c.type === "json") out[c.name] = JSON.stringify(v);
+      else out[c.name] = String(v);
+    }
+    return out;
+  });
+
+  const submit = () => {
+    const patch: Record<string, unknown> = {};
+    for (const c of table.columns) {
+      const raw = fields[c.name];
+      if (raw === "" && c.nullable) {
+        patch[c.name] = null;
+        continue;
+      }
+      patch[c.name] = parseInputValue(c, raw);
+    }
+    onSave(patch);
+  };
+
+  return (
+    <tr className="border-t border-border bg-accent/5">
+      <td className="px-2 py-1.5 text-text-dim align-top">{Number(row.id)}</td>
+      {table.columns.map((c) => (
+        <td key={c.name} className="px-2 py-1 align-top">
+          <input
+            value={fields[c.name]}
+            onChange={(e) => setFields({ ...fields, [c.name]: e.target.value })}
+            className="bg-bg-input border border-border rounded px-1.5 py-0.5 text-xs w-full font-mono"
+            placeholder={c.nullable ? "null" : ""}
+          />
+        </td>
+      ))}
+      <td className="px-2 py-1 align-top text-text-dim">
+        {String(row.updated_at || "").slice(0, 16)}
+      </td>
+      <td className="px-2 py-1 align-top">
+        <div className="flex flex-col gap-1">
+          <button
+            type="button"
+            onClick={submit}
+            className="text-[10px] px-1.5 py-0.5 border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+          >
+            save
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="text-[10px] px-1.5 py-0.5 border border-border rounded hover:bg-bg-input text-text-muted"
+          >
+            cancel
+          </button>
+          <button
+            type="button"
+            onClick={onDelete}
+            className="text-[10px] px-1.5 py-0.5 border border-red/40 text-red rounded hover:bg-red/10"
+          >
+            delete
+          </button>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+// parseInputValue translates an HTML input string back to the JSON
+// shape the server expects for the column's type. It's deliberately
+// permissive — invalid input lands as a server-side validation error
+// the user sees in the alert.
+function parseInputValue(c: ColumnDef, raw: string): unknown {
+  if (c.type === "text" || c.type === "datetime") return raw;
+  if (c.type === "number") {
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : raw;
+  }
+  if (c.type === "bool") return raw === "true";
+  if (c.type === "file_id") {
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : raw;
+  }
+  if (c.type === "json") {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return raw;
+    }
+  }
+  return raw;
+}
+
+// ─── pager ──────────────────────────────────────────────────────────
+
+function Pager({
+  page,
+  lastPage,
+  total,
+  onChange,
+}: {
+  page: number;
+  lastPage: number;
+  total: number;
+  onChange: (p: number) => void;
+}) {
+  if (total === 0) return null;
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        onClick={() => onChange(Math.max(0, page - 1))}
+        disabled={page === 0}
+        className="text-xs px-1.5 py-0.5 border border-border rounded disabled:opacity-30"
+      >
+        ‹
+      </button>
+      <span>
+        page {page + 1} / {lastPage + 1} ({total} rows)
+      </span>
+      <button
+        type="button"
+        onClick={() => onChange(Math.min(lastPage, page + 1))}
+        disabled={page >= lastPage}
+        className="text-xs px-1.5 py-0.5 border border-border rounded disabled:opacity-30"
+      >
+        ›
+      </button>
+    </div>
+  );
+}
+
+// ─── create-table dialog ────────────────────────────────────────────
+
+function CreateDialog({
+  onCancel,
+  onSubmit,
+}: {
+  onCancel: () => void;
+  onSubmit: (name: string, cols: ColumnDef[]) => void;
+}) {
+  const [name, setName] = useState("");
+  const [cols, setCols] = useState<ColumnDef[]>([
+    { name: "title", type: "text", nullable: false },
+  ]);
+
+  const update = (i: number, patch: Partial<ColumnDef>) => {
+    const next = [...cols];
+    next[i] = { ...next[i], ...patch };
+    setCols(next);
+  };
+
+  const submit = () => {
+    if (!name) return;
+    const cleaned = cols.filter((c) => c.name);
+    if (cleaned.length === 0) return;
+    onSubmit(name, cleaned);
+  };
+
+  return (
+    <div className="absolute inset-0 bg-bg/80 flex items-center justify-center z-10">
+      <div className="bg-bg-card border border-border rounded p-4 w-[28rem] max-w-[90vw] flex flex-col gap-3">
+        <h3 className="text-sm font-medium text-text">New table</h3>
+        <label className="flex flex-col gap-1 text-xs">
+          <span className="text-text-dim">Table name</span>
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="books"
+            className="bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+          />
+        </label>
+        <div className="flex flex-col gap-1">
+          <span className="text-text-dim text-xs">Columns</span>
+          {cols.map((c, i) => (
+            <div key={i} className="flex items-center gap-1.5 text-xs">
+              <input
+                value={c.name}
+                onChange={(e) => update(i, { name: e.target.value })}
+                placeholder="column_name"
+                className="bg-bg-input border border-border rounded px-1.5 py-0.5 text-xs font-mono flex-1 min-w-0"
+              />
+              <select
+                value={c.type}
+                onChange={(e) => update(i, { type: e.target.value as ColumnType })}
+                className="bg-bg-input border border-border rounded px-1.5 py-0.5 text-xs"
+              >
+                <option value="text">text</option>
+                <option value="number">number</option>
+                <option value="bool">bool</option>
+                <option value="datetime">datetime</option>
+                <option value="json">json</option>
+                <option value="file_id">file_id</option>
+              </select>
+              <label className="flex items-center gap-1 text-text-dim">
+                <input
+                  type="checkbox"
+                  checked={c.nullable}
+                  onChange={(e) => update(i, { nullable: e.target.checked })}
+                />
+                nullable
+              </label>
+              <button
+                type="button"
+                onClick={() => setCols(cols.filter((_, j) => j !== i))}
+                disabled={cols.length === 1}
+                className="text-text-dim hover:text-red disabled:opacity-30 px-1"
+                aria-label="Remove column"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            onClick={() => setCols([...cols, { name: "", type: "text", nullable: true }])}
+            className="text-xs text-accent hover:underline self-start"
+          >
+            + add column
+          </button>
+        </div>
+        <div className="flex justify-end gap-2 pt-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="text-xs px-3 py-1 border border-border rounded hover:bg-bg-input"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={!name}
+            className="text-xs px-3 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+          >
+            Create
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── insert-row dialog ──────────────────────────────────────────────
+
+function InsertDialog({
+  table,
+  onCancel,
+  onSubmit,
+}: {
+  table: TableMeta;
+  onCancel: () => void;
+  onSubmit: (row: Record<string, unknown>) => void;
+}) {
+  const [fields, setFields] = useState<Record<string, string>>({});
+
+  const submit = () => {
+    const row: Record<string, unknown> = {};
+    for (const c of table.columns) {
+      const raw = fields[c.name];
+      if (raw === undefined || raw === "") {
+        if (!c.nullable) {
+          alert(`Column "${c.name}" is required.`);
+          return;
+        }
+        continue;
+      }
+      row[c.name] = parseInputValue(c, raw);
+    }
+    onSubmit(row);
+  };
+
+  return (
+    <div className="absolute inset-0 bg-bg/80 flex items-center justify-center z-10">
+      <div className="bg-bg-card border border-border rounded p-4 w-[28rem] max-w-[90vw] flex flex-col gap-3">
+        <h3 className="text-sm font-medium text-text">
+          Insert into <span className="font-mono">{table.name}</span>
+        </h3>
+        <div className="flex flex-col gap-2">
+          {table.columns.map((c) => (
+            <label key={c.name} className="flex flex-col gap-1 text-xs">
+              <span className="text-text-dim">
+                <span className="font-mono text-text">{c.name}</span>{" "}
+                <span>{c.type}</span>
+                {!c.nullable && <span className="text-red"> *</span>}
+              </span>
+              <input
+                value={fields[c.name] || ""}
+                onChange={(e) => setFields({ ...fields, [c.name]: e.target.value })}
+                placeholder={placeholderFor(c)}
+                className="bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono"
+              />
+            </label>
+          ))}
+        </div>
+        <div className="flex justify-end gap-2 pt-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="text-xs px-3 py-1 border border-border rounded hover:bg-bg-input"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            className="text-xs px-3 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+          >
+            Insert
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function placeholderFor(c: ColumnDef): string {
+  switch (c.type) {
+    case "text":
+      return "string";
+    case "number":
+      return "42";
+    case "bool":
+      return "true / false";
+    case "datetime":
+      return "2026-05-05T12:00:00Z";
+    case "json":
+      return '{"a": 1}';
+    case "file_id":
+      return "file id (integer)";
+  }
+}
+
+// ─── query drawer ───────────────────────────────────────────────────
+
+function QueryDrawer({
+  api,
+  onClose,
+}: {
+  api: <T>(method: string, path: string, params?: Record<string, string>, body?: unknown) => Promise<T>;
+  onClose: () => void;
+}) {
+  const [sql, setSql] = useState(
+    "SELECT 1 AS sample\n-- Reference user-tables with {table_name} placeholders.",
+  );
+  const [result, setResult] = useState<QueryResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    ref.current?.focus();
+  }, []);
+
+  // The drawer makes a query whose path embeds a table name, but for
+  // this generic playground we route to the first matching table or
+  // require the SQL itself to use placeholders. Simplest: hit any one
+  // table; the server doesn't care which, since validateReadOnlySQL +
+  // placeholder substitution operate on the full query body. We use
+  // the first table from /tables.
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    setResult(null);
+    try {
+      const tables = await api<{ tables: TableMeta[] }>("GET", "/tables");
+      const first = tables.tables?.[0]?.name;
+      if (!first) {
+        setError("No tables yet — create one before running a query.");
+        setBusy(false);
+        return;
+      }
+      const resp = await api<QueryResponse>("POST", `/tables/${first}/query`, {}, { sql });
+      setResult(resp);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="border-t border-border bg-bg-card flex flex-col" style={{ height: "20rem" }}>
+      <header className="flex items-center justify-between px-3 py-1.5 border-b border-border">
+        <span className="text-xs text-text-dim">tables_query — read-only SELECT</span>
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-text-muted hover:text-text text-sm leading-none px-1"
+          aria-label="Close"
+        >
+          ×
+        </button>
+      </header>
+      <div className="flex flex-1 min-h-0">
+        <textarea
+          ref={ref}
+          value={sql}
+          onChange={(e) => setSql(e.target.value)}
+          className="flex-1 bg-bg-input border-r border-border p-2 text-xs font-mono text-text resize-none focus:outline-none"
+        />
+        <div className="flex-1 overflow-auto p-2 text-xs font-mono">
+          {error && <div className="text-red">{error}</div>}
+          {result && (
+            <div className="flex flex-col gap-2">
+              {result.truncated && (
+                <div className="text-text-dim text-[10px]">
+                  truncated at row cap
+                </div>
+              )}
+              <table className="w-full">
+                <thead>
+                  <tr className="text-text-dim text-[10px] uppercase">
+                    {result.columns.map((c) => (
+                      <th key={c} className="text-left pr-3 py-0.5">
+                        {c}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.rows.map((r, i) => (
+                    <tr key={i} className="border-t border-border">
+                      {result.columns.map((c) => (
+                        <td key={c} className="pr-3 py-0.5 text-text truncate max-w-xs">
+                          {String(r[c] ?? "")}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+      <footer className="flex justify-end gap-2 px-3 py-1.5 border-t border-border">
+        <button
+          type="button"
+          onClick={run}
+          disabled={busy}
+          className="text-xs px-3 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+        >
+          {busy ? "Running…" : "Run"}
+        </button>
+      </footer>
+    </div>
+  );
+}

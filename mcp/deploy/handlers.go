@@ -60,6 +60,10 @@ func (a *App) handleDeploymentItem(w http.ResponseWriter, r *http.Request) {
 		a.httpDeploymentStop(w, r, d)
 	case tail == "logs":
 		a.httpDeploymentLogs(w, r, d)
+	case tail == "attach-domain":
+		a.httpDeploymentAttachDomain(w, r, d)
+	case tail == "detach-domain":
+		a.httpDeploymentDetachDomain(w, r, d)
 	default:
 		httpErr(w, http.StatusNotFound, "no such resource")
 	}
@@ -166,19 +170,34 @@ func (a *App) httpCreateDeployment(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	d, err := dbCreateDeployment(globalCtx.AppDB(), pid, CreateDeploymentInput{
+	domainArg := strings.TrimSpace(body.Domain)
+	domainsOn := domainArg != "" && a.domainsAvailable(globalCtx)
+	in := CreateDeploymentInput{
 		Name: body.Name, Description: body.Description,
 		SourceKind: body.SourceKind, SourceRef: body.SourceRef,
 		Framework: body.Framework,
 		BuildCmd:  body.BuildCmd, StartCmd: body.StartCmd,
-		PortHint: body.PortHint, EnvJSON: body.EnvJSON, Domain: body.Domain,
-	})
+		PortHint: body.PortHint, EnvJSON: body.EnvJSON,
+	}
+	if !domainsOn {
+		in.Domain = domainArg
+	}
+	d, err := dbCreateDeployment(globalCtx.AppDB(), pid, in)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	emit("deploy.created", map[string]any{"deployment_id": d.ID, "name": d.Name, "source_kind": d.SourceKind})
-	httpJSON(w, map[string]any{"deployment": d})
+	resp := map[string]any{"deployment": d}
+	if domainsOn {
+		if err := a.attachDomain(globalCtx, d, attachDomainSpec{FQDN: domainArg}); err != nil {
+			resp["domain_error"] = err.Error()
+		} else {
+			d, _ = dbGetDeployment(globalCtx.AppDB(), pid, d.ID)
+			resp["deployment"] = d
+		}
+	}
+	httpJSON(w, resp)
 }
 
 // ─── Item ──────────────────────────────────────────────────────────
@@ -318,6 +337,45 @@ func (a *App) httpDeploymentLogs(w http.ResponseWriter, r *http.Request, d *Depl
 	body, _ := tailFile(rel.LogPath, tail)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write([]byte(body))
+}
+
+func (a *App) httpDeploymentAttachDomain(w http.ResponseWriter, r *http.Request, d *Deployment) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	var body struct {
+		FQDN   string `json:"fqdn"`
+		Target string `json:"target"`
+		Type   string `json:"type"`
+		TTL    int    `json:"ttl"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if err := a.attachDomain(globalCtx, d, attachDomainSpec{
+		FQDN: body.FQDN, Target: body.Target, Type: body.Type, TTL: body.TTL,
+	}); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	out, _ := dbGetDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
+	httpJSON(w, map[string]any{"deployment": out})
+}
+
+func (a *App) httpDeploymentDetachDomain(w http.ResponseWriter, r *http.Request, d *Deployment) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	res := map[string]any{"detached": true, "id": d.ID, "fqdn": d.Domain}
+	if err := a.detachDomain(globalCtx, d); err != nil {
+		res["registrar_error"] = err.Error()
+	}
+	out, _ := dbGetDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
+	res["deployment"] = out
+	httpJSON(w, res)
 }
 
 // ─── helpers ──────────────────────────────────────────────────────

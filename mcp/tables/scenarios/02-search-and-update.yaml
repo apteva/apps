@@ -1,0 +1,43 @@
+name: search-and-update
+description: |
+  Agent updates rows by id after searching for them. Exercises
+  rows_search + rows_get + rows_update — the typical "find then change"
+  loop a real agent will run all the time.
+
+timeout: 60s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  fixture:
+    tools:
+      - tables_create:
+          name: tasks
+          columns:
+            - { name: title, type: text, nullable: false }
+            - { name: status, type: text }
+            - { name: priority, type: number }
+      - rows_insert:
+          table: tasks
+          rows:
+            - { title: "Reply to Anne", status: "todo", priority: 1 }
+            - { title: "Pay the gas bill", status: "todo", priority: 3 }
+            - { title: "Call the plumber", status: "in_progress", priority: 2 }
+
+directive: |
+  In the "tasks" table, find every row where status="todo" and update
+  it to status="in_progress". Use rows_search to find them, then
+  rows_update on each id. After, confirm by counting how many tasks
+  are now in_progress.
+
+assert:
+  - tool_called: rows_search
+  - tool_called: rows_update
+  - tool_called: rows_count
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 18000
+  cost_usd: 0.25

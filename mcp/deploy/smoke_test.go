@@ -86,6 +86,42 @@ func TestStoreSmoke(t *testing.T) {
 	}
 }
 
+func TestDeploymentDomainLink(t *testing.T) {
+	db := openSchemaDB(t)
+	defer db.Close()
+
+	d, err := dbCreateDeployment(db, "p1", CreateDeploymentInput{
+		Name: "api", SourceKind: "local", SourceRef: "/tmp/src",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if d.Domain != "" || d.DomainRecordID != "" || d.DomainAttachedAt != "" {
+		t.Fatalf("expected empty domain fields, got %+v", d)
+	}
+
+	if err := dbSetDeploymentDomain(db, d.ID, "app.acme.com", "acme.com|CNAME", nowUTC()); err != nil {
+		t.Fatalf("set domain: %v", err)
+	}
+	got, _ := dbGetDeployment(db, "p1", d.ID)
+	if got.Domain != "app.acme.com" || got.DomainRecordID != "acme.com|CNAME" || got.DomainAttachedAt == "" {
+		t.Fatalf("attached row mismatched: %+v", got)
+	}
+
+	apex, rtype, ok := splitRecordID(got.DomainRecordID)
+	if !ok || apex != "acme.com" || rtype != "CNAME" {
+		t.Fatalf("splitRecordID: ok=%v apex=%q rtype=%q", ok, apex, rtype)
+	}
+
+	if err := dbSetDeploymentDomain(db, d.ID, "", "", ""); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	got, _ = dbGetDeployment(db, "p1", d.ID)
+	if got.Domain != "" || got.DomainRecordID != "" || got.DomainAttachedAt != "" {
+		t.Fatalf("expected cleared, got %+v", got)
+	}
+}
+
 func TestValidateName(t *testing.T) {
 	cases := map[string]bool{
 		"":         false,
@@ -421,18 +457,20 @@ func openSchemaDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		t.Fatal(err)
 	}
-	body, err := os.ReadFile("migrations/001_init.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cleaned := stripSQLComments(string(body))
-	for _, stmt := range strings.Split(cleaned, ";") {
-		s := strings.TrimSpace(stmt)
-		if s == "" {
-			continue
+	for _, mig := range []string{"migrations/001_init.sql", "migrations/002_domain_link.sql"} {
+		body, err := os.ReadFile(mig)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if _, err := db.Exec(s); err != nil {
-			t.Fatalf("migration: %v\n%s", err, s)
+		cleaned := stripSQLComments(string(body))
+		for _, stmt := range strings.Split(cleaned, ";") {
+			s := strings.TrimSpace(stmt)
+			if s == "" {
+				continue
+			}
+			if _, err := db.Exec(s); err != nil {
+				t.Fatalf("%s: %v\n%s", mig, err, s)
+			}
 		}
 	}
 	return db

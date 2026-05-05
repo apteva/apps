@@ -54,6 +54,12 @@ requires:
       compatible_app_names: [code]
       label: Code app
       hint: Install the Code app to host repositories the Deploy app builds.
+    - role: domains
+      kind: app
+      required: false
+      compatible_app_names: [domains]
+      label: Domains app
+      hint: Install the Domains app to attach a custom domain to a deployment.
 provides:
   http_routes:
     - prefix: /
@@ -67,6 +73,8 @@ provides:
     - { name: deploy_logs,    description: "Tail build or runtime logs." }
     - { name: deploy_stop,    description: "Stop the live release." }
     - { name: deploy_destroy, description: "Stop, drop, delete artifacts." }
+    - { name: deploy_attach_domain, description: "Attach an FQDN to a deployment via the Domains app." }
+    - { name: deploy_detach_domain, description: "Clear a deployment's domain link." }
   ui_panels:
     - { slot: project.page, label: "Deploy", icon: rocket, entry: /ui/DeployPanel.mjs }
 runtime:
@@ -201,7 +209,35 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/deployments/", Handler: a.handleDeploymentItem},
 		{Pattern: "/api/builds/", Handler: a.handleBuildItem},
 		{Pattern: "/api/releases/", Handler: a.handleReleaseItem},
+		{Pattern: "/api/_meta", Handler: a.handleMeta},
 	}
+}
+
+// handleMeta exposes whether the optional Domains app is installed +
+// the registered domains (so the panel can render a picker). Cheap
+// fan-out to the Domains app — the panel calls this once per load.
+func (a *App) handleMeta(w http.ResponseWriter, r *http.Request) {
+	avail := a.domainsAvailable(globalCtx)
+	out := map[string]any{
+		"domains_available": avail,
+		"domains":           []any{},
+		"public_host":       configOr(globalCtx, "public_host", ""),
+	}
+	if avail {
+		var resp struct {
+			Domains []struct {
+				Name string `json:"name"`
+			} `json:"domains"`
+		}
+		if err := callDomainsTool(globalCtx, "domain_list", map[string]any{}, &resp); err == nil {
+			names := make([]map[string]any, 0, len(resp.Domains))
+			for _, d := range resp.Domains {
+				names = append(names, map[string]any{"name": d.Name})
+			}
+			out["domains"] = names
+		}
+	}
+	httpJSON(w, out)
 }
 
 func main() {

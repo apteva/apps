@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: storage
 display_name: Storage
-version: 0.6.0
+version: 0.7.0
 description: |
   File storage for Apteva agents and human teams. Upload bytes,
   organise into folders, share via signed URLs. Pluggable backend:
@@ -28,21 +28,52 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  # Folder is the only resource shape storage exposes. Glob matcher +
+  # tree picker means the dashboard renders a folder tree; navigable
+  # listing makes ancestor folders visible so an agent scoped to
+  # "folder/invoices/**" can still see "invoices/" at root and drill
+  # in. See app-sdk's FilterTree for the rules.
+  resources:
+    - name: folder
+      label: Folder
+      list_endpoint: /folders
+      matcher: glob
+      picker: tree
+      listing_visibility: navigable
+  permissions:
+    - name: files.read
+      resource: folder
+      description: List + download files in matching folders.
+    - name: files.write
+      resource: folder
+      description: Upload, move/rename, set tags + visibility on files in matching folders.
+    - name: files.delete
+      resource: folder
+      description: Hard- or soft-delete files in matching folders.
   mcp_tools:
+    # Tools where the folder is in the args get platform-side gating
+    # (requires + resource_from). The SDK's MCP handler 403s before
+    # the tool's handler runs.
     - name: files_upload
       description: Upload bytes from base64 + filename + folder. Returns the file id, signed URL, and sha256.
+      requires: files.write
+      resource_from: "folder/{arg.folder?}"
+    - name: files_move
+      description: Move a file to a different folder, optionally rename it.
+      requires: files.write
+      resource_from: "folder/{arg.folder?}"
+    - name: files_from_url
+      description: Fetch an external URL into storage in one call. Returns the new file's id.
+      requires: files.write
+      resource_from: "folder/{arg.folder?}"
+    # Tools that operate on a file id don't know the folder until the
+    # row is loaded, so they're handler-enforced (Caller().Allows in
+    # the handler after the lookup). No requires here keeps the SDK's
+    # gate out of the way.
     - name: files_get
       description: Fetch one file's metadata by id (no bytes).
     - name: files_get_url
       description: Mint a signed time-limited URL the agent can hand out for sharing.
-    - name: files_search
-      description: Filtered file list — by name, tag, folder, content_type, sha256, size range.
-    - name: files_list
-      description: List files in one folder. Pass recursive=true to descend into sub-folders.
-    - name: files_list_folders
-      description: List immediate child folders one level under a parent folder.
-    - name: files_move
-      description: Move a file to a different folder, optionally rename it.
     - name: files_set_tags
       description: Append or remove tags on a file.
     - name: files_set_visibility
@@ -51,8 +82,14 @@ provides:
       description: Look up an existing file by sha256 — the agent's "have I seen this already?" primitive.
     - name: files_delete
       description: Delete a file. Default is hard delete — row removed AND bytes removed from disk. Pass keep_record=true for soft-delete (audit history; bytes stay).
-    - name: files_from_url
-      description: Fetch an external URL into storage in one call. Returns the new file's id.
+    # List/search tools filter their return values via FilterTree /
+    # Filter — same handler-side enforcement, just at result time.
+    - name: files_search
+      description: Filtered file list — by name, tag, folder, content_type, sha256, size range.
+    - name: files_list
+      description: List files in one folder. Pass recursive=true to descend into sub-folders.
+    - name: files_list_folders
+      description: List immediate child folders one level under a parent folder.
   ui_panels:
     - slot: project.page
       label: Files
