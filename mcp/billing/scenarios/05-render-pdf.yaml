@@ -1,0 +1,39 @@
+name: render-pdf
+description: |
+  Agent finalizes an invoice and renders it as a PDF the user can
+  send. Verifies the agent reaches for invoices_render_pdf (not the
+  /print HTML view) and gets back base64 bytes — the right primitive
+  when the user wants the file delivered, not a print page.
+
+timeout: 90s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Two steps:
+
+  Step 1: Set up. Upsert customer Initech (peter@initech.com),
+          create + finalize an invoice for $2,800 USD with one line
+          ("Q2 retainer", 1 unit at $2,800, no tax).
+
+  Step 2: I need to email this to peter@initech.com later — render it
+          as a PDF and tell me the filename + size in KB. Don't save
+          to storage; I'll attach the bytes from your response.
+
+  Then stop.
+
+assert:
+  - tool_called: invoices_create
+  - tool_called: invoices_finalize
+  - tool_called: invoices_render_pdf
+  - agent_response_contains: ".pdf"
+  - agent_response_contains: "KB" | "kb" | "kilobytes"
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 18000
+  cost_usd: 0.25

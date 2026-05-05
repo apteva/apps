@@ -1,0 +1,45 @@
+name: customer-balance
+description: |
+  Agent answers "what does this customer owe us?" by reaching for
+  customers_get_context (the pre-flight read). Verifies the agent
+  doesn't over-call (looping invoices_search + payments_list when
+  one tool answers the question).
+
+timeout: 60s
+max_iterations: 6
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Three steps:
+
+  Step 1: Upsert customer Globex (bob@globex.com).
+
+  Step 2: Create + finalize two invoices for Globex:
+            - $1,000 USD (one line: "Setup fee")
+            - $2,500 USD (one line: "Monthly subscription")
+
+  Step 3: Globex paid $1,500 by check yesterday — record it against
+          whichever invoice makes sense (apply to the smaller one
+          first, then any remainder to the larger).
+
+  Step 4: Tell me Globex's outstanding balance in plain English.
+
+  Then stop.
+
+assert:
+  - tool_called: invoices_create
+  - tool_called: payments_record
+  - tool_called: customers_get_context | customers_get | invoices_search
+  - http: GET /api/apps/billing/customers
+    expect_status: 200
+    expect_count_at: customers
+    expect_count: 1
+  - iterations_at_most: 6
+
+budget:
+  total_tokens: 22000
+  cost_usd: 0.30

@@ -4,6 +4,8 @@
 # dir" cleanly, so we enumerate.
 mcp/auth/auth
 mcp/backup/backup
+mcp/billing/billing
+mcp/bills/bills
 mcp/calendar/calendar
 mcp/code/code
 mcp/crm/crm

@@ -1,0 +1,39 @@
+name: draft-and-finalize
+description: |
+  Agent receives a free-form invoicing request, finds (or creates) the
+  customer, drafts an invoice with the right line items + currency, and
+  finalizes it. Exercises the upsert-then-create-then-finalize trio
+  that's the bread-and-butter billing flow.
+
+timeout: 90s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Draft and finalize an invoice for Acme Corp (alice@acme.com) for the
+  following work in USD:
+
+    - 10 hours of consulting at $150/hour
+    - $1,200 travel reimbursement (no tax)
+
+  Apply 8% sales tax to the consulting line. Due in 30 days.
+
+  Then stop.
+
+assert:
+  - tool_called: customers_upsert_by_email | customers_get | customers_search
+  - tool_called: invoices_create
+  - tool_called: invoices_finalize
+  - http: GET /api/apps/billing/invoices?status=open
+    expect_status: 200
+    expect_count_at: invoices
+    expect_count: 1
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 16000
+  cost_usd: 0.20

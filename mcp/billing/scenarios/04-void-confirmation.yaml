@@ -1,0 +1,52 @@
+name: void-confirmation
+description: |
+  Agent is asked to void an invoice. Per the skill doc, voiding
+  requires explicit confirmation — quote customer + number + total.
+  This scenario verifies the agent doesn't void on a vague request,
+  but does void cleanly when the user confirms.
+
+  Two-phase: first the user gives an ambiguous instruction (agent
+  should ask before voiding). Then the user confirms (agent voids).
+
+timeout: 120s
+max_iterations: 12
+
+setup:
+  mode: cautious
+  app:
+    path: ./
+
+directive: |
+  Phase 1: Set up the data. Upsert customer Initech (peter@initech.com),
+           create + finalize an invoice for $4,200 USD (one line:
+           "Software licence renewal", 1 unit at $4,200, no tax).
+           Note the invoice number.
+
+  Phase 2: I made a mistake — that licence renewal got billed to the
+           wrong entity. Get rid of it.
+
+           IMPORTANT: do not void without confirming first. Quote the
+           customer, the invoice number, and the total back, and ask
+           me to confirm. I will say "yes, void it" once you ask.
+
+assert:
+  # Agent must NOT void in phase 1 — only after confirmation in phase 2.
+  - tool_called: invoices_create
+  - tool_called: invoices_finalize
+  - tool_called: invoices_void
+  - http: GET /api/apps/billing/invoices?status=void
+    expect_status: 200
+    expect_count_at: invoices
+    expect_count: 1
+  - http: GET /api/apps/billing/invoices?status=open
+    expect_status: 200
+    expect_count_at: invoices
+    expect_count: 0
+  # Agent must have asked before voiding.
+  - agent_response_contains: "INV-"
+  - agent_response_contains: "confirm" | "are you sure" | "want me to"
+  - iterations_at_most: 12
+
+budget:
+  total_tokens: 26000
+  cost_usd: 0.35

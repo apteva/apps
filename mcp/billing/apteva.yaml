@@ -1,0 +1,167 @@
+schema: apteva-app/v1
+
+name: billing
+display_name: Billing
+version: 0.1.0
+description: |
+  Customers, invoices, and payments for Apteva agents and human teams.
+  Per-invoice provider — local for internal/wire/cash records, stripe
+  for card-payable hosted invoices — chosen at create time and frozen
+  for the invoice's lifetime. v0.1.0 ships local-only; v0.1.1 adds the
+  Stripe provider via the integrations catalog. Lifecycle is explicit
+  (draft → open → paid/void/uncollectible) with an append-only audit
+  log per invoice.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/billing
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/billing/icon.png
+tags: [billing, invoices, payments, finance]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: customers_search
+      description: Filtered customer search by name / email / external_id / metadata.
+    - name: customers_get
+      description: Fetch one customer (snapshot only).
+    - name: customers_get_context
+      description: Snapshot + open invoices + recent payments + lifetime totals — pre-flight read before drafting an invoice.
+    - name: customers_upsert_by_email
+      description: Find-or-create by email. Returns was_created. Right-by-default primitive.
+    - name: customers_update
+      description: Partial-patch a customer.
+    - name: customers_merge
+      description: Merge one customer into another. Reassigns invoices + payments.
+    - name: invoices_create
+      description: Create a DRAFT invoice with optional initial line items. Provider arg ('local' | 'stripe') falls back to install default. Provider is frozen after create.
+    - name: invoices_add_line_item
+      description: Append a line item to a DRAFT invoice. Errors on non-draft invoices.
+    - name: invoices_finalize
+      description: Transition draft → open. Mints invoice number. v0.1.0 supports provider=local only.
+    - name: invoices_void
+      description: Void an open invoice. Cannot void paid invoices.
+    - name: invoices_get
+      description: Fetch one invoice with line items, payment history, and audit log.
+    - name: invoices_search
+      description: Filter by status / customer / provider / date range / total range / currency.
+    - name: invoices_render_pdf
+      description: |
+        Render the invoice as a PDF. Default returns the bytes as base64; set
+        save_to_storage=true to write the PDF into the storage app and get back
+        a file_id + URL the agent can attach to chat or email.
+    - name: payments_record
+      description: Record a non-Stripe payment (wire / cash / check / other). Updates invoice status when fully covered.
+    - name: payments_list
+      description: List payments for a customer or invoice, optionally filtered by method or date range.
+  ui_panels:
+    - slot: project.page
+      label: Billing
+      icon: receipt
+      entry: /ui/BillingPanel.mjs
+  ui_components:
+    # Inline invoice tile the agent attaches to chat messages via
+    # respond(components=[{app:"billing", name:"invoice-card", props:{invoice_id:N}}]).
+    # Renders status pill + amount + customer + open/pay link.
+    - name: invoice-card
+      entry: /ui/InvoiceCard.mjs
+      slots:
+        - chat.message_attachment
+      props_schema:
+        type: object
+        required: [invoice_id]
+        properties:
+          invoice_id:
+            type: integer
+      preview_props:
+        preview: true
+    - name: customer-card
+      entry: /ui/CustomerCard.mjs
+      slots:
+        - chat.message_attachment
+      props_schema:
+        type: object
+        required: [customer_id]
+        properties:
+          customer_id:
+            type: integer
+      preview_props:
+        preview: true
+  skills:
+    # Foundational "how this app thinks" skill loaded whenever the
+    # agent touches billing. Lifecycle, picking provider at create
+    # time, currency conventions, void confirmation, payment-link
+    # safety. body_file is canonical SKILL.md; the manifest fields
+    # are kept as a sanity check / preview for the dashboard.
+    - name: how-to-use-billing
+      command: /billing
+      body_file: skills/how-to-use-billing.md
+      description: |
+        Billing's mental model + conventions. Load when working
+        with customers, invoices, or payments. Triggers on:
+        "invoice", "bill", "charge", "customer balance",
+        "payment link", or any billing tool call.
+      metadata:
+        category: finance
+        icon: 💰
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/billing
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/billing.db
+  migrations: migrations/
+
+config_schema:
+  - name: stripe_enabled
+    type: select
+    options: ["true", "false"]
+    default: "false"
+    label: Stripe enabled
+    description: |
+      Master switch. v0.1.0 must leave this false — the Stripe provider lands in v0.1.1.
+      When set true on a v0.1.1+ install, the Stripe integration must be installed for
+      this project; boot fails loud if it isn't.
+  - name: default_provider
+    type: select
+    options: [local, stripe]
+    default: local
+    label: Default provider
+    description: |
+      Provider applied when invoices_create doesn't specify one. v0.1.0 only honours
+      "local"; "stripe" is rejected at create time.
+  - name: default_currency
+    type: text
+    default: "USD"
+    label: Default currency
+    description: ISO 4217 code used for new invoices when not specified.
+  - name: invoice_number_format
+    type: text
+    default: "INV-{yyyy}-{seq:04}"
+    label: Invoice number format
+    description: |
+      Tokens — {yyyy}/{yy}/{mm}/{dd} (UTC), {seq} (project-scoped sequence;
+      :04 zero-pads to four digits). Minted on finalize.
+  - name: tax_default_rate_bps
+    type: text
+    default: "0"
+    label: Default tax rate (basis points)
+    description: |
+      1000 = 10.00%. Applied when invoices_create / invoices_add_line_item don't
+      specify a per-line rate. Set 0 to require explicit per-line tax.
+
+upgrade_policy: auto-patch

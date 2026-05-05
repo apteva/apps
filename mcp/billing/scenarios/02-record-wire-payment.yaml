@@ -1,0 +1,45 @@
+name: record-wire-payment
+description: |
+  Agent records an inbound wire payment against an existing open
+  invoice and the invoice transitions to 'paid'. Verifies that the
+  agent uses payments_record (not customers_update or some other
+  workaround) and picks the right method.
+
+timeout: 90s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Two steps:
+
+  Step 1: Set up the test data. Upsert customer Acme Corp
+          (alice@acme.com), then create + finalize an invoice for
+          $1,500 USD (one line: "Quarterly retainer", 1 unit at
+          $1,500, no tax). Note the invoice number from the response.
+
+  Step 2: Acme just wired the full $1,500 against that invoice
+          today. Record it.
+
+  Then stop.
+
+assert:
+  - tool_called: invoices_create
+  - tool_called: invoices_finalize
+  - tool_called: payments_record
+  - http: GET /api/apps/billing/invoices?status=paid
+    expect_status: 200
+    expect_count_at: invoices
+    expect_count: 1
+  - http: GET /api/apps/billing/payments?method=wire
+    expect_status: 200
+    expect_count_at: payments
+    expect_count: 1
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 18000
+  cost_usd: 0.25
