@@ -22,6 +22,7 @@ mcp/messaging/messaging
 mcp/social/social
 mcp/status/status
 mcp/storage/storage
+mcp/tables/tables
 mcp/tapo/tapo
 mcp/tasks/tasks
 mcp/todo/todo
