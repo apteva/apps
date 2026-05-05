@@ -93,6 +93,19 @@ function formatSize(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
+// Per-file upload state surfaced as a progress strip above the table.
+// Mirrors the shape uploadResumable's onProgress hands us; status =
+// "uploading" until the resumable helper resolves, then "done" or
+// "error" so the strip can finish/auto-clear.
+interface UploadJob {
+  id: number;
+  name: string;
+  total: number;
+  loaded: number;
+  status: "uploading" | "done" | "error";
+  error?: string;
+}
+
 export default function StoragePanel({ projectId, installId }: NativePanelProps) {
   const [folder, setFolder] = useState("/");
   const [folders, setFolders] = useState<string[]>([]);
@@ -101,6 +114,7 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
   const [busy, setBusy] = useState(false);
   const [newFolder, setNewFolder] = useState("");
   const [selected, setSelected] = useState<FileRow | null>(null);
+  const [uploads, setUploads] = useState<UploadJob[]>([]);
   const uploadRef = useRef<HTMLInputElement | null>(null);
 
   const withParams = useCallback((extra: Record<string, string>) => {
@@ -156,35 +170,60 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
     const fileList = Array.from(ev.target.files || []);
     if (fileList.length === 0) return;
     setBusy(true);
-    try {
-      let i = 0;
-      for (const file of fileList) {
-        i += 1;
-        // The resumable helper auto-chooses single-shot vs chunked
-        // based on size. onProgress drives a status banner so the
-        // user sees throughput on the multi-GB videos that would
-        // otherwise look stuck.
-        const label = `(${i}/${fileList.length}) ${file.name}`;
-        await uploadResumable(file, {
-          folder,
-          onProgress: (bytes, total) => {
-            const pct = total > 0 ? Math.floor((bytes / total) * 100) : 0;
-            setStatus(`Uploading ${label} — ${pct}%`);
-          },
-        });
-      }
-      setStatus(
-        fileList.length === 1
-          ? `Uploaded ${fileList[0].name}.`
-          : `Uploaded ${fileList.length} files.`,
+    // Seed one job per selected file. Preserve insertion order — the
+    // strip renders top-to-bottom matching what the user picked.
+    const baseId = Date.now();
+    const initialJobs: UploadJob[] = fileList.map((f, i) => ({
+      id: baseId + i,
+      name: f.name,
+      total: f.size,
+      loaded: 0,
+      status: "uploading" as const,
+    }));
+    setUploads((prev) => [...prev, ...initialJobs]);
+
+    const updateJob = (id: number, patch: Partial<UploadJob>) => {
+      setUploads((prev) =>
+        prev.map((j) => (j.id === id ? { ...j, ...patch } : j)),
       );
+    };
+
+    try {
+      for (let i = 0; i < fileList.length; i++) {
+        const file = fileList[i];
+        const job = initialJobs[i];
+        try {
+          await uploadResumable(file, {
+            folder,
+            onProgress: (bytes, total) => {
+              updateJob(job.id, { loaded: bytes, total });
+            },
+          });
+          updateJob(job.id, { loaded: file.size, status: "done" });
+        } catch (e) {
+          updateJob(job.id, {
+            status: "error",
+            error: (e as Error).message,
+          });
+          throw e;
+        }
+      }
     } catch (e) {
       setStatus("Upload failed: " + (e as Error).message);
     } finally {
       ev.target.value = "";
       setBusy(false);
       load();
+      // Auto-clear successful jobs after a beat so the strip doesn't
+      // accrue forever. Errors stick around — user dismisses them.
+      window.setTimeout(() => {
+        setUploads((prev) => prev.filter((j) => j.status !== "done"));
+      }, 2500);
     }
+  };
+
+  const dismissUpload = (id: number) => {
+    setUploads((prev) => prev.filter((j) => j.id !== id));
   };
 
   const handleMakeFolder = async () => {
@@ -295,6 +334,14 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
         </div>
       </div>
 
+      {uploads.length > 0 && (
+        <div className="flex flex-col gap-2 border border-border rounded p-3 bg-bg-input/30">
+          {uploads.map((job) => (
+            <UploadProgressRow key={job.id} job={job} onDismiss={() => dismissUpload(job.id)} />
+          ))}
+        </div>
+      )}
+
       <div className="flex-1 overflow-auto border border-border rounded">
         {folders.length === 0 && files.length === 0 ? (
           <div className="py-12 px-6 text-center text-text-muted text-sm">
@@ -341,11 +388,7 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
                     </td>
                     <td className="px-4 py-2 text-text-muted">{formatSize(f.size_bytes)}</td>
                     <td className="px-4 py-2">
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${
-                        f.visibility === "public" ? "bg-green/15 text-green" :
-                        f.visibility === "signed" ? "bg-accent/15 text-accent" :
-                        "bg-border text-text-muted"
-                      }`}>{f.visibility}</span>
+                      <VisibilityBadge value={f.visibility} />
                     </td>
                     <td className="px-4 py-2 text-right">
                       <button
@@ -415,11 +458,7 @@ function FileDetail({
           <MetaRow label="Folder" value={file.folder} />
           <div className="flex items-center gap-2">
             <span className="text-text-dim w-20 flex-shrink-0">Visibility</span>
-            <span className={`text-[10px] px-1.5 py-0.5 rounded ${
-              file.visibility === "public" ? "bg-green/15 text-green" :
-              file.visibility === "signed" ? "bg-accent/15 text-accent" :
-              "bg-border text-text-muted"
-            }`}>{file.visibility}</span>
+            <VisibilityBadge value={file.visibility} />
           </div>
           <MetaRow label="Created" value={new Date(file.created_at).toLocaleString()} />
           <MetaRow label="SHA-256" value={file.sha256 || "—"} mono />
@@ -482,11 +521,41 @@ function MetaRow({ label, value, mono }: { label: string; value: string; mono?: 
 function FilePreview({ file, contentURL }: { file: FileRow; contentURL: string }) {
   const ct = (file.content_type || "").toLowerCase();
   const TEXT_LIMIT = 256 * 1024;
+  // Some uploads land with no content_type (browser couldn't sniff,
+  // or the upload predates the platform's defaulting). Fall back to
+  // the filename extension so video.mp4 / audio.mp3 still play.
+  const ext = file.name.toLowerCase().split(".").pop() || "";
+  const isVideo = ct.startsWith("video/") || ["mp4", "webm", "mov", "m4v", "ogv"].includes(ext);
+  const isAudio = ct.startsWith("audio/") || ["mp3", "wav", "ogg", "m4a", "flac", "aac"].includes(ext);
 
   if (ct.startsWith("image/")) {
     return (
       <div className="bg-bg-input border-b border-border flex items-center justify-center" style={{ minHeight: "12rem", maxHeight: "20rem" }}>
         <img src={contentURL} alt={file.name} className="max-w-full" style={{ maxHeight: "20rem", objectFit: "contain" }} />
+      </div>
+    );
+  }
+  if (isVideo) {
+    return (
+      <div className="bg-black border-b border-border flex items-center justify-center" style={{ maxHeight: "24rem" }}>
+        <video
+          src={contentURL}
+          controls
+          preload="metadata"
+          className="max-w-full"
+          style={{ maxHeight: "24rem" }}
+        >
+          Your browser does not support inline video playback.
+        </video>
+      </div>
+    );
+  }
+  if (isAudio) {
+    return (
+      <div className="bg-bg-input border-b border-border p-4">
+        <audio src={contentURL} controls preload="metadata" className="w-full">
+          Your browser does not support inline audio playback.
+        </audio>
       </div>
     );
   }
@@ -515,6 +584,71 @@ function FilePreview({ file, contentURL }: { file: FileRow; contentURL: string }
     <div className="bg-bg-input border-b border-border flex flex-col items-center justify-center text-text-dim text-xs" style={{ height: "8rem" }}>
       <div className="text-3xl mb-1" aria-hidden>📄</div>
       <div>No preview available</div>
+    </div>
+  );
+}
+
+// Defensive renderer for the visibility column. Older rows can land
+// with empty visibility from the pre-fix chunked-upload path; treat
+// those as "private" (which the column's default would have been
+// without the explicit override) and label them so an operator can
+// tell at a glance that they're falling back rather than inheriting
+// a value.
+function VisibilityBadge({ value }: { value: string | undefined | null }) {
+  const v = value || "private";
+  const cls =
+    v === "public" ? "bg-green/15 text-green" :
+    v === "signed" ? "bg-accent/15 text-accent" :
+    "bg-border text-text-muted";
+  return <span className={`text-[10px] px-1.5 py-0.5 rounded ${cls}`}>{v}</span>;
+}
+
+// One row in the upload-progress strip. Renders filename, a
+// percentage bar, and human bytes/total. Errors swap the bar for a
+// red error message + dismiss button.
+function UploadProgressRow({
+  job,
+  onDismiss,
+}: {
+  job: UploadJob;
+  onDismiss: () => void;
+}) {
+  const pct = job.total > 0 ? Math.min(100, Math.floor((job.loaded / job.total) * 100)) : 0;
+  const isError = job.status === "error";
+  const isDone = job.status === "done";
+  return (
+    <div className="flex items-center gap-3 text-xs">
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center justify-between gap-2 mb-1">
+          <span className="text-text truncate" title={job.name}>{job.name}</span>
+          <span className={`flex-shrink-0 ${isError ? "text-red" : "text-text-muted"}`}>
+            {isError
+              ? "failed"
+              : isDone
+              ? "uploaded"
+              : `${formatSize(job.loaded)} / ${formatSize(job.total)} · ${pct}%`}
+          </span>
+        </div>
+        <div className="h-1.5 bg-bg-input rounded overflow-hidden">
+          <div
+            className={`h-full transition-all duration-150 ${
+              isError ? "bg-red" : isDone ? "bg-green" : "bg-accent"
+            }`}
+            style={{ width: isError || isDone ? "100%" : `${pct}%` }}
+          />
+        </div>
+        {isError && job.error && (
+          <div className="text-red mt-1">{job.error}</div>
+        )}
+      </div>
+      {(isError || isDone) && (
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="text-text-muted hover:text-text px-1"
+          aria-label="Dismiss"
+        >×</button>
+      )}
     </div>
   );
 }

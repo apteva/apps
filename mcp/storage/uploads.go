@@ -252,7 +252,12 @@ func (a *App) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 		ContentType:    body.ContentType,
 		Folder:         body.Folder,
 		Tags:           body.Tags,
-		Visibility:     visibilityOrDefault(body.Visibility),
+		// effectiveVisibility falls back to the install's configured
+		// default when the client doesn't pass an explicit value.
+		// visibilityOrDefault alone returns "" on miss, which lands
+		// in the DB as empty string and renders as "undefined" in the
+		// dashboard. Match the single-shot upload path.
+		Visibility:     effectiveVisibility(ctx, body.Visibility),
 		DeclaredSize:   body.Size,
 		DeclaredSHA256: strings.ToLower(body.SHA256),
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
