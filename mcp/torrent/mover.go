@@ -20,11 +20,16 @@
 package main
 
 import (
-	"encoding/base64"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,7 +39,10 @@ import (
 )
 
 const (
-	uploadInlineMax = 256 * 1024 * 1024 // 256 MiB; storage v0.1 inlines bytes
+	// chunkSize matches storage's defaultPartSize. Reads + PUTs one
+	// chunk at a time so memory stays flat regardless of file size —
+	// a 5 MB buffer is enough headroom for the storage HTTP client.
+	chunkSize = 5 * 1024 * 1024
 )
 
 // onTransition is wired up in OnMount as the engine's transition
@@ -188,51 +196,176 @@ func (a *App) markError(infohash, msg string) {
 	}
 }
 
-// uploadOneFile reads one local file and pushes it into storage via
-// `files_upload`. The relative path inside the torrent is preserved
-// under `root` — a torrent like Movie.X/subs/en.srt becomes
-// {target}/Movie.X/subs/en.srt.
+// uploadOneFile streams one local file into storage via the chunked
+// /uploads protocol. Bypasses the base64-inline files_upload tool
+// which capped at storage's max_upload_size_mb (default 100 MB) and
+// pulled the whole file into RAM before write.
+//
+// The relative path inside the torrent is preserved under `root` —
+// a torrent like Movie.X/subs/en.srt becomes {target}/Movie.X/subs/en.srt.
+//
+// Wire (cross-app HTTP, sidecar→sidecar via the platform gateway):
+//
+//   POST   {gateway}/api/apps/storage/uploads
+//   PUT    {gateway}/api/apps/storage/uploads/{id}/parts/{N}     (×many)
+//   POST   {gateway}/api/apps/storage/uploads/{id}/complete
+//
+// Auth: APTEVA_APP_TOKEN. Project: APTEVA_PROJECT_ID query param so
+// storage's resolveProjectFromRequest is unambiguous even on
+// global-scoped storage installs.
 func (a *App) uploadOneFile(ctx *sdk.AppCtx, root string, f FileSnapshot) (int64, error) {
-	if f.Length > uploadInlineMax {
-		return 0, fmt.Errorf("file too large for inline upload (%d > %d MiB) — set keep_working_copy=true and upload manually until storage exposes a chunked upload tool",
-			f.Length, uploadInlineMax/(1<<20))
-	}
-	working := configString(a.ctx, "working_dir", "/data/torrents")
+	working := resolveWorkingDir(a.ctx)
 	abs := filepath.Join(working, f.Path)
-	bytes, err := os.ReadFile(abs)
+
+	file, err := os.Open(abs)
 	if err != nil {
 		return 0, err
 	}
-	contentType := guessContentType(f.Path)
+	defer file.Close()
+
+	stat, err := file.Stat()
+	if err != nil {
+		return 0, err
+	}
+
 	relDir, name := filepath.Split(f.Path)
 	folder := root
 	if relDir != "" && relDir != "./" {
 		folder = root + "/" + strings.Trim(relDir, "/")
 	}
+	contentType := guessContentType(f.Path)
 
-	raw, err := ctx.PlatformAPI().CallApp("storage", "files_upload", map[string]any{
+	gateway := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")
+	token := os.Getenv("APTEVA_APP_TOKEN")
+	if gateway == "" || token == "" {
+		return 0, errors.New("APTEVA_GATEWAY_URL / APTEVA_APP_TOKEN not set in env")
+	}
+	pid := projectScope()
+	base := gateway + "/api/apps/storage"
+	q := "?project_id=" + url.QueryEscape(pid)
+
+	// No per-request timeout — multi-GB uploads take minutes. The
+	// engine's polling loop will keep tickling the row's progress in
+	// the meantime, and onTransition runs in its own goroutine so the
+	// poll loop doesn't block here.
+	httpc := &http.Client{}
+
+	// 1. init session.
+	initBody, _ := json.Marshal(map[string]any{
 		"filename":     name,
-		"folder":       folder,
+		"size":         stat.Size(),
 		"content_type": contentType,
-		"bytes_base64": base64.StdEncoding.EncodeToString(bytes),
+		"folder":       folder,
 	})
+	req, _ := http.NewRequest("POST", base+"/uploads"+q, bytes.NewReader(initBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpc.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("upload init: %w", err)
 	}
-	var out struct {
-		FileID int64 `json:"file_id"`
-		ID     int64 `json:"id"`
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		resp.Body.Close()
+		return 0, fmt.Errorf("upload init: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return 0, fmt.Errorf("storage response: %w", err)
+	var initOut struct {
+		UploadID string `json:"upload_id"`
+		PartSize int64  `json:"part_size"`
+		File     *struct {
+			ID int64 `json:"id"`
+		} `json:"file"` // populated when init short-circuits on sha256 dedup
 	}
-	if out.FileID != 0 {
-		return out.FileID, nil
+	if err := json.NewDecoder(resp.Body).Decode(&initOut); err != nil {
+		resp.Body.Close()
+		return 0, fmt.Errorf("upload init decode: %w", err)
 	}
-	if out.ID != 0 {
-		return out.ID, nil
+	resp.Body.Close()
+	if initOut.File != nil && initOut.File.ID != 0 {
+		return initOut.File.ID, nil
 	}
-	return 0, errors.New("storage returned no file id")
+
+	partSize := initOut.PartSize
+	if partSize <= 0 {
+		partSize = chunkSize
+	}
+
+	// 2. parts — stream one chunk at a time, hash incrementally so
+	// the complete call has the sha256 storage will verify against.
+	hasher := sha256.New()
+	buf := make([]byte, partSize)
+	partNum := 1
+	for {
+		n, rerr := io.ReadFull(file, buf)
+		if n > 0 {
+			chunk := buf[:n]
+			hasher.Write(chunk)
+			partURL := fmt.Sprintf("%s/uploads/%s/parts/%d%s", base, initOut.UploadID, partNum, q)
+			preq, _ := http.NewRequest("PUT", partURL, bytes.NewReader(chunk))
+			preq.Header.Set("Authorization", "Bearer "+token)
+			preq.Header.Set("Content-Type", "application/octet-stream")
+			preq.ContentLength = int64(n)
+			presp, perr := httpc.Do(preq)
+			if perr != nil {
+				abortUpload(httpc, base, q, token, initOut.UploadID)
+				return 0, fmt.Errorf("upload part %d: %w", partNum, perr)
+			}
+			if presp.StatusCode/100 != 2 {
+				body, _ := io.ReadAll(io.LimitReader(presp.Body, 2048))
+				presp.Body.Close()
+				abortUpload(httpc, base, q, token, initOut.UploadID)
+				return 0, fmt.Errorf("upload part %d: HTTP %d: %s", partNum, presp.StatusCode, strings.TrimSpace(string(body)))
+			}
+			presp.Body.Close()
+			partNum++
+		}
+		if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
+			break
+		}
+		if rerr != nil {
+			abortUpload(httpc, base, q, token, initOut.UploadID)
+			return 0, fmt.Errorf("read %s: %w", abs, rerr)
+		}
+	}
+	sha := hex.EncodeToString(hasher.Sum(nil))
+
+	// 3. complete.
+	compBody, _ := json.Marshal(map[string]any{"sha256": sha})
+	creq, _ := http.NewRequest("POST", base+"/uploads/"+initOut.UploadID+"/complete"+q, bytes.NewReader(compBody))
+	creq.Header.Set("Authorization", "Bearer "+token)
+	creq.Header.Set("Content-Type", "application/json")
+	cresp, err := httpc.Do(creq)
+	if err != nil {
+		return 0, fmt.Errorf("upload complete: %w", err)
+	}
+	defer cresp.Body.Close()
+	if cresp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(io.LimitReader(cresp.Body, 2048))
+		return 0, fmt.Errorf("upload complete: HTTP %d: %s", cresp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var compOut struct {
+		File struct {
+			ID int64 `json:"id"`
+		} `json:"file"`
+	}
+	if err := json.NewDecoder(cresp.Body).Decode(&compOut); err != nil {
+		return 0, fmt.Errorf("upload complete decode: %w", err)
+	}
+	if compOut.File.ID == 0 {
+		return 0, errors.New("upload complete returned no file id")
+	}
+	return compOut.File.ID, nil
+}
+
+// abortUpload best-effort releases the partial session on storage's
+// side after a part error. Don't return its error — we already have
+// one to surface; abort is housekeeping.
+func abortUpload(httpc *http.Client, base, q, token, uploadID string) {
+	req, _ := http.NewRequest("DELETE", base+"/uploads/"+uploadID+q, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	if resp, err := httpc.Do(req); err == nil {
+		resp.Body.Close()
+	}
 }
 
 // maybeProbeMedia is fire-and-forget: if `media` isn't installed or
