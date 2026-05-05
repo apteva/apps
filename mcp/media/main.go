@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,7 +21,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.6.0
+version: 0.7.0
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -481,7 +482,13 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		return nil, err
 	}
-	return map[string]any{"found": true, "media": m}, nil
+	enriched, _, eerr := enrichRows(context.Background(), pid, []MediaRow{*m})
+	if eerr != nil {
+		// Storage roundtrip failed — surface unenriched row with a
+		// flag so agents can tell it apart from a deleted file.
+		return map[string]any{"found": true, "media": m, "storage_unavailable": true}, nil
+	}
+	return map[string]any{"found": true, "media": enriched[0]}, nil
 }
 
 // toolSetDescription writes prose columns on the media row. Partial
@@ -693,7 +700,15 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"media": rows}, nil
+	enriched, _, eerr := enrichRows(context.Background(), pid, rows)
+	if eerr != nil {
+		// Storage temporarily unreachable — return un-enriched rows
+		// with a flag so the agent doesn't read missing URLs as
+		// "files deleted". media's own probe + description data is
+		// still useful even without storage's metadata.
+		return map[string]any{"media": rows, "storage_unavailable": true}, nil
+	}
+	return map[string]any{"media": enriched}, nil
 }
 
 // toolGetDerivation closes over the derivation kind so the same body
@@ -714,10 +729,17 @@ func (a *App) toolGetDerivation(kind string) sdk.ToolHandler {
 		}
 		for _, d := range ds {
 			if d.Kind == kind && d.Status == "ok" {
+				// Resolve the derivation's storage URL so an agent
+				// gets a directly-usable link without a follow-up
+				// storage call.
+				files, _ := newStorageClient().ResolveFiles(
+					context.Background(), pid, []string{d.StorageFileID})
+				enriched := enrichDerivation(d, files)
 				return map[string]any{
 					"found":           true,
-					"derivation":      d,
+					"derivation":      enriched,
 					"storage_file_id": d.StorageFileID,
+					"url":             enriched.URL,
 				}, nil
 			}
 		}
@@ -1144,7 +1166,16 @@ func (a *App) toolGetRender(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		return nil, err
 	}
-	return map[string]any{"found": true, "render": r}, nil
+	// Resolve the output file's URL when the render is done. Agents
+	// using just media MCP get a directly-usable link without
+	// chaining a storage call.
+	files, ferr := newStorageClient().ResolveFiles(
+		context.Background(), pid, []string{r.OutputFileID})
+	out := map[string]any{"found": true, "render": enrichRender(*r, files)}
+	if ferr != nil && r.OutputFileID != "" {
+		out["storage_unavailable"] = true
+	}
+	return out, nil
 }
 
 func (a *App) toolListRenders(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1160,7 +1191,23 @@ func (a *App) toolListRenders(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"renders": rows}, nil
+	// Enrich completed renders with storage URLs in one batch.
+	ids := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if r.OutputFileID != "" {
+			ids = append(ids, r.OutputFileID)
+		}
+	}
+	files, ferr := newStorageClient().ResolveFiles(context.Background(), pid, ids)
+	enriched := make([]EnrichedRender, len(rows))
+	for i, r := range rows {
+		enriched[i] = enrichRender(r, files)
+	}
+	out := map[string]any{"renders": enriched}
+	if ferr != nil {
+		out["storage_unavailable"] = true
+	}
+	return out, nil
 }
 
 func (a *App) toolCancelRender(ctx *sdk.AppCtx, args map[string]any) (any, error) {

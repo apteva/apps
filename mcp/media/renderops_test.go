@@ -309,7 +309,7 @@ func TestToolListRenders_FiltersThrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows := out.(map[string]any)["renders"].([]RenderRow)
+	rows := out.(map[string]any)["renders"].([]EnrichedRender)
 	if len(rows) != 1 || rows[0].Operation != "trim" {
 		t.Errorf("filter didn't apply: %v", rows)
 	}

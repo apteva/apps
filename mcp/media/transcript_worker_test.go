@@ -84,6 +84,12 @@ func (s *stubPlatform) StartOAuth(sdk.OAuthStartRequest) (*sdk.OAuthStartResult,
 func (s *stubPlatform) DisconnectConnection(int64) error                   { return nil }
 func (s *stubPlatform) ListOwnedConnections() ([]sdk.PlatformConnection, error) { return nil, nil }
 
+// GetGrants — added for app-sdk v0.3 PlatformClient. Tests don't
+// exercise authz scoping, so we return the default-allow shape.
+func (s *stubPlatform) GetGrants(int64) (*sdk.GrantsResponse, error) {
+	return &sdk.GrantsResponse{DefaultEffect: "allow"}, nil
+}
+
 // boundDeepgram returns a stub configured as if a deepgram connection
 // with id 7 is bound to the transcripts role. The platform's
 // AppCtx.IntegrationFor expects integer-typed binding values; JSON

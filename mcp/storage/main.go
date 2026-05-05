@@ -982,6 +982,29 @@ func (a *App) httpListOrSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
+
+	// Batch lookup by id — used by the media app's enrichment helper
+	// to resolve a search-result's URLs/metadata in one round-trip.
+	// Comma-separated ids; missing rows are silently absent (caller
+	// chose how to render the gap). Caps at 500 to keep URL length
+	// under the typical 8 KB reverse-proxy limit; callers chunk.
+	if idsRaw := q.Get("ids"); idsRaw != "" {
+		ids := parseIDList(idsRaw)
+		if len(ids) > 500 {
+			httpErr(w, http.StatusBadRequest, "ids exceeds 500 — chunk and retry")
+			return
+		}
+		out := make([]*File, 0, len(ids))
+		for _, id := range ids {
+			f, err := dbGetByID(ctx.AppDB(), pid, id)
+			if err == nil && f != nil {
+				out = append(out, f)
+			}
+		}
+		httpJSON(w, map[string]any{"files": out})
+		return
+	}
+
 	folderRaw := q.Get("folder")
 	if folderRaw != "" {
 		folder := normaliseFolder(folderRaw)
@@ -1009,6 +1032,24 @@ func (a *App) httpListOrSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpJSON(w, map[string]any{"files": out})
+}
+
+// parseIDList splits "1,2,3" into a slice of int64. Bad entries are
+// silently skipped — the endpoint silently absent-bys missing rows
+// anyway, so an unparseable id is treated the same as a missing one.
+func parseIDList(raw string) []int64 {
+	parts := strings.Split(raw, ",")
+	out := make([]int64, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if id, err := strconv.ParseInt(p, 10, 64); err == nil && id > 0 {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 func (a *App) httpUpload(w http.ResponseWriter, r *http.Request) {

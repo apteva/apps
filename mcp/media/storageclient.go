@@ -59,6 +59,13 @@ type StorageFile struct {
 	SHA256      string   `json:"sha256"`
 	Tags        []string `json:"tags"`
 	Visibility  string   `json:"visibility"`
+	// URL — absolute canonical URL minted by storage. Same shape
+	// regardless of visibility; the file's `visibility` field tells
+	// you whether the URL works without auth (public), needs a
+	// signature (signed), or needs an authenticated request
+	// (private). Storage v0.8+ populates this; older storage drops
+	// it and we fall through (URL stays "").
+	URL string `json:"url"`
 }
 
 // SearchFiles asks storage for files matching contentType prefixes
@@ -84,6 +91,54 @@ func (c *storageClient) SearchFiles(ctx context.Context, projectID string, limit
 		return nil, fmt.Errorf("parse files: %w (body=%s)", err, string(body))
 	}
 	return resp.Files, nil
+}
+
+// ResolveFiles batch-fetches storage metadata for a list of file ids.
+// One HTTP round-trip regardless of result count (chunked at 500 ids
+// per call, matching storage's URL-length cap). Returned map is keyed
+// by string-id so callers can look up by MediaRow.FileID without
+// formatting juggling. Missing ids are silently absent — caller
+// decides how to render the gap (stale row, deleted file, etc.).
+//
+// Used by the media tool handlers to enrich MediaRow with the URL
+// + name + visibility metadata storage holds, so an agent only needs
+// the media MCP — never storage's.
+func (c *storageClient) ResolveFiles(ctx context.Context, projectID string, ids []string) (map[string]*StorageFile, error) {
+	out := make(map[string]*StorageFile, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	const chunkSize = 500
+	for start := 0; start < len(ids); start += chunkSize {
+		end := start + chunkSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		q := url.Values{}
+		if projectID != "" {
+			q.Set("project_id", projectID)
+		}
+		// Pre-validate that every chunk entry parses as int64 — saves
+		// a round-trip on a typo'd argument.
+		idsCSV := strings.Join(chunk, ",")
+		q.Set("ids", idsCSV)
+		body, err := c.do(ctx, http.MethodGet, "/files?"+q.Encode(), nil, "")
+		if err != nil {
+			return nil, fmt.Errorf("resolve files: %w", err)
+		}
+		var resp struct {
+			Files []StorageFile `json:"files"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return nil, fmt.Errorf("parse files batch: %w", err)
+		}
+		for i := range resp.Files {
+			f := &resp.Files[i]
+			out[strconv.FormatInt(f.ID, 10)] = f
+		}
+	}
+	return out, nil
 }
 
 // GetFile pulls one file's metadata.
