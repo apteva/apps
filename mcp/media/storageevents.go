@@ -46,9 +46,20 @@ func startStorageEventSubscriber(app *sdk.AppCtx) {
 
 func runStorageEventSubscriber(app *sdk.AppCtx) {
 	log := app.Logger()
-	publicURL := strings.TrimRight(os.Getenv("APTEVA_PUBLIC_URL"), "/")
-	if publicURL == "" {
-		log.Warn("storage event subscriber: APTEVA_PUBLIC_URL not set; reverting to indexer-poll-only delete cleanup")
+	// Sidecar→platform calls go to APTEVA_GATEWAY_URL (the local
+	// platform listener), NOT APTEVA_PUBLIC_URL (the tunnel domain
+	// for outside callers). The pre-fix path tried to subscribe via
+	// the tunnel — Cloudflare 530'd on the long-lived SSE stream
+	// and the indexer fell back to its 30s sweep, missing instant
+	// indexing for newly-uploaded files.
+	gatewayURL := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")
+	if gatewayURL == "" {
+		// Last-resort fallback to the public URL for ops in
+		// unusual setups where the gateway env isn't injected.
+		gatewayURL = strings.TrimRight(os.Getenv("APTEVA_PUBLIC_URL"), "/")
+	}
+	if gatewayURL == "" {
+		log.Warn("storage event subscriber: APTEVA_GATEWAY_URL not set; reverting to indexer-poll-only delete cleanup")
 		return
 	}
 	projectID := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
@@ -76,7 +87,7 @@ func runStorageEventSubscriber(app *sdk.AppCtx) {
 		default:
 		}
 
-		err := connectAndStream(app, publicURL, projectID, token, &lastSeq)
+		err := connectAndStream(app, gatewayURL, projectID, token, &lastSeq)
 		if errors.Is(err, context.Canceled) || app.Done() == nil {
 			return
 		}
@@ -106,9 +117,9 @@ func runStorageEventSubscriber(app *sdk.AppCtx) {
 // connectAndStream opens the SSE connection and processes events
 // until the connection drops. Updates *sinceSeq as it goes so a
 // reconnect resumes correctly.
-func connectAndStream(app *sdk.AppCtx, publicURL, projectID, token string, sinceSeq *uint64) error {
+func connectAndStream(app *sdk.AppCtx, gatewayURL, projectID, token string, sinceSeq *uint64) error {
 	url := fmt.Sprintf("%s/api/app-events/storage?project_id=%s&since=%d",
-		publicURL, projectID, *sinceSeq)
+		gatewayURL, projectID, *sinceSeq)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

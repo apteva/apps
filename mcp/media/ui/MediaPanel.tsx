@@ -165,7 +165,12 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
   // makes the current view include sub-folders.
   const [folder, setFolder] = useState("/");
   const [childFolders, setChildFolders] = useState<string[]>([]);
-  const [recursive, setRecursive] = useState(false);
+  // Default to recursive=true so the root view shows every media
+  // file in the project — matches the pre-folder-feature mental
+  // model where opening Media meant "see everything." Users who
+  // want strict per-folder navigation toggle it off; descending
+  // into a sub-folder keeps the toggle's current value.
+  const [recursive, setRecursive] = useState(true);
 
   const withParams = useCallback(
     (extra: Record<string, string> = {}) => {
