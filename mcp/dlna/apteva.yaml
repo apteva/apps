@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: dlna
 display_name: DLNA Server
-version: 0.1.6
+version: 0.1.7
 description: |
   Publishes a UPnP/DLNA MediaServer on the LAN. Smart TVs, game
   consoles, Sonos, VLC, and other AV clients discover this app via
@@ -63,6 +63,11 @@ runtime:
     entry: mcp/dlna
   port: 8200
   health_check: /health
+  # Bind on every interface, not loopback — TVs reach this sidecar
+  # directly over LAN UDP/TCP; SSDP advertises http://lan_ip:port.
+  # Combined with the per-route NoAuth carve-outs above, the LAN is
+  # the auth boundary.
+  bind_host: "0.0.0.0"
 
 db:
   driver: sqlite
