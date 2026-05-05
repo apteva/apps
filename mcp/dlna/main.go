@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: dlna
 display_name: DLNA Server
-version: 0.1.12
+version: 0.1.13
 description: Local-LAN UPnP/DLNA MediaServer for Apteva.
 author: Apteva
 scopes: [project, global]
@@ -726,22 +726,19 @@ type storageSubfolder struct {
 //   files_search       → {files: [...], count}
 //   files_get          → {id, name, …}                         (bare object — historical)
 //
-// Earlier dlna versions tried to json.Unmarshal those envelopes
-// straight into []slice and crashed Browse with
-//   "json: cannot unmarshal object into Go value of type []main.X".
-// Pull through the envelope explicitly here.
+// All cross-app calls below go through PlatformAPI.CallAppResult
+// (added in app-sdk v0.1.8) which strips the JSON-RPC envelope and
+// decodes the tool's inner JSON directly into the destination
+// struct. No more "cannot unmarshal object into Go value of type
+// []main.X" crashes the way earlier dlna versions hit.
 
 func (a *App) storageListFolders(ctx context.Context, parent string) ([]storageSubfolder, error) {
-	raw, err := a.ctx.PlatformAPI().CallApp("storage", "files_list_folders", map[string]any{
-		"parent": parent,
-	})
-	if err != nil {
-		return nil, err
-	}
 	var env struct {
 		Folders []string `json:"folders"`
 	}
-	if err := json.Unmarshal(raw, &env); err != nil {
+	if err := a.ctx.PlatformAPI().CallAppResult("storage", "files_list_folders", map[string]any{
+		"parent": parent,
+	}, &env); err != nil {
 		return nil, err
 	}
 	out := make([]storageSubfolder, 0, len(env.Folders))
@@ -756,30 +753,22 @@ func (a *App) storageListFolders(ctx context.Context, parent string) ([]storageS
 }
 
 func (a *App) storageListFiles(ctx context.Context, folder string, recursive bool) ([]storageFile, error) {
-	raw, err := a.ctx.PlatformAPI().CallApp("storage", "files_list", map[string]any{
-		"folder":    folder,
-		"recursive": recursive,
-		"limit":     1000,
-	})
-	if err != nil {
-		return nil, err
-	}
 	var env struct {
 		Files []storageFile `json:"files"`
 	}
-	if err := json.Unmarshal(raw, &env); err != nil {
+	if err := a.ctx.PlatformAPI().CallAppResult("storage", "files_list", map[string]any{
+		"folder":    folder,
+		"recursive": recursive,
+		"limit":     1000,
+	}, &env); err != nil {
 		return nil, err
 	}
 	return env.Files, nil
 }
 
 func (a *App) storageGetFile(ctx context.Context, id int64) (*storageFile, error) {
-	raw, err := a.ctx.PlatformAPI().CallApp("storage", "files_get", map[string]any{"id": id})
-	if err != nil {
-		return nil, err
-	}
 	var f storageFile
-	if err := json.Unmarshal(raw, &f); err != nil {
+	if err := a.ctx.PlatformAPI().CallAppResult("storage", "files_get", map[string]any{"id": id}, &f); err != nil {
 		return nil, err
 	}
 	return &f, nil
@@ -789,17 +778,13 @@ func (a *App) storageGetFile(ctx context.Context, id int64) (*storageFile, error
 // directly. Storage handles ranges & ETag, which is what we need for
 // seeking.
 func (a *App) storageGetURL(ctx context.Context, id int64, ttlSec int) (string, error) {
-	raw, err := a.ctx.PlatformAPI().CallApp("storage", "files_get_url", map[string]any{
-		"id":          id,
-		"ttl_seconds": ttlSec,
-	})
-	if err != nil {
-		return "", err
-	}
 	var out struct {
 		URL string `json:"url"`
 	}
-	if err := json.Unmarshal(raw, &out); err != nil {
+	if err := a.ctx.PlatformAPI().CallAppResult("storage", "files_get_url", map[string]any{
+		"id":          id,
+		"ttl_seconds": ttlSec,
+	}, &out); err != nil {
 		return "", err
 	}
 	if out.URL == "" {
@@ -826,14 +811,10 @@ func (a *App) searchStorage(ctx context.Context, contentTypePrefix, query string
 	if !configFlag(a.ctx, "publish_root_by_default", false) {
 		args["folders"] = a.publishedFolderPaths()
 	}
-	raw, err := a.ctx.PlatformAPI().CallApp("storage", "files_search", args)
-	if err != nil {
-		return nil, err
-	}
 	var env struct {
 		Files []storageFile `json:"files"`
 	}
-	if err := json.Unmarshal(raw, &env); err != nil {
+	if err := a.ctx.PlatformAPI().CallAppResult("storage", "files_search", args, &env); err != nil {
 		return nil, err
 	}
 	out := make([]didlItem, 0, len(env.Files))
@@ -863,14 +844,10 @@ func (a *App) recentItems(ctx context.Context, start, count int) ([]didlItem, er
 	if !configFlag(a.ctx, "publish_root_by_default", false) {
 		args["folders"] = a.publishedFolderPaths()
 	}
-	raw, err := a.ctx.PlatformAPI().CallApp("storage", "files_search", args)
-	if err != nil {
-		return nil, err
-	}
 	var env struct {
 		Files []storageFile `json:"files"`
 	}
-	if err := json.Unmarshal(raw, &env); err != nil {
+	if err := a.ctx.PlatformAPI().CallAppResult("storage", "files_search", args, &env); err != nil {
 		return nil, err
 	}
 	out := make([]didlItem, 0, len(env.Files))
@@ -946,14 +923,10 @@ type mediaMeta struct {
 // reachable, or doesn't know about this file, we silently return nil
 // and leave the DIDL fields blank — clients tolerate that.
 func (a *App) mediaProbe(ctx context.Context, fileID int64) *mediaMeta {
-	raw, err := a.ctx.PlatformAPI().CallApp("media", "probe_file", map[string]any{
-		"file_id": fileID,
-	})
-	if err != nil {
-		return nil
-	}
 	var m mediaMeta
-	if err := json.Unmarshal(raw, &m); err != nil {
+	if err := a.ctx.PlatformAPI().CallAppResult("media", "probe_file", map[string]any{
+		"file_id": fileID,
+	}, &m); err != nil {
 		return nil
 	}
 	return &m
