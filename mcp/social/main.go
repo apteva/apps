@@ -181,6 +181,14 @@ type platformDef struct {
 	ProfileTool          string
 	ProfileNameField     string
 	ProfileAvatarField   string
+	// DeleteTool — integration tool that removes an already-published
+	// post from the upstream platform. Empty when the platform's API
+	// doesn't permit it (Instagram media, TikTok videos) or when the
+	// catalog hasn't grown the verb yet (LinkedIn, Reddit, Threads).
+	// When empty, post_delete still removes the local rows but leaves
+	// the upstream copy in place.
+	DeleteTool    string
+	DeleteIDField string // input field carrying platform_post_id ("tweet_id", "postId", "id"…)
 }
 
 // platforms is the static registry. v0.1 ships with two — Twitter
@@ -200,6 +208,8 @@ var platforms = map[string]platformDef{
 		ProfileTool:        "get_me",
 		ProfileNameField:   "username",
 		ProfileAvatarField: "profile_image_url",
+		DeleteTool:         "delete_tweet",
+		DeleteIDField:      "tweet_id",
 	},
 	"facebook": {
 		Platform:        "facebook",
@@ -237,6 +247,12 @@ var platforms = map[string]platformDef{
 		VideoPostTool:      "post_video",
 		VideoMediaURLField: "file_url",
 		VideoBodyField:     "description",
+		// Graph DELETE /{pageId}_{postId} — the platform_post_id we
+		// stored from post_to_page is already in that exact form. The
+		// page-level access_token is forwarded via PostTokenInputField
+		// (same pattern + same field name as the post path).
+		DeleteTool:    "facebook_delete_post",
+		DeleteIDField: "postId",
 	},
 	"instagram": {
 		Platform:        "instagram",
@@ -308,6 +324,12 @@ var platforms = map[string]platformDef{
 		ProfileTool:        "get_my_channel",
 		ProfileNameField:   "snippet.title",
 		ProfileAvatarField: "snippet.thumbnails.default.url",
+		// Wired in advance of v0.2 upload support. With current upload
+		// strategy returning an error, no published platform_post_id
+		// is recorded for YouTube targets, so this branch stays dormant
+		// until upload lands — no harm in pre-wiring it.
+		DeleteTool:    "delete_video",
+		DeleteIDField: "id",
 	},
 }
 
@@ -463,9 +485,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "post_delete",
-			Description: "Delete a post + its post_targets locally. If the post is currently scheduled, cancels the corresponding jobs row first. Does NOT delete the post from the upstream platform — Facebook/Instagram/etc keep their copy of any already-published content. Args: post_id.",
+			Description: "Delete a post locally and, where the platform allows it, remove the upstream copy too. For each published target the app calls the platform's delete verb (Twitter, Facebook, YouTube wired today; LinkedIn/Reddit/Threads pending catalog work; Instagram and TikTok don't permit programmatic deletion of posted media). The local rows always go regardless of upstream outcome — the response includes a per-target `upstream` array (status: deleted | unsupported | skipped | failed) so callers can flag platforms that still hold a copy. Cancels any scheduled job first. Args: post_id, force_local_only? (skip all upstream calls; default false).",
 			InputSchema: schemaObject(map[string]any{
-				"post_id": map[string]any{"type": "integer"},
+				"post_id":          map[string]any{"type": "integer"},
+				"force_local_only": map[string]any{"type": "boolean", "description": "Skip upstream platform deletion; only remove local rows. Default false."},
 			}, []string{"post_id"}),
 			Handler: a.toolPostDelete,
 		},
@@ -1903,11 +1926,24 @@ func (a *App) toolPostReschedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 
 // ─── post_delete ───────────────────────────────────────────────────
 
+// targetDeleteOutcome captures one upstream-delete attempt for the
+// post.deleted event payload + tool response. Best-effort: a failed
+// outcome here does NOT block the local row delete — the user gets a
+// clear list of which platforms still hold a copy.
+type targetDeleteOutcome struct {
+	TargetID       int64  `json:"target_id"`
+	Platform       string `json:"platform"`
+	PlatformPostID string `json:"platform_post_id"`
+	Status         string `json:"status"` // deleted | unsupported | skipped | failed
+	Error          string `json:"error,omitempty"`
+}
+
 func (a *App) toolPostDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	postID := int64(intArg(args, "post_id", 0))
 	if postID <= 0 {
 		return mcpError("post_id required"), nil
 	}
+	forceLocal := boolArg(args, "force_local_only", false)
 	pid := os.Getenv("APTEVA_PROJECT_ID")
 	var status string
 	var jobID int64
@@ -1922,6 +1958,13 @@ func (a *App) toolPostDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	// already fired, jobs treats the cancel as a no-op).
 	if status == "scheduled" && jobID > 0 {
 		a.cancelJob(ctx, jobID)
+	}
+	// Fan out upstream deletes for every published target with a
+	// platform_post_id. Best-effort: failures are recorded but the
+	// local rows still get removed below.
+	var outcomes []targetDeleteOutcome
+	if !forceLocal && (status == "published" || status == "partial") {
+		outcomes = a.deletePostUpstream(ctx, postID)
 	}
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
@@ -1940,15 +1983,119 @@ func (a *App) toolPostDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	ctx.Emit("post.deleted", map[string]any{
-		"post_id":            postID,
-		"prior_status":       status,
-		"cancelled_job_id":   jobID,
+		"post_id":          postID,
+		"prior_status":     status,
+		"cancelled_job_id": jobID,
+		"upstream":         outcomes,
 	})
 	return map[string]any{
 		"deleted":          postID,
 		"prior_status":     status,
 		"cancelled_job_id": jobID,
+		"upstream":         outcomes,
 	}, nil
+}
+
+// deletePostUpstream walks every published target with a platform_post_id
+// and asks the platform's integration to remove the post. Returns one
+// outcome per target so callers can surface per-platform results.
+//
+// Status semantics:
+//   - "deleted"     — upstream confirmed the removal
+//   - "unsupported" — platform's API doesn't allow deletion (Instagram media,
+//                     TikTok), or the catalog doesn't expose a verb yet
+//                     (LinkedIn, Reddit, Threads). Local row will still be
+//                     removed; the upstream copy stays
+//   - "skipped"     — target was never published (no platform_post_id) or
+//                     its social_account row is gone (account disconnected
+//                     after posting), so we have nothing to delete upstream
+//   - "failed"      — integration call returned an error; user can verify
+//                     manually with platform_post_id
+func (a *App) deletePostUpstream(ctx *sdk.AppCtx, postID int64) []targetDeleteOutcome {
+	rows, err := ctx.AppDB().Query(
+		`SELECT t.id, t.status, COALESCE(t.platform_post_id,''),
+		        a.platform, a.connection_id, COALESCE(a.page_credentials,'')
+		 FROM post_targets t
+		 LEFT JOIN social_accounts a ON a.id=t.social_account_id
+		 WHERE t.post_id=?`,
+		postID,
+	)
+	if err != nil {
+		ctx.Logger().Warn("deletePostUpstream: query targets", "post_id", postID, "err", err)
+		return nil
+	}
+	defer rows.Close()
+	type row struct {
+		targetID  int64
+		status    string
+		extPostID string
+		platform  sql.NullString
+		connID    sql.NullInt64
+		pageCreds sql.NullString
+	}
+	var rs []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.targetID, &r.status, &r.extPostID, &r.platform, &r.connID, &r.pageCreds); err == nil {
+			rs = append(rs, r)
+		}
+	}
+	outcomes := make([]targetDeleteOutcome, 0, len(rs))
+	for _, r := range rs {
+		out := targetDeleteOutcome{TargetID: r.targetID, PlatformPostID: r.extPostID}
+		if r.platform.Valid {
+			out.Platform = r.platform.String
+		}
+		// Skip unpublished targets and orphans (account row gone).
+		if r.status != "published" || r.extPostID == "" || !r.platform.Valid || !r.connID.Valid {
+			out.Status = "skipped"
+			outcomes = append(outcomes, out)
+			continue
+		}
+		def, ok := platforms[r.platform.String]
+		if !ok || def.DeleteTool == "" {
+			out.Status = "unsupported"
+			outcomes = append(outcomes, out)
+			continue
+		}
+		input := map[string]any{def.DeleteIDField: r.extPostID}
+		// Reuse the same page-token forwarding as the post path —
+		// Facebook's DELETE /{pageId}_{postId} requires the page-level
+		// access_token same as /feed writes do.
+		if def.PostTokenInputField != "" && r.pageCreds.Valid && r.pageCreds.String != "" {
+			var creds map[string]string
+			if json.Unmarshal([]byte(r.pageCreds.String), &creds) == nil {
+				if tok, ok := creds[def.PageAccessTokenField]; ok && tok != "" {
+					input[def.PostTokenInputField] = tok
+				}
+			}
+		}
+		ctx.Logger().Info("deletePostUpstream: calling DeleteTool",
+			"platform", def.Platform, "tool", def.DeleteTool, "platform_post_id", r.extPostID)
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(r.connID.Int64, def.DeleteTool, input)
+		if err != nil {
+			out.Status = "failed"
+			out.Error = err.Error()
+			ctx.Logger().Warn("deletePostUpstream: integration err",
+				"platform", def.Platform, "tool", def.DeleteTool, "err", err)
+			outcomes = append(outcomes, out)
+			continue
+		}
+		if res == nil || !res.Success {
+			ue := upstreamError(res)
+			out.Status = "failed"
+			out.Error = ue.Error()
+			ctx.Logger().Warn("deletePostUpstream: upstream non-2xx",
+				"platform", def.Platform, "tool", def.DeleteTool, "err", ue)
+			outcomes = append(outcomes, out)
+			continue
+		}
+		out.Status = "deleted"
+		ctx.Logger().Info("deletePostUpstream: deleted",
+			"platform", def.Platform, "platform_post_id", r.extPostID)
+		outcomes = append(outcomes, out)
+	}
+	return outcomes
 }
 
 // ─── HTTP handlers (panel) ────────────────────────────────────────

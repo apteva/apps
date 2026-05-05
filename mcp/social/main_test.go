@@ -139,6 +139,10 @@ func (p *recordingPlatform) ListOwnedConnections() ([]sdk.PlatformConnection, er
 	return nil, nil
 }
 
+func (p *recordingPlatform) GetGrants(instanceID int64) (*sdk.GrantsResponse, error) {
+	return &sdk.GrantsResponse{}, nil
+}
+
 // --- helpers -------------------------------------------------------
 
 func newSocialCtx(t *testing.T, pf sdk.PlatformClient) *sdk.AppCtx {
@@ -1236,6 +1240,149 @@ func TestPostDelete_CancelsJobAndRemovesRows(t *testing.T) {
 	}
 	if !sawCancel {
 		t.Errorf("expected jobs_cancel call before delete")
+	}
+}
+
+func TestPostDelete_FansOutUpstream(t *testing.T) {
+	// Three published targets — twitter (delete wired, succeeds),
+	// facebook (delete wired, integration returns non-2xx so the
+	// outcome is "failed"), instagram (no DeleteTool — outcome
+	// "unsupported"). Local rows always go.
+	pf := newRecordingPlatform()
+	pf.executeResponses["delete_tweet"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{}`)}
+	pf.executeResponses["facebook_delete_post"] = &sdk.ExecuteResult{Success: false, Status: 400, Data: json.RawMessage(`{"error":{"message":"page token required"}}`)}
+	ctx := newSocialCtx(t, pf)
+	app := &App{}
+
+	// Three accounts.
+	rTw, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 11, '@me', 'active')`)
+	twAcct, _ := rTw.LastInsertId()
+	rFb, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status, page_credentials)
+		 VALUES ('test-proj', 'facebook', 22, 'My Page', 'active', '{"access_token":"PAGE_TOKEN"}')`)
+	fbAcct, _ := rFb.LastInsertId()
+	rIg, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'instagram', 33, '@me_ig', 'active')`)
+	igAcct, _ := rIg.LastInsertId()
+
+	// One published post with all three targets already in 'published'
+	// state with platform_post_ids set (skipping the publish path).
+	rPost, _ := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, status) VALUES ('test-proj', 'hi', 'published')`)
+	postID, _ := rPost.LastInsertId()
+	for _, row := range []struct {
+		acct int64
+		ext  string
+	}{{twAcct, "1234567890"}, {fbAcct, "100_999"}, {igAcct, "ig_abc"}} {
+		ctx.AppDB().Exec(
+			`INSERT INTO post_targets (post_id, social_account_id, status, platform_post_id)
+			 VALUES (?, ?, 'published', ?)`,
+			postID, row.acct, row.ext)
+	}
+
+	out, err := app.toolPostDelete(ctx, map[string]any{"post_id": postID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(map[string]any)
+
+	// Each wired DeleteTool got called exactly once.
+	var twCalls, fbCalls, igCalls int
+	for _, c := range pf.executeCalls {
+		switch c.Tool {
+		case "delete_tweet":
+			twCalls++
+			if c.Input["tweet_id"] != "1234567890" {
+				t.Errorf("delete_tweet wrong tweet_id: %+v", c.Input)
+			}
+			if c.ConnID != 11 {
+				t.Errorf("delete_tweet wrong conn: %d", c.ConnID)
+			}
+		case "facebook_delete_post":
+			fbCalls++
+			if c.Input["postId"] != "100_999" {
+				t.Errorf("facebook_delete_post wrong postId: %+v", c.Input)
+			}
+			if c.Input["access_token"] != "PAGE_TOKEN" {
+				t.Errorf("facebook_delete_post missing page token: %+v", c.Input)
+			}
+		default:
+			if strings.Contains(c.Tool, "delete") {
+				igCalls++
+				t.Errorf("unexpected delete call for %s", c.Tool)
+			}
+		}
+	}
+	if twCalls != 1 {
+		t.Errorf("expected 1 delete_tweet call, got %d", twCalls)
+	}
+	if fbCalls != 1 {
+		t.Errorf("expected 1 facebook_delete_post call, got %d", fbCalls)
+	}
+	if igCalls != 0 {
+		t.Errorf("expected zero IG delete calls (unsupported)")
+	}
+
+	// Per-target outcomes returned.
+	upstream, ok := res["upstream"].([]targetDeleteOutcome)
+	if !ok {
+		t.Fatalf("upstream missing or wrong type: %T", res["upstream"])
+	}
+	byPlatform := map[string]targetDeleteOutcome{}
+	for _, o := range upstream {
+		byPlatform[o.Platform] = o
+	}
+	if byPlatform["twitter"].Status != "deleted" {
+		t.Errorf("twitter outcome: %+v", byPlatform["twitter"])
+	}
+	if byPlatform["facebook"].Status != "failed" {
+		t.Errorf("facebook outcome: %+v", byPlatform["facebook"])
+	}
+	if byPlatform["instagram"].Status != "unsupported" {
+		t.Errorf("instagram outcome: %+v", byPlatform["instagram"])
+	}
+
+	// Local rows are still gone — best-effort semantics.
+	var n int
+	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts WHERE id=?`, postID).Scan(&n)
+	if n != 0 {
+		t.Errorf("post row should be deleted regardless of upstream outcome")
+	}
+	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM post_targets WHERE post_id=?`, postID).Scan(&n)
+	if n != 0 {
+		t.Errorf("post_targets should be deleted regardless of upstream outcome")
+	}
+}
+
+func TestPostDelete_ForceLocalOnlySkipsUpstream(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newSocialCtx(t, pf)
+	app := &App{}
+
+	rTw, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 11, '@me', 'active')`)
+	twAcct, _ := rTw.LastInsertId()
+	rPost, _ := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, status) VALUES ('test-proj', 'hi', 'published')`)
+	postID, _ := rPost.LastInsertId()
+	ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id, social_account_id, status, platform_post_id)
+		 VALUES (?, ?, 'published', '1234567890')`, postID, twAcct)
+
+	if _, err := app.toolPostDelete(ctx, map[string]any{
+		"post_id":          postID,
+		"force_local_only": true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range pf.executeCalls {
+		if c.Tool == "delete_tweet" {
+			t.Errorf("force_local_only=true should skip upstream calls, got %+v", c)
+		}
 	}
 }
 

@@ -1110,6 +1110,7 @@ function ComposeDialog({
   // browser doesn't keep the bytes around forever.
   const [media, setMedia] = useState<{ id: number; name: string; mime: string; previewURL: string }[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [showPicker, setShowPicker] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Revoke any object URLs we created when the modal closes.
@@ -1176,6 +1177,26 @@ function ComposeDialog({
       if (dropped) URL.revokeObjectURL(dropped.previewURL);
       return prev.filter((m) => m.id !== id);
     });
+  };
+
+  // Add files chosen from the storage browser. Same shape as the
+  // upload flow — the only difference is previewURL points at storage's
+  // /content endpoint instead of a local ObjectURL. Skip ids already in
+  // media so users don't double-attach the same file.
+  const addFromStorage = (picked: { id: number; name: string; content_type: string }[]) => {
+    setMedia((prev) => {
+      const existing = new Set(prev.map((m) => m.id));
+      const adds = picked
+        .filter((f) => !existing.has(f.id))
+        .map((f) => ({
+          id: f.id,
+          name: f.name,
+          mime: f.content_type || "",
+          previewURL: `/api/apps/storage/files/${f.id}/content`,
+        }));
+      return [...prev, ...adds];
+    });
+    setStatus(`Added ${picked.length} file${picked.length !== 1 ? "s" : ""} from storage.`);
   };
 
   const submit = async () => {
@@ -1249,22 +1270,31 @@ function ComposeDialog({
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between">
             <label className="text-xs uppercase tracking-wide text-text-dim">Media (optional)</label>
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploading}
-              className="text-xs text-accent hover:underline disabled:opacity-50"
-            >
-              {uploading ? "Uploading…" : "+ Attach image / video"}
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              accept="image/*,video/*"
-              onChange={handleAttach}
-              className="hidden"
-            />
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setShowPicker(true)}
+                className="text-xs text-accent hover:underline"
+              >
+                Browse storage
+              </button>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading}
+                className="text-xs text-accent hover:underline disabled:opacity-50"
+              >
+                {uploading ? "Uploading…" : "+ Attach image / video"}
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept="image/*,video/*"
+                onChange={handleAttach}
+                className="hidden"
+              />
+            </div>
           </div>
           {media.length > 0 && (
             <div className="flex flex-wrap gap-2">
@@ -1346,6 +1376,222 @@ function ComposeDialog({
           </div>
         </div>
       </div>
+      {showPicker && (
+        <StoragePickerDialog
+          excludeIds={new Set(media.map((m) => m.id))}
+          onClose={() => setShowPicker(false)}
+          onPick={(picked) => {
+            addFromStorage(picked);
+            setShowPicker(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// --- StoragePickerDialog ------------------------------------------
+//
+// Lets the user pick existing files from the storage app instead of
+// uploading new ones. Lists `/api/apps/storage/files` (the same HTTP
+// route the storage panel uses), filters client-side to image/video
+// MIMEs, and renders a grid of thumbnails sourced from each file's
+// `/content` endpoint. Multi-select; "Add" returns the selected rows
+// to the caller, who folds them into the compose dialog's `media`
+// state with the same shape as a fresh upload.
+//
+// Stacked on top of ComposeDialog (z-[60] vs ComposeDialog's z-50).
+
+interface StorageFile {
+  id: number;
+  name: string;
+  content_type: string;
+  folder?: string;
+  size_bytes?: number;
+}
+
+function StoragePickerDialog({
+  excludeIds, onClose, onPick,
+}: {
+  excludeIds: Set<number>;
+  onClose: () => void;
+  onPick: (files: StorageFile[]) => void;
+}) {
+  const [files, setFiles] = useState<StorageFile[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [q, setQ] = useState("");
+  const [kind, setKind] = useState<"all" | "image" | "video">("all");
+  const [picked, setPicked] = useState<Set<number>>(new Set());
+
+  // Re-fetch on q/kind change. The storage app does prefix-match on
+  // content_type via SQL LIKE, so passing "image/" filters server-side;
+  // for "all" we fetch unfiltered and drop non-media client-side so
+  // there's only ever one round-trip per change.
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const params = new URLSearchParams();
+        params.set("limit", "100");
+        if (q.trim()) params.set("q", q.trim());
+        if (kind === "image") params.set("content_type", "image/");
+        else if (kind === "video") params.set("content_type", "video/");
+        const res = await fetch(`/api/apps/storage/files?${params.toString()}`, {
+          credentials: "same-origin",
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json() as { files: StorageFile[] };
+        if (cancelled) return;
+        const usable = (data.files || []).filter(
+          (f) => kind !== "all" ||
+            (f.content_type || "").startsWith("image/") ||
+            (f.content_type || "").startsWith("video/")
+        );
+        setFiles(usable);
+      } catch (e) {
+        if (!cancelled) setError((e as Error).message);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    // Debounce text input so we don't hammer storage on every keystroke.
+    const t = setTimeout(run, q.trim() ? 200 : 0);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [q, kind]);
+
+  const toggle = (id: number) => {
+    setPicked((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  };
+
+  const confirm = () => {
+    const chosen = files.filter((f) => picked.has(f.id));
+    if (chosen.length === 0) return;
+    onPick(chosen);
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] grid place-items-center bg-black/60"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="bg-bg border border-border rounded-lg w-[min(720px,92vw)] max-h-[85vh] flex flex-col">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <div className="text-sm font-bold text-text">Pick from storage</div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-text-dim hover:text-text text-lg leading-none"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 px-4 py-2 border-b border-border">
+          <input
+            type="text"
+            placeholder="Search by name…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            className="flex-1 bg-bg-input border border-border rounded px-3 py-1.5 text-sm"
+          />
+          <select
+            value={kind}
+            onChange={(e) => setKind(e.target.value as "all" | "image" | "video")}
+            className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+          >
+            <option value="all">All media</option>
+            <option value="image">Images</option>
+            <option value="video">Videos</option>
+          </select>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4">
+          {loading && (
+            <div className="py-12 text-center text-text-dim text-sm">Loading…</div>
+          )}
+          {error && !loading && (
+            <div className="py-12 text-center text-red text-sm">Couldn't load files: {error}</div>
+          )}
+          {!loading && !error && files.length === 0 && (
+            <div className="py-12 text-center text-text-dim text-sm">
+              No matching files in storage. Upload one with "+ Attach image / video".
+            </div>
+          )}
+          {!loading && !error && files.length > 0 && (
+            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3">
+              {files.map((f) => {
+                const already = excludeIds.has(f.id);
+                const sel = picked.has(f.id);
+                const isVideo = (f.content_type || "").startsWith("video/");
+                const src = `/api/apps/storage/files/${f.id}/content`;
+                return (
+                  <button
+                    key={f.id}
+                    type="button"
+                    disabled={already}
+                    onClick={() => toggle(f.id)}
+                    className={
+                      "relative aspect-square rounded border overflow-hidden bg-bg-input flex flex-col items-stretch text-left transition-colors " +
+                      (already
+                        ? "opacity-40 cursor-not-allowed border-border"
+                        : sel
+                          ? "border-accent ring-2 ring-accent"
+                          : "border-border hover:border-text-dim")
+                    }
+                    title={already ? `${f.name} (already attached)` : f.name}
+                  >
+                    {isVideo ? (
+                      <video src={src} className="w-full h-full object-cover" muted preload="metadata" />
+                    ) : (
+                      <img src={src} alt={f.name} className="w-full h-full object-cover" loading="lazy" />
+                    )}
+                    {sel && (
+                      <div className="absolute top-1 right-1 w-5 h-5 rounded-full bg-accent text-bg text-xs font-bold grid place-items-center">
+                        ✓
+                      </div>
+                    )}
+                    <div className="absolute bottom-0 inset-x-0 bg-black/60 text-white text-[10px] px-1.5 py-0.5 truncate">
+                      {f.name}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between px-4 py-3 border-t border-border">
+          <div className="text-xs text-text-dim">
+            {picked.size > 0 ? `${picked.size} selected` : `${files.length} file${files.length !== 1 ? "s" : ""}`}
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-card"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={confirm}
+              disabled={picked.size === 0}
+              className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+            >
+              Add {picked.size > 0 ? picked.size : ""}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1371,15 +1617,28 @@ function PostsView({
   const remove = async (post: Post) => {
     const what =
       post.status === "scheduled" ? "Cancel this scheduled post?" :
-      post.status === "published" ? "Delete this post locally? (Won't unpublish from upstream platforms.)" :
-      "Delete this post?";
+      (post.status === "published" || post.status === "partial")
+        ? "Delete this post? Where the platform allows it (X, Facebook, YouTube) we'll also remove the upstream copy. Instagram and TikTok keep their copy — those have to be deleted in-app."
+        : "Delete this post?";
     if (!confirm(what)) return;
     try {
       const res = await fetch(`${API}/posts/${post.id}`, {
         method: "DELETE", credentials: "same-origin",
       });
       if (!res.ok) throw new Error(await res.text());
-      setStatus("Deleted.");
+      const body = await res.json().catch(() => null) as { upstream?: { platform: string; status: string; error?: string }[] } | null;
+      const upstream = body?.upstream || [];
+      const failed = upstream.filter(o => o.status === "failed");
+      const unsupported = upstream.filter(o => o.status === "unsupported");
+      if (failed.length > 0) {
+        const names = Array.from(new Set(failed.map(o => o.platform))).join(", ");
+        setStatus(`Deleted locally. Upstream removal failed on: ${names}. The post may still be live there.`);
+      } else if (unsupported.length > 0) {
+        const names = Array.from(new Set(unsupported.map(o => o.platform))).join(", ");
+        setStatus(`Deleted. Note: ${names} doesn't permit programmatic deletion — remove the post in-app if needed.`);
+      } else {
+        setStatus("Deleted.");
+      }
       onChange();
     } catch (e) {
       setStatus("Delete failed: " + (e as Error).message);
