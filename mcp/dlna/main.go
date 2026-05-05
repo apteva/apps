@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: dlna
 display_name: DLNA Server
-version: 0.1.9
+version: 0.1.10
 description: Local-LAN UPnP/DLNA MediaServer for Apteva.
 author: Apteva
 scopes: [project, global]
@@ -719,6 +719,18 @@ type storageSubfolder struct {
 	Count int    `json:"file_count"`
 }
 
+// Storage's MCP tools return enveloped responses, not bare arrays:
+//
+//   files_list_folders → {folders: ["a","b"], count, parent}   (names only)
+//   files_list         → {files: [{id, name, …}, …], count, …}
+//   files_search       → {files: [...], count}
+//   files_get          → {id, name, …}                         (bare object — historical)
+//
+// Earlier dlna versions tried to json.Unmarshal those envelopes
+// straight into []slice and crashed Browse with
+//   "json: cannot unmarshal object into Go value of type []main.X".
+// Pull through the envelope explicitly here.
+
 func (a *App) storageListFolders(ctx context.Context, parent string) ([]storageSubfolder, error) {
 	raw, err := a.ctx.PlatformAPI().CallApp("storage", "files_list_folders", map[string]any{
 		"parent": parent,
@@ -726,9 +738,19 @@ func (a *App) storageListFolders(ctx context.Context, parent string) ([]storageS
 	if err != nil {
 		return nil, err
 	}
-	var out []storageSubfolder
-	if err := json.Unmarshal(raw, &out); err != nil {
+	var env struct {
+		Folders []string `json:"folders"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, err
+	}
+	out := make([]storageSubfolder, 0, len(env.Folders))
+	for _, name := range env.Folders {
+		// Storage doesn't return per-folder file counts (would need
+		// a separate query). DIDL childCount=0 tells DLNA clients
+		// "unknown" and they tolerate it (we already do this for
+		// the root virtual containers).
+		out = append(out, storageSubfolder{Name: name, Count: 0})
 	}
 	return out, nil
 }
@@ -742,11 +764,13 @@ func (a *App) storageListFiles(ctx context.Context, folder string, recursive boo
 	if err != nil {
 		return nil, err
 	}
-	var out []storageFile
-	if err := json.Unmarshal(raw, &out); err != nil {
+	var env struct {
+		Files []storageFile `json:"files"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, err
 	}
-	return out, nil
+	return env.Files, nil
 }
 
 func (a *App) storageGetFile(ctx context.Context, id int64) (*storageFile, error) {
