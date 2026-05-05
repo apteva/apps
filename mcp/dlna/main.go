@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: dlna
 display_name: DLNA Server
-version: 0.1.5
+version: 0.1.6
 description: Local-LAN UPnP/DLNA MediaServer for Apteva.
 author: Apteva
 scopes: [project, global]
@@ -176,17 +176,22 @@ func (a *App) Workers() []sdk.Worker {
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
-		// UPnP wire — discovered via SSDP.
-		{Pattern: "/device.xml", Handler: a.handleDeviceXML},
-		{Pattern: "/ContentDirectory.xml", Handler: a.handleContentDirectorySCPD},
-		{Pattern: "/ConnectionManager.xml", Handler: a.handleConnectionManagerSCPD},
-		{Pattern: "/ContentDirectory/control", Handler: a.handleControlContentDirectory},
-		{Pattern: "/ConnectionManager/control", Handler: a.handleControlConnectionManager},
-		{Pattern: "/ContentDirectory/event", Handler: stubEvent},
-		{Pattern: "/ConnectionManager/event", Handler: stubEvent},
-		{Pattern: "/media/", Handler: a.handleMediaRedirect},
+		// UPnP wire — these are the URLs SSDP advertises to TVs on
+		// the LAN. TVs can't carry an APTEVA_APP_TOKEN, so every
+		// route here MUST set NoAuth. The auth boundary for DLNA is
+		// the LAN itself; the operator is expected to keep this
+		// install off any internet-routable interface.
+		{Pattern: "/device.xml", Handler: a.handleDeviceXML, NoAuth: true},
+		{Pattern: "/ContentDirectory.xml", Handler: a.handleContentDirectorySCPD, NoAuth: true},
+		{Pattern: "/ConnectionManager.xml", Handler: a.handleConnectionManagerSCPD, NoAuth: true},
+		{Pattern: "/ContentDirectory/control", Handler: a.handleControlContentDirectory, NoAuth: true},
+		{Pattern: "/ConnectionManager/control", Handler: a.handleControlConnectionManager, NoAuth: true},
+		{Pattern: "/ContentDirectory/event", Handler: stubEvent, NoAuth: true},
+		{Pattern: "/ConnectionManager/event", Handler: stubEvent, NoAuth: true},
+		{Pattern: "/media/", Handler: a.handleMediaRedirect, NoAuth: true},
 
-		// Panel reads.
+		// Panel reads — proxied through the dashboard with the
+		// install's APTEVA_APP_TOKEN, so they keep the default auth.
 		{Pattern: "/published_folders", Handler: a.handlePublishedFolders},
 		{Pattern: "/published_folders/", Handler: a.handlePublishedFoldersItem},
 		{Pattern: "/clients", Handler: a.handleClientsRecent},
