@@ -209,12 +209,17 @@ function AddFolderModal({
 
   // Walk storage's top-level folders. Two clicks deep is enough for
   // the modal — anything more demanding belongs in the storage panel.
+  // Storage returns `{folders: ["a","b"], parent: "/"}` — an envelope
+  // with the names as a plain string array, NOT a list of objects.
+  // (Earlier versions of this panel called rows.map(...) directly on
+  // the envelope and crashed with "H.map is not a function".)
   useEffect(() => {
     fetch(`${STORAGE_API}/folders?parent=/`)
-      .then((r) => r.ok ? r.json() : Promise.reject(r.statusText))
-      .then((rows: { name: string }[]) =>
-        setFolders(rows.map((r) => ({ name: r.name, path: "/" + r.name })))
-      )
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText)))
+      .then((env: { folders?: string[] }) => {
+        const names = Array.isArray(env?.folders) ? env.folders : [];
+        setFolders(names.map((n) => ({ name: n, path: "/" + n })));
+      })
       .catch((e) => setErr(`storage: ${e}`));
   }, []);
 
