@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -34,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: dlna
 display_name: DLNA Server
-version: 0.1.13
+version: 0.1.14
 description: Local-LAN UPnP/DLNA MediaServer for Apteva.
 author: Apteva
 scopes: [project, global]
@@ -260,10 +261,22 @@ func (a *App) handleConnectionManagerSCPD(w http.ResponseWriter, r *http.Request
 }
 
 // handleMediaRedirect: TVs hit this URL (advertised in DIDL <res>)
-// with range/seek; we 302 to a freshly minted storage signed URL so
-// bytes never pass through this sidecar. Each redirect uses a short
-// TTL because TVs re-request on every seek — a long TTL just means
-// stale URLs floating around longer.
+// with range/seek; we want bytes flowing Mac→LAN→TV without any
+// detour through the public internet.
+//
+// Earlier versions 302'd to storage's signed URL — but that signed
+// URL is built from publicBase() (e.g. https://tunnel.example.com),
+// which is unreliable for LAN playback (offline tunnels, NAT
+// hairpinning, slower than local). The tunnel was the live failure
+// mode: 530 from Cloudflare, "device disconnected" on the TV.
+//
+// Instead, mint the same signed URL but rewrite the host to point
+// at the platform's local gateway (APTEVA_GATEWAY_URL, set by the
+// SDK at boot), fetch the bytes through dlna's own listener
+// (which is on the LAN), and stream them back. Range / If-Range /
+// If-None-Match all pass through so seeking works. The signed-URL
+// query params (sig=, exp=) ride along untouched — the gateway's
+// auth middleware carves out signed paths.
 func (a *App) handleMediaRedirect(w http.ResponseWriter, r *http.Request) {
 	idStr := strings.TrimPrefix(r.URL.Path, "/media/")
 	idStr = strings.TrimSuffix(idStr, "."+strings.ToLower(extOf(idStr)))
@@ -279,8 +292,71 @@ func (a *App) handleMediaRedirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.logClientFromRequest(r, "media:"+strconv.FormatInt(fileID, 10))
-	w.Header().Set("Cache-Control", "no-store")
-	http.Redirect(w, r, signed, http.StatusFound)
+
+	// Reroute via local gateway. If APTEVA_GATEWAY_URL isn't set
+	// (unlikely but possible for older platforms), fall back to the
+	// original 302 — bytes go through whatever public path storage
+	// configured. Better than failing outright.
+	gateway := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")
+	if gateway == "" {
+		w.Header().Set("Cache-Control", "no-store")
+		http.Redirect(w, r, signed, http.StatusFound)
+		return
+	}
+	parsed, err := url.Parse(signed)
+	if err != nil {
+		http.Error(w, "bad signed url: "+err.Error(), 502)
+		return
+	}
+	target := gateway + parsed.Path
+	if parsed.RawQuery != "" {
+		target += "?" + parsed.RawQuery
+	}
+
+	method := r.Method
+	if method != http.MethodGet && method != http.MethodHead {
+		method = http.MethodGet
+	}
+	req, err := http.NewRequestWithContext(r.Context(), method, target, nil)
+	if err != nil {
+		http.Error(w, "build proxy request: "+err.Error(), 500)
+		return
+	}
+	for _, h := range []string{"Range", "If-Range", "If-None-Match", "If-Modified-Since"} {
+		if v := r.Header.Get(h); v != "" {
+			req.Header.Set(h, v)
+		}
+	}
+	// Long timeout: TVs may keep a single connection open across
+	// seeks during a multi-hour movie. The handler context cancels
+	// when the TV disconnects.
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(w, "storage fetch: "+err.Error(), 502)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Forward storage's response headers (Content-Type,
+	// Content-Length, Content-Range, ETag, Accept-Ranges, …) so the
+	// TV can seek and resume. Strip hop-by-hop headers Go's stdlib
+	// would otherwise complain about.
+	for k, vs := range resp.Header {
+		switch strings.ToLower(k) {
+		case "connection", "transfer-encoding", "keep-alive",
+			"proxy-authenticate", "proxy-authorization", "te",
+			"trailer", "upgrade":
+			continue
+		}
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	if method == http.MethodHead {
+		return
+	}
+	_, _ = io.Copy(w, resp.Body)
 }
 
 func extOf(s string) string {
