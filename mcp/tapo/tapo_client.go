@@ -487,12 +487,13 @@ func (c *Client) GetDeviceInfo() (*DeviceInfo, error) {
 }
 
 // ProbeCapabilities asks the camera which features it advertises.
-// On secure_passthrough firmware the per-feature lookups can return
-// -40101 ("method not supported") if the verb-noun method name has
-// rotated; we silently treat those as "feature absent" rather than
-// bubbling, so the caller still gets a useful Capabilities back
-// even on a partially-understood firmware. v0.2 covers the common
-// cases; extend per camera model.
+// On secure_passthrough firmware the legacy `get / motor / capability`
+// shape returns -40101 even for cameras that *do* have a motor — the
+// wire format for capability advertisement rotated. We probe PTZ
+// indirectly by attempting a no-op `motor/stop` (a stop with no
+// preceding move is a cheap idempotent ping that returns 0 on
+// motorised models and -40101 on fixed-mount). Other features fall
+// back to "feature absent" on -40101 to keep the caller useful.
 func (c *Client) ProbeCapabilities() (*Capabilities, error) {
 	probe := func(field, name string) bool {
 		rs, err := c.call(map[string]any{
@@ -504,9 +505,16 @@ func (c *Client) ProbeCapabilities() (*Capabilities, error) {
 		}
 		return digMap(rs, 0, field, name) != nil
 	}
+	probePTZ := func() bool {
+		_, err := c.call(map[string]any{
+			"method": "do",
+			"motor":  map[string]any{"stop": map[string]any{}},
+		})
+		return err == nil
+	}
 	caps := &Capabilities{
 		OnvifPort:    2020, // Tapos default; refined by a real ONVIF probe later.
-		PTZ:          probe("motor", "capability"),
+		PTZ:          probePTZ(),
 		PrivacyLens:  probe("lens_mask", "lens_mask_info"),
 		Siren:        probe("audio_capability", "device_speaker"),
 		NightVision:  probe("image", "switch"),
@@ -517,58 +525,59 @@ func (c *Client) ProbeCapabilities() (*Capabilities, error) {
 	return caps, nil
 }
 
-// PTZMoveDirection nudges the camera one of {up,down,left,right} for a
-// short pulse; "stop" cancels any in-progress move. The camera
-// interprets x_coord/y_coord as absolute target degrees, but it also
-// accepts a `move` action with sign-only values that mean "step in
-// this direction". We use the latter — directional pulses match how
-// agents reason about cameras.
+// PTZMoveDirection nudges the camera in one of {up,down,left,right}
+// by the camera's intrinsic step. The on-wire shape is the
+// `motor/movestep/direction` flavor pytapo uses on
+// secure_passthrough firmware: direction is the angle of motion in
+// degrees, as a string — the camera rotates toward that compass
+// heading by one step.
+//
+//   right (clockwise)         = 0
+//   up    (vertical up)       = 90
+//   left  (counter-clockwise) = 180
+//   down  (vertical down)     = 270
+//
+// durationMs is honoured by issuing additional steps until elapsed,
+// then a `stop`. Each step is small (~10° on C200/C210) so a 500ms
+// pulse usually means 1–2 calls.
 func (c *Client) PTZMoveDirection(dir string, durationMs int) error {
+	if strings.EqualFold(dir, "stop") {
+		_, err := c.call(map[string]any{
+			"method": "do",
+			"motor":  map[string]any{"stop": map[string]any{}},
+		})
+		return err
+	}
+	angle, ok := map[string]string{
+		"right": "0",
+		"up":    "90",
+		"left":  "180",
+		"down":  "270",
+	}[strings.ToLower(dir)]
+	if !ok {
+		return fmt.Errorf("ptz_move: unknown direction %q (want up|down|left|right|stop)", dir)
+	}
 	if durationMs <= 0 {
 		durationMs = 500
 	}
-	x, y := 0, 0
-	switch strings.ToLower(dir) {
-	case "left":
-		x = -10
-	case "right":
-		x = 10
-	case "up":
-		y = 10
-	case "down":
-		y = -10
-	case "stop":
-		_, err := c.call(map[string]any{
-			"method": "do",
-			"motor": map[string]any{"stop": map[string]any{}},
-		})
-		return err
-	default:
-		return fmt.Errorf("ptz_move: unknown direction %q", dir)
-	}
-	_, err := c.call(map[string]any{
-		"method": "do",
-		"motor": map[string]any{
-			"move": map[string]any{
-				"x_coord": strconv.Itoa(x),
-				"y_coord": strconv.Itoa(y),
-			},
-		},
-	})
-	if err != nil {
-		return err
-	}
-	// Pulse duration: the camera doesn't support timed moves natively,
-	// so we sleep and stop. Cap at 5s — anything longer is the agent
-	// doing something weird.
 	if durationMs > 5000 {
 		durationMs = 5000
 	}
-	time.Sleep(time.Duration(durationMs) * time.Millisecond)
-	_, _ = c.call(map[string]any{
-		"method": "do",
-		"motor":  map[string]any{"stop": map[string]any{}},
-	})
+	deadline := time.Now().Add(time.Duration(durationMs) * time.Millisecond)
+	for {
+		if _, err := c.call(map[string]any{
+			"method": "do",
+			"motor": map[string]any{
+				"movestep": map[string]any{"direction": angle},
+			},
+		}); err != nil {
+			return err
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
 	return nil
 }
 
