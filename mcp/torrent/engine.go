@@ -78,30 +78,30 @@ type managedTorrent struct {
 // Crucially it contains no engine handles; copies are safe to ship
 // across the cross-app boundary.
 type TorrentSnapshot struct {
-	Infohash         string
-	Name             string
-	State            string  // queued | downloading | seeding | paused | completed | error
-	Length           int64
-	BytesCompleted   int64
-	BytesMissing     int64
-	Progress         float64 // 0..1
-	DownloadRateBPS  int64
-	UploadRateBPS    int64
-	Peers            int
-	Seeds            int
-	ETASeconds       int64 // -1 if unknown
-	LastError        string
-	HasInfo          bool
-	IsPaused         bool
+	Infohash        string  `json:"infohash"`
+	Name            string  `json:"name"`
+	State           string  `json:"state"` // queued | downloading | seeding | paused | completed | error
+	Length          int64   `json:"length"`
+	BytesCompleted  int64   `json:"bytes_completed"`
+	BytesMissing    int64   `json:"bytes_missing"`
+	Progress        float64 `json:"progress"` // 0..1
+	DownloadRateBPS int64   `json:"download_rate_bps"`
+	UploadRateBPS   int64   `json:"upload_rate_bps"`
+	Peers           int     `json:"peers"`
+	Seeds           int     `json:"seeds"`
+	ETASeconds      int64   `json:"eta_seconds"` // -1 if unknown
+	LastError       string  `json:"last_error"`
+	HasInfo         bool    `json:"has_info"`
+	IsPaused        bool    `json:"is_paused"`
 }
 
 // FileSnapshot — per-file view for selective downloading.
 type FileSnapshot struct {
-	Index          int
-	Path           string
-	Length         int64
-	BytesCompleted int64
-	Priority       string // skip | low | normal | high
+	Index          int    `json:"index"`
+	Path           string `json:"path"`
+	Length         int64  `json:"length"`
+	BytesCompleted int64  `json:"bytes_completed"`
+	Priority       string `json:"priority"` // skip | low | normal | high
 }
 
 // NewEngine sets up the torrent client. Returns ready-to-use Engine

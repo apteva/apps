@@ -178,6 +178,56 @@ func TestApibayParser_NoResults(t *testing.T) {
 	}
 }
 
+// TestSnapshotJSON_SnakeCase — pin the wire shape the panel reads.
+// engine.go's TorrentSnapshot is what callers see via GET /torrents
+// → r.snapshot. The panel's TS interface expects snake_case
+// (`state`, `bytes_completed`, `has_info`, …). When the struct
+// shipped without JSON tags (v0.1.x) it serialised as CamelCase,
+// every snapshot field came back undefined in the panel, and every
+// torrent rendered as "Fetching metadata 0%" regardless of real
+// progress — even completed ones. Pin it.
+func TestSnapshotJSON_SnakeCase(t *testing.T) {
+	snap := TorrentSnapshot{
+		Infohash:        "ABCDEF",
+		Name:            "x",
+		State:           "downloading",
+		Length:          100,
+		BytesCompleted:  42,
+		BytesMissing:    58,
+		Progress:        0.42,
+		DownloadRateBPS: 1024,
+		UploadRateBPS:   512,
+		Peers:           3,
+		Seeds:           7,
+		ETASeconds:      -1,
+		LastError:       "",
+		HasInfo:         true,
+		IsPaused:        false,
+	}
+	b, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	wantKeys := []string{
+		`"infohash"`, `"name"`, `"state"`, `"length"`, `"bytes_completed"`,
+		`"bytes_missing"`, `"progress"`, `"download_rate_bps"`, `"upload_rate_bps"`,
+		`"peers"`, `"seeds"`, `"eta_seconds"`, `"last_error"`,
+		`"has_info"`, `"is_paused"`,
+	}
+	for _, k := range wantKeys {
+		if !strings.Contains(got, k) {
+			t.Errorf("json missing key %s — TS panel will read undefined: %s", k, got)
+		}
+	}
+	// Belt + braces: assert no CamelCase capitals leaked through.
+	for _, bad := range []string{`"State"`, `"BytesCompleted"`, `"HasInfo"`, `"Length"`} {
+		if strings.Contains(got, bad) {
+			t.Errorf("json has CamelCase %s — missing json tag re-introduces the v0.1.13 bug", bad)
+		}
+	}
+}
+
 // TestPanelStateContract — every state snapshot() in engine.go can
 // emit must be handled by the panel's bucket filter (TorrentPanel.tsx
 // KNOWN_STATES). When you add a new state, update both this list
