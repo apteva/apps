@@ -247,12 +247,22 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
     return () => clearInterval(id);
   }, [rows, load]);
 
-  // Live refresh — the indexer worker emits media.indexed when a
-  // newly-seen storage file finishes probing. Cheaper than the
-  // 4s poll above (which stays as a safety net while pending rows
-  // exist) and surfaces the result immediately.
+  // Live refresh — single SSE subscription handling every event we
+  // care about. Two separate useAppEvents calls used to open two
+  // EventSource connections per mount, and the constant
+  // mount/unmount churn would burn through the browser's
+  // 6-per-origin HTTP/1.1 connection cap (esp. with the file detail
+  // pane also subscribed). Image + Range-fetch requests then sat
+  // queued behind pending SSE handshakes, looking like "the panel
+  // hangs." Folding into one handler halves the per-mount cost and
+  // keeps slots free for the actual content fetches.
   useAppEvents("media", projectId, (ev) => {
-    if (ev.topic === "media.indexed") load();
+    switch (ev.topic) {
+      case "media.indexed":
+      case "media.transcribed":
+        load();
+        return;
+    }
   });
 
   const counts = useMemo(() => {
@@ -302,11 +312,8 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
     [withParams],
   );
 
-  // Live refresh on transcript completion — the worker emits
-  // media.transcribed with {file_id} so we can patch + reload.
-  useAppEvents<{ file_id?: string }>("media", projectId, (ev) => {
-    if (ev.topic === "media.transcribed") load();
-  });
+  // (transcript completion was its own useAppEvents; folded into
+  // the single subscription above to halve connection count.)
 
   // saveDescription writes prose via PUT /media/{id}/description (which
   // wraps the same setDescription used by the MCP tool). On success we
