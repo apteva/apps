@@ -27,16 +27,22 @@ type RenderRow struct {
 	ProgressPct   int      `json:"progress_pct"`
 	OutputFileID  string   `json:"output_file_id,omitempty"`
 	OutputName    string   `json:"output_name,omitempty"`
-	Error         string   `json:"error,omitempty"`
-	RequestedBy   string   `json:"requested_by,omitempty"`
-	CreatedAt     string   `json:"created_at"`
-	StartedAt     string   `json:"started_at,omitempty"`
-	CompletedAt   string   `json:"completed_at,omitempty"`
+	// OutputFolder — where the result lands in storage. Set per-call
+	// at submit time, falling back to the install's
+	// render_output_folder config when empty.
+	OutputFolder string `json:"output_folder,omitempty"`
+	Error        string `json:"error,omitempty"`
+	RequestedBy  string `json:"requested_by,omitempty"`
+	CreatedAt    string `json:"created_at"`
+	StartedAt    string `json:"started_at,omitempty"`
+	CompletedAt  string `json:"completed_at,omitempty"`
 }
 
 // insertRender enqueues a new render and returns its id. Callers
 // have already validated the operation + params; we just persist.
-func insertRender(db *sql.DB, projectID, operation string, sourceFileIDs []string, params map[string]any, outputName, requestedBy string) (int64, error) {
+// outputFolder is optional — empty means "use the install's
+// render_output_folder config at execution time".
+func insertRender(db *sql.DB, projectID, operation string, sourceFileIDs []string, params map[string]any, outputName, outputFolder, requestedBy string) (int64, error) {
 	if projectID == "" {
 		return 0, errors.New("project_id required")
 	}
@@ -58,9 +64,9 @@ func insertRender(db *sql.DB, projectID, operation string, sourceFileIDs []strin
 		return 0, fmt.Errorf("marshal params: %w", err)
 	}
 	res, err := db.Exec(`
-		INSERT INTO renders (project_id, operation, source_file_ids, params, output_name, requested_by)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		projectID, operation, string(srcJSON), string(paramJSON), outputName, requestedBy,
+		INSERT INTO renders (project_id, operation, source_file_ids, params, output_name, output_folder, requested_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		projectID, operation, string(srcJSON), string(paramJSON), outputName, outputFolder, requestedBy,
 	)
 	if err != nil {
 		return 0, err
@@ -88,7 +94,7 @@ func claimNextPending(db *sql.DB) (*RenderRow, error) {
 		 )
 		 RETURNING id, project_id, operation, source_file_ids, params,
 		           status, progress_pct, COALESCE(output_file_id,''),
-		           COALESCE(output_name,''), error, COALESCE(requested_by,''),
+		           COALESCE(output_name,''), COALESCE(output_folder,''), error, COALESCE(requested_by,''),
 		           created_at, COALESCE(started_at,''), COALESCE(completed_at,'')`,
 		now,
 	)
@@ -154,7 +160,7 @@ func renderMarkCancelled(db *sql.DB, id int64) error {
 func getRender(db *sql.DB, projectID string, id int64) (*RenderRow, error) {
 	q := `SELECT id, project_id, operation, source_file_ids, params,
 	             status, progress_pct, COALESCE(output_file_id,''),
-	             COALESCE(output_name,''), error, COALESCE(requested_by,''),
+	             COALESCE(output_name,''), COALESCE(output_folder,''), error, COALESCE(requested_by,''),
 	             created_at, COALESCE(started_at,''), COALESCE(completed_at,'')
 	      FROM renders WHERE id = ? AND project_id = ?`
 	return scanRender(db.QueryRow(q, id, projectID))
@@ -171,7 +177,7 @@ func listRenders(db *sql.DB, projectID string, f RenderFilters) ([]RenderRow, er
 	q := strings.Builder{}
 	q.WriteString(`SELECT id, project_id, operation, source_file_ids, params,
 	                      status, progress_pct, COALESCE(output_file_id,''),
-	                      COALESCE(output_name,''), error, COALESCE(requested_by,''),
+	                      COALESCE(output_name,''), COALESCE(output_folder,''), error, COALESCE(requested_by,''),
 	                      created_at, COALESCE(started_at,''), COALESCE(completed_at,'')
 	               FROM renders WHERE project_id = ?`)
 	args := []any{projectID}
@@ -219,7 +225,7 @@ func scanRender(row *sql.Row) (*RenderRow, error) {
 	err := row.Scan(
 		&r.ID, &r.ProjectID, &r.Operation, &srcRaw, &paramsRaw,
 		&r.Status, &r.ProgressPct, &r.OutputFileID,
-		&r.OutputName, &r.Error, &r.RequestedBy,
+		&r.OutputName, &r.OutputFolder, &r.Error, &r.RequestedBy,
 		&r.CreatedAt, &r.StartedAt, &r.CompletedAt,
 	)
 	if err != nil {
@@ -238,7 +244,7 @@ func scanRenderFromRows(rows *sql.Rows) (*RenderRow, error) {
 	err := rows.Scan(
 		&r.ID, &r.ProjectID, &r.Operation, &srcRaw, &paramsRaw,
 		&r.Status, &r.ProgressPct, &r.OutputFileID,
-		&r.OutputName, &r.Error, &r.RequestedBy,
+		&r.OutputName, &r.OutputFolder, &r.Error, &r.RequestedBy,
 		&r.CreatedAt, &r.StartedAt, &r.CompletedAt,
 	)
 	if err != nil {

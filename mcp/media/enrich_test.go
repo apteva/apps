@@ -80,7 +80,7 @@ func parseInt64Local(s string) (int64, bool) {
 // media_search returns rows with absolute URLs + storage metadata.
 func TestSearch_EnrichesURLsAndMetadata(t *testing.T) {
 	ctx := newTestCtx(t)
-	if err := upsertMedia(ctx.AppDB(), testProj, "42", sampleVideoProbe(), "deadbeef"); err != nil {
+	if err := upsertMedia(ctx.AppDB(), testProj, "42", sampleVideoProbe(), "deadbeef", ""); err != nil {
 		t.Fatal(err)
 	}
 	_, cleanup := newFakeStorage(t, []StorageFile{
@@ -121,7 +121,7 @@ func TestSearch_EnrichesURLsAndMetadata(t *testing.T) {
 // media_get on a single file enriches the same way.
 func TestGet_EnrichesURL(t *testing.T) {
 	ctx := newTestCtx(t)
-	if err := upsertMedia(ctx.AppDB(), testProj, "7", sampleVideoProbe(), "abc"); err != nil {
+	if err := upsertMedia(ctx.AppDB(), testProj, "7", sampleVideoProbe(), "abc", ""); err != nil {
 		t.Fatal(err)
 	}
 	_, cleanup := newFakeStorage(t, []StorageFile{
@@ -150,7 +150,7 @@ func TestGet_EnrichesURL(t *testing.T) {
 // broken" from "no URL because file deleted".
 func TestSearch_StorageUnavailable_FlagsAndDegrades(t *testing.T) {
 	ctx := newTestCtx(t)
-	if err := upsertMedia(ctx.AppDB(), testProj, "42", sampleVideoProbe(), "deadbeef"); err != nil {
+	if err := upsertMedia(ctx.AppDB(), testProj, "42", sampleVideoProbe(), "deadbeef", ""); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("APTEVA_GATEWAY_URL", "http://127.0.0.1:1") // unreachable
@@ -177,8 +177,8 @@ func TestSearch_StorageUnavailable_FlagsAndDegrades(t *testing.T) {
 // storage_unavailable — only some rows degrade.
 func TestSearch_FileDeleted_LeavesURLEmpty(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoProbe(), "a")
-	upsertMedia(ctx.AppDB(), testProj, "2", sampleVideoProbe(), "b")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoProbe(), "a", "")
+	upsertMedia(ctx.AppDB(), testProj, "2", sampleVideoProbe(), "b", "")
 	_, cleanup := newFakeStorage(t, []StorageFile{
 		{ID: 1, Name: "alive.mp4", Visibility: "public",
 			URL: "https://x.com/api/apps/storage/files/1/content"},
@@ -222,7 +222,7 @@ func TestSearch_OneBatchRoundtripPerCall(t *testing.T) {
 	ctx := newTestCtx(t)
 	files := []StorageFile{}
 	for i := int64(1); i <= 50; i++ {
-		upsertMedia(ctx.AppDB(), testProj, idStrFromInt64(i), sampleVideoProbe(), "sha")
+		upsertMedia(ctx.AppDB(), testProj, idStrFromInt64(i), sampleVideoProbe(), "sha", "")
 		files = append(files, StorageFile{
 			ID: i, Name: "f.mp4", Visibility: "public",
 			URL: "https://x.com/" + idStrFromInt64(i),

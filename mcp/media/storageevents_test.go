@@ -12,7 +12,7 @@ import (
 
 func TestCascadeDeleteOne_DeletesAll(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha", "")
 	upsertDerivation(ctx.AppDB(), testProj, "1", "thumbnail", 100, 320, 240)
 	upsertDerivation(ctx.AppDB(), testProj, "1", "waveform", 101, 800, 100)
 	upsertTranscript(ctx.AppDB(), &TranscriptRow{
@@ -94,8 +94,8 @@ func TestCascadeDeleteOne_OtherProjectUntouched(t *testing.T) {
 	// Cross-tenant safety: deleting file_id 1 in project A must
 	// not touch project B's row with the same file_id.
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha-a")
-	upsertMedia(ctx.AppDB(), "other-proj", "1", sampleAudioProbe(), "sha-b")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha-a", "")
+	upsertMedia(ctx.AppDB(), "other-proj", "1", sampleAudioProbe(), "sha-b", "")
 
 	if err := cascadeDeleteOne(ctx.AppDB(), testProj, "1"); err != nil {
 		t.Fatal(err)

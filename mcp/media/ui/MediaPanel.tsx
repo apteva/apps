@@ -161,6 +161,11 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
   const [selected, setSelected] = useState<MediaRow | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  // Folder navigation. "/" = root (all folders). Recursive toggle
+  // makes the current view include sub-folders.
+  const [folder, setFolder] = useState("/");
+  const [childFolders, setChildFolders] = useState<string[]>([]);
+  const [recursive, setRecursive] = useState(false);
 
   const withParams = useCallback(
     (extra: Record<string, string> = {}) => {
@@ -189,18 +194,34 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
         params.is_image = "false";
       }
       if (kind === "image") params.is_image = "true";
-      const res = await fetch(`${API}/media?${withParams(params)}`, {
-        credentials: "same-origin",
-      });
-      if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
-      const data = (await res.json()) as { media: MediaRow[] };
+      // At root with recursive off, no folder filter is applied —
+      // show everything in the project. Inside a folder, filter to
+      // exact (or prefix when recursive).
+      if (folder !== "/") {
+        params.folder = folder;
+        if (recursive) params.recursive = "true";
+      } else if (recursive) {
+        // root + recursive = all = no filter (skip).
+      }
+      const [mediaRes, foldersRes] = await Promise.all([
+        fetch(`${API}/media?${withParams(params)}`, { credentials: "same-origin" }),
+        fetch(`${API}/folders?${withParams({ parent: folder })}`, { credentials: "same-origin" }),
+      ]);
+      if (!mediaRes.ok) throw new Error(`${mediaRes.status}: ${await mediaRes.text().catch(() => "")}`);
+      const data = (await mediaRes.json()) as { media: MediaRow[] };
       setRows(data.media || []);
+      if (foldersRes.ok) {
+        const fdata = (await foldersRes.json()) as { folders?: string[] };
+        setChildFolders(fdata.folders || []);
+      } else {
+        setChildFolders([]);
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setLoading(false);
     }
-  }, [withParams, kind, sort]);
+  }, [withParams, kind, sort, folder, recursive]);
 
   // Status counts via the MCP-style summary endpoint — implemented as
   // a fan over rows here to avoid a second roundtrip; once we add a
@@ -358,8 +379,48 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
     );
   };
 
+  // Breadcrumb segments. "/" = root; "/clips/q3/" yields ["clips","q3"].
+  const breadcrumbParts = folder.split("/").filter(Boolean);
+
   return (
     <div className="h-full flex flex-col p-6 gap-4">
+      {/* Folder breadcrumb. Click any segment to jump to that level. */}
+      <nav className="flex items-center gap-1 text-sm flex-wrap">
+        <button
+          type="button"
+          onClick={() => setFolder("/")}
+          className="text-accent hover:underline"
+        >/</button>
+        {breadcrumbParts.map((part, i) => {
+          const target = "/" + breadcrumbParts.slice(0, i + 1).join("/") + "/";
+          const last = i === breadcrumbParts.length - 1;
+          return (
+            <span key={target} className="flex items-center gap-1">
+              <span className="text-text-dim">/</span>
+              {last ? (
+                <span className="text-text">{part}</span>
+              ) : (
+                <button
+                  type="button"
+                  className="text-accent hover:underline"
+                  onClick={() => setFolder(target)}
+                >{part}</button>
+              )}
+            </span>
+          );
+        })}
+        <span className="ml-3 text-text-dim text-xs">·</span>
+        <label className="text-xs text-text-dim flex items-center gap-1 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={recursive}
+            onChange={(e) => setRecursive(e.target.checked)}
+            className="accent-accent"
+          />
+          recursive
+        </label>
+      </nav>
+
       <div className="flex items-center gap-2 flex-wrap">
         {(["all", "video", "audio", "image"] as Kind[]).map((k) => (
           <button
@@ -399,17 +460,35 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
       <div className="flex-1 overflow-auto">
         {error ? (
           <div className="text-red text-sm p-4">{error}</div>
-        ) : loading && rows.length === 0 ? (
+        ) : loading && rows.length === 0 && childFolders.length === 0 ? (
           <div className="text-text-muted text-sm text-center mt-12">Loading…</div>
-        ) : rows.length === 0 ? (
+        ) : rows.length === 0 && childFolders.length === 0 ? (
           <div className="text-text-muted text-sm text-center mt-12">
-            No indexed media yet. Upload audio, video, or image files to storage —
-            the indexer picks them up within ~30s.
+            {folder === "/"
+              ? "No indexed media yet. Upload audio, video, or image files to storage — the indexer picks them up within ~30s."
+              : `No media in ${folder}.`}
           </div>
         ) : (
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-3">
-            {rows.map(renderTile)}
-          </div>
+          <>
+            {childFolders.length > 0 && (
+              <div className="mb-3 flex flex-wrap gap-2">
+                {childFolders.map((name) => (
+                  <button
+                    key={name}
+                    type="button"
+                    onClick={() => setFolder(folder + name + "/")}
+                    className="flex items-center gap-1 px-3 py-2 text-xs border border-border rounded hover:bg-bg-input hover:border-accent/40"
+                  >
+                    <span aria-hidden>📁</span>
+                    <span className="text-text">{name}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-3">
+              {rows.map(renderTile)}
+            </div>
+          </>
         )}
       </div>
 

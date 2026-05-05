@@ -167,7 +167,14 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 		return 0, fmt.Errorf("open output: %w", err)
 	}
 	defer out.Close()
-	uploaded, err := sc.UploadRender(ctx, row.ProjectID, e.outputFolder, plan.Filename, plan.ContentType, out)
+	// Per-render output folder takes precedence over the install
+	// default. Renders submitted before this column existed (or
+	// without an explicit folder) fall back to e.outputFolder.
+	folder := row.OutputFolder
+	if folder == "" {
+		folder = e.outputFolder
+	}
+	uploaded, err := sc.UploadRender(ctx, row.ProjectID, folder, plan.Filename, plan.ContentType, out)
 	if err != nil {
 		return 0, fmt.Errorf("upload: %w", err)
 	}

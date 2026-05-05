@@ -12,9 +12,9 @@ func TestPurgeOrphans_DeletesMissingFiles(t *testing.T) {
 	ctx := newTestCtx(t)
 
 	// Three media rows representing files 1, 2, 3.
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha-1")
-	upsertMedia(ctx.AppDB(), testProj, "2", sampleAudioProbe(), "sha-2")
-	upsertMedia(ctx.AppDB(), testProj, "3", sampleAudioProbe(), "sha-3")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha-1", "")
+	upsertMedia(ctx.AppDB(), testProj, "2", sampleAudioProbe(), "sha-2", "")
+	upsertMedia(ctx.AppDB(), testProj, "3", sampleAudioProbe(), "sha-3", "")
 
 	// Storage lists file 1 only — files 2 + 3 were deleted.
 	n, err := purgeOrphans(ctx.AppDB(), testProj, []string{"1"})
@@ -36,7 +36,7 @@ func TestPurgeOrphans_DeletesMissingFiles(t *testing.T) {
 
 func TestPurgeOrphans_CascadesDerivations(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha", "")
 	upsertDerivation(ctx.AppDB(), testProj, "1", "thumbnail", 100, 320, 240)
 	upsertDerivation(ctx.AppDB(), testProj, "1", "waveform", 101, 800, 100)
 
@@ -54,7 +54,7 @@ func TestPurgeOrphans_CascadesDerivations(t *testing.T) {
 
 func TestPurgeOrphans_CascadesTranscripts(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha", "")
 	upsertTranscript(ctx.AppDB(), &TranscriptRow{
 		FileID: "1", ProjectID: testProj, Status: "ok", Text: "to be cleaned",
 	})
@@ -69,8 +69,8 @@ func TestPurgeOrphans_CascadesTranscripts(t *testing.T) {
 
 func TestPurgeOrphans_NoOpWhenAllPresent(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha-1")
-	upsertMedia(ctx.AppDB(), testProj, "2", sampleAudioProbe(), "sha-2")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha-1", "")
+	upsertMedia(ctx.AppDB(), testProj, "2", sampleAudioProbe(), "sha-2", "")
 
 	n, err := purgeOrphans(ctx.AppDB(), testProj, []string{"1", "2"})
 	if err != nil {
@@ -90,8 +90,8 @@ func TestPurgeOrphans_OtherProjectUntouched(t *testing.T) {
 	// Cross-tenant safety: passing an empty list for project A must
 	// not delete project B's rows.
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha-a")
-	upsertMedia(ctx.AppDB(), "other-proj", "1", sampleAudioProbe(), "sha-b")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha-a", "")
+	upsertMedia(ctx.AppDB(), "other-proj", "1", sampleAudioProbe(), "sha-b", "")
 
 	if _, err := purgeOrphans(ctx.AppDB(), testProj, []string{}); err != nil {
 		t.Fatal(err)
@@ -107,8 +107,8 @@ func TestPurgeOrphans_NilFileListWipesProject(t *testing.T) {
 	// resets; the indexer never calls it this way without the
 	// safety guard.
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha")
-	upsertMedia(ctx.AppDB(), testProj, "2", sampleAudioProbe(), "sha")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "2", sampleAudioProbe(), "sha", "")
 
 	n, err := purgeOrphans(ctx.AppDB(), testProj, nil)
 	if err != nil {
@@ -127,7 +127,7 @@ func TestPurgeOrphans_LargeBatch(t *testing.T) {
 	ctx := newTestCtx(t)
 	for i := 0; i < 500; i++ {
 		fid := strDigit(i)
-		upsertMedia(ctx.AppDB(), testProj, fid, sampleAudioProbe(), "sha"+fid)
+		upsertMedia(ctx.AppDB(), testProj, fid, sampleAudioProbe(), "sha"+fid, "")
 	}
 	n, err := purgeOrphans(ctx.AppDB(), testProj, nil)
 	if err != nil {

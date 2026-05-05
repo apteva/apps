@@ -20,6 +20,12 @@ type MediaRow struct {
 	FileID       string  `json:"file_id"`
 	ProjectID    string  `json:"project_id"`
 	SourceSHA256 string  `json:"source_sha256"`
+	// Folder mirrors storage.files.folder on the row so media's own
+	// queries can filter + paginate by folder without joining to
+	// storage. Populated by upsertMedia at probe time + by the
+	// storage `file.updated` event handler when storage's
+	// files_move changes a folder.
+	Folder string `json:"folder,omitempty"`
 
 	FormatName string `json:"format_name,omitempty"`
 	DurationMs int64  `json:"duration_ms,omitempty"`
@@ -83,22 +89,25 @@ type DerivationRow struct {
 }
 
 // upsertMedia INSERT-or-UPDATEs the media row. Source-of-truth fields
-// (durations, codecs) are written every time; status fields too.
-func upsertMedia(db *sql.DB, projectID string, fileID string, p *Probe, sha string) error {
+// (durations, codecs, folder) are written every time; status fields
+// too. folder mirrors storage.files.folder so media can filter +
+// paginate by folder without an enrichment roundtrip per query.
+func upsertMedia(db *sql.DB, projectID string, fileID string, p *Probe, sha string, folder string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := db.Exec(`
 		INSERT INTO media (
-			file_id, project_id, source_sha256,
+			file_id, project_id, source_sha256, folder,
 			format_name, duration_ms, bitrate,
 			has_video, has_audio, is_image,
 			width, height, fps, video_codec,
 			channels, sample_rate, audio_codec,
 			probe_status, probe_error, probe_at,
 			raw_probe, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', '', ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', '', ?, ?, ?)
 		ON CONFLICT(file_id) DO UPDATE SET
 			project_id=excluded.project_id,
 			source_sha256=excluded.source_sha256,
+			folder=excluded.folder,
 			format_name=excluded.format_name,
 			duration_ms=excluded.duration_ms,
 			bitrate=excluded.bitrate,
@@ -117,7 +126,7 @@ func upsertMedia(db *sql.DB, projectID string, fileID string, p *Probe, sha stri
 			probe_at=excluded.probe_at,
 			raw_probe=excluded.raw_probe,
 			updated_at=excluded.updated_at`,
-		fileID, projectID, sha,
+		fileID, projectID, sha, folder,
 		p.FormatName, p.DurationMs, p.Bitrate,
 		boolInt(p.HasVideo), boolInt(p.HasAudio), boolInt(p.IsImage),
 		nullableInt(p.Width), nullableInt(p.Height), nullableFloat(p.FPS), nullableStr(p.VideoCodec),
@@ -125,6 +134,69 @@ func upsertMedia(db *sql.DB, projectID string, fileID string, p *Probe, sha stri
 		now, p.Raw, now,
 	)
 	return err
+}
+
+// updateFolder is the lightweight write the storage `file.updated`
+// event handler calls when a file's folder changed (storage's
+// files_move). Doesn't touch probe state.
+func updateFolder(db *sql.DB, projectID, fileID, folder string) error {
+	_, err := db.Exec(
+		`UPDATE media SET folder = ?, updated_at = ? WHERE project_id = ? AND file_id = ?`,
+		folder, time.Now().UTC().Format(time.RFC3339), projectID, fileID,
+	)
+	return err
+}
+
+// listChildFolders returns the immediate child folder names ONE
+// level under `parent` that contain media (audio/video/image rows
+// with probe_status='ok'). Mirrors storage's dbListChildFolders
+// shape so the navigation pattern is identical.
+//
+// parent="/" means root; the result is the top-level folders that
+// contain at least one media file. parent="/clips/" returns the
+// children of /clips/ (e.g. "q3", "q4") — single names, dedup'd,
+// no trailing slash.
+//
+// Folders that hold only non-media files (PDFs in /docs/, etc.)
+// don't appear — agents browsing media never land somewhere with
+// nothing to play.
+func listChildFolders(db *sql.DB, projectID, parent string) ([]string, error) {
+	if parent == "" {
+		parent = "/"
+	}
+	rows, err := db.Query(
+		`SELECT DISTINCT folder FROM media
+		 WHERE project_id = ? AND folder LIKE ? AND folder != ?
+		   AND probe_status = 'ok'
+		 ORDER BY folder`,
+		projectID, parent+"%", parent)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	out := []string{}
+	for rows.Next() {
+		var folder string
+		if err := rows.Scan(&folder); err != nil {
+			continue
+		}
+		// Take the first path segment after parent.
+		rel := strings.TrimPrefix(folder, parent)
+		if rel == "" {
+			continue
+		}
+		seg := rel
+		if i := strings.IndexByte(rel, '/'); i >= 0 {
+			seg = rel[:i]
+		}
+		if seg == "" || seen[seg] {
+			continue
+		}
+		seen[seg] = true
+		out = append(out, seg)
+	}
+	return out, nil
 }
 
 // markFailed flips a row to probe_status='failed' with the message
@@ -422,7 +494,8 @@ func markDescribeAttempt(db *sql.DB, projectID, fileID, errMsg string) error {
 
 func getMedia(db *sql.DB, projectID, fileID string) (*MediaRow, error) {
 	row := db.QueryRow(`
-		SELECT m.file_id, m.project_id, m.source_sha256, m.format_name, m.duration_ms, m.bitrate,
+		SELECT m.file_id, m.project_id, m.source_sha256, m.folder,
+			m.format_name, m.duration_ms, m.bitrate,
 			m.has_video, m.has_audio, m.is_image,
 			m.width, m.height, m.fps, m.video_codec,
 			m.channels, m.sample_rate, m.audio_codec,
@@ -461,7 +534,7 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 		transcriptStatus               string
 	)
 	err := row.Scan(
-		&m.FileID, &m.ProjectID, &m.SourceSHA256,
+		&m.FileID, &m.ProjectID, &m.SourceSHA256, &m.Folder,
 		&formatName, &duration, &bitrate,
 		&hasVideo, &hasAudio, &isImage,
 		&width, &height, &fps, &vcodec,
@@ -517,8 +590,13 @@ type SearchFilters struct {
 	WidthMax      int
 	VideoCodec    string
 	AudioCodec    string
-	Limit         int
-	OrderBy       string // duration_ms | created_at | updated_at
+	// Folder filters by storage folder. Empty = no filter.
+	// "/clips/" = exact-folder match. With Recursive=true, treated
+	// as a prefix so "/clips/" also matches "/clips/q3/", etc.
+	Folder    string
+	Recursive bool
+	Limit     int
+	OrderBy   string // duration_ms | created_at | updated_at
 }
 
 // searchMedia returns rows matching f. Joins derivations once at the
@@ -563,6 +641,19 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 		clauses = append(clauses, "audio_codec = ?")
 		args = append(args, f.AudioCodec)
 	}
+	// Folder filter — exact match by default, prefix LIKE when
+	// recursive=true. The trailing slash on storage's normalized
+	// folders (e.g. "/clips/") makes the prefix match safe — it
+	// won't match "/clips-archive/".
+	if f.Folder != "" {
+		if f.Recursive {
+			clauses = append(clauses, "folder LIKE ?")
+			args = append(args, f.Folder+"%")
+		} else {
+			clauses = append(clauses, "folder = ?")
+			args = append(args, f.Folder)
+		}
+	}
 
 	order := "created_at DESC"
 	switch f.OrderBy {
@@ -583,7 +674,8 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 	for i, c := range clauses {
 		clauses[i] = strings.ReplaceAll(c, "project_id =", "m.project_id =")
 	}
-	query := `SELECT m.file_id, m.project_id, m.source_sha256, m.format_name, m.duration_ms, m.bitrate,
+	query := `SELECT m.file_id, m.project_id, m.source_sha256, m.folder,
+		m.format_name, m.duration_ms, m.bitrate,
 		m.has_video, m.has_audio, m.is_image,
 		m.width, m.height, m.fps, m.video_codec,
 		m.channels, m.sample_rate, m.audio_codec,

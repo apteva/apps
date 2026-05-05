@@ -213,7 +213,7 @@ func processOne(
 		_ = markFailed(app.AppDB(), projectID, fid, f.SHA256, "unsupported", "no audio, video, or image stream")
 		return
 	}
-	if err := upsertMedia(app.AppDB(), projectID, fid, probe, f.SHA256); err != nil {
+	if err := upsertMedia(app.AppDB(), projectID, fid, probe, f.SHA256, f.Folder); err != nil {
 		logger.Warn("upsert failed", "err", err)
 		return
 	}

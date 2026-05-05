@@ -151,8 +151,12 @@ func (e *cloudinaryExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *
 		return 0, fmt.Errorf("download eager: HTTP %d: %s", httpResp.StatusCode, string(body))
 	}
 
+	folder := row.OutputFolder
+	if folder == "" {
+		folder = e.fallback.outputFolder
+	}
 	uploaded, err := sc.UploadRender(ctx, row.ProjectID,
-		e.fallback.outputFolder, plan.Filename, plan.ContentType, httpResp.Body)
+		folder, plan.Filename, plan.ContentType, httpResp.Body)
 	if err != nil {
 		return 0, fmt.Errorf("upload result: %w", err)
 	}

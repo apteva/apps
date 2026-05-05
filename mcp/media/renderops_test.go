@@ -285,7 +285,7 @@ func TestToolGetRender_FoundFlag(t *testing.T) {
 	}
 
 	// Present → found=true with payload.
-	id, _ := insertRender(ctx.AppDB(), testProj, "trim", []string{"1"}, nil, "", "")
+	id, _ := insertRender(ctx.AppDB(), testProj, "trim", []string{"1"}, nil, "", "", "")
 	out, _ = app.toolGetRender(ctx, map[string]any{
 		"_project_id": testProj,
 		"render_id":   id,
@@ -299,8 +299,8 @@ func TestToolListRenders_FiltersThrough(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}
 
-	insertRender(ctx.AppDB(), testProj, "trim", []string{"1"}, nil, "", "")
-	insertRender(ctx.AppDB(), testProj, "resize", []string{"1"}, nil, "", "")
+	insertRender(ctx.AppDB(), testProj, "trim", []string{"1"}, nil, "", "", "")
+	insertRender(ctx.AppDB(), testProj, "resize", []string{"1"}, nil, "", "", "")
 
 	out, err := app.toolListRenders(ctx, map[string]any{
 		"_project_id": testProj,
@@ -320,7 +320,7 @@ func TestToolCancelRender_TerminalIsNoOp(t *testing.T) {
 	// returns ok with noop=true, not an error.
 	ctx := newTestCtx(t)
 	app := &App{}
-	id, _ := insertRender(ctx.AppDB(), testProj, "trim", []string{"1"}, nil, "", "")
+	id, _ := insertRender(ctx.AppDB(), testProj, "trim", []string{"1"}, nil, "", "", "")
 	_ = renderMarkFailed(ctx.AppDB(), id, "boom")
 
 	out, err := app.toolCancelRender(ctx, map[string]any{
@@ -339,7 +339,7 @@ func TestToolCancelRender_TerminalIsNoOp(t *testing.T) {
 func TestToolCancelRender_PendingFlipsRow(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}
-	id, _ := insertRender(ctx.AppDB(), testProj, "trim", []string{"1"}, nil, "", "")
+	id, _ := insertRender(ctx.AppDB(), testProj, "trim", []string{"1"}, nil, "", "", "")
 
 	out, err := app.toolCancelRender(ctx, map[string]any{
 		"_project_id": testProj,

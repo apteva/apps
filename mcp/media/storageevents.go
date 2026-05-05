@@ -190,6 +190,46 @@ func handleStorageEvent(app *sdk.AppCtx, raw []byte) {
 		cascadeDeleteFromEvent(app, ev.Data, ev.ProjectID)
 	case "file.added":
 		indexFromEvent(app, ev.Data, ev.ProjectID)
+	case "file.updated":
+		// files_move (and other PATCHes) emit file.updated. We only
+		// react to folder changes — the row's probe data hasn't
+		// changed. updateFolder is a single SQL UPDATE; no probe
+		// re-run, no event fanout amplification.
+		updateFolderFromEvent(app, ev.Data, ev.ProjectID)
+	}
+}
+
+// updateFolderFromEvent extracts (file_id, folder) from a
+// storage.file.updated event payload and writes the folder onto
+// our row. Silently no-ops when the file isn't in our index yet
+// (storage updated a non-media file) or when the folder is missing
+// from the payload (some non-folder PATCH).
+func updateFolderFromEvent(app *sdk.AppCtx, data map[string]any, projectID string) {
+	if projectID == "" {
+		projectID = strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
+	}
+	if projectID == "" {
+		return
+	}
+	idVal, ok := data["id"]
+	if !ok {
+		return
+	}
+	var fid string
+	switch v := idVal.(type) {
+	case float64:
+		fid = strconv.FormatInt(int64(v), 10)
+	case string:
+		fid = v
+	default:
+		return
+	}
+	folder, _ := data["folder"].(string)
+	if folder == "" {
+		return
+	}
+	if err := updateFolder(app.AppDB(), projectID, fid, folder); err != nil {
+		app.Logger().Warn("file.updated folder write failed", "file_id", fid, "err", err)
 	}
 }
 

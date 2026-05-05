@@ -21,7 +21,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.7.0
+version: 0.8.0
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -82,7 +82,8 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: media_get,             description: "Fetch one media record by storage file_id." }
-    - { name: media_search,          description: "Filter by duration / dimensions / codec / has_video / has_audio." }
+    - { name: media_search,          description: "Filter by folder / duration / dimensions / codec / has_video / has_audio." }
+    - { name: media_list_folders,    description: "List immediate child folders of parent that contain media." }
     - { name: media_get_thumbnail,   description: "Get the thumbnail derivation pointer (storage file_id) — generates if missing." }
     - { name: media_get_waveform,    description: "Get the waveform derivation pointer (audio only)." }
     - { name: media_reindex,         description: "Force a re-probe + re-derive — for one file_id or all failed rows." }
@@ -220,6 +221,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/media", Handler: a.handleMediaCollection},
 		{Pattern: "/media/", Handler: a.handleMediaItem},
+		{Pattern: "/folders", Handler: a.handleFolders},
 		{Pattern: "/status", Handler: a.handleStatus},
 		{Pattern: "/reindex", Handler: a.handleReindex},
 		// Renders. /renders accepts POST {operation, ...} for
@@ -228,6 +230,37 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/renders", Handler: a.handleRendersCollection},
 		{Pattern: "/renders/", Handler: a.handleRenderItem},
 	}
+}
+
+// handleFolders is the HTTP twin of media_list_folders. The dashboard
+// panel uses it to render the folder navigation tree.
+func (a *App) handleFolders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	parent := r.URL.Query().Get("parent")
+	if parent == "" {
+		parent = "/"
+	} else {
+		if !strings.HasPrefix(parent, "/") {
+			parent = "/" + parent
+		}
+		if !strings.HasSuffix(parent, "/") {
+			parent = parent + "/"
+		}
+	}
+	folders, err := listChildFolders(globalCtx.AppDB(), pid, parent)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"folders": folders, "parent": parent})
 }
 
 // ─── MCP tools ─────────────────────────────────────────────────────
@@ -242,8 +275,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_search",
-			Description: "Filter the catalog. Args: duration_min_ms, duration_max_ms, has_video, has_audio, is_image, width_min, width_max, video_codec, audio_codec, limit, order_by ('duration_ms'|'created_at'|'updated_at').",
+			Description: "Filter the catalog. Args: folder, recursive, duration_min_ms, duration_max_ms, has_video, has_audio, is_image, width_min, width_max, video_codec, audio_codec, limit, order_by ('duration_ms'|'created_at'|'updated_at').",
 			InputSchema: schemaObject(map[string]any{
+				"folder":          map[string]any{"type": "string"},
+				"recursive":       map[string]any{"type": "boolean"},
 				"duration_min_ms": map[string]any{"type": "integer"},
 				"duration_max_ms": map[string]any{"type": "integer"},
 				"has_video":       map[string]any{"type": "boolean"},
@@ -257,6 +292,14 @@ func (a *App) MCPTools() []sdk.Tool {
 				"order_by":        map[string]any{"type": "string"},
 			}, nil),
 			Handler: a.toolSearch,
+		},
+		{
+			Name:        "media_list_folders",
+			Description: "List immediate child folders of `parent` that contain media (audio/video/image). Args: parent (default '/').",
+			InputSchema: schemaObject(map[string]any{
+				"parent": map[string]any{"type": "string"},
+			}, nil),
+			Handler: a.toolListFolders,
 		},
 		{
 			Name:        "media_get_thumbnail",
@@ -295,7 +338,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"file_id":     map[string]any{"type": "string"},
 				"start_ms":    map[string]any{"type": "integer"},
 				"end_ms":      map[string]any{"type": "integer"},
-				"output_name": map[string]any{"type": "string"},
+				"output_name":   map[string]any{"type": "string"},
+				"output_folder": map[string]any{"type": "string"},
 			}, []string{"file_id", "start_ms", "end_ms"}),
 			Handler: a.toolSubmitRender("trim", []string{"start_ms", "end_ms"}, []string{"file_id"}),
 		},
@@ -307,7 +351,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"width":       map[string]any{"type": "integer"},
 				"height":      map[string]any{"type": "integer"},
 				"keep_aspect": map[string]any{"type": "boolean"},
-				"output_name": map[string]any{"type": "string"},
+				"output_name":   map[string]any{"type": "string"},
+				"output_folder": map[string]any{"type": "string"},
 			}, []string{"file_id", "width"}),
 			Handler: a.toolSubmitRender("resize", []string{"width", "height", "keep_aspect"}, []string{"file_id"}),
 		},
@@ -320,7 +365,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"video_codec": map[string]any{"type": "string"},
 				"audio_codec": map[string]any{"type": "string"},
 				"bitrate":     map[string]any{"type": "string"},
-				"output_name": map[string]any{"type": "string"},
+				"output_name":   map[string]any{"type": "string"},
+				"output_folder": map[string]any{"type": "string"},
 			}, []string{"file_id", "format"}),
 			Handler: a.toolSubmitRender("transcode", []string{"format", "video_codec", "audio_codec", "bitrate"}, []string{"file_id"}),
 		},
@@ -329,7 +375,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Join multiple sources end-to-end (must share container/codec). Args: file_ids (array of strings, 2+), output_name (string, required).",
 			InputSchema: schemaObject(map[string]any{
 				"file_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"output_name": map[string]any{"type": "string"},
+				"output_name":   map[string]any{"type": "string"},
+				"output_folder": map[string]any{"type": "string"},
 			}, []string{"file_ids", "output_name"}),
 			Handler: a.toolSubmitRender("concat", nil, []string{"file_ids"}),
 		},
@@ -342,7 +389,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"y":           map[string]any{"type": "integer"},
 				"width":       map[string]any{"type": "integer"},
 				"height":      map[string]any{"type": "integer"},
-				"output_name": map[string]any{"type": "string"},
+				"output_name":   map[string]any{"type": "string"},
+				"output_folder": map[string]any{"type": "string"},
 			}, []string{"file_id", "x", "y", "width", "height"}),
 			Handler: a.toolSubmitRender("crop", []string{"x", "y", "width", "height"}, []string{"file_id"}),
 		},
@@ -353,7 +401,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"file_id":     map[string]any{"type": "string"},
 				"at_ms":       map[string]any{"type": "integer"},
 				"width":       map[string]any{"type": "integer"},
-				"output_name": map[string]any{"type": "string"},
+				"output_name":   map[string]any{"type": "string"},
+				"output_folder": map[string]any{"type": "string"},
 			}, []string{"file_id", "at_ms"}),
 			Handler: a.toolSubmitRender("extract_frame", []string{"at_ms", "width"}, []string{"file_id"}),
 		},
@@ -363,7 +412,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"file_id":     map[string]any{"type": "string"},
 				"format":      map[string]any{"type": "string"},
-				"output_name": map[string]any{"type": "string"},
+				"output_name":   map[string]any{"type": "string"},
+				"output_folder": map[string]any{"type": "string"},
 			}, []string{"file_id", "format"}),
 			Handler: a.toolSubmitRender("audio_extract", []string{"format"}, []string{"file_id"}),
 		},
@@ -694,6 +744,20 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	f.WidthMax = int(int64Arg(args["width_max"]))
 	f.VideoCodec, _ = args["video_codec"].(string)
 	f.AudioCodec, _ = args["audio_codec"].(string)
+	f.Folder, _ = args["folder"].(string)
+	if f.Folder != "" {
+		// Normalize so callers can pass "clips", "/clips", "/clips/"
+		// and all hit the same rows.
+		if !strings.HasPrefix(f.Folder, "/") {
+			f.Folder = "/" + f.Folder
+		}
+		if !strings.HasSuffix(f.Folder, "/") {
+			f.Folder = f.Folder + "/"
+		}
+	}
+	if v, ok := args["recursive"].(bool); ok {
+		f.Recursive = v
+	}
 	f.Limit = int(int64Arg(args["limit"]))
 	f.OrderBy, _ = args["order_by"].(string)
 	rows, err := searchMedia(ctx.AppDB(), pid, f)
@@ -709,6 +773,34 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return map[string]any{"media": rows, "storage_unavailable": true}, nil
 	}
 	return map[string]any{"media": enriched}, nil
+}
+
+// toolListFolders mirrors storage's files_list_folders semantics —
+// immediate children of `parent` that contain media. Lets agents
+// browse the folder tree without leaving the media MCP.
+func (a *App) toolListFolders(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	parent, _ := args["parent"].(string)
+	if parent == "" {
+		parent = "/"
+	} else {
+		// Same normalization as toolSearch — accept "clips",
+		// "/clips", "/clips/" interchangeably.
+		if !strings.HasPrefix(parent, "/") {
+			parent = "/" + parent
+		}
+		if !strings.HasSuffix(parent, "/") {
+			parent = parent + "/"
+		}
+	}
+	folders, err := listChildFolders(ctx.AppDB(), pid, parent)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"folders": folders, "parent": parent, "count": len(folders)}, nil
 }
 
 // toolGetDerivation closes over the derivation kind so the same body
@@ -779,6 +871,18 @@ func (a *App) handleMediaCollection(w http.ResponseWriter, r *http.Request) {
 		f.Limit, _ = strconv.Atoi(v)
 	}
 	f.OrderBy = q.Get("order_by")
+	if folder := q.Get("folder"); folder != "" {
+		if !strings.HasPrefix(folder, "/") {
+			folder = "/" + folder
+		}
+		if !strings.HasSuffix(folder, "/") {
+			folder = folder + "/"
+		}
+		f.Folder = folder
+	}
+	if v := q.Get("recursive"); v != "" {
+		f.Recursive = v == "true" || v == "1"
+	}
 	rows, err := searchMedia(globalCtx.AppDB(), pid, f)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1128,6 +1232,17 @@ func (a *App) toolSubmitRender(operation string, paramKeys, sourceKeys []string)
 		}
 		params := pickParams(args, paramKeys)
 		outputName, _ := args["output_name"].(string)
+		outputFolder, _ := args["output_folder"].(string)
+		// Normalize same way as toolSearch — agents pass "clips" /
+		// "/clips" / "/clips/" and we land on the same target.
+		if outputFolder != "" {
+			if !strings.HasPrefix(outputFolder, "/") {
+				outputFolder = "/" + outputFolder
+			}
+			if !strings.HasSuffix(outputFolder, "/") {
+				outputFolder = outputFolder + "/"
+			}
+		}
 		requestedBy, _ := args["_requested_by"].(string)
 
 		// Pre-validate by building the plan now. Fast-fail bad params
@@ -1138,7 +1253,7 @@ func (a *App) toolSubmitRender(operation string, paramKeys, sourceKeys []string)
 			return nil, err
 		}
 
-		id, err := insertRender(ctx.AppDB(), pid, operation, sources, params, outputName, requestedBy)
+		id, err := insertRender(ctx.AppDB(), pid, operation, sources, params, outputName, outputFolder, requestedBy)
 		if err != nil {
 			return nil, err
 		}
@@ -1329,12 +1444,13 @@ func (a *App) handleRendersCollection(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"renders": rows})
 	case http.MethodPost:
 		var body struct {
-			Operation   string         `json:"operation"`
-			FileID      string         `json:"file_id"`
-			FileIDs     []string       `json:"file_ids"`
-			OutputName  string         `json:"output_name"`
-			RequestedBy string         `json:"requested_by"`
-			Params      map[string]any `json:"params"`
+			Operation    string         `json:"operation"`
+			FileID       string         `json:"file_id"`
+			FileIDs      []string       `json:"file_ids"`
+			OutputName   string         `json:"output_name"`
+			OutputFolder string         `json:"output_folder"`
+			RequestedBy  string         `json:"requested_by"`
+			Params       map[string]any `json:"params"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
@@ -1360,7 +1476,7 @@ func (a *App) handleRendersCollection(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		id, err := insertRender(globalCtx.AppDB(), pid, body.Operation, sources, body.Params, body.OutputName, body.RequestedBy)
+		id, err := insertRender(globalCtx.AppDB(), pid, body.Operation, sources, body.Params, body.OutputName, body.OutputFolder, body.RequestedBy)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

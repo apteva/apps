@@ -167,8 +167,8 @@ func TestTranscriberSweep_NoIntegrationBound_QueueAndSkip(t *testing.T) {
 	// unbounded, and reconnecting Deepgram later requires explicit
 	// requeue (media_transcribe with force=true).
 	ctx := newTestCtxWithPlatform(t, noBindings())
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(5000), "sha")
-	upsertMedia(ctx.AppDB(), testProj, "2", sampleAVProbe(5000), "sha")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(5000), "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "2", sampleAVProbe(5000), "sha", "")
 
 	transcriberSweep(ctx)
 
@@ -193,7 +193,7 @@ func TestTranscriberSweep_BoundButOverDurationCap_Skipped(t *testing.T) {
 
 	// Default cap is 120 minutes = 7,200,000 ms. Pick something well
 	// past that.
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(8*60*60*1000), "sha")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(8*60*60*1000), "sha", "")
 
 	transcriberSweep(ctx)
 
@@ -236,7 +236,7 @@ func TestTranscriberSweep_BoundHappyPath_PersistsTranscript(t *testing.T) {
 		}`),
 	}
 	ctx := newTestCtxWithPlatform(t, stub)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "")
 
 	transcriberSweep(ctx)
 
@@ -296,7 +296,7 @@ func TestTranscriberSweep_DeepgramNon2xx_MarkedFailed(t *testing.T) {
 		Data: json.RawMessage(`{"error":"unauthorized"}`),
 	}
 	ctx := newTestCtxWithPlatform(t, stub)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "")
 
 	transcriberSweep(ctx)
 
@@ -314,7 +314,7 @@ func TestTranscriberSweep_DeepgramNetworkError_MarkedFailed(t *testing.T) {
 	stub := boundDeepgram()
 	stub.executeErr = errors.New("connection reset by peer")
 	ctx := newTestCtxWithPlatform(t, stub)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "")
 
 	transcriberSweep(ctx)
 
@@ -336,7 +336,7 @@ func TestTranscriberSweep_MalformedDeepgramResponse_MarkedFailed(t *testing.T) {
 		Data: json.RawMessage(`{"unexpected":"shape"}`),
 	}
 	ctx := newTestCtxWithPlatform(t, stub)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "")
 
 	transcriberSweep(ctx)
 
@@ -354,7 +354,7 @@ func TestTranscriberSweep_VideoOnlyNotEligible(t *testing.T) {
 	stub.executeResp = &sdk.ExecuteResult{Success: true, Status: 200,
 		Data: json.RawMessage(`{"results":{"channels":[{"alternatives":[{"transcript":"x"}]}]}}`)}
 	ctx := newTestCtxWithPlatform(t, stub)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoOnlyProbe(), "sha")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoOnlyProbe(), "sha", "")
 
 	transcriberSweep(ctx)
 
@@ -387,7 +387,7 @@ func TestTranscriberSweep_DiarizeFlagPropagates(t *testing.T) {
 	)
 	globalCtx = ctx
 
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "")
 	transcriberSweep(ctx)
 
 	if len(stub.ExecuteCalls) != 1 {
