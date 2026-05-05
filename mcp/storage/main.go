@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: storage
 display_name: Storage
-version: 0.7.1
+version: 0.8.0
 description: |
   File storage with virtual folders, signed URLs, dedup. Pluggable
   backend: local disk by default, S3-compatible (AWS / R2 / B2 /
@@ -378,6 +378,20 @@ type File struct {
 	Source      string   `json:"source,omitempty"`
 	Tags        []string `json:"tags"`
 	Visibility  string   `json:"visibility"`
+	// URL — the file's canonical absolute URL. Reachable per the
+	// file's visibility:
+	//
+	//   public  → anyone can fetch (no auth, no signature)
+	//   signed  → requires the ?sig=&exp= query the URL was minted
+	//             with; agents call files_get_url to get one
+	//   private → requires an authenticated request (dashboard
+	//             session, API key, or app-install bearer)
+	//
+	// Same path shape across all three — like S3, where a public
+	// bucket's object URL and a presigned URL share the same prefix
+	// and only differ in query params. Agents share `url` with
+	// external recipients when visibility=public; for signed sharing
+	// they call files_get_url and share the returned (signed) form.
 	URL         string   `json:"url,omitempty"`
 	CreatedAt   string   `json:"created_at,omitempty"`
 	UpdatedAt   string   `json:"updated_at,omitempty"`
@@ -463,7 +477,7 @@ func (a *App) toolUpload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	emitFileEvent(ctx, "file.added", f, existed)
 	return map[string]any{
 		"id":           f.ID,
-		"url":          buildContentURL(f),
+		"url":          absoluteContentURL(ctx, f),
 		"sha256":       f.SHA256,
 		"size_bytes":   f.SizeBytes,
 		"folder":       f.Folder,
@@ -534,7 +548,11 @@ func (a *App) toolGetURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 
 	sig := signFile(f.ID, exp)
-	url := fmt.Sprintf("/files/%d/content?sig=%s&exp=%d", f.ID, sig, exp)
+	// Absolute URL so callers can hand it to third-party services
+	// (Deepgram, Cloudinary, plain links shared with humans) without
+	// having to know the platform's host. Falls back to relative
+	// when public_url isn't configured (dev, no-network installs).
+	url := signedAbsoluteURL(ctx, f.ID, sig, exp)
 	return map[string]any{"url": url, "expires_at": exp, "file_id": f.ID}, nil
 }
 
@@ -752,7 +770,7 @@ func (a *App) toolFromURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	emitFileEvent(ctx, "file.added", f, existed)
 	return map[string]any{
 		"id":           f.ID,
-		"url":          buildContentURL(f),
+		"url":          absoluteContentURL(ctx, f),
 		"sha256":       f.SHA256,
 		"was_existing": existed,
 	}, nil
@@ -795,6 +813,17 @@ func (a *App) handleFilesItem(w http.ResponseWriter, r *http.Request) {
 	switch tail {
 	case "content":
 		a.httpServeContent(w, r, id)
+	case "url":
+		// POST /files/:id/url — mint a signed time-limited URL.
+		// Mirrors the files_get_url MCP tool but available over plain
+		// HTTP for callers that aren't speaking MCP (the dashboard,
+		// the media app's storageclient, ad-hoc scripts).
+		// Body: {ttl_seconds?: int}. Response: {url, expires_at, file_id}.
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		a.httpMintSignedURL(w, r, id)
 	case "":
 		switch r.Method {
 		case http.MethodGet:
@@ -809,6 +838,45 @@ func (a *App) handleFilesItem(w http.ResponseWriter, r *http.Request) {
 	default:
 		httpErr(w, http.StatusNotFound, "not found")
 	}
+}
+
+// httpMintSignedURL is the HTTP-protocol wrapper around the
+// files_get_url MCP tool. Same logic, plain-HTTP envelope. Lets the
+// media app (and any non-Go caller) skip the JSON-RPC dance just to
+// mint a signed URL.
+func (a *App) httpMintSignedURL(w http.ResponseWriter, r *http.Request, id int64) {
+	ctx := globalCtx
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var body struct {
+		TTLSeconds int `json:"ttl_seconds"`
+	}
+	if r.ContentLength > 0 {
+		// Body is optional — a TTL of 0 / missing falls back to the
+		// install's default (24h today).
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&body); err != nil && err != io.EOF {
+			httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+			return
+		}
+	}
+	args := map[string]any{"_project_id": pid, "id": id}
+	if body.TTLSeconds > 0 {
+		args["ttl_seconds"] = body.TTLSeconds
+	}
+	out, err := a.toolGetURL(ctx, args)
+	if err != nil {
+		// Reuse toolGetURL's error semantics: not-found → 404.
+		if strings.Contains(err.Error(), "not found") {
+			httpErr(w, http.StatusNotFound, err.Error())
+			return
+		}
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, out)
 }
 
 func (a *App) handleFolders(w http.ResponseWriter, r *http.Request) {
@@ -995,7 +1063,7 @@ func (a *App) httpUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	emitFileEvent(ctx, "file.added", f, existed)
 	httpJSON(w, map[string]any{
-		"id": f.ID, "url": buildContentURL(f), "sha256": f.SHA256,
+		"id": f.ID, "url": absoluteContentURL(ctx, f), "sha256": f.SHA256,
 		"size_bytes": f.SizeBytes, "name": f.Name, "folder": f.Folder,
 		"was_existing": existed,
 	})
@@ -1046,26 +1114,41 @@ func (a *App) httpServeContent(w http.ResponseWriter, r *http.Request, id int64)
 		return
 	}
 
-	// Authorise based on visibility + signature.
+	// Authorise based on visibility + signature. The platform's
+	// authMiddleware lets unauthenticated GETs through to app
+	// routes, leaving the per-resource decision to the app — same
+	// shape as S3, where the bucket's public-read ACL governs
+	// anonymous access without the URL needing to be different.
+	//
+	// X-User-ID is set by authMiddleware on authenticated requests
+	// (session cookie, API key, app-install bearer); its absence
+	// means the request reached us anonymously, in which case
+	// private/signed files are gated by their own auth carrier.
 	q := r.URL.Query()
 	sig := q.Get("sig")
 	exp, _ := strconv.ParseInt(q.Get("exp"), 10, 64)
+	authed := r.Header.Get("X-User-ID") != ""
 	switch f.Visibility {
 	case "public":
-		// Anyone can fetch.
+		// Anyone can fetch — no auth, no signature.
 	case "signed":
-		if !verifySignature(f.ID, exp, sig) {
+		// Signed URL required. Authenticated users (the dashboard
+		// browsing files) also get to fetch via their session, so we
+		// accept either a valid sig OR a present X-User-ID.
+		if !authed && !verifySignature(f.ID, exp, sig) {
 			httpErr(w, http.StatusForbidden, "invalid or expired signature")
 			return
 		}
 	case "private":
-		// Either a valid signature OR rely on the platform's auth
-		// proxy to have stripped the request's bearer. v0.1: if a sig
-		// is present we accept it; otherwise we trust the proxy
-		// (sidecar's withTokenAuth empty token = pass-through).
-		if sig != "" && !verifySignature(f.ID, exp, sig) {
-			httpErr(w, http.StatusForbidden, "invalid or expired signature")
-			return
+		// Authenticated request, OR a valid sig (private files can
+		// still be shared via files_get_url). Anonymous requests with
+		// no sig are refused — this is the gap that needed closing
+		// once we relaxed the platform's auth gate for app routes.
+		if !authed {
+			if !verifySignature(f.ID, exp, sig) {
+				httpErr(w, http.StatusForbidden, "private file requires authentication or a valid signature")
+				return
+			}
 		}
 	}
 
@@ -1328,7 +1411,13 @@ func scanFile(row *sql.Row) (*File, error) {
 	if f.Tags == nil {
 		f.Tags = []string{}
 	}
-	f.URL = buildContentURL(f)
+	// Absolute URL derived live from the platform's public_url
+	// setting (via WhoAmI's sub-second cache) so changing the
+	// setting in Settings → Server reflects immediately. The same
+	// URL shape is used regardless of visibility — public files just
+	// don't require auth at the platform layer (see the GET-app-route
+	// carve-out in authMiddleware).
+	f.URL = absoluteContentURL(globalCtx, f)
 	return f, nil
 }
 

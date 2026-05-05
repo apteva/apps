@@ -79,6 +79,12 @@ interface FileRow {
   visibility: "private" | "signed" | "public";
   sha256: string;
   created_at: string;
+  // Canonical absolute URL minted by storage. Same shape regardless
+  // of visibility — what differs is whether the request needs auth.
+  // For visibility=public, anyone with this URL can fetch; for
+  // signed, append ?sig=&exp= via files_get_url; for private, only
+  // authenticated requests succeed.
+  url?: string;
 }
 
 interface FoldersResp { folders?: string[] }
@@ -244,15 +250,81 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
     }
   };
 
+  // handleShare adapts to the file's current visibility instead of
+  // unconditionally flipping it to signed.
+  //
+  //   public  → copy the public_url storage already minted (no PATCH)
+  //   signed  → mint/refresh a signed URL via POST /files/:id/url
+  //   private → ask first; if the user confirms, flip to signed and
+  //             return the time-limited URL
+  //
+  // Pre-fix the button always called PATCH visibility=signed which
+  // demoted public files. The visibility column is now the operator's
+  // intent, not a side-effect of clicking Share.
   const handleShare = async (f: FileRow) => {
     try {
-      await api("PATCH", `/files/${f.id}`, undefined, { visibility: "signed" });
-      const url = window.location.origin + `${API}/files/${f.id}/content?${withParams({})}`;
-      await navigator.clipboard.writeText(url).catch(() => {});
-      alert(`Marked signed. URL copied to clipboard:\n${url}`);
+      if (f.visibility === "public") {
+        const url = f.url || "";
+        if (!url) {
+          alert("This file is public but storage didn't return an absolute URL — check Settings → Server → public_url.");
+          return;
+        }
+        await navigator.clipboard.writeText(url).catch(() => {});
+        alert(`Public link copied:\n${url}\n\nAnyone with this URL can fetch the file.`);
+        return;
+      }
+      if (f.visibility === "private") {
+        if (!window.confirm(
+          "This file is private. Generate a time-limited signed URL anyone can use to download it?"
+        )) {
+          return;
+        }
+      }
+      // signed or just-confirmed-private → mint a fresh signed URL.
+      const resp = await api<{ url: string; expires_at: number }>(
+        "POST", `/files/${f.id}/url`, undefined, { ttl_seconds: 86400 },
+      );
+      // If the file was private, also flip its visibility flag so
+      // future Share clicks recognize the intent.
+      if (f.visibility === "private") {
+        await api("PATCH", `/files/${f.id}`, undefined, { visibility: "signed" });
+      }
+      await navigator.clipboard.writeText(resp.url).catch(() => {});
+      alert(`Signed link copied (expires in 24h):\n${resp.url}`);
       load();
     } catch (e) {
       alert("Share failed: " + (e as Error).message);
+    }
+  };
+
+  // handleMakePublic flips a file to permanent anonymous access.
+  // Distinct from Share so the operator must explicitly opt in to
+  // "anyone with the URL, forever". Refreshes the row to surface the
+  // newly-populated public_url.
+  const handleMakePublic = async (f: FileRow) => {
+    if (f.visibility === "public") return;
+    if (!window.confirm(
+      "Make this file public?\n\nAnyone with the URL will be able to fetch it permanently — there's no expiration.",
+    )) {
+      return;
+    }
+    try {
+      await api("PATCH", `/files/${f.id}`, undefined, { visibility: "public" });
+      load();
+    } catch (e) {
+      alert("Make public failed: " + (e as Error).message);
+    }
+  };
+
+  // handleMakePrivate revokes both public and signed access. Used by
+  // the detail pane to undo a Make-public click.
+  const handleMakePrivate = async (f: FileRow) => {
+    if (f.visibility === "private") return;
+    try {
+      await api("PATCH", `/files/${f.id}`, undefined, { visibility: "private" });
+      load();
+    } catch (e) {
+      alert("Make private failed: " + (e as Error).message);
     }
   };
 
@@ -414,6 +486,8 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
         onClose={() => setSelected(null)}
         onDownload={() => handleDownload(selected)}
         onShare={() => handleShare(selected)}
+        onMakePublic={() => handleMakePublic(selected)}
+        onMakePrivate={() => handleMakePrivate(selected)}
         onDelete={() => handleDelete(selected)}
       />
     )}
@@ -422,13 +496,15 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
 }
 
 function FileDetail({
-  file, contentURL, onClose, onDownload, onShare, onDelete,
+  file, contentURL, onClose, onDownload, onShare, onMakePublic, onMakePrivate, onDelete,
 }: {
   file: FileRow;
   contentURL: string;
   onClose: () => void;
   onDownload: () => void;
   onShare: () => void;
+  onMakePublic: () => void;
+  onMakePrivate: () => void;
   onDelete: () => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -463,7 +539,48 @@ function FileDetail({
           <MetaRow label="Created" value={new Date(file.created_at).toLocaleString()} />
           <MetaRow label="SHA-256" value={file.sha256 || "—"} mono />
           <MetaRow label="ID" value={file.id} mono />
+          {/* Public link surfacing — when visibility=public the
+              file's URL works anonymously, so operators can copy it
+              straight from the detail pane without going through
+              Share. */}
+          {file.visibility === "public" && file.url && (
+            <div className="flex flex-col gap-1 mt-2 pt-2 border-t border-border">
+              <span className="text-text-dim">Public link</span>
+              <code
+                className="text-[10px] text-accent break-all bg-bg-input/50 rounded px-2 py-1"
+                title="Anyone with this URL can fetch the file."
+              >{file.url}</code>
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard.writeText(file.url || "").catch(() => {});
+                }}
+                className="text-[10px] text-accent self-start hover:underline"
+              >Copy</button>
+            </div>
+          )}
         </dl>
+      </div>
+
+      {/* Visibility actions — distinct from Share. Make-public flips
+          to permanent anonymous access; Make-private revokes it.
+          Both confirm before mutating. */}
+      <div className="px-3 py-2 border-t border-border flex items-center gap-2 text-xs">
+        <span className="text-text-dim">Visibility:</span>
+        {file.visibility !== "public" && (
+          <button
+            type="button"
+            onClick={onMakePublic}
+            className="px-2 py-1 border border-border rounded hover:bg-bg-input text-green"
+          >Make public</button>
+        )}
+        {file.visibility !== "private" && (
+          <button
+            type="button"
+            onClick={onMakePrivate}
+            className="px-2 py-1 border border-border rounded hover:bg-bg-input"
+          >Make private</button>
+        )}
       </div>
 
       <footer className="border-t border-border p-3">
@@ -492,7 +609,20 @@ function FileDetail({
               type="button"
               onClick={onShare}
               className="flex-1 text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
-            >Share</button>
+              title={
+                file.visibility === "public"
+                  ? "Copy the permanent public URL."
+                  : file.visibility === "signed"
+                  ? "Copy a fresh time-limited signed URL (24h)."
+                  : "Generate a time-limited signed URL anyone with the link can use."
+              }
+            >{
+              file.visibility === "public"
+                ? "Copy link"
+                : file.visibility === "signed"
+                ? "Copy link"
+                : "Share"
+            }</button>
             <button
               type="button"
               onClick={() => setConfirmDelete(true)}
