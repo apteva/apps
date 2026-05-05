@@ -37,13 +37,18 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: tapo
 display_name: Tapo Cameras
-version: 0.2.0
+version: 0.2.1
 description: Local-LAN control of TP-Link Tapo cameras.
 author: Apteva
 scopes: [project, global]
 requires:
   permissions: [db.write.app, net.egress]
   integrations: []
+  apps:
+    - name: ffmpeg
+      version: ">=0.1.0"
+      optional: true
+      reason: "snapshot_capture delegates to ffmpeg_grab_frame"
 provides:
   http_routes:
     - prefix: /
@@ -266,7 +271,7 @@ func (a *App) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 502)
 		return
 	}
-	jpg, err := cli.FetchSnapshot()
+	jpg, err := snapshotViaFfmpegApp(globalCtx, cli)
 	if err != nil {
 		http.Error(w, err.Error(), 502)
 		return
@@ -480,7 +485,7 @@ func (a *App) toolSnapshotCapture(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
-	jpg, err := cli.FetchSnapshot()
+	jpg, err := snapshotViaFfmpegApp(ctx, cli)
 	if err != nil {
 		return nil, err
 	}
@@ -1010,7 +1015,7 @@ func pollAllCameras(ctx *sdk.AppCtx) error {
 				continue
 			}
 			if autoSnap {
-				if jpg, err := cli.FetchSnapshot(); err == nil {
+				if jpg, err := snapshotViaFfmpegApp(ctx, cli); err == nil {
 					if fid, err := pushToStorage(ctx, "/cameras/"+cam.Name, cam.Name, jpg); err == nil {
 						_, _ = ctx.AppDB().Exec(
 							`UPDATE motion_events SET snapshot_file_id = ? WHERE id = ?`,

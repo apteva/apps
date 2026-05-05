@@ -1,0 +1,63 @@
+schema: apteva-app/v1
+
+name: ffmpeg
+display_name: FFmpeg
+version: 0.1.0
+description: |
+  Stateless ffmpeg-as-a-service for sibling Apteva apps. Wraps the
+  local `ffmpeg` and `ffprobe` binaries behind three sync MCP tools
+  (grab_frame / probe / version) so apps that need a single frame
+  out of a stream — tapo's snapshot_capture is the v0.1 use case —
+  don't have to bundle their own ffmpeg.
+
+  This app is intentionally minimal: no DB, no job queue, no panel,
+  no async tools. Larger jobs (transcode, trim, concat) stay in the
+  `media` app for v0.1.x. v0.2 will grow the async surface.
+
+  Requires ffmpeg + ffprobe on $PATH. The OnMount hook refuses to
+  start when either is missing and surfaces a clear "install ffmpeg"
+  error.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/ffmpeg
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/ffmpeg/icon.png
+tags: [ffmpeg, video, infrastructure, executor]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - net.egress
+  integrations: []
+  apps: []
+
+provides:
+  http_routes: []
+  mcp_tools:
+    - { name: ffmpeg_grab_frame, description: "Grab a single frame from any ffmpeg-readable URL (RTSP, HTTP, file://) and return the JPEG bytes inline. Sync; capped at 4 MiB. Args: url, format? (jpeg|png), timeout_seconds? (default 8, max 30)." }
+    - { name: ffmpeg_probe,      description: "Run ffprobe and return its parsed JSON: streams, duration, codecs, dimensions, bitrate. Sync. Args: url." }
+    - { name: ffmpeg_version,    description: "Cached `ffmpeg -version` output: build string + key codec flags. Sync, no args." }
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/ffmpeg
+  port: 8080
+  health_check: /health
+
+config_schema:
+  - name: ffmpeg_path
+    type: text
+    default: ""
+    label: Path to ffmpeg
+    description: Empty = look up `ffmpeg` on $PATH. Set explicitly when the binary lives outside PATH (e.g. /opt/homebrew/bin/ffmpeg on macOS sidecars under launchd).
+  - name: ffprobe_path
+    type: text
+    default: ""
+    label: Path to ffprobe
+    description: Same — empty = $PATH lookup.
+
+upgrade_policy: auto-patch

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: tapo
 display_name: Tapo Cameras
-version: 0.2.0
+version: 0.2.1
 description: |
   Local-LAN control of TP-Link Tapo cameras. Pan/tilt/zoom, snapshots,
   RTSP streams, motion events, privacy + LED + night-mode toggles,
@@ -32,6 +32,11 @@ requires:
     - db.write.app
     - net.egress
   integrations: []
+  apps:
+    - name: ffmpeg
+      version: ">=0.1.0"
+      optional: true
+      reason: "snapshot_capture asks the ffmpeg app to grab a single frame from the camera's RTSP stream. Without ffmpeg installed, snapshots fail with a clear 'install the ffmpeg app' error; the rest of the surface (PTZ, LED, privacy, motion polling) keeps working."
 
 provides:
   http_routes:
