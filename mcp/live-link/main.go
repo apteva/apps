@@ -21,6 +21,7 @@ package main
 
 import (
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,45 +35,14 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const manifestYAML = `schema: apteva-app/v1
-name: live-link
-display_name: Live Link
-version: 0.1.0
-description: |
-  One-click public HTTPS URL for a locally-installed Apteva instance,
-  via Cloudflare Quick Tunnels.
-author: Apteva
-scopes: [global]
-requires:
-  permissions:
-    - db.write.app
-    - net.egress
-provides:
-  http_routes:
-    - prefix: /
-  mcp_tools:
-    - { name: expose_start,  description: "Start a public tunnel and return the assigned URL." }
-    - { name: expose_stop,   description: "Stop the running tunnel, if any." }
-    - { name: expose_status, description: "Report whether a tunnel is up and its public URL." }
-  ui_panels:
-    - slot: project.page
-      label: Live Link
-      icon: globe
-      entry: /ui/LiveLinkPanel.mjs
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/live-link
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/live-link.db
-  migrations: migrations/
-upgrade_policy: auto-patch
-`
+// manifestYAML is the on-disk apteva.yaml, embedded at compile time.
+// Keeping the binary's view of the manifest and the file the registry
+// fetches identical removes a whole class of drift bugs (e.g. the
+// dashboard rendering a config_schema field the sidecar doesn't know
+// about).
+//
+//go:embed apteva.yaml
+var manifestYAML string
 
 // Default forwarded URL when the operator doesn't override target_url.
 // Matches apteva-server's default port. The platform also injects

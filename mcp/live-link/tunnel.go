@@ -201,22 +201,19 @@ func (m *Manager) waitForExit(runID int64) {
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
 			// Distinguish "we asked it to stop" from "it crashed".
-			// signal: terminated / killed → user stop; otherwise →
-			// unexpected exit, mark failed so the UI can surface it.
-			if exitErr.ProcessState != nil {
-				ws, ok := exitErr.ProcessState.Sys().(syscall.WaitStatus)
-				if ok && ws.Signaled() {
-					reason = fmt.Sprintf("signal %s", ws.Signal())
-					if ws.Signal() == syscall.SIGTERM || ws.Signal() == syscall.SIGINT || ws.Signal() == syscall.SIGKILL {
-						// We almost always sent these ourselves.
-						break
-					}
-				} else {
-					reason = fmt.Sprintf("exit %d", exitErr.ExitCode())
+			// SIGTERM/SIGINT/SIGKILL → user stop; any other signal
+			// (SIGSEGV/SIGBUS/SIGABRT/…) is a crash; non-signal exits
+			// are also failures.
+			ws, ok := exitErr.ProcessState.Sys().(syscall.WaitStatus)
+			switch {
+			case ok && ws.Signaled():
+				sig := ws.Signal()
+				reason = fmt.Sprintf("signal %s", sig)
+				if sig != syscall.SIGTERM && sig != syscall.SIGINT && sig != syscall.SIGKILL {
 					finalStatus = StatusFailed
 				}
-			} else {
-				reason = waitErr.Error()
+			default:
+				reason = fmt.Sprintf("exit %d", exitErr.ExitCode())
 				finalStatus = StatusFailed
 			}
 		} else {

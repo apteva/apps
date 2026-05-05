@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: live-link
 display_name: Live Link
-version: 0.1.0
+version: 0.1.1
 description: |
   One-click public HTTPS URL for a locally-installed Apteva instance.
   Spawns a Cloudflare Quick Tunnel under the hood — anonymous, free,
