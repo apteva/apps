@@ -23,8 +23,9 @@ Public HTTPS URL for a locally-installed Apteva instance. Two modes:
   UUID, connector token, DNS record id) lives in `named_tunnels` so
   restarts skip the API roundtrip.
 - **One UI toggle** at `project.page` slot: status pill, the live URL
-  with a Copy button, a Stop button, and a run history. Status now
-  surfaces the configured mode.
+  with a Copy button, a QR code (scan with a phone camera to open the
+  URL), a Stop button, and a run history. Status now surfaces the
+  configured mode.
 - **4 MCP tools**:
   - `expose_start` — idempotent; if a tunnel is already up, returns it.
     Blocks up to 15s for the URL to be assigned before returning.

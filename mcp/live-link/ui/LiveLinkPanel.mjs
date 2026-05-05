@@ -15,8 +15,9 @@
 // Imports React + jsx-runtime via the dashboard's importmap (same
 // React instance as the host).
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { jsx, jsxs, Fragment } from "react/jsx-runtime";
+import { qrSVG } from "./qr.mjs";
 
 const API = "/api/apps/live-link";
 
@@ -170,6 +171,15 @@ function LiveLinkPanel({ projectId, installId }) {
   const isRunning = status.status === "running";
   const isStarting = isRunning && !status.public_url;
 
+  // Memoize the QR SVG so we don't re-encode on every render —
+  // encoding is fast (~0.5ms for a typical URL) but recomputing on
+  // every status poll is wasteful.
+  const qr = useMemo(() => {
+    if (!status.public_url) return "";
+    try { return qrSVG(status.public_url, { size: 192 }); }
+    catch { return ""; } // URL too long → just hide the code
+  }, [status.public_url]);
+
   return jsxs("div", {
     className: "live-link-panel",
     style: { maxWidth: 640 },
@@ -232,6 +242,36 @@ function LiveLinkPanel({ projectId, installId }) {
                 onClick: copyURL,
                 title: "Copy",
                 children: "Copy",
+              }),
+            ],
+          }),
+
+          // QR code so an operator can scan with a phone camera and
+          // open the tunnel URL without retyping. Sized for the panel
+          // (192px) but re-renders crisply via SVG if the layout grows.
+          isRunning && qr && jsxs("div", {
+            style: {
+              marginTop: 12, padding: 16,
+              background: "#fff", border: "1px solid #ddd", borderRadius: 6,
+              display: "flex", alignItems: "center", gap: 16,
+            },
+            children: [
+              jsx("div", {
+                "aria-label": "QR code for the tunnel URL",
+                style: { width: 192, height: 192, flexShrink: 0 },
+                dangerouslySetInnerHTML: { __html: qr },
+              }),
+              jsxs("div", {
+                style: { fontSize: 13, color: "#444", lineHeight: 1.5 },
+                children: [
+                  jsx("div", {
+                    style: { fontWeight: 600, marginBottom: 4 },
+                    children: "Scan to open on your phone",
+                  }),
+                  jsx("div", {
+                    children: "Point any camera app at the code — the URL opens in your default browser. Useful for testing on a different network or sharing in person.",
+                  }),
+                ],
               }),
             ],
           }),
