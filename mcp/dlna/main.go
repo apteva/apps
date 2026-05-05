@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: dlna
 display_name: DLNA Server
-version: 0.1.11
+version: 0.1.12
 description: Local-LAN UPnP/DLNA MediaServer for Apteva.
 author: Apteva
 scopes: [project, global]
@@ -830,11 +830,13 @@ func (a *App) searchStorage(ctx context.Context, contentTypePrefix, query string
 	if err != nil {
 		return nil, err
 	}
-	var files []storageFile
-	if err := json.Unmarshal(raw, &files); err != nil {
+	var env struct {
+		Files []storageFile `json:"files"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, err
 	}
-	out := make([]didlItem, 0, len(files))
+	out := make([]didlItem, 0, len(env.Files))
 	parent := "0/recent"
 	if contentTypePrefix != "" {
 		parent = "0/" + strings.TrimSuffix(contentTypePrefix, "/")
@@ -842,7 +844,7 @@ func (a *App) searchStorage(ctx context.Context, contentTypePrefix, query string
 			parent = "0/photos"
 		}
 	}
-	for _, f := range files {
+	for _, f := range env.Files {
 		out = append(out, a.fileToDIDL(ctx, f, parent))
 	}
 	return out, nil
