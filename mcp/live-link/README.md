@@ -1,27 +1,39 @@
-# Live Link (v0.2)
+# Live Link (v0.3)
 
 Public HTTPS URL for a locally-installed Apteva instance. Two modes:
 
 - **Quick** (default): Cloudflare Quick Tunnel. Anonymous, free,
-  fresh `*.trycloudflare.com` URL on every start. Zero config.
+  fresh `*.trycloudflare.com` URL on every start. Zero config — no
+  account, no integration, no token.
 - **Named**: a stable URL on a Cloudflare zone you own
-  (`https://tunnel.example.com`). Requires a CF API token + account
-  ID + zone ID. Restarts reuse the same URL.
+  (`https://tunnel.example.com`). Bind the cloudflare integration at
+  install time (one API token), then pick a zone from the dropdown
+  and a subdomain in the panel. Restarts reuse the same URL.
 
-## What's in v0.2
+## What's in v0.3
 
 - **Mode switch** via the `mode` config field (`quick` | `named`).
 - **Quick mode** (unchanged from v0.1): spawns
   `cloudflared tunnel --url <target>` and parses the assigned
-  `*.trycloudflare.com` URL out of stderr.
-- **Named mode**: on first start the app calls Cloudflare's API to
-  - create a `cfd_tunnel` (or adopt an existing one with the same name)
-  - PUT its ingress to point `hostname → target_url`
-  - upsert a proxied CNAME at `hostname → <tunnel_id>.cfargotunnel.com`
-  Connector is run with `tunnel run --token <token>`; URL is known
-  up-front, so the runs row gets populated immediately. State (tunnel
-  UUID, connector token, DNS record id) lives in `named_tunnels` so
-  restarts skip the API roundtrip.
+  `*.trycloudflare.com` URL out of stderr. No account or integration
+  required — install, click "Go live", copy the URL.
+- **Named mode** (rewritten in v0.3 to use the cloudflare integration):
+  - Manifest declares `requires.integrations.cloudflare` so the
+    install dialog handles auth — operator binds one API token, no
+    raw secrets pass through this app.
+  - Panel calls `list_zones` to populate a domain dropdown; operator
+    picks a zone + types a subdomain. `/named/configure` saves it.
+  - On configure (and on every restart): app calls
+    `create_tunnel` / `get_tunnel_token`, `update_tunnel_configuration`
+    (ingress: hostname → target_url + 404 catch-all), and `create/update_dns_record`
+    to upsert a proxied CNAME at `hostname → <tunnel_id>.cfargotunnel.com`.
+  - All Cloudflare traffic goes through `ctx.PlatformAPI().ExecuteIntegrationTool` —
+    the platform proxies with credentials injected; this app never
+    holds a raw API token.
+  - Connector is run with `tunnel run --token <token>`; URL is known
+    up-front, so the runs row gets populated immediately. State (tunnel
+    UUID, connector token, DNS record id) lives in `named_tunnels` so
+    restarts skip the API roundtrip.
 - **One UI toggle** at `project.page` slot: status pill, the live URL
   with a Copy button, a QR code (scan with a phone camera to open the
   URL), a Stop button, and a run history. Status now surfaces the
@@ -43,12 +55,11 @@ Public HTTPS URL for a locally-installed Apteva instance. Two modes:
 
 | Capability                                | When  |
 |-------------------------------------------|-------|
-| Auto-rewrite of `PUBLIC_URL`              | v0.3 — needs a new `POST /api/platform/config` endpoint on apteva-server |
-| Pull CF creds from the `cloudflare` integration | v0.3 — once the SDK exposes integration credential reads; for now use the `cf_*` config fields |
-| ngrok provider                            | v0.3 — adds a new `ngrok` integration to the catalog |
-| Tailscale Funnel provider                 | v0.4 |
-| Edge HTTP basic auth                      | v0.3 — cloudflared supports it natively |
-| Auto-restart on tunnel drop with backoff  | v0.3 |
+| Auto-rewrite of `PUBLIC_URL`              | v0.4 — needs a new `POST /api/platform/config` endpoint on apteva-server |
+| ngrok provider                            | v0.4 — adds a new `ngrok` integration to the catalog |
+| Tailscale Funnel provider                 | v0.5 |
+| Edge HTTP basic auth                      | v0.4 — cloudflared supports it natively |
+| Auto-restart on tunnel drop with backoff  | v0.4 |
 
 ## Why this is cleaner for Apteva than for WordPress
 

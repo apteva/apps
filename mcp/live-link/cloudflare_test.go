@@ -1,386 +1,365 @@
 package main
 
+// Tests for v0.3 platform-proxied named-tunnel flow.
+//
+// Strategy: implement a fake sdk.PlatformClient that routes
+// ExecuteIntegrationTool calls by tool name, returning canned JSON
+// envelopes shaped like Cloudflare's API. Bindings are pre-set so
+// ctx.IntegrationFor("cloudflare") returns a non-nil binding pointing
+// at a synthetic connection id.
+
 import (
-	"bytes"
 	"encoding/json"
-	"io"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
-// ─── CF client (httptest-mocked) ───────────────────────────────────
+// ─── fake PlatformClient ──────────────────────────────────────────
 
-// mockCF spins up an httptest server that records every call and lets
-// each test plug in handlers per (method, path-prefix). Tests assert on
-// requests + canned responses without needing real Cloudflare creds.
-type mockCF struct {
-	t        *testing.T
-	srv      *httptest.Server
-	handlers map[string]http.HandlerFunc // key: METHOD path-prefix
-	calls    []mockCall
+const fakeCFConnID int64 = 4242
+
+// fakePlatform implements sdk.PlatformClient with a registry of
+// (tool → handler) entries the test wires up.
+type fakePlatform struct {
+	bindings map[string]any
+	tools    map[string]func(input map[string]any) *sdk.ExecuteResult
+	calls    []fakeCall
 }
 
-type mockCall struct {
-	Method string
-	Path   string
-	Body   string
-	Auth   string
+type fakeCall struct {
+	Tool  string
+	Input map[string]any
 }
 
-func newMockCF(t *testing.T) *mockCF {
-	m := &mockCF{t: t, handlers: map[string]http.HandlerFunc{}}
-	m.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		// Replay bytes back into r.Body so the registered handler can
-		// decode them too — io.ReadAll consumes the original.
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		m.calls = append(m.calls, mockCall{
-			Method: r.Method,
-			Path:   r.URL.Path + (func() string {
-				if r.URL.RawQuery != "" {
-					return "?" + r.URL.RawQuery
-				}
-				return ""
-			})(),
-			Body: string(body),
-			Auth: r.Header.Get("Authorization"),
-		})
-		// Match the longest registered prefix.
-		var bestKey string
-		for key := range m.handlers {
-			parts := strings.SplitN(key, " ", 2)
-			if len(parts) != 2 || parts[0] != r.Method {
-				continue
-			}
-			if strings.HasPrefix(r.URL.Path, parts[1]) && len(parts[1]) > len(bestKey) {
-				bestKey = key
-			}
-		}
-		if bestKey != "" {
-			m.handlers[bestKey](w, r)
-			return
-		}
-		t.Errorf("mockCF: unhandled %s %s", r.Method, r.URL.Path)
-		http.Error(w, "no handler", http.StatusNotImplemented)
-	}))
-	t.Cleanup(m.srv.Close)
-	return m
+func newFakePlatform() *fakePlatform {
+	return &fakePlatform{
+		bindings: map[string]any{"cloudflare": float64(fakeCFConnID)}, // WhoAmI bindings come from JSON; ints arrive as float64
+		tools:    map[string]func(map[string]any) *sdk.ExecuteResult{},
+	}
 }
 
-func (m *mockCF) on(method, prefix string, h http.HandlerFunc) {
-	m.handlers[method+" "+prefix] = h
+func (p *fakePlatform) on(tool string, h func(input map[string]any) *sdk.ExecuteResult) {
+	p.tools[tool] = h
 }
 
-func (m *mockCF) client() *cfClient {
-	return &cfClient{apiToken: "test-token", baseURL: m.srv.URL, hc: m.srv.Client()}
+// PlatformClient interface — only ExecuteIntegrationTool, WhoAmI,
+// GetConnection are used by live-link's code path; the rest return
+// zeros so the fake satisfies the interface.
+
+func (p *fakePlatform) WhoAmI() (*sdk.InstallIdentity, error) {
+	return &sdk.InstallIdentity{
+		AppName: "live-link", InstallID: 1, ProjectID: "test",
+		Bindings: p.bindings,
+	}, nil
+}
+func (p *fakePlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
+	return &sdk.PlatformConnection{ID: id, AppSlug: "cloudflare", Name: "test", Status: "active"}, nil
+}
+func (p *fakePlatform) ExecuteIntegrationTool(connID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	p.calls = append(p.calls, fakeCall{Tool: tool, Input: input})
+	if connID != fakeCFConnID {
+		return nil, errors.New("fake: wrong connection id")
+	}
+	h, ok := p.tools[tool]
+	if !ok {
+		return nil, errors.New("fake: no handler for tool " + tool)
+	}
+	return h(input), nil
 }
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+// Stubs for the rest of the interface — return zero values.
+func (p *fakePlatform) ListConnections(_ sdk.ConnectionFilter) ([]sdk.PlatformConnection, error) {
+	return nil, nil
+}
+func (p *fakePlatform) GetInstance(_ int64) (*sdk.PlatformInstance, error)         { return nil, nil }
+func (p *fakePlatform) SendEvent(_ int64, _ string) error                          { return nil }
+func (p *fakePlatform) SendToChannel(_, _, _ string) error                         { return nil }
+func (p *fakePlatform) CallApp(_, _ string, _ map[string]any) (json.RawMessage, error) {
+	return nil, nil
+}
+func (p *fakePlatform) StartOAuth(_ sdk.OAuthStartRequest) (*sdk.OAuthStartResult, error) {
+	return nil, nil
+}
+func (p *fakePlatform) DisconnectConnection(_ int64) error                  { return nil }
+func (p *fakePlatform) ListOwnedConnections() ([]sdk.PlatformConnection, error) { return nil, nil }
+func (p *fakePlatform) GetGrants(_ int64) (*sdk.GrantsResponse, error)      { return nil, nil }
+
+// ─── helpers ──────────────────────────────────────────────────────
+
+// jsonResult wraps any value into Cloudflare's standard {"result": …}
+// envelope, then into ExecuteResult so the platform layer parses it
+// back the same way it would in production.
+func jsonResult(v any) *sdk.ExecuteResult {
+	body, _ := json.Marshal(map[string]any{"result": v})
+	return &sdk.ExecuteResult{Success: true, Status: 200, Data: body}
 }
 
-func TestCF_CreateTunnel_PostsBodyAndExtractsToken(t *testing.T) {
-	m := newMockCF(t)
-	m.on("POST", "/accounts/acct-1/cfd_tunnel", func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if body["name"] != "live-link-test" {
-			t.Errorf("body name=%v", body["name"])
-		}
-		if body["config_src"] != "cloudflare" {
-			t.Errorf("body config_src=%v, want cloudflare (so ingress is API-managed)", body["config_src"])
-		}
-		writeJSON(w, 200, map[string]any{"result": map[string]any{
-			"id": "TUN-UUID-1", "name": "live-link-test", "token": "TOK-1",
-		}})
-	})
-	tun, err := m.client().createTunnel("acct-1", "live-link-test")
+// newTestCtxWithCF builds a context wired to a fakePlatform, with
+// the cloudflare role pre-bound.
+func newTestCtxWithCF(t *testing.T) (*sdk.AppCtx, *fakePlatform) {
+	t.Helper()
+	db := openTestDB(t)
+	m := (&App{}).Manifest()
+	plat := newFakePlatform()
+	ctx := sdk.NewAppCtxForTest(&m, db, sdk.Config{}, plat, &silentLogger{})
+	globalCtx = ctx
+	return ctx, plat
+}
+
+// ─── Tests ────────────────────────────────────────────────────────
+
+func TestCFConnectionID_RequiresBoundIntegration(t *testing.T) {
+	// No platform → no bindings → no binding for "cloudflare" → error.
+	db := openTestDB(t)
+	m := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&m, db, sdk.Config{}, nil, &silentLogger{})
+	globalCtx = ctx
+	if _, err := (&App{}).cfConnectionID(ctx); err == nil {
+		t.Fatal("expected error when integration unbound")
+	}
+}
+
+func TestCFConnectionID_ReturnsBoundID(t *testing.T) {
+	ctx, _ := newTestCtxWithCF(t)
+	id, err := (&App{}).cfConnectionID(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tun.ID != "TUN-UUID-1" || tun.Token != "TOK-1" {
-		t.Errorf("tun=%+v", tun)
-	}
-	if !strings.HasPrefix(m.calls[0].Auth, "Bearer ") {
-		t.Errorf("missing bearer auth: %q", m.calls[0].Auth)
+	if id != fakeCFConnID {
+		t.Errorf("got %d, want %d", id, fakeCFConnID)
 	}
 }
 
-func TestCF_CreateTunnel_SurfacesAPIError(t *testing.T) {
-	m := newMockCF(t)
-	m.on("POST", "/accounts/acct-1/cfd_tunnel", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 403, map[string]any{
-			"errors": []map[string]any{{"code": 10000, "message": "Authentication error"}},
-		})
+func TestEnsureNamedTunnel_CreateFlow(t *testing.T) {
+	ctx, plat := newTestCtxWithCF(t)
+	plat.on("list_tunnels", func(_ map[string]any) *sdk.ExecuteResult {
+		return jsonResult([]any{}) // no existing tunnel
 	})
-	_, err := m.client().createTunnel("acct-1", "n")
-	if err == nil {
-		t.Fatal("want error")
-	}
-	if !strings.Contains(err.Error(), "Authentication error") || !strings.Contains(err.Error(), "10000") {
-		t.Errorf("error %q should include CF code + message", err)
-	}
-}
+	plat.on("create_tunnel", func(input map[string]any) *sdk.ExecuteResult {
+		// Verify the app asked to API-manage ingress, not local.
+		if input["config_src"] != "cloudflare" {
+			t.Errorf("create_tunnel config_src=%v, want cloudflare (so update_tunnel_configuration works)", input["config_src"])
+		}
+		return jsonResult(map[string]any{"id": "TUN", "token": "TOK", "name": input["name"]})
+	})
+	plat.on("update_tunnel_configuration", func(input map[string]any) *sdk.ExecuteResult {
+		// Catch-all rule must be present, otherwise CF rejects the config.
+		cfg, _ := input["config"].(map[string]any)
+		ingress, _ := cfg["ingress"].([]map[string]any)
+		if len(ingress) != 2 {
+			t.Errorf("ingress len=%d, want 2 (rule + catch-all)", len(ingress))
+		}
+		if ingress[1]["service"] != "http_status:404" {
+			t.Errorf("catch-all=%v, want http_status:404", ingress[1]["service"])
+		}
+		return jsonResult(map[string]any{})
+	})
+	plat.on("list_dns_records", func(_ map[string]any) *sdk.ExecuteResult {
+		return jsonResult([]any{}) // no existing CNAME
+	})
+	plat.on("create_dns_record", func(input map[string]any) *sdk.ExecuteResult {
+		if input["proxied"] != true {
+			t.Errorf("proxied=%v — must be true or the tunnel doesn't get traffic", input["proxied"])
+		}
+		if input["content"] != "TUN.cfargotunnel.com" {
+			t.Errorf("CNAME content=%v, want TUN.cfargotunnel.com", input["content"])
+		}
+		return jsonResult(map[string]any{"id": "REC", "name": "h.example.com", "type": "CNAME"})
+	})
 
-func TestCF_FindTunnelByName_FilteringAndEmptyMatch(t *testing.T) {
-	m := newMockCF(t)
-	m.on("GET", "/accounts/acct-1/cfd_tunnel", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"result": []map[string]any{
-			{"id": "wrong", "name": "other-tunnel"},
-			{"id": "right", "name": "live-link-x"},
-		}})
-	})
-	tun, err := m.client().findTunnelByName("acct-1", "live-link-x")
+	nt, err := (&App{}).ensureNamedTunnel(ctx, "h.example.com", "ZONE")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tun == nil || tun.ID != "right" {
-		t.Errorf("got %+v", tun)
-	}
-
-	// Same call but no match should return (nil, nil), not an error.
-	tun, err = m.client().findTunnelByName("acct-1", "no-such-tunnel")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tun != nil {
-		t.Errorf("got %+v, want nil", tun)
-	}
-}
-
-func TestCF_PutTunnelConfig_SendsIngressWithCatchAll(t *testing.T) {
-	m := newMockCF(t)
-	m.on("PUT", "/accounts/acct-1/cfd_tunnel/T/configurations", func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Config struct {
-				Ingress []map[string]any `json:"ingress"`
-			} `json:"config"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if len(body.Config.Ingress) != 2 {
-			t.Errorf("ingress len=%d, want 2 (rule + catch-all)", len(body.Config.Ingress))
-		}
-		if body.Config.Ingress[0]["hostname"] != "h.example.com" {
-			t.Errorf("rule hostname=%v", body.Config.Ingress[0]["hostname"])
-		}
-		if body.Config.Ingress[0]["service"] != "http://localhost:5280" {
-			t.Errorf("rule service=%v", body.Config.Ingress[0]["service"])
-		}
-		if body.Config.Ingress[1]["service"] != "http_status:404" {
-			t.Errorf("catch-all=%v", body.Config.Ingress[1]["service"])
-		}
-		writeJSON(w, 200, map[string]any{"result": map[string]any{}})
-	})
-	if err := m.client().putTunnelConfig("acct-1", "T", "h.example.com", "http://localhost:5280"); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestCF_UpsertDNSCNAME_CreatesWhenAbsent(t *testing.T) {
-	m := newMockCF(t)
-	m.on("GET", "/zones/Z/dns_records", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"result": []map[string]any{}})
-	})
-	m.on("POST", "/zones/Z/dns_records", func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if body["type"] != "CNAME" || body["name"] != "h.example.com" {
-			t.Errorf("create body=%+v", body)
-		}
-		if body["content"] != "T-UUID.cfargotunnel.com" {
-			t.Errorf("create content=%v", body["content"])
-		}
-		if body["proxied"] != true {
-			t.Errorf("proxied should be true (otherwise the tunnel doesn't get traffic)")
-		}
-		writeJSON(w, 200, map[string]any{"result": map[string]any{"id": "REC-1"}})
-	})
-	id, err := m.client().upsertDNSCNAME("Z", "h.example.com", "T-UUID")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id != "REC-1" {
-		t.Errorf("id=%q", id)
-	}
-}
-
-func TestCF_UpsertDNSCNAME_UpdatesWhenPresent(t *testing.T) {
-	m := newMockCF(t)
-	m.on("GET", "/zones/Z/dns_records", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"result": []map[string]any{
-			{"id": "REC-EXISTING", "type": "CNAME", "name": "h.example.com", "content": "stale.cfargotunnel.com"},
-		}})
-	})
-	m.on("PUT", "/zones/Z/dns_records/REC-EXISTING", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"result": map[string]any{"id": "REC-EXISTING"}})
-	})
-	// If the test failed it would call POST and the mock would error,
-	// so the absence of a POST handler is itself an assertion.
-	id, err := m.client().upsertDNSCNAME("Z", "h.example.com", "NEW-UUID")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id != "REC-EXISTING" {
-		t.Errorf("should reuse existing record id; got %q", id)
-	}
-}
-
-// ─── resolveMode ───────────────────────────────────────────────────
-
-func TestResolveMode_DefaultsToQuickAndAcceptsNamed(t *testing.T) {
-	cases := []struct {
-		in   string
-		want Mode
-	}{
-		{"", ModeQuick},
-		{"quick", ModeQuick},
-		{"QUICK", ModeQuick},
-		{"named", ModeNamed},
-		{"  Named  ", ModeNamed},
-		{"bogus", ModeQuick}, // unknown values fall back rather than 500ing
-	}
-	for _, c := range cases {
-		ctx := newTestCtxWithConfig(t, map[string]string{"mode": c.in})
-		got := (&App{}).resolveMode(ctx)
-		if got != c.want {
-			t.Errorf("mode=%q: got %q want %q", c.in, got, c.want)
-		}
-	}
-}
-
-// ─── ensureNamedTunnel + destroyNamedTunnel (end-to-end with mockCF) ─
-
-func TestEnsureNamedTunnel_CreatesPersistsAndIsIdempotent(t *testing.T) {
-	cf := newMockCF(t)
-	created := 0
-	cf.on("GET", "/accounts/A/cfd_tunnel", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"result": []any{}})
-	})
-	cf.on("POST", "/accounts/A/cfd_tunnel", func(w http.ResponseWriter, r *http.Request) {
-		created++
-		writeJSON(w, 200, map[string]any{"result": map[string]any{
-			"id": "TUN-UUID", "token": "TOK", "name": "irrelevant",
-		}})
-	})
-	cf.on("PUT", "/accounts/A/cfd_tunnel/TUN-UUID/configurations", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"result": map[string]any{}})
-	})
-	cf.on("GET", "/zones/Z/dns_records", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"result": []any{}})
-	})
-	cf.on("POST", "/zones/Z/dns_records", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"result": map[string]any{"id": "REC"}})
-	})
-
-	// Swap in the mock CF base URL via a small patch: we can't inject
-	// it into ensureNamedTunnel directly, so we wrap the test by
-	// pointing newCFClient at the mock via the package-level cfAPIBase
-	// variable. (Done at the bottom of this file via testCFBaseURL.)
-	t.Setenv("LIVE_LINK_CF_API_BASE", cf.srv.URL)
-
-	ctx := newTestCtxWithConfig(t, map[string]string{
-		"mode":          "named",
-		"hostname":      "h.example.com",
-		"cf_api_token":  "tok",
-		"cf_account_id": "A",
-		"cf_zone_id":    "Z",
-		"target_url":    "http://localhost:5280",
-	})
-
-	app := &App{}
-	nt, err := app.ensureNamedTunnel(ctx)
-	if err != nil {
-		t.Fatalf("ensureNamedTunnel: %v", err)
-	}
-	if nt.TunnelID != "TUN-UUID" || nt.TunnelToken != "TOK" || nt.DNSRecordID != "REC" {
+	if nt.TunnelID != "TUN" || nt.TunnelToken != "TOK" || nt.DNSRecordID != "REC" {
 		t.Errorf("nt=%+v", nt)
 	}
 
-	// Second call: should hit the local DB cache and not create again.
-	nt2, err := app.ensureNamedTunnel(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if nt2.TunnelID != "TUN-UUID" {
-		t.Errorf("second call returned different tunnel: %+v", nt2)
-	}
-	if created != 1 {
-		t.Errorf("createTunnel called %d times; want exactly 1 (idempotent)", created)
+	// Persisted to DB.
+	got, _ := dbFirstNamedTunnel(ctx.AppDB())
+	if got == nil || got.Hostname != "h.example.com" {
+		t.Errorf("persisted row=%+v", got)
 	}
 }
 
-func TestEnsureNamedTunnel_RejectsMissingConfig(t *testing.T) {
-	ctx := newTestCtxWithConfig(t, map[string]string{
-		"mode":     "named",
-		"hostname": "h.example.com",
-		// no cf_api_token / account / zone
+func TestEnsureNamedTunnel_AdoptsExistingTunnel(t *testing.T) {
+	// list_tunnels returns one match → app should NOT call create_tunnel
+	// and SHOULD call get_tunnel_token to fetch the connector token.
+	ctx, plat := newTestCtxWithCF(t)
+	plat.on("list_tunnels", func(_ map[string]any) *sdk.ExecuteResult {
+		return jsonResult([]any{
+			map[string]any{"id": "EXISTING", "name": "apteva-live-link-h-example-com"},
+		})
 	})
-	_, err := (&App{}).ensureNamedTunnel(ctx)
-	if err == nil {
-		t.Fatal("expected error for missing CF credentials")
+	plat.on("create_tunnel", func(_ map[string]any) *sdk.ExecuteResult {
+		t.Fatal("create_tunnel should not be called when a tunnel with this name exists")
+		return nil
+	})
+	plat.on("get_tunnel_token", func(input map[string]any) *sdk.ExecuteResult {
+		if input["tunnel_id"] != "EXISTING" {
+			t.Errorf("tunnel_id=%v, want EXISTING", input["tunnel_id"])
+		}
+		body, _ := json.Marshal(map[string]any{"result": "ADOPTED-TOK"})
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: body}
+	})
+	plat.on("update_tunnel_configuration", func(_ map[string]any) *sdk.ExecuteResult {
+		return jsonResult(map[string]any{})
+	})
+	plat.on("list_dns_records", func(_ map[string]any) *sdk.ExecuteResult { return jsonResult([]any{}) })
+	plat.on("create_dns_record", func(_ map[string]any) *sdk.ExecuteResult {
+		return jsonResult(map[string]any{"id": "REC"})
+	})
+
+	nt, err := (&App{}).ensureNamedTunnel(ctx, "h.example.com", "Z")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "cf_api_token") {
-		t.Errorf("error should name the missing field: %q", err)
+	if nt.TunnelToken != "ADOPTED-TOK" {
+		t.Errorf("token=%q, want ADOPTED-TOK (from get_tunnel_token)", nt.TunnelToken)
+	}
+}
+
+func TestEnsureNamedTunnel_IsIdempotentOnSecondCall(t *testing.T) {
+	ctx, plat := newTestCtxWithCF(t)
+	createCalls := 0
+	plat.on("list_tunnels", func(_ map[string]any) *sdk.ExecuteResult { return jsonResult([]any{}) })
+	plat.on("create_tunnel", func(input map[string]any) *sdk.ExecuteResult {
+		createCalls++
+		return jsonResult(map[string]any{"id": "TUN", "token": "TOK", "name": input["name"]})
+	})
+	plat.on("update_tunnel_configuration", func(_ map[string]any) *sdk.ExecuteResult { return jsonResult(map[string]any{}) })
+	plat.on("list_dns_records", func(_ map[string]any) *sdk.ExecuteResult { return jsonResult([]any{}) })
+	plat.on("create_dns_record", func(_ map[string]any) *sdk.ExecuteResult {
+		return jsonResult(map[string]any{"id": "REC"})
+	})
+
+	if _, err := (&App{}).ensureNamedTunnel(ctx, "h.example.com", "Z"); err != nil {
+		t.Fatal(err)
+	}
+	// Second call hits the local DB cache — no CF traffic at all.
+	if _, err := (&App{}).ensureNamedTunnel(ctx, "h.example.com", "Z"); err != nil {
+		t.Fatal(err)
+	}
+	if createCalls != 1 {
+		t.Errorf("create_tunnel called %d times; want exactly 1", createCalls)
 	}
 }
 
 func TestDestroyNamedTunnel_HitsCFAndDropsRow(t *testing.T) {
-	cf := newMockCF(t)
-	cf.on("GET", "/accounts/A/cfd_tunnel", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"result": []any{}})
-	})
-	cf.on("POST", "/accounts/A/cfd_tunnel", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"result": map[string]any{"id": "TUN", "token": "TOK"}})
-	})
-	cf.on("PUT", "/accounts/A/cfd_tunnel/TUN/configurations", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"result": map[string]any{}})
-	})
-	cf.on("GET", "/zones/Z/dns_records", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"result": []any{}})
-	})
-	cf.on("POST", "/zones/Z/dns_records", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"result": map[string]any{"id": "REC"}})
-	})
-	dnsDeleted := false
-	tunDeleted := false
-	cf.on("DELETE", "/zones/Z/dns_records/REC", func(w http.ResponseWriter, r *http.Request) {
-		dnsDeleted = true
-		writeJSON(w, 200, map[string]any{"result": map[string]any{}})
-	})
-	cf.on("DELETE", "/accounts/A/cfd_tunnel/TUN", func(w http.ResponseWriter, r *http.Request) {
-		tunDeleted = true
-		writeJSON(w, 200, map[string]any{"result": map[string]any{}})
-	})
-
-	t.Setenv("LIVE_LINK_CF_API_BASE", cf.srv.URL)
-
-	ctx := newTestCtxWithConfig(t, map[string]string{
-		"mode":          "named",
-		"hostname":      "h.example.com",
-		"cf_api_token":  "tok",
-		"cf_account_id": "A",
-		"cf_zone_id":    "Z",
-	})
-	app := &App{}
-	if _, err := app.ensureNamedTunnel(ctx); err != nil {
+	ctx, plat := newTestCtxWithCF(t)
+	// Seed: pretend we ensured a tunnel earlier. Use the row directly
+	// rather than running the full ensure flow.
+	if err := dbInsertNamedTunnel(ctx.AppDB(), &NamedTunnel{
+		Hostname: "h.example.com", TunnelID: "TUN", TunnelToken: "TOK",
+		ZoneID: "Z", DNSRecordID: "REC",
+	}); err != nil {
 		t.Fatal(err)
 	}
-	destroyed, err := app.destroyNamedTunnel(ctx)
+
+	dnsDeleted := false
+	tunDeleted := false
+	plat.on("delete_dns_record", func(input map[string]any) *sdk.ExecuteResult {
+		dnsDeleted = true
+		if input["zone_id"] != "Z" || input["record_id"] != "REC" {
+			t.Errorf("delete_dns args=%v", input)
+		}
+		return jsonResult(map[string]any{})
+	})
+	plat.on("delete_tunnel", func(input map[string]any) *sdk.ExecuteResult {
+		tunDeleted = true
+		if input["tunnel_id"] != "TUN" {
+			t.Errorf("delete_tunnel args=%v", input)
+		}
+		return jsonResult(map[string]any{})
+	})
+
+	destroyed, err := (&App{}).destroyNamedTunnel(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !destroyed {
-		t.Error("destroyed=false")
+	if !destroyed || !dnsDeleted || !tunDeleted {
+		t.Errorf("destroyed=%v dns=%v tun=%v", destroyed, dnsDeleted, tunDeleted)
 	}
-	if !dnsDeleted || !tunDeleted {
-		t.Errorf("CF deletes: dns=%v tunnel=%v", dnsDeleted, tunDeleted)
+	if got, _ := dbFirstNamedTunnel(ctx.AppDB()); got != nil {
+		t.Errorf("row should be gone, got %+v", got)
 	}
-	// And the local row is gone.
-	if got, _ := dbGetNamedTunnel(ctx.AppDB(), "h.example.com"); got != nil {
-		t.Errorf("named_tunnels row still present: %+v", got)
+}
+
+func TestStart_NamedMode_RequiresConfiguredTunnel(t *testing.T) {
+	ctx, _ := newTestCtxWithCF(t)
+	ctx.Config()["mode"] = "named"
+	app := &App{mgr: NewManager(nil, nil)}
+	_, err := app.start(ctx)
+	if err == nil || !strings.Contains(err.Error(), "no tunnel configured") {
+		t.Fatalf("expected 'no tunnel configured' error, got %v", err)
+	}
+}
+
+// ─── HTTP handlers ─────────────────────────────────────────────────
+
+func TestHandleNamedZones_ProxiesListZones(t *testing.T) {
+	ctx, plat := newTestCtxWithCF(t)
+	plat.on("list_zones", func(_ map[string]any) *sdk.ExecuteResult {
+		return jsonResult([]any{
+			map[string]any{"id": "Z1", "name": "example.com"},
+			map[string]any{"id": "Z2", "name": "another.com"},
+		})
+	})
+	app := &App{mgr: NewManager(nil, nil)}
+	_ = ctx
+	srv := httptest.NewServer(http.HandlerFunc(app.handleNamedZones))
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	var body struct {
+		Zones []struct{ ID, Name string }
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if len(body.Zones) != 2 || body.Zones[0].Name != "example.com" {
+		t.Errorf("zones=%+v", body.Zones)
+	}
+}
+
+func TestHandleNamedConfigure_PersistsAndPipesArgs(t *testing.T) {
+	ctx, plat := newTestCtxWithCF(t)
+	plat.on("list_tunnels", func(_ map[string]any) *sdk.ExecuteResult { return jsonResult([]any{}) })
+	plat.on("create_tunnel", func(_ map[string]any) *sdk.ExecuteResult {
+		return jsonResult(map[string]any{"id": "TUN", "token": "TOK"})
+	})
+	plat.on("update_tunnel_configuration", func(_ map[string]any) *sdk.ExecuteResult { return jsonResult(map[string]any{}) })
+	plat.on("list_dns_records", func(_ map[string]any) *sdk.ExecuteResult { return jsonResult([]any{}) })
+	plat.on("create_dns_record", func(_ map[string]any) *sdk.ExecuteResult {
+		return jsonResult(map[string]any{"id": "REC"})
+	})
+
+	app := &App{mgr: NewManager(nil, nil)}
+	srv := httptest.NewServer(http.HandlerFunc(app.handleNamedConfigure))
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Post(srv.URL, "application/json",
+		strings.NewReader(`{"zone_id":"Z","hostname":"h.example.com"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+
+	got, _ := dbFirstNamedTunnel(ctx.AppDB())
+	if got == nil || got.Hostname != "h.example.com" || got.ZoneID != "Z" {
+		t.Errorf("persisted=%+v", got)
 	}
 }

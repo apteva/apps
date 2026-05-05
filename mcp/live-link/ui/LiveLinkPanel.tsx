@@ -87,6 +87,12 @@ interface StatusResp {
   started_at?: string;
   mode?: "quick" | "named";
   hostname?: string;
+  cloudflare_bound?: boolean;
+}
+
+interface CFZone {
+  id: string;
+  name: string;
 }
 
 interface RunRow {
@@ -135,7 +141,14 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
   });
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState<"start" | "stop" | "install" | null>(null);
+  const [busy, setBusy] = useState<"start" | "stop" | "install" | "configure" | null>(null);
+
+  // Named-mode form state. zones lazy-loads when the operator opens
+  // the configure form; selectedZone + subdomain are the inputs.
+  const [zones, setZones] = useState<CFZone[] | null>(null);
+  const [selectedZoneID, setSelectedZoneID] = useState("");
+  const [subdomain, setSubdomain] = useState("");
+  const [showConfigure, setShowConfigure] = useState(false);
 
   const qs = useCallback(
     () => new URLSearchParams({ project_id: projectId, install_id: String(installId) }).toString(),
@@ -207,8 +220,59 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
     try { await navigator.clipboard.writeText(status.public_url); } catch {}
   };
 
+  // Lazy-load zones the first time the operator opens the configure
+  // form. Cheap (1 API call) but needs the cloudflare integration to
+  // be bound — which we surface as a clean error if it isn't.
+  const loadZones = useCallback(async () => {
+    try {
+      const r = await api<{ zones: CFZone[] }>("GET", "/named/zones");
+      setZones(r.zones || []);
+      setError("");
+    } catch (e: unknown) {
+      setError("Could not load zones: " + (e instanceof Error ? e.message : String(e)));
+    }
+  }, [api]);
+
+  const openConfigure = async () => {
+    setShowConfigure(true);
+    if (zones === null) await loadZones();
+    // Pre-fill from existing config if any.
+    if (status.hostname && zones && zones.length > 0) {
+      const zone = zones.find((z) => status.hostname!.endsWith("." + z.name));
+      if (zone) {
+        setSelectedZoneID(zone.id);
+        setSubdomain(status.hostname!.slice(0, -(zone.name.length + 1)));
+      }
+    }
+  };
+
+  const saveConfigure = async () => {
+    if (!selectedZoneID) {
+      setError("Pick a zone first");
+      return;
+    }
+    if (!subdomain.trim()) {
+      setError("Enter a subdomain");
+      return;
+    }
+    const zone = (zones || []).find((z) => z.id === selectedZoneID);
+    if (!zone) return;
+    const hostname = `${subdomain.trim()}.${zone.name}`;
+    setBusy("configure"); setError("");
+    try {
+      await api("POST", "/named/configure", { zone_id: selectedZoneID, hostname });
+      setShowConfigure(false);
+      await refresh();
+    } catch (e: unknown) {
+      setError("Configure failed: " + (e instanceof Error ? e.message : String(e)));
+    } finally { setBusy(null); }
+  };
+
   const isRunning = status.status === "running";
   const isStarting = isRunning && !status.public_url;
+  const isNamed = status.mode === "named";
+  const cfBound = !!status.cloudflare_bound;
+  const hasNamedHostname = isNamed && !!status.hostname;
 
   // Memoize the QR SVG — encoding is fast (~0.5ms) but recomputing on
   // every status poll is wasteful. Force light=#fff so the QR is
@@ -243,6 +307,107 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
         </div>
       )}
 
+      {/* ─── Named-mode hostname management ─────────────────────── */}
+      {isNamed && (
+        <section className="border border-border rounded-lg p-4 bg-bg-card space-y-3">
+          {!cfBound ? (
+            <div className="text-text-muted text-sm">
+              <div className="text-text font-bold mb-1">Cloudflare not connected</div>
+              Named mode needs the cloudflare integration. Open this app's
+              settings and bind a connection (one API token with
+              Cloudflare Tunnel:Edit + DNS:Edit), then come back.
+            </div>
+          ) : !hasNamedHostname && !showConfigure ? (
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div className="text-text-muted text-sm">
+                <span className="text-text font-bold">No hostname configured.</span>{" "}
+                Pick a zone and a subdomain to get a stable URL.
+              </div>
+              <button
+                onClick={openConfigure}
+                className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold hover:bg-accent-hover"
+              >
+                Configure hostname
+              </button>
+            </div>
+          ) : showConfigure ? (
+            <div className="space-y-3">
+              <div className="text-text font-bold text-sm">Configure named tunnel</div>
+              {zones === null ? (
+                <div className="text-text-muted text-xs">Loading your Cloudflare zones…</div>
+              ) : zones.length === 0 ? (
+                <div className="text-text-muted text-xs">
+                  No zones found on this Cloudflare account. Add a domain
+                  on Cloudflare first, then refresh.
+                </div>
+              ) : (
+                <>
+                  <label className="block">
+                    <span className="text-text-muted text-xs">Zone</span>
+                    <select
+                      value={selectedZoneID}
+                      onChange={(e) => setSelectedZoneID(e.target.value)}
+                      className="w-full mt-1 bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
+                    >
+                      <option value="">Pick a zone…</option>
+                      {zones.map((z) => (
+                        <option key={z.id} value={z.id}>{z.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="block">
+                    <span className="text-text-muted text-xs">Subdomain</span>
+                    <div className="flex items-center gap-2 mt-1">
+                      <input
+                        type="text"
+                        value={subdomain}
+                        onChange={(e) => setSubdomain(e.target.value)}
+                        placeholder="tunnel"
+                        className="flex-1 bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text font-mono"
+                      />
+                      <span className="text-text-dim text-xs font-mono">
+                        .{(zones.find((z) => z.id === selectedZoneID)?.name) || "<zone>"}
+                      </span>
+                    </div>
+                  </label>
+                  <div className="flex justify-end gap-2 pt-1">
+                    <button
+                      onClick={() => { setShowConfigure(false); setError(""); }}
+                      className="px-3 py-1.5 text-sm text-text-muted hover:text-text"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={saveConfigure}
+                      disabled={busy !== null || !selectedZoneID || !subdomain.trim()}
+                      className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold hover:bg-accent-hover disabled:opacity-50"
+                    >
+                      {busy === "configure" ? "Saving…" : "Save"}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          ) : (
+            // Configured: small hostname row with a Change affordance.
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div className="text-sm">
+                <span className="text-text-muted">Hostname:</span>{" "}
+                <code className="font-mono text-text">{status.hostname}</code>
+              </div>
+              <button
+                onClick={openConfigure}
+                disabled={isRunning}
+                title={isRunning ? "Stop the tunnel before changing hostname" : ""}
+                className="text-text-muted text-xs underline hover:text-text disabled:opacity-50"
+              >
+                Change
+              </button>
+            </div>
+          )}
+        </section>
+      )}
+
       {/* ─── Main toggle / URL display ──────────────────────────── */}
       <section className="border border-border rounded-lg p-4 bg-bg-card space-y-3">
         <div className="flex items-center gap-3">
@@ -258,8 +423,12 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
           {!isRunning && (
             <button
               onClick={onStart}
-              disabled={busy !== null}
-              title="First click may download cloudflared (~30MB)."
+              disabled={busy !== null || (isNamed && !hasNamedHostname)}
+              title={
+                isNamed && !hasNamedHostname
+                  ? "Configure a hostname first (named mode)"
+                  : "First click may download cloudflared (~30MB)."
+              }
               className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold hover:bg-accent-hover disabled:opacity-50"
             >
               {busy === "start" ? "Starting…" : "Go live"}

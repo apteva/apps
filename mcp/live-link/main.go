@@ -7,14 +7,16 @@
 //     fresh https://<random>.trycloudflare.com URL on every start. No
 //     account or token required. Best for dev and one-off shares.
 //
-//   - named  (v0.2): a stable URL on a Cloudflare zone the operator
-//     owns (e.g. https://tunnel.example.com). Requires an API token
-//     with Cloudflare Tunnel:Edit + DNS:Edit, an account_id, and a
-//     zone_id. The app uses those to create-or-adopt a cfd_tunnel,
-//     PUT its ingress to point hostname → target_url, and upsert a
-//     proxied CNAME → <tunnel_id>.cfargotunnel.com. Restarts reuse
-//     the same tunnel + URL; uninstall reverses both steps via the
-//     expose_destroy tool.
+//   - named  (v0.3): a stable URL on a Cloudflare zone the operator
+//     owns (e.g. https://tunnel.example.com). Requires the cloudflare
+//     integration to be bound at install time (operator pastes one CF
+//     API token into the connection form). The panel calls list_zones
+//     via the integration to populate a zone picker; the operator
+//     enters a subdomain; /named/configure asks the platform proxy to
+//     create-or-adopt a cfd_tunnel, configure ingress, and upsert a
+//     proxied CNAME at <hostname> → <tunnel_id>.cfargotunnel.com.
+//     The platform handles credential injection — the app never sees
+//     a raw token. Restarts reuse the same tunnel + URL.
 //
 // In both modes, runs are persisted to runs(...) for "was the tunnel
 // up at X?" history, with a mode column so the UI can render the
@@ -138,6 +140,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/runs", Handler: a.handleRuns},
 		{Pattern: "/install", Handler: a.handleInstall},
 		{Pattern: "/destroy", Handler: a.handleDestroy},
+		{Pattern: "/named/zones", Handler: a.handleNamedZones},
+		{Pattern: "/named/configure", Handler: a.handleNamedConfigure},
+		{Pattern: "/named/current", Handler: a.handleNamedCurrent},
 	}
 }
 
@@ -164,8 +169,13 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	mode := a.resolveMode(ctx)
 	out["mode"] = string(mode)
 	if mode == ModeNamed {
-		// hostname is non-secret operator config — safe to surface.
-		out["hostname"] = strings.TrimSpace(ctx.Config().Get("hostname"))
+		// Surface the configured hostname (from named_tunnels) and
+		// whether the cloudflare integration is bound, so the panel
+		// knows whether to render the configure form vs the live URL.
+		if nt, _ := dbFirstNamedTunnel(ctx.AppDB()); nt != nil {
+			out["hostname"] = nt.Hostname
+		}
+		out["cloudflare_bound"] = ctx.IntegrationFor("cloudflare") != nil
 	}
 	httpJSON(w, out)
 }
@@ -393,13 +403,15 @@ func (a *App) start(ctx *sdk.AppCtx) (string, error) {
 	params := StartParams{Binary: binary, Target: target, Mode: mode}
 
 	if mode == ModeNamed {
-		// Idempotent: creates the tunnel + DNS record on first start,
-		// adopts the existing pair on subsequent starts. The CF API
-		// calls happen *before* we insert the run row, so a config
-		// error doesn't leave a "failed before launch" row behind.
-		nt, err := a.ensureNamedTunnel(ctx)
+		// Look up the operator's chosen hostname (set via the panel's
+		// /named/configure flow). The DB row is the only source of
+		// truth for named mode in v0.3 — config no longer carries it.
+		nt, err := dbFirstNamedTunnel(ctx.AppDB())
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("look up named tunnel: %w", err)
+		}
+		if nt == nil {
+			return "", errors.New("named mode: no tunnel configured — pick a hostname in the Live Link panel first")
 		}
 		params.Token = nt.TunnelToken
 		params.Hostname = nt.Hostname
@@ -443,62 +455,80 @@ func (a *App) resolveMode(ctx *sdk.AppCtx) Mode {
 	}
 }
 
-// ensureNamedTunnel returns a usable named tunnel: from the local DB
-// if one already exists for the configured hostname, otherwise creates
-// it on Cloudflare (or adopts an existing CF tunnel with the same
-// name) and persists the credentials. Idempotent — safe to call on
-// every start.
-func (a *App) ensureNamedTunnel(ctx *sdk.AppCtx) (*NamedTunnel, error) {
-	cfg := ctx.Config()
-	hostname := strings.TrimSpace(cfg.Get("hostname"))
-	apiToken := strings.TrimSpace(cfg.Get("cf_api_token"))
-	accountID := strings.TrimSpace(cfg.Get("cf_account_id"))
-	zoneID := strings.TrimSpace(cfg.Get("cf_zone_id"))
-	if hostname == "" || apiToken == "" || accountID == "" || zoneID == "" {
-		return nil, errors.New("named mode requires hostname, cf_api_token, cf_account_id, and cf_zone_id in app config")
+// cfConnectionID returns the bound cloudflare integration's
+// connection id, or an actionable error if the operator hasn't bound
+// one yet. Named mode is unusable without it.
+func (a *App) cfConnectionID(ctx *sdk.AppCtx) (int64, error) {
+	bound := ctx.IntegrationFor("cloudflare")
+	if bound == nil {
+		return 0, errors.New("named mode requires the cloudflare integration — bind a connection in app settings")
 	}
+	if bound.ConnectionID == 0 {
+		return 0, errors.New("cloudflare integration is bound but has no connection id (binding may be in progress)")
+	}
+	return bound.ConnectionID, nil
+}
 
-	// Local cache hit: nothing to call CF for.
+// ensureNamedTunnel creates-or-adopts the CF tunnel + CNAME for the
+// given hostname/zone, persisting the result in named_tunnels. All
+// CF traffic goes through ctx.PlatformAPI().ExecuteIntegrationTool,
+// so the app never holds a raw API token.
+func (a *App) ensureNamedTunnel(ctx *sdk.AppCtx, hostname, zoneID string) (*NamedTunnel, error) {
+	hostname = strings.TrimSpace(hostname)
+	zoneID = strings.TrimSpace(zoneID)
+	if hostname == "" || zoneID == "" {
+		return nil, errors.New("hostname and zone_id are required")
+	}
 	if existing, err := dbGetNamedTunnel(ctx.AppDB(), hostname); err == nil && existing != nil {
 		return existing, nil
 	}
 
-	cf := newCFClient(apiToken)
-	name := namedTunnelPrefix + sanitizeForTunnelName(hostname)
+	connID, err := a.cfConnectionID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	tunnelName := namedTunnelPrefix + sanitizeForTunnelName(hostname)
 
-	tun, err := cf.findTunnelByName(accountID, name)
+	tun, err := cfFindTunnel(ctx, connID, tunnelName)
 	if err != nil {
 		return nil, fmt.Errorf("cf find tunnel: %w", err)
 	}
-	if tun == nil {
-		tun, err = cf.createTunnel(accountID, name)
+	var tunnelID, token string
+	if tun != nil {
+		tunnelID = tun.ID
+		// Adopting: list_tunnels doesn't return the token, fetch it
+		// separately via get_tunnel_token.
+		token, err = cfGetTunnelToken(ctx, connID, tunnelID)
+		if err != nil {
+			return nil, fmt.Errorf("cf get tunnel token: %w", err)
+		}
+	} else {
+		created, err := cfCreateTunnel(ctx, connID, tunnelName)
 		if err != nil {
 			return nil, fmt.Errorf("cf create tunnel: %w", err)
 		}
-	} else if tun.Token == "" {
-		// Adopting an existing tunnel: CF's list endpoint doesn't
-		// return the connector token. Without it we can't `run`, so
-		// fail loudly rather than silently re-creating (which would
-		// abandon the old tunnel and need a manual cleanup).
-		return nil, fmt.Errorf("a tunnel named %q already exists in this account but its connector token isn't available via the API; delete it in the Cloudflare dashboard or pick a different hostname", name)
+		tunnelID, token = created.ID, created.Token
 	}
 
 	target := a.resolveTargetURL(ctx)
-	if err := cf.putTunnelConfig(accountID, tun.ID, hostname, target); err != nil {
+	if err := cfPutTunnelConfig(ctx, connID, tunnelID, hostname, target); err != nil {
 		return nil, fmt.Errorf("cf put tunnel config: %w", err)
 	}
-	dnsRecordID, err := cf.upsertDNSCNAME(zoneID, hostname, tun.ID)
+	recordID, err := cfUpsertCNAME(ctx, connID, zoneID, hostname, tunnelID+".cfargotunnel.com")
 	if err != nil {
 		return nil, fmt.Errorf("cf upsert dns: %w", err)
 	}
 
 	nt := &NamedTunnel{
 		Hostname:    hostname,
-		TunnelID:    tun.ID,
-		TunnelToken: tun.Token,
-		AccountID:   accountID,
+		TunnelID:    tunnelID,
+		TunnelToken: token,
+		// account_id is no longer carried by the app — the platform
+		// substitutes it from the connection's stored creds. Keep the
+		// column for schema-compat but write empty.
+		AccountID:   "",
 		ZoneID:      zoneID,
-		DNSRecordID: dnsRecordID,
+		DNSRecordID: recordID,
 	}
 	if err := dbInsertNamedTunnel(ctx.AppDB(), nt); err != nil {
 		return nil, fmt.Errorf("persist named tunnel: %w", err)
@@ -506,36 +536,116 @@ func (a *App) ensureNamedTunnel(ctx *sdk.AppCtx) (*NamedTunnel, error) {
 	return nt, nil
 }
 
-// destroyNamedTunnel reverses ensureNamedTunnel: delete CNAME, delete
-// CF tunnel, drop the local row. Returns whether anything was
-// destroyed (false = no named tunnel to destroy). CF errors are
-// returned as-is; callers can retry, since the local row only gets
-// dropped after CF acknowledges both deletes.
+// destroyNamedTunnel reverses ensureNamedTunnel for whatever named
+// tunnel is currently configured (at most one row in v0.3). Returns
+// whether anything was destroyed. CF errors are returned as-is; the
+// local row only gets dropped after CF acknowledges both deletes,
+// so retries pick up where they left off.
 func (a *App) destroyNamedTunnel(ctx *sdk.AppCtx) (bool, error) {
-	cfg := ctx.Config()
-	hostname := strings.TrimSpace(cfg.Get("hostname"))
-	if hostname == "" {
-		return false, nil
-	}
-	nt, err := dbGetNamedTunnel(ctx.AppDB(), hostname)
+	nt, err := dbFirstNamedTunnel(ctx.AppDB())
 	if err != nil || nt == nil {
 		return false, nil
 	}
-	apiToken := strings.TrimSpace(cfg.Get("cf_api_token"))
-	if apiToken == "" {
-		return false, errors.New("cf_api_token missing — cannot reach Cloudflare to destroy the tunnel")
+	connID, err := a.cfConnectionID(ctx)
+	if err != nil {
+		return false, err
 	}
-	cf := newCFClient(apiToken)
-	if err := cf.deleteDNSRecord(nt.ZoneID, nt.DNSRecordID); err != nil {
+	if err := cfDeleteDNSRecord(ctx, connID, nt.ZoneID, nt.DNSRecordID); err != nil {
 		return false, fmt.Errorf("cf delete dns: %w", err)
 	}
-	if err := cf.deleteTunnel(nt.AccountID, nt.TunnelID); err != nil {
+	if err := cfDeleteTunnel(ctx, connID, nt.TunnelID); err != nil {
 		return false, fmt.Errorf("cf delete tunnel: %w", err)
 	}
-	if err := dbDeleteNamedTunnel(ctx.AppDB(), hostname); err != nil {
+	if err := dbDeleteNamedTunnel(ctx.AppDB(), nt.Hostname); err != nil {
 		return false, fmt.Errorf("drop named tunnel row: %w", err)
 	}
 	return true, nil
+}
+
+// ─── Named-mode HTTP handlers ──────────────────────────────────────
+
+func (a *App) handleNamedZones(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	ctx := getAppCtx(r)
+	connID, err := a.cfConnectionID(ctx)
+	if err != nil {
+		httpErr(w, http.StatusFailedDependency, err.Error())
+		return
+	}
+	zones, err := cfListZones(ctx, connID)
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"zones": zones})
+}
+
+// handleNamedConfigure sets the active hostname for named mode. Body
+// is {zone_id, hostname}. If a different tunnel was previously
+// configured, it's destroyed first so we don't accumulate orphans on
+// CF. The reconciliation isn't atomic — a network failure in the
+// middle leaves the old row gone but the new one in flight; the
+// operator just retries with the same args (ensureNamedTunnel is
+// idempotent on hostname).
+func (a *App) handleNamedConfigure(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if a.mgr.Snapshot().Status == StatusRunning {
+		httpErr(w, http.StatusConflict, "stop the tunnel before reconfiguring")
+		return
+	}
+	var body struct {
+		ZoneID   string `json:"zone_id"`
+		Hostname string `json:"hostname"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	ctx := getAppCtx(r)
+
+	// If the operator is changing hostnames, tear down the old one.
+	if existing, _ := dbFirstNamedTunnel(ctx.AppDB()); existing != nil && existing.Hostname != strings.TrimSpace(body.Hostname) {
+		if _, err := a.destroyNamedTunnel(ctx); err != nil {
+			httpErr(w, http.StatusBadGateway, "could not tear down previous tunnel: "+err.Error())
+			return
+		}
+	}
+
+	nt, err := a.ensureNamedTunnel(ctx, body.Hostname, body.ZoneID)
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{
+		"hostname":  nt.Hostname,
+		"tunnel_id": nt.TunnelID,
+		"zone_id":   nt.ZoneID,
+	})
+}
+
+func (a *App) handleNamedCurrent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	ctx := getAppCtx(r)
+	nt, _ := dbFirstNamedTunnel(ctx.AppDB())
+	if nt == nil {
+		httpJSON(w, map[string]any{"configured": false})
+		return
+	}
+	httpJSON(w, map[string]any{
+		"configured": true,
+		"hostname":   nt.Hostname,
+		"zone_id":    nt.ZoneID,
+		"tunnel_id":  nt.TunnelID,
+	})
 }
 
 // sanitizeForTunnelName turns a hostname into a CF-tunnel-name-safe
@@ -645,6 +755,26 @@ func dbGetNamedTunnel(db *sql.DB, hostname string) (*NamedTunnel, error) {
 		`SELECT id, hostname, tunnel_id, tunnel_token, account_id, zone_id,
 		        dns_record_id, created_at
 		 FROM named_tunnels WHERE hostname = ?`, hostname)
+	nt := &NamedTunnel{}
+	if err := row.Scan(&nt.ID, &nt.Hostname, &nt.TunnelID, &nt.TunnelToken,
+		&nt.AccountID, &nt.ZoneID, &nt.DNSRecordID, &nt.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return nt, nil
+}
+
+// dbFirstNamedTunnel returns whichever named_tunnels row was inserted
+// most recently — there's at most one in v0.3 (one hostname per
+// install), but using ORDER BY id DESC LIMIT 1 keeps the lookup
+// resilient if a future version supports multiple.
+func dbFirstNamedTunnel(db *sql.DB) (*NamedTunnel, error) {
+	row := db.QueryRow(
+		`SELECT id, hostname, tunnel_id, tunnel_token, account_id, zone_id,
+		        dns_record_id, created_at
+		 FROM named_tunnels ORDER BY id DESC LIMIT 1`)
 	nt := &NamedTunnel{}
 	if err := row.Scan(&nt.ID, &nt.Hostname, &nt.TunnelID, &nt.TunnelToken,
 		&nt.AccountID, &nt.ZoneID, &nt.DNSRecordID, &nt.CreatedAt); err != nil {

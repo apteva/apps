@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: live-link
 display_name: Live Link
-version: 0.2.3
+version: 0.3.0
 description: |
   Public HTTPS URL for a locally-installed Apteva instance. Two modes:
 
@@ -10,13 +10,13 @@ description: |
     *.trycloudflare.com URL on every start. Zero config — install the
     app, click "Go live", copy the URL.
 
-  - named (v0.2): a stable URL on a Cloudflare zone you own (e.g.
-    https://tunnel.example.com). Requires a Cloudflare API token with
-    Cloudflare Tunnel:Edit + DNS:Edit, plus account_id and zone_id.
-    The app creates-or-adopts a cfd_tunnel, configures ingress to
-    point hostname → target_url, and upserts a proxied CNAME pointing
-    your hostname at <tunnel_id>.cfargotunnel.com. Restarts reuse the
-    same URL; expose_destroy reverses both steps.
+  - named (v0.3): a stable URL on a Cloudflare zone you own (e.g.
+    https://tunnel.example.com). Bind the cloudflare integration at
+    install time (one API token), then pick a zone from the dropdown
+    and a subdomain in the panel. The app calls the integration's
+    cfd_tunnel + DNS tools through the platform proxy — your token
+    never leaves the platform. Restarts reuse the same URL;
+    expose_destroy reverses everything (CNAME + tunnel) on Cloudflare.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/live-link
@@ -30,6 +30,34 @@ requires:
   permissions:
     - db.write.app
     - net.egress
+    - platform.connections.execute    # named mode: call cloudflare integration tools
+  integrations:
+    # Cloudflare integration — used in named mode to list zones, manage
+    # cfd_tunnels, and upsert/delete the CNAME. Optional at install
+    # time so quick mode works without setup; named-mode start fails
+    # with a clear error if the operator picks named without binding
+    # this first.
+    - role: cloudflare
+      kind: integration
+      compatible_slugs: [cloudflare]
+      capabilities: [dns.write, tunnel.manage]
+      tools:
+        # Logical capability → upstream tool name mapping. Capability
+        # strings are app-internal; the upstream names match what the
+        # integration catalog declares.
+        zones.list:               list_zones
+        tunnels.list:             list_tunnels
+        tunnels.create:           create_tunnel
+        tunnels.token:            get_tunnel_token
+        tunnels.update_config:    update_tunnel_configuration
+        tunnels.delete:           delete_tunnel
+        dns.list:                 list_dns_records
+        dns.create:               create_dns_record
+        dns.update:               update_dns_record
+        dns.delete:               delete_dns_record
+      required: false
+      label: "Cloudflare (named mode)"
+      hint: "Required for named mode (stable URL on your own domain). Quick mode works without this."
 
 provides:
   http_routes:
@@ -79,7 +107,8 @@ config_schema:
     description: |
       "quick" mints a fresh trycloudflare.com URL on every start — zero
       config, no account. "named" gives you a stable URL on a hostname
-      you control (requires the cf_* fields below).
+      you control (bind the cloudflare integration above and pick a
+      zone in the panel).
   - name: target_url
     type: text
     default: ""
@@ -99,34 +128,5 @@ config_schema:
       previously auto-installed copy in the install's data dir, and as a
       last resort download the latest release from github.com/cloudflare/cloudflared
       (~30MB, one-time, on the first "Go live" click).
-  - name: hostname
-    type: text
-    default: ""
-    label: Hostname (named mode)
-    description: |
-      The stable public hostname, e.g. tunnel.example.com. Must be a
-      subdomain of a zone you own on Cloudflare. The app creates a
-      proxied CNAME at this name pointing at the tunnel; restarts
-      keep the same URL.
-  - name: cf_api_token
-    type: secret
-    default: ""
-    label: Cloudflare API token (named mode)
-    description: |
-      API token with Cloudflare Tunnel:Edit + DNS:Edit scopes. Created
-      at https://dash.cloudflare.com/profile/api-tokens. Stored
-      encrypted in the install's data dir; never logged.
-  - name: cf_account_id
-    type: text
-    default: ""
-    label: Cloudflare account ID (named mode)
-    description: Numeric/hex account id, visible in the URL of any page in the Cloudflare dashboard.
-  - name: cf_zone_id
-    type: text
-    default: ""
-    label: Cloudflare zone ID (named mode)
-    description: |
-      Zone ID for the domain hosting the hostname above. Visible on the
-      zone's overview page in the Cloudflare dashboard.
 
 upgrade_policy: auto-patch
