@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: torrent
 display_name: Torrent
-version: 0.1.14
+version: 0.1.15
 description: BitTorrent client + indexer-search frontend.
 author: Apteva
 scopes: [project, global]

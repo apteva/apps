@@ -178,6 +178,36 @@ func TestApibayParser_NoResults(t *testing.T) {
 	}
 }
 
+// TestCompletionDedupe — pin the v0.1.15 race fix. anacrolix's
+// engine flips rapidly between completed/seeding when peers churn,
+// so onTransition can spawn handleCompletion for the same infohash
+// many times in quick succession. The completionInFlight sync.Map
+// guard makes overlapping calls bail immediately rather than both
+// running the upload loop in parallel (which would orphan storage
+// rows like file_id=8 in the v0.1.13 cffaba02 download).
+//
+// Drives the gate directly: LoadOrStore returns loaded=false on
+// first call, true thereafter; Delete on defer clears the entry so
+// a fresh transition (e.g. after the work has finished) is free to
+// re-enter.
+func TestCompletionDedupe(t *testing.T) {
+	ih := "DEADBEEF"
+	if _, loaded := completionInFlight.LoadOrStore(ih, struct{}{}); loaded {
+		t.Fatalf("first LoadOrStore unexpectedly returned loaded=true")
+	}
+	t.Cleanup(func() { completionInFlight.Delete(ih) })
+
+	// Second concurrent caller must see loaded=true.
+	if _, loaded := completionInFlight.LoadOrStore(ih, struct{}{}); !loaded {
+		t.Errorf("second LoadOrStore returned loaded=false; the dedupe is broken")
+	}
+	// After Delete, a future caller can re-enter.
+	completionInFlight.Delete(ih)
+	if _, loaded := completionInFlight.LoadOrStore(ih, struct{}{}); loaded {
+		t.Errorf("post-Delete LoadOrStore returned loaded=true; dedupe is sticky")
+	}
+}
+
 // TestSnapshotJSON_SnakeCase — pin the wire shape the panel reads.
 // engine.go's TorrentSnapshot is what callers see via GET /torrents
 // → r.snapshot. The panel's TS interface expects snake_case

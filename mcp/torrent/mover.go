@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -44,6 +45,21 @@ const (
 	// a 5 MB buffer is enough headroom for the storage HTTP client.
 	chunkSize = 5 * 1024 * 1024
 )
+
+// completionInFlight dedupes overlapping handleCompletion runs for
+// the same infohash. anacrolix's engine flips rapidly between
+// `completed` and `seeding` while peers come and go (we saw
+// completed→seeding→completed→seeding inside the same second on
+// the C210/cffaba02 cycle in v0.1.13), and onTransition spawns a
+// goroutine for each one. Without this guard, two goroutines both
+// see `storage_file_ids_json='[]'`, both run the upload loop, and
+// both write a final row — leaving an orphan file copy in storage.
+//
+// LoadOrStore returns loaded=true when the key already exists, so
+// the second goroutine bails immediately. The defer Delete clears
+// the entry on exit (success or any error path) so a future
+// transition (e.g. after a long idle period) is free to re-enter.
+var completionInFlight sync.Map // infohash → struct{}{}
 
 // onTransition is wired up in OnMount as the engine's transition
 // callback. Runs on the engine's polling goroutine — keep work bounded
@@ -88,10 +104,27 @@ func (a *App) persistSnapshot(infohash string, s TorrentSnapshot) {
 	}
 }
 
-// handleCompletion is the storage hand-off. Idempotent: if the row
-// already has file_ids, we skip and just emit a redundant "completed"
-// event so subscribers can rely on at-least-once delivery.
+// handleCompletion is the storage hand-off. Idempotent at two
+// layers:
+//
+//  1. completionInFlight gates concurrent goroutines for the same
+//     infohash — only one runs at a time; subsequent ones bail
+//     immediately rather than queue. Avoids the v0.1.13 race that
+//     produced orphaned uploads when the engine bounced between
+//     completed/seeding faster than one upload could finish.
+//
+//  2. Even after acquiring that gate, we re-check
+//     storage_file_ids_json: if a previous run already populated it,
+//     just emit the redundant "completed" event so subscribers can
+//     rely on at-least-once delivery.
 func (a *App) handleCompletion(infohash string, snap TorrentSnapshot) {
+	if _, loaded := completionInFlight.LoadOrStore(infohash, struct{}{}); loaded {
+		a.ctx.Logger().Info("completion already in flight, skipping",
+			"name", snap.Name, "ih", infohash)
+		return
+	}
+	defer completionInFlight.Delete(infohash)
+
 	row, err := getTorrentRow(a.ctx.AppDB(), projectScope(), infohash)
 	if err != nil {
 		a.ctx.Logger().Warn("completion: row lookup", "err", err.Error())
