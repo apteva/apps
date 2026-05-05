@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.3.1
+version: 0.4.0
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -22,6 +22,19 @@ min_apteva_version: "0.10.0"
 requires:
   permissions:
     - db.write.app
+    - platform.connections.execute
+  integrations:
+    - role: github
+      kind: integration
+      required: false
+      compatible_slugs: [github]
+      label: GitHub
+      hint: Connect GitHub to import repositories. Optional — local templates work without it.
+      capabilities: [repo.import]
+      tools:
+        list_repos: list_repos
+        get_archive: get_archive
+        get_repo: get_repo
 
 provides:
   http_routes:
@@ -39,6 +52,8 @@ provides:
       description: Set build_cmd / start_cmd / port / env_json on a repository.
     - name: repos_export
       description: Export a repo as a zip archive — base64-encoded bytes for cross-app calls (used by deploy).
+    - name: repos_import_github
+      description: Import a GitHub repository as a local repo (gzip tarball snapshot via the bound github connection).
     - name: code_list_files
       description: List files in a repository, optionally recursive.
     - name: code_glob

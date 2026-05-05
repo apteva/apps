@@ -217,7 +217,48 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"name"}),
 			Handler: a.toolReposFork,
 		},
+		{
+			Name: "repos_import_github",
+			Description: "Import a GitHub repository as a local code repo (snapshot via gzip tarball). " +
+				"Requires the install to have a github connection bound to the 'github' role. " +
+				"Args: owner (required), repo (required), ref? (default repo's HEAD), slug?, framework?.",
+			InputSchema: schemaObject(map[string]any{
+				"owner":     map[string]any{"type": "string"},
+				"repo":      map[string]any{"type": "string"},
+				"ref":       map[string]any{"type": "string"},
+				"slug":      map[string]any{"type": "string"},
+				"framework": map[string]any{"type": "string"},
+			}, []string{"owner", "repo"}),
+			Handler: a.toolReposImportGithub,
+		},
 	}
+}
+
+// ─── repos_import_github handler ──────────────────────────────────
+
+func (a *App) toolReposImportGithub(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	res, err := importGitHub(ctx, a.store, importGitHubInput{
+		Owner:     strArg(args, "owner"),
+		Repo:      strArg(args, "repo"),
+		Ref:       strArg(args, "ref"),
+		Slug:      strArg(args, "slug"),
+		Framework: strArg(args, "framework"),
+		ProjectID: pid,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"repository":    res.Repository,
+		"file_count":    res.FileCount,
+		"bytes_written": res.BytesWritten,
+		"source_url":    res.SourceURL,
+		"ref":           res.Ref,
+	}, nil
 }
 
 // ─── Template / fork handlers ──────────────────────────────────────

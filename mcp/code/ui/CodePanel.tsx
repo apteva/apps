@@ -163,6 +163,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [loadingTree, setLoadingTree] = useState(false);
   const [loadingFile, setLoadingFile] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
+  const [showImportGithub, setShowImportGithub] = useState(false);
   const [showNewFile, setShowNewFile] = useState(false);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -547,6 +548,12 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
             </label>
             <button
               type="button"
+              onClick={() => setShowImportGithub(true)}
+              title="Import a repository from GitHub"
+              className="px-2 py-0.5 text-xs border border-border text-text-muted rounded hover:text-text hover:border-text"
+            >GitHub</button>
+            <button
+              type="button"
               onClick={() => setShowCreate(true)}
               className="px-2 py-0.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg"
             >+ New</button>
@@ -838,6 +845,18 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
             loadRepos().then(() => selectRepo(slug));
           }}
           api={api}
+        />
+      )}
+
+      {showImportGithub && (
+        <ImportGithubDialog
+          onClose={() => setShowImportGithub(false)}
+          onImported={(slug) => {
+            setShowImportGithub(false);
+            loadRepos().then(() => selectRepo(slug));
+          }}
+          api={api}
+          withParams={withParams}
         />
       )}
 
@@ -1316,6 +1335,283 @@ function MarkTemplateDialog({
           >
             {busy ? "Working…" : "Mark as template"}
           </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// ─── ImportGithubDialog ────────────────────────────────────────────
+//
+// Two-mode picker for importing a repository from GitHub. Mode A
+// renders a typeahead populated by `list_repos` (the bound github
+// integration's tool); mode B is free-text "owner/repo" for repos the
+// user has read access to but doesn't own.
+//
+// Wires through:
+//   GET  /api/github/repos        → integration → list_repos
+//   POST /api/github/import       → repos_import_github
+//
+// When the github connection isn't bound, the GET returns 424 (Failed
+// Dependency) and the dialog renders a "Connect GitHub" CTA pointing
+// to the dashboard's connections settings rather than 404-ing the
+// user's day.
+
+interface GithubRepo {
+  id: number;
+  name: string;
+  full_name: string;
+  private: boolean;
+  default_branch: string;
+  description?: string;
+  language?: string;
+  pushed_at?: string;
+  owner?: { login: string };
+}
+
+const FRAMEWORKS_IMPORT = ["", "blank", "nextjs", "static", "go", "python"] as const;
+
+function ImportGithubDialog({
+  onClose,
+  onImported,
+  api,
+  withParams,
+}: {
+  onClose: () => void;
+  onImported: (slug: string) => void;
+  api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
+  withParams: (extra?: Record<string, string>) => string;
+}) {
+  const [mode, setMode] = useState<"picker" | "url">("picker");
+  const [repos, setRepos] = useState<GithubRepo[] | null>(null);
+  const [reposErr, setReposErr] = useState("");
+  const [filter, setFilter] = useState("");
+
+  const [owner, setOwner] = useState("");
+  const [repo, setRepo] = useState("");
+  const [ref, setRef] = useState("");
+  const [slug, setSlug] = useState("");
+  const [framework, setFramework] = useState<(typeof FRAMEWORKS_IMPORT)[number]>("");
+
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  // One-shot fetch of the user's repos. The list_repos integration
+  // call is rate-limit-cheap (one HTTP call per page) and apps with
+  // <500 repos fit in a single page.
+  useEffect(() => {
+    if (mode !== "picker" || repos !== null) return;
+    let cancelled = false;
+    fetch(`/api/apps/code/api/github/repos?${withParams({ sort: "pushed", per_page: "100" })}`, {
+      credentials: "same-origin",
+    })
+      .then(async (r) => {
+        if (!r.ok) {
+          if (r.status === 424) throw new Error("github_not_connected");
+          throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
+        }
+        return r.json() as Promise<GithubRepo[]>;
+      })
+      .then((j) => {
+        if (cancelled) return;
+        setRepos(Array.isArray(j) ? j : []);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setReposErr((e as Error).message);
+        setRepos([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, repos, withParams]);
+
+  const filtered = (repos || []).filter((r) =>
+    r.full_name.toLowerCase().includes(filter.toLowerCase()),
+  );
+
+  const pickRepo = (r: GithubRepo) => {
+    setOwner(r.owner?.login || r.full_name.split("/")[0] || "");
+    setRepo(r.name);
+    setRef(r.default_branch || "");
+    if (!slug) setSlug(r.name);
+  };
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!owner.trim() || !repo.trim()) {
+      setErr("owner and repo are required");
+      return;
+    }
+    setBusy(true);
+    setErr("");
+    try {
+      const r = await api<{ repository: { slug: string } }>("POST", "/github/import", {
+        owner: owner.trim(),
+        repo: repo.trim(),
+        ref: ref.trim(),
+        slug: slug.trim(),
+        framework,
+      });
+      onImported(r.repository.slug);
+    } catch (e2) {
+      setErr((e2 as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <form
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={submit}
+        className="w-[560px] bg-bg border border-border rounded p-5 space-y-4 max-h-[80vh] overflow-auto"
+      >
+        <div className="flex items-baseline justify-between">
+          <h2 className="text-text font-semibold">Import from GitHub</h2>
+          <div className="flex gap-1 text-[11px]">
+            <button
+              type="button"
+              onClick={() => setMode("picker")}
+              className={`px-2 py-0.5 rounded border ${mode === "picker" ? "border-accent text-accent" : "border-border text-text-muted hover:text-text"}`}
+            >Pick from your repos</button>
+            <button
+              type="button"
+              onClick={() => setMode("url")}
+              className={`px-2 py-0.5 rounded border ${mode === "url" ? "border-accent text-accent" : "border-border text-text-muted hover:text-text"}`}
+            >owner/repo</button>
+          </div>
+        </div>
+
+        {mode === "picker" ? (
+          repos === null ? (
+            <div className="text-xs text-text-muted">Loading repositories…</div>
+          ) : reposErr === "github_not_connected" ? (
+            <div className="text-xs text-text-muted space-y-2">
+              <div>GitHub isn't connected on this install.</div>
+              <div>Open Settings → Integrations in the dashboard, connect GitHub, then bind it to this install's "GitHub" role.</div>
+              <button
+                type="button"
+                onClick={() => setMode("url")}
+                className="text-accent hover:underline"
+              >Switch to owner/repo entry instead →</button>
+            </div>
+          ) : repos.length === 0 ? (
+            <div className="text-xs text-text-muted">{reposErr || "No repositories accessible to this connection."}</div>
+          ) : (
+            <div className="space-y-2">
+              <input
+                type="text"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                placeholder="Filter (owner/repo)"
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              />
+              <ul className="max-h-48 overflow-auto border border-border rounded divide-y divide-border">
+                {filtered.slice(0, 50).map((r) => {
+                  const picked = owner === (r.owner?.login || "") && repo === r.name;
+                  return (
+                    <li key={r.id}>
+                      <button
+                        type="button"
+                        onClick={() => pickRepo(r)}
+                        className={`w-full text-left px-2 py-1.5 text-xs hover:bg-bg-input ${picked ? "bg-bg-input" : ""}`}
+                      >
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="font-mono truncate">{r.full_name}</span>
+                          <span className="flex gap-1 shrink-0 text-[10px] text-text-dim">
+                            {r.private && <span className="px-1 border border-border rounded">private</span>}
+                            {r.language && <span>{r.language}</span>}
+                          </span>
+                        </div>
+                        {r.description && (
+                          <div className="text-[11px] text-text-muted truncate">{r.description}</div>
+                        )}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+              {filtered.length > 50 && (
+                <div className="text-[10px] text-text-dim">Showing 50 of {filtered.length}. Refine the filter to see more.</div>
+              )}
+            </div>
+          )
+        ) : (
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-xs text-text-muted block mb-1">Owner</label>
+              <input
+                type="text"
+                value={owner}
+                onChange={(e) => setOwner(e.target.value)}
+                placeholder="apteva"
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-text-muted block mb-1">Repo</label>
+              <input
+                type="text"
+                value={repo}
+                onChange={(e) => setRepo(e.target.value)}
+                placeholder="apps"
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+              />
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <label className="text-xs text-text-muted block mb-1">Branch / ref</label>
+            <input
+              type="text"
+              value={ref}
+              onChange={(e) => setRef(e.target.value)}
+              placeholder="main"
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-text-muted block mb-1">Local slug</label>
+            <input
+              type="text"
+              value={slug}
+              onChange={(e) => setSlug(e.target.value)}
+              placeholder={repo || "my-import"}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+            />
+          </div>
+          <div className="col-span-2">
+            <label className="text-xs text-text-muted block mb-1">Framework</label>
+            <select
+              value={framework}
+              onChange={(e) => setFramework(e.target.value as typeof framework)}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            >
+              {FRAMEWORKS_IMPORT.map((f) => (
+                <option key={f} value={f}>{f === "" ? "(auto-detect)" : f}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {err && <div className="text-red text-xs">{err}</div>}
+
+        <div className="flex justify-end gap-2 pt-1">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="px-3 py-1.5 text-sm rounded border border-border text-text-muted hover:text-text disabled:opacity-50"
+          >Cancel</button>
+          <button
+            type="submit"
+            disabled={busy || !owner.trim() || !repo.trim()}
+            className="px-3 py-1.5 text-sm rounded bg-blue text-white hover:bg-blue/90 disabled:opacity-50"
+          >{busy ? "Importing…" : "Import"}</button>
         </div>
       </form>
     </div>

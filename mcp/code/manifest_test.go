@@ -14,8 +14,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("manifest.Version is empty")
 	}
-	if len(m.Provides.MCPTools) != 19 {
-		t.Errorf("expected 19 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 20 {
+		t.Errorf("expected 20 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
 	}
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Errorf("manifest.DB.Migrations missing")

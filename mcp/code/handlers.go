@@ -724,3 +724,110 @@ func (a *App) httpRepoFork(w http.ResponseWriter, r *http.Request, slug string) 
 	}
 	httpJSON(w, res)
 }
+
+// ─── GitHub import (panel-driven) ─────────────────────────────────
+
+// POST /api/github/import — body: {owner, repo, ref?, slug?, framework?}
+//
+// Same logic as the repos_import_github MCP tool. Surfaced as a REST
+// route so the panel can call it without going through the agent's
+// MCP gateway.
+func (a *App) handleGithubImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var body struct {
+		Owner     string `json:"owner"`
+		Repo      string `json:"repo"`
+		Ref       string `json:"ref"`
+		Slug      string `json:"slug"`
+		Framework string `json:"framework"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	res, err := importGitHub(globalCtx, a.store, importGitHubInput{
+		Owner:     body.Owner,
+		Repo:      body.Repo,
+		Ref:       body.Ref,
+		Slug:      body.Slug,
+		Framework: body.Framework,
+		ProjectID: pid,
+	})
+	if err != nil {
+		// Map a known set of error strings to status codes the panel
+		// can branch on. Unmatched falls through to 500.
+		msg := err.Error()
+		switch {
+		case strings.Contains(msg, "github not connected"):
+			httpErr(w, http.StatusFailedDependency, msg)
+		case strings.Contains(msg, "owner and repo are required"):
+			httpErr(w, http.StatusBadRequest, msg)
+		case strings.Contains(msg, "UNIQUE") || strings.Contains(msg, "duplicate"):
+			httpErr(w, http.StatusConflict, msg)
+		default:
+			httpErr(w, http.StatusInternalServerError, msg)
+		}
+		return
+	}
+	httpJSON(w, map[string]any{
+		"repository":    res.Repository,
+		"file_count":    res.FileCount,
+		"bytes_written": res.BytesWritten,
+		"source_url":    res.SourceURL,
+		"ref":           res.Ref,
+	})
+}
+
+// GET /api/github/repos — calls list_repos via the bound github
+// integration so the panel's import dialog can render a picker. Pass
+// query params through (sort, per_page, etc.) so panel-side filters
+// reach GitHub directly.
+func (a *App) handleGithubReposList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET")
+		return
+	}
+	bound := globalCtx.IntegrationFor("github")
+	if bound == nil || bound.ConnectionID == 0 {
+		httpErr(w, http.StatusFailedDependency, "github not connected: bind a github connection on this install first")
+		return
+	}
+	input := map[string]any{}
+	if v := r.URL.Query().Get("sort"); v != "" {
+		input["sort"] = v
+	}
+	if v := r.URL.Query().Get("per_page"); v != "" {
+		input["per_page"] = v
+	} else {
+		input["per_page"] = "100"
+	}
+	if v := r.URL.Query().Get("page"); v != "" {
+		input["page"] = v
+	}
+	res, err := globalCtx.PlatformAPI().ExecuteIntegrationTool(
+		bound.ConnectionID,
+		bound.ToolFor("list_repos"),
+		input,
+	)
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, "list_repos: "+err.Error())
+		return
+	}
+	if !res.Success {
+		httpErr(w, http.StatusBadGateway, fmt.Sprintf("github list_repos status=%d", res.Status))
+		return
+	}
+	// Pass the upstream payload through verbatim — a JSON array of
+	// repo objects with the fields the panel needs (name, full_name,
+	// default_branch, language, private, pushed_at, …).
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(res.Data)
+}

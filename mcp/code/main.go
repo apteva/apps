@@ -34,15 +34,29 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.3.1
+version: 0.4.0
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
-  first-class editing tools modelled on Claude Code.
+  first-class editing tools modelled on Claude Code. Optionally
+  imports repositories from GitHub when a github connection is bound.
 author: Apteva
 scopes: [project, global]
 requires:
   permissions:
     - db.write.app
+    - platform.connections.execute
+  integrations:
+    - role: github
+      kind: integration
+      required: false
+      compatible_slugs: [github]
+      label: GitHub
+      hint: Connect GitHub to import repositories. Optional — local templates work without it.
+      capabilities: [repo.import]
+      tools:
+        list_repos:  list_repos
+        get_archive: get_archive
+        get_repo:    get_repo
 provides:
   http_routes:
     - prefix: /
@@ -66,6 +80,7 @@ provides:
     - { name: repos_unmark_template,  description: "Clear template flag on a repo. Existing forks unaffected." }
     - { name: templates_list,         description: "List user templates visible to this project + embedded ones." }
     - { name: repos_fork,             description: "Create a new repo by snapshot-copying a template or another repo." }
+    - { name: repos_import_github,    description: "Import a GitHub repo as a local repository (gzip tarball snapshot)." }
   ui_panels:
     - { slot: project.page, label: "Code", icon: code, entry: /ui/CodePanel.mjs }
 runtime:
@@ -176,6 +191,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/repos", Handler: a.handleReposCollection},
 		{Pattern: "/api/repos/", Handler: a.handleRepoItem},
 		{Pattern: "/api/templates", Handler: a.handleTemplatesList},
+		{Pattern: "/api/github/import", Handler: a.handleGithubImport},
+		{Pattern: "/api/github/repos", Handler: a.handleGithubReposList},
 	}
 }
 
