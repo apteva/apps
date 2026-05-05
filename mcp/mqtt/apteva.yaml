@@ -1,0 +1,110 @@
+schema: apteva-app/v1
+
+name: mqtt
+display_name: MQTT Broker
+version: 0.1.0
+description: |
+  Embedded MQTT broker for Apteva. Acts as the LAN message bus for
+  smart-home devices (ESP32, Zigbee2MQTT, Tasmota, anything that
+  speaks MQTT 3.1.1 or 5.0). Every published message is mirrored
+  onto the platform event bus as `mqtt.message` so sibling apps
+  (messaging, jobs, calendar) can react without speaking MQTT
+  themselves; per-pattern subscriptions promote interesting topics
+  to named bus events (e.g. `mqtt.motion.frontdoor`).
+
+  Runs mochi-mqtt under the hood — pure-Go broker, MIT licensed,
+  retained-message + persistent-session support, MQTT 5 properties.
+  Auth is username/password against this app's own DB; per-user
+  topic ACLs (publish + subscribe glob lists) gate every operation
+  and the panel surfaces the first 1000 ACL decisions for debugging.
+
+  Auto-discovers Home Assistant-convention devices by parsing
+  `homeassistant/+/+/config` so any sensor that already speaks the
+  HA discovery convention shows up in the Devices tab without
+  hand-config.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/mqtt
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/mqtt/icon.png
+tags: [mqtt, iot, home-automation, broker, infrastructure]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+  integrations: []
+  apps: []
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: mqtt_publish,            description: "Publish one message. Args: topic, payload, retain?, qos? (0|1|2)." }
+    - { name: mqtt_topics_recent,      description: "Last N topics seen by the broker. Args: limit? (default 50)." }
+    - { name: mqtt_subscribe,          description: "Persist a subscription pattern that re-emits matches as `mqtt.<bus_topic>` on the platform bus. Args: topic_pattern, bus_topic." }
+    - { name: mqtt_subscribe_list,     description: "List persisted bus subscriptions." }
+    - { name: mqtt_subscribe_delete,   description: "Delete a bus subscription. Args: id." }
+    - { name: mqtt_users_add,          description: "Create an MQTT user. Args: username, password, allow_publish? (glob list), allow_subscribe? (glob list)." }
+    - { name: mqtt_users_list,         description: "List users (no passwords)." }
+    - { name: mqtt_users_delete,       description: "Delete a user. Args: username." }
+    - { name: mqtt_users_set_enabled,  description: "Enable / disable a user. Args: username, enabled (bool)." }
+    - { name: mqtt_devices,            description: "List HA-discovered devices. Args: filter? (substring on slug or model)." }
+    - { name: mqtt_status,             description: "Broker status: port, client count, retained count, uptime, free disk." }
+  ui_panels:
+    - slot: project.page
+      label: MQTT
+      icon: radio
+      entry: /ui/MQTTPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/mqtt
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/mqtt.db
+  migrations: migrations/
+
+config_schema:
+  - name: listen_port
+    type: text
+    default: "1883"
+    label: MQTT listener port
+    description: TCP port the broker binds for client connections. 0 = kernel-assigned (forces clients to read mqtt_status to discover the actual port). 1883 is conventional but the engine falls back to a free port if it's busy.
+  - name: bind_interface
+    type: text
+    default: ""
+    label: Bind interface (advanced)
+    description: Pin the listener to one interface (e.g. en0). Empty = all interfaces. Useful when the host has a VPN you don't want broker traffic to enter.
+  - name: allow_anonymous
+    type: select
+    options: ["true", "false"]
+    default: "false"
+    label: Allow anonymous clients
+    description: When true, clients can connect with no username/password. Convenient for trusted LANs; refuse on shared networks.
+  - name: ha_discovery_enabled
+    type: select
+    options: ["true", "false"]
+    default: "true"
+    label: Parse Home Assistant discovery
+    description: When true, messages on homeassistant/+/+/config populate the Devices tab. Disable on installs that don't speak the HA convention to skip the parsing overhead.
+  - name: retain_max_count
+    type: text
+    default: "10000"
+    label: Max retained messages
+    description: Hard ceiling on retained messages stored in the broker. Oldest pruned beyond this.
+  - name: message_log_retention_hours
+    type: text
+    default: "168"
+    label: ACL log retention (hours)
+    description: How long to keep rows in mqtt_acl_log. 168 = 7 days.
+
+upgrade_policy: auto-patch
