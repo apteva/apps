@@ -194,14 +194,15 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
         params.is_image = "false";
       }
       if (kind === "image") params.is_image = "true";
-      // At root with recursive off, no folder filter is applied —
-      // show everything in the project. Inside a folder, filter to
-      // exact (or prefix when recursive).
-      if (folder !== "/") {
+      // Root non-recursive → only files literally at "/" (matches
+      // storage panel's behavior). Root recursive → everything in
+      // the project (no folder filter). In a sub-folder → exact
+      // match by default, prefix when recursive.
+      if (recursive && folder === "/") {
+        // all — no filter
+      } else {
         params.folder = folder;
         if (recursive) params.recursive = "true";
-      } else if (recursive) {
-        // root + recursive = all = no filter (skip).
       }
       const [mediaRes, foldersRes] = await Promise.all([
         fetch(`${API}/media?${withParams(params)}`, { credentials: "same-origin" }),
