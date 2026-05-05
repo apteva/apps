@@ -1,40 +1,61 @@
 // tapo_client.go — TP-Link Tapo camera HTTPS JSON-RPC client.
 //
-// Reverse-engineered from the Tapo mobile app + the python-tapo
-// community library. There is no public SDK; firmware revs occasionally
-// rotate the auth scheme (legacy MD5+stok → KLAP handshake → newer
-// hashed variants). v0.1 supports legacy MD5+stok cleanly and leaves
-// KLAP as a stub — set the camera firmware to ≤1.3.x or contribute the
-// crypto path.
+// Reverse-engineered from the Tapo mobile app + the pytapo community
+// library. There is no public SDK; firmware build 230921 (Sept 2023+)
+// fixed a CVE that disabled the legacy md5+stok flow that older
+// integrations relied on. Since Dec 2024 TP-Link has shipped an
+// official escape hatch — Me → Tapo Lab → Third-Party Compatibility
+// in the Tapo app (≥ 3.8.103). Once enabled, the user supplies a
+// per-camera username + password used by this client below.
 //
-// Wire shape (legacy):
+// Wire shape (secure_passthrough — current):
 //
-//   1. POST https://{ip}/   { "method":"login",
-//                             "params":{ "hashed":true,
-//                                        "username":<u>,
-//                                        "password":<md5_hex(password)> } }
-//      → { "result":{ "stok":<token> }, "error_code":0 }
+//   1. POST https://{ip}/  with cnonce  → -40413 envelope carrying
+//      RSA pubkey + server nonce + device_confirm proof
 //
-//   2. POST https://{ip}/stok={stok}/ds  with `multipleRequest` envelope:
-//      { "method":"multipleRequest",
-//        "params":{ "requests":[ {"method":..., ...}, ... ] } }
-//      → { "result":{ "responses":[ ... ] }, "error_code":0 }
+//      device_confirm = sha256(cnonce + hashedPwd + nonce).hex.upper +
+//                       nonce + cnonce
+//
+//      Try hashedPwd = sha256(password) first, fall back to md5 — the
+//      camera advertises which by which proof it returns.
+//
+//   2. POST https://{ip}/  with digest_passwd =
+//        sha256(hashedPwd + cnonce + nonce).hex.upper + cnonce + nonce
+//      → { "result":{ "stok":<token>, "start_seq":<int>, ... }, "error_code":0 }
+//
+//   3. Derive AES-128 key + IV:
+//        hashedKey = sha256(cnonce + hashedPwd + nonce).hex.upper
+//        lsk = sha256("lsk" + cnonce + nonce + hashedKey)[:16]
+//        ivb = sha256("ivb" + cnonce + nonce + hashedKey)[:16]
+//
+//   4. Per request to /stok={stok}/ds, wrap the inner JSON in:
+//        ciphertext = AES-128-CBC(lsk, ivb, pkcs7-pad(json))
+//        envelope   = {"method":"securePassthrough",
+//                      "params":{"request": base64(ciphertext)}}
+//        Headers:
+//          Seq:      <seq>            (incremented per request)
+//          Tapo_tag: sha256(sha256(hashedPwd + cnonce).hex.upper +
+//                           json(envelope) + str(seq)).hex.upper
+//      Decrypt the response.params.response field with the same
+//      lsk/ivb to recover the inner JSON.
 //
 // Notes:
-//   * TLS verification is disabled — the cameras self-sign with a cert
-//     for an internal CN that won't validate against any local trust
-//     store. This is fine on a trusted LAN; do not expose cameras to
-//     the internet directly.
-//   * Tapo's internal time is UTC and a few of the response time fields
-//     come back as Unix seconds in a string. We normalise to RFC3339.
-//   * Method names below are the camera-facing strings (snake-cased,
-//     verb-noun) — keep them; renaming breaks the wire format.
+//   * TLS verification disabled — self-signed internal CN. LAN-only.
+//   * AES-CBC reuses (key, iv) per request, by protocol design. The
+//     Tapo_tag (HMAC-flavoured proof) is what makes per-request
+//     auth work despite the static IV.
+//   * Method names below are the camera-facing strings — keep them.
 package main
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/md5"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -62,17 +83,23 @@ type Capabilities struct {
 	OnvifPort    int  `json:"onvif_port"`    // 0 if not detected
 }
 
-// Client is one camera's session. Holds the stok cookie until it
-// expires; legacy stoks live ~30min so we re-login lazily on 401.
+// Client is one camera's session. Holds the stok + AES key/IV +
+// monotonic seq counter; we re-login lazily on -40401.
 type Client struct {
 	IP       string
 	Username string
 	Password string
 
-	mu       sync.Mutex
-	stok     string
-	expiry   time.Time
-	httpc    *http.Client
+	mu        sync.Mutex
+	stok      string
+	expiry    time.Time
+	httpc     *http.Client
+	hashedPwd string // SHA256 or MD5 of password, hex.upper — set during login
+	cnonce    string // 16-hex local nonce, regenerated each login
+	nonce     string // 16-hex server nonce, returned in handshake
+	lsk       []byte // AES-128 key, 16 bytes
+	ivb       []byte // AES-CBC IV, 16 bytes
+	seq       int    // monotonic sequence, starts at start_seq, +1 per request
 }
 
 // NewClient returns a Client; no I/O until first call.
@@ -90,47 +117,136 @@ func NewClient(ip, username, password string) *Client {
 	}
 }
 
-// login performs the legacy MD5+stok handshake and caches the token.
-// Caller must hold c.mu.
+// login performs the full three-step secure_passthrough handshake.
+// Caller must hold c.mu. Sets stok, hashedPwd, cnonce, nonce, lsk,
+// ivb, seq on success.
 func (c *Client) login() error {
-	payload := map[string]any{
+	cnonceB := make([]byte, 8)
+	if _, err := rand.Read(cnonceB); err != nil {
+		return fmt.Errorf("login: rand: %w", err)
+	}
+	cnonce := strings.ToUpper(hex.EncodeToString(cnonceB))
+	c.cnonce = cnonce
+
+	// --- Step 1: kick off handshake. The first POST always returns
+	// -40413 with the device_confirm envelope; we use it to derive
+	// the right hashing algorithm AND prove the camera knows our
+	// password before sending any further data.
+	probe := map[string]any{
 		"method": "login",
 		"params": map[string]any{
-			"hashed":   true,
-			"username": c.Username,
-			"password": md5Hex(c.Password),
+			"encrypt_type": "3",
+			"username":     c.Username,
+			"cnonce":       cnonce,
 		},
 	}
-	body, _ := json.Marshal(payload)
-	req, err := http.NewRequest("POST", "https://"+c.IP+"/", bytes.NewReader(body))
+	body, _ := json.Marshal(probe)
+	resp, err := c.postRoot(body)
 	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpc.Do(req)
-	if err != nil {
-		return fmt.Errorf("login: dial %s: %w", c.IP, err)
+		return fmt.Errorf("login probe: %w", err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 
-	var out struct {
+	var step1 struct {
 		Result struct {
-			Stok string `json:"stok"`
+			Data struct {
+				EncryptType   []string `json:"encrypt_type"`
+				Nonce         string   `json:"nonce"`
+				DeviceConfirm string   `json:"device_confirm"`
+			} `json:"data"`
 		} `json:"result"`
 		ErrorCode int `json:"error_code"`
 	}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return fmt.Errorf("login: parse %s: %w", string(raw), err)
+	if err := json.Unmarshal(raw, &step1); err != nil {
+		return fmt.Errorf("login probe parse: %w body=%s", err, snippet(raw))
 	}
-	if out.ErrorCode != 0 || out.Result.Stok == "" {
-		// -40401 = bad password; -40404 = locked out for ~5min after
-		// repeated bad attempts; -40413 = camera-account not enabled.
-		return fmt.Errorf("login: error_code=%d (set the Camera Account password in the Tapo app)", out.ErrorCode)
+	if step1.Result.Data.Nonce == "" || step1.Result.Data.DeviceConfirm == "" {
+		return fmt.Errorf("login probe: missing handshake fields (error_code=%d body=%s) — enable Tapo app → Me → Tapo Lab → Third-Party Compatibility",
+			step1.ErrorCode, snippet(raw))
 	}
-	c.stok = out.Result.Stok
+	c.nonce = step1.Result.Data.Nonce
+
+	// --- Step 2: figure out which hashing algorithm the camera uses
+	// and validate device_confirm proof.
+	hashedSHA := strings.ToUpper(hex.EncodeToString(sha256Sum([]byte(c.Password))))
+	hashedMD5 := strings.ToUpper(hex.EncodeToString(md5Sum([]byte(c.Password))))
+	switch {
+	case validateDeviceConfirm(cnonce, hashedSHA, c.nonce, step1.Result.Data.DeviceConfirm):
+		c.hashedPwd = hashedSHA
+	case validateDeviceConfirm(cnonce, hashedMD5, c.nonce, step1.Result.Data.DeviceConfirm):
+		c.hashedPwd = hashedMD5
+	default:
+		// Wrong username, wrong password, or Third-Party
+		// Compatibility is off. The error_code=-40413 outer is the
+		// same in all three cases — pytapo can't disambiguate either.
+		return errors.New("login: device_confirm mismatch — wrong credentials, or enable Third-Party Compatibility in the Tapo app")
+	}
+
+	// --- Step 3: send the digest_passwd login. On success the
+	// camera issues a stok cookie + start_seq counter.
+	digest := strings.ToUpper(hex.EncodeToString(
+		sha256Sum([]byte(c.hashedPwd + cnonce + c.nonce))))
+	loginBody, _ := json.Marshal(map[string]any{
+		"method": "login",
+		"params": map[string]any{
+			"cnonce":        cnonce,
+			"encrypt_type":  "3",
+			"digest_passwd": digest + cnonce + c.nonce,
+			"username":      c.Username,
+		},
+	})
+	resp2, err := c.postRoot(loginBody)
+	if err != nil {
+		return fmt.Errorf("login digest: %w", err)
+	}
+	defer resp2.Body.Close()
+	raw2, _ := io.ReadAll(resp2.Body)
+
+	var step3 struct {
+		Result struct {
+			Stok      string `json:"stok"`
+			StartSeq  int    `json:"start_seq"`
+			UserGroup string `json:"user_group"`
+		} `json:"result"`
+		ErrorCode int `json:"error_code"`
+	}
+	if err := json.Unmarshal(raw2, &step3); err != nil {
+		return fmt.Errorf("login digest parse: %w body=%s", err, snippet(raw2))
+	}
+	if step3.Result.Stok == "" {
+		return fmt.Errorf("login: digest rejected, error_code=%d body=%s", step3.ErrorCode, snippet(raw2))
+	}
+	c.stok = step3.Result.Stok
+	c.seq = step3.Result.StartSeq
 	c.expiry = time.Now().Add(25 * time.Minute)
+
+	// --- Step 4: derive AES key + IV from cnonce/nonce/hashedPwd.
+	hashedKey := strings.ToUpper(hex.EncodeToString(
+		sha256Sum([]byte(cnonce + c.hashedPwd + c.nonce))))
+	c.lsk = sha256Sum([]byte("lsk" + cnonce + c.nonce + hashedKey))[:16]
+	c.ivb = sha256Sum([]byte("ivb" + cnonce + c.nonce + hashedKey))[:16]
 	return nil
+}
+
+// validateDeviceConfirm — does the server's proof match our local
+// hashedPwd? The format is sha256(cnonce + hashedPwd + nonce) ||
+// nonce || cnonce, all hex-uppercase concatenated.
+func validateDeviceConfirm(cnonce, hashedPwd, nonce, deviceConfirm string) bool {
+	want := strings.ToUpper(hex.EncodeToString(
+		sha256Sum([]byte(cnonce + hashedPwd + nonce))))
+	return deviceConfirm == want+nonce+cnonce
+}
+
+// postRoot is a small helper for the two unauthenticated handshake
+// POSTs to https://<ip>/. Keeps login() readable.
+func (c *Client) postRoot(body []byte) (*http.Response, error) {
+	req, err := http.NewRequest("POST", "https://"+c.IP+"/", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.httpc.Do(req)
 }
 
 // ensureSession refreshes the stok if missing/expired.
@@ -165,44 +281,175 @@ func (c *Client) call(methods ...map[string]any) ([]map[string]any, error) {
 }
 
 func (c *Client) callOnce(methods []map[string]any) ([]map[string]any, error) {
-	envelope := map[string]any{
-		"method": "multipleRequest",
-		"params": map[string]any{"requests": methods},
+	if len(methods) == 0 {
+		return nil, errors.New("call: no methods")
 	}
-	body, _ := json.Marshal(envelope)
+	// secure_passthrough firmware rejects the multipleRequest wrapper
+	// with -40210 for batched calls; we instead send each inner
+	// method as a standalone request and stitch the responses back
+	// into the slice the legacy callers expect. The cost is one
+	// round-trip per method, but each one is on the LAN so it's
+	// cheap, and we never amortise more than ~7 in ProbeCapabilities.
+	if len(methods) > 1 {
+		out := make([]map[string]any, 0, len(methods))
+		for _, m := range methods {
+			rs, err := c.callOnce([]map[string]any{m})
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, rs...)
+		}
+		return out, nil
+	}
+	innerJSON, _ := json.Marshal(methods[0])
+
+	// Encrypt with AES-128-CBC (key=lsk, iv=ivb), pkcs7-padded.
+	ct, err := aesEncrypt(c.lsk, c.ivb, pkcs7Pad(innerJSON, aes.BlockSize))
+	if err != nil {
+		return nil, fmt.Errorf("call: encrypt: %w", err)
+	}
+	envelope := map[string]any{
+		"method": "securePassthrough",
+		"params": map[string]any{
+			"request": base64.StdEncoding.EncodeToString(ct),
+		},
+	}
+	envBody, _ := json.Marshal(envelope)
+
+	// Tapo_tag = sha256(sha256(hashedPwd+cnonce).hex.upper +
+	//                   json(envelope) + str(seq)).hex.upper
+	innerTag := strings.ToUpper(hex.EncodeToString(
+		sha256Sum([]byte(c.hashedPwd + c.cnonce))))
+	tag := strings.ToUpper(hex.EncodeToString(
+		sha256Sum([]byte(innerTag + string(envBody) + strconv.Itoa(c.seq)))))
+
 	url := "https://" + c.IP + "/stok=" + c.stok + "/ds"
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	req, err := http.NewRequest("POST", url, bytes.NewReader(envBody))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Seq", strconv.Itoa(c.seq))
+	req.Header.Set("Tapo_tag", tag)
 	resp, err := c.httpc.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
+	c.seq++ // advance once we've sent, regardless of response
 
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
 		return nil, errAuth
 	}
 
-	var parsed struct {
+	// Outer envelope: {"result":{"response":<base64>}, "error_code":0}.
+	var outer struct {
 		Result struct {
-			Responses []map[string]any `json:"responses"`
+			Response string `json:"response"`
 		} `json:"result"`
 		ErrorCode int `json:"error_code"`
 	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, fmt.Errorf("call: parse %s: %w", string(raw), err)
+	if err := json.Unmarshal(raw, &outer); err != nil {
+		return nil, fmt.Errorf("call: parse outer: %w body=%s", err, snippet(raw))
 	}
-	if parsed.ErrorCode == -40401 {
+	if outer.ErrorCode == -40401 {
 		return nil, errAuth
 	}
-	if parsed.ErrorCode != 0 {
-		return nil, fmt.Errorf("call: error_code=%d body=%s", parsed.ErrorCode, snippet(raw))
+	// Newer firmware returns the inner reply *plain* (no encrypted
+	// wrapper) for some method shapes — same fallback pytapo applies.
+	// Use the encrypted path when result.response is set; otherwise
+	// take the raw body as already-plaintext inner JSON.
+	var pt []byte
+	if outer.Result.Response != "" {
+		ctResp, err := base64.StdEncoding.DecodeString(outer.Result.Response)
+		if err != nil {
+			return nil, fmt.Errorf("call: b64 decode: %w", err)
+		}
+		dec, err := aesDecrypt(c.lsk, c.ivb, ctResp)
+		if err != nil {
+			return nil, fmt.Errorf("call: decrypt: %w", err)
+		}
+		pt = pkcs7Unpad(dec)
+	} else {
+		pt = raw
 	}
-	return parsed.Result.Responses, nil
+
+	// Single-method response shape: top-level fields are the camera's
+	// reply (e.g. {"device_info":{"basic_info":...},"error_code":0}).
+	// Wrap that into the legacy []map[string]any contract: one entry,
+	// keyed by the same top-level fields the caller expects.
+	var single map[string]any
+	if err := json.Unmarshal(pt, &single); err != nil {
+		return nil, fmt.Errorf("call: parse inner: %w body=%s", err, snippet(pt))
+	}
+	if ec, ok := single["error_code"].(float64); ok {
+		if int(ec) == -40401 {
+			return nil, errAuth
+		}
+		if int(ec) != 0 {
+			return nil, fmt.Errorf("call: error_code=%d body=%s", int(ec), snippet(pt))
+		}
+	}
+	return []map[string]any{single}, nil
+}
+
+// ─── crypto helpers ────────────────────────────────────────────────
+
+func sha256Sum(b []byte) []byte {
+	h := sha256.Sum256(b)
+	return h[:]
+}
+
+func md5Sum(b []byte) []byte {
+	h := md5.Sum(b)
+	return h[:]
+}
+
+func aesEncrypt(key, iv, pt []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	mode := cipher.NewCBCEncrypter(block, iv)
+	ct := make([]byte, len(pt))
+	mode.CryptBlocks(ct, pt)
+	return ct, nil
+}
+
+func aesDecrypt(key, iv, ct []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(ct)%aes.BlockSize != 0 {
+		return nil, errors.New("ciphertext not aligned to block size")
+	}
+	mode := cipher.NewCBCDecrypter(block, iv)
+	pt := make([]byte, len(ct))
+	mode.CryptBlocks(pt, ct)
+	return pt, nil
+}
+
+func pkcs7Pad(b []byte, sz int) []byte {
+	pad := sz - len(b)%sz
+	out := make([]byte, len(b)+pad)
+	copy(out, b)
+	for i := len(b); i < len(out); i++ {
+		out[i] = byte(pad)
+	}
+	return out
+}
+
+func pkcs7Unpad(b []byte) []byte {
+	if len(b) == 0 {
+		return b
+	}
+	n := int(b[len(b)-1])
+	if n <= 0 || n > len(b) {
+		return b
+	}
+	return b[:len(b)-n]
 }
 
 // ─── high-level commands ────────────────────────────────────────────
@@ -239,32 +486,34 @@ func (c *Client) GetDeviceInfo() (*DeviceInfo, error) {
 	}, nil
 }
 
-// ProbeCapabilities does a single batched call asking for every
-// feature flag we support, then derives a Capabilities from whatever
-// the camera answered (or didn't).
+// ProbeCapabilities asks the camera which features it advertises.
+// On secure_passthrough firmware the per-feature lookups can return
+// -40101 ("method not supported") if the verb-noun method name has
+// rotated; we silently treat those as "feature absent" rather than
+// bubbling, so the caller still gets a useful Capabilities back
+// even on a partially-understood firmware. v0.2 covers the common
+// cases; extend per camera model.
 func (c *Client) ProbeCapabilities() (*Capabilities, error) {
-	resp, err := c.call(
-		map[string]any{"method": "get", "motor": map[string]any{"name": []string{"capability"}}},
-		map[string]any{"method": "get", "lens_mask": map[string]any{"name": []string{"lens_mask_info"}}},
-		map[string]any{"method": "get", "audio_capability": map[string]any{"name": []string{"device_speaker"}}},
-		map[string]any{"method": "get", "image": map[string]any{"name": []string{"switch"}}},
-		map[string]any{"method": "get", "led": map[string]any{"name": []string{"config"}}},
-		map[string]any{"method": "get", "motion_detection": map[string]any{"name": []string{"motion_det"}}},
-		map[string]any{"method": "get", "smartdet": map[string]any{"name": []string{"smartdet"}}},
-	)
-	if err != nil {
-		return nil, err
+	probe := func(field, name string) bool {
+		rs, err := c.call(map[string]any{
+			"method": "get",
+			field:    map[string]any{"name": []string{name}},
+		})
+		if err != nil {
+			return false
+		}
+		return digMap(rs, 0, field, name) != nil
 	}
 	caps := &Capabilities{
-		OnvifPort: 2020, // Tapos default; refined by a real ONVIF probe later.
+		OnvifPort:    2020, // Tapos default; refined by a real ONVIF probe later.
+		PTZ:          probe("motor", "capability"),
+		PrivacyLens:  probe("lens_mask", "lens_mask_info"),
+		Siren:        probe("audio_capability", "device_speaker"),
+		NightVision:  probe("image", "switch"),
+		StatusLED:    probe("led", "config"),
+		MotionDetect: probe("motion_detection", "motion_det"),
+		BabyCry:      probe("smartdet", "smartdet"),
 	}
-	caps.PTZ = digMap(resp, 0, "motor", "capability") != nil
-	caps.PrivacyLens = digMap(resp, 1, "lens_mask", "lens_mask_info") != nil
-	caps.Siren = digMap(resp, 2, "audio_capability", "device_speaker") != nil
-	caps.NightVision = digMap(resp, 3, "image", "switch") != nil
-	caps.StatusLED = digMap(resp, 4, "led", "config") != nil
-	caps.MotionDetect = digMap(resp, 5, "motion_detection", "motion_det") != nil
-	caps.BabyCry = digMap(resp, 6, "smartdet", "smartdet") != nil
 	return caps, nil
 }
 

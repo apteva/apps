@@ -37,12 +37,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: tapo
 display_name: Tapo Cameras
-version: 0.1.0
+version: 0.2.0
 description: Local-LAN control of TP-Link Tapo cameras.
 author: Apteva
 scopes: [project, global]
 requires:
-  permissions: [db.write.app, network.lan]
+  permissions: [db.write.app, net.egress]
   integrations: []
 provides:
   http_routes:
@@ -79,6 +79,10 @@ provides:
       slots: [chat.message_attachment]
 runtime:
   kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/tapo
   port: 8080
   health_check: /health
 db:

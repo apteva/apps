@@ -6,10 +6,10 @@ account required.
 
 ## Setup
 
-1. **Create a Camera Account** in the Tapo mobile app:
-   `Settings → Advanced Settings → Camera Account`. This gives you a
-   local username + password the camera will accept on its on-device
-   API. Your TP-Link cloud login does **not** work for this.
+1. **Enable Third-Party Compatibility** in the Tapo app (see
+   "Firmware support" below). The Camera Account flow that older
+   versions of this README pointed you to is dead — TP-Link
+   killed it as a security fix.
 
 2. **Find the camera's IP** on your LAN. The Tapo app shows it under
    `Camera Settings → Device Info`. A static DHCP lease is wise — the
@@ -33,18 +33,26 @@ account required.
 
 ## Firmware support
 
-| Auth scheme | Firmware | Status |
-|---|---|---|
-| MD5 + stok cookie | ≤ 1.3.x | ✅ supported |
-| KLAP handshake | ≥ 1.4.x (~mid-2023+) | 🚧 scaffolded, not wired |
+`secure_passthrough` (the encrypted JSON-RPC flow shipped on every
+internet-connected Tapo camera since TP-Link's Sept-2023 security
+patch — build 230921+) is the only auth scheme this app speaks.
+There is no longer a "legacy md5+stok" fallback because TP-Link
+disabled it on all current firmware.
 
-If `cameras_add` fails with `error_code=-40401` or 401-loops, your
-camera is on KLAP firmware. Two paths:
+You **must enable Third-Party Compatibility** in the Tapo app
+before `cameras_add` will work:
 
-* Pin the camera to ≤ 1.3.x via the Tapo app (disable auto-update,
-  factory-reset, install old firmware bundle).
-* Contribute the KLAP path — see `tapo_client.go` ⇒ `klapAvailable()`
-  for the integration point.
+1. Update the Tapo app to ≥ 3.8.103.
+2. **Me → Tapo Lab → Third-Party Compatibility → On**.
+3. The app prompts you to set a **username + password specifically
+   for third-party use**. These are not your TP-Link cloud
+   credentials and not the per-camera Camera Account; they're a
+   third, dedicated set.
+4. Use those credentials in `cameras_add(username=…, password=…)`.
+
+If you ever see `device_confirm mismatch — wrong credentials, or
+enable Third-Party Compatibility in the Tapo app`, you skipped step
+2 (or you're typing the wrong password).
 
 ## Composition with `storage`
 
