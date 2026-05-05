@@ -125,7 +125,8 @@ func upsertMedia(db *sql.DB, projectID string, fileID string, p *Probe, sha stri
 			probe_error='',
 			probe_at=excluded.probe_at,
 			raw_probe=excluded.raw_probe,
-			updated_at=excluded.updated_at`,
+			updated_at=excluded.updated_at,
+			force_probe=0`,
 		fileID, projectID, sha, folder,
 		p.FormatName, p.DurationMs, p.Bitrate,
 		boolInt(p.HasVideo), boolInt(p.HasAudio), boolInt(p.IsImage),
@@ -214,7 +215,8 @@ func markFailed(db *sql.DB, projectID, fileID, sha, kind, msg string) error {
 			probe_status=excluded.probe_status,
 			probe_error=excluded.probe_error,
 			probe_at=excluded.probe_at,
-			updated_at=excluded.updated_at`,
+			updated_at=excluded.updated_at,
+			force_probe=0`,
 		fileID, projectID, sha, kind, msg, now, now,
 	)
 	return err

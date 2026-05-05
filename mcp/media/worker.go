@@ -174,7 +174,17 @@ func processOne(
 	logger := app.Logger()
 	logCtx := []any{"file_id", fid, "name", f.Name, "content_type", f.ContentType, "size", f.SizeBytes}
 
-	if maxBytes > 0 && f.SizeBytes > maxBytes {
+	// force_probe (set by media_reindex(force=true)) bypasses the
+	// size cap for one shot. The flag is cleared at every terminal
+	// outcome below — success via probe_status='ok', failure via
+	// markFailed — so a second cycle re-applies the cap.
+	var forceProbe int
+	_ = app.AppDB().QueryRow(
+		`SELECT force_probe FROM media WHERE project_id=? AND file_id=?`,
+		projectID, fid,
+	).Scan(&forceProbe)
+
+	if forceProbe == 0 && maxBytes > 0 && f.SizeBytes > maxBytes {
 		_ = markFailed(app.AppDB(), projectID, fid, f.SHA256, "skipped_size",
 			fmt.Sprintf("file size %d > max_probe_size_mb (%d MB)", f.SizeBytes, toInt(maxSizeMB)))
 		logger.Info("skipped — over size cap", logCtx...)

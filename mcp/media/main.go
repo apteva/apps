@@ -21,7 +21,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.8.1
+version: 0.8.2
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -314,11 +314,15 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler:     a.toolGetDerivation("waveform"),
 		},
 		{
-			Name:        "media_reindex",
-			Description: "Force a re-probe + re-derive. Pass file_id to re-index one row, or failed_only=true to retry every failed/unsupported row in the project.",
+			Name: "media_reindex",
+			Description: "Force a re-probe + re-derive. Pass file_id to re-index one row, " +
+				"or failed_only=true to retry every failed/unsupported row in the project. " +
+				"force=true (with file_id) bypasses the max_probe_size_mb cap for that one file " +
+				"— useful for genuinely huge sources where you accept the temp-disk hit.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":     map[string]any{"type": "string"},
 				"failed_only": map[string]any{"type": "boolean"},
+				"force":       map[string]any{"type": "boolean"},
 			}, nil),
 			Handler: a.toolReindex,
 		},
@@ -1157,21 +1161,26 @@ func int64Arg(v any) int64 {
 
 // toolReindex flips one row (or all failed rows) back to pending so
 // the indexer's next tick re-probes them. MCP wrapper around the
-// existing /reindex HTTP route.
+// existing /reindex HTTP route. force=true (file_id only) sets
+// force_probe=1 on the row so processOne skips the size cap.
 func (a *App) toolReindex(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
 	if fid, _ := args["file_id"].(string); fid != "" {
+		force := 0
+		if v, _ := args["force"].(bool); v {
+			force = 1
+		}
 		_, err := ctx.AppDB().Exec(
-			`UPDATE media SET probe_status='pending', probe_error='', source_sha256='' WHERE project_id=? AND file_id=?`,
-			pid, fid,
+			`UPDATE media SET probe_status='pending', probe_error='', source_sha256='', force_probe=? WHERE project_id=? AND file_id=?`,
+			force, pid, fid,
 		)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"queued": 1, "file_id": fid}, nil
+		return map[string]any{"queued": 1, "file_id": fid, "force": force == 1}, nil
 	}
 	if v, _ := args["failed_only"].(bool); v {
 		res, err := ctx.AppDB().Exec(

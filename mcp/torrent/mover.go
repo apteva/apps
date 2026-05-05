@@ -150,10 +150,20 @@ func (a *App) handleCompletion(infohash string, snap TorrentSnapshot) {
 		target = configString(a.ctx, "default_target_folder", "/downloads")
 	}
 	target = strings.TrimRight(target, "/")
-	// Group files under a per-torrent folder when the torrent has
-	// more than one file (preserves "Movie.2024.1080p/" structure).
+	// Choose the per-torrent root carefully. anacrolix's File.Path()
+	// returns the BEP-3 path verbatim, which for any multi-file
+	// torrent that declares a top-level "name" already starts with
+	// that name (e.g. f.Path = "Show.S01/E01.mkv"). If we naively
+	// prefix sanitiseName(snap.Name) on top, the storage path doubles
+	// up to /downloads/Show.S01/Show.S01/E01.mkv — exactly what hit
+	// the live cffaba02 install in v0.1.15.
+	//
+	// So: use target as the root when the torrent's files already
+	// share a wrapper directory. Add the snap.Name wrapper only for
+	// the rare "flat multi-file" case (>1 file, none of them in a
+	// subdir) so those don't all collide in /downloads/ root.
 	root := target
-	if len(files) > 1 {
+	if len(files) > 1 && !filesShareWrapperDir(files) {
 		root = target + "/" + sanitiseName(snap.Name)
 	}
 
@@ -174,7 +184,10 @@ func (a *App) handleCompletion(infohash string, snap TorrentSnapshot) {
 			continue
 		}
 		uploaded = append(uploaded, fileID)
-		a.maybeProbeMedia(fileID, f.Path)
+		// Media indexing happens automatically via the media app's
+		// storage.file.added subscription — no MCP round-trip needed
+		// from here. (Earlier versions called a non-existent
+		// "media.probe_file" tool that errored silently.)
 	}
 
 	// Bail-out path. If any file failed to upload, leave the working
@@ -401,10 +414,25 @@ func abortUpload(httpc *http.Client, base, q, token, uploadID string) {
 	}
 }
 
-// maybeProbeMedia is fire-and-forget: if `media` isn't installed or
-// errors, the metadata just doesn't appear and we move on. Restricted
-// to file extensions where probing is meaningful so we don't bombard
-// `media` with image/text files it'll just bounce.
+// filesShareWrapperDir — true when every file in the torrent has at
+// least one path separator, i.e. they all live inside some parent
+// directory. anacrolix puts the BEP-3 top-level name into Path()
+// for multi-file torrents, so this is the cheap check for "the
+// torrent already brings its own wrapper".
+func filesShareWrapperDir(files []FileSnapshot) bool {
+	for _, f := range files {
+		if !strings.Contains(f.Path, "/") {
+			return false
+		}
+	}
+	return true
+}
+
+// maybeProbeMedia is unused as of v0.1.16 — media's
+// storage.file.added subscription handles indexing automatically
+// via SSE. Kept temporarily so removed-callsite reverts surface as
+// "this is unused" rather than build errors. Will be deleted in
+// v0.2 along with the rest of the post-completion hooks.
 func (a *App) maybeProbeMedia(fileID int64, path string) {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {

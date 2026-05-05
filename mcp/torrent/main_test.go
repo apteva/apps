@@ -178,6 +178,45 @@ func TestApibayParser_NoResults(t *testing.T) {
 	}
 }
 
+// TestFilesShareWrapperDir — pin the v0.1.16 fix for the
+// /downloads/<name>/<name>/ doubled-folder bug. anacrolix's
+// File.Path() includes the torrent's top-level name for any BEP-3
+// multi-file torrent, so /downloads/<name> already exists in the
+// path; prefixing snap.Name on top doubles it. The detection
+// helper says "true when every file shares some wrapper dir" so
+// handleCompletion can skip the prefix in that case.
+func TestFilesShareWrapperDir(t *testing.T) {
+	cases := []struct {
+		name  string
+		files []FileSnapshot
+		want  bool
+	}{
+		{"single file no slash", []FileSnapshot{{Path: "big.iso"}}, false},
+		{"multi-file with wrapper (cffaba02 case)", []FileSnapshot{
+			{Path: "Show.S01/E01.mkv"},
+			{Path: "Show.S01/E01.nfo"},
+		}, true},
+		{"multi-file flat (rare)", []FileSnapshot{
+			{Path: "track1.mp3"},
+			{Path: "track2.mp3"},
+		}, false},
+		{"multi-file mixed (some flat, some nested)", []FileSnapshot{
+			{Path: "track1.mp3"},
+			{Path: "covers/front.jpg"},
+		}, false},
+		{"multi-file, all nested, multiple wrappers", []FileSnapshot{
+			{Path: "Disk1/01.flac"},
+			{Path: "Disk2/01.flac"},
+		}, true}, // both share *some* wrapper, even if different ones — fine
+	}
+	for _, c := range cases {
+		got := filesShareWrapperDir(c.files)
+		if got != c.want {
+			t.Errorf("%s: filesShareWrapperDir = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 // TestCompletionDedupe — pin the v0.1.15 race fix. anacrolix's
 // engine flips rapidly between completed/seeding when peers churn,
 // so onTransition can spawn handleCompletion for the same infohash
