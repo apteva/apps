@@ -76,13 +76,16 @@ func absoluteContentURL(ctx *sdk.AppCtx, f *File) string {
 }
 
 // signedAbsoluteURL returns the absolute form of a signed URL.
-// Same path as absoluteContentURL, with ?sig=&exp= appended; the
-// platform's authMiddleware carves out signed URLs for app paths.
-func signedAbsoluteURL(ctx *sdk.AppCtx, fileID int64, sig string, exp int64) string {
-	rel := fmt.Sprintf("/files/%d/content?sig=%s&exp=%d", fileID, sig, exp)
+// Same path as absoluteContentURL — including the filename suffix
+// so the URL ends in the proper extension for downstream sniffers.
+// `?sig=&exp=` are appended; the platform's authMiddleware carves
+// out signed URLs for app paths.
+func signedAbsoluteURL(ctx *sdk.AppCtx, f *File, sig string, exp int64) string {
+	rel := buildContentURL(f) // includes filename when present
+	q := fmt.Sprintf("?sig=%s&exp=%d", sig, exp)
 	base := publicBase(ctx)
 	if base == "" {
-		return "/api/apps/storage" + rel
+		return "/api/apps/storage" + rel + q
 	}
-	return base + "/api/apps/storage" + rel
+	return base + "/api/apps/storage" + rel + q
 }

@@ -17,9 +17,9 @@ import (
 
 func TestAbsoluteContentURL_WithEnv(t *testing.T) {
 	t.Setenv("STORAGE_PUBLIC_URL", "https://agents.example.com")
-	f := &File{ID: 42}
+	f := &File{ID: 42, Name: "video.mp4"}
 	got := absoluteContentURL(nil, f)
-	want := "https://agents.example.com/api/apps/storage/files/42/content"
+	want := "https://agents.example.com/api/apps/storage/files/42/content/video.mp4"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -28,9 +28,9 @@ func TestAbsoluteContentURL_WithEnv(t *testing.T) {
 func TestAbsoluteContentURL_NoEnv(t *testing.T) {
 	t.Setenv("STORAGE_PUBLIC_URL", "")
 	t.Setenv("APTEVA_PUBLIC_URL", "")
-	f := &File{ID: 42}
+	f := &File{ID: 42, Name: "video.mp4"}
 	got := absoluteContentURL(nil, f)
-	want := "/api/apps/storage/files/42/content"
+	want := "/api/apps/storage/files/42/content/video.mp4"
 	if got != want {
 		t.Fatalf("got %q, want %q (relative when no public_url)", got, want)
 	}
@@ -38,11 +38,35 @@ func TestAbsoluteContentURL_NoEnv(t *testing.T) {
 
 func TestAbsoluteContentURL_StripsTrailingSlash(t *testing.T) {
 	t.Setenv("STORAGE_PUBLIC_URL", "https://agents.example.com/")
-	f := &File{ID: 7}
+	f := &File{ID: 7, Name: "x.png"}
 	got := absoluteContentURL(nil, f)
-	want := "https://agents.example.com/api/apps/storage/files/7/content"
+	want := "https://agents.example.com/api/apps/storage/files/7/content/x.png"
 	if got != want {
 		t.Fatalf("got %q, want %q (trailing slash should be stripped)", got, want)
+	}
+}
+
+// Filename appears URL-escaped — spaces, special chars, unicode all
+// land safely in the path. This is the property browsers/CDN edges
+// + Twitter cards rely on for content sniffing.
+func TestAbsoluteContentURL_EscapesFilename(t *testing.T) {
+	t.Setenv("STORAGE_PUBLIC_URL", "https://agents.example.com")
+	f := &File{ID: 9, Name: "my video (final).mp4"}
+	got := absoluteContentURL(nil, f)
+	want := "https://agents.example.com/api/apps/storage/files/9/content/my%20video%20%28final%29.mp4"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestAbsoluteContentURL_NameMissingFallsBack(t *testing.T) {
+	t.Setenv("STORAGE_PUBLIC_URL", "https://agents.example.com")
+	// Defensive — empty name shouldn't produce a trailing slash.
+	f := &File{ID: 5}
+	got := absoluteContentURL(nil, f)
+	want := "https://agents.example.com/api/apps/storage/files/5/content"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 
@@ -61,8 +85,8 @@ func TestAbsoluteContentURL_VisibilityIndependent(t *testing.T) {
 
 func TestSignedAbsoluteURL(t *testing.T) {
 	t.Setenv("STORAGE_PUBLIC_URL", "https://agents.example.com")
-	got := signedAbsoluteURL(nil, 42, "abcdef", 1234567890)
-	want := "https://agents.example.com/api/apps/storage/files/42/content?sig=abcdef&exp=1234567890"
+	got := signedAbsoluteURL(nil, &File{ID: 42, Name: "video.mp4"}, "abcdef", 1234567890)
+	want := "https://agents.example.com/api/apps/storage/files/42/content/video.mp4?sig=abcdef&exp=1234567890"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -74,7 +98,7 @@ func TestDBGetByID_PopulatesURL(t *testing.T) {
 	f := mustUpload(t, ctx, "video.mp4", "/clips/", "fakebytes")
 
 	wantURL := "https://agents.example.com/api/apps/storage/files/" +
-		intToString(f.ID) + "/content"
+		intToString(f.ID) + "/content/video.mp4"
 	if f.URL != wantURL {
 		t.Errorf("URL = %q, want %q", f.URL, wantURL)
 	}

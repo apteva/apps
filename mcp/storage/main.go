@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -44,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: storage
 display_name: Storage
-version: 0.8.1
+version: 0.8.2
 description: |
   File storage with virtual folders, signed URLs, dedup. Pluggable
   backend: local disk by default, S3-compatible (AWS / R2 / B2 /
@@ -552,7 +553,7 @@ func (a *App) toolGetURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// (Deepgram, Cloudinary, plain links shared with humans) without
 	// having to know the platform's host. Falls back to relative
 	// when public_url isn't configured (dev, no-network installs).
-	url := signedAbsoluteURL(ctx, f.ID, sig, exp)
+	url := signedAbsoluteURL(ctx, f, sig, exp)
 	return map[string]any{"url": url, "expires_at": exp, "file_id": f.ID}, nil
 }
 
@@ -810,7 +811,16 @@ func (a *App) handleFilesItem(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 2 {
 		tail = parts[1]
 	}
-	switch tail {
+	// First segment of the tail decides the action — the rest is
+	// cosmetic. /files/6/content/foo.mp4 routes to httpServeContent
+	// the same as /files/6/content; the trailing filename is for
+	// content-sniffers (Twitter cards, OG scrapers, CDN edges) that
+	// route by URL path extension regardless of Content-Type header.
+	firstSeg := tail
+	if i := strings.IndexByte(tail, '/'); i >= 0 {
+		firstSeg = tail[:i]
+	}
+	switch firstSeg {
 	case "content":
 		a.httpServeContent(w, r, id)
 	case "url":
@@ -1744,8 +1754,24 @@ func blobPath(ctx *sdk.AppCtx, sha256 string, storageKey string) string {
 	return filepath.Join(blobsDir(ctx), prefix, storageKey)
 }
 
+// buildContentURL returns the path-only content URL for a file.
+// The filename is appended (URL-escaped) so the URL ends in the
+// proper extension — Twitter/Slack/OG scrapers and CDN edges sniff
+// content type from the path even when Content-Type headers are
+// correct. Storage's router treats the trailing path segment as
+// cosmetic (httpServeContent looks the file up by id and ignores
+// what comes after `/content`).
+//
+// Example: /files/6/content/14246297_2160_3840_60fps.mp4
+//
+// When name is empty (rare — shouldn't happen on a saved row but
+// defensive against junk data), falls back to the bare id form
+// rather than producing a trailing slash.
 func buildContentURL(f *File) string {
-	return fmt.Sprintf("/files/%d/content", f.ID)
+	if f == nil || f.Name == "" {
+		return fmt.Sprintf("/files/%d/content", f.ID)
+	}
+	return fmt.Sprintf("/files/%d/content/%s", f.ID, url.PathEscape(f.Name))
 }
 
 func extOf(name, contentType string) string {
