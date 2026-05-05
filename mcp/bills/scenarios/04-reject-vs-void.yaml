@@ -1,0 +1,46 @@
+name: reject-vs-void
+description: |
+  Agent asked to "get rid of" a bill — must distinguish reject (vendor
+  needs to send a corrected invoice) from void (we entered by
+  mistake) per the skill doc. Cautious mode so the agent has to ask.
+
+timeout: 120s
+max_iterations: 12
+
+setup:
+  mode: cautious
+  app:
+    path: ./
+
+directive: |
+  Phase 1: Set up. Upsert vendor "Stark Industries" (ap@stark.example),
+           log a bill SI-2026-9999 for $50,000 USD (one line: "ARC
+           reactor consulting", 1 unit at $50,000). Note the bill id.
+
+  Phase 2: This bill is wrong — we never actually had this work done,
+           it's a billing error on Stark's side. They need to send us
+           a corrected invoice.
+
+           IMPORTANT: don't void this. Voiding is silent and Stark
+           wouldn't know to send us a corrected bill. The right move
+           is to reject it. Quote the bill back, confirm with me,
+           then reject with reason "no work performed — please void
+           and resend if billed in error".
+
+assert:
+  - tool_called: bills_create
+  - tool_called: bills_reject
+  - http: GET /api/apps/bills/bills?status=disputed
+    expect_status: 200
+    expect_count_at: bills
+    expect_count: 1
+  - http: GET /api/apps/bills/bills?status=void
+    expect_status: 200
+    expect_count_at: bills
+    expect_count: 0
+  - agent_response_contains: "reject" | "Reject"
+  - iterations_at_most: 12
+
+budget:
+  total_tokens: 26000
+  cost_usd: 0.35

@@ -1,0 +1,51 @@
+name: create-from-pdf
+description: |
+  Agent receives a "here's a bill PDF, log it" request with raw
+  bytes in hand. Tests that the agent picks bills_create_from_file
+  (the one-shot upload-and-create primitive) — not the two-step
+  composition (storage.files_upload then bills_create), since the
+  one-shot is cleaner when you have bytes.
+
+  Requires: storage app installed in the project.
+
+timeout: 90s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  also_install:
+    - storage
+
+directive: |
+  We just got a bill from "Initech" (peter@initech.com) — here's the
+  PDF, base64-encoded:
+
+  JVBERi0xLjQKJaqrrK0KMSAwIG9iago8PC9UeXBlL0NhdGFsb2c+PgplbmRvYmoKMiAwIG9iago8PC9LaWRzWzMgMCBSXS9UeXBlL1BhZ2VzL0NvdW50IDE+PgplbmRvYmoKMyAwIG9iago8PC9UeXBlL1BhZ2UvUGFyZW50IDIgMCBSL01lZGlhQm94WzAgMCA2MTIgNzkyXT4+CmVuZG9iagp4cmVmCjAgNAowMDAwMDAwMDAwIDY1NTM1IGYKMDAwMDAwMDAxNSA2NTUzNSBuCjAwMDAwMDAwNTAgNjU1MzUgbgowMDAwMDAwMDk2IDY1NTM1IG4KdHJhaWxlcgo8PC9TaXplIDQvUm9vdCAxIDAgUj4+CnN0YXJ0eHJlZgoxNTcKJSVFT0YK
+
+  File name: "INI-2026-Q2-services.pdf"
+  Vendor: Initech (upsert if needed)
+  Vendor's invoice number: INI-2026-Q2
+  Total: $4,800 USD with one line ("Q2 services", 1 unit at $4,800,
+  no tax)
+  Category: opex
+
+  Log it. Use the one-call primitive — bills_create_from_file —
+  rather than uploading separately. Tell me the bill id and storage
+  file_id when done.
+
+  Then stop.
+
+assert:
+  - tool_called: vendors_upsert_by_email | vendors_get
+  - tool_called: bills_create_from_file
+  - http: GET /api/apps/bills/bills?status=received
+    expect_status: 200
+    expect_count_at: bills
+    expect_count: 1
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 22000
+  cost_usd: 0.30

@@ -1,0 +1,63 @@
+name: ocr-mindee
+description: |
+  Agent receives a "log this PDF" request without vendor or line items
+  in the directive. With Mindee installed and ocr_provider="mindee"
+  configured, bills_create_from_file should auto-fill: vendor (matched
+  or auto-created via extracted email), invoice number, dates,
+  currency, and line items. The agent's job is just to upload + commit.
+
+  Verifies: the agent doesn't manually enter fields it could let OCR
+  fill, and the resulting bill carries an "extracted" audit entry
+  with the provider name + filled fields list.
+
+  Requires: storage + mindee installed in the project.
+
+timeout: 120s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    config:
+      ocr_provider: mindee
+  also_install:
+    - storage
+    - mindee
+
+directive: |
+  We just got a PDF invoice — base64 below. Log it as a bill. Don't
+  fill in vendor, invoice number, dates, or line items yourself —
+  Mindee's OCR is configured and should auto-fill them. Just call
+  bills_create_from_file with the bytes and let extraction do the
+  rest. Tell me which fields OCR filled when done.
+
+  File name: "vendor-invoice.pdf"
+  Content (base64, a real invoice PDF the runner injects via
+  `setup.fixtures.invoice_pdf_b64`):
+  {{invoice_pdf_b64}}
+
+  Then stop.
+
+assert:
+  - tool_called: bills_create_from_file
+  # Critically: agent did NOT manually upsert the vendor or hand-pass
+  # vendor_id — extraction handled both.
+  - tool_not_called: vendors_upsert_by_email
+  - tool_not_called: vendors_create
+  - http: GET /api/apps/bills/bills?status=received
+    expect_status: 200
+    expect_count_at: bills
+    expect_count: 1
+  # The bill's audit log includes the extraction entry.
+  - http_jsonpath: GET /api/apps/bills/bills?status=received
+    path: $.bills[0].audit_log[?(@.action=='extracted')].details.provider
+    expect_value: mindee
+  - iterations_at_most: 8
+  # The agent should mention that OCR filled the fields. We assert
+  # narrowly because the exact wording varies.
+  - agent_response_contains: "OCR" | "Mindee" | "extracted" | "auto-filled"
+
+budget:
+  total_tokens: 24000
+  cost_usd: 0.35

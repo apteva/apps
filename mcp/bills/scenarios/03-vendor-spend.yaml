@@ -1,0 +1,45 @@
+name: vendor-spend
+description: |
+  Agent answers "what have we spent with this vendor this quarter?"
+  by reaching for vendors_get_context (the pre-flight read).
+  Verifies the agent doesn't over-call (looping bills_search +
+  bill_payments_list when one tool answers the question).
+
+timeout: 90s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Three steps:
+
+  Step 1: Upsert vendor "Initech" (peter@initech.com).
+
+  Step 2: Log + approve + pay three bills for Initech:
+            - INT-2026-001: $300 USD for January's hosting
+            - INT-2026-002: $300 USD for February's hosting
+            - INT-2026-003: $300 USD for March's hosting
+          Pay each one in full by ACH.
+
+  Step 4: Tell me Initech's lifetime spend in plain English. Don't
+          loop multiple search calls — there's a tool that gives you
+          this directly.
+
+  Then stop.
+
+assert:
+  - tool_called: bills_create
+  - tool_called: bill_payments_record
+  - tool_called: vendors_get_context
+  - http: GET /api/apps/bills/bills?status=paid
+    expect_status: 200
+    expect_count_at: bills
+    expect_count: 3
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 28000
+  cost_usd: 0.40

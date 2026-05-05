@@ -1,0 +1,49 @@
+name: attach-existing-pdf
+description: |
+  User has already uploaded a vendor's PDF to storage (file_id is
+  known). Agent must use bills_attach_file to link it — not paste
+  the URL into notes, not re-upload the bytes via
+  bills_create_from_file. Tests the linker primitive.
+
+  Requires: storage app installed in the project.
+
+timeout: 90s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  also_install:
+    - storage
+
+directive: |
+  Two phases:
+
+  Phase 1: Set up. Upload a small PDF to storage via files_upload
+           (any short payload — base64 of "%PDF-1.4\n%%EOF\n" is fine).
+           Note the storage file_id. Then upsert vendor "AWS"
+           (billing@aws.amazon.com), and create a bill for AWS:
+           - their invoice number AWS-2026-04-001
+           - $480 USD, one line "EC2 March", no tax
+           - category "software"
+           - DO NOT set attached_file_id at create time
+
+  Phase 2: Now link the storage file you uploaded in Phase 1 to the
+           bill. Use bills_attach_file. Tell me when done.
+
+  Then stop.
+
+assert:
+  - tool_called: storage.files_upload
+  - tool_called: bills_create
+  - tool_called: bills_attach_file
+  - http: GET /api/apps/bills/bills?status=received
+    expect_status: 200
+    expect_count_at: bills
+    expect_count: 1
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 22000
+  cost_usd: 0.30

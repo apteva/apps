@@ -1,0 +1,49 @@
+name: approve-and-pay
+description: |
+  Agent walks a bill through the full happy-path lifecycle: approve
+  → schedule → record payment. Tests that the agent picks the right
+  sequence of state-transition tools (not bills_update, not
+  invoices_finalize from billing).
+
+timeout: 120s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Two phases:
+
+  Phase 1: Set up. Upsert vendor "Globex" (ap@globex.com), then log a
+           received bill — their invoice number GLBX-2026-0042, dated
+           April 1, due April 30, $1,200 USD for one line ("Q2
+           consulting retainer", no tax). Note the bill id.
+
+  Phase 2: Walk it through:
+            (a) Approve it.
+            (b) Schedule the payment for April 28, by wire.
+            (c) The wire went out today for the full amount —
+                record it.
+
+  Then stop.
+
+assert:
+  - tool_called: bills_create
+  - tool_called: bills_approve
+  - tool_called: bills_schedule_payment
+  - tool_called: bill_payments_record
+  - http: GET /api/apps/bills/bills?status=paid
+    expect_status: 200
+    expect_count_at: bills
+    expect_count: 1
+  - http: GET /api/apps/bills/payments?method=wire
+    expect_status: 200
+    expect_count_at: payments
+    expect_count: 1
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 22000
+  cost_usd: 0.30

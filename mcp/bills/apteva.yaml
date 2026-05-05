@@ -1,0 +1,224 @@
+schema: apteva-app/v1
+
+name: bills
+display_name: Bills
+version: 0.1.2
+description: |
+  Vendors, bills, and bill payments for Apteva agents and human teams.
+  The accounts-payable mirror of the `billing` app — money OUT instead
+  of money in. Per-bill provider field (frozen at create) lets v0.2
+  layer in bank-rail integrations (Mercury / Wise / Bill.com) without
+  schema migration. v0.1.0 is local-only: agents log bills they receive,
+  approve them, schedule payment, and record when the money left the
+  account.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/bills
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/bills/icon.png
+tags: [bills, vendors, accounts-payable, finance]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+  # v0.1.2 — bills can optionally call into an installed integration's
+  # `extract_invoice(file_id)` tool to auto-fill bill fields. Operator
+  # selects the provider via the `ocr_provider` config field below
+  # (e.g. "mindee", "veryfi"). Capability-based auto-discovery lands
+  # in a later app-sdk version; until then, the dependency is
+  # operator-asserted, not manifest-validated.
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: vendors_search
+      description: Filtered vendor search by name / email / external_id / metadata.
+    - name: vendors_get
+      description: Fetch one vendor (snapshot only).
+    - name: vendors_get_context
+      description: Snapshot + open bills + recent payments + lifetime spend — pre-flight read before logging a bill.
+    - name: vendors_upsert_by_email
+      description: Find-or-create by email. Returns was_created. Right-by-default primitive.
+    - name: vendors_update
+      description: Partial-patch a vendor.
+    - name: vendors_merge
+      description: Merge one vendor into another. Reassigns bills + payments.
+    - name: bills_create
+      description: |
+        Log a bill received from a vendor. Status starts at 'received'. Provider
+        arg ('local' | 'mercury' | 'wise' | 'bill_dot_com') falls back to install
+        default. Provider is FROZEN after create; to switch, void and recreate.
+        v0.1.0 only honours 'local'.
+    - name: bills_update
+      description: Partial-patch a bill while it's still in 'received' state. Errors on approved+ bills.
+    - name: bills_approve
+      description: |
+        Transition received → approved. Records the approver in the audit log.
+        Required before scheduling payment. v0.1.0 is single-step approval;
+        v0.2 adds multi-step workflows.
+    - name: bills_reject
+      description: |
+        Transition received|approved → disputed. Records the rejection reason.
+        Use when the bill is wrong (overcharge, duplicate, work not done) and
+        you need the vendor to issue a corrected invoice. Differs from void
+        (which is for "we entered this by mistake").
+    - name: bills_schedule_payment
+      description: |
+        Transition approved → scheduled. Sets scheduled_for + payment_method
+        hint. Doesn't move money (v0.2's bank integrations will). The agent
+        or AP team executes the actual transfer outside, then calls
+        bill_payments_record.
+    - name: bills_void
+      description: Void a bill. Use when entered by mistake. Cannot void paid bills (record an offsetting refund instead). Confirm before voiding.
+    - name: bills_get
+      description: Fetch one bill with line items, payment history, and audit log.
+    - name: bills_search
+      description: Filter bills by status / vendor / due-date range / total range / category / currency.
+    - name: bills_render_pdf
+      description: |
+        Render OUR voucher copy of the bill as a PDF — vendor info + their
+        invoice number + line items + approval trail + payment history.
+        Used for filing / audit, NOT for sending to the vendor (they sent
+        you the original). Default returns base64; save_to_storage=true
+        writes to the storage app and returns a file_id + URL.
+    - name: bills_attach_file
+      description: |
+        Link an existing storage app file to a bill. Use after the user
+        or agent has uploaded the original PDF/email to storage.
+        Validates the file exists in storage. Allowed on any status
+        except void. Replaces an existing attachment if there is one
+        (the previous file is NOT auto-deleted from storage).
+    - name: bills_detach_file
+      description: |
+        Unlink the attached storage file from a bill. Does NOT delete
+        the file from storage — that's a deliberate safety guard, the
+        user can clean up via the storage panel.
+    - name: bills_create_from_file
+      description: |
+        Upload a PDF/image to the storage app AND create a bill row
+        in one call. Saves the agent the storage.files_upload →
+        bills_create two-step. v0.1.2 will add automatic OCR
+        extraction to this same tool.
+    - name: bill_payments_record
+      description: |
+        Record an outbound payment to a vendor (wire / cash / check / ach /
+        card). The money has left the account; this logs it. Updates the
+        bill's amount_paid_cents and transitions to 'paid' when fully
+        covered. method='external_rail' is reserved for v0.2's bank
+        integrations and rejected here.
+    - name: bill_payments_list
+      description: List payments OUT, optionally filtered by vendor / bill / method / date range.
+  ui_panels:
+    - slot: project.page
+      label: Bills
+      icon: receipt-outgoing
+      entry: /ui/BillsPanel.mjs
+  ui_components:
+    - name: bill-card
+      entry: /ui/BillCard.mjs
+      slots:
+        - chat.message_attachment
+      props_schema:
+        type: object
+        required: [bill_id]
+        properties:
+          bill_id:
+            type: integer
+      preview_props:
+        preview: true
+    - name: vendor-card
+      entry: /ui/VendorCard.mjs
+      slots:
+        - chat.message_attachment
+      props_schema:
+        type: object
+        required: [vendor_id]
+        properties:
+          vendor_id:
+            type: integer
+      preview_props:
+        preview: true
+  skills:
+    - name: how-to-use-bills
+      command: /bills
+      body_file: skills/how-to-use-bills.md
+      description: |
+        Bills' mental model + conventions. Load when working with vendors,
+        bills, or outbound payments. Covers the AP lifecycle (received →
+        approved → scheduled → paid), rejection vs void, currency
+        conventions, schedule-then-record discipline. Triggers on:
+        "bill", "vendor", "AP", "pay vendor", "approve invoice from",
+        "wire to", or any bills tool call.
+      metadata:
+        category: finance
+        icon: 📥
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/bills
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/bills.db
+  migrations: migrations/
+
+config_schema:
+  - name: default_provider
+    type: select
+    options: [local, mercury, wise, bill_dot_com]
+    default: local
+    label: Default provider
+    description: |
+      Provider applied when bills_create doesn't specify one. v0.1.0 only
+      honours "local"; bank-rail providers land in v0.2.
+  - name: default_currency
+    type: text
+    default: "USD"
+    label: Default currency
+    description: ISO 4217 code applied to new bills when not specified.
+  - name: default_payment_terms_days
+    type: text
+    default: "30"
+    label: Default payment terms (days)
+    description: |
+      "Net N" — used to compute due_date when bills_create doesn't set one
+      and the vendor doesn't have its own default_payment_terms_days.
+  - name: tax_default_rate_bps
+    type: text
+    default: "0"
+    label: Default tax rate (basis points)
+    description: |
+      1000 = 10.00%. Applied when bill line items don't specify a rate.
+      Note this is the tax YOU were charged (input VAT / sales tax paid),
+      tracked separately from the billing app's output tax in v0.2.
+  - name: ocr_provider
+    type: text
+    default: ""
+    label: OCR provider (slug)
+    description: |
+      Slug of an installed integration that exposes the standard
+      `extract_invoice(file_id)` tool — e.g. "mindee", "veryfi".
+      When set, bills_create_from_file and POST /bills/from-file
+      auto-extract vendor + fields from the uploaded file before
+      creating the bill row. Caller-supplied args always win. Leave
+      empty to disable OCR (default). Note: each call typically
+      bills the provider per page; v0.1.2 doesn't cache.
+  - name: require_w9_before_payment
+    type: select
+    options: ["true", "false"]
+    default: "false"
+    label: Block payments to vendors without W-9 on file
+    description: |
+      US 1099 prerequisite. When true, bill_payments_record refuses to
+      log a payment to a vendor whose w9_received_at is NULL. Operator-set
+      per-install — defaults off so the tool stays unopinionated.
+
+upgrade_policy: auto-patch

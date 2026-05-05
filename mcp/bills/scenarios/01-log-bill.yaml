@@ -1,0 +1,38 @@
+name: log-bill
+description: |
+  Agent receives a free-form "log this bill" request, finds (or
+  creates) the vendor, and records the bill with the right line
+  items + currency. Bread-and-butter AP entry path. Verifies the
+  agent uses bills_create (not invoices_create from the billing app).
+
+timeout: 90s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Log a bill we received from AWS:
+
+    - Vendor: AWS, billing@aws.amazon.com
+    - Their invoice number: AWS-2026-04-001
+    - Issued April 15, 2026, due May 15
+    - One line: $480 EC2 usage in March, no tax
+    - Category: software
+
+  Then stop.
+
+assert:
+  - tool_called: vendors_upsert_by_email | vendors_get | vendors_search
+  - tool_called: bills_create
+  - http: GET /api/apps/bills/bills?status=received
+    expect_status: 200
+    expect_count_at: bills
+    expect_count: 1
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 16000
+  cost_usd: 0.20
