@@ -151,6 +151,14 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 			},
 		},
+		{
+			Name: "deploy_list_routes", Handler: a.toolListRoutes,
+			Description: "List live deployments as a route table for the host-based proxy. Returns [{slug, port, domain, status}]; only deployments with a current_release in 'live' or 'starting' status are returned. Used by the server, not by agents.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+		},
 	}
 }
 
@@ -416,6 +424,41 @@ func (a *App) toolDetachDomain(ctx *sdk.AppCtx, args map[string]any) (any, error
 		res["registrar_error"] = err.Error()
 	}
 	return res, nil
+}
+
+type RouteEntry struct {
+	Slug      string `json:"slug"`
+	ProjectID string `json:"project_id,omitempty"`
+	Port      int    `json:"port"`
+	Domain    string `json:"domain,omitempty"`
+	Status    string `json:"status"`
+}
+
+// toolListRoutes is the server's pull-side: a small, no-secrets shape
+// it can refresh into its route table on a 5-second tick.
+func (a *App) toolListRoutes(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	releases, err := dbListLiveReleases(ctx.AppDB())
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RouteEntry, 0, len(releases))
+	for _, r := range releases {
+		// Cross-project lookup: fetch the deployment without scoping.
+		// Cheap because we only have a handful of live releases.
+		row := ctx.AppDB().QueryRow(
+			`SELECT id, project_id, name, domain FROM deployments WHERE id = ?`,
+			r.DeploymentID)
+		var id int64
+		var projectID, name, domain string
+		if err := row.Scan(&id, &projectID, &name, &domain); err != nil {
+			continue
+		}
+		out = append(out, RouteEntry{
+			Slug: name, ProjectID: projectID, Port: r.Port,
+			Domain: domain, Status: r.Status,
+		})
+	}
+	return map[string]any{"routes": out, "count": len(out)}, nil
 }
 
 // ─── helpers ──────────────────────────────────────────────────────

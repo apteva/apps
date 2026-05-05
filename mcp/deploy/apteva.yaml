@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.3.3
+version: 0.3.4
 description: |
   Local-first builds and runtime supervision for Apteva projects.
   Takes a code repo (from the Code app, a local path, or a git URL),
@@ -39,6 +39,12 @@ requires:
       compatible_app_names: [domains]
       label: Domains app
       hint: Install the Domains app to attach a custom domain to a deployment. Without it, the `domain` field on a deployment is free-text and no DNS is written.
+    - role: certs
+      kind: app
+      required: false
+      compatible_app_names: [certs]
+      label: Certs app
+      hint: Install the Certs app to auto-issue (and renew) Let's Encrypt certs when a domain is attached. Optional — the deploy/domain link works without it; you'll just have HTTP-only custom domains.
 
 provides:
   http_routes:
@@ -66,6 +72,8 @@ provides:
       description: Attach an FQDN to a deployment. Validates ownership against the Domains app and upserts a CNAME (or A) record pointing at this deployment's public host. Args: name (deployment) OR id, fqdn, target?, type? (CNAME|A, default CNAME), ttl?.
     - name: deploy_detach_domain
       description: Clear a deployment's domain. Deletes the DNS record via the Domains app (if known) and clears the link. Args: name OR id.
+    - name: deploy_list_routes
+      description: "Server-side: live deployments as a route table {slug, port, domain, status} for the host-based proxy. Polled by apteva-server's host-router on a 5s tick — not intended for agent calls."
   ui_panels:
     - slot: project.page
       label: Deploy

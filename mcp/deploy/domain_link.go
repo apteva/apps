@@ -70,6 +70,55 @@ func (a *App) domainsAvailable(ctx *sdk.AppCtx) bool {
 	return bound != nil && bound.Kind == "app"
 }
 
+// certsAvailable reports whether the optional Certs app is bound. When
+// true, attach fires cert_issue and detach fires cert_revoke. When
+// false, custom domains stay HTTP-only.
+func (a *App) certsAvailable(ctx *sdk.AppCtx) bool {
+	if ctx == nil {
+		return false
+	}
+	bound := ctx.IntegrationFor("certs")
+	return bound != nil && bound.Kind == "app"
+}
+
+// callCertsTool mirrors callDomainsTool: invoke a tool on the Certs
+// app and unwrap the MCP envelope.
+func callCertsTool(ctx *sdk.AppCtx, tool string, args map[string]any, out any) error {
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return errors.New("platform unavailable")
+	}
+	raw, err := ctx.PlatformAPI().CallApp("certs", tool, args)
+	if err != nil {
+		return fmt.Errorf("call certs.%s: %w", tool, err)
+	}
+	var env struct {
+		Result map[string]any `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return fmt.Errorf("decode certs.%s envelope: %w", tool, err)
+	}
+	if env.Error != nil {
+		return fmt.Errorf("certs.%s: %s", tool, env.Error.Message)
+	}
+	content, _ := env.Result["content"].([]any)
+	if len(content) == 0 {
+		return fmt.Errorf("certs.%s returned empty content", tool)
+	}
+	first, _ := content[0].(map[string]any)
+	text, _ := first["text"].(string)
+	if text == "" {
+		return fmt.Errorf("certs.%s returned no text payload", tool)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.Unmarshal([]byte(text), out)
+}
+
 // resolveApex calls domains.domain_list and finds the registered apex
 // that's a suffix of fqdn ("app.acme.com" → "acme.com"). Errors if
 // the fqdn doesn't sit under any registered domain — that's the
@@ -180,6 +229,19 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec
 	emit("deploy.domain.attached", map[string]any{
 		"deployment_id": d.ID, "fqdn": fqdn, "apex": apex, "type": rtype,
 	})
+
+	// Fire-and-forget cert issuance when the Certs app is installed.
+	// Issuance is async on the certs side too — the panel polls
+	// cert status via /api/_meta and renders the badge.
+	if a.certsAvailable(ctx) {
+		if err := callCertsTool(ctx, "cert_issue", map[string]any{"fqdn": fqdn}, nil); err != nil {
+			// Don't fail attach: the DNS record is good and the user
+			// can retry cert_issue later. Log via emit.
+			emit("deploy.domain.cert_kickoff_failed", map[string]any{
+				"deployment_id": d.ID, "fqdn": fqdn, "error": err.Error(),
+			})
+		}
+	}
 	return nil
 }
 
@@ -213,10 +275,48 @@ func (a *App) detachDomain(ctx *sdk.AppCtx, d *Deployment) error {
 	if err := dbSetDeploymentDomain(globalCtx.AppDB(), d.ID, "", "", ""); err != nil {
 		return err
 	}
+	if a.certsAvailable(ctx) && d.Domain != "" {
+		_ = callCertsTool(ctx, "cert_revoke", map[string]any{"fqdn": d.Domain}, nil)
+	}
 	emit("deploy.domain.detached", map[string]any{
 		"deployment_id": d.ID, "fqdn": d.Domain,
 	})
 	return deleteErr
+}
+
+// certStatusFor returns a small struct describing the cert state of
+// the deployment's FQDN, or nil when no cert exists / certs app not
+// installed. Used by /api/_meta so the panel can render a badge
+// without making the UI talk to certs directly.
+type certStatusEntry struct {
+	FQDN      string `json:"fqdn"`
+	Status    string `json:"status"`
+	ExpiresAt string `json:"expires_at,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+func (a *App) certStatusFor(ctx *sdk.AppCtx, fqdn string) *certStatusEntry {
+	if !a.certsAvailable(ctx) || fqdn == "" {
+		return nil
+	}
+	var resp struct {
+		Cert *struct {
+			FQDN      string `json:"fqdn"`
+			Status    string `json:"status"`
+			ExpiresAt string `json:"expires_at,omitempty"`
+			Error     string `json:"error,omitempty"`
+		} `json:"cert"`
+	}
+	if err := callCertsTool(ctx, "cert_get", map[string]any{"fqdn": fqdn}, &resp); err != nil {
+		return nil
+	}
+	if resp.Cert == nil {
+		return nil
+	}
+	return &certStatusEntry{
+		FQDN: resp.Cert.FQDN, Status: resp.Cert.Status,
+		ExpiresAt: resp.Cert.ExpiresAt, Error: resp.Cert.Error,
+	}
 }
 
 func splitRecordID(s string) (apex, rtype string, ok bool) {

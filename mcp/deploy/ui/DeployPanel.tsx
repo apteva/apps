@@ -86,10 +86,17 @@ interface Deployment {
   updated_at: string;
 }
 
+interface CertStatus {
+  status: "pending" | "issuing" | "live" | "failed" | "revoked";
+  expires_at?: string;
+  error?: string;
+}
 interface MetaInfo {
   domains_available: boolean;
+  certs_available: boolean;
   domains: { name: string }[];
   public_host: string;
+  certs: Record<string, CertStatus>;
 }
 
 interface Build {
@@ -437,14 +444,17 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                 >{detail.url} ↗</a>
               )}
               {detail.deployment.domain ? (
-                <button
-                  type="button"
-                  onClick={handleDetachDomain}
-                  title={detail.deployment.domain_attached_at ? `Attached ${detail.deployment.domain_attached_at}` : "Free-text domain (no DNS managed)"}
-                  className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input"
-                >
-                  {detail.deployment.domain_attached_at ? "Detach" : "Clear"} {detail.deployment.domain}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleDetachDomain}
+                    title={detail.deployment.domain_attached_at ? `Attached ${detail.deployment.domain_attached_at}` : "Free-text domain (no DNS managed)"}
+                    className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input"
+                  >
+                    {detail.deployment.domain_attached_at ? "Detach" : "Clear"} {detail.deployment.domain}
+                  </button>
+                  {meta?.certs_available && <CertBadge status={meta.certs[detail.deployment.domain]} />}
+                </div>
               ) : meta?.domains_available && (
                 <button
                   type="button"
@@ -1110,4 +1120,42 @@ function AttachDomainDialog({
       </form>
     </div>
   );
+}
+
+// ─── CertBadge ────────────────────────────────────────────────────
+//
+// One-glance cert status next to an attached domain. The Certs app
+// owns issuance state — this is purely a render of the meta payload.
+
+function CertBadge({ status }: { status?: CertStatus }) {
+  if (!status) {
+    return <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-dim">no cert</span>;
+  }
+  const cls =
+    status.status === "live"     ? "bg-green/15 text-green" :
+    status.status === "issuing"  ? "bg-blue/15 text-blue" :
+    status.status === "pending"  ? "bg-blue/15 text-blue" :
+    status.status === "failed"   ? "bg-red/15 text-red" :
+                                   "bg-border text-text-dim";
+  const label =
+    status.status === "live"    ? `cert · expires ${formatExpires(status.expires_at)}` :
+    status.status === "issuing" ? "cert · issuing…" :
+    status.status === "pending" ? "cert · pending" :
+    status.status === "failed"  ? "cert · failed" :
+                                  `cert · ${status.status}`;
+  return (
+    <span
+      className={`text-[10px] px-1.5 py-0.5 rounded ${cls}`}
+      title={status.error || (status.expires_at ? `expires ${status.expires_at}` : "")}
+    >
+      {label}
+    </span>
+  );
+}
+
+function formatExpires(iso?: string): string {
+  if (!iso) return "?";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "?";
+  return d.toISOString().slice(0, 10);
 }

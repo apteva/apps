@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.3.3
+version: 0.3.4
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
@@ -60,6 +60,12 @@ requires:
       compatible_app_names: [domains]
       label: Domains app
       hint: Install the Domains app to attach a custom domain to a deployment.
+    - role: certs
+      kind: app
+      required: false
+      compatible_app_names: [certs]
+      label: Certs app
+      hint: Install the Certs app to auto-issue Let's Encrypt certs on attach.
 provides:
   http_routes:
     - prefix: /
@@ -75,6 +81,7 @@ provides:
     - { name: deploy_destroy, description: "Stop, drop, delete artifacts." }
     - { name: deploy_attach_domain, description: "Attach an FQDN to a deployment via the Domains app." }
     - { name: deploy_detach_domain, description: "Clear a deployment's domain link." }
+    - { name: deploy_list_routes, description: "Server-side: live deployments as a route table for the host-based proxy. Polled by apteva-server's host-router; not for agents." }
   ui_panels:
     - { slot: project.page, label: "Deploy", icon: rocket, entry: /ui/DeployPanel.mjs }
 runtime:
@@ -213,17 +220,21 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	}
 }
 
-// handleMeta exposes whether the optional Domains app is installed +
-// the registered domains (so the panel can render a picker). Cheap
-// fan-out to the Domains app — the panel calls this once per load.
+// handleMeta exposes whether the optional Domains and Certs apps are
+// installed + registered domains and per-deployment cert status. The
+// panel calls this once per load (and on relevant events) so the UI
+// never has to talk to other apps directly.
 func (a *App) handleMeta(w http.ResponseWriter, r *http.Request) {
-	avail := a.domainsAvailable(globalCtx)
+	domAvail := a.domainsAvailable(globalCtx)
+	certsOn := a.certsAvailable(globalCtx)
 	out := map[string]any{
-		"domains_available": avail,
+		"domains_available": domAvail,
+		"certs_available":   certsOn,
 		"domains":           []any{},
 		"public_host":       configOr(globalCtx, "public_host", ""),
+		"certs":             map[string]any{}, // fqdn → {status, expires_at, error}
 	}
-	if avail {
+	if domAvail {
 		var resp struct {
 			Domains []struct {
 				Name string `json:"name"`
@@ -235,6 +246,29 @@ func (a *App) handleMeta(w http.ResponseWriter, r *http.Request) {
 				names = append(names, map[string]any{"name": d.Name})
 			}
 			out["domains"] = names
+		}
+	}
+	if certsOn {
+		// One cert_list call is cheaper than one cert_get per
+		// deployment with a domain; fold into a {fqdn → status} map.
+		var resp struct {
+			Certs []struct {
+				FQDN      string `json:"fqdn"`
+				Status    string `json:"status"`
+				ExpiresAt string `json:"expires_at,omitempty"`
+				Error     string `json:"error,omitempty"`
+			} `json:"certs"`
+		}
+		if err := callCertsTool(globalCtx, "cert_list", map[string]any{}, &resp); err == nil {
+			byFQDN := make(map[string]any, len(resp.Certs))
+			for _, c := range resp.Certs {
+				byFQDN[c.FQDN] = map[string]any{
+					"status":     c.Status,
+					"expires_at": c.ExpiresAt,
+					"error":      c.Error,
+				}
+			}
+			out["certs"] = byFQDN
 		}
 	}
 	httpJSON(w, out)
