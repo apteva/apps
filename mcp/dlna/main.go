@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: dlna
 display_name: DLNA Server
-version: 0.1.10
+version: 0.1.11
 description: Local-LAN UPnP/DLNA MediaServer for Apteva.
 author: Apteva
 scopes: [project, global]
@@ -865,12 +865,14 @@ func (a *App) recentItems(ctx context.Context, start, count int) ([]didlItem, er
 	if err != nil {
 		return nil, err
 	}
-	var files []storageFile
-	if err := json.Unmarshal(raw, &files); err != nil {
+	var env struct {
+		Files []storageFile `json:"files"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, err
 	}
-	out := make([]didlItem, 0, len(files))
-	for _, f := range files {
+	out := make([]didlItem, 0, len(env.Files))
+	for _, f := range env.Files {
 		out = append(out, a.fileToDIDL(ctx, f, "0/recent"))
 	}
 	return out, nil
