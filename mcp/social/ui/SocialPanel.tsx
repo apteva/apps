@@ -90,6 +90,21 @@ interface PlatformInfo {
   available: boolean;
 }
 
+// Each multi-destination platform exposes a different concept in its
+// picker — FB shows pages, IG shows business accounts (linked via FB
+// pages), YouTube shows channels. Used to label the picker title,
+// counter, search placeholder, and AddAccount hint without scattering
+// platform checks all over the UI.
+const PICKER_KIND: Record<string, { singular: string; plural: string }> = {
+  facebook: { singular: "page", plural: "pages" },
+  instagram: { singular: "account", plural: "accounts" },
+  youtube: { singular: "channel", plural: "channels" },
+};
+
+function pickerKind(platform: string): { singular: string; plural: string } {
+  return PICKER_KIND[platform] || { singular: "destination", plural: "destinations" };
+}
+
 interface PageEntry {
   id: string;
   name: string;
@@ -942,7 +957,7 @@ function AddAccountDialog({
               >
                 <span className="text-text">{p.display_name}</span>
                 {p.requires_picker && p.available && (
-                  <span className="text-text-dim text-xs ml-2">(page picker after auth)</span>
+                  <span className="text-text-dim text-xs ml-2">({pickerKind(p.platform).singular} picker after auth)</span>
                 )}
                 {!p.available && (
                   <span className="text-text-dim text-xs ml-2">— integration not installed</span>
@@ -963,12 +978,15 @@ function PagePicker({
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState("");
   const [busyID, setBusyID] = useState<string>("");
+  const [platform, setPlatform] = useState<string>("");
+  const kind = pickerKind(platform);
 
   useEffect(() => {
     fetch(`${API}/accounts/${pendingId}/pages`, { credentials: "same-origin" })
       .then((r) => r.json())
       .then((d) => {
         setPages(d.pages || []);
+        setPlatform(d.platform || "");
         setLoading(false);
         if (!d.requires_picker) {
           onClose();
@@ -1013,11 +1031,11 @@ function PagePicker({
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-border">
           <div>
-            <div className="text-text font-medium">Pick which page to connect</div>
+            <div className="text-text font-medium">Pick which {kind.singular} to connect</div>
             {!loading && pages.length > 0 && (
               <div className="text-text-dim text-xs mt-0.5">
                 {filtered.length === pages.length
-                  ? `${pages.length} page${pages.length === 1 ? "" : "s"}`
+                  ? `${pages.length} ${pages.length === 1 ? kind.singular : kind.plural}`
                   : `${filtered.length} of ${pages.length}`}
               </div>
             )}
@@ -1038,7 +1056,7 @@ function PagePicker({
               autoFocus
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
-              placeholder="Search pages…"
+              placeholder={`Search ${kind.plural}…`}
               className="w-full bg-bg-input border border-border rounded px-3 py-2 text-sm text-text focus:outline-none focus:border-accent"
             />
           </div>
@@ -1048,10 +1066,10 @@ function PagePicker({
           {loading ? (
             <div className="text-text-dim text-sm py-8 text-center">Loading…</div>
           ) : pages.length === 0 ? (
-            <div className="text-text-dim text-sm py-8 text-center">No pages found.</div>
+            <div className="text-text-dim text-sm py-8 text-center">No {kind.plural} found.</div>
           ) : filtered.length === 0 ? (
             <div className="text-text-dim text-sm py-8 text-center">
-              No pages match "{filter}".
+              No {kind.plural} match "{filter}".
             </div>
           ) : (
             <div className="flex flex-col gap-1">

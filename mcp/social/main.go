@@ -692,6 +692,7 @@ func (a *App) toolAccountListPendingPages(ctx *sdk.AppCtx, args map[string]any) 
 		return map[string]any{
 			"pages":           []any{},
 			"requires_picker": false,
+			"platform":        row.platform,
 			"hint":            fmt.Sprintf("%s has no page-selection step — call account_finalize with this pending_account_id (no page_id needed)", def.DisplayName),
 		}, nil
 	}
@@ -708,6 +709,7 @@ func (a *App) toolAccountListPendingPages(ctx *sdk.AppCtx, args map[string]any) 
 	return map[string]any{
 		"pages":           pages,
 		"requires_picker": true,
+		"platform":        row.platform,
 	}, nil
 }
 
