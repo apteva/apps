@@ -88,6 +88,19 @@ interface PlatformInfo {
   // it, OAuth start would fail with "missing client_id" — we gray
   // out the button instead of letting the user click into an error.
   available: boolean;
+  // option_fields — per-platform overrides the compose dialog can
+  // surface as inputs. Empty when the platform has nothing to
+  // customise (Twitter / FB / IG / LinkedIn / TikTok in v1; only
+  // YouTube exposes title / visibility / category / tags today).
+  option_fields?: OptionField[];
+}
+
+interface OptionField {
+  name: string;
+  label: string;
+  type: "text" | "textarea" | "select" | "tags";
+  options?: string[];
+  help?: string;
 }
 
 // Each multi-destination platform exposes a different concept in its
@@ -335,6 +348,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
       {composeOpen && (
         <ComposeDialog
           accounts={accounts}
+          platforms={platforms}
           activeProfile={activeProfile}
           onClose={() => setComposeOpen(false)}
           onCreated={() => { loadPosts(); setComposeOpen(false); setTab("posts"); }}
@@ -1149,10 +1163,98 @@ function PagePicker({
 // just shown as an overlay instead of swapping the tab body. Matches
 // the pattern apps/mcp/jobs uses for "+ New job" → CreateJobDialog.
 
+// OptionFieldInput renders one platform-specific override input —
+// text, textarea, select dropdown, or comma-separated tags — based
+// on the platformDef's declared field type. Server tells us which
+// fields exist for which platform via /platforms; this component
+// just reflects what the server says without hard-coding any
+// platform's schema in the panel.
+function OptionFieldInput({
+  field, value, onChange,
+}: {
+  field: OptionField;
+  value: any;
+  onChange: (v: any) => void;
+}) {
+  const labelEl = (
+    <div className="flex items-baseline gap-2">
+      <label className="text-xs uppercase tracking-wide text-text-dim">{field.label}</label>
+      {field.help && <span className="text-text-dim text-[10px]">{field.help}</span>}
+    </div>
+  );
+
+  if (field.type === "select") {
+    return (
+      <div className="flex flex-col gap-1">
+        {labelEl}
+        <select
+          value={typeof value === "string" ? value : ""}
+          onChange={(e) => onChange(e.target.value)}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+        >
+          <option value="">Use default</option>
+          {(field.options || []).map((opt) => (
+            <option key={opt} value={opt}>{opt}</option>
+          ))}
+        </select>
+      </div>
+    );
+  }
+
+  if (field.type === "textarea") {
+    return (
+      <div className="flex flex-col gap-1">
+        {labelEl}
+        <textarea
+          value={typeof value === "string" ? value : ""}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="Override the default body for this target"
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm min-h-[80px] resize-y"
+        />
+      </div>
+    );
+  }
+
+  if (field.type === "tags") {
+    // Comma-separated input → string[]. Empty string clears.
+    const asString = Array.isArray(value) ? value.join(", ") : (typeof value === "string" ? value : "");
+    return (
+      <div className="flex flex-col gap-1">
+        {labelEl}
+        <input
+          type="text"
+          value={asString}
+          onChange={(e) => {
+            const raw = e.target.value;
+            if (raw.trim() === "") onChange("");
+            else onChange(raw.split(",").map((t) => t.trim()).filter(Boolean));
+          }}
+          placeholder="comma, separated, tags"
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+        />
+      </div>
+    );
+  }
+
+  // Default: plain text input
+  return (
+    <div className="flex flex-col gap-1">
+      {labelEl}
+      <input
+        type="text"
+        value={typeof value === "string" ? value : ""}
+        onChange={(e) => onChange(e.target.value)}
+        className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+      />
+    </div>
+  );
+}
+
 function ComposeDialog({
-  accounts, activeProfile, onClose, onCreated, setStatus,
+  accounts, platforms, activeProfile, onClose, onCreated, setStatus,
 }: {
   accounts: SocialAccount[];
+  platforms: PlatformInfo[];
   activeProfile: Profile | null;
   onClose: () => void;
   onCreated: () => void;
@@ -1162,6 +1264,14 @@ function ComposeDialog({
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [scheduleAt, setScheduleAt] = useState("");
   const [busy, setBusy] = useState(false);
+  // Per-account overrides keyed by account id. Sparse — only accounts
+  // the user has actually customized appear here. At submit time, if
+  // any account has non-empty options the call uses targets[]; otherwise
+  // the simple social_account_ids[] form ships.
+  const [accountOptions, setAccountOptions] = useState<Record<number, Record<string, any>>>({});
+  // Which account's options are currently expanded inline. One at a
+  // time keeps the form readable; null = nothing expanded.
+  const [expanded, setExpanded] = useState<number | null>(null);
   // Media attached to the post. We upload immediately to the storage app
   // (so the post_create call only carries IDs, not bytes) and remember the
   // returned id + a local preview URL. The previewURL is a local
@@ -1171,6 +1281,41 @@ function ComposeDialog({
   const [uploading, setUploading] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Quick lookup: option_fields by platform name. Empty array when the
+  // platform has no per-target customisation today.
+  const fieldsByPlatform: Record<string, OptionField[]> = {};
+  for (const p of platforms) fieldsByPlatform[p.platform] = p.option_fields || [];
+
+  // Returns true when the given account's stored options have any
+  // non-empty value — drives whether we count the account as customized
+  // (shows a "•" badge on the expander button + decides targets[] vs
+  // social_account_ids[] at submit time).
+  const isCustomized = (accountId: number): boolean => {
+    const opts = accountOptions[accountId];
+    if (!opts) return false;
+    return Object.values(opts).some((v) =>
+      v != null && (typeof v === "string" ? v.trim() !== "" : true)
+    );
+  };
+
+  const setAccountOption = (accountId: number, key: string, value: any) => {
+    setAccountOptions((prev) => {
+      const next = { ...prev, [accountId]: { ...(prev[accountId] || {}), [key]: value } };
+      // If the field is being cleared, remove the key entirely so the
+      // submit-shape decision doesn't see a phantom empty string.
+      if (typeof value === "string" && value.trim() === "") {
+        const acct = { ...next[accountId] };
+        delete acct[key];
+        if (Object.keys(acct).length === 0) {
+          const { [accountId]: _drop, ...rest } = next;
+          return rest;
+        }
+        next[accountId] = acct;
+      }
+      return next;
+    });
+  };
 
   // Revoke any object URLs we created when the modal closes.
   useEffect(() => {
@@ -1263,22 +1408,36 @@ function ComposeDialog({
     setBusy(true);
     setStatus("Posting…");
     try {
+      // Choose between the simple multicast shape (social_account_ids[])
+      // and the per-target shape (targets[]). Use targets[] only when
+      // at least one selected account has non-empty options — keeps the
+      // common case as terse as it was before.
+      const selectedIds = Array.from(selected);
+      const anyCustomized = selectedIds.some((id) => isCustomized(id));
+      const payload: Record<string, any> = {
+        body,
+        schedule_at: scheduleAt || undefined,
+        media_storage_ids: media.length > 0 ? media.map((m) => m.id) : undefined,
+        // When the panel is scoped to one profile, tag the post
+        // with that profile_id so post_list filtering keeps it
+        // visible. Without this, mixed-profile sessions could
+        // create "no profile" posts that disappear from filtered
+        // views even though their accounts are tagged.
+        profile_id: activeProfile?.id,
+      };
+      if (anyCustomized) {
+        payload.targets = selectedIds.map((id) => ({
+          social_account_id: id,
+          ...(accountOptions[id] || {}),
+        }));
+      } else {
+        payload.social_account_ids = selectedIds;
+      }
       const res = await fetch(`${API}/posts`, {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          body,
-          social_account_ids: Array.from(selected),
-          schedule_at: scheduleAt || undefined,
-          media_storage_ids: media.length > 0 ? media.map((m) => m.id) : undefined,
-          // When the panel is scoped to one profile, tag the post
-          // with that profile_id so post_list filtering keeps it
-          // visible. Without this, mixed-profile sessions could
-          // create "no profile" posts that disappear from filtered
-          // views even though their accounts are tagged.
-          profile_id: activeProfile?.id,
-        }),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) {
         setStatus("Post failed: " + (await res.text()));
@@ -1385,32 +1544,73 @@ function ComposeDialog({
 
         <div className="flex flex-col gap-1">
           <label className="text-xs uppercase tracking-wide text-text-dim">Post to</label>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            {accounts.map((a) => (
-              <label
-                key={a.id}
-                className={
-                  "flex items-center gap-3 px-3 py-2 border rounded cursor-pointer transition-colors " +
-                  (selected.has(a.id) ? "border-accent bg-bg-card" : "border-border hover:border-text-dim")
-                }
-              >
-                <input
-                  type="checkbox"
-                  checked={selected.has(a.id)}
-                  onChange={() => toggle(a.id)}
-                  className="accent-accent"
-                />
-                {a.avatar_url ? (
-                  <img src={a.avatar_url} alt="" className="w-6 h-6 rounded-full" />
-                ) : (
-                  <div className="w-6 h-6 rounded-full bg-bg-input" />
-                )}
-                <div className="flex-1 min-w-0">
-                  <div className="text-text text-sm truncate">{a.display_name}</div>
-                  <div className="text-text-dim text-xs">{a.platform}</div>
+          <div className="flex flex-col gap-2">
+            {accounts.map((a) => {
+              const isSelected = selected.has(a.id);
+              const fields = fieldsByPlatform[a.platform] || [];
+              const hasCustomization = fields.length > 0;
+              const isExpanded = expanded === a.id;
+              const customized = isCustomized(a.id);
+              return (
+                <div
+                  key={a.id}
+                  className={
+                    "border rounded transition-colors " +
+                    (isSelected ? "border-accent bg-bg-card" : "border-border")
+                  }
+                >
+                  <div className="flex items-center gap-3 px-3 py-2">
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => toggle(a.id)}
+                      className="accent-accent"
+                    />
+                    {a.avatar_url ? (
+                      <img src={a.avatar_url} alt="" className="w-6 h-6 rounded-full" />
+                    ) : (
+                      <div className="w-6 h-6 rounded-full bg-bg-input" />
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <div className="text-text text-sm truncate">{a.display_name}</div>
+                      <div className="text-text-dim text-xs">{a.platform}</div>
+                    </div>
+                    {isSelected && hasCustomization && (
+                      <button
+                        type="button"
+                        onClick={() => setExpanded(isExpanded ? null : a.id)}
+                        className={
+                          "text-xs px-2 py-1 rounded border transition-colors " +
+                          (customized
+                            ? "border-accent text-accent"
+                            : "border-border text-text-dim hover:text-text hover:border-text-dim")
+                        }
+                        title={
+                          customized
+                            ? "This target has custom settings"
+                            : "Set per-target overrides for this account"
+                        }
+                      >
+                        {customized ? "Customized" : "Customize"}
+                        {customized && <span className="ml-1 text-accent">•</span>}
+                      </button>
+                    )}
+                  </div>
+                  {isSelected && hasCustomization && isExpanded && (
+                    <div className="border-t border-border px-3 py-3 flex flex-col gap-3 bg-bg/40">
+                      {fields.map((f) => (
+                        <OptionFieldInput
+                          key={f.name}
+                          field={f}
+                          value={accountOptions[a.id]?.[f.name]}
+                          onChange={(v) => setAccountOption(a.id, f.name, v)}
+                        />
+                      ))}
+                    </div>
+                  )}
                 </div>
-              </label>
-            ))}
+              );
+            })}
           </div>
         </div>
 

@@ -196,6 +196,25 @@ type platformDef struct {
 	// the upstream copy in place.
 	DeleteTool    string
 	DeleteIDField string // input field carrying platform_post_id ("tweet_id", "postId", "id"…)
+	// OptionFields declares the per-platform override keys that can
+	// appear under post.platform_options[platform]. Drives both the
+	// /platforms endpoint (so the UI knows what controls to render)
+	// and tool-level validation (unknown keys get a warn-but-accept).
+	// Empty for platforms with no overrides today (Twitter, FB, IG,
+	// LinkedIn, TikTok in v1).
+	OptionFields []optionField
+}
+
+// optionField describes one customizable knob on a platform — its key
+// name (matches what publish strategies read), a UI-friendly label,
+// the input type the panel should render, and an enum of allowed
+// values when applicable.
+type optionField struct {
+	Name    string   `json:"name"`
+	Label   string   `json:"label"`
+	Type    string   `json:"type"` // "text" | "textarea" | "select" | "tags"
+	Options []string `json:"options,omitempty"`
+	Help    string   `json:"help,omitempty"`
 }
 
 // platforms is the static registry. v0.1 ships with two — Twitter
@@ -354,6 +373,21 @@ var platforms = map[string]platformDef{
 		// until upload lands — no harm in pre-wiring it.
 		DeleteTool:    "delete_video",
 		DeleteIDField: "id",
+		// publishYoutube reads these keys from posts.platform_options.youtube
+		// at publish time. `body` overrides the post-level body when
+		// populating snippet.description; `title` is required upstream
+		// so we fall back to first 80 chars of body when missing.
+		OptionFields: []optionField{
+			{Name: "title", Type: "text", Label: "Title",
+				Help: "Required by YouTube. Falls back to the first 80 chars of body when blank. Max 100 chars."},
+			{Name: "body", Type: "textarea", Label: "Description",
+				Help: "Shown on the video page. Falls back to the post body when blank."},
+			{Name: "visibility", Type: "select", Label: "Visibility",
+				Options: []string{"public", "unlisted", "private"},
+				Help: "Defaults to private if blank — safer for first-pass uploads."},
+			{Name: "category", Type: "text", Label: "Category ID",
+				Help: "YouTube numeric category id (e.g. 22 = People & Blogs, 27 = Education). Optional."},
+		},
 	},
 }
 
@@ -471,14 +505,27 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolAccountDisconnect,
 		},
 		{
-			Name:        "post_create",
-			Description: "Create a post and publish (or schedule) it to N social accounts. Args: body, social_account_ids[], schedule_at? (RFC3339; omit = post now), media_storage_ids? (file ids from the storage app).",
+			Name: "post_create",
+			Description: "Create a post and publish (or schedule) it to N social accounts. " +
+				"Pass EITHER social_account_ids[] (simple multicast — every target uses the post body) " +
+				"OR targets[] (when you want per-target overrides). The two are mutually exclusive. " +
+				"Each target object: {social_account_id (required), body? (override text for this target), " +
+				"plus platform-specific keys for the target's platform}. " +
+				"Today: youtube accepts {title, body, visibility (public|unlisted|private), category, tags[]}. " +
+				"Other platforms (twitter, facebook, instagram, linkedin, tiktok) accept just {body}. " +
+				"Body resolution per target: target.body if set, else post-level body. " +
+				"Args: body, schedule_at? (RFC3339; omit = post now), media_storage_ids? (file ids).",
 			InputSchema: schemaObject(map[string]any{
 				"body":               map[string]any{"type": "string"},
 				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
-				"schedule_at":        map[string]any{"type": "string"},
-				"media_storage_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
-			}, []string{"body", "social_account_ids"}),
+				"targets": map[string]any{
+					"type":        "array",
+					"description": "Per-target overrides. Each entry: {social_account_id (required), body?, plus platform-specific keys like title/visibility for YouTube}. Mutually exclusive with social_account_ids.",
+					"items":       map[string]any{"type": "object"},
+				},
+				"schedule_at":       map[string]any{"type": "string"},
+				"media_storage_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+			}, []string{"body"}),
 			Handler: a.toolPostCreate,
 		},
 		{
@@ -935,23 +982,110 @@ func (a *App) toolAccountDisconnect(ctx *sdk.AppCtx, args map[string]any) (any, 
 
 // ─── post_create ──────────────────────────────────────────────────
 
+// validateTargetOptions checks each target's options keys against the
+// declared OptionFields for that target's platform and logs a warning
+// on unknown keys. It does NOT reject — forward-compat matters more
+// than strict validation here. Empty platforms (or platforms with
+// only `body` semantics) accept just `body`.
+func (a *App) validateTargetOptions(ctx *sdk.AppCtx, targets []targetSpec) {
+	pid := os.Getenv("APTEVA_PROJECT_ID")
+	for _, t := range targets {
+		if len(t.Options) == 0 {
+			continue
+		}
+		var platform string
+		_ = ctx.AppDB().QueryRow(
+			`SELECT platform FROM social_accounts WHERE id=? AND project_id=?`,
+			t.SocialAccountID, pid,
+		).Scan(&platform)
+		if platform == "" {
+			continue // unknown account — finalize will catch it
+		}
+		def := platforms[platform]
+		// Build the set of accepted keys: every platform implicitly
+		// accepts `body` as an override; OptionFields adds the rest.
+		ok := map[string]bool{"body": true}
+		for _, f := range def.OptionFields {
+			ok[f.Name] = true
+		}
+		for k := range t.Options {
+			if !ok[k] {
+				ctx.Logger().Warn("post_create: unknown option key",
+					"platform", platform, "social_account_id", t.SocialAccountID, "key", k)
+			}
+		}
+	}
+}
+
+// targetSpec is the normalised form of one entry in post_create's
+// targets[] array (or a synthetic version of social_account_ids[]). The
+// raw options map is kept verbatim so the publish-path strategies can
+// pick out whatever keys their platform cares about; unknown keys are
+// stored as-is for forward compatibility.
+type targetSpec struct {
+	SocialAccountID int64
+	Options         map[string]any // verbatim — body, title, visibility, etc.
+}
+
 func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	body, _ := args["body"].(string)
 	if strings.TrimSpace(body) == "" {
 		return nil, errors.New("body required")
 	}
-	rawAccts, _ := args["social_account_ids"].([]any)
-	if len(rawAccts) == 0 {
-		return nil, errors.New("social_account_ids required (at least one)")
+
+	// Accept either form: social_account_ids[] (simple multicast) or
+	// targets[] (per-target overrides). Mutually exclusive — passing
+	// both is ambiguous and we refuse rather than guess which to use.
+	rawAccts, hasAccts := args["social_account_ids"].([]any)
+	rawTargets, hasTargets := args["targets"].([]any)
+	if hasAccts && hasTargets && len(rawAccts) > 0 && len(rawTargets) > 0 {
+		return mcpError("pass either social_account_ids[] OR targets[], not both"), nil
 	}
-	acctIDs := make([]int64, 0, len(rawAccts))
-	for _, v := range rawAccts {
-		if id := toInt64Loose(v); id > 0 {
-			acctIDs = append(acctIDs, id)
+	var targets []targetSpec
+	switch {
+	case len(rawTargets) > 0:
+		for i, t := range rawTargets {
+			m, ok := t.(map[string]any)
+			if !ok {
+				return mcpError(fmt.Sprintf("targets[%d] must be an object {social_account_id, …}", i)), nil
+			}
+			id := toInt64Loose(m["social_account_id"])
+			if id <= 0 {
+				return mcpError(fmt.Sprintf("targets[%d].social_account_id required", i)), nil
+			}
+			// Strip the id from the options map so it doesn't get
+			// re-serialised inside the per-target options blob.
+			opts := make(map[string]any, len(m))
+			for k, v := range m {
+				if k == "social_account_id" {
+					continue
+				}
+				opts[k] = v
+			}
+			targets = append(targets, targetSpec{SocialAccountID: id, Options: opts})
 		}
+	case len(rawAccts) > 0:
+		for _, v := range rawAccts {
+			if id := toInt64Loose(v); id > 0 {
+				targets = append(targets, targetSpec{SocialAccountID: id})
+			}
+		}
+	default:
+		return nil, errors.New("social_account_ids or targets required (at least one)")
 	}
-	if len(acctIDs) == 0 {
-		return nil, errors.New("social_account_ids required (at least one)")
+	if len(targets) == 0 {
+		return nil, errors.New("social_account_ids or targets required (at least one)")
+	}
+	// Validate per-target options against each target's platform's
+	// declared OptionFields. Unknown keys log a warning but don't fail
+	// the call (forward-compat: an agent passing a field that lands
+	// in a future version still works).
+	a.validateTargetOptions(ctx, targets)
+	// Flat list of just the account ids — used by profile-spanning
+	// resolution below, same shape the prior code path relied on.
+	acctIDs := make([]int64, len(targets))
+	for i, t := range targets {
+		acctIDs[i] = t.SocialAccountID
 	}
 	scheduleAt, _ := args["schedule_at"].(string)
 	mediaIDsRaw, _ := args["media_storage_ids"].([]any)
@@ -1013,14 +1147,21 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	postID, _ := res.LastInsertId()
 
-	// Fan out: one target row per requested social account.
-	for _, aid := range acctIDs {
+	// Fan out: one target row per requested social account, carrying
+	// any per-target overrides as a JSON blob in post_targets.options.
+	for _, t := range targets {
+		var optsJSON sql.NullString
+		if len(t.Options) > 0 {
+			b, _ := json.Marshal(t.Options)
+			optsJSON = sql.NullString{String: string(b), Valid: true}
+		}
 		_, err := ctx.AppDB().Exec(
-			`INSERT INTO post_targets (post_id, social_account_id) VALUES (?, ?)`,
-			postID, aid,
+			`INSERT INTO post_targets (post_id, social_account_id, options) VALUES (?, ?, ?)`,
+			postID, t.SocialAccountID, optsJSON,
 		)
 		if err != nil {
-			ctx.Logger().Warn("create post_target failed", "post", postID, "account", aid, "err", err)
+			ctx.Logger().Warn("create post_target failed",
+				"post", postID, "account", t.SocialAccountID, "err", err)
 		}
 	}
 
@@ -1068,8 +1209,14 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 type publishJob struct {
 	targetID, connID int64
 	platform, extID  string
-	body             string
+	body             string      // already resolved: target.options["body"] || post.body
 	media            []mediaItem // resolved (URL + MIME) so strategies can branch image/video
+	// options — verbatim per-target overrides decoded from
+	// post_targets.options. Strategies pick out whatever keys their
+	// platform cares about (publishYoutube reads title/visibility/…).
+	// Body is already merged into `body` above; strategies should
+	// NOT re-read options["body"].
+	options map[string]any
 	// pageCreds — JSON map of per-destination credentials populated at
 	// finalize time (e.g. Facebook's page-level access_token). Empty
 	// for platforms that reuse the user-level token for writes.
@@ -1094,7 +1241,8 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 	rows, err := ctx.AppDB().Query(
 		`SELECT t.id, t.social_account_id, a.platform, a.connection_id,
 		        COALESCE(a.external_account_id,''), p.body,
-		        COALESCE(a.page_credentials,'')
+		        COALESCE(a.page_credentials,''),
+		        COALESCE(t.options,'')
 		 FROM post_targets t
 		 JOIN social_accounts a ON a.id=t.social_account_id
 		 JOIN posts p ON p.id=t.post_id
@@ -1109,10 +1257,25 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 	for rows.Next() {
 		var j publishJob
 		var acctID int64
-		if err := rows.Scan(&j.targetID, &acctID, &j.platform, &j.connID, &j.extID, &j.body, &j.pageCreds); err == nil {
-			j.media = media
-			jobs = append(jobs, j)
+		var optsRaw, postBody string
+		if err := rows.Scan(&j.targetID, &acctID, &j.platform, &j.connID, &j.extID, &postBody, &j.pageCreds, &optsRaw); err != nil {
+			continue
 		}
+		// Decode per-target options (may be empty/null).
+		if optsRaw != "" {
+			_ = json.Unmarshal([]byte(optsRaw), &j.options)
+		}
+		// Body resolution: target's own body override beats post-level
+		// body. The merged value is what strategies see; they don't
+		// re-read options["body"].
+		j.body = postBody
+		if j.options != nil {
+			if override, ok := j.options["body"].(string); ok && override != "" {
+				j.body = override
+			}
+		}
+		j.media = media
+		jobs = append(jobs, j)
 	}
 	rows.Close()
 
@@ -1370,16 +1533,55 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	}
 
 	// Step 1: init the upload session.
-	title := strings.TrimSpace(j.body)
+	//
+	// Per-target overrides (via post_targets.options for this row):
+	//   title       — snippet.title. If blank, fall back to first
+	//                 ~80 chars of body so YouTube's required-title
+	//                 constraint is satisfied without surprising the
+	//                 user with a "missing title" upstream error.
+	//   body        — already merged into j.body upstream, so the
+	//                 description below uses j.body directly.
+	//   visibility  — status.privacyStatus (public|unlisted|private).
+	//                 Defaults to private — safer for first-pass
+	//                 uploads, matches what most users want when
+	//                 they didn't explicitly set it.
+	//   category    — snippet.categoryId (numeric string).
+	//   tags        — snippet.tags (array of strings).
+	title := strOption(j.options, "title")
+	if title == "" {
+		title = firstChars(strings.TrimSpace(j.body), 80)
+	}
 	if title == "" {
 		title = "Untitled"
 	}
+	visibility := strOption(j.options, "visibility")
+	if visibility == "" {
+		visibility = "private"
+	}
+	snippet := map[string]any{
+		"title":       title,
+		"description": j.body,
+	}
+	if cat := strOption(j.options, "category"); cat != "" {
+		snippet["categoryId"] = cat
+	}
+	if tags, ok := j.options["tags"].([]any); ok && len(tags) > 0 {
+		out := make([]string, 0, len(tags))
+		for _, t := range tags {
+			if s, ok := t.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		if len(out) > 0 {
+			snippet["tags"] = out
+		}
+	}
 	initInput := map[string]any{
-		"snippet": map[string]any{"title": title},
-		"status":  map[string]any{"privacyStatus": "private"},
+		"snippet": snippet,
+		"status":  map[string]any{"privacyStatus": visibility},
 	}
 	ctx.Logger().Info("publishYoutube: init upload session",
-		"title", title, "media_url", first.URL)
+		"title", title, "visibility", visibility, "media_url", first.URL)
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, initInput)
 	if err != nil {
 		return "", "", fmt.Errorf("upload_video_init: %w", err)
@@ -2568,12 +2770,22 @@ func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
 		}); err == nil && len(conns) > 0 {
 			available = true
 		}
+		// option_fields drives the compose-dialog "Customize" expander —
+		// when a user picks an account whose platform has fields, the
+		// panel renders inputs for them. Empty array = no per-target
+		// customisation possible (Twitter / FB / IG / LinkedIn / TikTok
+		// today; just YouTube has knobs in v1).
+		fields := def.OptionFields
+		if fields == nil {
+			fields = []optionField{}
+		}
 		out = append(out, map[string]any{
 			"platform":         def.Platform,
 			"display_name":     def.DisplayName,
 			"integration_slug": def.IntegrationSlug,
 			"requires_picker":  def.ListPagesTool != "",
 			"available":        available,
+			"option_fields":    fields,
 		})
 	}
 	writeJSON(w, map[string]any{"platforms": out})
@@ -2990,6 +3202,30 @@ func toString(v any) string {
 		return s
 	}
 	return fmt.Sprintf("%v", v)
+}
+
+// strOption pulls a string-valued key out of a per-target options map.
+// Returns "" when the key is missing, nil, or non-string. Used by
+// publish strategies to read overrides like title/visibility/category.
+func strOption(opts map[string]any, key string) string {
+	if opts == nil {
+		return ""
+	}
+	if s, ok := opts[key].(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return ""
+}
+
+// firstChars returns up to n characters of s — used to derive a
+// YouTube title from body when no explicit title was set. Trims
+// trailing whitespace on the cut so the result doesn't end mid-word
+// when truncation lands on a space.
+func firstChars(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return strings.TrimRight(s[:n], " \t")
 }
 
 func nullable(s string) any {
