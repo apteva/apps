@@ -2634,27 +2634,17 @@ func (a *App) handlePostsAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, out)
 	case http.MethodPost:
-		var body struct {
-			Body              string  `json:"body"`
-			SocialAccountIDs  []int64 `json:"social_account_ids"`
-			ScheduleAt        string  `json:"schedule_at"`
-			MediaStorageIDs   []int64 `json:"media_storage_ids"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		// Decode into a generic map so we keep targets[] / profile_id /
+		// any other field the panel sends without a strict struct
+		// schema getting in the way (Go silently drops unknown JSON
+		// fields, which previously made `targets` invisible to
+		// toolPostCreate and produced a confusing 500).
+		var raw map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		args := map[string]any{
-			"body":               body.Body,
-			"social_account_ids": int64SliceToAny(body.SocialAccountIDs),
-		}
-		if body.ScheduleAt != "" {
-			args["schedule_at"] = body.ScheduleAt
-		}
-		if len(body.MediaStorageIDs) > 0 {
-			args["media_storage_ids"] = int64SliceToAny(body.MediaStorageIDs)
-		}
-		out, err := a.toolPostCreate(globalCtx, args)
+		out, err := a.toolPostCreate(globalCtx, raw)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
