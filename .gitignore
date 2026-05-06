@@ -34,6 +34,9 @@ mcp/todo/todo
 mcp/torrent/torrent
 mcp/trading/trading
 
+# Stray apps-root binary from accidental `go build` in the wrong dir.
+/media
+
 # Per-app runtime data dirs that get created when sidecars run locally.
 mcp/jobs/data/
 mcp/code/workspace/
