@@ -193,6 +193,14 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
   const lastSuccess = runs.find(r => r.status === "success");
   const lastRun = runs[0];
 
+  // ─── modals (themed; replace window.confirm / window.alert) ────
+
+  // pending = an action awaiting operator confirmation; notice = a
+  // dismissable post-action message. Two slots so a notice from a
+  // completed restore can show without blocking a fresh confirm.
+  const [pending, setPending] = useState<PendingAction | null>(null);
+  const [notice, setNotice] = useState<{ title: string; body: string } | null>(null);
+
   // ─── actions ────────────────────────────────────────────────────
 
   const runNow = async (destID: number) => {
@@ -206,36 +214,40 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
     } finally { setBusy(null); }
   };
 
-  const restoreRun = async (runID: number, destName: string) => {
-    if (!window.confirm(
-      `Restore from run #${runID} on "${destName}"?\n\n` +
-      `App databases will be replaced live. The platform DB will be ` +
-      `staged and applied on the next server restart.\n\n` +
-      `This is a destructive operation.`
-    )) return;
+  const doRestore = async (runID: number) => {
     setBusy(`restore-${runID}`);
     try {
       const out = await api<{ report: { restart_required?: boolean } }>("POST", "/restore", { run_id: runID });
       const restart = out?.report?.restart_required;
-      window.alert(restart
-        ? "Restore complete. Restart apteva-server to activate the platform DB swap."
-        : "Restore complete.");
+      setNotice({
+        title: "Restore complete",
+        body: restart
+          ? "App databases were swapped live. Restart apteva-server to activate the platform DB swap."
+          : "App databases were swapped live.",
+      });
       await reload();
     } catch (e) {
       setStatus("Restore failed: " + (e as Error).message);
     } finally { setBusy(null); }
   };
 
-  const deleteDestination = async (id: number) => {
-    if (!window.confirm("Delete this destination? Past runs in history will keep working.")) return;
+  const doDeleteDestination = async (id: number) => {
     try { await api("DELETE", `/destinations/${id}`); await reload(); }
     catch (e) { setStatus("Delete failed: " + (e as Error).message); }
   };
 
-  const deletePolicy = async (id: number) => {
-    if (!window.confirm("Delete this policy? Existing backups remain.")) return;
+  const doDeletePolicy = async (id: number) => {
     try { await api("DELETE", `/policies/${id}`); await reload(); }
     catch (e) { setStatus("Delete failed: " + (e as Error).message); }
+  };
+
+  const onConfirm = async () => {
+    if (!pending) return;
+    const p = pending;
+    setPending(null);
+    if (p.kind === "restore") return doRestore(p.runID);
+    if (p.kind === "delete-destination") return doDeleteDestination(p.id);
+    if (p.kind === "delete-policy") return doDeletePolicy(p.id);
   };
 
   // ─── render ─────────────────────────────────────────────────────
@@ -304,7 +316,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
                 {busy === `run-${d.id}` ? "Running…" : "Run now"}
               </button>
               <button
-                onClick={() => deleteDestination(d.id)}
+                onClick={() => setPending({ kind: "delete-destination", id: d.id, name: d.name })}
                 className="px-2 py-1 text-xs border border-border text-text-muted rounded hover:bg-bg-hover hover:text-text"
               >
                 Delete
@@ -337,7 +349,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
               </div>
             </div>
             <button
-              onClick={() => deletePolicy(p.id)}
+              onClick={() => setPending({ kind: "delete-policy", id: p.id, name: p.name || `policy ${p.id}` })}
               className="px-2 py-1 text-xs border border-border text-text-muted rounded hover:bg-bg-hover hover:text-text shrink-0"
             >
               Delete
@@ -371,7 +383,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
             </div>
             {r.status === "success" && r.remote_key && (
               <button
-                onClick={() => restoreRun(r.id, r.destination_name)}
+                onClick={() => setPending({ kind: "restore", runID: r.id, destName: r.destination_name })}
                 disabled={busy === `restore-${r.id}`}
                 className="px-2 py-1 text-xs border border-border text-text-muted rounded hover:bg-bg-hover hover:text-text disabled:opacity-50 shrink-0"
               >
@@ -381,6 +393,142 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
           </Row>
         ))}
       </section>
+
+      {/* Themed modals — replace window.confirm/alert which look
+          out of place against the dashboard chrome. */}
+      <ConfirmModal
+        pending={pending}
+        onCancel={() => setPending(null)}
+        onConfirm={onConfirm}
+      />
+      <NoticeModal notice={notice} onClose={() => setNotice(null)} />
+    </div>
+  );
+}
+
+// ─── modal + confirm types ────────────────────────────────────────
+
+type PendingAction =
+  | { kind: "restore"; runID: number; destName: string }
+  | { kind: "delete-destination"; id: number; name: string }
+  | { kind: "delete-policy"; id: number; name: string };
+
+function ConfirmModal({
+  pending, onCancel, onConfirm,
+}: { pending: PendingAction | null; onCancel: () => void; onConfirm: () => void }) {
+  if (!pending) return null;
+
+  let title = "";
+  let body: React.ReactNode = null;
+  let confirmLabel = "Confirm";
+  let danger = false;
+
+  if (pending.kind === "restore") {
+    title = "Restore from this backup?";
+    confirmLabel = "Restore";
+    danger = true;
+    body = (
+      <>
+        <div>
+          Restore the backup taken on{" "}
+          <span className="text-text font-bold">{pending.destName}</span> (run #{pending.runID}).
+        </div>
+        <ul className="list-disc pl-5 mt-2 space-y-1 text-text-muted">
+          <li>App databases will be replaced live (sidecars stop and restart).</li>
+          <li>The platform DB will be staged and applied on the next server restart.</li>
+          <li>This is destructive and cannot be undone.</li>
+        </ul>
+      </>
+    );
+  } else if (pending.kind === "delete-destination") {
+    title = "Delete destination?";
+    confirmLabel = "Delete";
+    danger = true;
+    body = (
+      <>
+        Delete <span className="text-text font-bold">{pending.name}</span>?
+        Past runs in history will keep working.
+      </>
+    );
+  } else if (pending.kind === "delete-policy") {
+    title = "Delete policy?";
+    confirmLabel = "Delete";
+    danger = true;
+    body = (
+      <>
+        Delete <span className="text-text font-bold">{pending.name}</span>?
+        Existing backups remain untouched.
+      </>
+    );
+  }
+
+  return (
+    <ModalShell title={title} onClose={onCancel}>
+      <div className="text-text-muted text-sm">{body}</div>
+      <div className="flex justify-end gap-2 pt-1">
+        <button
+          onClick={onCancel}
+          className="px-3 py-1.5 text-sm text-text-muted hover:text-text"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={onConfirm}
+          className={`px-3 py-1.5 text-sm rounded font-bold ${
+            danger
+              ? "bg-error text-bg hover:opacity-90"
+              : "bg-accent text-bg hover:bg-accent-hover"
+          }`}
+        >
+          {confirmLabel}
+        </button>
+      </div>
+    </ModalShell>
+  );
+}
+
+function NoticeModal({
+  notice, onClose,
+}: { notice: { title: string; body: string } | null; onClose: () => void }) {
+  if (!notice) return null;
+  return (
+    <ModalShell title={notice.title} onClose={onClose}>
+      <div className="text-text-muted text-sm">{notice.body}</div>
+      <div className="flex justify-end gap-2 pt-1">
+        <button
+          onClick={onClose}
+          className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold hover:bg-accent-hover"
+        >
+          OK
+        </button>
+      </div>
+    </ModalShell>
+  );
+}
+
+// ModalShell — fixed-positioned overlay + centered card. Uses the
+// dashboard's z-50 layer so it sits above the panel chrome but below
+// any global toast layer. Esc closes; clicking the backdrop closes.
+function ModalShell({
+  title, children, onClose,
+}: { title: string; children: React.ReactNode; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-bg-overlay"
+      onClick={onClose}
+    >
+      <div
+        className="bg-bg-card border border-border rounded-lg shadow-popover w-full max-w-md p-5 space-y-3"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-text text-base font-bold">{title}</h3>
+        {children}
+      </div>
     </div>
   );
 }

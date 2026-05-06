@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: backup
 display_name: Backup
-version: 0.1.3
+version: 0.1.4
 description: |
   Periodic backups of your Apteva instance — server DB plus every
   installed app's data. Captured via the platform snapshot endpoint
