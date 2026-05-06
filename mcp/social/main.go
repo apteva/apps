@@ -2645,13 +2645,21 @@ type targetMetricsOutcome struct {
 	Metrics         *normalizedMetrics `json:"metrics,omitempty"`
 }
 
+// metricsTarget is the resolved per-target context the dispatcher
+// passes to each platform's fetcher. PageCreds is the JSON blob from
+// social_accounts.page_credentials (Facebook page access_token, IG's
+// linked-page token) — needed by FB/IG metrics calls because those
+// endpoints reject user-level tokens.
+type metricsTarget struct {
+	TargetID, SocialAccountID, ConnID int64
+	Platform, ExtPostID, ExtURL       string
+	PageCreds                         string
+}
+
 // getPostMetrics dispatches to the per-platform fetcher for one
 // target. Returns a complete outcome (never nil) so the caller can
 // always include it in the response array.
-func (a *App) getPostMetrics(ctx *sdk.AppCtx, target struct {
-	TargetID, SocialAccountID, ConnID int64
-	Platform, ExtPostID, ExtURL       string
-}) targetMetricsOutcome {
+func (a *App) getPostMetrics(ctx *sdk.AppCtx, target metricsTarget) targetMetricsOutcome {
 	out := targetMetricsOutcome{
 		TargetID:        target.TargetID,
 		SocialAccountID: target.SocialAccountID,
@@ -2671,15 +2679,33 @@ func (a *App) getPostMetrics(ctx *sdk.AppCtx, target struct {
 		return a.getYoutubePostMetrics(ctx, out, target.ConnID)
 	case "tiktok":
 		return a.getTikTokPostMetrics(ctx, out, target.ConnID)
+	case "facebook":
+		return a.getFacebookPostMetrics(ctx, out, target.ConnID, target.PageCreds)
+	case "instagram":
+		return a.getInstagramPostMetrics(ctx, out, target.ConnID, target.PageCreds)
 	default:
-		// FB / IG / LinkedIn / Reddit / Pinterest / Threads — analytics
-		// tools either aren't in the catalog yet or have slug-style paths
-		// that don't resolve to real upstream endpoints. Surface as
-		// unsupported so the agent + UI know not to expect numbers.
+		// LinkedIn / Reddit / Pinterest / Threads — analytics tools
+		// either aren't in the catalog yet or have slug-style paths
+		// that don't resolve. Surface as unsupported.
 		out.Status = "unsupported"
 		out.Reason = "no analytics tool wired for this platform yet"
 		return out
 	}
+}
+
+// extractPageToken pulls the page-level access_token out of a
+// social_accounts.page_credentials JSON blob. Returns "" when the
+// blob is missing, malformed, or doesn't carry an access_token —
+// callers can decide whether that's fatal.
+func extractPageToken(pageCreds string) string {
+	if pageCreds == "" {
+		return ""
+	}
+	var creds map[string]string
+	if err := json.Unmarshal([]byte(pageCreds), &creds); err != nil {
+		return ""
+	}
+	return creds["access_token"]
 }
 
 // getTwitterPostMetrics calls get_tweet_analytics for a single tweet
@@ -2689,7 +2715,8 @@ func (a *App) getPostMetrics(ctx *sdk.AppCtx, target struct {
 // which we don't use here.
 func (a *App) getTwitterPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, connID int64) targetMetricsOutcome {
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_tweet_analytics", map[string]any{
-		"tweetId": out.PlatformPostID,
+		"tweet_id":     out.PlatformPostID,
+		"tweet.fields": "public_metrics",
 	})
 	if err != nil {
 		out.Status, out.Error = "failed", err.Error()
@@ -2812,6 +2839,112 @@ func (a *App) getTikTokPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, co
 		Comments: v.CommentCount,
 		Shares:   v.ShareCount,
 		Raw:      res.Data,
+	}
+	return out
+}
+
+// getFacebookPostMetrics calls facebook_get_post with engagement-summary
+// fields. Graph response carries each count under .summary.total_count
+// (likes, comments, reactions) or just .count (shares). Reactions and
+// likes are technically separate signals on Graph — we map likes →
+// likes (the raw "like" reactions), and stash the broader reactions
+// total in raw for callers that want it. Views are not exposed on
+// organic FB posts via this endpoint; needs /insights for that.
+func (a *App) getFacebookPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, connID int64, pageCreds string) targetMetricsOutcome {
+	token := extractPageToken(pageCreds)
+	if token == "" {
+		out.Status = "failed"
+		out.Error = "facebook page access_token missing — reconnect the account"
+		return out
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "facebook_get_post", map[string]any{
+		"postId":       out.PlatformPostID,
+		"fields":       "likes.summary(true),comments.summary(true),shares,reactions.summary(true)",
+		"access_token": token,
+	})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	var resp struct {
+		Likes struct {
+			Summary struct {
+				TotalCount int64 `json:"total_count"`
+			} `json:"summary"`
+		} `json:"likes"`
+		Comments struct {
+			Summary struct {
+				TotalCount int64 `json:"total_count"`
+			} `json:"summary"`
+		} `json:"comments"`
+		Shares struct {
+			Count int64 `json:"count"`
+		} `json:"shares"`
+	}
+	_ = json.Unmarshal(res.Data, &resp)
+	out.Status = "ok"
+	out.Metrics = &normalizedMetrics{
+		Views:    0, // not exposed on this endpoint; would need /insights for impressions/reach
+		Likes:    resp.Likes.Summary.TotalCount,
+		Comments: resp.Comments.Summary.TotalCount,
+		Shares:   resp.Shares.Count,
+		Raw:      res.Data,
+	}
+	return out
+}
+
+// getInstagramPostMetrics calls get_media_insights for an IG Business
+// media id. Response shape: {data: [{name, period, values: [{value: N}]}]}
+// — one entry per requested metric, value lives under values[0].value.
+// Maps reach → views (closest match), plus likes / comments / saves /
+// shares to their normalized slots; saves goes to raw because the
+// normalized shape doesn't have a saves field.
+func (a *App) getInstagramPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, connID int64, pageCreds string) targetMetricsOutcome {
+	token := extractPageToken(pageCreds)
+	if token == "" {
+		out.Status = "failed"
+		out.Error = "instagram page access_token missing — reconnect the account"
+		return out
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_media_insights", map[string]any{
+		"mediaId":      out.PlatformPostID,
+		"metric":       "reach,likes,comments,saves,shares",
+		"access_token": token,
+	})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	var resp struct {
+		Data []struct {
+			Name   string `json:"name"`
+			Values []struct {
+				Value int64 `json:"value"`
+			} `json:"values"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(res.Data, &resp)
+	byName := map[string]int64{}
+	for _, m := range resp.Data {
+		if len(m.Values) > 0 {
+			byName[m.Name] = m.Values[0].Value
+		}
+	}
+	out.Status = "ok"
+	out.Metrics = &normalizedMetrics{
+		Views:    byName["reach"],
+		Likes:    byName["likes"],
+		Comments: byName["comments"],
+		Shares:   byName["shares"],
+		Raw:      res.Data, // includes saves under data[].name="saves"
 	}
 	return out
 }
@@ -2975,7 +3108,8 @@ func (a *App) toolPostMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	rows, err := ctx.AppDB().Query(
 		`SELECT t.id, t.social_account_id, COALESCE(t.platform_post_id,''),
-		        COALESCE(t.platform_url,''), a.platform, a.connection_id
+		        COALESCE(t.platform_url,''), a.platform, a.connection_id,
+		        COALESCE(a.page_credentials,'')
 		 FROM post_targets t
 		 LEFT JOIN social_accounts a ON a.id=t.social_account_id
 		 WHERE t.post_id=?`,
@@ -2985,16 +3119,12 @@ func (a *App) toolPostMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	defer rows.Close()
-	type targetRow struct {
-		TargetID, SocialAccountID, ConnID int64
-		Platform, ExtPostID, ExtURL       string
-	}
-	var trs []targetRow
+	var trs []metricsTarget
 	for rows.Next() {
-		var r targetRow
+		var r metricsTarget
 		var connID sql.NullInt64
 		var platform sql.NullString
-		if err := rows.Scan(&r.TargetID, &r.SocialAccountID, &r.ExtPostID, &r.ExtURL, &platform, &connID); err == nil {
+		if err := rows.Scan(&r.TargetID, &r.SocialAccountID, &r.ExtPostID, &r.ExtURL, &platform, &connID, &r.PageCreds); err == nil {
 			if platform.Valid {
 				r.Platform = platform.String
 			}
