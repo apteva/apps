@@ -82,13 +82,18 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// Reconcile DB state with reality: any 'running' rows from a
 	// previous sidecar life are dead — the subprocess died with us.
 	// Mark them orphaned so the UI doesn't lie about a tunnel being
-	// up.
-	if _, err := ctx.AppDB().Exec(
+	// up. orphanedCount tells us whether the previous life ended
+	// while a tunnel was up — the auto-restart trigger below.
+	var orphanedCount int64
+	res, err := ctx.AppDB().Exec(
 		`UPDATE runs SET status = 'orphaned',
 		                 finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP),
 		                 exit_reason = CASE WHEN exit_reason = '' THEN 'sidecar restarted' ELSE exit_reason END
-		 WHERE status = 'running'`); err != nil {
+		 WHERE status = 'running'`)
+	if err != nil {
 		ctx.Logger().Warn("reconcile running runs", "err", err)
+	} else if res != nil {
+		orphanedCount, _ = res.RowsAffected()
 	}
 
 	// Manager wires its lifecycle callbacks back into the DB.
@@ -116,8 +121,37 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	)
 
 	ctx.Logger().Info("live-link mounted",
-		"gateway", os.Getenv("APTEVA_GATEWAY_URL"))
+		"gateway", os.Getenv("APTEVA_GATEWAY_URL"),
+		"orphaned_runs", orphanedCount)
+
+	// Auto-restart: if the previous sidecar died while a tunnel was
+	// up, bring it back. The 2-second delay lets the local HTTP
+	// listener finish wiring up and (in named mode) the platform's
+	// integration cache settle. start() does the right thing for
+	// both modes — picks up the named_tunnels row when present.
+	if orphanedCount > 0 && shouldAutoRestartOnBoot(ctx) {
+		go func() {
+			time.Sleep(2 * time.Second)
+			if _, err := a.start(ctx); err != nil {
+				ctx.Logger().Warn("auto-restart failed", "err", err.Error())
+			} else {
+				ctx.Logger().Info("auto-restart succeeded")
+			}
+		}()
+	}
 	return nil
+}
+
+// shouldAutoRestartOnBoot reads the operator's preference. Default is
+// true — most operators install live-link to keep a URL up; they
+// don't want to click "Go live" after every laptop sleep / server
+// reboot. Recognizes "false" / "0" / "no" as opt-out.
+func shouldAutoRestartOnBoot(ctx *sdk.AppCtx) bool {
+	v := strings.ToLower(strings.TrimSpace(ctx.Config().Get("auto_restart_on_boot")))
+	if v == "" {
+		return true
+	}
+	return v != "false" && v != "0" && v != "no" && v != "off"
 }
 
 func (a *App) OnUnmount(ctx *sdk.AppCtx) error {

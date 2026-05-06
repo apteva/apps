@@ -50,6 +50,12 @@ Public HTTPS URL for a locally-installed Apteva instance. Two modes:
   with the mode it ran in.
 - **Crash-safe**: on sidecar boot, any leftover `running` rows from a
   previous process life are marked `orphaned` so the UI doesn't lie.
+- **Auto-restart on boot**: if a tunnel was up when the sidecar died
+  (server reboot, crash, redeploy), live-link brings it back two
+  seconds after mount. In named mode the same hostname comes back
+  with no operator action; in quick mode you get a fresh
+  `*.trycloudflare.com` since the old one isn't recoverable. Disable
+  via the `auto_restart_on_boot` config toggle.
 
 ## What's deliberately deferred
 
@@ -59,7 +65,7 @@ Public HTTPS URL for a locally-installed Apteva instance. Two modes:
 | ngrok provider                            | v0.4 — adds a new `ngrok` integration to the catalog |
 | Tailscale Funnel provider                 | v0.5 |
 | Edge HTTP basic auth                      | v0.4 — cloudflared supports it natively |
-| Auto-restart on tunnel drop with backoff  | v0.4 |
+| Auto-restart on tunnel drop with backoff (mid-flight, not just on boot) | v0.4 |
 
 ## Why this is cleaner for Apteva than for WordPress
 

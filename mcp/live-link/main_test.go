@@ -276,6 +276,33 @@ func TestDB_RunsRoundTrip(t *testing.T) {
 	}
 }
 
+// shouldAutoRestartOnBoot defaults to true (no config) and respects
+// off-shaped values. Operator only has to know about the toggle to
+// disable it; default behavior is "bring my tunnel back".
+func TestShouldAutoRestartOnBoot_Defaults(t *testing.T) {
+	cases := []struct {
+		v    string
+		want bool
+	}{
+		{"", true},
+		{"true", true},
+		{"yes", true},
+		{"1", true},
+		{"on", true},
+		{"false", false},
+		{"0", false},
+		{"no", false},
+		{"off", false},
+		{"FALSE", false}, // case-insensitive
+	}
+	for _, c := range cases {
+		ctx := newTestCtxWithConfig(t, map[string]string{"auto_restart_on_boot": c.v})
+		if got := shouldAutoRestartOnBoot(ctx); got != c.want {
+			t.Errorf("auto_restart_on_boot=%q: got %v, want %v", c.v, got, c.want)
+		}
+	}
+}
+
 func TestOnMount_OrphansLeftoverRunningRows(t *testing.T) {
 	ctx := newTestCtx(t)
 	// Plant a stale 'running' row from a previous sidecar life.
