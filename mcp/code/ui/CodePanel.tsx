@@ -166,6 +166,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [showImportGithub, setShowImportGithub] = useState(false);
   const [showNewFile, setShowNewFile] = useState(false);
   const [showNewFolder, setShowNewFolder] = useState(false);
+  const [showDevLogs, setShowDevLogs] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameTo, setRenameTo] = useState("");
   const [forkSlug, setForkSlug] = useState<string | null>(null);
@@ -738,7 +739,19 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
 
       {/* File content / editor */}
       <main className="flex-1 overflow-hidden flex flex-col">
-        {!openFile ? (
+        {selectedSlug && (
+          <DevBar
+            slug={selectedSlug}
+            api={api}
+            withParams={withParams}
+            showLogs={showDevLogs}
+            onToggleLogs={() => setShowDevLogs((v) => !v)}
+            onError={(msg) => setError(msg)}
+          />
+        )}
+        {selectedSlug && showDevLogs ? (
+          <DevLogsView slug={selectedSlug} withParams={withParams} />
+        ) : !openFile ? (
           <div className="p-8 text-text-muted text-sm text-center mt-12">
             {selectedSlug
               ? "Click a file in the tree to view it. + File to create one."
@@ -1615,5 +1628,211 @@ function ImportGithubDialog({
         </div>
       </form>
     </div>
+  );
+}
+
+// ─── DevBar / DevLogsView ─────────────────────────────────────────
+//
+// Dev runtime UI for the right pane. DevBar is the thin status strip
+// above the file editor; it polls /api/repos/<slug>/dev/status every
+// 2s and offers Run / Stop. DevLogsView replaces the file editor when
+// the user toggles "Logs", streaming the dev process's stdout/stderr
+// via SSE on /api/repos/<slug>/dev/log?follow=1.
+
+interface DevRunWire {
+  id: number;
+  status: "starting" | "live" | "stopped" | "crashed";
+  port: number;
+  pid: number;
+  framework: string;
+  run_cmd?: string;
+  started_at?: string;
+  stopped_at?: string;
+  error?: string;
+}
+
+function devStatusColor(s?: string): string {
+  if (s === "live") return "text-green";
+  if (s === "starting") return "text-blue";
+  if (s === "crashed") return "text-red";
+  return "text-text-dim";
+}
+
+function uptimeStr(startedAt?: string): string {
+  if (!startedAt) return "";
+  const ms = Date.now() - new Date(startedAt).getTime();
+  if (ms < 0) return "";
+  if (ms < 60_000) return `${Math.floor(ms / 1000)}s`;
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m`;
+  return `${Math.floor(ms / 3_600_000)}h${Math.floor((ms % 3_600_000) / 60_000)}m`;
+}
+
+function DevBar({
+  slug,
+  api,
+  withParams,
+  showLogs,
+  onToggleLogs,
+  onError,
+}: {
+  slug: string;
+  api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
+  withParams: (extra?: Record<string, string>) => string;
+  showLogs: boolean;
+  onToggleLogs: () => void;
+  onError: (msg: string) => void;
+}) {
+  const [run, setRun] = useState<DevRunWire | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const r = await api<{ dev_run: DevRunWire | null }>("GET", `/repos/${slug}/dev/status`);
+      setRun(r.dev_run);
+    } catch (e) {
+      // Swallow — this polls in the background; the panel-wide error
+      // banner is for explicit user actions.
+    }
+  }, [api, slug]);
+
+  useEffect(() => {
+    refresh();
+    const t = setInterval(refresh, 2000);
+    return () => clearInterval(t);
+  }, [refresh]);
+
+  const start = async () => {
+    setBusy(true);
+    try {
+      await api("POST", `/repos/${slug}/dev/start`, {});
+      await refresh();
+    } catch (e) {
+      onError("Run failed: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const stop = async () => {
+    setBusy(true);
+    try {
+      await api("POST", `/repos/${slug}/dev/stop`, {});
+      await refresh();
+    } catch (e) {
+      onError("Stop failed: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const status = run?.status ?? "stopped";
+  const isLive = status === "live";
+  const isBusy = status === "starting" || busy;
+
+  return (
+    <div className="px-3 py-2 border-b border-border flex items-center gap-2 bg-bg-input/40">
+      <span className={`text-xs ${devStatusColor(status)}`}>●</span>
+      <span className="text-xs text-text-muted">
+        {status === "live" ? (
+          <>
+            Running on{" "}
+            <a
+              href={`http://127.0.0.1:${run?.port}/`}
+              target="_blank"
+              rel="noreferrer"
+              className="text-accent hover:underline font-mono"
+            >127.0.0.1:{run?.port}</a>
+            {" "}· {uptimeStr(run?.started_at)} · {run?.framework}
+          </>
+        ) : status === "starting" ? (
+          <>Starting {run?.framework}…</>
+        ) : status === "crashed" ? (
+          <span className="text-red">
+            Crashed: <span className="font-mono">{(run?.error || "").split("\n")[0].slice(0, 80)}</span>
+          </span>
+        ) : (
+          <>Dev runtime stopped</>
+        )}
+      </span>
+      <span className="flex-1" />
+      <button
+        type="button"
+        onClick={onToggleLogs}
+        className={`px-2 py-0.5 text-xs border rounded ${showLogs ? "border-accent text-accent" : "border-border text-text-muted hover:text-text"}`}
+      >Logs</button>
+      {isLive ? (
+        <button
+          type="button"
+          onClick={stop}
+          disabled={isBusy}
+          className="px-2 py-0.5 text-xs border border-red text-red rounded hover:bg-red hover:text-white disabled:opacity-50"
+        >Stop</button>
+      ) : (
+        <button
+          type="button"
+          onClick={start}
+          disabled={isBusy}
+          className="px-2 py-0.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+        >{isBusy ? "Starting…" : "Run"}</button>
+      )}
+    </div>
+  );
+}
+
+// DevLogsView streams the dev run log via SSE. Auto-scrolls to bottom
+// unless the user scrolls up; resumes auto-scroll when they scroll
+// back to the bottom. No history retention beyond the current session
+// — the log file is truncated on each `repos_dev_start`, so older
+// runs aren't accessible (by design).
+function DevLogsView({
+  slug,
+  withParams,
+}: {
+  slug: string;
+  withParams: (extra?: Record<string, string>) => string;
+}) {
+  const [lines, setLines] = useState<string[]>([]);
+  const containerRef = useRef<HTMLPreElement | null>(null);
+  const stickToBottom = useRef(true);
+
+  useEffect(() => {
+    setLines([]);
+    const url = `/api/apps/code/api/repos/${slug}/dev/log?${withParams({ follow: "1" })}`;
+    const es = new EventSource(url, { withCredentials: true });
+    es.onmessage = (e) => {
+      // SSE delivers each `data:` line as a separate message; the
+      // server emits them line-by-line so we just append.
+      setLines((prev) => prev.concat([e.data]));
+    };
+    es.onerror = () => {
+      // EventSource auto-reconnects; nothing to do.
+    };
+    return () => es.close();
+  }, [slug, withParams]);
+
+  useEffect(() => {
+    if (stickToBottom.current && containerRef.current) {
+      containerRef.current.scrollTop = containerRef.current.scrollHeight;
+    }
+  }, [lines]);
+
+  const onScroll = (e: React.UIEvent<HTMLPreElement>) => {
+    const el = e.currentTarget;
+    const distFromBottom = el.scrollHeight - el.clientHeight - el.scrollTop;
+    stickToBottom.current = distFromBottom < 24;
+  };
+
+  return (
+    <pre
+      ref={containerRef}
+      onScroll={onScroll}
+      className="flex-1 overflow-auto bg-bg text-text font-mono text-[11px] p-3 whitespace-pre"
+    >
+      {lines.length === 0 ? (
+        <span className="text-text-dim">Waiting for output…</span>
+      ) : (
+        lines.join("\n")
+      )}
+    </pre>
   );
 }
