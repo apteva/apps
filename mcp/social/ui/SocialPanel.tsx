@@ -1241,6 +1241,7 @@ function ComposeDialog({
   };
 
   return (
+    <>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center"
       onClick={onClose}
@@ -1376,17 +1377,18 @@ function ComposeDialog({
           </div>
         </div>
       </div>
-      {showPicker && (
-        <StoragePickerDialog
-          excludeIds={new Set(media.map((m) => m.id))}
-          onClose={() => setShowPicker(false)}
-          onPick={(picked) => {
-            addFromStorage(picked);
-            setShowPicker(false);
-          }}
-        />
-      )}
     </div>
+    {showPicker && (
+      <StoragePickerDialog
+        excludeIds={new Set(media.map((m) => m.id))}
+        onClose={() => setShowPicker(false)}
+        onPick={(picked) => {
+          addFromStorage(picked);
+          setShowPicker(false);
+        }}
+      />
+    )}
+    </>
   );
 }
 
