@@ -34,7 +34,7 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.4.0
+version: 0.5.0
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code. Optionally
@@ -81,6 +81,10 @@ provides:
     - { name: templates_list,         description: "List user templates visible to this project + embedded ones." }
     - { name: repos_fork,             description: "Create a new repo by snapshot-copying a template or another repo." }
     - { name: repos_import_github,    description: "Import a GitHub repo as a local repository (gzip tarball snapshot)." }
+    - { name: repos_dev_start,        description: "Start a Replit-style dev process for a repo. Auto-detects framework or accepts run_cmd." }
+    - { name: repos_dev_stop,         description: "Stop the dev process for a repo." }
+    - { name: repos_dev_status,       description: "Get the current dev run state (port, pid, status, framework)." }
+    - { name: repos_dev_logs,         description: "Tail the dev run's stdout/stderr log file." }
   ui_panels:
     - { slot: project.page, label: "Code", icon: code, entry: /ui/CodePanel.mjs }
 runtime:
@@ -101,7 +105,9 @@ upgrade_policy: auto-patch
 // ─── App ───────────────────────────────────────────────────────────
 
 type App struct {
-	store FileStore
+	store   FileStore
+	dataDir string
+	dev     *devSupervisor
 }
 
 var globalCtx *sdk.AppCtx
@@ -139,13 +145,37 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return fmt.Errorf("mkdir repos root: %w", err)
 	}
 	a.store = NewLocalFileStore(root)
+
+	// Dev runtime — live "Run" surface for repos. Lives inside this
+	// sidecar process; one supervised child per (project, repo). The
+	// dataDir is the per-install writable dir, separate from the
+	// repos root so log files / future dev-run state don't pollute
+	// the storage tree the user actually edits.
+	dataDir := ctx.DataDir()
+	if dataDir == "" {
+		dataDir = filepath.Dir(root)
+	}
+	a.dataDir = dataDir
+	portStart := atoiOr(os.Getenv("CODE_DEV_PORT_RANGE_START"), 6100)
+	portEnd := atoiOr(os.Getenv("CODE_DEV_PORT_RANGE_END"), 6199)
+	a.dev = newDevSupervisor(dataDir, a.store, a, portStart, portEnd)
+	if err := a.dev.reconcileOrphanDevRuns(ctx); err != nil {
+		ctx.Logger().Warn("dev orphan reconcile failed", "err", err)
+	}
+
 	ctx.Logger().Info("code mounted",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
-		"repos_dir", root)
+		"repos_dir", root,
+		"dev_port_range", fmt.Sprintf("%d-%d", portStart, portEnd))
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if a.dev != nil {
+		a.dev.stopAll()
+	}
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }

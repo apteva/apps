@@ -231,7 +231,132 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"owner", "repo"}),
 			Handler: a.toolReposImportGithub,
 		},
+		{
+			Name: "repos_dev_start",
+			Description: "Start a Replit-style dev process for a repo. Auto-detects framework " +
+				"(nextjs / node / go / static) from the file tree, or accepts framework='blank' with run_cmd. " +
+				"Spawns the framework's dev command (next dev / <pm> run dev / go run . / in-process FileServer) " +
+				"with cwd set to the repo's storage_root, so edits via code_edit_file land directly where the " +
+				"running framework's watcher sees them. Args: slug (required), framework?, run_cmd?, env_json?.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":      map[string]any{"type": "string"},
+				"framework": map[string]any{"type": "string"},
+				"run_cmd":   map[string]any{"type": "string"},
+				"env_json":  map[string]any{"type": "string"},
+			}, []string{"slug"}),
+			Handler: a.toolDevStart,
+		},
+		{
+			Name:        "repos_dev_stop",
+			Description: "Stop the dev process for a repo. SIGTERM the process group, then SIGKILL after 5s. Idempotent.",
+			InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}}, []string{"slug"}),
+			Handler:     a.toolDevStop,
+		},
+		{
+			Name:        "repos_dev_status",
+			Description: "Get the current dev run state for a repo (status, port, pid, framework, last error).",
+			InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}}, []string{"slug"}),
+			Handler:     a.toolDevStatus,
+		},
+		{
+			Name:        "repos_dev_logs",
+			Description: "Tail the dev run's stdout/stderr log file. Args: slug, tail? (lines, default 200).",
+			InputSchema: schemaObject(map[string]any{
+				"slug": map[string]any{"type": "string"},
+				"tail": map[string]any{"type": "integer"},
+			}, []string{"slug"}),
+			Handler: a.toolDevLogs,
+		},
 	}
+}
+
+// ─── repos_dev_* handlers ─────────────────────────────────────────
+
+func (a *App) toolDevStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	slug := strArg(args, "slug")
+	repo, err := requireRepo(ctx, pid, slug)
+	if err != nil {
+		return nil, err
+	}
+	if a.dev == nil {
+		return nil, errors.New("dev runtime not initialised")
+	}
+	dr, err := a.dev.startDevRun(ctx, startDevInput{
+		ProjectID: pid,
+		Repo:      repo,
+		Framework: strArg(args, "framework"),
+		RunCmd:    strArg(args, "run_cmd"),
+		EnvJSON:   strArg(args, "env_json"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"dev_run": dr}, nil
+}
+
+func (a *App) toolDevStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	slug := strArg(args, "slug")
+	repo, err := requireRepo(ctx, pid, slug)
+	if err != nil {
+		return nil, err
+	}
+	if a.dev == nil {
+		return map[string]any{"stopped": true}, nil
+	}
+	if err := a.dev.stopDevRun(ctx, pid, repo.ID); err != nil {
+		return nil, err
+	}
+	return map[string]any{"stopped": true}, nil
+}
+
+func (a *App) toolDevStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	slug := strArg(args, "slug")
+	repo, err := requireRepo(ctx, pid, slug)
+	if err != nil {
+		return nil, err
+	}
+	dr, err := dbGetDevRun(ctx.AppDB(), pid, repo.ID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"dev_run": dr}, nil
+}
+
+func (a *App) toolDevLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	slug := strArg(args, "slug")
+	repo, err := requireRepo(ctx, pid, slug)
+	if err != nil {
+		return nil, err
+	}
+	dr, err := dbGetDevRun(ctx.AppDB(), pid, repo.ID)
+	if err != nil {
+		return nil, err
+	}
+	if dr == nil || dr.LogPath == "" {
+		return map[string]any{"log": "", "available": false}, nil
+	}
+	tail := intArg(args, "tail", 200)
+	body, err := tailFile(dr.LogPath, tail)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"log": body, "available": true}, nil
 }
 
 // ─── repos_import_github handler ──────────────────────────────────

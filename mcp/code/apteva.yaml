@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.4.0
+version: 0.5.0
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -54,6 +54,14 @@ provides:
       description: Export a repo as a zip archive — base64-encoded bytes for cross-app calls (used by deploy).
     - name: repos_import_github
       description: Import a GitHub repository as a local repo (gzip tarball snapshot via the bound github connection).
+    - name: repos_dev_start
+      description: Start a Replit-style dev process for a repo. Auto-detects nextjs / node / go / static; accepts run_cmd override.
+    - name: repos_dev_stop
+      description: Stop the dev process for a repo. Idempotent.
+    - name: repos_dev_status
+      description: Current dev run state (port, pid, status, framework, last error).
+    - name: repos_dev_logs
+      description: Tail the dev run's stdout/stderr log file.
     - name: code_list_files
       description: List files in a repository, optionally recursive.
     - name: code_glob

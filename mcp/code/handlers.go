@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 )
 
 // REST surface — mirror of the MCP tools, used by the SPA and curl.
@@ -78,6 +80,8 @@ func (a *App) handleRepoItem(w http.ResponseWriter, r *http.Request) {
 		a.httpRepoUnmarkTemplate(w, r, slug)
 	case tail == "fork":
 		a.httpRepoFork(w, r, slug)
+	case strings.HasPrefix(tail, "dev/") || tail == "dev":
+		a.httpRepoDev(w, r, slug, strings.TrimPrefix(tail, "dev/"))
 	default:
 		httpErr(w, http.StatusNotFound, "no such resource")
 	}
@@ -830,4 +834,159 @@ func (a *App) handleGithubReposList(w http.ResponseWriter, r *http.Request) {
 	// default_branch, language, private, pushed_at, …).
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(res.Data)
+}
+
+// ─── dev runtime (panel-driven) ────────────────────────────────────
+
+// /api/repos/<slug>/dev/{start,stop,status,log}
+func (a *App) httpRepoDev(w http.ResponseWriter, r *http.Request, slug, action string) {
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	repo, err := requireRepoSlug(globalCtx, pid, slug)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	switch action {
+	case "start":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		var body struct {
+			Framework string `json:"framework"`
+			RunCmd    string `json:"run_cmd"`
+			EnvJSON   string `json:"env_json"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if a.dev == nil {
+			httpErr(w, http.StatusInternalServerError, "dev runtime not initialised")
+			return
+		}
+		dr, err := a.dev.startDevRun(globalCtx, startDevInput{
+			ProjectID: pid, Repo: repo,
+			Framework: body.Framework, RunCmd: body.RunCmd, EnvJSON: body.EnvJSON,
+		})
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"dev_run": dr})
+	case "stop":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		if a.dev != nil {
+			_ = a.dev.stopDevRun(globalCtx, pid, repo.ID)
+		}
+		httpJSON(w, map[string]any{"stopped": true})
+	case "status", "":
+		if r.Method != http.MethodGet {
+			httpErr(w, http.StatusMethodNotAllowed, "GET")
+			return
+		}
+		dr, err := dbGetDevRun(globalCtx.AppDB(), pid, repo.ID)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"dev_run": dr})
+	case "log":
+		a.httpRepoDevLog(w, r, pid, repo)
+	default:
+		httpErr(w, http.StatusNotFound, "no such dev action: "+action)
+	}
+}
+
+// httpRepoDevLog serves the dev run's log file. ?follow=1 streams via
+// SSE so the panel's EventSource can render lines as they appear; the
+// default response is a plain-text tail of the last `tail` lines (or
+// 200 by default), matching the deploy app's deploy_logs REST shape.
+func (a *App) httpRepoDevLog(w http.ResponseWriter, r *http.Request, pid string, repo *Repo) {
+	dr, err := dbGetDevRun(globalCtx.AppDB(), pid, repo.ID)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if dr == nil || dr.LogPath == "" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte(""))
+		return
+	}
+	if r.URL.Query().Get("follow") == "1" {
+		streamLogSSE(w, r, dr.LogPath)
+		return
+	}
+	tail := atoiOr(r.URL.Query().Get("tail"), 200)
+	body, _ := tailFile(dr.LogPath, tail)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(body))
+}
+
+// streamLogSSE emits the file's current contents (last 200 lines) and
+// then polls every 200ms for new bytes, pushing each new chunk as a
+// `data:` SSE event. Closes when the request context is cancelled
+// (panel closed the EventSource). Cheap: one short read per tick, no
+// inotify, no fanout — there's at most one viewer per dev run in
+// practice.
+func streamLogSSE(w http.ResponseWriter, r *http.Request, path string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		httpErr(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	body, _ := tailFile(path, 200)
+	if body != "" {
+		writeSSE(w, body)
+		flusher.Flush()
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		writeSSEEvent(w, "error", err.Error())
+		flusher.Flush()
+		return
+	}
+	defer f.Close()
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		writeSSEEvent(w, "error", err.Error())
+		flusher.Flush()
+		return
+	}
+
+	buf := make([]byte, 16*1024)
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-tick.C:
+			n, _ := f.Read(buf)
+			if n > 0 {
+				writeSSE(w, string(buf[:n]))
+				flusher.Flush()
+			}
+		}
+	}
+}
+
+func writeSSE(w http.ResponseWriter, payload string) {
+	for _, line := range strings.Split(payload, "\n") {
+		_, _ = fmt.Fprintf(w, "data: %s\n", line)
+	}
+	_, _ = fmt.Fprint(w, "\n")
+}
+
+func writeSSEEvent(w http.ResponseWriter, event, payload string) {
+	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, payload)
 }
