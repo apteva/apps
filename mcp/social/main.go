@@ -576,6 +576,27 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"post_id"}),
 			Handler: a.toolPostDelete,
 		},
+		{
+			Name: "post_metrics",
+			Description: "Fetch fresh per-target performance metrics for a post by fanning out to each platform's analytics tool. Returns a per-target array of {status: ok|unsupported|skipped|failed, metrics?: {views, likes, comments, shares, raw}, reason?, error?}. " +
+				"Wired today: Twitter, YouTube, TikTok. Other platforms return status=unsupported until their analytics tools are wired. " +
+				"Direct calls — no caching, no DB writes. Be mindful of upstream rate limits when looping over many posts. Args: post_id.",
+			InputSchema: schemaObject(map[string]any{
+				"post_id": map[string]any{"type": "integer"},
+			}, []string{"post_id"}),
+			Handler: a.toolPostMetrics,
+		},
+		{
+			Name: "account_metrics",
+			Description: "Fetch account-level totals (followers, total likes/videos where available) for one connected social account. " +
+				"Wired today: YouTube (subscriberCount, videoCount), TikTok (follower_count, following_count, likes_count, video_count). " +
+				"Other platforms return status=unsupported. Args: social_account_id, period? (reserved for time-windowed metrics; ignored today).",
+			InputSchema: schemaObject(map[string]any{
+				"social_account_id": map[string]any{"type": "integer"},
+				"period":            map[string]any{"type": "string", "description": "Optional time window like \"7d\" or \"30d\". Reserved for future use; ignored today."},
+			}, []string{"social_account_id"}),
+			Handler: a.toolAccountMetrics,
+		},
 	}
 	tools = append(tools, a.profileTools()...)
 	return tools
@@ -2584,6 +2605,440 @@ func (a *App) toolPostReschedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 	}, nil
 }
 
+// ─── metrics ──────────────────────────────────────────────────────
+//
+// post_metrics(post_id) and account_metrics(social_account_id) fan out
+// to per-platform analytics tools and return fresh numbers. No DB
+// writes, no caching — every call hits the upstream. Suitable for
+// agent-driven one-off queries; agents looping through 100 posts will
+// burn rate limits (mitigation: add a metrics cache later with a TTL).
+//
+// Per-target outcome envelope mirrors post_delete's vocabulary:
+//   ok          — upstream returned numbers; metrics populated
+//   unsupported — platform's analytics tool isn't in catalog yet
+//   skipped     — target was never published (no platform_post_id)
+//   failed      — integration call errored or returned non-2xx
+//
+// Hybrid response shape: normalized common fields (views, likes,
+// comments, shares) so agents can compare across platforms, plus the
+// raw platform JSON for deep dives into platform-specific fields
+// (IG saves, TikTok profile_visits, YouTube likeCount-vs-favoriteCount,
+// etc.) that don't fit the common shape.
+
+type normalizedMetrics struct {
+	Views    int64           `json:"views"`
+	Likes    int64           `json:"likes"`
+	Comments int64           `json:"comments"`
+	Shares   int64           `json:"shares"`
+	Raw      json.RawMessage `json:"raw,omitempty"`
+}
+
+type targetMetricsOutcome struct {
+	TargetID        int64              `json:"target_id"`
+	SocialAccountID int64              `json:"social_account_id"`
+	Platform        string             `json:"platform"`
+	PlatformPostID  string             `json:"platform_post_id,omitempty"`
+	PlatformURL     string             `json:"platform_url,omitempty"`
+	Status          string             `json:"status"` // ok | unsupported | skipped | failed
+	Reason          string             `json:"reason,omitempty"`
+	Error           string             `json:"error,omitempty"`
+	Metrics         *normalizedMetrics `json:"metrics,omitempty"`
+}
+
+// getPostMetrics dispatches to the per-platform fetcher for one
+// target. Returns a complete outcome (never nil) so the caller can
+// always include it in the response array.
+func (a *App) getPostMetrics(ctx *sdk.AppCtx, target struct {
+	TargetID, SocialAccountID, ConnID int64
+	Platform, ExtPostID, ExtURL       string
+}) targetMetricsOutcome {
+	out := targetMetricsOutcome{
+		TargetID:        target.TargetID,
+		SocialAccountID: target.SocialAccountID,
+		Platform:        target.Platform,
+		PlatformPostID:  target.ExtPostID,
+		PlatformURL:     target.ExtURL,
+	}
+	if target.ExtPostID == "" {
+		out.Status = "skipped"
+		out.Reason = "target was never published — no platform_post_id"
+		return out
+	}
+	switch target.Platform {
+	case "twitter":
+		return a.getTwitterPostMetrics(ctx, out, target.ConnID)
+	case "youtube":
+		return a.getYoutubePostMetrics(ctx, out, target.ConnID)
+	case "tiktok":
+		return a.getTikTokPostMetrics(ctx, out, target.ConnID)
+	default:
+		// FB / IG / LinkedIn / Reddit / Pinterest / Threads — analytics
+		// tools either aren't in the catalog yet or have slug-style paths
+		// that don't resolve to real upstream endpoints. Surface as
+		// unsupported so the agent + UI know not to expect numbers.
+		out.Status = "unsupported"
+		out.Reason = "no analytics tool wired for this platform yet"
+		return out
+	}
+}
+
+// getTwitterPostMetrics calls get_tweet_analytics for a single tweet
+// and maps Twitter's public_metrics to our normalized shape. Twitter's
+// response wraps under {data: {public_metrics: {...}}}; some shapes
+// also nest under {data: [{...}]} when called for multiple tweets,
+// which we don't use here.
+func (a *App) getTwitterPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, connID int64) targetMetricsOutcome {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_tweet_analytics", map[string]any{
+		"tweetId": out.PlatformPostID,
+	})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	// Pull public_metrics out of either {data: {public_metrics}} or
+	// {public_metrics} top-level depending on the integration's response
+	// shape.
+	var resp struct {
+		Data struct {
+			PublicMetrics struct {
+				ImpressionCount int64 `json:"impression_count"`
+				LikeCount       int64 `json:"like_count"`
+				ReplyCount      int64 `json:"reply_count"`
+				RetweetCount    int64 `json:"retweet_count"`
+				QuoteCount      int64 `json:"quote_count"`
+				BookmarkCount   int64 `json:"bookmark_count"`
+			} `json:"public_metrics"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(res.Data, &resp)
+	pm := resp.Data.PublicMetrics
+	out.Status = "ok"
+	out.Metrics = &normalizedMetrics{
+		Views:    pm.ImpressionCount,
+		Likes:    pm.LikeCount,
+		Comments: pm.ReplyCount,
+		Shares:   pm.RetweetCount + pm.QuoteCount, // group retweets + quotes under shares
+		Raw:      res.Data,
+	}
+	return out
+}
+
+// getYoutubePostMetrics calls get_video?part=statistics and maps the
+// YouTube Data API v3 statistics block. Response shape:
+// {items: [{statistics: {viewCount, likeCount, commentCount, ...}}]}.
+// Statistic counts come back as STRINGS in YouTube's API (per spec),
+// so we parse them out.
+func (a *App) getYoutubePostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, connID int64) targetMetricsOutcome {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_video", map[string]any{
+		"id":   out.PlatformPostID,
+		"part": "statistics,snippet",
+	})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	var resp struct {
+		Items []struct {
+			Statistics struct {
+				ViewCount    string `json:"viewCount"`
+				LikeCount    string `json:"likeCount"`
+				CommentCount string `json:"commentCount"`
+			} `json:"statistics"`
+		} `json:"items"`
+	}
+	_ = json.Unmarshal(res.Data, &resp)
+	if len(resp.Items) == 0 {
+		out.Status = "failed"
+		out.Error = "video not found or no items in response"
+		return out
+	}
+	stats := resp.Items[0].Statistics
+	out.Status = "ok"
+	out.Metrics = &normalizedMetrics{
+		Views:    parseInt64(stats.ViewCount),
+		Likes:    parseInt64(stats.LikeCount),
+		Comments: parseInt64(stats.CommentCount),
+		Shares:   0, // YouTube doesn't expose share count via Data API
+		Raw:      res.Data,
+	}
+	return out
+}
+
+// getTikTokPostMetrics calls query_videos with filters.video_ids + the
+// metric fields. Response shape:
+// {data: {videos: [{view_count, like_count, comment_count, share_count}]}}.
+func (a *App) getTikTokPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, connID int64) targetMetricsOutcome {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "query_videos", map[string]any{
+		"filters": map[string]any{"video_ids": []string{out.PlatformPostID}},
+		"fields":  "id,title,view_count,like_count,comment_count,share_count",
+	})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	var resp struct {
+		Data struct {
+			Videos []struct {
+				ViewCount    int64 `json:"view_count"`
+				LikeCount    int64 `json:"like_count"`
+				CommentCount int64 `json:"comment_count"`
+				ShareCount   int64 `json:"share_count"`
+			} `json:"videos"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(res.Data, &resp)
+	if len(resp.Data.Videos) == 0 {
+		out.Status = "failed"
+		out.Error = "video not in query result (may not have propagated yet, or wrong id)"
+		return out
+	}
+	v := resp.Data.Videos[0]
+	out.Status = "ok"
+	out.Metrics = &normalizedMetrics{
+		Views:    v.ViewCount,
+		Likes:    v.LikeCount,
+		Comments: v.CommentCount,
+		Shares:   v.ShareCount,
+		Raw:      res.Data,
+	}
+	return out
+}
+
+// parseInt64 is a forgiving int64 parser that returns 0 for empty,
+// non-numeric, or negative inputs. YouTube's Data API serialises
+// numeric stats as strings, hence the need.
+func parseInt64(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// ─── account_metrics ──────────────────────────────────────────────
+
+type accountMetricsResult struct {
+	SocialAccountID int64           `json:"social_account_id"`
+	Platform        string          `json:"platform"`
+	DisplayName     string          `json:"display_name"`
+	Status          string          `json:"status"` // ok | unsupported | failed
+	Reason          string          `json:"reason,omitempty"`
+	Error           string          `json:"error,omitempty"`
+	Followers       int64           `json:"followers,omitempty"`
+	Following       int64           `json:"following,omitempty"`
+	TotalLikes      int64           `json:"total_likes,omitempty"`
+	TotalVideos     int64           `json:"total_videos,omitempty"`
+	Raw             json.RawMessage `json:"raw,omitempty"`
+}
+
+func (a *App) getAccountMetrics(ctx *sdk.AppCtx, accountID int64, period string) accountMetricsResult {
+	pid := os.Getenv("APTEVA_PROJECT_ID")
+	var platform, displayName string
+	var connID int64
+	err := ctx.AppDB().QueryRow(
+		`SELECT platform, COALESCE(display_name,''), connection_id
+		 FROM social_accounts WHERE id=? AND project_id=?`,
+		accountID, pid,
+	).Scan(&platform, &displayName, &connID)
+	if err != nil {
+		return accountMetricsResult{
+			SocialAccountID: accountID,
+			Status:          "failed",
+			Error:           "account not found",
+		}
+	}
+	out := accountMetricsResult{
+		SocialAccountID: accountID,
+		Platform:        platform,
+		DisplayName:     displayName,
+	}
+	switch platform {
+	case "youtube":
+		return a.getYoutubeChannelMetrics(ctx, out, connID)
+	case "tiktok":
+		return a.getTikTokAccountMetrics(ctx, out, connID)
+	default:
+		// FB pages have follower counts via /me/accounts fields, IG via
+		// instagram_business_account.followers_count, X via get_me — but
+		// each takes a different shape and the existing platformDef
+		// machinery doesn't surface them yet. Mark as unsupported with
+		// a clear reason; agents and the UI both render that gracefully.
+		out.Status = "unsupported"
+		out.Reason = "account-level metrics not wired for this platform yet"
+		return out
+	}
+}
+
+func (a *App) getYoutubeChannelMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64) accountMetricsResult {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_my_channel", map[string]any{
+		"part": "statistics,snippet",
+	})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	var resp struct {
+		Items []struct {
+			Statistics struct {
+				ViewCount       string `json:"viewCount"`
+				SubscriberCount string `json:"subscriberCount"`
+				VideoCount      string `json:"videoCount"`
+			} `json:"statistics"`
+		} `json:"items"`
+	}
+	_ = json.Unmarshal(res.Data, &resp)
+	if len(resp.Items) == 0 {
+		out.Status = "failed"
+		out.Error = "channel not found in response"
+		return out
+	}
+	s := resp.Items[0].Statistics
+	out.Status = "ok"
+	out.Followers = parseInt64(s.SubscriberCount)
+	out.TotalVideos = parseInt64(s.VideoCount)
+	// Stash totalViewCount in raw — useful for "channel reach" but
+	// doesn't fit the per-account shape cleanly.
+	out.Raw = res.Data
+	return out
+}
+
+func (a *App) getTikTokAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64) accountMetricsResult {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_user_info", map[string]any{
+		"fields": "open_id,display_name,follower_count,following_count,likes_count,video_count",
+	})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	var resp struct {
+		Data struct {
+			User struct {
+				FollowerCount  int64 `json:"follower_count"`
+				FollowingCount int64 `json:"following_count"`
+				LikesCount     int64 `json:"likes_count"`
+				VideoCount     int64 `json:"video_count"`
+			} `json:"user"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(res.Data, &resp)
+	u := resp.Data.User
+	out.Status = "ok"
+	out.Followers = u.FollowerCount
+	out.Following = u.FollowingCount
+	out.TotalLikes = u.LikesCount
+	out.TotalVideos = u.VideoCount
+	out.Raw = res.Data
+	return out
+}
+
+// toolPostMetrics is the post_metrics MCP entrypoint. Walks the
+// post's targets, dispatches each to its platform's fetcher, returns
+// the per-target outcomes.
+func (a *App) toolPostMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	postID := int64(intArg(args, "post_id", 0))
+	if postID <= 0 {
+		return mcpError("post_id required"), nil
+	}
+	pid := os.Getenv("APTEVA_PROJECT_ID")
+	// Existence + ownership check — also surfaces post status / body
+	// in the response so the agent gets context without a second call.
+	var body, status string
+	err := ctx.AppDB().QueryRow(
+		`SELECT body, status FROM posts WHERE id=? AND project_id=?`,
+		postID, pid,
+	).Scan(&body, &status)
+	if err != nil {
+		return mcpError("post not found"), nil
+	}
+	rows, err := ctx.AppDB().Query(
+		`SELECT t.id, t.social_account_id, COALESCE(t.platform_post_id,''),
+		        COALESCE(t.platform_url,''), a.platform, a.connection_id
+		 FROM post_targets t
+		 LEFT JOIN social_accounts a ON a.id=t.social_account_id
+		 WHERE t.post_id=?`,
+		postID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type targetRow struct {
+		TargetID, SocialAccountID, ConnID int64
+		Platform, ExtPostID, ExtURL       string
+	}
+	var trs []targetRow
+	for rows.Next() {
+		var r targetRow
+		var connID sql.NullInt64
+		var platform sql.NullString
+		if err := rows.Scan(&r.TargetID, &r.SocialAccountID, &r.ExtPostID, &r.ExtURL, &platform, &connID); err == nil {
+			if platform.Valid {
+				r.Platform = platform.String
+			}
+			if connID.Valid {
+				r.ConnID = connID.Int64
+			}
+			trs = append(trs, r)
+		}
+	}
+	outcomes := make([]targetMetricsOutcome, 0, len(trs))
+	for _, r := range trs {
+		if r.Platform == "" || r.ConnID == 0 {
+			outcomes = append(outcomes, targetMetricsOutcome{
+				TargetID: r.TargetID, SocialAccountID: r.SocialAccountID,
+				Platform: r.Platform, PlatformPostID: r.ExtPostID,
+				Status: "skipped",
+				Reason: "social account row gone — was the account disconnected?",
+			})
+			continue
+		}
+		ctx.Logger().Info("post_metrics: fetching",
+			"post", postID, "platform", r.Platform, "platform_post_id", r.ExtPostID)
+		outcomes = append(outcomes, a.getPostMetrics(ctx, r))
+	}
+	return map[string]any{
+		"post_id": postID,
+		"body":    body,
+		"status":  status,
+		"targets": outcomes,
+	}, nil
+}
+
+// toolAccountMetrics is the account_metrics MCP entrypoint.
+func (a *App) toolAccountMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := int64(intArg(args, "social_account_id", 0))
+	if id <= 0 {
+		return mcpError("social_account_id required"), nil
+	}
+	period, _ := args["period"].(string) // currently unused; reserved for future
+	_ = period
+	res := a.getAccountMetrics(ctx, id, period)
+	return res, nil
+}
+
 // ─── post_delete ───────────────────────────────────────────────────
 
 // targetDeleteOutcome captures one upstream-delete attempt for the
@@ -2879,6 +3334,18 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, out)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "metrics" && r.Method == http.MethodGet {
+		out, err := a.toolAccountMetrics(globalCtx, map[string]any{
+			"social_account_id": id,
+			"period":            r.URL.Query().Get("period"),
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, out)
+		return
+	}
 	if r.Method == http.MethodDelete {
 		out, err := a.toolAccountDisconnect(globalCtx, map[string]any{"id": id})
 		if err != nil {
@@ -2968,6 +3435,15 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 			"post_id":     id,
 			"schedule_at": body.ScheduleAt,
 		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, out)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "metrics" && r.Method == http.MethodGet {
+		out, err := a.toolPostMetrics(globalCtx, map[string]any{"post_id": id})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

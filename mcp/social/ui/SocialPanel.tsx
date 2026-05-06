@@ -181,7 +181,7 @@ function useAppEvents<T = unknown>(
 // --- Panel ---------------------------------------------------------
 
 export default function SocialPanel({ projectId }: NativePanelProps) {
-  const [tab, setTab] = useState<"accounts" | "posts">("posts");
+  const [tab, setTab] = useState<"accounts" | "posts" | "metrics">("posts");
   const [accounts, setAccounts] = useState<SocialAccount[]>([]);
   const [posts, setPosts] = useState<Post[]>([]);
   const [platforms, setPlatforms] = useState<PlatformInfo[]>([]);
@@ -315,6 +315,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
         <span className="w-px h-5 bg-border mx-2" />
         <Tab label="Posts" value="posts" current={tab} onClick={setTab} count={posts.length} />
         <Tab label="Accounts" value="accounts" current={tab} onClick={setTab} count={accounts.length} />
+        <Tab label="Metrics" value="metrics" current={tab} onClick={setTab} />
         <button
           onClick={() => setComposeOpen(true)}
           disabled={accounts.length === 0}
@@ -342,6 +343,9 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
         )}
         {tab === "posts" && (
           <PostsView posts={posts} onChange={loadPosts} setStatus={setStatus} />
+        )}
+        {tab === "metrics" && (
+          <MetricsView posts={posts} accounts={accounts} setStatus={setStatus} />
         )}
       </div>
 
@@ -709,7 +713,7 @@ function ProfileManageModal({
 function Tab({
   label, value, current, onClick, count,
 }: {
-  label: string; value: "accounts" | "posts";
+  label: string; value: "accounts" | "posts" | "metrics";
   current: string; onClick: (v: any) => void; count?: number;
 }) {
   const active = value === current;
@@ -2287,6 +2291,308 @@ async function loadMediaMeta(fileId: number): Promise<{ mime: string; name: stri
     for (const w of waiters) w(null);
     return null;
   }
+}
+
+// --- MetricsView --------------------------------------------------
+//
+// Two sections:
+//   1. Account-level totals — one row per connected account, click to
+//      load (lazy; the agent flow doesn't need all of them at once).
+//   2. Recent published posts — table with normalized metrics columns.
+//      Click a row to expand and fetch per-target details (raw blob
+//      included for deep-dives).
+//
+// All data is fetched fresh on click — no caching today, matching the
+// MCP-tool semantics. Be mindful that scanning many posts will burn
+// upstream rate limits.
+
+interface PostMetrics {
+  post_id: number;
+  body: string;
+  status: string;
+  targets: TargetMetrics[];
+}
+
+interface TargetMetrics {
+  target_id: number;
+  social_account_id: number;
+  platform: string;
+  platform_post_id?: string;
+  platform_url?: string;
+  status: "ok" | "unsupported" | "skipped" | "failed";
+  reason?: string;
+  error?: string;
+  metrics?: {
+    views: number;
+    likes: number;
+    comments: number;
+    shares: number;
+    raw?: any;
+  };
+}
+
+interface AccountMetrics {
+  social_account_id: number;
+  platform: string;
+  display_name: string;
+  status: "ok" | "unsupported" | "failed";
+  reason?: string;
+  error?: string;
+  followers?: number;
+  following?: number;
+  total_likes?: number;
+  total_videos?: number;
+  raw?: any;
+}
+
+function MetricsView({
+  posts, accounts, setStatus,
+}: {
+  posts: Post[];
+  accounts: SocialAccount[];
+  setStatus: (s: string) => void;
+}) {
+  // accountFor[accountId] = AccountMetrics — fetched lazily.
+  const [accountFor, setAccountFor] = useState<Record<number, AccountMetrics | "loading" | { error: string }>>({});
+  // postFor[postId] = PostMetrics — fetched on row expand.
+  const [postFor, setPostFor] = useState<Record<number, PostMetrics | "loading" | { error: string }>>({});
+  const [expanded, setExpanded] = useState<number | null>(null);
+
+  const loadAccount = async (id: number) => {
+    setAccountFor((prev) => ({ ...prev, [id]: "loading" }));
+    try {
+      const res = await fetch(`${API}/accounts/${id}/metrics`, { credentials: "same-origin" });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as AccountMetrics;
+      setAccountFor((prev) => ({ ...prev, [id]: data }));
+    } catch (e) {
+      setAccountFor((prev) => ({ ...prev, [id]: { error: (e as Error).message } }));
+    }
+  };
+
+  const loadPost = async (id: number) => {
+    setPostFor((prev) => ({ ...prev, [id]: "loading" }));
+    try {
+      const res = await fetch(`${API}/posts/${id}/metrics`, { credentials: "same-origin" });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as PostMetrics;
+      setPostFor((prev) => ({ ...prev, [id]: data }));
+    } catch (e) {
+      setPostFor((prev) => ({ ...prev, [id]: { error: (e as Error).message } }));
+      setStatus("Metrics fetch failed: " + (e as Error).message);
+    }
+  };
+
+  const togglePost = (id: number) => {
+    if (expanded === id) {
+      setExpanded(null);
+      return;
+    }
+    setExpanded(id);
+    if (!postFor[id] || (typeof postFor[id] === "object" && "error" in (postFor[id] as any))) {
+      loadPost(id);
+    }
+  };
+
+  const published = posts.filter((p) => p.status === "published" || p.status === "partial");
+
+  return (
+    <div className="p-4 flex flex-col gap-6">
+      {/* ── Accounts section ── */}
+      <section className="flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm uppercase tracking-wide text-text-dim">Accounts</h2>
+          <span className="text-text-dim text-xs">Click to load totals</span>
+        </div>
+        {accounts.length === 0 ? (
+          <div className="text-text-dim text-sm py-6 text-center">No accounts connected.</div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {accounts.map((a) => {
+              const m = accountFor[a.id];
+              return (
+                <button
+                  key={a.id}
+                  onClick={() => loadAccount(a.id)}
+                  disabled={m === "loading"}
+                  className="text-left flex items-center gap-3 px-3 py-2 border border-border rounded hover:border-text-dim disabled:opacity-50"
+                >
+                  {a.avatar_url ? (
+                    <img src={a.avatar_url} alt="" className="w-8 h-8 rounded-full flex-shrink-0" />
+                  ) : (
+                    <div className="w-8 h-8 rounded-full bg-bg-input flex-shrink-0" />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <div className="text-text text-sm truncate">{a.display_name}</div>
+                    <div className="text-text-dim text-xs">{a.platform}</div>
+                  </div>
+                  <AccountMetricsCell m={m} />
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      {/* ── Posts section ── */}
+      <section className="flex flex-col gap-2">
+        <h2 className="text-sm uppercase tracking-wide text-text-dim">Recent posts</h2>
+        {published.length === 0 ? (
+          <div className="text-text-dim text-sm py-6 text-center">No published posts yet.</div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {published.map((p) => {
+              const m = postFor[p.id];
+              const isExpanded = expanded === p.id;
+              const totals = (typeof m === "object" && m && "targets" in m)
+                ? aggregateTotals((m as PostMetrics).targets)
+                : null;
+              return (
+                <div key={p.id} className="border border-border rounded">
+                  <button
+                    onClick={() => togglePost(p.id)}
+                    className="w-full text-left flex items-start gap-3 px-3 py-2 hover:bg-bg-card"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="text-text text-sm whitespace-nowrap overflow-hidden text-ellipsis">
+                        {p.body || <span className="text-text-dim italic">no body</span>}
+                      </div>
+                      <div className="text-text-dim text-xs mt-0.5">
+                        {new Date(p.created_at).toLocaleString()}
+                        {p.targets && p.targets.length > 0 && (
+                          <span className="ml-2">
+                            · {p.targets.length} target{p.targets.length !== 1 ? "s" : ""}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    {totals ? (
+                      <MetricsRow totals={totals} />
+                    ) : m === "loading" ? (
+                      <span className="text-text-dim text-xs">Loading…</span>
+                    ) : (
+                      <span className="text-text-dim text-xs">↓</span>
+                    )}
+                  </button>
+                  {isExpanded && (
+                    <div className="border-t border-border px-3 py-2 bg-bg/40 flex flex-col gap-2">
+                      {m === "loading" && <div className="text-text-dim text-sm">Loading metrics…</div>}
+                      {typeof m === "object" && m && "error" in m && (
+                        <div className="text-red text-sm">{(m as any).error}</div>
+                      )}
+                      {typeof m === "object" && m && "targets" in m && (
+                        <div className="flex flex-col gap-2">
+                          {(m as PostMetrics).targets.map((t) => (
+                            <TargetMetricsBlock key={t.target_id} target={t} />
+                          ))}
+                          <button
+                            onClick={() => loadPost(p.id)}
+                            className="self-start text-xs text-accent hover:underline mt-1"
+                          >
+                            ↻ Refresh
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function AccountMetricsCell({ m }: { m: any }) {
+  if (!m) return <span className="text-text-dim text-xs">→</span>;
+  if (m === "loading") return <span className="text-text-dim text-xs">…</span>;
+  if (typeof m === "object" && "error" in m) {
+    return <span className="text-red text-xs">err</span>;
+  }
+  const am = m as AccountMetrics;
+  if (am.status === "unsupported") {
+    return <span className="text-text-dim text-xs italic">unsupported</span>;
+  }
+  if (am.status === "failed") {
+    return <span className="text-red text-xs" title={am.error}>failed</span>;
+  }
+  const bits: string[] = [];
+  if (am.followers != null) bits.push(`${formatNumber(am.followers)} followers`);
+  if (am.total_videos != null && am.total_videos > 0) bits.push(`${am.total_videos} videos`);
+  return <span className="text-text text-xs">{bits.join(" · ") || "ok"}</span>;
+}
+
+function MetricsRow({ totals }: { totals: { views: number; likes: number; comments: number; shares: number } }) {
+  return (
+    <div className="flex items-center gap-3 text-xs text-text-dim flex-shrink-0">
+      <Stat label="views" value={totals.views} />
+      <Stat label="likes" value={totals.likes} />
+      <Stat label="comments" value={totals.comments} />
+      <Stat label="shares" value={totals.shares} />
+    </div>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="flex flex-col items-end leading-tight">
+      <span className="text-text font-medium text-sm">{formatNumber(value)}</span>
+      <span className="text-[10px] uppercase tracking-wider">{label}</span>
+    </div>
+  );
+}
+
+function TargetMetricsBlock({ target }: { target: TargetMetrics }) {
+  const status = target.status;
+  return (
+    <div className="border border-border rounded px-3 py-2 bg-bg-card/40">
+      <div className="flex items-center gap-2 text-xs">
+        <span className="text-text font-medium">{target.platform}</span>
+        {target.platform_url && (
+          <a href={target.platform_url} target="_blank" rel="noreferrer" className="text-accent hover:underline">
+            view post ↗
+          </a>
+        )}
+        <span className="ml-auto text-text-dim">
+          {status === "ok" ? "" : status}
+          {status === "unsupported" && target.reason && <span className="ml-1">— {target.reason}</span>}
+          {status === "failed" && target.error && <span className="ml-1 text-red">— {target.error}</span>}
+          {status === "skipped" && target.reason && <span className="ml-1">— {target.reason}</span>}
+        </span>
+      </div>
+      {target.metrics && (
+        <div className="mt-2 flex items-center gap-4 text-xs">
+          <Stat label="views" value={target.metrics.views} />
+          <Stat label="likes" value={target.metrics.likes} />
+          <Stat label="comments" value={target.metrics.comments} />
+          <Stat label="shares" value={target.metrics.shares} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function aggregateTotals(targets: TargetMetrics[]): { views: number; likes: number; comments: number; shares: number } {
+  return targets.reduce(
+    (acc, t) => {
+      if (t.metrics) {
+        acc.views += t.metrics.views;
+        acc.likes += t.metrics.likes;
+        acc.comments += t.metrics.comments;
+        acc.shares += t.metrics.shares;
+      }
+      return acc;
+    },
+    { views: 0, likes: 0, comments: 0, shares: 0 }
+  );
+}
+
+function formatNumber(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "K";
+  return n.toString();
 }
 
 function MediaThumb({ fileId }: { fileId: number }) {
