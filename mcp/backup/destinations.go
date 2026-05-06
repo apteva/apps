@@ -70,11 +70,13 @@ func validateDestination(d *Destination) error {
 		if err := json.Unmarshal(d.Config, &c); err != nil {
 			return fmt.Errorf("local config: %w", err)
 		}
-		if c.Path == "" {
-			return errors.New("local destination requires {\"path\": \"/some/dir\"}")
-		}
-		if !filepath.IsAbs(c.Path) {
-			return errors.New("local path must be absolute")
+		// Empty path is allowed: the runner fills in a default rooted
+		// at the install's writable data dir (`<DataDir>/backups`).
+		// That way a self-hoster can hit "Add destination" → Create
+		// without picking a path, and we don't ship a default like
+		// /var/apteva/backups that fails on every non-root install.
+		if c.Path != "" && !filepath.IsAbs(c.Path) {
+			return errors.New("local path must be absolute (or leave blank for the default under the install's data dir)")
 		}
 	case kindS3:
 		var c s3Config
@@ -101,12 +103,24 @@ func validateDestination(d *Destination) error {
 // openDestination instantiates a writer for the row. The runner
 // re-opens for each backup run rather than caching — destinations are
 // rare-use and the cost of a fresh client is negligible.
-func openDestination(d *Destination, getConn func(int64) (*credentials.Credentials, *s3Endpoint, error)) (Destination_writer, error) {
+//
+// defaultLocalDir is used when a kindLocal destination has an empty
+// Path — we resolve to a writable location under the install's data
+// dir rather than failing the run. Pass "" if you don't want the
+// fallback (validation already accepts empty paths so this is the
+// only place that materializes one).
+func openDestination(d *Destination, getConn func(int64) (*credentials.Credentials, *s3Endpoint, error), defaultLocalDir string) (Destination_writer, error) {
 	switch d.Kind {
 	case kindLocal:
 		var c localConfig
 		if err := json.Unmarshal(d.Config, &c); err != nil {
 			return nil, err
+		}
+		if c.Path == "" {
+			if defaultLocalDir == "" {
+				return nil, errors.New("local destination has no path and no default available")
+			}
+			c.Path = defaultLocalDir
 		}
 		if err := os.MkdirAll(c.Path, 0o755); err != nil {
 			return nil, fmt.Errorf("local dest mkdir %s: %w", c.Path, err)

@@ -26,6 +26,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -60,7 +61,7 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy) (*Run, error)
 
 	// 1) Open the destination first so credentials/endpoint failures
 	// don't waste a snapshot.
-	writer, err := openDestination(dest, makeConnAdapter(ctx))
+	writer, err := openDestination(dest, makeConnAdapter(ctx), defaultLocalBackupDir(ctx))
 	if err != nil {
 		return finish("failed", "open destination: "+err.Error(), 0, "", "", "")
 	}
@@ -231,6 +232,24 @@ func pruneRetention(ctx context.Context, app *sdk.AppCtx, w Destination_writer, 
 			`DELETE FROM runs WHERE destination_id = ? AND remote_key = ?`, d.ID, o.Key)
 	}
 	return nil
+}
+
+// defaultLocalBackupDir is the path used when a kindLocal destination
+// has no explicit Path. We root it under the install's data dir,
+// which the platform creates and guarantees writable — that's where
+// every other piece of per-install state already lives.
+//
+// Returns "" only if the SDK didn't provide a data dir (shouldn't
+// happen in production; openDestination handles it as an error).
+func defaultLocalBackupDir(ctx *sdk.AppCtx) string {
+	if ctx == nil {
+		return ""
+	}
+	dd := ctx.DataDir()
+	if dd == "" {
+		return ""
+	}
+	return filepath.Join(dd, "backups")
 }
 
 // makeConnAdapter wires the SDK's GetConnection into the format

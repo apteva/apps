@@ -414,7 +414,7 @@ function DestinationForm({
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [kind, setKind] = useState<"local" | "s3">("local");
-  const [path, setPath] = useState("/var/apteva/backups");
+  const [path, setPath] = useState("");
   const [bucket, setBucket] = useState("");
   const [endpoint, setEndpoint] = useState("");
   const [region, setRegion] = useState("us-east-1");
@@ -462,7 +462,11 @@ function DestinationForm({
 
         {kind === "local" && <>
           <Label>Path</Label>
-          <Input value={path} onChange={setPath} placeholder="/var/apteva/backups" />
+          <Input
+            value={path}
+            onChange={setPath}
+            placeholder="leave blank to use the install's data dir"
+          />
         </>}
 
         {kind === "s3" && <>
