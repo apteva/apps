@@ -16,12 +16,14 @@ mcp/deploy/deploy
 mcp/dlna/dlna
 mcp/domains/domains
 mcp/email-checker/email-checker
+mcp/ffmpeg/ffmpeg
 mcp/health/health
 mcp/image-studio/image-studio
 mcp/jobs/jobs
 mcp/live-link/live-link
 mcp/media/media
 mcp/messaging/messaging
+mcp/mqtt/mqtt
 mcp/social/social
 mcp/status/status
 mcp/storage/storage
