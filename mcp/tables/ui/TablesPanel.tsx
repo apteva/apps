@@ -116,6 +116,7 @@ export default function TablesPanel({ projectId, installId }: NativePanelProps) 
   const [showCreate, setShowCreate] = useState(false);
   const [showInsert, setShowInsert] = useState(false);
   const [showQuery, setShowQuery] = useState(false);
+  const [showApi, setShowApi] = useState(false);
   const [editingRow, setEditingRow] = useState<Record<string, unknown> | null>(null);
 
   const withParams = useCallback(
@@ -348,6 +349,14 @@ export default function TablesPanel({ projectId, installId }: NativePanelProps) 
                 </button>
                 <button
                   type="button"
+                  onClick={() => setShowApi(true)}
+                  title="Show curl examples for calling this table from outside"
+                  className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
+                >
+                  API
+                </button>
+                <button
+                  type="button"
                   onClick={onDropTable}
                   className="text-xs px-2 py-1 text-red border border-red/40 rounded hover:bg-red/10"
                 >
@@ -392,6 +401,13 @@ export default function TablesPanel({ projectId, installId }: NativePanelProps) 
                 table={selectedTable}
                 onCancel={() => setShowInsert(false)}
                 onSubmit={onInsert}
+              />
+            )}
+            {showApi && (
+              <ApiHelp
+                table={selectedTable}
+                projectId={projectId}
+                onClose={() => setShowApi(false)}
               />
             )}
           </>
@@ -948,4 +964,237 @@ function QueryDrawer({
       </footer>
     </div>
   );
+}
+
+// ─── API help modal ────────────────────────────────────────────────
+//
+// "How do I call this from outside?" docs scoped to the currently-
+// selected table. Gives copy-paste curl examples for every endpoint
+// and explains the three auth-key carriers apteva-server accepts.
+//
+// Note on the URL we surface: window.location.origin is the dashboard
+// host, which IS the API host (apteva-server proxies /api/apps/*
+// transparently). So a key issued from this dashboard works against
+// these URLs without any extra wiring.
+
+function ApiHelp({
+  table,
+  projectId,
+  onClose,
+}: {
+  table: TableMeta;
+  projectId: string;
+  onClose: () => void;
+}) {
+  const origin = typeof window !== "undefined" ? window.location.origin : "https://your-host";
+  const base = `${origin}/api/apps/tables`;
+  const sample = sampleRowFor(table);
+  const sampleJSON = JSON.stringify(sample, null, 2);
+  const wherePred = whereExampleFor(table);
+  const whereJSON = JSON.stringify({ where: [wherePred] }, null, 2);
+
+  const examples: { title: string; verb: string; description: string; curl: string }[] = [
+    {
+      title: "List rows",
+      verb: "GET",
+      description: "First 50 rows ordered by id desc.",
+      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  "${base}/tables/${table.name}/rows?limit=50"`,
+    },
+    {
+      title: "Filtered search",
+      verb: "POST",
+      description: "Typed predicates: eq, neq, lt, lte, gt, gte, contains, in, between, is_null, is_not_null.",
+      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -X POST "${base}/tables/${table.name}/rows/search" \\\n  -d '${whereJSON}'`,
+    },
+    {
+      title: "Get one row",
+      verb: "GET",
+      description: "Pass ?hydrate_files=true to resolve file_id columns to {id, url, expires_at}.",
+      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  "${base}/tables/${table.name}/rows/<id>"`,
+    },
+    {
+      title: "Insert a row",
+      verb: "POST",
+      description: "Wrap a single object as { row: {...} } or pass { rows: [...] } for atomic batch.",
+      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -X POST "${base}/tables/${table.name}/rows" \\\n  -d '{"row": ${sampleJSON.replace(/\n/g, "\n  ")}}'`,
+    },
+    {
+      title: "Update a row",
+      verb: "PATCH",
+      description: "Body is a partial object — only listed fields are touched. updated_at moves automatically.",
+      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -X PATCH "${base}/tables/${table.name}/rows/<id>" \\\n  -d '${JSON.stringify(sample).slice(0, 80)}...'`,
+    },
+    {
+      title: "Delete a row",
+      verb: "DELETE",
+      description: "Filter-form (where + confirm=true) is supported on POST /rows/search semantics — see docs.",
+      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  -X DELETE "${base}/tables/${table.name}/rows/<id>"`,
+    },
+    {
+      title: "Run a SELECT (escape hatch)",
+      verb: "POST",
+      description: "Read-only. Reference user-tables with {name} placeholders; bind values via params.",
+      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -X POST "${base}/tables/${table.name}/query" \\\n  -d '{"sql": "SELECT COUNT(*) AS n FROM {${table.name}}"}'`,
+    },
+  ];
+
+  const projectHint =
+    projectId && projectId !== ""
+      ? `# Sidecar is bound to project_id="${projectId}". For globally-scoped\n# installs, append &project_id=<id> to the URL or pass _project_id in the body.`
+      : "# Add ?project_id=<id> to the URL for globally-scoped installs.";
+
+  return (
+    <div className="absolute inset-0 bg-bg/80 flex items-center justify-center z-10 p-6">
+      <div className="bg-bg-card border border-border rounded w-[44rem] max-w-full max-h-full flex flex-col overflow-hidden">
+        <header className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <div>
+            <h3 className="text-sm font-medium text-text">
+              Connect to <span className="font-mono">{table.name}</span> from outside
+            </h3>
+            <p className="text-xs text-text-dim mt-0.5">
+              Same REST surface the dashboard uses, reachable from any host with a valid API key.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-text-muted hover:text-text text-lg leading-none px-1"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </header>
+        <div className="overflow-auto flex-1 p-4 flex flex-col gap-4 text-xs">
+          <section>
+            <h4 className="text-text-dim uppercase text-[10px] tracking-wide mb-2">Auth carriers</h4>
+            <p className="text-text-muted mb-2">
+              Three ways to attach your API key — pick whichever fits the client. Keys are issued
+              under your account settings.
+            </p>
+            <ul className="space-y-1.5 font-mono">
+              <li>
+                <code className="bg-bg-input px-1.5 py-0.5 rounded">
+                  Authorization: Bearer $APTEVA_API_KEY
+                </code>{" "}
+                <span className="text-text-dim font-sans not-italic">— canonical</span>
+              </li>
+              <li>
+                <code className="bg-bg-input px-1.5 py-0.5 rounded">
+                  X-API-Key: $APTEVA_API_KEY
+                </code>{" "}
+                <span className="text-text-dim font-sans">— common alt header</span>
+              </li>
+              <li>
+                <code className="bg-bg-input px-1.5 py-0.5 rounded">?api_key=$APTEVA_API_KEY</code>{" "}
+                <span className="text-text-dim font-sans">— for SSE/EventSource</span>
+              </li>
+            </ul>
+          </section>
+          <section>
+            <h4 className="text-text-dim uppercase text-[10px] tracking-wide mb-2">Base URL</h4>
+            <CopyBlock text={base} />
+            <p className="text-[10px] text-text-dim mt-2 whitespace-pre-line font-mono">
+              {projectHint}
+            </p>
+          </section>
+          <section>
+            <h4 className="text-text-dim uppercase text-[10px] tracking-wide mb-2">Endpoints</h4>
+            <div className="flex flex-col gap-3">
+              {examples.map((ex) => (
+                <div key={ex.title} className="border border-border rounded">
+                  <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border bg-bg-input/30">
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 bg-accent/15 text-accent rounded">
+                      {ex.verb}
+                    </span>
+                    <span className="text-text font-medium">{ex.title}</span>
+                  </div>
+                  <div className="p-3 flex flex-col gap-2">
+                    <p className="text-text-muted">{ex.description}</p>
+                    <CopyBlock text={ex.curl} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// CopyBlock renders a code block with a copy-to-clipboard button.
+function CopyBlock({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // clipboard API blocked — fall through silently
+    }
+  };
+  return (
+    <div className="relative group">
+      <pre className="bg-bg-input border border-border rounded p-2 pr-14 text-[11px] font-mono text-text whitespace-pre-wrap break-all overflow-auto">
+        {text}
+      </pre>
+      <button
+        type="button"
+        onClick={onCopy}
+        className="absolute top-1.5 right-1.5 text-[10px] px-1.5 py-0.5 border border-border rounded bg-bg-card hover:bg-bg-input text-text-dim hover:text-text"
+      >
+        {copied ? "copied" : "copy"}
+      </button>
+    </div>
+  );
+}
+
+// sampleRowFor synthesises a believable example payload from the
+// table's schema. The values are deterministic placeholders, not
+// random — so curl examples don't churn between renders.
+function sampleRowFor(table: TableMeta): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const c of table.columns) {
+    if (c.nullable && c.default === undefined) continue;
+    switch (c.type) {
+      case "text":
+        out[c.name] = "example";
+        break;
+      case "number":
+        out[c.name] = 42;
+        break;
+      case "bool":
+        out[c.name] = true;
+        break;
+      case "datetime":
+        out[c.name] = "2026-05-06T12:00:00Z";
+        break;
+      case "json":
+        out[c.name] = { example: true };
+        break;
+      case "file_id":
+        out[c.name] = 1;
+        break;
+    }
+  }
+  // If every column was nullable, still surface one column so the
+  // example isn't an empty object.
+  if (Object.keys(out).length === 0 && table.columns.length > 0) {
+    const c = table.columns[0];
+    out[c.name] = c.type === "number" ? 0 : "example";
+  }
+  return out;
+}
+
+// whereExampleFor picks the first column whose type makes for a clean
+// predicate demo — string with contains, number with gte, bool with
+// eq, etc. — and returns a {col, op, value} triple.
+function whereExampleFor(table: TableMeta): { col: string; op: string; value: unknown } {
+  for (const c of table.columns) {
+    if (c.type === "text") return { col: c.name, op: "contains", value: "search" };
+    if (c.type === "bool") return { col: c.name, op: "eq", value: true };
+    if (c.type === "number") return { col: c.name, op: "gte", value: 0 };
+  }
+  return { col: "id", op: "gt", value: 0 };
 }
