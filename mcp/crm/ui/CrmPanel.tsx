@@ -227,6 +227,19 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const [status, setStatus] = useState("");
   const [edits, setEdits] = useState<Partial<Contact>>({});
   const [composer, setComposer] = useState<ComposerState | null>(null);
+  const [errorToast, setErrorToast] = useState<string | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmState | null>(null);
+  const [logActivityOpen, setLogActivityOpen] = useState(false);
+  const [newContactOpen, setNewContactOpen] = useState(false);
+
+  // Auto-dismiss the error toast after 5s. Manual dismiss via the
+  // X button is also wired up below; this prevents stale errors
+  // from lingering when the user moves on.
+  useEffect(() => {
+    if (!errorToast) return;
+    const id = window.setTimeout(() => setErrorToast(null), 5000);
+    return () => window.clearTimeout(id);
+  }, [errorToast]);
 
   const withParams = useCallback((extra: Record<string, string> = {}) => {
     const u = new URLSearchParams({ project_id: projectId, install_id: String(installId), ...extra });
@@ -337,51 +350,53 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       setEdits({});
       await loadList(query.trim());
     } catch (e) {
-      alert("Save failed: " + (e as Error).message);
+      setErrorToast("Save failed: " + (e as Error).message);
     }
   };
 
-  const handleArchive = async () => {
+  const handleArchive = () => {
     if (!detail) return;
-    if (!confirm(`Archive ${displayName(detail)}?`)) return;
-    try {
-      await api("DELETE", `/contacts/${detail.id}`);
-      setDetail(null);
-      setSelectedId(null);
-      await loadList(query.trim());
-    } catch (e) {
-      alert("Archive failed: " + (e as Error).message);
-    }
+    setConfirmDialog({
+      title: "Archive contact",
+      message: `Archive ${displayName(detail)}? You can still view archived contacts via Status filter.`,
+      confirmLabel: "Archive",
+      destructive: true,
+      onConfirm: async () => {
+        try {
+          await api("DELETE", `/contacts/${detail.id}`);
+          setDetail(null);
+          setSelectedId(null);
+          await loadList(query.trim());
+        } catch (e) {
+          setErrorToast("Archive failed: " + (e as Error).message);
+        }
+      },
+    });
   };
 
-  const handleLogActivity = async () => {
+  const handleLogActivity = async (kind: string, body: string) => {
     if (!detail) return;
-    const kind = prompt("Kind (call / meeting / note):", "note");
-    if (!kind) return;
-    const body = prompt("Body:");
-    if (!body) return;
     try {
       await api("POST", `/contacts/${detail.id}/activities`, { kind, body, source: "human" });
       reloadActivities(detail.id);
+      setLogActivityOpen(false);
     } catch (e) {
-      alert("Log failed: " + (e as Error).message);
+      setErrorToast("Log failed: " + (e as Error).message);
     }
   };
 
-  const handleNewContact = async () => {
-    const first = prompt("First name:");
-    if (!first) return;
-    const email = prompt("Email (optional):", "") || "";
+  const handleNewContact = async (firstName: string, email: string) => {
     try {
       const r = await api<{ contact: Contact }>("POST", "/contacts", {
-        first_name: first,
+        first_name: firstName,
         source: "human",
         channels: email ? [{ kind: "email", value: email, is_primary: true }] : [],
       });
+      setNewContactOpen(false);
       await loadList();
       selectContact(r.contact.id);
     } catch (e) {
-      alert("Create failed: " + (e as Error).message);
+      setErrorToast("Create failed: " + (e as Error).message);
     }
   };
 
@@ -465,7 +480,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
                 />
                 <button
                   type="button"
-                  onClick={handleNewContact}
+                  onClick={() => setNewContactOpen(true)}
                   className="px-2 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg"
                 >+ New</button>
               </div>
@@ -625,7 +640,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
                     >Save</button>
                     <button
                       type="button"
-                      onClick={handleLogActivity}
+                      onClick={() => setLogActivityOpen(true)}
                       className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input"
                     >Log activity</button>
                     <button
@@ -652,6 +667,35 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
           onCancel={() => setComposer(null)}
           onChange={(patch) => setComposer((prev) => prev ? { ...prev, ...patch } : prev)}
           onSend={handleSendFromComposer}
+        />
+      )}
+
+      {newContactOpen && (
+        <NewContactModal
+          onCancel={() => setNewContactOpen(false)}
+          onSubmit={handleNewContact}
+        />
+      )}
+
+      {logActivityOpen && detail && (
+        <LogActivityModal
+          contactName={displayName(detail)}
+          onCancel={() => setLogActivityOpen(false)}
+          onSubmit={handleLogActivity}
+        />
+      )}
+
+      {confirmDialog && (
+        <ConfirmDialog
+          state={confirmDialog}
+          onClose={() => setConfirmDialog(null)}
+        />
+      )}
+
+      {errorToast && (
+        <ErrorToast
+          message={errorToast}
+          onDismiss={() => setErrorToast(null)}
         />
       )}
     </div>
@@ -1007,6 +1051,225 @@ function RouteRow({ label, wired, onWire, busy }: { label: string; wired: boolea
         disabled={busy || wired}
         className="ml-auto text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
       >{wired ? "Wired" : "Wire up"}</button>
+    </div>
+  );
+}
+
+// ─── Generic modal shell ──────────────────────────────────────────
+
+function ModalShell({ title, onCancel, children, footer }: {
+  title: string;
+  onCancel: () => void;
+  children: React.ReactNode;
+  footer: React.ReactNode;
+}) {
+  // Esc-to-close. Centralised here so every modal honours the same
+  // dismissal contract instead of each one reinventing it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onCancel(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+  return (
+    <div className="absolute inset-0 bg-black/40 flex items-center justify-center pointer-events-auto z-10">
+      <div className="bg-bg border border-border rounded-lg shadow-lg w-full max-w-md mx-4">
+        <header className="flex items-center justify-between px-4 py-2 border-b border-border">
+          <div className="text-sm text-text font-medium">{title}</div>
+          <button type="button" onClick={onCancel} className="text-text-dim hover:text-text px-2">×</button>
+        </header>
+        <div className="p-4 space-y-3 text-sm">{children}</div>
+        <footer className="flex items-center gap-2 px-4 py-3 border-t border-border">{footer}</footer>
+      </div>
+    </div>
+  );
+}
+
+// ─── ConfirmDialog ────────────────────────────────────────────────
+
+interface ConfirmState {
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  destructive?: boolean;
+  onConfirm: () => void | Promise<void>;
+}
+
+function ConfirmDialog({ state, onClose }: { state: ConfirmState; onClose: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const handleConfirm = async () => {
+    setBusy(true);
+    try { await state.onConfirm(); }
+    finally { setBusy(false); onClose(); }
+  };
+  return (
+    <ModalShell
+      title={state.title}
+      onCancel={onClose}
+      footer={
+        <>
+          <button
+            type="button"
+            onClick={handleConfirm}
+            disabled={busy}
+            className={`px-3 py-1 text-sm rounded disabled:opacity-50 ${
+              state.destructive
+                ? "border border-red/50 text-red hover:bg-red/10"
+                : "border border-accent text-accent hover:bg-accent hover:text-bg"
+            }`}
+          >{busy ? "Working…" : (state.confirmLabel || "Confirm")}</button>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input disabled:opacity-50"
+          >Cancel</button>
+        </>
+      }
+    >
+      <p className="text-text">{state.message}</p>
+    </ModalShell>
+  );
+}
+
+// ─── NewContactModal ──────────────────────────────────────────────
+
+function NewContactModal({ onCancel, onSubmit }: {
+  onCancel: () => void;
+  onSubmit: (firstName: string, email: string) => void | Promise<void>;
+}) {
+  const [firstName, setFirstName] = useState("");
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    if (!firstName.trim()) return;
+    setBusy(true);
+    try { await onSubmit(firstName.trim(), email.trim()); }
+    finally { setBusy(false); }
+  };
+  return (
+    <ModalShell
+      title="New contact"
+      onCancel={onCancel}
+      footer={
+        <>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={busy || !firstName.trim()}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+          >{busy ? "Creating…" : "Create"}</button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input disabled:opacity-50"
+          >Cancel</button>
+        </>
+      }
+    >
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-20">First name</label>
+        <input
+          type="text"
+          value={firstName}
+          onChange={(e) => setFirstName(e.target.value)}
+          autoFocus
+          className="flex-1 bg-bg-input border border-border rounded px-2 py-1"
+        />
+      </div>
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-20">Email</label>
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="optional"
+          className="flex-1 bg-bg-input border border-border rounded px-2 py-1"
+        />
+      </div>
+    </ModalShell>
+  );
+}
+
+// ─── LogActivityModal ─────────────────────────────────────────────
+
+function LogActivityModal({ contactName, onCancel, onSubmit }: {
+  contactName: string;
+  onCancel: () => void;
+  onSubmit: (kind: string, body: string) => void | Promise<void>;
+}) {
+  const [kind, setKind] = useState("note");
+  const [body, setBody] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    if (!body.trim()) return;
+    setBusy(true);
+    try { await onSubmit(kind, body.trim()); }
+    finally { setBusy(false); }
+  };
+  return (
+    <ModalShell
+      title={`Log activity — ${contactName}`}
+      onCancel={onCancel}
+      footer={
+        <>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={busy || !body.trim()}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+          >{busy ? "Logging…" : "Log"}</button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input disabled:opacity-50"
+          >Cancel</button>
+        </>
+      }
+    >
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-20">Kind</label>
+        <select
+          value={kind}
+          onChange={(e) => setKind(e.target.value)}
+          className="bg-bg-input border border-border rounded px-2 py-1"
+        >
+          {["note", "call", "meeting", "system"].map((k) => (
+            <option key={k} value={k}>{k}</option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <label className="text-text-muted text-xs uppercase tracking-wide block mb-1">Body</label>
+        <textarea
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          rows={5}
+          autoFocus
+          className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+          placeholder="What happened?"
+        />
+      </div>
+    </ModalShell>
+  );
+}
+
+// ─── ErrorToast ───────────────────────────────────────────────────
+//
+// Bottom-right transient notification. Auto-dismisses on a timer
+// (panel-level effect) and on manual click of the × button.
+
+function ErrorToast({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+  return (
+    <div className="absolute bottom-4 right-4 z-20 max-w-sm border border-red/50 bg-red/10 text-text rounded shadow-lg flex items-start gap-2 p-3 text-sm">
+      <span className="text-red shrink-0">⚠</span>
+      <span className="flex-1 break-words">{message}</span>
+      <button
+        type="button"
+        onClick={onDismiss}
+        className="text-text-dim hover:text-text shrink-0"
+      >×</button>
     </div>
   );
 }
