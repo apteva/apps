@@ -449,6 +449,7 @@ function ProfileManageModal({
   const [newName, setNewName] = useState("");
   const [newColor, setNewColor] = useState("#3b82f6");
   const [busy, setBusy] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState<Profile | null>(null);
 
   const create = async () => {
     const name = newName.trim();
@@ -514,7 +515,6 @@ function ProfileManageModal({
   };
 
   const removeProfile = async (id: number) => {
-    if (!confirm("Delete this profile? Accounts and posts will become unassigned.")) return;
     try {
       const res = await fetch(`${API}/profiles/${id}`, {
         method: "DELETE",
@@ -547,6 +547,7 @@ function ProfileManageModal({
   const unassigned = accounts.filter((a) => !a.profile_id);
 
   return (
+    <>
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/60" onClick={onClose}>
       <div
         className="bg-bg-card border border-border rounded-lg shadow-lg w-[640px] max-w-[92vw] max-h-[85vh] flex flex-col"
@@ -613,7 +614,7 @@ function ProfileManageModal({
                   )}
                   {p.is_default && <span className="text-text-dim text-xs">default</span>}
                   <button
-                    onClick={() => removeProfile(p.id)}
+                    onClick={() => setConfirmingDelete(p)}
                     className="text-xs text-text-muted hover:text-red"
                   >
                     Delete
@@ -668,6 +669,26 @@ function ProfileManageModal({
         </div>
       </div>
     </div>
+    {confirmingDelete && (
+      <ConfirmDialog
+        title={`Delete profile "${confirmingDelete.name}"?`}
+        body={
+          <>
+            Accounts and posts assigned to this profile will become
+            unassigned — they won't be deleted. You can re-home them
+            from the unassigned bucket below.
+          </>
+        }
+        confirmLabel="Delete profile"
+        onClose={() => setConfirmingDelete(null)}
+        onConfirm={async () => {
+          const p = confirmingDelete;
+          setConfirmingDelete(null);
+          if (p) await removeProfile(p.id);
+        }}
+      />
+    )}
+    </>
   );
 }
 
@@ -788,8 +809,8 @@ function AccountsView({
 function AccountCard({
   account, onChange, setStatus,
 }: { account: SocialAccount; onChange: () => void; setStatus: (s: string) => void }) {
-  const remove = async () => {
-    if (!confirm(`Disconnect ${account.display_name}?`)) return;
+  const [confirming, setConfirming] = useState(false);
+  const doRemove = async () => {
     try {
       await fetch(`${API}/accounts/${account.id}`, { method: "DELETE", credentials: "same-origin" });
       setStatus("Disconnected.");
@@ -799,26 +820,46 @@ function AccountCard({
     }
   };
   return (
-    <div className="border border-border rounded p-3 flex items-center gap-3">
-      {account.avatar_url ? (
-        <img src={account.avatar_url} alt="" className="w-10 h-10 rounded-full" />
-      ) : (
-        <div className="w-10 h-10 rounded-full bg-bg-input grid place-items-center text-text-dim text-xs uppercase">
-          {account.platform[0]}
+    <>
+      <div className="border border-border rounded p-3 flex items-center gap-3">
+        {account.avatar_url ? (
+          <img src={account.avatar_url} alt="" className="w-10 h-10 rounded-full" />
+        ) : (
+          <div className="w-10 h-10 rounded-full bg-bg-input grid place-items-center text-text-dim text-xs uppercase">
+            {account.platform[0]}
+          </div>
+        )}
+        <div className="flex-1 min-w-0">
+          <div className="text-text text-sm truncate">{account.display_name}</div>
+          <div className="text-text-dim text-xs">{account.platform}</div>
         </div>
-      )}
-      <div className="flex-1 min-w-0">
-        <div className="text-text text-sm truncate">{account.display_name}</div>
-        <div className="text-text-dim text-xs">{account.platform}</div>
+        <button
+          onClick={() => setConfirming(true)}
+          className="text-text-muted hover:text-error text-xs"
+          title="Disconnect"
+        >
+          ×
+        </button>
       </div>
-      <button
-        onClick={remove}
-        className="text-text-muted hover:text-error text-xs"
-        title="Disconnect"
-      >
-        ×
-      </button>
-    </div>
+      {confirming && (
+        <ConfirmDialog
+          title={`Disconnect ${account.display_name}?`}
+          body={
+            <>
+              The OAuth grant stays valid upstream — you can re-add this {account.platform} account
+              later without going through the auth dance again. Scheduled posts targeting this
+              account will fail to publish until reconnected.
+            </>
+          }
+          confirmLabel="Disconnect"
+          onClose={() => setConfirming(false)}
+          onConfirm={async () => {
+            await doRemove();
+            setConfirming(false);
+          }}
+        />
+      )}
+    </>
   );
 }
 
@@ -1856,6 +1897,76 @@ function DeleteConfirmDialog({
             className="px-3 py-1.5 text-sm bg-red text-bg rounded font-bold hover:opacity-90 disabled:opacity-50"
           >
             {busy ? "…" : isScheduled ? "Cancel post" : "Delete"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- ConfirmDialog -----------------------------------------------
+//
+// Reusable destructive-action confirmation modal. DeleteConfirmDialog
+// is intentionally left separate because it has more bespoke layout
+// (post body preview + per-platform upstream breakdown). For simple
+// "are you sure?" cases — disconnect account, delete profile — use
+// this one. Async onConfirm: the button shows a loading state and the
+// backdrop+close are disabled while the request is in flight.
+
+function ConfirmDialog({
+  title, body, confirmLabel = "Confirm", cancelLabel = "Cancel",
+  onConfirm, onClose,
+}: {
+  title: string;
+  body?: React.ReactNode;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  onConfirm: () => void | Promise<void>;
+  onClose: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const handleConfirm = async () => {
+    setBusy(true);
+    try {
+      await onConfirm();
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center bg-black/60"
+      onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}
+    >
+      <div className="bg-bg-card border border-border rounded-lg shadow-lg w-[min(440px,92vw)] p-5 flex flex-col gap-4">
+        <div className="flex items-center justify-between">
+          <div className="text-text font-bold">{title}</div>
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="text-text-muted hover:text-text text-lg leading-none disabled:opacity-50"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+        {body && <div className="text-text-dim text-sm">{body}</div>}
+        <div className="flex justify-end gap-2 pt-1">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-card disabled:opacity-50"
+          >
+            {cancelLabel}
+          </button>
+          <button
+            type="button"
+            onClick={handleConfirm}
+            disabled={busy}
+            className="px-3 py-1.5 text-sm bg-red text-bg rounded font-bold hover:opacity-90 disabled:opacity-50"
+          >
+            {busy ? "…" : confirmLabel}
           </button>
         </div>
       </div>
