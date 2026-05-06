@@ -3,7 +3,7 @@
 // layout: contact list on the left, detail on the right. Tabbed
 // shell exposes a Settings pane for the messaging coupling.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
 // because panels are bundled standalone and apps are independently
@@ -76,8 +76,19 @@ interface Channel {
 interface Attribute {
   key: string;
   label?: string;
+  type?: string;
   value: unknown;
 }
+interface AttributeDef {
+  key: string;
+  label: string;
+  type: AttributeType;
+  enum_values?: string[];
+  required?: boolean;
+  sort_order?: number;
+  is_system?: number;
+}
+type AttributeType = "text" | "number" | "date" | "bool" | "select" | "multi_select" | "url";
 interface Activity {
   id: string;
   kind: string;
@@ -184,13 +195,6 @@ function secondaryLine(c: Contact): string {
   return bits.join(" · ");
 }
 
-function formatAttrValue(a: Attribute): string {
-  if (a.value == null) return "—";
-  if (Array.isArray(a.value)) return a.value.join(", ");
-  if (typeof a.value === "boolean") return a.value ? "yes" : "no";
-  return String(a.value);
-}
-
 function formatTime(s: string | undefined): string {
   if (!s) return "";
   try { return new Date(s).toLocaleString(); } catch { return s; }
@@ -231,6 +235,8 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const [confirmDialog, setConfirmDialog] = useState<ConfirmState | null>(null);
   const [logActivityOpen, setLogActivityOpen] = useState(false);
   const [newContactOpen, setNewContactOpen] = useState(false);
+  const [attrDefs, setAttrDefs] = useState<AttributeDef[]>([]);
+  const [defineFieldOpen, setDefineFieldOpen] = useState(false);
 
   // Auto-dismiss the error toast after 5s. Manual dismiss via the
   // X button is also wired up below; this prevents stale errors
@@ -279,8 +285,18 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     }
   }, [api]);
 
+  const loadAttrDefs = useCallback(async () => {
+    try {
+      const r = await api<{ attribute_defs?: AttributeDef[] }>("GET", "/attribute-defs");
+      setAttrDefs(r.attribute_defs || []);
+    } catch (e) {
+      // Best-effort — settings tab surfaces errors more loudly.
+    }
+  }, [api]);
+
   // Initial load.
   useEffect(() => { loadList(""); }, [loadList]);
+  useEffect(() => { loadAttrDefs(); }, [loadAttrDefs]);
 
   // Debounced search.
   useEffect(() => {
@@ -382,6 +398,28 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       setLogActivityOpen(false);
     } catch (e) {
       setErrorToast("Log failed: " + (e as Error).message);
+    }
+  };
+
+  const handleSetAttribute = async (key: string, value: unknown) => {
+    if (!detail) return;
+    try {
+      await api("POST", `/contacts/${detail.id}/attributes`, { key, value, source: "human" });
+      // Refresh the contact to pick up the new attribute value.
+      const r = await api<{ contact: Contact }>("GET", `/contacts/${detail.id}`);
+      setDetail(r.contact);
+    } catch (e) {
+      setErrorToast("Save field failed: " + (e as Error).message);
+    }
+  };
+
+  const handleDefineField = async (def: { key: string; label: string; type: AttributeType; enum_values?: string[]; required?: boolean }) => {
+    try {
+      await api("POST", "/attribute-defs", def);
+      await loadAttrDefs();
+      setDefineFieldOpen(false);
+    } catch (e) {
+      setErrorToast("Define field failed: " + (e as Error).message);
     }
   };
 
@@ -592,19 +630,12 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
                     </section>
                   )}
 
-                  {detail.attributes && detail.attributes.length > 0 && (
-                    <section>
-                      <h2 className="text-xs uppercase tracking-wide text-text-dim mb-2">Attributes</h2>
-                      <div className="grid grid-cols-[140px_1fr] gap-2 text-sm">
-                        {detail.attributes.map((a, i) => (
-                          <span key={i} className="contents">
-                            <span className="text-text-muted">{a.label || a.key}</span>
-                            <span className="text-text">{formatAttrValue(a)}</span>
-                          </span>
-                        ))}
-                      </div>
-                    </section>
-                  )}
+                  <FieldsSection
+                    contact={detail}
+                    defs={attrDefs}
+                    onSet={handleSetAttribute}
+                  />
+
 
                   <section>
                     <h2 className="text-xs uppercase tracking-wide text-text-dim mb-2">
@@ -656,6 +687,8 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
         ) : (
           <SettingsTab
             messagingTool={messagingTool}
+            attrDefs={attrDefs}
+            onAddField={() => setDefineFieldOpen(true)}
           />
         )}
       </div>
@@ -689,6 +722,14 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
         <ConfirmDialog
           state={confirmDialog}
           onClose={() => setConfirmDialog(null)}
+        />
+      )}
+
+      {defineFieldOpen && (
+        <DefineFieldModal
+          existing={attrDefs}
+          onCancel={() => setDefineFieldOpen(false)}
+          onSubmit={handleDefineField}
         />
       )}
 
@@ -947,8 +988,10 @@ function addressForChannel(c: Contact, channel: string): string {
 
 // ─── Settings tab ─────────────────────────────────────────────────
 
-function SettingsTab({ messagingTool }: {
+function SettingsTab({ messagingTool, attrDefs, onAddField }: {
   messagingTool: <T,>(tool: string, args?: Record<string, unknown>) => Promise<T>;
+  attrDefs: AttributeDef[];
+  onAddField: () => void;
 }) {
   const [routes, setRoutes] = useState<InboundRoute[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1031,6 +1074,35 @@ function SettingsTab({ messagingTool }: {
         {error && !messagingMissing && (
           <div className="mt-3 text-red text-xs">Error: {error}</div>
         )}
+      </section>
+
+      <section>
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-xs uppercase tracking-wide text-text-dim">Custom fields</h2>
+          <button
+            type="button"
+            onClick={onAddField}
+            className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+          >+ Add field</button>
+        </div>
+        {attrDefs.length === 0 ? (
+          <p className="text-text-muted text-sm">No custom fields yet. Add one to enrich contacts with project-specific data.</p>
+        ) : (
+          <ul className="divide-y divide-border border border-border rounded">
+            {attrDefs.map((d) => (
+              <li key={d.key} className="px-3 py-2 flex items-center gap-3 text-sm">
+                <span className="text-text font-medium flex-1 truncate">{d.label}</span>
+                <span className="text-[10px] uppercase text-text-dim">{d.key}</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted">{d.type}</span>
+                {d.required ? <span className="text-[10px] text-red">required</span> : null}
+                {d.is_system ? <span className="text-[10px] text-accent">system</span> : null}
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="text-text-dim text-xs pt-2">
+          Fields are project-scoped. Type drives the editor (text → input, bool → checkbox, select → dropdown, date → date picker, etc.).
+        </p>
       </section>
     </div>
   );
@@ -1272,4 +1344,288 @@ function ErrorToast({ message, onDismiss }: { message: string; onDismiss: () => 
       >×</button>
     </div>
   );
+}
+
+// ─── Fields section (custom attributes) ───────────────────────────
+//
+// Renders one row per defined attribute, with a type-aware editor.
+// Unset rows show a faint placeholder; set rows show the current
+// value; both edit in place and save on blur (or onChange for the
+// instant-feedback inputs like checkbox/select). When defs include
+// attributes the contact doesn't yet have, an "Add a field value"
+// dropdown lets the user start filling them in.
+
+function FieldsSection({ contact, defs, onSet }: {
+  contact: Contact;
+  defs: AttributeDef[];
+  onSet: (key: string, value: unknown) => void | Promise<void>;
+}) {
+  const valueByKey = useMemo(() => {
+    const out: Record<string, unknown> = {};
+    for (const a of contact.attributes || []) out[a.key] = a.value;
+    return out;
+  }, [contact]);
+
+  if (defs.length === 0) {
+    return null;
+  }
+
+  return (
+    <section>
+      <h2 className="text-xs uppercase tracking-wide text-text-dim mb-2">Fields</h2>
+      <div className="grid grid-cols-[140px_1fr] gap-y-2 gap-x-3 text-sm items-center">
+        {defs.map((d) => (
+          <Fragment key={d.key}>
+            <label className="text-text-muted self-center" title={d.key}>
+              {d.label}
+              {d.required ? <span className="text-red ml-1">*</span> : null}
+            </label>
+            <FieldEditor
+              def={d}
+              value={valueByKey[d.key]}
+              onCommit={(v) => onSet(d.key, v)}
+            />
+          </Fragment>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function FieldEditor({ def, value, onCommit }: {
+  def: AttributeDef;
+  value: unknown;
+  onCommit: (v: unknown) => void;
+}) {
+  // Local draft so typing doesn't fire a save per keystroke. We
+  // commit on blur (text/url/number/date) or on change (bool/select),
+  // matching how each input naturally behaves.
+  const initial = value == null ? "" : (def.type === "multi_select" ? (Array.isArray(value) ? value.join(", ") : "") : String(value));
+  const [draft, setDraft] = useState<string>(initial);
+  useEffect(() => { setDraft(initial); }, [initial]);
+
+  const cls = "bg-bg-input border border-border rounded px-2 py-1 w-full";
+
+  if (def.type === "bool") {
+    const b = value === true || value === "true" || value === 1;
+    return (
+      <input
+        type="checkbox"
+        checked={b}
+        onChange={(e) => onCommit(e.target.checked)}
+        className="w-4 h-4 accent-accent"
+      />
+    );
+  }
+  if (def.type === "select") {
+    return (
+      <select
+        value={(value == null ? "" : String(value))}
+        onChange={(e) => onCommit(e.target.value || null)}
+        className={cls}
+      >
+        <option value="">—</option>
+        {(def.enum_values || []).map((opt) => (
+          <option key={opt} value={opt}>{opt}</option>
+        ))}
+      </select>
+    );
+  }
+  if (def.type === "multi_select") {
+    const selected = Array.isArray(value) ? (value as string[]) : [];
+    const toggle = (opt: string) => {
+      const next = selected.includes(opt) ? selected.filter((s) => s !== opt) : [...selected, opt];
+      onCommit(next);
+    };
+    return (
+      <div className="flex flex-wrap gap-1">
+        {(def.enum_values || []).map((opt) => {
+          const on = selected.includes(opt);
+          return (
+            <button
+              key={opt}
+              type="button"
+              onClick={() => toggle(opt)}
+              className={`text-[11px] px-1.5 py-0.5 rounded border ${on ? "border-accent text-accent bg-accent/10" : "border-border text-text-muted hover:bg-bg-input"}`}
+            >{opt}</button>
+          );
+        })}
+      </div>
+    );
+  }
+  if (def.type === "date") {
+    return (
+      <input
+        type="date"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => { if (draft !== initial) onCommit(draft || null); }}
+        className={cls}
+      />
+    );
+  }
+  if (def.type === "number") {
+    return (
+      <input
+        type="number"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => {
+          if (draft === initial) return;
+          if (draft === "") onCommit(null);
+          else {
+            const n = Number(draft);
+            if (!Number.isNaN(n)) onCommit(n);
+          }
+        }}
+        className={cls}
+      />
+    );
+  }
+  // text, url, fallback
+  return (
+    <input
+      type={def.type === "url" ? "url" : "text"}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => { if (draft !== initial) onCommit(draft || null); }}
+      placeholder={def.type === "url" ? "https://…" : ""}
+      className={cls}
+    />
+  );
+}
+
+// ─── DefineFieldModal ─────────────────────────────────────────────
+//
+// Operator-facing form for creating a new custom field. Backed by the
+// contacts_define_attribute MCP tool / POST /attribute-defs HTTP route.
+
+function DefineFieldModal({ existing, onCancel, onSubmit }: {
+  existing: AttributeDef[];
+  onCancel: () => void;
+  onSubmit: (def: { key: string; label: string; type: AttributeType; enum_values?: string[]; required?: boolean }) => void | Promise<void>;
+}) {
+  const [label, setLabel] = useState("");
+  const [key, setKey] = useState("");
+  const [type, setType] = useState<AttributeType>("text");
+  const [required, setRequired] = useState(false);
+  const [enumStr, setEnumStr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [touchedKey, setTouchedKey] = useState(false);
+
+  // Auto-derive a snake_case key from the label until the user edits
+  // the key directly.
+  const suggestedKey = useMemo(() => slugify(label), [label]);
+  const effectiveKey = touchedKey ? key : suggestedKey;
+  const keyTaken = existing.some((d) => d.key === effectiveKey);
+  const needsEnum = type === "select" || type === "multi_select";
+  const enumVals = enumStr.split(",").map((s) => s.trim()).filter(Boolean);
+
+  const submit = async () => {
+    if (!label.trim() || !effectiveKey) return;
+    if (needsEnum && enumVals.length === 0) return;
+    setBusy(true);
+    try {
+      await onSubmit({
+        key: effectiveKey,
+        label: label.trim(),
+        type,
+        enum_values: needsEnum ? enumVals : undefined,
+        required,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <ModalShell
+      title="Add custom field"
+      onCancel={onCancel}
+      footer={
+        <>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={busy || !label.trim() || !effectiveKey || keyTaken || (needsEnum && enumVals.length === 0)}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+          >{busy ? "Adding…" : "Add field"}</button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input disabled:opacity-50"
+          >Cancel</button>
+        </>
+      }
+    >
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-20">Label</label>
+        <input
+          type="text"
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          autoFocus
+          placeholder="Renewal date"
+          className="flex-1 bg-bg-input border border-border rounded px-2 py-1"
+        />
+      </div>
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-20">Key</label>
+        <input
+          type="text"
+          value={effectiveKey}
+          onChange={(e) => { setTouchedKey(true); setKey(e.target.value); }}
+          placeholder="renewal_date"
+          className="flex-1 bg-bg-input border border-border rounded px-2 py-1 font-mono text-xs"
+        />
+      </div>
+      {keyTaken && (
+        <p className="text-red text-xs ml-22">Key already exists in this project.</p>
+      )}
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-20">Type</label>
+        <select
+          value={type}
+          onChange={(e) => setType(e.target.value as AttributeType)}
+          className="bg-bg-input border border-border rounded px-2 py-1"
+        >
+          {(["text", "number", "date", "bool", "select", "multi_select", "url"] as AttributeType[]).map((t) => (
+            <option key={t} value={t}>{t}</option>
+          ))}
+        </select>
+      </div>
+      {needsEnum && (
+        <div className="flex items-start gap-2">
+          <label className="text-text-muted w-20 mt-1">Options</label>
+          <div className="flex-1">
+            <input
+              type="text"
+              value={enumStr}
+              onChange={(e) => setEnumStr(e.target.value)}
+              placeholder="alpha, beta, gamma"
+              className="w-full bg-bg-input border border-border rounded px-2 py-1"
+            />
+            <p className="text-text-dim text-xs mt-1">Comma-separated.</p>
+          </div>
+        </div>
+      )}
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-20">Required</label>
+        <input
+          type="checkbox"
+          checked={required}
+          onChange={(e) => setRequired(e.target.checked)}
+          className="w-4 h-4 accent-accent"
+        />
+      </div>
+    </ModalShell>
+  );
+}
+
+function slugify(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
 }

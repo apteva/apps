@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.2.1
+version: 0.3.0
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -202,6 +202,9 @@ func (a *App) handleHTTPContactItem(w http.ResponseWriter, r *http.Request) {
 				a.handleHTTPListConversations(w, r)
 			}
 			return
+		case "attributes":
+			a.handleHTTPSetAttribute(w, r)
+			return
 		}
 	}
 	switch r.Method {
@@ -227,6 +230,49 @@ func (a *App) handleHTTPAttrDefs(w http.ResponseWriter, r *http.Request) {
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+// handleHTTPSetAttribute writes an attribute value via POST to
+// /contacts/<id>/attributes. Body: { key, value, source? }. Mirrors
+// the contacts_set_attribute MCP tool so the panel can edit fields
+// without going through /tools/call (CRM doesn't expose one).
+func (a *App) handleHTTPSetAttribute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	ctx := getAppCtx(r)
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/contacts/")
+	parts := strings.SplitN(rest, "/", 2)
+	id, _ := strconv.ParseInt(parts[0], 10, 64)
+	if id == 0 {
+		httpErr(w, http.StatusBadRequest, "id required")
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	key, _ := body["key"].(string)
+	if key == "" {
+		httpErr(w, http.StatusBadRequest, "key required")
+		return
+	}
+	source, _ := body["source"].(string)
+	if source == "" {
+		source = "human"
+	}
+	if err := dbSetAttribute(ctx.AppDB(), pid, id, key, body["value"], source); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"ok": true})
 }
 
 // handleHTTPPostActivity creates an activity via POST. Body:
