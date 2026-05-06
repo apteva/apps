@@ -273,7 +273,7 @@ var platforms = map[string]platformDef{
 		PostTool:        "create_media_container",
 		PublishTool:     "publish_media_container",
 		BodyField:       "caption",
-		MediaURLField:   "imageUrl",
+		MediaURLField:   "image_url",
 		ExternalIDField: "instagramAccountId",
 		MediaRequired:   true,
 		MediaType:       "any", // images + REELS via same two-step
@@ -1271,12 +1271,12 @@ func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (
 		"instagramAccountId": j.extID,
 	}
 	if first.IsVideo() {
-		containerInput["videoUrl"] = first.URL
-		containerInput["mediaType"] = "REELS"
+		containerInput["video_url"] = first.URL
+		containerInput["media_type"] = "REELS"
 		containerInput["sync"] = true
 	} else {
-		containerInput["imageUrl"] = first.URL
-		containerInput["mediaType"] = "IMAGE"
+		containerInput["image_url"] = first.URL
+		containerInput["media_type"] = "IMAGE"
 	}
 	if pageToken != "" {
 		containerInput["access_token"] = pageToken

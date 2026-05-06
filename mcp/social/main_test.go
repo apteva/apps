@@ -628,9 +628,9 @@ func TestPublishInstagram_TwoStepWithStorageMedia(t *testing.T) {
 			if c.Input["instagramAccountId"] != "ig-acct-1" {
 				t.Errorf("instagramAccountId not extID: %+v", c.Input)
 			}
-			imgURL, _ := c.Input["imageUrl"].(string)
+			imgURL, _ := c.Input["image_url"].(string)
 			if !strings.Contains(imgURL, "/files/77/content") {
-				t.Errorf("imageUrl not from storage: %q", imgURL)
+				t.Errorf("image_url not from storage: %q", imgURL)
 			}
 		}
 		if c.Tool == "publish_media_container" {
