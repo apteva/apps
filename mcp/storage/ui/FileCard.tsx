@@ -8,7 +8,23 @@
 // video / icon by MIME) and the metadata fetch.
 
 import { useEffect, useState } from "react";
-import { Card, CardHeader, DataList } from "@apteva/ui-kit";
+import { Card, CardHeader, DataList, type CardVendor } from "@apteva/ui-kit";
+
+// Brand identity for storage cards. First-party Apteva app, so we
+// use a neutral slate-blue rather than a third-party brand color.
+// Inline SVG (folder + file glyph) so this file has no extra deps —
+// apps/ doesn't carry lucide-react the way integrations/ does.
+const storageLogo = (
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden>
+    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+  </svg>
+);
+
+const storageVendor: CardVendor = {
+  name: "Storage",
+  logo: storageLogo,
+  color: "#475569", // slate-600 — first-party signal, not a vendor brand
+};
 
 interface FileMeta {
   id: number;
@@ -124,25 +140,27 @@ export default function FileCard({ file_id, projectId, preview }: Props) {
     );
   }
 
+  // In preview mode, hand the <img> a real photograph instead of an
+  // SVG placeholder so the card looks like a card rendered for an
+  // actual file. Picsum returns a stable image when seeded — same
+  // photo on every refresh, no dependency on auth or our backend.
   const contentURL = preview
-    ? "data:image/svg+xml;utf8," +
-      encodeURIComponent(
-        `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 240 160'>` +
-          `<rect width='240' height='160' fill='%23334155'/>` +
-          `<text x='50%' y='50%' fill='%2394a3b8' font-family='sans-serif' font-size='20' text-anchor='middle' dy='.3em'>preview</text>` +
-          `</svg>`
-      )
+    ? "https://picsum.photos/seed/apteva-storage/480/300"
     : `/api/apps/storage/files/${file_id}/content`;
 
+  // Whole card isn't wrapped in <a> — that nested an anchor inside
+  // CardHeader's own "Open" link, which the HTML parser splits and
+  // breaks the header's layout. The CardHeader action is enough.
   return (
-    <Card href={contentURL}>
+    <Card>
       <CardHeader
+        vendor={storageVendor}
         title={meta.name}
         subtitle={meta.folder}
         action={{ label: "Open", href: contentURL }}
       />
       <FilePreview url={contentURL} mime={meta.content_type} />
-      <div className="px-3 py-2 border-t border-border">
+      <div className="px-4 py-3 border-t border-border">
         <DataList
           items={[
             { label: "Type", value: meta.content_type || "binary" },
@@ -155,24 +173,45 @@ export default function FileCard({ file_id, projectId, preview }: Props) {
 }
 
 function FilePreview({ url, mime }: { url: string; mime: string }) {
-  const wrap = "bg-bg-input flex items-center justify-center";
+  // Height constraint sits directly on the media element. The earlier
+  // pattern (flex wrapper with style={{ height: 160 }} and an
+  // h-full img inside) didn't constrain the image — its natural
+  // intrinsic size was leaking through because the cascading
+  // h-full ended up resolving against the wrapper's content size,
+  // not its declared height. Putting the height on the <img> /
+  // <video> directly is unambiguous: the element is 160px tall,
+  // object-cover crops the source.
   if (mime.startsWith("image/")) {
     return (
-      <div className={wrap} style={{ height: 160 }}>
-        <img src={url} alt="" className="w-full h-full object-cover" />
-      </div>
+      <img
+        src={url}
+        alt=""
+        className="w-full block bg-bg-input object-cover"
+        style={{ height: 160 }}
+      />
     );
   }
   if (mime.startsWith("video/")) {
     return (
-      <div className={wrap} style={{ height: 160 }}>
-        <video src={url} preload="metadata" muted playsInline className="w-full h-full object-cover" />
-      </div>
+      <video
+        src={url}
+        preload="metadata"
+        muted
+        playsInline
+        className="w-full block bg-bg-input object-cover"
+        style={{ height: 160 }}
+      />
     );
   }
   return (
-    <div className={`${wrap} text-text-dim text-2xl`} style={{ height: 96 }}>
-      📄
+    <div
+      className="bg-bg-input flex items-center justify-center text-text-dim"
+      style={{ height: 96 }}
+    >
+      <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+        <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5z" />
+        <path d="M14 3v5h5" />
+      </svg>
     </div>
   );
 }
