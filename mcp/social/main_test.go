@@ -732,12 +732,24 @@ func TestPublishTikTok_BuildsNestedInput(t *testing.T) {
 	}
 }
 
-// --- YouTube unsupported -----------------------------------------
+// --- YouTube upload (resumable) -----------------------------------
 
-func TestPublishYouTube_UnsupportedFails(t *testing.T) {
+func TestPublishYouTube_InitCallShape(t *testing.T) {
+	// Verify publishYoutube calls upload_video_init with the right
+	// snippet shape (title from post body, default privacy=private),
+	// and surfaces a clear error when the server didn't forward the
+	// Location header (older apteva-server / network drop).
 	pf := newRecordingPlatform()
-	// Provide a storage URL so we get past the MediaRequired check —
-	// the deferral happens inside the strategy dispatch.
+	// Mock the upload_video_init call: success but no Location header,
+	// which is exactly the failure mode we want to surface.
+	pf.executeResponses["upload_video_init"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{}`),
+	}
+	pf.callAppResponses["storage:files_get"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":1,\"content_type\":\"video/mp4\",\"name\":\"v.mp4\"}"}]}}`,
+	)
 	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
 		`{"result":{"content":[{"type":"text","text":"{\"url\":\"https://cdn.test/v.mp4\"}"}]}}`,
 	)
@@ -749,17 +761,38 @@ func TestPublishYouTube_UnsupportedFails(t *testing.T) {
 	acctID, _ := r.LastInsertId()
 	app := &App{}
 	out, _ := app.toolPostCreate(ctx, map[string]any{
-		"body":               "skip me",
+		"body":               "My video title",
 		"social_account_ids": []any{acctID},
 		"media_storage_ids":  []any{int64(1)},
 	})
 	postID := out.(map[string]any)["post_id"].(int64)
+
+	// upload_video_init was called with title from body.
+	var sawInit bool
+	for _, c := range pf.executeCalls {
+		if c.Tool == "upload_video_init" {
+			sawInit = true
+			snippet, _ := c.Input["snippet"].(map[string]any)
+			if snippet["title"] != "My video title" {
+				t.Errorf("snippet.title = %v, want body", snippet["title"])
+			}
+			status, _ := c.Input["status"].(map[string]any)
+			if status["privacyStatus"] != "private" {
+				t.Errorf("default privacyStatus should be private, got %v", status["privacyStatus"])
+			}
+		}
+	}
+	if !sawInit {
+		t.Errorf("expected upload_video_init call, got %+v", pf.executeCalls)
+	}
+	// Without a Location header the strategy should surface a clear
+	// "no Location" error rather than silently succeeding.
 	var lastErr string
 	ctx.AppDB().QueryRow(
 		`SELECT COALESCE(last_error,'') FROM post_targets WHERE post_id=?`, postID,
 	).Scan(&lastErr)
-	if !strings.Contains(lastErr, "v0.2") {
-		t.Errorf("expected v0.2 deferral note; got %q", lastErr)
+	if !strings.Contains(lastErr, "no Location header") {
+		t.Errorf("expected 'no Location header' error; got %q", lastErr)
 	}
 }
 

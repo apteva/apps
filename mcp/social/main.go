@@ -333,8 +333,13 @@ var platforms = map[string]platformDef{
 		// to drive a picker against. One Google OAuth = one channel
 		// under the standard scope, so YT behaves like Twitter/TikTok
 		// (single-account, always fresh OAuth, no picker step).
-		Strategy:           "youtube_unsupported",
-		PostTool:           "upload_video",
+		// Resumable upload: publishYoutube calls upload_video_init (POSTs
+		// metadata, gets back a session URL via the Location response
+		// header) then PUTs the bytes directly to that session URL —
+		// the bytes-PUT bypasses the integration system because Google's
+		// session URLs are pre-authorized.
+		Strategy:           "youtube",
+		PostTool:           "upload_video_init",
 		MediaRequired:      true,
 		MediaType:          "video",
 		ProfileTool:        "get_my_channel",
@@ -1177,8 +1182,8 @@ func (a *App) runStrategy(ctx *sdk.AppCtx, def platformDef, j publishJob) (strin
 		return a.publishInstagram(ctx, def, j)
 	case "tiktok":
 		return a.publishTikTok(ctx, def, j)
-	case "youtube_unsupported":
-		return "", "", errors.New("YouTube video upload via the resumable-upload protocol lands in v0.2 — connect the channel and we'll wire it up")
+	case "youtube":
+		return a.publishYoutube(ctx, def, j)
 	default: // "single" or empty
 		return a.publishSingle(ctx, def, j)
 	}
@@ -1338,6 +1343,113 @@ func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (
 		url = "https://www.instagram.com/p/" + id // best-effort; real shortcode may differ
 	}
 	return id, url, nil
+}
+
+// publishYoutube drives YouTube's resumable upload protocol.
+//
+//  1. upload_video_init: POSTs the snippet+status metadata to the
+//     upload host. The response carries the session URL in the
+//     Location header (surfaced via ExecuteResult.Headers thanks to
+//     the server-side header allowlist).
+//  2. PUT the video bytes directly to that session URL using stdlib
+//     http. This step does NOT go through the integration system —
+//     Google's session URLs are pre-authorized, so no Bearer token is
+//     needed and we don't have to expose credentials to apps.
+//
+// On success the PUT response contains the published video resource;
+// we extract `id` for the platform_post_id and assemble the canonical
+// watch URL. The post body is used as the title; the title field is
+// the only required snippet metadata.
+func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+	if len(j.media) == 0 {
+		return "", "", errors.New("youtube requires a video file")
+	}
+	first := j.media[0]
+	if !first.IsVideo() {
+		return "", "", errors.New("youtube only accepts video files")
+	}
+
+	// Step 1: init the upload session.
+	title := strings.TrimSpace(j.body)
+	if title == "" {
+		title = "Untitled"
+	}
+	initInput := map[string]any{
+		"snippet": map[string]any{"title": title},
+		"status":  map[string]any{"privacyStatus": "private"},
+	}
+	ctx.Logger().Info("publishYoutube: init upload session",
+		"title", title, "media_url", first.URL)
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, initInput)
+	if err != nil {
+		return "", "", fmt.Errorf("upload_video_init: %w", err)
+	}
+	if res == nil || !res.Success {
+		return "", "", upstreamError(res)
+	}
+	sessionURL := ""
+	if res.Headers != nil {
+		sessionURL = res.Headers["Location"]
+	}
+	if sessionURL == "" {
+		return "", "", errors.New("upload_video_init: no Location header (apteva-server may be older than the header-forwarding change — bump server)")
+	}
+	ctx.Logger().Info("publishYoutube: got session url",
+		"session_url_len", len(sessionURL))
+
+	// Step 2: stream bytes from storage's signed URL into a PUT to the
+	// session URL. Both calls happen on the social sidecar's own HTTP
+	// client. The signed URL is short-lived but we use it within the
+	// same function so freshness isn't a concern.
+	getReq, err := http.NewRequest(http.MethodGet, first.URL, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("build storage GET: %w", err)
+	}
+	getResp, err := http.DefaultClient.Do(getReq)
+	if err != nil {
+		return "", "", fmt.Errorf("fetch media bytes from storage: %w", err)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("fetch media: storage returned %d", getResp.StatusCode)
+	}
+
+	putReq, err := http.NewRequest(http.MethodPut, sessionURL, getResp.Body)
+	if err != nil {
+		return "", "", fmt.Errorf("build upload PUT: %w", err)
+	}
+	mime := first.Mime
+	if mime == "" {
+		mime = "video/*"
+	}
+	putReq.Header.Set("Content-Type", mime)
+	if cl := getResp.ContentLength; cl > 0 {
+		putReq.ContentLength = cl
+	}
+	// Tighter timeout than http.DefaultClient (no timeout) so a stuck
+	// upload doesn't pin a worker forever. 30 minutes covers most
+	// reasonable YouTube videos at any practical bitrate.
+	putClient := &http.Client{Timeout: 30 * time.Minute}
+	putResp, err := putClient.Do(putReq)
+	if err != nil {
+		return "", "", fmt.Errorf("upload PUT: %w", err)
+	}
+	defer putResp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(putResp.Body, 1<<20))
+	if putResp.StatusCode < 200 || putResp.StatusCode >= 300 {
+		return "", "", fmt.Errorf("upload PUT %d: %s", putResp.StatusCode, string(body))
+	}
+	var resource struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(body, &resource)
+	if resource.ID == "" {
+		return "", "", fmt.Errorf("upload PUT returned no video id: %s", string(body))
+	}
+	url := "https://www.youtube.com/watch?v=" + resource.ID
+	ctx.Logger().Info("publishYoutube: upload complete",
+		"video_id", resource.ID)
+	return resource.ID, url, nil
 }
 
 // waitContainerReady polls get_container_status on an Instagram media
