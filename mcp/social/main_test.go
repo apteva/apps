@@ -682,13 +682,21 @@ func TestPublishInstagram_NoMediaFails(t *testing.T) {
 	}
 }
 
-// --- TikTok nested input -----------------------------------------
+// --- TikTok FILE_UPLOAD init shape -----------------------------------
 
-func TestPublishTikTok_BuildsNestedInput(t *testing.T) {
+func TestPublishTikTok_BuildsFileUploadInitInput_SingleChunk(t *testing.T) {
+	// 4 MB video — well under the 64 MB single-chunk threshold.
+	const videoBytes = 4 * 1024 * 1024
 	pf := newRecordingPlatform()
+	pf.callAppResponses["storage:files_get"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":7,\"content_type\":\"video/mp4\",\"size_bytes\":4194304}"}]}}`,
+	)
 	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
 		`{"result":{"content":[{"type":"text","text":"{\"url\":\"https://cdn.test/v.mp4\"}"}]}}`,
 	)
+	// Init response missing upload_url so the strategy stops at the
+	// init step — exercises the init-shape assertions without needing
+	// a real HTTP target for the bytes-PUT.
 	pf.executeResponses["post_video"] = &sdk.ExecuteResult{
 		Success: true,
 		Data:    json.RawMessage(`{"data":{"publish_id":"pub_xyz"}}`),
@@ -710,7 +718,7 @@ func TestPublishTikTok_BuildsNestedInput(t *testing.T) {
 	}
 
 	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "post_video" {
-		t.Fatalf("expected post_video call: %+v", pf.executeCalls)
+		t.Fatalf("expected one post_video init call: %+v", pf.executeCalls)
 	}
 	in := pf.executeCalls[0].Input
 	postInfo, ok := in["post_info"].(map[string]any)
@@ -724,11 +732,74 @@ func TestPublishTikTok_BuildsNestedInput(t *testing.T) {
 	if !ok {
 		t.Fatalf("source_info not nested: %+v", in)
 	}
-	if srcInfo["source"] != "PULL_FROM_URL" {
-		t.Errorf("source = %v", srcInfo["source"])
+	if srcInfo["source"] != "FILE_UPLOAD" {
+		t.Errorf("source = %v, want FILE_UPLOAD (PULL_FROM_URL needs domain verification)", srcInfo["source"])
 	}
-	if srcInfo["video_url"] != "https://cdn.test/v.mp4" {
-		t.Errorf("video_url = %v", srcInfo["video_url"])
+	if srcInfo["video_size"] != int64(videoBytes) {
+		t.Errorf("video_size = %v, want %d", srcInfo["video_size"], videoBytes)
+	}
+	if srcInfo["chunk_size"] != int64(videoBytes) {
+		t.Errorf("single-chunk should set chunk_size = video_size: %v", srcInfo["chunk_size"])
+	}
+	if srcInfo["total_chunk_count"] != 1 {
+		t.Errorf("single-chunk should set total_chunk_count = 1: %v", srcInfo["total_chunk_count"])
+	}
+
+	// And the strategy bailed cleanly on the missing upload_url —
+	// recorded in post_targets.last_error rather than crashing.
+	var lastErr string
+	ctx.AppDB().QueryRow(
+		`SELECT COALESCE(last_error,'') FROM post_targets WHERE social_account_id=? ORDER BY id DESC LIMIT 1`, acctID,
+	).Scan(&lastErr)
+	if !strings.Contains(lastErr, "upload_url") {
+		t.Errorf("expected error about missing upload_url; got %q", lastErr)
+	}
+}
+
+func TestPublishTikTok_FileUploadInit_MultiChunkMath(t *testing.T) {
+	// 100 MB video — exceeds the 64 MB single-chunk threshold so the
+	// strategy switches to multi-chunk: 32 MB chunks, total_count =
+	// floor(100 MB / 32 MB) = 3, final chunk absorbs the trailing bytes.
+	const videoBytes = 100 * 1024 * 1024
+	pf := newRecordingPlatform()
+	pf.callAppResponses["storage:files_get"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":8,\"content_type\":\"video/mp4\",\"size_bytes\":104857600}"}]}}`,
+	)
+	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"url\":\"https://cdn.test/v.mp4\"}"}]}}`,
+	)
+	pf.executeResponses["post_video"] = &sdk.ExecuteResult{
+		Success: true,
+		Data:    json.RawMessage(`{"data":{"publish_id":"pub_xyz"}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'tiktok', 42, '@tt', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	if _, err := app.toolPostCreate(ctx, map[string]any{
+		"body":               "long video",
+		"social_account_ids": []any{acctID},
+		"media_storage_ids":  []any{int64(8)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "post_video" {
+		t.Fatalf("expected post_video init: %+v", pf.executeCalls)
+	}
+	srcInfo := pf.executeCalls[0].Input["source_info"].(map[string]any)
+	if srcInfo["video_size"] != int64(videoBytes) {
+		t.Errorf("video_size = %v, want %d", srcInfo["video_size"], videoBytes)
+	}
+	if srcInfo["chunk_size"] != int64(32*1024*1024) {
+		t.Errorf("chunk_size = %v, want 32 MB", srcInfo["chunk_size"])
+	}
+	if srcInfo["total_chunk_count"] != 3 {
+		t.Errorf("total_chunk_count = %v, want 3 (floor(100/32))", srcInfo["total_chunk_count"])
 	}
 }
 

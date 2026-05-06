@@ -1717,17 +1717,189 @@ func (a *App) waitContainerReady(ctx *sdk.AppCtx, connID int64, containerID, pag
 	}
 }
 
-// publishTikTok builds the nested {post_info, source_info} shape from
-// our flat (body, media_url) inputs. Caption goes to post_info.title;
-// media goes to source_info.video_url with PULL_FROM_URL.
+// publishTikTok drives TikTok's video publish flow.
+//
+// Default path: FILE_UPLOAD — TikTok hands us a temporary upload_url
+// and we PUT the video bytes there directly (no domain verification
+// needed). Same architectural pattern as publishYoutube's resumable
+// upload: init via the integration to mint an upload_url + publish_id,
+// then bypass the integration system for the bytes-PUT (the upload
+// URL is pre-authorized, no Bearer header needed).
+//
+// Single-chunk for ≤64 MB, multi-chunk for larger. Per TikTok's docs
+// (Media Transfer Guide, "Chunk restrictions"):
+//   - chunk_size in [5 MB, 64 MB]
+//   - total_chunk_count = floor(video_size / chunk_size); the final
+//     chunk absorbs the trailing bytes (up to 128 MB)
+//   - chunks must be uploaded sequentially with Content-Range tracking
+//
+// Why we don't use PULL_FROM_URL by default: it requires the caller's
+// domain to be DNS-verified in the TikTok dev portal. FILE_UPLOAD has
+// no such requirement and works from a fresh OAuth grant. The
+// PULL_FROM_URL path is preserved as publishTikTokPullFromURL below
+// for callers that need it (verified-domain installs that want
+// TikTok's servers to do the fetch instead of streaming through us).
 func (a *App) publishTikTok(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+	if len(j.media) == 0 {
+		return "", "", errors.New("tiktok requires a video")
+	}
+	first := j.media[0]
+	if !first.IsVideo() {
+		return "", "", errors.New("tiktok only accepts video files")
+	}
+	if first.Bytes <= 0 {
+		return "", "", errors.New("tiktok FILE_UPLOAD needs the video's byte size — storage didn't return size_bytes")
+	}
+
+	// TikTok's per-chunk constraints: each in [5 MB, 64 MB] except
+	// the final chunk can absorb up to 128 MB of trailing bytes.
+	// Strategy: pick 32 MB chunks (mid-range) when we need to chunk.
+	const (
+		singleChunkLimit = int64(64 * 1024 * 1024)
+		multiChunkSize   = int64(32 * 1024 * 1024)
+		hardCeiling      = int64(4 * 1024 * 1024 * 1024) // TikTok's 4GB max
+	)
+	if first.Bytes > hardCeiling {
+		return "", "", fmt.Errorf("tiktok video too large: %d bytes (max 4 GB)", first.Bytes)
+	}
+
+	var chunkSize int64
+	var totalChunks int
+	if first.Bytes <= singleChunkLimit {
+		chunkSize = first.Bytes
+		totalChunks = 1
+	} else {
+		chunkSize = multiChunkSize
+		// Per TikTok's spec: total_chunk_count = floor(video_size / chunk_size).
+		// The final chunk absorbs the trailing bytes, so this is correct
+		// (no +1 for remainder).
+		totalChunks = int(first.Bytes / chunkSize)
+	}
+
+	// Step 1: init upload via the integration to get upload_url +
+	// publish_id. The integration handles auth + URL building; we just
+	// pass the post_info / source_info shapes TikTok expects.
+	initInput := map[string]any{
+		"post_info": map[string]any{
+			"title":         j.body,
+			"privacy_level": "PUBLIC_TO_EVERYONE", // sensible default; future: per-target override
+		},
+		"source_info": map[string]any{
+			"source":            "FILE_UPLOAD",
+			"video_size":        first.Bytes,
+			"chunk_size":        chunkSize,
+			"total_chunk_count": totalChunks,
+		},
+	}
+	ctx.Logger().Info("publishTikTok: init upload",
+		"video_size", first.Bytes, "chunk_size", chunkSize, "total_chunks", totalChunks)
+	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, initInput)
+	if err != nil {
+		return "", "", fmt.Errorf("post_video init: %w", err)
+	}
+	if out == nil || !out.Success {
+		return "", "", upstreamError(out)
+	}
+	uploadURL, publishID := extractTikTokUploadInit(out.Data)
+	if uploadURL == "" || publishID == "" {
+		return "", "", fmt.Errorf("post_video init: missing upload_url or publish_id in response: %s", string(out.Data))
+	}
+	ctx.Logger().Info("publishTikTok: init done",
+		"publish_id", publishID, "upload_url_len", len(uploadURL))
+
+	// Step 2: GET the bytes from storage as a single stream. We'll
+	// consume chunkBytes per iteration via io.LimitReader, leaving the
+	// rest of the stream for the next PUT.
+	getReq, err := http.NewRequest(http.MethodGet, first.URL, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("build storage GET: %w", err)
+	}
+	getResp, err := http.DefaultClient.Do(getReq)
+	if err != nil {
+		return "", "", fmt.Errorf("fetch media bytes from storage: %w", err)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("fetch media: storage returned %d", getResp.StatusCode)
+	}
+
+	// Step 3: PUT each chunk. Sequential per TikTok's spec; each chunk
+	// returns 206 Partial Content except the last which returns 201
+	// Created. Tight per-chunk timeout so a stuck PUT doesn't pin a
+	// worker forever — 10 minutes per chunk covers 64 MB on slow
+	// uplinks (≈100 KB/s).
+	putClient := &http.Client{Timeout: 10 * time.Minute}
+	mime := first.Mime
+	if mime == "" {
+		mime = "video/mp4"
+	}
+	for i := 0; i < totalChunks; i++ {
+		firstByte := int64(i) * chunkSize
+		var chunkBytes int64
+		if i == totalChunks-1 {
+			// Final chunk absorbs trailing bytes — could be larger than
+			// chunkSize for multi-chunk uploads, equal to videoSize for
+			// single-chunk.
+			chunkBytes = first.Bytes - firstByte
+		} else {
+			chunkBytes = chunkSize
+		}
+		lastByte := firstByte + chunkBytes - 1
+
+		body := io.LimitReader(getResp.Body, chunkBytes)
+		putReq, err := http.NewRequest(http.MethodPut, uploadURL, body)
+		if err != nil {
+			return "", "", fmt.Errorf("build chunk %d PUT: %w", i+1, err)
+		}
+		putReq.ContentLength = chunkBytes
+		putReq.Header.Set("Content-Type", mime)
+		putReq.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", firstByte, lastByte, first.Bytes))
+
+		ctx.Logger().Info("publishTikTok: PUT chunk",
+			"chunk", fmt.Sprintf("%d/%d", i+1, totalChunks), "bytes", chunkBytes,
+			"range", fmt.Sprintf("%d-%d", firstByte, lastByte))
+		putResp, err := putClient.Do(putReq)
+		if err != nil {
+			return "", "", fmt.Errorf("chunk %d PUT: %w", i+1, err)
+		}
+		respBody, _ := io.ReadAll(io.LimitReader(putResp.Body, 4<<10))
+		putResp.Body.Close()
+
+		// Intermediate chunks should return 206; the final chunk
+		// returns 201. Anything else is a fail.
+		expected := http.StatusPartialContent
+		if i == totalChunks-1 {
+			expected = http.StatusCreated
+		}
+		if putResp.StatusCode != expected {
+			return "", "", fmt.Errorf("chunk %d/%d returned %d (expected %d): %s",
+				i+1, totalChunks, putResp.StatusCode, expected, string(respBody))
+		}
+	}
+
+	ctx.Logger().Info("publishTikTok: upload complete", "publish_id", publishID)
+	// TikTok continues processing async after the last chunk is in;
+	// the published URL isn't known until the worker polls
+	// get_publish_status. v0.1 records the publish_id; v0.2 schedules
+	// a follow-up status check.
+	return publishID, "", nil
+}
+
+// publishTikTokPullFromURL is the original PULL_FROM_URL implementation,
+// kept around for installs that have verified their domain in the
+// TikTok dev portal and prefer letting TikTok's servers do the fetch
+// (saves bandwidth on the social sidecar's host vs streaming bytes
+// through us). Not currently called — runStrategy dispatches to
+// publishTikTok which uses FILE_UPLOAD. Wire this in if you ever add
+// a per-target / per-platformDef opt-in flag.
+func (a *App) publishTikTokPullFromURL(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
 	if len(j.media) == 0 {
 		return "", "", errors.New("tiktok requires a video URL")
 	}
 	input := map[string]any{
 		"post_info": map[string]any{
 			"title":         j.body,
-			"privacy_level": "PUBLIC_TO_EVERYONE", // sensible default; future: per-target override
+			"privacy_level": "PUBLIC_TO_EVERYONE",
 		},
 		"source_info": map[string]any{
 			"source":    "PULL_FROM_URL",
@@ -1741,11 +1913,28 @@ func (a *App) publishTikTok(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 	if out == nil || !out.Success {
 		return "", "", upstreamError(out)
 	}
-	// TikTok returns a publish_id (async processing); the actual post
-	// URL isn't known until the worker polls get_publish_status. v0.1
-	// records the publish_id; v0.2 schedules a follow-up status check.
 	pubID := extractTikTokPublishID(out.Data)
 	return pubID, "", nil
+}
+
+// extractTikTokUploadInit pulls upload_url + publish_id out of the
+// /post/publish/video/init/ response. Shape: {data: {publish_id,
+// upload_url}, error: {code, message, log_id}}. Empty strings on
+// missing — caller decides what to do.
+func extractTikTokUploadInit(raw json.RawMessage) (uploadURL, publishID string) {
+	if len(raw) == 0 {
+		return "", ""
+	}
+	var resp struct {
+		Data struct {
+			UploadURL string `json:"upload_url"`
+			PublishID string `json:"publish_id"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &resp) == nil {
+		return resp.Data.UploadURL, resp.Data.PublishID
+	}
+	return "", ""
 }
 
 // loadPostMedia reads the post's media_storage_ids JSON column.
@@ -1760,11 +1949,16 @@ func (a *App) loadPostMedia(ctx *sdk.AppCtx, postID int64) []int64 {
 	return out
 }
 
-// mediaItem is a resolved media file — public URL + MIME so callers
-// can branch image vs video without a second round-trip.
+// mediaItem is a resolved media file — public URL + MIME + byte size
+// so callers can branch image vs video without a second round-trip,
+// and chunked-upload paths (TikTok FILE_UPLOAD) can pre-compute chunk
+// counts without a second files_get. Bytes is 0 when storage didn't
+// return size_bytes (older storage versions); strategies that need
+// it should error out clearly rather than guess.
 type mediaItem struct {
-	URL  string
-	Mime string
+	URL   string
+	Mime  string
+	Bytes int64
 }
 
 // IsVideo reports whether this is a video MIME type.
@@ -1796,6 +1990,7 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64) ([]mediaItem, error) {
 			return nil, fmt.Errorf("storage files_get(%d): %w", id, err)
 		}
 		mime := extractStorageContentType(metaRes)
+		size := extractStorageSize(metaRes)
 
 		// Signed URL — separate call because files_get_url is the
 		// canonical way to mint a TTL'd link.
@@ -1822,9 +2017,68 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64) ([]mediaItem, error) {
 		}
 		ctx.Logger().Info("resolveMedia: item",
 			"id", id, "mime", mime, "is_video", strings.HasPrefix(mime, "video/"))
-		out = append(out, mediaItem{URL: fullURL, Mime: mime})
+		out = append(out, mediaItem{URL: fullURL, Mime: mime, Bytes: size})
 	}
 	return out, nil
+}
+
+// extractStorageSize pulls size_bytes out of storage's files_get
+// response. Mirrors extractStorageContentType's shape-handling: direct
+// {file: {size_bytes}} / {size_bytes}, JSON-RPC-wrapped, and flat-MCP
+// envelopes. Returns 0 when the field isn't present (caller decides
+// whether that's fatal — TikTok FILE_UPLOAD needs it; FB / IG / X
+// don't read it).
+func extractStorageSize(raw json.RawMessage) int64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var direct struct {
+		File struct {
+			SizeBytes int64 `json:"size_bytes"`
+		} `json:"file"`
+		SizeBytes int64 `json:"size_bytes"`
+	}
+	if json.Unmarshal(raw, &direct) == nil {
+		if direct.File.SizeBytes > 0 {
+			return direct.File.SizeBytes
+		}
+		if direct.SizeBytes > 0 {
+			return direct.SizeBytes
+		}
+	}
+	var wrapped struct {
+		Result struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(raw, &wrapped) == nil {
+		for _, c := range wrapped.Result.Content {
+			if c.Type == "text" && c.Text != "" {
+				if got := extractStorageSize(json.RawMessage(c.Text)); got > 0 {
+					return got
+				}
+			}
+		}
+	}
+	var flat struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if json.Unmarshal(raw, &flat) == nil {
+		for _, c := range flat.Content {
+			if c.Type == "text" && c.Text != "" {
+				if got := extractStorageSize(json.RawMessage(c.Text)); got > 0 {
+					return got
+				}
+			}
+		}
+	}
+	return 0
 }
 
 // extractStorageContentType pulls the file's content_type out of
