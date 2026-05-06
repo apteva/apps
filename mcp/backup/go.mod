@@ -1,10 +1,13 @@
 module github.com/apteva/apps/mcp/backup
+
 go 1.25.0
+
 require (
-	github.com/apteva/app-sdk v0.1.3-0.20260430070155-43f24574d06d
+	github.com/apteva/app-sdk v0.2.0
 	github.com/minio/minio-go/v7 v7.1.0
 	modernc.org/sqlite v1.50.0
 )
+
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
