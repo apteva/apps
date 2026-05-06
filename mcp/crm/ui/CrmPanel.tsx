@@ -423,12 +423,17 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     }
   };
 
-  const handleNewContact = async (firstName: string, email: string) => {
+  const handleNewContact = async (firstName: string, email: string, phone: string) => {
+    // First channel listed becomes is_primary; we prefer email when both
+    // are given, matching the channel-precedence used by the send tool.
+    const channels: Channel[] = [];
+    if (email) channels.push({ kind: "email", value: email, is_primary: true });
+    if (phone) channels.push({ kind: "phone", value: phone, is_primary: channels.length === 0 });
     try {
       const r = await api<{ contact: Contact }>("POST", "/contacts", {
         first_name: firstName,
         source: "human",
-        channels: email ? [{ kind: "email", value: email, is_primary: true }] : [],
+        channels,
       });
       setNewContactOpen(false);
       await loadList();
@@ -1207,15 +1212,20 @@ function ConfirmDialog({ state, onClose }: { state: ConfirmState; onClose: () =>
 
 function NewContactModal({ onCancel, onSubmit }: {
   onCancel: () => void;
-  onSubmit: (firstName: string, email: string) => void | Promise<void>;
+  onSubmit: (firstName: string, email: string, phone: string) => void | Promise<void>;
 }) {
   const [firstName, setFirstName] = useState("");
   const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
   const [busy, setBusy] = useState(false);
+  // At least one of name / email / phone must be provided. Most CRMs
+  // accept any of the three; we mirror that so a "phone-only" lead
+  // (e.g. inbound SMS) can be filed without a placeholder name.
+  const canSubmit = !!(firstName.trim() || email.trim() || phone.trim());
   const submit = async () => {
-    if (!firstName.trim()) return;
+    if (!canSubmit) return;
     setBusy(true);
-    try { await onSubmit(firstName.trim(), email.trim()); }
+    try { await onSubmit(firstName.trim(), email.trim(), phone.trim()); }
     finally { setBusy(false); }
   };
   return (
@@ -1227,7 +1237,7 @@ function NewContactModal({ onCancel, onSubmit }: {
           <button
             type="button"
             onClick={submit}
-            disabled={busy || !firstName.trim()}
+            disabled={busy || !canSubmit}
             className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
           >{busy ? "Creating…" : "Create"}</button>
           <button
@@ -1259,6 +1269,17 @@ function NewContactModal({ onCancel, onSubmit }: {
           className="flex-1 bg-bg-input border border-border rounded px-2 py-1"
         />
       </div>
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-20">Phone</label>
+        <input
+          type="tel"
+          value={phone}
+          onChange={(e) => setPhone(e.target.value)}
+          placeholder="+15551234567"
+          className="flex-1 bg-bg-input border border-border rounded px-2 py-1"
+        />
+      </div>
+      <p className="text-text-dim text-xs">At least one of name, email, or phone is required.</p>
     </ModalShell>
   );
 }
