@@ -2618,9 +2618,17 @@ func (a *App) fetchProfile(ctx *sdk.AppCtx, connID int64, def platformDef) (*pro
 	}
 	var raw map[string]any
 	_ = json.Unmarshal(res.Data, &raw)
-	// Twitter returns {data: {...}}. Try inner first.
+	// Unwrap whichever envelope the integration uses so the platformDef
+	// path expressions can stay shallow:
+	//   Twitter / TikTok → {data: {...}}
+	//   YouTube          → {items: [{...}], kind: "..."}  (channelListResponse)
 	if inner, ok := raw["data"].(map[string]any); ok {
 		raw = inner
+	}
+	if items, ok := raw["items"].([]any); ok && len(items) > 0 {
+		if first, ok := items[0].(map[string]any); ok {
+			raw = first
+		}
 	}
 	return &profileEntry{
 		Name:   toString(walkPath(raw, def.ProfileNameField)),
