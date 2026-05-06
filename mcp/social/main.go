@@ -332,10 +332,23 @@ var platforms = map[string]platformDef{
 		PostTool:           "post_video",
 		BodyField:          "title", // logical, lifted into post_info.title
 		MediaRequired:      true,
-		MediaType:          "video",
-		ProfileTool:        "get_creator_info",
-		ProfileNameField:   "creator_username",
-		ProfileAvatarField: "creator_avatar_url",
+		MediaType: "video",
+		// TikTok's catalog has no "get_creator_info" tool (an older name
+		// that never existed); the right primitive for our profile-fetch
+		// use case is /user/info/ via get_user_info — same scope
+		// (user.info.basic) but returns the display_name + avatar_url we
+		// want. The response wraps the user fields under data.user, hence
+		// the dotted ProfileNameField/ProfileAvatarField paths. fetchProfile
+		// already strips one level of `data` envelope; the second hop into
+		// `user` is encoded in the path expressions.
+		ProfileTool:        "get_user_info",
+		ProfileNameField:   "user.display_name",
+		ProfileAvatarField: "user.avatar_url",
+		// /user/info/ requires a comma-separated fields query param —
+		// no default applied by the executor, so we must pass it.
+		ProfileToolArgs: map[string]any{
+			"fields": "open_id,display_name,avatar_url",
+		},
 	},
 	"youtube": {
 		Platform:        "youtube",
