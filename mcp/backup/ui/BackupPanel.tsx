@@ -1,13 +1,19 @@
 // BackupPanel — UI for the backup app.
 //
-// Layout: three sections stacked vertically.
-//   1. Status   — last run summary + "Run now" button
-//   2. Policies — table of cron-driven schedules with destination
-//   3. Destinations — local + S3 destinations the user can target
-//   4. History  — recent runs (status, size, destination, restore)
+// Layout: four sections stacked vertically.
+//   1. Status      — last successful run + last failed run (if any)
+//   2. Destinations — local + S3 destinations the user can target
+//   3. Policies    — cron-driven schedules with destination
+//   4. History     — recent runs (status, size, destination, restore)
 //
-// Talks to /api/apps/backup/* through the platform proxy. Same
-// useAppEvents hook pattern as CrmPanel for live updates.
+// Talks to /api/apps/backup/* through the platform proxy. Uses the
+// dashboard's Tailwind theme tokens (bg-bg-card / text-text-muted /
+// border-border / etc.) so the panel recolors across light/dark/cooler-
+// dark themes — same idioms as live-link / storage.
+//
+// Hand-authored as .tsx so the dashboard's Tailwind v4 build picks up
+// the class names. The bundled .mjs is produced by
+// `bun run scripts/build-panels.ts` from the apps repo root.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -136,6 +142,12 @@ function durationOf(r: Run): string {
   } catch { return "—"; }
 }
 
+function statusColor(s: Run["status"]): string {
+  if (s === "success") return "bg-success";
+  if (s === "failed")  return "bg-error";
+  return "bg-warn"; // running
+}
+
 export default function BackupPanel({ projectId, installId }: NativePanelProps) {
   const [destinations, setDestinations] = useState<Destination[]>([]);
   const [policies, setPolicies] = useState<Policy[]>([]);
@@ -229,27 +241,36 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
   // ─── render ─────────────────────────────────────────────────────
 
   return (
-    <div className="backup-panel">
-      <header style={{ marginBottom: 24 }}>
-        <h2>Backup</h2>
-        {status && <div style={{ color: "#b00", marginTop: 8 }}>{status}</div>}
+    <div className="h-full flex flex-col p-6 gap-4 min-w-0 overflow-y-auto">
+      <header>
+        <h2 className="text-text text-base font-bold">Backup</h2>
+        <p className="text-text-muted text-xs mt-1">
+          Periodic snapshots of your Apteva instance shipped to local disk
+          or any S3-compatible bucket.
+        </p>
       </header>
 
+      {status && (
+        <div className="text-error text-xs border border-error/40 bg-error/10 rounded px-3 py-2">
+          {status}
+        </div>
+      )}
+
       {/* Status card */}
-      <section style={{ marginBottom: 24, padding: 16, background: "#f6f8fa", borderRadius: 8 }}>
-        <h3 style={{ marginTop: 0 }}>Status</h3>
+      <section className="border border-border rounded-lg p-4 bg-bg-card space-y-2">
+        <h3 className="text-text text-sm font-bold">Status</h3>
         {lastSuccess ? (
-          <div>
+          <div className="text-text-muted text-sm">
             Last successful backup:{" "}
-            <strong>{formatTime(lastSuccess.finished_at)}</strong>{" "}
-            to <strong>{lastSuccess.destination_name}</strong>{" "}
+            <span className="text-text font-bold">{formatTime(lastSuccess.finished_at)}</span>{" "}
+            to <span className="text-text font-bold">{lastSuccess.destination_name}</span>{" "}
             ({formatBytes(lastSuccess.bytes_compressed)})
           </div>
         ) : (
-          <div>No successful backups yet.</div>
+          <div className="text-text-muted text-sm italic">No successful backups yet.</div>
         )}
         {lastRun && lastRun.status !== "success" && (
-          <div style={{ color: "#b00", marginTop: 4 }}>
+          <div className="text-error text-xs">
             Last run: {lastRun.status}
             {lastRun.error ? ` — ${lastRun.error}` : ""}
           </div>
@@ -257,108 +278,129 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
       </section>
 
       {/* Destinations */}
-      <Section title="Destinations">
-        {destinations.length === 0 && <Empty>No destinations yet — add one below.</Empty>}
+      <section className="border border-border rounded-lg p-4 bg-bg-card space-y-2">
+        <h3 className="text-text text-sm font-bold">Destinations</h3>
+        {destinations.length === 0 && (
+          <div className="text-text-muted text-sm italic">No destinations yet — add one below.</div>
+        )}
         {destinations.map(d => (
           <Row key={d.id}>
-            <div>
-              <strong>{d.name}</strong> <Pill>{d.kind}</Pill>
-              <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <strong className="text-text">{d.name}</strong>
+                <Pill>{d.kind}</Pill>
+              </div>
+              <div className="text-text-muted text-xs mt-0.5 font-mono truncate">
                 {d.kind === "local" && (d.config.path as string)}
                 {d.kind === "s3" && `s3://${d.config.bucket}${d.config.key_prefix ? "/" + d.config.key_prefix : ""}`}
               </div>
             </div>
-            <div>
-              <button disabled={busy === `run-${d.id}`} onClick={() => runNow(d.id)}>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => runNow(d.id)}
+                disabled={busy === `run-${d.id}`}
+                className="px-3 py-1 text-xs bg-accent text-bg rounded font-bold hover:bg-accent-hover disabled:opacity-50"
+              >
                 {busy === `run-${d.id}` ? "Running…" : "Run now"}
-              </button>{" "}
-              <button onClick={() => deleteDestination(d.id)}>Delete</button>
+              </button>
+              <button
+                onClick={() => deleteDestination(d.id)}
+                className="px-2 py-1 text-xs border border-border text-text-muted rounded hover:bg-bg-hover hover:text-text"
+              >
+                Delete
+              </button>
             </div>
           </Row>
         ))}
         <DestinationForm onCreated={reload} api={api} />
-      </Section>
+      </section>
 
       {/* Policies */}
-      <Section title="Policies">
-        {policies.length === 0 && <Empty>No scheduled policies — add one to back up automatically.</Empty>}
+      <section className="border border-border rounded-lg p-4 bg-bg-card space-y-2">
+        <h3 className="text-text text-sm font-bold">Policies</h3>
+        {policies.length === 0 && (
+          <div className="text-text-muted text-sm italic">No scheduled policies — add one to back up automatically.</div>
+        )}
         {policies.map(p => (
           <Row key={p.id}>
-            <div>
-              <strong>{p.name || `policy ${p.id}`}</strong>{" "}
-              <code style={{ fontSize: 12 }}>{p.schedule}</code>
-              <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <strong className="text-text">{p.name || `policy ${p.id}`}</strong>
+                <code className="text-text-muted text-xs font-mono bg-bg-input px-1.5 py-0.5 rounded">{p.schedule}</code>
+              </div>
+              <div className="text-text-muted text-xs mt-0.5">
                 → {destinations.find(d => d.id === p.destination_id)?.name || `destination ${p.destination_id}`}
                 {" · keep last "}{p.retention_keep}
-                {p.jobs_id ? ` · jobs#${p.jobs_id}` : " · not scheduled"}
+                {p.jobs_id ? ` · jobs#${p.jobs_id}` : (
+                  <span className="text-warn"> · not scheduled</span>
+                )}
               </div>
             </div>
-            <button onClick={() => deletePolicy(p.id)}>Delete</button>
+            <button
+              onClick={() => deletePolicy(p.id)}
+              className="px-2 py-1 text-xs border border-border text-text-muted rounded hover:bg-bg-hover hover:text-text shrink-0"
+            >
+              Delete
+            </button>
           </Row>
         ))}
         <PolicyForm destinations={destinations} onCreated={reload} api={api} />
-      </Section>
+      </section>
 
       {/* History */}
-      <Section title="History">
-        {runs.length === 0 && <Empty>No backup runs yet.</Empty>}
+      <section className="border border-border rounded-lg p-4 bg-bg-card space-y-2">
+        <h3 className="text-text text-sm font-bold">History</h3>
+        {runs.length === 0 && (
+          <div className="text-text-muted text-sm italic">No backup runs yet.</div>
+        )}
         {runs.map(r => (
           <Row key={r.id}>
-            <div>
-              <StatusDot status={r.status} />{" "}
-              {formatTime(r.started_at)} → <strong>{r.destination_name}</strong>
-              {" · "}{formatBytes(r.bytes_compressed)}
-              {" · "}{durationOf(r)}
-              {r.error && (
-                <div style={{ fontSize: 12, color: "#b00", marginTop: 2 }}>{r.error}</div>
-              )}
+            <div className="min-w-0 flex-1 flex items-start gap-2">
+              <span className={`inline-block w-2 h-2 rounded-full mt-1.5 shrink-0 ${statusColor(r.status)}`} />
+              <div className="min-w-0 flex-1">
+                <div className="text-sm text-text-muted">
+                  {formatTime(r.started_at)} →{" "}
+                  <span className="text-text font-bold">{r.destination_name}</span>
+                  {" · "}{formatBytes(r.bytes_compressed)}
+                  {" · "}{durationOf(r)}
+                </div>
+                {r.error && (
+                  <div className="text-error text-xs mt-0.5">{r.error}</div>
+                )}
+              </div>
             </div>
             {r.status === "success" && r.remote_key && (
               <button
-                disabled={busy === `restore-${r.id}`}
                 onClick={() => restoreRun(r.id, r.destination_name)}
+                disabled={busy === `restore-${r.id}`}
+                className="px-2 py-1 text-xs border border-border text-text-muted rounded hover:bg-bg-hover hover:text-text disabled:opacity-50 shrink-0"
               >
                 {busy === `restore-${r.id}` ? "Restoring…" : "Restore"}
               </button>
             )}
           </Row>
         ))}
-      </Section>
+      </section>
     </div>
   );
 }
 
 // ─── tiny presentational helpers ──────────────────────────────────
 
-function Section(p: { title: string; children: React.ReactNode }) {
+function Row({ children }: { children: React.ReactNode }) {
   return (
-    <section style={{ marginBottom: 24 }}>
-      <h3>{p.title}</h3>
-      {p.children}
-    </section>
+    <div className="flex items-center justify-between gap-3 py-2 border-b border-border last:border-b-0">
+      {children}
+    </div>
   );
 }
 
-function Row(p: { children: React.ReactNode }) {
+function Pill({ children }: { children: React.ReactNode }) {
   return (
-    <div style={{
-      display: "flex", justifyContent: "space-between", alignItems: "center",
-      padding: "8px 0", borderBottom: "1px solid #eee",
-    }}>{p.children}</div>
+    <span className="text-[10px] uppercase tracking-wide bg-bg-input text-text-muted px-1.5 py-0.5 rounded">
+      {children}
+    </span>
   );
-}
-
-function Empty(p: { children: React.ReactNode }) {
-  return <div style={{ color: "#888", padding: "8px 0", fontStyle: "italic" }}>{p.children}</div>;
-}
-
-function Pill(p: { children: React.ReactNode }) {
-  return <span style={{ fontSize: 11, padding: "2px 6px", background: "#e6e8eb", borderRadius: 4, marginLeft: 6 }}>{p.children}</span>;
-}
-
-function StatusDot({ status }: { status: Run["status"] }) {
-  const color = status === "success" ? "#0a0" : status === "failed" ? "#b00" : "#aa0";
-  return <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 4, background: color, marginRight: 6 }} />;
 }
 
 // ─── forms ────────────────────────────────────────────────────────
@@ -380,7 +422,14 @@ function DestinationForm({
   const [connID, setConnID] = useState("");
   const [err, setErr] = useState("");
 
-  if (!open) return <button style={{ marginTop: 8 }} onClick={() => setOpen(true)}>+ Add destination</button>;
+  if (!open) return (
+    <button
+      onClick={() => setOpen(true)}
+      className="text-accent text-xs hover:underline self-start mt-1"
+    >
+      + Add destination
+    </button>
+  );
 
   const submit = async () => {
     setErr("");
@@ -399,40 +448,51 @@ function DestinationForm({
   };
 
   return (
-    <div style={{ marginTop: 12, padding: 12, background: "#f6f8fa", borderRadius: 8 }}>
-      <div><strong>New destination</strong></div>
-      <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "120px 1fr", gap: 8 }}>
-        <label>Name</label>
-        <input value={name} onChange={e => setName(e.target.value)} placeholder="nightly-local" />
+    <div className="mt-2 p-3 bg-bg-input border border-border rounded space-y-2">
+      <div className="text-text font-bold text-sm">New destination</div>
+      <FormGrid>
+        <Label>Name</Label>
+        <Input value={name} onChange={setName} placeholder="nightly-local" />
 
-        <label>Kind</label>
-        <select value={kind} onChange={e => setKind(e.target.value as "local" | "s3")}>
+        <Label>Kind</Label>
+        <Select value={kind} onChange={(v) => setKind(v as "local" | "s3")}>
           <option value="local">local — host directory</option>
           <option value="s3">s3 — AWS / R2 / B2 / MinIO</option>
-        </select>
+        </Select>
 
         {kind === "local" && <>
-          <label>Path</label>
-          <input value={path} onChange={e => setPath(e.target.value)} placeholder="/var/apteva/backups" />
+          <Label>Path</Label>
+          <Input value={path} onChange={setPath} placeholder="/var/apteva/backups" />
         </>}
 
         {kind === "s3" && <>
-          <label>Bucket</label>
-          <input value={bucket} onChange={e => setBucket(e.target.value)} placeholder="apteva-backups" />
-          <label>Endpoint</label>
-          <input value={endpoint} onChange={e => setEndpoint(e.target.value)} placeholder="empty for AWS, otherwise e.g. <accountid>.r2.cloudflarestorage.com" />
-          <label>Region</label>
-          <input value={region} onChange={e => setRegion(e.target.value)} />
-          <label>Key prefix</label>
-          <input value={keyPrefix} onChange={e => setKeyPrefix(e.target.value)} placeholder="prod/" />
-          <label>Connection ID</label>
-          <input value={connID} onChange={e => setConnID(e.target.value)} placeholder="from /connections" />
+          <Label>Bucket</Label>
+          <Input value={bucket} onChange={setBucket} placeholder="apteva-backups" />
+          <Label>Endpoint</Label>
+          <Input value={endpoint} onChange={setEndpoint} placeholder="empty for AWS, e.g. <accountid>.r2.cloudflarestorage.com" />
+          <Label>Region</Label>
+          <Input value={region} onChange={setRegion} />
+          <Label>Key prefix</Label>
+          <Input value={keyPrefix} onChange={setKeyPrefix} placeholder="prod/" />
+          <Label>Connection ID</Label>
+          <Input value={connID} onChange={setConnID} placeholder="from /connections" />
         </>}
-      </div>
-      {err && <div style={{ color: "#b00", marginTop: 8 }}>{err}</div>}
-      <div style={{ marginTop: 12 }}>
-        <button onClick={submit} disabled={!name}>Create</button>{" "}
-        <button onClick={() => setOpen(false)}>Cancel</button>
+      </FormGrid>
+      {err && <div className="text-error text-xs">{err}</div>}
+      <div className="flex justify-end gap-2 pt-1">
+        <button
+          onClick={() => setOpen(false)}
+          className="px-3 py-1.5 text-sm text-text-muted hover:text-text"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={submit}
+          disabled={!name}
+          className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold hover:bg-accent-hover disabled:opacity-50"
+        >
+          Create
+        </button>
       </div>
     </div>
   );
@@ -455,11 +515,13 @@ function PolicyForm({
 
   if (!open) return (
     <button
-      style={{ marginTop: 8 }}
       onClick={() => setOpen(true)}
       disabled={destinations.length === 0}
       title={destinations.length === 0 ? "Add a destination first" : ""}
-    >+ Add policy</button>
+      className="text-accent text-xs hover:underline self-start mt-1 disabled:opacity-50 disabled:no-underline"
+    >
+      + Add policy
+    </button>
   );
 
   const submit = async () => {
@@ -479,26 +541,75 @@ function PolicyForm({
   };
 
   return (
-    <div style={{ marginTop: 12, padding: 12, background: "#f6f8fa", borderRadius: 8 }}>
-      <div><strong>New policy</strong></div>
-      <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "120px 1fr", gap: 8 }}>
-        <label>Name</label>
-        <input value={name} onChange={e => setName(e.target.value)} />
-        <label>Schedule (cron)</label>
-        <input value={schedule} onChange={e => setSchedule(e.target.value)} placeholder="0 3 * * *" />
-        <label>Destination</label>
-        <select value={destID} onChange={e => setDestID(Number(e.target.value))}>
+    <div className="mt-2 p-3 bg-bg-input border border-border rounded space-y-2">
+      <div className="text-text font-bold text-sm">New policy</div>
+      <FormGrid>
+        <Label>Name</Label>
+        <Input value={name} onChange={setName} />
+        <Label>Schedule (cron)</Label>
+        <Input value={schedule} onChange={setSchedule} placeholder="0 3 * * *" />
+        <Label>Destination</Label>
+        <Select value={String(destID)} onChange={(v) => setDestID(Number(v))}>
           {destinations.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
-        </select>
-        <label>Retention (last N)</label>
-        <input value={keep} onChange={e => setKeep(e.target.value)} />
-      </div>
-      {err && <div style={{ color: "#b00", marginTop: 8 }}>{err}</div>}
-      {warning && <div style={{ color: "#aa0", marginTop: 8 }}>{warning}</div>}
-      <div style={{ marginTop: 12 }}>
-        <button onClick={submit}>Create</button>{" "}
-        <button onClick={() => setOpen(false)}>Cancel</button>
+        </Select>
+        <Label>Retention (last N)</Label>
+        <Input value={keep} onChange={setKeep} />
+      </FormGrid>
+      {err && <div className="text-error text-xs">{err}</div>}
+      {warning && <div className="text-warn text-xs">{warning}</div>}
+      <div className="flex justify-end gap-2 pt-1">
+        <button
+          onClick={() => setOpen(false)}
+          className="px-3 py-1.5 text-sm text-text-muted hover:text-text"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={submit}
+          className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold hover:bg-accent-hover"
+        >
+          Create
+        </button>
       </div>
     </div>
+  );
+}
+
+function FormGrid({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="grid gap-2 items-center" style={{ gridTemplateColumns: "120px 1fr" }}>
+      {children}
+    </div>
+  );
+}
+
+function Label({ children }: { children: React.ReactNode }) {
+  return <label className="text-text-muted text-xs">{children}</label>;
+}
+
+function Input({
+  value, onChange, placeholder,
+}: { value: string; onChange: (v: string) => void; placeholder?: string }) {
+  return (
+    <input
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      className="bg-bg border border-border rounded px-2 py-1.5 text-sm text-text font-mono focus:outline-none focus:border-accent"
+    />
+  );
+}
+
+function Select({
+  value, onChange, children,
+}: { value: string; onChange: (v: string) => void; children: React.ReactNode }) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="bg-bg border border-border rounded px-2 py-1.5 text-sm text-text"
+    >
+      {children}
+    </select>
   );
 }
