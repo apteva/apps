@@ -1605,6 +1605,8 @@ function PostsView({
 }: { posts: Post[]; onChange: () => void; setStatus: (s: string) => void }) {
   // Open reschedule dialog for a specific post (null = closed).
   const [rescheduleFor, setRescheduleFor] = useState<Post | null>(null);
+  // Same pattern for the delete-confirm modal: which post (null = closed).
+  const [deleteFor, setDeleteFor] = useState<Post | null>(null);
 
   const retry = async (postId: number) => {
     try {
@@ -1616,13 +1618,7 @@ function PostsView({
     }
   };
 
-  const remove = async (post: Post) => {
-    const what =
-      post.status === "scheduled" ? "Cancel this scheduled post?" :
-      (post.status === "published" || post.status === "partial")
-        ? "Delete this post? Where the platform allows it (X, Facebook, YouTube) we'll also remove the upstream copy. Instagram and TikTok keep their copy — those have to be deleted in-app."
-        : "Delete this post?";
-    if (!confirm(what)) return;
+  const executeDelete = async (post: Post) => {
     try {
       const res = await fetch(`${API}/posts/${post.id}`, {
         method: "DELETE", credentials: "same-origin",
@@ -1686,7 +1682,7 @@ function PostsView({
               </button>
             )}
             <button
-              onClick={() => remove(p)}
+              onClick={() => setDeleteFor(p)}
               className="text-xs text-text-muted hover:text-red"
               title={p.status === "scheduled" ? "Cancel + delete" : "Delete"}
             >
@@ -1717,6 +1713,134 @@ function PostsView({
           setStatus={setStatus}
         />
       )}
+      {deleteFor && (
+        <DeleteConfirmDialog
+          post={deleteFor}
+          onClose={() => setDeleteFor(null)}
+          onConfirm={async () => {
+            const p = deleteFor;
+            setDeleteFor(null);
+            await executeDelete(p);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// --- DeleteConfirmDialog ------------------------------------------
+//
+// Replaces the native confirm() prompt for post deletion. Same status-
+// aware copy as before but rendered as an in-app modal so it matches
+// the rest of the panel and can highlight the upstream-deletion
+// behavior more legibly than a single string crammed into a browser
+// alert. The actual fetch lives in PostsView.executeDelete; this
+// component only collects the user's intent.
+
+function DeleteConfirmDialog({
+  post, onClose, onConfirm,
+}: {
+  post: Post;
+  onClose: () => void;
+  onConfirm: () => void | Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const isScheduled = post.status === "scheduled";
+  const willTouchUpstream = post.status === "published" || post.status === "partial";
+
+  const title =
+    isScheduled ? "Cancel scheduled post?" :
+    willTouchUpstream ? "Delete post?" :
+    "Delete post?";
+
+  const handleConfirm = async () => {
+    setBusy(true);
+    try {
+      await onConfirm();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center bg-black/60"
+      onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}
+    >
+      <div className="bg-bg-card border border-border rounded-lg shadow-lg w-[min(480px,92vw)] p-5 flex flex-col gap-4">
+        <div className="flex items-center justify-between">
+          <div className="text-text font-bold">{title}</div>
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="text-text-muted hover:text-text text-lg leading-none disabled:opacity-50"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="text-text text-sm whitespace-pre-wrap line-clamp-3 bg-bg-input border border-border rounded px-3 py-2">
+          {post.body}
+        </div>
+
+        {isScheduled && (
+          <div className="text-text-dim text-sm">
+            This will cancel the scheduled job and remove the post locally.
+            Nothing has been published yet, so no platform is affected.
+          </div>
+        )}
+
+        {willTouchUpstream && (
+          <div className="flex flex-col gap-2 text-sm">
+            <div className="text-text-dim">
+              The post will be removed locally. Where the platform's API allows it,
+              we'll also remove the upstream copy:
+            </div>
+            <ul className="flex flex-col gap-1.5">
+              <li className="flex items-start gap-2">
+                <span className="text-green mt-0.5">✓</span>
+                <span className="text-text">
+                  <span className="font-medium">X, Facebook, YouTube</span>
+                  <span className="text-text-dim"> — upstream copy will be deleted</span>
+                </span>
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-text-muted mt-0.5">○</span>
+                <span className="text-text">
+                  <span className="font-medium">Instagram, TikTok</span>
+                  <span className="text-text-dim"> — keeps its copy; delete it in the app</span>
+                </span>
+              </li>
+            </ul>
+          </div>
+        )}
+
+        {!isScheduled && !willTouchUpstream && (
+          <div className="text-text-dim text-sm">
+            This post hasn't been published. The local row will be removed.
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2 pt-1">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-card disabled:opacity-50"
+          >
+            {isScheduled ? "Keep scheduled" : "Cancel"}
+          </button>
+          <button
+            type="button"
+            onClick={handleConfirm}
+            disabled={busy}
+            className="px-3 py-1.5 text-sm bg-red text-bg rounded font-bold hover:opacity-90 disabled:opacity-50"
+          >
+            {busy ? "…" : isScheduled ? "Cancel post" : "Delete"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
