@@ -1273,7 +1273,6 @@ func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (
 	if first.IsVideo() {
 		containerInput["video_url"] = first.URL
 		containerInput["media_type"] = "REELS"
-		containerInput["sync"] = true
 	} else {
 		containerInput["image_url"] = first.URL
 		containerInput["media_type"] = "IMAGE"
@@ -1293,6 +1292,15 @@ func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (
 	containerID := extractContainerID(out.Data)
 	if containerID == "" {
 		return "", "", fmt.Errorf("create_media_container returned no containerId: %s", string(out.Data))
+	}
+	// Reels need processing time before publish — Graph API rejects
+	// publish_media_container with error 9007 ("Media is not ready")
+	// otherwise. Poll get_container_status until FINISHED or timeout.
+	// Images are processed inline so no wait is needed.
+	if first.IsVideo() {
+		if err := a.waitContainerReady(ctx, j.connID, containerID, pageToken); err != nil {
+			return "", "", fmt.Errorf("container not ready: %w", err)
+		}
 	}
 	// Step 2: publish_media_container. Graph API expects
 	// creation_id; we send both names so the integration's input
@@ -1320,6 +1328,56 @@ func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (
 		url = "https://www.instagram.com/p/" + id // best-effort; real shortcode may differ
 	}
 	return id, url, nil
+}
+
+// waitContainerReady polls get_container_status on an Instagram media
+// container until status_code is FINISHED, then returns nil. Returns an
+// error on ERROR / EXPIRED status, on a timeout, or on a transport
+// failure. Reels typically finish in 5-30s; we cap the wait at 3
+// minutes to avoid blocking a worker forever on a stuck transcode.
+func (a *App) waitContainerReady(ctx *sdk.AppCtx, connID int64, containerID, pageToken string) error {
+	const (
+		maxWait  = 3 * time.Minute
+		interval = 5 * time.Second
+	)
+	deadline := time.Now().Add(maxWait)
+	input := map[string]any{
+		"containerId": containerID,
+		"fields":      "id,status_code,status",
+	}
+	if pageToken != "" {
+		input["access_token"] = pageToken
+	}
+	for {
+		out, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_container_status", input)
+		if err != nil {
+			return fmt.Errorf("get_container_status: %w", err)
+		}
+		if out == nil || !out.Success {
+			return upstreamError(out)
+		}
+		var resp struct {
+			StatusCode string `json:"status_code"`
+			Status     string `json:"status"`
+		}
+		_ = json.Unmarshal(out.Data, &resp)
+		ctx.Logger().Info("publishInstagram: container status",
+			"container_id", containerID, "status_code", resp.StatusCode)
+		switch resp.StatusCode {
+		case "FINISHED":
+			return nil
+		case "ERROR":
+			return fmt.Errorf("container processing failed: %s", resp.Status)
+		case "EXPIRED":
+			return fmt.Errorf("container expired (>24h old) before publish")
+		}
+		// IN_PROGRESS or empty — keep polling.
+		if time.Now().After(deadline) {
+			return fmt.Errorf("container still %q after %s — giving up",
+				resp.StatusCode, maxWait)
+		}
+		time.Sleep(interval)
+	}
 }
 
 // publishTikTok builds the nested {post_info, source_info} shape from
