@@ -181,6 +181,13 @@ type platformDef struct {
 	ProfileTool          string
 	ProfileNameField     string
 	ProfileAvatarField   string
+	// ProfileToolArgs — optional input passed to ProfileTool. YouTube's
+	// get_my_channel needs `part=snippet` (it's a `required` field on
+	// the integration's input schema; without it the upstream Graph
+	// returns 400 and the profile fetch silently fails). Most platforms
+	// can leave this nil — Twitter's get_me, TikTok's get_creator_info
+	// take no inputs.
+	ProfileToolArgs map[string]any
 	// DeleteTool — integration tool that removes an already-published
 	// post from the upstream platform. Empty when the platform's API
 	// doesn't permit it (Instagram media, TikTok videos) or when the
@@ -333,6 +340,9 @@ var platforms = map[string]platformDef{
 		ProfileTool:        "get_my_channel",
 		ProfileNameField:   "snippet.title",
 		ProfileAvatarField: "snippet.thumbnails.default.url",
+		// `part` is required by YouTube Data API v3; just snippet is
+		// enough for the title + thumbnails we surface.
+		ProfileToolArgs: map[string]any{"part": "snippet"},
 		// Wired in advance of v0.2 upload support. With current upload
 		// strategy returning an error, no published platform_post_id
 		// is recorded for YouTube targets, so this branch stays dormant
@@ -2612,9 +2622,20 @@ func (a *App) fetchProfile(ctx *sdk.AppCtx, connID int64, def platformDef) (*pro
 	if def.ProfileTool == "" {
 		return nil, nil
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, def.ProfileTool, map[string]any{})
-	if err != nil || res == nil || !res.Success {
+	input := map[string]any{}
+	for k, v := range def.ProfileToolArgs {
+		input[k] = v
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, def.ProfileTool, input)
+	if err != nil {
+		ctx.Logger().Warn("fetchProfile: integration error",
+			"platform", def.Platform, "tool", def.ProfileTool, "err", err)
 		return nil, err
+	}
+	if res == nil || !res.Success {
+		ctx.Logger().Warn("fetchProfile: upstream non-2xx",
+			"platform", def.Platform, "tool", def.ProfileTool, "err", upstreamError(res))
+		return nil, nil
 	}
 	var raw map[string]any
 	_ = json.Unmarshal(res.Data, &raw)
