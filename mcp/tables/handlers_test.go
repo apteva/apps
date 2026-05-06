@@ -15,6 +15,15 @@ func newTestCtx(t *testing.T, opts ...tk.Option) *sdk.AppCtx {
 	return tk.NewAppCtx(t, "apteva.yaml", full...)
 }
 
+// newTestCtxWithRecorder pairs an AppCtx with an EmitRecorder so
+// tests can assert which app-events fired.
+func newTestCtxWithRecorder(t *testing.T) (*sdk.AppCtx, *tk.EmitRecorder) {
+	t.Helper()
+	rec := tk.NewEmitRecorder()
+	ctx := newTestCtx(t, tk.WithEmitter(rec))
+	return ctx, rec
+}
+
 // mustCall runs a tool and fails the test on error.
 func mustCall(t *testing.T, app *App, ctx *sdk.AppCtx, tool string, args map[string]any) map[string]any {
 	t.Helper()

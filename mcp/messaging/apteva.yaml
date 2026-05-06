@@ -89,6 +89,7 @@ provides:
     - { name: suppression_list,       description: "List suppressed addresses. Args: channel?, limit?." }
     - { name: suppression_add,        description: "Suppress a recipient. Args: address (URI), reason." }
     - { name: suppression_remove,     description: "Remove an address from suppression. Args: address (URI)." }
+    - { name: suppression_check,      description: "Single-row suppression lookup. Args: address, channel?. Returns {suppressed, reason?, source?, suppressed_at?}." }
     # senders (outbound identities — channel-agnostic list/get/delete; channel-specific onboarding)
     - { name: senders_list,           description: "List sending identities (verified emails, domains; later phones, push apps). Args: channel?, verified_only?. Returns [{address, kind, verified, dkim_status?}]." }
     - { name: senders_get,            description: "Get a single identity's status — verification, DKIM, feedback forwarding. Args: address (URI or bare)." }

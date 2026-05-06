@@ -2,12 +2,15 @@
 # a binary named after the directory. One entry per app keeps the list
 # explicit; gitignore globs can't match "file with same name as parent
 # dir" cleanly, so we enumerate.
+mcp/analytics/analytics
 mcp/auth/auth
 mcp/backup/backup
 mcp/billing/billing
 mcp/bills/bills
 mcp/calendar/calendar
+mcp/certs/certs
 mcp/code/code
+mcp/computer/computer
 mcp/crm/crm
 mcp/deploy/deploy
 mcp/dlna/dlna

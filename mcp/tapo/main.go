@@ -1160,11 +1160,15 @@ func pushToStorage(ctx *sdk.AppCtx, folder, camName string, jpg []byte) (int64, 
 	if err != nil {
 		return 0, err
 	}
+	inner, err := mcpInnerJSON(raw)
+	if err != nil {
+		return 0, fmt.Errorf("storage upload: %w", err)
+	}
 	var out struct {
 		FileID int64 `json:"file_id"`
 		ID     int64 `json:"id"`
 	}
-	if err := json.Unmarshal(raw, &out); err != nil {
+	if err := json.Unmarshal(inner, &out); err != nil {
 		return 0, fmt.Errorf("storage response: %w", err)
 	}
 	if out.FileID != 0 {
@@ -1352,6 +1356,39 @@ func configFlag(ctx *sdk.AppCtx, key string, def bool) bool {
 		return false
 	}
 	return def
+}
+
+// mcpInnerJSON strips the MCP JSON-RPC envelope CallApp returns and
+// yields the inner content[0].text bytes for a typed Unmarshal.
+// Pre-unwrapped responses pass through. RPC errors → Go error.
+//
+// Local copy of app-sdk's decodeMCPEnvelope (v0.1.8); delete and
+// switch to CallAppResult once the SDK pin advances.
+func mcpInnerJSON(raw []byte) ([]byte, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("empty mcp response")
+	}
+	var env struct {
+		Result *struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return raw, nil
+	}
+	if env.Error != nil {
+		return nil, fmt.Errorf("rpc error %d: %s", env.Error.Code, env.Error.Message)
+	}
+	if env.Result == nil || len(env.Result.Content) == 0 {
+		return raw, nil
+	}
+	return []byte(env.Result.Content[0].Text), nil
 }
 
 // ─── main ───────────────────────────────────────────────────────────

@@ -110,6 +110,11 @@ func (a *App) toolRowsInsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	emit(ctx, topicRowInserted, map[string]any{
+		"table": tableName,
+		"ids":   ids,
+		"count": len(ids),
+	})
 	return map[string]any{"ids": ids, "inserted": len(ids)}, nil
 }
 
@@ -205,6 +210,10 @@ func (a *App) toolRowsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
+	emit(ctx, topicRowUpdated, map[string]any{
+		"table": tableName,
+		"id":    id,
+	})
 	return map[string]any{"row": row}, nil
 }
 
@@ -238,6 +247,13 @@ func (a *App) toolRowsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			return nil, err
 		}
 		n, _ := res.RowsAffected()
+		if n > 0 {
+			emit(ctx, topicRowDeleted, map[string]any{
+				"table":   tableName,
+				"id":      id,
+				"deleted": n,
+			})
+		}
 		return map[string]any{"deleted": n}, nil
 	}
 
@@ -257,6 +273,12 @@ func (a *App) toolRowsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	n, _ := res.RowsAffected()
+	if n > 0 {
+		emit(ctx, topicRowDeleted, map[string]any{
+			"table":   tableName,
+			"deleted": n,
+		})
+	}
 	return map[string]any{"deleted": n}, nil
 }
 
@@ -465,8 +487,12 @@ func hydrateFileColumns(ctx *sdk.AppCtx, t *Table, row map[string]any) {
 		if err != nil || raw == nil {
 			continue
 		}
+		inner, err := mcpInnerJSON(raw)
+		if err != nil {
+			continue
+		}
 		var resp map[string]any
-		if err := jsonUnmarshalRaw(raw, &resp); err == nil {
+		if err := jsonUnmarshalRaw(inner, &resp); err == nil {
 			row[c.Name] = map[string]any{"id": id, "url": resp["url"], "expires_at": resp["expires_at"]}
 		}
 	}

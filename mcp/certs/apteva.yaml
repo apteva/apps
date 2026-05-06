@@ -1,0 +1,88 @@
+schema: apteva-app/v1
+
+name: certs
+display_name: Certs
+version: 0.1.0
+description: |
+  TLS certificate issuance for Apteva projects. Talks to Let's
+  Encrypt (or any RFC 8555 ACME directory) using DNS-01 challenges,
+  routing the TXT record writes through the Domains app so we never
+  hold the registrar's API keys here.
+
+  v0.1: single-name certs. SAN / wildcard support is a v0.2 schema
+  add (sans_json column) and an extra DNS round-trip.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/certs
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/certs/icon.png
+tags: [certs, tls, acme, infrastructure, lets-encrypt]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.apps.call
+  integrations:
+    - role: domains
+      kind: app
+      required: true
+      compatible_app_names: [domains]
+      label: Domains app
+      hint: Required — DNS-01 challenges go through the Domains app's record API.
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: cert_issue,    description: "Issue a TLS cert for an FQDN. Async — returns a cert_id with status=pending; poll cert_get for completion. Args: fqdn." }
+    - { name: cert_get,      description: "Fetch one cert by id or fqdn. Args: id OR fqdn." }
+    - { name: cert_list,     description: "List certs in this project. Args: include_revoked? (default false)." }
+    - { name: cert_material, description: "Return PEM cert + key for an FQDN. PRIVILEGED — only the server (TLS cache) and the certs app itself may call this. Args: fqdn." }
+    - { name: cert_revoke,   description: "Revoke and delete a cert. Args: id OR fqdn." }
+    - { name: cert_renew,    description: "Force-renew a cert. The renewal worker also runs this on a daily schedule for certs in the renewal window. Args: id OR fqdn." }
+  ui_panels:
+    - slot: project.page
+      label: Certs
+      icon: lock
+      entry: /ui/CertsPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/certs
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/certs.db
+  migrations: migrations/
+
+config_schema:
+  - name: acme_directory_url
+    type: text
+    default: "https://acme-staging-v02.api.letsencrypt.org/directory"
+    label: ACME directory URL
+    description: Defaults to Let's Encrypt **staging** so first-time setup doesn't burn rate limits. Switch to https://acme-v02.api.letsencrypt.org/directory when you've issued a successful staging cert end-to-end.
+  - name: acme_email
+    type: text
+    default: ""
+    label: ACME account contact email
+    description: Required. Used as the registered contact on the ACME account (the address that receives expiry warnings).
+  - name: renewal_window_days
+    type: text
+    default: "30"
+    label: Renewal window (days)
+    description: Renew any live cert with fewer than this many days left.
+  - name: dns_propagation_timeout_seconds
+    type: text
+    default: "180"
+    label: DNS propagation timeout (s)
+    description: How long to poll public resolvers for the _acme-challenge TXT record before giving up. Slow registrars (Namecheap) may need 300+.
+
+upgrade_policy: auto-patch

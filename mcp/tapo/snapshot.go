@@ -51,12 +51,16 @@ func snapshotViaFfmpegApp(ctx *sdk.AppCtx, cli *Client) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("snapshot: %w", err)
 	}
+	inner, err := mcpInnerJSON(raw)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot: %w", err)
+	}
 	var out struct {
 		BytesBase64 string `json:"bytes_base64"`
 		SizeBytes   int    `json:"size_bytes"`
 		ContentType string `json:"content_type"`
 	}
-	if err := json.Unmarshal(raw, &out); err != nil {
+	if err := json.Unmarshal(inner, &out); err != nil {
 		return nil, fmt.Errorf("snapshot: parse ffmpeg response: %w", err)
 	}
 	if out.BytesBase64 == "" {

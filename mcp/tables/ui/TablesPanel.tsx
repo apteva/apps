@@ -8,6 +8,64 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+// Inlined SDK app-event subscription. Panels are runtime-bundled
+// standalone .mjs files and each app is independently installable
+// from its own source — sharing across app directories would break
+// the install when an app is cloned alone. Same hook storage uses;
+// keep them in sync if you add reconnect/backoff knobs.
+interface AppEventEnvelope<T = unknown> {
+  topic: string;
+  app: string;
+  project_id: string;
+  install_id: number;
+  seq: number;
+  time: string;
+  data: T;
+}
+function useAppEvents<T = unknown>(
+  app: string,
+  projectId: string | undefined | null,
+  onEvent: (ev: AppEventEnvelope<T>) => void,
+) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+  useEffect(() => {
+    if (!app || !projectId) return;
+    let lastSeq = 0;
+    let es: EventSource | null = null;
+    let cancelled = false;
+    let reconnectTimer: number | null = null;
+    const connect = () => {
+      if (cancelled) return;
+      const url =
+        `/api/app-events/${encodeURIComponent(app)}` +
+        `?project_id=${encodeURIComponent(projectId)}` +
+        (lastSeq > 0 ? `&since=${lastSeq}` : "");
+      es = new EventSource(url, { withCredentials: true });
+      es.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data) as AppEventEnvelope<T>;
+          if (ev.seq <= lastSeq) return;
+          lastSeq = ev.seq;
+          handlerRef.current(ev);
+        } catch {}
+      };
+      es.onerror = () => {
+        if (es && es.readyState === EventSource.CLOSED) {
+          if (reconnectTimer) window.clearTimeout(reconnectTimer);
+          reconnectTimer = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (es) es.close();
+    };
+  }, [app, projectId]);
+}
+
 interface NativePanelProps {
   appName: string;
   installId: number;
@@ -129,6 +187,30 @@ export default function TablesPanel({ projectId, installId }: NativePanelProps) 
   useEffect(() => {
     loadRows();
   }, [loadRows]);
+
+  // Live refresh on mutations from agents or other tabs. We always
+  // re-fetch the table list on schema-shaped events (the rail's row
+  // counts may have shifted on any of them); we only re-fetch rows
+  // when the active table is the one that changed.
+  useAppEvents<{ table?: string; name?: string }>("tables", projectId, (ev) => {
+    if (ev.topic.startsWith("table.")) {
+      loadTables();
+      // If the table the user is looking at was just dropped, clear
+      // the selection so the main pane shows the empty state instead
+      // of stale rows.
+      if (ev.topic === "table.dropped" && ev.data.name === selected) {
+        setSelected(null);
+      }
+      return;
+    }
+    if (ev.topic.startsWith("row.")) {
+      // table-list row counts shift on every row change.
+      loadTables();
+      if (ev.data.table === selected) {
+        loadRows();
+      }
+    }
+  });
 
   const selectedTable = useMemo(
     () => tables.find((t) => t.name === selected) || null,

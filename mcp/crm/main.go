@@ -44,6 +44,15 @@ requires:
   permissions:
     - db.write.app
     - platform.instances.read
+    - platform.apps.call
+  integrations:
+    - role: messaging
+      kind: app
+      compatible_app_names: [messaging]
+      capabilities: [message.send]
+      required: false
+      label: "Messaging (optional)"
+      hint: "When bound, CRM gains Send/Reply tools and accepts inbound mail/SMS/WhatsApp at /inbound, auto-attaching to contact activity. Without it, CRM is a standalone contact store."
 provides:
   http_routes:
     - prefix: /
@@ -68,6 +77,18 @@ provides:
       description: Write one custom-attribute value with provenance.
     - name: contacts_define_attribute
       description: Create or update an attribute definition.
+    - name: contacts_send_message
+      description: Send a message via the messaging app; auto-logs to the activity timeline.
+    - name: contacts_reply
+      description: Reply on the contact's most-recent inbound conversation.
+    - name: contacts_send_test
+      description: Send a test message; logged as *_test_sent.
+    - name: contacts_list_messageable
+      description: List contacts reachable on a channel.
+    - name: contacts_list_conversations
+      description: List a contact's recent conversations.
+    - name: contacts_get_conversation
+      description: Fetch one conversation with its full activity chain.
   ui_panels:
     - slot: project.page
       label: Contacts
@@ -131,6 +152,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// only routes by path; method is dispatched inside.
 		{Pattern: "/contacts/", Handler: a.handleHTTPContactItem},
 		{Pattern: "/attribute-defs", Handler: a.handleHTTPAttrDefs},
+		// Inbound webhook from messaging.dispatchInbound. POST only.
+		{Pattern: "/inbound", Handler: a.handleInbound},
 	}
 }
 
@@ -149,20 +172,37 @@ func (a *App) handleHTTPContactsCollection(w http.ResponseWriter, r *http.Reques
 }
 
 // handleHTTPContactItem dispatches /contacts/<id> by method, and
-// routes /contacts/<id>/activities to the activity sub-handlers.
+// routes the recognised sub-paths (activities, messages, reply,
+// conversations, conversations/<cid>) to their handlers.
 func (a *App) handleHTTPContactItem(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/contacts/")
-	parts := strings.SplitN(rest, "/", 2)
-	if len(parts) == 2 && parts[1] == "activities" {
-		switch r.Method {
-		case http.MethodGet:
-			a.handleHTTPGetOrChild(w, r) // also handles activities GET
-		case http.MethodPost:
-			a.handleHTTPPostActivity(w, r)
-		default:
-			httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	parts := strings.SplitN(rest, "/", 3)
+	if len(parts) >= 2 {
+		switch parts[1] {
+		case "activities":
+			switch r.Method {
+			case http.MethodGet:
+				a.handleHTTPGetOrChild(w, r)
+			case http.MethodPost:
+				a.handleHTTPPostActivity(w, r)
+			default:
+				httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			}
+			return
+		case "messages":
+			a.handleHTTPSendMessage(w, r)
+			return
+		case "reply":
+			a.handleHTTPReply(w, r)
+			return
+		case "conversations":
+			if len(parts) == 3 && parts[2] != "" {
+				a.handleHTTPGetConversation(w, r)
+			} else {
+				a.handleHTTPListConversations(w, r)
+			}
+			return
 		}
-		return
 	}
 	switch r.Method {
 	case http.MethodGet:
@@ -255,12 +295,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_get_context",
-			Description: "Snapshot + recent activities + tags + attributes — the agent's pre-flight read. Args: id OR email OR phone, activity_limit (default 10).",
+			Description: "Snapshot + recent activities + tags + attributes + recent conversations — the agent's pre-flight read. Args: id OR email OR phone, activity_limit (default 10), conversation_limit (default 10).",
 			InputSchema: schemaObject(map[string]any{
-				"id":             map[string]any{"type": "integer"},
-				"email":          map[string]any{"type": "string"},
-				"phone":          map[string]any{"type": "string"},
-				"activity_limit": map[string]any{"type": "integer"},
+				"id":                 map[string]any{"type": "integer"},
+				"email":              map[string]any{"type": "string"},
+				"phone":              map[string]any{"type": "string"},
+				"activity_limit":     map[string]any{"type": "integer"},
+				"conversation_limit": map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolGetContext,
 		},
@@ -315,7 +356,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_log_activity",
-			Description: "Append a row to a contact's timeline. Args: contact_id, kind (email_sent|email_received|call|meeting|note|system), body, occurred_at (RFC3339, default now), source.",
+			Description: "Append a row to a contact's timeline. Args: contact_id, kind (email_sent|email_received|sms_sent|sms_received|whatsapp_sent|whatsapp_received|call|meeting|note|system|*_send_failed|*_test_sent), body, occurred_at (RFC3339, default now), source.",
 			InputSchema: schemaObject(map[string]any{
 				"contact_id":  map[string]any{"type": "integer"},
 				"kind":        map[string]any{"type": "string"},
@@ -348,6 +389,77 @@ func (a *App) MCPTools() []sdk.Tool {
 				"sort_order":  map[string]any{"type": "integer"},
 			}, []string{"key", "label", "type"}),
 			Handler: a.toolDefineAttribute,
+		},
+
+		// ─── messaging-coupled tools ────────────────────────────────
+		// These all gate on a bound messaging app — see messaging.go.
+		// Calling without messaging installed returns a clear error.
+		{
+			Name:        "contacts_send_message",
+			Description: "Send a message to a contact via the bound messaging app. Auto-resolves channel + address (channel arg overrides). Logs the send to the activity timeline and links it to a conversation. Args: id (contact id), body, channel? (email|sms|whatsapp), subject?, body_html?, from? (overrides default sender), conversation_id? (attach to existing thread), template_vars?, idempotency_key?.",
+			InputSchema: schemaObject(map[string]any{
+				"id":              map[string]any{"type": "integer"},
+				"body":            map[string]any{"type": "string"},
+				"channel":         map[string]any{"type": "string"},
+				"subject":         map[string]any{"type": "string"},
+				"body_html":       map[string]any{"type": "string"},
+				"from":            map[string]any{"type": "string"},
+				"conversation_id": map[string]any{"type": "integer"},
+				"template_vars":   map[string]any{"type": "object"},
+				"idempotency_key": map[string]any{"type": "string"},
+			}, []string{"id", "body"}),
+			Handler: a.toolSendMessage,
+		},
+		{
+			Name:        "contacts_reply",
+			Description: "Reply on the contact's most-recent inbound conversation (or the one given by conversation_id). Sets In-Reply-To/References for email so the thread keeps grouping. Args: id, body, conversation_id?, subject?.",
+			InputSchema: schemaObject(map[string]any{
+				"id":              map[string]any{"type": "integer"},
+				"body":            map[string]any{"type": "string"},
+				"conversation_id": map[string]any{"type": "integer"},
+				"subject":         map[string]any{"type": "string"},
+			}, []string{"id", "body"}),
+			Handler: a.toolReply,
+		},
+		{
+			Name:        "contacts_send_test",
+			Description: "Send a test message — same wire path as contacts_send_message but logged as *_test_sent and not linked to a conversation. UI filters these out by default. Args: same as contacts_send_message.",
+			InputSchema: schemaObject(map[string]any{
+				"id":      map[string]any{"type": "integer"},
+				"body":    map[string]any{"type": "string"},
+				"channel": map[string]any{"type": "string"},
+				"subject": map[string]any{"type": "string"},
+				"from":    map[string]any{"type": "string"},
+			}, []string{"id", "body"}),
+			Handler: a.toolSendTest,
+		},
+		{
+			Name:        "contacts_list_messageable",
+			Description: "List contacts reachable on the given channel (or any channel). Args: channel? (email|sms|whatsapp), limit? (default 100, max 500).",
+			InputSchema: schemaObject(map[string]any{
+				"channel": map[string]any{"type": "string"},
+				"limit":   map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolListMessageable,
+		},
+		{
+			Name:        "contacts_list_conversations",
+			Description: "List a contact's recent conversations, newest first. Args: id, channel?, limit? (default 50).",
+			InputSchema: schemaObject(map[string]any{
+				"id":      map[string]any{"type": "integer"},
+				"channel": map[string]any{"type": "string"},
+				"limit":   map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolListConversations,
+		},
+		{
+			Name:        "contacts_get_conversation",
+			Description: "Fetch one conversation with its full activity chain in chronological order. Args: id (contact id, optional safety check), conversation_id.",
+			InputSchema: schemaObject(map[string]any{
+				"id":              map[string]any{"type": "integer"},
+				"conversation_id": map[string]any{"type": "integer"},
+			}, []string{"conversation_id"}),
+			Handler: a.toolGetConversation,
 		},
 	}
 }
@@ -433,13 +545,48 @@ type Attribute struct {
 }
 
 type Activity struct {
-	ID          int64  `json:"id"`
-	ContactID   int64  `json:"contact_id"`
-	Kind        string `json:"kind"`
-	Body        string `json:"body"`
-	OccurredAt  string `json:"occurred_at"`
-	Source      string `json:"source,omitempty"`
+	ID             int64  `json:"id"`
+	ContactID      int64  `json:"contact_id"`
+	Kind           string `json:"kind"`
+	Body           string `json:"body"`
+	OccurredAt     string `json:"occurred_at"`
+	Source         string `json:"source,omitempty"`
+	ConversationID int64  `json:"conversation_id,omitempty"`
 }
+
+// Activity kinds. Stored as TEXT (no SQL CHECK), so adding a new kind
+// is purely a Go-side change. Kinds split into three families:
+//
+//   - "human" kinds the agent or operator logs directly (call, meeting,
+//     note, system) — never linked to a conversation.
+//   - "message" kinds emitted when a message is sent or received via
+//     the messaging app — always linked to a conversation_id.
+//   - "*_send_failed" kinds emitted when a send was attempted but the
+//     provider rejected it. First-class so the activity timeline shows
+//     what was tried, not just what succeeded.
+//   - "*_test_sent" kinds for messages flagged as tests; UI filters
+//     them out by default but agents can see them on read.
+const (
+	ActivityKindCall    = "call"
+	ActivityKindMeeting = "meeting"
+	ActivityKindNote    = "note"
+	ActivityKindSystem  = "system"
+
+	ActivityKindEmailSent     = "email_sent"
+	ActivityKindEmailReceived = "email_received"
+	ActivityKindSMSSent       = "sms_sent"
+	ActivityKindSMSReceived   = "sms_received"
+	ActivityKindWhatsAppSent     = "whatsapp_sent"
+	ActivityKindWhatsAppReceived = "whatsapp_received"
+
+	ActivityKindEmailSendFailed    = "email_send_failed"
+	ActivityKindSMSSendFailed      = "sms_send_failed"
+	ActivityKindWhatsAppSendFailed = "whatsapp_send_failed"
+
+	ActivityKindEmailTestSent    = "email_test_sent"
+	ActivityKindSMSTestSent      = "sms_test_sent"
+	ActivityKindWhatsAppTestSent = "whatsapp_test_sent"
+)
 
 // ─── Tool handlers ─────────────────────────────────────────────────
 
@@ -505,10 +652,16 @@ func (a *App) toolGetContext(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
+	convoLimit := intArg(args, "conversation_limit", 10)
+	conversations, err := dbConversationsList(ctx.AppDB(), pid, c.ID, "", convoLimit)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
-		"contact":    c,
-		"activities": activities,
-		"found":      true,
+		"contact":       c,
+		"activities":    activities,
+		"conversations": conversations,
+		"found":         true,
 	}, nil
 }
 
@@ -1277,7 +1430,14 @@ func dbMerge(db *sql.DB, pid string, loserID, winnerID int64, notes, source stri
 }
 
 func dbLogActivity(db *sql.DB, pid string, contactID int64, kind, body, occurredAt, source string) (*Activity, error) {
-	res, err := db.Exec(
+	// Wrap insert + last_contact_at bump in one tx so a row never
+	// lands without its accompanying contact-level recency update.
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
 		`INSERT INTO contact_activities (project_id, contact_id, kind, body, occurred_at, source)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		pid, contactID, kind, body, occurredAt, source)
@@ -1285,12 +1445,15 @@ func dbLogActivity(db *sql.DB, pid string, contactID int64, kind, body, occurred
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	// Bump last_contact_at on the contact row for fast "who haven't I
-	// talked to in 30 days" queries.
-	db.Exec(
+	if _, err := tx.Exec(
 		`UPDATE contacts SET last_contact_at = ?, updated_at = CURRENT_TIMESTAMP
 		 WHERE id = ? AND project_id = ?`,
-		occurredAt, contactID, pid)
+		occurredAt, contactID, pid); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	return &Activity{
 		ID: id, ContactID: contactID, Kind: kind, Body: body,
 		OccurredAt: occurredAt, Source: source,
@@ -1301,11 +1464,15 @@ func dbActivities(db *sql.DB, pid string, contactID int64, limit int) ([]*Activi
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
+	// id DESC tiebreaker so events at the same occurred_at sort by
+	// insertion order — fixes the audit's stability concern when two
+	// agents log to the same microsecond.
 	rows, err := db.Query(
-		`SELECT id, contact_id, kind, body, occurred_at, COALESCE(source,'')
+		`SELECT id, contact_id, kind, body, occurred_at, COALESCE(source,''),
+				COALESCE(conversation_id, 0)
 		 FROM contact_activities
 		 WHERE project_id = ? AND contact_id = ?
-		 ORDER BY occurred_at DESC LIMIT ?`,
+		 ORDER BY occurred_at DESC, id DESC LIMIT ?`,
 		pid, contactID, limit)
 	if err != nil {
 		return nil, err
@@ -1314,7 +1481,7 @@ func dbActivities(db *sql.DB, pid string, contactID int64, limit int) ([]*Activi
 	out := []*Activity{}
 	for rows.Next() {
 		a := &Activity{}
-		if err := rows.Scan(&a.ID, &a.ContactID, &a.Kind, &a.Body, &a.OccurredAt, &a.Source); err == nil {
+		if err := rows.Scan(&a.ID, &a.ContactID, &a.Kind, &a.Body, &a.OccurredAt, &a.Source, &a.ConversationID); err == nil {
 			out = append(out, a)
 		}
 	}

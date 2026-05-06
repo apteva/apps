@@ -22,6 +22,15 @@ requires:
   permissions:
     - db.write.app
     - platform.instances.read
+    - platform.apps.call
+  integrations:
+    - role: messaging
+      kind: app
+      compatible_app_names: [messaging]
+      capabilities: [message.send]
+      required: false
+      label: "Messaging (optional)"
+      hint: "When bound, CRM gains Send/Reply tools and accepts inbound mail/SMS/WhatsApp at /inbound, auto-attaching to contact activity. Without it, CRM is a standalone contact store."
 
 provides:
   http_routes:
@@ -47,6 +56,19 @@ provides:
       description: Write one custom-attribute value with provenance.
     - name: contacts_define_attribute
       description: Create or update an attribute definition.
+    # Messaging-coupled tools — gate on the messaging dep being bound.
+    - name: contacts_send_message
+      description: Send a message to a contact via the messaging app; auto-logs to the activity timeline and links to a conversation.
+    - name: contacts_reply
+      description: Reply on the contact's most-recent inbound conversation; preserves email threading via In-Reply-To.
+    - name: contacts_send_test
+      description: Send a test message; logged as *_test_sent and not linked to a conversation.
+    - name: contacts_list_messageable
+      description: List contacts reachable on a given channel.
+    - name: contacts_list_conversations
+      description: List a contact's recent conversations.
+    - name: contacts_get_conversation
+      description: Fetch one conversation with its full activity chain.
   ui_panels:
     - slot: project.page
       label: Contacts
@@ -78,5 +100,13 @@ config_schema:
     default: false
     label: Strip +suffix on email locals
     description: Treat alice+work@x and alice@x as the same person. Default off.
+  - name: default_sender_email
+    type: text
+    label: Default sender (email)
+    description: Verified sender used by contacts_send_message for email when no `from` arg is supplied. Pick one from messaging.senders_list.
+  - name: default_sender_phone
+    type: text
+    label: Default sender (phone, E.164)
+    description: Verified sender used for SMS/WhatsApp when no `from` arg is supplied.
 
 upgrade_policy: auto-patch

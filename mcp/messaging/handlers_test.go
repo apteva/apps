@@ -83,6 +83,17 @@ func (s *stubPlatform) CallApp(app, tool string, input map[string]any) (json.Raw
 	return s.callAppReply, nil
 }
 
+func (s *stubPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
+	raw, err := s.CallApp(app, tool, input)
+	if err != nil {
+		return err
+	}
+	if len(raw) == 0 || out == nil {
+		return nil
+	}
+	return json.Unmarshal(raw, out)
+}
+
 // Unused PlatformClient methods — return zero values; tests that hit
 // them would panic, which is the intended signal.
 func (s *stubPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
@@ -106,9 +117,19 @@ func (s *stubPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
 		Bindings:  bindings,
 	}, nil
 }
-// Older PlatformClient interfaces (pre-StartOAuth) require neither
-// of these methods; newer ones add them. We omit them so the stub
-// builds against whichever app-sdk version go.mod resolves.
+// PlatformClient methods added in v0.1.3+ (StartOAuth, Disconnect,
+// ListOwnedConnections, GetGrants). Stubs return zero values; tests
+// don't exercise these paths.
+func (s *stubPlatform) StartOAuth(sdk.OAuthStartRequest) (*sdk.OAuthStartResult, error) {
+	return &sdk.OAuthStartResult{}, nil
+}
+func (s *stubPlatform) DisconnectConnection(int64) error { return nil }
+func (s *stubPlatform) ListOwnedConnections() ([]sdk.PlatformConnection, error) {
+	return nil, nil
+}
+func (s *stubPlatform) GetGrants(int64) (*sdk.GrantsResponse, error) {
+	return &sdk.GrantsResponse{DefaultEffect: "allow"}, nil
+}
 
 // ─── Test harness ─────────────────────────────────────────────────
 

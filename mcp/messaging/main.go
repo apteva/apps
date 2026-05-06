@@ -110,6 +110,7 @@ provides:
     - { name: suppression_list,       description: "List suppressed addresses." }
     - { name: suppression_add,        description: "Suppress a recipient." }
     - { name: suppression_remove,     description: "Remove an address from suppression." }
+    - { name: suppression_check,      description: "Single-row suppression lookup; returns {suppressed, reason?, source?, suppressed_at?}." }
     - { name: senders_list,           description: "List sending identities. Returns canonical URI rows." }
     - { name: senders_get,            description: "Get one identity's verification + DKIM state." }
     - { name: senders_delete,         description: "Remove a sending identity from the provider." }
@@ -367,6 +368,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"channel": map[string]any{"type": "string"},
 			}, []string{"address"}),
 			Handler: a.toolSuppressionRemove,
+		},
+		{
+			Name:        "suppression_check",
+			Description: "Cheap single-row suppression lookup. Returns {suppressed (bool), reason, source, channel, address (canonical), suppressed_at}. Args: address, channel? (auto-detected if omitted).",
+			InputSchema: schemaObject(map[string]any{
+				"address": map[string]any{"type": "string"},
+				"channel": map[string]any{"type": "string"},
+			}, []string{"address"}),
+			Handler: a.toolSuppressionCheck,
 		},
 		{
 			Name: "senders_list",
@@ -1596,6 +1606,56 @@ func (a *App) toolSuppressionAdd(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	return map[string]any{"ok": true, "address": addr, "channel": channel, "reason": reason}, nil
+}
+
+// toolSuppressionCheck answers "is this one address suppressed?"
+// without paginating the full list. CRM (and any campaign sender)
+// uses this on every send; the previous suppression_list call was
+// O(N) over all suppressions per check.
+func (a *App) toolSuppressionCheck(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	addrRaw := strArg(args, "address")
+	if addrRaw == "" {
+		return nil, errors.New("address required")
+	}
+	channel := strArg(args, "channel")
+	if channel == "" {
+		channel = guessChannelFromAddress(addrRaw)
+	}
+	if !validChannel(channel) {
+		return nil, errors.New("channel: required (one of email, sms, whatsapp)")
+	}
+	addr, err := normaliseAddress(channel, addrRaw)
+	if err != nil {
+		return nil, err
+	}
+	row := ctx.AppDB().QueryRow(
+		`SELECT reason, source, COALESCE(first_seen,'')
+		 FROM suppressions WHERE project_id = ? AND channel = ? AND address = ?`,
+		pid, channel, addr,
+	)
+	var reason, source, firstSeen string
+	if err := row.Scan(&reason, &source, &firstSeen); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return map[string]any{
+				"suppressed": false,
+				"channel":    channel,
+				"address":    addr,
+			}, nil
+		}
+		return nil, err
+	}
+	return map[string]any{
+		"suppressed":     true,
+		"reason":         reason,
+		"source":         source,
+		"channel":        channel,
+		"address":        addr,
+		"suppressed_at":  firstSeen,
+	}, nil
 }
 
 func (a *App) toolSuppressionRemove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -3311,11 +3371,16 @@ func (a *App) handleSetupDomain(w http.ResponseWriter, r *http.Request) {
 				actions = append(actions, actionResult{Step: s.Step, OK: false, Error: err.Error()})
 				continue
 			}
+			inner, err := mcpInnerJSON(raw)
+			if err != nil {
+				actions = append(actions, actionResult{Step: s.Step, OK: false, Error: err.Error()})
+				continue
+			}
 			var probe struct {
 				Action string `json:"action"`
 				Error  string `json:"error"`
 			}
-			_ = json.Unmarshal(raw, &probe)
+			_ = json.Unmarshal(inner, &probe)
 			if probe.Error != "" {
 				actions = append(actions, actionResult{Step: s.Step, OK: false, Error: probe.Error})
 				continue
@@ -4177,4 +4242,36 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// mcpInnerJSON strips the MCP JSON-RPC envelope returned by
+// CallApp and yields the inner content[0].text bytes ready for
+// a typed Unmarshal. Pre-unwrapped responses pass through.
+// Local copy of app-sdk's decodeMCPEnvelope (v0.1.8); delete and
+// switch to CallAppResult once the SDK pin advances.
+func mcpInnerJSON(raw []byte) ([]byte, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("empty mcp response")
+	}
+	var env struct {
+		Result *struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return raw, nil
+	}
+	if env.Error != nil {
+		return nil, fmt.Errorf("rpc error %d: %s", env.Error.Code, env.Error.Message)
+	}
+	if env.Result == nil || len(env.Result.Content) == 0 {
+		return raw, nil
+	}
+	return []byte(env.Result.Content[0].Text), nil
 }

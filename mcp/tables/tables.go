@@ -86,6 +86,12 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 
+	emit(ctx, topicTableCreated, map[string]any{
+		"id":      id,
+		"name":    name,
+		"scope":   scope,
+		"columns": cols,
+	})
 	return map[string]any{
 		"id":      id,
 		"name":    name,
@@ -258,6 +264,10 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	defer tx.Rollback()
 
+	// changeKind + changeCol are populated by the executed branch so we
+	// can emit a single typed table.altered event after commit.
+	var changeKind, changeCol string
+
 	switch {
 	case add != nil:
 		cols, err := parseColumnDefs([]any{add})
@@ -298,6 +308,7 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			t.ID, c.Name, c.Type, boolToInt(c.Nullable), dv, nextPos); err != nil {
 			return nil, err
 		}
+		changeKind, changeCol = "add", c.Name
 
 	case rename != nil:
 		from := strArg(rename, "from")
@@ -324,6 +335,7 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		if _, err := tx.Exec(`UPDATE columns_meta SET name = ? WHERE table_id = ? AND name = ?`, to, t.ID, from); err != nil {
 			return nil, err
 		}
+		changeKind, changeCol = "rename", to
 
 	case drop != "":
 		if err := validateIdentifier("column", drop); err != nil {
@@ -342,6 +354,7 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		if _, err := tx.Exec(`DELETE FROM columns_meta WHERE table_id = ? AND name = ?`, t.ID, drop); err != nil {
 			return nil, err
 		}
+		changeKind, changeCol = "drop", drop
 	}
 
 	if _, err := tx.Exec(`UPDATE tables_meta SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, t.ID); err != nil {
@@ -355,6 +368,12 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
+	emit(ctx, topicTableAltered, map[string]any{
+		"id":     updated.ID,
+		"name":   updated.Name,
+		"change": changeKind,
+		"column": changeCol,
+	})
 	return map[string]any{
 		"id":        updated.ID,
 		"name":      updated.Name,
@@ -449,6 +468,10 @@ func (a *App) toolTablesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	emit(ctx, topicTableDropped, map[string]any{
+		"id":   t.ID,
+		"name": name,
+	})
 	return map[string]any{"dropped": name}, nil
 }
 

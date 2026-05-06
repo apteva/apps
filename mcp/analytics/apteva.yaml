@@ -1,0 +1,68 @@
+schema: apteva-app/v1
+
+name: analytics
+display_name: Analytics
+version: 0.1.0
+description: |
+  Generic event analytics for Apteva apps. Other apps call
+  analytics_track to record typed events; analytics_query / count /
+  top / topics surface aggregates over JSON props. Soft dependency:
+  if analytics is uninstalled, callers' track calls fail silently and
+  the rest of their flow continues.
+
+  v0.1 is explicit-tracking only — apps opt in by calling
+  analytics_track. Auto-capture from the platform event firehose is
+  deferred to v0.2 (waiting on a global app-events stream endpoint
+  in apteva-server).
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/analytics
+tags: [analytics, events, observability]
+
+scopes: [global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+
+provides:
+  http_routes:
+    - prefix: /
+  permissions:
+    - name: events.write
+      description: Record events via analytics_track.
+    - name: events.read
+      description: Query events.
+  mcp_tools:
+    - name: analytics_track
+      description: Record one event. Args: event (required), props?, app?, project_id?, user_id?, session_id?, ts? (unix ms — defaults to now). Returns the new event id.
+      requires: events.write
+    - name: analytics_query
+      description: Read events with optional filters. Args: app?, topic?, project_id?, since?, until?, where? (map of "props.X" → value), group_by? (array of "props.X" keys), limit? (default 100, max 1000). Returns rows or aggregate buckets.
+      requires: events.read
+    - name: analytics_count
+      description: Count events matching filters. Args same as query minus group_by/limit. Returns {count}.
+      requires: events.read
+    - name: analytics_top
+      description: Top-N values for a JSON props key. Args topic?, app?, by (required, e.g. "props.platform"), since?, until?, limit? (default 10). Returns [{value, count}].
+      requires: events.read
+    - name: analytics_topics
+      description: List distinct (app, topic) pairs seen. Args app?. Returns [{app, topic, last_ts, count}].
+      requires: events.read
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/analytics
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/analytics.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
