@@ -143,6 +143,17 @@ func (p *recordingPlatform) GetGrants(instanceID int64) (*sdk.GrantsResponse, er
 	return &sdk.GrantsResponse{}, nil
 }
 
+func (p *recordingPlatform) CallAppResult(appName, tool string, input map[string]any, out any) error {
+	raw, err := p.CallApp(appName, tool, input)
+	if err != nil {
+		return err
+	}
+	if out == nil || len(raw) == 0 {
+		return nil
+	}
+	return json.Unmarshal(raw, out)
+}
+
 // --- helpers -------------------------------------------------------
 
 func newSocialCtx(t *testing.T, pf sdk.PlatformClient) *sdk.AppCtx {

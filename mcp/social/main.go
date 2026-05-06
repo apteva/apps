@@ -255,8 +255,16 @@ var platforms = map[string]platformDef{
 		DeleteIDField: "postId",
 	},
 	"instagram": {
-		Platform:        "instagram",
-		IntegrationSlug: "instagram-api",
+		Platform: "instagram",
+		// IG Business is a Meta product — the underlying API is the
+		// Facebook Graph, and IG Business accounts are reached via the
+		// FB Pages they're linked to. Reuse the facebook-api integration
+		// here: its OAuth scopes already include instagram_basic +
+		// instagram_content_publish, and its list_pages tool returns the
+		// linked IG account when we ask for the right fields. This means
+		// users with an existing FB connection get IG accounts auto-
+		// discovered without a second OAuth dance.
+		IntegrationSlug: "facebook-api",
 		DisplayName:     "Instagram Business",
 		// Two-step: create_media_container({imageUrl|videoUrl, caption,
 		// instagramAccountId}) then publish_media_container({containerId,
@@ -269,11 +277,12 @@ var platforms = map[string]platformDef{
 		ExternalIDField: "instagramAccountId",
 		MediaRequired:   true,
 		MediaType:       "any", // images + REELS via same two-step
-		ListPagesTool:   "list_accounts",
-		// /me/accounts on the FB Graph base returns Pages with their
-		// linked instagram_business_account nested. PageIDField walks
-		// into that — list_accounts response is filtered+flattened
-		// in publishInstagram for IG-Business-account-id semantics.
+		ListPagesTool:   "list_pages",
+		// /me/accounts on the FB Graph returns Pages; we ask for each
+		// page's linked instagram_business_account so the picker can
+		// surface IG accounts directly. PageIDField walks into that
+		// nested object. Pages without a linked IG account are filtered
+		// out by fetchPages (entry.ID == "" → skip).
 		PageIDField:     "instagram_business_account.id",
 		PageNameField:   "instagram_business_account.username",
 		PageAvatarField: "instagram_business_account.profile_picture_url",
