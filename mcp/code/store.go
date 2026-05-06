@@ -378,3 +378,154 @@ func dbGetFork(db *sql.DB, childID int64) (*ForkInfo, error) {
 	}
 	return &f, nil
 }
+
+// ─── Dev runs (v0.5.0) ────────────────────────────────────────────
+
+// DevRun is one row in the dev_runs table — the supervisor's durable
+// view of a per-repo dev process. status transitions:
+//
+//   stopped → starting → live → stopped (clean Stop)
+//                              → crashed (non-zero exit)
+//
+// The supervisor lives inside the code sidecar; on a sidecar restart
+// the reconcile pass at OnMount checks whether the recorded pid is
+// still alive and demotes orphans to stopped.
+type DevRun struct {
+	ID         int64  `json:"id"`
+	ProjectID  string `json:"project_id"`
+	RepoID     int64  `json:"repo_id"`
+	Status     string `json:"status"`
+	Port       int    `json:"port"`
+	PID        int    `json:"pid"`
+	Framework  string `json:"framework"`
+	RunCmd     string `json:"run_cmd,omitempty"`
+	EnvJSON    string `json:"env_json,omitempty"`
+	LogPath    string `json:"log_path,omitempty"`
+	StartedAt  string `json:"started_at,omitempty"`
+	StoppedAt  string `json:"stopped_at,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+const devRunCols = `id, project_id, repo_id, status, port, pid, framework,
+		run_cmd, env_json, log_path,
+		COALESCE(started_at, '') AS started_at,
+		COALESCE(stopped_at, '') AS stopped_at,
+		error`
+
+func scanDevRunRow(s rowScanner) (*DevRun, error) {
+	var dr DevRun
+	if err := s.Scan(
+		&dr.ID, &dr.ProjectID, &dr.RepoID, &dr.Status, &dr.Port, &dr.PID,
+		&dr.Framework, &dr.RunCmd, &dr.EnvJSON, &dr.LogPath,
+		&dr.StartedAt, &dr.StoppedAt, &dr.Error,
+	); err != nil {
+		return nil, err
+	}
+	return &dr, nil
+}
+
+// dbGetDevRun fetches the dev run row for a repo, if any. Returns
+// (nil, nil) when no row exists — a never-run repo isn't an error.
+func dbGetDevRun(db *sql.DB, projectID string, repoID int64) (*DevRun, error) {
+	row := db.QueryRow(`SELECT `+devRunCols+` FROM dev_runs WHERE project_id = ? AND repo_id = ?`, projectID, repoID)
+	dr, err := scanDevRunRow(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return dr, err
+}
+
+// dbUpsertDevRun creates or replaces the dev run row for a repo. The
+// UNIQUE(project_id, repo_id) constraint enforces one-per-repo; this
+// helper is the canonical write path so the panel and the agent can't
+// race two starting rows. Used at start time to claim status='starting'
+// before the process is actually spawned; the supervisor flips to live
+// once the readiness probe succeeds (or to crashed/stopped on exit).
+func dbUpsertDevRun(db *sql.DB, in DevRun) (*DevRun, error) {
+	if in.ProjectID == "" || in.RepoID == 0 {
+		return nil, errors.New("project_id and repo_id required")
+	}
+	if in.Status == "" {
+		in.Status = "starting"
+	}
+	res, err := db.Exec(`
+		INSERT INTO dev_runs (
+			project_id, repo_id, status, port, pid, framework, run_cmd, env_json, log_path,
+			started_at, error
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(project_id, repo_id) DO UPDATE SET
+			status     = excluded.status,
+			port       = excluded.port,
+			pid        = excluded.pid,
+			framework  = excluded.framework,
+			run_cmd    = excluded.run_cmd,
+			env_json   = excluded.env_json,
+			log_path   = excluded.log_path,
+			started_at = excluded.started_at,
+			stopped_at = NULL,
+			error      = excluded.error
+	`, in.ProjectID, in.RepoID, in.Status, in.Port, in.PID, in.Framework,
+		in.RunCmd, in.EnvJSON, in.LogPath, nullableTS(in.StartedAt), in.Error,
+	)
+	if err != nil {
+		return nil, err
+	}
+	_ = res
+	return dbGetDevRun(db, in.ProjectID, in.RepoID)
+}
+
+// dbUpdateDevRun mutates a subset of fields on an existing row. Mirrors
+// the deploy app's dbUpdateBuild pattern — fixed allowlist + dynamic
+// SET clause. The fields most often updated are status / pid / port at
+// transition points and stopped_at / error on shutdown.
+func dbUpdateDevRun(db *sql.DB, id int64, fields map[string]any) error {
+	if len(fields) == 0 {
+		return nil
+	}
+	cols := []string{}
+	args := []any{}
+	for _, k := range []string{"status", "port", "pid", "framework", "run_cmd",
+		"env_json", "log_path", "started_at", "stopped_at", "error"} {
+		if v, ok := fields[k]; ok {
+			cols = append(cols, k+" = ?")
+			args = append(args, v)
+		}
+	}
+	if len(cols) == 0 {
+		return nil
+	}
+	args = append(args, id)
+	_, err := db.Exec(`UPDATE dev_runs SET `+strings.Join(cols, ", ")+` WHERE id = ?`, args...)
+	return err
+}
+
+// dbListLiveDevRuns returns rows in starting|live status. Used by the
+// boot reconcile pass — the orchestrator checks each PID against the
+// real process table and demotes orphans to stopped.
+func dbListLiveDevRuns(db *sql.DB) ([]*DevRun, error) {
+	rows, err := db.Query(`SELECT ` + devRunCols + ` FROM dev_runs WHERE status IN ('starting','live')`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*DevRun
+	for rows.Next() {
+		dr, err := scanDevRunRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, dr)
+	}
+	return out, rows.Err()
+}
+
+// nullableTS returns sql.NullString for empty strings so timestamp
+// columns get NULL rather than '', which sqlite would otherwise store
+// as a literal empty string and surprise downstream readers.
+func nullableTS(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}

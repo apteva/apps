@@ -161,3 +161,100 @@ func TestArchiveAndList(t *testing.T) {
 		t.Errorf("includeArchived list = %+v", all)
 	}
 }
+
+// TestDevRun_UpsertAndGet pins the per-(project, repo) uniqueness
+// guarantee — re-upserting the same key updates in place rather than
+// creating a second row, so the supervisor can't end up with two
+// "starting" rows racing the spawn.
+func TestDevRun_UpsertAndGet(t *testing.T) {
+	db := openTestDB(t)
+	repo, err := dbCreateRepo(db, "p1", CreateRepoInput{Name: "site"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := dbUpsertDevRun(db, DevRun{
+		ProjectID: "p1", RepoID: repo.ID,
+		Status: "starting", Port: 6101, PID: 1234,
+		Framework: "nextjs", LogPath: "/tmp/log",
+		StartedAt: "2026-05-06T10:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if first.Status != "starting" || first.Port != 6101 {
+		t.Fatalf("upsert read-back wrong: %+v", first)
+	}
+
+	// Second upsert with same (project, repo) updates; doesn't create.
+	if _, err := dbUpsertDevRun(db, DevRun{
+		ProjectID: "p1", RepoID: repo.ID,
+		Status: "live", Port: 6101, PID: 1234,
+		Framework: "nextjs", LogPath: "/tmp/log",
+		StartedAt: "2026-05-06T10:00:00Z",
+	}); err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+
+	got, err := dbGetDevRun(db, "p1", repo.ID)
+	if err != nil || got == nil {
+		t.Fatalf("get: dr=%v err=%v", got, err)
+	}
+	if got.Status != "live" {
+		t.Errorf("status after second upsert = %q, want live", got.Status)
+	}
+	if got.ID != first.ID {
+		t.Errorf("upsert created a new row: %d vs %d", got.ID, first.ID)
+	}
+}
+
+// TestDevRun_UpdateAllowlist guards the column allowlist in
+// dbUpdateDevRun — same shape as deploy's framework regression. If
+// "status" or "stopped_at" silently drops, the supervisor's clean-stop
+// path leaves rows in 'starting' forever.
+func TestDevRun_UpdateAllowlist(t *testing.T) {
+	db := openTestDB(t)
+	repo, _ := dbCreateRepo(db, "p1", CreateRepoInput{Name: "site"})
+	dr, _ := dbUpsertDevRun(db, DevRun{
+		ProjectID: "p1", RepoID: repo.ID, Status: "starting", Port: 6101, PID: 1234,
+	})
+	if err := dbUpdateDevRun(db, dr.ID, map[string]any{
+		"status":     "stopped",
+		"stopped_at": "2026-05-06T10:05:00Z",
+		"error":      "user clicked stop",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := dbGetDevRun(db, "p1", repo.ID)
+	if after.Status != "stopped" {
+		t.Errorf("status not updated: %q", after.Status)
+	}
+	if after.Error != "user clicked stop" {
+		t.Errorf("error not updated: %q", after.Error)
+	}
+	if after.StoppedAt == "" {
+		t.Errorf("stopped_at not updated")
+	}
+}
+
+// TestDevRun_ListLive returns starting|live rows; orphans the
+// reconciler will check on boot. Stopped rows must not leak in or
+// reconcile would touch dead rows.
+func TestDevRun_ListLive(t *testing.T) {
+	db := openTestDB(t)
+	r1, _ := dbCreateRepo(db, "p1", CreateRepoInput{Name: "a"})
+	r2, _ := dbCreateRepo(db, "p1", CreateRepoInput{Name: "b"})
+	r3, _ := dbCreateRepo(db, "p1", CreateRepoInput{Name: "c"})
+
+	dbUpsertDevRun(db, DevRun{ProjectID: "p1", RepoID: r1.ID, Status: "live", PID: 1, Port: 6101})
+	dbUpsertDevRun(db, DevRun{ProjectID: "p1", RepoID: r2.ID, Status: "starting", PID: 2, Port: 6102})
+	dbUpsertDevRun(db, DevRun{ProjectID: "p1", RepoID: r3.ID, Status: "stopped", PID: 0, Port: 0})
+
+	live, err := dbListLiveDevRuns(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(live) != 2 {
+		t.Fatalf("live count = %d, want 2 (starting + live; stopped excluded)", len(live))
+	}
+}

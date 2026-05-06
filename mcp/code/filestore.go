@@ -95,6 +95,23 @@ func (s *LocalFileStore) repoRoot(slug string) string {
 	return filepath.Join(s.root, slug, "files")
 }
 
+// RepoPath returns the absolute on-disk path of a repo's storage root.
+// Implements FileStoreLocalPath so the dev runtime can spawn child
+// processes with cwd set to the live source — no copy, no sync. When
+// storage moves to the Storage app (v0.6+) the new backend won't
+// satisfy this interface and dev mode degrades with a clean error.
+func (s *LocalFileStore) RepoPath(slug string) string {
+	return s.repoRoot(slug)
+}
+
+// FileStoreLocalPath is the optional capability dev runtime relies on.
+// LocalFileStore implements it; future remote-storage backends won't.
+// The dev_runtime layer type-asserts and surfaces a clear error rather
+// than silently breaking when storage isn't local.
+type FileStoreLocalPath interface {
+	RepoPath(slug string) string
+}
+
 // resolve joins the repo root with the (already-normalised) relPath
 // and verifies the result is still inside the repo root. This is the
 // last line of defence against path traversal — even if
