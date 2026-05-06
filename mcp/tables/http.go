@@ -19,6 +19,7 @@ import (
 //   GET    /tables                     → tables_list
 //   POST   /tables                     → tables_create
 //   GET    /tables/{name}              → tables_describe
+//   PATCH  /tables/{name}              → tables_alter ({add|rename|drop})
 //   DELETE /tables/{name}              → tables_drop  (?confirm=true)
 //   GET    /tables/{name}/rows         → rows_search  (limit/offset/order_by)
 //   POST   /tables/{name}/rows         → rows_insert  ({rows:[...]} | {row:{...}})
@@ -74,12 +75,21 @@ func (a *App) handleTablesItem(w http.ResponseWriter, r *http.Request) {
 		case http.MethodGet:
 			out, err := a.toolTablesDescribe(globalCtx, injectProject(r, map[string]any{"name": tableName}))
 			writeToolResult(w, out, err)
+		case http.MethodPatch:
+			body, err := readJSONBody(r)
+			if err != nil {
+				httpErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			body["name"] = tableName
+			out, err := a.toolTablesAlter(globalCtx, injectProject(r, body))
+			writeToolResult(w, out, err)
 		case http.MethodDelete:
 			confirm := r.URL.Query().Get("confirm") == "true"
 			out, err := a.toolTablesDrop(globalCtx, injectProject(r, map[string]any{"name": tableName, "confirm": confirm}))
 			writeToolResult(w, out, err)
 		default:
-			httpErr(w, http.StatusMethodNotAllowed, "GET or DELETE")
+			httpErr(w, http.StatusMethodNotAllowed, "GET, PATCH, or DELETE")
 		}
 		return
 	}

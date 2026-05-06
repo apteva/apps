@@ -23,7 +23,10 @@ const storageLogo = (
 const storageVendor: CardVendor = {
   name: "Storage",
   logo: storageLogo,
-  color: "#475569", // slate-600 — first-party signal, not a vendor brand
+  // Slate dims hard against the dashboard's terminal-dark surface
+  // (#0a0a0a). Light variant = slate-600 so it reads on warm beige
+  // light mode; dark variant = slate-300 so it pops on near-black.
+  color: { light: "#475569", dark: "#cbd5e1" },
 };
 
 interface FileMeta {

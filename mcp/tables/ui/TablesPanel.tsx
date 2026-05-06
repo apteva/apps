@@ -117,6 +117,7 @@ export default function TablesPanel({ projectId, installId }: NativePanelProps) 
   const [showInsert, setShowInsert] = useState(false);
   const [showQuery, setShowQuery] = useState(false);
   const [showApi, setShowApi] = useState(false);
+  const [showSchema, setShowSchema] = useState(false);
   const [editingRow, setEditingRow] = useState<Record<string, unknown> | null>(null);
 
   const withParams = useCallback(
@@ -263,6 +264,14 @@ export default function TablesPanel({ projectId, installId }: NativePanelProps) 
     }
   };
 
+  const onAlter = async (op: AlterOp) => {
+    if (!selectedTable) return;
+    await api("PATCH", `/tables/${selectedTable.name}`, {}, op);
+    // The event subscription refreshes the table list automatically;
+    // also refresh rows because new columns appear in the grid.
+    await Promise.all([loadTables(), loadRows()]);
+  };
+
   const onDropTable = async () => {
     if (!selectedTable) return;
     if (!confirm(`Drop table "${selectedTable.name}" and all its rows? This cannot be undone.`)) return;
@@ -349,6 +358,14 @@ export default function TablesPanel({ projectId, installId }: NativePanelProps) 
                 </button>
                 <button
                   type="button"
+                  onClick={() => setShowSchema(true)}
+                  title="Add, rename, or drop columns"
+                  className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
+                >
+                  Schema
+                </button>
+                <button
+                  type="button"
                   onClick={() => setShowApi(true)}
                   title="Show curl examples for calling this table from outside"
                   className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
@@ -408,6 +425,13 @@ export default function TablesPanel({ projectId, installId }: NativePanelProps) 
                 table={selectedTable}
                 projectId={projectId}
                 onClose={() => setShowApi(false)}
+              />
+            )}
+            {showSchema && (
+              <SchemaEditor
+                table={selectedTable}
+                onAlter={onAlter}
+                onClose={() => setShowSchema(false)}
               />
             )}
           </>
@@ -1197,4 +1221,307 @@ function whereExampleFor(table: TableMeta): { col: string; op: string; value: un
     if (c.type === "number") return { col: c.name, op: "gte", value: 0 };
   }
   return { col: "id", op: "gt", value: 0 };
+}
+
+// ─── schema editor ─────────────────────────────────────────────────
+//
+// Three operation shapes the panel POSTs to PATCH /tables/{name}:
+//
+//   {add:    {name, type, nullable?, default?}}
+//   {rename: {from, to}}
+//   {drop:   "<column name>"}
+//
+// All three forward to the same toolTablesAlter handler server-side.
+// Reserved columns (id / created_at / updated_at) aren't editable —
+// the server enforces that, and we hide them from the editor too.
+
+type AlterOp =
+  | { add: ColumnDef }
+  | { rename: { from: string; to: string } }
+  | { drop: string };
+
+function SchemaEditor({
+  table,
+  onAlter,
+  onClose,
+}: {
+  table: TableMeta;
+  onAlter: (op: AlterOp) => Promise<void>;
+  onClose: () => void;
+}) {
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameTo, setRenameTo] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+
+  const editableColumns = table.columns; // reserved cols never appear here
+
+  const safeAlter = async (op: AlterOp, after?: () => void) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await onAlter(op);
+      after?.();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startRename = (name: string) => {
+    setRenaming(name);
+    setRenameTo(name);
+    setError(null);
+  };
+
+  const cancelRename = () => {
+    setRenaming(null);
+    setRenameTo("");
+  };
+
+  const submitRename = async () => {
+    if (!renaming || renameTo === renaming || !renameTo.trim()) {
+      cancelRename();
+      return;
+    }
+    await safeAlter({ rename: { from: renaming, to: renameTo.trim() } }, cancelRename);
+  };
+
+  const submitDrop = async (name: string) => {
+    if (!confirm(`Drop column "${name}"? Existing values are lost.`)) return;
+    await safeAlter({ drop: name });
+  };
+
+  return (
+    <div className="absolute inset-0 bg-bg/80 flex items-center justify-center z-10 p-6">
+      <div className="bg-bg-card border border-border rounded w-[36rem] max-w-full max-h-full flex flex-col overflow-hidden">
+        <header className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <div>
+            <h3 className="text-sm font-medium text-text">
+              Edit <span className="font-mono">{table.name}</span> schema
+            </h3>
+            <p className="text-xs text-text-dim mt-0.5">
+              Add, rename, or drop columns. Reserved columns
+              (<span className="font-mono">id</span>, <span className="font-mono">created_at</span>,{" "}
+              <span className="font-mono">updated_at</span>) are managed automatically.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-text-muted hover:text-text text-lg leading-none px-1"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </header>
+        <div className="overflow-auto flex-1 p-4 flex flex-col gap-4">
+          {error && (
+            <div className="text-xs text-red bg-red/10 border border-red/40 rounded p-2">
+              {error}
+            </div>
+          )}
+          <section className="flex flex-col gap-1">
+            <h4 className="text-text-dim uppercase text-[10px] tracking-wide mb-1">
+              Columns ({editableColumns.length})
+            </h4>
+            {editableColumns.length === 0 ? (
+              <div className="text-xs text-text-muted py-2">
+                No user columns yet. Add one below.
+              </div>
+            ) : (
+              <ul className="flex flex-col gap-1">
+                {editableColumns.map((c) => (
+                  <li
+                    key={c.name}
+                    className="border border-border rounded px-2 py-1.5 text-xs flex items-center gap-2"
+                  >
+                    {renaming === c.name ? (
+                      <>
+                        <input
+                          autoFocus
+                          value={renameTo}
+                          disabled={busy}
+                          onChange={(e) => setRenameTo(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") submitRename();
+                            if (e.key === "Escape") cancelRename();
+                          }}
+                          className="bg-bg-input border border-border rounded px-1.5 py-0.5 text-xs font-mono flex-1 min-w-0"
+                        />
+                        <button
+                          type="button"
+                          onClick={submitRename}
+                          disabled={busy}
+                          className="text-[10px] px-1.5 py-0.5 border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+                        >
+                          save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelRename}
+                          disabled={busy}
+                          className="text-[10px] px-1.5 py-0.5 border border-border rounded text-text-muted hover:bg-bg-input"
+                        >
+                          cancel
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="font-mono text-text flex-1 truncate" title={c.name}>
+                          {c.name}
+                        </span>
+                        <span className="text-text-dim text-[10px]">{c.type}</span>
+                        {!c.nullable && (
+                          <span className="text-[10px] text-red bg-red/10 border border-red/30 rounded px-1">
+                            required
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => startRename(c.name)}
+                          disabled={busy}
+                          className="text-[10px] px-1.5 py-0.5 border border-border rounded text-text-dim hover:text-text hover:bg-bg-input disabled:opacity-50"
+                        >
+                          rename
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => submitDrop(c.name)}
+                          disabled={busy}
+                          className="text-[10px] px-1.5 py-0.5 border border-red/40 text-red rounded hover:bg-red/10 disabled:opacity-50"
+                        >
+                          drop
+                        </button>
+                      </>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+          <section className="border-t border-border pt-3 flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <h4 className="text-text-dim uppercase text-[10px] tracking-wide">Add column</h4>
+              {!adding && (
+                <button
+                  type="button"
+                  onClick={() => setAdding(true)}
+                  className="text-xs text-accent hover:underline"
+                >
+                  + new column
+                </button>
+              )}
+            </div>
+            {adding && (
+              <AddColumnForm
+                hasRows={table.row_count > 0}
+                disabled={busy}
+                onCancel={() => setAdding(false)}
+                onSubmit={async (col) => {
+                  await safeAlter({ add: col }, () => setAdding(false));
+                }}
+              />
+            )}
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AddColumnForm({
+  hasRows,
+  disabled,
+  onCancel,
+  onSubmit,
+}: {
+  hasRows: boolean;
+  disabled: boolean;
+  onCancel: () => void;
+  onSubmit: (col: ColumnDef) => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [type, setType] = useState<ColumnType>("text");
+  const [nullable, setNullable] = useState(true);
+  const [defaultStr, setDefaultStr] = useState("");
+
+  const submit = async () => {
+    if (!name.trim()) return;
+    const col: ColumnDef = { name: name.trim(), type, nullable };
+    if (defaultStr.trim() !== "") {
+      col.default = parseInputValue({ name, type, nullable }, defaultStr.trim());
+    }
+    // Server requires a default when adding a non-nullable column to a
+    // populated table — surface the rule in the UI before the round-trip.
+    if (!nullable && hasRows && col.default === undefined) {
+      alert("Non-nullable column on a populated table needs a default value.");
+      return;
+    }
+    await onSubmit(col);
+  };
+
+  return (
+    <div className="flex flex-col gap-2 border border-border rounded p-2 bg-bg-input/30">
+      <div className="grid grid-cols-[1fr_auto_auto] gap-2 items-center">
+        <input
+          autoFocus
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="column_name"
+          disabled={disabled}
+          className="bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono"
+        />
+        <select
+          value={type}
+          onChange={(e) => setType(e.target.value as ColumnType)}
+          disabled={disabled}
+          className="bg-bg-input border border-border rounded px-1.5 py-1 text-xs"
+        >
+          <option value="text">text</option>
+          <option value="number">number</option>
+          <option value="bool">bool</option>
+          <option value="datetime">datetime</option>
+          <option value="json">json</option>
+          <option value="file_id">file_id</option>
+        </select>
+        <label className="flex items-center gap-1 text-xs text-text-dim">
+          <input
+            type="checkbox"
+            checked={nullable}
+            onChange={(e) => setNullable(e.target.checked)}
+            disabled={disabled}
+          />
+          nullable
+        </label>
+      </div>
+      <input
+        value={defaultStr}
+        onChange={(e) => setDefaultStr(e.target.value)}
+        placeholder={`default value (optional${!nullable && hasRows ? " — required when adding required col to populated table" : ""})`}
+        disabled={disabled}
+        className="bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono"
+      />
+      <div className="flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={disabled}
+          className="text-xs px-3 py-1 border border-border rounded hover:bg-bg-input"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={submit}
+          disabled={disabled || !name.trim()}
+          className="text-xs px-3 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+        >
+          Add
+        </button>
+      </div>
+    </div>
+  );
 }

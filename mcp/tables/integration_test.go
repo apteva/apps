@@ -142,6 +142,69 @@ func TestSidecar_RESTSurface(t *testing.T) {
 	}
 }
 
+func TestSidecar_AlterTableViaPATCH(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	sc.MCP("tables_create", map[string]any{
+		"name": "books",
+		"columns": []any{
+			map[string]any{"name": "title", "type": "text", "nullable": false},
+		},
+	})
+
+	// add — PATCH with {add: {...}}
+	var out map[string]any
+	if resp := sc.PATCH("/tables/books", map[string]any{
+		"add": map[string]any{"name": "isbn", "type": "text"},
+	}, &out); resp.Status != 200 {
+		t.Fatalf("PATCH add: %d", resp.Status)
+	}
+	cols := out["columns"].([]any)
+	if len(cols) != 2 {
+		t.Errorf("after add, expected 2 cols, got %d", len(cols))
+	}
+
+	// rename — PATCH with {rename: {from, to}}
+	if resp := sc.PATCH("/tables/books", map[string]any{
+		"rename": map[string]any{"from": "isbn", "to": "isbn13"},
+	}, &out); resp.Status != 200 {
+		t.Fatalf("PATCH rename: %d", resp.Status)
+	}
+
+	// describe to confirm
+	var desc map[string]any
+	sc.GET("/tables/books", &desc)
+	descCols := desc["columns"].([]any)
+	hasIsbn13 := false
+	for _, c := range descCols {
+		if c.(map[string]any)["name"] == "isbn13" {
+			hasIsbn13 = true
+		}
+	}
+	if !hasIsbn13 {
+		t.Errorf("rename did not stick: %+v", descCols)
+	}
+
+	// drop — PATCH with {drop: "col"}
+	if resp := sc.PATCH("/tables/books", map[string]any{"drop": "isbn13"}, &out); resp.Status != 200 {
+		t.Fatalf("PATCH drop: %d", resp.Status)
+	}
+	sc.GET("/tables/books", &desc)
+	if len(desc["columns"].([]any)) != 1 {
+		t.Errorf("drop did not stick: %+v", desc["columns"])
+	}
+
+	// Bad PATCH bodies should return 400, not 500
+	if resp := sc.PATCH("/tables/books", map[string]any{}, &out); resp.Status == 200 {
+		t.Errorf("empty PATCH body should 4xx, got %d", resp.Status)
+	}
+	if resp := sc.PATCH("/tables/books", map[string]any{
+		"add":    map[string]any{"name": "x", "type": "text"},
+		"rename": map[string]any{"from": "title", "to": "tname"},
+	}, &out); resp.Status == 200 {
+		t.Errorf("PATCH with two ops should 4xx, got %d", resp.Status)
+	}
+}
+
 func TestSidecar_QueryViaRESTRefusesWrites(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
 	sc.MCP("tables_create", map[string]any{
