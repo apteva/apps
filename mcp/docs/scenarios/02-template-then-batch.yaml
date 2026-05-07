@@ -1,0 +1,59 @@
+name: template-then-batch
+description: |
+  Operator-style flow — author a template once, then render it
+  N times with different data. Exercises template reuse + the
+  audit log so docs_list_renders surfaces all the rendered docs.
+
+timeout: 120s
+max_iterations: 12
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  dependencies:
+    - storage: ../storage
+  fixture:
+    tools:
+      - docs_create_template:
+          slug: receipt
+          name: Sales receipt
+          body: |
+            # Receipt {{.receipt.number}}
+
+            **Customer:** {{.customer.name}}
+            **Date:** {{.receipt.date}}
+
+            ## Item
+            {{.item.description}} — ${{.item.price}}
+
+            ---
+
+            **Total:** ${{.item.price}}
+
+            Thank you.
+
+directive: |
+  Render receipts for these three sales using the existing "receipt"
+  template (already in the docs app):
+
+    1. Receipt R-001, customer "Alice", date "2026-05-07",
+       item "Coffee subscription", price "12.00"
+    2. Receipt R-002, customer "Bob", date "2026-05-07",
+       item "Annual hosting", price "120.00"
+    3. Receipt R-003, customer "Charlie", date "2026-05-07",
+       item "Domain renewal", price "15.00"
+
+  After rendering all three, list the recent renders to confirm
+  they're in the audit trail.
+
+assert:
+  - tool_called: docs_render
+  - tool_called: docs_list_renders
+  - tool_call_count:
+      tool: docs_render
+      at_least: 3
+
+budget:
+  total_tokens: 24000
+  cost_usd: 0.40

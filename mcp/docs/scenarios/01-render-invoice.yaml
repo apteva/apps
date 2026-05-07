@@ -1,0 +1,44 @@
+name: render-invoice
+description: |
+  Agent creates an invoice template from scratch and renders one
+  invoice for a customer. The flagship "I need this PDF for a
+  client" flow — exercises docs_create_template + docs_render +
+  the storage round-trip.
+
+timeout: 90s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  dependencies:
+    - storage: ../storage
+
+directive: |
+  We need to start invoicing clients. Set up an "invoice" template
+  in the docs app. The body should include:
+    - title with the invoice number
+    - customer name and address
+    - a list of line items (description and price)
+    - a total
+  Use markdown formatting, with Go-template placeholders for the
+  data fields ({{.invoice.number}}, {{.customer.name}}, etc.).
+
+  Then render one invoice for "Acme Corp" with these line items:
+    - "Consulting hours" — $1000
+    - "Travel expenses" — $250
+  Total: $1250. Invoice number: INV-2026-001.
+
+  Use the docs_render tool, NOT direct file uploads to storage.
+  Tell me the URL when done.
+
+assert:
+  - tool_called: docs_create_template
+  - tool_called: docs_render
+  - tool_not_called: files_upload
+  - response_contains: "url"
+
+budget:
+  total_tokens: 20000
+  cost_usd: 0.30
