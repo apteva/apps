@@ -34,17 +34,20 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.5.0
+version: 0.5.1
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code. Optionally
-  imports repositories from GitHub when a github connection is bound.
+  imports repositories from GitHub when a github connection is bound,
+  and optionally publishes dev runs at <slug>.<dev_base_hostname>
+  when the Routes app is bound.
 author: Apteva
 scopes: [project, global]
 requires:
   permissions:
     - db.write.app
     - platform.connections.execute
+    - platform.apps.call
   integrations:
     - role: github
       kind: integration
@@ -57,6 +60,12 @@ requires:
         list_repos:  list_repos
         get_archive: get_archive
         get_repo:    get_repo
+    - role: routes
+      kind: app
+      required: false
+      compatible_app_names: [routes]
+      label: Routes app
+      hint: Install the Routes app to publish dev runs at <slug>.<dev_base_hostname>. Off by default — pass expose=true on repos_dev_start to publish.
 provides:
   http_routes:
     - prefix: /

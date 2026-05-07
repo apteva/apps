@@ -237,12 +237,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"(nextjs / node / go / static) from the file tree, or accepts framework='blank' with run_cmd. " +
 				"Spawns the framework's dev command (next dev / <pm> run dev / go run . / in-process FileServer) " +
 				"with cwd set to the repo's storage_root, so edits via code_edit_file land directly where the " +
-				"running framework's watcher sees them. Args: slug (required), framework?, run_cmd?, env_json?.",
+				"running framework's watcher sees them. With expose=true, registers <slug>.<dev_base_hostname> " +
+				"with the Routes app so the dev process is reachable publicly via apteva-server's host router. " +
+				"Args: slug (required), framework?, run_cmd?, env_json?, expose? (default false).",
 			InputSchema: schemaObject(map[string]any{
 				"slug":      map[string]any{"type": "string"},
 				"framework": map[string]any{"type": "string"},
 				"run_cmd":   map[string]any{"type": "string"},
 				"env_json":  map[string]any{"type": "string"},
+				"expose":    map[string]any{"type": "boolean"},
 			}, []string{"slug"}),
 			Handler: a.toolDevStart,
 		},
@@ -295,7 +298,21 @@ func (a *App) toolDevStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"dev_run": dr}, nil
+	// Optional public exposure via the Routes app. Best-effort: a
+	// failure here doesn't roll back the dev run — the user can fix
+	// the routes-app binding and call again. Cert handling is the
+	// user's job (a wildcard *.<dev_base_hostname> cert in Certs is
+	// the natural pairing; v0.5.0 doesn't auto-issue per-slug certs).
+	exposeResult := map[string]any{"requested": false}
+	if boolArg(args, "expose") && dr != nil && dr.Status != "stopped" && dr.Port > 0 {
+		hostname, err := exposeDevRun(ctx, repo.Slug, dr.Port)
+		if err != nil {
+			exposeResult = map[string]any{"requested": true, "registered": false, "error": err.Error()}
+		} else {
+			exposeResult = map[string]any{"requested": true, "registered": true, "hostname": hostname}
+		}
+	}
+	return map[string]any{"dev_run": dr, "expose": exposeResult}, nil
 }
 
 func (a *App) toolDevStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -314,6 +331,11 @@ func (a *App) toolDevStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := a.dev.stopDevRun(ctx, pid, repo.ID); err != nil {
 		return nil, err
 	}
+	// Best-effort route cleanup — if the user passed expose=true on
+	// start, we registered <slug>.<dev_base_hostname>. Drop it now
+	// regardless of whether expose was requested; routes_unregister
+	// is idempotent on a missing hostname.
+	_ = unexposeDevRun(ctx, repo.Slug)
 	return map[string]any{"stopped": true}, nil
 }
 
