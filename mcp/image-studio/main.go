@@ -579,30 +579,31 @@ func imageBytes(img generatedImage) ([]byte, error) {
 func saveToStorage(ctx *sdk.AppCtx, img generatedImage, ext, contentType, providerSlug string, idx int) (int64, error) {
 	name := fmt.Sprintf("img-%d-%d.%s", time.Now().Unix(), idx, ext)
 	tags := []string{"ai", "generated", providerSlug}
+	var got struct {
+		ID int64 `json:"id"`
+	}
 	if img.B64 != "" {
-		res, err := ctx.PlatformAPI().CallApp("storage", "files_upload", map[string]any{
+		if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", map[string]any{
 			"name":           name,
 			"content_base64": img.B64,
 			"folder":         "/generated/",
 			"content_type":   contentType,
 			"tags":           tags,
-		})
-		if err != nil {
+		}, &got); err != nil {
 			return 0, err
 		}
-		return extractStorageID(res), nil
+		return got.ID, nil
 	}
 	if img.UpstreamURL != "" {
-		res, err := ctx.PlatformAPI().CallApp("storage", "files_from_url", map[string]any{
+		if err := ctx.PlatformAPI().CallAppResult("storage", "files_from_url", map[string]any{
 			"url":    img.UpstreamURL,
 			"folder": "/generated/",
 			"name":   name,
 			"tags":   tags,
-		})
-		if err != nil {
+		}, &got); err != nil {
 			return 0, err
 		}
-		return extractStorageID(res), nil
+		return got.ID, nil
 	}
 	return 0, errors.New("no image source")
 }
@@ -776,44 +777,6 @@ func makeThumbnail(src []byte, maxEdge int) []byte {
 		return nil
 	}
 	return buf.Bytes()
-}
-
-// extractStorageID pulls the file id out of storage's MCP tools/call
-// response shape. Storage's tool returns its result as {content:[{text:"<json>"}]}
-// — we parse the inner JSON to find {id, url, sha256, ...}.
-func extractStorageID(raw json.RawMessage) int64 {
-	if len(raw) == 0 {
-		return 0
-	}
-	// Try direct shape first ({id, url, sha256}).
-	var direct struct {
-		ID int64 `json:"id"`
-	}
-	if json.Unmarshal(raw, &direct) == nil && direct.ID > 0 {
-		return direct.ID
-	}
-	// Fall back to MCP-wrapped: {result:{content:[{text:"<json>"}]}}.
-	var wrapped struct {
-		Result struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"result"`
-	}
-	if json.Unmarshal(raw, &wrapped) == nil {
-		for _, c := range wrapped.Result.Content {
-			if c.Type == "text" && c.Text != "" {
-				var inner struct {
-					ID int64 `json:"id"`
-				}
-				if json.Unmarshal([]byte(c.Text), &inner) == nil && inner.ID > 0 {
-					return inner.ID
-				}
-			}
-		}
-	}
-	return 0
 }
 
 func schemaObject(props map[string]any, required []string) map[string]any {

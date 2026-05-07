@@ -1203,12 +1203,12 @@ func storageFileExists(ctx *sdk.AppCtx, fileID int64) error {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return errors.New("attach: storage app not installed for this project — install it to attach files to bills")
 	}
-	res, err := ctx.PlatformAPI().CallApp("storage", "files_get", map[string]any{
+	var got struct {
+		ID int64 `json:"id"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", map[string]any{
 		"id": fileID,
-	})
-	if err != nil {
-		// Try to distinguish "no such app" from "no such file." Both
-		// surface as errors from CallApp; we lean on the message.
+	}, &got); err != nil {
 		msg := err.Error()
 		if strings.Contains(strings.ToLower(msg), "not installed") ||
 			strings.Contains(strings.ToLower(msg), "no such app") {
@@ -1216,7 +1216,7 @@ func storageFileExists(ctx *sdk.AppCtx, fileID int64) error {
 		}
 		return fmt.Errorf("attach: storage file %d not found (%w)", fileID, err)
 	}
-	if extractStorageFileID(res) == 0 {
+	if got.ID == 0 {
 		return fmt.Errorf("attach: storage file %d not found", fileID)
 	}
 	return nil
@@ -1229,15 +1229,17 @@ func storageUploadBase64(ctx *sdk.AppCtx, name, folder, contentType, b64 string)
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return 0, errors.New("upload: storage app not installed for this project — install it to attach files to bills")
 	}
-	res, err := ctx.PlatformAPI().CallApp("storage", "files_upload", map[string]any{
+	var got struct {
+		ID int64 `json:"id"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", map[string]any{
 		"name":           name,
 		"folder":         folder,
 		"content_base64": b64,
 		"content_type":   contentType,
 		"tags":           []any{"bill", "attachment"},
 		"source":         "bills",
-	})
-	if err != nil {
+	}, &got); err != nil {
 		msg := err.Error()
 		if strings.Contains(strings.ToLower(msg), "not installed") ||
 			strings.Contains(strings.ToLower(msg), "no such app") {
@@ -1245,11 +1247,10 @@ func storageUploadBase64(ctx *sdk.AppCtx, name, folder, contentType, b64 string)
 		}
 		return 0, fmt.Errorf("upload: storage call failed (%w)", err)
 	}
-	id := extractStorageFileID(res)
-	if id == 0 {
+	if got.ID == 0 {
 		return 0, errors.New("upload: storage returned no file id")
 	}
-	return id, nil
+	return got.ID, nil
 }
 
 // ─── PDF rendering tool ─────────────────────────────────────────────
@@ -1291,21 +1292,23 @@ func (a *App) toolBillsRenderPDF(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if ctx.PlatformAPI() == nil {
 		return nil, errors.New("save_to_storage=true requires the platform API; running outside an Apteva server")
 	}
-	res, callErr := ctx.PlatformAPI().CallApp("storage", "files_upload", map[string]any{
+	var got struct {
+		ID int64 `json:"id"`
+	}
+	if callErr := ctx.PlatformAPI().CallAppResult("storage", "files_upload", map[string]any{
 		"name":           filename,
 		"folder":         folder,
 		"content_base64": base64.StdEncoding.EncodeToString(pdfBytes),
 		"content_type":   "application/pdf",
 		"tags":           []any{"bill", "voucher", bill.Status},
 		"source":         "bills",
-	})
-	if callErr != nil {
+	}, &got); callErr != nil {
 		return nil, fmt.Errorf("save_to_storage: storage app call failed (%w) — install the storage app or retry with save_to_storage=false", callErr)
 	}
-	storageID := extractStorageFileID(res)
-	if storageID == 0 {
+	if got.ID == 0 {
 		return nil, errors.New("save_to_storage: storage returned no file id")
 	}
+	storageID := got.ID
 	return map[string]any{
 		"file_id":    storageID,
 		"url":        fmt.Sprintf("/api/apps/storage/files/%d/content?project_id=%s", storageID, pid),
@@ -1330,39 +1333,6 @@ func loadBillForRender(db *sql.DB, pid string, id int64) (*Bill, *Vendor, error)
 		return bill, nil, err
 	}
 	return bill, vendor, nil
-}
-
-func extractStorageFileID(raw json.RawMessage) int64 {
-	if len(raw) == 0 {
-		return 0
-	}
-	var direct struct {
-		ID int64 `json:"id"`
-	}
-	if err := json.Unmarshal(raw, &direct); err == nil && direct.ID > 0 {
-		return direct.ID
-	}
-	var wrapped struct {
-		Result struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(raw, &wrapped); err == nil {
-		for _, c := range wrapped.Result.Content {
-			if c.Type == "text" && c.Text != "" {
-				var inner struct {
-					ID int64 `json:"id"`
-				}
-				if err := json.Unmarshal([]byte(c.Text), &inner); err == nil && inner.ID > 0 {
-					return inner.ID
-				}
-			}
-		}
-	}
-	return 0
 }
 
 // ─── Event emission ─────────────────────────────────────────────────

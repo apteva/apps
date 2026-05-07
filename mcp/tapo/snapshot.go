@@ -15,7 +15,6 @@ package main
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -33,15 +32,16 @@ func snapshotViaFfmpegApp(ctx *sdk.AppCtx, cli *Client) ([]byte, error) {
 		return nil, errors.New("snapshot: platform unavailable")
 	}
 	rtspURL := cli.RTSPURL("hd")
-	raw, err := ctx.PlatformAPI().CallApp("ffmpeg", "ffmpeg_grab_frame", map[string]any{
+	var out struct {
+		BytesBase64 string `json:"bytes_base64"`
+		SizeBytes   int    `json:"size_bytes"`
+		ContentType string `json:"content_type"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("ffmpeg", "ffmpeg_grab_frame", map[string]any{
 		"url":             rtspURL,
 		"format":          "jpeg",
 		"timeout_seconds": 10,
-	})
-	if err != nil {
-		// The platform surfaces "app not installed" via the error
-		// string. Rewrite to a single, actionable message rather than
-		// bubble the platform's internal phrasing.
+	}, &out); err != nil {
 		msg := strings.ToLower(err.Error())
 		if strings.Contains(msg, "not installed") ||
 			strings.Contains(msg, "not found") ||
@@ -50,18 +50,6 @@ func snapshotViaFfmpegApp(ctx *sdk.AppCtx, cli *Client) ([]byte, error) {
 				"(or set keep_working_copy on the camera and grab frames externally with ffplay/VLC)")
 		}
 		return nil, fmt.Errorf("snapshot: %w", err)
-	}
-	inner, err := mcpInnerJSON(raw)
-	if err != nil {
-		return nil, fmt.Errorf("snapshot: %w", err)
-	}
-	var out struct {
-		BytesBase64 string `json:"bytes_base64"`
-		SizeBytes   int    `json:"size_bytes"`
-		ContentType string `json:"content_type"`
-	}
-	if err := json.Unmarshal(inner, &out); err != nil {
-		return nil, fmt.Errorf("snapshot: parse ffmpeg response: %w", err)
 	}
 	if out.BytesBase64 == "" {
 		return nil, errors.New("snapshot: ffmpeg returned empty payload")

@@ -2004,29 +2004,42 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64) ([]mediaItem, error) {
 	for _, id := range ids {
 		// Metadata first — content_type drives the publish strategy
 		// (image → /feed; video → /videos for FB; REELS for IG).
-		metaRes, err := ctx.PlatformAPI().CallApp("storage", "files_get", map[string]any{
+		var meta struct {
+			File struct {
+				ContentType string `json:"content_type"`
+				SizeBytes   int64  `json:"size_bytes"`
+			} `json:"file"`
+			ContentType string `json:"content_type"`
+			SizeBytes   int64  `json:"size_bytes"`
+		}
+		if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", map[string]any{
 			"id": id,
-		})
-		if err != nil {
+		}, &meta); err != nil {
 			return nil, fmt.Errorf("storage files_get(%d): %w", id, err)
 		}
-		mime := extractStorageContentType(metaRes)
-		size := extractStorageSize(metaRes)
+		mime := meta.ContentType
+		if mime == "" {
+			mime = meta.File.ContentType
+		}
+		size := meta.SizeBytes
+		if size == 0 {
+			size = meta.File.SizeBytes
+		}
 
 		// Signed URL — separate call because files_get_url is the
 		// canonical way to mint a TTL'd link.
-		urlRes, err := ctx.PlatformAPI().CallApp("storage", "files_get_url", map[string]any{
+		var signed struct {
+			URL string `json:"url"`
+		}
+		if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_url", map[string]any{
 			"id":          id,
 			"ttl_seconds": 3600,
-		})
-		if err != nil {
+		}, &signed); err != nil {
 			return nil, fmt.Errorf("storage files_get_url(%d): %w", id, err)
 		}
-		// Storage's MCP response is wrapped in {content:[{type:text, text:json}]}.
-		// The inner JSON is {url, expires_at, file_id}.
-		rel := extractStorageGetURL(urlRes)
+		rel := signed.URL
 		if rel == "" {
-			return nil, fmt.Errorf("storage files_get_url(%d) returned no url: %s", id, string(urlRes))
+			return nil, fmt.Errorf("storage files_get_url(%d) returned no url", id)
 		}
 		var fullURL string
 		if strings.HasPrefix(rel, "http://") || strings.HasPrefix(rel, "https://") {
@@ -2043,161 +2056,6 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64) ([]mediaItem, error) {
 	return out, nil
 }
 
-// extractStorageSize pulls size_bytes out of storage's files_get
-// response. Mirrors extractStorageContentType's shape-handling: direct
-// {file: {size_bytes}} / {size_bytes}, JSON-RPC-wrapped, and flat-MCP
-// envelopes. Returns 0 when the field isn't present (caller decides
-// whether that's fatal — TikTok FILE_UPLOAD needs it; FB / IG / X
-// don't read it).
-func extractStorageSize(raw json.RawMessage) int64 {
-	if len(raw) == 0 {
-		return 0
-	}
-	var direct struct {
-		File struct {
-			SizeBytes int64 `json:"size_bytes"`
-		} `json:"file"`
-		SizeBytes int64 `json:"size_bytes"`
-	}
-	if json.Unmarshal(raw, &direct) == nil {
-		if direct.File.SizeBytes > 0 {
-			return direct.File.SizeBytes
-		}
-		if direct.SizeBytes > 0 {
-			return direct.SizeBytes
-		}
-	}
-	var wrapped struct {
-		Result struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"result"`
-	}
-	if json.Unmarshal(raw, &wrapped) == nil {
-		for _, c := range wrapped.Result.Content {
-			if c.Type == "text" && c.Text != "" {
-				if got := extractStorageSize(json.RawMessage(c.Text)); got > 0 {
-					return got
-				}
-			}
-		}
-	}
-	var flat struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	if json.Unmarshal(raw, &flat) == nil {
-		for _, c := range flat.Content {
-			if c.Type == "text" && c.Text != "" {
-				if got := extractStorageSize(json.RawMessage(c.Text)); got > 0 {
-					return got
-				}
-			}
-		}
-	}
-	return 0
-}
-
-// extractStorageContentType pulls the file's content_type out of
-// storage's files_get response. The shape is {file: {...}} or the
-// row at the top level depending on storage version — handle both.
-func extractStorageContentType(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	// Direct shapes first: {file: {content_type}} or {content_type}.
-	var direct struct {
-		File struct {
-			ContentType string `json:"content_type"`
-		} `json:"file"`
-		ContentType string `json:"content_type"`
-	}
-	if json.Unmarshal(raw, &direct) == nil {
-		if direct.File.ContentType != "" {
-			return direct.File.ContentType
-		}
-		if direct.ContentType != "" {
-			return direct.ContentType
-		}
-	}
-	// JSON-RPC wrapper from CallApp: {result:{content:[{type,text}]}}.
-	// Mirrors extractStorageGetURL — unwrap result.content[].text and
-	// recurse into the inner JSON to pick up the file/content_type.
-	var wrapped struct {
-		Result struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"result"`
-	}
-	if json.Unmarshal(raw, &wrapped) == nil {
-		for _, c := range wrapped.Result.Content {
-			if c.Type == "text" && c.Text != "" {
-				if got := extractStorageContentType(json.RawMessage(c.Text)); got != "" {
-					return got
-				}
-			}
-		}
-	}
-	// MCP-flat shape (no jsonrpc wrapper): {content:[...]}. Some
-	// transports unwrap one layer for us.
-	var flat struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	if json.Unmarshal(raw, &flat) == nil {
-		for _, c := range flat.Content {
-			if c.Type == "text" && c.Text != "" {
-				if got := extractStorageContentType(json.RawMessage(c.Text)); got != "" {
-					return got
-				}
-			}
-		}
-	}
-	return ""
-}
-
-// extractStorageGetURL pulls the .url field out of storage's
-// files_get_url response. Same wrapping shape as extractStorageID.
-func extractStorageGetURL(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var direct struct {
-		URL string `json:"url"`
-	}
-	if json.Unmarshal(raw, &direct) == nil && direct.URL != "" {
-		return direct.URL
-	}
-	var wrapped struct {
-		Result struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"result"`
-	}
-	if json.Unmarshal(raw, &wrapped) == nil {
-		for _, c := range wrapped.Result.Content {
-			if c.Type == "text" && c.Text != "" {
-				var inner struct {
-					URL string `json:"url"`
-				}
-				if json.Unmarshal([]byte(c.Text), &inner) == nil && inner.URL != "" {
-					return inner.URL
-				}
-			}
-		}
-	}
-	return ""
-}
 
 // extractContainerID pulls the IG containerId from create_media_container.
 // IG returns either {id: "<container>"} or {containerId: "..."}.
@@ -2256,7 +2114,12 @@ func (a *App) scheduleJob(ctx *sdk.AppCtx, postID int64, scheduleAt string) (int
 	if err != nil {
 		return 0, fmt.Errorf("invalid schedule_at %q: %w", scheduleAt, err)
 	}
-	res, err := ctx.PlatformAPI().CallApp("jobs", "jobs_schedule", map[string]any{
+	var jr struct {
+		Job struct {
+			ID int64 `json:"id"`
+		} `json:"job"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("jobs", "jobs_schedule", map[string]any{
 		"name": fmt.Sprintf("social.publish_post.%d", postID),
 		"schedule": map[string]any{
 			"kind":   "once",
@@ -2273,53 +2136,12 @@ func (a *App) scheduleJob(ctx *sdk.AppCtx, postID int64, scheduleAt string) (int
 		"max_retries":     3,
 		"backoff_seconds": 60,
 		"owner_app":       "social",
-	})
-	if err != nil {
-		return 0, err
+	}, &jr); err != nil {
+		return 0, fmt.Errorf("jobs_schedule: %w", err)
 	}
-	if msg := mcpErrorMessage(res); msg != "" {
-		return 0, fmt.Errorf("jobs_schedule: %s", msg)
-	}
-	jobID := extractJobID(res)
+	jobID := jr.Job.ID
 	ctx.Logger().Info("scheduleJob: created", "post_id", postID, "job_id", jobID, "run_at", rfc3339)
 	return jobID, nil
-}
-
-// extractJobID pulls the new job's id out of a jobs_schedule
-// response. Both shapes appear: direct `{job:{id}}` (in-process
-// tests) and the JSON-RPC-wrapped `result.content[].text` form
-// CallApp returns over HTTP. Returns 0 when the response doesn't
-// match — caller stores 0 and post_delete falls back to letting
-// the run_at lapse without a cancel.
-func extractJobID(raw json.RawMessage) int64 {
-	if len(raw) == 0 {
-		return 0
-	}
-	var direct struct {
-		Job struct {
-			ID int64 `json:"id"`
-		} `json:"job"`
-	}
-	if json.Unmarshal(raw, &direct) == nil && direct.Job.ID != 0 {
-		return direct.Job.ID
-	}
-	var wrapped struct {
-		Result struct {
-			Content []struct {
-				Type, Text string
-			} `json:"content"`
-		} `json:"result"`
-	}
-	if json.Unmarshal(raw, &wrapped) == nil {
-		for _, c := range wrapped.Result.Content {
-			if c.Type == "text" && c.Text != "" {
-				if id := extractJobID(json.RawMessage(c.Text)); id != 0 {
-					return id
-				}
-			}
-		}
-	}
-	return 0
 }
 
 // cancelJob asks jobs to cancel a previously-created job. Quiet on
@@ -2332,15 +2154,10 @@ func (a *App) cancelJob(ctx *sdk.AppCtx, jobID int64) {
 	if ctx.IntegrationFor("jobs") == nil {
 		return
 	}
-	res, err := ctx.PlatformAPI().CallApp("jobs", "jobs_cancel", map[string]any{
+	if err := ctx.PlatformAPI().CallAppResult("jobs", "jobs_cancel", map[string]any{
 		"id": jobID,
-	})
-	if err != nil {
+	}, nil); err != nil {
 		ctx.Logger().Warn("cancelJob failed", "job_id", jobID, "err", err)
-		return
-	}
-	if msg := mcpErrorMessage(res); msg != "" {
-		ctx.Logger().Warn("cancelJob envelope error", "job_id", jobID, "err", msg)
 	}
 }
 
@@ -2374,48 +2191,6 @@ func normaliseScheduleAt(s string) (string, error) {
 	return "", fmt.Errorf("unrecognised time format")
 }
 
-// mcpErrorMessage extracts the inner text from an MCP-shaped error
-// response. Returns "" when the response is a normal success — used
-// by callers of CallApp to detect tool-level errors that came back
-// at HTTP 200. Mirrors the envelope check in fetchPages.
-func mcpErrorMessage(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	// Direct: {isError:true, content:[{type,text}]}.
-	var direct struct {
-		IsError bool `json:"isError"`
-		Content []struct {
-			Type, Text string
-		} `json:"content"`
-	}
-	if json.Unmarshal(raw, &direct) == nil && direct.IsError {
-		for _, c := range direct.Content {
-			if c.Type == "text" && c.Text != "" {
-				return c.Text
-			}
-		}
-		return "tool returned an error envelope"
-	}
-	// JSON-RPC wrapper: {jsonrpc, id, result:{isError, content}}.
-	var wrapped struct {
-		Result struct {
-			IsError bool `json:"isError"`
-			Content []struct {
-				Type, Text string
-			} `json:"content"`
-		} `json:"result"`
-	}
-	if json.Unmarshal(raw, &wrapped) == nil && wrapped.Result.IsError {
-		for _, c := range wrapped.Result.Content {
-			if c.Type == "text" && c.Text != "" {
-				return c.Text
-			}
-		}
-		return "tool returned an error envelope"
-	}
-	return ""
-}
 
 func (a *App) markTargetFailed(ctx *sdk.AppCtx, targetID int64, msg string) {
 	_, _ = ctx.AppDB().Exec(

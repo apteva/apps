@@ -3366,21 +3366,14 @@ func (a *App) handleSetupDomain(w http.ResponseWriter, r *http.Request) {
 				"value":  s.Value,
 				"ttl":    s.TTL,
 			}
-			raw, err := globalCtx.PlatformAPI().CallApp("domains", "domain_records_set", args)
-			if err != nil {
-				actions = append(actions, actionResult{Step: s.Step, OK: false, Error: err.Error()})
-				continue
-			}
-			inner, err := mcpInnerJSON(raw)
-			if err != nil {
-				actions = append(actions, actionResult{Step: s.Step, OK: false, Error: err.Error()})
-				continue
-			}
 			var probe struct {
 				Action string `json:"action"`
 				Error  string `json:"error"`
 			}
-			_ = json.Unmarshal(inner, &probe)
+			if err := globalCtx.PlatformAPI().CallAppResult("domains", "domain_records_set", args, &probe); err != nil {
+				actions = append(actions, actionResult{Step: s.Step, OK: false, Error: err.Error()})
+				continue
+			}
 			if probe.Error != "" {
 				actions = append(actions, actionResult{Step: s.Step, OK: false, Error: probe.Error})
 				continue
@@ -4244,34 +4237,3 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-// mcpInnerJSON strips the MCP JSON-RPC envelope returned by
-// CallApp and yields the inner content[0].text bytes ready for
-// a typed Unmarshal. Pre-unwrapped responses pass through.
-// Local copy of app-sdk's decodeMCPEnvelope (v0.1.8); delete and
-// switch to CallAppResult once the SDK pin advances.
-func mcpInnerJSON(raw []byte) ([]byte, error) {
-	if len(raw) == 0 {
-		return nil, fmt.Errorf("empty mcp response")
-	}
-	var env struct {
-		Result *struct {
-			Content []struct {
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"result"`
-		Error *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error,omitempty"`
-	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return raw, nil
-	}
-	if env.Error != nil {
-		return nil, fmt.Errorf("rpc error %d: %s", env.Error.Code, env.Error.Message)
-	}
-	if env.Result == nil || len(env.Result.Content) == 0 {
-		return raw, nil
-	}
-	return []byte(env.Result.Content[0].Text), nil
-}

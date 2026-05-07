@@ -21,7 +21,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -314,21 +313,13 @@ func scheduleViaJobs(ctx *sdk.AppCtx, p *Policy) error {
 		"idempotency_key": fmt.Sprintf("backup-policy-%d", p.ID),
 		"owner_app":       "backup",
 	}
-	out, err := ctx.PlatformAPI().CallApp("jobs", "jobs_schedule", body)
-	if err != nil {
-		return err
-	}
-	inner, err := mcpInnerJSON(out)
-	if err != nil {
-		return fmt.Errorf("jobs_schedule: %w", err)
-	}
 	var resp struct {
 		Job struct {
 			ID string `json:"id"`
 		} `json:"job"`
 	}
-	if err := json.Unmarshal(inner, &resp); err != nil {
-		return fmt.Errorf("decode jobs response: %w", err)
+	if err := ctx.PlatformAPI().CallAppResult("jobs", "jobs_schedule", body, &resp); err != nil {
+		return fmt.Errorf("jobs_schedule: %w", err)
 	}
 	if resp.Job.ID == "" {
 		return fmt.Errorf("jobs returned no id")
@@ -345,37 +336,3 @@ func cancelViaJobs(ctx *sdk.AppCtx, jobsID string) error {
 	return err
 }
 
-// mcpInnerJSON strips the MCP JSON-RPC envelope that CallApp returns
-// and yields the inner content[0].text bytes — what callers actually
-// want to Unmarshal. Pre-unwrapped responses (test fakes) fall
-// through unchanged. RPC-level errors surface as a Go error.
-//
-// Lift+shift from app-sdk's decodeMCPEnvelope (v0.1.8); local copy so
-// this app keeps compiling against its pinned v0.2.0. Delete when the
-// SDK pin moves to v0.1.8 and switch the call to CallAppResult.
-func mcpInnerJSON(raw []byte) ([]byte, error) {
-	if len(raw) == 0 {
-		return nil, fmt.Errorf("empty mcp response")
-	}
-	var env struct {
-		Result *struct {
-			Content []struct {
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"result"`
-		Error *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error,omitempty"`
-	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return raw, nil
-	}
-	if env.Error != nil {
-		return nil, fmt.Errorf("rpc error %d: %s", env.Error.Code, env.Error.Message)
-	}
-	if env.Result == nil || len(env.Result.Content) == 0 {
-		return raw, nil
-	}
-	return []byte(env.Result.Content[0].Text), nil
-}

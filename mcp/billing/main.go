@@ -945,21 +945,23 @@ func (a *App) toolInvoicesRenderPDF(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if ctx.PlatformAPI() == nil {
 		return nil, errors.New("save_to_storage=true requires the platform API; running outside an Apteva server")
 	}
-	res, callErr := ctx.PlatformAPI().CallApp("storage", "files_upload", map[string]any{
+	var got struct {
+		ID int64 `json:"id"`
+	}
+	if callErr := ctx.PlatformAPI().CallAppResult("storage", "files_upload", map[string]any{
 		"name":           filename,
 		"folder":         folder,
 		"content_base64": base64.StdEncoding.EncodeToString(pdfBytes),
 		"content_type":   "application/pdf",
 		"tags":           []any{"invoice", "billing", inv.Status},
 		"source":         "billing",
-	})
-	if callErr != nil {
+	}, &got); callErr != nil {
 		return nil, fmt.Errorf("save_to_storage: storage app call failed (%w) — install the storage app or retry with save_to_storage=false", callErr)
 	}
-	storageID := extractStorageFileID(res)
-	if storageID == 0 {
+	if got.ID == 0 {
 		return nil, errors.New("save_to_storage: storage returned no file id")
 	}
+	storageID := got.ID
 	return map[string]any{
 		"file_id":    storageID,
 		"url":        fmt.Sprintf("/api/apps/storage/files/%d/content?project_id=%s", storageID, pid),
@@ -967,44 +969,6 @@ func (a *App) toolInvoicesRenderPDF(ctx *sdk.AppCtx, args map[string]any) (any, 
 		"size_bytes": len(pdfBytes),
 		"saved":      true,
 	}, nil
-}
-
-// extractStorageFileID parses storage's tools/call response to find
-// the file id. Mirrors the shape image-studio uses (storage returns
-// {content:[{text:"<json>"}]} and we unwrap one level).
-func extractStorageFileID(raw json.RawMessage) int64 {
-	if len(raw) == 0 {
-		return 0
-	}
-	// Direct shape: {id, ...}
-	var direct struct {
-		ID int64 `json:"id"`
-	}
-	if err := json.Unmarshal(raw, &direct); err == nil && direct.ID > 0 {
-		return direct.ID
-	}
-	// Wrapped MCP tool result: {result:{content:[{text:"<json>"}]}}.
-	var wrapped struct {
-		Result struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(raw, &wrapped); err == nil {
-		for _, c := range wrapped.Result.Content {
-			if c.Type == "text" && c.Text != "" {
-				var inner struct {
-					ID int64 `json:"id"`
-				}
-				if err := json.Unmarshal([]byte(c.Text), &inner); err == nil && inner.ID > 0 {
-					return inner.ID
-				}
-			}
-		}
-	}
-	return 0
 }
 
 func (a *App) handleHTTPInvoicePrint(w http.ResponseWriter, r *http.Request) {

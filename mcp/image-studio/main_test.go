@@ -119,6 +119,19 @@ func (p *recordingPlatform) CallAppResult(appName, tool string, input map[string
 	if len(raw) == 0 || out == nil {
 		return nil
 	}
+	// Mirror app-sdk decodeMCPEnvelope: prefer the wrapped
+	// {result:{content:[{text:"<inner>"}]}} shape, fall through to
+	// direct decode when the bytes are already unwrapped.
+	var env struct {
+		Result *struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(raw, &env) == nil && env.Result != nil && len(env.Result.Content) > 0 {
+		return json.Unmarshal([]byte(env.Result.Content[0].Text), out)
+	}
 	return json.Unmarshal(raw, out)
 }
 
@@ -213,30 +226,6 @@ func TestNormalizeImageResponse_UnknownSlug(t *testing.T) {
 	}
 }
 
-// --- extractStorageID ----------------------------------------------
-
-func TestExtractStorageID_DirectShape(t *testing.T) {
-	body := []byte(`{"id":1234,"url":"http://...","sha256":"abc"}`)
-	if got := extractStorageID(body); got != 1234 {
-		t.Errorf("got %d", got)
-	}
-}
-
-func TestExtractStorageID_MCPWrapped(t *testing.T) {
-	body := []byte(`{"result":{"content":[{"type":"text","text":"{\"id\":555,\"url\":\"...\"}"}]}}`)
-	if got := extractStorageID(body); got != 555 {
-		t.Errorf("got %d", got)
-	}
-}
-
-func TestExtractStorageID_Empty(t *testing.T) {
-	if got := extractStorageID(nil); got != 0 {
-		t.Errorf("got %d on nil", got)
-	}
-	if got := extractStorageID([]byte(`{}`)); got != 0 {
-		t.Errorf("got %d on empty object", got)
-	}
-}
 
 // --- toolImageGenerate ---------------------------------------------
 

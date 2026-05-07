@@ -1151,25 +1151,17 @@ func doPTZ(pid string, id int64, dir string, durationMs int, pan, tilt *int) err
 // of motion snapshots produces distinct rows.
 func pushToStorage(ctx *sdk.AppCtx, folder, camName string, jpg []byte) (int64, error) {
 	fname := fmt.Sprintf("%s-%s.jpg", camName, time.Now().UTC().Format("20060102-150405"))
-	raw, err := ctx.PlatformAPI().CallApp("storage", "files_upload", map[string]any{
-		"filename":     fname,
-		"folder":       folder,
-		"content_type": "image/jpeg",
-		"bytes_base64": base64.StdEncoding.EncodeToString(jpg),
-	})
-	if err != nil {
-		return 0, err
-	}
-	inner, err := mcpInnerJSON(raw)
-	if err != nil {
-		return 0, fmt.Errorf("storage upload: %w", err)
-	}
 	var out struct {
 		FileID int64 `json:"file_id"`
 		ID     int64 `json:"id"`
 	}
-	if err := json.Unmarshal(inner, &out); err != nil {
-		return 0, fmt.Errorf("storage response: %w", err)
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", map[string]any{
+		"filename":     fname,
+		"folder":       folder,
+		"content_type": "image/jpeg",
+		"bytes_base64": base64.StdEncoding.EncodeToString(jpg),
+	}, &out); err != nil {
+		return 0, fmt.Errorf("storage upload: %w", err)
 	}
 	if out.FileID != 0 {
 		return out.FileID, nil
@@ -1356,39 +1348,6 @@ func configFlag(ctx *sdk.AppCtx, key string, def bool) bool {
 		return false
 	}
 	return def
-}
-
-// mcpInnerJSON strips the MCP JSON-RPC envelope CallApp returns and
-// yields the inner content[0].text bytes for a typed Unmarshal.
-// Pre-unwrapped responses pass through. RPC errors → Go error.
-//
-// Local copy of app-sdk's decodeMCPEnvelope (v0.1.8); delete and
-// switch to CallAppResult once the SDK pin advances.
-func mcpInnerJSON(raw []byte) ([]byte, error) {
-	if len(raw) == 0 {
-		return nil, fmt.Errorf("empty mcp response")
-	}
-	var env struct {
-		Result *struct {
-			Content []struct {
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"result"`
-		Error *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error,omitempty"`
-	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return raw, nil
-	}
-	if env.Error != nil {
-		return nil, fmt.Errorf("rpc error %d: %s", env.Error.Code, env.Error.Message)
-	}
-	if env.Result == nil || len(env.Result.Content) == 0 {
-		return raw, nil
-	}
-	return []byte(env.Result.Content[0].Text), nil
 }
 
 // ─── main ───────────────────────────────────────────────────────────

@@ -151,6 +151,19 @@ func (p *recordingPlatform) CallAppResult(appName, tool string, input map[string
 	if out == nil || len(raw) == 0 {
 		return nil
 	}
+	// Mirror app-sdk decodeMCPEnvelope: prefer the wrapped
+	// {result:{content:[{text:"<inner>"}]}} shape, fall through to
+	// direct decode for already-unwrapped bytes.
+	var env struct {
+		Result *struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(raw, &env) == nil && env.Result != nil && len(env.Result.Content) > 0 {
+		return json.Unmarshal([]byte(env.Result.Content[0].Text), out)
+	}
 	return json.Unmarshal(raw, out)
 }
 
@@ -962,17 +975,6 @@ func TestSchedule_FailsWhenJobsUnbound(t *testing.T) {
 
 // --- helpers -------------------------------------------------------
 
-func TestExtractStorageGetURL(t *testing.T) {
-	wrapped := json.RawMessage(`{"result":{"content":[{"type":"text","text":"{\"url\":\"/files/1/content?sig=x\",\"file_id\":1}"}]}}`)
-	if got := extractStorageGetURL(wrapped); got != "/files/1/content?sig=x" {
-		t.Errorf("got %q", got)
-	}
-	direct := json.RawMessage(`{"url":"/files/2/content?sig=y","file_id":2}`)
-	if got := extractStorageGetURL(direct); got != "/files/2/content?sig=y" {
-		t.Errorf("direct: got %q", got)
-	}
-}
-
 func TestExtractContainerID(t *testing.T) {
 	if got := extractContainerID(json.RawMessage(`{"id":"c_1"}`)); got != "c_1" {
 		t.Errorf("got %q", got)
@@ -1096,31 +1098,6 @@ func TestHandleAvatar_RejectsTraversal(t *testing.T) {
 	}
 }
 
-func TestExtractStorageContentType(t *testing.T) {
-	cases := []struct {
-		name, in, want string
-	}{
-		{"direct file wrapper", `{"file":{"content_type":"video/mp4","id":1}}`, "video/mp4"},
-		{"direct flat", `{"content_type":"image/png"}`, "image/png"},
-		{"jsonrpc wrapped — the CallApp shape that v0.4.3 missed",
-			`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"file\":{\"content_type\":\"video/mp4\",\"id\":5},\"found\":true}"}]}}`,
-			"video/mp4"},
-		{"flat content (no jsonrpc layer)",
-			`{"content":[{"type":"text","text":"{\"content_type\":\"image/jpeg\"}"}]}`,
-			"image/jpeg"},
-		{"empty payload", "", ""},
-		{"unrecognised shape", `{"something":"else"}`, ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := extractStorageContentType(json.RawMessage(c.in))
-			if got != c.want {
-				t.Errorf("got %q, want %q", got, c.want)
-			}
-		})
-	}
-}
-
 func TestNormaliseScheduleAt(t *testing.T) {
 	cases := []struct {
 		name, in     string
@@ -1151,41 +1128,6 @@ func TestNormaliseScheduleAt(t *testing.T) {
 				t.Errorf("normaliseScheduleAt(%q) = %q, want substring %q", c.in, got, c.wantContains)
 			}
 		})
-	}
-}
-
-func TestMcpErrorMessage(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"", ""},
-		{`{"job":{"id":1}}`, ""},
-		{`{"isError":true,"content":[{"type":"text","text":"schedule.run_at: unrecognised time format"}]}`,
-			"schedule.run_at: unrecognised time format"},
-		{`{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"jobs not bound"}]}}`,
-			"jobs not bound"},
-		{`{"isError":true,"content":[]}`, "tool returned an error envelope"},
-	}
-	for _, c := range cases {
-		got := mcpErrorMessage(json.RawMessage(c.in))
-		if got != c.want {
-			t.Errorf("mcpErrorMessage(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}
-
-func TestExtractJobID(t *testing.T) {
-	cases := []struct {
-		in   string
-		want int64
-	}{
-		{"", 0},
-		{`{"job":{"id":42,"name":"x"}}`, 42},
-		{`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"job\":{\"id\":99}}"}]}}`, 99},
-		{`{"unrelated":true}`, 0},
-	}
-	for _, c := range cases {
-		if got := extractJobID(json.RawMessage(c.in)); got != c.want {
-			t.Errorf("extractJobID(%q) = %d, want %d", c.in, got, c.want)
-		}
 	}
 }
 

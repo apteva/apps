@@ -10,66 +10,6 @@ import (
 	"testing"
 )
 
-// ─── Response parsing ───────────────────────────────────────────────
-
-func TestParseExtraction_DirectShape(t *testing.T) {
-	raw := []byte(`{
-		"vendor": {"name": "AWS", "email": "billing@aws.amazon.com"},
-		"invoice_number": "AWS-2026-04-001",
-		"total_cents": 48000,
-		"line_items": [{"description": "EC2", "amount_cents": 48000}]
-	}`)
-	got, err := parseExtraction(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Vendor.Name != "AWS" {
-		t.Errorf("vendor.name=%q", got.Vendor.Name)
-	}
-	if got.InvoiceNumber != "AWS-2026-04-001" {
-		t.Errorf("invoice_number=%q", got.InvoiceNumber)
-	}
-	if len(got.LineItems) != 1 {
-		t.Errorf("line_items=%d", len(got.LineItems))
-	}
-}
-
-func TestParseExtraction_WrappedShape(t *testing.T) {
-	// MCP gateway shape: {result:{content:[{text:"<json>"}]}}.
-	raw := []byte(`{
-		"result": {
-			"content": [
-				{"type": "text", "text": "{\"vendor\":{\"name\":\"Globex\",\"email\":\"ap@globex.com\"},\"total_cents\":12000}"}
-			]
-		}
-	}`)
-	got, err := parseExtraction(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Vendor.Email != "ap@globex.com" {
-		t.Errorf("vendor.email=%q", got.Vendor.Email)
-	}
-	if got.TotalCents != 12000 {
-		t.Errorf("total_cents=%d", got.TotalCents)
-	}
-}
-
-func TestParseExtraction_EmptyResponse(t *testing.T) {
-	if _, err := parseExtraction(nil); err == nil {
-		t.Fatal("expected empty response error")
-	}
-	if _, err := parseExtraction([]byte(``)); err == nil {
-		t.Fatal("expected empty response error")
-	}
-}
-
-func TestParseExtraction_BogusJSON(t *testing.T) {
-	if _, err := parseExtraction([]byte(`not-json`)); err == nil {
-		t.Fatal("expected parse error")
-	}
-}
-
 // ─── Field merge ────────────────────────────────────────────────────
 
 func sampleExtraction() *ExtractedInvoice {

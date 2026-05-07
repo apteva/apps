@@ -26,7 +26,6 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -81,72 +80,20 @@ func callOCR(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, error) {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return nil, provider, errors.New("ocr_provider set but platform API unavailable")
 	}
-	raw, err := ctx.PlatformAPI().CallApp(provider, "extract_invoice", map[string]any{
+	var parsed ExtractedInvoice
+	if err := ctx.PlatformAPI().CallAppResult(provider, "extract_invoice", map[string]any{
 		"file_id": fileID,
-	})
-	if err != nil {
+	}, &parsed); err != nil {
 		return nil, provider, fmt.Errorf("ocr provider %q: %w", provider, err)
 	}
-	parsed, err := parseExtraction(raw)
-	if err != nil {
-		return nil, provider, fmt.Errorf("ocr provider %q response: %w", provider, err)
+	if parsed.Vendor.Name == "" && parsed.Vendor.Email == "" &&
+		len(parsed.LineItems) == 0 && parsed.InvoiceNumber == "" && parsed.TotalCents == 0 {
+		return nil, provider, fmt.Errorf("ocr provider %q: no parseable extraction in response", provider)
 	}
 	if parsed.Provider == "" {
 		parsed.Provider = provider
 	}
-	return parsed, provider, nil
-}
-
-// parseExtraction unwraps the MCP tool/call response shape — either
-// {content:[{text:"<json>"}]} (when called via the gateway) or the
-// raw object directly (when CallApp short-circuits in-process).
-func parseExtraction(raw json.RawMessage) (*ExtractedInvoice, error) {
-	if len(raw) == 0 {
-		return nil, errors.New("empty response")
-	}
-	// Direct shape first.
-	var direct ExtractedInvoice
-	if err := json.Unmarshal(raw, &direct); err == nil {
-		// A direct shape is plausible when the response has at least
-		// vendor or line_items. An empty struct unmarshals successfully
-		// but isn't useful — fall through to the wrapped shape.
-		if direct.Vendor.Name != "" || direct.Vendor.Email != "" ||
-			len(direct.LineItems) > 0 || direct.InvoiceNumber != "" ||
-			direct.TotalCents != 0 {
-			return &direct, nil
-		}
-	}
-	// Wrapped: {result:{content:[{text:"<json>"}]}} or
-	//          {content:[{text:"<json>"}]}.
-	var wrapped struct {
-		Result struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"result"`
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	if err := json.Unmarshal(raw, &wrapped); err != nil {
-		return nil, err
-	}
-	candidates := wrapped.Result.Content
-	if len(candidates) == 0 {
-		candidates = wrapped.Content
-	}
-	for _, c := range candidates {
-		if c.Type != "text" || c.Text == "" {
-			continue
-		}
-		var inner ExtractedInvoice
-		if err := json.Unmarshal([]byte(c.Text), &inner); err == nil {
-			return &inner, nil
-		}
-	}
-	return nil, errors.New("no parseable extraction in response")
+	return &parsed, provider, nil
 }
 
 // ─── Field merge ────────────────────────────────────────────────────

@@ -483,26 +483,15 @@ func hydrateFileColumns(ctx *sdk.AppCtx, t *Table, row map[string]any) {
 		default:
 			continue
 		}
-		raw, err := api.CallApp("storage", "files_get_url", map[string]any{"id": id})
-		if err != nil || raw == nil {
+		var resp struct {
+			URL       string `json:"url"`
+			ExpiresAt string `json:"expires_at"`
+		}
+		if err := api.CallAppResult("storage", "files_get_url", map[string]any{"id": id}, &resp); err != nil {
 			continue
 		}
-		inner, err := mcpInnerJSON(raw)
-		if err != nil {
-			continue
-		}
-		var resp map[string]any
-		if err := jsonUnmarshalRaw(inner, &resp); err == nil {
-			row[c.Name] = map[string]any{"id": id, "url": resp["url"], "expires_at": resp["expires_at"]}
-		}
+		row[c.Name] = map[string]any{"id": id, "url": resp.URL, "expires_at": resp.ExpiresAt}
 	}
-}
-
-func jsonUnmarshalRaw(raw []byte, v any) error {
-	if len(raw) == 0 {
-		return errf("empty payload")
-	}
-	return jsonUnmarshalBytes(raw, v)
 }
 
 // ─── filter / order_by builders ────────────────────────────────────
