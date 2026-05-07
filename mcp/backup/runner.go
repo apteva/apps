@@ -30,7 +30,6 @@ import (
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 // runBackup executes a backup against dest. policy may be nil for
@@ -60,7 +59,7 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy) (*Run, error)
 
 	// 1) Open the destination first so credentials/endpoint failures
 	// don't waste a snapshot.
-	writer, err := openDestination(dest, makeConnAdapter(ctx), defaultLocalBackupDir(ctx))
+	writer, err := openDestination(dest, ctx, defaultLocalBackupDir(ctx))
 	if err != nil {
 		return finish("failed", "open destination: "+err.Error(), 0, "", "", "")
 	}
@@ -249,39 +248,6 @@ func defaultLocalBackupDir(ctx *sdk.AppCtx) string {
 		return ""
 	}
 	return filepath.Join(dd, "backups")
-}
-
-// makeConnAdapter wires the SDK's GetConnection into the format
-// openDestination wants. Lives here so destinations.go can stay free
-// of SDK imports and remain unit-testable.
-func makeConnAdapter(ctx *sdk.AppCtx) func(int64) (*credentials.Credentials, *s3Endpoint, error) {
-	return func(id int64) (*credentials.Credentials, *s3Endpoint, error) {
-		c, err := ctx.PlatformAPI().GetConnection(id)
-		if err != nil {
-			return nil, nil, err
-		}
-		// The platform redacts secrets when listing but returns them
-		// for GetConnection on connections owned by this install. We
-		// rely on the operator having added the connection with their
-		// admin session, so the access/secret keys come back populated.
-		var raw struct {
-			AccessKey string `json:"access_key_id"`
-			Secret    string `json:"secret_access_key"`
-			Token     string `json:"session_token"`
-			Endpoint  string `json:"endpoint_url"`
-			Region    string `json:"region"`
-		}
-		// PlatformConnection's full credential JSON isn't exposed in
-		// the SDK's typed shape. Apps in this codebase round-trip via
-		// json.Marshal/Unmarshal on the typed struct's anonymous
-		// fields. For the v0.1 scaffold we keep the surface narrow:
-		// expect the connection's name field to be the access key id
-		// and rely on the platform admin to set the secret via env or
-		// a future SDK extension. See README "S3 credentials" section.
-		_ = c
-		_ = raw
-		return nil, nil, fmt.Errorf("S3 credentials adapter incomplete — install pending platform SDK extension; see README")
-	}
 }
 
 // filepathBase is filepath.Base inlined to avoid pulling the import

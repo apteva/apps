@@ -34,7 +34,7 @@ func restoreFromRun(ctx *sdk.AppCtx, runID int64) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("destination %d for run %d: %w", run.DestinationID, runID, err)
 	}
-	writer, err := openDestination(dest, makeConnAdapter(ctx), defaultLocalBackupDir(ctx))
+	writer, err := openDestination(dest, ctx, defaultLocalBackupDir(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("open destination: %w", err)
 	}

@@ -564,10 +564,7 @@ function DestinationForm({
   const [kind, setKind] = useState<"local" | "s3">("local");
   const [path, setPath] = useState("");
   const [bucket, setBucket] = useState("");
-  const [endpoint, setEndpoint] = useState("");
-  const [region, setRegion] = useState("us-east-1");
   const [keyPrefix, setKeyPrefix] = useState("");
-  const [connID, setConnID] = useState("");
   const [err, setErr] = useState("");
 
   if (!open) return (
@@ -583,14 +580,12 @@ function DestinationForm({
     setErr("");
     const config = kind === "local"
       ? { path }
-      : { bucket, endpoint, region, key_prefix: keyPrefix };
+      : { bucket, key_prefix: keyPrefix };
     try {
       await api("POST", "/destinations", {
-        name, kind, config,
-        connection_id: kind === "s3" ? Number(connID || 0) : undefined,
-        enabled: true,
+        name, kind, config, enabled: true,
       });
-      setOpen(false); setName(""); setBucket(""); setKeyPrefix(""); setConnID("");
+      setOpen(false); setName(""); setBucket(""); setKeyPrefix("");
       onCreated();
     } catch (e) { setErr((e as Error).message); }
   };
@@ -600,12 +595,12 @@ function DestinationForm({
       <div className="text-text font-bold text-sm">New destination</div>
       <FormGrid>
         <Label>Name</Label>
-        <Input value={name} onChange={setName} placeholder="nightly-local" />
+        <Input value={name} onChange={setName} placeholder="nightly-r2" />
 
         <Label>Kind</Label>
         <Select value={kind} onChange={(v) => setKind(v as "local" | "s3")}>
           <option value="local">local — host directory</option>
-          <option value="s3">s3 — AWS / R2 / B2 / MinIO</option>
+          <option value="s3">s3 — uses bound cloud_storage connection</option>
         </Select>
 
         {kind === "local" && <>
@@ -620,16 +615,16 @@ function DestinationForm({
         {kind === "s3" && <>
           <Label>Bucket</Label>
           <Input value={bucket} onChange={setBucket} placeholder="apteva-backups" />
-          <Label>Endpoint</Label>
-          <Input value={endpoint} onChange={setEndpoint} placeholder="empty for AWS, e.g. <accountid>.r2.cloudflarestorage.com" />
-          <Label>Region</Label>
-          <Input value={region} onChange={setRegion} />
           <Label>Key prefix</Label>
           <Input value={keyPrefix} onChange={setKeyPrefix} placeholder="prod/" />
-          <Label>Connection ID</Label>
-          <Input value={connID} onChange={setConnID} placeholder="from /connections" />
         </>}
       </FormGrid>
+      {kind === "s3" && (
+        <div className="text-text-muted text-xs">
+          Credentials come from the cloud_storage connection bound to this app
+          (R2 / S3 / B2 / …). Bind it in the install dialog or app settings.
+        </div>
+      )}
       {err && <div className="text-error text-xs">{err}</div>}
       <div className="flex justify-end gap-2 pt-1">
         <button

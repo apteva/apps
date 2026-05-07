@@ -117,9 +117,11 @@ func TestValidateDestination(t *testing.T) {
 		{"missing kind", Destination{Name: "n", Config: json.RawMessage(`{}`)}, false},
 		{"local relative path", Destination{Name: "n", Kind: "local", Config: json.RawMessage(`{"path":"rel"}`)}, false},
 		{"local ok", Destination{Name: "n", Kind: "local", Config: json.RawMessage(`{"path":"/abs"}`)}, true},
-		{"s3 missing bucket", Destination{Name: "n", Kind: "s3", Config: json.RawMessage(`{}`), ConnectionID: 1}, false},
-		{"s3 missing connection", Destination{Name: "n", Kind: "s3", Config: json.RawMessage(`{"bucket":"b"}`)}, false},
-		{"s3 ok", Destination{Name: "n", Kind: "s3", Config: json.RawMessage(`{"bucket":"b"}`), ConnectionID: 7}, true},
+		{"s3 missing bucket", Destination{Name: "n", Kind: "s3", Config: json.RawMessage(`{}`)}, false},
+		// v0.2: connection_id no longer carried per-destination — the
+		// cloud_storage role's binding (set at install time) supplies
+		// credentials. So a destination row only needs a bucket name.
+		{"s3 ok no connection_id", Destination{Name: "n", Kind: "s3", Config: json.RawMessage(`{"bucket":"b"}`)}, true},
 		{"unknown kind", Destination{Name: "n", Kind: "weird", Config: json.RawMessage(`{}`)}, false},
 		{"storage_app reserved", Destination{Name: "n", Kind: "storage_app", Config: json.RawMessage(`{}`)}, false},
 	}

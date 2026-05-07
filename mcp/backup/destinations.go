@@ -7,20 +7,17 @@ package main
 //   - Get bytes back by remote_key (for restore)
 //   - List existing keys and Delete one (for retention pruning)
 //
-// Two impls in v0.1:
-//   - local: writes under a host directory; the simplest possible backup
-//   - s3:    any S3-compatible bucket (AWS, R2, B2, Wasabi, MinIO).
-//            Credentials come from the platform's connections store via
-//            the SDK's GetConnection — bytes never touch backup.db.
-//
-// A storage_app destination is reserved for v0.2 (calls files_upload
-// on the storage app); the manifest already declares storage as an
-// optional dep so installing it later doesn't require a backup
-// reinstall.
+// Two impls in v0.2:
+//   - local: writes under a host directory; the simplest possible backup.
+//   - s3:    any S3-compatible bucket. Credentials never touch this app —
+//            we use ctx.PlatformAPI().ExecuteIntegrationTool against the
+//            install's bound `cloud_storage` integration (aws-s3,
+//            cloudflare-r2, …). The runner handles SigV4 signing.
 
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -30,8 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
+	sdk "github.com/apteva/app-sdk"
 )
 
 type Destination_writer interface { // disambiguates from the DB row type
@@ -53,10 +49,6 @@ const (
 	kindStorageApp = "storage_app"
 )
 
-// validateDestination is run before insert. We don't try to *connect*
-// (S3 endpoints can be flaky and we'd rather surface the error in the
-// first run row), but we do enforce the per-kind schema so later code
-// can trust the JSON layout.
 func validateDestination(d *Destination) error {
 	if d.Name == "" {
 		return errors.New("name required")
@@ -72,9 +64,6 @@ func validateDestination(d *Destination) error {
 		}
 		// Empty path is allowed: the runner fills in a default rooted
 		// at the install's writable data dir (`<DataDir>/backups`).
-		// That way a self-hoster can hit "Add destination" → Create
-		// without picking a path, and we don't ship a default like
-		// /var/apteva/backups that fails on every non-root install.
 		if c.Path != "" && !filepath.IsAbs(c.Path) {
 			return errors.New("local path must be absolute (or leave blank for the default under the install's data dir)")
 		}
@@ -86,30 +75,23 @@ func validateDestination(d *Destination) error {
 		if c.Bucket == "" {
 			return errors.New("s3 destination requires {\"bucket\": ...}")
 		}
-		// Endpoint may be empty for AWS; required for R2/B2/MinIO.
-		// We only enforce the bucket here; the runner surfaces auth /
-		// endpoint mistakes during the first Put.
-		if d.ConnectionID == 0 {
-			return errors.New("s3 destination requires connection_id pointing at credentials in the platform connections store")
-		}
+		// Credentials, endpoint, region all live on the bound
+		// cloud_storage integration in v0.2 — no per-destination
+		// connection_id and no access_key fields. The bind happens at
+		// install time via the install dialog's RolePicker.
 	case kindStorageApp:
-		return errors.New("storage_app destination is reserved for v0.2")
+		return errors.New("storage_app destination is reserved for v0.3")
 	default:
 		return fmt.Errorf("unknown destination kind %q", d.Kind)
 	}
 	return nil
 }
 
-// openDestination instantiates a writer for the row. The runner
-// re-opens for each backup run rather than caching — destinations are
-// rare-use and the cost of a fresh client is negligible.
-//
-// defaultLocalDir is used when a kindLocal destination has an empty
-// Path — we resolve to a writable location under the install's data
-// dir rather than failing the run. Pass "" if you don't want the
-// fallback (validation already accepts empty paths so this is the
-// only place that materializes one).
-func openDestination(d *Destination, getConn func(int64) (*credentials.Credentials, *s3Endpoint, error), defaultLocalDir string) (Destination_writer, error) {
+// openDestination instantiates a writer for the row. Cloud (kindS3)
+// destinations resolve credentials via the bound cloud_storage role on
+// the install — none of the operator's S3 keys ever land in backup's
+// own DB.
+func openDestination(d *Destination, ctx *sdk.AppCtx, defaultLocalDir string) (Destination_writer, error) {
 	switch d.Kind {
 	case kindLocal:
 		var c localConfig
@@ -131,34 +113,11 @@ func openDestination(d *Destination, getConn func(int64) (*credentials.Credentia
 		if err := json.Unmarshal(d.Config, &c); err != nil {
 			return nil, err
 		}
-		creds, endpoint, err := getConn(d.ConnectionID)
-		if err != nil {
-			return nil, fmt.Errorf("s3 dest credentials: %w", err)
+		bound := ctx.IntegrationFor("cloud_storage")
+		if bound == nil {
+			return nil, errors.New("s3 destination requires a cloud_storage connection — bind one in the app's settings (R2, S3, …)")
 		}
-		if endpoint != nil {
-			if c.Endpoint == "" {
-				c.Endpoint = endpoint.URL
-			}
-			if c.Region == "" {
-				c.Region = endpoint.Region
-			}
-		}
-		// Default to AWS S3 when the connection didn't pin an endpoint.
-		host := c.Endpoint
-		secure := true
-		if host == "" {
-			host = "s3.amazonaws.com"
-		}
-		host = strings.TrimPrefix(strings.TrimPrefix(host, "https://"), "http://")
-		client, err := minio.New(host, &minio.Options{
-			Creds:  creds,
-			Secure: secure,
-			Region: c.Region,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("s3 client: %w", err)
-		}
-		return &s3Dest{cfg: c, client: client}, nil
+		return &cloudDest{cfg: c, ctx: ctx, bound: bound}, nil
 	default:
 		return nil, fmt.Errorf("unsupported destination kind %q", d.Kind)
 	}
@@ -232,83 +191,137 @@ func (d *localDest) Delete(_ context.Context, key string) error {
 	return err
 }
 
-// ─── s3 ─────────────────────────────────────────────────────────────
+// ─── cloud (s3-compatible via integration) ─────────────────────────
 
 type s3Config struct {
 	Bucket    string `json:"bucket"`
-	Region    string `json:"region,omitempty"`     // "us-east-1" by default
-	Endpoint  string `json:"endpoint,omitempty"`   // "s3.amazonaws.com" by default; required for R2/B2/MinIO
 	KeyPrefix string `json:"key_prefix,omitempty"` // "prod/" → all keys land under prod/
 }
 
-type s3Dest struct {
-	cfg    s3Config
-	client *minio.Client
+type cloudDest struct {
+	cfg   s3Config
+	ctx   *sdk.AppCtx
+	bound *sdk.BoundIntegration
 }
 
-// s3Endpoint is the parsed shape of a connection's S3-compatible
-// metadata. The runner builds this from the connection's config_json.
-type s3Endpoint struct {
-	URL    string
-	Region string
-}
-
-func (d *s3Dest) prefixedKey(key string) string {
+func (d *cloudDest) prefixedKey(key string) string {
 	if d.cfg.KeyPrefix == "" {
 		return key
 	}
 	return strings.TrimSuffix(d.cfg.KeyPrefix, "/") + "/" + key
 }
 
-func (d *s3Dest) Put(ctx context.Context, key string, body io.Reader, size int64) error {
-	_, err := d.client.PutObject(ctx, d.cfg.Bucket, d.prefixedKey(key), body, size,
-		minio.PutObjectOptions{ContentType: "application/gzip"})
+// callTool routes a logical capability through the bound integration's
+// configured tool name, passing the input through ExecuteIntegrationTool.
+// Returns the parsed result envelope or an actionable error.
+func (d *cloudDest) callTool(capability string, input map[string]any) (*sdk.ExecuteResult, error) {
+	tool := d.bound.ToolFor(capability)
+	res, err := d.ctx.PlatformAPI().ExecuteIntegrationTool(d.bound.ConnectionID, tool, input)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", tool, err)
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		status := 0
+		if res != nil {
+			status = res.Status
+		}
+		return nil, fmt.Errorf("%s: %d %s", tool, status, strings.TrimSpace(body))
+	}
+	return res, nil
+}
+
+func (d *cloudDest) Put(_ context.Context, key string, body io.Reader, _ int64) error {
+	// Read the full body into memory. Snapshots are typically small
+	// (<<100MB on real instances; the tar.gz is the platform DB +
+	// per-app DBs, which are SQLite and compress well). For very large
+	// instances we'd want a streaming put — punt to v0.3.
+	bytes, err := io.ReadAll(body)
+	if err != nil {
+		return fmt.Errorf("read body: %w", err)
+	}
+	_, err = d.callTool("object.put", map[string]any{
+		"bucket": d.cfg.Bucket,
+		"key":    d.prefixedKey(key),
+		"body":   bytes,
+	})
 	return err
 }
 
-func (d *s3Dest) Get(ctx context.Context, key string) (io.ReadCloser, error) {
-	obj, err := d.client.GetObject(ctx, d.cfg.Bucket, d.prefixedKey(key), minio.GetObjectOptions{})
+func (d *cloudDest) Get(_ context.Context, key string) (io.ReadCloser, error) {
+	res, err := d.callTool("object.get", map[string]any{
+		"bucket": d.cfg.Bucket,
+		"key":    d.prefixedKey(key),
+	})
 	if err != nil {
 		return nil, err
 	}
-	// Force a stat so callers get an error here rather than mid-stream
-	// when the key is missing.
-	if _, err := obj.Stat(); err != nil {
-		_ = obj.Close()
-		return nil, err
-	}
-	return obj, nil
+	// The runner returns the upstream body in res.Data; for binary
+	// responses it's the raw object bytes. JSON-decoding is *not* run
+	// for non-JSON content types, so res.Data is what S3 sent us.
+	return io.NopCloser(strings.NewReader(string(res.Data))), nil
 }
 
-func (d *s3Dest) List(ctx context.Context) ([]storedObject, error) {
+// listBucketResult mirrors the S3 ListObjectsV2 XML response. Only the
+// fields backup needs.
+type listBucketResult struct {
+	XMLName               xml.Name           `xml:"ListBucketResult"`
+	IsTruncated           bool               `xml:"IsTruncated"`
+	NextContinuationToken string             `xml:"NextContinuationToken"`
+	Contents              []listBucketObject `xml:"Contents"`
+}
+
+type listBucketObject struct {
+	Key          string    `xml:"Key"`
+	Size         int64     `xml:"Size"`
+	LastModified time.Time `xml:"LastModified"`
+}
+
+func (d *cloudDest) List(_ context.Context) ([]storedObject, error) {
 	out := []storedObject{}
-	for info := range d.client.ListObjects(ctx, d.cfg.Bucket, minio.ListObjectsOptions{
-		Prefix: d.cfg.KeyPrefix, Recursive: true,
-	}) {
-		if info.Err != nil {
-			return nil, info.Err
+	cursor := ""
+	for {
+		input := map[string]any{
+			"bucket":    d.cfg.Bucket,
+			"list-type": 2,
 		}
-		key := info.Key
-		key = strings.TrimPrefix(key, strings.TrimSuffix(d.cfg.KeyPrefix, "/")+"/")
-		out = append(out, storedObject{Key: key, Size: info.Size, Modified: info.LastModified})
+		if d.cfg.KeyPrefix != "" {
+			input["prefix"] = d.cfg.KeyPrefix
+		}
+		if cursor != "" {
+			input["continuation-token"] = cursor
+		}
+		res, err := d.callTool("object.list", input)
+		if err != nil {
+			return nil, err
+		}
+		var lbr listBucketResult
+		if err := xml.Unmarshal(res.Data, &lbr); err != nil {
+			return nil, fmt.Errorf("parse list_objects xml: %w", err)
+		}
+		for _, c := range lbr.Contents {
+			key := c.Key
+			if d.cfg.KeyPrefix != "" {
+				key = strings.TrimPrefix(key, strings.TrimSuffix(d.cfg.KeyPrefix, "/")+"/")
+			}
+			out = append(out, storedObject{Key: key, Size: c.Size, Modified: c.LastModified})
+		}
+		if !lbr.IsTruncated || lbr.NextContinuationToken == "" {
+			break
+		}
+		cursor = lbr.NextContinuationToken
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Modified.After(out[j].Modified) })
 	return out, nil
 }
 
-func (d *s3Dest) Delete(ctx context.Context, key string) error {
-	return d.client.RemoveObject(ctx, d.cfg.Bucket, d.prefixedKey(key), minio.RemoveObjectOptions{})
-}
-
-// ─── connection → credentials adapter ───────────────────────────────
-//
-// The runner passes a closure into openDestination so we don't have a
-// hard dependency on the platform SDK shape in the destination layer
-// (eases unit testing). The adapter below is the "real" implementation
-// the runner uses; tests substitute a static credential.
-
-func staticCredentialsAdapter(accessKey, secretKey, sessionToken string) func(int64) (*credentials.Credentials, *s3Endpoint, error) {
-	return func(_ int64) (*credentials.Credentials, *s3Endpoint, error) {
-		return credentials.NewStaticV4(accessKey, secretKey, sessionToken), nil, nil
-	}
+func (d *cloudDest) Delete(_ context.Context, key string) error {
+	_, err := d.callTool("object.delete", map[string]any{
+		"bucket": d.cfg.Bucket,
+		"key":    d.prefixedKey(key),
+	})
+	return err
 }
