@@ -28,7 +28,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.1.0
+version: 0.2.0
 description: |
   Watch and steer the agent's browser. Operator panel + chat
   components. v0.1 is UI-only; backends and tools land in a
