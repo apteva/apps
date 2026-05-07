@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: docs
 display_name: Documents
-version: 0.1.0
+version: 0.1.1
 description: |
   Generate client-facing documents (PDFs from markdown templates) and
   store them in storage. Templates live in this app's DB; agents call
