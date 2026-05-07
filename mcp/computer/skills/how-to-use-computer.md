@@ -3,142 +3,109 @@ name: how-to-use-computer
 triggers:
   - browser_session
   - computer_use
-  - "navigated through"
-  - "browsed"
+  - dialog
+  - modal
+  - embed
+  - compose
+  - "cookie banner"
+  - "login form"
 ---
 
-# Computer — chat attachment guide
+# Computer — chat attachments + web-browsing guide
 
-When you do something visible to a browser, attach the matching
-chat component so the operator sees it instead of reading a wall
-of text. All four are render-only — never use them to ask the
-operator a question.
+## SoM badge colors
 
-## Patterns
+Every interactive element on a screenshot has a colored numeric badge:
 
-### After `browser_session(open, url=X)` succeeds
+- **ORANGE** — text inputs, textareas, contenteditable, selects.
+  *Need to type? Click an orange badge.*
+- **GREEN** — buttons, `role=button`, submit controls.
+  *Need to click an action? Look at green badges.*
+- **BLUE** — `<a href>`, `role=link`. Navigation.
+- **GRAY** — generic `onclick` / `tabindex` wrappers. Prefer the
+  more specific neighbour.
 
-Attach a `browser-card` instead of writing "I opened …":
+Lower label number = higher priority. When two labels match your
+goal, pick the lowest.
 
-```
-respond(components=[{
-  app: "computer",
-  name: "browser-card",
-  props: {
-    instance_id: "<the instance you're on>",
-    backend: "local" | "browserbase" | "steel",
-    url: "<the URL you opened>",
-    status: "active"
-  }
-}])
-```
+## Chat attachments
 
-The card carries the URL, backend, status, and a "watch live" button
-that deep-links to the operator panel. Don't also describe the
-session in prose; the card is the description.
+When you do something visible to the browser, attach a component
+instead of describing it in prose. All render-only — never use them
+to ask the operator a question.
 
-### After `computer_use(screenshot)` when SoM is on
+| When | Component | Key props |
+|---|---|---|
+| After `browser_session(open)` succeeds | `browser-card` | `instance_id`, `backend`, `url`, `status` |
+| After `screenshot` with SoM on | `screenshot-with-som` | `screenshot_url`, `som: [{label,x,y,w,h,kind}]`, `caption` |
+| After traversing several pages | `navigation-timeline` | `steps: [{url,title,thumbnail,ts}]` |
+| Mid-flow "watch me work" tile | `live-view` | `instance_id`, `height`, `mode` |
 
-Attach `screenshot-with-som` so the badges render over the image
-in chat:
+Attach via:
 
 ```
-respond(components=[{
-  app: "computer",
-  name: "screenshot-with-som",
-  props: {
-    screenshot_url: "<the screenshot URL the tool returned>",
-    som: [
-      { label: 1, x: 120, y: 84, w: 200, h: 32, kind: "input" },
-      { label: 2, x: 120, y: 130, w: 80, h: 32, kind: "button" }
-    ],
-    caption: "Login form — email field is label=1, submit is label=2"
-  }
-}])
+respond(components=[{ app: "computer", name: "<from-table>", props: {...} }])
 ```
 
-Skip the component when SoM is off; for a plain screenshot, just
-reference it inline as you would any image.
+Default `live-view` to `mode: "thumb"` (polled image). `mode: "live"`
+is the full screencast — only when the view IS the message; multiple
+live tiles in one transcript get expensive.
 
-### Summarising a multi-page browse
+## Web-browsing patterns
 
-After traversing several pages (research, reading docs, clicking
-through a flow), attach `navigation-timeline` instead of bulleting
-URLs in prose:
+**Cookie / consent banners.** Dismiss FIRST. Look for "Accept",
+"Accept all", "OK", "Agree", "Got it". Some live in closed shadow
+DOM but the AX-tree fallback surfaces them.
 
-```
-respond(components=[{
-  app: "computer",
-  name: "navigation-timeline",
-  props: {
-    steps: [
-      { url: "https://...", title: "...", thumbnail: "...", ts: "10:14" },
-      { url: "https://...", title: "...", thumbnail: "...", ts: "10:15" },
-      ...
-    ]
-  }
-}])
-```
+**Login forms.** Email/username (orange, topmost) → type → click
+"Continue"/"Next" (green) → password if shown → submit. Some sites
+skip the password step if cookies/IP are trusted.
 
-### Announcing "I'm working on this now" mid-flow
+**Floating modals** (overlay + Cancel/X at corner). Click ONLY inside
+the modal's box. Sidebar / page-behind labels are visually covered.
 
-When the next step will take a while and the operator should be
-able to watch, attach a small live-view tile:
+**Inline panels** (no overlay; replaces a section of the page). Common
+when clicking "Video" / "Link" / "Embed" toolbar buttons in editors —
+the picker takes over the area where the body editor was. Click the
+input INSIDE the panel, type, press `Enter` to commit. Most pickers
+auto-commit on Enter — there's often NO visible "Insert" button.
 
-```
-respond(components=[{
-  app: "computer",
-  name: "live-view",
-  props: {
-    instance_id: "<this instance>",
-    height: 320,
-    mode: "thumb"     // "live" only when this view is the focus
-                      // of the message; thumbs are cheaper for
-                      // long transcripts.
-  }
-}])
-```
+**Search auto-suggest.** Type → `ArrowDown` + `Enter` to pick a
+suggestion, or just `Enter` for the raw query.
 
-Default to `mode: "thumb"` (polled image, ~3s refresh). Use
-`mode: "live"` only when the live screencast is the point of the
-message — three live tiles in a long transcript get expensive.
+**Lazy-loaded content.** If your target is below the fold or the
+page seems incomplete: `computer_use(action=scroll, direction=down)`.
 
-## SaaS web composers (Patreon, Substack, Twitter, Notion, …)
+**Form errors.** Rejected input shows red text/icon near the field.
+Read it before retrying.
 
-Three traps that consistently break agent flows in rich-text editors:
+**Click did nothing.** Two consecutive screenshots identical after a
+click → press `Escape`, take a fresh screenshot, retry with a
+different label (the click likely hit an invisible overlay).
 
-1. **/new allocates server state.** URLs like `/posts/new`, `/compose`,
-   `/create` create a draft on the server before the editor renders,
-   then redirect to `/posts/<id>/edit`. Each visit spawns a duplicate
-   draft. If the editor seems broken, do NOT navigate to /new again
-   as a reset — recover in-place by pressing Escape and re-clicking
-   the field.
+## Composers (post / blog / comment editors)
 
-2. **Inline pickers steal focus.** Most editors expose a "+" or
-   "Add ..." button INSIDE the empty body area. Clicking it opens
-   a content-type picker menu (image/video/poll/embed) instead of
-   focusing the text editor. Press Escape, then click an empty
-   area inside the body region.
+**`/new` URLs allocate server state.** `/posts/new`, `/compose`,
+`/create` create a draft on first visit then redirect to
+`/posts/<id>/edit`. Each visit spawns a duplicate. Recover
+IN-PLACE — don't navigate to /new again as a "reset".
 
-3. **Recognise the body field by badge color and tier:**
-   - **Body editor**: ORANGE badge (input/textbox tier), label text
-     shows the placeholder — "Start writing…", "Type here", "Tell
-     your story…". This is a `textbox`-role contenteditable. Always
-     click this first when typing post content.
-   - **Picker buttons**: GREEN badge (button tier), labels read
-     "Click to add", "Add image", "+", icon-only. These open menus,
-     don't accept text.
-   - **Publish is usually two clicks**: first opens a confirmation
-     modal; the post is NOT live until you click the inner
-     Publish/Confirm button. Dismiss any post-publish share/success
-     modal before reading the URL.
+**Body editor vs picker buttons.** Body = ORANGE, large empty area,
+placeholder like "Start writing…". Pickers = GREEN, small icon
+toolbar items that open inline panels. To type post content, click
+the orange body area first; clicking pickers opens menus.
 
-## What NOT to use these for
+**Publish is usually two clicks.** First "Publish" opens a
+confirmation step (visibility / schedule / audience). The post is
+NOT live until you click the inner Publish/Confirm. After publish,
+dismiss any share/success modal before reading the final URL.
 
-- **Asking the operator a question.** Components are render-only.
-  For HITL questions, use `pace(1m)` and wait for a console
-  message back, the same pattern as the Patreon login flow.
-- **Persistent dashboards or settings.** Those belong in the
-  operator panel, not in chat.
-- **Replacing tool calls.** Always run the tool first; the
-  component only summarises what the tool already did.
+## What NOT to do with chat attachments
+
+- **Ask the operator a question.** Components are render-only. For
+  human-in-the-loop input, call `pace(1h)` and emit a marker like
+  `AWAITING_CODE` — the operator's reply arrives as a console-
+  injected message which you read on resume.
+- **Persistent dashboards.** Belong in the operator panel.
+- **Replace a tool call.** Always run the tool first; the component
+  summarises what the tool already did.

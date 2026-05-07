@@ -49,7 +49,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: backup
 display_name: Backup
-version: 0.2.9
+version: 0.2.10
 description: |
   Periodic backups of your Apteva instance — server DB plus every
   installed app's data — driven by the platform snapshot endpoint
@@ -311,7 +311,14 @@ func (a *App) handlePoliciesCollection(w http.ResponseWriter, r *http.Request) {
 		// Schedule via the jobs app. Failure here doesn't roll back the
 		// row — the operator can fix the dependency and re-trigger via
 		// PATCH later. We surface the error in the response.
-		jobsErr := scheduleViaJobs(ctx, p)
+		//
+		// Pass the operator's currently-selected project_id (from the
+		// dashboard URL) so the cron job lands in that project's Jobs
+		// panel. Backup itself is scope:global, so its sidecar has no
+		// natural project context — the panel sends ?project_id=<pid>
+		// on every call and we forward it. Empty falls through to a
+		// project-less ("global") tag.
+		jobsErr := scheduleViaJobs(ctx, p, r.URL.Query().Get("project_id"))
 		out := map[string]any{"policy": p}
 		if jobsErr != nil {
 			out["jobs_warning"] = jobsErr.Error()
@@ -342,8 +349,14 @@ func (a *App) handlePolicyItem(w http.ResponseWriter, r *http.Request) {
 		// an orphan job is harmless (it'll POST /run with a stale
 		// policy_id and that path is idempotent — we treat unknown ids
 		// as a no-op).
+		//
+		// Pass the current request's project_id to jobs_cancel so it
+		// finds the job (jobs filters by project_id). Best case:
+		// operator deletes from the same project where they created
+		// the policy; worst case: project mismatch leaves a stale
+		// jobs row but the policy is still deleted on backup's side.
 		if p, err := dbGetPolicy(ctx.AppDB(), id); err == nil && p.JobsID != "" {
-			_ = cancelViaJobs(ctx, p.JobsID)
+			_ = cancelViaJobs(ctx, p.JobsID, r.URL.Query().Get("project_id"))
 		}
 		if _, err := ctx.AppDB().Exec(`DELETE FROM policies WHERE id = ?`, id); err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())

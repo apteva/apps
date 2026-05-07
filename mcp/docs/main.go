@@ -29,7 +29,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: docs
 display_name: Documents
-version: 0.1.1
+version: 0.1.2
 description: |
   Generate client-facing PDFs from markdown templates and store them
   in storage. Pure-Go render pipeline (no Chromium). Audit trail on

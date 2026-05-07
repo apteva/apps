@@ -263,7 +263,12 @@ func filepathBase(p string) string {
 // scheduleViaJobs / cancelViaJobs proxy through the platform's
 // app-to-app call. Lives in this file because the cron registration
 // is a runner-adjacent concern (every policy creation needs it).
-func scheduleViaJobs(ctx *sdk.AppCtx, p *Policy) error {
+//
+// callerProjectID is the operator's currently-selected project from
+// the dashboard URL — used as _project_id so the scheduled job
+// lands in that project's Jobs panel. Backup is scope:global so
+// its own ctx has no project, but the operator's view does.
+func scheduleViaJobs(ctx *sdk.AppCtx, p *Policy, callerProjectID string) error {
 	gateway := os.Getenv("APTEVA_GATEWAY_URL")
 	if gateway == "" {
 		return fmt.Errorf("APTEVA_GATEWAY_URL not set")
@@ -289,12 +294,15 @@ func scheduleViaJobs(ctx *sdk.AppCtx, p *Policy) error {
 		},
 		"idempotency_key": fmt.Sprintf("backup-policy-%d", p.ID),
 		"owner_app":       "backup",
-		// Backup installs as scope:global, so it has no project_id of
-		// its own. Pass "" explicitly — jobs accepts present-with-empty
-		// as "global, project-less job" (>= jobs v0.1.8). Without this
-		// the call fails with "project_id missing — pass _project_id
-		// when scope=global" on jobs installs that are also global.
-		"_project_id": "",
+		// Tag the cron job with the operator's currently-selected
+		// project so it shows up in that project's Jobs panel.
+		// Backup is scope:global and its sidecar has no APTEVA_PROJECT_ID,
+		// but the dashboard sends ?project_id=<pid> on every call and
+		// we forward it here. Empty (""), with the present-empty
+		// semantics that jobs >= 0.1.8 accepts, marks the job as
+		// "global / no project" — a safe fallback for tool-driven
+		// scheduling that didn't supply one.
+		"_project_id": callerProjectID,
 	}
 	// jobs_schedule returns the job's id as a number — record it as a
 	// string in our policies.jobs_id (TEXT column) and convert back to
@@ -318,14 +326,14 @@ func scheduleViaJobs(ctx *sdk.AppCtx, p *Policy) error {
 	return nil
 }
 
-func cancelViaJobs(ctx *sdk.AppCtx, jobsID string) error {
+func cancelViaJobs(ctx *sdk.AppCtx, jobsID, callerProjectID string) error {
 	id, err := strconv.ParseInt(jobsID, 10, 64)
 	if err != nil {
 		return fmt.Errorf("bad jobs_id %q: %w", jobsID, err)
 	}
 	_, err = ctx.PlatformAPI().CallApp("jobs", "jobs_cancel", map[string]any{
 		"id":          id,
-		"_project_id": "",
+		"_project_id": callerProjectID,
 	})
 	return err
 }

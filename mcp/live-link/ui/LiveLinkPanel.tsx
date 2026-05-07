@@ -35,6 +35,27 @@ function useAppEvents<T = unknown>(
   handlerRef.current = onEvent;
   useEffect(() => {
     if (!app || !projectId) return;
+    const handler = (ev: AppEventEnvelope<T>) => handlerRef.current(ev);
+    // Cross-bundle multiplexer: the dashboard publishes a shared
+    // (app, project) channel pool on window.__aptevaAppEvents. Every
+    // panel mounted in the same realm reuses one EventSource per
+    // (app, project) instead of opening its own. Without this, a few
+    // panels mounted in the agent detail page burn the browser's
+    // per-origin HTTP/1.1 connection budget and stuck POSTs follow.
+    const bridge = (window as unknown as {
+      __aptevaAppEvents?: {
+        subscribe(
+          app: string,
+          projectId: string,
+          fn: (ev: AppEventEnvelope<T>) => void,
+        ): () => void;
+      };
+    }).__aptevaAppEvents;
+    if (bridge) {
+      return bridge.subscribe(app, projectId, handler);
+    }
+    // Fallback: panel running outside the dashboard (or before its
+    // hook module loaded). Open an EventSource directly.
     let lastSeq = 0;
     let es: EventSource | null = null;
     let cancelled = false;
