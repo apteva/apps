@@ -744,6 +744,16 @@ function PolicyForm({
   const [err, setErr] = useState("");
   const [warning, setWarning] = useState("");
 
+  // The form is mounted alongside the parent; if destinations was empty
+  // at first render and the user added one before opening the form,
+  // useState's initializer (which runs only once) already locked destID
+  // at "". Reconcile when destinations populate.
+  useEffect(() => {
+    if (destID === "" && destinations.length > 0) {
+      setDestID(destinations[0].id);
+    }
+  }, [destinations, destID]);
+
   if (!open) return (
     <button
       onClick={() => setOpen(true)}

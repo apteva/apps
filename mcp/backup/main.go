@@ -49,7 +49,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: backup
 display_name: Backup
-version: 0.2.5
+version: 0.2.6
 description: |
   Periodic backups of your Apteva instance — server DB plus every
   installed app's data — driven by the platform snapshot endpoint
