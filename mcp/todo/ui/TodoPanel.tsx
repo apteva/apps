@@ -314,7 +314,7 @@ export default function TodoPanel({}: NativePanelProps) {
           </button>
         </form>
 
-        <div className="flex-1 overflow-auto px-2 py-2">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden px-2 py-2">
           {todos.length === 0 ? (
             <div className="py-12 text-center text-text-muted text-sm">
               Nothing here.
@@ -372,19 +372,25 @@ function TodoRow({
     <li className="flex items-start gap-2 py-1.5 px-2 border-b border-border/50 hover:bg-bg-card/50 group">
       <button
         onClick={onToggle}
-        className={`mt-0.5 w-4 h-4 rounded-full border ${
+        className={`shrink-0 mt-0.5 w-4 h-4 rounded-full border ${
           t.status === "done" ? "bg-success border-success" : "border-text-dim"
         }`}
       />
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className={`text-xs ${PRIORITY_TONE[t.priority]}`}>P{t.priority}</span>
-          <button onClick={onEdit} className="text-left text-text text-sm truncate">
+        <div className="flex items-center gap-2">
+          {t.priority < 4 && (
+            <span className={`shrink-0 text-xs ${PRIORITY_TONE[t.priority]}`}>P{t.priority}</span>
+          )}
+          <button
+            onClick={onEdit}
+            className="flex-1 min-w-0 text-left text-text text-sm truncate"
+            title={t.title}
+          >
             {t.title}
           </button>
-          {t.rrule && <span className="text-[10px] text-text-dim">↻</span>}
+          {t.rrule && <span className="shrink-0 text-[10px] text-text-dim">↻</span>}
           {t.source === "agent" && (
-            <span className="text-[10px] text-info border border-info/40 rounded px-1">agent</span>
+            <span className="shrink-0 text-[10px] text-info border border-info/40 rounded px-1">agent</span>
           )}
         </div>
         <div className="flex items-center gap-2 text-xs text-text-dim flex-wrap">
@@ -394,9 +400,9 @@ function TodoRow({
             </span>
           )}
           {list && (
-            <span className="flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full" style={{ background: list.color }} />
-              {list.name}
+            <span className="flex items-center gap-1 min-w-0">
+              <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: list.color }} />
+              <span className="truncate">{list.name}</span>
             </span>
           )}
           {t.tags.map((tag) => (
@@ -411,7 +417,7 @@ function TodoRow({
           ))}
         </div>
       </div>
-      <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1 text-xs">
+      <div className="shrink-0 opacity-30 group-hover:opacity-100 flex items-center gap-1 text-xs">
         <button onClick={() => onSnooze("tomorrow")} className="text-text-muted hover:text-text px-1">tmrw</button>
         <button onClick={() => onSnooze("next_week")} className="text-text-muted hover:text-text px-1">+1w</button>
         <button onClick={onDelete} className="text-text-muted hover:text-error px-1">×</button>
