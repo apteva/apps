@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/live-link
 go 1.25.0
 
 require (
-	github.com/apteva/app-sdk v0.2.0
+	github.com/apteva/app-sdk v0.4.0
 	modernc.org/sqlite v1.50.0
 )
 

@@ -82,6 +82,14 @@ func (p *recordingPlatform) GetInstance(id int64) (*sdk.PlatformInstance, error)
 func (p *recordingPlatform) SendEvent(int64, string) error { return nil }
 func (p *recordingPlatform) SendToChannel(string, string, string) error { return nil }
 func (p *recordingPlatform) WhoAmI() (*sdk.InstallIdentity, error) { return p.identity, nil }
+func (p *recordingPlatform) StartOAuth(sdk.OAuthStartRequest) (*sdk.OAuthStartResult, error) {
+	return &sdk.OAuthStartResult{}, nil
+}
+func (p *recordingPlatform) DisconnectConnection(int64) error                        { return nil }
+func (p *recordingPlatform) ListOwnedConnections() ([]sdk.PlatformConnection, error) { return nil, nil }
+func (p *recordingPlatform) GetGrants(int64) (*sdk.GrantsResponse, error) {
+	return &sdk.GrantsResponse{DefaultEffect: "allow"}, nil
+}
 
 func (p *recordingPlatform) ExecuteIntegrationTool(connID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
 	p.mu.Lock()
@@ -101,6 +109,17 @@ func (p *recordingPlatform) CallApp(appName, tool string, input map[string]any) 
 		return nil, p.nextCallErr
 	}
 	return p.nextCallResult, nil
+}
+
+func (p *recordingPlatform) CallAppResult(appName, tool string, input map[string]any, out any) error {
+	raw, err := p.CallApp(appName, tool, input)
+	if err != nil {
+		return err
+	}
+	if len(raw) == 0 || out == nil {
+		return nil
+	}
+	return json.Unmarshal(raw, out)
 }
 
 // --- helpers --------------------------------------------------------

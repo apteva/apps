@@ -82,6 +82,7 @@ func (p *fakePlatform) SendToChannel(_, _, _ string) error                      
 func (p *fakePlatform) CallApp(_, _ string, _ map[string]any) (json.RawMessage, error) {
 	return nil, nil
 }
+func (p *fakePlatform) CallAppResult(_, _ string, _ map[string]any, _ any) error { return nil }
 func (p *fakePlatform) StartOAuth(_ sdk.OAuthStartRequest) (*sdk.OAuthStartResult, error) {
 	return nil, nil
 }

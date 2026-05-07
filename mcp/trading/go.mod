@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/trading
 go 1.25.0
 
 require (
-	github.com/apteva/app-sdk v0.1.3-0.20260430070155-43f24574d06d
+	github.com/apteva/app-sdk v0.4.0
 	github.com/google/uuid v1.6.0
 	modernc.org/sqlite v1.50.0
 )

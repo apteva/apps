@@ -39,6 +39,7 @@ func (s *stubPlatform) ExecuteIntegrationTool(connID int64, tool string, input m
 func (s *stubPlatform) CallApp(string, string, map[string]any) (json.RawMessage, error) {
 	return nil, nil
 }
+func (s *stubPlatform) CallAppResult(string, string, map[string]any, any) error { return nil }
 func (s *stubPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
 	return &sdk.PlatformConnection{ID: id, AppSlug: "porkbun", Status: "active"}, nil
 }
@@ -58,6 +59,14 @@ func (s *stubPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
 		ProjectID: "test-proj",
 		Bindings:  bindings,
 	}, nil
+}
+func (s *stubPlatform) StartOAuth(sdk.OAuthStartRequest) (*sdk.OAuthStartResult, error) {
+	return &sdk.OAuthStartResult{}, nil
+}
+func (s *stubPlatform) DisconnectConnection(int64) error                        { return nil }
+func (s *stubPlatform) ListOwnedConnections() ([]sdk.PlatformConnection, error) { return nil, nil }
+func (s *stubPlatform) GetGrants(int64) (*sdk.GrantsResponse, error) {
+	return &sdk.GrantsResponse{DefaultEffect: "allow"}, nil
 }
 
 // ─── Test harness ─────────────────────────────────────────────────

@@ -78,6 +78,7 @@ func (s *stubPlatform) ExecuteIntegrationTool(connID int64, tool string, input m
 func (s *stubPlatform) CallApp(string, string, map[string]any) (json.RawMessage, error) {
 	return nil, nil
 }
+func (s *stubPlatform) CallAppResult(string, string, map[string]any, any) error { return nil }
 func (s *stubPlatform) StartOAuth(sdk.OAuthStartRequest) (*sdk.OAuthStartResult, error) {
 	return nil, nil
 }
