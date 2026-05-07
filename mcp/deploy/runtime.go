@@ -218,11 +218,21 @@ func resolveCommand(spec ReleaseSpec) (string, []string, error) {
 		// artifact (mirror of what the builder picked) and run its
 		// start script. Users can override via start_cmd if their app
 		// doesn't have a "start" script or wants a custom invocation.
-		pm := detectPackageManager(spec.ArtifactDir)
-		if !hasNpmScript(spec.ArtifactDir, "start") {
-			return "", nil, fmt.Errorf("node release has no \"start\" script in package.json; set start_cmd explicitly")
+		//
+		// Bun-script convention fallback: package.json with no start
+		// script but a root-level serve.ts (or server.ts) →
+		// `bun run serve.ts`. Common in Bun-native projects that drive
+		// their own server. Only kicks in when bun is on PATH.
+		if hasNpmScript(spec.ArtifactDir, "start") {
+			pm := detectPackageManager(spec.ArtifactDir)
+			return pm, []string{"run", "start"}, nil
 		}
-		return pm, []string{"run", "start"}, nil
+		if bunScript := findBunRunScript(spec.ArtifactDir); bunScript != "" {
+			if _, err := exec.LookPath("bun"); err == nil {
+				return "bun", []string{"run", bunScript}, nil
+			}
+		}
+		return "", nil, fmt.Errorf("node release has no \"start\" script and no serve.ts/server.ts; set start_cmd explicitly")
 	case "blank":
 		return "", nil, errors.New("blank framework requires start_cmd")
 	default:

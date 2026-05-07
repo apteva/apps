@@ -172,12 +172,51 @@ func (*nodeBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io
 			if err := bc.Run(); err != nil {
 				return "", fmt.Errorf("%s run build: %w", pm, err)
 			}
+		} else if buildScript := findBunBuildScript(srcDir); buildScript != "" {
+			// Bun-script convention: package.json has no "build" but
+			// there's a root-level build.ts. Run it via `bun run` —
+			// only when bun is on PATH (npm/yarn/pnpm can't execute a
+			// .ts file directly without a TS runner).
+			if _, err := exec.LookPath("bun"); err != nil {
+				fmt.Fprintf(logW, "skipping build: no \"build\" script and bun (for build.ts) not on PATH\n")
+			} else {
+				fmt.Fprintf(logW, "+ bun run %s (cwd=%s) — Bun-script convention\n", buildScript, srcDir)
+				bc := exec.Command("bun", "run", buildScript)
+				bc.Dir = srcDir
+				bc.Stdout = logW
+				bc.Stderr = logW
+				if err := bc.Run(); err != nil {
+					return "", fmt.Errorf("bun run %s: %w", buildScript, err)
+				}
+			}
 		}
 	}
 	if err := copyTreeAll(srcDir, artifactDir); err != nil {
 		return "", fmt.Errorf("stage artifact: %w", err)
 	}
 	return "", nil
+}
+
+// findBunBuildScript / findBunRunScript look for the Bun-script
+// convention's canonical entry files. build.ts is the convention for
+// custom build pipelines (apteva-site, several Bun examples);
+// serve.ts / server.ts is the convention for runtime entries that
+// drive Bun.serve directly. Returning "" leaves the caller to fall
+// back to the conventional npm-scripts path or error out.
+func findBunBuildScript(dir string) string {
+	if exists(filepath.Join(dir, "build.ts")) {
+		return "build.ts"
+	}
+	return ""
+}
+
+func findBunRunScript(dir string) string {
+	for _, name := range []string{"serve.ts", "server.ts"} {
+		if exists(filepath.Join(dir, name)) {
+			return name
+		}
+	}
+	return ""
 }
 
 // detectPackageManager picks a Node toolchain from lockfiles in dir.
