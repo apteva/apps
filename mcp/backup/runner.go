@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -295,26 +296,37 @@ func scheduleViaJobs(ctx *sdk.AppCtx, p *Policy) error {
 		// when scope=global" on jobs installs that are also global.
 		"_project_id": "",
 	}
+	// jobs_schedule returns the job's id as a number — record it as a
+	// string in our policies.jobs_id (TEXT column) and convert back to
+	// int64 in cancelViaJobs.
 	var resp struct {
 		Job struct {
-			ID string `json:"id"`
+			ID int64 `json:"id"`
 		} `json:"job"`
 	}
 	if err := ctx.PlatformAPI().CallAppResult("jobs", "jobs_schedule", body, &resp); err != nil {
 		return fmt.Errorf("jobs_schedule: %w", err)
 	}
-	if resp.Job.ID == "" {
+	if resp.Job.ID == 0 {
 		return fmt.Errorf("jobs returned no id")
 	}
-	if _, err := ctx.AppDB().Exec(`UPDATE policies SET jobs_id = ? WHERE id = ?`, resp.Job.ID, p.ID); err != nil {
+	jobsID := strconv.FormatInt(resp.Job.ID, 10)
+	if _, err := ctx.AppDB().Exec(`UPDATE policies SET jobs_id = ? WHERE id = ?`, jobsID, p.ID); err != nil {
 		return err
 	}
-	p.JobsID = resp.Job.ID
+	p.JobsID = jobsID
 	return nil
 }
 
 func cancelViaJobs(ctx *sdk.AppCtx, jobsID string) error {
-	_, err := ctx.PlatformAPI().CallApp("jobs", "jobs_cancel", map[string]any{"id": jobsID})
+	id, err := strconv.ParseInt(jobsID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("bad jobs_id %q: %w", jobsID, err)
+	}
+	_, err = ctx.PlatformAPI().CallApp("jobs", "jobs_cancel", map[string]any{
+		"id":          id,
+		"_project_id": "",
+	})
 	return err
 }
 
