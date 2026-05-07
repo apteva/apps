@@ -131,7 +131,13 @@ func cmdDevNextJS(srcDir string) (string, []string, error) {
 // cmdDevNode prefers `<pm> run dev` if the package.json has one,
 // else `<pm> start`. Doesn't try to run a non-existent script — the
 // readiness probe would just time out and the user gets a confusing
-// crash. We sniff package.json scripts to pick the right one.
+// crash.
+//
+// Bun-script convention fallback: package.json with no dev/start
+// script but a root-level serve.ts (or server.ts) → run it via
+// `bun run serve.ts`. Common in Bun-native projects that drive their
+// own server with Bun.serve. Only kicks in when bun is on PATH —
+// npm/yarn/pnpm can't run a .ts file without a TS runner.
 func cmdDevNode(srcDir string) (string, []string, error) {
 	pm := detectPackageManagerInDir(srcDir)
 	if _, err := exec.LookPath(pm); err != nil {
@@ -143,7 +149,24 @@ func cmdDevNode(srcDir string) (string, []string, error) {
 	if hasScript(srcDir, "start") {
 		return pm, []string{"run", "start"}, nil
 	}
-	return "", nil, errors.New(`no "dev" or "start" script in package.json — set run_cmd explicitly`)
+	if bunScript := findBunRunScript(srcDir); bunScript != "" {
+		if _, err := exec.LookPath("bun"); err == nil {
+			return "bun", []string{"run", bunScript}, nil
+		}
+	}
+	return "", nil, errors.New(`no "dev" or "start" script in package.json — set run_cmd explicitly (or add bun + serve.ts for Bun-script convention)`)
+}
+
+// findBunRunScript looks for the Bun-script convention's runtime
+// entry. serve.ts is canonical (apteva-site et al); server.ts is the
+// next most common. Returns the filename or "" if none.
+func findBunRunScript(dir string) string {
+	for _, name := range []string{"serve.ts", "server.ts"} {
+		if exists(filepath.Join(dir, name)) {
+			return name
+		}
+	}
+	return ""
 }
 
 func cmdDevGo(srcDir string) (string, []string, error) {
