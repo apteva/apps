@@ -34,7 +34,7 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.5.3
+version: 0.5.4
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code. Optionally
@@ -246,6 +246,13 @@ func writeZip(w http.ResponseWriter, store FileStore, slug string) error {
 // zipRepo streams a repo zip into any io.Writer. Used by the HTTP
 // export handler (writes to the response) and by the repos_export MCP
 // tool (writes to a bytes.Buffer for base64 envelope).
+//
+// Dev artifacts are skipped — node_modules / .next / .git / dist /
+// build / .cache. Once the dev runtime ran on a repo, those dirs
+// can be hundreds of megabytes; consumers (Deploy, GitHub re-export,
+// agent-side downloads) need the source tree, not the build cache.
+// Same skip list Deploy's kind=local fetcher already uses, so a
+// kind=code fetch and a kind=local fetch produce equivalent trees.
 func zipRepo(w io.Writer, store FileStore, slug string) error {
 	files, err := store.List(slug, "", true)
 	if err != nil {
@@ -255,6 +262,9 @@ func zipRepo(w io.Writer, store FileStore, slug string) error {
 	defer zw.Close()
 	for _, f := range files {
 		if f.IsDir {
+			continue
+		}
+		if shouldSkipForExport(f.Path) {
 			continue
 		}
 		body, err := store.Read(slug, f.Path)
@@ -271,6 +281,19 @@ func zipRepo(w io.Writer, store FileStore, slug string) error {
 		}
 	}
 	return nil
+}
+
+// shouldSkipForExport drops dev/build cache directories so exports
+// stay source-only. A path is skipped if any of its segments names a
+// well-known dev artifact dir.
+func shouldSkipForExport(rel string) bool {
+	for _, seg := range strings.Split(rel, "/") {
+		switch seg {
+		case "node_modules", ".next", ".git", "dist", "build", ".cache":
+			return true
+		}
+	}
+	return false
 }
 
 // readZipInto unpacks a zip into a repo via the store. Used by import.
