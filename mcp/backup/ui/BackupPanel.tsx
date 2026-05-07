@@ -324,7 +324,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
             </div>
           </Row>
         ))}
-        <DestinationForm onCreated={reload} api={api} />
+        <DestinationForm onCreated={reload} api={api} installId={installId} />
       </section>
 
       {/* Policies */}
@@ -553,11 +553,23 @@ function Pill({ children }: { children: React.ReactNode }) {
 
 // ─── forms ────────────────────────────────────────────────────────
 
+// Connection — minimal shape we need from /api/connections.
+interface Connection {
+  id: number;
+  name: string;
+  app_slug: string;
+  status: string;
+}
+
+// compatible_slugs for the cloud_storage role; mirrors apteva.yaml.
+const CLOUD_STORAGE_SLUGS = ["aws-s3", "cloudflare-r2"];
+
 function DestinationForm({
-  onCreated, api,
+  onCreated, api, installId,
 }: {
   onCreated: () => void;
   api: <T>(method: string, path: string, body?: unknown) => Promise<T>;
+  installId: number;
 }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
@@ -565,7 +577,31 @@ function DestinationForm({
   const [path, setPath] = useState("");
   const [bucket, setBucket] = useState("");
   const [keyPrefix, setKeyPrefix] = useState("");
+  const [connections, setConnections] = useState<Connection[] | null>(null);
+  const [connID, setConnID] = useState<number | "">("");
   const [err, setErr] = useState("");
+
+  // Lazy-load operator's S3-compatible connections the first time the
+  // form is opened with kind=s3. Single round-trip to /api/connections;
+  // we filter client-side by app_slug.
+  useEffect(() => {
+    if (kind !== "s3" || connections !== null) return;
+    (async () => {
+      try {
+        const res = await fetch("/api/connections", { credentials: "same-origin" });
+        if (!res.ok) throw new Error(`${res.status}`);
+        const body = await res.json() as { connections?: Connection[] };
+        const list = (body.connections || []).filter(
+          (c) => CLOUD_STORAGE_SLUGS.includes(c.app_slug) && c.status === "active",
+        );
+        setConnections(list);
+        if (list.length === 1) setConnID(list[0].id);
+      } catch (e) {
+        setErr("Couldn't load connections: " + (e as Error).message);
+        setConnections([]);
+      }
+    })();
+  }, [kind, connections]);
 
   if (!open) return (
     <button
@@ -578,6 +614,21 @@ function DestinationForm({
 
   const submit = async () => {
     setErr("");
+    if (kind === "s3") {
+      if (!connID) { setErr("Pick a cloud storage connection"); return; }
+      // Bind the chosen connection to the cloud_storage role on this
+      // install. Idempotent — same body on every save just refreshes
+      // the binding to the picked value.
+      try {
+        const r = await fetch(`/api/apps/installs/${installId}/bindings`, {
+          method: "PUT",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cloud_storage: connID }),
+        });
+        if (!r.ok) throw new Error(`bind failed: ${r.status} ${await r.text().catch(() => "")}`);
+      } catch (e) { setErr((e as Error).message); return; }
+    }
     const config = kind === "local"
       ? { path }
       : { bucket, key_prefix: keyPrefix };
@@ -600,7 +651,7 @@ function DestinationForm({
         <Label>Kind</Label>
         <Select value={kind} onChange={(v) => setKind(v as "local" | "s3")}>
           <option value="local">local — host directory</option>
-          <option value="s3">s3 — uses bound cloud_storage connection</option>
+          <option value="s3">s3 — Cloudflare R2 / AWS S3 / B2 / …</option>
         </Select>
 
         {kind === "local" && <>
@@ -613,16 +664,38 @@ function DestinationForm({
         </>}
 
         {kind === "s3" && <>
+          <Label>Connection</Label>
+          {connections === null ? (
+            <div className="text-text-muted text-xs italic py-1.5">Loading your connections…</div>
+          ) : connections.length === 0 ? (
+            <div className="text-text-muted text-xs">
+              No compatible connections found. Create one in the{" "}
+              <a href="/integrations" className="text-accent hover:underline">Integrations</a>{" "}
+              tab — pick "Cloudflare R2" or "AWS S3", paste your credentials.
+            </div>
+          ) : (
+            <Select
+              value={connID === "" ? "" : String(connID)}
+              onChange={(v) => setConnID(Number(v))}
+            >
+              <option value="">Pick a connection…</option>
+              {connections.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name} · {c.app_slug}
+                </option>
+              ))}
+            </Select>
+          )}
           <Label>Bucket</Label>
           <Input value={bucket} onChange={setBucket} placeholder="apteva-backups" />
           <Label>Key prefix</Label>
           <Input value={keyPrefix} onChange={setKeyPrefix} placeholder="prod/" />
         </>}
       </FormGrid>
-      {kind === "s3" && (
+      {kind === "s3" && connections && connections.length > 0 && (
         <div className="text-text-muted text-xs">
-          Credentials come from the cloud_storage connection bound to this app
-          (R2 / S3 / B2 / …). Bind it in the install dialog or app settings.
+          Saving binds the chosen connection to this app's cloud_storage role —
+          credentials never leave the platform.
         </div>
       )}
       {err && <div className="text-error text-xs">{err}</div>}
@@ -635,7 +708,10 @@ function DestinationForm({
         </button>
         <button
           onClick={submit}
-          disabled={!name}
+          disabled={
+            !name ||
+            (kind === "s3" && (!connID || !bucket))
+          }
           className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold hover:bg-accent-hover disabled:opacity-50"
         >
           Create
