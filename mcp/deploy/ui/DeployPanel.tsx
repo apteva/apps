@@ -538,13 +538,22 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                 <div className="text-text-dim uppercase mb-1">Latest build</div>
                 {detail.builds[0] ? (
                   <div className="space-y-1">
-                    <div>
+                    <div className="flex items-baseline gap-2">
                       <span className={statusColor(detail.builds[0].status) + " font-medium"}>
                         #{detail.builds[0].id} {detail.builds[0].status}
                       </span>
                       <span className="text-text-dim">
-                        {" "}· {formatDuration(detail.builds[0].duration_ms)} · {formatSize(detail.builds[0].artifact_size)}
+                        · {formatDuration(detail.builds[0].duration_ms)} · {formatSize(detail.builds[0].artifact_size)}
                       </span>
+                      {detail.builds[0].status === "succeeded"
+                        && detail.current_release?.build_id !== detail.builds[0].id && (
+                        <button
+                          type="button"
+                          onClick={() => handleReleaseBuild(detail.builds[0].id)}
+                          className="ml-auto px-2 py-0.5 text-[11px] border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+                          title="Promote this build to a live release"
+                        >Release this build →</button>
+                      )}
                     </div>
                     <div className="text-text-dim truncate">framework: {detail.builds[0].framework}</div>
                     {detail.builds[0].error && (
