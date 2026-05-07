@@ -268,11 +268,21 @@ func scheduleViaJobs(ctx *sdk.AppCtx, p *Policy) error {
 		return fmt.Errorf("APTEVA_GATEWAY_URL not set")
 	}
 	body := map[string]any{
-		"name":     "backup-policy-" + fmt.Sprint(p.ID),
-		"cron":     p.Schedule,
+		"name": "backup-policy-" + fmt.Sprint(p.ID),
+		// jobs_schedule expects {schedule: {kind, cron}}; the older
+		// "cron" top-level field was rejected as "schedule required".
+		"schedule": map[string]any{
+			"kind": "cron",
+			"cron": p.Schedule,
+		},
+		// target.kind=http with {app, path} — jobs builds the
+		// gateway URL itself (APTEVA_GATEWAY_URL + /api/apps/backup/run).
+		// Passing url:"/api/apps/backup/run" would be treated as an
+		// absolute URL and fail to resolve.
 		"target": map[string]any{
 			"kind":   "http",
-			"url":    "/api/apps/backup/run",
+			"app":    "backup",
+			"path":   "/run",
 			"method": "POST",
 			"body":   map[string]any{"policy_id": p.ID},
 		},
