@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.3.4
+version: 0.4.0
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
@@ -66,6 +66,12 @@ requires:
       compatible_app_names: [certs]
       label: Certs app
       hint: Install the Certs app to auto-issue Let's Encrypt certs on attach.
+    - role: routes
+      kind: app
+      required: false
+      compatible_app_names: [routes]
+      label: Routes app
+      hint: Install the Routes app to publish deployments at public hostnames via the platform's host router.
 provides:
   http_routes:
     - prefix: /
@@ -522,6 +528,18 @@ func (a *App) runRelease(d *Deployment, b *Build) (*Release, error) {
 	emit("deploy.release.live", map[string]any{
 		"deployment_id": d.ID, "release_id": rel.ID, "port": port, "pid": rr.PID,
 	})
+	// If this deployment has a domain attached, refresh the routes
+	// app so apteva-server's host router proxies to the new port.
+	// Each release gets a fresh port from the supervisor's allocator,
+	// so this catches the rebuild case where attach_domain ran before
+	// release and the route hasn't been registered yet, plus the
+	// re-release case where the previous route's target is stale.
+	if d.Domain != "" {
+		fresh, _ := dbGetDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
+		if fresh != nil {
+			registerRouteForDeployment(globalCtx, a, fresh)
+		}
+	}
 	return dbGetRelease(globalCtx.AppDB(), rel.ID)
 }
 

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 
 	sdk "github.com/apteva/app-sdk"
@@ -242,6 +244,18 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec
 			})
 		}
 	}
+
+	// Register the route with the Routes app so apteva-server's host
+	// router can proxy public requests for this fqdn to the live
+	// release. Re-fetch the deployment so we see the freshly-stamped
+	// Domain field. No-op when Routes isn't installed; no-op when
+	// no release is live yet (the next deploy_release will register
+	// it via runRelease's hook below).
+	fresh, _ := dbGetDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
+	if fresh == nil {
+		fresh = d
+	}
+	registerRouteForDeployment(ctx, a, fresh)
 	return nil
 }
 
@@ -278,6 +292,11 @@ func (a *App) detachDomain(ctx *sdk.AppCtx, d *Deployment) error {
 	if a.certsAvailable(ctx) && d.Domain != "" {
 		_ = callCertsTool(ctx, "cert_revoke", map[string]any{"fqdn": d.Domain}, nil)
 	}
+	// Drop the route entry so apteva-server stops proxying to a
+	// deployment the user just severed from its domain. No-op when
+	// Routes isn't installed; the platform host router falls through
+	// to its existing path-based routing.
+	unregisterRouteForDeployment(ctx, a, d.Domain)
 	emit("deploy.domain.detached", map[string]any{
 		"deployment_id": d.ID, "fqdn": d.Domain,
 	})
@@ -325,4 +344,145 @@ func splitRecordID(s string) (apex, rtype string, ok bool) {
 		return "", "", false
 	}
 	return s[:i], s[i+1:], true
+}
+
+// ─── Routes app integration ───────────────────────────────────────
+//
+// Routes is the platform's hostname-routing layer (apps/mcp/routes).
+// When deploy.attach_domain runs and a current release is live, we
+// register the (fqdn → 127.0.0.1:port) pair so apteva-server's host
+// router can proxy public requests to the supervised process.
+//
+// Optional dep — if Routes isn't installed, public reachability falls
+// back to whatever the operator has wired externally (Caddy, nginx,
+// or just-not-public). The DNS record is still written via Domains;
+// the user can reach the deployment by IP/port directly until Routes
+// shows up.
+
+func (a *App) routesAvailable(ctx *sdk.AppCtx) bool {
+	if ctx == nil {
+		return false
+	}
+	bound := ctx.IntegrationFor("routes")
+	return bound != nil && bound.Kind == "app"
+}
+
+// callRoutesTool mirrors callDomainsTool / callCertsTool. Pass
+// owner_install_id (deploy's own install id) explicitly — the
+// platform's CallApp proxy doesn't yet forward caller identity to
+// MCP targets, so the routes app trusts the caller-supplied value.
+func callRoutesTool(ctx *sdk.AppCtx, tool string, args map[string]any, out any) error {
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return errors.New("platform unavailable")
+	}
+	raw, err := ctx.PlatformAPI().CallApp("routes", tool, args)
+	if err != nil {
+		return fmt.Errorf("call routes.%s: %w", tool, err)
+	}
+	var env struct {
+		Result map[string]any `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return fmt.Errorf("decode routes.%s envelope: %w", tool, err)
+	}
+	if env.Error != nil {
+		return fmt.Errorf("routes.%s: %s", tool, env.Error.Message)
+	}
+	content, _ := env.Result["content"].([]any)
+	if len(content) == 0 {
+		return nil
+	}
+	first, _ := content[0].(map[string]any)
+	text, _ := first["text"].(string)
+	if text == "" || out == nil {
+		return nil
+	}
+	return json.Unmarshal([]byte(text), out)
+}
+
+// myInstallID reads APTEVA_INSTALL_ID from the env. The routes app's
+// register tool requires it as owner_install_id; the platform sets
+// it when spawning the sidecar. Returns 0 if unset (which the routes
+// app rejects with a clear error).
+func myInstallID() int64 {
+	v := strings.TrimSpace(os.Getenv("APTEVA_INSTALL_ID"))
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// registerRouteForDeployment publishes a deployment's current release
+// port at its attached domain. Idempotent — calling again with the
+// same args updates the route in place. Skipped (no error) when
+// Routes isn't installed or when there's no live release to point
+// at; callers can rely on this being safe to fan out from anywhere.
+func registerRouteForDeployment(ctx *sdk.AppCtx, app *App, d *Deployment) {
+	if d == nil || d.Domain == "" {
+		return
+	}
+	if app == nil || !app.routesAvailable(ctx) {
+		return
+	}
+	port := currentReleasePort(ctx, d)
+	if port == 0 {
+		return // No live release; route registration waits until release.
+	}
+	target := fmt.Sprintf("http://127.0.0.1:%d", port)
+	if err := callRoutesTool(ctx, "routes_register", map[string]any{
+		"hostname":         d.Domain,
+		"target":           target,
+		"owner_install_id": myInstallID(),
+		"owner_kind":       "deploy",
+		"cert_fqdn":        d.Domain,
+	}, nil); err != nil {
+		emit("deploy.route.register_failed", map[string]any{
+			"deployment_id": d.ID, "fqdn": d.Domain, "error": err.Error(),
+		})
+		return
+	}
+	emit("deploy.route.registered", map[string]any{
+		"deployment_id": d.ID, "fqdn": d.Domain, "port": port,
+	})
+}
+
+// unregisterRouteForDeployment is the cleanup half — called from
+// detachDomain and from deploy_destroy. Safe when Routes isn't
+// installed; safe when no route was ever registered (the routes app
+// returns removed: false).
+func unregisterRouteForDeployment(ctx *sdk.AppCtx, app *App, fqdn string) {
+	if fqdn == "" {
+		return
+	}
+	if app == nil || !app.routesAvailable(ctx) {
+		return
+	}
+	_ = callRoutesTool(ctx, "routes_unregister", map[string]any{
+		"hostname":         fqdn,
+		"owner_install_id": myInstallID(),
+	}, nil)
+}
+
+// currentReleasePort returns the live port for a deployment, or 0
+// when no release is live. Best-effort — DB-only, no IPC.
+func currentReleasePort(ctx *sdk.AppCtx, d *Deployment) int {
+	if d.CurrentReleaseID == nil {
+		return 0
+	}
+	rel, err := dbGetRelease(ctx.AppDB(), *d.CurrentReleaseID)
+	if err != nil || rel == nil {
+		return 0
+	}
+	if rel.Status != "live" {
+		return 0
+	}
+	return rel.Port
 }
