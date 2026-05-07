@@ -246,9 +246,19 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
       try {
         const d = await api<DeploymentDetail>("GET", `/deployments/${id}`);
         setDetail(d);
+        // Always re-anchor the log pane to THIS deployment, so
+        // switching from a deployment with a live release to a
+        // deployment without one doesn't leave the previous one's
+        // log target stuck in view. Preference: live release > latest
+        // build > nothing.
         if (d.current_release) {
           setLogKind("release");
           setLogTargetId(d.current_release.id);
+        } else if (d.builds && d.builds[0]) {
+          setLogKind("build");
+          setLogTargetId(d.builds[0].id);
+        } else {
+          setLogTargetId(null);
         }
       } catch (e) {
         setError((e as Error).message);
@@ -555,7 +565,16 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                         >Release this build →</button>
                       )}
                     </div>
-                    <div className="text-text-dim truncate">framework: {detail.builds[0].framework}</div>
+                    <div className="text-text-dim truncate">
+                      built as: {detail.builds[0].framework}
+                      {detail.builds[0].framework !== detail.deployment.framework
+                        && detail.deployment.framework !== ""
+                        && (
+                          <span className="text-yellow/80" title="Deployment's framework changed since this build — next build will use the deployment's current framework.">
+                            {" "}· next build: {detail.deployment.framework}
+                          </span>
+                        )}
+                    </div>
                     {detail.builds[0].error && (
                       <div className="text-red truncate" title={detail.builds[0].error}>
                         {detail.builds[0].error}
