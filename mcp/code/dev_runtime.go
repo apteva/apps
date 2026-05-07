@@ -179,9 +179,13 @@ func cmdDevGo(srcDir string) (string, []string, error) {
 // detectPackageManagerInDir mirrors deploy's lockfile-precedence rule
 // (bun > pnpm > yarn > npm) so the dev runtime and the deploy build
 // pick the same tool when both observe the same repo.
+//
+// Both bun.lockb (legacy binary) and bun.lock (current text format)
+// are accepted — the latter is what current bun init / bun install
+// creates, so missing it silently falls through to npm.
 func detectPackageManagerInDir(dir string) string {
 	switch {
-	case exists(filepath.Join(dir, "bun.lockb")):
+	case exists(filepath.Join(dir, "bun.lockb")) || exists(filepath.Join(dir, "bun.lock")):
 		return "bun"
 	case exists(filepath.Join(dir, "pnpm-lock.yaml")):
 		return "pnpm"
