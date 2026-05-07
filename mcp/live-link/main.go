@@ -124,22 +124,59 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		"gateway", os.Getenv("APTEVA_GATEWAY_URL"),
 		"orphaned_runs", orphanedCount)
 
-	// Auto-restart: if the previous sidecar died while a tunnel was
-	// up, bring it back. The 2-second delay lets the local HTTP
-	// listener finish wiring up and (in named mode) the platform's
-	// integration cache settle. start() does the right thing for
-	// both modes — picks up the named_tunnels row when present.
-	if orphanedCount > 0 && shouldAutoRestartOnBoot(ctx) {
+	// 2-second delay lets the local HTTP listener finish wiring up
+	// and (in named mode) the platform's integration cache settle
+	// before we hit ExecuteIntegrationTool.
+	if trigger := autoRestartTrigger(ctx, orphanedCount); trigger != "" {
 		go func() {
 			time.Sleep(2 * time.Second)
+			// Skip if something else (a fast operator click) already
+			// brought the manager up — start() would just spawn a
+			// duplicate run row marked failed.
+			if a.mgr != nil && a.mgr.Snapshot().Status == StatusRunning {
+				return
+			}
 			if _, err := a.start(ctx); err != nil {
-				ctx.Logger().Warn("auto-restart failed", "err", err.Error())
+				ctx.Logger().Warn("auto-restart failed", "trigger", trigger, "err", err.Error())
 			} else {
-				ctx.Logger().Info("auto-restart succeeded")
+				ctx.Logger().Info("auto-restart succeeded", "trigger", trigger)
 			}
 		}()
 	}
 	return nil
+}
+
+// autoRestartTrigger returns a non-empty reason for why the sidecar
+// should bring the tunnel back on this boot, or "" when it should
+// stay idle. Pure read of DB state + config so it's unit-testable
+// without spawning cloudflared.
+//
+// Two trigger paths reflect operator *intent*, not the cleanliness
+// of the previous shutdown:
+//
+//   - named-tunnel-persists: a named_tunnels row exists. Operator
+//     configured a stable URL; bring it back whether the previous
+//     sidecar died cleanly (SIGTERM → OnUnmount → Stop →
+//     status='stopped' in DB) or unexpectedly (SIGKILL / crash →
+//     status='running' → just orphaned above). Without this, a
+//     clean restart of apteva-server would silently leave the URL
+//     down — breaking the "stable URL across reboots" promise.
+//
+//   - orphan-detected: quick mode (no persistent state). Restart
+//     only when the previous sidecar was serving when it died.
+//     Operator who clicks Stop in quick mode shouldn't get a fresh
+//     trycloudflare URL on next boot.
+func autoRestartTrigger(ctx *sdk.AppCtx, orphanedCount int64) string {
+	if !shouldAutoRestartOnBoot(ctx) {
+		return ""
+	}
+	if nt, _ := dbFirstNamedTunnel(ctx.AppDB()); nt != nil {
+		return "named-tunnel-persists"
+	}
+	if orphanedCount > 0 {
+		return "orphan-detected"
+	}
+	return ""
 }
 
 // shouldAutoRestartOnBoot reads the operator's preference. Default is

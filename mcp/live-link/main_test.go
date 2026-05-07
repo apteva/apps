@@ -303,6 +303,68 @@ func TestShouldAutoRestartOnBoot_Defaults(t *testing.T) {
 	}
 }
 
+// autoRestartTrigger reflects operator intent, not previous-shutdown
+// cleanliness. The four cases below prove the four important paths.
+func TestAutoRestartTrigger(t *testing.T) {
+	cases := []struct {
+		name           string
+		cfg            map[string]string
+		seedNamedRow   bool
+		orphanedCount  int64
+		want           string
+	}{
+		{
+			name:    "quick mode, no orphan, no row → idle",
+			want:    "",
+		},
+		{
+			name:          "quick mode, sidecar died mid-flight (orphan) → restart",
+			orphanedCount: 1,
+			want:          "orphan-detected",
+		},
+		{
+			name:         "named mode after clean stop (no orphan) → restart",
+			seedNamedRow: true,
+			want:         "named-tunnel-persists",
+		},
+		{
+			name:          "named mode after crash (orphan AND row) → restart, named-tunnel wins",
+			seedNamedRow:  true,
+			orphanedCount: 1,
+			want:          "named-tunnel-persists",
+		},
+		{
+			name:          "operator opted out → idle even with orphan",
+			cfg:           map[string]string{"auto_restart_on_boot": "false"},
+			orphanedCount: 1,
+			want:          "",
+		},
+		{
+			name:         "operator opted out + named row → idle (opt-out trumps intent)",
+			cfg:          map[string]string{"auto_restart_on_boot": "false"},
+			seedNamedRow: true,
+			want:         "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := newTestCtxWithConfig(t, c.cfg)
+			if c.seedNamedRow {
+				if err := dbInsertNamedTunnel(ctx.AppDB(), &NamedTunnel{
+					Hostname: "h.example.com", TunnelID: "T", TunnelToken: "K",
+					ZoneID: "Z", DNSRecordID: "R",
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := autoRestartTrigger(ctx, c.orphanedCount)
+			if got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestOnMount_OrphansLeftoverRunningRows(t *testing.T) {
 	ctx := newTestCtx(t)
 	// Plant a stale 'running' row from a previous sidecar life.

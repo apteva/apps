@@ -50,12 +50,18 @@ Public HTTPS URL for a locally-installed Apteva instance. Two modes:
   with the mode it ran in.
 - **Crash-safe**: on sidecar boot, any leftover `running` rows from a
   previous process life are marked `orphaned` so the UI doesn't lie.
-- **Auto-restart on boot**: if a tunnel was up when the sidecar died
-  (server reboot, crash, redeploy), live-link brings it back two
-  seconds after mount. In named mode the same hostname comes back
-  with no operator action; in quick mode you get a fresh
-  `*.trycloudflare.com` since the old one isn't recoverable. Disable
-  via the `auto_restart_on_boot` config toggle.
+- **Auto-restart on boot**: live-link brings the tunnel back two
+  seconds after mount, with the trigger reflecting operator intent
+  rather than the previous shutdown's cleanliness:
+  - **Named mode**: any time a `named_tunnels` row exists. Same
+    hostname comes back whether the previous sidecar died cleanly
+    (SIGTERM during `apteva-server` restart) or unexpectedly
+    (crash / SIGKILL).
+  - **Quick mode**: only when the previous sidecar died while
+    serving traffic (a `running` row got orphaned at boot). Operator
+    who clicks Stop in quick mode won't see a new trycloudflare URL
+    on next boot.
+  Disable via the `auto_restart_on_boot` config toggle.
 
 ## What's deliberately deferred
 
