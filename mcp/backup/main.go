@@ -49,7 +49,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: backup
 display_name: Backup
-version: 0.1.0
+version: 0.2.5
 description: |
   Periodic backups of your Apteva instance — server DB plus every
   installed app's data — driven by the platform snapshot endpoint
@@ -61,13 +61,23 @@ requires:
     - db.write.app
     - net.egress
     - platform.apps.call
+    - platform.connections.execute
   apps:
     - name: jobs
       version: ">=0.1.7"
       reason: Cron scheduling for periodic backup runs.
-    - name: storage
-      optional: true
-      reason: Optional destination — store backups inside the storage app's blob store.
+  integrations:
+    - role: cloud_storage
+      kind: integration
+      compatible_slugs: [aws-s3, cloudflare-r2]
+      capabilities: [object.put, object.list, object.delete]
+      tools:
+        object.put:    put_object
+        object.list:   list_objects
+        object.delete: delete_object
+      required: false
+      label: "Cloud storage (optional)"
+      hint: "Bind an S3-compatible connection (R2, S3, …) to enable cloud destinations. Local destinations work without this."
 provides:
   http_routes:
     - prefix: /
