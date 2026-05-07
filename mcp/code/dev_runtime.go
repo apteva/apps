@@ -326,6 +326,25 @@ func (s *devSupervisor) startDevRun(ctx *sdk.AppCtx, in startDevInput) (*DevRun,
 		return nil, fmt.Errorf("persist dev_run: %w", err)
 	}
 
+	// Node-family frameworks need node_modules/ before `<pm> run dev`
+	// works — otherwise `next dev` / `vite` etc fail with exit 127.
+	// Auto-install on first start (or whenever node_modules is gone)
+	// so "Run" Just Works on a freshly-imported repo. Output streams
+	// to the same log file the panel tails, so the user sees it live.
+	// Override via CODE_SKIP_AUTO_INSTALL=1 if a workflow needs to
+	// manage installs externally.
+	if needsNodeInstall(fw, srcDir) {
+		if err := installNodeDeps(srcDir, logF); err != nil {
+			_ = dbUpdateDevRun(ctx.AppDB(), dr.ID, map[string]any{
+				"status":     "crashed",
+				"stopped_at": time.Now().UTC().Format(time.RFC3339),
+				"error":      err.Error(),
+			})
+			logF.Close()
+			return nil, err
+		}
+	}
+
 	if err := s.spawn(ctx, dr, srcDir, fw, in.RunCmd, in.EnvJSON, port, logF); err != nil {
 		_ = dbUpdateDevRun(ctx.AppDB(), dr.ID, map[string]any{
 			"status":     "crashed",
@@ -336,6 +355,45 @@ func (s *devSupervisor) startDevRun(ctx *sdk.AppCtx, in startDevInput) (*DevRun,
 		return nil, err
 	}
 	return dbGetDevRun(ctx.AppDB(), in.ProjectID, in.Repo.ID)
+}
+
+// needsNodeInstall returns true when the framework is node-based
+// AND node_modules/ is missing. Skipped when CODE_SKIP_AUTO_INSTALL
+// is set so power users can manage installs themselves (e.g. via
+// `bun install` directly in the storage_root).
+func needsNodeInstall(framework, srcDir string) bool {
+	if os.Getenv("CODE_SKIP_AUTO_INSTALL") != "" {
+		return false
+	}
+	switch framework {
+	case "nextjs", "node":
+		// fall through
+	default:
+		return false
+	}
+	return !exists(filepath.Join(srcDir, "node_modules"))
+}
+
+// installNodeDeps runs `<pm> install` synchronously, streaming both
+// stdout and stderr into the dev log so the panel shows progress
+// live. Returns an error if the install command can't be found or
+// exits non-zero. Detects pm via lockfile precedence (bun > pnpm >
+// yarn > npm), same rule used by the dev command resolver.
+func installNodeDeps(srcDir string, logF *os.File) error {
+	pm := detectPackageManagerInDir(srcDir)
+	if _, err := exec.LookPath(pm); err != nil {
+		return fmt.Errorf("%s not on PATH; install it first or set CODE_SKIP_AUTO_INSTALL=1 and run install manually", pm)
+	}
+	fmt.Fprintf(logF, "+ %s install (cwd=%s) — first-run dependency install\n", pm, srcDir)
+	cmd := exec.Command(pm, "install")
+	cmd.Dir = srcDir
+	cmd.Stdout = logF
+	cmd.Stderr = logF
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s install: %w (see dev log for details)", pm, err)
+	}
+	fmt.Fprintln(logF, "=== install complete ===")
+	return nil
 }
 
 // spawn does the actual exec / static-server dance. Splits the static
