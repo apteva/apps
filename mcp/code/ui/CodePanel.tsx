@@ -127,6 +127,155 @@ interface FileMeta {
   sha256?: string;
 }
 
+// ─── Tree builder + renderer ──────────────────────────────────────
+//
+// The /api/repos/<slug>/tree endpoint returns a flat list of file
+// paths. The panel renders them as a classic IDE tree: folders
+// before files at each level, expand/collapse per directory, file
+// icons by extension. With 195 files in marcoschwartz-new, the flat
+// list version was a 195-row scroll wall — this gives the user the
+// shape of the project at a glance.
+
+interface TreeNode {
+  name: string;
+  path: string;        // repo-relative; "" for synthetic root
+  isDir: boolean;
+  size: number;
+  children: TreeNode[];
+}
+
+function buildTree(files: FileMeta[]): TreeNode[] {
+  const root: TreeNode = { name: "", path: "", isDir: true, size: 0, children: [] };
+  for (const f of files) {
+    const parts = f.path.split("/").filter(Boolean);
+    let node = root;
+    for (let i = 0; i < parts.length; i++) {
+      const last = i === parts.length - 1;
+      const partPath = parts.slice(0, i + 1).join("/");
+      let child = node.children.find((c) => c.name === parts[i]);
+      if (!child) {
+        child = {
+          name: parts[i],
+          path: partPath,
+          isDir: !last,
+          size: last ? f.size : 0,
+          children: [],
+        };
+        node.children.push(child);
+      }
+      node = child;
+    }
+  }
+  sortTree(root);
+  return root.children;
+}
+
+function sortTree(node: TreeNode) {
+  // Folders first, then files; alpha within each. Classic IDE order.
+  node.children.sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+  for (const c of node.children) sortTree(c);
+}
+
+// flattenTree walks the tree DFS and returns only rows that should
+// be visible given the current expansion state. Each row carries its
+// nesting depth so the renderer can indent.
+interface FlatRow {
+  node: TreeNode;
+  depth: number;
+}
+function flattenTree(nodes: TreeNode[], expanded: Set<string>, depth = 0): FlatRow[] {
+  const out: FlatRow[] = [];
+  for (const n of nodes) {
+    out.push({ node: n, depth });
+    if (n.isDir && expanded.has(n.path)) {
+      out.push(...flattenTree(n.children, expanded, depth + 1));
+    }
+  }
+  return out;
+}
+
+// Initial expansion: expand top-level dirs (gives the user the
+// big-picture shape) plus any ancestor of the currently-open file
+// (so you can always see where you are).
+function initialExpansion(tree: TreeNode[], openPath: string | null): Set<string> {
+  const out = new Set<string>();
+  for (const n of tree) {
+    if (n.isDir) out.add(n.path);
+  }
+  if (openPath) {
+    const parts = openPath.split("/").filter(Boolean);
+    for (let i = 1; i < parts.length; i++) {
+      out.add(parts.slice(0, i).join("/"));
+    }
+  }
+  return out;
+}
+
+// File-type glyphs. Single-letter monospace tags coloured by category
+// — cheap, dependency-free, and readable at the small font sizes the
+// tree uses. Real file-icons SVGs would be nicer but pull in either
+// a library or a couple of KB of inline paths per icon; this is the
+// pragmatic middle ground.
+function fileGlyph(name: string): { letter: string; cls: string } {
+  const ext = name.toLowerCase().split(".").pop() || "";
+  switch (ext) {
+    case "ts":
+    case "tsx":
+      return { letter: "TS", cls: "text-blue" };
+    case "js":
+    case "mjs":
+    case "cjs":
+    case "jsx":
+      return { letter: "JS", cls: "text-yellow" };
+    case "json":
+      return { letter: "{}", cls: "text-yellow/80" };
+    case "md":
+    case "mdx":
+      return { letter: "M↓", cls: "text-text-muted" };
+    case "css":
+    case "scss":
+    case "sass":
+      return { letter: "#", cls: "text-blue/80" };
+    case "html":
+    case "htm":
+      return { letter: "<>", cls: "text-orange" };
+    case "yaml":
+    case "yml":
+    case "toml":
+      return { letter: "≡", cls: "text-text-muted" };
+    case "svg":
+    case "png":
+    case "jpg":
+    case "jpeg":
+    case "gif":
+    case "webp":
+    case "ico":
+      return { letter: "🖼", cls: "text-green/80" };
+    case "go":
+      return { letter: "Go", cls: "text-blue/80" };
+    case "py":
+      return { letter: "Py", cls: "text-blue/80" };
+    case "sh":
+    case "bash":
+    case "zsh":
+      return { letter: "$_", cls: "text-text-muted" };
+    case "lock":
+      return { letter: "🔒", cls: "text-text-dim" };
+    case "env":
+      return { letter: "ENV", cls: "text-yellow/70" };
+    case "dockerfile":
+      return { letter: "🐳", cls: "text-blue/80" };
+  }
+  // Special-case some no-extension files (Dockerfile, README, etc.)
+  if (name === "Dockerfile") return { letter: "🐳", cls: "text-blue/80" };
+  if (name.toLowerCase().startsWith("readme")) return { letter: "M↓", cls: "text-text-muted" };
+  if (name.startsWith(".")) return { letter: "·", cls: "text-text-dim" };
+  return { letter: "•", cls: "text-text-dim" };
+}
+
 interface FileEventData {
   slug?: string;
   path?: string;
@@ -191,6 +340,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameTo, setRenameTo] = useState("");
   const [forkSlug, setForkSlug] = useState<string | null>(null);
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   const uploadRef = useRef<HTMLInputElement | null>(null);
 
   const selectedRepo = repos.find((r) => r.slug === selectedSlug);
@@ -260,7 +410,15 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
       setLoadingTree(true);
       try {
         const r = await api<{ files?: FileMeta[] }>("GET", `/repos/${slug}/tree`);
-        setTree((r.files || []).filter((f) => !f.is_dir));
+        const files = (r.files || []).filter((f) => !f.is_dir);
+        setTree(files);
+        // First load: expand top-level dirs so the user sees the
+        // shape immediately. Preserve any user-driven collapses on
+        // subsequent loads (event-driven refreshes after edits).
+        setExpandedDirs((prev) => {
+          if (prev.size > 0) return prev;
+          return initialExpansion(buildTree(files), null);
+        });
       } catch (e) {
         setError((e as Error).message);
         setTree([]);
@@ -279,6 +437,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
     setOpenFile(null);
     setEditing(false);
     setDraft("");
+    setExpandedDirs(new Set()); // reset; loadTree seeds top-level dirs.
     loadTree(slug);
   };
   const selectRepo = (slug: string) => {
@@ -689,66 +848,25 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
               ) : tree.length === 0 ? (
                 <div className="p-3 text-text-muted text-sm">Empty repo.</div>
               ) : (
-                <ul>
-                  {tree.map((f) => {
-                    const isOpen = openFile?.path === f.path;
-                    const isRenaming = renaming === f.path;
-                    return (
-                      <li
-                        key={f.path}
-                        className={`group px-3 py-1 text-xs border-b border-border/40 ${
-                          isOpen ? "bg-bg-input" : "hover:bg-bg-input/50"
-                        }`}
-                      >
-                        {isRenaming ? (
-                          <form
-                            onSubmit={(e) => {
-                              e.preventDefault();
-                              handleRename(f.path, renameTo);
-                            }}
-                            className="flex items-center gap-1"
-                          >
-                            <input
-                              autoFocus
-                              type="text"
-                              value={renameTo}
-                              onChange={(e) => setRenameTo(e.target.value)}
-                              onBlur={() => { setRenaming(null); setRenameTo(""); }}
-                              onKeyDown={(e) => { if (e.key === "Escape") { setRenaming(null); setRenameTo(""); } }}
-                              className="flex-1 bg-bg-input border border-border rounded px-1 py-0.5 text-xs"
-                            />
-                          </form>
-                        ) : (
-                          <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => selectFile(f.path)}
-                              className="text-text truncate flex-1 text-left"
-                              title={f.path}
-                            >{f.path}</button>
-                            <span className="text-text-dim text-[10px] group-hover:hidden">
-                              {formatSize(f.size)}
-                            </span>
-                            <span className="hidden group-hover:flex items-center gap-1">
-                              <button
-                                type="button"
-                                onClick={(e) => { e.stopPropagation(); setRenaming(f.path); setRenameTo(f.path); }}
-                                className="text-text-dim hover:text-text px-1"
-                                title="Rename"
-                              >✎</button>
-                              <button
-                                type="button"
-                                onClick={(e) => { e.stopPropagation(); handleDeleteFile(f.path); }}
-                                className="text-red/70 hover:text-red px-1"
-                                title="Delete"
-                              >🗑</button>
-                            </span>
-                          </div>
-                        )}
-                      </li>
-                    );
+                <FileTree
+                  tree={buildTree(tree)}
+                  expanded={expandedDirs}
+                  onToggle={(p) => setExpandedDirs((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(p)) next.delete(p);
+                    else next.add(p);
+                    return next;
                   })}
-                </ul>
+                  openPath={openFile?.path}
+                  renaming={renaming}
+                  renameTo={renameTo}
+                  setRenameTo={setRenameTo}
+                  onRenameSubmit={(from) => handleRename(from, renameTo)}
+                  onRenameCancel={() => { setRenaming(null); setRenameTo(""); }}
+                  onSelect={(p) => selectFile(p)}
+                  onStartRename={(p) => { setRenaming(p); setRenameTo(p); }}
+                  onDelete={(p) => handleDeleteFile(p)}
+                />
               )}
             </div>
             <div className="p-2 text-xs text-text-dim border-t border-border">
@@ -1855,5 +1973,117 @@ function DevLogsView({
         lines.join("\n")
       )}
     </pre>
+  );
+}
+
+// ─── FileTree ──────────────────────────────────────────────────────
+//
+// Classic IDE folder tree. Folders expand/collapse with a chevron;
+// files render with an ext-typed glyph. Indentation by depth, hover
+// reveals rename/delete actions on file rows.
+
+interface FileTreeProps {
+  tree: TreeNode[];
+  expanded: Set<string>;
+  onToggle: (path: string) => void;
+  openPath?: string;
+  renaming: string | null;
+  renameTo: string;
+  setRenameTo: (s: string) => void;
+  onRenameSubmit: (from: string) => void;
+  onRenameCancel: () => void;
+  onSelect: (path: string) => void;
+  onStartRename: (path: string) => void;
+  onDelete: (path: string) => void;
+}
+
+function FileTree(props: FileTreeProps) {
+  const rows = flattenTree(props.tree, props.expanded);
+  return (
+    <ul className="select-none">
+      {rows.map(({ node, depth }) => (
+        <FileTreeRow key={node.path} node={node} depth={depth} {...props} />
+      ))}
+    </ul>
+  );
+}
+
+function FileTreeRow({
+  node, depth,
+  expanded, onToggle,
+  openPath,
+  renaming, renameTo, setRenameTo, onRenameSubmit, onRenameCancel,
+  onSelect, onStartRename, onDelete,
+}: FileTreeProps & { node: TreeNode; depth: number }) {
+  const isOpen = openPath === node.path;
+  const isRenaming = renaming === node.path;
+  const indent = depth * 12 + 8;
+
+  if (node.isDir) {
+    const open = expanded.has(node.path);
+    return (
+      <li className="text-xs">
+        <button
+          type="button"
+          onClick={() => onToggle(node.path)}
+          className="w-full flex items-center gap-1 px-2 py-0.5 text-left hover:bg-bg-input/50 text-text"
+          style={{ paddingLeft: `${indent}px` }}
+        >
+          <span className="w-3 text-text-dim">{open ? "▾" : "▸"}</span>
+          <span className={open ? "text-yellow/80" : "text-yellow/60"}>📁</span>
+          <span className="truncate">{node.name}</span>
+        </button>
+      </li>
+    );
+  }
+
+  const glyph = fileGlyph(node.name);
+  return (
+    <li className={`group text-xs ${isOpen ? "bg-bg-input" : "hover:bg-bg-input/50"}`}>
+      {isRenaming ? (
+        <form
+          onSubmit={(e) => { e.preventDefault(); onRenameSubmit(node.path); }}
+          className="flex items-center gap-1 px-2 py-0.5"
+          style={{ paddingLeft: `${indent + 16}px` }}
+        >
+          <input
+            autoFocus
+            type="text"
+            value={renameTo}
+            onChange={(e) => setRenameTo(e.target.value)}
+            onBlur={onRenameCancel}
+            onKeyDown={(e) => { if (e.key === "Escape") onRenameCancel(); }}
+            className="flex-1 bg-bg-input border border-border rounded px-1 py-0.5 text-xs"
+          />
+        </form>
+      ) : (
+        <div className="flex items-center gap-2 pr-2" style={{ paddingLeft: `${indent + 16}px` }}>
+          <span className={`w-5 text-[10px] font-mono ${glyph.cls}`}>{glyph.letter}</span>
+          <button
+            type="button"
+            onClick={() => onSelect(node.path)}
+            className="text-text truncate flex-1 text-left py-0.5"
+            title={node.path}
+          >{node.name}</button>
+          <span className="text-text-dim text-[10px] group-hover:hidden">
+            {formatSize(node.size)}
+          </span>
+          <span className="hidden group-hover:flex items-center gap-1">
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onStartRename(node.path); }}
+              className="text-text-dim hover:text-text px-1"
+              title="Rename"
+            >✎</button>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onDelete(node.path); }}
+              className="text-red/70 hover:text-red px-1"
+              title="Delete"
+            >🗑</button>
+          </span>
+        </div>
+      )}
+    </li>
   );
 }
