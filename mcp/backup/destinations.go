@@ -115,7 +115,11 @@ func openDestination(d *Destination, ctx *sdk.AppCtx, defaultLocalDir string) (D
 		}
 		bound := ctx.IntegrationFor("cloud_storage")
 		if bound == nil {
-			return nil, errors.New("s3 destination requires a cloud_storage connection — bind one in the app's settings (R2, S3, …)")
+			// Most common cause: this destination was created in
+			// backup v0.2.0 before the panel had a connection
+			// picker. Deleting + recreating the destination via
+			// the v0.2.2+ form binds the connection automatically.
+			return nil, errors.New("s3 destination has no cloud storage connection bound — delete this destination and add a new one (the picker will appear when you choose kind=s3)")
 		}
 		return &cloudDest{cfg: c, ctx: ctx, bound: bound}, nil
 	default:

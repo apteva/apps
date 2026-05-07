@@ -190,8 +190,15 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
   useEffect(() => { reload(); }, [reload]);
   useAppEvents("backup", projectId, () => reload());
 
-  const lastSuccess = runs.find(r => r.status === "success");
-  const lastRun = runs[0];
+  // Status surfaces should be about *current* destinations. A run
+  // whose destination was deleted is just history — showing its
+  // error confuses the operator into thinking the live setup is
+  // broken when it's actually fine. Filter both summaries through
+  // the current destination set.
+  const liveDestIDs = new Set(destinations.map((d) => d.id));
+  const liveRuns = runs.filter((r) => liveDestIDs.has(r.destination_id));
+  const lastSuccess = liveRuns.find(r => r.status === "success");
+  const lastRun = liveRuns[0];
 
   // ─── modals (themed; replace window.confirm / window.alert) ────
 
