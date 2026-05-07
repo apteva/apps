@@ -49,7 +49,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: backup
 display_name: Backup
-version: 0.2.7
+version: 0.2.8
 description: |
   Periodic backups of your Apteva instance — server DB plus every
   installed app's data — driven by the platform snapshot endpoint
@@ -64,8 +64,8 @@ requires:
     - platform.connections.execute
   apps:
     - name: jobs
-      version: ">=0.1.7"
-      reason: Cron scheduling for periodic backup runs.
+      version: ">=0.1.8"
+      reason: Cron scheduling for periodic backup runs. v0.1.8 accepts explicit empty _project_id from global-scope callers.
   integrations:
     - role: cloud_storage
       kind: integration

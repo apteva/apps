@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: jobs
 display_name: Jobs
-version: 0.1.7
+version: 0.1.8
 description: |
   Scheduled-job runner. Other apps and agents enqueue work; jobs
   delivers it later via HTTP or instance events.
@@ -437,8 +437,14 @@ func resolveProjectFromArgs(args map[string]any) (string, error) {
 	if env := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); env != "" {
 		return env, nil
 	}
-	if v, ok := args["_project_id"].(string); ok && v != "" {
-		return v, nil
+	// Explicit _project_id wins; empty string is a valid value —
+	// global-scope callers (like backup) intentionally pass "" to
+	// record a project-less job. Distinguish present-with-empty
+	// from absent by checking the map directly, not just the value.
+	if raw, has := args["_project_id"]; has {
+		if v, ok := raw.(string); ok {
+			return v, nil
+		}
 	}
 	return "", errors.New("project_id missing — pass _project_id when scope=global")
 }

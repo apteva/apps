@@ -288,6 +288,12 @@ func scheduleViaJobs(ctx *sdk.AppCtx, p *Policy) error {
 		},
 		"idempotency_key": fmt.Sprintf("backup-policy-%d", p.ID),
 		"owner_app":       "backup",
+		// Backup installs as scope:global, so it has no project_id of
+		// its own. Pass "" explicitly — jobs accepts present-with-empty
+		// as "global, project-less job" (>= jobs v0.1.8). Without this
+		// the call fails with "project_id missing — pass _project_id
+		// when scope=global" on jobs installs that are also global.
+		"_project_id": "",
 	}
 	var resp struct {
 		Job struct {
