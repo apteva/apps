@@ -305,8 +305,17 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   }, [logKind, logTargetId, apiText]);
 
   const selectDeployment = (id: number) => {
+    // Clear deployment-scoped state synchronously BEFORE the async
+    // fetch so the panel renders empty during the load window
+    // instead of the previously-selected deployment's data. Without
+    // this, switching from a deployment with a live release to
+    // another briefly shows the previous deployment's logs / build
+    // card / status — visibly confusing for ~1s.
     setSelected(id);
+    setDetail(null);
     setLogs("");
+    setLogTargetId(null);
+    setLogKind("release");
     loadDetail(id);
   };
 
