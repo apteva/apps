@@ -1,0 +1,68 @@
+schema: apteva-app/v1
+
+name: routes
+display_name: Routes
+version: 0.1.0
+description: |
+  Hostname-based routing for Apteva. Owns the table mapping public
+  hostnames (blog.example.com) to local backend targets
+  (http://127.0.0.1:7100). Apps register routes via routes_register;
+  apteva-server reads this table and reverse-proxies inbound traffic.
+
+  Optional — uninstall this app and the platform keeps working;
+  hostname routing simply stops, the server falls back to its
+  existing path-based routing for everything.
+
+  Works identically for cloud installs (browser → public IP →
+  apteva-server) and tunnel installs (browser → cloudflared →
+  apteva-server). The exposure mechanism doesn't matter — apteva-
+  server is always the routing point.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/routes
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/routes/icon.png
+tags: [routes, ingress, hostname, infrastructure, reverse-proxy]
+
+scopes: [global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+  # v0.2 will add platform.events.subscribe for auto-orphan cleanup
+  # when an install is uninstalled. v0.1 defers this — orphans show
+  # in the panel; the user removes them by hand.
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: routes_register
+      description: Register a hostname → target route. Idempotent on (hostname, target) from the same owner.
+    - name: routes_unregister
+      description: Remove a route by hostname. Caller must own it (errors if not).
+    - name: routes_list
+      description: List routes. Optional owner_install_id filter.
+    - name: routes_get
+      description: Fetch one route by hostname. Returns null when no route exists.
+  ui_panels:
+    - slot: install.settings
+      label: Routes
+      icon: route
+      entry: /ui/RoutesPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/routes
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/routes.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
