@@ -582,16 +582,17 @@ function DestinationForm({
   const [err, setErr] = useState("");
 
   // Lazy-load operator's S3-compatible connections the first time the
-  // form is opened with kind=s3. Single round-trip to /api/connections;
-  // we filter client-side by app_slug.
+  // form is opened with kind=s3. /api/connections returns a bare JSON
+  // array (not {connections: [...]}) — see handleListConnections in
+  // server/connections.go. Filter client-side by app_slug + status.
   useEffect(() => {
     if (kind !== "s3" || connections !== null) return;
     (async () => {
       try {
         const res = await fetch("/api/connections", { credentials: "same-origin" });
         if (!res.ok) throw new Error(`${res.status}`);
-        const body = await res.json() as { connections?: Connection[] };
-        const list = (body.connections || []).filter(
+        const body = await res.json() as Connection[];
+        const list = (Array.isArray(body) ? body : []).filter(
           (c) => CLOUD_STORAGE_SLUGS.includes(c.app_slug) && c.status === "active",
         );
         setConnections(list);

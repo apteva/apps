@@ -14,6 +14,7 @@ mcp/computer/computer
 mcp/crm/crm
 mcp/deploy/deploy
 mcp/dlna/dlna
+mcp/docs/docs
 mcp/domains/domains
 mcp/email-checker/email-checker
 mcp/ffmpeg/ffmpeg

@@ -1,0 +1,114 @@
+schema: apteva-app/v1
+
+name: docs
+display_name: Documents
+version: 0.1.0
+description: |
+  Generate client-facing documents (PDFs from markdown templates) and
+  store them in storage. Templates live in this app's DB; agents call
+  docs_render(template, data) to produce a finished PDF that lands in
+  storage as a real file with all the URL/visibility/permissions
+  machinery storage already provides. Pure-Go render pipeline (no
+  Chromium): markdown body + Go template syntax for placeholders,
+  rendered via maroto.
+
+  Audit trail on every render — who rendered what template with which
+  data — for compliance use cases (invoices, contracts, NDAs). Past
+  renders keep working even if the template is later edited or
+  deleted, because the output is a stable storage file_id, not a
+  derivation pointer.
+
+author: Apteva
+tags: [documents, pdf, templates, invoices, contracts]
+
+scopes: [project, global]
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: storage
+      version: ">=0.8.1"
+      reason: rendered PDFs are uploaded to storage; the file's URL/visibility/sharing all flow through storage's surface.
+
+provides:
+  http_routes:
+    - prefix: /
+
+  resources:
+    - name: template
+      label: "Document template"
+      list_endpoint: /templates
+      matcher: id_set
+      picker: list
+
+  permissions:
+    - name: docs.read
+      resource: template
+      description: List + read templates.
+    - name: docs.write
+      resource: template
+      description: Create / update / delete templates.
+    - name: docs.render
+      resource: template
+      description: Render a document from a template.
+
+  mcp_tools:
+    - { name: docs_list_templates,  description: "List templates available in this install. Returns id, slug, name, description, source_format, output_format, default_folder.", requires: docs.read }
+    - { name: docs_get_template,    description: "Fetch one template's full body + metadata. Args - id (int) OR slug (string).", requires: docs.read }
+    - { name: docs_create_template, description: "Create a template. Args - slug, name, body, description?, source_format? (markdown), output_format? (pdf), default_folder?.", requires: docs.write }
+    - { name: docs_update_template, description: "Partial update of a template. Args - id, plus any of name/description/body/default_folder.", requires: docs.write }
+    - { name: docs_delete_template, description: "Remove a template. Past renders keep working - output_file_ids in storage are stable. Args - id.", requires: docs.write }
+
+    - { name: docs_render,          description: "Render a template with data into a file in storage. Args - template_id (int) OR template_slug (string), data (object), output_name?, output_folder? (defaults to template's default). Returns file_id + url + render_id.", requires: docs.render }
+    - { name: docs_preview,         description: "Render but do not persist. Returns base64 PDF bytes for inline display - used by the panel during template authoring. Args - template_id (or template_slug), data.", requires: docs.render }
+
+    - { name: docs_list_renders,    description: "Audit trail. Filter by template_id, since (RFC3339), limit. Returns render_id, template_id, output_file_id, rendered_by, rendered_at, data_snapshot.", requires: docs.read }
+    - { name: docs_get_render,      description: "Replay one render - data snapshot, output file_id, timestamps. Args - render_id.", requires: docs.read }
+
+  ui_panels:
+    - slot: project.page
+      label: Documents
+      icon: file-text
+      entry: /ui/DocsPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/docs
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/docs.db
+  migrations: migrations/
+
+config_schema:
+  - name: default_output_folder
+    type: text
+    default: "/docs/"
+    label: Default output folder
+    description: Where rendered PDFs land in storage when a template doesn't specify its own. Must end with a trailing slash.
+
+  - name: page_size
+    type: select
+    default: "A4"
+    options: ["A4", "letter", "legal"]
+    label: Page size
+    description: Default page size for rendered PDFs. Templates can override per render via data.page_size.
+
+  - name: prune_renders_older_than_days
+    type: text
+    default: "365"
+    label: Audit retention (days)
+    description: |
+      The renders audit table keeps the data snapshot of every render
+      for this many days, then auto-prunes. 0 = keep forever. The
+      output files in storage are not affected — they're stable
+      regardless of audit retention.
+
+upgrade_policy: auto-patch
