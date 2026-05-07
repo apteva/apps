@@ -52,3 +52,9 @@ _test_sidecar_bin
 # Local-dev noise.
 node_modules/
 apteva-core.log
+
+# Per-app local test credentials — .env.local files hold real secrets
+# used by integration test scripts (backup → R2, etc.) and must never
+# land in a repo.
+mcp/*/scripts/.env.local
+mcp/*/scripts/.env
