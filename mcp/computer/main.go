@@ -15,8 +15,6 @@
 package main
 
 import (
-	"net/http"
-
 	sdk "github.com/apteva/app-sdk"
 )
 
@@ -28,7 +26,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.2.0
+version: 0.2.1
 description: |
   Watch and steer the agent's browser. Operator panel + chat
   components. v0.1 is UI-only; backends and tools land in a
@@ -57,6 +55,10 @@ provides:
       slots: [chat.message_attachment]
 runtime:
   kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/computer
   port: 8080
   health_check: /health
 `
@@ -82,19 +84,14 @@ func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) MCPTools() []sdk.Tool              { return nil }
 
-// HTTPRoutes — only /health here. The UI bundles under /ui/* are
-// served by the platform's static handler against this app's bundle
-// directory; a custom Go handler would shadow that and break panel
-// loading. /health is the only route we own.
+// HTTPRoutes — none. UI bundles under /ui/* are served by the
+// platform's static handler against this app's bundle directory;
+// /health is auto-registered by the SDK (mountFrameworkRoutes). A
+// custom handler for either would conflict (we panicked once on
+// /health when we tried to own it ourselves). Future MCP tools or
+// custom HTTP routes go here when they land.
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{
-		{Pattern: "/health", Handler: handleHealth},
-	}
-}
-
-func handleHealth(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"ok":true}`))
+	return nil
 }
 
 func main() { sdk.Run(&App{}) }

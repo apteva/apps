@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.2.0
+version: 0.2.1
 description: |
   Watch and steer the agent's browser. Operator panel for browsing
   live sessions across instances, taking control of one, and reading
