@@ -30,11 +30,19 @@ type BuildOverrides struct {
 
 // detectFramework picks a builder when the deployment doesn't pin
 // one. Crude but effective: presence of go.mod / package.json / etc.
+//
+// Bun-shaped projects (bun.lockb / bun.lock at the root) auto-detect
+// to "bun" rather than "node" so the chosen builder always uses Bun's
+// toolchain — picks up Bun-script convention (build.ts / serve.ts)
+// without the npm-fallback compat path.
 func detectFramework(srcDir string) string {
 	if exists(filepath.Join(srcDir, "go.mod")) {
 		return "go"
 	}
 	if exists(filepath.Join(srcDir, "package.json")) {
+		if exists(filepath.Join(srcDir, "bun.lockb")) || exists(filepath.Join(srcDir, "bun.lock")) {
+			return "bun"
+		}
 		return "node"
 	}
 	if exists(filepath.Join(srcDir, "requirements.txt")) || exists(filepath.Join(srcDir, "pyproject.toml")) {
@@ -54,12 +62,14 @@ func builderFor(framework string) (Builder, error) {
 		return &staticBuilder{}, nil
 	case "node":
 		return &nodeBuilder{}, nil
+	case "bun":
+		return &bunBuilder{}, nil
 	case "blank":
 		return &blankBuilder{}, nil
 	case "":
 		return nil, errors.New("framework not detected; set framework explicitly on the deployment")
 	default:
-		return nil, fmt.Errorf("framework %q not supported (supported: go, node, static, blank)", framework)
+		return nil, fmt.Errorf("framework %q not supported (supported: go, node, bun, static, blank)", framework)
 	}
 }
 
@@ -219,13 +229,86 @@ func findBunRunScript(dir string) string {
 	return ""
 }
 
+// ─── bun ──────────────────────────────────────────────────────────
+//
+// Explicit Bun framework. Same shape as nodeBuilder but always uses
+// bun (no pm fallback). Honours both "scripts" entries in package.json
+// and the Bun-script convention (build.ts / serve.ts at the root).
+//
+// Auto-detected when bun.lockb or bun.lock is present alongside
+// package.json. Existing node deployments keep working as-is — the
+// nodeBuilder still handles npm/pnpm/yarn projects unchanged.
+
+type bunBuilder struct{}
+
+func (*bunBuilder) Framework() string { return "bun" }
+
+func (*bunBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.Writer) (string, error) {
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		return "", err
+	}
+	if _, err := exec.LookPath("bun"); err != nil {
+		return "", errors.New("bun not on PATH; install Bun (https://bun.sh) or pick framework=node to use npm/pnpm/yarn")
+	}
+	if ov.BuildCmd != "" {
+		fmt.Fprintf(logW, "+ %s (cwd=%s)\n", ov.BuildCmd, srcDir)
+		c := exec.Command("sh", "-c", ov.BuildCmd)
+		c.Dir = srcDir
+		c.Stdout = logW
+		c.Stderr = logW
+		if err := c.Run(); err != nil {
+			return "", fmt.Errorf("bun build_cmd: %w", err)
+		}
+	} else {
+		fmt.Fprintf(logW, "+ bun install (cwd=%s)\n", srcDir)
+		ic := exec.Command("bun", "install")
+		ic.Dir = srcDir
+		ic.Stdout = logW
+		ic.Stderr = logW
+		if err := ic.Run(); err != nil {
+			return "", fmt.Errorf("bun install: %w", err)
+		}
+		switch {
+		case hasNpmScript(srcDir, "build"):
+			fmt.Fprintf(logW, "+ bun run build (cwd=%s)\n", srcDir)
+			bc := exec.Command("bun", "run", "build")
+			bc.Dir = srcDir
+			bc.Stdout = logW
+			bc.Stderr = logW
+			if err := bc.Run(); err != nil {
+				return "", fmt.Errorf("bun run build: %w", err)
+			}
+		default:
+			if buildScript := findBunBuildScript(srcDir); buildScript != "" {
+				fmt.Fprintf(logW, "+ bun run %s (cwd=%s) — Bun-script convention\n", buildScript, srcDir)
+				bc := exec.Command("bun", "run", buildScript)
+				bc.Dir = srcDir
+				bc.Stdout = logW
+				bc.Stderr = logW
+				if err := bc.Run(); err != nil {
+					return "", fmt.Errorf("bun run %s: %w", buildScript, err)
+				}
+			}
+		}
+	}
+	if err := copyTreeAll(srcDir, artifactDir); err != nil {
+		return "", fmt.Errorf("stage artifact: %w", err)
+	}
+	return "", nil
+}
+
 // detectPackageManager picks a Node toolchain from lockfiles in dir.
 // Order matters: bun first to honour the workspace's bun-by-default
 // convention, then pnpm/yarn for explicit declarations, npm last as
 // the default for vanilla create-next-app.
+//
+// Both bun.lockb (legacy binary, pre-2024) and bun.lock (current
+// text format) are accepted — the latter is what bun init / bun
+// install creates today, so omitting it would silently fall through
+// to npm and miss the user's intent.
 func detectPackageManager(dir string) string {
 	switch {
-	case exists(filepath.Join(dir, "bun.lockb")):
+	case exists(filepath.Join(dir, "bun.lockb")) || exists(filepath.Join(dir, "bun.lock")):
 		return "bun"
 	case exists(filepath.Join(dir, "pnpm-lock.yaml")):
 		return "pnpm"

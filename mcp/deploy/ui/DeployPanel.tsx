@@ -162,7 +162,7 @@ interface DeploymentDetail {
 
 const API = "/api/apps/deploy/api";
 
-const FRAMEWORKS = ["", "go", "node", "static", "blank"] as const;
+const FRAMEWORKS = ["", "go", "node", "bun", "static", "blank"] as const;
 const SOURCE_KINDS = ["code", "local"] as const;
 
 function statusColor(s: string): string {

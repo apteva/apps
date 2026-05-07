@@ -34,7 +34,7 @@ type ReleaseSpec struct {
 	ReleaseID    int64
 	DeploymentID int64
 	Name         string  // for log/process labels
-	Framework    string  // 'go' | 'node' | 'static' | 'blank'
+	Framework    string  // 'go' | 'node' | 'bun' | 'static' | 'blank'
 	ArtifactDir  string  // /data/builds/<id>/dist/
 	Entrypoint   string  // relative path within ArtifactDir; "" = static FileServer
 	StartCmd     string  // override; if non-empty wins over framework default
@@ -233,6 +233,19 @@ func resolveCommand(spec ReleaseSpec) (string, []string, error) {
 			}
 		}
 		return "", nil, fmt.Errorf("node release has no \"start\" script and no serve.ts/server.ts; set start_cmd explicitly")
+	case "bun":
+		// Always uses bun. Tries scripts.start first; then the
+		// Bun-script convention serve.ts / server.ts.
+		if _, err := exec.LookPath("bun"); err != nil {
+			return "", nil, errors.New("bun not on PATH; install Bun or change the deployment's framework")
+		}
+		if hasNpmScript(spec.ArtifactDir, "start") {
+			return "bun", []string{"run", "start"}, nil
+		}
+		if bunScript := findBunRunScript(spec.ArtifactDir); bunScript != "" {
+			return "bun", []string{"run", bunScript}, nil
+		}
+		return "", nil, fmt.Errorf("bun release has no \"start\" script and no serve.ts/server.ts; set start_cmd explicitly")
 	case "blank":
 		return "", nil, errors.New("blank framework requires start_cmd")
 	default:

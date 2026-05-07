@@ -17,7 +17,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "deploy_init", Handler: a.toolInit,
-			Description: "Bind a source to a new deployment. Args: name (slug), source_kind (code|local), source_ref (slug or path), framework? (go|node|static|blank|''), build_cmd?, start_cmd?, port_hint?, env_json?, domain?, description?",
+			Description: "Bind a source to a new deployment. Args: name (slug), source_kind (code|local), source_ref (slug or path), framework? (go|node|bun|static|blank|''), build_cmd?, start_cmd?, port_hint?, env_json?, domain?, description?",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
