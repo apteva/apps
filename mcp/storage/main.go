@@ -133,14 +133,16 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// creds are missing — better than silently routing writes to the
 	// wrong place.
 	bound := ctx.IntegrationFor("backend")
-	id, _ := ctx.PlatformAPI().WhoAmI()
+	id, whoamiErr := ctx.PlatformAPI().WhoAmI()
 	if id != nil {
 		ctx.Logger().Info("storage backend role probe",
 			"bindings", id.Bindings,
-			"resolved_bound", bound,
-			"manifest_integrations", ctx.Manifest().Requires.Integrations)
+			"resolved_bound", bound)
 	} else {
-		ctx.Logger().Warn("storage backend role probe — WhoAmI returned nil identity")
+		ctx.Logger().Warn("storage backend role probe — WhoAmI returned nil identity",
+			"err", fmt.Sprintf("%v", whoamiErr),
+			"gateway", os.Getenv("APTEVA_GATEWAY_URL"),
+			"token", os.Getenv("APTEVA_APP_TOKEN"))
 	}
 	be, err := initBackend(ctx)
 	if err != nil {
