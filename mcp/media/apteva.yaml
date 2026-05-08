@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.9.4
+version: 0.9.5
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -277,9 +277,15 @@ config_schema:
     description: Refuse renders whose output exceeds this (post-encode size check). Guards disk + storage upload.
   - name: render_scratch_dir
     type: text
-    default: "/data/renders"
+    default: ""
     label: Render scratch dir
-    description: Working directory for downloaded sources + ffmpeg outputs. Cleaned per render on terminal status.
+    description: |
+      Working directory for downloaded sources + ffmpeg outputs.
+      Cleaned per render on terminal status. Leave empty to default
+      to <APTEVA_DATA_DIR>/renders/ (the per-install writable dir
+      the platform provisions). Set explicitly only when you want
+      a different volume — e.g. a fast NVMe scratch on a server
+      where the platform data dir lives on slower disk.
   - name: render_output_folder
     type: text
     default: "/renders/"

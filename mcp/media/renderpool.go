@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -76,13 +77,19 @@ func renderWorker(app *sdk.AppCtx, id int) {
 	db := app.AppDB()
 	cfg := app.Config()
 
-	scratchRoot := strings.TrimSpace(cfg.Get("render_scratch_dir"))
-	if scratchRoot == "" {
-		scratchRoot = "/data/renders"
-	}
+	scratchRoot := resolveScratchRoot(app, cfg.Get("render_scratch_dir"))
 	if err := os.MkdirAll(scratchRoot, 0o755); err != nil {
-		log.Error("render worker: scratch root", "err", err)
-		return
+		// Last-ditch fallback: try OS temp before giving up. The
+		// worker exiting silently means rendered jobs sit pending
+		// forever (the pool drains to zero) — far worse than using
+		// a less-than-ideal scratch location for one boot.
+		fallback := filepath.Join(os.TempDir(), "apteva-media-renders")
+		if mkErr := os.MkdirAll(fallback, 0o755); mkErr != nil {
+			log.Error("render worker: scratch root + fallback failed", "configured", scratchRoot, "fallback", fallback, "configured_err", err, "fallback_err", mkErr)
+			return
+		}
+		log.Warn("render worker: configured scratch unwritable, using OS temp", "configured", scratchRoot, "fallback", fallback, "err", err)
+		scratchRoot = fallback
 	}
 	timeoutSec := parseConfigIntFallback(cfg.Get("render_timeout_seconds"), 1800)
 	ffmpegPath := strings.TrimSpace(cfg.Get("ffmpeg_path"))
@@ -182,4 +189,31 @@ func parseConfigIntFallback(s string, def int) int {
 		return def
 	}
 	return n
+}
+
+// resolveScratchRoot picks the scratch directory for ffmpeg renders.
+//
+// Resolution order:
+//
+//   1. Operator override via render_scratch_dir config — absolute path
+//      they explicitly set, used as-is.
+//   2. ctx.DataDir() — the per-install writable dir the platform
+//      provisions ("<persistentRoot>/<install_id>/" on local installs,
+//      a Docker volume in containerized deploys). This is the right
+//      default on a dev laptop AND a production Linux box; the SDK
+//      hands us the platform's chosen path so we don't have to guess.
+//   3. /data/renders — the legacy default, kept as a final fallback
+//      for older platforms that don't set APTEVA_DATA_DIR yet. The
+//      worker also catches any mkdir failure and falls back to
+//      os.TempDir() at runtime, so even a misconfigured install
+//      doesn't end up with a zero-worker render pool.
+func resolveScratchRoot(app *sdk.AppCtx, override string) string {
+	override = strings.TrimSpace(override)
+	if override != "" {
+		return override
+	}
+	if dd := app.DataDir(); dd != "" {
+		return filepath.Join(dd, "renders")
+	}
+	return "/data/renders"
 }
