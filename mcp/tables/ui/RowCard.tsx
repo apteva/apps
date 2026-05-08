@@ -7,8 +7,19 @@
 
 import { Card, CardHeader, DataList, StatusPill } from "@apteva/ui-kit";
 import {
-  parseFields, rowPanelUrl, rowStatusVariant, tablesVendor,
+  CellTone, cellToneClass, parseFields, rowPanelUrl,
+  rowStatusVariant, tablesVendor,
 } from "./lib/tables";
+
+/** Structured field — same as the legacy "key=value" form, plus an
+ *  optional tone that highlights the cell with a subtle tint. The
+ *  agent picks the tone (e.g. "warn" for a value the user should
+ *  notice). */
+export interface FieldEntry {
+  key: string;
+  value: string;
+  tone?: CellTone;
+}
 
 interface Props {
   /** Numeric row id — what the agent gets back from `tables_insert`. */
@@ -17,25 +28,31 @@ interface Props {
   table_name: string;
   /** Optional title for the card — defaults to "#<row_id>". */
   title?: string;
-  /** "key=value, key=value" of the row's fields. */
-  fields?: string;
+  /** Either a "key=value, key=value" string (legacy, no tones) or
+   *  an array of {key, value, tone?} entries (new — supports per-
+   *  field highlighting). */
+  fields?: string | FieldEntry[];
   /** Which field's value drives the status pill in the header. */
   status_field?: string;
   preview?: boolean;
   projectId?: string;
 }
 
-const previewSample = {
+const previewSample: {
+  row_id: number; table_name: string; title: string;
+  fields: FieldEntry[]; status_field: string;
+} = {
   row_id: 1042,
   table_name: "invoices",
   title: "invoice #1042",
-  fields:
-    "customer=Acme Logistics, " +
-    "amount=$48,000.00, " +
-    "status=paid, " +
-    "due=May 11, " +
-    "contract=contract-acme-q4.pdf, " +
-    "notes=Extended via signed renewal addendum, expedited approval.",
+  fields: [
+    { key: "customer",  value: "Acme Logistics" },
+    { key: "amount",    value: "$48,000.00", tone: "warn" }, // big invoice — highlight
+    { key: "status",    value: "paid" },                     // moves to header
+    { key: "due",       value: "May 11" },
+    { key: "contract",  value: "contract-acme-q4.pdf" },
+    { key: "notes",     value: "Extended via signed renewal addendum, expedited approval." },
+  ],
   status_field: "status",
 };
 
@@ -46,11 +63,11 @@ export default function RowCard(props: Props) {
         row_id: props.row_id,
         table_name: props.table_name,
         title: props.title || `#${props.row_id}`,
-        fields: props.fields || "",
+        fields: props.fields ?? "",
         status_field: props.status_field || "status",
       };
 
-  const fields = parseFields(p.fields);
+  const fields = normaliseFields(p.fields);
   const statusField = fields.find((f) => f.key.toLowerCase() === p.status_field.toLowerCase());
   const status = statusField?.value;
 
@@ -85,7 +102,7 @@ export default function RowCard(props: Props) {
           <DataList
             items={bodyFields.map((f) => ({
               label: f.key,
-              value: renderFieldValue(f.key, f.value),
+              value: renderFieldValue(f.key, f.value, f.tone),
             }))}
           />
         )}
@@ -94,12 +111,45 @@ export default function RowCard(props: Props) {
   );
 }
 
+/** normaliseFields accepts either the legacy "k=v, k=v" string OR an
+ *  array of {key, value, tone?}. Returns a uniform FieldEntry[] so
+ *  the rest of the component doesn't branch. */
+function normaliseFields(raw: string | FieldEntry[] | undefined): FieldEntry[] {
+  if (!raw) return [];
+  if (typeof raw === "string") return parseFields(raw); // tone undefined for legacy
+  // The agent might send a JSON-string form when calling via MCP —
+  // try once to parse as JSON, fall back to comma-string parsing.
+  if (Array.isArray(raw)) return raw;
+  return [];
+}
+
 // renderFieldValue — light type heuristics: a value that looks like a
 // filename gets a tiny attachment chip; everything else is plain text.
 // Real type info lives in the parent table's schema; the agent could
 // pass it explicitly later, but this covers the 80% case.
-function renderFieldValue(key: string, value: string): React.ReactNode {
+//
+// When `tone` is supplied, the cell wraps in a tinted pill — that
+// trumps the file/number heuristics so the agent's intent wins. The
+// status-pill branch still applies (a status field with a status-y
+// value remains a StatusPill regardless of tone) because that's the
+// dedicated channel for that signal.
+function renderFieldValue(key: string, value: string, tone?: CellTone): React.ReactNode {
   if (!value) return <span className="text-text-dim">—</span>;
+  // Status-like value — render as a pill (header status takes precedence
+  // over agent-supplied tone for the canonical "status" field).
+  if (/^[a-z][a-z _-]{0,20}$/i.test(value) && key.toLowerCase().includes("status")) {
+    return <StatusPill variant={mapToPill(rowStatusVariant(value))}>{value}</StatusPill>;
+  }
+  // Agent-supplied tone takes precedence over filename/number formatting:
+  // if the agent flagged a cell, that's a deliberate signal we shouldn't
+  // bury under generic styling.
+  if (tone && tone !== "neutral") {
+    return (
+      <span className={`inline-block px-1.5 py-0.5 rounded text-sm tabular-nums ${cellToneClass(tone)}`}>
+        {value}
+      </span>
+    );
+  }
   // File chip — match a value that looks like a filename with a real extension
   if (/\.[a-z0-9]{2,5}$/i.test(value) && key.toLowerCase().match(/file|attach|contract|invoice|doc/)) {
     return (
@@ -112,10 +162,6 @@ function renderFieldValue(key: string, value: string): React.ReactNode {
   // Currency / number — let the agent format it; just monospace it
   if (/^\$|^[+-]?[\d,.]+$/.test(value)) {
     return <span className="font-mono tabular-nums text-sm">{value}</span>;
-  }
-  // Status-like value — render as a pill
-  if (/^[a-z][a-z _-]{0,20}$/i.test(value) && key.toLowerCase().includes("status")) {
-    return <StatusPill variant={mapToPill(rowStatusVariant(value))}>{value}</StatusPill>;
   }
   return <span className="text-sm">{value}</span>;
 }

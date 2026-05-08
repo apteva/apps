@@ -5,16 +5,27 @@ package main
 // any other compatible service. The choice is opaque to callers —
 // this file is the only place that touches S3 SDK types.
 //
-// Config (from config_schema, surfaced via ctx.Config):
+// v0.9 model: credentials come from a bound integration, NOT
+// config_schema. The operator picks an aws-s3 / cloudflare-r2 /
+// backblaze-b2 connection at install time; this file reads
+// connection.Fields via PlatformAPI().GetConnectionCredentials and
+// resolves slug-specific endpoint construction.
 //
-//	backend                = s3
-//	s3_endpoint            = host[:port]   (no scheme; minio-go derives that from secure flag)
-//	s3_region              = us-east-1     (default; some providers require their own value)
-//	s3_bucket              = my-bucket
-//	s3_access_key
-//	s3_secret_key
-//	s3_use_ssl             = "true" / "false" (default true)
-//	s3_force_path_style    = "true" / "false" (default false; set true for MinIO)
+// Per-slug resolution rules (the only slug-aware code in storage):
+//
+//   cloudflare-r2:  endpoint = "<account_id>.r2.cloudflarestorage.com"
+//                   region   = "auto"
+//                   path-style = false
+//   aws-s3:         endpoint = "s3.<region>.amazonaws.com"
+//                   region   = catalog field (default "us-east-1")
+//                   path-style = false
+//   backblaze-b2:   endpoint = "s3.<region>.backblazeb2.com"
+//                   region   = catalog field
+//                   path-style = false
+//
+// The bucket name lives in install config (`s3_bucket`) — one R2
+// account commonly hosts many buckets, so it's per-install state, not
+// per-connection.
 //
 // Key semantics: s3 object key == objectKey(sha256, storage_key) ==
 // "<2hex>/<storage_key>". Buckets stay flat-ish (256 prefixes) which
@@ -40,45 +51,26 @@ type s3Backend struct {
 	region string
 }
 
-// newS3Backend resolves the install config and initialises a minio
-// client. Returns an error rather than panicking — OnMount logs and
-// surfaces it so a misconfigured install fails loud.
-func newS3Backend(ctx *sdk.AppCtx) (*s3Backend, error) {
-	cfg := ctx.Config()
-	endpoint := strings.TrimSpace(cfg.Get("s3_endpoint"))
-	if endpoint == "" {
-		return nil, errors.New("s3 backend: s3_endpoint required (e.g. s3.amazonaws.com)")
+// newS3Backend reads the bound connection's credentials, resolves the
+// slug-specific endpoint, and initialises a minio client. Returns an
+// error rather than panicking — OnMount logs + surfaces it so a
+// misconfigured install fails loud.
+func newS3Backend(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, bucket string) (*s3Backend, error) {
+	creds, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
+	if err != nil {
+		return nil, fmt.Errorf("s3 backend: read credentials for connection %d: %w", bound.ConnectionID, err)
 	}
-	bucket := strings.TrimSpace(cfg.Get("s3_bucket"))
-	if bucket == "" {
-		return nil, errors.New("s3 backend: s3_bucket required")
-	}
-	access := strings.TrimSpace(cfg.Get("s3_access_key"))
-	secret := strings.TrimSpace(cfg.Get("s3_secret_key"))
-	if access == "" || secret == "" {
-		return nil, errors.New("s3 backend: s3_access_key + s3_secret_key required")
-	}
-	region := strings.TrimSpace(cfg.Get("s3_region"))
-	if region == "" {
-		region = "us-east-1"
+	resolved, err := resolveS3Connection(creds)
+	if err != nil {
+		return nil, err
 	}
 
-	useSSL := configBool(cfg.Get("s3_use_ssl"), true)
-
-	// Strip an accidental scheme — minio-go expects "host" not "https://host".
-	endpoint = strings.TrimPrefix(endpoint, "https://")
-	endpoint = strings.TrimPrefix(endpoint, "http://")
-	endpoint = strings.TrimRight(endpoint, "/")
-
-	client, err := minio.New(endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(access, secret, ""),
-		Secure: useSSL,
-		Region: region,
-		// BucketLookup: explicit when force_path_style=true; some
-		// providers (MinIO, custom Ceph, R2 sometimes) need path
-		// style instead of vhost style.
+	client, err := minio.New(resolved.endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(resolved.accessKey, resolved.secretKey, ""),
+		Secure: resolved.useSSL,
+		Region: resolved.region,
 		BucketLookup: func() minio.BucketLookupType {
-			if configBool(cfg.Get("s3_force_path_style"), false) {
+			if resolved.forcePathStyle {
 				return minio.BucketLookupPath
 			}
 			return minio.BucketLookupAuto
@@ -87,7 +79,86 @@ func newS3Backend(ctx *sdk.AppCtx) (*s3Backend, error) {
 	if err != nil {
 		return nil, fmt.Errorf("s3 backend: minio.New: %w", err)
 	}
-	return &s3Backend{client: client, bucket: bucket, region: region}, nil
+	return &s3Backend{client: client, bucket: bucket, region: resolved.region}, nil
+}
+
+// s3ResolvedConnection is the post-slug-resolution form of a bound
+// connection — same shape regardless of which provider the operator
+// picked.
+type s3ResolvedConnection struct {
+	endpoint       string
+	region         string
+	accessKey      string
+	secretKey      string
+	useSSL         bool
+	forcePathStyle bool
+}
+
+// resolveS3Connection turns a ConnectionCredentials bundle (slug +
+// catalog credential_fields) into the wire-level config minio-go
+// expects. Slug-aware: this is the only place storage knows that R2
+// uses <account_id>.r2.cloudflarestorage.com vs AWS uses
+// s3.<region>.amazonaws.com etc.
+func resolveS3Connection(creds *sdk.ConnectionCredentials) (*s3ResolvedConnection, error) {
+	if creds == nil {
+		return nil, errors.New("s3 backend: nil credentials")
+	}
+	access := strings.TrimSpace(creds.Fields["access_key_id"])
+	secret := strings.TrimSpace(creds.Fields["secret_access_key"])
+	if access == "" || secret == "" {
+		return nil, fmt.Errorf("s3 backend: connection %d (%s) is missing access_key_id / secret_access_key", creds.ConnectionID, creds.Slug)
+	}
+	region := strings.TrimSpace(creds.Fields["region"])
+
+	out := &s3ResolvedConnection{
+		accessKey:      access,
+		secretKey:      secret,
+		useSSL:         true,
+		forcePathStyle: false,
+		region:         region,
+	}
+
+	switch creds.Slug {
+	case "cloudflare-r2":
+		acct := strings.TrimSpace(creds.Fields["account_id"])
+		if acct == "" {
+			return nil, fmt.Errorf("s3 backend: cloudflare-r2 connection %d has no account_id", creds.ConnectionID)
+		}
+		out.endpoint = acct + ".r2.cloudflarestorage.com"
+		if out.region == "" {
+			out.region = "auto"
+		}
+	case "aws-s3":
+		if out.region == "" {
+			out.region = "us-east-1"
+		}
+		out.endpoint = "s3." + out.region + ".amazonaws.com"
+	case "backblaze-b2":
+		if out.region == "" {
+			return nil, fmt.Errorf("s3 backend: backblaze-b2 connection %d has no region (e.g. us-west-004)", creds.ConnectionID)
+		}
+		out.endpoint = "s3." + out.region + ".backblazeb2.com"
+	default:
+		// Generic S3-compatible (MinIO, Wasabi, custom Ceph). Catalog
+		// must surface an "endpoint" credential field for these.
+		ep := strings.TrimSpace(creds.Fields["endpoint"])
+		if ep == "" {
+			return nil, fmt.Errorf("s3 backend: unknown slug %q and connection has no 'endpoint' field", creds.Slug)
+		}
+		// Strip an accidental scheme — minio-go expects "host" not "https://host".
+		ep = strings.TrimPrefix(ep, "https://")
+		ep = strings.TrimPrefix(ep, "http://")
+		ep = strings.TrimRight(ep, "/")
+		out.endpoint = ep
+		if out.region == "" {
+			out.region = "us-east-1"
+		}
+		// Generic deployments (MinIO especially) commonly need
+		// path-style. Read it from creds if present, else default true.
+		out.forcePathStyle = configBool(creds.Fields["force_path_style"], true)
+		out.useSSL = configBool(creds.Fields["use_ssl"], true)
+	}
+	return out, nil
 }
 
 func (s *s3Backend) Kind() string { return "s3" }

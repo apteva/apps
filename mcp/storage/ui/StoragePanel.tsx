@@ -4,7 +4,7 @@
 // theme via Tailwind tokens.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { uploadResumable } from "./uploadResumable";
+import { uploadResumable, abortUploadServer } from "./uploadResumable";
 
 // Inlined SDK app-event subscription. Panels are runtime-bundled
 // standalone .mjs files and each app is independently installable
@@ -129,8 +129,15 @@ interface UploadJob {
   name: string;
   total: number;
   loaded: number;
-  status: "uploading" | "done" | "error";
+  status: "uploading" | "done" | "error" | "cancelled";
   error?: string;
+  // Set when the user clicks the row's Cancel button. The
+  // controller is fired on the in-flight upload; uploadResumable
+  // catches the AbortError and DELETEs server-side. We also keep
+  // the upload_id once the server hands one out, so a Cancel that
+  // races with the abort propagation can still clean up directly.
+  controller?: AbortController;
+  serverUploadId?: string;
 }
 
 export default function StoragePanel({ projectId, installId }: NativePanelProps) {
@@ -206,6 +213,7 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
       total: f.size,
       loaded: 0,
       status: "uploading" as const,
+      controller: new AbortController(),
     }));
     setUploads((prev) => [...prev, ...initialJobs]);
 
@@ -222,16 +230,31 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
         try {
           await uploadResumable(file, {
             folder,
+            signal: job.controller!.signal,
+            onUploadIdAssigned: (sid) => {
+              updateJob(job.id, { serverUploadId: sid });
+            },
             onProgress: (bytes, total) => {
               updateJob(job.id, { loaded: bytes, total });
             },
           });
           updateJob(job.id, { loaded: file.size, status: "done" });
         } catch (e) {
+          // Distinguish user-cancel from genuine failure — the
+          // strip styles them differently and a cancel is not a
+          // setStatus("Upload failed: ...") situation.
+          const isAbort =
+            (e as DOMException).name === "AbortError" ||
+            job.controller?.signal.aborted;
           updateJob(job.id, {
-            status: "error",
-            error: (e as Error).message,
+            status: isAbort ? "cancelled" : "error",
+            error: isAbort ? undefined : (e as Error).message,
           });
+          if (isAbort) {
+            // Skip to the next file; cancelling one shouldn't kill
+            // the rest of a multi-file selection.
+            continue;
+          }
           throw e;
         }
       }
@@ -241,12 +264,31 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
       ev.target.value = "";
       setBusy(false);
       load();
-      // Auto-clear successful jobs after a beat so the strip doesn't
-      // accrue forever. Errors stick around — user dismisses them.
+      // Auto-clear terminal jobs that don't need user action.
+      // Errors and cancels stick around — user dismisses them.
       window.setTimeout(() => {
         setUploads((prev) => prev.filter((j) => j.status !== "done"));
       }, 2500);
     }
+  };
+
+  // cancelUpload — fired by the row's Cancel button. Aborts the
+  // fetch chain (uploadResumable's catch path issues DELETE), and
+  // for safety also fires DELETE directly if we already know the
+  // server upload_id (covers a race where the resumable helper has
+  // already returned before the abort propagated).
+  const cancelUpload = (jobId: number) => {
+    setUploads((prev) =>
+      prev.map((j) => {
+        if (j.id !== jobId) return j;
+        if (j.status !== "uploading") return j;
+        try { j.controller?.abort(); } catch {}
+        if (j.serverUploadId) {
+          abortUploadServer(j.serverUploadId).catch(() => undefined);
+        }
+        return { ...j, status: "cancelled" };
+      }),
+    );
   };
 
   const dismissUpload = (id: number) => {
@@ -430,7 +472,12 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
       {uploads.length > 0 && (
         <div className="flex flex-col gap-2 border border-border rounded p-3 bg-bg-input/30">
           {uploads.map((job) => (
-            <UploadProgressRow key={job.id} job={job} onDismiss={() => dismissUpload(job.id)} />
+            <UploadProgressRow
+              key={job.id}
+              job={job}
+              onDismiss={() => dismissUpload(job.id)}
+              onCancel={() => cancelUpload(job.id)}
+            />
           ))}
         </div>
       )}
@@ -760,39 +807,61 @@ function VisibilityBadge({ value }: { value: string | undefined | null }) {
 function UploadProgressRow({
   job,
   onDismiss,
+  onCancel,
 }: {
   job: UploadJob;
   onDismiss: () => void;
+  onCancel: () => void;
 }) {
   const pct = job.total > 0 ? Math.min(100, Math.floor((job.loaded / job.total) * 100)) : 0;
   const isError = job.status === "error";
   const isDone = job.status === "done";
+  const isCancelled = job.status === "cancelled";
+  const isUploading = job.status === "uploading";
+  // Bar tint per status. Cancelled gets the muted color so the
+  // strip doesn't scream visually for an action the user took.
+  const barClass = isError
+    ? "bg-red"
+    : isDone
+    ? "bg-green"
+    : isCancelled
+    ? "bg-text-muted"
+    : "bg-accent";
+  const statusText = isError
+    ? "failed"
+    : isDone
+    ? "uploaded"
+    : isCancelled
+    ? "cancelled"
+    : `${formatSize(job.loaded)} / ${formatSize(job.total)} · ${pct}%`;
   return (
     <div className="flex items-center gap-3 text-xs">
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2 mb-1">
           <span className="text-text truncate" title={job.name}>{job.name}</span>
           <span className={`flex-shrink-0 ${isError ? "text-red" : "text-text-muted"}`}>
-            {isError
-              ? "failed"
-              : isDone
-              ? "uploaded"
-              : `${formatSize(job.loaded)} / ${formatSize(job.total)} · ${pct}%`}
+            {statusText}
           </span>
         </div>
         <div className="h-1.5 bg-bg-input rounded overflow-hidden">
           <div
-            className={`h-full transition-all duration-150 ${
-              isError ? "bg-red" : isDone ? "bg-green" : "bg-accent"
-            }`}
-            style={{ width: isError || isDone ? "100%" : `${pct}%` }}
+            className={`h-full transition-all duration-150 ${barClass}`}
+            style={{ width: isError || isDone || isCancelled ? "100%" : `${pct}%` }}
           />
         </div>
         {isError && job.error && (
           <div className="text-red mt-1">{job.error}</div>
         )}
       </div>
-      {(isError || isDone) && (
+      {isUploading && (
+        <button
+          type="button"
+          onClick={onCancel}
+          className="text-text-muted hover:text-red px-2 py-0.5 border border-border rounded text-[10px]"
+          aria-label="Cancel upload"
+        >Cancel</button>
+      )}
+      {(isError || isDone || isCancelled) && (
         <button
           type="button"
           onClick={onDismiss}

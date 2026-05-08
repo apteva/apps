@@ -314,7 +314,7 @@ func TestUploads_SweepStaleRemovesOldDirs(t *testing.T) {
 	staleDir := filepath.Join(upDir, staleID)
 	_ = os.MkdirAll(staleDir, 0755)
 	_ = os.WriteFile(filepath.Join(staleDir, "meta.json"), []byte(`{"user_id":1}`), 0644)
-	old := time.Now().Add(-2 * uploadIdleTTL)
+	old := time.Now().Add(-2 * defaultUploadIdleTTL)
 	_ = os.Chtimes(staleDir, old, old)
 
 	sweepStaleUploads(ctx)
@@ -366,4 +366,120 @@ func sha256SumOf(b []byte) []byte {
 	h := sha256.New()
 	_, _ = io.Copy(h, bytes.NewReader(b))
 	return h.Sum(nil)
+}
+
+// Abort: DELETE /uploads/<id> after init wipes the session dir,
+// returns bytes_freed, and emits upload.aborted.
+func TestUploads_AbortRemovesSession(t *testing.T) {
+	ctx := newTestCtx(t, tk.WithEnv("STORAGE_UPLOADS_DIR", t.TempDir()))
+	app := &App{}
+
+	startUpload(t, app, map[string]any{"filename": "abandoned.bin", "size": 1024})
+	id := lastUploadID(t, app, nil, "")
+
+	// Land one part so there are bytes to reclaim.
+	rec := putPart(t, app, id, 1, bytes.Repeat([]byte("A"), 256), "1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT part: %d %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(uploadSessionDir(ctx, id)); err != nil {
+		t.Fatalf("session dir missing pre-abort: %v", err)
+	}
+
+	req := httptest.NewRequest("DELETE", "/uploads/"+id+"?project_id=test-proj", nil)
+	req.Header.Set("X-User-ID", "1")
+	delRec := httptest.NewRecorder()
+	app.handleUploadsItem(delRec, req)
+	if delRec.Code != http.StatusOK {
+		t.Fatalf("DELETE: %d %s", delRec.Code, delRec.Body.String())
+	}
+	var rsp map[string]any
+	if err := json.Unmarshal(delRec.Body.Bytes(), &rsp); err != nil {
+		t.Fatal(err)
+	}
+	if rsp["aborted"] != id {
+		t.Errorf("aborted=%v want %s", rsp["aborted"], id)
+	}
+	if bf, _ := rsp["bytes_freed"].(float64); bf < 256 {
+		t.Errorf("bytes_freed=%v want >=256", rsp["bytes_freed"])
+	}
+	if _, err := os.Stat(uploadSessionDir(ctx, id)); !os.IsNotExist(err) {
+		t.Error("session dir still present after abort")
+	}
+}
+
+// Abort by a different user is forbidden.
+func TestUploads_AbortRejectsForeignUser(t *testing.T) {
+	_ = newTestCtx(t, tk.WithEnv("STORAGE_UPLOADS_DIR", t.TempDir()))
+	app := &App{}
+
+	startUpload(t, app, map[string]any{"filename": "mine.bin", "size": 10})
+	id := lastUploadID(t, app, nil, "")
+
+	req := httptest.NewRequest("DELETE", "/uploads/"+id+"?project_id=test-proj", nil)
+	req.Header.Set("X-User-ID", "999")
+	rec := httptest.NewRecorder()
+	app.handleUploadsItem(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Abort of an unknown id returns 404 (idempotent in the sense that
+// the dir really is gone after the call).
+func TestUploads_AbortMissingReturns404(t *testing.T) {
+	_ = newTestCtx(t, tk.WithEnv("STORAGE_UPLOADS_DIR", t.TempDir()))
+	app := &App{}
+	req := httptest.NewRequest("DELETE", "/uploads/01HABCDEFGHJKMNPQRSTVWXYZ0?project_id=test-proj", nil)
+	req.Header.Set("X-User-ID", "1")
+	rec := httptest.NewRecorder()
+	app.handleUploadsItem(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rec.Code)
+	}
+}
+
+// configuredUploadIdleTTL falls back, parses, and treats 0 as "off".
+func TestConfiguredUploadIdleTTL(t *testing.T) {
+	cases := []struct {
+		raw      string
+		minHours float64
+		maxHours float64
+	}{
+		{"", 5.9, 6.1},                             // default 6h
+		{"abc", 5.9, 6.1},                          // garbage → default
+		{"-1", 5.9, 6.1},                           // negative → default
+		{"3", 2.9, 3.1},                            // 3h
+		{"0", 99 * 365 * 24, 101 * 365 * 24},       // disabled = 100y
+	}
+	for _, c := range cases {
+		ctx := newTestCtx(t, tk.WithConfig(map[string]string{"upload_idle_ttl_hours": c.raw}))
+		got := configuredUploadIdleTTL(ctx).Hours()
+		if got < c.minHours || got > c.maxHours {
+			t.Errorf("upload_idle_ttl_hours=%q -> %v hours, want in [%v, %v]",
+				c.raw, got, c.minHours, c.maxHours)
+		}
+	}
+}
+
+// configuredSweepInterval clamps to [1m, 24h].
+func TestConfiguredSweepInterval(t *testing.T) {
+	cases := []struct {
+		raw     string
+		wantMin time.Duration
+	}{
+		{"", 15 * time.Minute},
+		{"5", 5 * time.Minute},
+		{"0", time.Minute},        // floor
+		{"99999", 24 * time.Hour}, // ceiling
+		{"abc", 15 * time.Minute},
+	}
+	for _, c := range cases {
+		ctx := newTestCtx(t, tk.WithConfig(map[string]string{"upload_sweep_interval_minutes": c.raw}))
+		got := configuredSweepInterval(ctx)
+		if got != c.wantMin {
+			t.Errorf("upload_sweep_interval_minutes=%q -> %v, want %v",
+				c.raw, got, c.wantMin)
+		}
+	}
 }

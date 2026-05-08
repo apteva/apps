@@ -44,6 +44,10 @@ export interface UploadResumableOptions {
   /** Override the parallelism. Default 4. */
   parallel?: number;
   signal?: AbortSignal;
+  /** Notified once the server has issued an upload_id, so the UI can
+   *  surface a Cancel button + later trigger DELETE /uploads/<id> if
+   *  the user tears the row down out-of-band. */
+  onUploadIdAssigned?: (id: string) => void;
 }
 
 export async function uploadResumable(
@@ -120,6 +124,10 @@ async function uploadChunked(
     throw new Error("init returned no upload_id");
   }
   const id = init.upload_id;
+  // Side-channel for the panel: tell the caller the upload-id as
+  // soon as we have one, so a Cancel button can call DELETE even
+  // if the AbortController is later misplaced. Best-effort.
+  opts.onUploadIdAssigned?.(id);
   const partSize = init.part_size ?? defaultPartSize;
   const parallel = Math.max(1, opts.parallel ?? init.max_parallel ?? defaultParallel);
 
@@ -193,19 +201,49 @@ async function uploadChunked(
 
   const workers: Promise<void>[] = [];
   for (let i = 0; i < parallel; i++) workers.push(work());
-  await Promise.all(workers);
-  if (firstErr) throw firstErr;
-  if (opts.signal?.aborted) {
-    throw new DOMException("upload aborted", "AbortError");
-  }
 
-  // All parts are on the server. Complete.
-  const completion = (await jsonFetch<{ file: UploadedFile; was_existing: boolean }>(
-    "POST",
-    `${STORAGE_API}/uploads/${id}/complete`,
-    { body: {}, signal: opts.signal },
-  )).body;
-  return completion.file;
+  try {
+    await Promise.all(workers);
+    if (firstErr) throw firstErr;
+    if (opts.signal?.aborted) {
+      throw new DOMException("upload aborted", "AbortError");
+    }
+    // All parts are on the server. Complete.
+    const completion = (await jsonFetch<{ file: UploadedFile; was_existing: boolean }>(
+      "POST",
+      `${STORAGE_API}/uploads/${id}/complete`,
+      { body: {}, signal: opts.signal },
+    )).body;
+    return completion.file;
+  } catch (e) {
+    // User cancel OR per-part retry exhaustion both leak partial
+    // bytes on disk if we don't wipe the session. Fire-and-forget
+    // DELETE — server is idempotent on missing sessions, so a
+    // race with the sweeper is harmless.
+    abortServerSession(id).catch(() => undefined);
+    throw e;
+  }
+}
+
+/** Cancel a multipart upload server-side. Idempotent. The panel
+ *  calls this from its per-row Cancel button after aborting the
+ *  in-flight AbortController. */
+export async function abortUploadServer(uploadId: string): Promise<void> {
+  return abortServerSession(uploadId);
+}
+
+async function abortServerSession(id: string): Promise<void> {
+  try {
+    await fetch(`${STORAGE_API}/uploads/${id}`, {
+      method: "DELETE",
+      credentials: "same-origin",
+      // Deliberately no AbortSignal here: the user's AbortController
+      // is what got us here. Using it would short-circuit the cleanup.
+    });
+  } catch {
+    // Network failure during cleanup is logged-and-forgotten —
+    // the sweeper will eventually reclaim the session.
+  }
 }
 
 // ─── helpers ─────────────────────────────────────────────────────

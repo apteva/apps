@@ -36,6 +36,7 @@ import (
 // fields they care about (whoami, executeResp, executeErr) and assert
 // against ExecuteCalls afterwards. Methods we don't use return zero.
 type stubPlatform struct {
+	tk.BasePlatformClient
 	mu sync.Mutex
 
 	whoami      *sdk.InstallIdentity

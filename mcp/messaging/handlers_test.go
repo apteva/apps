@@ -23,6 +23,7 @@ import (
 // and returns a canned response. Only the methods we actually use in
 // tests are non-nil; everything else panics so failures are loud.
 type stubPlatform struct {
+	tk.BasePlatformClient
 	mu               sync.Mutex
 	executeCalls     []executeCall
 	callAppCalls     []callAppCall

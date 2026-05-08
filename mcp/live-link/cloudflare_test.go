@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
 )
 
 // ─── fake PlatformClient ──────────────────────────────────────────
@@ -26,6 +27,7 @@ const fakeCFConnID int64 = 4242
 // fakePlatform implements sdk.PlatformClient with a registry of
 // (tool → handler) entries the test wires up.
 type fakePlatform struct {
+	tk.BasePlatformClient
 	bindings map[string]any
 	tools    map[string]func(input map[string]any) *sdk.ExecuteResult
 	calls    []fakeCall

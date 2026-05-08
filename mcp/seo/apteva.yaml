@@ -1,0 +1,65 @@
+schema: apteva-app/v1
+
+name: seo
+display_name: SEO
+version: 0.1.0
+description: |
+  Generic SEO research workbench. Track domains, keywords, rankings,
+  and backlinks; pull metrics from any provider behind one pluggable
+  role (Ahrefs / DataForSEO / Moz / etc.). Schema is grounded in the
+  convergent shape across the major SEO APIs: per-(entity, provider,
+  ts) snapshot rows for metrics, dedicated time-series for keyword
+  volume history, and per-link rows for backlinks.
+
+  v0.1 ships the schema + domain/keyword CRUD. Pages, rankings,
+  backlinks, and a stub provider land in subsequent cuts; v0.2 wires
+  scheduled refresh via the jobs app.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/seo
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/seo/icon.png
+tags: [seo, marketing, keywords, rankings, backlinks]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.connections.execute
+  integrations: []
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: domains_add,    description: "Add a domain (hostname) to track. Args: host (required), label?." }
+    - { name: domains_list,   description: "List tracked domains in this scope." }
+    - { name: domains_get,    description: "Read one domain plus its latest metrics snapshot. Args: id." }
+    - { name: domains_remove, description: "Remove a domain. Cascades to its pages, metrics, rankings, backlinks. Args: id." }
+    - { name: keywords_add,    description: "Add a keyword to track. Args: text (required), country_iso? (default 'US'), language_iso? (default 'en')." }
+    - { name: keywords_list,   description: "List keywords in this scope. Args: country_iso?, limit? (default 200)." }
+    - { name: keywords_get,    description: "Read one keyword plus its latest metrics snapshot. Args: id." }
+    - { name: keywords_remove, description: "Remove a keyword. Cascades to its metrics, volume history, rankings. Args: id." }
+  ui_panels:
+    - slot: project.page
+      label: SEO
+      icon: trending-up
+      entry: /ui/SeoPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/seo
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/seo.db
+  migrations: migrations/
+
+upgrade_policy: manual

@@ -45,17 +45,25 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: storage
 display_name: Storage
-version: 0.8.2
+version: 0.9.0
 description: |
   File storage with virtual folders, signed URLs, dedup. Pluggable
   backend: local disk by default, S3-compatible (AWS / R2 / B2 /
-  Wasabi / MinIO) when configured. Direct presigned uploads +
-  downloads when on S3 — bytes never touch the storage container.
+  Wasabi / MinIO) when an integration is bound. Direct presigned
+  uploads + downloads on S3 — bytes never touch the storage container.
 author: Apteva
 scopes: [project, global]
 requires:
   permissions:
     - db.write.app
+    - platform.connections.read_credentials
+  integrations:
+    - role: backend
+      kind: integration
+      compatible_slugs: [aws-s3, cloudflare-r2, backblaze-b2]
+      required: false
+      label: "S3-compatible backend (optional)"
+      hint: "Bind to host blobs in S3/R2/B2; otherwise blobs live on local disk."
 provides:
   http_routes:
     - prefix: /
@@ -83,6 +91,7 @@ provides:
     - { name: files_dedupe_check,   description: "Find an existing file by sha256." }
     - { name: files_delete,         description: "Delete a file (hard or soft)." }
     - { name: files_from_url,       description: "Fetch a URL into storage.", requires: files.write, resource_from: "folder/{arg.folder?}" }
+    - { name: storage_abort_upload, description: "Abort a leaked multipart upload session and reclaim its bytes." }
   ui_panels:
     - slot: project.page
       label: Files
@@ -148,14 +157,19 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 
 	// Background sweeper for stale upload sessions. Runs once on
 	// boot (so a restart immediately reclaims anything older than
-	// 24h) and then hourly. Goroutine has no shutdown — apps don't
-	// have a clean teardown signal in v0.1, but the sweeper does
-	// nothing destructive past the TTL gate so an abrupt exit is
-	// fine.
+	// the TTL) and then on the configured interval. Goroutine has
+	// no shutdown — apps don't have a clean teardown signal in
+	// v0.1, but the sweeper does nothing destructive past the TTL
+	// gate so an abrupt exit is fine.
 	go func() {
 		sweepStaleUploads(ctx)
 		sweepStalePendingUploads(ctx)
-		t := time.NewTicker(time.Hour)
+		interval := configuredSweepInterval(ctx)
+		ctx.Logger().Info("upload sweeper started",
+			"interval", interval.String(),
+			"ttl", configuredUploadIdleTTL(ctx).String(),
+		)
+		t := time.NewTicker(interval)
 		defer t.Stop()
 		for range t.C {
 			sweepStaleUploads(ctx)
@@ -305,6 +319,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"tags":   map[string]any{"type": "array"},
 			}, []string{"url"}),
 			Handler: a.toolFromURL,
+		},
+		{
+			Name:        "storage_abort_upload",
+			Description: "Abort an in-progress multipart upload session. Removes the partial bytes on disk and emits upload.aborted. Idempotent: aborting an already-removed session returns found=false. Args: id (the upload session id from /uploads init), reason? (free-text label for the audit log). Use this when a client cancels a large upload — without it, partial bytes sit on disk until the sweeper TTL fires.",
+			InputSchema: schemaObject(map[string]any{
+				"id":     map[string]any{"type": "string"},
+				"reason": map[string]any{"type": "string"},
+			}, []string{"id"}),
+			HandlerCtx: a.toolAbortUploadCtx,
 		},
 	}
 }

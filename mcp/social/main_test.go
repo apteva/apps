@@ -36,6 +36,7 @@ import (
 // --- stub PlatformClient -------------------------------------------
 
 type recordingPlatform struct {
+	tk.BasePlatformClient
 	mu                sync.Mutex
 	executeCalls      []executeCall
 	callAppCalls      []callAppCall

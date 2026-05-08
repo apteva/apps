@@ -114,6 +114,31 @@ export function parseFields(raw?: string): RowField[] {
     });
 }
 
+// ─── Per-cell highlight tones ─────────────────────────────────────
+//
+// Same vocabulary as ui-kit's StatusPill so an agent can pick a
+// single tone for both header pills and inline cells. Renders as a
+// subtle tinted background + matching text color: visible enough to
+// catch the eye, restrained enough not to derail the rest of the
+// card.
+//
+// `neutral` and undefined both map to no special styling (default
+// inline cell colors), so cards can call cellToneClass() for every
+// cell unconditionally.
+
+export type CellTone = "success" | "error" | "info" | "warn" | "neutral";
+
+export function cellToneClass(tone?: CellTone): string {
+  switch (tone) {
+    case "success": return "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400";
+    case "error":   return "bg-red-500/15 text-red-700 dark:text-red-400";
+    case "warn":    return "bg-amber-500/15 text-amber-700 dark:text-amber-400";
+    case "info":    return "bg-sky-500/15 text-sky-700 dark:text-sky-400";
+    case "neutral":
+    default:        return "";
+  }
+}
+
 // ─── Status / scope mappers ───────────────────────────────────────
 
 /** Map a row's `status` cell value to a StatusPill variant. Tables

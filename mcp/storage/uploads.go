@@ -33,10 +33,12 @@ package main
 // no shared mutex on PUT, so the network is the only contention.
 
 import (
+	"context"
 	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,13 +54,72 @@ import (
 )
 
 const (
-	uploadIdleTTL  = 24 * time.Hour
-	uploadIDChars  = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-	maxPartNumber  = 10000              // S3-compatible upper bound
-	maxPartSize    = 100 * 1024 * 1024  // sanity cap per part
+	// defaultUploadIdleTTL — how long an idle upload session sits
+	// before the sweeper reclaims it. Was 24h; bumped down to 6h
+	// because cancel-spam during dev fills disks faster than the
+	// old TTL drained. Operators can override via the
+	// upload_idle_ttl_hours config; 0 = never expire (anti-pattern,
+	// flagged in the config description).
+	defaultUploadIdleTTL = 6 * time.Hour
+	// defaultSweepInterval — how often the sweeper looks for stale
+	// sessions. Was 1h; 15min keeps reclaim within an hour even
+	// when idle TTL drops to 1h. Operators override via
+	// upload_sweep_interval_minutes.
+	defaultSweepInterval = 15 * time.Minute
+	uploadIDChars   = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+	maxPartNumber   = 10000             // S3-compatible upper bound
+	maxPartSize     = 100 * 1024 * 1024 // sanity cap per part
 	defaultPartSize = 5 * 1024 * 1024
 	defaultParallel = 4
 )
+
+// configuredUploadIdleTTL reads upload_idle_ttl_hours from install
+// config, falling back to defaultUploadIdleTTL. 0 in config = no
+// auto-cleanup ever — surfaced in the config description as an
+// anti-pattern but technically supported.
+func configuredUploadIdleTTL(ctx *sdk.AppCtx) time.Duration {
+	if ctx == nil {
+		return defaultUploadIdleTTL
+	}
+	raw := strings.TrimSpace(ctx.Config().Get("upload_idle_ttl_hours"))
+	if raw == "" {
+		return defaultUploadIdleTTL
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return defaultUploadIdleTTL
+	}
+	if n == 0 {
+		// Effectively disable. 100y is "long enough to not fire."
+		return 100 * 365 * 24 * time.Hour
+	}
+	return time.Duration(n) * time.Hour
+}
+
+// configuredSweepInterval reads upload_sweep_interval_minutes,
+// clamped to [1m, 24h] for sanity. Anything outside that range
+// likely indicates a typo.
+func configuredSweepInterval(ctx *sdk.AppCtx) time.Duration {
+	if ctx == nil {
+		return defaultSweepInterval
+	}
+	raw := strings.TrimSpace(ctx.Config().Get("upload_sweep_interval_minutes"))
+	if raw == "" {
+		return defaultSweepInterval
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return defaultSweepInterval
+	}
+	d := time.Duration(n) * time.Minute
+	if d < time.Minute {
+		return time.Minute
+	}
+	if d > 24*time.Hour {
+		return 24 * time.Hour
+	}
+	return d
+}
 
 type uploadMeta struct {
 	UserID         int64    `json:"user_id"`
@@ -274,7 +335,7 @@ func (a *App) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 		"part_size":    defaultPartSize,
 		"max_parallel": defaultParallel,
 		"max_parts":    maxPartNumber,
-		"expires_at":   time.Now().Add(uploadIdleTTL).UTC().Format(time.RFC3339),
+		"expires_at":   time.Now().Add(configuredUploadIdleTTL(ctx)).UTC().Format(time.RFC3339),
 	})
 }
 
@@ -582,23 +643,113 @@ func (a *App) handleUploadComplete(w http.ResponseWriter, r *http.Request, id st
 func (a *App) handleUploadAbort(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := globalCtx
 	uid, _ := strconv.ParseInt(r.Header.Get("X-User-ID"), 10, 64)
+	bytesFreed, err := abortUploadSession(ctx, id, uid, "client")
+	if err != nil {
+		switch err {
+		case errAbortNotFound:
+			httpErr(w, http.StatusNotFound, "session not found")
+		case errAbortNotOwner:
+			httpErr(w, http.StatusForbidden, "not your upload")
+		default:
+			httpErr(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	httpJSON(w, map[string]any{"aborted": id, "bytes_freed": bytesFreed})
+}
+
+// toolAbortUploadCtx — MCP wrapper around abortUploadSession. The
+// tool surface intentionally skips the ownership check (admin-style
+// abort): operators clearing leaked sessions don't necessarily own
+// them. Use the HTTP DELETE for client-initiated cancels which DO
+// want the X-User-ID gate.
+func (a *App) toolAbortUploadCtx(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	id, _ := args["id"].(string)
+	if id == "" {
+		return nil, errors.New("id required")
+	}
+	reason, _ := args["reason"].(string)
+	if reason == "" {
+		reason = "tool"
+	}
+	bytes, err := abortUploadSession(app, id, 0, reason)
+	if err != nil {
+		if errors.Is(err, errAbortNotFound) {
+			return map[string]any{"found": false, "id": id}, nil
+		}
+		return nil, err
+	}
+	return map[string]any{"found": true, "id": id, "bytes_freed": bytes}, nil
+}
+
+// abortUploadSession is the shared backend for the HTTP DELETE
+// /uploads/<id> route, the storage_abort_upload MCP tool, and the
+// stale-upload sweeper. Returns bytes reclaimed so the caller can
+// surface "X MB freed" without a separate stat call.
+//
+// reason is logged + included in the upload.aborted event ("client",
+// "tool", "sweep") for ops visibility.
+func abortUploadSession(ctx *sdk.AppCtx, id string, requestingUser int64, reason string) (int64, error) {
 	dir := uploadSessionDir(ctx, id)
 	meta, err := loadUploadMeta(dir)
 	if err != nil {
-		httpErr(w, http.StatusNotFound, "session not found")
-		return
+		return 0, errAbortNotFound
 	}
-	if meta.UserID != uid {
-		httpErr(w, http.StatusForbidden, "not your upload")
-		return
+	// Skip ownership check when the sweeper is calling (requestingUser=0),
+	// or when the meta has no user_id (legacy sessions).
+	if requestingUser != 0 && meta.UserID != 0 && meta.UserID != requestingUser {
+		return 0, errAbortNotOwner
 	}
+	bytes := dirSize(dir)
 	mu := sessionLock(id)
 	mu.Lock()
-	_ = os.RemoveAll(dir)
+	rmErr := os.RemoveAll(dir)
 	mu.Unlock()
 	releaseSessionLock(id)
-	httpJSON(w, map[string]any{"aborted": id})
+	if rmErr != nil {
+		return 0, rmErr
+	}
+	emitUploadAborted(ctx, id, meta, bytes, reason)
+	return bytes, nil
 }
+
+// emitUploadAborted publishes upload.aborted so the dashboard's
+// status banner + ops dashboards see "session reclaimed" without
+// polling the filesystem.
+func emitUploadAborted(ctx *sdk.AppCtx, id string, meta *uploadMeta, bytes int64, reason string) {
+	if ctx == nil {
+		return
+	}
+	ctx.Emit("upload.aborted", map[string]any{
+		"upload_id":   id,
+		"filename":    meta.Filename,
+		"folder":      meta.Folder,
+		"bytes_freed": bytes,
+		"reason":      reason,
+	})
+}
+
+// dirSize sums the byte count of every regular file under root.
+// Best-effort — failures (deleted mid-walk, permission gaps) silently
+// roll forward to whatever was countable.
+func dirSize(root string) int64 {
+	var total int64
+	_ = filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
+		if err != nil || info == nil {
+			return nil
+		}
+		if !info.IsDir() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
+}
+
+var (
+	errAbortNotFound = errors.New("session not found")
+	errAbortNotOwner = errors.New("not your upload")
+)
 
 // ─── helpers ─────────────────────────────────────────────────────────
 
@@ -677,7 +828,8 @@ func sweepStaleUploads(ctx *sdk.AppCtx) {
 	if err != nil {
 		return
 	}
-	cutoff := time.Now().Add(-uploadIdleTTL)
+	ttl := configuredUploadIdleTTL(ctx)
+	cutoff := time.Now().Add(-ttl)
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -691,9 +843,19 @@ func sweepStaleUploads(ctx *sdk.AppCtx) {
 			continue
 		}
 		if st.ModTime().Before(cutoff) {
-			ctx.Logger().Info("upload sweeper removing stale session",
-				"id", e.Name(), "age", time.Since(st.ModTime()).String())
-			_ = os.RemoveAll(path)
+			// Route through abortUploadSession so we get the same
+			// lock + event emission as a client-initiated abort.
+			// requestingUser=0 skips ownership check; reason="sweep"
+			// distinguishes in upload.aborted listeners.
+			bytes, err := abortUploadSession(ctx, e.Name(), 0, "sweep")
+			if err != nil {
+				ctx.Logger().Warn("upload sweeper failed to remove session",
+					"id", e.Name(), "err", err)
+				continue
+			}
+			ctx.Logger().Info("upload sweeper removed stale session",
+				"id", e.Name(), "age", time.Since(st.ModTime()).String(),
+				"bytes_freed", bytes)
 		}
 	}
 }

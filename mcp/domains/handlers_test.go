@@ -14,6 +14,7 @@ import (
 // ─── Stub PlatformClient ──────────────────────────────────────────
 
 type stubPlatform struct {
+	tk.BasePlatformClient
 	mu               sync.Mutex
 	calls            []executeCall
 	replyByTool      map[string]*sdk.ExecuteResult

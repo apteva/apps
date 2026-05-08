@@ -1,0 +1,86 @@
+schema: apteva-app/v1
+
+name: ads
+display_name: Ads
+version: 0.1.0
+description: |
+  Manage paid advertising across networks behind one MCP surface.
+  v0.1 supports Meta Ads (Facebook + Instagram) — campaigns, ad sets,
+  ads, creatives, audiences. Connect ad accounts at runtime via the
+  Add Account flow; the underlying integrations system handles OAuth
+  and token refresh. Reporting is intentionally not in v1; this is a
+  control plane only.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/ads
+tags: [advertising, ads, marketing, campaigns, meta, facebook, instagram]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.connections.execute
+    - platform.connections.manage
+    - platform.oauth.start
+    - platform.apps.call
+  integrations:
+    - role: storage
+      kind: app
+      compatible_app_names: [storage]
+      capabilities: [files.read]
+      required: false
+      label: "Storage (optional)"
+      hint: "Used by creative_upload to fetch image/video bytes from a stored file id and forward them to Meta. Without storage, upload directly by URL via the platform_options escape hatch."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: account_add,                 description: "Begin OAuth for an ads platform. Returns authorize_url + pending_account_id." }
+    - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable ad accounts on the connected platform." }
+    - { name: account_finalize,            description: "Commit a pending ad account into the active list. Supply page_id (the platform ad account id, e.g. act_12345)." }
+    - { name: account_list,                description: "List connected ad accounts in this project." }
+    - { name: account_disconnect,          description: "Remove a connected ad account; releases the underlying connection when the last reference goes." }
+    - { name: campaign_create,             description: "Create a campaign on the bound ad account." }
+    - { name: campaign_list,                description: "List campaigns on a connected ad account." }
+    - { name: campaign_update,              description: "Update campaign fields (name, status, budget, schedule, bid strategy)." }
+    - { name: campaign_pause,               description: "Convenience: set campaign status=PAUSED." }
+    - { name: campaign_resume,              description: "Convenience: set campaign status=ACTIVE." }
+    - { name: campaign_delete,              description: "Delete a campaign (and its ad sets / ads upstream)." }
+    - { name: adset_create,                 description: "Create an ad set under a campaign. Accepts targeting passthrough via platform_options." }
+    - { name: adset_list,                   description: "List ad sets under a campaign or ad account." }
+    - { name: adset_update,                 description: "Update an ad set." }
+    - { name: adset_delete,                 description: "Delete an ad set." }
+    - { name: ad_create,                    description: "Create an ad referencing an existing creative." }
+    - { name: ad_list,                      description: "List ads under an ad set or ad account." }
+    - { name: ad_update,                    description: "Update an ad." }
+    - { name: ad_delete,                    description: "Delete an ad." }
+    - { name: creative_upload,              description: "Upload an image or video to the platform's creative library. Reads bytes from the storage app when storage_id is given, or accepts a public source_url passthrough." }
+    - { name: creative_list,                description: "List creatives in the ad account." }
+    - { name: audience_create_custom,       description: "Create a custom audience (passthrough payload). Use platform_options.* for source-specific payloads." }
+    - { name: audience_create_lookalike,    description: "Create a lookalike audience from an existing custom audience." }
+    - { name: audience_list,                description: "List audiences in the ad account." }
+  ui_panels:
+    - slot: project.page
+      label: Ads
+      icon: target
+      entry: /ui/AdsPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/ads
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/ads.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch

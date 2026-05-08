@@ -1,0 +1,102 @@
+schema: apteva-app/v1
+
+name: streaming
+display_name: Streaming
+version: 0.1.0
+description: |
+  Live ingest + HLS packaging for sibling Apteva apps. Owns RTMP ingest,
+  ffmpeg-driven HLS segmentation, recording-to-mp4, viewer heartbeats,
+  signed-URL playback gating, and a built-in synthetic load generator
+  for capacity planning. Has no opinion about *why* a stream exists —
+  webinars, podcasts, demo days, hardware cameras all share one engine.
+
+  v0.1 is fully standalone: segments and recordings live on the
+  sidecar's local data dir and are served directly from there. No
+  storage/media dependency yet — keeps the replay path local-only and
+  the deployment trivial. v0.2 adds optional storage upload + media
+  derivatives.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/streaming
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/streaming/icon.png
+tags: [streaming, video, live, hls, rtmp, infrastructure]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: streams_create
+      description: "Allocate a stream — returns ingest_url (RTMP push target), playback_url (HLS), stream_key, playback_token. Idle until the first publisher push, then status flips to 'live'. Args: name, owner_app?, owner_tag?, record? (default true), visibility? (signed|public, default signed), retention_days? (default 30)."
+    - name: streams_get
+      description: "Full state: status (idle|live|ended|errored), current_bitrate, current_fps, resolution, viewer_count, peak_viewers, started_at, ended_at, error. Args: id."
+    - name: streams_list
+      description: "Filter by status, owner_app, owner_tag, limit. The webinars app calls list(owner_app='webinars', owner_tag='webinar:42') to find its stream. Args: status?, owner_app?, owner_tag?, limit? (default 50)."
+    - name: streams_stop
+      description: "Graceful stop. SIGINT the publisher's ffmpeg child, finalize recording, set status=ended, emit stream.ended. Idempotent. Args: id."
+    - name: streams_delete
+      description: "Tear down listener and delete segments + recording from disk. Idempotent. Args: id."
+    - name: streams_rotate_key
+      description: "Generate new stream_key (kills the active session if any). For when a key leaks. Returns the new ingest_url + stream_key. Args: id."
+    - name: streams_get_metrics
+      description: "Lightweight metrics read for the dashboard polling lane: current_bitrate, current_fps, viewer_count, peak_viewers, total_viewer_seconds, uptime_seconds, dropped_frames. Args: id."
+    - name: streams_replay_url
+      description: "Once status=ended: returns the playback URL for the recording (mp4) and/or the segments. Returns null when no recording was made or status != ended. Args: id."
+    - name: streams_load_test
+      description: "Synthetic load generator. Spawns N goroutine 'viewers' against the playback URL, fetches manifest + segments, discards bytes. Reports p50/p95/p99 first-byte latency, served bitrate, refusals, http_5xx, segments_late. The agent uses this to bisect for the box's viewer ceiling. Args: id, viewers (default 50), duration_seconds (default 30, max 300)."
+  ui_panels: []
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/streaming
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/streaming.db
+  migrations: migrations/
+
+config_schema:
+  - name: rtmp_port_range
+    type: text
+    default: "1935-1965"
+    label: RTMP listener port range
+    description: Inclusive range. Each active stream binds one port from this pool.
+  - name: hls_segment_seconds
+    type: number
+    default: 4
+    label: HLS segment duration (seconds)
+    description: Lower = lower latency, higher request rate. 2-6 is sane.
+  - name: hls_window_segments
+    type: number
+    default: 0
+    label: Live window size (segments)
+    description: 0 = keep all segments (replay-from-segments). Otherwise trim to N most-recent.
+  - name: viewer_idle_seconds
+    type: number
+    default: 30
+    label: Viewer heartbeat timeout (seconds)
+    description: A viewer stops being counted after this long without a heartbeat.
+  - name: max_concurrent_streams
+    type: number
+    default: 4
+    label: Max concurrent active publishers
+    description: Hard cap on simultaneous live streams. Must be <= rtmp_port_range size.
+  - name: ffmpeg_path
+    type: text
+    default: "ffmpeg"
+    label: ffmpeg binary
+    description: Resolved via $PATH when unset. Override for non-standard installs.
+
+upgrade_policy: auto-patch

@@ -120,22 +120,32 @@ func backend() Backend {
 	panic("backend(): globalCtx not set — call tk.NewAppCtx + assign globalCtx before invoking storage handlers")
 }
 
-// initBackend reads the install config and returns the chosen
-// backend. Called from OnMount. Returns an error rather than falling
-// back silently — a misconfigured s3 backend should fail loud at
-// boot rather than route writes to disk.
+// initBackend resolves the active backend from the install state.
+// v0.9 model:
+//
+//	If requires.integrations[role=backend] is bound + a bucket is
+//	configured → s3, with credentials read live from the bound
+//	connection.
+//	Otherwise → disk.
+//
+// No more `backend` config toggle: the binding's presence is the
+// signal. An operator who wants to fall back to disk can clear the
+// binding from Settings.
+//
+// Returns an error rather than silently falling back — a binding
+// present but bucket missing (or creds unreadable) should fail loud
+// at boot, not route writes to disk.
 func initBackend(ctx *sdk.AppCtx) (Backend, error) {
-	cfg := ctx.Config()
-	kind := strings.ToLower(strings.TrimSpace(cfg.Get("backend")))
-	if kind == "" {
-		kind = "disk"
-	}
-	switch kind {
-	case "disk":
+	bound := ctx.IntegrationFor(s3IntegrationRole)
+	if bound == nil {
 		return newDiskBackend(ctx), nil
-	case "s3":
-		return newS3Backend(ctx)
-	default:
-		return nil, fmt.Errorf("unknown backend %q (expected disk|s3)", kind)
 	}
+	bucket := strings.TrimSpace(ctx.Config().Get("s3_bucket"))
+	if bucket == "" {
+		return nil, fmt.Errorf("s3 backend: integration is bound but s3_bucket is empty — set the bucket name in Storage settings")
+	}
+	return newS3Backend(ctx, bound, bucket)
 }
+
+// s3IntegrationRole is the role name in requires.integrations.
+const s3IntegrationRole = "backend"

@@ -38,6 +38,7 @@ import (
 // in nextExecuteResult; CallApp returns nextCallResult. WhoAmI / GetX
 // stubs are minimal and only what the SDK touches in these tests.
 type recordingPlatform struct {
+	tk.BasePlatformClient
 	mu                sync.Mutex
 	executeCalls      []executeCall
 	callAppCalls      []callAppCall

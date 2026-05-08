@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: storage
 display_name: Storage
-version: 0.8.2
+version: 0.9.0
 description: |
   File storage for Apteva agents and human teams. Upload bytes,
   organise into folders, share via signed URLs. Pluggable backend:
@@ -24,6 +24,24 @@ min_apteva_version: "0.10.0"
 requires:
   permissions:
     - db.write.app
+    # platform.connections.read_credentials lets storage read raw
+    # access_key/secret_key from the bound S3-compatible connection
+    # to drive its own minio-go client (multipart, presigned URLs,
+    # range GETs the integration runner can't broker).
+    - platform.connections.read_credentials
+  integrations:
+    # Optional: bind any S3-compatible connection to flip storage
+    # from disk-backed to cloud-backed. Without a binding, blobs
+    # live on local disk (the v0.1 model). The bucket is set in
+    # config_schema (s3_bucket); this binding only carries
+    # credentials + endpoint info.
+    - role: backend
+      kind: integration
+      compatible_slugs: [aws-s3, cloudflare-r2, backblaze-b2]
+      capabilities: []
+      required: false
+      label: "S3-compatible backend (optional)"
+      hint: "Bind an S3 / R2 / B2 connection to host blobs in the cloud. Without this, files live on local disk."
 
 provides:
   http_routes:
@@ -90,6 +108,8 @@ provides:
       description: List files in one folder. Pass recursive=true to descend into sub-folders.
     - name: files_list_folders
       description: List immediate child folders one level under a parent folder.
+    - name: storage_abort_upload
+      description: Abort a stuck/leaked multipart upload session and reclaim its bytes. Args - id (the upload session id), reason? (free-text). Idempotent. Operators use this to clear sessions left behind by crashed clients before the sweeper TTL fires.
   ui_panels:
     - slot: project.page
       label: Files
@@ -167,51 +187,37 @@ config_schema:
     label: Max upload size (MB)
     description: Hard ceiling for files_upload + multipart uploads. v0.1 stores in memory before write — keep it modest.
 
-  # Backend (new in v0.6) ─ leave at "disk" for the local filesystem
-  # default. Switching to "s3" requires the s3_* fields below; boot
-  # fails if any are missing.
-  - name: backend
-    type: select
-    options: [disk, s3]
-    default: disk
-    label: Backend
-    description: Where blob bytes live. "disk" = local filesystem (default). "s3" = any S3-compatible service (AWS S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO, …). Switch only on a freshly-deployed install — existing blobs are not migrated automatically.
-  - name: s3_endpoint
+  # Stale upload reclamation (new in v0.8.3) ─ a multipart upload
+  # that's started but never completed sits as bytes-on-disk in
+  # /data/uploads/<id>/. The sweeper deletes anything idle longer
+  # than the TTL; clients that explicitly call DELETE /uploads/<id>
+  # (or storage_abort_upload) reclaim immediately.
+  - name: upload_idle_ttl_hours
     type: text
-    default: ""
-    label: S3 endpoint
-    description: Hostname of the S3 endpoint (no scheme). AWS = "s3.amazonaws.com" or region-specific "s3.<region>.amazonaws.com". R2 = "<account-id>.r2.cloudflarestorage.com". MinIO = "minio.example.com:9000". Required when backend=s3.
-  - name: s3_region
+    default: "6"
+    label: Upload session TTL (hours)
+    description: |
+      How many hours an idle multipart upload sits before the
+      sweeper reclaims it. Default 6h — long enough that a
+      genuinely-paused upload survives a laptop sleep cycle, short
+      enough that a crashed client doesn't burn disk for a day.
+      Set to 0 to disable auto-reclaim entirely (anti-pattern; only
+      do this if a separate process owns cleanup).
+  - name: upload_sweep_interval_minutes
     type: text
-    default: "us-east-1"
-    label: S3 region
-    description: SigV4 signing region. AWS uses the bucket's region; R2 = "auto"; B2 = "us-east-005" (or your region); MinIO ignores it but a value is still required.
+    default: "15"
+    label: Sweep interval (minutes)
+    description: How often the sweeper scans for stale upload sessions. Default 15m. Clamped to [1, 1440]. Lower values reclaim sooner at the cost of more readdir calls.
+
+  # Backend (v0.9 model) ─ binding the optional `backend` integration
+  # role flips storage from disk to S3-compatible. The bucket lives
+  # here (one R2/S3 account often hosts many buckets per install);
+  # credentials + endpoint flow live on the bound connection and are
+  # read at boot via platform.connections.read_credentials.
   - name: s3_bucket
     type: text
     default: ""
     label: S3 bucket
-    description: Bucket name. Must exist before storage starts — we don't auto-create.
-  - name: s3_access_key
-    type: text
-    default: ""
-    label: S3 access key
-    description: Access key ID. R2 = the API token's "Access Key ID"; B2 = "keyID"; AWS = IAM access key. Use a key scoped to this single bucket.
-  - name: s3_secret_key
-    type: password
-    default: ""
-    label: S3 secret key
-    description: Paired secret. Stored in the install's encrypted config blob, never logged.
-  - name: s3_use_ssl
-    type: select
-    options: ["true", "false"]
-    default: "true"
-    label: S3 over HTTPS
-    description: Set false only for plain-HTTP MinIO in dev. Production must stay true.
-  - name: s3_force_path_style
-    type: select
-    options: ["false", "true"]
-    default: "false"
-    label: Force path-style addressing
-    description: AWS + R2 + B2 use virtual-host style ("bucket.endpoint/key") and want this false. MinIO and some custom Ceph deployments need true ("endpoint/bucket/key").
+    description: Bucket name to store blobs in. Required when the backend integration is bound; ignored otherwise. Must exist before storage starts — we don't auto-create.
 
 upgrade_policy: auto-patch

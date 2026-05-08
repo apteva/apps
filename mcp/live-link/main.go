@@ -63,6 +63,15 @@ const namedTunnelPrefix = "apteva-live-link-"
 
 type App struct {
 	mgr *Manager
+
+	// providers holds the strategy implementations available to this
+	// install. v0.4.0 ships two; future providers (self-vps, ngrok,
+	// tailscale-funnel) append to this slice. activeProvider() picks
+	// the right one per request based on DB state. App methods like
+	// ensureNamedTunnel still exist as test-stable entrypoints; they
+	// are now implemented as thin facades that the named provider
+	// also delegates to.
+	providers []Provider
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -94,6 +103,15 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		ctx.Logger().Warn("reconcile running runs", "err", err)
 	} else if res != nil {
 		orphanedCount, _ = res.RowsAffected()
+	}
+
+	// Build the provider registry. Order matters: activeProvider()
+	// asks each non-quick provider whether it's Configured() and
+	// returns the first match; quick is the fallback default. Adding
+	// future providers means inserting them ahead of quick.
+	a.providers = []Provider{
+		&cloudflareNamedProvider{app: a},
+		&cloudflareQuickProvider{app: a},
 	}
 
 	// Manager wires its lifecycle callbacks back into the DB.
@@ -242,6 +260,11 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	out["resolved_target"] = a.resolveTargetURL(ctx)
 	mode := a.currentMode(ctx)
 	out["mode"] = string(mode)
+	// v0.4: surface the new provider name alongside the legacy mode
+	// field. Panel can switch over to provider once it ships
+	// non-cloudflare options; v0.3 panels stay on mode without
+	// breaking.
+	out["provider"] = a.activeProviderName(ctx)
 	// Always surface cloudflare_bound + the configured hostname (if
 	// any), regardless of mode, so the panel can render its
 	// "promote to named" CTA without a separate roundtrip — and so
@@ -411,6 +434,7 @@ func (a *App) toolStatus(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 		"run_id":     snap.RunID,
 		"last_error": snap.LastError,
 		"mode":       string(a.currentMode(ctx)),
+		"provider":   a.activeProviderName(ctx),
 	}, nil
 }
 
@@ -457,70 +481,39 @@ func waitForURL(mgr *Manager, runID int64) map[string]any {
 
 // ─── Start logic shared by HTTP + MCP entrypoints ───────────────────
 
+// start picks the active provider and delegates. v0.3's mode-based
+// dispatch is now inside the providers themselves — see
+// provider_cloudflare.go. The shape (returns target URL or error,
+// idempotent in concert with mgr.Snapshot()) is unchanged.
 func (a *App) start(ctx *sdk.AppCtx) (string, error) {
-	target := a.resolveTargetURL(ctx)
-	if target == "" {
-		return "", errors.New("no target URL — set target_url in app config or APTEVA_GATEWAY_URL in the env")
+	p := a.activeProvider(ctx)
+	if p == nil {
+		return "", errors.New("no provider available — provider registry not initialized")
 	}
-
-	// Resolve the binary first so a missing/unsupported install
-	// surfaces *before* we write a run row — keeps history clean of
-	// "failed in 5ms because cloudflared wasn't installed yet" rows
-	// that just confused the user. Synchronous download is fine; the
-	// "Starting…" button covers it.
-	binary, err := resolveBinary(ctx.Config().Get("cloudflared_path"), ctx.DataDir(), false, ctx.Logger().Info)
-	if err != nil {
-		return "", err
-	}
-
-	mode := a.currentMode(ctx)
-	params := StartParams{Binary: binary, Target: target, Mode: mode}
-
-	if mode == ModeNamed {
-		// Look up the operator's chosen hostname (set via the panel's
-		// /named/configure flow). The DB row is the only source of
-		// truth for named mode in v0.3 — config no longer carries it.
-		nt, err := dbFirstNamedTunnel(ctx.AppDB())
-		if err != nil {
-			return "", fmt.Errorf("look up named tunnel: %w", err)
-		}
-		if nt == nil {
-			return "", errors.New("named mode: no tunnel configured — pick a hostname in the Live Link panel first")
-		}
-		params.Token = nt.TunnelToken
-		params.Hostname = nt.Hostname
-	}
-
-	runID, err := dbInsertRun(ctx.AppDB(), "cloudflared", target, string(mode))
-	if err != nil {
-		return "", fmt.Errorf("insert run: %w", err)
-	}
-	params.RunID = runID
-
-	if err := a.mgr.Start(params); err != nil {
-		// Surface the reason in the run row so history shows *why*
-		// the start attempt failed.
-		_, _ = ctx.AppDB().Exec(
-			`UPDATE runs SET status = 'failed', finished_at = CURRENT_TIMESTAMP, exit_reason = ?
-			 WHERE id = ?`, err.Error(), runID)
-		return "", err
-	}
-	return target, nil
+	return p.Start(ctx)
 }
 
-// currentMode reports which mode is active. Mode is implicit in v0.3:
-// if a hostname has been configured (named_tunnels row exists), we're
-// in named mode; otherwise quick. The panel flips between the two by
-// calling /named/configure (→ named) or /destroy (→ back to quick).
+// currentMode reports which legacy v0.3-shape mode is active. v0.4
+// introduced the Provider abstraction; Mode survives only because
+// existing v0.3 panel callers (and their tests) read it. New callers
+// should prefer activeProviderName(ctx).
 //
-// This replaces the v0.2 `mode` config field — having a config knob
-// AND a DB row was redundant and made the panel UX awkward (the panel
-// couldn't change config). DB-as-source-of-truth means the panel
-// owns the flip.
+// Implementation derives from the provider registry: a non-empty
+// providers slice is the single source of truth. If providers haven't
+// been wired (e.g. some tests instantiate App{} directly without
+// OnMount), fall back to the v0.3 DB-state read so those tests
+// continue to pass.
 func (a *App) currentMode(ctx *sdk.AppCtx) Mode {
 	if ctx == nil || ctx.AppDB() == nil {
 		return ModeQuick
 	}
+	if a != nil && len(a.providers) > 0 {
+		if a.activeProviderName(ctx) == providerNameNamed {
+			return ModeNamed
+		}
+		return ModeQuick
+	}
+	// Fallback for tests that build &App{} without OnMount.
 	if nt, _ := dbFirstNamedTunnel(ctx.AppDB()); nt != nil {
 		return ModeNamed
 	}
