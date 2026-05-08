@@ -28,6 +28,12 @@ const mediaVendor: CardVendor = {
   color: { light: "#0f766e", dark: "#5eead4" },
 };
 
+interface DerivationRow {
+  kind: string; // "thumbnail" | "waveform"
+  storage_file_id: string;
+  status: string; // "ok" | "pending" | "failed"
+}
+
 interface MediaMeta {
   file_id: string;
   name: string;
@@ -40,8 +46,9 @@ interface MediaMeta {
   height?: number;
   description?: string;
   title?: string;
-  thumbnail_file_id?: string;
-  waveform_file_id?: string;
+  // The API returns derivations as a nested array. The card walks
+  // it to find the thumbnail/waveform storage_file_id for preview.
+  derivations?: DerivationRow[];
 }
 
 interface Props {
@@ -75,25 +82,25 @@ function useMediaEvents(
   useEffect(() => {
     if (!projectId) return;
 
-        // Bridge to the dashboard's shared (app, project) multiplexer
-        // when it's loaded. Without this, every Card mount opens its own
-        // EventSource — N cards in a chat thread = N connections, which
-        // blows past Chrome's per-origin HTTP/1.1 cap and freezes the
-        // dashboard. Falls back to a direct EventSource when running
-        // outside the dashboard (standalone preview, future surfaces).
-        const bridge = (window as unknown as {
-          __aptevaAppEvents?: {
-            subscribe(
-              app: string,
-              projectId: string,
-              fn: (ev: { topic: string; app: string; project_id: string; data: any }) => void,
-            ): () => void;
-          };
-        }).__aptevaAppEvents;
-        if (bridge) {
-          return bridge.subscribe("media", projectId, onEvent as any);
-        }
-            const url = `/api/app-events/media?project_id=${encodeURIComponent(projectId)}`;
+    // Bridge to the dashboard's shared (app, project) multiplexer
+    // when it's loaded. Without this, every Card mount opens its own
+    // EventSource — N cards in a chat thread = N connections, which
+    // blows past Chrome's per-origin HTTP/1.1 cap and freezes the
+    // dashboard. Falls back to a direct EventSource when running
+    // outside the dashboard (standalone preview, future surfaces).
+    const bridge = (window as unknown as {
+      __aptevaAppEvents?: {
+        subscribe(
+          app: string,
+          projectId: string,
+          fn: (ev: { topic: string; app: string; project_id: string; data: any }) => void,
+        ): () => void;
+      };
+    }).__aptevaAppEvents;
+    if (bridge) {
+      return bridge.subscribe("media", projectId, onEvent as any);
+    }
+    const url = `/api/app-events/media?project_id=${encodeURIComponent(projectId)}`;
     const es = new EventSource(url, { withCredentials: true });
     es.onmessage = (e) => {
       try {
@@ -306,16 +313,27 @@ function metaItems(m: MediaMeta) {
   return items;
 }
 
-// thumbnailURLFor — builds a signed URL for the cached thumbnail
-// derivation when we have one. Falls back to undefined so the
-// preview picks the right secondary path. The derivation is in
-// storage; we hit storage's content endpoint via the file_id we
-// stored in media's row.
+// thumbnailURLFor — finds the cached thumbnail (or waveform for
+// audio-only) derivation in media.derivations[] and builds a URL
+// to its bytes via storage's content endpoint. Returns undefined
+// when no ok-status derivation exists yet (file is mid-probe or the
+// derive step failed); the preview falls back to a <video>/<audio>
+// element in that case.
+//
+// Earlier versions read flat fields (m.thumbnail_file_id) that the
+// API never returned, so this always came back undefined and the
+// card showed an empty <video preload="metadata"> placeholder.
 function thumbnailURLFor(m: MediaMeta, projectId?: string): string | undefined {
   if (!projectId) return undefined;
-  const id = m.thumbnail_file_id || m.waveform_file_id;
-  if (!id) return undefined;
-  return `/api/apps/storage/files/${encodeURIComponent(id)}/content?project_id=${encodeURIComponent(projectId)}`;
+  const derivs = m.derivations ?? [];
+  // Prefer "thumbnail" (video + image cache); fall back to "waveform"
+  // for audio-only files so the card shows the wave instead of a
+  // generic music glyph.
+  const pick =
+    derivs.find((d) => d.kind === "thumbnail" && d.status === "ok") ??
+    derivs.find((d) => d.kind === "waveform" && d.status === "ok");
+  if (!pick) return undefined;
+  return `/api/apps/storage/files/${encodeURIComponent(pick.storage_file_id)}/content?project_id=${encodeURIComponent(projectId)}`;
 }
 
 function prettyDuration(ms: number): string {
