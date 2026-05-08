@@ -292,6 +292,20 @@ func buildDescribePrompt(app *sdk.AppCtx, projectID string, media *MediaRow) ([]
 	transcript, _ := getTranscript(app.AppDB(), projectID, media.FileID)
 	hasTranscript := transcript != nil && transcript.Status == "ok" && strings.TrimSpace(transcript.Text) != ""
 
+	// Project context — operator-set name + description from the
+	// platform's projects table, surfaced through WhoAmI. When set,
+	// they go in as a second system message so generated descriptions
+	// land in the right register ("internal team standups", "cooking
+	// show clips"). WhoAmI is sub-second-cached in the SDK so a
+	// per-prompt call is cheap.
+	systemMessages := []map[string]any{{"role": "system", "content": describeSystemPrompt}}
+	if id, _ := app.PlatformAPI().WhoAmI(); id != nil {
+		ctx := strings.TrimSpace(projectContextLine(id.ProjectName, id.ProjectDescription))
+		if ctx != "" {
+			systemMessages = append(systemMessages, map[string]any{"role": "system", "content": ctx})
+		}
+	}
+
 	var thumbURL string
 	if media.HasVideo || media.IsImage {
 		// Use thumbnail for video, the file itself for image. Fall
@@ -327,35 +341,58 @@ func buildDescribePrompt(app *sdk.AppCtx, projectID string, media *MediaRow) ([]
 	switch {
 	case thumbURL != "" && hasTranscript:
 		// Multimodal: video frame + transcript. Best signal.
-		return []map[string]any{
-			{"role": "system", "content": describeSystemPrompt},
-			{"role": "user", "content": []map[string]any{
+		return append(systemMessages, map[string]any{
+			"role": "user",
+			"content": []map[string]any{
 				{"type": "text", "text": "A representative frame and the transcript follow. Describe the content in 1-2 short sentences (under ~200 chars).\n\nTranscript:\n" + transcript.Text},
 				{"type": "image_url", "image_url": map[string]any{"url": thumbURL}},
-			}},
-		}, nil
+			},
+		}), nil
 
 	case thumbURL != "":
 		// Vision-only: image or silent video.
-		return []map[string]any{
-			{"role": "system", "content": describeSystemPrompt},
-			{"role": "user", "content": []map[string]any{
+		return append(systemMessages, map[string]any{
+			"role": "user",
+			"content": []map[string]any{
 				{"type": "text", "text": "Describe the content of this image in 1-2 short sentences (under ~200 chars)."},
 				{"type": "image_url", "image_url": map[string]any{"url": thumbURL}},
-			}},
-		}, nil
+			},
+		}), nil
 
 	case hasTranscript:
 		// Audio-only: transcript is all we have.
-		return []map[string]any{
-			{"role": "system", "content": describeSystemPrompt},
-			{"role": "user", "content": "Summarise what's said in 1-2 short sentences (under ~200 chars).\n\nTranscript:\n" + transcript.Text},
-		}, nil
+		return append(systemMessages, map[string]any{
+			"role":    "user",
+			"content": "Summarise what's said in 1-2 short sentences (under ~200 chars).\n\nTranscript:\n" + transcript.Text,
+		}), nil
 	}
 
 	// Nothing usable yet — silent video without a thumbnail derivation,
 	// or an image where the file isn't readable. Skip without marking.
 	return nil, nil
+}
+
+// projectContextLine builds a short system-prompt addendum with the
+// operator-set project name + description. Returns "" when both are
+// empty so callers can no-op silently — global installs and projects
+// the operator hasn't filled in shouldn't get a stray "Project: " in
+// their prompt.
+func projectContextLine(name, description string) string {
+	name = strings.TrimSpace(name)
+	description = strings.TrimSpace(description)
+	switch {
+	case name == "" && description == "":
+		return ""
+	case name != "" && description != "":
+		return "This file belongs to project: " + name + " — " + description +
+			"\nUse this as context for what the file is likely about, but only mention details you can directly observe in the frame or transcript."
+	case name != "":
+		return "This file belongs to project: " + name +
+			"\nUse this as light context, but only mention details you can directly observe."
+	default:
+		return "Project context: " + description +
+			"\nUse this as light context, but only mention details you can directly observe."
+	}
 }
 
 // ─── chat-completion response parser ───────────────────────────────
