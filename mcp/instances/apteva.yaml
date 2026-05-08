@@ -1,0 +1,90 @@
+schema: apteva-app/v1
+
+name: instances
+display_name: Instances
+version: 0.1.0
+description: |
+  Compute-host inventory + lifecycle for Apteva. The local Apteva
+  machine is always available as a built-in instance (id 0); remote
+  instances are provisioned via VPS providers (Hetzner Cloud in
+  v0.1; DO/Vultr/AWS in later releases).
+
+  Foundation layer for higher-level apps that run workloads
+  somewhere — Live Link's self-vps tunnel, Deploy's planned
+  SSHRuntime, Backup off-host targets, Containers, future Database
+  / MQTT / game-server apps. Consumers bind Instances as a
+  kind=app integration and call instance_run_command /
+  instance_upload_file / instance_metrics with a host_id, instead
+  of binding a VPS provider directly.
+
+  Note: "instance" here = compute machine (AWS-style). Apteva-core's
+  existing "instance" concept (a thinking loop per project) is a
+  separate, internal-only model. Same word, different scope. A
+  future apteva-server release renames core's concept to "agent"
+  and removes the linguistic collision.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/instances
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/instances/icon.png
+tags: [instances, hosts, vps, compute, infrastructure]
+
+scopes: [global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.connections.execute
+  integrations:
+    - role: provider
+      kind: integration
+      required: false
+      compatible_slugs: [hetzner]
+      label: VPS provider
+      hint: |
+        Optional — local instance always available. Bind a Hetzner
+        Cloud connection to provision remote instances (v0.1.0).
+        DigitalOcean / Vultr / AWS EC2 land in v0.2.
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: instance_create
+      description: Provision a new instance via the bound VPS provider. v0.1 supports provider=hetzner.
+    - name: instance_get
+      description: Fetch one instance by id (0 for local).
+    - name: instance_list
+      description: List instances, optionally filtered by provider or status.
+    - name: instance_destroy
+      description: Terminate the upstream resource and remove the row. Refused for local (id 0).
+    - name: instance_run_command
+      description: Execute a shell command (local exec or remote SSH). Output capped at 1 MB.
+    - name: instance_upload_file
+      description: Write file content (local filesystem or remote SCP-equivalent over SSH).
+    - name: instance_wait_ready
+      description: Poll the instance until SSH is reachable.
+    - name: instance_metrics
+      description: CPU / memory / disk / network / load / uptime (local gopsutil, remote /proc parse). 5s cache.
+  ui_panels:
+    - slot: install.settings
+      label: Instances
+      icon: server
+      entry: /ui/InstancesPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/instances
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/instances.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
