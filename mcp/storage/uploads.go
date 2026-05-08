@@ -519,96 +519,89 @@ func (a *App) handleUploadComplete(w http.ResponseWriter, r *http.Request, id st
 	}
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&body)
 
-	// Stream-concat parts into a local scratch file, hashing as we
-	// go. We don't know the SHA256 yet, so we can't compute the
-	// final object key — write to scratch first, hand the bytes to
-	// the backend after the hash is known.
 	tmpKey := newUploadID() + extOf(meta.Filename, meta.ContentType)
-	tmpDir := uploadsDir(ctx)
-	if err := os.MkdirAll(tmpDir, 0755); err != nil {
-		httpErr(w, http.StatusInternalServerError, "mkdir scratch: "+err.Error())
-		return
-	}
-	tmpPath := filepath.Join(tmpDir, tmpKey+".stitch")
-	out, err := os.Create(tmpPath)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, "create blob: "+err.Error())
-		return
-	}
+
+	// Pass 1: hash the concatenated parts in place.
+	//
+	// The earlier implementation stream-stitched parts into a local
+	// scratch file, then re-opened that file and uploaded it to the
+	// backend. That cost ~2× totalSize of local I/O before the
+	// network upload could even start, which on S3-backed installs
+	// dominated complete() latency for large uploads.
+	//
+	// New flow: read parts twice. First pass computes sha256 against
+	// the on-disk bytes (~free — kernel page cache holds the parts
+	// from the recent PUTs anyway). Second pass uses io.MultiReader
+	// to stream parts directly into backend.Put without a scratch
+	// file. The second read also hits page cache, so the only real
+	// cost is the network upload.
+	//
+	// Skipping the scratch write removes ~totalSize of local disk
+	// I/O entirely AND lets S3's multipart-upload start immediately
+	// rather than waiting for stitch to finish.
 	h := sha256.New()
-	mw := io.MultiWriter(out, h)
 	for _, p := range parts {
 		f, err := os.Open(partPath(ctx, id, p.N))
 		if err != nil {
-			out.Close()
-			_ = os.Remove(tmpPath)
 			httpErr(w, http.StatusInternalServerError, "open part "+strconv.Itoa(p.N)+": "+err.Error())
 			return
 		}
-		if _, err := io.Copy(mw, f); err != nil {
+		if _, err := io.Copy(h, f); err != nil {
 			f.Close()
-			out.Close()
-			_ = os.Remove(tmpPath)
-			httpErr(w, http.StatusInternalServerError, "concat: "+err.Error())
+			httpErr(w, http.StatusInternalServerError, "hash part "+strconv.Itoa(p.N)+": "+err.Error())
 			return
 		}
 		f.Close()
-	}
-	if err := out.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		httpErr(w, http.StatusInternalServerError, "close blob: "+err.Error())
-		return
 	}
 	finalSHA := hex.EncodeToString(h.Sum(nil))
 
 	// Verify any client-supplied or pre-declared hash before we
 	// take any action that could observe drift.
 	if body.SHA256 != "" && !strings.EqualFold(body.SHA256, finalSHA) {
-		_ = os.Remove(tmpPath)
 		httpErr(w, http.StatusBadRequest, "sha256 mismatch: client="+body.SHA256+" server="+finalSHA)
 		return
 	}
 	if meta.DeclaredSHA256 != "" && !strings.EqualFold(meta.DeclaredSHA256, finalSHA) {
-		_ = os.Remove(tmpPath)
 		httpErr(w, http.StatusBadRequest, "declared sha256 mismatch — bytes corrupted")
 		return
 	}
 
-	// Dedup against existing files. If we already have these bytes,
-	// drop the freshly-concatenated blob and return the old row.
+	// Dedup before uploading: cheapest possible short-circuit. If the
+	// project already has these bytes, drop everything and return.
 	if existing, err := dbFindBySHA(ctx.AppDB(), meta.ProjectID, finalSHA); err == nil && existing != nil {
-		_ = os.Remove(tmpPath)
 		_ = os.RemoveAll(dir)
 		releaseSessionLock(id)
 		httpJSON(w, map[string]any{"file": existing, "was_existing": true})
 		return
 	}
 
-	// Hand the stitched scratch file to the backend. Disk does an
-	// io.Copy into its canonical layout; s3 streams the PUT. Either
-	// way, the scratch file is removed once the backend has the bytes.
-	stitched, err := os.Open(tmpPath)
-	if err != nil {
-		_ = os.Remove(tmpPath)
-		httpErr(w, http.StatusInternalServerError, "reopen stitch: "+err.Error())
-		return
+	// Pass 2: stream parts → backend without a scratch file.
+	// io.MultiReader concatenates the part files lazily — the backend
+	// pulls bytes as it needs them, so disk reads and the network
+	// upload overlap. minio-go uses size to pick its multipart part
+	// sizing; passing the real totalSize unlocks parallel multipart.
+	partReaders := make([]io.Reader, 0, len(parts))
+	openedFiles := make([]*os.File, 0, len(parts))
+	defer func() {
+		for _, f := range openedFiles {
+			f.Close()
+		}
+	}()
+	for _, p := range parts {
+		f, err := os.Open(partPath(ctx, id, p.N))
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, "reopen part "+strconv.Itoa(p.N)+": "+err.Error())
+			return
+		}
+		openedFiles = append(openedFiles, f)
+		partReaders = append(partReaders, f)
 	}
-	st, err := stitched.Stat()
-	if err != nil {
-		stitched.Close()
-		_ = os.Remove(tmpPath)
-		httpErr(w, http.StatusInternalServerError, "stat stitch: "+err.Error())
-		return
-	}
+	stream := io.MultiReader(partReaders...)
 	finalKey := objectKey(finalSHA, tmpKey)
-	if err := backend().Put(r.Context(), finalKey, meta.ContentType, stitched, st.Size()); err != nil {
-		stitched.Close()
-		_ = os.Remove(tmpPath)
+	if err := backend().Put(r.Context(), finalKey, meta.ContentType, stream, totalSize); err != nil {
 		httpErr(w, http.StatusInternalServerError, "backend put: "+err.Error())
 		return
 	}
-	stitched.Close()
-	_ = os.Remove(tmpPath)
 
 	tagsJSON, _ := json.Marshal(meta.Tags)
 	res, err := ctx.AppDB().Exec(

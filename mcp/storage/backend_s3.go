@@ -168,12 +168,31 @@ func (s *s3Backend) Put(ctx context.Context, key, contentType string, r io.Reade
 	if contentType != "" {
 		opts.ContentType = contentType
 	}
+	// Tuning notes:
+	//
+	//   PartSize  — 32 MB. Larger parts mean fewer round trips, more
+	//               throughput per concurrent upload, and lower
+	//               total latency on R2 / S3 over residential links.
+	//               minio-go's default of ~16 MB is conservative for
+	//               small objects; storage handles uploads up to GBs
+	//               so 32 MB pays for itself the moment we cross the
+	//               5-MB single-PUT threshold. R2's max part size is
+	//               5 GB, AWS S3 is 5 GB — well within the cap.
+	//
+	//   NumThreads — 8 concurrent part uploads. Default 4 leaves
+	//               throughput on the table on anything faster than
+	//               ~50 Mbps. 8 saturates a typical residential up
+	//               without overshooting the connection budget.
+	//
+	// These are hints — minio-go falls back to a single PUT below
+	// the multipart threshold (5 MB) and won't spawn unnecessary
+	// goroutines for tiny payloads.
+	opts.PartSize = 32 * 1024 * 1024
+	opts.NumThreads = 8
 	// minio-go needs a known size for non-multipart uploads; -1 falls
-	// back to multipart with PartSize hints. saveBytes always knows
-	// size, so we expect size>0 here.
+	// back to multipart with PartSize hints.
 	if size <= 0 {
 		size = -1
-		opts.PartSize = 16 * 1024 * 1024
 	}
 	if _, err := s.client.PutObject(ctx, s.bucket, key, r, size, opts); err != nil {
 		return fmt.Errorf("s3 put %s: %w", key, err)
