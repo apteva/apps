@@ -21,7 +21,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.9.0
+version: 0.9.1
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -112,6 +112,22 @@ provides:
       label: Media
       icon: video
       entry: /ui/MediaPanel.mjs
+  ui_components:
+    - name: media-card
+      entry: /ui/MediaCard.mjs
+      slots: [chat.message_attachment]
+      props_schema: {type: object, required: [file_id], properties: {file_id: {type: [string, integer]}}}
+      preview_props: {preview: true}
+    - name: render-card
+      entry: /ui/RenderCard.mjs
+      slots: [chat.message_attachment]
+      props_schema: {type: object, required: [render_id], properties: {render_id: {type: integer}}}
+      preview_props: {preview: true}
+    - name: transcript-card
+      entry: /ui/TranscriptCard.mjs
+      slots: [chat.message_attachment]
+      props_schema: {type: object, required: [file_id], properties: {file_id: {type: [string, integer]}, max_lines: {type: integer}}}
+      preview_props: {preview: true}
 runtime:
   kind: source
   source:

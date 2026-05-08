@@ -71,7 +71,26 @@ function useBillsEvents(
 ) {
   useEffect(() => {
     if (!projectId) return;
-    const url = `/api/app-events/bills?project_id=${encodeURIComponent(projectId)}`;
+
+        // Bridge to the dashboard's shared (app, project) multiplexer
+        // when it's loaded. Without this, every Card mount opens its own
+        // EventSource — N cards in a chat thread = N connections, which
+        // blows past Chrome's per-origin HTTP/1.1 cap and freezes the
+        // dashboard. Falls back to a direct EventSource when running
+        // outside the dashboard (standalone preview, future surfaces).
+        const bridge = (window as unknown as {
+          __aptevaAppEvents?: {
+            subscribe(
+              app: string,
+              projectId: string,
+              fn: (ev: { topic: string; app: string; project_id: string; data: any }) => void,
+            ): () => void;
+          };
+        }).__aptevaAppEvents;
+        if (bridge) {
+          return bridge.subscribe("bills", projectId, onEvent as any);
+        }
+            const url = `/api/app-events/bills?project_id=${encodeURIComponent(projectId)}`;
     const es = new EventSource(url, { withCredentials: true });
     es.onmessage = (e) => {
       try {

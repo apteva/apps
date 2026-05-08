@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.9.0
+version: 0.9.1
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -145,6 +145,56 @@ provides:
       # default export as a React component inside its own tree.
       # Iframe fallback (older platforms) lands on the .html sibling.
       entry: /ui/MediaPanel.mjs
+  ui_components:
+    # Inline media tile the agent can attach to chat messages via
+    # respond(components=[{app:"media", name:"media-card", props:{file_id:N}}]).
+    # Renders thumbnail/waveform + filename + duration + Open link;
+    # live-updates on media events (described, transcribed, deleted).
+    - name: media-card
+      entry: /ui/MediaCard.mjs
+      slots:
+        - chat.message_attachment
+      props_schema:
+        type: object
+        required: [file_id]
+        properties:
+          file_id:
+            type: [string, integer]
+      preview_props:
+        preview: true
+    # Live-updating render progress card. Polls /renders/<id> every
+    # 1.5s while pending/running and silently promotes itself to a
+    # MediaCard once the render hits status=ok. Use this immediately
+    # after media_trim / media_resize / media_extract_frame etc.
+    - name: render-card
+      entry: /ui/RenderCard.mjs
+      slots:
+        - chat.message_attachment
+      props_schema:
+        type: object
+        required: [render_id]
+        properties:
+          render_id:
+            type: integer
+      preview_props:
+        preview: true
+    # Transcript with language badge, scrollable up to ~24rem; "Show
+    # more" reveals the rest. Reacts to media.transcribed so a
+    # still-pending transcript fills in the moment Deepgram finishes.
+    - name: transcript-card
+      entry: /ui/TranscriptCard.mjs
+      slots:
+        - chat.message_attachment
+      props_schema:
+        type: object
+        required: [file_id]
+        properties:
+          file_id:
+            type: [string, integer]
+          max_lines:
+            type: integer
+      preview_props:
+        preview: true
 
 runtime:
   kind: source
