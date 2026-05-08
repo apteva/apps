@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.1.0
+version: 0.1.1
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances (Hetzner in v0.1; DO/Vultr/AWS in later releases).
