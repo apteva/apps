@@ -72,6 +72,14 @@ const previewSample: MediaMeta = {
     "Sci-fi short. Two characters debate her robotic prosthetic on an Amsterdam canal bridge.",
 };
 
+// dbg — always-on for now while we hunt the media-card hang. Filter
+// the DevTools console by "[media-card]" to isolate this component's
+// output from the rest of the dashboard chatter.
+function dbg(...args: unknown[]) {
+  // eslint-disable-next-line no-console
+  console.log("[media-card]", ...args);
+}
+
 // Inlined SSE subscription, mirroring storage's FileCard. Topic
 // filter narrows to media events for this project; payload data.id
 // (file_id) gates re-fetches.
@@ -98,18 +106,34 @@ function useMediaEvents(
       };
     }).__aptevaAppEvents;
     if (bridge) {
-      return bridge.subscribe("media", projectId, onEvent as any);
+      dbg("subscribe via bridge", { project: projectId });
+      const unsub = bridge.subscribe("media", projectId, ((ev: any) => {
+        dbg("event via bridge", { topic: ev?.topic, file_id: ev?.data?.file_id });
+        onEvent(ev);
+      }) as any);
+      return () => {
+        dbg("unsubscribe (bridge)", { project: projectId });
+        unsub();
+      };
     }
+    dbg("subscribe via direct EventSource (bridge missing)", { project: projectId });
     const url = `/api/app-events/media?project_id=${encodeURIComponent(projectId)}`;
     const es = new EventSource(url, { withCredentials: true });
+    es.onopen = () => dbg("EventSource open", { url });
+    es.onerror = (e) => dbg("EventSource error", { readyState: es.readyState, e });
     es.onmessage = (e) => {
       try {
-        onEvent(JSON.parse(e.data));
+        const ev = JSON.parse(e.data);
+        dbg("event via direct ES", { topic: ev?.topic, file_id: ev?.data?.file_id });
+        onEvent(ev);
       } catch {
         /* ignore */
       }
     };
-    return () => es.close();
+    return () => {
+      dbg("unsubscribe (direct ES)", { project: projectId });
+      es.close();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 }
@@ -124,8 +148,12 @@ export default function MediaCard({ file_id, projectId, preview }: Props) {
     const url =
       `/api/apps/media/media/${encodeURIComponent(fid)}` +
       `?project_id=${encodeURIComponent(projectId)}`;
+    const t0 = (typeof performance !== "undefined" ? performance.now() : Date.now());
+    dbg("refetch start", { fid, url });
     fetch(url, { credentials: "same-origin" })
       .then((r) => {
+        const dt = ((typeof performance !== "undefined" ? performance.now() : Date.now()) - t0).toFixed(1);
+        dbg("refetch response", { fid, status: r.status, ms: dt });
         if (r.status === 404) {
           setMissing(true);
           return null;
@@ -139,22 +167,34 @@ export default function MediaCard({ file_id, projectId, preview }: Props) {
           (data.media as MediaMeta | undefined) ??
           (data.file_id ? (data as MediaMeta) : undefined);
         if (row) {
+          dbg("refetch parsed", { fid, has_video: row.has_video, has_audio: row.has_audio, derivations: row.derivations?.length ?? 0 });
           setMeta(row);
           setMissing(false);
+        } else {
+          dbg("refetch unrecognized payload", { fid, data });
         }
       })
-      .catch(() => undefined);
+      .catch((err) => {
+        dbg("refetch failed", { fid, err: String(err) });
+      });
   };
 
   useEffect(() => {
+    dbg("mount", { fid, projectId, preview });
     refetch();
+    return () => dbg("unmount", { fid, projectId });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fid, projectId]);
 
   useMediaEvents(preview ? undefined : projectId, (ev) => {
     if (String(ev?.data?.file_id ?? "") !== fid) return;
-    if (ev.topic === "media.deleted") setMissing(true);
-    else refetch();
+    if (ev.topic === "media.deleted") {
+      dbg("event matched: media.deleted", { fid });
+      setMissing(true);
+    } else {
+      dbg("event matched → refetch", { fid, topic: ev.topic });
+      refetch();
+    }
   });
 
   if (missing) {

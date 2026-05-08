@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.9.1
+version: 0.9.2
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -32,6 +32,13 @@ requires:
     - db.write.app
     - net.egress
     - platform.connections.execute
+    # platform.apps.call lets media use the SDK's CallApp() to reach
+    # sibling apps (e.g. storage's files_create_folder, files_move).
+    # The legacy storageclient path uses direct /api/apps/storage/*
+    # HTTP and doesn't need this permission, but every tool we ship
+    # going forward (media_create_folder, media_move, …) goes through
+    # CallApp so the binding system gates the call properly.
+    - platform.apps.call
   apps:
     - name: storage
       version: ">=0.8.1"
@@ -85,6 +92,8 @@ provides:
       description: List immediate child folders of `parent` that contain media. Args - parent (default "/"). Mirrors storage's files_list_folders semantics; only folders with at least one audio/video/image row appear.
     - name: media_create_folder
       description: Create an empty folder in storage so media uploads can land in it later. Thin pass-through to storage's files_create_folder. Idempotent — silently no-ops when the folder already has content. Args - path (e.g. "/raw-footage/2026-05/").
+    - name: media_move
+      description: Move and/or rename a media file in storage. Pass-through to storage's files_move; media's row auto-updates via the file.updated event handler. Args - file_id (string), folder? (new folder, e.g. "/clips/archived/"), name? (new filename). At least one of folder / name must be set.
     - name: media_get_thumbnail
       description: Return the storage file_id (and signed URL) of the cached thumbnail. Generates on demand if missing.
     - name: media_get_waveform

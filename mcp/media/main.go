@@ -21,7 +21,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.9.1
+version: 0.9.2
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -38,6 +38,7 @@ requires:
     - db.write.app
     - net.egress
     - platform.connections.execute
+    - platform.apps.call
   apps:
     - name: storage
       version: ">=0.1.0"
@@ -85,6 +86,7 @@ provides:
     - { name: media_search,          description: "Filter by folder / duration / dimensions / codec / has_video / has_audio." }
     - { name: media_list_folders,    description: "List immediate child folders of parent that contain media." }
     - { name: media_create_folder,   description: "Create an empty folder in storage that media files can later land in. Idempotent. Args - path." }
+    - { name: media_move,            description: "Move and/or rename a media file in storage. Media's row auto-updates via the file.updated event handler. Args - file_id, folder?, name?." }
     - { name: media_get_thumbnail,   description: "Get the thumbnail derivation pointer (storage file_id) — generates if missing." }
     - { name: media_get_waveform,    description: "Get the waveform derivation pointer (audio only)." }
     - { name: media_reindex,         description: "Force a re-probe + re-derive — for one file_id or all failed rows." }
@@ -325,6 +327,16 @@ func (a *App) MCPTools() []sdk.Tool {
 				"path": map[string]any{"type": "string"},
 			}, []string{"path"}),
 			Handler: a.toolCreateFolder,
+		},
+		{
+			Name:        "media_move",
+			Description: "Move and/or rename a media file in storage. At least one of folder / name must be set. Media's row auto-updates via the file.updated event. Args: file_id (string), folder?, name?.",
+			InputSchema: schemaObject(map[string]any{
+				"file_id": map[string]any{"type": "string"},
+				"folder":  map[string]any{"type": "string"},
+				"name":    map[string]any{"type": "string"},
+			}, []string{"file_id"}),
+			Handler: a.toolMove,
 		},
 		{
 			Name:        "media_get_thumbnail",
@@ -859,6 +871,53 @@ func (a *App) toolCreateFolder(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, fmt.Errorf("storage.files_create_folder: %w", err)
 	}
 	return map[string]any{"created": out.Created, "path": out.Path}, nil
+}
+
+// toolMove relays a file move/rename to storage's files_move. Media's
+// own row auto-updates because the indexer subscribes to storage's
+// file.updated event and runs updateFolderFromEvent — so by the time
+// this returns, media_search / media_list_folders already reflect
+// the new location. We don't write the row ourselves to keep storage
+// as the single source of truth for file location.
+func (a *App) toolMove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	fid, _ := args["file_id"].(string)
+	fid = strings.TrimSpace(fid)
+	if fid == "" {
+		return nil, errors.New("file_id required")
+	}
+	folder, _ := args["folder"].(string)
+	name, _ := args["name"].(string)
+	folder = strings.TrimSpace(folder)
+	name = strings.TrimSpace(name)
+	if folder == "" && name == "" {
+		return nil, errors.New("at least one of folder, name must be set")
+	}
+	idNum, perr := strconv.ParseInt(fid, 10, 64)
+	if perr != nil {
+		return nil, fmt.Errorf("file_id %q must be numeric", fid)
+	}
+	in := map[string]any{
+		"id":          idNum,
+		"_project_id": pid,
+	}
+	if folder != "" {
+		in["folder"] = folder
+	}
+	if name != "" {
+		in["name"] = name
+	}
+	var out map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_move", in, &out); err != nil {
+		return nil, fmt.Errorf("storage.files_move: %w", err)
+	}
+	// Pass storage's response through verbatim — it carries the
+	// updated id/folder/name plus an absolute URL the agent might
+	// want to surface in chat.
+	return out, nil
 }
 
 // toolGetDerivation closes over the derivation kind so the same body
