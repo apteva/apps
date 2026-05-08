@@ -132,6 +132,16 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// via the install's config_schema). Boot fails loud here when s3
 	// creds are missing — better than silently routing writes to the
 	// wrong place.
+	bound := ctx.IntegrationFor("backend")
+	id, _ := ctx.PlatformAPI().WhoAmI()
+	if id != nil {
+		ctx.Logger().Info("storage backend role probe",
+			"bindings", id.Bindings,
+			"resolved_bound", bound,
+			"manifest_integrations", ctx.Manifest().Requires.Integrations)
+	} else {
+		ctx.Logger().Warn("storage backend role probe — WhoAmI returned nil identity")
+	}
 	be, err := initBackend(ctx)
 	if err != nil {
 		return fmt.Errorf("init backend: %w", err)
