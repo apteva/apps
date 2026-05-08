@@ -21,7 +21,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.9.6
+version: 0.9.7
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -98,6 +98,7 @@ provides:
     - { name: media_crop,            description: "Crop a video or image to a rectangular region. Returns render_id." }
     - { name: media_extract_frame,   description: "Save a single frame at a specific timestamp as PNG. Returns render_id." }
     - { name: media_audio_extract,   description: "Strip audio from a video into a standalone file. Returns render_id." }
+    - { name: media_extract_reel,    description: "Trim + reframe to a target aspect ratio in one ffmpeg pass. Replaces media_trim → media_crop → media_resize for vertical-reel workflows. Args - file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080)." }
     - { name: media_get_render,      description: "Status of one render — progress + output_file_id when ready." }
     - { name: media_list_renders,    description: "List renders filtered by status / operation." }
     - { name: media_cancel_render,   description: "Cancel a pending or running render. Idempotent." }
@@ -457,6 +458,20 @@ func (a *App) MCPTools() []sdk.Tool {
 				"output_folder": map[string]any{"type": "string"},
 			}, []string{"file_id", "format"}),
 			Handler: a.toolSubmitRender("audio_extract", []string{"format"}, []string{"file_id"}),
+		},
+		{
+			Name: "media_extract_reel",
+			Description: "Cut a clip from a video AND reframe it to a target aspect ratio in a single ffmpeg pass. Replaces the manual chain media_trim → media_crop → media_resize for the common 'make a 9:16 reel from a 16:9 source' workflow. Args: file_id, start_ms, end_ms (same units + names as media_trim), target_ratio? (default '9:16', e.g. '1:1', '4:5'), output_width? (default 1080; height auto-derives from ratio), output_name?, output_folder?.",
+			InputSchema: schemaObject(map[string]any{
+				"file_id":       map[string]any{"type": "string", "description": "Storage file_id of the source video."},
+				"start_ms":      map[string]any{"type": "integer", "description": "Clip start, milliseconds from start of source. Same convention as media_trim."},
+				"end_ms":        map[string]any{"type": "integer", "description": "Clip end, milliseconds from start of source. Must be > start_ms."},
+				"target_ratio":  map[string]any{"type": "string", "description": "Output aspect ratio as 'W:H'. Default '9:16'. Common: '9:16' (vertical reels), '1:1' (square), '4:5' (Instagram portrait), '16:9' (passthrough crop)."},
+				"output_width":  map[string]any{"type": "integer", "description": "Output width in pixels. Default 1080. Height auto-derives from target_ratio (rounded to even for codec compatibility)."},
+				"output_name":   map[string]any{"type": "string", "description": "Optional output filename. Extension auto-corrected to .mp4."},
+				"output_folder": map[string]any{"type": "string", "description": "Optional storage folder for the rendered output. Defaults to install's render_output_folder (typically /renders/)."},
+			}, []string{"file_id", "start_ms", "end_ms"}),
+			Handler: a.toolSubmitRender("extract_reel", []string{"start_ms", "end_ms", "target_ratio", "output_width"}, []string{"file_id"}),
 		},
 		// ─── Render manage tools ────────────────────────────────────
 		{

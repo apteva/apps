@@ -359,6 +359,93 @@ func TestToolCancelRender_PendingFlipsRow(t *testing.T) {
 
 // ─── helpers ────────────────────────────────────────────────────────
 
+func TestPlanExtractReel_Defaults(t *testing.T) {
+	plan, err := buildPlan("extract_reel", []string{"42"},
+		raw(t, map[string]any{"start_ms": 60_000, "end_ms": 90_000}), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.ContentType != "video/mp4" {
+		t.Errorf("content_type=%q want video/mp4", plan.ContentType)
+	}
+	// Time pair lands as fractional seconds, same as media_trim.
+	if !argPair(plan.Args, "-ss", "60.000") {
+		t.Errorf("missing -ss 60.000: %v", plan.Args)
+	}
+	if !argPair(plan.Args, "-to", "90.000") {
+		t.Errorf("missing -to 90.000: %v", plan.Args)
+	}
+	// Audio passthrough — no re-encode needed.
+	if !argPair(plan.Args, "-c:a", "copy") {
+		t.Errorf("missing -c:a copy: %v", plan.Args)
+	}
+	// Filter chain encodes 9:16 default + 1080-wide scale.
+	vfIdx := -1
+	for i, a := range plan.Args {
+		if a == "-vf" && i+1 < len(plan.Args) {
+			vfIdx = i + 1
+			break
+		}
+	}
+	if vfIdx == -1 {
+		t.Fatalf("no -vf in args: %v", plan.Args)
+	}
+	vf := plan.Args[vfIdx]
+	for _, want := range []string{
+		"crop=", "ih*9/16", "iw*16/9", "scale=1080:-2",
+	} {
+		if !strings.Contains(vf, want) {
+			t.Errorf("vf chain missing %q: %s", want, vf)
+		}
+	}
+}
+
+func TestPlanExtractReel_CustomRatio(t *testing.T) {
+	plan, err := buildPlan("extract_reel", []string{"42"},
+		raw(t, map[string]any{
+			"start_ms": 0, "end_ms": 5000,
+			"target_ratio": "1:1", "output_width": 720,
+		}), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vfIdx := -1
+	for i, a := range plan.Args {
+		if a == "-vf" {
+			vfIdx = i + 1
+			break
+		}
+	}
+	vf := plan.Args[vfIdx]
+	if !strings.Contains(vf, "ih*1/1") || !strings.Contains(vf, "iw*1/1") {
+		t.Errorf("1:1 ratio not encoded: %s", vf)
+	}
+	if !strings.Contains(vf, "scale=720:-2") {
+		t.Errorf("output_width=720 not honoured: %s", vf)
+	}
+}
+
+func TestPlanExtractReel_BadParams(t *testing.T) {
+	cases := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"end before start", map[string]any{"start_ms": 5000, "end_ms": 1000}, "end_ms must be > start_ms"},
+		{"negative start", map[string]any{"start_ms": -1, "end_ms": 1000}, "start_ms must be >= 0"},
+		{"bad ratio shape", map[string]any{"start_ms": 0, "end_ms": 1000, "target_ratio": "9-16"}, "target_ratio"},
+		{"zero width", map[string]any{"start_ms": 0, "end_ms": 1000, "target_ratio": "0:16"}, "target_ratio"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := buildPlan("extract_reel", []string{"42"}, raw(t, tc.args), "")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err=%v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func raw(t *testing.T, m map[string]any) json.RawMessage {
 	t.Helper()
 	b, err := json.Marshal(m)

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 )
 
@@ -46,6 +47,8 @@ func buildPlan(op string, sources []string, params json.RawMessage, outputName s
 		return planCrop(sources, params, outputName)
 	case "extract_frame":
 		return planExtractFrame(sources, params, outputName)
+	case "extract_reel":
+		return planExtractReel(sources, params, outputName)
 	case "audio_extract":
 		return planAudioExtract(sources, params, outputName)
 	default:
@@ -297,6 +300,109 @@ func planExtractFrame(sources []string, raw json.RawMessage, outputName string) 
 		outputName += ".png"
 	}
 	return &opPlan{Filename: outputName, ContentType: "image/png", Args: args}, nil
+}
+
+// ─── extract_reel ───────────────────────────────────────────────────
+//
+// One-pass trim + center-crop + scale to a target aspect ratio.
+// Designed for the common "make a 9:16 reel from a 16:9 source"
+// workflow without forcing the agent to chain media_trim →
+// media_crop → media_resize (3 tool calls, 3 download/upload pairs,
+// 3 re-encodes — vs one).
+//
+// Time fields use the same names + unit as media_trim (start_ms,
+// end_ms, integer milliseconds). Aspect ratio is parsed at submit
+// time but the actual crop math runs INSIDE ffmpeg via filter
+// expression variables (iw, ih, out_w, out_h) — the planner never
+// touches source dimensions, so this stays a pure function like
+// every other planner here.
+//
+// Both source orientations are handled with one filter expression:
+// when source is wider than target (16:9 → 9:16), the height is
+// preserved and width crops to ih*9/16. When source is taller than
+// target (9:16 → 16:9), width is preserved and height crops. The
+// `gt(iw/ih, target_aspect)` test inside the expression picks the
+// branch at render time.
+//
+// Audio: copied through. The trim happens server-side via -ss / -to
+// before re-encoding the video, so we save audio bandwidth too.
+
+type extractReelParams struct {
+	StartMs     int64   `json:"start_ms"`
+	EndMs       int64   `json:"end_ms"`
+	TargetRatio string  `json:"target_ratio"` // "9:16" (default), "1:1", "4:5", "16:9", …
+	OutputWidth int     `json:"output_width"` // optional; default 1080
+}
+
+func planExtractReel(sources []string, raw json.RawMessage, outputName string) (*opPlan, error) {
+	if len(sources) != 1 {
+		return nil, errors.New("extract_reel takes exactly one source file_id")
+	}
+	var p extractReelParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, fmt.Errorf("extract_reel params: %w", err)
+	}
+	if p.EndMs <= p.StartMs {
+		return nil, errors.New("extract_reel: end_ms must be > start_ms")
+	}
+	if p.StartMs < 0 {
+		return nil, errors.New("extract_reel: start_ms must be >= 0")
+	}
+	if p.TargetRatio == "" {
+		p.TargetRatio = "9:16"
+	}
+	if p.OutputWidth <= 0 {
+		p.OutputWidth = 1080
+	}
+	rw, rh, err := parseAspectRatio(p.TargetRatio)
+	if err != nil {
+		return nil, fmt.Errorf("extract_reel: %w", err)
+	}
+	// Filter chain:
+	//   crop=W:H:X:Y where:
+	//     W = if source-wider-than-target then ih*rw/rh else iw
+	//     H = if source-wider-than-target then ih       else iw*rh/rw
+	//   X,Y = center using out_w / out_h (auto-references)
+	// Then scale=output_width:-2 (height auto-derived, even).
+	cropExpr := fmt.Sprintf(
+		"crop=w='if(gt(iw/ih,%d/%d),ih*%d/%d,iw)':h='if(gt(iw/ih,%d/%d),ih,iw*%d/%d)':x='(iw-out_w)/2':y='(ih-out_h)/2'",
+		rw, rh, rw, rh, rw, rh, rh, rw,
+	)
+	scaleExpr := fmt.Sprintf("scale=%d:-2", p.OutputWidth)
+	args := []string{
+		"-y",
+		"-loglevel", "error",
+		"-progress", "pipe:1",
+		// Demuxer-level seek before -i: fast + frame-accurate enough
+		// for the typical reel use case. Same convention as planTrim.
+		"-ss", msToSeconds(p.StartMs),
+		"-to", msToSeconds(p.EndMs),
+		"-i", "{input}",
+		"-vf", cropExpr + "," + scaleExpr,
+		"-c:a", "copy",                        // audio passthrough — no re-encode
+		"-avoid_negative_ts", "make_zero",
+	}
+	name, ct := defaultOutputName(outputName, sources[0], "reel", ".mp4")
+	return &opPlan{Filename: name, ContentType: ct, Args: args}, nil
+}
+
+// parseAspectRatio splits "9:16" / "1:1" / "16:9" into integer (w, h)
+// pairs. Rejects values < 1 and non-integer tokens — keeps the filter
+// expression algebra clean.
+func parseAspectRatio(s string) (int, int, error) {
+	parts := strings.Split(strings.TrimSpace(s), ":")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("target_ratio %q must be \"W:H\" (e.g. \"9:16\")", s)
+	}
+	w, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil || w < 1 {
+		return 0, 0, fmt.Errorf("target_ratio %q: width must be a positive integer", s)
+	}
+	h, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil || h < 1 {
+		return 0, 0, fmt.Errorf("target_ratio %q: height must be a positive integer", s)
+	}
+	return w, h, nil
 }
 
 // ─── audio_extract ──────────────────────────────────────────────────
