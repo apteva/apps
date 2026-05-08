@@ -31,6 +31,27 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+// transcriberNotify carries file_ids that just became eligible —
+// indexer fires it the moment probe_status=ok AND has_audio=1.
+// Buffered so a burst of file.added events never blocks the
+// indexer; on overflow we drop and let the periodic sweep catch
+// up. Set in startTranscriber; nil otherwise (auto-transcribe
+// disabled), notifyTranscriber is a no-op then.
+var transcriberNotify chan string
+
+// notifyTranscriber is called by the indexer when a media row
+// finishes probing and has audio. Non-blocking — channel buffer
+// is bounded so a backlog falls back to the periodic sweep.
+func notifyTranscriber(fileID string) {
+	if transcriberNotify == nil || fileID == "" {
+		return
+	}
+	select {
+	case transcriberNotify <- fileID:
+	default:
+	}
+}
+
 // startTranscriber kicks off the auto-transcribe goroutine. Honours
 // the transcribe_auto config kill switch — when false, the worker
 // doesn't tick at all; manual media_transcribe still works.
@@ -40,6 +61,7 @@ func startTranscriber(app *sdk.AppCtx) {
 		app.Logger().Info("transcribe_auto=false — auto-transcriber disabled (manual still works)")
 		return
 	}
+	transcriberNotify = make(chan string, 100)
 	go transcriberLoop(app)
 	app.Logger().Info("transcriber started")
 }
@@ -61,9 +83,46 @@ func transcriberLoop(app *sdk.AppCtx) {
 			log.Info("transcriber stopping")
 			return
 		case <-tick.C:
+			// Periodic safety-net sweep. Picks up rows the notify
+			// path missed (channel overflow, app restart while a row
+			// was queued, integration newly bound, etc).
 			transcriberSweep(app)
+		case fid := <-transcriberNotify:
+			// Indexer just made this file eligible. Process just
+			// THIS row immediately rather than wait the next tick.
+			transcriberOne(app, fid)
 		}
 	}
+}
+
+// transcriberOne runs the transcriber for a single file_id signalled
+// via notifyTranscriber. Goes through insertPendingTranscript +
+// runOneTranscription so all the normal guards (duration cap,
+// integration binding, dedup-on-source-sha) still apply.
+func transcriberOne(app *sdk.AppCtx, fileID string) {
+	log := app.Logger()
+	pid := os.Getenv("APTEVA_PROJECT_ID")
+	if pid == "" || fileID == "" {
+		return
+	}
+	bound := app.IntegrationFor("transcripts")
+	if bound == nil {
+		// No integration — fall through silently. Periodic sweep
+		// will mark candidates as skipped with a clearer message.
+		return
+	}
+	if err := insertPendingTranscript(app.AppDB(), pid, fileID, "auto"); err != nil {
+		log.Error("queue pending transcript failed", "file_id", fileID, "err", err)
+		return
+	}
+	row, err := claimNextPendingTranscript(app.AppDB())
+	if err != nil {
+		if !isNoRows(err) {
+			log.Error("claim transcript failed", "err", err)
+		}
+		return
+	}
+	runOneTranscription(app, bound, row)
 }
 
 // transcriberSweep does one pass: queue eligible candidates, then

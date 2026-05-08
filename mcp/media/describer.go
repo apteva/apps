@@ -184,6 +184,26 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 		return
 	}
 
+	// Wait for the transcript on audio-bearing files. Without this
+	// gate, video-with-audio gets described from the thumbnail alone
+	// the first time the periodic sweep sees it — and once
+	// description != '', the row is no longer a candidate, so the
+	// post-transcript notifyDescriber call has nothing to do. Better
+	// to wait: a video's transcript is usually the richest signal,
+	// and the indexer's notifyTranscriber path means the wait is
+	// only as long as the Deepgram call itself.
+	//
+	// Skip without marking — terminal transcript states (failed,
+	// skipped, ok) all unblock the next sweep, and a still-pending
+	// transcript will trigger this same path again via the
+	// transcriber's notifyDescriber on completion.
+	if media.HasAudio {
+		t, _ := getTranscript(db, projectID, media.FileID)
+		if t == nil || t.Status == "pending" || t.Status == "running" {
+			return
+		}
+	}
+
 	// Build the prompt + optional image_url. Three branches map onto
 	// the three input paths. Each returns the messages array we POST
 	// to opencode-go's chat_completion endpoint.

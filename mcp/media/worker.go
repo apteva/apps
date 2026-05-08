@@ -258,14 +258,21 @@ func processOne(
 		}
 	}
 
-	// Wake the describer NOW for files that don't need a transcript
-	// — image, silent video, anything without audio. Files with
-	// audio get described later by the transcriber's notify (after
-	// the transcript lands), so the LLM call gets the richer
-	// multimodal {thumbnail + transcript} input instead of a
-	// vision-only call we'd later overwrite. Periodic sweep is the
-	// safety net for both paths.
-	if !probe.HasAudio {
+	// Wake the right downstream worker the moment probe finishes:
+	//
+	//   has audio  → notifyTranscriber. The transcriber claims a
+	//                pending row, calls Deepgram, then itself
+	//                notifies the describer once the transcript
+	//                lands so the LLM gets {thumbnail + transcript}.
+	//   no audio   → notifyDescriber directly. Image / silent video
+	//                only ever needs a vision-only describe.
+	//
+	// Without this, both workers waited up to 60s for their next
+	// periodic tick to notice the new row. Periodic sweep stays as
+	// the safety net for both paths.
+	if probe.HasAudio {
+		notifyTranscriber(fid)
+	} else {
 		notifyDescriber(fid)
 	}
 }
