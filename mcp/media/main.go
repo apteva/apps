@@ -21,7 +21,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.9.3
+version: 0.9.4
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -1529,11 +1529,49 @@ func extractSourceIDs(args map[string]any, keys []string) ([]string, error) {
 func pickParams(args map[string]any, keys []string) map[string]any {
 	out := map[string]any{}
 	for _, k := range keys {
-		if v, ok := args[k]; ok {
-			out[k] = v
+		v, ok := args[k]
+		if !ok {
+			continue
 		}
+		// Coerce numeric-looking strings to numbers. Smaller LLMs
+		// (and some MCP clients) emit at_ms / start_ms / width etc.
+		// as JSON strings even when the tool's input_schema declares
+		// "type": "integer". Without this coercion, json.Unmarshal
+		// into the per-op params struct (e.g. extractFrameParams's
+		// AtMs int64 field) fails on "1000" → "json: cannot unmarshal
+		// string into Go struct field …", and the agent retries
+		// forever in a loop that never actually reaches ffmpeg.
+		//
+		// The set of keys that flow through pickParams is closed and
+		// entirely numeric (start_ms, end_ms, at_ms, width, height,
+		// x, y, bitrate, keep_aspect). String params (format,
+		// video_codec, audio_codec) live on different ops or skip
+		// pickParams. So coercing string→number here doesn't risk
+		// trampling a legitimate string value.
+		out[k] = coerceNumeric(v)
 	}
 	return out
+}
+
+// coerceNumeric turns "1000" into 1000 (float64), "1.5" into 1.5,
+// "true" / "false" into bool. Non-string values pass through. Strings
+// that don't parse cleanly are left as-is.
+func coerceNumeric(v any) any {
+	s, ok := v.(string)
+	if !ok {
+		return v
+	}
+	// Booleans first — keep_aspect is the one bool-shaped param.
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "true":
+		return true
+	case "false":
+		return false
+	}
+	if n, err := strconv.ParseFloat(s, 64); err == nil {
+		return n
+	}
+	return s
 }
 
 // ─── Render HTTP handlers ──────────────────────────────────────────
