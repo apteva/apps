@@ -16,6 +16,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"strconv"
@@ -339,11 +340,7 @@ func (c *storageClient) UploadRender(ctx context.Context, projectID, folder, fil
 	if err := mw.WriteField("tags", "render"); err != nil {
 		return 0, err
 	}
-	part, err := mw.CreateFormFile("file", filename)
-	if err != nil {
-		return 0, err
-	}
-	if _, err := io.Copy(part, r); err != nil {
+	if err := writeFilePartWithType(mw, filename, contentType, r); err != nil {
 		return 0, err
 	}
 	if err := mw.Close(); err != nil {
@@ -364,11 +361,47 @@ func (c *storageClient) UploadRender(ctx context.Context, projectID, folder, fil
 	if err := json.Unmarshal(respBody, &out); err != nil {
 		return 0, fmt.Errorf("parse upload: %w (body=%s)", err, string(respBody))
 	}
-	_ = contentType // reserved for future header injection
 	if out.ID == 0 {
 		return 0, errors.New("storage returned id=0 for render upload")
 	}
 	return out.ID, nil
+}
+
+// writeFilePartWithType writes a multipart "file" part with an
+// explicit Content-Type header. Go's standard CreateFormFile ALWAYS
+// sets the part header to "application/octet-stream" — the parameter
+// is not exposed — and storage reads exactly that header to populate
+// files.content_type. So a render output named frame.png landed in
+// storage with content_type="application/octet-stream", which made
+// the panel say "No preview available" and broke download MIME-
+// sniffing for any client that respects the content_type column.
+//
+// The textproto.MIMEHeader form lets us drop in the real MIME type
+// (image/png for extract_frame, video/mp4 for transcodes, etc.) so
+// storage saves the right value and previews work end-to-end.
+func writeFilePartWithType(mw *multipart.Writer, filename, contentType string, r io.Reader) error {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition",
+		fmt.Sprintf(`form-data; name="file"; filename=%q`, escapeQuotes(filename)))
+	h.Set("Content-Type", contentType)
+	part, err := mw.CreatePart(h)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(part, r); err != nil {
+		return err
+	}
+	return nil
+}
+
+// escapeQuotes mirrors mime/multipart's internal quoteEscaper, which
+// is unexported. Avoids breaking Content-Disposition on filenames
+// with embedded quotes or backslashes.
+func escapeQuotes(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s)
 }
 
 // UploadDerivationMultipart is the multipart variant — used when the
@@ -384,11 +417,7 @@ func (c *storageClient) UploadDerivationMultipart(ctx context.Context, projectID
 	if err := mw.WriteField("visibility", "private"); err != nil {
 		return 0, err
 	}
-	part, err := mw.CreateFormFile("file", filename)
-	if err != nil {
-		return 0, err
-	}
-	if _, err := io.Copy(part, r); err != nil {
+	if err := writeFilePartWithType(mw, filename, contentType, r); err != nil {
 		return 0, err
 	}
 	if err := mw.Close(); err != nil {
@@ -409,7 +438,6 @@ func (c *storageClient) UploadDerivationMultipart(ctx context.Context, projectID
 	if err := json.Unmarshal(respBody, &out); err != nil {
 		return 0, fmt.Errorf("parse upload: %w (body=%s)", err, string(respBody))
 	}
-	_ = contentType // reserved for future header injection
 	return out.ID, nil
 }
 
