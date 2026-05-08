@@ -597,6 +597,22 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"social_account_id"}),
 			Handler: a.toolAccountMetrics,
 		},
+		{
+			Name: "post_edit",
+			Description: "Edit an already-published post's body and/or per-target metadata. Updates the local post + fans out to each platform's edit verb where supported. " +
+				"Editable platforms today: Facebook (message), YouTube (title, description, tags, privacy, category). Twitter / TikTok / Instagram return status=unsupported — those platforms don't permit programmatic edits (or the catalog doesn't expose the verb yet). " +
+				"Args: post_id, body? (new post-level default body), targets? (per-target overrides keyed by social_account_id, same shape as post_create's targets — body, title, visibility, category, tags, etc.). At least one of body/targets must be set.",
+			InputSchema: schemaObject(map[string]any{
+				"post_id": map[string]any{"type": "integer"},
+				"body":    map[string]any{"type": "string"},
+				"targets": map[string]any{
+					"type":        "array",
+					"description": "Optional per-target overrides. Each entry: {social_account_id (required), body?, plus platform-specific keys (title/visibility/category/tags for YouTube; just body/message for Facebook).}",
+					"items":       map[string]any{"type": "object"},
+				},
+			}, []string{"post_id"}),
+			Handler: a.toolPostEdit,
+		},
 	}
 	tools = append(tools, a.profileTools()...)
 	return tools
@@ -2944,6 +2960,461 @@ func (a *App) toolAccountMetrics(ctx *sdk.AppCtx, args map[string]any) (any, err
 	return res, nil
 }
 
+// ─── import ───────────────────────────────────────────────────────
+//
+// Internal-only — NOT exposed as an MCP tool. Agents shouldn't be
+// triggering bulk reads of upstream content; this is a panel-only
+// affordance the user clicks deliberately.
+//
+// importAccountPosts pulls recent posts from one connected account
+// into our local posts/post_targets tables so they show up in the
+// Posts tab and the Metrics tab can query them like any locally-
+// authored post. v1 supports Facebook (page posts); other platforms
+// return an "unsupported, defer to follow-up" outcome.
+//
+// Dedup is handled by a unique partial index on
+// post_targets(social_account_id, platform_post_id) — INSERT OR IGNORE
+// silently skips already-imported posts. Re-running import is safe.
+
+type importResult struct {
+	AccountID       int64  `json:"account_id"`
+	Platform        string `json:"platform"`
+	Imported        int    `json:"imported"`
+	SkippedExisting int    `json:"skipped_existing"`
+	Status          string `json:"status"` // ok | unsupported | failed
+	Reason          string `json:"reason,omitempty"`
+	Error           string `json:"error,omitempty"`
+}
+
+func (a *App) importAccountPosts(ctx *sdk.AppCtx, accountID int64, limit int) importResult {
+	if limit <= 0 || limit > 200 {
+		limit = 25
+	}
+	pid := os.Getenv("APTEVA_PROJECT_ID")
+	var platform, extID, pageCreds string
+	var connID int64
+	var profileID int64
+	err := ctx.AppDB().QueryRow(
+		`SELECT platform, COALESCE(external_account_id,''), connection_id,
+		        COALESCE(page_credentials,''), COALESCE(profile_id,0)
+		 FROM social_accounts WHERE id=? AND project_id=?`,
+		accountID, pid,
+	).Scan(&platform, &extID, &connID, &pageCreds, &profileID)
+	if err != nil {
+		return importResult{AccountID: accountID, Status: "failed", Error: "account not found"}
+	}
+	out := importResult{AccountID: accountID, Platform: platform}
+	switch platform {
+	case "facebook":
+		return a.importFacebookPosts(ctx, out, accountID, connID, extID, pageCreds, profileID, limit)
+	default:
+		out.Status = "unsupported"
+		out.Reason = "import for this platform isn't wired yet (v1 covers Facebook; Twitter/IG/YouTube/TikTok pending)"
+		return out
+	}
+}
+
+func (a *App) importFacebookPosts(
+	ctx *sdk.AppCtx, out importResult,
+	accountID, connID int64, pageID, pageCreds string,
+	profileID int64, limit int,
+) importResult {
+	if pageID == "" {
+		out.Status = "failed"
+		out.Error = "facebook account has no page id stored"
+		return out
+	}
+	token := extractPageToken(pageCreds)
+	if token == "" {
+		out.Status = "failed"
+		out.Error = "facebook page access_token missing — reconnect the account"
+		return out
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_page_posts", map[string]any{
+		"pageId":       pageID,
+		"limit":        limit,
+		"access_token": token,
+		"fields":       "id,message,created_time,full_picture,permalink_url",
+	})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	var resp struct {
+		Data []struct {
+			ID           string `json:"id"`
+			Message      string `json:"message"`
+			CreatedTime  string `json:"created_time"`
+			FullPicture  string `json:"full_picture"`
+			PermalinkURL string `json:"permalink_url"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(res.Data, &resp); err != nil {
+		out.Status, out.Error = "failed", "decode page posts: "+err.Error()
+		return out
+	}
+	pid := os.Getenv("APTEVA_PROJECT_ID")
+	if profileID == 0 {
+		profileID = projectDefaultProfileID(ctx, pid)
+	}
+	for _, p := range resp.Data {
+		if p.ID == "" {
+			continue
+		}
+		// Pre-check dedupe so we know whether we created a new local
+		// post or skipped an already-imported one. Without this we'd
+		// have to reverse-engineer the result from rows-affected on
+		// the unique-constraint INSERT — not portable across drivers.
+		var existing int64
+		_ = ctx.AppDB().QueryRow(
+			`SELECT id FROM post_targets WHERE social_account_id=? AND platform_post_id=?`,
+			accountID, p.ID,
+		).Scan(&existing)
+		if existing > 0 {
+			out.SkippedExisting++
+			continue
+		}
+		// Encode the picture as a single-element external media array
+		// (or NULL when no image). Read-only references — we never
+		// download these into our storage app.
+		var extMediaJSON sql.NullString
+		if p.FullPicture != "" {
+			b, _ := json.Marshal([]string{p.FullPicture})
+			extMediaJSON = sql.NullString{String: string(b), Valid: true}
+		}
+		// Local post row — imported, body comes from the FB message.
+		postRes, err := ctx.AppDB().Exec(
+			`INSERT INTO posts (project_id, body, media_storage_ids, status, profile_id,
+			                    imported_at, external_media_urls, published_at)
+			 VALUES (?, ?, '[]', 'published', ?, CURRENT_TIMESTAMP, ?, ?)`,
+			pid, p.Message, profileID, extMediaJSON, nullable(p.CreatedTime),
+		)
+		if err != nil {
+			ctx.Logger().Warn("import: insert post failed", "fb_id", p.ID, "err", err)
+			continue
+		}
+		postID, _ := postRes.LastInsertId()
+		// Target row — already-published, with the upstream id + URL.
+		_, err = ctx.AppDB().Exec(
+			`INSERT INTO post_targets (post_id, social_account_id, status,
+			                           platform_post_id, platform_url, published_at)
+			 VALUES (?, ?, 'published', ?, ?, ?)`,
+			postID, accountID, p.ID, nullable(p.PermalinkURL), nullable(p.CreatedTime),
+		)
+		if err != nil {
+			ctx.Logger().Warn("import: insert target failed", "fb_id", p.ID, "err", err)
+			// Roll back the orphan post row so re-running import doesn't
+			// leave dangling locally-only entries.
+			_, _ = ctx.AppDB().Exec(`DELETE FROM posts WHERE id=?`, postID)
+			continue
+		}
+		out.Imported++
+	}
+	out.Status = "ok"
+	return out
+}
+
+// ─── post_edit ────────────────────────────────────────────────────
+//
+// post_edit lets agents (and the panel) update an already-published
+// post's text and per-target metadata. Same fan-out shape as
+// post_delete + post_metrics — each target reports ok / unsupported /
+// skipped / failed independently, with reason / error strings for
+// non-ok outcomes.
+//
+// Editable platforms today: Facebook (message), YouTube (title /
+// description / tags / privacy / category). Other platforms either
+// don't permit programmatic edits (Twitter, TikTok) or don't have the
+// verb wired in our catalog (Instagram caption-only edits).
+//
+// Local body update: we always update posts.body when the call
+// includes a top-level body. The local row is the source of truth for
+// what the user *meant* the post to say; divergence with what's
+// actually live on unsupported platforms is documented in the
+// per-target outcomes.
+
+type targetEditOutcome struct {
+	TargetID        int64  `json:"target_id"`
+	SocialAccountID int64  `json:"social_account_id"`
+	Platform        string `json:"platform"`
+	PlatformPostID  string `json:"platform_post_id,omitempty"`
+	Status          string `json:"status"` // ok | unsupported | skipped | failed
+	Reason          string `json:"reason,omitempty"`
+	Error           string `json:"error,omitempty"`
+}
+
+func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	postID := int64(intArg(args, "post_id", 0))
+	if postID <= 0 {
+		return mcpError("post_id required"), nil
+	}
+	newBody, hasBody := args["body"].(string)
+	rawTargets, _ := args["targets"].([]any)
+	if !hasBody && len(rawTargets) == 0 {
+		return mcpError("nothing to edit — pass body and/or targets"), nil
+	}
+	pid := os.Getenv("APTEVA_PROJECT_ID")
+	var currentBody, status string
+	err := ctx.AppDB().QueryRow(
+		`SELECT body, status FROM posts WHERE id=? AND project_id=?`,
+		postID, pid,
+	).Scan(&currentBody, &status)
+	if err != nil {
+		return mcpError("post not found"), nil
+	}
+
+	// Parse target-specific overrides into a map keyed by
+	// social_account_id so the fan-out loop can look them up cheaply.
+	overrides := map[int64]map[string]any{}
+	for i, t := range rawTargets {
+		m, ok := t.(map[string]any)
+		if !ok {
+			return mcpError(fmt.Sprintf("targets[%d] must be an object", i)), nil
+		}
+		id := toInt64Loose(m["social_account_id"])
+		if id <= 0 {
+			return mcpError(fmt.Sprintf("targets[%d].social_account_id required", i)), nil
+		}
+		opts := make(map[string]any, len(m))
+		for k, v := range m {
+			if k == "social_account_id" {
+				continue
+			}
+			opts[k] = v
+		}
+		overrides[id] = opts
+	}
+
+	// Update local body if a new one was provided. Take the post-level
+	// body as the new default that target-specific overrides extend.
+	resolvedPostBody := currentBody
+	if hasBody {
+		resolvedPostBody = newBody
+		if _, err := ctx.AppDB().Exec(
+			`UPDATE posts SET body=? WHERE id=? AND project_id=?`,
+			resolvedPostBody, postID, pid,
+		); err != nil {
+			return nil, fmt.Errorf("update post body: %w", err)
+		}
+	}
+
+	// Fan out across the post's targets.
+	rows, err := ctx.AppDB().Query(
+		`SELECT t.id, t.social_account_id, COALESCE(t.platform_post_id,''),
+		        a.platform, a.connection_id, COALESCE(a.page_credentials,''),
+		        COALESCE(t.options,'')
+		 FROM post_targets t
+		 LEFT JOIN social_accounts a ON a.id=t.social_account_id
+		 WHERE t.post_id=?`,
+		postID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type editTarget struct {
+		TargetID, SocialAccountID, ConnID int64
+		Platform, ExtPostID, PageCreds    string
+		ExistingOptions                   map[string]any
+	}
+	var trs []editTarget
+	for rows.Next() {
+		var r editTarget
+		var optsRaw string
+		var connID sql.NullInt64
+		var platform sql.NullString
+		if err := rows.Scan(&r.TargetID, &r.SocialAccountID, &r.ExtPostID, &platform, &connID, &r.PageCreds, &optsRaw); err == nil {
+			if platform.Valid {
+				r.Platform = platform.String
+			}
+			if connID.Valid {
+				r.ConnID = connID.Int64
+			}
+			if optsRaw != "" {
+				_ = json.Unmarshal([]byte(optsRaw), &r.ExistingOptions)
+			}
+			trs = append(trs, r)
+		}
+	}
+
+	outcomes := make([]targetEditOutcome, 0, len(trs))
+	for _, r := range trs {
+		out := targetEditOutcome{
+			TargetID:        r.TargetID,
+			SocialAccountID: r.SocialAccountID,
+			Platform:        r.Platform,
+			PlatformPostID:  r.ExtPostID,
+		}
+		if r.Platform == "" || r.ConnID == 0 {
+			out.Status = "skipped"
+			out.Reason = "social account row gone — was the account disconnected?"
+			outcomes = append(outcomes, out)
+			continue
+		}
+		if r.ExtPostID == "" {
+			out.Status = "skipped"
+			out.Reason = "target was never published"
+			outcomes = append(outcomes, out)
+			continue
+		}
+		// Merge: existing per-target options ← post-level body fallback ←
+		// caller's per-target overrides (most specific wins). The merged
+		// "effective options" are what each platform's editor should send.
+		eff := map[string]any{}
+		for k, v := range r.ExistingOptions {
+			eff[k] = v
+		}
+		// Body resolution: this target's override → existing target body
+		// → resolvedPostBody (post-level after body update).
+		if newOpts, ok := overrides[r.SocialAccountID]; ok {
+			for k, v := range newOpts {
+				eff[k] = v
+			}
+		}
+		// If neither the per-target override nor the existing target
+		// options had a body, supply the post-level body so platforms
+		// that edit body get the latest text.
+		if _, has := eff["body"].(string); !has {
+			eff["body"] = resolvedPostBody
+		}
+
+		// Persist the merged options back so subsequent reads (metrics
+		// tab, list views, future re-edits) reflect what was sent.
+		if optsJSON, err := json.Marshal(eff); err == nil {
+			_, _ = ctx.AppDB().Exec(
+				`UPDATE post_targets SET options=? WHERE id=?`,
+				string(optsJSON), r.TargetID,
+			)
+		}
+
+		switch r.Platform {
+		case "facebook":
+			out = a.editFacebookPost(ctx, out, r.ConnID, r.PageCreds, eff)
+		case "youtube":
+			out = a.editYoutubePost(ctx, out, r.ConnID, eff)
+		case "twitter", "tiktok", "instagram":
+			out.Status = "unsupported"
+			out.Reason = platformEditReason(r.Platform)
+		default:
+			out.Status = "unsupported"
+			out.Reason = "no edit verb wired for this platform yet"
+		}
+		outcomes = append(outcomes, out)
+	}
+
+	return map[string]any{
+		"post_id":      postID,
+		"updated_body": resolvedPostBody,
+		"prior_status": status,
+		"targets":      outcomes,
+	}, nil
+}
+
+// platformEditReason explains *why* a given platform's edit returns
+// unsupported — important context for agents and the UI so the user
+// knows whether this is "fix our catalog" or "the platform itself
+// doesn't allow it".
+func platformEditReason(platform string) string {
+	switch platform {
+	case "twitter":
+		return "Twitter / X has no public edit-tweet API — the X Premium edit feature is web-only"
+	case "tiktok":
+		return "TikTok doesn't permit programmatic edits to published videos"
+	case "instagram":
+		return "Instagram caption edits aren't in the catalog yet (POST /{ig-media-id}?caption=… would work upstream)"
+	default:
+		return "no edit verb wired for this platform yet"
+	}
+}
+
+func (a *App) editFacebookPost(ctx *sdk.AppCtx, out targetEditOutcome, connID int64, pageCreds string, eff map[string]any) targetEditOutcome {
+	body, _ := eff["body"].(string)
+	if strings.TrimSpace(body) == "" {
+		out.Status = "skipped"
+		out.Reason = "facebook edit needs a body — none provided"
+		return out
+	}
+	token := extractPageToken(pageCreds)
+	if token == "" {
+		out.Status = "failed"
+		out.Error = "facebook page access_token missing — reconnect the account"
+		return out
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "facebook_update_post", map[string]any{
+		"postId":       out.PlatformPostID,
+		"message":      body,
+		"access_token": token,
+	})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	out.Status = "ok"
+	return out
+}
+
+// editYoutubePost calls update_video. YouTube wants the *full* snippet
+// you want it to keep — it replaces fields you don't include with
+// defaults, so we pass through what we have. Body becomes description;
+// title comes from eff.title (or first line of body if missing — since
+// title is required by the upstream resource).
+func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int64, eff map[string]any) targetEditOutcome {
+	title := strOption(eff, "title")
+	body, _ := eff["body"].(string)
+	if title == "" {
+		title = firstChars(strings.TrimSpace(body), 80)
+	}
+	if title == "" {
+		out.Status = "skipped"
+		out.Reason = "youtube edit needs a title or non-empty body — neither provided"
+		return out
+	}
+	snippet := map[string]any{"title": title}
+	if body != "" {
+		snippet["description"] = body
+	}
+	if cat := strOption(eff, "category"); cat != "" {
+		snippet["categoryId"] = cat
+	}
+	if tags, ok := eff["tags"].([]any); ok && len(tags) > 0 {
+		ts := make([]string, 0, len(tags))
+		for _, t := range tags {
+			if s, ok := t.(string); ok && s != "" {
+				ts = append(ts, s)
+			}
+		}
+		if len(ts) > 0 {
+			snippet["tags"] = ts
+		}
+	}
+	input := map[string]any{
+		"id":      out.PlatformPostID,
+		"snippet": snippet,
+	}
+	if vis := strOption(eff, "visibility"); vis != "" {
+		input["status"] = map[string]any{"privacyStatus": vis}
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "update_video", input)
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	out.Status = "ok"
+	return out
+}
+
 // ─── post_delete ───────────────────────────────────────────────────
 
 // targetDeleteOutcome captures one upstream-delete attempt for the
@@ -3251,6 +3722,19 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, out)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "import" && r.Method == http.MethodPost {
+		// Internal-only — panel route. Not registered as an MCP tool.
+		// Optional ?limit=N (default 25, max 200).
+		limit := 25
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
+				limit = n
+			}
+		}
+		out := a.importAccountPosts(globalCtx, id, limit)
+		writeJSON(w, out)
+		return
+	}
 	if r.Method == http.MethodDelete {
 		out, err := a.toolAccountDisconnect(globalCtx, map[string]any{"id": id})
 		if err != nil {
@@ -3349,6 +3833,24 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) == 2 && parts[1] == "metrics" && r.Method == http.MethodGet {
 		out, err := a.toolPostMetrics(globalCtx, map[string]any{"post_id": id})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, out)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "edit" && r.Method == http.MethodPost {
+		// Decode into map[string]any (same pattern as POST /posts) so
+		// targets[]/body/etc. flow through without a strict struct
+		// dropping unknown fields.
+		var raw map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		raw["post_id"] = id
+		out, err := a.toolPostEdit(globalCtx, raw)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

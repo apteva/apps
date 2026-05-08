@@ -849,6 +849,7 @@ function AccountCard({
   account, onChange, setStatus,
 }: { account: SocialAccount; onChange: () => void; setStatus: (s: string) => void }) {
   const [confirming, setConfirming] = useState(false);
+  const [importing, setImporting] = useState(false);
   const doRemove = async () => {
     try {
       await fetch(`${API}/accounts/${account.id}`, { method: "DELETE", credentials: "same-origin" });
@@ -856,6 +857,36 @@ function AccountCard({
       onChange();
     } catch (e) {
       setStatus("Disconnect failed: " + (e as Error).message);
+    }
+  };
+  // Import is wired today only for Facebook accounts. Hide the button
+  // on platforms where the backend will return unsupported anyway —
+  // saves the user an action that can't succeed and keeps the AccountCard
+  // surface clean.
+  const importSupported = account.platform === "facebook";
+  const doImport = async () => {
+    setImporting(true);
+    setStatus(`Importing recent posts from ${account.display_name}…`);
+    try {
+      const res = await fetch(`${API}/accounts/${account.id}/import?limit=25`, {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as { status: string; imported: number; skipped_existing: number; error?: string; reason?: string };
+      if (data.status === "ok") {
+        setStatus(`Imported ${data.imported} new post${data.imported !== 1 ? "s" : ""}` +
+          (data.skipped_existing > 0 ? ` (${data.skipped_existing} already in)` : "") + ".");
+        onChange();
+      } else if (data.status === "unsupported") {
+        setStatus("Import unsupported: " + (data.reason || "platform not wired yet"));
+      } else {
+        setStatus("Import failed: " + (data.error || "unknown error"));
+      }
+    } catch (e) {
+      setStatus("Import failed: " + (e as Error).message);
+    } finally {
+      setImporting(false);
     }
   };
   return (
@@ -872,6 +903,16 @@ function AccountCard({
           <div className="text-text text-sm truncate">{account.display_name}</div>
           <div className="text-text-dim text-xs">{account.platform}</div>
         </div>
+        {importSupported && (
+          <button
+            onClick={doImport}
+            disabled={importing}
+            className="text-xs text-text-muted hover:text-text px-2 py-1 border border-border rounded disabled:opacity-50"
+            title="Import recent posts from this account into the local DB"
+          >
+            {importing ? "Importing…" : "Import"}
+          </button>
+        )}
         <button
           onClick={() => setConfirming(true)}
           className="text-text-muted hover:text-error text-xs"
@@ -1891,6 +1932,8 @@ function PostsView({
   const [rescheduleFor, setRescheduleFor] = useState<Post | null>(null);
   // Same pattern for the delete-confirm modal: which post (null = closed).
   const [deleteFor, setDeleteFor] = useState<Post | null>(null);
+  // And for the edit dialog.
+  const [editFor, setEditFor] = useState<Post | null>(null);
 
   const retry = async (postId: number) => {
     try {
@@ -1965,6 +2008,16 @@ function PostsView({
                 Reschedule
               </button>
             )}
+            {(p.status === "published" || p.status === "partial") &&
+              p.targets.some((t) => isEditablePlatform(t.platform)) && (
+              <button
+                onClick={() => setEditFor(p)}
+                className="text-xs text-accent hover:underline"
+                title="Edit post body and metadata where the platform allows"
+              >
+                Edit
+              </button>
+            )}
             <button
               onClick={() => setDeleteFor(p)}
               className="text-xs text-text-muted hover:text-red"
@@ -2006,6 +2059,14 @@ function PostsView({
             setDeleteFor(null);
             await executeDelete(p);
           }}
+        />
+      )}
+      {editFor && (
+        <EditPostDialog
+          post={editFor}
+          onClose={() => setEditFor(null)}
+          onSaved={() => { setEditFor(null); onChange(); }}
+          setStatus={setStatus}
         />
       )}
     </div>
@@ -2195,6 +2256,247 @@ function ConfirmDialog({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// EDITABLE_PLATFORMS — kept here (rather than driven by the server's
+// /platforms endpoint) because edit-support is more about platform
+// API constraints than per-install configuration. If the server gains
+// more edit verbs (Reddit, IG caption-only) we widen this set.
+const EDITABLE_PLATFORMS: Set<string> = new Set(["facebook", "youtube"]);
+
+function isEditablePlatform(platform: string): boolean {
+  return EDITABLE_PLATFORMS.has(platform);
+}
+
+// --- EditPostDialog ----------------------------------------------
+//
+// Pre-fills the post's current body + per-target options, lets the
+// user change them, and submits to POST /posts/:id/edit. Targets on
+// non-editable platforms render as disabled rows with a "not editable"
+// badge — included in the dialog so the user has visibility into the
+// full set of targets even though they can't be modified.
+
+interface TargetEditOutcome {
+  social_account_id: number;
+  platform: string;
+  status: "ok" | "unsupported" | "skipped" | "failed";
+  reason?: string;
+  error?: string;
+}
+
+function EditPostDialog({
+  post, onClose, onSaved, setStatus,
+}: {
+  post: Post;
+  onClose: () => void;
+  onSaved: () => void;
+  setStatus: (s: string) => void;
+}) {
+  const [body, setBody] = useState(post.body || "");
+  // Per-target option overrides, keyed by social_account_id. Seeded
+  // empty — the server already has the existing options on file and
+  // will merge our overrides on top, so the user only types what they
+  // want to change.
+  const [targetOptions, setTargetOptions] = useState<Record<number, Record<string, any>>>({});
+  const [busy, setBusy] = useState(false);
+
+  const setOpt = (acctId: number, key: string, value: any) => {
+    setTargetOptions((prev) => {
+      const next = { ...prev, [acctId]: { ...(prev[acctId] || {}), [key]: value } };
+      if (typeof value === "string" && value.trim() === "") {
+        const acct = { ...next[acctId] };
+        delete acct[key];
+        if (Object.keys(acct).length === 0) {
+          const { [acctId]: _drop, ...rest } = next;
+          return rest;
+        }
+        next[acctId] = acct;
+      }
+      return next;
+    });
+  };
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      const payload: Record<string, any> = {};
+      if (body !== post.body) payload.body = body;
+      const targets = Object.entries(targetOptions).map(([id, opts]) => ({
+        social_account_id: Number(id), ...opts,
+      }));
+      if (targets.length > 0) payload.targets = targets;
+      if (Object.keys(payload).length === 0) {
+        setStatus("Nothing to save — body and targets unchanged.");
+        setBusy(false);
+        return;
+      }
+      const res = await fetch(`${API}/posts/${post.id}/edit`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as { targets?: TargetEditOutcome[] };
+      const outcomes = data.targets || [];
+      const failed = outcomes.filter((t) => t.status === "failed");
+      const unsupported = outcomes.filter((t) => t.status === "unsupported");
+      if (failed.length > 0) {
+        const names = Array.from(new Set(failed.map((o) => o.platform))).join(", ");
+        setStatus(`Saved locally. Edit failed upstream on: ${names}.`);
+      } else if (unsupported.length > 0) {
+        setStatus(`Saved. ${unsupported.length} target${unsupported.length !== 1 ? "s" : ""} couldn't be edited upstream (platform constraint).`);
+      } else {
+        setStatus("Edits applied.");
+      }
+      onSaved();
+    } catch (e) {
+      setStatus("Edit failed: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <div
+        className="fixed inset-0 z-50 grid place-items-center bg-black/60"
+        onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}
+      >
+        <div className="bg-bg-card border border-border rounded-lg shadow-lg w-[min(640px,92vw)] max-h-[85vh] flex flex-col">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+            <div className="text-text font-bold">Edit post</div>
+            <button onClick={onClose} disabled={busy} className="text-text-muted hover:text-text text-lg leading-none disabled:opacity-50">×</button>
+          </div>
+          <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-text-dim">Body</label>
+              <textarea
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                className="w-full bg-bg-input border border-border rounded px-3 py-2 text-sm min-h-[100px] resize-y"
+              />
+              <div className="text-text-dim text-xs">
+                {body.length} chars · applies to platforms that don't have a per-target override
+              </div>
+            </div>
+            <div className="flex flex-col gap-2">
+              <label className="text-xs uppercase tracking-wide text-text-dim">Targets</label>
+              {post.targets.map((t) => {
+                const editable = isEditablePlatform(t.platform);
+                return (
+                  <div
+                    key={t.id}
+                    className={
+                      "border rounded p-3 " +
+                      (editable ? "border-border" : "border-border opacity-60")
+                    }
+                  >
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-text text-sm font-medium">{t.platform}</span>
+                      <span className="text-text-dim text-xs">·</span>
+                      <span className="text-text-dim text-xs">{t.display_name}</span>
+                      {!editable && (
+                        <span className="ml-auto text-xs text-text-dim italic">
+                          not editable on this platform
+                        </span>
+                      )}
+                    </div>
+                    {editable && t.platform === "facebook" && (
+                      <FieldText
+                        label="Override message"
+                        placeholder="leave blank to use the post body above"
+                        value={targetOptions[t.social_account_id]?.body || ""}
+                        onChange={(v) => setOpt(t.social_account_id, "body", v)}
+                      />
+                    )}
+                    {editable && t.platform === "youtube" && (
+                      <div className="flex flex-col gap-2">
+                        <FieldText
+                          label="Title"
+                          value={targetOptions[t.social_account_id]?.title || ""}
+                          onChange={(v) => setOpt(t.social_account_id, "title", v)}
+                          placeholder="leave blank to derive from body"
+                        />
+                        <FieldText
+                          label="Description (override)"
+                          value={targetOptions[t.social_account_id]?.body || ""}
+                          onChange={(v) => setOpt(t.social_account_id, "body", v)}
+                          placeholder="leave blank to use the post body above"
+                          textarea
+                        />
+                        <div className="flex flex-col gap-1">
+                          <label className="text-xs uppercase tracking-wide text-text-dim">Visibility</label>
+                          <select
+                            value={targetOptions[t.social_account_id]?.visibility || ""}
+                            onChange={(e) => setOpt(t.social_account_id, "visibility", e.target.value)}
+                            className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+                          >
+                            <option value="">Keep current</option>
+                            <option value="public">public</option>
+                            <option value="unlisted">unlisted</option>
+                            <option value="private">private</option>
+                          </select>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-border">
+            <button
+              onClick={onClose}
+              disabled={busy}
+              className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-card disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={submit}
+              disabled={busy}
+              className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+            >
+              {busy ? "…" : "Save changes"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function FieldText({
+  label, value, onChange, placeholder, textarea,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  textarea?: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <label className="text-xs uppercase tracking-wide text-text-dim">{label}</label>
+      {textarea ? (
+        <textarea
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm min-h-[60px] resize-y"
+        />
+      ) : (
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+        />
+      )}
     </div>
   );
 }
