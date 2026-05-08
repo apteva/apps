@@ -184,22 +184,26 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 		return
 	}
 
-	// Wait for the transcript on audio-bearing files. Without this
-	// gate, video-with-audio gets described from the thumbnail alone
-	// the first time the periodic sweep sees it — and once
-	// description != '', the row is no longer a candidate, so the
-	// post-transcript notifyDescriber call has nothing to do. Better
-	// to wait: a video's transcript is usually the richest signal,
-	// and the indexer's notifyTranscriber path means the wait is
-	// only as long as the Deepgram call itself.
+	// On audio-bearing files we ONLY describe when there's a usable
+	// transcript. Earlier versions of this gate let through
+	// terminal-but-not-ok statuses ("skipped" when no Deepgram is
+	// bound, "failed" on network errors), which fell through to the
+	// thumbnail-only branch in buildDescribePrompt and produced
+	// misleading vision-only descriptions for videos whose dialogue
+	// carried half the meaning ("Two people on a bridge" for a
+	// scripted scene where the line was "admit you're freaked out
+	// by my robot hand").
 	//
-	// Skip without marking — terminal transcript states (failed,
-	// skipped, ok) all unblock the next sweep, and a still-pending
-	// transcript will trigger this same path again via the
-	// transcriber's notifyDescriber on completion.
+	// Cleaner contract: has_audio=1 + transcript not ok → skip
+	// without marking. The row stays a describer candidate, so:
+	//   • transcript still pending/running     → next notify wakes it
+	//   • transcript skipped / failed          → operator must
+	//     re-attempt (bind Deepgram + delete the transcript row, or
+	//     call media_transcribe force=true). Better than writing a
+	//     bad description that masks the missing signal.
 	if media.HasAudio {
 		t, _ := getTranscript(db, projectID, media.FileID)
-		if t == nil || t.Status == "pending" || t.Status == "running" {
+		if t == nil || t.Status != "ok" {
 			return
 		}
 	}
