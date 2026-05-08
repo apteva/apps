@@ -68,7 +68,7 @@ provides:
     - name: instance_metrics
       description: CPU / memory / disk / network / load / uptime (local gopsutil, remote /proc parse). 5s cache.
   ui_panels:
-    - slot: install.settings
+    - slot: project.page
       label: Instances
       icon: server
       entry: /ui/InstancesPanel.mjs

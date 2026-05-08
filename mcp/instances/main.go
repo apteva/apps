@@ -75,7 +75,7 @@ provides:
     - { name: instance_wait_ready,   description: "Poll the instance until SSH is reachable. Args: id, timeout_s?." }
     - { name: instance_metrics,      description: "CPU / memory / disk / network / load / uptime. Args: id." }
   ui_panels:
-    - { slot: install.settings, label: "Instances", icon: server, entry: /ui/InstancesPanel.mjs }
+    - { slot: project.page, label: "Instances", icon: server, entry: /ui/InstancesPanel.mjs }
 runtime:
   kind: source
   source:
