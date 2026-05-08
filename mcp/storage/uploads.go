@@ -576,29 +576,28 @@ func (a *App) handleUploadComplete(w http.ResponseWriter, r *http.Request, id st
 	}
 
 	// Pass 2: stream parts → backend without a scratch file.
-	// io.MultiReader concatenates the part files lazily — the backend
-	// pulls bytes as it needs them, so disk reads and the network
-	// upload overlap. minio-go uses size to pick its multipart part
-	// sizing; passing the real totalSize unlocks parallel multipart.
-	partReaders := make([]io.Reader, 0, len(parts))
-	openedFiles := make([]*os.File, 0, len(parts))
-	defer func() {
-		for _, f := range openedFiles {
-			f.Close()
-		}
-	}()
-	for _, p := range parts {
-		f, err := os.Open(partPath(ctx, id, p.N))
-		if err != nil {
-			httpErr(w, http.StatusInternalServerError, "reopen part "+strconv.Itoa(p.N)+": "+err.Error())
-			return
-		}
-		openedFiles = append(openedFiles, f)
-		partReaders = append(partReaders, f)
+	//
+	// We hand the backend a partsReaderAt instead of an io.MultiReader.
+	// The difference matters: minio-go's parallel multipart upload
+	// (the path that gets us decent R2/S3 throughput) probes the
+	// reader for io.ReaderAt and falls back to a single-threaded
+	// sequential upload when it isn't there. io.MultiReader is
+	// forward-only — no ReadAt — so the previous "no-scratch" flow
+	// silently lost parallelism and ran SLOWER than the scratch-file
+	// version on large uploads.
+	//
+	// partsReaderAt lazily opens part files on demand and maps the
+	// virtual offset to (part_index, part_offset). Parallel goroutines
+	// inside minio-go each call ReadAt with their own offsets and
+	// race the bytes onto S3 without local stitching.
+	pr, err := newPartsReaderAt(ctx, id, parts)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, "open parts: "+err.Error())
+		return
 	}
-	stream := io.MultiReader(partReaders...)
+	defer pr.Close()
 	finalKey := objectKey(finalSHA, tmpKey)
-	if err := backend().Put(r.Context(), finalKey, meta.ContentType, stream, totalSize); err != nil {
+	if err := backend().Put(r.Context(), finalKey, meta.ContentType, pr, totalSize); err != nil {
 		httpErr(w, http.StatusInternalServerError, "backend put: "+err.Error())
 		return
 	}
@@ -743,6 +742,147 @@ var (
 	errAbortNotFound = errors.New("session not found")
 	errAbortNotOwner = errors.New("not your upload")
 )
+
+// ─── partsReaderAt — io.Reader + io.ReaderAt over the part files ─────
+//
+// minio-go's PutObject probes for io.ReaderAt to enable parallel
+// multipart upload. We can't expose a regular *os.File (parts are
+// separate files) and io.MultiReader doesn't implement ReadAt, so
+// we map a virtual byte offset across the part files ourselves.
+//
+// Internally we open each part file lazily on first access and keep
+// the handle for the lifetime of the upload. Parallel ReadAt calls
+// from minio-go's worker goroutines safely share the open handles
+// because *os.File's pread (the syscall ReadAt uses on POSIX) is
+// position-independent — it doesn't advance the file's seek pointer.
+
+type partRange struct {
+	path  string
+	start int64 // virtual offset of part start
+	size  int64
+}
+
+type partsReaderAt struct {
+	ranges []partRange
+	total  int64
+
+	mu    sync.Mutex
+	files map[int]*os.File // indexed by ranges[]
+	pos   int64            // for sequential Read()
+}
+
+func newPartsReaderAt(ctx *sdk.AppCtx, sessionID string, parts []partInfo) (*partsReaderAt, error) {
+	pr := &partsReaderAt{
+		ranges: make([]partRange, 0, len(parts)),
+		files:  map[int]*os.File{},
+	}
+	var off int64
+	for _, p := range parts {
+		pr.ranges = append(pr.ranges, partRange{
+			path:  partPath(ctx, sessionID, p.N),
+			start: off,
+			size:  p.Size,
+		})
+		off += p.Size
+	}
+	pr.total = off
+	return pr, nil
+}
+
+// Close releases every open part-file handle. Idempotent.
+func (pr *partsReaderAt) Close() error {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	for i, f := range pr.files {
+		_ = f.Close()
+		delete(pr.files, i)
+	}
+	return nil
+}
+
+// fileForRange returns a cached or newly-opened file handle for the
+// given range index. Caller does NOT hold the mutex.
+func (pr *partsReaderAt) fileForRange(idx int) (*os.File, error) {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	if f, ok := pr.files[idx]; ok {
+		return f, nil
+	}
+	f, err := os.Open(pr.ranges[idx].path)
+	if err != nil {
+		return nil, err
+	}
+	pr.files[idx] = f
+	return f, nil
+}
+
+// ReadAt fills p starting at virtual offset off. May span multiple
+// part files. Safe for concurrent calls — pread doesn't share state
+// with the file's seek pointer, so multiple goroutines can ReadAt
+// the same *os.File at different offsets without locking.
+func (pr *partsReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off >= pr.total {
+		return 0, io.EOF
+	}
+	total := 0
+	idx := pr.findRange(off)
+	for total < len(p) && idx < len(pr.ranges) {
+		rng := pr.ranges[idx]
+		f, err := pr.fileForRange(idx)
+		if err != nil {
+			return total, err
+		}
+		// Where to start within this part, and how many bytes are left
+		// in it from there.
+		partOff := (off + int64(total)) - rng.start
+		remainingInPart := rng.size - partOff
+		want := int64(len(p) - total)
+		if want > remainingInPart {
+			want = remainingInPart
+		}
+		n, err := f.ReadAt(p[total:total+int(want)], partOff)
+		total += n
+		if err != nil && err != io.EOF {
+			return total, err
+		}
+		if int64(n) < want {
+			// Short read — bail; caller decides what to do.
+			break
+		}
+		idx++
+	}
+	if total < len(p) && off+int64(total) >= pr.total {
+		return total, io.EOF
+	}
+	return total, nil
+}
+
+// Read implements io.Reader for callers that don't use ReadAt
+// (notably the disk backend's io.Copy). Single-threaded; uses the
+// internal cursor pos.
+func (pr *partsReaderAt) Read(p []byte) (int, error) {
+	pr.mu.Lock()
+	off := pr.pos
+	pr.mu.Unlock()
+	n, err := pr.ReadAt(p, off)
+	pr.mu.Lock()
+	pr.pos += int64(n)
+	pr.mu.Unlock()
+	return n, err
+}
+
+// findRange returns the index of the part containing the given
+// virtual offset. Linear scan — number of parts is small (typically
+// <100 even for GB uploads at 5MB part size) so binary search isn't
+// worth the complexity.
+func (pr *partsReaderAt) findRange(off int64) int {
+	for i, r := range pr.ranges {
+		if off >= r.start && off < r.start+r.size {
+			return i
+		}
+	}
+	return len(pr.ranges)
+}
 
 // ─── helpers ─────────────────────────────────────────────────────────
 

@@ -1,9 +1,17 @@
--- Streaming v0.1 — streams + viewers + lifecycle audit.
+-- Streaming v0.1 — streams + lifecycle audit.
 --
 -- Every table is partitioned by project_id so the same schema serves
 -- both `scope: project` (one install per project, project_id is a
 -- safety partition) and `scope: global` (one install across projects,
 -- project_id is the isolation boundary).
+--
+-- Viewer tracking is intentionally NOT in the DB. Streaming is an
+-- infrastructure primitive — it knows about anonymous cookies but
+-- never about consumer-app identities. Per-viewer state lives in an
+-- in-memory map that the viewer-counter worker sweeps periodically,
+-- distilled into two aggregate columns on `streams` (current_viewers,
+-- peak_viewers). Identity-aware tracking belongs to the consumer
+-- (webinars, classroom, etc.) which owns its own attendance table.
 
 -- One row per allocated stream session.
 CREATE TABLE streams (
@@ -35,7 +43,9 @@ CREATE TABLE streams (
   resolution           TEXT,                        -- "1920x1080"
   dropped_frames       INTEGER NOT NULL DEFAULT 0,
 
-  -- Viewer aggregates (updated by viewer-counter worker).
+  -- Anonymous-viewer aggregates (updated by viewer-counter worker
+  -- from the in-memory tracker; never per-row identity).
+  current_viewers      INTEGER NOT NULL DEFAULT 0,
   peak_viewers         INTEGER NOT NULL DEFAULT 0,
   total_viewer_seconds INTEGER NOT NULL DEFAULT 0,
 
@@ -48,26 +58,6 @@ CREATE UNIQUE INDEX ux_stream_key   ON streams(stream_key);
 CREATE INDEX ix_stream_proj_status  ON streams(project_id, status);
 CREATE INDEX ix_stream_owner        ON streams(project_id, owner_app, owner_tag);
 CREATE INDEX ix_stream_proj_created ON streams(project_id, created_at DESC);
-
--- Viewer heartbeats. Anonymous, identified by random cookie. The
--- viewer-counter worker decays rows whose last_heartbeat is older
--- than viewer_idle_seconds and bumps peak_viewers on streams.
-CREATE TABLE stream_viewers (
-  id              INTEGER PRIMARY KEY,
-  project_id      TEXT NOT NULL,
-  stream_id       INTEGER NOT NULL REFERENCES streams(id) ON DELETE CASCADE,
-  viewer_id       TEXT NOT NULL,                    -- random per-viewer (cookie)
-  external_id     TEXT,                             -- consumer-supplied (webinars registrant token, etc.)
-  source          TEXT NOT NULL DEFAULT 'live',     -- live | replay
-  joined_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  last_heartbeat  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  left_at         TIMESTAMP,
-  watch_seconds   INTEGER NOT NULL DEFAULT 0,
-  user_agent      TEXT
-);
-CREATE UNIQUE INDEX ux_viewer       ON stream_viewers(stream_id, viewer_id);
-CREATE INDEX ix_viewer_active       ON stream_viewers(stream_id, last_heartbeat) WHERE left_at IS NULL;
-CREATE INDEX ix_viewer_external     ON stream_viewers(stream_id, external_id) WHERE external_id IS NOT NULL;
 
 -- Append-only audit. Every status flip + bitrate-drop + watchdog
 -- finding lands here. Mirrors CRM's contact_activities pattern.

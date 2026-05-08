@@ -2,18 +2,23 @@ schema: apteva-app/v1
 
 name: seo
 display_name: SEO
-version: 0.1.0
+version: 0.2.0
 description: |
   Generic SEO research workbench. Track domains, keywords, rankings,
   and backlinks; pull metrics from any provider behind one pluggable
-  role (Ahrefs / DataForSEO / Moz / etc.). Schema is grounded in the
-  convergent shape across the major SEO APIs: per-(entity, provider,
-  ts) snapshot rows for metrics, dedicated time-series for keyword
-  volume history, and per-link rows for backlinks.
+  integration role (DataForSEO / Ahrefs / Moz). Schema is grounded in
+  the convergent shape across the major SEO APIs: per-(entity,
+  provider, ts) snapshot rows for metrics, dedicated time-series for
+  keyword volume history, and per-link rows for backlinks.
 
-  v0.1 ships the schema + domain/keyword CRUD. Pages, rankings,
-  backlinks, and a stub provider land in subsequent cuts; v0.2 wires
-  scheduled refresh via the jobs app.
+  v0.1: schema + domain/keyword CRUD.
+  v0.2: read-only MCP tools for cached data + HTTP refresh routes
+        that call the bound provider integration. Refresh is NOT
+        exposed as MCP — paid actions stay human/UI-triggered, the
+        agent only reads cached rows and surfaces last_refreshed_at
+        as a staleness signal.
+  v0.3 (planned): scheduled refresh via the jobs app, plus pages
+        CRUD + ranked_keywords for auto-discovery.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/seo
@@ -25,23 +30,51 @@ min_apteva_version: "0.10.0"
 
 requires:
   permissions:
+    # Owns its own DB (domains, keywords, snapshots, rankings, backlinks).
     - db.write.app
+    # The bound provider integration runner makes outbound HTTP calls
+    # on the platform's behalf — seo doesn't open sockets directly,
+    # but we declare net.egress so the platform allows it transitively
+    # if the runner ever runs in-process.
     - net.egress
+    # Lets seo invoke tools on the bound SEO data provider (DataForSEO
+    # etc.) via PlatformAPI().ExecuteIntegrationTool. Credentials never
+    # leave the platform proxy.
     - platform.connections.execute
-  integrations: []
+  integrations:
+    # Optional binding. Without it, refresh routes return 503 with a
+    # "bind a provider" hint; read-only MCP tools still work against
+    # whatever has been cached.
+    - role: seo_data_provider
+      kind: integration
+      compatible_slugs: [dataforseo, ahrefs, moz]
+      capabilities: []
+      required: false
+      label: "SEO data provider (optional)"
+      hint: "Bind a DataForSEO, Ahrefs, or Moz connection to populate metrics, rankings, and backlinks. Without a binding, the schema and tools work against whatever's already cached."
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    # ── domain CRUD (v0.1) ──────────────────────────────────────────
     - { name: domains_add,    description: "Add a domain (hostname) to track. Args: host (required), label?." }
     - { name: domains_list,   description: "List tracked domains in this scope." }
     - { name: domains_get,    description: "Read one domain plus its latest metrics snapshot. Args: id." }
     - { name: domains_remove, description: "Remove a domain. Cascades to its pages, metrics, rankings, backlinks. Args: id." }
+    # ── keyword CRUD (v0.1) ─────────────────────────────────────────
     - { name: keywords_add,    description: "Add a keyword to track. Args: text (required), country_iso? (default 'US'), language_iso? (default 'en')." }
     - { name: keywords_list,   description: "List keywords in this scope. Args: country_iso?, limit? (default 200)." }
     - { name: keywords_get,    description: "Read one keyword plus its latest metrics snapshot. Args: id." }
     - { name: keywords_remove, description: "Remove a keyword. Cascades to its metrics, volume history, rankings. Args: id." }
+    # ── read-only views (v0.2) ──────────────────────────────────────
+    # Refresh tools are deliberately NOT exposed as MCP. The agent
+    # reads cached rows here and uses last_refreshed_at to flag
+    # staleness; the human triggers refresh via the panel.
+    - { name: rankings_for_domain,   description: "List a domain's ranking history (cached). Args: domain_id (required), since? (unix), limit? (default 200)." }
+    - { name: rankings_for_keyword,  description: "List which tracked domains rank for a keyword (cached). Args: keyword_id (required), since? (unix), limit? (default 200)." }
+    - { name: backlinks_list,        description: "List backlinks pointing at a domain (cached). Args: domain_id (required), lost? (bool, default false), dofollow? (bool, optional filter), limit? (default 200)." }
+    - { name: keyword_volume_history, description: "Monthly search-volume series for a keyword (cached). Args: keyword_id (required)." }
   ui_panels:
     - slot: project.page
       label: SEO

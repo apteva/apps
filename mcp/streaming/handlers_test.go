@@ -78,6 +78,7 @@ func newTestApp(t *testing.T) (*App, *sdk.AppCtx) {
 	)
 	app := &App{
 		runners:       map[int64]*streamRunner{},
+		viewers:       newViewerTracker(),
 		runnerFactory: newFakeRunnerFactory(t),
 	}
 	pa, err := newPortAllocator("1935-1940")
@@ -176,6 +177,7 @@ func TestCreate_GlobalScopeRequiresProjectID(t *testing.T) {
 	)
 	app := &App{
 		runners:       map[int64]*streamRunner{},
+		viewers:       newViewerTracker(),
 		runnerFactory: newFakeRunnerFactory(t),
 	}
 	pa, _ := newPortAllocator("1935-1940")
@@ -472,38 +474,70 @@ func TestWatchdog_HandlesCrash(t *testing.T) {
 	}
 }
 
-// ─── Viewer counter ────────────────────────────────────────────────
+// ─── Viewer counter (in-memory tracker) ────────────────────────────
 
-func TestViewerCounter_DecaysStaleAndUpdatesPeak(t *testing.T) {
+func TestViewerTracker_DecaysStaleAndCountsActive(t *testing.T) {
+	v := newViewerTracker()
+	streamID := int64(42)
+
+	// Three cookies; bump them all "now".
+	v.bump(streamID, "c1")
+	v.bump(streamID, "c2")
+	v.bump(streamID, "c3")
+	if got := v.count(streamID); got != 3 {
+		t.Errorf("count after 3 bumps = %d, want 3", got)
+	}
+
+	// Force one cookie's timestamp into the past, then sweep with a
+	// 30s window.
+	v.mu.Lock()
+	v.streams[streamID]["c2"] = time.Now().Add(-2 * time.Minute)
+	v.mu.Unlock()
+
+	if got := v.sweep(streamID, 30*time.Second); got != 2 {
+		t.Errorf("sweep with stale cookie = %d, want 2", got)
+	}
+	if got := v.count(streamID); got != 2 {
+		t.Errorf("count after sweep = %d, want 2", got)
+	}
+}
+
+func TestViewerCounter_BumpsPeakAndPersists(t *testing.T) {
 	app, ctx := newTestApp(t)
 	out, _ := app.toolCreate(ctx, map[string]any{"name": "x"})
 	id := out.(map[string]any)["stream"].(*Stream).ID
 
-	// Insert two viewers — one fresh, one stale.
-	now := time.Now().UTC()
-	fresh := now.Format(time.RFC3339)
-	stale := now.Add(-5 * time.Minute).Format(time.RFC3339)
-	ctx.AppDB().Exec(`INSERT INTO stream_viewers (project_id, stream_id, viewer_id, joined_at, last_heartbeat)
-		VALUES ('test-proj', ?, 'v1', ?, ?)`, id, fresh, fresh)
-	ctx.AppDB().Exec(`INSERT INTO stream_viewers (project_id, stream_id, viewer_id, joined_at, last_heartbeat)
-		VALUES ('test-proj', ?, 'v2', ?, ?)`, id, stale, stale)
+	// Simulate two viewers via the tracker, then run the worker.
+	app.viewers.bump(id, "viewer-a")
+	app.viewers.bump(id, "viewer-b")
 
 	if err := app.runViewerCounter(context.Background(), ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	// Stale viewer should now have left_at set.
-	var leftCount int
-	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM stream_viewers WHERE left_at IS NOT NULL`).Scan(&leftCount)
-	if leftCount != 1 {
-		t.Errorf("expected 1 viewer marked left, got %d", leftCount)
-	}
-
-	// peak_viewers should reflect at least 1 (the fresh one).
 	gotOut, _ := app.toolGet(ctx, map[string]any{"id": id})
 	s := gotOut.(map[string]any)["stream"].(*Stream)
-	if s.PeakViewers < 1 {
-		t.Errorf("peak_viewers=%d, want >= 1", s.PeakViewers)
+	if s.CurrentViewers != 2 {
+		t.Errorf("current_viewers=%d, want 2", s.CurrentViewers)
+	}
+	if s.PeakViewers != 2 {
+		t.Errorf("peak_viewers=%d, want 2", s.PeakViewers)
+	}
+	if s.TotalViewerSeconds < 20 {
+		t.Errorf("total_viewer_seconds=%d, want >= 20 (2 viewers × 10s)",
+			s.TotalViewerSeconds)
+	}
+}
+
+func TestViewerTracker_DropClearsBucket(t *testing.T) {
+	v := newViewerTracker()
+	v.bump(7, "x")
+	if got := v.count(7); got != 1 {
+		t.Errorf("pre-drop count=%d", got)
+	}
+	v.drop(7)
+	if got := v.count(7); got != 0 {
+		t.Errorf("post-drop count=%d, want 0", got)
 	}
 }
 

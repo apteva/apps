@@ -1,0 +1,119 @@
+schema: apteva-app/v1
+
+name: webinars
+display_name: Webinars
+version: 0.1.0
+description: |
+  Live, scheduled, and on-demand webinars. Composes the streaming app
+  for the pipe (RTMP→HLS+recording), CRM for the contact + activity
+  record, messaging for the reminder fan-out. Owns the funnel:
+  registration page, scheduled reminders, live room with chat + polls
+  + scripted offers, attendance tracking, replay with optional expiry,
+  and engagement reporting.
+
+  Streaming is a hard dep; CRM and messaging are soft. Without CRM,
+  registrants live only here. Without messaging, reminders queue but
+  never fan out.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/webinars
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/webinars/icon.png
+tags: [webinars, video, live, funnel, attendance]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.apps.call
+  apps:
+    - name: streaming
+      version: ">=0.1.0"
+      reason: allocates a stream per webinar; reads metrics + replay URL
+  integrations:
+    - role: crm
+      kind: app
+      compatible_app_names: [crm]
+      capabilities: [contacts.upsert_by_channel, contacts.log_activity]
+      required: false
+      label: "CRM (optional)"
+      hint: "When bound, every registrant becomes a contact and every touch (registered, reminder sent, joined live, watched replay, clicked offer) lands on the contact's activity timeline."
+    - role: messaging
+      kind: app
+      compatible_app_names: [messaging]
+      capabilities: [message.send]
+      required: false
+      label: "Messaging (optional)"
+      hint: "When bound, the reminder scheduler sends T-24h/T-1h/T-15m + we're-live blasts. Without it, reminders queue in the audit table but never fan out."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: webinars_create,           description: "Create a webinar — title, scheduled_at, host_name, kind (live|scheduled|replay), duration_minutes. Allocates a stream via streaming.streams_create. Returns id, slug, registration_url, ingest_url (host's RTMP target), stream_key. Args: title, scheduled_at? (RFC3339), host_name?, kind? (default scheduled), duration_minutes? (default 60), description?." }
+    - { name: webinars_get,              description: "Full webinar with stream metrics + registrant + attendance counts. Args: id." }
+    - { name: webinars_list,             description: "Filter by status (draft|scheduled|live|ended|cancelled), kind, scheduled_at_after, scheduled_at_before, limit (default 50). Args: status?, kind?, scheduled_at_after?, scheduled_at_before?, limit?." }
+    - { name: webinars_update,           description: "Patch — change title, scheduled_at, host_name, description, duration_minutes. Reschedules reminders if scheduled_at changes. Args: id, patch." }
+    - { name: webinars_delete,           description: "Cancel + tear down stream + delete registrants and attendance. Idempotent. Args: id." }
+    - { name: webinars_register,         description: "Add a registrant. Creates a CRM contact if bound. Args: webinar_id, email, phone?, display_name?, source? (form|agent|import). Returns registrant + join_url." }
+    - { name: webinars_list_registrants, description: "List registrants for a webinar with attendance status. Args: webinar_id, attended? (bool), limit? (default 100)." }
+    - { name: webinars_send_reminder,    description: "Fire a reminder now (manual override of the scheduler). Args: id, channel? (email|sms|all, default all), audience? (all|registered|joined|no_show, default registered), body? (override default template)." }
+    - { name: webinars_define_offer,     description: "Script an offer to auto-show at offset_seconds from start. Args: id, offset_seconds, headline, body?, cta_label, cta_url, duration_seconds? (default 30)." }
+    - { name: webinars_post_offer,       description: "Push an ad-hoc offer to the live room right now (host console / agent-driven). Same shape as define_offer minus offset_seconds. Args: id, headline, body?, cta_label, cta_url, duration_seconds? (default 30)." }
+    - { name: webinars_push_poll,        description: "Open a poll in the live room. Args: id, question, choices (string array), duration_seconds? (default 60)." }
+    - { name: webinars_publish_replay,   description: "Mark the recording as published replay. Args: id, expires_at? (RFC3339; null = no expiry). Returns replay_url + expires_at." }
+    - { name: webinars_get_engagement,   description: "Funnel report: registrations, joined_live, joined_replay, avg_watch_pct, peak_concurrent, offer_click_through, poll_response_rate. Args: id." }
+    - { name: webinars_close,            description: "End the webinar — stop the stream, snapshot final attendance, mark status=ended. Idempotent. Args: id." }
+  ui_panels: []
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/webinars
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/webinars.db
+  migrations: migrations/
+
+config_schema:
+  - name: registration_url_prefix
+    type: text
+    default: "/r"
+    label: Public registration path prefix
+  - name: live_room_url_prefix
+    type: text
+    default: "/live"
+    label: Public live-room path prefix
+  - name: replay_url_prefix
+    type: text
+    default: "/replay"
+    label: Public replay path prefix
+  - name: reminder_lead_hours
+    type: text
+    default: "24,1,0.25"
+    label: Reminder lead times (comma-separated hours before start; 0.25 = 15 min)
+  - name: heartbeat_interval_s
+    type: number
+    default: 10
+    label: Live-room heartbeat cadence (seconds)
+  - name: viewer_idle_seconds
+    type: number
+    default: 30
+    label: Viewer idle timeout for "still attending"
+  - name: default_sender_email
+    type: text
+    label: Default sender (email)
+    description: Used for reminder email blasts. Pick a verified sender from messaging.senders_list.
+  - name: default_sender_phone
+    type: text
+    label: Default sender (phone, E.164)
+    description: Used for reminder SMS blasts.
+
+upgrade_policy: auto-patch

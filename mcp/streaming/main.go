@@ -94,6 +94,11 @@ type App struct {
 	// OnMount.
 	ports *portAllocator
 
+	// In-memory anonymous-viewer tracker. The aggregate counts are
+	// persisted to streams.current_viewers + peak_viewers by the
+	// viewer-counter worker; per-cookie state is never persisted.
+	viewers *viewerTracker
+
 	// runnerFactory creates a streamRunner. Tests inject a fake that
 	// doesn't actually exec ffmpeg; production uses newFFmpegRunner.
 	runnerFactory func(opts runnerOpts) (*streamRunner, error)
@@ -131,6 +136,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.ports = pa
 
 	a.runners = map[int64]*streamRunner{}
+	a.viewers = newViewerTracker()
 	if a.runnerFactory == nil {
 		a.runnerFactory = newFFmpegRunner
 	}
@@ -333,6 +339,7 @@ type Stream struct {
 	CurrentFPS         float64 `json:"current_fps,omitempty"`
 	Resolution         string  `json:"resolution,omitempty"`
 	DroppedFrames      int     `json:"dropped_frames,omitempty"`
+	CurrentViewers     int     `json:"current_viewers"`
 	PeakViewers        int     `json:"peak_viewers"`
 	TotalViewerSeconds int     `json:"total_viewer_seconds"`
 	CreatedAt          string  `json:"created_at"`

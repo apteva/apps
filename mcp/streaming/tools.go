@@ -222,6 +222,9 @@ func (a *App) toolStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		_ = runner.stop(5 * time.Second)
 		a.ports.release(runner.port)
 	}
+	if a.viewers != nil {
+		a.viewers.drop(id)
+	}
 
 	// Finalize: status=ended, ended_at, recording_path if present.
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -278,6 +281,9 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		_ = runner.stop(2 * time.Second)
 		a.ports.release(runner.port)
 	}
+	if a.viewers != nil {
+		a.viewers.drop(id)
+	}
 
 	// Delete the disk dir. Best-effort — log on failure but proceed.
 	dir := streamDataDir(ctx, s.StoragePrefix)
@@ -321,6 +327,9 @@ func (a *App) toolRotateKey(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if runner != nil {
 		_ = runner.stop(2 * time.Second)
 		a.ports.release(runner.port)
+	}
+	if a.viewers != nil {
+		a.viewers.drop(id)
 	}
 
 	newKey := randomToken()
@@ -387,6 +396,15 @@ func (a *App) toolGetMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	runner := a.runners[id]
 	a.runnersMu.Unlock()
 
+	// current_viewers is read live from the in-memory tracker so the
+	// metric reflects this instant, not the worker's last sweep.
+	currentViewers := 0
+	if a.viewers != nil {
+		currentViewers = a.viewers.count(id)
+	} else {
+		currentViewers = s.CurrentViewers
+	}
+
 	out := map[string]any{
 		"id":                   s.ID,
 		"status":               s.Status,
@@ -394,9 +412,9 @@ func (a *App) toolGetMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		"current_fps":          s.CurrentFPS,
 		"resolution":           s.Resolution,
 		"dropped_frames":       s.DroppedFrames,
+		"current_viewers":      currentViewers,
 		"peak_viewers":         s.PeakViewers,
 		"total_viewer_seconds": s.TotalViewerSeconds,
-		"viewer_count":         a.activeViewerCount(ctx, id),
 		"uptime_seconds":       0,
 	}
 	if runner != nil {
@@ -410,18 +428,6 @@ func (a *App) toolGetMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	return out, nil
 }
 
-// activeViewerCount counts viewers whose last_heartbeat is within the
-// idle window. Cheap — single COUNT(*) over an indexed predicate.
-func (a *App) activeViewerCount(ctx *sdk.AppCtx, streamID int64) int {
-	idle := a.viewerIdleSeconds(ctx)
-	cutoff := time.Now().UTC().Add(-time.Duration(idle) * time.Second).Format(time.RFC3339)
-	var n int
-	_ = ctx.AppDB().QueryRow(
-		`SELECT COUNT(*) FROM stream_viewers
-		 WHERE stream_id = ? AND left_at IS NULL AND last_heartbeat >= ?`,
-		streamID, cutoff).Scan(&n)
-	return n
-}
 
 // ─── streams_replay_url ───────────────────────────────────────────
 
@@ -469,7 +475,7 @@ func (a *App) dbGet(ctx *sdk.AppCtx, pid string, id int64) (*Stream, error) {
 				COALESCE(current_bitrate_kbps, 0),
 				COALESCE(current_fps, 0),
 				COALESCE(resolution,''), dropped_frames,
-				peak_viewers, total_viewer_seconds,
+				current_viewers, peak_viewers, total_viewer_seconds,
 				created_at, COALESCE(started_at,''), COALESCE(ended_at,''),
 				COALESCE(error,'')
 		 FROM streams WHERE id = ? AND project_id = ?`,
@@ -486,7 +492,7 @@ func (a *App) dbGet(ctx *sdk.AppCtx, pid string, id int64) (*Stream, error) {
 		&s.RecordingPath,
 		&s.CurrentBitrateKbps, &s.CurrentFPS,
 		&s.Resolution, &s.DroppedFrames,
-		&s.PeakViewers, &s.TotalViewerSeconds,
+		&s.CurrentViewers, &s.PeakViewers, &s.TotalViewerSeconds,
 		&s.CreatedAt, &s.StartedAt, &s.EndedAt,
 		&s.Error,
 	); err != nil {

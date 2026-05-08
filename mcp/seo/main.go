@@ -17,10 +17,13 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	sdk "github.com/apteva/app-sdk"
@@ -30,13 +33,20 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.1.0
-description: Generic SEO research workbench — domains, keywords, rankings, backlinks behind one pluggable provider role.
+version: 0.2.0
+description: Generic SEO research workbench — domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
 requires:
   permissions: [db.write.app, net.egress, platform.connections.execute]
-  integrations: []
+  integrations:
+    - role: seo_data_provider
+      kind: integration
+      compatible_slugs: [dataforseo, ahrefs, moz]
+      capabilities: []
+      required: false
+      label: "SEO data provider (optional)"
+      hint: "Bind DataForSEO/Ahrefs/Moz to populate metrics & backlinks."
 provides:
   http_routes:
     - prefix: /
@@ -49,6 +59,10 @@ provides:
     - { name: keywords_list,   description: "List keywords in this scope." }
     - { name: keywords_get,    description: "Read one keyword plus latest metrics." }
     - { name: keywords_remove, description: "Remove a keyword (cascades to children)." }
+    - { name: rankings_for_domain,    description: "Cached rankings history for a domain." }
+    - { name: rankings_for_keyword,   description: "Cached rankings of a keyword across tracked domains." }
+    - { name: backlinks_list,         description: "Cached backlinks pointing at a domain." }
+    - { name: keyword_volume_history, description: "Monthly search-volume series (cached)." }
   ui_panels:
     - slot: project.page
       label: SEO
@@ -68,6 +82,11 @@ db:
   migrations: migrations/
 upgrade_policy: manual
 `
+
+// providerRole is the role name in requires.integrations. Refresh
+// dispatch reads ctx.IntegrationFor(providerRole) at call time so a
+// connection bound after boot is honoured without a restart.
+const providerRole = "seo_data_provider"
 
 var globalCtx *sdk.AppCtx
 
@@ -91,10 +110,25 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) HTTPRoutes() []sdk.Route           { return nil }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+
+// ─── HTTP routes (refresh lives here, NOT in MCPTools) ───────────
+//
+// Refresh costs money — it calls the bound provider (DataForSEO etc.)
+// which bills per request. Keeping it off the MCP surface means the
+// agent can never trigger a paid action; only the human can, via the
+// SeoPanel button or curl. The agent reads cached rows via the
+// MCP read-only tools and surfaces last_refreshed_at as a staleness
+// signal in its answers.
+
+func (a *App) HTTPRoutes() []sdk.Route {
+	return []sdk.Route{
+		{Pattern: "/domains/", Handler: a.handleDomainsItem},
+		{Pattern: "/keywords/", Handler: a.handleKeywordsItem},
+	}
+}
 
 // ─── MCP tools ───────────────────────────────────────────────────
 
@@ -143,6 +177,39 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Remove a keyword. Cascades to its metrics, volume history, and rankings. Args: id.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			Handler:     a.toolKeywordsRemove},
+
+		// ── read-only views (v0.2) ──────────────────────────────
+		{Name: "rankings_for_domain",
+			Description: "List a domain's ranking history (cached; no provider call). Args: domain_id (required), since? (unix seconds), limit? (default 200).",
+			InputSchema: schemaObject(map[string]any{
+				"domain_id": map[string]any{"type": "integer"},
+				"since":     map[string]any{"type": "integer"},
+				"limit":     map[string]any{"type": "integer"},
+			}, []string{"domain_id"}),
+			Handler: a.toolRankingsForDomain},
+		{Name: "rankings_for_keyword",
+			Description: "List which tracked domains rank for a keyword (cached). Args: keyword_id (required), since? (unix seconds), limit? (default 200).",
+			InputSchema: schemaObject(map[string]any{
+				"keyword_id": map[string]any{"type": "integer"},
+				"since":      map[string]any{"type": "integer"},
+				"limit":      map[string]any{"type": "integer"},
+			}, []string{"keyword_id"}),
+			Handler: a.toolRankingsForKeyword},
+		{Name: "backlinks_list",
+			Description: "List backlinks pointing at a domain (cached). Args: domain_id (required), lost? (bool, default false), dofollow? (bool, optional filter), limit? (default 200).",
+			InputSchema: schemaObject(map[string]any{
+				"domain_id": map[string]any{"type": "integer"},
+				"lost":      map[string]any{"type": "boolean"},
+				"dofollow":  map[string]any{"type": "boolean"},
+				"limit":     map[string]any{"type": "integer"},
+			}, []string{"domain_id"}),
+			Handler: a.toolBacklinksList},
+		{Name: "keyword_volume_history",
+			Description: "Monthly search-volume series for a keyword (cached). Args: keyword_id (required).",
+			InputSchema: schemaObject(map[string]any{
+				"keyword_id": map[string]any{"type": "integer"},
+			}, []string{"keyword_id"}),
+			Handler: a.toolKeywordVolumeHistory},
 	}
 }
 
@@ -491,6 +558,334 @@ func (a *App) toolKeywordsRemove(ctx *sdk.AppCtx, args map[string]any) (any, err
 	return map[string]any{"removed": id}, nil
 }
 
+// ─── Read-only tool handlers (v0.2) ─────────────────────────────
+
+type Ranking struct {
+	ID                int64  `json:"id"`
+	DomainID          int64  `json:"domain_id"`
+	KeywordID         int64  `json:"keyword_id"`
+	Provider          string `json:"provider"`
+	TS                int64  `json:"ts"`
+	Rank              *int64 `json:"rank,omitempty"`
+	RankURL           string `json:"rank_url,omitempty"`
+	Device            string `json:"device"`
+	SerpFeaturesJSON  string `json:"serp_features_json"`
+}
+
+type Backlink struct {
+	ID              int64   `json:"id"`
+	DomainID        int64   `json:"domain_id"`
+	Provider        string  `json:"provider"`
+	SourceURL       string  `json:"source_url"`
+	DestURL         string  `json:"dest_url"`
+	Anchor          string  `json:"anchor"`
+	IsDofollow      *int64  `json:"is_dofollow,omitempty"`
+	IsNofollow      *int64  `json:"is_nofollow,omitempty"`
+	IsUGC           *int64  `json:"is_ugc,omitempty"`
+	IsSponsored     *int64  `json:"is_sponsored,omitempty"`
+	SourceAuthority *int64  `json:"source_authority,omitempty"`
+	FirstSeen       *int64  `json:"first_seen,omitempty"`
+	LastSeen        *int64  `json:"last_seen,omitempty"`
+	IsLost          int64   `json:"is_lost"`
+}
+
+type VolumeHistoryRow struct {
+	Provider string `json:"provider"`
+	Year     int    `json:"year"`
+	Month    int    `json:"month"`
+	Volume   int64  `json:"volume"`
+}
+
+func (a *App) toolRankingsForDomain(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := toInt64(args["domain_id"])
+	if id == 0 {
+		return nil, errors.New("domain_id required")
+	}
+	if _, err := getDomain(ctx.AppDB(), projectScope(), id); err != nil {
+		return nil, err
+	}
+	since := toInt64(args["since"])
+	limit := int(toInt64(args["limit"]))
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := ctx.AppDB().Query(
+		`SELECT id, domain_id, keyword_id, provider, ts, rank, rank_url,
+		        device, serp_features_json
+		   FROM rankings
+		   WHERE domain_id = ? AND ts >= ?
+		   ORDER BY ts DESC LIMIT ?`, id, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	return scanRankings(rows)
+}
+
+func (a *App) toolRankingsForKeyword(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := toInt64(args["keyword_id"])
+	if id == 0 {
+		return nil, errors.New("keyword_id required")
+	}
+	if _, err := getKeyword(ctx.AppDB(), projectScope(), id); err != nil {
+		return nil, err
+	}
+	since := toInt64(args["since"])
+	limit := int(toInt64(args["limit"]))
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := ctx.AppDB().Query(
+		`SELECT id, domain_id, keyword_id, provider, ts, rank, rank_url,
+		        device, serp_features_json
+		   FROM rankings
+		   WHERE keyword_id = ? AND ts >= ?
+		   ORDER BY ts DESC LIMIT ?`, id, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	return scanRankings(rows)
+}
+
+func scanRankings(rows *sql.Rows) ([]Ranking, error) {
+	defer rows.Close()
+	out := []Ranking{}
+	for rows.Next() {
+		var r Ranking
+		if err := rows.Scan(&r.ID, &r.DomainID, &r.KeywordID, &r.Provider, &r.TS,
+			&r.Rank, &r.RankURL, &r.Device, &r.SerpFeaturesJSON); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (a *App) toolBacklinksList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := toInt64(args["domain_id"])
+	if id == 0 {
+		return nil, errors.New("domain_id required")
+	}
+	if _, err := getDomain(ctx.AppDB(), projectScope(), id); err != nil {
+		return nil, err
+	}
+	limit := int(toInt64(args["limit"]))
+	if limit <= 0 {
+		limit = 200
+	}
+	// `lost` defaults to false: callers only see live links unless
+	// they ask for the lost set. dofollow nil → no filter.
+	wantLost := boolArg(args, "lost", false)
+	q := `SELECT id, domain_id, provider, source_url, dest_url, anchor,
+	             is_dofollow, is_nofollow, is_ugc, is_sponsored,
+	             source_authority, first_seen, last_seen, is_lost
+	        FROM backlinks
+	       WHERE domain_id = ? AND is_lost = ?`
+	qargs := []any{id, boolToInt(wantLost)}
+	if v, ok := args["dofollow"].(bool); ok {
+		q += ` AND is_dofollow = ?`
+		qargs = append(qargs, boolToInt(v))
+	}
+	q += ` ORDER BY last_seen DESC LIMIT ?`
+	qargs = append(qargs, limit)
+	rows, err := ctx.AppDB().Query(q, qargs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Backlink{}
+	for rows.Next() {
+		var b Backlink
+		if err := rows.Scan(&b.ID, &b.DomainID, &b.Provider, &b.SourceURL, &b.DestURL, &b.Anchor,
+			&b.IsDofollow, &b.IsNofollow, &b.IsUGC, &b.IsSponsored,
+			&b.SourceAuthority, &b.FirstSeen, &b.LastSeen, &b.IsLost); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+func (a *App) toolKeywordVolumeHistory(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := toInt64(args["keyword_id"])
+	if id == 0 {
+		return nil, errors.New("keyword_id required")
+	}
+	if _, err := getKeyword(ctx.AppDB(), projectScope(), id); err != nil {
+		return nil, err
+	}
+	rows, err := ctx.AppDB().Query(
+		`SELECT provider, year, month, volume
+		   FROM keyword_volume_history
+		   WHERE keyword_id = ?
+		   ORDER BY year DESC, month DESC`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []VolumeHistoryRow{}
+	for rows.Next() {
+		var v VolumeHistoryRow
+		if err := rows.Scan(&v.Provider, &v.Year, &v.Month, &v.Volume); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// ─── HTTP refresh dispatchers (NOT exposed as MCP) ───────────────
+//
+// Routes:
+//   POST /domains/{id}/refresh             → refreshDomain
+//   POST /domains/{id}/backlinks/refresh   → refreshBacklinks
+//   POST /keywords/{id}/refresh            → refreshKeyword
+//
+// Each route is a thin wrapper around an internal Go func. The funcs
+// are unexported and never registered as MCP tools — paid actions
+// stay off the agent's surface.
+
+func (a *App) handleDomainsItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/domains/")
+	parts := strings.Split(rest, "/")
+	if len(parts) < 2 {
+		http.Error(w, "expected /domains/{id}/refresh or /domains/{id}/backlinks/refresh", http.StatusNotFound)
+		return
+	}
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid domain id", http.StatusBadRequest)
+		return
+	}
+	ctx := mustCtx(r)
+	switch {
+	case len(parts) == 2 && parts[1] == "refresh":
+		out, err := refreshDomain(ctx, id)
+		writeJSONOrErr(w, out, err)
+	case len(parts) == 3 && parts[1] == "backlinks" && parts[2] == "refresh":
+		out, err := refreshBacklinks(ctx, id)
+		writeJSONOrErr(w, out, err)
+	default:
+		http.Error(w, "unknown subroute", http.StatusNotFound)
+	}
+}
+
+func (a *App) handleKeywordsItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/keywords/")
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 || parts[1] != "refresh" {
+		http.Error(w, "expected /keywords/{id}/refresh", http.StatusNotFound)
+		return
+	}
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid keyword id", http.StatusBadRequest)
+		return
+	}
+	out, err := refreshKeyword(mustCtx(r), id)
+	writeJSONOrErr(w, out, err)
+}
+
+func writeJSONOrErr(w http.ResponseWriter, payload any, err error) {
+	if err != nil {
+		// 503 reads better than 500 for "no provider bound" — it's a
+		// configuration state, not a code fault.
+		code := http.StatusInternalServerError
+		if errors.Is(err, errProviderUnbound) {
+			code = http.StatusServiceUnavailable
+		}
+		http.Error(w, err.Error(), code)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func mustCtx(_ *http.Request) *sdk.AppCtx { return globalCtx }
+
+// errProviderUnbound is returned from refresh* funcs when no SEO data
+// provider integration is bound. Callers translate to HTTP 503.
+var errProviderUnbound = errors.New("no SEO data provider is bound — connect DataForSEO/Ahrefs/Moz in Integrations")
+
+// boundProvider returns the bound SEO data provider connection's
+// slug + connection id, or errProviderUnbound when nothing is wired.
+func boundProvider(ctx *sdk.AppCtx) (slug string, connID int64, err error) {
+	bound := ctx.IntegrationFor(providerRole)
+	if bound == nil {
+		return "", 0, errProviderUnbound
+	}
+	// AppSlug is filled lazily via GetConnection. If empty, fall back
+	// to the integration runner — it'll route by connection id alone.
+	return bound.AppSlug, bound.ConnectionID, nil
+}
+
+// ─── Internal refresh orchestrators ──────────────────────────────
+//
+// One func per refreshable entity. Dispatch on the bound provider's
+// slug, call the provider-specific normaliser (provider_dataforseo.go
+// today; provider_ahrefs.go later), write rows in our schema. DB
+// writes happen here; HTTP + credential handling live in the
+// integration runner; provider-shape mapping lives in the per-slug
+// normaliser file.
+
+func refreshDomain(ctx *sdk.AppCtx, domainID int64) (any, error) {
+	d, err := getDomain(ctx.AppDB(), projectScope(), domainID)
+	if err != nil {
+		return nil, err
+	}
+	slug, _, err := boundProvider(ctx)
+	if err != nil {
+		return nil, err
+	}
+	switch slug {
+	case "dataforseo":
+		return refreshDomainViaDataForSEO(ctx, d)
+	default:
+		return nil, fmt.Errorf("provider %q not yet wired (v0.2 supports dataforseo only)", slug)
+	}
+}
+
+func refreshKeyword(ctx *sdk.AppCtx, keywordID int64) (any, error) {
+	k, err := getKeyword(ctx.AppDB(), projectScope(), keywordID)
+	if err != nil {
+		return nil, err
+	}
+	slug, _, err := boundProvider(ctx)
+	if err != nil {
+		return nil, err
+	}
+	switch slug {
+	case "dataforseo":
+		return refreshKeywordViaDataForSEO(ctx, k)
+	default:
+		return nil, fmt.Errorf("provider %q not yet wired (v0.2 supports dataforseo only)", slug)
+	}
+}
+
+func refreshBacklinks(ctx *sdk.AppCtx, domainID int64) (any, error) {
+	d, err := getDomain(ctx.AppDB(), projectScope(), domainID)
+	if err != nil {
+		return nil, err
+	}
+	slug, _, err := boundProvider(ctx)
+	if err != nil {
+		return nil, err
+	}
+	switch slug {
+	case "dataforseo":
+		return refreshBacklinksViaDataForSEO(ctx, d)
+	default:
+		return nil, fmt.Errorf("provider %q not yet wired (v0.2 supports dataforseo only)", slug)
+	}
+}
+
 // ─── Tiny arg helpers (mirrors the pattern in todo/calendar apps) ─
 
 func schemaObject(props map[string]any, required []string) map[string]any {
@@ -519,6 +914,20 @@ func toInt64(v any) int64 {
 		return int64(x)
 	case float64:
 		return int64(x)
+	}
+	return 0
+}
+
+func boolArg(args map[string]any, key string, def bool) bool {
+	if v, ok := args[key].(bool); ok {
+		return v
+	}
+	return def
+}
+
+func boolToInt(b bool) int64 {
+	if b {
+		return 1
 	}
 	return 0
 }

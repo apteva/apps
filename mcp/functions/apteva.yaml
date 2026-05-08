@@ -1,0 +1,59 @@
+schema: apteva-app/v1
+
+name: functions
+display_name: Functions
+version: 0.1.0
+description: |
+  Lambda-style serverless functions. Each function gets an
+  auto-routed HTTP endpoint at /fn/<name>; the dispatcher spawns
+  the runtime per invocation with stdin=event JSON, captures
+  stdout as response, kills on timeout. Pair with the Jobs app
+  for cron-fired schedules; stand-alone for HTTP webhooks.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/functions
+tags: [functions, faas, serverless, scripts, agent]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: functions_create
+      description: "Create a function. Args: name, runtime (bun|node|python|sh), source (inline) OR (repo_id+repo_path), env?, timeout_ms?, max_memory_mb?."
+    - name: functions_update
+      description: "Update a function's source, env, or limits. Bumps source_hash."
+    - name: functions_delete
+      description: "Delete a function and all its invocation rows."
+    - name: functions_list
+      description: "List functions in the project. Optional filter by runtime, status."
+    - name: functions_get
+      description: "Fetch one function by id or name."
+    - name: functions_invoke
+      description: "Synchronously invoke a function. Args: name (or id), event (any JSON). Returns {ok, response, duration_ms, exit_code, invocation_id}."
+    - name: functions_invocations
+      description: "Recent invocations for a function. Args: id (or name), limit (default 50, max 200)."
+    - name: functions_logs
+      description: "stdout + stderr of a single invocation. Args: invocation_id."
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/functions
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/functions.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch

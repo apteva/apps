@@ -2,32 +2,103 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
 
-// handleHeartbeat receives viewer heartbeats. Path shape:
+// viewerTracker is the in-memory anonymous-viewer counter. One bucket
+// per active stream; each bucket maps an opaque cookie to its last
+// heartbeat time. The worker sweeps stale entries and projects the
+// size into the streams.current_viewers column.
 //
-//   POST /heartbeat/<stream_id>?t=<playback_token>[&v=<viewer_id>][&ext=<external_id>]
+// Identity is deliberately absent here. Consumer apps (webinars,
+// classroom, …) own per-identity attendance in their own tables.
+type viewerTracker struct {
+	mu      sync.Mutex
+	streams map[int64]map[string]time.Time
+}
+
+func newViewerTracker() *viewerTracker {
+	return &viewerTracker{streams: map[int64]map[string]time.Time{}}
+}
+
+// bump records a heartbeat for (stream, cookie).
+func (v *viewerTracker) bump(streamID int64, cookie string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	bucket, ok := v.streams[streamID]
+	if !ok {
+		bucket = map[string]time.Time{}
+		v.streams[streamID] = bucket
+	}
+	bucket[cookie] = time.Now()
+}
+
+// sweep drops cookies stale past `idle`, returns the active count
+// after the sweep. Safe to call when the stream has no bucket
+// (returns 0).
+func (v *viewerTracker) sweep(streamID int64, idle time.Duration) int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	bucket, ok := v.streams[streamID]
+	if !ok {
+		return 0
+	}
+	cutoff := time.Now().Add(-idle)
+	for cookie, ts := range bucket {
+		if ts.Before(cutoff) {
+			delete(bucket, cookie)
+		}
+	}
+	return len(bucket)
+}
+
+// count returns the bucket size without sweeping.
+func (v *viewerTracker) count(streamID int64) int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return len(v.streams[streamID])
+}
+
+// drop removes the bucket entirely — used when a stream is deleted
+// or torn down.
+func (v *viewerTracker) drop(streamID int64) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	delete(v.streams, streamID)
+}
+
+// trackedStreams returns a snapshot of the stream IDs that currently
+// have at least one bucket entry. The worker iterates over these to
+// run sweeps.
+func (v *viewerTracker) trackedStreams() []int64 {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	out := make([]int64, 0, len(v.streams))
+	for id := range v.streams {
+		out = append(out, id)
+	}
+	return out
+}
+
+// ─── Heartbeat handler ────────────────────────────────────────────
 //
-// Body is optional JSON:
-//   { "position_seconds": 41.2, "user_agent": "..." }
+// POST /heartbeat/<stream_id>?t=<playback_token>
+// Cookie-based viewer ID — the server sets one on first contact.
+// Returns: { ok: true, viewer_id: "<set-as-cookie>" }.
 //
-// Returns: { ok: true, viewer_id: "<set-this-as-cookie>" }.
-//
-// The heartbeat table is the single source of truth for viewer counts;
-// the viewer-counter worker decays stale rows every 10s.
+// Anonymous by design. If the consumer app needs identity attribution,
+// it runs its own heartbeat endpoint; this one only feeds the
+// aggregate counter.
+
 func (a *App) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodGet {
-		// GET allowed so a `<img>` beacon can be used as a fallback if
-		// the player can't issue POSTs.
+		// GET allowed so a `<img>` beacon can be used as a fallback.
 		httpErr(w, http.StatusMethodNotAllowed, "POST or GET")
 		return
 	}
@@ -60,7 +131,6 @@ func (a *App) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Token check — same gate as playback.
 	if s.Visibility == "signed" {
 		token := r.URL.Query().Get("t")
 		if token == "" || token != s.PlaybackToken {
@@ -69,146 +139,85 @@ func (a *App) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Resolve viewer_id: query param > cookie > new random.
-	viewerID := r.URL.Query().Get("v")
-	if viewerID == "" {
-		if c, err := r.Cookie("apteva_viewer"); err == nil {
-			viewerID = c.Value
-		}
+	cookie := ""
+	if c, err := r.Cookie("apteva_viewer"); err == nil {
+		cookie = c.Value
 	}
-	if viewerID == "" {
-		viewerID = randomViewerID()
+	if cookie == "" {
+		cookie = randomViewerID()
 		http.SetCookie(w, &http.Cookie{
 			Name:     "apteva_viewer",
-			Value:    viewerID,
+			Value:    cookie,
 			Path:     "/",
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
-			MaxAge:   86400, // 24h
+			MaxAge:   86400, // 24h — same idle window-of-windows
 		})
 	}
-	externalID := r.URL.Query().Get("ext")
-	source := r.URL.Query().Get("source")
-	if source != "replay" {
-		source = "live"
-	}
 
-	// Optional JSON body — ignored for v0.1 except user_agent fallback.
-	userAgent := r.UserAgent()
-	if r.Method == http.MethodPost && r.Body != nil {
-		var body struct {
-			UserAgent string `json:"user_agent"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err == nil && body.UserAgent != "" {
-			userAgent = body.UserAgent
-		}
-	}
-
-	// Upsert (stream_id, viewer_id) — refresh last_heartbeat each call.
-	now := time.Now().UTC().Format(time.RFC3339)
-	if _, err := ctx.AppDB().Exec(
-		`INSERT INTO stream_viewers
-			(project_id, stream_id, viewer_id, external_id, source,
-			 joined_at, last_heartbeat, user_agent)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(stream_id, viewer_id) DO UPDATE SET
-			last_heartbeat = excluded.last_heartbeat,
-			external_id = COALESCE(NULLIF(excluded.external_id,''), stream_viewers.external_id),
-			user_agent = COALESCE(NULLIF(excluded.user_agent,''), stream_viewers.user_agent)`,
-		pid, id, viewerID, nullStr(externalID), source, now, now, nullStr(userAgent)); err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	app.viewers.bump(id, cookie)
 
 	httpJSON(w, map[string]any{
 		"ok":        true,
-		"viewer_id": viewerID,
+		"viewer_id": cookie,
 	})
 }
 
-// runViewerCounter is the SDK Worker that:
+// ─── Worker: viewer-counter ───────────────────────────────────────
 //
-//   - Marks viewers as "left" when last_heartbeat is older than the
-//     idle window.
-//   - Bumps total_viewer_seconds for active viewers (idle + 10s slot).
-//   - Updates peak_viewers per stream.
-//   - Emits stream.viewer_count_changed when the count moves (debounced
-//     to avoid event spam: only emit if the value differs from the last
-//     persisted peak_viewers OR a configurable poll cadence).
-//
-// Runs every 10s via the Worker schedule. Idempotent — re-running on
-// the same data is safe.
+// Every 10s, sweep each tracked stream's bucket, project the active
+// count into `streams.current_viewers`, bump `peak_viewers` and
+// `total_viewer_seconds`, and emit `stream.viewer_count_changed` so
+// the dashboard panel can render without polling.
+
 func (a *App) runViewerCounter(ctx context.Context, app *sdk.AppCtx) error {
-	if app == nil || app.AppDB() == nil {
+	if app == nil || app.AppDB() == nil || a.viewers == nil {
 		return nil
 	}
-	idle := a.viewerIdleSeconds(app)
-	cutoff := time.Now().UTC().Add(-time.Duration(idle) * time.Second).Format(time.RFC3339)
+	idle := time.Duration(a.viewerIdleSeconds(app)) * time.Second
 
-	// 1. Mark stale viewers as left.
-	if _, err := app.AppDB().Exec(
-		`UPDATE stream_viewers
-		 SET left_at = CURRENT_TIMESTAMP
-		 WHERE left_at IS NULL AND last_heartbeat < ?`, cutoff); err != nil {
-		app.Logger().Warn("viewer-counter: mark stale", "err", err)
-	}
+	for _, streamID := range a.viewers.trackedStreams() {
+		current := a.viewers.sweep(streamID, idle)
 
-	// 2. For each active stream, count viewers and update peak.
-	rows, err := app.AppDB().Query(
-		`SELECT id, project_id, peak_viewers FROM streams
-		 WHERE status IN ('idle','live')`)
-	if err != nil {
-		return err
-	}
-	type streamSnap struct {
-		ID         int64
-		ProjectID  string
-		Peak       int
-	}
-	var snaps []streamSnap
-	for rows.Next() {
-		var s streamSnap
-		if err := rows.Scan(&s.ID, &s.ProjectID, &s.Peak); err == nil {
-			snaps = append(snaps, s)
-		}
-	}
-	rows.Close()
-
-	for _, s := range snaps {
-		var current int
-		_ = app.AppDB().QueryRow(
-			`SELECT COUNT(*) FROM stream_viewers
-			 WHERE stream_id = ? AND left_at IS NULL`,
-			s.ID).Scan(&current)
-
-		// Bump total_viewer_seconds by current * (idle/3) — a fudge
-		// matching the worker's cadence (10s) without trusting the
-		// schedule. v0.2: track watch_seconds per-viewer with proper
-		// time-since-last-tick math.
-		if current > 0 {
-			_, _ = app.AppDB().Exec(
-				`UPDATE streams SET total_viewer_seconds = total_viewer_seconds + ?
-				 WHERE id = ?`, current*10, s.ID)
+		// Look up project_id + previous peak. A row may have been
+		// deleted out from under us — drop the bucket and continue.
+		var pid string
+		var peak int
+		err := app.AppDB().QueryRow(
+			`SELECT project_id, peak_viewers FROM streams WHERE id = ?`,
+			streamID).Scan(&pid, &peak)
+		if err != nil {
+			a.viewers.drop(streamID)
+			continue
 		}
 
-		if current > s.Peak {
-			_, _ = app.AppDB().Exec(
-				`UPDATE streams SET peak_viewers = ? WHERE id = ?`, current, s.ID)
+		newPeak := peak
+		if current > peak {
+			newPeak = current
 		}
+		// Tick adds (current * 10s) of watch time. Approximate; v0.2
+		// could compute per-cookie session lengths from the map.
+		_, _ = app.AppDB().Exec(
+			`UPDATE streams
+			 SET current_viewers = ?, peak_viewers = ?,
+			     total_viewer_seconds = total_viewer_seconds + ?
+			 WHERE id = ?`,
+			current, newPeak, current*10, streamID)
 
-		// Emit on every tick — apteva-server's event bus is the
-		// natural rate-limiter (it dedups in the buffer ring), and
-		// dashboard subscribers need the regular tick to refresh.
 		app.Emit("stream.viewer_count_changed", map[string]any{
-			"id":    s.ID,
+			"id":    streamID,
 			"count": current,
 		})
+		_ = pid // reserved for v0.2 per-project rate limiting
 	}
 	return nil
 }
 
-// runWatchdog detects ffmpeg children that exited unexpectedly and
-// reconciles DB state. Runs every 5s.
+// ─── Watchdog (unchanged) ─────────────────────────────────────────
+//
+// Detects ffmpeg children that exited unexpectedly + the idle→live
+// transition on the first scraped bitrate line. Every 5s.
+
 func (a *App) runWatchdog(ctx context.Context, app *sdk.AppCtx) error {
 	if app == nil {
 		return nil
@@ -233,26 +242,21 @@ func (a *App) runWatchdog(ctx context.Context, app *sdk.AppCtx) error {
 
 	for _, id := range dead {
 		err := deadDetail[id]
-		// Look up the row so we can emit with project_id and pick a
-		// clean status.
 		var pid string
 		var status string
 		_ = app.AppDB().QueryRow(
 			`SELECT project_id, status FROM streams WHERE id = ?`, id).Scan(&pid, &status)
 		if pid == "" {
+			a.viewers.drop(id)
 			continue
 		}
-		// If the operator already called streams_stop, status is
-		// already 'ended' — leave it. Otherwise this was an unexpected
-		// exit.
 		if status == "ended" || status == "errored" {
+			a.viewers.drop(id)
 			continue
 		}
 		newStatus := "errored"
 		errMsg := ""
 		if err == nil {
-			// Graceful exit without an explicit stop — publisher
-			// disconnected. Treat as ended.
 			newStatus = "ended"
 		} else {
 			errMsg = err.Error()
@@ -270,10 +274,10 @@ func (a *App) runWatchdog(ctx context.Context, app *sdk.AppCtx) error {
 			emitStreamEvent(app, s, EventKindPublisherDisconnect, "", nil)
 			emitStreamEvent(app, s, EventKindEnded, "", nil)
 		}
+		a.viewers.drop(id)
 	}
 
-	// Also detect transition from idle → live: a runner whose first
-	// progress line just landed bumps started_at on the row.
+	// idle→live transition on first scraped bitrate.
 	a.runnersMu.Lock()
 	live := map[int64]*streamRunner{}
 	for id, r := range a.runners {
@@ -285,7 +289,6 @@ func (a *App) runWatchdog(ctx context.Context, app *sdk.AppCtx) error {
 		if !m.HasPublisher {
 			continue
 		}
-		// Bump started_at + status if not done already.
 		var status string
 		_ = app.AppDB().QueryRow(`SELECT status FROM streams WHERE id = ?`, id).Scan(&status)
 		if status == "idle" {
@@ -305,7 +308,6 @@ func (a *App) runWatchdog(ctx context.Context, app *sdk.AppCtx) error {
 				})
 			}
 		} else if status == "live" {
-			// Periodic refresh of the persisted snapshot.
 			_, _ = app.AppDB().Exec(
 				`UPDATE streams
 				 SET current_bitrate_kbps = ?, current_fps = ?, resolution = ?,
@@ -317,12 +319,7 @@ func (a *App) runWatchdog(ctx context.Context, app *sdk.AppCtx) error {
 	return nil
 }
 
-// randomViewerID is shorter than randomToken — viewers are anonymous
-// and the cookie is set on every page load, so 16 bytes is plenty.
+// randomViewerID — short opaque cookie for anonymous viewers.
 func randomViewerID() string {
-	var b [12]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic("rand.Read: " + err.Error())
-	}
-	return base64.RawURLEncoding.EncodeToString(b[:])
+	return randomToken()[:16]
 }
