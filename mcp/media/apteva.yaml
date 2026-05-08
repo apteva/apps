@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.8.9
+version: 0.9.0
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -83,6 +83,8 @@ provides:
       description: Filter by folder / duration / dimensions / codec / has_video / has_audio. Returns rows with absolute storage URLs. Args include folder (e.g. "/clips/") and recursive (descend into sub-folders).
     - name: media_list_folders
       description: List immediate child folders of `parent` that contain media. Args - parent (default "/"). Mirrors storage's files_list_folders semantics; only folders with at least one audio/video/image row appear.
+    - name: media_create_folder
+      description: Create an empty folder in storage so media uploads can land in it later. Thin pass-through to storage's files_create_folder. Idempotent — silently no-ops when the folder already has content. Args - path (e.g. "/raw-footage/2026-05/").
     - name: media_get_thumbnail
       description: Return the storage file_id (and signed URL) of the cached thumbnail. Generates on demand if missing.
     - name: media_get_waveform

@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: storage
 display_name: Storage
-version: 0.9.2
+version: 0.9.3
 description: |
   File storage with virtual folders, signed URLs, dedup. Pluggable
   backend: local disk by default, S3-compatible (AWS / R2 / B2 /
@@ -85,6 +85,7 @@ provides:
     - { name: files_search,         description: "Filtered file list." }
     - { name: files_list,           description: "List files in one folder." }
     - { name: files_list_folders,   description: "List immediate child folders." }
+    - { name: files_create_folder,  description: "Create an empty folder via a 0-byte .placeholder upload. Idempotent.", requires: files.write, resource_from: "folder/{arg.path?}" }
     - { name: files_move,           description: "Move + optionally rename a file.", requires: files.write,  resource_from: "folder/{arg.folder?}" }
     - { name: files_set_tags,       description: "Append/remove tags." }
     - { name: files_set_visibility, description: "private | signed | public." }
@@ -275,6 +276,14 @@ func (a *App) MCPTools() []sdk.Tool {
 				"parent": map[string]any{"type": "string"},
 			}, nil),
 			HandlerCtx: a.toolListFoldersCtx,
+		},
+		{
+			Name:        "files_create_folder",
+			Description: "Create an empty folder by uploading a 0-byte .placeholder file at the given path. Idempotent — silently no-ops if the path already exists. Args: path (e.g. '/raw-footage/2026-05/').",
+			InputSchema: schemaObject(map[string]any{
+				"path": map[string]any{"type": "string"},
+			}, []string{"path"}),
+			HandlerCtx: a.toolCreateFolderCtx,
 		},
 		{
 			Name:        "files_move",
@@ -477,6 +486,47 @@ func normaliseFilename(s string) string {
 }
 
 // ─── Tool handlers ─────────────────────────────────────────────────
+
+// toolCreateFolderCtx materialises an empty folder by uploading a
+// 0-byte .placeholder file at the requested path. S3-style folders
+// only exist when something lives in them; the placeholder is the
+// universal trick for "make this folder visible to listings without
+// putting real content in it yet".
+//
+// Idempotent: if the folder already has any file (placeholder or
+// otherwise), returns {created: false, path}. The dashboard panel
+// has been doing this inline since v0.1; this just exposes the same
+// semantics as a proper MCP tool so agents and other apps can call
+// it without learning storage's HTTP surface.
+func (a *App) toolCreateFolderCtx(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	path := normaliseFolder(strArg(args, "path"))
+	if path == "" || path == "/" {
+		return nil, errors.New("path required (e.g. '/raw/2026-05/')")
+	}
+	// Idempotency: if any file already lives in this folder, do
+	// nothing and report created=false. Cheap sub-second query —
+	// the project_id+folder index is the same one /folders walks.
+	if hasFiles, err := dbFolderHasFiles(ctx.AppDB(), pid, path); err == nil && hasFiles {
+		return map[string]any{"created": false, "path": path}, nil
+	}
+	in := uploadInput{
+		Name:        ".placeholder",
+		Folder:      path,
+		ContentType: "application/x-empty",
+		Source:      "system",
+		Visibility:  effectiveVisibility(ctx, ""),
+	}
+	f, existed, err := saveBytes(ctx, pid, in, []byte{})
+	if err != nil {
+		return nil, err
+	}
+	emitFileEvent(ctx, "file.added", f, existed)
+	return map[string]any{"created": true, "path": path}, nil
+}
 
 func (a *App) toolUpload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
@@ -1603,6 +1653,28 @@ func dbListFolder(db *sql.DB, pid, folder string, recursive bool, limit int) ([]
 		}
 	}
 	return out, nil
+}
+
+// dbFolderHasFiles reports whether any non-deleted file exists at
+// the EXACT folder path (children don't count). Used by
+// toolCreateFolderCtx for idempotency — if anything is already
+// there, the folder doesn't need a placeholder.
+func dbFolderHasFiles(db *sql.DB, pid, folder string) (bool, error) {
+	folder = normaliseFolder(folder)
+	var n int
+	err := db.QueryRow(
+		`SELECT 1 FROM files
+		 WHERE project_id = ? AND folder = ? AND deleted_at IS NULL
+		 LIMIT 1`,
+		pid, folder,
+	).Scan(&n)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // dbListChildFolders returns the immediate child folder names ONE

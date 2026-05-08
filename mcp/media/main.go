@@ -21,7 +21,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.8.9
+version: 0.9.0
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -84,6 +84,7 @@ provides:
     - { name: media_get,             description: "Fetch one media record by storage file_id." }
     - { name: media_search,          description: "Filter by folder / duration / dimensions / codec / has_video / has_audio." }
     - { name: media_list_folders,    description: "List immediate child folders of parent that contain media." }
+    - { name: media_create_folder,   description: "Create an empty folder in storage that media files can later land in. Idempotent. Args - path." }
     - { name: media_get_thumbnail,   description: "Get the thumbnail derivation pointer (storage file_id) — generates if missing." }
     - { name: media_get_waveform,    description: "Get the waveform derivation pointer (audio only)." }
     - { name: media_reindex,         description: "Force a re-probe + re-derive — for one file_id or all failed rows." }
@@ -300,6 +301,14 @@ func (a *App) MCPTools() []sdk.Tool {
 				"parent": map[string]any{"type": "string"},
 			}, nil),
 			Handler: a.toolListFolders,
+		},
+		{
+			Name:        "media_create_folder",
+			Description: "Create an empty folder in storage. Pass-through to storage's files_create_folder; idempotent. Args: path (e.g. '/raw-footage/2026-05/').",
+			InputSchema: schemaObject(map[string]any{
+				"path": map[string]any{"type": "string"},
+			}, []string{"path"}),
+			Handler: a.toolCreateFolder,
 		},
 		{
 			Name:        "media_get_thumbnail",
@@ -805,6 +814,35 @@ func (a *App) toolListFolders(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	return map[string]any{"folders": folders, "parent": parent, "count": len(folders)}, nil
+}
+
+// toolCreateFolder is a thin pass-through to storage's
+// files_create_folder. Media has no folder-state of its own — folders
+// only exist in storage's files table — so the right move is to
+// delegate. Goes through CallApp so the binding is honoured and we
+// don't bypass the platform's authorization gate.
+func (a *App) toolCreateFolder(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	path, _ := args["path"].(string)
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, errors.New("path required")
+	}
+	in := map[string]any{
+		"path":        path,
+		"_project_id": pid,
+	}
+	var out struct {
+		Created bool   `json:"created"`
+		Path    string `json:"path"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_create_folder", in, &out); err != nil {
+		return nil, fmt.Errorf("storage.files_create_folder: %w", err)
+	}
+	return map[string]any{"created": out.Created, "path": out.Path}, nil
 }
 
 // toolGetDerivation closes over the derivation kind so the same body
