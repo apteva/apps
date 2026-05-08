@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: storage
 display_name: Storage
-version: 0.9.3
+version: 0.9.4
 description: |
   File storage with virtual folders, signed URLs, dedup. Pluggable
   backend: local disk by default, S3-compatible (AWS / R2 / B2 /
@@ -724,6 +724,11 @@ func (a *App) toolMove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Fan out file.updated so subscribers (storage panel,
+	// media's storageevents.go cascade, FileCard chat attachments)
+	// can react instantly. Existed=false because move/rename is
+	// always a real change — the dedup short-circuit doesn't apply.
+	emitFileEvent(ctx, "file.updated", f, false)
 	return map[string]any{"file": f}, nil
 }
 

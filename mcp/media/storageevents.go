@@ -241,7 +241,16 @@ func updateFolderFromEvent(app *sdk.AppCtx, data map[string]any, projectID strin
 	}
 	if err := updateFolder(app.AppDB(), projectID, fid, folder); err != nil {
 		app.Logger().Warn("file.updated folder write failed", "file_id", fid, "err", err)
+		return
 	}
+	// Re-emit on media's bus so panels + cards subscribed to media
+	// events know to refetch. Without this, MediaCard / MediaPanel
+	// would only see storage's file.updated (different bus, different
+	// subscription) and stay stale until a manual reload.
+	app.Emit("media.updated", map[string]any{
+		"file_id": fid,
+		"folder":  folder,
+	})
 }
 
 // indexFromEvent triggers a single-file indexing pass off the
