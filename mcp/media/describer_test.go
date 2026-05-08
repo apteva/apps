@@ -263,11 +263,13 @@ func TestRunOneDescription_VideoWithBoth_FullMultimodal(t *testing.T) {
 	}
 }
 
-func TestRunOneDescription_UsesReasoningWhenContentNull(t *testing.T) {
-	// Kimi K2.6 with tight max_tokens returns content=null + a
-	// populated reasoning string. The describer should fall back to
-	// the reasoning rather than mark the row failed — better to have
-	// a noisy description than no description.
+func TestRunOneDescription_TruncatedMarksAttempt(t *testing.T) {
+	// Kimi K2.6 with tight max_tokens returns finish_reason=length
+	// and either an empty content or the raw reasoning trace. Earlier
+	// versions wrote the trace into the description column; now we
+	// refuse the partial response and mark the row failed so the
+	// cooldown gate kicks in and the operator sees an actionable
+	// error message in description_error.
 	stub := boundOpencodeGo()
 	stub.executeResp = &sdk.ExecuteResult{
 		Success: true, Status: 200,
@@ -292,8 +294,11 @@ func TestRunOneDescription_UsesReasoningWhenContentNull(t *testing.T) {
 	describerSweep(ctx)
 
 	got, _ := getMedia(ctx.AppDB(), testProj, "1")
-	if !strings.Contains(got.Description, "two people") {
-		t.Errorf("expected reasoning fallback, got %q", got.Description)
+	if got.Description != "" {
+		t.Errorf("description should stay empty on truncation, got %q", got.Description)
+	}
+	if !strings.Contains(got.DescriptionError, "truncated") {
+		t.Errorf("expected truncation error, got %q", got.DescriptionError)
 	}
 }
 
@@ -519,16 +524,23 @@ func TestExtractChatContent_NormalString(t *testing.T) {
 	}
 }
 
-func TestExtractChatContent_NullContentFallsToReasoning(t *testing.T) {
+// finish_reason="length" means the model ran out of token budget
+// before emitting the actual answer. Earlier versions of
+// extractChatContent fell back to writing the raw `reasoning` field
+// as the description — but that's the chain-of-thought scratchpad,
+// not a user-facing answer. Now we error out so the caller marks
+// the row failed and the operator can bump max_tokens (or switch
+// to a non-reasoning vision model).
+func TestExtractChatContent_TruncatedErrors(t *testing.T) {
 	raw := json.RawMessage(`{
-	  "choices": [{ "message": { "content": null, "reasoning": "fallback" }, "finish_reason": "length" }]
+	  "choices": [{ "message": { "content": null, "reasoning": "long thinking..." }, "finish_reason": "length" }]
 	}`)
-	s, err := extractChatContent(raw)
-	if err != nil {
-		t.Fatal(err)
+	_, err := extractChatContent(raw)
+	if err == nil {
+		t.Fatal("expected error on finish_reason=length")
 	}
-	if s != "fallback" {
-		t.Errorf("got %q want fallback", s)
+	if !strings.Contains(err.Error(), "truncated") {
+		t.Errorf("expected error to mention truncation, got: %v", err)
 	}
 }
 

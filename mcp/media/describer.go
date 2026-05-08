@@ -223,7 +223,7 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 	if model == "" {
 		model = "kimi-k2.6"
 	}
-	maxTokens := parseConfigIntFallback(cfg.Get("describe_max_tokens"), 1500)
+	maxTokens := parseConfigIntFallback(cfg.Get("describe_max_tokens"), 4000)
 	timeout := time.Duration(parseConfigIntFallback(cfg.Get("describe_timeout_seconds"), 120)) * time.Second
 	_ = timeout // timeout is enforced by the platform's HTTP client; reserved for future per-call override.
 
@@ -282,7 +282,7 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 
 // ─── prompt building ───────────────────────────────────────────────
 
-const describeSystemPrompt = "You write very brief media descriptions. Output 1-2 short sentences, ~200 characters maximum. Plain prose, no preamble, no headings, no quotes. Focus on subjects, setting, and action — concrete what's-there observations only. No speculation about emotion or intent. Don't mention the medium ('this video', 'this image', 'this audio') — describe the content directly."
+const describeSystemPrompt = "You write very brief media descriptions. Output 1-2 short sentences, ~200 characters maximum. Plain prose, no preamble, no headings, no quotes. Focus on subjects, setting, and action — concrete what's-there observations only. No speculation about emotion or intent. Don't mention the medium ('this video', 'this image', 'this audio') — describe the content directly.\n\nIMPORTANT: respond with ONLY the final 1-2 sentences. No reasoning, no drafts, no character counts, no thinking out loud. Just the description."
 
 // buildDescribePrompt assembles the messages array for the chat call
 // based on what's available for the file. Returns nil (no error) when
@@ -398,19 +398,30 @@ func projectContextLine(name, description string) string {
 // ─── chat-completion response parser ───────────────────────────────
 
 // extractChatContent pulls the assistant message's content out of a
-// chat_completion response. Falls back to the `reasoning` field
-// when content is null — opencode-go's reasoning models (Kimi K2.6,
-// DeepSeek V4 Pro) put their visible answer there if max_tokens is
-// tight. We log this case and use it; the agent gets the trace
-// instead of nothing.
+// chat_completion response.
+//
+// Two failure modes worth surfacing distinctly so the cooldown gate
+// + the operator's settings tweak both have actionable info:
+//
+//  1. finish_reason=length — the model ran out of token budget. With
+//     a reasoning model (Kimi K2.6, DeepSeek V4 Pro) and a tight
+//     max_tokens this is the common case, and the partial content
+//     is the chain-of-thought scratchpad, NOT a user-facing answer.
+//     Older versions of this function fell back to writing that raw
+//     reasoning into the description column — never the right call.
+//     Now we surface the truncation as an error, leave the row's
+//     description empty, and the operator can bump max_tokens or
+//     switch to a non-reasoning vision model.
+//
+//  2. Empty content for any other reason — model returned content="",
+//     filtered, refused, etc. Same: error out, don't write garbage.
 func extractChatContent(data json.RawMessage) (string, error) {
 	var env struct {
 		Choices []struct {
 			Message struct {
 				// Content is `string | null` in OpenAI's schema; we
 				// decode as RawMessage so we can distinguish the two.
-				Content   json.RawMessage `json:"content"`
-				Reasoning string          `json:"reasoning"`
+				Content json.RawMessage `json:"content"`
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
@@ -421,22 +432,24 @@ func extractChatContent(data json.RawMessage) (string, error) {
 	if len(env.Choices) == 0 {
 		return "", errors.New("response has no choices")
 	}
-	msg := env.Choices[0].Message
+	choice := env.Choices[0]
+	msg := choice.Message
 
-	// Try content first.
+	// Truncation: refuse the partial output. The bytes there are
+	// either reasoning trace (useless) or a half-finished sentence
+	// (writing a 6-letter description doesn't help anyone).
+	if choice.FinishReason == "length" {
+		return "", fmt.Errorf("response truncated (finish_reason=length) — bump describe_max_tokens or switch to a non-reasoning vision model")
+	}
+
 	if len(msg.Content) > 0 && string(msg.Content) != "null" {
 		var s string
 		if err := json.Unmarshal(msg.Content, &s); err == nil {
-			if strings.TrimSpace(s) != "" {
-				return s, nil
+			out := strings.TrimSpace(s)
+			if out != "" {
+				return out, nil
 			}
 		}
 	}
-	// Fall back to reasoning when the model exhausted the budget on
-	// thinking. Surface a hint so the auto-describer's caller can
-	// decide whether to bump max_tokens.
-	if strings.TrimSpace(msg.Reasoning) != "" {
-		return msg.Reasoning, nil
-	}
-	return "", fmt.Errorf("empty content and reasoning (finish_reason=%s)", env.Choices[0].FinishReason)
+	return "", fmt.Errorf("empty content (finish_reason=%s) — model returned no answer", choice.FinishReason)
 }

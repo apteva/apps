@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.8.7
+version: 0.8.8
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -281,9 +281,10 @@ config_schema:
       Model slug from the OpenCode Go catalog. kimi-k2.6 is the default (vision-capable, 256K context, reasoning model). Faster non-reasoning options like glm-5.1 / qwen3.6-plus may work depending on vision support.
   - name: describe_max_tokens
     type: text
-    default: "1500"
+    default: "4000"
     label: Description max_tokens
-    description: Token budget per call. Reasoning models (Kimi, DeepSeek) need ~1000+ to leave room for both reasoning and the visible answer; non-reasoning models can run on ~200.
+    description: |
+      Token budget per call. Reasoning models (Kimi K2.6, DeepSeek V4 Pro) burn most of this on internal thinking before emitting the final answer — 4000 leaves comfortable headroom for both. If you see "response truncated (finish_reason=length)" errors, bump this further or switch to a non-reasoning vision model. Non-reasoning models can run on ~200 since they emit the answer directly.
   - name: describe_poll_seconds
     type: text
     default: "60"
