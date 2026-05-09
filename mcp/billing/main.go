@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.1.0
+version: 0.1.1
 description: |
   Customers, invoices, and payments. Per-invoice provider — local for
   internal/wire/cash, stripe for card-payable hosted invoices (v0.1.1+).
@@ -93,7 +93,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("billing mounted",
-		"version", "0.1.0",
+		"version", "0.1.1",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -936,7 +936,12 @@ func (a *App) toolInvoicesRenderPDF(ctx *sdk.AppCtx, args map[string]any) (any, 
 
 	folder, _ := args["folder"].(string)
 	if folder == "" {
-		folder = "/invoices/"
+		// App-internal default per storage's dotted-folder convention —
+		// these are voucher PDFs the agent attaches to chat via
+		// invoice-card; users don't browse them through the storage
+		// panel directly. Caller can pass any non-dot folder to make
+		// them user-visible.
+		folder = "/.billing/invoices/"
 	}
 	// Cross-app call: hand the bytes to storage's files_upload tool.
 	// Falls back to base64 + a clear error reason if storage isn't
