@@ -1,8 +1,34 @@
-# Bills (v0.1.2)
+# Bills (v0.1.3)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.1.3
+
+Adds **`ocr_provider="llm"` mode** on top of v0.1.2 — a built-in
+vision-LLM path that runs inline (no separate sidecar app required).
+
+- New manifest binding: `requires.integrations.[{role: vision_llm,
+  compatible_slugs: [opencode-go], ...}]`. Bind OpenCode Go in the
+  dashboard and pick a vision-capable model (Kimi K2.6 is the
+  default).
+- New file `ocr_llm.go` with the embedded path: storage fetch via
+  signed URL → PDF render via PDFium-WASM → OpenAI-shape chat
+  completion → JSON parse → same `ExtractedInvoice` shape that
+  drives v0.1.2's auto-fill.
+- PDFium-WASM via `klippa-app/go-pdfium` (Wazero runtime, BSD
+  license). No CGO, no external system deps; ~10 MB binary delta.
+  Lazy-init pool so the OnMount path is unchanged.
+- New permissions in the manifest: `net.egress` (signed-URL fetch),
+  `platform.connections.execute` (bound integration call),
+  `platform.apps.call` (storage cross-app calls).
+- Bills' own surface didn't change: 20 MCP tools, 5 tables, same
+  `bills_create_from_file` contract.
+
+The OpenCode Go subscription provides flat-rate access to Kimi K2.6
++ other vision models — typically cheaper than per-page Mindee
+billing for moderate AP volume.
 
 ## What's in v0.1.2
 
@@ -105,7 +131,7 @@ go test -tags integration ./...     # tier 2, ~2s — real binary, real HTTP
 apteva test ./scenarios/            # tier 3, ~3min — live agent + LLM
 ```
 
-Counts today: 62 tier 1 tests · 10 tier 2 tests · 7 tier 3 scenarios.
+Counts today: 71 tier 1 tests · 10 tier 2 tests · 7 tier 3 scenarios.
 
 ## Relationship to `billing`
 

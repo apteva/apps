@@ -68,10 +68,18 @@ type ExtractedInvoice struct {
 	CostCents          int64              `json:"cost_cents,omitempty"`
 }
 
-// callOCR invokes the configured provider's extract_invoice tool.
-// Returns nil on disabled / unconfigured (NOT an error — caller falls
-// through to manual path). Returns an error only on real failure
-// (network, malformed response). Callers log + continue.
+// callOCR invokes whichever OCR backend the install is configured for.
+// Three modes, dispatched on the `ocr_provider` config value:
+//
+//	""       Disabled. Returns (nil, "", nil); caller falls through to manual.
+//	"llm"    Use the bound vision_llm integration (v0.1.3+). PDF render
+//	         + chat-completion + JSON parse all happen in ocr_llm.go.
+//	"<slug>" Treated as the slug of another Apteva sidecar app exposing
+//	         an `extract_invoice(file_id)` MCP tool — kept as a forward-
+//	         compat hook for custom providers. Calls via CallAppResult.
+//
+// Real failures (network, malformed response) return an error; the
+// caller logs and continues with manual fields.
 func callOCR(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, error) {
 	provider := strings.TrimSpace(configString(ctx, "ocr_provider", ""))
 	if provider == "" {
@@ -80,6 +88,21 @@ func callOCR(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, error) {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return nil, provider, errors.New("ocr_provider set but platform API unavailable")
 	}
+
+	// LLM path — uses the bound vision_llm integration (no separate
+	// sidecar). Lives in ocr_llm.go.
+	if provider == "llm" {
+		parsed, providerLabel, err := callOCRViaLLM(ctx, fileID)
+		if err != nil {
+			return nil, providerLabel, err
+		}
+		return parsed, providerLabel, nil
+	}
+
+	// Sidecar-app path — provider is the slug of an installed app that
+	// implements extract_invoice. No app of this kind ships in v0.1.3,
+	// but the contract is here for anyone who wants to wrap a different
+	// OCR API as a sidecar (Mindee, Veryfi, custom internal service).
 	var parsed ExtractedInvoice
 	if err := ctx.PlatformAPI().CallAppResult(provider, "extract_invoice", map[string]any{
 		"file_id": fileID,

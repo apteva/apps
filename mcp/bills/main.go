@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bills
 display_name: Bills
-version: 0.1.2
+version: 0.1.3
 description: |
   Vendors, bills, and outbound payments. The AP mirror of billing.
 author: Apteva
@@ -53,6 +53,24 @@ scopes: [project, global]
 requires:
   permissions:
     - db.write.app
+    - net.egress
+    - platform.connections.execute
+    - platform.apps.call
+  apps:
+    - name: storage
+      version: ">=0.1.0"
+      reason: holds vendor PDF attachments, rendered vouchers, and source bytes for OCR
+  integrations:
+    - role: vision_llm
+      kind: integration
+      compatible_slugs: [opencode-go]
+      capabilities: [chat.complete, vision.describe]
+      tools:
+        chat.complete: chat_completion
+        vision.describe: chat_completion
+      required: false
+      label: "Vision LLM provider (for ocr_provider=llm)"
+      hint: "Bind OpenCode Go (or another compatible chat-completion provider). Only needed when ocr_provider config is set to 'llm'."
 provides:
   http_routes:
     - prefix: /
@@ -95,7 +113,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("bills mounted",
-		"version", "0.1.2",
+		"version", "0.1.3",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"ocr_provider", configString(ctx, "ocr_provider", "(disabled)"))
 	return nil

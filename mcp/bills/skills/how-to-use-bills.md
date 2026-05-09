@@ -217,11 +217,22 @@ bills_attach_file(bill_id=…, file_id=…)
 
 ## OCR auto-fill (v0.1.2+)
 
-When the install's `ocr_provider` config is set (e.g. `"mindee"`)
-and that integration is installed, `bills_create_from_file` and the
-multipart `POST /bills/from-file` endpoint **automatically extract
-fields from the uploaded file** before creating the bill. No new
-tools, no opt-in flag — it just happens.
+When the install's `ocr_provider` config is set, `bills_create_from_file`
+and the multipart `POST /bills/from-file` endpoint **automatically
+extract fields from the uploaded file** before creating the bill.
+No new tools, no opt-in flag — it just happens.
+
+### Three modes
+
+| `ocr_provider` value | Backend | When |
+|---|---|---|
+| `""` (default) | None | OCR disabled. Caller fills everything manually. |
+| `"llm"` | Bound `vision_llm` integration (default: OpenCode Go / Kimi K2.6). Bills renders PDFs to JPEG via embedded PDFium-WASM, sends image + structured-output prompt to chat-completion. **v0.1.3+, recommended.** | Free on the OpenCode Go subscription; provider-agnostic vision LLM. |
+| `"<slug>"` | Slug of an Apteva sidecar app exposing `extract_invoice(file_id)` (custom Mindee/Veryfi/etc. wrapper). | Forward-compat hook; no such app ships in v0.1.3. |
+
+The agent doesn't pick the mode — it's an install setting. From the
+agent's POV, `bills_create_from_file` either auto-fills (any non-empty
+mode) or doesn't (empty mode).
 
 What gets auto-filled when the caller didn't pass it:
 
@@ -285,7 +296,10 @@ message includes the orphan id for cleanup.
 
 ### Cost
 
-Each extraction call is billed by the provider (Mindee is ~$0.01-0.03
+Each extraction call is billed by the provider. Vision-LLM mode
+(`ocr_provider="llm"` via OpenCode Go) typically lands at flat-rate
+subscription cost ($10/mo for the Go plan, no per-page billing).
+Sidecar-mode wrappers around external APIs (Mindee is ~$0.01-0.03
 per page, varies). v0.1.2 doesn't cache — uploading the same file
 twice triggers two extractions. Mitigate by only calling
 `bills_create_from_file` once per file, and using
