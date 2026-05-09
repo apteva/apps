@@ -1,8 +1,20 @@
-# Bills (v0.1.5)
+# Bills (v0.1.6)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.1.6
+
+UX patch: the bills tab's empty state was just "No bills." text —
+no visible affordance that you could drop a PDF to draft one.
+Users couldn't discover the upload flow without already knowing
+about it. Replaced with a real drop-zone card: 📄 icon, "Drop a
+PDF here or click to upload", with a hidden file input wired to
+the same OCR-first submit-then-fallback flow as drag-drop. The
+"+ New" button still works for starting a bill blank.
+
+The full-pane drag overlay still triggers on dragenter (unchanged).
 
 ## What's in v0.1.5
 

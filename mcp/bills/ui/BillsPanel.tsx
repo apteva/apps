@@ -635,6 +635,10 @@ function BillsTab({
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [vendorPickOpen, setVendorPickOpen] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  // Hidden <input type="file"> for the click-to-upload affordance on
+  // the empty-state drop zone — gives users a way in besides drag-drop.
+  const bareFileInputRef = useRef<HTMLInputElement>(null);
 
   const loadList = useCallback(async () => {
     setStatus("Loading…");
@@ -810,14 +814,13 @@ function BillsTab({
     return j.bill.id;
   };
 
-  const onDrop = async (e: ReactDragEvent) => {
-    e.preventDefault();
-    setDragOver(false);
-    const f = e.dataTransfer.files?.[0];
-    if (!f) return;
-    // First try: upload with no vendor_id and let OCR resolve the
-    // vendor (auto-create or auto-match by extracted email/name).
-    // This is the fast path when ocr_provider is set.
+  // uploadFile runs the OCR-first happy path (no vendor_id passed)
+  // and falls back to the vendor-pick modal when the backend tags
+  // the response with vendor_id-required. Shared by drop handler +
+  // click-to-upload from the empty-state drop zone.
+  const uploadFile = async (f: File) => {
+    if (uploading) return;
+    setUploading(true);
     try {
       const billId = await submitFromFile(f);
       await loadList();
@@ -825,15 +828,28 @@ function BillsTab({
     } catch (err) {
       const e2 = err as Error & { vendorRequired?: boolean };
       if (e2.vendorRequired) {
-        // OCR couldn't identify a vendor (or OCR is disabled). Hold the
-        // file in state and prompt for a vendor — the modal's "Create
-        // new" path covers the case where the vendor doesn't exist yet.
         setPendingFile(f);
         setVendorPickOpen(true);
       } else {
         alert(`Upload failed: ${e2.message}`);
       }
+    } finally {
+      setUploading(false);
     }
+  };
+
+  const onDrop = async (e: ReactDragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    const f = e.dataTransfer.files?.[0];
+    if (f) await uploadFile(f);
+  };
+
+  const onFilePicked = async (e: ReactChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (f) await uploadFile(f);
+    // Allow re-uploading the same file by resetting the input.
+    e.target.value = "";
   };
 
   const onVendorPicked = async (vendor: Vendor) => {
@@ -942,7 +958,34 @@ function BillsTab({
         </div>
         <div className="flex-1 overflow-auto">
           {list.length === 0 ? (
-            <div className="p-4 text-text-muted text-xs">No bills.</div>
+            <div className="p-4">
+              <div
+                onClick={() => bareFileInputRef.current?.click()}
+                className={`border-2 border-dashed rounded p-6 text-center cursor-pointer transition-colors ${
+                  uploading
+                    ? "border-accent bg-accent/10"
+                    : "border-border hover:border-accent hover:bg-bg-input/30"
+                }`}
+              >
+                <div className="text-3xl mb-2">📄</div>
+                <p className="text-sm text-text">
+                  {uploading ? "Uploading…" : "Drop a PDF here or click to upload"}
+                </p>
+                <p className="text-xs text-text-muted mt-1">
+                  OCR auto-fills vendor + line items when bound
+                </p>
+              </div>
+              <p className="text-xs text-text-muted text-center mt-3">
+                or use <span className="text-accent">+ New</span> to start blank
+              </p>
+              <input
+                ref={bareFileInputRef}
+                type="file"
+                accept="application/pdf,image/*"
+                className="hidden"
+                onChange={onFilePicked}
+              />
+            </div>
           ) : (
             <ul>
               {list.map((b) => (
