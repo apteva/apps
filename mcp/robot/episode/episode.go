@@ -90,6 +90,8 @@ func (m *Manager) Start(scenarioID, model string) (*StepResult, error) {
 	}
 
 	view := buildSceneView(scen, world.Pos{X: scen.AgentStart.X, Y: scen.AgentStart.Y})
+	view.Step = 0
+	view.Status = "idle"
 	return &StepResult{
 		EpisodeID: id,
 		Step:      0,
@@ -106,9 +108,8 @@ func (m *Manager) Observe(episodeID string) (*StepResult, error) {
 		return nil, err
 	}
 	view := buildSceneView(scen, world.Pos{X: ep.PosX, Y: ep.PosY})
-	if ep.EndedAt != nil && ep.Success {
-		view.Status = "done"
-	}
+	view.Step = ep.Steps
+	view.Status = viewStatus(ep)
 	return &StepResult{
 		EpisodeID: ep.ID,
 		Step:      ep.Steps,
@@ -145,6 +146,8 @@ func (m *Manager) Move(episodeID string, dir world.Direction) (*StepResult, erro
 	ep.Steps++
 
 	view := buildSceneView(scen, world.Pos{X: ep.PosX, Y: ep.PosY})
+	view.Step = ep.Steps
+	view.Status = "idle"
 	res := &StepResult{
 		EpisodeID: ep.ID,
 		Step:      ep.Steps,
@@ -199,6 +202,8 @@ func (m *Manager) inertItemStep(episodeID, tool string) (*StepResult, error) {
 	ep.Steps++
 	reason := "no_items_in_scenario" // v0.1 ships no items
 	view := buildSceneView(scen, world.Pos{X: ep.PosX, Y: ep.PosY})
+	view.Step = ep.Steps
+	view.Status = "idle"
 	res := &StepResult{
 		EpisodeID: ep.ID,
 		Step:      ep.Steps,
@@ -313,13 +318,23 @@ func (m *Manager) resolveActive(episodeID string) (*episodeRow, *world.Scenario,
 }
 
 // buildSceneView is the small adapter that picks goal vs no-goal and
-// hands off to world.BuildView.
+// hands off to world.BuildView. Callers fill in view.Step and
+// view.Status from the live episode — those fields are runtime state,
+// not derivable from the scenario alone.
 func buildSceneView(scen *world.Scenario, at world.Pos) world.View {
 	goal := world.Pos{X: scen.Goal[0], Y: scen.Goal[1]}
-	v := world.BuildView(&scen.Grid, at, &goal, scen.Observability)
-	v.Step = 0
-	v.Status = "idle"
-	return v
+	return world.BuildView(&scen.Grid, at, &goal, scen.Observability)
+}
+
+// viewStatus collapses an episodeRow into the View's status field.
+// "done" only on successful termination; "idle" otherwise (including
+// timeouts — the agent never gets a "you failed" status mid-View, by
+// design; terminal_reason on the StepResult conveys timeouts).
+func viewStatus(ep *episodeRow) string {
+	if ep.EndedAt != nil && ep.Success {
+		return "done"
+	}
+	return "idle"
 }
 
 func summarize(ep *episodeRow) *EpisodeSummary {

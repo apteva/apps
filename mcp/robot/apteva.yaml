@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: robot
 display_name: Robot
-version: 0.1.5
+version: 0.1.6
 description: |
   Agent navigation eval sandbox. 2D grid worlds the agent perceives
   locally and moves through one cell at a time. Episodes terminate on
