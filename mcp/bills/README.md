@@ -1,8 +1,24 @@
-# Bills (v0.1.3)
+# Bills (v0.1.4)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.1.4
+
+UX patch on the v0.1.3 LLM-OCR path — the dashboard's drop-PDF flow
+no longer prompts for a vendor when OCR can resolve one. Two changes:
+
+- **Backend**: `bills_create_from_file` and `POST /bills/from-file`
+  now treat `vendor_id` as optional when an OCR provider is
+  configured (let `resolveVendorFromExtraction` fill it). The "still
+  missing post-OCR" error message now points at the actual gap —
+  OCR disabled, OCR errored, or OCR ran but found no vendor.
+- **Panel**: dropping a PDF on the bills tab uploads immediately
+  instead of opening the vendor-pick modal. Modal still appears as a
+  fallback when the backend tags the response with `vendor_id
+  required` (i.e. OCR couldn't resolve). The "+ New" button (no file
+  context) still goes through the modal directly.
 
 ## What's in v0.1.3
 
