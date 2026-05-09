@@ -1,0 +1,74 @@
+schema: apteva-app/v1
+
+name: workflows
+display_name: Workflows
+version: 0.1.0
+description: |
+  Deterministic, on-demand pipelines. A workflow is a YAML/JSON
+  graph of steps (http, function, app, emit, branch). Triggered by
+  HTTP or manual invocation in v0.1; pair with the Jobs app for
+  cron schedules. Every run records a per-step audit log so you
+  can inspect, retry, and replay.
+
+  Strict separation from agents: workflows never call LLMs. If a
+  step needs judgment, it sends an event to an agent and the
+  workflow ends; the agent's reply triggers a downstream workflow.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/workflows
+tags: [workflows, automation, pipelines, deterministic, agent]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.apps.call
+    - platform.connections.execute
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: workflows_create
+      description: "Create a workflow. Args: name, source (YAML/JSON inline) OR (repo_id+repo_path), trigger?, status?."
+    - name: workflows_update
+      description: "Update a workflow's source, trigger, or status."
+    - name: workflows_delete
+      description: "Delete a workflow and cascade-drop its runs."
+    - name: workflows_list
+      description: "List workflows in the project. Optional filter by status, trigger_kind."
+    - name: workflows_get
+      description: "Fetch one workflow by id or name."
+    - name: workflows_run
+      description: "Synchronously execute a workflow. Args: name (or id), input (any JSON). Returns the run row + per-step trace."
+    - name: workflows_runs
+      description: "Recent runs for a workflow. Args: id (or name), limit (default 50, max 200)."
+    - name: workflows_run_status
+      description: "Full run + step trace. Args: run_id."
+    - name: workflows_replay
+      description: "Re-run a workflow against the same input. Args: run_id, from_step? (skip ahead to this step id)."
+    - name: workflows_cancel
+      description: "Cancel an in-flight run. Args: run_id."
+  ui_panels:
+    - slot: project.page
+      label: Workflows
+      icon: git-branch
+      entry: /ui/WorkflowsPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/workflows
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/workflows.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch

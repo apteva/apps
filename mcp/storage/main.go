@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: storage
 display_name: Storage
-version: 0.9.5
+version: 0.9.6
 description: |
   File storage with virtual folders, signed URLs, dedup. Pluggable
   backend: local disk by default, S3-compatible (AWS / R2 / B2 /
@@ -60,10 +60,10 @@ requires:
   integrations:
     - role: backend
       kind: integration
-      compatible_slugs: [aws-s3, cloudflare-r2, backblaze-b2]
+      compatible_slugs: [aws-s3, cloudflare-r2, backblaze-b2, hetzner-object-storage]
       required: false
       label: "S3-compatible backend (optional)"
-      hint: "Bind to host blobs in S3/R2/B2; otherwise blobs live on local disk."
+      hint: "Bind to host blobs in S3/R2/B2/Hetzner; otherwise blobs live on local disk."
 provides:
   http_routes:
     - prefix: /

@@ -138,6 +138,19 @@ func resolveS3Connection(creds *sdk.ConnectionCredentials) (*s3ResolvedConnectio
 			return nil, fmt.Errorf("s3 backend: backblaze-b2 connection %d has no region (e.g. us-west-004)", creds.ConnectionID)
 		}
 		out.endpoint = "s3." + out.region + ".backblazeb2.com"
+	case "hetzner-object-storage":
+		// Hetzner uses one endpoint per data centre at <region>.your-
+		// objectstorage.com. Three regions: fsn1 (Falkenstein, DE),
+		// nbg1 (Nuremberg, DE), hel1 (Helsinki, FI). The catalog
+		// presents these as a select + sets a default of nbg1, but
+		// we still validate here in case an operator hand-edits the
+		// connection JSON. SigV4 region naming: Hetzner doesn't care
+		// what we sign with, but minio-go demands a non-empty value
+		// — pass through whatever's in the credential.
+		if out.region == "" {
+			return nil, fmt.Errorf("s3 backend: hetzner-object-storage connection %d has no region (fsn1/nbg1/hel1)", creds.ConnectionID)
+		}
+		out.endpoint = out.region + ".your-objectstorage.com"
 	default:
 		// Generic S3-compatible (MinIO, Wasabi, custom Ceph). Catalog
 		// must surface an "endpoint" credential field for these.

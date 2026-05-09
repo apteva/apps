@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: storage
 display_name: Storage
-version: 0.9.5
+version: 0.9.6
 description: |
   File storage for Apteva agents and human teams. Upload bytes,
   organise into folders, share via signed URLs. Pluggable backend:
@@ -37,11 +37,11 @@ requires:
     # credentials + endpoint info.
     - role: backend
       kind: integration
-      compatible_slugs: [aws-s3, cloudflare-r2, backblaze-b2]
+      compatible_slugs: [aws-s3, cloudflare-r2, backblaze-b2, hetzner-object-storage]
       capabilities: []
       required: false
       label: "S3-compatible backend (optional)"
-      hint: "Bind an S3 / R2 / B2 connection to host blobs in the cloud. Without this, files live on local disk."
+      hint: "Bind an S3 / R2 / B2 / Hetzner connection to host blobs in the cloud. Without this, files live on local disk."
 
 provides:
   http_routes:
