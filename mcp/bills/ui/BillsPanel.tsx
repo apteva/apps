@@ -782,13 +782,58 @@ function BillsTab({
     setVendorPickOpen(true);
   };
 
-  const onDrop = (e: ReactDragEvent) => {
+  // submitFromFile uploads a file to /bills/from-file with the
+  // optional bill_json envelope (typically {} on first try, then
+  // {vendor_id} on the fallback retry after a vendor-pick prompt).
+  // Returns the new bill id on success.
+  const submitFromFile = async (
+    f: File,
+    body: Record<string, unknown> = {},
+  ): Promise<number> => {
+    const fd = new FormData();
+    fd.append("file", f);
+    fd.append("bill_json", JSON.stringify(body));
+    const r = await fetch(
+      `${API}/bills/from-file?${queryString()}`,
+      { method: "POST", credentials: "same-origin", body: fd },
+    );
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      const err = new Error(`${r.status}: ${text}`);
+      // Tag the error so onDrop can decide whether to fall back to a
+      // vendor pick (the backend tells us when vendor_id is the gap).
+      (err as Error & { vendorRequired?: boolean }).vendorRequired =
+        text.includes("vendor_id required");
+      throw err;
+    }
+    const j = await r.json();
+    return j.bill.id;
+  };
+
+  const onDrop = async (e: ReactDragEvent) => {
     e.preventDefault();
     setDragOver(false);
     const f = e.dataTransfer.files?.[0];
     if (!f) return;
-    setPendingFile(f);
-    setVendorPickOpen(true);
+    // First try: upload with no vendor_id and let OCR resolve the
+    // vendor (auto-create or auto-match by extracted email/name).
+    // This is the fast path when ocr_provider is set.
+    try {
+      const billId = await submitFromFile(f);
+      await loadList();
+      select(billId);
+    } catch (err) {
+      const e2 = err as Error & { vendorRequired?: boolean };
+      if (e2.vendorRequired) {
+        // OCR couldn't identify a vendor (or OCR is disabled). Hold the
+        // file in state and prompt for a vendor — the modal's "Create
+        // new" path covers the case where the vendor doesn't exist yet.
+        setPendingFile(f);
+        setVendorPickOpen(true);
+      } else {
+        alert(`Upload failed: ${e2.message}`);
+      }
+    }
   };
 
   const onVendorPicked = async (vendor: Vendor) => {
@@ -796,20 +841,10 @@ function BillsTab({
     try {
       let billId: number;
       if (pendingFile) {
-        // multipart → /bills/from-file with bill_json {vendor_id}
-        const fd = new FormData();
-        fd.append("file", pendingFile);
-        fd.append("bill_json", JSON.stringify({ vendor_id: vendor.id }));
-        const r = await fetch(
-          `${API}/bills/from-file?${queryString()}`,
-          { method: "POST", credentials: "same-origin", body: fd },
-        );
-        if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
-        const j = await r.json();
-        billId = j.bill.id;
+        billId = await submitFromFile(pendingFile, { vendor_id: vendor.id });
         setPendingFile(null);
       } else {
-        // No file — minimal bill, vendor only.
+        // No file — minimal bill, vendor only (the "+ New" flow).
         const j = await apiCall<{ bill: Bill }>("POST", "/bills", {
           vendor_id: vendor.id,
         });

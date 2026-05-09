@@ -1119,8 +1119,13 @@ func (a *App) toolBillsCreateFromFile(ctx *sdk.AppCtx, args map[string]any) (any
 	if _, err := resolveProjectFromArgs(args); err != nil {
 		return nil, err
 	}
-	if int64Arg(args, "vendor_id") == 0 {
-		return nil, errors.New("vendor_id required")
+	// vendor_id is OPTIONAL when an OCR provider is configured —
+	// resolveVendorFromExtraction will fill it from the extracted
+	// vendor email/name. When OCR is disabled, vendor_id is required
+	// and we error early before uploading bytes.
+	ocrEnabled := strings.TrimSpace(configString(ctx, "ocr_provider", "")) != ""
+	if int64Arg(args, "vendor_id") == 0 && !ocrEnabled {
+		return nil, errors.New("vendor_id required (OCR is disabled — set ocr_provider config to 'llm' or pass vendor_id)")
 	}
 	name := strArg(args, "name")
 	b64 := strArg(args, "content_base64")
@@ -2015,8 +2020,20 @@ func (a *App) handleHTTPBillsCreateFromFile(w http.ResponseWriter, r *http.Reque
 	}
 
 	if int64Arg(billBody, "vendor_id") == 0 {
+		hint := "pass vendor_id explicitly"
+		if extracted == nil {
+			// Either OCR is disabled or it errored out. Tell the user
+			// which so they can fix the right thing.
+			if strings.TrimSpace(configString(ctx, "ocr_provider", "")) == "" {
+				hint = "set ocr_provider config to 'llm' (and bind the vision_llm integration), or pass vendor_id explicitly"
+			} else if ocrErr != nil {
+				hint = fmt.Sprintf("OCR failed (%s) — pass vendor_id explicitly or fix the OCR provider", truncate(ocrErr.Error(), 120))
+			} else {
+				hint = "OCR ran but couldn't identify a vendor — pass vendor_id explicitly"
+			}
+		}
 		httpErr(w, http.StatusBadRequest,
-			fmt.Sprintf("vendor_id required (file uploaded as storage id %d; if you change your mind, delete via storage panel)", fileID))
+			fmt.Sprintf("vendor_id required: %s (file uploaded as storage id %d — delete via storage panel if you don't intend to retry)", hint, fileID))
 		return
 	}
 
