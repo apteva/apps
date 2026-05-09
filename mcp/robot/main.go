@@ -12,8 +12,8 @@
 package main
 
 import (
+	"embed"
 	"errors"
-	"os"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -24,10 +24,16 @@ import (
 	"github.com/apteva/apps/mcp/robot/world"
 )
 
+// scenariosFS bakes the JSON scenarios into the binary so the sidecar
+// can find them regardless of CWD when the platform spawns it.
+//
+//go:embed scenarios/*.json
+var scenariosFS embed.FS
+
 const manifestYAML = `schema: apteva-app/v1
 name: robot
 display_name: Robot
-version: 0.1.3
+version: 0.1.4
 description: Agent navigation eval sandbox. 2D grid worlds; partial observability; harness-decided termination (success or timeout).
 author: Apteva
 scopes: [project, global]
@@ -81,7 +87,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("robot app requires a db block")
 	}
-	scens, err := world.LoadAll(scenariosDir())
+	scens, err := world.LoadAll(scenariosFS, "scenarios")
 	if err != nil {
 		return err
 	}
@@ -109,16 +115,5 @@ func (a *App) MCPTools() []sdk.Tool {
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
-
-// scenariosDir resolves where scenarios/*.json live. The platform's
-// source-installer sets APTEVA_SCENARIOS_DIR to the absolute path
-// inside the cloned source tree; dev runs fall back to "scenarios/"
-// relative to the binary's CWD.
-func scenariosDir() string {
-	if v := os.Getenv("APTEVA_SCENARIOS_DIR"); v != "" {
-		return v
-	}
-	return "scenarios"
-}
 
 func main() { sdk.Run(&App{}) }

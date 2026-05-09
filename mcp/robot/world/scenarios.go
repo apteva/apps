@@ -3,23 +3,28 @@ package world
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
+	"path"
 	"sort"
 	"strings"
 )
 
-// LoadAll reads every *.json file in dir, finalises each, and returns
-// them keyed by id. Returns an error on the first malformed scenario
-// — better to fail closed at sidecar boot than silently drop a
-// scenario the operator expects to be installed.
-func LoadAll(dir string) (map[string]*Scenario, error) {
-	entries, err := os.ReadDir(dir)
+// LoadAll reads every *.json file under dir on the supplied fs.FS,
+// finalises each, and returns them keyed by id. Use embed.FS so the
+// scenarios travel with the binary — sidecars are spawned with a CWD
+// that's not the cloned source tree, so disk-relative loading would
+// silently return zero scenarios at runtime.
+//
+// dir is interpreted using io/fs path semantics (forward slashes,
+// relative to the embed root) — passing "." or "scenarios" both
+// work, depending on how the embed directive is shaped.
+func LoadAll(fsys fs.FS, dir string) (map[string]*Scenario, error) {
+	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return map[string]*Scenario{}, nil
-		}
-		return nil, fmt.Errorf("read scenarios dir: %w", err)
+		// Missing dir on the embed FS is a hard error — different from
+		// disk loading where "no scenarios installed yet" was a sane
+		// empty-result. Embedded sidecars must ship scenarios.
+		return nil, fmt.Errorf("read scenarios dir %q: %w", dir, err)
 	}
 	out := make(map[string]*Scenario)
 	var names []string
@@ -31,7 +36,7 @@ func LoadAll(dir string) (map[string]*Scenario, error) {
 	}
 	sort.Strings(names)
 	for _, n := range names {
-		body, err := os.ReadFile(filepath.Join(dir, n))
+		body, err := fs.ReadFile(fsys, path.Join(dir, n))
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", n, err)
 		}
