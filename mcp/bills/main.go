@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bills
 display_name: Bills
-version: 0.1.10
+version: 0.1.11
 description: |
   Vendors, bills, and outbound payments. The AP mirror of billing.
 author: Apteva
@@ -113,7 +113,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("bills mounted",
-		"version", "0.1.10",
+		"version", "0.1.11",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"ocr_provider", configString(ctx, "ocr_provider", "(disabled)"))
 	return nil
@@ -606,6 +606,11 @@ type Bill struct {
 	LineItems           []BillLineItem  `json:"line_items,omitempty"`
 	Payments            []*BillPayment  `json:"payments,omitempty"`
 	AuditLog            []BillAudit     `json:"audit_log,omitempty"`
+	// VendorName is populated by list/get queries (LEFT JOIN vendors).
+	// Not stored on the bills table — purely a denormalised display
+	// label so the UI can show "Acme Corp" instead of "Vendor #2"
+	// without an N+1 round-trip.
+	VendorName string `json:"vendor_name,omitempty"`
 }
 
 type BillLineItem struct {
@@ -2637,16 +2642,35 @@ func dbBillSearch(db *sql.DB, pid string, f billFilters) ([]*Bill, error) {
 		limit = 50
 	}
 	args = append(args, limit)
+	// Scope `where` clauses to the bills table to disambiguate from
+	// the vendors join.
+	scopedWhere := make([]string, len(where))
+	for i, w := range where {
+		// All current `where` entries reference unqualified columns
+		// that exist on bills only — prefix with `bills.` so the JOIN
+		// doesn't make them ambiguous.
+		if strings.Contains(w, ".") {
+			scopedWhere[i] = w
+		} else {
+			scopedWhere[i] = "bills." + w
+		}
+	}
 	rows, err := db.Query(
-		`SELECT id, project_id, vendor_id, provider, vendor_invoice_number, vendor_invoice_date,
-		        status, currency, subtotal_cents, tax_cents, total_cents, amount_paid_cents,
-		        due_date, notes, category, gl_account, attached_file_id,
-		        approved_at, approved_by, scheduled_for, scheduled_method,
-		        external_id, external_url, last_synced_at, metadata,
-		        paid_at, voided_at, disputed_at, created_at, updated_at
+		`SELECT bills.id, bills.project_id, bills.vendor_id, bills.provider,
+		        bills.vendor_invoice_number, bills.vendor_invoice_date,
+		        bills.status, bills.currency, bills.subtotal_cents, bills.tax_cents,
+		        bills.total_cents, bills.amount_paid_cents,
+		        bills.due_date, bills.notes, bills.category, bills.gl_account,
+		        bills.attached_file_id,
+		        bills.approved_at, bills.approved_by, bills.scheduled_for, bills.scheduled_method,
+		        bills.external_id, bills.external_url, bills.last_synced_at, bills.metadata,
+		        bills.paid_at, bills.voided_at, bills.disputed_at,
+		        bills.created_at, bills.updated_at,
+		        vendors.name
 		 FROM bills
-		 WHERE `+strings.Join(where, " AND ")+`
-		 ORDER BY updated_at DESC
+		 LEFT JOIN vendors ON vendors.id = bills.vendor_id
+		 WHERE `+strings.Join(scopedWhere, " AND ")+`
+		 ORDER BY bills.updated_at DESC
 		 LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
@@ -2654,28 +2678,90 @@ func dbBillSearch(db *sql.DB, pid string, f billFilters) ([]*Bill, error) {
 	defer rows.Close()
 	var out []*Bill
 	for rows.Next() {
-		b, err := scanBill(rows)
+		b, vname, err := scanBillWithVendor(rows)
 		if err != nil {
 			return nil, err
 		}
+		b.VendorName = vname
 		out = append(out, b)
 	}
 	return out, rows.Err()
 }
 
+// scanBillWithVendor scans the same columns as scanBill plus a
+// trailing nullable vendors.name (NULL when the LEFT JOIN finds no
+// row, e.g. the vendor was hard-deleted out from under a bill).
+func scanBillWithVendor(s rowScanner) (*Bill, string, error) {
+	var b Bill
+	var (
+		invNum, invDate                                 sql.NullString
+		dueDate, notes, category, gl                    sql.NullString
+		fileID                                          sql.NullInt64
+		approvedAt, approvedBy, scheduledFor, schedMeth sql.NullString
+		ext, extURL, syncedAt                           sql.NullString
+		meta                                            sql.NullString
+		paidAt, voidedAt, disputedAt                    sql.NullString
+		vendorName                                      sql.NullString
+	)
+	if err := s.Scan(
+		&b.ID, &b.ProjectID, &b.VendorID, &b.Provider, &invNum, &invDate,
+		&b.Status, &b.Currency, &b.SubtotalCents, &b.TaxCents, &b.TotalCents,
+		&b.AmountPaidCents,
+		&dueDate, &notes, &category, &gl, &fileID,
+		&approvedAt, &approvedBy, &scheduledFor, &schedMeth,
+		&ext, &extURL, &syncedAt, &meta,
+		&paidAt, &voidedAt, &disputedAt, &b.CreatedAt, &b.UpdatedAt,
+		&vendorName); err != nil {
+		return nil, "", err
+	}
+	b.VendorInvoiceNumber = invNum.String
+	b.VendorInvoiceDate = invDate.String
+	b.DueDate = dueDate.String
+	b.Notes = notes.String
+	b.Category = category.String
+	b.GLAccount = gl.String
+	if fileID.Valid {
+		v := fileID.Int64
+		b.AttachedFileID = &v
+	}
+	b.ApprovedAt = approvedAt.String
+	b.ApprovedBy = approvedBy.String
+	b.ScheduledFor = scheduledFor.String
+	b.ScheduledMethod = schedMeth.String
+	b.ExternalID = ext.String
+	b.ExternalURL = extURL.String
+	b.LastSyncedAt = syncedAt.String
+	b.PaidAt = paidAt.String
+	b.VoidedAt = voidedAt.String
+	b.DisputedAt = disputedAt.String
+	if meta.Valid {
+		b.Metadata = json.RawMessage(meta.String)
+	}
+	return &b, vendorName.String, nil
+}
+
 func dbBillGetByID(db *sql.DB, pid string, id int64) (*Bill, error) {
 	row := db.QueryRow(
-		`SELECT id, project_id, vendor_id, provider, vendor_invoice_number, vendor_invoice_date,
-		        status, currency, subtotal_cents, tax_cents, total_cents, amount_paid_cents,
-		        due_date, notes, category, gl_account, attached_file_id,
-		        approved_at, approved_by, scheduled_for, scheduled_method,
-		        external_id, external_url, last_synced_at, metadata,
-		        paid_at, voided_at, disputed_at, created_at, updated_at
+		`SELECT bills.id, bills.project_id, bills.vendor_id, bills.provider,
+		        bills.vendor_invoice_number, bills.vendor_invoice_date,
+		        bills.status, bills.currency, bills.subtotal_cents, bills.tax_cents,
+		        bills.total_cents, bills.amount_paid_cents,
+		        bills.due_date, bills.notes, bills.category, bills.gl_account,
+		        bills.attached_file_id,
+		        bills.approved_at, bills.approved_by, bills.scheduled_for, bills.scheduled_method,
+		        bills.external_id, bills.external_url, bills.last_synced_at, bills.metadata,
+		        bills.paid_at, bills.voided_at, bills.disputed_at,
+		        bills.created_at, bills.updated_at,
+		        vendors.name
 		 FROM bills
-		 WHERE id = ? AND project_id = ? AND deleted_at IS NULL`, id, pid)
-	b, err := scanBill(row)
+		 LEFT JOIN vendors ON vendors.id = bills.vendor_id
+		 WHERE bills.id = ? AND bills.project_id = ? AND bills.deleted_at IS NULL`, id, pid)
+	b, vname, err := scanBillWithVendor(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
+	}
+	if err == nil {
+		b.VendorName = vname
 	}
 	return b, err
 }

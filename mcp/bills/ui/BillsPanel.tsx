@@ -145,6 +145,7 @@ type BillStatus =
 interface Bill {
   id: number;
   vendor_id: number;
+  vendor_name?: string;
   provider: "local" | "mercury" | "wise" | "bill_dot_com";
   vendor_invoice_number?: string;
   vendor_invoice_date?: string;
@@ -1387,9 +1388,26 @@ function BillsTab({
             <button
               type="button"
               onClick={newBill}
-              className="px-2 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg whitespace-nowrap"
+              disabled={uploading}
+              className="px-2.5 py-1 text-sm bg-accent text-bg rounded hover:bg-accent/90 disabled:opacity-50 whitespace-nowrap inline-flex items-center gap-1.5"
+              title="Upload a PDF or image to draft a new bill"
             >
-              + New
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="h-3.5 w-3.5"
+                aria-hidden="true"
+              >
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+              {uploading ? "Uploading…" : "Upload"}
             </button>
           </div>
           <select
@@ -1452,7 +1470,7 @@ function BillsTab({
                 >
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-sm text-text font-medium truncate">
-                      {b.vendor_invoice_number || `#${b.id}`}
+                      {b.vendor_name || `Vendor #${b.vendor_id}`}
                     </span>
                     <span
                       className={`text-[10px] px-1.5 py-0.5 rounded ${
@@ -1463,7 +1481,9 @@ function BillsTab({
                     </span>
                   </div>
                   <div className="text-xs text-text-muted mt-0.5 flex items-center justify-between gap-2">
-                    <span className="truncate">Vendor #{b.vendor_id}</span>
+                    <span className="truncate">
+                      {b.vendor_invoice_number || `Bill #${b.id}`}
+                    </span>
                     <span className="text-text">
                       {fmtMoney(b.total_cents, b.currency)}
                     </span>
@@ -1545,7 +1565,7 @@ function BillDetail({
             </span>
           </h1>
           <p className="text-text-muted text-sm mt-1">
-            Vendor #{bill.vendor_id}
+            {bill.vendor_name || `Vendor #${bill.vendor_id}`}
             {bill.due_date ? ` · due ${fmtDate(bill.due_date)}` : ""}
             {bill.category ? ` · ${bill.category}` : ""}
           </p>
