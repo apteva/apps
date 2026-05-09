@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: storage
 display_name: Storage
-version: 0.9.4
+version: 0.9.5
 description: |
   File storage for Apteva agents and human teams. Upload bytes,
   organise into folders, share via signed URLs. Pluggable backend:
@@ -92,6 +92,14 @@ provides:
       description: Fetch one file's metadata by id (no bytes).
     - name: files_get_url
       description: Mint a signed time-limited URL the agent can hand out for sharing.
+    - name: files_get_content
+      description: |
+        Fetch the file's bytes inline as base64 (≤25 MB). For
+        cross-sidecar reads where the platform's HTTP-routed signed
+        URL doesn't resolve to the right storage instance — this call
+        goes through the binding so it always hits the bound storage
+        install. Use files_get_url for files >25 MB or for handing
+        URLs to third parties.
     - name: files_set_tags
       description: Append or remove tags on a file.
     - name: files_set_visibility

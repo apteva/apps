@@ -75,6 +75,13 @@ func (a *App) toolGetURLCtx(ctx context.Context, app *sdk.AppCtx, args map[strin
 	return a.toolGetURL(app, args)
 }
 
+func (a *App) toolGetContentCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	if _, err := a.requireFileAccess(ctx, app, args, "files.read"); err != nil {
+		return nil, err
+	}
+	return a.toolGetContent(app, args)
+}
+
 func (a *App) toolDeleteCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
 	if _, err := a.requireFileAccess(ctx, app, args, "files.delete"); err != nil {
 		return nil, err

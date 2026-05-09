@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: storage
 display_name: Storage
-version: 0.9.4
+version: 0.9.5
 description: |
   File storage with virtual folders, signed URLs, dedup. Pluggable
   backend: local disk by default, S3-compatible (AWS / R2 / B2 /
@@ -82,6 +82,7 @@ provides:
     - { name: files_upload,         description: "Upload bytes (base64). Returns id, url, sha256.", requires: files.write,  resource_from: "folder/{arg.folder?}" }
     - { name: files_get,            description: "Metadata for one file." }
     - { name: files_get_url,        description: "Mint a signed time-limited URL." }
+    - { name: files_get_content,    description: "Fetch bytes inline as base64 (≤25 MB). For cross-sidecar reads where signed-URL routing is fragile across multiple storage installs." }
     - { name: files_search,         description: "Filtered file list." }
     - { name: files_list,           description: "List files in one folder." }
     - { name: files_list_folders,   description: "List immediate child folders." }
@@ -244,6 +245,12 @@ func (a *App) MCPTools() []sdk.Tool {
 				"ttl_seconds": map[string]any{"type": "integer"},
 			}, []string{"id"}),
 			HandlerCtx: a.toolGetURLCtx,
+		},
+		{
+			Name:        "files_get_content",
+			Description: "Fetch the file's bytes inline as base64 (≤25 MB). Use this for cross-sidecar reads where the platform's HTTP-routed signed URL doesn't resolve to the right storage instance — this call goes through the binding (CallAppResult) so it always hits the storage install bound to the caller. For files >25 MB or for handing URLs to third parties (Deepgram, browsers, humans) use files_get_url instead. Args: id. Returns {id, name, content_type, size_bytes, content_base64}.",
+			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
+			HandlerCtx:  a.toolGetContentCtx,
 		},
 		{
 			Name:        "files_search",
@@ -640,6 +647,86 @@ func (a *App) toolGetURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// when public_url isn't configured (dev, no-network installs).
 	url := signedAbsoluteURL(ctx, f, sig, exp)
 	return map[string]any{"url": url, "expires_at": exp, "file_id": f.ID}, nil
+}
+
+// toolGetContent reads bytes inline and returns them as base64. Built
+// for the cross-sidecar case where the platform routes app HTTP paths
+// to one storage install but the bound storage is a different one —
+// e.g. a project has multiple storage installs and the bills sidecar
+// uploaded via the bound storage but its signed-URL fetch lands at
+// the wrong instance and 404s. CallAppResult always routes via
+// binding, so this tool is the route-correct way to get bytes back.
+//
+// 25 MB cap matches the multipart upload limit. Larger files should
+// use files_get_url + http.GET (the routing fragility is an operator
+// problem at that scale; the right fix is to consolidate to one
+// storage install per project).
+func (a *App) toolGetContent(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	f, err := dbGetByID(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if f == nil {
+		return nil, fmt.Errorf("file %d not found", id)
+	}
+
+	const maxBytes int64 = 25 << 20
+	if f.SizeBytes > maxBytes {
+		return nil, fmt.Errorf(
+			"file %d is %d bytes, exceeds %d-byte limit for files_get_content; use files_get_url for large files",
+			id, f.SizeBytes, maxBytes)
+	}
+
+	key := objectKey(f.SHA256, f.StorageKey)
+	var data []byte
+	if path, ok := backend().LocalPath(key); ok {
+		data, err = os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read disk: %w", err)
+		}
+	} else {
+		// S3 / remote backend — presign briefly + http.GET.
+		signedURL, err := backend().PresignGet(context.Background(), key, f.Name, f.ContentType, 5*time.Minute)
+		if err != nil {
+			return nil, fmt.Errorf("presign: %w", err)
+		}
+		req, err := http.NewRequest(http.MethodGet, signedURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		client := &http.Client{Timeout: 60 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("fetch presigned: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("presigned URL: status %d", resp.StatusCode)
+		}
+		data, err = io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+		if err != nil {
+			return nil, err
+		}
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("file %d exceeded %d bytes during read", id, maxBytes)
+	}
+
+	return map[string]any{
+		"id":             f.ID,
+		"name":           f.Name,
+		"content_type":   f.ContentType,
+		"size_bytes":     int64(len(data)),
+		"content_base64": base64.StdEncoding.EncodeToString(data),
+	}, nil
 }
 
 func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
