@@ -1,0 +1,132 @@
+schema: apteva-app/v1
+
+name: campaigns
+display_name: Campaigns
+version: 0.1.0
+description: |
+  Bulk-send orchestrator. Compose a campaign, target a CRM segment (or
+  a list — segments scoped to a list work too), schedule it, and the
+  jobs app drives the materialise → tick loop while messaging does the
+  actual sending. Per-recipient state, suppression respect, email
+  unsubscribe with HMAC-validated tokens, basic stats.
+
+  v0.1 ships authoring + scheduled-send + email unsubscribe. Open/click
+  tracking, drip sequences, recurring schedules, and A/B variants are
+  v0.2 polish on top of the same schema.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/campaigns
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/campaigns/icon.png
+tags: [campaigns, marketing, broadcast, email, sms]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.instances.read
+    - platform.apps.call
+  integrations:
+    - role: crm
+      kind: app
+      compatible_app_names: [crm]
+      capabilities: [contacts.list, segments.eval]
+      required: true
+      label: "CRM (audience source)"
+      hint: "Audience is a segment (or a list — wrap it in a segment with in_list). CRM owns contacts, segments, and lists."
+    - role: messaging
+      kind: app
+      compatible_app_names: [messaging]
+      capabilities: [message.send, suppression.check]
+      required: true
+      label: "Messaging (sender)"
+      hint: "Every recipient is sent via messaging.send_message; suppression respect goes through messaging.suppression_check."
+    - role: jobs
+      kind: app
+      compatible_app_names: [jobs]
+      capabilities: [job.schedule]
+      required: true
+      label: "Jobs (scheduler)"
+      hint: "Drives the materialise → tick → reconcile loop. Without it campaigns can't progress past 'scheduled'."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    # authoring
+    - name: campaigns_create
+      description: Create a new campaign in draft state.
+    - name: campaigns_list
+      description: List campaigns with filter on status / channel.
+    - name: campaigns_get
+      description: Fetch one campaign with stats.
+    - name: campaigns_update
+      description: Partial-patch a draft / paused campaign.
+    - name: campaigns_clone
+      description: Duplicate a campaign as a new draft.
+    - name: campaigns_delete
+      description: Archive a campaign (hard-delete only allowed when status=draft).
+    - name: campaigns_send_test
+      description: Send a single test message to a contact, logged but not threaded.
+    # lifecycle
+    - name: campaigns_schedule
+      description: Move a draft to scheduled at a specific timestamp.
+    - name: campaigns_start_now
+      description: Move a draft / scheduled campaign straight to materialising.
+    - name: campaigns_pause
+      description: Pause a sending campaign — the tick loop stops claiming new recipients.
+    - name: campaigns_resume
+      description: Resume a paused campaign.
+    - name: campaigns_cancel
+      description: Cancel a campaign permanently. Pending recipients become 'skipped'.
+    # read
+    - name: campaigns_recipients
+      description: List a campaign's recipients with filter on status.
+    - name: campaigns_stats
+      description: Aggregate counts per status — drives the panel progress bar.
+  ui_panels:
+    - slot: project.page
+      label: Campaigns
+      icon: send
+      entry: /ui/CampaignsPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/campaigns
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/campaigns.db
+  migrations: migrations/
+
+config_schema:
+  - name: default_batch_size
+    type: number
+    default: 100
+    label: Default tick batch size
+    description: Number of recipients claimed per tick. Per-campaign override via campaign.batch_size.
+  - name: default_tick_seconds
+    type: number
+    default: 60
+    label: Default tick interval (seconds)
+    description: How often the tick job runs while the campaign is sending. Per-campaign override.
+  - name: unsubscribe_secret
+    type: text
+    label: Unsubscribe token signing secret
+    description: |
+      Secret used to HMAC-sign unsubscribe tokens. If unset a random one is generated at first use and persisted in the
+      campaigns DB. Setting it explicitly lets multiple replicas verify each other's tokens.
+  - name: public_base_url
+    type: text
+    label: Public base URL for tracking links
+    description: |
+      Base URL the unsubscribe / tracking links point at. Defaults to the platform's reverse-proxy URL when blank.
+
+upgrade_policy: auto-patch
