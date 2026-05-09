@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.4.0
+version: 0.5.0
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -105,6 +105,22 @@ provides:
       description: Remove a contact from a list.
     - name: lists_membership
       description: Which active lists is a contact on?
+    - name: segments_create
+      description: Create a saved filter (dynamic or static).
+    - name: segments_list
+      description: List segments in this project.
+    - name: segments_get
+      description: Fetch one segment with its definition.
+    - name: segments_update
+      description: Partial-patch a segment.
+    - name: segments_delete
+      description: Archive a segment.
+    - name: segments_eval
+      description: Evaluate a segment and return matching contact IDs.
+    - name: segments_count
+      description: TTL-cached segment size.
+    - name: segments_materialise
+      description: Freeze a segment's dynamic membership into a snapshot.
   ui_panels:
     - slot: project.page
       label: Contacts
@@ -173,6 +189,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Lists CRUD + membership management.
 		{Pattern: "/lists", Handler: a.handleHTTPLists},
 		{Pattern: "/lists/", Handler: a.handleHTTPListItem},
+		// Segments CRUD + eval + materialise.
+		{Pattern: "/segments", Handler: a.handleHTTPSegments},
+		{Pattern: "/segments/", Handler: a.handleHTTPSegmentItem},
 	}
 }
 
@@ -607,6 +626,84 @@ func (a *App) MCPTools() []sdk.Tool {
 				"contact_id": map[string]any{"type": "integer"},
 			}, []string{"contact_id"}),
 			Handler: a.toolListsMembership,
+		},
+
+		// ─── segments tools ────────────────────────────────────────
+		// Saved filters over contacts. Definition is a JSON array of
+		// predicate entries (column-level {field,op,value} or synthetic
+		// {predicate, ...}); v0.5 supports tag_in/not_in, attribute,
+		// last_activity_within, channel_present, in_list/not_in_list,
+		// not_in_segment. Two kinds: dynamic (re-evaluates on every
+		// call), static (frozen snapshot via segments_materialise).
+		{
+			Name:        "segments_create",
+			Description: "Create a segment. Args: name, kind (dynamic|static, default dynamic), description?, list_id? (scopes the segment to a list — definition is implicitly AND-ed with in_list), definition (predicate array).",
+			InputSchema: schemaObject(map[string]any{
+				"name":        map[string]any{"type": "string"},
+				"kind":        map[string]any{"type": "string"},
+				"description": map[string]any{"type": "string"},
+				"list_id":     map[string]any{"type": "integer"},
+				"definition":  map[string]any{"type": "array"},
+			}, []string{"name"}),
+			Handler: a.toolSegmentsCreate,
+		},
+		{
+			Name:        "segments_list",
+			Description: "List segments in this project. Args: include_archived? (default false).",
+			InputSchema: schemaObject(map[string]any{
+				"include_archived": map[string]any{"type": "boolean"},
+			}, nil),
+			Handler: a.toolSegmentsList,
+		},
+		{
+			Name:        "segments_get",
+			Description: "Fetch one segment by id, including its definition.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolSegmentsGet,
+		},
+		{
+			Name:        "segments_update",
+			Description: "Partial-patch a segment (name, description, kind, list_id, definition). Mutating definition busts the cached count.",
+			InputSchema: schemaObject(map[string]any{
+				"id":    map[string]any{"type": "integer"},
+				"patch": map[string]any{"type": "object"},
+			}, []string{"id", "patch"}),
+			Handler: a.toolSegmentsUpdate,
+		},
+		{
+			Name:        "segments_delete",
+			Description: "Archive a segment (soft-delete). The snapshot rows stay until the segment is hard-deleted.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolSegmentsDelete,
+		},
+		{
+			Name:        "segments_eval",
+			Description: "Evaluate a segment and return matching contact IDs. Dynamic kind re-runs the filter; static returns the snapshot. Args: id, limit? (default 200, max 5000).",
+			InputSchema: schemaObject(map[string]any{
+				"id":    map[string]any{"type": "integer"},
+				"limit": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolSegmentsEval,
+		},
+		{
+			Name:        "segments_count",
+			Description: "Cheap segment size — TTL-cached for dynamic segments (5min), exact for static. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolSegmentsCount,
+		},
+		{
+			Name:        "segments_materialise",
+			Description: "Freeze a segment's current dynamic membership into a static snapshot. Used by campaigns at start-time so the audience doesn't shift mid-send. Promotes the segment to kind=static. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolSegmentsMaterialise,
 		},
 	}
 }

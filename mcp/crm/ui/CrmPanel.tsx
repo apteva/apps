@@ -239,7 +239,7 @@ function extractPossibleMatchIds(activities: Activity[]): string[] {
   return [];
 }
 
-type Tab = "contacts" | "lists" | "settings";
+type Tab = "contacts" | "lists" | "segments" | "settings";
 
 interface List {
   id: number;
@@ -251,6 +251,32 @@ interface List {
   inbound_route_pattern?: string;
   archived_at?: string;
   member_count?: number;
+}
+
+// Segment definition is an array of predicate entries. Each is either
+// a column-level filter ({field, op, value}) or a synthetic predicate
+// ({predicate, ...args}). The panel editor produces the synthetic
+// shape — the simpler case of "agent crafts a JSON spec by hand" goes
+// straight through the MCP layer.
+type SegmentPredicate =
+  | { field: string; op?: string; value?: unknown }
+  | { predicate: "tag_in" | "tag_not_in"; tags: string[] }
+  | { predicate: "attribute"; key: string; op?: string; value?: unknown }
+  | { predicate: "last_activity_within"; days: number; kind?: string }
+  | { predicate: "channel_present"; kind: "email" | "phone" }
+  | { predicate: "in_list" | "not_in_list"; list_id: number }
+  | { predicate: "not_in_segment"; segment_id: number };
+
+interface Segment {
+  id: number;
+  name: string;
+  description?: string;
+  kind: "dynamic" | "static";
+  list_id?: number | null;
+  definition?: SegmentPredicate[];
+  cached_count?: number;
+  cached_at?: string;
+  archived_at?: string;
 }
 
 export default function CrmPanel({ projectId, installId }: NativePanelProps) {
@@ -274,6 +300,9 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const [contactLists, setContactLists] = useState<List[]>([]);
   const [newListOpen, setNewListOpen] = useState(false);
   const [editListId, setEditListId] = useState<number | null>(null);
+  const [segments, setSegments] = useState<Segment[]>([]);
+  const [editSegmentId, setEditSegmentId] = useState<number | "new" | null>(null);
+  const [segmentPreview, setSegmentPreview] = useState<{ id: number; contacts: Contact[]; total: number } | null>(null);
 
   // Auto-dismiss the error toast after 5s. Manual dismiss via the
   // X button is also wired up below; this prevents stale errors
@@ -340,10 +369,20 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     }
   }, [api]);
 
+  const loadSegments = useCallback(async () => {
+    try {
+      const r = await api<{ segments?: Segment[] }>("GET", "/segments");
+      setSegments(r.segments || []);
+    } catch (e) {
+      // Best-effort.
+    }
+  }, [api]);
+
   // Initial load.
   useEffect(() => { loadList(""); }, [loadList]);
   useEffect(() => { loadAttrDefs(); }, [loadAttrDefs]);
   useEffect(() => { loadLists(); }, [loadLists]);
+  useEffect(() => { loadSegments(); }, [loadSegments]);
 
   // Debounced search.
   useEffect(() => {
@@ -381,6 +420,12 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
           loadContactLists(detail.id);
         }
       }
+    }
+    if (
+      ev.topic === "segment.created" || ev.topic === "segment.updated" ||
+      ev.topic === "segment.archived" || ev.topic === "segment.materialised"
+    ) {
+      loadSegments();
     }
   });
 
@@ -534,6 +579,55 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     });
   };
 
+  const handleSaveSegment = async (id: number | "new", patch: Partial<Segment>) => {
+    try {
+      if (id === "new") {
+        await api("POST", "/segments", patch);
+      } else {
+        await api("PATCH", `/segments/${id}`, patch);
+      }
+      await loadSegments();
+      setEditSegmentId(null);
+    } catch (e) {
+      setErrorToast("Save segment failed: " + (e as Error).message);
+    }
+  };
+
+  const handleArchiveSegment = (s: Segment) => {
+    setConfirmDialog({
+      title: "Archive segment",
+      message: `Archive "${s.name}"? Snapshot rows are kept; the segment just stops appearing.`,
+      confirmLabel: "Archive",
+      destructive: true,
+      onConfirm: async () => {
+        try {
+          await api("DELETE", `/segments/${s.id}`);
+          await loadSegments();
+        } catch (e) {
+          setErrorToast("Archive segment failed: " + (e as Error).message);
+        }
+      },
+    });
+  };
+
+  const handleMaterialiseSegment = async (s: Segment) => {
+    try {
+      await api("POST", `/segments/${s.id}/materialise`);
+      await loadSegments();
+    } catch (e) {
+      setErrorToast("Materialise failed: " + (e as Error).message);
+    }
+  };
+
+  const handlePreviewSegment = async (s: Segment) => {
+    try {
+      const r = await api<{ contacts?: Contact[]; count?: number }>("GET", `/segments/${s.id}/members`, undefined, { limit: "20" });
+      setSegmentPreview({ id: s.id, contacts: r.contacts || [], total: r.count || 0 });
+    } catch (e) {
+      setErrorToast("Preview failed: " + (e as Error).message);
+    }
+  };
+
   const toggleContactList = async (l: List, on: boolean) => {
     if (!detail) return;
     try {
@@ -631,6 +725,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       <nav className="flex gap-1 border-b border-border px-3 pt-2 text-xs">
         <TabButton active={tab === "contacts"} onClick={() => setTab("contacts")}>Contacts</TabButton>
         <TabButton active={tab === "lists"} onClick={() => setTab("lists")}>Lists</TabButton>
+        <TabButton active={tab === "segments"} onClick={() => setTab("segments")}>Segments</TabButton>
         <TabButton active={tab === "settings"} onClick={() => setTab("settings")}>Settings</TabButton>
       </nav>
 
@@ -828,6 +923,18 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
             onEdit={(id) => setEditListId(id)}
             onArchive={handleArchiveList}
           />
+        ) : tab === "segments" ? (
+          <SegmentsTab
+            segments={segments}
+            lists={lists}
+            preview={segmentPreview}
+            onCreate={() => setEditSegmentId("new")}
+            onEdit={(id) => setEditSegmentId(id)}
+            onArchive={handleArchiveSegment}
+            onMaterialise={handleMaterialiseSegment}
+            onPreview={handlePreviewSegment}
+            onClosePreview={() => setSegmentPreview(null)}
+          />
         ) : (
           <SettingsTab
             messagingTool={messagingTool}
@@ -891,6 +998,16 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
           editing={lists.find((l) => l.id === editListId) || null}
           onCancel={() => setEditListId(null)}
           onSubmit={(patch) => handleSaveList(editListId, patch)}
+        />
+      )}
+
+      {editSegmentId !== null && (
+        <SegmentEditorModal
+          editing={editSegmentId === "new" ? null : (segments.find((s) => s.id === editSegmentId) || null)}
+          lists={lists}
+          segments={segments}
+          onCancel={() => setEditSegmentId(null)}
+          onSubmit={(patch) => handleSaveSegment(editSegmentId, patch)}
         />
       )}
 
@@ -2059,4 +2176,460 @@ function ListEditorModal({ existing, editing, onCancel, onSubmit }: {
       </p>
     </ModalShell>
   );
+}
+
+// ─── Segments ─────────────────────────────────────────────────────
+
+function SegmentsTab({ segments, lists, preview, onCreate, onEdit, onArchive, onMaterialise, onPreview, onClosePreview }: {
+  segments: Segment[];
+  lists: List[];
+  preview: { id: number; contacts: Contact[]; total: number } | null;
+  onCreate: () => void;
+  onEdit: (id: number) => void;
+  onArchive: (s: Segment) => void;
+  onMaterialise: (s: Segment) => void;
+  onPreview: (s: Segment) => void;
+  onClosePreview: () => void;
+}) {
+  const active = segments.filter((s) => !s.archived_at);
+  const listById = useMemo(() => new Map(lists.map((l) => [l.id, l])), [lists]);
+  return (
+    <div className="p-6 max-w-4xl space-y-4">
+      <header className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl text-text font-semibold">Segments</h1>
+          <p className="text-text-muted text-sm">
+            Saved filters over contacts. Dynamic segments re-evaluate on each call; static segments freeze the membership for campaign sends.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onCreate}
+          className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg whitespace-nowrap"
+        >+ New segment</button>
+      </header>
+
+      {active.length === 0 ? (
+        <div className="border border-border rounded p-4 text-sm text-text-muted">
+          No segments yet. Create one to slice your contacts by tag, attribute, list membership, or recent activity.
+        </div>
+      ) : (
+        <ul className="divide-y divide-border border border-border rounded">
+          {active.map((s) => {
+            const list = s.list_id ? listById.get(s.list_id) : null;
+            return (
+              <li key={s.id} className="px-3 py-2">
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-text font-medium truncate">{s.name}</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${s.kind === "static" ? "bg-amber/15 text-amber" : "bg-accent/10 text-accent"}`}>
+                        {s.kind}
+                      </span>
+                      {list && <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted">in {list.name}</span>}
+                      {typeof s.cached_count === "number" && (
+                        <span className="text-[10px] text-text-dim">~ {s.cached_count} matches</span>
+                      )}
+                    </div>
+                    {s.description && <div className="text-xs text-text-muted truncate mt-0.5">{s.description}</div>}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onPreview(s)}
+                    className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
+                  >Preview</button>
+                  <button
+                    type="button"
+                    onClick={() => onMaterialise(s)}
+                    title="Freeze membership into a static snapshot"
+                    className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
+                  >Snapshot</button>
+                  <button
+                    type="button"
+                    onClick={() => onEdit(s.id)}
+                    className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
+                  >Edit</button>
+                  <button
+                    type="button"
+                    onClick={() => onArchive(s)}
+                    className="text-xs px-2 py-1 text-red border border-red/50 rounded hover:bg-red/10"
+                  >Archive</button>
+                </div>
+                {preview && preview.id === s.id && (
+                  <div className="mt-2 border border-border rounded bg-bg-input/30 p-2">
+                    <div className="flex items-center justify-between text-xs text-text-dim mb-1">
+                      <span>Preview — {preview.total} match{preview.total === 1 ? "" : "es"}, showing {preview.contacts.length}</span>
+                      <button type="button" onClick={onClosePreview} className="hover:text-text">×</button>
+                    </div>
+                    {preview.contacts.length === 0 ? (
+                      <p className="text-text-muted text-xs">No contacts match.</p>
+                    ) : (
+                      <ul className="text-xs space-y-0.5">
+                        {preview.contacts.map((c) => (
+                          <li key={c.id} className="text-text truncate">{displayName(c)} — <span className="text-text-dim">{secondaryLine(c) || c.primary_email || c.primary_phone || "—"}</span></li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <p className="text-text-dim text-xs">
+        Dynamic segments re-evaluate on every call (TTL-cached count for 5min). Static segments hold a frozen snapshot — the kind a campaign uses so the audience doesn't shift mid-send.
+      </p>
+    </div>
+  );
+}
+
+// SegmentEditorModal — predicate builder. Each row is one entry in
+// the JSON definition: pick a kind (column / synthetic predicate),
+// fill in args. v0.5 keeps the UI to a flat AND list; OR/NOT trees
+// and richer composition come later if real demand emerges.
+
+type PredicateKind =
+  | "field"
+  | "tag_in" | "tag_not_in"
+  | "attribute"
+  | "last_activity_within"
+  | "channel_present"
+  | "in_list" | "not_in_list"
+  | "not_in_segment";
+
+interface DraftPredicate {
+  k: PredicateKind;
+  // Free-form payload mirroring the chosen kind. Only fields used by
+  // each kind are read at submit time.
+  field?: string;
+  op?: string;
+  value?: string;
+  tags?: string;       // comma-separated
+  key?: string;
+  days?: string;
+  kind?: string;
+  list_id?: number;
+  segment_id?: number;
+}
+
+const FIELD_OPTIONS = ["first_name", "last_name", "display_name", "company", "job_title", "primary_email", "primary_phone", "status", "source"];
+const FIELD_OPS = ["eq", "neq", "contains", "starts_with", "is_null", "in"];
+
+function predicateToDraft(p: SegmentPredicate): DraftPredicate {
+  if ("field" in p) {
+    return { k: "field", field: p.field, op: p.op || "eq", value: p.value == null ? "" : String(p.value) };
+  }
+  switch (p.predicate) {
+    case "tag_in": return { k: "tag_in", tags: (p.tags || []).join(", ") };
+    case "tag_not_in": return { k: "tag_not_in", tags: (p.tags || []).join(", ") };
+    case "attribute": return { k: "attribute", key: p.key, op: p.op || "eq", value: p.value == null ? "" : String(p.value) };
+    case "last_activity_within": return { k: "last_activity_within", days: String(p.days), kind: p.kind || "" };
+    case "channel_present": return { k: "channel_present", kind: p.kind };
+    case "in_list": return { k: "in_list", list_id: p.list_id };
+    case "not_in_list": return { k: "not_in_list", list_id: p.list_id };
+    case "not_in_segment": return { k: "not_in_segment", segment_id: p.segment_id };
+  }
+  return { k: "field" };
+}
+
+function draftToPredicate(d: DraftPredicate): SegmentPredicate | null {
+  switch (d.k) {
+    case "field": {
+      if (!d.field) return null;
+      const value = d.op === "in" ? (d.value || "").split(",").map((s) => s.trim()).filter(Boolean) : (d.value ?? "");
+      return { field: d.field, op: d.op || "eq", value };
+    }
+    case "tag_in":
+    case "tag_not_in": {
+      const tags = (d.tags || "").split(",").map((s) => s.trim()).filter(Boolean);
+      if (tags.length === 0) return null;
+      return { predicate: d.k, tags };
+    }
+    case "attribute": {
+      if (!d.key) return null;
+      return { predicate: "attribute", key: d.key, op: d.op || "eq", value: d.value ?? "" };
+    }
+    case "last_activity_within": {
+      const days = Number(d.days || 0);
+      if (!days) return null;
+      const out: SegmentPredicate = { predicate: "last_activity_within", days };
+      if (d.kind) (out as { kind?: string }).kind = d.kind;
+      return out;
+    }
+    case "channel_present": {
+      if (d.kind !== "email" && d.kind !== "phone") return null;
+      return { predicate: "channel_present", kind: d.kind };
+    }
+    case "in_list":
+    case "not_in_list": {
+      if (!d.list_id) return null;
+      return { predicate: d.k, list_id: d.list_id };
+    }
+    case "not_in_segment": {
+      if (!d.segment_id) return null;
+      return { predicate: "not_in_segment", segment_id: d.segment_id };
+    }
+  }
+  return null;
+}
+
+function SegmentEditorModal({ editing, lists, segments, onCancel, onSubmit }: {
+  editing?: Segment | null;
+  lists: List[];
+  segments: Segment[];
+  onCancel: () => void;
+  onSubmit: (patch: Partial<Segment>) => void | Promise<void>;
+}) {
+  const isEdit = !!editing;
+  const [name, setName] = useState(editing?.name || "");
+  const [description, setDescription] = useState(editing?.description || "");
+  const [kind, setKind] = useState<"dynamic" | "static">((editing?.kind as "dynamic" | "static") || "dynamic");
+  const [listID, setListID] = useState<number | "">(editing?.list_id ?? "");
+  const [predicates, setPredicates] = useState<DraftPredicate[]>(
+    (editing?.definition || []).map(predicateToDraft)
+  );
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (!name.trim()) return;
+    const def = predicates.map(draftToPredicate).filter((p): p is SegmentPredicate => p !== null);
+    setBusy(true);
+    try {
+      const patch: Partial<Segment> = {
+        name: name.trim(),
+        description: description.trim(),
+        kind,
+        list_id: listID === "" ? null : Number(listID),
+        definition: def,
+      };
+      await onSubmit(patch);
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <ModalShell
+      title={isEdit ? `Edit segment — ${editing!.name}` : "New segment"}
+      onCancel={onCancel}
+      footer={
+        <>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={busy || !name.trim()}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+          >{busy ? "Saving…" : (isEdit ? "Save" : "Create")}</button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input disabled:opacity-50"
+          >Cancel</button>
+        </>
+      }
+    >
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-24">Name</label>
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          autoFocus
+          placeholder="EU trial users"
+          className="flex-1 bg-bg-input border border-border rounded px-2 py-1"
+        />
+      </div>
+      <div className="flex items-start gap-2">
+        <label className="text-text-muted w-24 mt-1">Description</label>
+        <textarea
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          rows={2}
+          className="flex-1 bg-bg-input border border-border rounded px-2 py-1"
+        />
+      </div>
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-24">Kind</label>
+        <select
+          value={kind}
+          onChange={(e) => setKind(e.target.value as "dynamic" | "static")}
+          className="bg-bg-input border border-border rounded px-2 py-1"
+        >
+          <option value="dynamic">dynamic — re-evaluates each call</option>
+          <option value="static">static — frozen snapshot</option>
+        </select>
+      </div>
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-24">In list</label>
+        <select
+          value={listID === "" ? "" : String(listID)}
+          onChange={(e) => setListID(e.target.value === "" ? "" : Number(e.target.value))}
+          className="bg-bg-input border border-border rounded px-2 py-1"
+        >
+          <option value="">— project-wide —</option>
+          {lists.filter((l) => !l.archived_at).map((l) => (
+            <option key={l.id} value={l.id}>{l.name}</option>
+          ))}
+        </select>
+      </div>
+      <hr className="border-border" />
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <h3 className="text-xs uppercase tracking-wide text-text-dim">Filters (all must match)</h3>
+          <button
+            type="button"
+            onClick={() => setPredicates((p) => [...p, { k: "field", field: "company", op: "eq", value: "" }])}
+            className="text-xs px-2 py-0.5 border border-border rounded hover:bg-bg-input"
+          >+ Add filter</button>
+        </div>
+        {predicates.length === 0 ? (
+          <p className="text-text-dim text-xs">No filters yet. The segment will match every contact in scope.</p>
+        ) : (
+          <ul className="space-y-2">
+            {predicates.map((p, i) => (
+              <li key={i} className="border border-border rounded p-2 space-y-1.5">
+                <div className="flex items-center gap-2 text-xs">
+                  <select
+                    value={p.k}
+                    onChange={(e) => {
+                      const k = e.target.value as PredicateKind;
+                      setPredicates((arr) => arr.map((x, j) => j === i ? { k } : x));
+                    }}
+                    className="bg-bg-input border border-border rounded px-1.5 py-0.5"
+                  >
+                    <option value="field">column…</option>
+                    <option value="tag_in">tag in…</option>
+                    <option value="tag_not_in">tag not in…</option>
+                    <option value="attribute">attribute…</option>
+                    <option value="last_activity_within">activity within last…</option>
+                    <option value="channel_present">has channel…</option>
+                    <option value="in_list">in list…</option>
+                    <option value="not_in_list">not in list…</option>
+                    <option value="not_in_segment">not in segment…</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => setPredicates((arr) => arr.filter((_, j) => j !== i))}
+                    className="ml-auto text-text-dim hover:text-red"
+                    title="Remove filter"
+                  >×</button>
+                </div>
+                <PredicateRow
+                  draft={p}
+                  lists={lists}
+                  segments={segments}
+                  excludeSegmentId={editing?.id}
+                  onChange={(patch) => setPredicates((arr) => arr.map((x, j) => j === i ? { ...x, ...patch } : x))}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </ModalShell>
+  );
+}
+
+function PredicateRow({ draft, lists, segments, excludeSegmentId, onChange }: {
+  draft: DraftPredicate;
+  lists: List[];
+  segments: Segment[];
+  excludeSegmentId?: number;
+  onChange: (patch: Partial<DraftPredicate>) => void;
+}) {
+  const cls = "bg-bg-input border border-border rounded px-1.5 py-0.5 text-xs";
+  switch (draft.k) {
+    case "field":
+      return (
+        <div className="flex items-center gap-1.5">
+          <select value={draft.field || "company"} onChange={(e) => onChange({ field: e.target.value })} className={cls}>
+            {FIELD_OPTIONS.map((f) => <option key={f} value={f}>{f}</option>)}
+          </select>
+          <select value={draft.op || "eq"} onChange={(e) => onChange({ op: e.target.value })} className={cls}>
+            {FIELD_OPS.map((o) => <option key={o} value={o}>{o}</option>)}
+          </select>
+          {draft.op !== "is_null" && (
+            <input
+              type="text"
+              value={draft.value || ""}
+              onChange={(e) => onChange({ value: e.target.value })}
+              placeholder={draft.op === "in" ? "comma,separated" : "value"}
+              className={`${cls} flex-1`}
+            />
+          )}
+        </div>
+      );
+    case "tag_in":
+    case "tag_not_in":
+      return (
+        <input
+          type="text"
+          value={draft.tags || ""}
+          onChange={(e) => onChange({ tags: e.target.value })}
+          placeholder="enterprise, trial"
+          className={`${cls} w-full`}
+        />
+      );
+    case "attribute":
+      return (
+        <div className="flex items-center gap-1.5">
+          <input type="text" value={draft.key || ""} onChange={(e) => onChange({ key: e.target.value })} placeholder="lead_score" className={`${cls} flex-1`} />
+          <select value={draft.op || "eq"} onChange={(e) => onChange({ op: e.target.value })} className={cls}>
+            {["eq", "neq", "gt", "gte", "lt", "lte", "contains", "is_null"].map((o) => <option key={o} value={o}>{o}</option>)}
+          </select>
+          {draft.op !== "is_null" && (
+            <input type="text" value={draft.value || ""} onChange={(e) => onChange({ value: e.target.value })} placeholder="value" className={`${cls} flex-1`} />
+          )}
+        </div>
+      );
+    case "last_activity_within":
+      return (
+        <div className="flex items-center gap-1.5">
+          <input type="number" value={draft.days || ""} onChange={(e) => onChange({ days: e.target.value })} placeholder="30" className={`${cls} w-24`} />
+          <span className="text-text-dim text-xs">days</span>
+          <select value={draft.kind || ""} onChange={(e) => onChange({ kind: e.target.value })} className={cls}>
+            <option value="">any kind</option>
+            {["email_received", "email_sent", "sms_received", "sms_sent", "whatsapp_received", "whatsapp_sent", "call", "meeting", "note"].map((k) => (
+              <option key={k} value={k}>{k}</option>
+            ))}
+          </select>
+        </div>
+      );
+    case "channel_present":
+      return (
+        <select value={draft.kind || ""} onChange={(e) => onChange({ kind: e.target.value })} className={cls}>
+          <option value="">— pick channel —</option>
+          <option value="email">email</option>
+          <option value="phone">phone</option>
+        </select>
+      );
+    case "in_list":
+    case "not_in_list":
+      return (
+        <select
+          value={draft.list_id || ""}
+          onChange={(e) => onChange({ list_id: Number(e.target.value) })}
+          className={`${cls} w-full`}
+        >
+          <option value="">— pick list —</option>
+          {lists.filter((l) => !l.archived_at).map((l) => (
+            <option key={l.id} value={l.id}>{l.name}</option>
+          ))}
+        </select>
+      );
+    case "not_in_segment":
+      return (
+        <select
+          value={draft.segment_id || ""}
+          onChange={(e) => onChange({ segment_id: Number(e.target.value) })}
+          className={`${cls} w-full`}
+        >
+          <option value="">— pick segment —</option>
+          {segments.filter((s) => !s.archived_at && s.id !== excludeSegmentId).map((s) => (
+            <option key={s.id} value={s.id}>{s.name}{s.kind === "static" ? " (snapshot)" : ""}</option>
+          ))}
+        </select>
+      );
+  }
+  return null;
 }
