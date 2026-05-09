@@ -722,3 +722,71 @@ func TestUpsert_RejectsWithoutProjectID(t *testing.T) {
 		t.Errorf("error %q should mention project_id", err.Error())
 	}
 }
+
+// dbBillCreate previously always recomputed totals from line items
+// — bad when OCR pulls correct header totals but only a subset of
+// line items (typical on multi-page or VAT-summary-style invoices).
+// v0.1.10 makes caller-supplied header totals take precedence.
+func TestBillCreate_HeaderTotalsOverrideLineItemsSum(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	v := mustVendor(t, ctx, "ap@aws.example", "AWS")
+	out, err := app.toolBillsCreate(ctx, map[string]any{
+		"vendor_id": v.ID,
+		"line_items": []any{
+			line("Route 53", 1, 60, 0),
+			line("SES", 1, 38, 0),
+		},
+		"subtotal_cents": int64(7859),
+		"tax_cents":      int64(1650),
+		"total_cents":    int64(9509),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)["bill"].(*Bill)
+	if got.SubtotalCents != 7859 || got.TaxCents != 1650 || got.TotalCents != 9509 {
+		t.Errorf("header totals not preserved: sub=%d tax=%d total=%d (want 7859/1650/9509)",
+			got.SubtotalCents, got.TaxCents, got.TotalCents)
+	}
+}
+
+func TestBillCreate_NoHeaderTotalsFallsBackToLineItemsSum(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	v := mustVendor(t, ctx, "ap@x.example", "X")
+	out, err := app.toolBillsCreate(ctx, map[string]any{
+		"vendor_id": v.ID,
+		"line_items": []any{
+			line("A", 1, 1000, 1000),
+			line("B", 2, 500, 0),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)["bill"].(*Bill)
+	if got.SubtotalCents != 2000 || got.TaxCents != 100 || got.TotalCents != 2100 {
+		t.Errorf("computed totals wrong: sub=%d tax=%d total=%d (want 2000/100/2100)",
+			got.SubtotalCents, got.TaxCents, got.TotalCents)
+	}
+}
+
+func TestBillCreate_PartialHeaderTotalsBackfills(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	v := mustVendor(t, ctx, "ap@y.example", "Y")
+	out, err := app.toolBillsCreate(ctx, map[string]any{
+		"vendor_id":   v.ID,
+		"line_items":  []any{line("X", 1, 100, 0)},
+		"total_cents": int64(9509),
+		"tax_cents":   int64(1650),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)["bill"].(*Bill)
+	if got.SubtotalCents != 7859 {
+		t.Errorf("subtotal backfill = %d, want 7859 (= 9509 - 1650)", got.SubtotalCents)
+	}
+}

@@ -76,6 +76,11 @@ func TestMergeExtractedIntoArgs_CallerAlwaysWins(t *testing.T) {
 		"due_date":              "2099-01-01",
 		"currency":              "EUR",
 		"line_items":            []any{map[string]any{"description": "stub", "unit_price_cents": int64(1)}},
+		// v0.1.10 added header-totals merge — pre-populate them too so
+		// "caller wins" still means "extraction fills nothing".
+		"subtotal_cents": int64(1),
+		"tax_cents":      int64(1),
+		"total_cents":    int64(1),
 	}
 	filled := mergeExtractedIntoArgs(args, sampleExtraction())
 	if len(filled) != 0 {

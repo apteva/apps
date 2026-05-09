@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bills
 display_name: Bills
-version: 0.1.9
+version: 0.1.10
 description: |
   Vendors, bills, and outbound payments. The AP mirror of billing.
 author: Apteva
@@ -113,7 +113,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("bills mounted",
-		"version", "0.1.9",
+		"version", "0.1.10",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"ocr_provider", configString(ctx, "ocr_provider", "(disabled)"))
 	return nil
@@ -337,7 +337,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		// ── Bills ──────────────────────────────────────────────────
 		{
 			Name: "bills_create",
-			Description: "Log a bill received from a vendor. Status starts at 'received'. Provider arg ('local' | 'mercury' | 'wise' | 'bill_dot_com') falls back to install default. PROVIDER IS FROZEN: to switch, void and recreate. v0.1.0 only honours 'local'. Args: vendor_id, vendor_invoice_number, vendor_invoice_date, currency, provider, due_date, line_items [{description, quantity, unit_price_cents, tax_rate_bps?}], notes, category, gl_account, attached_file_id.",
+			Description: "Log a bill received from a vendor. Status starts at 'received'. Provider arg ('local' | 'mercury' | 'wise' | 'bill_dot_com') falls back to install default. PROVIDER IS FROZEN: to switch, void and recreate. v0.1.0 only honours 'local'. Args: vendor_id, vendor_invoice_number, vendor_invoice_date, currency, provider, due_date, line_items [{description, quantity, unit_price_cents, tax_rate_bps?}], subtotal_cents, tax_cents, total_cents (when supplied, override the line-items computation — use these when the OCR-extracted invoice header total is the source of truth and line items are only a partial breakdown), notes, category, gl_account, attached_file_id.",
 			InputSchema: schemaObject(map[string]any{
 				"vendor_id":             map[string]any{"type": "integer"},
 				"vendor_invoice_number": map[string]any{"type": "string"},
@@ -346,6 +346,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"provider":              map[string]any{"type": "string"},
 				"due_date":              map[string]any{"type": "string"},
 				"line_items":            map[string]any{"type": "array"},
+				"subtotal_cents":        map[string]any{"type": "integer"},
+				"tax_cents":             map[string]any{"type": "integer"},
+				"total_cents":           map[string]any{"type": "integer"},
 				"notes":                 map[string]any{"type": "string"},
 				"category":              map[string]any{"type": "string"},
 				"gl_account":            map[string]any{"type": "string"},
@@ -833,6 +836,13 @@ func (a *App) toolBillsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		Category:            strArg(args, "category"),
 		GLAccount:           strArg(args, "gl_account"),
 		LineItems:           items,
+		// Header totals — when supplied (typically by OCR pulling them
+		// from the invoice header), they override dbBillCreate's
+		// line-items-sum recompute. See dbBillCreate for the precedence
+		// rules. Caller can supply any subset.
+		SubtotalCents: int64Arg(args, "subtotal_cents"),
+		TaxCents:      int64Arg(args, "tax_cents"),
+		TotalCents:    int64Arg(args, "total_cents"),
 	}
 	if fid := int64Arg(args, "attached_file_id"); fid != 0 {
 		bill.AttachedFileID = &fid
@@ -1157,7 +1167,8 @@ func (a *App) toolBillsCreateFromFile(ctx *sdk.AppCtx, args map[string]any) (any
 		"_project_id", "_caller",
 		"vendor_id", "vendor_invoice_number", "vendor_invoice_date",
 		"currency", "provider", "due_date",
-		"line_items", "notes", "category", "gl_account", "metadata",
+		"line_items", "subtotal_cents", "tax_cents", "total_cents",
+		"notes", "category", "gl_account", "metadata",
 	} {
 		if v, ok := args[k]; ok {
 			createArgs[k] = v
@@ -1629,6 +1640,9 @@ func (a *App) handleHTTPBillCreate(w http.ResponseWriter, r *http.Request) {
 		Category:            strArg(body, "category"),
 		GLAccount:           strArg(body, "gl_account"),
 		LineItems:           items,
+		SubtotalCents:       int64Arg(body, "subtotal_cents"),
+		TaxCents:            int64Arg(body, "tax_cents"),
+		TotalCents:          int64Arg(body, "total_cents"),
 	}
 	if fid := int64Arg(body, "attached_file_id"); fid != 0 {
 		bill.AttachedFileID = &fid
@@ -2093,6 +2107,9 @@ func (a *App) handleHTTPBillsCreateFromFile(w http.ResponseWriter, r *http.Reque
 		GLAccount:           strArg(billBody, "gl_account"),
 		LineItems:           items,
 		AttachedFileID:      &fileID,
+		SubtotalCents:       int64Arg(billBody, "subtotal_cents"),
+		TaxCents:            int64Arg(billBody, "tax_cents"),
+		TotalCents:          int64Arg(billBody, "total_cents"),
 	}
 	if md, ok := billBody["metadata"].(map[string]any); ok {
 		if rb, err := json.Marshal(md); err == nil {
@@ -2700,8 +2717,23 @@ func dbBillCreate(db *sql.DB, bill *Bill, actor string) (*Bill, error) {
 	if n == 0 {
 		return nil, fmt.Errorf("vendor %d not found", bill.VendorID)
 	}
-	subtotal, tax, total := computeTotals(bill.LineItems)
-	bill.SubtotalCents, bill.TaxCents, bill.TotalCents = subtotal, tax, total
+	// Totals: caller-supplied wins (OCR fills these from the invoice
+	// header, which is more reliable than summing extracted line items
+	// — line items are often a per-service summary that doesn't add up
+	// to the header total). Only compute from line items when caller
+	// didn't supply ANY of subtotal/tax/total. Partial supply (e.g.
+	// total + tax but no subtotal) is filled in: subtotal = total - tax.
+	if bill.SubtotalCents == 0 && bill.TaxCents == 0 && bill.TotalCents == 0 {
+		bill.SubtotalCents, bill.TaxCents, bill.TotalCents = computeTotals(bill.LineItems)
+	} else {
+		// Backfill the one missing field if the other two are present.
+		if bill.SubtotalCents == 0 && bill.TotalCents > 0 {
+			bill.SubtotalCents = bill.TotalCents - bill.TaxCents
+		}
+		if bill.TotalCents == 0 {
+			bill.TotalCents = bill.SubtotalCents + bill.TaxCents
+		}
+	}
 
 	tx, err := db.Begin()
 	if err != nil {

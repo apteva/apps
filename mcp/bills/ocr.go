@@ -178,6 +178,26 @@ func mergeExtractedIntoArgs(args map[string]any, e *ExtractedInvoice) []string {
 	fillStr("due_date", e.DueDate)
 	fillStr("currency", strings.ToUpper(e.Currency))
 
+	// Header totals — these come from the invoice's printed totals
+	// row, which is more authoritative than summing extracted line
+	// items (the model often pulls only a subset of lines, especially
+	// on multi-page invoices or when many line items are $0). When
+	// supplied here, dbBillCreate uses them directly instead of
+	// recomputing from line_items.
+	fillInt := func(key string, val int64) {
+		if val == 0 {
+			return
+		}
+		if _, has := args[key]; has {
+			return
+		}
+		args[key] = val
+		filled = append(filled, key)
+	}
+	fillInt("subtotal_cents", e.SubtotalCents)
+	fillInt("tax_cents", e.TaxCents)
+	fillInt("total_cents", e.TotalCents)
+
 	if _, has := args["line_items"]; !has {
 		if items := convertExtractedLineItems(e); len(items) > 0 {
 			args["line_items"] = items

@@ -289,6 +289,296 @@ type ApiCall = <T,>(
   query?: Record<string, string>,
 ) => Promise<T>;
 
+// ─── In-panel dialog system ────────────────────────────────────────
+//
+// Replaces window.alert / confirm / prompt — those break our themed
+// design (native chrome, no Apteva styling) and block the JS thread.
+// Each helper returns a Promise; render the returned `dialogs` element
+// once near the top of the component so dialogs/toasts can mount.
+//
+// API:
+//   const d = useDialogs();
+//   const ok = await d.confirm({ title, body, confirmLabel, danger });
+//   const txt = await d.text({ title, label, initialValue });
+//   const result = await d.form({ title, fields, submitLabel });
+//   d.toast({ message, level });   // non-blocking; auto-dismiss
+//   {d.element}                    // mount once
+//
+// Each blocking call returns null on cancel.
+
+interface FieldSpec {
+  name: string;
+  label: string;
+  type?: "text" | "number" | "date" | "select" | "textarea";
+  initialValue?: string;
+  options?: { value: string; label: string }[];
+  placeholder?: string;
+  required?: boolean;
+}
+
+type DialogState =
+  | {
+      kind: "confirm";
+      title: string;
+      body?: string;
+      confirmLabel: string;
+      cancelLabel: string;
+      danger: boolean;
+      resolve: (ok: boolean) => void;
+    }
+  | {
+      kind: "form";
+      title: string;
+      body?: string;
+      fields: FieldSpec[];
+      submitLabel: string;
+      resolve: (values: Record<string, string> | null) => void;
+    };
+
+interface ToastState {
+  id: number;
+  message: string;
+  level: "info" | "error";
+}
+
+function useDialogs() {
+  const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [toasts, setToasts] = useState<ToastState[]>([]);
+  const toastIdRef = useRef(0);
+
+  const close = (resolveValue: unknown) => {
+    if (dialog) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (dialog.resolve as any)(resolveValue);
+    }
+    setDialog(null);
+  };
+
+  const confirm = (opts: {
+    title: string;
+    body?: string;
+    confirmLabel?: string;
+    cancelLabel?: string;
+    danger?: boolean;
+  }) =>
+    new Promise<boolean>((resolve) => {
+      setDialog({
+        kind: "confirm",
+        title: opts.title,
+        body: opts.body,
+        confirmLabel: opts.confirmLabel ?? "Confirm",
+        cancelLabel: opts.cancelLabel ?? "Cancel",
+        danger: !!opts.danger,
+        resolve,
+      });
+    });
+
+  const text = (opts: {
+    title: string;
+    label?: string;
+    initialValue?: string;
+    placeholder?: string;
+    submitLabel?: string;
+    multiline?: boolean;
+    required?: boolean;
+  }) =>
+    new Promise<string | null>((resolve) => {
+      const f: FieldSpec = {
+        name: "value",
+        label: opts.label ?? "",
+        type: opts.multiline ? "textarea" : "text",
+        initialValue: opts.initialValue ?? "",
+        placeholder: opts.placeholder,
+        required: opts.required,
+      };
+      setDialog({
+        kind: "form",
+        title: opts.title,
+        fields: [f],
+        submitLabel: opts.submitLabel ?? "Save",
+        resolve: (v) => resolve(v ? v.value : null),
+      });
+    });
+
+  const form = (opts: {
+    title: string;
+    body?: string;
+    fields: FieldSpec[];
+    submitLabel?: string;
+  }) =>
+    new Promise<Record<string, string> | null>((resolve) => {
+      setDialog({
+        kind: "form",
+        title: opts.title,
+        body: opts.body,
+        fields: opts.fields,
+        submitLabel: opts.submitLabel ?? "Save",
+        resolve,
+      });
+    });
+
+  const toast = (opts: { message: string; level?: "info" | "error" }) => {
+    const id = ++toastIdRef.current;
+    setToasts((cur) => [...cur, { id, message: opts.message, level: opts.level ?? "info" }]);
+    window.setTimeout(() => {
+      setToasts((cur) => cur.filter((t) => t.id !== id));
+    }, 5000);
+  };
+
+  const element = (
+    <>
+      {dialog && (
+        <DialogShell
+          dialog={dialog}
+          onConfirm={() => close(true)}
+          onCancel={() => close(dialog.kind === "form" ? null : false)}
+          onSubmit={(values) => close(values)}
+        />
+      )}
+      {toasts.length > 0 && (
+        <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
+          {toasts.map((t) => (
+            <div
+              key={t.id}
+              className={`pointer-events-auto px-4 py-2 rounded shadow-lg border text-sm max-w-md ${
+                t.level === "error"
+                  ? "bg-bg border-red text-red"
+                  : "bg-bg border-border text-text"
+              }`}
+            >
+              {t.message}
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+
+  return { confirm, text, form, toast, element };
+}
+
+function DialogShell({
+  dialog,
+  onConfirm,
+  onCancel,
+  onSubmit,
+}: {
+  dialog: DialogState;
+  onConfirm: () => void;
+  onCancel: () => void;
+  onSubmit: (values: Record<string, string>) => void;
+}) {
+  const [values, setValues] = useState<Record<string, string>>(() => {
+    if (dialog.kind === "form") {
+      const init: Record<string, string> = {};
+      for (const f of dialog.fields) init[f.name] = f.initialValue ?? "";
+      return init;
+    }
+    return {};
+  });
+
+  const submit = () => {
+    if (dialog.kind === "form") {
+      // Required-field validation before submit.
+      for (const f of dialog.fields) {
+        if (f.required && !(values[f.name] ?? "").trim()) {
+          // Pulse-animate the missing field — for now just no-op.
+          return;
+        }
+      }
+      onSubmit(values);
+    } else {
+      onConfirm();
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-40 bg-bg/70 flex items-start justify-center pt-24"
+      onClick={(e) => {
+        // Click-outside cancels.
+        if (e.target === e.currentTarget) onCancel();
+      }}
+    >
+      <div className="bg-bg border border-border rounded shadow-xl w-[28rem] max-h-[80vh] flex flex-col">
+        <div className="px-4 py-3 border-b border-border">
+          <h2 className="text-sm font-medium text-text">{dialog.title}</h2>
+          {dialog.body && (
+            <p className="text-xs text-text-muted mt-1 whitespace-pre-line">{dialog.body}</p>
+          )}
+        </div>
+        {dialog.kind === "form" && (
+          <div className="px-4 py-3 flex-1 overflow-auto space-y-3">
+            {dialog.fields.map((f) => (
+              <div key={f.name}>
+                {f.label && (
+                  <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+                    {f.label}
+                    {f.required && <span className="text-red ml-1">*</span>}
+                  </label>
+                )}
+                {f.type === "textarea" ? (
+                  <textarea
+                    autoFocus={dialog.fields.indexOf(f) === 0}
+                    value={values[f.name] ?? ""}
+                    onChange={(e) => setValues((v) => ({ ...v, [f.name]: e.target.value }))}
+                    placeholder={f.placeholder}
+                    className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm min-h-[80px]"
+                  />
+                ) : f.type === "select" ? (
+                  <select
+                    value={values[f.name] ?? ""}
+                    onChange={(e) => setValues((v) => ({ ...v, [f.name]: e.target.value }))}
+                    className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                  >
+                    {(f.options ?? []).map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    autoFocus={dialog.fields.indexOf(f) === 0}
+                    type={f.type ?? "text"}
+                    value={values[f.name] ?? ""}
+                    onChange={(e) => setValues((v) => ({ ...v, [f.name]: e.target.value }))}
+                    placeholder={f.placeholder}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && f.type !== "textarea") submit();
+                    }}
+                    className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="px-4 py-3 border-t border-border flex items-center gap-2 justify-end">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input"
+          >
+            {dialog.kind === "confirm" ? dialog.cancelLabel : "Cancel"}
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            className={
+              dialog.kind === "confirm" && dialog.danger
+                ? "px-3 py-1 text-sm bg-red text-bg rounded hover:bg-red/90"
+                : "px-3 py-1 text-sm bg-accent text-bg rounded hover:bg-accent/90"
+            }
+          >
+            {dialog.kind === "confirm" ? dialog.confirmLabel : dialog.submitLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // VendorPickModal — used by both "+ New" and the drop-on-list flow.
 // Search + pick existing, or upsert a new one inline.
 function VendorPickModal({
@@ -306,6 +596,9 @@ function VendorPickModal({
   const [results, setResults] = useState<Vendor[]>([]);
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [createEmail, setCreateEmail] = useState("");
+  const [createName, setCreateName] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -328,23 +621,31 @@ function VendorPickModal({
     };
   }, [q, apiCall]);
 
-  const createNew = async () => {
-    const email = prompt("New vendor email:", q.includes("@") ? q : "");
-    if (!email) return;
-    const name = prompt("Vendor name:", q.includes("@") ? "" : q) || email;
+  const startCreate = () => {
+    setCreateError(null);
+    setCreateEmail(q.includes("@") ? q : "");
+    setCreateName(q.includes("@") ? "" : q);
+    setCreating(true);
+  };
+
+  const submitCreate = async () => {
+    if (!createEmail.trim()) {
+      setCreateError("Email is required.");
+      return;
+    }
     setBusy(true);
+    setCreateError(null);
     try {
       const res = await apiCall<{ vendor: Vendor }>(
         "POST",
         "/vendors",
-        { email, defaults: { name } },
+        { email: createEmail, defaults: { name: createName || createEmail } },
       );
       onPick(res.vendor);
     } catch (err) {
-      alert(`Create vendor failed: ${(err as Error).message}`);
+      setCreateError((err as Error).message);
     } finally {
       setBusy(false);
-      setCreating(false);
     }
   };
 
@@ -368,7 +669,38 @@ function VendorPickModal({
           />
         </div>
         <div className="flex-1 overflow-auto">
-          {results.length === 0 ? (
+          {creating ? (
+            <div className="p-4 space-y-3">
+              <div>
+                <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+                  Email <span className="text-red">*</span>
+                </label>
+                <input
+                  type="email"
+                  autoFocus
+                  value={createEmail}
+                  onChange={(e) => setCreateEmail(e.target.value)}
+                  placeholder="billing@vendor.com"
+                  className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+                  Name
+                </label>
+                <input
+                  type="text"
+                  value={createName}
+                  onChange={(e) => setCreateName(e.target.value)}
+                  placeholder="(defaults to email)"
+                  className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                />
+              </div>
+              {createError && (
+                <p className="text-xs text-red">{createError}</p>
+              )}
+            </div>
+          ) : results.length === 0 ? (
             <div className="p-4 text-text-muted text-xs">
               No vendors match. Use "+ Create new" below.
             </div>
@@ -388,14 +720,38 @@ function VendorPickModal({
           )}
         </div>
         <div className="p-2 border-t border-border flex items-center gap-2">
-          <button
-            type="button"
-            onClick={createNew}
-            disabled={busy || creating}
-            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
-          >
-            + Create new
-          </button>
+          {creating ? (
+            <>
+              <button
+                type="button"
+                onClick={submitCreate}
+                disabled={busy}
+                className="px-3 py-1 text-sm bg-accent text-bg rounded hover:bg-accent/90 disabled:opacity-50"
+              >
+                Create vendor
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setCreating(false);
+                  setCreateError(null);
+                }}
+                disabled={busy}
+                className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input"
+              >
+                Back
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={startCreate}
+              disabled={busy}
+              className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+            >
+              + Create new
+            </button>
+          )}
           <button
             type="button"
             onClick={onCancel}
@@ -465,6 +821,7 @@ function AttachedDocumentSection({
   installId: number;
   onChanged: () => void;
 }) {
+  const dialogs = useDialogs();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -487,14 +844,20 @@ function AttachedDocumentSection({
       if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
       onChanged();
     } catch (err) {
-      alert(`Attach failed: ${(err as Error).message}`);
+      dialogs.toast({ message: `Attach failed: ${(err as Error).message}`, level: "error" });
     } finally {
       setBusy(false);
     }
   };
 
   const remove = async () => {
-    if (!confirm("Detach the document? It stays in storage; this just unlinks.")) return;
+    const ok = await dialogs.confirm({
+      title: "Detach the document?",
+      body: "It stays in storage; this just unlinks it from the bill.",
+      confirmLabel: "Detach",
+      danger: true,
+    });
+    if (!ok) return;
     setBusy(true);
     try {
       const r = await fetch(
@@ -504,7 +867,7 @@ function AttachedDocumentSection({
       if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
       onChanged();
     } catch (err) {
-      alert(`Detach failed: ${(err as Error).message}`);
+      dialogs.toast({ message: `Detach failed: ${(err as Error).message}`, level: "error" });
     } finally {
       setBusy(false);
     }
@@ -530,12 +893,27 @@ function AttachedDocumentSection({
       `?project_id=${encodeURIComponent(projectId)}`;
     return (
       <section>
+        {dialogs.element}
         <h2 className="text-xs uppercase tracking-wide text-text-dim mb-2">
           Original document
         </h2>
         <div className="border border-border rounded p-3 flex items-center justify-between gap-2">
-          <span className="text-sm text-text">
-            📄 Storage file #{bill.attached_file_id}
+          <span className="text-sm text-text inline-flex items-center gap-2">
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="text-text-muted h-4 w-4"
+              aria-hidden="true"
+            >
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+            </svg>
+            Storage file #{bill.attached_file_id}
           </span>
           <div className="flex items-center gap-2">
             <a
@@ -577,6 +955,7 @@ function AttachedDocumentSection({
 
   return (
     <section>
+      {dialogs.element}
       <h2 className="text-xs uppercase tracking-wide text-text-dim mb-2">
         Original document
       </h2>
@@ -623,6 +1002,7 @@ function BillsTab({
   apiCall: ApiCall;
   queryString: (extra?: Record<string, string>) => string;
 }) {
+  const dialogs = useDialogs();
   const [list, setList] = useState<Bill[]>([]);
   const [statusFilter, setStatusFilter] = useState("");
   const [search, setSearch] = useState("");
@@ -699,91 +1079,144 @@ function BillsTab({
 
   const approve = async () => {
     if (!detail) return;
-    if (!confirm(`Approve this bill? It will become eligible for payment.`)) return;
+    const ok = await dialogs.confirm({
+      title: "Approve this bill?",
+      body: "It will become eligible for payment.",
+      confirmLabel: "Approve",
+    });
+    if (!ok) return;
     try {
       await apiCall("POST", `/bills/${detail.id}/approve`);
       await loadList();
       await loadDetail(detail.id);
     } catch (err) {
-      alert(`Approve failed: ${(err as Error).message}`);
+      dialogs.toast({ message: `Approve failed: ${(err as Error).message}`, level: "error" });
     }
   };
 
   const reject = async () => {
     if (!detail) return;
-    const reason = prompt(
-      `Reject this bill (vendor will need to send a corrected invoice).\n\nReason:`,
-    );
+    const reason = await dialogs.text({
+      title: "Reject bill",
+      body: "Vendor will need to send a corrected invoice.",
+      label: "Reason",
+      multiline: true,
+      required: true,
+      submitLabel: "Reject",
+    });
     if (!reason) return;
     try {
       await apiCall("POST", `/bills/${detail.id}/reject`, { reason });
       await loadList();
       await loadDetail(detail.id);
     } catch (err) {
-      alert(`Reject failed: ${(err as Error).message}`);
+      dialogs.toast({ message: `Reject failed: ${(err as Error).message}`, level: "error" });
     }
   };
 
   const schedule = async () => {
     if (!detail) return;
-    const dateStr = prompt(
-      `Schedule payment date (YYYY-MM-DD or RFC3339, default now):`,
-      new Date().toISOString().slice(0, 10),
-    );
-    if (dateStr === null) return;
-    const method = prompt(
-      `Method (wire / check / ach / card / other):`,
-      "wire",
-    );
-    if (!method) return;
+    const result = await dialogs.form({
+      title: "Schedule payment",
+      fields: [
+        {
+          name: "scheduled_for",
+          label: "Date",
+          type: "date",
+          initialValue: new Date().toISOString().slice(0, 10),
+          required: true,
+        },
+        {
+          name: "method",
+          label: "Method",
+          type: "select",
+          initialValue: "wire",
+          options: [
+            { value: "wire", label: "Wire" },
+            { value: "check", label: "Check" },
+            { value: "ach", label: "ACH" },
+            { value: "card", label: "Card" },
+            { value: "other", label: "Other" },
+          ],
+        },
+      ],
+      submitLabel: "Schedule",
+    });
+    if (!result) return;
     try {
       await apiCall("POST", `/bills/${detail.id}/schedule`, {
-        scheduled_for: dateStr,
-        method,
+        scheduled_for: result.scheduled_for,
+        method: result.method,
       });
       await loadList();
       await loadDetail(detail.id);
     } catch (err) {
-      alert(`Schedule failed: ${(err as Error).message}`);
+      dialogs.toast({ message: `Schedule failed: ${(err as Error).message}`, level: "error" });
     }
   };
 
   const recordPayment = async () => {
     if (!detail) return;
     const remaining = detail.total_cents - detail.amount_paid_cents;
-    const amountStr = prompt(
-      `Record outbound payment.\n\n` +
-        `Outstanding: ${fmtMoney(remaining, detail.currency)}.\n` +
-        `Amount in cents (positive only):`,
-      String(remaining),
-    );
-    if (!amountStr) return;
-    const amount = parseInt(amountStr, 10);
+    const result = await dialogs.form({
+      title: "Record outbound payment",
+      body: `Outstanding: ${fmtMoney(remaining, detail.currency)}.`,
+      fields: [
+        {
+          name: "amount_cents",
+          label: "Amount (cents)",
+          type: "number",
+          initialValue: String(remaining),
+          required: true,
+        },
+        {
+          name: "method",
+          label: "Method",
+          type: "select",
+          initialValue: detail.scheduled_method || "wire",
+          options: [
+            { value: "wire", label: "Wire" },
+            { value: "check", label: "Check" },
+            { value: "cash", label: "Cash" },
+            { value: "ach", label: "ACH" },
+            { value: "card", label: "Card" },
+            { value: "other", label: "Other" },
+          ],
+        },
+      ],
+      submitLabel: "Record payment",
+    });
+    if (!result) return;
+    const amount = parseInt(result.amount_cents, 10);
     if (Number.isNaN(amount) || amount <= 0) {
-      alert("Amount must be a positive integer (cents).");
+      dialogs.toast({
+        message: "Amount must be a positive integer (cents).",
+        level: "error",
+      });
       return;
     }
-    const method = prompt(
-      "Method (wire / check / cash / ach / card / other):",
-      detail.scheduled_method || "wire",
-    );
-    if (!method) return;
     try {
       await apiCall("POST", "/payments", {
         bill_id: detail.id,
         amount_cents: amount,
-        method,
+        method: result.method,
       });
       await loadList();
       await loadDetail(detail.id);
     } catch (err) {
-      alert(`Record payment failed: ${(err as Error).message}`);
+      dialogs.toast({
+        message: `Record payment failed: ${(err as Error).message}`,
+        level: "error",
+      });
     }
   };
 
+  // The persistent "+ New" button reuses the hidden file input from
+  // the empty-state drop zone — same OCR flow, vendor pick is the
+  // fallback only when the backend can't resolve a vendor.
   const newBill = () => {
     setPendingFile(null);
-    setVendorPickOpen(true);
+    bareFileInputRef.current?.click();
   };
 
   // submitFromFile uploads a file to /bills/from-file with the
@@ -831,7 +1264,7 @@ function BillsTab({
         setPendingFile(f);
         setVendorPickOpen(true);
       } else {
-        alert(`Upload failed: ${e2.message}`);
+        dialogs.toast({ message: `Upload failed: ${e2.message}`, level: "error" });
       }
     } finally {
       setUploading(false);
@@ -869,7 +1302,7 @@ function BillsTab({
       await loadList();
       select(billId);
     } catch (err) {
-      alert(`Create failed: ${(err as Error).message}`);
+      dialogs.toast({ message: `Create failed: ${(err as Error).message}`, level: "error" });
     }
   };
 
@@ -879,16 +1312,22 @@ function BillsTab({
       detail.total_cents,
       detail.currency,
     )})`;
-    const reason = prompt(
-      `Void ${display}?\n\nThis is silent — the vendor won't know.\nUse 'reject' instead if you want them to issue a corrected invoice.\n\nOptional reason:`,
-    );
+    const reason = await dialogs.text({
+      title: `Void ${display}?`,
+      body:
+        "This is silent — the vendor won't know.\n" +
+        "Use 'reject' instead if you want them to issue a corrected invoice.",
+      label: "Optional reason",
+      multiline: true,
+      submitLabel: "Void bill",
+    });
     if (reason === null) return;
     try {
       await apiCall("POST", `/bills/${detail.id}/void`, { reason });
       await loadList();
       await loadDetail(detail.id);
     } catch (err) {
-      alert(`Void failed: ${(err as Error).message}`);
+      dialogs.toast({ message: `Void failed: ${(err as Error).message}`, level: "error" });
     }
   };
 
@@ -906,6 +1345,17 @@ function BillsTab({
       }}
       onDrop={onDrop}
     >
+      {dialogs.element}
+      {/* Always-mounted file input so the "+ New" button works even
+          when the bills list is non-empty (the empty-state drop zone
+          unmounts once any bill exists). */}
+      <input
+        ref={bareFileInputRef}
+        type="file"
+        accept="application/pdf,image/*"
+        className="hidden"
+        onChange={onFilePicked}
+      />
       {dragOver && (
         <div className="absolute inset-0 z-10 bg-accent/10 border-4 border-dashed border-accent flex items-center justify-center pointer-events-none">
           <div className="text-accent text-lg font-medium">
@@ -989,16 +1439,6 @@ function BillsTab({
                   OCR auto-fills vendor + line items when bound
                 </p>
               </div>
-              <p className="text-xs text-text-muted text-center mt-3">
-                or use <span className="text-accent">+ New</span> to start blank
-              </p>
-              <input
-                ref={bareFileInputRef}
-                type="file"
-                accept="application/pdf,image/*"
-                className="hidden"
-                onChange={onFilePicked}
-              />
             </div>
           ) : (
             <ul>
@@ -1335,6 +1775,7 @@ function VendorsTab({
   projectId: string;
   apiCall: ApiCall;
 }) {
+  const dialogs = useDialogs();
   const [list, setList] = useState<Vendor[]>([]);
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<Vendor | null>(null);
@@ -1401,9 +1842,28 @@ function VendorsTab({
   };
 
   const create = async () => {
-    const email = prompt("Vendor email:");
-    if (!email) return;
-    const name = prompt("Vendor name (optional):", email) || email;
+    const result = await dialogs.form({
+      title: "New vendor",
+      fields: [
+        {
+          name: "email",
+          label: "Email",
+          type: "text",
+          placeholder: "billing@vendor.com",
+          required: true,
+        },
+        {
+          name: "name",
+          label: "Name (optional)",
+          type: "text",
+          placeholder: "(defaults to email)",
+        },
+      ],
+      submitLabel: "Create vendor",
+    });
+    if (!result) return;
+    const email = result.email.trim();
+    const name = result.name.trim() || email;
     try {
       const res = await apiCall<{ vendor: Vendor }>(
         "POST",
@@ -1413,7 +1873,7 @@ function VendorsTab({
       await load("");
       select(res.vendor);
     } catch (err) {
-      alert(`Create failed: ${(err as Error).message}`);
+      dialogs.toast({ message: `Create failed: ${(err as Error).message}`, level: "error" });
     }
   };
 
@@ -1421,6 +1881,7 @@ function VendorsTab({
 
   return (
     <div className="h-full flex">
+      {dialogs.element}
       <aside className="w-80 border-r border-border flex flex-col">
         <div className="p-2 border-b border-border flex items-center gap-2">
           <input
@@ -1493,8 +1954,23 @@ function VendorsTab({
                   : ""}
               </p>
               {!selected.w9_received_at && (
-                <div className="mt-2 text-xs text-yellow-500">
-                  ⚠ No W-9 on file (1099 prerequisite when enabled)
+                <div className="mt-2 text-xs text-yellow-500 inline-flex items-center gap-1.5">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="h-3.5 w-3.5"
+                    aria-hidden="true"
+                  >
+                    <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                    <line x1="12" y1="9" x2="12" y2="13" />
+                    <line x1="12" y1="17" x2="12.01" y2="17" />
+                  </svg>
+                  No W-9 on file (1099 prerequisite when enabled)
                 </div>
               )}
             </header>
