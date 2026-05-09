@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: bills
 display_name: Bills
-version: 0.1.8
+version: 0.1.9
 description: |
   Vendors, bills, and bill payments for Apteva agents and human teams.
   The accounts-payable mirror of the `billing` app — money OUT instead
@@ -45,14 +45,16 @@ requires:
   integrations:
     - role: vision_llm
       kind: integration
-      compatible_slugs: [opencode-go]
+      compatible_slugs: [anthropic-api, opencode-go]
       capabilities: [chat.complete, vision.describe]
       tools:
-        chat.complete: chat_completion
-        vision.describe: chat_completion
+        chat.complete: chat_completion       # opencode-go's tool name
+        vision.describe: chat_completion     # bills picks the right tool per
+                                             # bound.AppSlug — anthropic-api uses
+                                             # create_message instead
       required: false
-      label: "Vision LLM provider (for ocr_provider=llm)"
-      hint: "Bind OpenCode Go (or another compatible OpenAI-shape chat-completion provider). Pick a vision-capable model — Kimi K2.6 is the default. Only needed when ocr_provider config is set to 'llm'."
+      label: "Vision LLM provider"
+      hint: "Bind one. Anthropic API (Claude Haiku 4.5 default) is fastest — ~3s per page, cheap. OpenCode Go (Qwen3.6 Plus default) takes ~100s per page but works on a flat-rate subscription."
 
 provides:
   http_routes:
@@ -251,6 +253,27 @@ config_schema:
                  hook for custom providers (e.g. a Mindee sidecar).
 
       Caller-supplied args always win over extracted values.
+  - name: ocr_llm_model
+    type: text
+    default: ""
+    label: OCR model (LLM path)
+    description: |
+      Model slug used by the LLM-OCR path. Empty (default) picks a
+      provider-aware default:
+        anthropic-api → claude-haiku-4-5-20251001  (~3s/page, recommended)
+        opencode-go   → qwen3.6-plus               (~100s/page, flat-rate)
+      Override to pick another vision-capable model from the bound
+      provider's catalog (e.g. claude-sonnet-4-6, kimi-k2.6, glm-5.1).
+  - name: ocr_llm_max_tokens
+    type: text
+    default: ""
+    label: OCR max output tokens
+    description: |
+      Max tokens the LLM is allowed to generate. Empty picks a
+      provider-aware default: 4096 for anthropic-api (Haiku produces
+      ~250-500 on typical invoices), 8000 for opencode-go (reasoning
+      models like Kimi K2.6 need headroom). Bump for line-item-heavy
+      bills if responses are getting truncated.
   - name: require_w9_before_payment
     type: select
     options: ["true", "false"]

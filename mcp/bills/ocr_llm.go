@@ -40,12 +40,12 @@ func callOCRViaLLM(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, er
 	bound := ctx.IntegrationFor("vision_llm")
 	if bound == nil {
 		log.Warn("ocr/llm: vision_llm integration not bound", "file_id", fileID)
-		return nil, "llm", errors.New("ocr_provider=llm but vision_llm integration not bound — bind opencode-go (or another compatible chat-completion provider) in the dashboard")
+		return nil, "llm", errors.New("ocr_provider=llm but vision_llm integration not bound — bind anthropic-api (recommended; ~3s/page with Claude Haiku 4.5) or opencode-go (Kimi/Qwen, slower) in the dashboard")
 	}
 	log.Info("ocr/llm: starting",
 		"file_id", fileID,
-		"connection_id", bound.ConnectionID,
-		"chat_tool", bound.ToolFor("chat.complete"))
+		"provider_slug", bound.AppSlug,
+		"connection_id", bound.ConnectionID)
 
 	// 1. Storage bytes + content type in one call (storage v0.9.5+).
 	t1 := time.Now()
@@ -81,25 +81,20 @@ func callOCRViaLLM(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, er
 		"file_id", fileID, "pages", len(images), "total_bytes", totalImgBytes,
 		"dpi", dpi, "elapsed_ms", time.Since(t2).Milliseconds())
 
-	// 3. Build messages + call.
-	model := configString(ctx, "ocr_llm_model", "kimi-k2.6")
-	maxTokens := configIntDefault(ctx, "ocr_llm_max_tokens", 4000)
-	messages := buildOCRMessages(images)
+	// 3. Build the request shape per provider. Branch on bound.AppSlug
+	//    rather than on a generic capability name — anthropic-api
+	//    speaks Anthropic's Messages shape, every other compatible_slug
+	//    today (opencode-go) speaks OpenAI's chat-completion shape.
+	//    Different request, different response, different model
+	//    defaults — but the rest of the pipeline (storage fetch, render,
+	//    audit, vendor resolve) is identical.
+	model, toolName, args := buildLLMArgs(ctx, bound, images)
 
 	log.Info("ocr/llm: calling vision_llm",
-		"file_id", fileID, "model", model, "max_tokens", maxTokens, "pages", len(images))
+		"file_id", fileID, "provider_slug", bound.AppSlug, "model", model,
+		"tool", toolName, "pages", len(images))
 	t3 := time.Now()
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(
-		bound.ConnectionID,
-		bound.ToolFor("chat.complete"),
-		map[string]any{
-			"model":           model,
-			"messages":        messages,
-			"temperature":     0.1, // structured extraction wants determinism
-			"max_tokens":      maxTokens,
-			"response_format": map[string]any{"type": "json_object"},
-		},
-	)
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, toolName, args)
 	llmElapsed := time.Since(t3).Milliseconds()
 	if err != nil {
 		log.Warn("ocr/llm: chat completion call errored",
@@ -120,21 +115,123 @@ func callOCRViaLLM(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, er
 		"file_id", fileID, "model", model, "response_bytes", len(res.Data),
 		"elapsed_ms", llmElapsed)
 
-	parsed, err := parseAssistantInvoice(res.Data)
+	// 4. Parse based on provider's response shape.
+	var parsed *ExtractedInvoice
+	switch bound.AppSlug {
+	case "anthropic-api":
+		parsed, err = parseAnthropicInvoice(res.Data)
+	default:
+		parsed, err = parseAssistantInvoice(res.Data)
+	}
 	if err != nil {
 		log.Warn("ocr/llm: response parse failed",
-			"file_id", fileID, "model", model, "err", err)
+			"file_id", fileID, "model", model, "err", err,
+			"raw_response_head", truncate(string(res.Data), 1500))
 		return nil, "llm/" + model, fmt.Errorf("parse llm extraction: %w", err)
 	}
+	providerLabel := bound.AppSlug + "/" + model
 	if parsed.Provider == "" {
-		parsed.Provider = "llm/" + model
+		parsed.Provider = providerLabel
 	}
 	log.Info("ocr/llm: extraction complete",
-		"file_id", fileID, "model", model,
+		"file_id", fileID, "provider", providerLabel,
 		"vendor_name", parsed.Vendor.Name, "vendor_email", parsed.Vendor.Email,
 		"invoice_number", parsed.InvoiceNumber, "total_cents", parsed.TotalCents,
 		"line_items", len(parsed.LineItems))
-	return parsed, "llm/" + model, nil
+	return parsed, providerLabel, nil
+}
+
+// buildLLMArgs produces (model, tool name, args map) for the bound
+// vision_llm provider. Picks per-provider defaults for model + tool
+// name; the operator can override the model via `ocr_llm_model`
+// config but the tool name is fixed by the provider.
+func buildLLMArgs(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, images [][]byte) (model, tool string, args map[string]any) {
+	switch bound.AppSlug {
+	case "anthropic-api":
+		// Anthropic's max_tokens caps at 4096 in their Messages API
+		// for non-extended-thinking models; Haiku produces ~250-500
+		// output tokens on typical invoices so 4096 is plenty.
+		model = configString(ctx, "ocr_llm_model", "claude-haiku-4-5-20251001")
+		maxTokens := configIntDefault(ctx, "ocr_llm_max_tokens", 4096)
+		tool = "create_message"
+		args = buildAnthropicArgs(images, model, maxTokens)
+	default:
+		// OpenAI-compatible chat-completion shape (opencode-go and any
+		// future compatible providers). Reasoning-shaped models (Kimi
+		// K2.6, GLM-5.1 thinking) need headroom — reasoning eats most
+		// of the budget before the final JSON answer.
+		model = configString(ctx, "ocr_llm_model", "qwen3.6-plus")
+		maxTokens := configIntDefault(ctx, "ocr_llm_max_tokens", 8000)
+		tool = "chat_completion"
+		args = map[string]any{
+			"model":           model,
+			"messages":        buildOCRMessages(images),
+			"temperature":     0.1,
+			"max_tokens":      maxTokens,
+			"response_format": map[string]any{"type": "json_object"},
+		}
+	}
+	return
+}
+
+// buildAnthropicArgs assembles the Messages-API request: system as a
+// top-level field (not a message), user message with image content
+// blocks BEFORE the text instruction (Anthropic's recommended order
+// for vision tasks — the model attends to images first, then reads
+// the directive). Image content blocks use base64 source.
+func buildAnthropicArgs(images [][]byte, model string, maxTokens int) map[string]any {
+	parts := make([]any, 0, len(images)+1)
+	for _, img := range images {
+		parts = append(parts, map[string]any{
+			"type": "image",
+			"source": map[string]any{
+				"type":       "base64",
+				"media_type": "image/jpeg",
+				"data":       base64.StdEncoding.EncodeToString(img),
+			},
+		})
+	}
+	parts = append(parts, map[string]any{
+		"type": "text",
+		"text": "Extract the invoice fields from the page(s) above. Reply with ONLY the JSON object described in the system prompt — no other text.",
+	})
+	return map[string]any{
+		"model":       model,
+		"max_tokens":  maxTokens,
+		"system":      ocrSystemPrompt,
+		"messages":    []any{map[string]any{"role": "user", "content": parts}},
+		"temperature": 0.1,
+	}
+}
+
+// parseAnthropicInvoice decodes the Anthropic Messages-API response
+// shape: top-level `content: [{type, text}]` array, no `choices`.
+// Walks each text block, applies the same fence-stripping +
+// leading-prose tolerance as the OpenAI parser. Haiku tends to wrap
+// in ```json fences despite the prompt — parseInvoiceJSON handles it.
+func parseAnthropicInvoice(raw json.RawMessage) (*ExtractedInvoice, error) {
+	var envelope struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		StopReason string `json:"stop_reason,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, fmt.Errorf("decode anthropic envelope: %w", err)
+	}
+	if len(envelope.Content) == 0 {
+		return nil, fmt.Errorf("anthropic: no content blocks (stop_reason=%q)", envelope.StopReason)
+	}
+	for _, b := range envelope.Content {
+		if b.Type == "text" && b.Text != "" {
+			if inv, err := parseInvoiceJSON(b.Text); err == nil {
+				return inv, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("anthropic: no parseable JSON in any text block (stop_reason=%q, blocks=%d)",
+		envelope.StopReason, len(envelope.Content))
 }
 
 // ─── Storage cross-app helpers ──────────────────────────────────────
@@ -369,15 +466,36 @@ func buildOCRMessages(images [][]byte) []any {
 // parseAssistantInvoice digs the assistant's content out of the
 // chat-completion response and unmarshals it as ExtractedInvoice.
 // The OpenCode Go gateway returns OpenAI-shape responses
-// ({choices:[{message:{content:"<json string>"}}]}). We tolerate the
-// content being either a raw JSON string or a single content-part
-// array (defensive against gateway shape drift).
+// ({choices:[{message:{content:"<json string>"}}]}). We tolerate three
+// real-world shapes:
+//
+//  1. Standard:    message.content = "<json string>"
+//  2. Multi-part:  message.content = [{type:"text", text:"<json>"}]
+//  3. Reasoning:   message.reasoning_content / message.reasoning carries
+//     the structured output (Kimi K2.6, DeepSeek V4 Pro, GLM-5.1
+//     thinking-mode all do this when max_tokens is consumed by
+//     reasoning before the final answer can be produced — or, for
+//     some providers, ALWAYS when the model is reasoning-shaped).
+//     We look in those fields too rather than reporting a fail.
+//
+// For Kimi K2.6 in particular: with structured-output
+// (response_format=json_object) the model often writes its reasoning
+// in reasoning_content and the final JSON in content; but if
+// max_tokens is too low (≤4000 for a multi-page invoice) reasoning
+// fills the budget and content arrives empty. The fallback to
+// reasoning_content here recovers the answer when that happens —
+// the model still typed the JSON near the end of its reasoning
+// stream, and parseInvoiceJSON's "find first {" + fence stripping
+// handles the prose-mixed-with-JSON case.
 func parseAssistantInvoice(raw json.RawMessage) (*ExtractedInvoice, error) {
 	var envelope struct {
 		Choices []struct {
 			Message struct {
-				Content json.RawMessage `json:"content"`
+				Content          json.RawMessage `json:"content"`
+				ReasoningContent string          `json:"reasoning_content,omitempty"`
+				Reasoning        string          `json:"reasoning,omitempty"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason,omitempty"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
@@ -386,28 +504,51 @@ func parseAssistantInvoice(raw json.RawMessage) (*ExtractedInvoice, error) {
 	if len(envelope.Choices) == 0 {
 		return nil, errors.New("chat-completion: no choices in response")
 	}
-	contentRaw := envelope.Choices[0].Message.Content
+	msg := envelope.Choices[0].Message
+	finishReason := envelope.Choices[0].FinishReason
 
-	// Two shapes: string (the common OpenAI shape) or array of parts
-	// ([{type:'text', text:'...'}]). Try string first.
-	var contentStr string
-	if err := json.Unmarshal(contentRaw, &contentStr); err == nil && contentStr != "" {
-		return parseInvoiceJSON(contentStr)
-	}
-	var parts []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(contentRaw, &parts); err == nil {
-		for _, p := range parts {
-			if p.Type == "text" && p.Text != "" {
-				if inv, err := parseInvoiceJSON(p.Text); err == nil {
-					return inv, nil
+	// Try the standard content field first (string shape, then array
+	// shape). Each candidate goes through parseInvoiceJSON which
+	// handles fence-stripping + leading-prose trimming.
+	if len(msg.Content) > 0 {
+		var contentStr string
+		if err := json.Unmarshal(msg.Content, &contentStr); err == nil && contentStr != "" {
+			if inv, err := parseInvoiceJSON(contentStr); err == nil {
+				return inv, nil
+			}
+		}
+		var parts []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(msg.Content, &parts); err == nil {
+			for _, p := range parts {
+				if p.Type == "text" && p.Text != "" {
+					if inv, err := parseInvoiceJSON(p.Text); err == nil {
+						return inv, nil
+					}
 				}
 			}
 		}
 	}
-	return nil, errors.New("chat-completion: could not extract assistant content")
+
+	// Reasoning-model fallback. Try reasoning_content then reasoning.
+	for _, src := range []string{msg.ReasoningContent, msg.Reasoning} {
+		if src == "" {
+			continue
+		}
+		if inv, err := parseInvoiceJSON(src); err == nil {
+			return inv, nil
+		}
+	}
+
+	// Last-resort diagnostic: when nothing parses, the
+	// finish_reason often tells us what went wrong (length =
+	// max_tokens hit; content_filter = blocked; tool_calls = model
+	// chose tool path instead of structured output).
+	return nil, fmt.Errorf("chat-completion: could not extract assistant content (finish_reason=%q, content_len=%d, reasoning_len=%d, has_reasoning_field=%t) — try bumping ocr_llm_max_tokens",
+		finishReason, len(msg.Content), len(msg.ReasoningContent),
+		msg.ReasoningContent != "" || msg.Reasoning != "")
 }
 
 // parseInvoiceJSON handles the small annoying real-world cases: the

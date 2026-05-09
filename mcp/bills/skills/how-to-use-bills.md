@@ -226,8 +226,8 @@ No new tools, no opt-in flag — it just happens.
 
 | `ocr_provider` | Backend | When |
 |---|---|---|
-| `""` (default) | **AUTO**: LLM if `vision_llm` is bound, else off. | Bind OpenCode Go in the dashboard's Bindings tab — that's all. No separate config flip required. |
-| `"llm"` | Bound `vision_llm` integration (Kimi K2.6 by default). Errors if not bound. | Use when you want a hard guarantee OCR is on (instead of silently falling back to manual). |
+| `""` (default) | **AUTO**: LLM if `vision_llm` is bound, else off. | Bind one provider in the dashboard's Bindings tab — that's all. No separate config flip required. |
+| `"llm"` | Bound `vision_llm` integration. Errors if not bound. | Use when you want a hard guarantee OCR is on (instead of silently falling back to manual). |
 | `"off"` | Force off, even if `vision_llm` is bound. | Operators who bound the integration for another purpose and don't want bills consuming it. |
 | `"<slug>"` | Slug of an Apteva sidecar app exposing `extract_invoice(file_id)` (custom Mindee/Veryfi/etc. wrapper). | Forward-compat hook; no such app ships today. |
 
@@ -298,7 +298,11 @@ message includes the orphan id for cleanup.
 ### Cost
 
 Each extraction call is billed by the provider. Vision-LLM mode
-(`ocr_provider="llm"` via OpenCode Go) typically lands at flat-rate
+(`ocr_provider="llm"`) cost depends on the bound provider:
+
+- **Anthropic API** (default model: Claude Haiku 4.5) — ~3s per page,
+  ~$0.0008/page. Recommended.
+- **OpenCode Go** (default model: Qwen3.6 Plus) typically lands at flat-rate
 subscription cost ($10/mo for the Go plan, no per-page billing).
 Sidecar-mode wrappers around external APIs (Mindee is ~$0.01-0.03
 per page, varies). v0.1.2 doesn't cache — uploading the same file

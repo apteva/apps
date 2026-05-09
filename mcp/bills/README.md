@@ -1,8 +1,47 @@
-# Bills (v0.1.7)
+# Bills (v0.1.9)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.1.9
+
+LLM-OCR is now **dual-rail** — the `vision_llm` binding accepts either
+`anthropic-api` (recommended, ~3s/page with Claude Haiku 4.5) or
+`opencode-go` (Qwen3.6 Plus default, ~100s/page on the flat-rate plan).
+Bills branches on `bound.AppSlug` to build the right request shape:
+
+- **anthropic-api** → Anthropic Messages API: `system` as top-level
+  field, single user message with image content blocks before text,
+  response in `content[0].text` (parser handles ```json fences)
+- **opencode-go** → OpenAI chat-completion: `messages` array with
+  system message + user message with image_url parts, response in
+  `choices[0].message.content` with reasoning_content fallback for
+  reasoning-shaped models
+
+Provider-aware defaults via the new `ocr_llm_model` config field
+(empty = pick per provider): `claude-haiku-4-5-20251001` for
+Anthropic, `qwen3.6-plus` for OpenCode Go (was `kimi-k2.6` —
+Qwen tested cleaner shape and similar speed).
+
+Plus pipeline observability — INFO logs at every stage of
+bills_create_from_file's OCR flow (request received → upload →
+ocr dispatch → storage fetch → render → vision_llm call → parse →
+bill create) — and parser fix for reasoning-model `reasoning_content`
+fallback.
+
+## What's in v0.1.8
+
+Pipeline observability for the LLM-OCR path — INFO logs at every
+stage of bills_create_from_file's OCR flow so we can see exactly
+where it stops when something goes wrong.
+
+## What's in v0.1.7
+
+OCR fetch via storage's new files_get_content tool (storage v0.9.5+)
+fixes the multi-storage-install routing bug. Default storage folders
+now dot-prefixed per storage's skill convention. Empty-state drop-zone
+icon swapped from emoji to monochrome SVG.
 
 ## What's in v0.1.6
 

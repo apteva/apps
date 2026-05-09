@@ -70,6 +70,91 @@ func TestBuildOCRMessages_ShapeAndImageParts(t *testing.T) {
 
 // ─── Response parser ───────────────────────────────────────────────
 
+func TestParseAnthropicInvoice_TextBlock(t *testing.T) {
+	// Anthropic Messages-API shape: top-level content[] of typed
+	// blocks, no "choices". Haiku tends to wrap in ```json fences
+	// despite the prompt — parseInvoiceJSON handles fence stripping
+	// so the parser must succeed on fenced output too.
+	envelope := map[string]any{
+		"content": []any{
+			map[string]any{
+				"type": "text",
+				"text": "```json\n{\"vendor\":{\"name\":\"AWS\",\"email\":\"billing@aws.amazon.com\"},\"invoice_number\":\"EUINES26-9466\",\"total_cents\":9509,\"currency\":\"USD\"}\n```",
+			},
+		},
+		"stop_reason": "end_turn",
+	}
+	raw, _ := json.Marshal(envelope)
+	got, err := parseAnthropicInvoice(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Vendor.Name != "AWS" || got.InvoiceNumber != "EUINES26-9466" || got.TotalCents != 9509 {
+		t.Errorf("got %+v", got)
+	}
+}
+
+func TestParseAnthropicInvoice_NoContentErrors(t *testing.T) {
+	envelope := map[string]any{
+		"content":     []any{},
+		"stop_reason": "max_tokens",
+	}
+	raw, _ := json.Marshal(envelope)
+	_, err := parseAnthropicInvoice(raw)
+	if err == nil {
+		t.Fatal("expected error on empty content")
+	}
+	if !strings.Contains(err.Error(), "max_tokens") {
+		t.Errorf("error %q should surface stop_reason", err.Error())
+	}
+}
+
+func TestParseAnthropicInvoice_NonTextBlocksSkipped(t *testing.T) {
+	// Defensive: if the response has tool_use or other block types
+	// before the text block, walk past them rather than bailing.
+	envelope := map[string]any{
+		"content": []any{
+			map[string]any{"type": "tool_use", "name": "ignored"},
+			map[string]any{"type": "text", "text": `{"vendor":{"name":"X"},"total_cents":1}`},
+		},
+	}
+	raw, _ := json.Marshal(envelope)
+	got, err := parseAnthropicInvoice(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Vendor.Name != "X" {
+		t.Errorf("got %+v", got)
+	}
+}
+
+func TestBuildAnthropicArgs_ImageBeforeText(t *testing.T) {
+	// Anthropic recommends image content blocks BEFORE the text
+	// instruction so the model attends to images first — not a
+	// hard requirement but helps consistency. Pin the order so a
+	// refactor doesn't accidentally swap them.
+	args := buildAnthropicArgs([][]byte{[]byte("page-bytes")}, "claude-haiku-4-5-20251001", 4096)
+	msgs := args["messages"].([]any)
+	parts := msgs[0].(map[string]any)["content"].([]any)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 content parts (image + text), got %d", len(parts))
+	}
+	if parts[0].(map[string]any)["type"] != "image" {
+		t.Errorf("first part type=%v, want image", parts[0].(map[string]any)["type"])
+	}
+	if parts[1].(map[string]any)["type"] != "text" {
+		t.Errorf("second part type=%v, want text", parts[1].(map[string]any)["type"])
+	}
+	// system is a top-level field (not a message), per Anthropic API.
+	if args["system"] == "" {
+		t.Error("system prompt should be passed as top-level field")
+	}
+	// max_tokens explicit, model explicit.
+	if args["model"] != "claude-haiku-4-5-20251001" {
+		t.Errorf("model=%v", args["model"])
+	}
+}
+
 func TestParseAssistantInvoice_StringContent(t *testing.T) {
 	// The common OpenAI shape: choices[0].message.content is a JSON
 	// string the model produced.

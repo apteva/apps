@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bills
 display_name: Bills
-version: 0.1.8
+version: 0.1.9
 description: |
   Vendors, bills, and outbound payments. The AP mirror of billing.
 author: Apteva
@@ -63,14 +63,14 @@ requires:
   integrations:
     - role: vision_llm
       kind: integration
-      compatible_slugs: [opencode-go]
+      compatible_slugs: [anthropic-api, opencode-go]
       capabilities: [chat.complete, vision.describe]
       tools:
         chat.complete: chat_completion
         vision.describe: chat_completion
       required: false
-      label: "Vision LLM provider (for ocr_provider=llm)"
-      hint: "Bind OpenCode Go (or another compatible chat-completion provider). Only needed when ocr_provider config is set to 'llm'."
+      label: "Vision LLM provider"
+      hint: "Anthropic API (Haiku 4.5, ~3s/page) or OpenCode Go (Qwen3.6 Plus, ~100s/page)."
 provides:
   http_routes:
     - prefix: /
@@ -113,7 +113,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("bills mounted",
-		"version", "0.1.8",
+		"version", "0.1.9",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"ocr_provider", configString(ctx, "ocr_provider", "(disabled)"))
 	return nil
