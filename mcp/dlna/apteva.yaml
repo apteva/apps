@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: dlna
 display_name: DLNA Server
-version: 0.1.14
+version: 0.1.15
 description: |
   Publishes a UPnP/DLNA MediaServer on the LAN. Smart TVs, game
   consoles, Sonos, VLC, and other AV clients discover this app via
@@ -50,6 +50,7 @@ provides:
     - { name: dlna_publish_folder,     description: "Add a storage folder to the published library. Args: folder (path in storage), label?." }
     - { name: dlna_unpublish_folder,   description: "Stop exposing a storage folder. Args: folder." }
     - { name: dlna_clients_recent,     description: "List clients that browsed in the last 24h: ip, user_agent, last_action_at, browse_count. Args: limit?." }
+    - { name: dlna_announce,           description: "Force an immediate SSDP alive burst. Useful when a TV just powered on and shouldn't have to wait for the next periodic NOTIFY (every 5 minutes). No args; returns {announced: bool}." }
   ui_panels:
     - slot: project.page
       label: DLNA

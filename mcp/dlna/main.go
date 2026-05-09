@@ -35,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: dlna
 display_name: DLNA Server
-version: 0.1.14
+version: 0.1.15
 description: Local-LAN UPnP/DLNA MediaServer for Apteva.
 author: Apteva
 scopes: [project, global]
@@ -50,6 +50,7 @@ provides:
     - { name: dlna_publish_folder,    description: "Publish a storage folder." }
     - { name: dlna_unpublish_folder,  description: "Unpublish a storage folder." }
     - { name: dlna_clients_recent,    description: "Recent LAN clients." }
+    - { name: dlna_announce,          description: "Force an immediate SSDP alive burst — useful when a TV just powered on and shouldn't have to wait for the next periodic NOTIFY cycle." }
   ui_panels:
     - slot: project.page
       label: DLNA
@@ -464,7 +465,28 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "List clients that browsed in the last 24h. Args: limit (default 50).",
 			InputSchema: obj(map[string]any{"limit": num}, nil),
 			Handler:     a.toolClientsRecent},
+		{Name: "dlna_announce",
+			Description: "Force an immediate SSDP alive burst — broadcasts NOTIFY packets right now instead of waiting for the next periodic cycle. Useful when a TV just powered on and operators don't want to wait the full notifyPeriod. Returns {announced: true} on success.",
+			InputSchema: obj(nil, nil),
+			Handler:     a.toolAnnounce},
 	}
+}
+
+// toolAnnounce triggers an immediate SSDP alive burst. The actual
+// broadcast runs on the SSDP server's main loop, so we don't block
+// the MCP call on the multicast socket.
+func (a *App) toolAnnounce(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	a.mu.Lock()
+	srv := a.ssdp
+	a.mu.Unlock()
+	if srv == nil || !srv.IsRunning() {
+		return map[string]any{
+			"announced": false,
+			"reason":    "ssdp server not running — check dlna_status for the current state",
+		}, nil
+	}
+	srv.Announce()
+	return map[string]any{"announced": true}, nil
 }
 
 func (a *App) toolStatus(ctx *sdk.AppCtx, _ map[string]any) (any, error) {

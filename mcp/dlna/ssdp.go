@@ -45,8 +45,21 @@ const (
 	ssdpAddr     = "239.255.255.250:1900"
 	ssdpHost     = "239.255.255.250"
 	ssdpPort     = 1900
-	notifyPeriod = 30 * time.Minute
-	maxAge       = 1800 // seconds; matches notifyPeriod
+	// notifyPeriod was 30 min (UPnP-spec maximum). Recovery from a
+	// dropped multicast packet was therefore "up to 30 minutes" —
+	// brutal on Wi-Fi where loss is the rule, not the exception, and
+	// painful on TVs that don't re-probe aggressively (LG WebOS in
+	// particular). 5 minutes is comfortably within spec, gives ~6×
+	// more announcement opportunities per hour, and matches what
+	// well-behaved DLNA servers like MiniDLNA + serviio default to.
+	notifyPeriod = 5 * time.Minute
+	maxAge       = 1800 // seconds; deliberately longer than notifyPeriod so a single missed cycle doesn't expire us
+	// notifyRetransmits — UPnP spec recommends sending each NOTIFY
+	// 2-3 times per cycle because UDP is lossy. We send 2 packets
+	// for each (NT, USN) pair, ~50ms apart. Doubles our packet
+	// volume but on the order of 20 packets per 5 minutes — nothing
+	// to worry about.
+	notifyRetransmits = 2
 )
 
 // SSDPServer multicasts NOTIFY beacons and replies to M-SEARCH probes.
@@ -65,6 +78,11 @@ type SSDPServer struct {
 	conn       *net.UDPConn
 	logFn      func(string, string)
 	onMSearch  func(remote string, st string)
+	mcastIface *net.Interface // resolved at Run() from LANIP — used for both inbound listen + outbound dial pinning
+	// announceCh — operator-triggered immediate alive burst signal.
+	// Used by the dlna_announce MCP tool so a freshly-powered-on TV
+	// doesn't have to wait the periodic cycle.
+	announceCh chan struct{}
 }
 
 func newSSDPServer(uuid string, port int, lanIP string, friendly func() string, log func(string, string)) *SSDPServer {
@@ -79,6 +97,58 @@ func newSSDPServer(uuid string, port int, lanIP string, friendly func() string, 
 		stopCh:       make(chan struct{}),
 		doneCh:       make(chan struct{}),
 		logFn:        log,
+		announceCh:   make(chan struct{}, 4), // small buffer; collapse bursts
+	}
+}
+
+// multicastInterface returns the *net.Interface that owns LANIP, so
+// the kernel pins multicast send/recv to the right physical link.
+// Returns nil (= OS default) if LANIP isn't usefully set or if no
+// interface matches — better to fall back than to error.
+func (s *SSDPServer) multicastInterface() *net.Interface {
+	if s.LANIP == "" {
+		return nil
+	}
+	target := net.ParseIP(s.LANIP)
+	if target == nil {
+		return nil
+	}
+	target = target.To4()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagMulticast == 0 {
+			continue
+		}
+		addrs, _ := ifc.Addrs()
+		for _, a := range addrs {
+			ip, _, err := net.ParseCIDR(a.String())
+			if err != nil {
+				continue
+			}
+			if ip.To4() != nil && ip.Equal(target) {
+				ifc := ifc
+				return &ifc
+			}
+		}
+	}
+	return nil
+}
+
+// Announce triggers an immediate alive-burst on the next reader-loop
+// tick. Non-blocking: if the buffered channel is full (multiple
+// announces queued in quick succession), additional sends drop —
+// they'd all coalesce into the same burst anyway. Used by the
+// dlna_announce MCP tool.
+func (s *SSDPServer) Announce() {
+	if s == nil || s.announceCh == nil {
+		return
+	}
+	select {
+	case s.announceCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -113,11 +183,22 @@ func (s *SSDPServer) Run(ctx context.Context) error {
 		s.mu.Unlock()
 		return err
 	}
-	conn, err := net.ListenMulticastUDP("udp4", nil, addr)
+	// Bind multicast to the interface that owns LANIP. Without this
+	// pin, Go (and the kernel) pick a route based on system metric
+	// — which on a laptop with Wi-Fi + Tailscale + maybe a USB
+	// dongle can land on the wrong interface. NOTIFY packets then
+	// go out a route the TV can't see, and the LOCATION URL we
+	// embed (http://<LANIP>:port) won't be reachable from the
+	// chosen route either. Net result: TVs miss us entirely on
+	// some boots and not others — the "intermittent" symptom
+	// operators see most often.
+	iface := s.multicastInterface()
+	conn, err := net.ListenMulticastUDP("udp4", iface, addr)
 	if err != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("ssdp: multicast listen: %w (host networking required)", err)
 	}
+	s.mcastIface = iface
 	if err := conn.SetReadBuffer(64 << 10); err != nil {
 		// non-fatal
 		s.logFn("ssdp", "set-read-buffer: "+err.Error())
@@ -170,6 +251,22 @@ func (s *SSDPServer) Run(ctx context.Context) error {
 			return nil
 		case <-t.C:
 			s.broadcastAlive()
+		case <-s.announceCh:
+			// Operator-triggered immediate burst. Drain any extra
+			// signals that piled up while we were processing — they
+			// coalesce into this single announcement.
+			drainAnnounces(s.announceCh)
+			s.broadcastAlive()
+		}
+	}
+}
+
+func drainAnnounces(ch <-chan struct{}) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
 		}
 	}
 }
@@ -244,27 +341,39 @@ func (s *SSDPServer) respondMSearch(dst *net.UDPAddr, nt, usn string) {
 	_, _ = conn.Write([]byte(resp))
 }
 
-// broadcastAlive multicasts one NOTIFY/alive per advertised type. TVs
-// are expected to refresh their server list on receipt — until the
-// next alive (within max-age) the entry stays.
+// broadcastAlive multicasts NOTIFY/alive packets per advertised type.
+// TVs are expected to refresh their server list on receipt — until
+// the next alive (within max-age) the entry stays.
+//
+// Each (NT, USN) pair is sent notifyRetransmits times with a small
+// jitter delay between packets. UPnP spec recommends 2-3 packets per
+// announcement because UDP multicast is lossy on Wi-Fi (and often
+// dropped by IGMP-snooping consumer routers). The fan-out is small
+// and only fires every notifyPeriod, so the wire cost is trivial.
 func (s *SSDPServer) broadcastAlive() {
 	location := fmt.Sprintf("http://%s:%d/device.xml", s.LANIP, s.HTTPPort)
-	for _, t := range s.allTargets() {
-		nt, usn := t[0], t[1]
-		msg := strings.Join([]string{
-			"NOTIFY * HTTP/1.1",
-			"HOST: " + ssdpAddr,
-			fmt.Sprintf("CACHE-CONTROL: max-age=%d", maxAge),
-			"LOCATION: " + location,
-			"NT: " + nt,
-			"NTS: ssdp:alive",
-			"SERVER: Apteva/1.0 UPnP/1.0 dlna/0.1",
-			"USN: " + usn,
-			"BOOTID.UPNP.ORG: 1",
-			"CONFIGID.UPNP.ORG: 1",
-			"", "",
-		}, "\r\n")
-		s.sendMulticast(msg)
+	targets := s.allTargets()
+	for r := 0; r < notifyRetransmits; r++ {
+		for _, t := range targets {
+			nt, usn := t[0], t[1]
+			msg := strings.Join([]string{
+				"NOTIFY * HTTP/1.1",
+				"HOST: " + ssdpAddr,
+				fmt.Sprintf("CACHE-CONTROL: max-age=%d", maxAge),
+				"LOCATION: " + location,
+				"NT: " + nt,
+				"NTS: ssdp:alive",
+				"SERVER: Apteva/1.0 UPnP/1.0 dlna/0.1",
+				"USN: " + usn,
+				"BOOTID.UPNP.ORG: 1",
+				"CONFIGID.UPNP.ORG: 1",
+				"", "",
+			}, "\r\n")
+			s.sendMulticast(msg)
+		}
+		if r < notifyRetransmits-1 {
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
 }
 
@@ -288,13 +397,23 @@ func (s *SSDPServer) broadcastByebye() {
 
 // sendMulticast opens a fresh UDP socket per call so we don't have
 // to worry about thread-safety on a shared writer. SSDP is low
-// volume — ~5 packets per period — so the socket churn is fine.
+// volume — ~10 packets per period — so the socket churn is fine.
+//
+// When mcastIface is set, the local UDP source is pinned to an
+// address on that interface so the kernel routes the outbound
+// multicast through it. Without the pin, on hosts with multiple
+// active interfaces (Wi-Fi + Tailscale + Ethernet) the kernel can
+// silently choose a non-LAN interface — TVs never see us.
 func (s *SSDPServer) sendMulticast(msg string) {
 	addr, err := net.ResolveUDPAddr("udp4", ssdpAddr)
 	if err != nil {
 		return
 	}
-	conn, err := net.DialUDP("udp4", nil, addr)
+	var laddr *net.UDPAddr
+	if s.LANIP != "" {
+		laddr = &net.UDPAddr{IP: net.ParseIP(s.LANIP), Port: 0}
+	}
+	conn, err := net.DialUDP("udp4", laddr, addr)
 	if err != nil {
 		s.logFn("ssdp", "dial multicast: "+err.Error())
 		return
