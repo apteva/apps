@@ -591,27 +591,20 @@ func evalSegment(ctx *sdk.AppCtx, pid string, segID int64) ([]int64, error) {
 	return out.ContactIDs, nil
 }
 
-// listMembers fetches the contact_ids of every member of a list. The
-// CRM doesn't expose this directly as an MCP tool today; we use the
-// REST endpoint via raw CallApp — but as a fallback we evaluate the
-// equivalent inline-segment shape (in_list predicate on a project-wide
-// scope). Either way returns a flat slice of ids.
+// listMembers fetches the contact_ids of every active member of a
+// list via crm.lists_eval. Mirrors evalSegment so materialise can
+// branch on which audience source the campaign was given without
+// reshaping its result.
 func listMembers(ctx *sdk.AppCtx, pid string, listID int64) ([]int64, error) {
-	// Inline-segment evaluation route: we don't have to create a new
-	// segment, just ask CRM to evaluate `in_list(listID)` directly via
-	// segments_eval. Today we'd need a real segment row — so until CRM
-	// adds an "evaluate ad-hoc definition" endpoint, the simplest path
-	// is to call /lists/{id}/members via CRM's REST layer.
-	raw, err := ctx.PlatformAPI().CallApp("crm", "lists_membership", map[string]any{
-		"_project_id": pid,
-		"contact_id":  listID, // placeholder — never reached, see fallback below
-	})
-	_ = raw
-	_ = err
-	// Pragmatic v0.1 fallback: panic if the operator picks a list-only
-	// audience. Recommend they wrap in a segment with `in_list`. Next
-	// turn we'll add a CRM tool to dump list members directly.
-	return nil, errors.New("list-only audience: wrap the list in a segment with in_list(listID); v0.1 doesn't expand list members directly")
+	var out struct {
+		ContactIDs []int64 `json:"contact_ids"`
+		Count      int64   `json:"count"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("crm", "lists_eval",
+		map[string]any{"_project_id": pid, "id": listID, "limit": 50000}, &out); err != nil {
+		return nil, fmt.Errorf("crm.lists_eval: %w", err)
+	}
+	return out.ContactIDs, nil
 }
 
 // contactAddressForChannel asks CRM for one contact's address on the

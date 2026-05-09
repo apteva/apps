@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.5.0
+version: 0.5.1
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -86,6 +86,8 @@ provides:
       description: Remove a contact from a list.
     - name: lists_membership
       description: Which active lists is a contact on?
+    - name: lists_eval
+      description: Return the active contact_ids in a list (paged) — campaigns audience source.
     # Segments — saved filters (dynamic or static snapshot).
     - name: segments_create
       description: Create a segment with a JSON predicate definition.

@@ -734,11 +734,6 @@ function CampaignEditorModal({ editing, lists, segments, onCancel, onSubmit }: {
             ))}
           </select>
         )}
-        {audienceKind === "list" && (
-          <p className="text-text-dim text-xs">
-            Heads-up: list-only audiences in v0.1 require wrapping in a segment with <code>in_list</code>. Use a segment for now.
-          </p>
-        )}
       </div>
       <hr className="border-border my-3" />
       <div className="grid grid-cols-[120px_1fr] gap-2 items-center text-xs">

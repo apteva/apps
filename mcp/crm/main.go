@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.5.0
+version: 0.5.1
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -105,6 +105,8 @@ provides:
       description: Remove a contact from a list.
     - name: lists_membership
       description: Which active lists is a contact on?
+    - name: lists_eval
+      description: Return the active contact_ids in a list (paged).
     - name: segments_create
       description: Create a saved filter (dynamic or static).
     - name: segments_list
@@ -626,6 +628,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"contact_id": map[string]any{"type": "integer"},
 			}, []string{"contact_id"}),
 			Handler: a.toolListsMembership,
+		},
+		{
+			Name:        "lists_eval",
+			Description: "Return the active contact_ids in a list, paged. Same shape as segments_eval so downstream consumers (e.g. campaigns) handle either uniformly. Args: id (list id), limit? (default 5000, max 50000).",
+			InputSchema: schemaObject(map[string]any{
+				"id":    map[string]any{"type": "integer"},
+				"limit": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolListsEval,
 		},
 
 		// ─── segments tools ────────────────────────────────────────

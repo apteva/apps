@@ -443,6 +443,60 @@ func (a *App) toolListsRemoveContact(ctx *sdk.AppCtx, args map[string]any) (any,
 	return map[string]any{"removed": true, "list_id": listID, "contact_id": cid}, nil
 }
 
+// toolListsEval — bulk member-id dump for a list. Mirrors
+// segments_eval's shape so a downstream consumer (campaigns) can
+// expand either kind of audience uniformly. Returns active members
+// only — archived contacts are filtered out at the SQL layer.
+func (a *App) toolListsEval(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	listID := int64Arg(args, "id")
+	if listID == 0 {
+		listID = int64Arg(args, "list_id")
+	}
+	if listID == 0 {
+		return nil, errors.New("id required")
+	}
+	limit := intArg(args, "limit", 5000)
+	if limit <= 0 || limit > 50000 {
+		limit = 5000
+	}
+	// Hot-path: single JOIN against contacts to filter out soft-
+	// deleted / non-active contacts. Cheaper than a two-step.
+	rows, err := ctx.AppDB().Query(
+		`SELECT c.id FROM contact_list_members m
+		 JOIN contacts c ON c.id = m.contact_id
+		 WHERE m.list_id = ? AND m.project_id = ?
+		   AND c.deleted_at IS NULL AND (c.status IS NULL OR c.status = 'active')
+		 ORDER BY c.id LIMIT ?`,
+		listID, pid, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err == nil {
+			out = append(out, id)
+		}
+	}
+	// Total count (independent of limit) — same JOIN.
+	var total int64
+	totalRow := ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM contact_list_members m
+		 JOIN contacts c ON c.id = m.contact_id
+		 WHERE m.list_id = ? AND m.project_id = ?
+		   AND c.deleted_at IS NULL AND (c.status IS NULL OR c.status = 'active')`,
+		listID, pid,
+	)
+	_ = totalRow.Scan(&total)
+	return map[string]any{"contact_ids": out, "count": total}, nil
+}
+
 func (a *App) toolListsMembership(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
