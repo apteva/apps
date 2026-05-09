@@ -73,6 +73,15 @@ func newS3Backend(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, bucket string) (
 			if resolved.forcePathStyle {
 				return minio.BucketLookupPath
 			}
+			if resolved.forceVirtualHost {
+				// minio-go's BucketLookupAuto falls back to path-style
+				// for non-AWS hostnames. That breaks providers whose
+				// canonical URL is <bucket>.<endpoint> (Hetzner Object
+				// Storage in particular) — the SigV4 signature mismatch
+				// surfaces as Access Denied. Force DNS/virtual-host
+				// here so the URL + signature both line up.
+				return minio.BucketLookupDNS
+			}
 			return minio.BucketLookupAuto
 		}(),
 	})
@@ -86,12 +95,13 @@ func newS3Backend(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, bucket string) (
 // connection — same shape regardless of which provider the operator
 // picked.
 type s3ResolvedConnection struct {
-	endpoint       string
-	region         string
-	accessKey      string
-	secretKey      string
-	useSSL         bool
-	forcePathStyle bool
+	endpoint         string
+	region           string
+	accessKey        string
+	secretKey        string
+	useSSL           bool
+	forcePathStyle   bool
+	forceVirtualHost bool // pin BucketLookupDNS for providers whose canonical URL is <bucket>.<endpoint>
 }
 
 // resolveS3Connection turns a ConnectionCredentials bundle (slug +
@@ -141,16 +151,17 @@ func resolveS3Connection(creds *sdk.ConnectionCredentials) (*s3ResolvedConnectio
 	case "hetzner-object-storage":
 		// Hetzner uses one endpoint per data centre at <region>.your-
 		// objectstorage.com. Three regions: fsn1 (Falkenstein, DE),
-		// nbg1 (Nuremberg, DE), hel1 (Helsinki, FI). The catalog
-		// presents these as a select + sets a default of nbg1, but
-		// we still validate here in case an operator hand-edits the
-		// connection JSON. SigV4 region naming: Hetzner doesn't care
-		// what we sign with, but minio-go demands a non-empty value
-		// — pass through whatever's in the credential.
+		// nbg1 (Nuremberg, DE), hel1 (Helsinki, FI). Canonical URL
+		// per their docs is <bucket>.<region>.your-objectstorage.com
+		// — so force virtual-host (DNS) lookup; minio-go's
+		// BucketLookupAuto would otherwise fall through to path
+		// style for any non-AWS endpoint, which Hetzner rejects
+		// with Access Denied (signature mismatch on host header).
 		if out.region == "" {
 			return nil, fmt.Errorf("s3 backend: hetzner-object-storage connection %d has no region (fsn1/nbg1/hel1)", creds.ConnectionID)
 		}
 		out.endpoint = out.region + ".your-objectstorage.com"
+		out.forceVirtualHost = true
 	default:
 		// Generic S3-compatible (MinIO, Wasabi, custom Ceph). Catalog
 		// must surface an "endpoint" credential field for these.
