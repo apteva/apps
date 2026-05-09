@@ -12,6 +12,7 @@ import (
 	sdk "github.com/apteva/app-sdk"
 
 	"github.com/apteva/apps/mcp/robot/episode"
+	"github.com/apteva/apps/mcp/robot/world"
 )
 
 // Build returns the route list to hand sdk.App.HTTPRoutes(). Go's
@@ -89,13 +90,16 @@ func (h *handler) episodesCollection(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// /episodes/{id}            → summary + recent steps
-// /episodes/{id}/steps      → just the step rows (paged via limit query)
+// /episodes/{id}            GET   → summary + recent steps
+// /episodes/{id}/steps      GET   → just the step rows (paged via limit)
+// /episodes/{id}/move       POST  → manual move; body {"direction": "N|E|S|W"}
+// /episodes/{id}/pick       POST  → manual pick (inert in v0.1)
+// /episodes/{id}/drop       POST  → manual drop (inert in v0.1)
+//
+// The /move /pick /drop routes hit the same Manager methods the MCP
+// tools use, so the harness-decided termination (success / timeout)
+// applies whether the agent or a human drives the episode.
 func (h *handler) episodesItem(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "GET only", http.StatusMethodNotAllowed)
-		return
-	}
 	rest := strings.TrimPrefix(r.URL.Path, "/episodes/")
 	id, sub, _ := strings.Cut(rest, "/")
 	if id == "" {
@@ -104,6 +108,10 @@ func (h *handler) episodesItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch sub {
 	case "":
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
 		summary, err := h.mgr.Status(id)
 		if err != nil {
 			httpErr(w, err, http.StatusNotFound)
@@ -116,6 +124,10 @@ func (h *handler) episodesItem(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"episode": summary, "steps": steps})
 	case "steps":
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
 		limit := 200
 		if v := r.URL.Query().Get("limit"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -128,6 +140,53 @@ func (h *handler) episodesItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"steps": steps})
+	case "move":
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			Direction string `json:"direction"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, err, http.StatusBadRequest)
+			return
+		}
+		dir := world.Direction(body.Direction)
+		switch dir {
+		case world.North, world.East, world.South, world.West:
+		default:
+			http.Error(w, "direction must be N|E|S|W", http.StatusBadRequest)
+			return
+		}
+		res, err := h.mgr.Move(id, dir)
+		if err != nil {
+			httpErr(w, err, http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	case "pick":
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		res, err := h.mgr.Pick(id)
+		if err != nil {
+			httpErr(w, err, http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	case "drop":
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		res, err := h.mgr.Drop(id)
+		if err != nil {
+			httpErr(w, err, http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
 	default:
 		http.Error(w, "unknown subresource", http.StatusNotFound)
 	}

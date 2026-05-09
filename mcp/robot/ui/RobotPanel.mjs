@@ -49,6 +49,20 @@ export function mount(root) {
       .robot-status-pill.success { background: #dcfce7; color: #166534; }
       .robot-status-pill.timeout { background: #fef3c7; color: #92400e; }
       .robot-status-pill.active  { background: #dbeafe; color: #1e40af; }
+      .robot-dpad { display: grid; grid-template-columns: repeat(3, 36px); grid-template-rows: repeat(3, 36px); gap: 4px; margin-top: 12px; }
+      .robot-dpad button { font: inherit; font-weight: 600; cursor: pointer; border-radius: 4px; border: 1px solid #d4d4d8; background: #fff; color: #18181b; }
+      .robot-dpad button:hover:not(:disabled) { background: #f4f4f5; }
+      .robot-dpad button:active:not(:disabled) { background: #e4e4e7; }
+      .robot-dpad button:disabled { color: #a1a1aa; cursor: default; }
+      .robot-dpad-N { grid-column: 2; grid-row: 1; }
+      .robot-dpad-W { grid-column: 1; grid-row: 2; }
+      .robot-dpad-E { grid-column: 3; grid-row: 2; }
+      .robot-dpad-S { grid-column: 2; grid-row: 3; }
+      .robot-drive { display: flex; gap: 16px; align-items: flex-start; margin-top: 12px; }
+      .robot-drive-extras { display: flex; flex-direction: column; gap: 4px; margin-top: 22px; }
+      .robot-drive-extras button { font: inherit; padding: 4px 10px; border-radius: 4px; border: 1px solid #d4d4d8; background: #fff; color: #18181b; cursor: pointer; }
+      .robot-drive-extras button:disabled { color: #a1a1aa; cursor: default; }
+      .robot-drive-hint { font-size: 11px; color: #71717a; align-self: center; }
     </style>
     <div class="robot-panel">
       <h2 class="robot-title">Robot</h2>
@@ -72,6 +86,19 @@ export function mount(root) {
             <span class="robot-metric">optimal <b data-role="m-optimal">—</b></span>
             <span class="robot-metric">ratio <b data-role="m-ratio">—</b></span>
           </div>
+          <div class="robot-drive">
+            <div class="robot-dpad">
+              <button class="robot-dpad-N" data-dir="N" title="Move north (↑)">↑</button>
+              <button class="robot-dpad-W" data-dir="W" title="Move west (←)">←</button>
+              <button class="robot-dpad-E" data-dir="E" title="Move east (→)">→</button>
+              <button class="robot-dpad-S" data-dir="S" title="Move south (↓)">↓</button>
+            </div>
+            <div class="robot-drive-extras">
+              <button data-role="pick" title="Pick up an item (inert in v0.1)">pick</button>
+              <button data-role="drop" title="Drop the held item (inert in v0.1)">drop</button>
+            </div>
+            <span class="robot-drive-hint">arrow keys also move</span>
+          </div>
         </div>
         <div class="robot-col">
           <div class="robot-h">Activity</div>
@@ -91,6 +118,9 @@ export function mount(root) {
     mSteps:     root.querySelector('[data-role="m-steps"]'),
     mOptimal:   root.querySelector('[data-role="m-optimal"]'),
     mRatio:     root.querySelector('[data-role="m-ratio"]'),
+    dpadBtns:   Array.from(root.querySelectorAll('.robot-dpad button')),
+    pickBtn:    root.querySelector('[data-role="pick"]'),
+    dropBtn:    root.querySelector('[data-role="drop"]'),
   };
 
   const state = {
@@ -107,6 +137,25 @@ export function mount(root) {
   });
   els.epPicker.addEventListener('change', () => loadEpisode(els.epPicker.value));
   els.startBtn.addEventListener('click', startEpisode);
+
+  for (const btn of els.dpadBtns) {
+    btn.addEventListener('click', () => driveMove(btn.dataset.dir));
+  }
+  els.pickBtn.addEventListener('click', () => driveAction('pick'));
+  els.dropBtn.addEventListener('click', () => driveAction('drop'));
+
+  // Keyboard arrows. Listen at document so the panel doesn't need
+  // focus; ignore when the user is typing in an input/select.
+  const keyHandler = (ev) => {
+    if (ev.target && /^(INPUT|SELECT|TEXTAREA)$/.test(ev.target.tagName)) return;
+    const map = { ArrowUp: 'N', ArrowDown: 'S', ArrowLeft: 'W', ArrowRight: 'E' };
+    const dir = map[ev.key];
+    if (!dir) return;
+    if (!canDrive()) return;
+    ev.preventDefault();
+    driveMove(dir);
+  };
+  document.addEventListener('keydown', keyHandler);
 
   refreshAll();
   setInterval(refreshAll, 5_000);
@@ -210,7 +259,42 @@ export function mount(root) {
     renderFeed(els.feed, steps);
     renderMetrics(els, ep);
     renderStatus(els.statusPill, ep);
+    updateDriveAvailability();
     if (ep.terminal_reason) stopPolling();
+  }
+
+  function canDrive() {
+    const ep = state.activeEpisode;
+    return ep && !ep.terminal_reason;
+  }
+
+  function updateDriveAvailability() {
+    const enabled = canDrive();
+    for (const b of els.dpadBtns) b.disabled = !enabled;
+    els.pickBtn.disabled = !enabled;
+    els.dropBtn.disabled = !enabled;
+  }
+
+  async function driveMove(dir) {
+    const ep = state.activeEpisode;
+    if (!ep || ep.terminal_reason) return;
+    try {
+      await fetch(`${API}/episodes/${ep.episode_id}/move`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({direction: dir}),
+      });
+    } catch (_) { /* ignore — next poll will reconcile */ }
+    refreshEpisode(ep.episode_id);
+  }
+
+  async function driveAction(action) {
+    const ep = state.activeEpisode;
+    if (!ep || ep.terminal_reason) return;
+    try {
+      await fetch(`${API}/episodes/${ep.episode_id}/${action}`, {method: 'POST'});
+    } catch (_) { /* ignore */ }
+    refreshEpisode(ep.episode_id);
   }
 
   function renderMetrics(els, ep) {
