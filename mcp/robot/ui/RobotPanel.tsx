@@ -43,6 +43,10 @@ function canvasColors() {
     agent: v("info", "#3b82f6"),
     grid: v("border-subtle", "#333"),
     trail: v("info", "#3b82f6"),
+    // bg-card matches the canvas-wrap surface, so unobserved cells
+    // visually merge with the panel's chrome — the visible region
+    // looks like a porthole.
+    fog: v("bg-card", "#141414"),
   };
 }
 
@@ -83,6 +87,8 @@ function mount(root: HTMLElement): () => void {
             <div class="flex flex-col gap-1 mt-[22px]">
               <button data-role="pick" class="${BTN_EXTRA}" title="Pick up an item (inert in v0.1)">pick</button>
               <button data-role="drop" class="${BTN_EXTRA}" title="Drop the held item (inert in v0.1)">drop</button>
+              <button data-role="observe" class="${BTN_EXTRA}" title="Show what observe() returns to the agent (no step cost)">observe</button>
+              <button data-role="fog" class="${BTN_EXTRA}" title="Hide cells outside the agent's view radius">fog: off</button>
             </div>
             <span class="text-xs text-text-dim self-center">arrow keys also move</span>
           </div>
@@ -91,6 +97,16 @@ function mount(root: HTMLElement): () => void {
         <div class="flex-1 min-w-0">
           <div class="text-xs uppercase tracking-wider text-text-dim mb-1">Activity</div>
           <div data-role="feed" class="max-h-[480px] overflow-auto bg-bg-card border border-border rounded p-2"></div>
+        </div>
+      </div>
+
+      <div data-role="observe-modal" class="fixed inset-0 bg-bg-overlay items-center justify-center z-50" style="display: none;">
+        <div class="bg-bg-card border border-border rounded p-4 max-w-2xl w-[90vw] max-h-[80vh] overflow-auto m-4 flex flex-col">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="font-semibold text-text">observe()</h3>
+            <button data-role="observe-close" class="text-text-muted hover:text-text text-lg leading-none px-1">×</button>
+          </div>
+          <pre data-role="observe-output" class="font-mono text-xs text-text whitespace-pre overflow-auto bg-bg-input border border-border rounded p-2"></pre>
         </div>
       </div>
     </div>
@@ -109,6 +125,11 @@ function mount(root: HTMLElement): () => void {
     dpadBtns: Array.from(root.querySelectorAll("[data-dir]")) as HTMLButtonElement[],
     pickBtn: root.querySelector('[data-role="pick"]'),
     dropBtn: root.querySelector('[data-role="drop"]'),
+    observeBtn: root.querySelector('[data-role="observe"]'),
+    fogBtn: root.querySelector('[data-role="fog"]'),
+    obsModal: root.querySelector('[data-role="observe-modal"]') as HTMLElement,
+    obsOutput: root.querySelector('[data-role="observe-output"]') as HTMLElement,
+    obsClose: root.querySelector('[data-role="observe-close"]'),
   };
 
   const state: any = {
@@ -117,11 +138,12 @@ function mount(root: HTMLElement): () => void {
     activeEpisode: null,
     activeScenario: null,
     pollHandle: null,
+    fog: false,
   };
 
   els.scenPicker.addEventListener("change", () => {
     state.activeScenario = state.scenarios.find((s: any) => s.id === els.scenPicker.value);
-    drawGrid(els.canvas, state.activeScenario, null, []);
+    drawGrid(els.canvas, state.activeScenario, null, [], state.fog);
   });
   els.epPicker.addEventListener("change", () => loadEpisode(els.epPicker.value));
   els.startBtn.addEventListener("click", startEpisode);
@@ -131,6 +153,13 @@ function mount(root: HTMLElement): () => void {
   }
   els.pickBtn.addEventListener("click", () => driveAction("pick"));
   els.dropBtn.addEventListener("click", () => driveAction("drop"));
+  els.observeBtn.addEventListener("click", showObserve);
+  els.fogBtn.addEventListener("click", toggleFog);
+  els.obsClose.addEventListener("click", () => closeModal(els.obsModal));
+  els.obsModal.addEventListener("click", (ev: MouseEvent) => {
+    // Click outside the inner card closes the modal.
+    if (ev.target === els.obsModal) closeModal(els.obsModal);
+  });
 
   // Keyboard arrows. Listen at document so the panel doesn't need
   // focus; ignore when the user is typing in an input/select.
@@ -177,7 +206,7 @@ function mount(root: HTMLElement): () => void {
     state.activeScenario =
       state.scenarios.find((s: any) => s.id === els.scenPicker.value) || state.scenarios[0];
     if (!state.activeEpisode && state.activeScenario) {
-      drawGrid(els.canvas, state.activeScenario, null, []);
+      drawGrid(els.canvas, state.activeScenario, null, [], state.fog);
     }
   }
 
@@ -232,7 +261,7 @@ function mount(root: HTMLElement): () => void {
     if (!id) {
       stopPolling();
       state.activeEpisode = null;
-      drawGrid(els.canvas, state.activeScenario, null, []);
+      drawGrid(els.canvas, state.activeScenario, null, [], state.fog);
       els.feed.innerHTML = "";
       setPillState(els.statusPill, "idle", "idle");
       els.mSteps.textContent = "—";
@@ -263,7 +292,7 @@ function mount(root: HTMLElement): () => void {
     const steps = data.steps || [];
     state.activeEpisode = ep;
     const scen = state.scenarios.find((s: any) => s.id === ep.scenario_id);
-    if (scen) drawGrid(els.canvas, scen, ep.position, steps);
+    if (scen) drawGrid(els.canvas, scen, ep.position, steps, state.fog);
     renderFeed(els.feed, steps);
     renderMetrics(els, ep);
     renderStatus(els.statusPill, ep);
@@ -281,6 +310,16 @@ function mount(root: HTMLElement): () => void {
     for (const b of els.dpadBtns) b.disabled = !enabled;
     els.pickBtn.disabled = !enabled;
     els.dropBtn.disabled = !enabled;
+    // observe doesn't advance steps and is fine on a finished episode —
+    // just needs *some* episode to resolve against.
+    els.observeBtn.disabled = !state.activeEpisode;
+  }
+
+  function openModal(el: HTMLElement) {
+    el.style.display = "flex";
+  }
+  function closeModal(el: HTMLElement) {
+    el.style.display = "none";
   }
 
   async function driveMove(dir: string) {
@@ -309,6 +348,37 @@ function mount(root: HTMLElement): () => void {
     refreshEpisode(ep.episode_id);
   }
 
+  // observe is non-mutating — we don't need to refresh after; just
+  // pop the agent's view as JSON.
+  async function showObserve() {
+    const ep = state.activeEpisode;
+    if (!ep) return;
+    try {
+      const res = await fetch(`${API}/episodes/${ep.episode_id}/observe`, { method: "POST" });
+      if (!res.ok) {
+        els.obsOutput.textContent = `error: ${res.status} ${await res.text()}`;
+      } else {
+        const data = await res.json();
+        els.obsOutput.textContent = JSON.stringify(data.view ?? data, null, 2);
+      }
+    } catch (e) {
+      els.obsOutput.textContent = `error: ${(e as Error).message}`;
+    }
+    openModal(els.obsModal);
+  }
+
+  function toggleFog() {
+    state.fog = !state.fog;
+    els.fogBtn.textContent = state.fog ? "fog: on" : "fog: off";
+    // Re-render with the new fog setting against whatever's current.
+    const ep = state.activeEpisode;
+    const scen = ep
+      ? state.scenarios.find((s: any) => s.id === ep.scenario_id)
+      : state.activeScenario;
+    drawGrid(els.canvas, scen, ep ? ep.position : null, [], state.fog);
+    if (ep) refreshEpisode(ep.episode_id);
+  }
+
   function renderMetrics(els: any, ep: any) {
     els.mSteps.textContent = ep.steps;
     els.mOptimal.textContent = ep.optimal_steps || "—";
@@ -327,7 +397,13 @@ function setPillState(pill: HTMLElement, state: string, label: string) {
   pill.textContent = label;
 }
 
-function drawGrid(canvas: HTMLCanvasElement, scen: any, agentPos: any, steps: any[]) {
+function drawGrid(
+  canvas: HTMLCanvasElement,
+  scen: any,
+  agentPos: any,
+  steps: any[],
+  fog: boolean = false,
+) {
   if (!canvas || !scen) return;
   const w = scen.grid.width;
   const h = scen.grid.height;
@@ -349,6 +425,28 @@ function drawGrid(canvas: HTMLCanvasElement, scen: any, agentPos: any, steps: an
     const [gx, gy] = scen.goal;
     ctx.fillStyle = c.goal;
     ctx.fillRect(gx * TILE + 4, gy * TILE + 4, TILE - 8, TILE - 8);
+  }
+
+  // Fog of war — paint cells outside the agent's view radius back to
+  // bg-card so walls + goal are hidden the same way they are in the
+  // agent's observe(). Trail + agent draw on top so the user can see
+  // the agent's track. Only meaningful when partial-obs and an agent
+  // is on the canvas; full-obs scenarios skip the overlay entirely.
+  if (
+    fog
+    && agentPos
+    && (scen.observability?.kind ?? "partial") === "partial"
+  ) {
+    const radius = scen.observability?.radius ?? 2;
+    const [ax, ay] = agentPos;
+    ctx.fillStyle = c.fog;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (Math.abs(x - ax) > radius || Math.abs(y - ay) > radius) {
+          ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
+        }
+      }
+    }
   }
 
   if (steps && steps.length > 0) {

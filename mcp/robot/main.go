@@ -33,7 +33,7 @@ var scenariosFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: robot
 display_name: Robot
-version: 0.1.4
+version: 0.1.5
 description: Agent navigation eval sandbox. 2D grid worlds; partial observability; harness-decided termination (success or timeout).
 author: Apteva
 scopes: [project, global]

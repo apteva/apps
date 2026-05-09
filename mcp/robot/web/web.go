@@ -95,6 +95,7 @@ func (h *handler) episodesCollection(w http.ResponseWriter, r *http.Request) {
 // /episodes/{id}/move       POST  → manual move; body {"direction": "N|E|S|W"}
 // /episodes/{id}/pick       POST  → manual pick (inert in v0.1)
 // /episodes/{id}/drop       POST  → manual drop (inert in v0.1)
+// /episodes/{id}/observe    POST  → return the agent's current view (no step cost)
 //
 // The /move /pick /drop routes hit the same Manager methods the MCP
 // tools use, so the harness-decided termination (success / timeout)
@@ -182,6 +183,17 @@ func (h *handler) episodesItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		res, err := h.mgr.Drop(id)
+		if err != nil {
+			httpErr(w, err, http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	case "observe":
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		res, err := h.mgr.Observe(id)
 		if err != nil {
 			httpErr(w, err, http.StatusBadRequest)
 			return
