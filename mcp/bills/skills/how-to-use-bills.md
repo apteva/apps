@@ -222,13 +222,14 @@ and the multipart `POST /bills/from-file` endpoint **automatically
 extract fields from the uploaded file** before creating the bill.
 No new tools, no opt-in flag — it just happens.
 
-### Three modes
+### Modes (v0.1.5+)
 
-| `ocr_provider` value | Backend | When |
+| `ocr_provider` | Backend | When |
 |---|---|---|
-| `""` (default) | None | OCR disabled. Caller fills everything manually. |
-| `"llm"` | Bound `vision_llm` integration (default: OpenCode Go / Kimi K2.6). Bills renders PDFs to JPEG via embedded PDFium-WASM, sends image + structured-output prompt to chat-completion. **v0.1.3+, recommended.** | Free on the OpenCode Go subscription; provider-agnostic vision LLM. |
-| `"<slug>"` | Slug of an Apteva sidecar app exposing `extract_invoice(file_id)` (custom Mindee/Veryfi/etc. wrapper). | Forward-compat hook; no such app ships in v0.1.3. |
+| `""` (default) | **AUTO**: LLM if `vision_llm` is bound, else off. | Bind OpenCode Go in the dashboard's Bindings tab — that's all. No separate config flip required. |
+| `"llm"` | Bound `vision_llm` integration (Kimi K2.6 by default). Errors if not bound. | Use when you want a hard guarantee OCR is on (instead of silently falling back to manual). |
+| `"off"` | Force off, even if `vision_llm` is bound. | Operators who bound the integration for another purpose and don't want bills consuming it. |
+| `"<slug>"` | Slug of an Apteva sidecar app exposing `extract_invoice(file_id)` (custom Mindee/Veryfi/etc. wrapper). | Forward-compat hook; no such app ships today. |
 
 The agent doesn't pick the mode — it's an install setting. From the
 agent's POV, `bills_create_from_file` either auto-fills (any non-empty

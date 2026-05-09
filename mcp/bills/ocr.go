@@ -69,21 +69,41 @@ type ExtractedInvoice struct {
 }
 
 // callOCR invokes whichever OCR backend the install is configured for.
-// Three modes, dispatched on the `ocr_provider` config value:
+// Modes, dispatched on the `ocr_provider` config value:
 //
-//	""       Disabled. Returns (nil, "", nil); caller falls through to manual.
-//	"llm"    Use the bound vision_llm integration (v0.1.3+). PDF render
-//	         + chat-completion + JSON parse all happen in ocr_llm.go.
+//	""       AUTO (default, v0.1.5+). If the vision_llm integration is
+//	         bound, behave as "llm". If not, OCR is off — returns
+//	         (nil, "", nil) and the caller falls through to manual.
+//	         The intent is: binding the integration IS the on switch;
+//	         no separate config flip required.
+//	"llm"    Force the LLM path (errors if vision_llm isn't bound).
+//	         Useful when you want a clear failure if the binding ever
+//	         disappears, instead of silently falling back to manual.
+//	"off"    Force OFF, even if vision_llm is bound. Escape hatch for
+//	         operators who bound the integration for another purpose
+//	         and don't want bills to use it.
 //	"<slug>" Treated as the slug of another Apteva sidecar app exposing
-//	         an `extract_invoice(file_id)` MCP tool — kept as a forward-
-//	         compat hook for custom providers. Calls via CallAppResult.
+//	         an `extract_invoice(file_id)` MCP tool — forward-compat
+//	         hook for custom providers. Calls via CallAppResult.
 //
 // Real failures (network, malformed response) return an error; the
 // caller logs and continues with manual fields.
 func callOCR(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, error) {
 	provider := strings.TrimSpace(configString(ctx, "ocr_provider", ""))
+
+	// Auto-detect (v0.1.5+): empty config means "use the binding if
+	// present, otherwise off." Binding the vision_llm integration is
+	// the user's intent to enable OCR — we don't want them to also
+	// flip a separate config switch.
 	if provider == "" {
-		return nil, "", nil // disabled — not an error
+		if ctx != nil && ctx.IntegrationFor("vision_llm") != nil {
+			provider = "llm"
+		} else {
+			return nil, "", nil // genuinely off — no binding, no override
+		}
+	}
+	if provider == "off" {
+		return nil, "", nil // explicit force-off
 	}
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return nil, provider, errors.New("ocr_provider set but platform API unavailable")

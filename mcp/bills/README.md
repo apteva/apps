@@ -1,8 +1,28 @@
-# Bills (v0.1.4)
+# Bills (v0.1.5)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.1.5
+
+UX patch: **binding the integration is now the on switch**. Previously
+operators had to bind OpenCode Go in the dashboard *and* set
+`ocr_provider="llm"` in the install Settings tab — two-step config
+that nobody discovered. Now `ocr_provider=""` (the default) auto-
+detects: if `vision_llm` is bound, the LLM path runs; if not, OCR
+is off.
+
+New `ocr_provider` modes:
+- `""` (default) — auto: LLM if bound, else off
+- `"llm"` — force LLM (errors if not bound; for installs that want
+  the binding loss to surface as a hard error rather than silent
+  manual fallback)
+- `"off"` — force off, even if bound (escape hatch)
+- `"<slug>"` — sidecar app, unchanged
+
+No code outside `callOCR` changed. Single-line behavior addition
+plus updated config_schema description + skill doc.
 
 ## What's in v0.1.4
 

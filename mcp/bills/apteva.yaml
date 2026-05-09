@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: bills
 display_name: Bills
-version: 0.1.4
+version: 0.1.5
 description: |
   Vendors, bills, and bill payments for Apteva agents and human teams.
   The accounts-payable mirror of the `billing` app — money OUT instead
@@ -229,23 +229,28 @@ config_schema:
     label: OCR provider mode
     description: |
       Selects the OCR backend used by bills_create_from_file and
-      POST /bills/from-file. Three modes:
+      POST /bills/from-file. Modes:
 
-        ""       Disabled (default). Caller fills bill fields manually.
+        ""       AUTO (default, v0.1.5+). If the vision_llm integration
+                 is bound (see Bindings tab), bills uses the LLM path.
+                 If not, OCR is off and the caller fills fields manually.
+                 Binding the integration IS the on switch — you don't
+                 need to flip this too.
 
-        "llm"    Use the bound vision_llm integration (bind it in the
-                 dashboard — defaults to OpenCode Go / Kimi K2.6).
-                 Bills renders PDFs to images via embedded PDFium-WASM
-                 and sends them to the chat-completion endpoint with a
-                 structured-output prompt. v0.1.3+.
+        "llm"    Force the LLM path. Errors if vision_llm isn't bound,
+                 instead of silently falling back to manual. Use when
+                 you want a hard guarantee OCR is on.
+
+        "off"    Force OFF even if vision_llm is bound. Escape hatch
+                 for installs that bound the integration for another
+                 reason and don't want bills consuming it.
 
         "<slug>" Slug of another installed Apteva sidecar app that
                  exposes an `extract_invoice(file_id)` MCP tool
                  returning the ExtractedInvoice shape. Forward-compat
                  hook for custom providers (e.g. a Mindee sidecar).
 
-      Caller-supplied args always win over extracted values. Each call
-      bills the provider per page; v0.1.3 doesn't cache.
+      Caller-supplied args always win over extracted values.
   - name: require_w9_before_payment
     type: select
     options: ["true", "false"]
