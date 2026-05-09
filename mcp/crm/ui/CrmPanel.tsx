@@ -239,7 +239,19 @@ function extractPossibleMatchIds(activities: Activity[]): string[] {
   return [];
 }
 
-type Tab = "contacts" | "settings";
+type Tab = "contacts" | "lists" | "settings";
+
+interface List {
+  id: number;
+  slug: string;
+  name: string;
+  description?: string;
+  default_sender_email?: string;
+  default_sender_phone?: string;
+  inbound_route_pattern?: string;
+  archived_at?: string;
+  member_count?: number;
+}
 
 export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const [tab, setTab] = useState<Tab>("contacts");
@@ -258,6 +270,10 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const [newContactOpen, setNewContactOpen] = useState(false);
   const [attrDefs, setAttrDefs] = useState<AttributeDef[]>([]);
   const [defineFieldOpen, setDefineFieldOpen] = useState(false);
+  const [lists, setLists] = useState<List[]>([]);
+  const [contactLists, setContactLists] = useState<List[]>([]);
+  const [newListOpen, setNewListOpen] = useState(false);
+  const [editListId, setEditListId] = useState<number | null>(null);
 
   // Auto-dismiss the error toast after 5s. Manual dismiss via the
   // X button is also wired up below; this prevents stale errors
@@ -315,9 +331,19 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     }
   }, [api]);
 
+  const loadLists = useCallback(async () => {
+    try {
+      const r = await api<{ lists?: List[] }>("GET", "/lists");
+      setLists(r.lists || []);
+    } catch (e) {
+      // Best-effort.
+    }
+  }, [api]);
+
   // Initial load.
   useEffect(() => { loadList(""); }, [loadList]);
   useEffect(() => { loadAttrDefs(); }, [loadAttrDefs]);
+  useEffect(() => { loadLists(); }, [loadLists]);
 
   // Debounced search.
   useEffect(() => {
@@ -344,7 +370,31 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
         reloadActivities(detail.id);
       }
     }
+    if (ev.topic === "list.created" || ev.topic === "list.updated" || ev.topic === "list.archived") {
+      loadLists();
+    }
+    if (ev.topic === "list.member.added" || ev.topic === "list.member.removed") {
+      loadLists();
+      if (detail) {
+        const data = (ev.data || {}) as { contact_id?: number };
+        if (String(data.contact_id) === String(detail.id)) {
+          loadContactLists(detail.id);
+        }
+      }
+    }
   });
+
+  const loadContactLists = useCallback(async (id: string | number) => {
+    try {
+      const r = await api<{ lists?: List[] }>("GET", `/contacts/${id}/lists`);
+      setContactLists(r.lists || []);
+    } catch (e) {
+      // Endpoint may not exist on older CRMs; fallback to client-side
+      // filter from the global list set won't show membership, so the
+      // chip row just stays empty in that case.
+      setContactLists([]);
+    }
+  }, [api]);
 
   const reloadActivities = useCallback(async (id: string) => {
     try {
@@ -364,16 +414,19 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     setDetail(null);
     setActivities([]);
     setConversations([]);
+    setContactLists([]);
     setEdits({});
     try {
-      const [c, a, conv] = await Promise.all([
+      const [c, a, conv, ls] = await Promise.all([
         api<{ contact: Contact }>("GET", `/contacts/${id}`),
         api<{ activities?: Activity[] }>("GET", `/contacts/${id}/activities`),
         api<{ conversations?: Conversation[] }>("GET", `/contacts/${id}/conversations`),
+        api<{ lists?: List[] }>("GET", `/contacts/${id}/lists`).catch(() => ({ lists: [] })),
       ]);
       setDetail(c.contact);
       setActivities(a.activities || []);
       setConversations(conv.conversations || []);
+      setContactLists(ls.lists || []);
     } catch (e) {
       setStatus("Detail error: " + (e as Error).message);
     }
@@ -441,6 +494,57 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       setDefineFieldOpen(false);
     } catch (e) {
       setErrorToast("Define field failed: " + (e as Error).message);
+    }
+  };
+
+  const handleCreateList = async (l: Partial<List>) => {
+    try {
+      await api("POST", "/lists", l);
+      await loadLists();
+      setNewListOpen(false);
+    } catch (e) {
+      setErrorToast("Create list failed: " + (e as Error).message);
+    }
+  };
+
+  const handleSaveList = async (id: number, patch: Partial<List>) => {
+    try {
+      await api("PATCH", `/lists/${id}`, patch);
+      await loadLists();
+      setEditListId(null);
+    } catch (e) {
+      setErrorToast("Save list failed: " + (e as Error).message);
+    }
+  };
+
+  const handleArchiveList = (l: List) => {
+    setConfirmDialog({
+      title: "Archive list",
+      message: `Archive "${l.name}"? Members rows are kept; the list just stops appearing in active views.`,
+      confirmLabel: "Archive",
+      destructive: true,
+      onConfirm: async () => {
+        try {
+          await api("DELETE", `/lists/${l.id}`);
+          await loadLists();
+        } catch (e) {
+          setErrorToast("Archive list failed: " + (e as Error).message);
+        }
+      },
+    });
+  };
+
+  const toggleContactList = async (l: List, on: boolean) => {
+    if (!detail) return;
+    try {
+      if (on) {
+        await api("POST", `/contacts/${detail.id}/lists`, { list_id: l.id, source: "human" });
+      } else {
+        await api("DELETE", `/lists/${l.id}/members/${detail.id}`);
+      }
+      await loadContactLists(detail.id);
+    } catch (e) {
+      setErrorToast("List membership failed: " + (e as Error).message);
     }
   };
 
@@ -526,6 +630,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       {/* Tabs */}
       <nav className="flex gap-1 border-b border-border px-3 pt-2 text-xs">
         <TabButton active={tab === "contacts"} onClick={() => setTab("contacts")}>Contacts</TabButton>
+        <TabButton active={tab === "lists"} onClick={() => setTab("lists")}>Lists</TabButton>
         <TabButton active={tab === "settings"} onClick={() => setTab("settings")}>Settings</TabButton>
       </nav>
 
@@ -597,6 +702,12 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
                       Inbound mail matched this contact's domain but not the address — review and merge if needed.
                     </div>
                   )}
+
+                  <ContactListChips
+                    lists={lists}
+                    contactLists={contactLists}
+                    onToggle={toggleContactList}
+                  />
 
                   <section>
                     <h2 className="text-xs uppercase tracking-wide text-text-dim mb-2">Core fields</h2>
@@ -710,6 +821,13 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
               )}
             </main>
           </div>
+        ) : tab === "lists" ? (
+          <ListsTab
+            lists={lists}
+            onCreate={() => setNewListOpen(true)}
+            onEdit={(id) => setEditListId(id)}
+            onArchive={handleArchiveList}
+          />
         ) : (
           <SettingsTab
             messagingTool={messagingTool}
@@ -756,6 +874,23 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
           existing={attrDefs}
           onCancel={() => setDefineFieldOpen(false)}
           onSubmit={handleDefineField}
+        />
+      )}
+
+      {newListOpen && (
+        <ListEditorModal
+          existing={lists}
+          onCancel={() => setNewListOpen(false)}
+          onSubmit={handleCreateList}
+        />
+      )}
+
+      {editListId !== null && (
+        <ListEditorModal
+          existing={lists}
+          editing={lists.find((l) => l.id === editListId) || null}
+          onCancel={() => setEditListId(null)}
+          onSubmit={(patch) => handleSaveList(editListId, patch)}
         />
       )}
 
@@ -1670,4 +1805,258 @@ function slugify(s: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
+}
+
+// ─── Lists ────────────────────────────────────────────────────────
+
+// ContactListChips renders a one-line row of "is this contact on
+// list X?" chips. Active memberships are filled; non-members are
+// outlined and click-to-add. Hides itself when no lists exist
+// (empty-state lives in the Lists tab, not on contact detail).
+function ContactListChips({ lists, contactLists, onToggle }: {
+  lists: List[];
+  contactLists: List[];
+  onToggle: (l: List, on: boolean) => void;
+}) {
+  const visible = lists.filter((l) => !l.archived_at);
+  if (visible.length === 0) return null;
+  const activeIds = new Set(contactLists.map((l) => l.id));
+  return (
+    <section>
+      <h2 className="text-xs uppercase tracking-wide text-text-dim mb-2">Lists</h2>
+      <div className="flex flex-wrap gap-1.5">
+        {visible.map((l) => {
+          const on = activeIds.has(l.id);
+          return (
+            <button
+              key={l.id}
+              type="button"
+              onClick={() => onToggle(l, !on)}
+              title={on ? "Remove from list" : "Add to list"}
+              className={`text-[11px] px-2 py-0.5 rounded border transition ${
+                on
+                  ? "border-accent text-accent bg-accent/10"
+                  : "border-border text-text-muted hover:bg-bg-input"
+              }`}
+            >
+              {on ? "✓ " : "+ "}{l.name}
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+// ListsTab renders the main lists view: left column = list of lists,
+// right column = nothing for v0.4 (member view comes via the Contacts
+// tab once the agent picks a contact). Keeping it lean for v0.4 — a
+// dedicated list-detail pane with member browsing is a v0.5 polish.
+function ListsTab({ lists, onCreate, onEdit, onArchive }: {
+  lists: List[];
+  onCreate: () => void;
+  onEdit: (id: number) => void;
+  onArchive: (l: List) => void;
+}) {
+  const active = lists.filter((l) => !l.archived_at);
+  return (
+    <div className="p-6 max-w-3xl space-y-4">
+      <header className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl text-text font-semibold">Lists</h1>
+          <p className="text-text-muted text-sm">
+            Buckets of contacts with their own sender defaults and inbound routing — used to keep multiple brands or products in one CRM install.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onCreate}
+          className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg whitespace-nowrap"
+        >+ New list</button>
+      </header>
+
+      {active.length === 0 ? (
+        <div className="border border-border rounded p-4 text-sm text-text-muted">
+          No lists yet. Create one for each brand / product / audience that needs its own sender identity.
+        </div>
+      ) : (
+        <ul className="divide-y divide-border border border-border rounded">
+          {active.map((l) => (
+            <li key={l.id} className="px-3 py-2 flex items-center gap-3">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-text font-medium truncate">{l.name}</span>
+                  <span className="text-[10px] uppercase text-text-dim font-mono">{l.slug}</span>
+                  {typeof l.member_count === "number" && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted">
+                      {l.member_count} member{l.member_count === 1 ? "" : "s"}
+                    </span>
+                  )}
+                </div>
+                <div className="text-xs text-text-muted truncate">
+                  {[
+                    l.default_sender_email && `from: ${l.default_sender_email}`,
+                    l.default_sender_phone && `phone: ${l.default_sender_phone}`,
+                    l.inbound_route_pattern && `inbound: ${l.inbound_route_pattern}`,
+                  ].filter(Boolean).join(" · ") || (l.description || "—")}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => onEdit(l.id)}
+                className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
+              >Edit</button>
+              <button
+                type="button"
+                onClick={() => onArchive(l)}
+                className="text-xs px-2 py-1 text-red border border-red/50 rounded hover:bg-red/10"
+              >Archive</button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// ListEditorModal — used for both Create (no `editing` prop) and Edit
+// (editing populated). Slug is auto-derived from name on create, and
+// locked on edit (we don't expose slug renames in the panel since
+// they're a stable identifier).
+function ListEditorModal({ existing, editing, onCancel, onSubmit }: {
+  existing: List[];
+  editing?: List | null;
+  onCancel: () => void;
+  onSubmit: (patch: Partial<List>) => void | Promise<void>;
+}) {
+  const isEdit = !!editing;
+  const [name, setName] = useState(editing?.name || "");
+  const [slug, setSlug] = useState(editing?.slug || "");
+  const [touchedSlug, setTouchedSlug] = useState(false);
+  const [description, setDescription] = useState(editing?.description || "");
+  const [senderEmail, setSenderEmail] = useState(editing?.default_sender_email || "");
+  const [senderPhone, setSenderPhone] = useState(editing?.default_sender_phone || "");
+  const [pattern, setPattern] = useState(editing?.inbound_route_pattern || "");
+  const [busy, setBusy] = useState(false);
+
+  const suggestedSlug = useMemo(() => slugify(name), [name]);
+  const effectiveSlug = isEdit ? (editing!.slug) : (touchedSlug ? slug : suggestedSlug);
+  const slugTaken = !isEdit && existing.some((l) => l.slug === effectiveSlug);
+
+  const submit = async () => {
+    if (!name.trim()) return;
+    setBusy(true);
+    try {
+      if (isEdit) {
+        await onSubmit({
+          name: name.trim(),
+          description: description.trim(),
+          default_sender_email: senderEmail.trim(),
+          default_sender_phone: senderPhone.trim(),
+          inbound_route_pattern: pattern.trim(),
+        });
+      } else {
+        await onSubmit({
+          name: name.trim(),
+          slug: effectiveSlug,
+          description: description.trim(),
+          default_sender_email: senderEmail.trim(),
+          default_sender_phone: senderPhone.trim(),
+          inbound_route_pattern: pattern.trim(),
+        });
+      }
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <ModalShell
+      title={isEdit ? `Edit list — ${editing!.name}` : "New list"}
+      onCancel={onCancel}
+      footer={
+        <>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={busy || !name.trim() || slugTaken}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+          >{busy ? "Saving…" : (isEdit ? "Save" : "Create")}</button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input disabled:opacity-50"
+          >Cancel</button>
+        </>
+      }
+    >
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-24">Name</label>
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          autoFocus
+          placeholder="SaaS 1 customers"
+          className="flex-1 bg-bg-input border border-border rounded px-2 py-1"
+        />
+      </div>
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-24">Slug</label>
+        <input
+          type="text"
+          value={effectiveSlug}
+          onChange={(e) => { if (!isEdit) { setTouchedSlug(true); setSlug(e.target.value); } }}
+          disabled={isEdit}
+          placeholder="saas_1_customers"
+          className="flex-1 bg-bg-input border border-border rounded px-2 py-1 font-mono text-xs disabled:opacity-50"
+        />
+      </div>
+      {slugTaken && (
+        <p className="text-red text-xs ml-26">Slug already used in this project.</p>
+      )}
+      <div className="flex items-start gap-2">
+        <label className="text-text-muted w-24 mt-1">Description</label>
+        <textarea
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          rows={2}
+          className="flex-1 bg-bg-input border border-border rounded px-2 py-1"
+        />
+      </div>
+      <hr className="border-border" />
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-24">Default sender (email)</label>
+        <input
+          type="email"
+          value={senderEmail}
+          onChange={(e) => setSenderEmail(e.target.value)}
+          placeholder="hello@saas1.example.com"
+          className="flex-1 bg-bg-input border border-border rounded px-2 py-1"
+        />
+      </div>
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-24">Default sender (phone)</label>
+        <input
+          type="tel"
+          value={senderPhone}
+          onChange={(e) => setSenderPhone(e.target.value)}
+          placeholder="+15551234567"
+          className="flex-1 bg-bg-input border border-border rounded px-2 py-1"
+        />
+      </div>
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-24">Inbound pattern</label>
+        <input
+          type="text"
+          value={pattern}
+          onChange={(e) => setPattern(e.target.value)}
+          placeholder="*@saas1.example.com"
+          className="flex-1 bg-bg-input border border-border rounded px-2 py-1 font-mono text-xs"
+        />
+      </div>
+      <p className="text-text-dim text-xs">
+        When inbound mail/SMS matches this pattern (registered separately in messaging's inbound routes), the contact gets auto-added to this list.
+      </p>
+    </ModalShell>
+  );
 }

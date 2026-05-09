@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.3.1
+version: 0.4.0
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -89,6 +89,22 @@ provides:
       description: List a contact's recent conversations.
     - name: contacts_get_conversation
       description: Fetch one conversation with its full activity chain.
+    - name: lists_create
+      description: Create a new contact list.
+    - name: lists_list
+      description: List active lists in this project.
+    - name: lists_get
+      description: Fetch one list (by id or slug).
+    - name: lists_update
+      description: Partial-patch a list (name, description, sender defaults, inbound pattern).
+    - name: lists_archive
+      description: Archive (soft-delete) a list.
+    - name: lists_add_contact
+      description: Add a contact to a list. Idempotent.
+    - name: lists_remove_contact
+      description: Remove a contact from a list.
+    - name: lists_membership
+      description: Which active lists is a contact on?
   ui_panels:
     - slot: project.page
       label: Contacts
@@ -154,6 +170,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/attribute-defs", Handler: a.handleHTTPAttrDefs},
 		// Inbound webhook from messaging.dispatchInbound. POST only.
 		{Pattern: "/inbound", Handler: a.handleInbound},
+		// Lists CRUD + membership management.
+		{Pattern: "/lists", Handler: a.handleHTTPLists},
+		{Pattern: "/lists/", Handler: a.handleHTTPListItem},
 	}
 }
 
@@ -204,6 +223,9 @@ func (a *App) handleHTTPContactItem(w http.ResponseWriter, r *http.Request) {
 			return
 		case "attributes":
 			a.handleHTTPSetAttribute(w, r)
+			return
+		case "lists":
+			a.handleHTTPContactLists(w, r)
 			return
 		}
 	}
@@ -442,7 +464,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		// Calling without messaging installed returns a clear error.
 		{
 			Name:        "contacts_send_message",
-			Description: "Send a message to a contact via the bound messaging app. Auto-resolves channel + address (channel arg overrides). Logs the send to the activity timeline and links it to a conversation. Args: id (contact id), body, channel? (email|sms|whatsapp), subject?, body_html?, from? (overrides default sender), conversation_id? (attach to existing thread), template_vars?, idempotency_key?.",
+			Description: "Send a message to a contact via the bound messaging app. Auto-resolves channel + address (channel arg overrides). Logs the send to the activity timeline and links it to a conversation. Sender precedence: from > list.default_sender > install default. Args: id (contact id), body, channel? (email|sms|whatsapp), subject?, body_html?, from? (overrides defaults), list_id? (use this list's sender defaults), conversation_id? (attach to existing thread), template_vars?, idempotency_key?.",
 			InputSchema: schemaObject(map[string]any{
 				"id":              map[string]any{"type": "integer"},
 				"body":            map[string]any{"type": "string"},
@@ -450,6 +472,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"subject":         map[string]any{"type": "string"},
 				"body_html":       map[string]any{"type": "string"},
 				"from":            map[string]any{"type": "string"},
+				"list_id":         map[string]any{"type": "integer"},
 				"conversation_id": map[string]any{"type": "integer"},
 				"template_vars":   map[string]any{"type": "object"},
 				"idempotency_key": map[string]any{"type": "string"},
@@ -506,6 +529,84 @@ func (a *App) MCPTools() []sdk.Tool {
 				"conversation_id": map[string]any{"type": "integer"},
 			}, []string{"conversation_id"}),
 			Handler: a.toolGetConversation,
+		},
+
+		// ─── lists tools ──────────────────────────────────────────────
+		// Explicit, configurable buckets of contacts. A contact can be
+		// on multiple lists; each list carries its own sender defaults.
+		{
+			Name:        "lists_create",
+			Description: "Create a new list. Args: name, slug? (auto-derived from name), description?, default_sender_email?, default_sender_phone?, inbound_route_pattern?.",
+			InputSchema: schemaObject(map[string]any{
+				"name":                  map[string]any{"type": "string"},
+				"slug":                  map[string]any{"type": "string"},
+				"description":           map[string]any{"type": "string"},
+				"default_sender_email":  map[string]any{"type": "string"},
+				"default_sender_phone":  map[string]any{"type": "string"},
+				"inbound_route_pattern": map[string]any{"type": "string"},
+			}, nil),
+			Handler: a.toolListsCreate,
+		},
+		{
+			Name:        "lists_list",
+			Description: "List active lists in this project. Args: include_archived? (default false).",
+			InputSchema: schemaObject(map[string]any{
+				"include_archived": map[string]any{"type": "boolean"},
+			}, nil),
+			Handler: a.toolListsList,
+		},
+		{
+			Name:        "lists_get",
+			Description: "Fetch one list. Args: id OR slug.",
+			InputSchema: schemaObject(map[string]any{
+				"id":   map[string]any{"type": "integer"},
+				"slug": map[string]any{"type": "string"},
+			}, nil),
+			Handler: a.toolListsGet,
+		},
+		{
+			Name:        "lists_update",
+			Description: "Partial-patch a list. Mutable fields: name, description, default_sender_email, default_sender_phone, inbound_route_pattern. Args: id, patch.",
+			InputSchema: schemaObject(map[string]any{
+				"id":    map[string]any{"type": "integer"},
+				"patch": map[string]any{"type": "object"},
+			}, []string{"id", "patch"}),
+			Handler: a.toolListsUpdate,
+		},
+		{
+			Name:        "lists_archive",
+			Description: "Archive a list (soft delete). Members rows are kept. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolListsArchive,
+		},
+		{
+			Name:        "lists_add_contact",
+			Description: "Add a contact to a list. Idempotent. Args: list_id, contact_id, source?.",
+			InputSchema: schemaObject(map[string]any{
+				"list_id":    map[string]any{"type": "integer"},
+				"contact_id": map[string]any{"type": "integer"},
+				"source":     map[string]any{"type": "string"},
+			}, []string{"list_id", "contact_id"}),
+			Handler: a.toolListsAddContact,
+		},
+		{
+			Name:        "lists_remove_contact",
+			Description: "Remove a contact from a list. Args: list_id, contact_id.",
+			InputSchema: schemaObject(map[string]any{
+				"list_id":    map[string]any{"type": "integer"},
+				"contact_id": map[string]any{"type": "integer"},
+			}, []string{"list_id", "contact_id"}),
+			Handler: a.toolListsRemoveContact,
+		},
+		{
+			Name:        "lists_membership",
+			Description: "Which active lists is a contact on? Args: contact_id.",
+			InputSchema: schemaObject(map[string]any{
+				"contact_id": map[string]any{"type": "integer"},
+			}, []string{"contact_id"}),
+			Handler: a.toolListsMembership,
 		},
 	}
 }
@@ -703,10 +804,15 @@ func (a *App) toolGetContext(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
+	lists, err := dbListsForContact(ctx.AppDB(), pid, c.ID)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
 		"contact":       c,
 		"activities":    activities,
 		"conversations": conversations,
+		"lists":         lists,
 		"found":         true,
 	}, nil
 }

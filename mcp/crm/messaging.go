@@ -489,14 +489,33 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		}
 	}
 
+	// Sender resolution precedence: explicit `from` arg > list default
+	// (when list_id supplied) > install-level default config.
 	from := strArg(args, "from")
+	listID := int64Arg(args, "list_id")
+	var resolvedList *List
+	if from == "" && listID != 0 {
+		l, err := dbListGet(ctx.AppDB(), pid, listID)
+		if err != nil {
+			return nil, fmt.Errorf("list lookup: %w", err)
+		}
+		if l == nil {
+			return nil, fmt.Errorf("list_id %d not found", listID)
+		}
+		resolvedList = l
+		from = l.defaultSenderForChannel(addr.Channel)
+	}
 	if from == "" {
 		from = defaultSenderForChannel(ctx, addr.Channel)
 	}
 	if from == "" {
-		return nil, fmt.Errorf("from required (no default_sender_%s configured)",
-			map[string]string{channelEmail: "email", channelSMS: "phone", channelWhatsApp: "phone"}[addr.Channel])
+		hint := map[string]string{channelEmail: "email", channelSMS: "phone", channelWhatsApp: "phone"}[addr.Channel]
+		if listID != 0 {
+			return nil, fmt.Errorf("from required (list_id %d has no default_sender_%s, and no install default configured)", listID, hint)
+		}
+		return nil, fmt.Errorf("from required (no default_sender_%s configured)", hint)
 	}
+	_ = resolvedList // reserved for future "tag activity with list" enrichment
 
 	sendArgs := map[string]any{
 		"_project_id": pid,
@@ -945,6 +964,22 @@ func (a *App) handleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// List auto-attach. If messaging's matched_pattern matches a list's
+	// inbound_route_pattern, add this contact to that list. Idempotent
+	// (INSERT OR IGNORE), so repeat inbound from the same address is a
+	// no-op for an already-attached contact.
+	var listID int64
+	if body.MatchedPattern != "" {
+		if l, _ := dbListByInboundPattern(db, pid, body.MatchedPattern); l != nil {
+			listID = l.ID
+			if err := dbListAddContact(db, pid, l.ID, contact.ID, "messaging:inbound"); err != nil {
+				globalCtx.Logger().Warn("inbound list auto-attach failed", "list_id", l.ID, "contact_id", contact.ID, "err", err)
+			} else {
+				globalCtx.Emit("list.member.added", map[string]any{"list_id": l.ID, "contact_id": contact.ID})
+			}
+		}
+	}
+
 	if stubCreated {
 		globalCtx.Emit("contact.added", map[string]any{
 			"id": contact.ID, "display_name": contact.DisplayName,
@@ -954,13 +989,17 @@ func (a *App) handleInbound(w http.ResponseWriter, r *http.Request) {
 		"contact_id": contact.ID, "kind": act.Kind,
 	})
 
-	httpJSON(w, map[string]any{
+	out := map[string]any{
 		"ok":              true,
 		"contact_id":      contact.ID,
 		"stub_created":    stubCreated,
 		"activity_id":     act.ID,
 		"conversation_id": convoID,
-	})
+	}
+	if listID != 0 {
+		out["list_id"] = listID
+	}
+	httpJSON(w, out)
 }
 
 func resolveInboundConversation(db *sql.DB, pid string, contactID int64, p inboundPayload) (int64, error) {

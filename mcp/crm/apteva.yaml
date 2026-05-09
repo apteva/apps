@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.3.1
+version: 0.4.0
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -69,6 +69,23 @@ provides:
       description: List a contact's recent conversations.
     - name: contacts_get_conversation
       description: Fetch one conversation with its full activity chain.
+    # Lists — explicit configurable buckets of contacts (multi-membership).
+    - name: lists_create
+      description: Create a new contact list with sender defaults + optional inbound pattern.
+    - name: lists_list
+      description: List active lists in this project.
+    - name: lists_get
+      description: Fetch one list by id or slug.
+    - name: lists_update
+      description: Partial-patch a list.
+    - name: lists_archive
+      description: Soft-delete a list.
+    - name: lists_add_contact
+      description: Add a contact to a list (idempotent).
+    - name: lists_remove_contact
+      description: Remove a contact from a list.
+    - name: lists_membership
+      description: Which active lists is a contact on?
   ui_panels:
     - slot: project.page
       label: Contacts
