@@ -1,0 +1,331 @@
+// Robot panel — vanilla ES module. The dashboard imports this at
+// /api/apps/robot/ui/RobotPanel.mjs and calls mount(root, ctx).
+//
+// v0.1 deliberately uses no framework: a small controller polls
+// /scenarios + /episodes/{id} and re-renders into a canvas + activity
+// feed. Adding React later means swapping this file; the manifest
+// only references the entry path.
+
+const API = "/api/apps/robot";
+
+const TILE = 24;
+const COLORS = {
+  floor:  "#f4f4f5",
+  wall:   "#1f2937",
+  goal:   "#22c55e",
+  agent:  "#3b82f6",
+  fog:    "#27272a",
+  oob:    "#09090b",
+  item:   "#f59e0b",
+  hazard: "#ef4444",
+  grid:   "#d4d4d8",
+};
+
+export function mount(root) {
+  root.innerHTML = `
+    <style>
+      .robot-panel { font: 13px/1.4 system-ui, sans-serif; color: #18181b; padding: 16px; }
+      .robot-panel.dark { color: #e4e4e7; }
+      .robot-row { display: flex; gap: 16px; align-items: flex-start; }
+      .robot-col { flex: 1; min-width: 0; }
+      .robot-h { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #71717a; margin-bottom: 4px; }
+      .robot-title { font-size: 18px; font-weight: 600; margin: 0 0 4px 0; }
+      .robot-desc { color: #52525b; margin: 0 0 12px 0; }
+      .robot-canvas-wrap { background: #fafafa; border: 1px solid #e4e4e7; border-radius: 6px; padding: 12px; display: inline-block; }
+      .robot-feed { max-height: 480px; overflow: auto; border: 1px solid #e4e4e7; border-radius: 6px; padding: 8px; background: #fafafa; }
+      .robot-feed-row { display: grid; grid-template-columns: 36px 90px 1fr; gap: 8px; padding: 3px 4px; border-bottom: 1px dashed #e4e4e7; font-family: ui-monospace, monospace; font-size: 12px; }
+      .robot-feed-row:last-child { border-bottom: none; }
+      .robot-step { color: #71717a; text-align: right; }
+      .robot-tool { color: #2563eb; }
+      .robot-result { color: #18181b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .robot-metrics { display: flex; gap: 16px; font-size: 13px; margin-top: 8px; }
+      .robot-metric b { color: #18181b; }
+      .robot-controls { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+      .robot-controls select, .robot-controls button { font: inherit; padding: 4px 8px; border-radius: 4px; border: 1px solid #d4d4d8; background: #fff; }
+      .robot-controls button { cursor: pointer; background: #2563eb; color: #fff; border-color: #2563eb; }
+      .robot-controls button:hover { background: #1d4ed8; }
+      .robot-controls button:disabled { background: #a1a1aa; border-color: #a1a1aa; cursor: default; }
+      .robot-status-pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #e4e4e7; color: #18181b; }
+      .robot-status-pill.success { background: #dcfce7; color: #166534; }
+      .robot-status-pill.timeout { background: #fef3c7; color: #92400e; }
+      .robot-status-pill.active  { background: #dbeafe; color: #1e40af; }
+    </style>
+    <div class="robot-panel">
+      <h2 class="robot-title">Robot</h2>
+      <p class="robot-desc">Agent navigation eval sandbox. Pick a scenario, start an episode, watch the agent's tool calls land in the feed.</p>
+
+      <div class="robot-controls">
+        <span class="robot-h">Scenario</span>
+        <select data-role="scenario-picker"></select>
+        <button data-role="start">Start episode</button>
+        <span class="robot-h">Episode</span>
+        <select data-role="episode-picker"></select>
+        <span class="robot-status-pill" data-role="status">idle</span>
+      </div>
+
+      <div class="robot-row">
+        <div class="robot-col" style="flex: 0 0 auto;">
+          <div class="robot-h">World</div>
+          <div class="robot-canvas-wrap"><canvas data-role="grid"></canvas></div>
+          <div class="robot-metrics">
+            <span class="robot-metric">steps <b data-role="m-steps">—</b></span>
+            <span class="robot-metric">optimal <b data-role="m-optimal">—</b></span>
+            <span class="robot-metric">ratio <b data-role="m-ratio">—</b></span>
+          </div>
+        </div>
+        <div class="robot-col">
+          <div class="robot-h">Activity</div>
+          <div class="robot-feed" data-role="feed"></div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const els = {
+    scenPicker: root.querySelector('[data-role="scenario-picker"]'),
+    epPicker:   root.querySelector('[data-role="episode-picker"]'),
+    startBtn:   root.querySelector('[data-role="start"]'),
+    statusPill: root.querySelector('[data-role="status"]'),
+    canvas:     root.querySelector('[data-role="grid"]'),
+    feed:       root.querySelector('[data-role="feed"]'),
+    mSteps:     root.querySelector('[data-role="m-steps"]'),
+    mOptimal:   root.querySelector('[data-role="m-optimal"]'),
+    mRatio:     root.querySelector('[data-role="m-ratio"]'),
+  };
+
+  const state = {
+    scenarios: [],
+    episodes: [],
+    activeEpisode: null,
+    activeScenario: null,
+    pollHandle: null,
+  };
+
+  els.scenPicker.addEventListener('change', () => {
+    state.activeScenario = state.scenarios.find(s => s.id === els.scenPicker.value);
+    drawGrid(els.canvas, state.activeScenario, null, []);
+  });
+  els.epPicker.addEventListener('change', () => loadEpisode(els.epPicker.value));
+  els.startBtn.addEventListener('click', startEpisode);
+
+  refreshAll();
+  setInterval(refreshAll, 5_000);
+
+  async function refreshAll() {
+    await Promise.all([loadScenarios(), loadEpisodes()]);
+  }
+
+  async function loadScenarios() {
+    const res = await fetch(`${API}/scenarios`);
+    if (!res.ok) return;
+    const data = await res.json();
+    state.scenarios = data.scenarios || [];
+    const cur = els.scenPicker.value;
+    els.scenPicker.innerHTML = state.scenarios
+      .map(s => `<option value="${s.id}">${escapeHTML(s.name)}</option>`)
+      .join('');
+    if (cur) els.scenPicker.value = cur;
+    state.activeScenario = state.scenarios.find(s => s.id === els.scenPicker.value) || state.scenarios[0];
+    if (!state.activeEpisode && state.activeScenario) {
+      drawGrid(els.canvas, state.activeScenario, null, []);
+    }
+  }
+
+  async function loadEpisodes() {
+    const res = await fetch(`${API}/episodes?limit=20`);
+    if (!res.ok) return;
+    const data = await res.json();
+    state.episodes = data.episodes || [];
+    const cur = els.epPicker.value;
+    els.epPicker.innerHTML = `<option value="">— recent episodes —</option>` +
+      state.episodes.map(e => {
+        const tag = e.terminal_reason ? ` (${e.terminal_reason})` : ' (active)';
+        return `<option value="${e.episode_id}">${shortID(e.episode_id)} · ${escapeHTML(e.scenario_id)}${tag}</option>`;
+      }).join('');
+    if (cur) els.epPicker.value = cur;
+    if (!state.activeEpisode && state.episodes.length > 0) {
+      const newest = state.episodes[0];
+      els.epPicker.value = newest.episode_id;
+      loadEpisode(newest.episode_id);
+    }
+  }
+
+  async function startEpisode() {
+    const scenID = els.scenPicker.value;
+    if (!scenID) return;
+    els.startBtn.disabled = true;
+    try {
+      const res = await fetch(`${API}/episodes`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({scenario_id: scenID, model: 'manual'}),
+      });
+      if (!res.ok) {
+        alert(`Start failed: ${await res.text()}`);
+        return;
+      }
+      const data = await res.json();
+      await loadEpisodes();
+      els.epPicker.value = data.episode_id;
+      loadEpisode(data.episode_id);
+    } finally {
+      els.startBtn.disabled = false;
+    }
+  }
+
+  async function loadEpisode(id) {
+    if (!id) {
+      stopPolling();
+      state.activeEpisode = null;
+      drawGrid(els.canvas, state.activeScenario, null, []);
+      els.feed.innerHTML = '';
+      els.statusPill.textContent = 'idle';
+      els.statusPill.className = 'robot-status-pill';
+      els.mSteps.textContent = els.mOptimal.textContent = els.mRatio.textContent = '—';
+      return;
+    }
+    await refreshEpisode(id);
+    startPolling(id);
+  }
+
+  function startPolling(id) {
+    stopPolling();
+    state.pollHandle = setInterval(() => refreshEpisode(id), 1500);
+  }
+
+  function stopPolling() {
+    if (state.pollHandle) clearInterval(state.pollHandle);
+    state.pollHandle = null;
+  }
+
+  async function refreshEpisode(id) {
+    const res = await fetch(`${API}/episodes/${id}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const ep = data.episode;
+    const steps = data.steps || [];
+    state.activeEpisode = ep;
+    const scen = state.scenarios.find(s => s.id === ep.scenario_id);
+    if (scen) drawGrid(els.canvas, scen, ep.position, steps);
+    renderFeed(els.feed, steps);
+    renderMetrics(els, ep);
+    renderStatus(els.statusPill, ep);
+    if (ep.terminal_reason) stopPolling();
+  }
+
+  function renderMetrics(els, ep) {
+    els.mSteps.textContent = ep.steps;
+    els.mOptimal.textContent = ep.optimal_steps || '—';
+    els.mRatio.textContent = ep.optimality_ratio ? ep.optimality_ratio.toFixed(2) : '—';
+  }
+
+  function renderStatus(pill, ep) {
+    pill.classList.remove('success', 'timeout', 'active');
+    if (ep.terminal_reason === 'success') {
+      pill.textContent = 'success';
+      pill.classList.add('success');
+    } else if (ep.terminal_reason === 'timeout') {
+      pill.textContent = 'timeout';
+      pill.classList.add('timeout');
+    } else {
+      pill.textContent = 'active';
+      pill.classList.add('active');
+    }
+  }
+}
+
+function drawGrid(canvas, scen, agentPos, steps) {
+  if (!canvas || !scen) return;
+  const w = scen.grid.width, h = scen.grid.height;
+  canvas.width = w * TILE + 1;
+  canvas.height = h * TILE + 1;
+  const ctx = canvas.getContext('2d');
+
+  ctx.fillStyle = COLORS.floor;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Walls — fetch from scenarios endpoint had `walls` originally? No, our /scenarios omits walls.
+  // Render walls from the wall positions present in the steps' observation? Too indirect.
+  // Workaround: fetch walls inline by reading scen.walls if loadScenarios populated them.
+  const walls = scen.walls || [];
+  ctx.fillStyle = COLORS.wall;
+  for (const [x, y] of walls) {
+    ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
+  }
+
+  if (scen.goal) {
+    const [gx, gy] = scen.goal;
+    ctx.fillStyle = COLORS.goal;
+    ctx.fillRect(gx * TILE + 4, gy * TILE + 4, TILE - 8, TILE - 8);
+  }
+
+  // Agent trail — light blue line through visited positions.
+  if (steps && steps.length > 0) {
+    ctx.strokeStyle = "rgba(59,130,246,0.35)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    let started = false;
+    for (const s of steps) {
+      const cx = s.pos_x * TILE + TILE / 2;
+      const cy = s.pos_y * TILE + TILE / 2;
+      if (!started) { ctx.moveTo(cx, cy); started = true; }
+      else ctx.lineTo(cx, cy);
+    }
+    ctx.stroke();
+  }
+
+  if (agentPos) {
+    const [ax, ay] = agentPos;
+    ctx.fillStyle = COLORS.agent;
+    ctx.beginPath();
+    ctx.arc(ax * TILE + TILE / 2, ay * TILE + TILE / 2, TILE / 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Grid lines on top.
+  ctx.strokeStyle = COLORS.grid;
+  ctx.lineWidth = 0.5;
+  ctx.beginPath();
+  for (let x = 0; x <= w; x++) {
+    ctx.moveTo(x * TILE + 0.5, 0);
+    ctx.lineTo(x * TILE + 0.5, h * TILE);
+  }
+  for (let y = 0; y <= h; y++) {
+    ctx.moveTo(0, y * TILE + 0.5);
+    ctx.lineTo(w * TILE, y * TILE + 0.5);
+  }
+  ctx.stroke();
+}
+
+function renderFeed(root, steps) {
+  if (!steps || steps.length === 0) {
+    root.innerHTML = `<div style="color:#71717a; font-size:12px; padding:8px;">no steps yet</div>`;
+    return;
+  }
+  // Newest at the top.
+  const ordered = [...steps].sort((a, b) => b.step - a.step);
+  root.innerHTML = ordered.map(s => {
+    let summary = '';
+    try {
+      const r = JSON.parse(s.result);
+      if (s.tool === 'move') {
+        summary = r.moved ? `→ ok` : `→ ${r.reason}`;
+      } else {
+        summary = r.reason || JSON.stringify(r).slice(0, 60);
+      }
+    } catch { summary = s.result?.slice(0, 60) || ''; }
+    return `<div class="robot-feed-row">
+      <span class="robot-step">${s.step}</span>
+      <span class="robot-tool">${escapeHTML(s.tool)}</span>
+      <span class="robot-result">${escapeHTML(summary)}</span>
+    </div>`;
+  }).join('');
+}
+
+function shortID(id) { return id ? id.slice(-6) : ''; }
+
+function escapeHTML(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}

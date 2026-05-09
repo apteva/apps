@@ -25,6 +25,7 @@ mcp/live-link/live-link
 mcp/media/media
 mcp/messaging/messaging
 mcp/mqtt/mqtt
+mcp/robot/robot
 mcp/social/social
 mcp/status/status
 mcp/storage/storage

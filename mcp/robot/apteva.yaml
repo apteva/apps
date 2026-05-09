@@ -1,0 +1,75 @@
+schema: apteva-app/v1
+
+name: robot
+display_name: Robot
+version: 0.1.0
+description: |
+  Agent navigation eval sandbox. 2D grid worlds the agent perceives
+  locally and moves through one cell at a time. Episodes terminate on
+  goal-reach (success) or max-steps (timeout) — the harness decides,
+  the agent only navigates. Per-episode metrics (steps, optimal_steps,
+  optimality_ratio) make runs comparable across models. v0.1 ships
+  reach-goal scenarios; pick/drop are part of the contract but inert
+  until v0.2 adds items.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/robot
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/robot/icon.png
+tags: [eval, navigation, agent, simulation]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+  integrations: []
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: list_scenarios,  description: "List available navigation scenarios in this install. Returns id, name, description for each." }
+    - { name: start_episode,   description: "Begin a new navigation episode against a scenario. Args: scenario_id, model? (label for the agent attempting the run). Returns episode_id and the initial observation." }
+    - { name: observe,         description: "Return the current view of the world from the agent's position. Partial observability by default — see scenario for radius. Returns view (cells), goal_bearing, step, status." }
+    - { name: move,            description: "Move one cell in a cardinal direction. Args: direction (N|E|S|W). Counts as one step whether or not the move succeeds (walls block, position stays)." }
+    - { name: pick,            description: "Attempt to pick up an item at the agent's current cell. Inert in v0.1 (no scenarios ship items); becomes active in v0.2." }
+    - { name: drop,            description: "Attempt to drop the held item at the agent's current cell. Inert in v0.1; becomes active in v0.2." }
+    - { name: episode_status,  description: "Return per-episode metrics — steps, optimal_steps, optimality_ratio, success, terminal_reason. Args: episode_id? (defaults to the most recent episode)." }
+  ui_panels:
+    - slot: project.page
+      label: Robot
+      icon: navigation
+      entry: /ui/RobotPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/robot
+  port: 8080
+  health_check: /health
+  resources:
+    cpu: 0.05
+    memory: 64
+    cpu_limit: 1
+    memory_limit: 256
+  storage:
+    - name: data
+      mount_path: /data
+  env:
+    APTEVA_GATEWAY_URL: { from: platform }
+    APTEVA_APP_TOKEN:   { from: platform }
+    APTEVA_INSTALL_ID:  { from: platform }
+    APTEVA_PROJECT_ID:  { from: platform }
+    APTEVA_APP_CONFIG:  { from: platform }
+
+db:
+  driver: sqlite
+  path: /data/robot.db
+  migrations: migrations/
+
+config_schema: []
+
+upgrade_policy: auto-patch

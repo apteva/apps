@@ -1,0 +1,16 @@
+{
+  "id": "warehouse_01",
+  "name": "Warehouse 01",
+  "description": "16x12 grid with three shelf-row obstacles. Agent enters bottom-left, goal at far right under the last shelf. Multiple plausible paths — optimality_ratio shows whether the agent picked one of the short ones.",
+  "grid": {"width": 16, "height": 12},
+  "walls": [
+    [4,2],[4,3],[4,4],[4,5],[4,6],[4,7],[4,8],
+    [8,4],[8,5],[8,6],[8,7],[8,8],[8,9],[8,10],
+    [12,2],[12,3],[12,4],[12,5],[12,6],[12,7],[12,8]
+  ],
+  "agent_start": {"x": 1, "y": 1, "heading": "E"},
+  "goal": [14, 10],
+  "max_steps": 150,
+  "observability": {"kind": "partial", "radius": 2},
+  "success": {"type": "reach_goal"}
+}

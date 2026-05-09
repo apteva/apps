@@ -1,0 +1,15 @@
+{
+  "id": "corridor",
+  "name": "S-Corridor",
+  "description": "12x8 grid. Two horizontal walls force an S-shaped path: south corridor right, vertical jog, north corridor left. Tests whether the agent remembers recent moves under partial observability.",
+  "grid": {"width": 12, "height": 8},
+  "walls": [
+    [0,2],[1,2],[2,2],[3,2],[4,2],[5,2],[6,2],[7,2],
+    [4,5],[5,5],[6,5],[7,5],[8,5],[9,5],[10,5],[11,5]
+  ],
+  "agent_start": {"x": 1, "y": 1, "heading": "E"},
+  "goal": [10, 6],
+  "max_steps": 80,
+  "observability": {"kind": "partial", "radius": 2},
+  "success": {"type": "reach_goal"}
+}

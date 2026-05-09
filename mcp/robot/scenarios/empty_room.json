@@ -1,0 +1,12 @@
+{
+  "id": "empty_room",
+  "name": "Empty Room",
+  "description": "10x10 room, no walls. Goal across the diagonal. Sanity check that the agent can find a goal it has bearing on under partial observability.",
+  "grid": {"width": 10, "height": 10},
+  "walls": [],
+  "agent_start": {"x": 1, "y": 1, "heading": "E"},
+  "goal": [8, 8],
+  "max_steps": 50,
+  "observability": {"kind": "partial", "radius": 2},
+  "success": {"type": "reach_goal"}
+}
