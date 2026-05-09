@@ -1,112 +1,96 @@
 // RobotPanel — agent navigation eval sandbox.
 //
-// React shell delegating to a vanilla mount(root) routine that builds
-// the DOM, drives the canvas, and runs the poll loop. The hybrid keeps
-// the v0.1.x panel small without rewriting the canvas + activity feed
-// as idiomatic React; that refactor lands in v0.2 alongside items.
+// React shell delegating to a vanilla mount(root) routine. Built via
+// `bun run scripts/build-panels.ts` from the apps/ repo root.
 //
-// Built via `bun run scripts/build-panels.ts` from the apps/ repo
-// root; the .mjs alongside this file is the generated artifact.
+// Styling strictly through the dashboard's Tailwind theme tokens
+// (text-text, bg-bg-card, border-border, text-accent, bg-info/20,
+// etc.) so the panel auto-themes on data-theme + data-mode flips.
+// Canvas colours read the same CSS variables at draw time so the
+// world view recolours in lockstep with the rest of the dashboard.
 
 import { useEffect, useRef } from "react";
 
 const API = "/api/apps/robot";
 const TILE = 24;
 
-const COLORS: Record<string, string> = {
-  floor: "#f4f4f5",
-  wall: "#1f2937",
-  goal: "#22c55e",
-  agent: "#3b82f6",
-  fog: "#27272a",
-  oob: "#09090b",
-  item: "#f59e0b",
-  hazard: "#ef4444",
-  grid: "#d4d4d8",
+// Pill class fragments — the base wrapper plus one of four state
+// fragments. State strings have to appear as literal tokens here so
+// Tailwind's source-scan picks them up and emits the rules.
+const PILL_BASE = "text-xs px-2 py-0.5 rounded-full ml-1";
+const PILL_STATES: Record<string, string> = {
+  idle: "bg-bg-hover text-text-muted",
+  active: "bg-info/20 text-info",
+  success: "bg-success/20 text-success",
+  timeout: "bg-warn/20 text-warn",
 };
+
+const BTN_DPAD =
+  "bg-bg-input border border-border rounded text-text font-semibold cursor-pointer " +
+  "hover:bg-bg-hover active:bg-bg-card disabled:opacity-50 disabled:cursor-default";
+const BTN_EXTRA =
+  "px-3 py-1 rounded border border-border bg-bg-input text-text cursor-pointer " +
+  "hover:bg-bg-hover disabled:opacity-50 disabled:cursor-default text-sm";
+
+function canvasColors() {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (name: string, fallback: string) =>
+    cs.getPropertyValue(`--${name}`).trim() || fallback;
+  return {
+    floor: v("bg-input", "#f4f4f5"),
+    wall: v("text-dim", "#888"),
+    goal: v("success", "#22c55e"),
+    agent: v("info", "#3b82f6"),
+    grid: v("border-subtle", "#333"),
+    trail: v("info", "#3b82f6"),
+  };
+}
 
 function mount(root: HTMLElement): () => void {
   root.innerHTML = `
-    <style>
-      .robot-panel { font: 13px/1.4 system-ui, sans-serif; color: #18181b; padding: 16px; }
-      .robot-panel.dark { color: #e4e4e7; }
-      .robot-row { display: flex; gap: 16px; align-items: flex-start; }
-      .robot-col { flex: 1; min-width: 0; }
-      .robot-h { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #71717a; margin-bottom: 4px; }
-      .robot-title { font-size: 18px; font-weight: 600; margin: 0 0 4px 0; }
-      .robot-desc { color: #52525b; margin: 0 0 12px 0; }
-      .robot-canvas-wrap { background: #fafafa; border: 1px solid #e4e4e7; border-radius: 6px; padding: 12px; display: inline-block; }
-      .robot-feed { max-height: 480px; overflow: auto; border: 1px solid #e4e4e7; border-radius: 6px; padding: 8px; background: #fafafa; }
-      .robot-feed-row { display: grid; grid-template-columns: 36px 90px 1fr; gap: 8px; padding: 3px 4px; border-bottom: 1px dashed #e4e4e7; font-family: ui-monospace, monospace; font-size: 12px; }
-      .robot-feed-row:last-child { border-bottom: none; }
-      .robot-step { color: #71717a; text-align: right; }
-      .robot-tool { color: #2563eb; }
-      .robot-result { color: #18181b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .robot-metrics { display: flex; gap: 16px; font-size: 13px; margin-top: 8px; }
-      .robot-metric b { color: #18181b; }
-      .robot-controls { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
-      .robot-controls select, .robot-controls button { font: inherit; padding: 4px 8px; border-radius: 4px; border: 1px solid #d4d4d8; background: #fff; }
-      .robot-controls button { cursor: pointer; background: #2563eb; color: #fff; border-color: #2563eb; }
-      .robot-controls button:hover { background: #1d4ed8; }
-      .robot-controls button:disabled { background: #a1a1aa; border-color: #a1a1aa; cursor: default; }
-      .robot-status-pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #e4e4e7; color: #18181b; }
-      .robot-status-pill.success { background: #dcfce7; color: #166534; }
-      .robot-status-pill.timeout { background: #fef3c7; color: #92400e; }
-      .robot-status-pill.active  { background: #dbeafe; color: #1e40af; }
-      .robot-dpad { display: grid; grid-template-columns: repeat(3, 36px); grid-template-rows: repeat(3, 36px); gap: 4px; margin-top: 12px; }
-      .robot-dpad button { font: inherit; font-weight: 600; cursor: pointer; border-radius: 4px; border: 1px solid #d4d4d8; background: #fff; color: #18181b; }
-      .robot-dpad button:hover:not(:disabled) { background: #f4f4f5; }
-      .robot-dpad button:active:not(:disabled) { background: #e4e4e7; }
-      .robot-dpad button:disabled { color: #a1a1aa; cursor: default; }
-      .robot-dpad-N { grid-column: 2; grid-row: 1; }
-      .robot-dpad-W { grid-column: 1; grid-row: 2; }
-      .robot-dpad-E { grid-column: 3; grid-row: 2; }
-      .robot-dpad-S { grid-column: 2; grid-row: 3; }
-      .robot-drive { display: flex; gap: 16px; align-items: flex-start; margin-top: 12px; }
-      .robot-drive-extras { display: flex; flex-direction: column; gap: 4px; margin-top: 22px; }
-      .robot-drive-extras button { font: inherit; padding: 4px 10px; border-radius: 4px; border: 1px solid #d4d4d8; background: #fff; color: #18181b; cursor: pointer; }
-      .robot-drive-extras button:disabled { color: #a1a1aa; cursor: default; }
-      .robot-drive-hint { font-size: 11px; color: #71717a; align-self: center; }
-    </style>
-    <div class="robot-panel">
-      <h2 class="robot-title">Robot</h2>
-      <p class="robot-desc">Agent navigation eval sandbox. Pick a scenario, start an episode, watch the agent's tool calls land in the feed.</p>
+    <div class="p-6 text-sm text-text">
+      <h2 class="text-lg font-semibold text-text mb-1">Robot</h2>
+      <p class="text-text-muted mb-4">Agent navigation eval sandbox. Pick a scenario, start an episode, watch the agent's tool calls land in the feed.</p>
 
-      <div class="robot-controls">
-        <span class="robot-h">Scenario</span>
-        <select data-role="scenario-picker"></select>
-        <button data-role="start">Start episode</button>
-        <span class="robot-h">Episode</span>
-        <select data-role="episode-picker"></select>
-        <span class="robot-status-pill" data-role="status">idle</span>
+      <div class="flex items-center gap-2 mb-4 flex-wrap">
+        <span class="text-xs uppercase tracking-wider text-text-dim">Scenario</span>
+        <select data-role="scenario-picker" class="bg-bg-input border border-border rounded px-2 py-1 text-text text-sm"></select>
+        <button data-role="start" class="bg-accent text-bg hover:bg-accent-hover rounded px-3 py-1 text-sm font-medium cursor-pointer disabled:opacity-50 disabled:cursor-default">Start episode</button>
+        <span class="text-xs uppercase tracking-wider text-text-dim ml-2">Episode</span>
+        <select data-role="episode-picker" class="bg-bg-input border border-border rounded px-2 py-1 text-text text-sm"></select>
+        <span data-role="status" class="${PILL_BASE} ${PILL_STATES.idle}">idle</span>
       </div>
 
-      <div class="robot-row">
-        <div class="robot-col" style="flex: 0 0 auto;">
-          <div class="robot-h">World</div>
-          <div class="robot-canvas-wrap"><canvas data-role="grid"></canvas></div>
-          <div class="robot-metrics">
-            <span class="robot-metric">steps <b data-role="m-steps">—</b></span>
-            <span class="robot-metric">optimal <b data-role="m-optimal">—</b></span>
-            <span class="robot-metric">ratio <b data-role="m-ratio">—</b></span>
+      <div class="flex gap-4 items-start flex-wrap">
+        <div class="flex-shrink-0">
+          <div class="text-xs uppercase tracking-wider text-text-dim mb-1">World</div>
+          <div class="bg-bg-card border border-border rounded p-3 inline-block">
+            <canvas data-role="grid"></canvas>
           </div>
-          <div class="robot-drive">
-            <div class="robot-dpad">
-              <button class="robot-dpad-N" data-dir="N" title="Move north (↑)">↑</button>
-              <button class="robot-dpad-W" data-dir="W" title="Move west (←)">←</button>
-              <button class="robot-dpad-E" data-dir="E" title="Move east (→)">→</button>
-              <button class="robot-dpad-S" data-dir="S" title="Move south (↓)">↓</button>
+          <div class="flex gap-4 text-sm text-text-muted mt-2">
+            <span>steps <b class="text-text" data-role="m-steps">—</b></span>
+            <span>optimal <b class="text-text" data-role="m-optimal">—</b></span>
+            <span>ratio <b class="text-text" data-role="m-ratio">—</b></span>
+          </div>
+
+          <div class="flex gap-4 items-start mt-3">
+            <div class="grid gap-1" style="grid-template-columns: repeat(3, 36px); grid-template-rows: repeat(3, 36px);">
+              <button data-dir="N" class="${BTN_DPAD}" style="grid-column: 2; grid-row: 1;" title="Move north (↑)">↑</button>
+              <button data-dir="W" class="${BTN_DPAD}" style="grid-column: 1; grid-row: 2;" title="Move west (←)">←</button>
+              <button data-dir="E" class="${BTN_DPAD}" style="grid-column: 3; grid-row: 2;" title="Move east (→)">→</button>
+              <button data-dir="S" class="${BTN_DPAD}" style="grid-column: 2; grid-row: 3;" title="Move south (↓)">↓</button>
             </div>
-            <div class="robot-drive-extras">
-              <button data-role="pick" title="Pick up an item (inert in v0.1)">pick</button>
-              <button data-role="drop" title="Drop the held item (inert in v0.1)">drop</button>
+            <div class="flex flex-col gap-1 mt-[22px]">
+              <button data-role="pick" class="${BTN_EXTRA}" title="Pick up an item (inert in v0.1)">pick</button>
+              <button data-role="drop" class="${BTN_EXTRA}" title="Drop the held item (inert in v0.1)">drop</button>
             </div>
-            <span class="robot-drive-hint">arrow keys also move</span>
+            <span class="text-xs text-text-dim self-center">arrow keys also move</span>
           </div>
         </div>
-        <div class="robot-col">
-          <div class="robot-h">Activity</div>
-          <div class="robot-feed" data-role="feed"></div>
+
+        <div class="flex-1 min-w-0">
+          <div class="text-xs uppercase tracking-wider text-text-dim mb-1">Activity</div>
+          <div data-role="feed" class="max-h-[480px] overflow-auto bg-bg-card border border-border rounded p-2"></div>
         </div>
       </div>
     </div>
@@ -114,17 +98,17 @@ function mount(root: HTMLElement): () => void {
 
   const els: any = {
     scenPicker: root.querySelector('[data-role="scenario-picker"]'),
-    epPicker:   root.querySelector('[data-role="episode-picker"]'),
-    startBtn:   root.querySelector('[data-role="start"]'),
+    epPicker: root.querySelector('[data-role="episode-picker"]'),
+    startBtn: root.querySelector('[data-role="start"]'),
     statusPill: root.querySelector('[data-role="status"]'),
-    canvas:     root.querySelector('[data-role="grid"]'),
-    feed:       root.querySelector('[data-role="feed"]'),
-    mSteps:     root.querySelector('[data-role="m-steps"]'),
-    mOptimal:   root.querySelector('[data-role="m-optimal"]'),
-    mRatio:     root.querySelector('[data-role="m-ratio"]'),
-    dpadBtns:   Array.from(root.querySelectorAll(".robot-dpad button")),
-    pickBtn:    root.querySelector('[data-role="pick"]'),
-    dropBtn:    root.querySelector('[data-role="drop"]'),
+    canvas: root.querySelector('[data-role="grid"]'),
+    feed: root.querySelector('[data-role="feed"]'),
+    mSteps: root.querySelector('[data-role="m-steps"]'),
+    mOptimal: root.querySelector('[data-role="m-optimal"]'),
+    mRatio: root.querySelector('[data-role="m-ratio"]'),
+    dpadBtns: Array.from(root.querySelectorAll("[data-dir]")) as HTMLButtonElement[],
+    pickBtn: root.querySelector('[data-role="pick"]'),
+    dropBtn: root.querySelector('[data-role="drop"]'),
   };
 
   const state: any = {
@@ -143,7 +127,7 @@ function mount(root: HTMLElement): () => void {
   els.startBtn.addEventListener("click", startEpisode);
 
   for (const btn of els.dpadBtns) {
-    btn.addEventListener("click", () => driveMove(btn.dataset.dir));
+    btn.addEventListener("click", () => driveMove(btn.dataset.dir!));
   }
   els.pickBtn.addEventListener("click", () => driveAction("pick"));
   els.dropBtn.addEventListener("click", () => driveAction("drop"));
@@ -153,7 +137,12 @@ function mount(root: HTMLElement): () => void {
   const keyHandler = (ev: KeyboardEvent) => {
     const target = ev.target as HTMLElement | null;
     if (target && /^(INPUT|SELECT|TEXTAREA)$/.test(target.tagName)) return;
-    const map: Record<string, string> = { ArrowUp: "N", ArrowDown: "S", ArrowLeft: "W", ArrowRight: "E" };
+    const map: Record<string, string> = {
+      ArrowUp: "N",
+      ArrowDown: "S",
+      ArrowLeft: "W",
+      ArrowRight: "E",
+    };
     const dir = map[ev.key];
     if (!dir) return;
     if (!canDrive()) return;
@@ -245,9 +234,10 @@ function mount(root: HTMLElement): () => void {
       state.activeEpisode = null;
       drawGrid(els.canvas, state.activeScenario, null, []);
       els.feed.innerHTML = "";
-      els.statusPill.textContent = "idle";
-      els.statusPill.className = "robot-status-pill";
-      els.mSteps.textContent = els.mOptimal.textContent = els.mRatio.textContent = "—";
+      setPillState(els.statusPill, "idle", "idle");
+      els.mSteps.textContent = "—";
+      els.mOptimal.textContent = "—";
+      els.mRatio.textContent = "—";
       updateDriveAvailability();
       return;
     }
@@ -325,19 +315,16 @@ function mount(root: HTMLElement): () => void {
     els.mRatio.textContent = ep.optimality_ratio ? ep.optimality_ratio.toFixed(2) : "—";
   }
 
-  function renderStatus(pill: any, ep: any) {
-    pill.classList.remove("success", "timeout", "active");
-    if (ep.terminal_reason === "success") {
-      pill.textContent = "success";
-      pill.classList.add("success");
-    } else if (ep.terminal_reason === "timeout") {
-      pill.textContent = "timeout";
-      pill.classList.add("timeout");
-    } else {
-      pill.textContent = "active";
-      pill.classList.add("active");
-    }
+  function renderStatus(pill: HTMLElement, ep: any) {
+    if (ep.terminal_reason === "success") setPillState(pill, "success", "success");
+    else if (ep.terminal_reason === "timeout") setPillState(pill, "timeout", "timeout");
+    else setPillState(pill, "active", "active");
   }
+}
+
+function setPillState(pill: HTMLElement, state: string, label: string) {
+  pill.className = `${PILL_BASE} ${PILL_STATES[state]}`;
+  pill.textContent = label;
 }
 
 function drawGrid(canvas: HTMLCanvasElement, scen: any, agentPos: any, steps: any[]) {
@@ -347,24 +334,26 @@ function drawGrid(canvas: HTMLCanvasElement, scen: any, agentPos: any, steps: an
   canvas.width = w * TILE + 1;
   canvas.height = h * TILE + 1;
   const ctx = canvas.getContext("2d")!;
+  const c = canvasColors();
 
-  ctx.fillStyle = COLORS.floor;
+  ctx.fillStyle = c.floor;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   const walls: number[][] = scen.walls || [];
-  ctx.fillStyle = COLORS.wall;
+  ctx.fillStyle = c.wall;
   for (const [x, y] of walls) {
     ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
   }
 
   if (scen.goal) {
     const [gx, gy] = scen.goal;
-    ctx.fillStyle = COLORS.goal;
+    ctx.fillStyle = c.goal;
     ctx.fillRect(gx * TILE + 4, gy * TILE + 4, TILE - 8, TILE - 8);
   }
 
   if (steps && steps.length > 0) {
-    ctx.strokeStyle = "rgba(59,130,246,0.35)";
+    ctx.strokeStyle = c.trail;
+    ctx.globalAlpha = 0.35;
     ctx.lineWidth = 2;
     ctx.beginPath();
     let started = false;
@@ -379,17 +368,18 @@ function drawGrid(canvas: HTMLCanvasElement, scen: any, agentPos: any, steps: an
       }
     }
     ctx.stroke();
+    ctx.globalAlpha = 1;
   }
 
   if (agentPos) {
     const [ax, ay] = agentPos;
-    ctx.fillStyle = COLORS.agent;
+    ctx.fillStyle = c.agent;
     ctx.beginPath();
     ctx.arc(ax * TILE + TILE / 2, ay * TILE + TILE / 2, TILE / 3, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  ctx.strokeStyle = COLORS.grid;
+  ctx.strokeStyle = c.grid;
   ctx.lineWidth = 0.5;
   ctx.beginPath();
   for (let x = 0; x <= w; x++) {
@@ -405,7 +395,7 @@ function drawGrid(canvas: HTMLCanvasElement, scen: any, agentPos: any, steps: an
 
 function renderFeed(root: HTMLElement, steps: any[]) {
   if (!steps || steps.length === 0) {
-    root.innerHTML = `<div style="color:#71717a; font-size:12px; padding:8px;">no steps yet</div>`;
+    root.innerHTML = `<div class="text-text-dim text-xs p-2">no steps yet</div>`;
     return;
   }
   const ordered = [...steps].sort((a: any, b: any) => b.step - a.step);
@@ -422,11 +412,11 @@ function renderFeed(root: HTMLElement, steps: any[]) {
       } catch {
         summary = (s.result?.slice ? s.result.slice(0, 60) : "") || "";
       }
-      return `<div class="robot-feed-row">
-      <span class="robot-step">${s.step}</span>
-      <span class="robot-tool">${escapeHTML(s.tool)}</span>
-      <span class="robot-result">${escapeHTML(summary)}</span>
-    </div>`;
+      return `<div class="grid gap-2 px-1 py-0.5 border-b border-border-subtle last:border-b-0 font-mono text-xs" style="grid-template-columns: 36px 90px 1fr;">
+        <span class="text-text-dim text-right">${s.step}</span>
+        <span class="text-info">${escapeHTML(s.tool)}</span>
+        <span class="text-text whitespace-nowrap overflow-hidden text-ellipsis" title="${escapeHTML(summary)}">${escapeHTML(summary)}</span>
+      </div>`;
     })
     .join("");
 }
@@ -454,5 +444,5 @@ export default function RobotPanel() {
     if (!ref.current) return;
     return mount(ref.current);
   }, []);
-  return <div ref={ref} style={{ height: "100%", overflow: "auto" }} />;
+  return <div ref={ref} className="h-full overflow-auto" />;
 }

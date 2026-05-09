@@ -27,7 +27,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: robot
 display_name: Robot
-version: 0.1.2
+version: 0.1.3
 description: Agent navigation eval sandbox. 2D grid worlds; partial observability; harness-decided termination (success or timeout).
 author: Apteva
 scopes: [project, global]
