@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bills
 display_name: Bills
-version: 0.1.6
+version: 0.1.7
 description: |
   Vendors, bills, and outbound payments. The AP mirror of billing.
 author: Apteva
@@ -113,7 +113,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("bills mounted",
-		"version", "0.1.6",
+		"version", "0.1.7",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"ocr_provider", configString(ctx, "ocr_provider", "(disabled)"))
 	return nil
@@ -1138,7 +1138,7 @@ func (a *App) toolBillsCreateFromFile(ctx *sdk.AppCtx, args map[string]any) (any
 	}
 	folder := strArg(args, "folder")
 	if folder == "" {
-		folder = "/bill-attachments/"
+		folder = "/.bills/attachments/"
 	}
 
 	// 1. Upload bytes to storage. Hard fail with a clear error when
@@ -1310,7 +1310,7 @@ func (a *App) toolBillsRenderPDF(ctx *sdk.AppCtx, args map[string]any) (any, err
 	}
 	folder := strArg(args, "folder")
 	if folder == "" {
-		folder = "/bill-vouchers/"
+		folder = "/.bills/vouchers/"
 	}
 	if ctx.PlatformAPI() == nil {
 		return nil, errors.New("save_to_storage=true requires the platform API; running outside an Apteva server")
@@ -1872,7 +1872,7 @@ func (a *App) handleHTTPBillAttachUpload(w http.ResponseWriter, r *http.Request)
 	}
 	folder := r.URL.Query().Get("folder")
 	if folder == "" {
-		folder = "/bill-attachments/"
+		folder = "/.bills/attachments/"
 	}
 	fileID, err := storageUploadBase64(ctx, name, folder, contentType, b64)
 	if err != nil {
@@ -1967,7 +1967,7 @@ func (a *App) handleHTTPBillsCreateFromFile(w http.ResponseWriter, r *http.Reque
 		}
 		folder := r.URL.Query().Get("folder")
 		if folder == "" {
-			folder = "/bill-attachments/"
+			folder = "/.bills/attachments/"
 		}
 		fileID, err = storageUploadBase64(ctx, name, folder, ct, b64)
 		if err != nil {

@@ -18,14 +18,11 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"image/jpeg"
-	"io"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -44,12 +41,8 @@ func callOCRViaLLM(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, er
 		return nil, "llm", errors.New("ocr_provider=llm but vision_llm integration not bound — bind opencode-go (or another compatible chat-completion provider) in the dashboard")
 	}
 
-	// 1. Storage metadata + bytes.
-	contentType, err := storageGetContentType(ctx, fileID)
-	if err != nil {
-		return nil, "llm", err
-	}
-	rawBytes, err := storageFetchBytes(ctx, fileID)
+	// 1. Storage bytes + content type in one call (storage v0.9.5+).
+	contentType, rawBytes, err := storageFetchBytes(ctx, fileID)
 	if err != nil {
 		return nil, "llm", err
 	}
@@ -104,60 +97,34 @@ func callOCRViaLLM(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, er
 
 // ─── Storage cross-app helpers ──────────────────────────────────────
 
-func storageGetContentType(ctx *sdk.AppCtx, fileID int64) (string, error) {
-	var meta struct {
-		File struct {
-			ContentType string `json:"content_type"`
-		} `json:"file"`
+// storageFetchBytes pulls the file's bytes via storage's
+// files_get_content tool (storage v0.9.5+). Returns content_type +
+// bytes in one call. Routes through the binding via CallAppResult so
+// it always hits the storage install bound to bills — distinct from
+// the v0.1.3 path that minted a signed URL and http.GET'd it, which
+// failed when the platform's HTTP routing for /api/apps/storage/*
+// landed at a different storage install than the one the bound
+// CallAppResult uses (multi-storage-install case).
+func storageFetchBytes(ctx *sdk.AppCtx, fileID int64) (contentType string, data []byte, err error) {
+	var got struct {
+		ID            int64  `json:"id"`
+		Name          string `json:"name"`
+		ContentType   string `json:"content_type"`
+		SizeBytes     int64  `json:"size_bytes"`
+		ContentBase64 string `json:"content_base64"`
 	}
-	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get",
-		map[string]any{"id": fileID}, &meta); err != nil {
-		// CallAppResult also accepts the unwrapped shape — try once
-		// more in case storage returns the bare {content_type:…}.
-		var bare struct {
-			ContentType string `json:"content_type"`
-		}
-		if err2 := ctx.PlatformAPI().CallAppResult("storage", "files_get",
-			map[string]any{"id": fileID}, &bare); err2 == nil && bare.ContentType != "" {
-			return bare.ContentType, nil
-		}
-		return "", fmt.Errorf("storage.files_get(%d): %w", fileID, err)
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_content",
+		map[string]any{"id": fileID}, &got); err != nil {
+		return "", nil, fmt.Errorf("storage.files_get_content(%d): %w", fileID, err)
 	}
-	return meta.File.ContentType, nil
-}
-
-// storageFetchBytes mints a signed URL via storage's files_get_url
-// tool then http.GETs it. The signed URL is short-lived (~24h by
-// default) and self-authenticates — no Authorization header needed.
-func storageFetchBytes(ctx *sdk.AppCtx, fileID int64) ([]byte, error) {
-	var sig struct {
-		URL string `json:"url"`
+	if got.ContentBase64 == "" {
+		return "", nil, fmt.Errorf("storage.files_get_content(%d): empty content_base64 (storage may be older than v0.9.5)", fileID)
 	}
-	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_url",
-		map[string]any{"id": fileID, "ttl_seconds": 600}, &sig); err != nil {
-		return nil, fmt.Errorf("storage.files_get_url(%d): %w", fileID, err)
-	}
-	if sig.URL == "" {
-		return nil, fmt.Errorf("storage.files_get_url(%d): empty URL", fileID)
-	}
-
-	httpCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(httpCtx, http.MethodGet, sig.URL, nil)
+	bytes, err := base64.StdEncoding.DecodeString(got.ContentBase64)
 	if err != nil {
-		return nil, err
+		return "", nil, fmt.Errorf("decode content_base64: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("GET signed URL: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("GET signed URL: status %d: %s", resp.StatusCode, string(body))
-	}
-	// 25 MB ceiling — same as the multipart upload limit.
-	return io.ReadAll(io.LimitReader(resp.Body, 25<<20))
+	return got.ContentType, bytes, nil
 }
 
 // ─── PDFium-WASM render ─────────────────────────────────────────────

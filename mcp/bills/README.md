@@ -1,4 +1,4 @@
-# Bills (v0.1.6)
+# Bills (v0.1.7)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
