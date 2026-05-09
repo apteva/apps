@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bills
 display_name: Bills
-version: 0.1.7
+version: 0.1.8
 description: |
   Vendors, bills, and outbound payments. The AP mirror of billing.
 author: Apteva
@@ -113,7 +113,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("bills mounted",
-		"version", "0.1.7",
+		"version", "0.1.8",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"ocr_provider", configString(ctx, "ocr_provider", "(disabled)"))
 	return nil
@@ -1937,6 +1937,14 @@ func (a *App) handleHTTPBillsCreateFromFile(w http.ResponseWriter, r *http.Reque
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	httpStart := time.Now()
+	ctx.Logger().Info("from-file: request received",
+		"content_type", r.Header.Get("Content-Type"),
+		"content_length", r.ContentLength)
+	defer func() {
+		ctx.Logger().Info("from-file: request done",
+			"elapsed_ms", time.Since(httpStart).Milliseconds())
+	}()
 
 	contentType := r.Header.Get("Content-Type")
 	var (
@@ -1969,11 +1977,18 @@ func (a *App) handleHTTPBillsCreateFromFile(w http.ResponseWriter, r *http.Reque
 		if folder == "" {
 			folder = "/.bills/attachments/"
 		}
+		uploadStart := time.Now()
 		fileID, err = storageUploadBase64(ctx, name, folder, ct, b64)
 		if err != nil {
+			ctx.Logger().Error("from-file: upload failed",
+				"name", name, "folder", folder, "err", err)
 			httpErr(w, http.StatusBadGateway, err.Error())
 			return
 		}
+		ctx.Logger().Info("from-file: uploaded to storage",
+			"file_id", fileID, "name", name, "folder", folder,
+			"size_bytes", len(b64)*3/4,
+			"upload_ms", time.Since(uploadStart).Milliseconds())
 	} else {
 		// JSON path.
 		var body struct {
@@ -2002,12 +2017,15 @@ func (a *App) handleHTTPBillsCreateFromFile(w http.ResponseWriter, r *http.Reque
 	// v0.1.2 — OCR auto-fill. Runs after the file is in storage but
 	// before we validate vendor_id (extraction may resolve it). Same
 	// "caller-args win" rule as the MCP path. Failures are non-fatal.
+	ocrStart := time.Now()
 	extracted, ocrProvider, ocrErr := callOCR(ctx, fileID)
+	ocrElapsed := time.Since(ocrStart).Milliseconds()
 	var fieldsFilled []string
 	var vendorVia string
 	if ocrErr != nil {
-		ctx.Logger().Warn("ocr extraction failed, falling back to manual fields",
-			"provider", ocrProvider, "file_id", fileID, "err", ocrErr)
+		ctx.Logger().Warn("from-file: ocr extraction failed, falling back to manual fields",
+			"provider", ocrProvider, "file_id", fileID, "err", ocrErr,
+			"ocr_ms", ocrElapsed)
 	} else if extracted != nil {
 		fieldsFilled = mergeExtractedIntoArgs(billBody, extracted)
 		via, vErr := resolveVendorFromExtraction(ctx.AppDB(), pid, extracted, billBody)

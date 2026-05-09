@@ -95,19 +95,26 @@ func callOCR(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, error) {
 	// present, otherwise off." Binding the vision_llm integration is
 	// the user's intent to enable OCR — we don't want them to also
 	// flip a separate config switch.
+	autoDetected := false
 	if provider == "" {
 		if ctx != nil && ctx.IntegrationFor("vision_llm") != nil {
 			provider = "llm"
+			autoDetected = true
 		} else {
-			return nil, "", nil // genuinely off — no binding, no override
+			ctx.Logger().Info("ocr: skipped — no provider configured + no vision_llm binding",
+				"file_id", fileID)
+			return nil, "", nil // genuinely off
 		}
 	}
 	if provider == "off" {
-		return nil, "", nil // explicit force-off
+		ctx.Logger().Info("ocr: skipped — provider=off", "file_id", fileID)
+		return nil, "", nil
 	}
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return nil, provider, errors.New("ocr_provider set but platform API unavailable")
 	}
+	ctx.Logger().Info("ocr: dispatching",
+		"provider", provider, "auto_detected", autoDetected, "file_id", fileID)
 
 	// LLM path — uses the bound vision_llm integration (no separate
 	// sidecar). Lives in ocr_llm.go.

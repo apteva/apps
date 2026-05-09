@@ -36,33 +36,59 @@ import (
 // ─── Top-level orchestrator ─────────────────────────────────────────
 
 func callOCRViaLLM(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, error) {
+	log := ctx.Logger()
 	bound := ctx.IntegrationFor("vision_llm")
 	if bound == nil {
+		log.Warn("ocr/llm: vision_llm integration not bound", "file_id", fileID)
 		return nil, "llm", errors.New("ocr_provider=llm but vision_llm integration not bound — bind opencode-go (or another compatible chat-completion provider) in the dashboard")
 	}
+	log.Info("ocr/llm: starting",
+		"file_id", fileID,
+		"connection_id", bound.ConnectionID,
+		"chat_tool", bound.ToolFor("chat.complete"))
 
 	// 1. Storage bytes + content type in one call (storage v0.9.5+).
+	t1 := time.Now()
 	contentType, rawBytes, err := storageFetchBytes(ctx, fileID)
 	if err != nil {
+		log.Warn("ocr/llm: storage fetch failed",
+			"file_id", fileID, "err", err, "elapsed_ms", time.Since(t1).Milliseconds())
 		return nil, "llm", err
 	}
+	log.Info("ocr/llm: storage fetch ok",
+		"file_id", fileID, "bytes", len(rawBytes), "content_type", contentType,
+		"elapsed_ms", time.Since(t1).Milliseconds())
 
 	// 2. Materialise as JPEG image(s).
 	dpi := configIntDefault(ctx, "render_dpi", 200)
 	maxPages := configIntDefault(ctx, "max_pages", 3)
+	t2 := time.Now()
 	images, err := materialiseImages(rawBytes, contentType, dpi, maxPages)
 	if err != nil {
+		log.Warn("ocr/llm: render failed",
+			"file_id", fileID, "content_type", contentType, "err", err,
+			"elapsed_ms", time.Since(t2).Milliseconds())
 		return nil, "llm", err
 	}
 	if len(images) == 0 {
 		return nil, "llm", fmt.Errorf("file %d (content_type=%q) produced no images — unsupported format?", fileID, contentType)
 	}
+	totalImgBytes := 0
+	for _, img := range images {
+		totalImgBytes += len(img)
+	}
+	log.Info("ocr/llm: render ok",
+		"file_id", fileID, "pages", len(images), "total_bytes", totalImgBytes,
+		"dpi", dpi, "elapsed_ms", time.Since(t2).Milliseconds())
 
 	// 3. Build messages + call.
 	model := configString(ctx, "ocr_llm_model", "kimi-k2.6")
 	maxTokens := configIntDefault(ctx, "ocr_llm_max_tokens", 4000)
 	messages := buildOCRMessages(images)
 
+	log.Info("ocr/llm: calling vision_llm",
+		"file_id", fileID, "model", model, "max_tokens", maxTokens, "pages", len(images))
+	t3 := time.Now()
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(
 		bound.ConnectionID,
 		bound.ToolFor("chat.complete"),
@@ -74,7 +100,10 @@ func callOCRViaLLM(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, er
 			"response_format": map[string]any{"type": "json_object"},
 		},
 	)
+	llmElapsed := time.Since(t3).Milliseconds()
 	if err != nil {
+		log.Warn("ocr/llm: chat completion call errored",
+			"file_id", fileID, "model", model, "err", err, "elapsed_ms", llmElapsed)
 		return nil, "llm/" + model, fmt.Errorf("vision_llm chat completion: %w", err)
 	}
 	if res == nil || !res.Success {
@@ -82,16 +111,29 @@ func callOCRViaLLM(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, er
 		if res != nil {
 			body = string(res.Data)
 		}
+		log.Warn("ocr/llm: chat completion non-2xx",
+			"file_id", fileID, "model", model,
+			"body", truncate(body, 500), "elapsed_ms", llmElapsed)
 		return nil, "llm/" + model, fmt.Errorf("vision_llm non-2xx: %s", truncate(body, 500))
 	}
+	log.Info("ocr/llm: chat completion ok",
+		"file_id", fileID, "model", model, "response_bytes", len(res.Data),
+		"elapsed_ms", llmElapsed)
 
 	parsed, err := parseAssistantInvoice(res.Data)
 	if err != nil {
+		log.Warn("ocr/llm: response parse failed",
+			"file_id", fileID, "model", model, "err", err)
 		return nil, "llm/" + model, fmt.Errorf("parse llm extraction: %w", err)
 	}
 	if parsed.Provider == "" {
 		parsed.Provider = "llm/" + model
 	}
+	log.Info("ocr/llm: extraction complete",
+		"file_id", fileID, "model", model,
+		"vendor_name", parsed.Vendor.Name, "vendor_email", parsed.Vendor.Email,
+		"invoice_number", parsed.InvoiceNumber, "total_cents", parsed.TotalCents,
+		"line_items", len(parsed.LineItems))
 	return parsed, "llm/" + model, nil
 }
 
