@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bills
 display_name: Bills
-version: 0.1.13
+version: 0.1.14
 description: |
   Vendors, bills, and outbound payments. The AP mirror of billing.
 author: Apteva
@@ -113,7 +113,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("bills mounted",
-		"version", "0.1.13",
+		"version", "0.1.14",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"ocr_provider", configString(ctx, "ocr_provider", "(disabled)"))
 	return nil
@@ -3012,15 +3012,16 @@ func dbBillMarkPaidOnCreate(db *sql.DB, pid string, billID int64, paid PaidOnCre
 	defer tx.Rollback()
 
 	var (
-		vid      int64
-		currency string
-		total    int64
-		status   string
+		vid         int64
+		currency    string
+		total       int64
+		status      string
+		invoiceDate sql.NullString
 	)
 	if err := tx.QueryRow(
-		`SELECT vendor_id, currency, total_cents, status
+		`SELECT vendor_id, currency, total_cents, status, vendor_invoice_date
 		 FROM bills WHERE id = ? AND project_id = ? AND deleted_at IS NULL`,
-		billID, pid).Scan(&vid, &currency, &total, &status); err != nil {
+		billID, pid).Scan(&vid, &currency, &total, &status, &invoiceDate); err != nil {
 		return nil, err
 	}
 	if status != "received" {
@@ -3033,7 +3034,15 @@ func dbBillMarkPaidOnCreate(db *sql.DB, pid string, billID int64, paid PaidOnCre
 	if amount <= 0 {
 		return nil, fmt.Errorf("paid.amount_cents must be positive (or omit to default to total %d)", total)
 	}
+	// paid_at preference: caller-supplied → bill's vendor_invoice_date
+	// (the OCR-extracted issue date) → now. The middle case is the
+	// common one for already-paid uploads — when you scan a receipt,
+	// "the date this was paid" is almost always the date printed on
+	// the invoice itself, not "right now".
 	paidAt := paid.PaidAt
+	if paidAt == "" && invoiceDate.Valid && invoiceDate.String != "" {
+		paidAt = invoiceDate.String
+	}
 	if paidAt == "" {
 		paidAt = nowRFC3339()
 	}

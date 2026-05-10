@@ -1255,18 +1255,21 @@ function BillsTab({
   // collectPaidBlock asks the user for the payment details to attach
   // to an "already paid" upload. Returns the paid block to send in
   // the bill_json envelope, or null if the user cancelled.
+  //
+  // We deliberately do NOT ask for paid_at here — the backend defaults
+  // it to the OCR-extracted invoice date (which is almost always the
+  // right answer for an already-paid receipt: you scan a receipt the
+  // day you got it, the date on the receipt IS the payment date). On
+  // invoices where OCR can't find a date, the backend falls back to
+  // "now". Asking the user before we've OCR'd would force them to
+  // type a date they don't know yet.
   const collectPaidBlock = async (): Promise<Record<string, string> | null> => {
     const result = await dialogs.form({
       title: "Mark as already paid",
-      body: "Records the payment up-front and lands the bill directly in 'paid' state, skipping approve + schedule.",
+      body:
+        "Records the payment up-front and lands the bill directly in 'paid' state, skipping approve + schedule. " +
+        "The payment date defaults to the invoice date (or today if not extracted).",
       fields: [
-        {
-          name: "paid_at",
-          label: "Paid on",
-          type: "date",
-          initialValue: new Date().toISOString().slice(0, 10),
-          required: true,
-        },
         {
           name: "method",
           label: "Method",
@@ -1312,9 +1315,9 @@ function BillsTab({
     try {
       const body: Record<string, unknown> = {};
       if (paidBlock) {
+        // No paid_at — backend defaults to vendor_invoice_date (then now).
         body.paid = {
           method: paidBlock.method,
-          paid_at: paidBlock.paid_at,
           ...(paidBlock.reference ? { reference: paidBlock.reference } : {}),
         };
       }
@@ -1367,7 +1370,6 @@ function BillsTab({
         if (paid) {
           body.paid = {
             method: paid.method,
-            paid_at: paid.paid_at,
             ...(paid.reference ? { reference: paid.reference } : {}),
           };
         }
@@ -1579,6 +1581,19 @@ function BillsTab({
                       {fmtMoney(b.total_cents, b.currency)}
                     </span>
                   </div>
+                  {(b.vendor_invoice_date || b.paid_at) && (
+                    <div className="text-[11px] text-text-dim mt-0.5 flex items-center gap-2 truncate">
+                      {b.vendor_invoice_date && (
+                        <span>Issued {fmtDate(b.vendor_invoice_date)}</span>
+                      )}
+                      {b.vendor_invoice_date && b.paid_at && (
+                        <span className="text-text-dim/60">·</span>
+                      )}
+                      {b.paid_at && (
+                        <span>Paid {fmtDate(b.paid_at)}</span>
+                      )}
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
@@ -1657,7 +1672,9 @@ function BillDetail({
           </h1>
           <p className="text-text-muted text-sm mt-1">
             {bill.vendor_name || `Vendor #${bill.vendor_id}`}
+            {bill.vendor_invoice_date ? ` · issued ${fmtDate(bill.vendor_invoice_date)}` : ""}
             {bill.due_date ? ` · due ${fmtDate(bill.due_date)}` : ""}
+            {bill.paid_at ? ` · paid ${fmtDate(bill.paid_at)}` : ""}
             {bill.category ? ` · ${bill.category}` : ""}
           </p>
         </div>

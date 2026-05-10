@@ -884,6 +884,63 @@ func TestBillCreate_PaidBlockRejectsBadMethod(t *testing.T) {
 	}
 }
 
+func TestBillCreate_PaidBlockDefaultsPaidAtToInvoiceDate(t *testing.T) {
+	// When the caller omits paid.paid_at but the bill has an
+	// OCR-extracted vendor_invoice_date, the payment should be dated
+	// to the invoice date (not "now"). This is the common case for
+	// already-paid uploads — the date on the receipt IS the payment
+	// date.
+	ctx := newTestCtx(t)
+	app := &App{}
+	v := mustVendor(t, ctx, "ap@meta.example", "Meta")
+	out, err := app.toolBillsCreate(ctx, map[string]any{
+		"vendor_id":           v.ID,
+		"vendor_invoice_date": "2026-02-05",
+		"line_items":          []any{line("Ad spend", 1, 462, 0)},
+		"total_cents":         int64(462),
+		"paid":                map[string]any{"method": "card"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)["bill"].(*Bill)
+	if got.PaidAt == "" {
+		t.Fatal("paid_at not set")
+	}
+	if !strings.HasPrefix(got.PaidAt, "2026-02-05") {
+		t.Errorf("paid_at = %q, want it to start with 2026-02-05 (the invoice date)", got.PaidAt)
+	}
+	if len(got.Payments) != 1 {
+		t.Fatalf("expected 1 payment, got %d", len(got.Payments))
+	}
+	if !strings.HasPrefix(got.Payments[0].SentAt, "2026-02-05") {
+		t.Errorf("payment.sent_at = %q, want 2026-02-05*", got.Payments[0].SentAt)
+	}
+}
+
+func TestBillCreate_PaidBlockExplicitPaidAtWins(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	v := mustVendor(t, ctx, "ap@override.example", "Z")
+	out, err := app.toolBillsCreate(ctx, map[string]any{
+		"vendor_id":           v.ID,
+		"vendor_invoice_date": "2026-02-05",
+		"line_items":          []any{line("X", 1, 100, 0)},
+		"total_cents":         int64(100),
+		"paid": map[string]any{
+			"method":  "card",
+			"paid_at": "2026-03-15",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)["bill"].(*Bill)
+	if !strings.HasPrefix(got.PaidAt, "2026-03-15") {
+		t.Errorf("paid_at = %q, want 2026-03-15* (explicit caller value)", got.PaidAt)
+	}
+}
+
 func TestBillCreate_PaidBlockPartialStaysReceived(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}
