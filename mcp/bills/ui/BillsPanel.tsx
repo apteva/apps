@@ -1296,96 +1296,164 @@ function BillsTab({
     return result;
   };
 
-  // uploadFile runs the OCR-first happy path (no vendor_id passed)
-  // and falls back to the vendor-pick modal when the backend tags
-  // the response with vendor_id-required. Shared by drop handler +
-  // click-to-upload from the empty-state drop zone.
-  //
-  // When `uploadAsPaid` is on, we collect payment details up-front
-  // and pass them as the `paid` block. The backend uses bill total
-  // (post-OCR) as the default amount, so we don't need to ask.
-  const uploadFile = async (f: File) => {
-    if (uploading) return;
-    let paidBlock: Record<string, string> | null = null;
-    if (uploadAsPaid) {
-      paidBlock = await collectPaidBlock();
-      if (!paidBlock) return; // user cancelled
-    }
-    setUploading(true);
-    try {
-      const body: Record<string, unknown> = {};
-      if (paidBlock) {
-        // No paid_at — backend defaults to vendor_invoice_date (then now).
-        body.paid = {
-          method: paidBlock.method,
-          ...(paidBlock.reference ? { reference: paidBlock.reference } : {}),
-        };
-      }
-      const billId = await submitFromFile(f, body);
-      await loadList();
-      select(billId);
-    } catch (err) {
-      const e2 = err as Error & { vendorRequired?: boolean };
-      if (e2.vendorRequired) {
-        setPendingFile(f);
-        // Stash the paid block on the file ref so the vendor-pick
-        // continuation knows to forward it.
-        if (paidBlock) pendingPaidRef.current = paidBlock;
-        setVendorPickOpen(true);
-      } else {
-        dialogs.toast({ message: `Upload failed: ${e2.message}`, level: "error" });
-      }
-    } finally {
-      setUploading(false);
-    }
-  };
-
   // Carries the paid block across the vendor-pick fallback round-trip
   // when the OCR path can't resolve a vendor. Module-scoped via a ref
   // so the picked-vendor handler can read it without a re-render.
   const pendingPaidRef = useRef<Record<string, string> | null>(null);
 
+  // Bridges the VendorPickModal back to the awaiting uploadOne promise
+  // so multi-file uploads can serialise over the modal correctly. When
+  // a file needs vendor pick, uploadOne stashes a resolver here and
+  // awaits; onVendorPicked / cancel resolves it with the picked vendor
+  // or null. Without this bridge a multi-file batch would race ahead
+  // and start uploading the next file while the modal is still open.
+  const vendorPickResolverRef = useRef<((v: Vendor | null) => void) | null>(null);
+
+  // Batch progress state — null when not uploading. Drives the
+  // "Uploading 2 of 5…" text in the sidebar status line.
+  const [batchProgress, setBatchProgress] = useState<{
+    current: number;
+    total: number;
+  } | null>(null);
+
+  // uploadOne runs the OCR-first happy path for one file and falls
+  // back to the vendor-pick modal when the backend tags the response
+  // with vendor_id-required. Returns when the file is FULLY handled
+  // (a bill was created, or the user cancelled the vendor pick) so
+  // the multi-file driver can sequence the next one.
+  //
+  // paidBlock is supplied by the caller — for batch uploads it's
+  // collected ONCE before the batch starts and reused for every file.
+  const uploadOne = async (
+    f: File,
+    paidBlock: Record<string, string> | null,
+  ): Promise<number | null> => {
+    const body: Record<string, unknown> = {};
+    if (paidBlock) {
+      // No paid_at — backend defaults to vendor_invoice_date (then now).
+      body.paid = {
+        method: paidBlock.method,
+        ...(paidBlock.reference ? { reference: paidBlock.reference } : {}),
+      };
+    }
+    try {
+      return await submitFromFile(f, body);
+    } catch (err) {
+      const e2 = err as Error & { vendorRequired?: boolean };
+      if (!e2.vendorRequired) {
+        throw err;
+      }
+      // Vendor pick fallback. Open the modal and await the user's
+      // choice via the resolver bridge before retrying the submit.
+      setPendingFile(f);
+      if (paidBlock) pendingPaidRef.current = paidBlock;
+      setVendorPickOpen(true);
+      const vendor = await new Promise<Vendor | null>((resolve) => {
+        vendorPickResolverRef.current = resolve;
+      });
+      if (!vendor) return null; // cancelled
+      const retryBody: Record<string, unknown> = { vendor_id: vendor.id, ...body };
+      return await submitFromFile(f, retryBody);
+    }
+  };
+
+  // uploadMany processes a batch of files sequentially. The "Already
+  // paid" flag, if set, prompts ONCE up-front and applies to every
+  // file in the batch. Per-file failures are toasted but don't stop
+  // the batch — that way one bad PDF doesn't kill an evening of
+  // expense scanning.
+  const uploadMany = async (files: File[]) => {
+    if (uploading || files.length === 0) return;
+    let paidBlock: Record<string, string> | null = null;
+    if (uploadAsPaid) {
+      paidBlock = await collectPaidBlock();
+      if (!paidBlock) return; // user cancelled before uploading
+    }
+    setUploading(true);
+    setBatchProgress({ current: 0, total: files.length });
+    let lastBillId: number | null = null;
+    let succeeded = 0;
+    let failed = 0;
+    let cancelled = 0;
+    for (let i = 0; i < files.length; i++) {
+      setBatchProgress({ current: i + 1, total: files.length });
+      try {
+        const id = await uploadOne(files[i], paidBlock);
+        if (id == null) {
+          cancelled++;
+        } else {
+          succeeded++;
+          lastBillId = id;
+        }
+      } catch (err) {
+        failed++;
+        dialogs.toast({
+          message: `${files[i].name}: ${(err as Error).message}`,
+          level: "error",
+        });
+      }
+    }
+    setBatchProgress(null);
+    setUploading(false);
+    await loadList();
+    if (lastBillId != null) select(lastBillId);
+    if (files.length > 1) {
+      const parts = [`${succeeded} uploaded`];
+      if (failed > 0) parts.push(`${failed} failed`);
+      if (cancelled > 0) parts.push(`${cancelled} cancelled`);
+      dialogs.toast({
+        message: parts.join(", "),
+        level: failed > 0 ? "error" : "info",
+      });
+    }
+  };
+
   const onDrop = async (e: ReactDragEvent) => {
     e.preventDefault();
     setDragOver(false);
-    const f = e.dataTransfer.files?.[0];
-    if (f) await uploadFile(f);
+    const files = Array.from(e.dataTransfer.files ?? []);
+    if (files.length > 0) await uploadMany(files);
   };
 
   const onFilePicked = async (e: ReactChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
-    if (f) await uploadFile(f);
-    // Allow re-uploading the same file by resetting the input.
+    const files = Array.from(e.target.files ?? []);
+    // Reset the input first so re-picking the same file works.
     e.target.value = "";
+    if (files.length > 0) await uploadMany(files);
   };
 
   const onVendorPicked = async (vendor: Vendor) => {
     setVendorPickOpen(false);
-    const paid = pendingPaidRef.current;
+    setPendingFile(null);
     pendingPaidRef.current = null;
+    // If a batch upload is awaiting, hand the vendor to the resolver
+    // so the loop can continue. Otherwise it's the legacy "+ New
+    // empty" flow — create a vendor-only bill the way it used to.
+    if (vendorPickResolverRef.current) {
+      const resolve = vendorPickResolverRef.current;
+      vendorPickResolverRef.current = null;
+      resolve(vendor);
+      return;
+    }
     try {
-      let billId: number;
-      if (pendingFile) {
-        const body: Record<string, unknown> = { vendor_id: vendor.id };
-        if (paid) {
-          body.paid = {
-            method: paid.method,
-            ...(paid.reference ? { reference: paid.reference } : {}),
-          };
-        }
-        billId = await submitFromFile(pendingFile, body);
-        setPendingFile(null);
-      } else {
-        // No file — minimal bill, vendor only (the "+ New" flow).
-        const j = await apiCall<{ bill: Bill }>("POST", "/bills", {
-          vendor_id: vendor.id,
-        });
-        billId = j.bill.id;
-      }
+      const j = await apiCall<{ bill: Bill }>("POST", "/bills", {
+        vendor_id: vendor.id,
+      });
       await loadList();
-      select(billId);
+      select(j.bill.id);
     } catch (err) {
       dialogs.toast({ message: `Create failed: ${(err as Error).message}`, level: "error" });
+    }
+  };
+
+  const onVendorPickCancel = () => {
+    setVendorPickOpen(false);
+    setPendingFile(null);
+    pendingPaidRef.current = null;
+    if (vendorPickResolverRef.current) {
+      const resolve = vendorPickResolverRef.current;
+      vendorPickResolverRef.current = null;
+      resolve(null);
     }
   };
 
@@ -1436,13 +1504,14 @@ function BillsTab({
         ref={bareFileInputRef}
         type="file"
         accept="application/pdf,image/*"
+        multiple
         className="hidden"
         onChange={onFilePicked}
       />
       {dragOver && (
         <div className="absolute inset-0 z-10 bg-accent/10 border-4 border-dashed border-accent flex items-center justify-center pointer-events-none">
           <div className="text-accent text-lg font-medium">
-            Drop a PDF or image to draft a bill
+            Drop one or more PDFs / images
           </div>
         </div>
       )}
@@ -1451,10 +1520,7 @@ function BillsTab({
           apiCall={apiCall}
           attachedFilename={pendingFile?.name}
           onPick={onVendorPicked}
-          onCancel={() => {
-            setVendorPickOpen(false);
-            setPendingFile(null);
-          }}
+          onCancel={onVendorPickCancel}
         />
       )}
       <aside className="w-96 border-r border-border flex flex-col">
@@ -1472,7 +1538,7 @@ function BillsTab({
               onClick={newBill}
               disabled={uploading}
               className="px-2.5 py-1 text-sm bg-accent text-bg rounded hover:bg-accent/90 disabled:opacity-50 whitespace-nowrap inline-flex items-center gap-1.5"
-              title="Upload a PDF or image to draft a new bill"
+              title="Upload one or more PDFs / images to draft new bills"
             >
               <svg
                 xmlns="http://www.w3.org/2000/svg"
@@ -1489,7 +1555,11 @@ function BillsTab({
                 <polyline points="17 8 12 3 7 8" />
                 <line x1="12" y1="3" x2="12" y2="15" />
               </svg>
-              {uploading ? "Uploading…" : "Upload"}
+              {uploading
+                ? batchProgress
+                  ? `${batchProgress.current}/${batchProgress.total}…`
+                  : "Uploading…"
+                : "Upload"}
             </button>
           </div>
           <label className="flex items-center gap-2 text-xs text-text-muted cursor-pointer select-none">
@@ -1544,7 +1614,11 @@ function BillsTab({
                   <line x1="12" y1="3" x2="12" y2="15" />
                 </svg>
                 <p className="text-sm text-text">
-                  {uploading ? "Uploading…" : "Drop a PDF here or click to upload"}
+                  {uploading
+                    ? batchProgress
+                      ? `Uploading ${batchProgress.current} of ${batchProgress.total}…`
+                      : "Uploading…"
+                    : "Drop one or more PDFs here, or click to browse"}
                 </p>
                 <p className="text-xs text-text-muted mt-1">
                   OCR auto-fills vendor + line items when bound
@@ -1599,8 +1673,14 @@ function BillsTab({
             </ul>
           )}
         </div>
-        <div className="p-2 text-xs text-text-dim border-t border-border">
-          {status}
+        <div className="p-2 text-xs border-t border-border">
+          {batchProgress ? (
+            <span className="text-accent">
+              Uploading {batchProgress.current} of {batchProgress.total}…
+            </span>
+          ) : (
+            <span className="text-text-dim">{status}</span>
+          )}
         </div>
       </aside>
 
