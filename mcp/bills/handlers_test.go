@@ -790,3 +790,132 @@ func TestBillCreate_PartialHeaderTotalsBackfills(t *testing.T) {
 		t.Errorf("subtotal backfill = %d, want 7859 (= 9509 - 1650)", got.SubtotalCents)
 	}
 }
+
+// ─── v0.1.12: paid-on-create ──────────────────────────────────────
+
+func TestBillCreate_PaidBlockMarksPaidAtomically(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	v := mustVendor(t, ctx, "ap@stripe.example", "Stripe")
+	out, err := app.toolBillsCreate(ctx, map[string]any{
+		"vendor_id":      v.ID,
+		"line_items":     []any{line("Subscription", 1, 5000, 0)},
+		"subtotal_cents": int64(5000),
+		"total_cents":    int64(5000),
+		"paid": map[string]any{
+			"method":    "card",
+			"paid_at":   "2026-05-09T10:00:00Z",
+			"reference": "ch_3xyz",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)["bill"].(*Bill)
+	if got.Status != "paid" {
+		t.Errorf("status = %q, want %q", got.Status, "paid")
+	}
+	if got.AmountPaidCents != 5000 {
+		t.Errorf("amount_paid_cents = %d, want 5000", got.AmountPaidCents)
+	}
+	if got.PaidAt == "" {
+		t.Errorf("paid_at not set")
+	}
+	if got.ApprovedBy != "auto-paid" {
+		t.Errorf("approved_by = %q, want %q", got.ApprovedBy, "auto-paid")
+	}
+	if len(got.Payments) != 1 {
+		t.Fatalf("expected 1 payment row, got %d", len(got.Payments))
+	}
+	if got.Payments[0].Method != "card" || got.Payments[0].AmountCents != 5000 {
+		t.Errorf("payment row mismatch: method=%q amount=%d", got.Payments[0].Method, got.Payments[0].AmountCents)
+	}
+	// audit log should record created_paid
+	saw := false
+	for _, a := range got.AuditLog {
+		if a.Action == "created_paid" {
+			saw = true
+			break
+		}
+	}
+	if !saw {
+		t.Errorf("expected audit log entry with action=created_paid, got actions=%v", auditActions(got.AuditLog))
+	}
+}
+
+func TestBillCreate_PaidBlockDefaultsAmountToTotal(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	v := mustVendor(t, ctx, "ap@fastly.example", "Fastly")
+	out, err := app.toolBillsCreate(ctx, map[string]any{
+		"vendor_id":   v.ID,
+		"line_items":  []any{line("CDN", 1, 12345, 0)},
+		"total_cents": int64(12345),
+		// amount_cents omitted on purpose — should default to total
+		"paid": map[string]any{"method": "wire"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)["bill"].(*Bill)
+	if got.AmountPaidCents != 12345 {
+		t.Errorf("amount default fallback = %d, want 12345 (= total)", got.AmountPaidCents)
+	}
+	if got.Status != "paid" {
+		t.Errorf("status = %q, want paid", got.Status)
+	}
+}
+
+func TestBillCreate_PaidBlockRejectsBadMethod(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	v := mustVendor(t, ctx, "ap@z.example", "Z")
+	_, err := app.toolBillsCreate(ctx, map[string]any{
+		"vendor_id":   v.ID,
+		"line_items":  []any{line("X", 1, 100, 0)},
+		"total_cents": int64(100),
+		"paid":        map[string]any{"method": "bitcoin"},
+	})
+	if err == nil {
+		t.Fatal("expected error on bad method")
+	}
+	if !strings.Contains(err.Error(), "bitcoin") {
+		t.Errorf("error %q should mention the bad method", err.Error())
+	}
+}
+
+func TestBillCreate_PaidBlockPartialStaysReceived(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	v := mustVendor(t, ctx, "ap@partial.example", "P")
+	out, err := app.toolBillsCreate(ctx, map[string]any{
+		"vendor_id":   v.ID,
+		"line_items":  []any{line("X", 1, 10000, 0)},
+		"total_cents": int64(10000),
+		"paid": map[string]any{
+			"method":       "card",
+			"amount_cents": int64(3000),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)["bill"].(*Bill)
+	// Partial paid-on-create: payment row exists, amount_paid_cents
+	// reflects it, but status stays 'received' so the rest goes
+	// through the normal flow.
+	if got.Status != "received" {
+		t.Errorf("status = %q, want received (partial pre-pay)", got.Status)
+	}
+	if got.AmountPaidCents != 3000 {
+		t.Errorf("amount_paid_cents = %d, want 3000", got.AmountPaidCents)
+	}
+}
+
+func auditActions(log []BillAudit) []string {
+	out := make([]string, 0, len(log))
+	for _, a := range log {
+		out = append(out, a.Action)
+	}
+	return out
+}

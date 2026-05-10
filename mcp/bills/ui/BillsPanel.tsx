@@ -1017,6 +1017,10 @@ function BillsTab({
   const [vendorPickOpen, setVendorPickOpen] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
+  // "Already paid" toggle near Upload — when on, after a file is
+  // picked we collect (paid_at, method, reference) via a modal and
+  // POST the bill with a `paid` block so it lands directly in 'paid'.
+  const [uploadAsPaid, setUploadAsPaid] = useState(false);
   // Hidden <input type="file"> for the click-to-upload affordance on
   // the empty-state drop zone — gives users a way in besides drag-drop.
   const bareFileInputRef = useRef<HTMLInputElement>(null);
@@ -1248,21 +1252,82 @@ function BillsTab({
     return j.bill.id;
   };
 
+  // collectPaidBlock asks the user for the payment details to attach
+  // to an "already paid" upload. Returns the paid block to send in
+  // the bill_json envelope, or null if the user cancelled.
+  const collectPaidBlock = async (): Promise<Record<string, string> | null> => {
+    const result = await dialogs.form({
+      title: "Mark as already paid",
+      body: "Records the payment up-front and lands the bill directly in 'paid' state, skipping approve + schedule.",
+      fields: [
+        {
+          name: "paid_at",
+          label: "Paid on",
+          type: "date",
+          initialValue: new Date().toISOString().slice(0, 10),
+          required: true,
+        },
+        {
+          name: "method",
+          label: "Method",
+          type: "select",
+          initialValue: "card",
+          options: [
+            { value: "card", label: "Card" },
+            { value: "wire", label: "Wire" },
+            { value: "check", label: "Check" },
+            { value: "cash", label: "Cash" },
+            { value: "ach", label: "ACH" },
+            { value: "other", label: "Other" },
+          ],
+        },
+        {
+          name: "reference",
+          label: "Reference (optional)",
+          type: "text",
+          placeholder: "txn id / check #",
+        },
+      ],
+      submitLabel: "Continue & upload",
+    });
+    return result;
+  };
+
   // uploadFile runs the OCR-first happy path (no vendor_id passed)
   // and falls back to the vendor-pick modal when the backend tags
   // the response with vendor_id-required. Shared by drop handler +
   // click-to-upload from the empty-state drop zone.
+  //
+  // When `uploadAsPaid` is on, we collect payment details up-front
+  // and pass them as the `paid` block. The backend uses bill total
+  // (post-OCR) as the default amount, so we don't need to ask.
   const uploadFile = async (f: File) => {
     if (uploading) return;
+    let paidBlock: Record<string, string> | null = null;
+    if (uploadAsPaid) {
+      paidBlock = await collectPaidBlock();
+      if (!paidBlock) return; // user cancelled
+    }
     setUploading(true);
     try {
-      const billId = await submitFromFile(f);
+      const body: Record<string, unknown> = {};
+      if (paidBlock) {
+        body.paid = {
+          method: paidBlock.method,
+          paid_at: paidBlock.paid_at,
+          ...(paidBlock.reference ? { reference: paidBlock.reference } : {}),
+        };
+      }
+      const billId = await submitFromFile(f, body);
       await loadList();
       select(billId);
     } catch (err) {
       const e2 = err as Error & { vendorRequired?: boolean };
       if (e2.vendorRequired) {
         setPendingFile(f);
+        // Stash the paid block on the file ref so the vendor-pick
+        // continuation knows to forward it.
+        if (paidBlock) pendingPaidRef.current = paidBlock;
         setVendorPickOpen(true);
       } else {
         dialogs.toast({ message: `Upload failed: ${e2.message}`, level: "error" });
@@ -1271,6 +1336,11 @@ function BillsTab({
       setUploading(false);
     }
   };
+
+  // Carries the paid block across the vendor-pick fallback round-trip
+  // when the OCR path can't resolve a vendor. Module-scoped via a ref
+  // so the picked-vendor handler can read it without a re-render.
+  const pendingPaidRef = useRef<Record<string, string> | null>(null);
 
   const onDrop = async (e: ReactDragEvent) => {
     e.preventDefault();
@@ -1288,10 +1358,20 @@ function BillsTab({
 
   const onVendorPicked = async (vendor: Vendor) => {
     setVendorPickOpen(false);
+    const paid = pendingPaidRef.current;
+    pendingPaidRef.current = null;
     try {
       let billId: number;
       if (pendingFile) {
-        billId = await submitFromFile(pendingFile, { vendor_id: vendor.id });
+        const body: Record<string, unknown> = { vendor_id: vendor.id };
+        if (paid) {
+          body.paid = {
+            method: paid.method,
+            paid_at: paid.paid_at,
+            ...(paid.reference ? { reference: paid.reference } : {}),
+          };
+        }
+        billId = await submitFromFile(pendingFile, body);
         setPendingFile(null);
       } else {
         // No file — minimal bill, vendor only (the "+ New" flow).
@@ -1410,6 +1490,17 @@ function BillsTab({
               {uploading ? "Uploading…" : "Upload"}
             </button>
           </div>
+          <label className="flex items-center gap-2 text-xs text-text-muted cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={uploadAsPaid}
+              onChange={(e) => setUploadAsPaid(e.target.checked)}
+              className="accent-accent"
+            />
+            <span>
+              Already paid (skip approve / schedule)
+            </span>
+          </label>
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}

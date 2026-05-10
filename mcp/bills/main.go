@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bills
 display_name: Bills
-version: 0.1.11
+version: 0.1.12
 description: |
   Vendors, bills, and outbound payments. The AP mirror of billing.
 author: Apteva
@@ -113,7 +113,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("bills mounted",
-		"version", "0.1.11",
+		"version", "0.1.12",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"ocr_provider", configString(ctx, "ocr_provider", "(disabled)"))
 	return nil
@@ -337,7 +337,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		// ── Bills ──────────────────────────────────────────────────
 		{
 			Name: "bills_create",
-			Description: "Log a bill received from a vendor. Status starts at 'received'. Provider arg ('local' | 'mercury' | 'wise' | 'bill_dot_com') falls back to install default. PROVIDER IS FROZEN: to switch, void and recreate. v0.1.0 only honours 'local'. Args: vendor_id, vendor_invoice_number, vendor_invoice_date, currency, provider, due_date, line_items [{description, quantity, unit_price_cents, tax_rate_bps?}], subtotal_cents, tax_cents, total_cents (when supplied, override the line-items computation — use these when the OCR-extracted invoice header total is the source of truth and line items are only a partial breakdown), notes, category, gl_account, attached_file_id.",
+			Description: "Log a bill received from a vendor. Status starts at 'received'. Provider arg ('local' | 'mercury' | 'wise' | 'bill_dot_com') falls back to install default. PROVIDER IS FROZEN: to switch, void and recreate. v0.1.0 only honours 'local'. Args: vendor_id, vendor_invoice_number, vendor_invoice_date, currency, provider, due_date, line_items [{description, quantity, unit_price_cents, tax_rate_bps?}], subtotal_cents, tax_cents, total_cents (when supplied, override the line-items computation — use these when the OCR-extracted invoice header total is the source of truth and line items are only a partial breakdown), notes, category, gl_account, attached_file_id, paid (optional {amount_cents?, method, paid_at?, reference?} — when present and amount covers the total, the bill skips received→approved→scheduled and lands directly in 'paid' with a matching payment row; use this for bills you've already paid outside the system, e.g. on a credit card).",
 			InputSchema: schemaObject(map[string]any{
 				"vendor_id":             map[string]any{"type": "integer"},
 				"vendor_invoice_number": map[string]any{"type": "string"},
@@ -354,6 +354,10 @@ func (a *App) MCPTools() []sdk.Tool {
 				"gl_account":            map[string]any{"type": "string"},
 				"attached_file_id":      map[string]any{"type": "integer"},
 				"metadata":              map[string]any{"type": "object"},
+				"paid": map[string]any{
+					"type":        "object",
+					"description": "Optional already-paid block. When present and amount covers the bill total, status goes directly to 'paid'. Fields: amount_cents (defaults to total_cents), method (wire|check|cash|ach|card|other), paid_at (RFC3339 or YYYY-MM-DD; defaults to now), reference (optional txn id / check #).",
+				},
 			}, []string{"vendor_id"}),
 			Handler: a.toolBillsCreate,
 		},
@@ -462,7 +466,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "bills_create_from_file",
-			Description: "Upload a PDF/image to the storage app AND create a bill row in one call. Saves the agent the storage.files_upload → bills_create two-step. Use when you have raw bytes; if you already have a storage file_id, use plain bills_create with attached_file_id instead. v0.1.2 will add automatic OCR extraction to this same tool. Args: name, content_base64, content_type (default 'application/pdf'), folder (default '/bill-attachments/'), plus all bills_create args (vendor_id, vendor_invoice_number, line_items, etc.).",
+			Description: "Upload a PDF/image to the storage app AND create a bill row in one call. Saves the agent the storage.files_upload → bills_create two-step. Use when you have raw bytes; if you already have a storage file_id, use plain bills_create with attached_file_id instead. OCR auto-fills vendor + line items + totals when a vision_llm integration is bound. Args: name, content_base64, content_type (default 'application/pdf'), folder (default '/.bills/attachments/'), plus all bills_create args (vendor_id, vendor_invoice_number, line_items, totals, paid block to record an already-paid bill, etc.).",
 			InputSchema: schemaObject(map[string]any{
 				"name":           map[string]any{"type": "string"},
 				"content_base64": map[string]any{"type": "string"},
@@ -476,10 +480,17 @@ func (a *App) MCPTools() []sdk.Tool {
 				"provider":              map[string]any{"type": "string"},
 				"due_date":              map[string]any{"type": "string"},
 				"line_items":            map[string]any{"type": "array"},
+				"subtotal_cents":        map[string]any{"type": "integer"},
+				"tax_cents":             map[string]any{"type": "integer"},
+				"total_cents":           map[string]any{"type": "integer"},
 				"notes":                 map[string]any{"type": "string"},
 				"category":              map[string]any{"type": "string"},
 				"gl_account":            map[string]any{"type": "string"},
 				"metadata":              map[string]any{"type": "object"},
+				"paid": map[string]any{
+					"type":        "object",
+					"description": "Optional already-paid block — see bills_create.paid for the schema. Use this when uploading a receipt for a bill you've already paid (credit card charge, manual transfer, cash).",
+				},
 			}, []string{"name", "content_base64", "vendor_id"}),
 			Handler: a.toolBillsCreateFromFile,
 		},
@@ -858,11 +869,24 @@ func (a *App) toolBillsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 	}
 
+	paid, err := parsePaidOnCreate(args)
+	if err != nil {
+		return nil, err
+	}
 	created, err := dbBillCreate(ctx.AppDB(), bill, callerActor(args))
 	if err != nil {
 		return nil, err
 	}
-	emitBill(ctx, "bill.added", created)
+	if paid != nil {
+		updated, err := dbBillMarkPaidOnCreate(ctx.AppDB(), pid, created.ID, *paid, callerActor(args))
+		if err != nil {
+			return nil, err
+		}
+		created = updated
+		emitBill(ctx, "bill.paid", created)
+	} else {
+		emitBill(ctx, "bill.added", created)
+	}
 	return map[string]any{"bill": created}, nil
 }
 
@@ -1174,6 +1198,7 @@ func (a *App) toolBillsCreateFromFile(ctx *sdk.AppCtx, args map[string]any) (any
 		"currency", "provider", "due_date",
 		"line_items", "subtotal_cents", "tax_cents", "total_cents",
 		"notes", "category", "gl_account", "metadata",
+		"paid", // pass through the already-paid block to toolBillsCreate
 	} {
 		if v, ok := args[k]; ok {
 			createArgs[k] = v
@@ -1657,12 +1682,27 @@ func (a *App) handleHTTPBillCreate(w http.ResponseWriter, r *http.Request) {
 			bill.Metadata = raw
 		}
 	}
+	paid, err := parsePaidOnCreate(body)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	created, err := dbBillCreate(ctx.AppDB(), bill, actorFromRequest(r))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	emitBill(ctx, "bill.added", created)
+	if paid != nil {
+		updated, err := dbBillMarkPaidOnCreate(ctx.AppDB(), pid, created.ID, *paid, actorFromRequest(r))
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		created = updated
+		emitBill(ctx, "bill.paid", created)
+	} else {
+		emitBill(ctx, "bill.added", created)
+	}
 	httpJSON(w, map[string]any{"bill": created})
 }
 
@@ -2121,13 +2161,29 @@ func (a *App) handleHTTPBillsCreateFromFile(w http.ResponseWriter, r *http.Reque
 			bill.Metadata = rb
 		}
 	}
+	paid, err := parsePaidOnCreate(billBody)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	created, err := dbBillCreate(ctx.AppDB(), bill, actorFromRequest(r))
 	if err != nil {
 		httpErr(w, http.StatusBadRequest,
 			fmt.Sprintf("%s — file orphaned as storage id %d", err.Error(), fileID))
 		return
 	}
-	emitBill(ctx, "bill.added", created)
+	if paid != nil {
+		updated, err := dbBillMarkPaidOnCreate(ctx.AppDB(), pid, created.ID, *paid, actorFromRequest(r))
+		if err != nil {
+			httpErr(w, http.StatusBadRequest,
+				fmt.Sprintf("bill created but mark-paid failed: %s (bill_id=%d)", err.Error(), created.ID))
+			return
+		}
+		created = updated
+		emitBill(ctx, "bill.paid", created)
+	} else {
+		emitBill(ctx, "bill.added", created)
+	}
 	if extracted != nil && len(fieldsFilled) > 0 {
 		if err := writeExtractedAudit(ctx.AppDB(), created.ID, ocrProvider, fieldsFilled, vendorVia, extracted.CostCents); err != nil {
 			ctx.Logger().Warn("audit write failed for ocr extraction", "err", err)
@@ -2882,6 +2938,160 @@ func dbBillCreate(db *sql.DB, bill *Bill, actor string) (*Bill, error) {
 		return nil, err
 	}
 	if err := loadBillChildren(db, bill.ProjectID, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// PaidOnCreate captures the "this bill was already paid by us
+// outside the system" case (credit card charge, manual bank transfer,
+// cash, etc). When supplied to a create call, the new bill skips the
+// received → approved → scheduled lifecycle and lands directly in
+// 'paid' state with a matching payment row attached.
+type PaidOnCreate struct {
+	// AmountCents defaults to bill.TotalCents when zero. Caller can
+	// pass a smaller value for a partial pre-payment (status stays
+	// 'received' in that case — partial pay-on-create isn't supported
+	// to keep the lifecycle simple; either you've fully paid it or
+	// you record the rest later through the normal flow).
+	AmountCents int64  `json:"amount_cents,omitempty"`
+	Method      string `json:"method"`
+	PaidAt      string `json:"paid_at,omitempty"` // RFC3339; defaults to now
+	Reference   string `json:"reference,omitempty"`
+}
+
+// parsePaidOnCreate extracts the optional "paid" block from a tool /
+// HTTP body. Returns nil when the caller didn't supply one. Callers
+// pass the unwrapped body map (whatever they normally read fields
+// out of). Validation of method happens here so every entry point
+// gets the same error message.
+func parsePaidOnCreate(body map[string]any) (*PaidOnCreate, error) {
+	if body == nil {
+		return nil, nil
+	}
+	raw, ok := body["paid"]
+	if !ok || raw == nil {
+		return nil, nil
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil, errors.New(`"paid" must be an object {amount_cents, method, paid_at, reference}`)
+	}
+	method := strings.ToLower(strArg(m, "method"))
+	if method == "" {
+		return nil, errors.New(`paid.method required (wire | check | cash | ach | card | other)`)
+	}
+	switch method {
+	case "wire", "check", "cash", "ach", "card", "other":
+	default:
+		return nil, fmt.Errorf("paid.method=%q is not a valid method", method)
+	}
+	return &PaidOnCreate{
+		AmountCents: int64Arg(m, "amount_cents"),
+		Method:      method,
+		PaidAt:      strArg(m, "paid_at"),
+		Reference:   strArg(m, "reference"),
+	}, nil
+}
+
+// dbBillMarkPaidOnCreate runs after dbBillCreate to record the
+// already-paid payment + flip the bill straight to 'paid', bypassing
+// the approve + schedule hops. Mirrors what the recordPayment +
+// approve transitions would do, but in a single tx and without the
+// status-gate (which forbids paying a 'received' bill).
+//
+// Caller is expected to have already supplied a fully-validated
+// PaidOnCreate (parsePaidOnCreate did the method check). Returns the
+// reloaded bill (now in status='paid' with the payment + audit log
+// attached).
+func dbBillMarkPaidOnCreate(db *sql.DB, pid string, billID int64, paid PaidOnCreate, actor string) (*Bill, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var (
+		vid      int64
+		currency string
+		total    int64
+		status   string
+	)
+	if err := tx.QueryRow(
+		`SELECT vendor_id, currency, total_cents, status
+		 FROM bills WHERE id = ? AND project_id = ? AND deleted_at IS NULL`,
+		billID, pid).Scan(&vid, &currency, &total, &status); err != nil {
+		return nil, err
+	}
+	if status != "received" {
+		return nil, fmt.Errorf("dbBillMarkPaidOnCreate: bill %d is %s, expected freshly-created 'received'", billID, status)
+	}
+	amount := paid.AmountCents
+	if amount == 0 {
+		amount = total
+	}
+	if amount <= 0 {
+		return nil, fmt.Errorf("paid.amount_cents must be positive (or omit to default to total %d)", total)
+	}
+	paidAt := paid.PaidAt
+	if paidAt == "" {
+		paidAt = nowRFC3339()
+	}
+	notes := ""
+	if paid.Reference != "" {
+		notes = "ref: " + paid.Reference
+	}
+	res, err := tx.Exec(
+		`INSERT INTO bill_payments (project_id, bill_id, vendor_id, amount_cents,
+		                            currency, method, sent_at, notes)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		pid, billID, vid, amount, currency, paid.Method, paidAt, nullStr(notes))
+	if err != nil {
+		return nil, err
+	}
+	payID, _ := res.LastInsertId()
+	// Full payment → 'paid'; partial → keep 'received' (caller can
+	// continue through the normal flow). We still attribute the
+	// approval to "auto-paid" so the audit trail says how this bill
+	// short-circuited the approval gate.
+	finalStatus := "received"
+	if amount >= total && total > 0 {
+		finalStatus = "paid"
+	}
+	if _, err := tx.Exec(
+		`UPDATE bills
+		 SET amount_paid_cents = ?,
+		     status = ?,
+		     approved_at = ?,
+		     approved_by = ?,
+		     paid_at = CASE WHEN ? = 'paid' THEN ? ELSE paid_at END,
+		     updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`,
+		amount, finalStatus, paidAt, "auto-paid", finalStatus, paidAt, billID); err != nil {
+		return nil, err
+	}
+	auditAction := "created_paid"
+	if finalStatus != "paid" {
+		auditAction = "created_partial_paid"
+	}
+	if err := writeAuditTx(tx, billID, actor, auditAction, map[string]any{
+		"payment_id":   payID,
+		"amount_cents": amount,
+		"method":       paid.Method,
+		"paid_at":      paidAt,
+		"reference":    paid.Reference,
+		"final_status": finalStatus,
+	}); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	out, err := dbBillGetByID(db, pid, billID)
+	if err != nil || out == nil {
+		return nil, err
+	}
+	if err := loadBillChildren(db, pid, out); err != nil {
 		return nil, err
 	}
 	return out, nil
