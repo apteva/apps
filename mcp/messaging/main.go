@@ -48,7 +48,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.6.0
+version: 0.7.0
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -90,6 +90,24 @@ requires:
       capabilities: [dns.upsert_record]
       required: false
       label: "Domains (optional)"
+    - role: inbound_storage
+      kind: integration
+      compatible_slugs: [aws-s3]
+      capabilities: [files.read, files.write]
+      tools:
+        files.read: get_object
+        files.write: put_object
+      required: false
+      label: "Inbound storage (AWS S3)"
+    - role: inbound_notifications
+      kind: integration
+      compatible_slugs: [aws-sns]
+      capabilities: [topic.manage, topic.subscribe]
+      tools:
+        topic.manage: set_topic_attributes
+        topic.subscribe: subscribe
+      required: false
+      label: "Inbound notifications (AWS SNS)"
 provides:
   http_routes:
     - prefix: /
@@ -116,6 +134,7 @@ provides:
     - { name: senders_delete,         description: "Remove a sending identity from the provider." }
     - { name: senders_verify_email,   description: "Verify an email or domain. Domain returns DKIM CNAMEs." }
     - { name: senders_get_quota,      description: "Provider sandbox + send-quota status." }
+    - { name: senders_bootstrap_inbound, description: "End-to-end SES inbound bootstrap: creates S3 bucket + SNS topic + receipt rule + subscribes webhook." }
   ui_panels:
     - slot: project.page
       label: Messaging
@@ -184,6 +203,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Sender domain setup — orchestrates SES verify_domain + (optional)
 		// DNS record writes via the domains app. Internal/panel only.
 		{Pattern: "/senders/setup-domain", Handler: a.handleSetupDomain},
+		// Full inbound bootstrap — creates S3 bucket + SNS topic + SES
+		// receipt rule + subscribes the inbound webhook. Requires aws-ses
+		// + aws-s3 + aws-sns integrations bound. Idempotent.
+		{Pattern: "/senders/bootstrap-inbound", Handler: a.handleBootstrapInbound},
 		{Pattern: "/templates/", Handler: a.handleTemplateItem}, // /templates/<id>/refresh-status
 		// Generic dispatcher so the panel can invoke any MCP tool via
 		// HTTP — saves declaring a per-tool route for every mutation.
@@ -413,6 +436,21 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Provider-account stats: sandbox flag, 24h send quota, current usage, sending-enabled flag. Drives the sandbox banner.",
 			InputSchema: schemaObject(map[string]any{}, nil),
 			Handler:     a.toolSendersGetQuota,
+		},
+		{
+			Name: "senders_bootstrap_inbound",
+			Description: "End-to-end SES inbound setup. Creates an S3 bucket + SNS topic with the right access policies, verifies the domain in SES (publishes DKIM CNAMEs + MX via the domains app if bound), creates a receipt rule set + rule routing inbound mail to S3+SNS, activates the rule set, and subscribes the messaging webhook to the SNS topic. Idempotent — safe to re-run. " +
+				"Args: domain (required), region? (default eu-west-1), bucket_name? (default apteva-ses-inbound-<install_id>), topic_name? (default apteva-ses-inbound-<install_id>), rule_set_name? (default apteva-default), rule_name? (default messaging-inbound). " +
+				"Requires aws-ses + aws-s3 + aws-sns integrations bound. Returns a step-by-step results array.",
+			InputSchema: schemaObject(map[string]any{
+				"domain":        map[string]any{"type": "string"},
+				"region":        map[string]any{"type": "string"},
+				"bucket_name":   map[string]any{"type": "string"},
+				"topic_name":    map[string]any{"type": "string"},
+				"rule_set_name": map[string]any{"type": "string"},
+				"rule_name":     map[string]any{"type": "string"},
+			}, []string{"domain"}),
+			Handler: a.toolBootstrapInbound,
 		},
 	}
 }
@@ -2890,59 +2928,75 @@ func parseRawEml(rawBytes []byte, fallbackMessageID string) (*parsedInbound, err
 }
 
 // fetchSESInboundFromS3 fetches the raw .eml from S3 using SigV4-
-// signed GET against the email_provider connection's credentials.
-// Returns the bytes ready for parseRawEml.
+// signed GET via the inbound_storage (aws-s3) integration. Returns the
+// bytes ready for parseRawEml.
+//
+// Resolution order: inbound_storage → email_provider (legacy fallback,
+// since some installs from before the inbound_storage role landed had
+// the SES connection pulling double duty).
 func fetchSESInboundFromS3(ctx *sdk.AppCtx, bucket, key string) ([]byte, error) {
-	bound := ctx.IntegrationFor("email_provider")
-	if bound == nil {
-		return nil, errors.New("email_provider not bound; cannot fetch S3 inbound")
-	}
-	conn, err := ctx.PlatformAPI().GetConnection(bound.ConnectionID)
+	connID, tool, err := resolveInboundStorageTool(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("get connection: %w", err)
+		return nil, err
 	}
-	_ = conn // we don't currently expose plaintext credentials through GetConnection,
-	// so the simplest production path is to call a per-connection HTTP
-	// passthrough that already does SigV4. v0.5 ships the data shape +
-	// integration point; the actual S3 fetch is delegated to a tool the
-	// aws-ses integration would expose (e.g. fetch_s3_object). When
-	// such a tool isn't there, fail loudly with an actionable error.
-	tool := bound.ToolFor("s3.get_object")
-	if tool == "" {
-		return nil, errors.New("aws-ses integration doesn't expose s3.get_object; SES S3-mode inbound needs a future catalog tool to fetch the .eml")
-	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, tool, map[string]any{
-		"Bucket": bucket,
-		"Key":    key,
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, map[string]any{
+		"bucket": bucket,
+		"key":    key,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("s3.get_object: %w", err)
+		return nil, fmt.Errorf("s3 get_object: %w", err)
 	}
 	if res == nil || !res.Success {
 		body := ""
 		if res != nil {
 			body = string(res.Data)
 		}
-		return nil, fmt.Errorf("s3.get_object non-2xx: %s", truncate(body, 400))
+		return nil, fmt.Errorf("s3 get_object non-2xx: %s", truncate(body, 400))
 	}
-	// Two reasonable response shapes: raw bytes (rare for JSON-shaped
-	// integration tools) or a JSON object with a base64-encoded body.
+	// Three reasonable response shapes:
+	//  1. http-executor binary envelope: { _binary: true, base64: …,
+	//     mimeType: …, size: … } — what aws-s3 get_object returns when
+	//     S3 sends back application/octet-stream.
+	//  2. {body_base64: …} — older variant, still seen for some apps.
+	//  3. raw bytes in res.Data — text/plain branch of the executor.
 	var probe struct {
+		Binary     bool   `json:"_binary"`
+		Base64     string `json:"base64"`
 		Body       string `json:"body"`
 		BodyBase64 string `json:"body_base64"`
 	}
 	_ = json.Unmarshal(res.Data, &probe)
+	if probe.Binary && probe.Base64 != "" {
+		if decoded, err := base64.StdEncoding.DecodeString(probe.Base64); err == nil {
+			return decoded, nil
+		}
+	}
 	if probe.BodyBase64 != "" {
-		decoded, err := base64.StdEncoding.DecodeString(probe.BodyBase64)
-		if err == nil {
+		if decoded, err := base64.StdEncoding.DecodeString(probe.BodyBase64); err == nil {
 			return decoded, nil
 		}
 	}
 	if probe.Body != "" {
 		return []byte(probe.Body), nil
 	}
-	// Fall back to treating Data itself as the eml bytes.
 	return []byte(res.Data), nil
+}
+
+// resolveInboundStorageTool returns the (connection_id, tool_name) pair
+// that fetchSESInboundFromS3 should use. Prefers the new
+// inbound_storage role; falls back to email_provider for installs from
+// before the role landed.
+func resolveInboundStorageTool(ctx *sdk.AppCtx) (int64, string, error) {
+	if bound := ctx.IntegrationFor("inbound_storage"); bound != nil {
+		return bound.ConnectionID, "get_object", nil
+	}
+	if bound := ctx.IntegrationFor("email_provider"); bound != nil {
+		// Legacy fallback. Most aws-ses connections won't expose
+		// get_object — this branch will fail with a clear error rather
+		// than crash, prompting the operator to bind aws-s3.
+		return bound.ConnectionID, "get_object", nil
+	}
+	return 0, "", errors.New("no S3 binding for inbound — bind the aws-s3 integration to the inbound_storage role")
 }
 
 // extractBodies handles single-part text/* directly and multipart by

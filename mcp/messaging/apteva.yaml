@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.6.0
+version: 0.7.0
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES; SMS and push are reserved channel namespaces. Tracks
@@ -64,6 +64,26 @@ requires:
       required: false
       label: "Domains (optional)"
       hint: "When bound, /senders/setup-domain auto-publishes DKIM CNAMEs + MX + SPF records via the domains app. Without it, the setup endpoint returns the records as JSON for manual paste into the registrar."
+    - role: inbound_storage
+      kind: integration
+      compatible_slugs: [aws-s3]
+      capabilities: [files.read, files.write]
+      tools:
+        files.read: get_object
+        files.write: put_object
+      required: false
+      label: "Inbound storage (AWS S3)"
+      hint: "Bucket where SES drops inbound .eml files. Required for /senders/bootstrap-inbound and for fetching attachments / large messages from SES inbound notifications."
+    - role: inbound_notifications
+      kind: integration
+      compatible_slugs: [aws-sns]
+      capabilities: [topic.manage, topic.subscribe]
+      tools:
+        topic.manage: set_topic_attributes
+        topic.subscribe: subscribe
+      required: false
+      label: "Inbound notifications (AWS SNS)"
+      hint: "Topic SES publishes inbound notifications to. Required for /senders/bootstrap-inbound — without it, inbound setup is manual via the AWS console."
 
 provides:
   http_routes:
@@ -96,6 +116,7 @@ provides:
     - { name: senders_delete,         description: "Remove a sending identity from the provider. Args: address." }
     - { name: senders_verify_email,   description: "Verify an email address or domain with the email provider. Args: address. Email: provider sends a confirmation link. Domain: returns 3 DKIM CNAMEs to publish in DNS." }
     - { name: senders_get_quota,      description: "Provider account stats — sandbox flag, 24h send quota, current usage. Powers the sandbox banner." }
+    - { name: senders_bootstrap_inbound, description: "End-to-end SES inbound setup. Creates S3 bucket + SNS topic with the right access policies, verifies the domain in SES (and publishes DKIM/MX DNS via the domains app if bound), creates a receipt rule set + rule routing inbound mail to S3+SNS, activates the rule set, and subscribes the messaging webhook to the SNS topic. Idempotent — safe to re-run. Args: domain, region? (default eu-west-1), bucket_name?, topic_name?, rule_set_name?, rule_name?. Requires aws-ses + aws-s3 + aws-sns integrations bound." }
   ui_panels:
     - slot: project.page
       label: Messaging
