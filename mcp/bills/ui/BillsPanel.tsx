@@ -1099,11 +1099,17 @@ function CurrencyChart({
         </div>
         <div className="flex items-center gap-3 text-[10px] text-text-muted">
           <span className="inline-flex items-center gap-1">
-            <span className="inline-block h-2 w-2 rounded-sm bg-green-500/80" />
+            <span
+            className="inline-block h-2 w-2 rounded-sm"
+            style={{ backgroundColor: "rgba(34, 197, 94, 0.85)" }}
+          />
             paid
           </span>
           <span className="inline-flex items-center gap-1">
-            <span className="inline-block h-2 w-2 rounded-sm bg-yellow-500/60" />
+            <span
+            className="inline-block h-2 w-2 rounded-sm"
+            style={{ backgroundColor: "rgba(234, 179, 8, 0.7)" }}
+          />
             pending
           </span>
         </div>
@@ -1115,29 +1121,32 @@ function CurrencyChart({
         role="img"
         aria-label={`Spend over the last 6 months in ${currency}`}
       >
-        {/* y=max + y=0 reference lines */}
+        {/* y=max + y=0 reference lines. SVG attributes — not Tailwind —
+            because the dashboard's Tailwind JIT doesn't scan panel TSX
+            sources, so utility classes like "fill-green-500/80" or
+            "text-text-dim" silently render as currentColor (i.e. black
+            on the dark theme). Inline style w/ CSS vars keeps things
+            themable; literal rgba covers the green/yellow accents. */}
         <line
           x1={padLeft}
           y1={padTop}
           x2={W - padRight}
           y2={padTop}
-          stroke="currentColor"
-          className="text-border"
-          strokeOpacity={0.5}
+          stroke="var(--border)"
+          strokeOpacity={0.6}
         />
         <line
           x1={padLeft}
           y1={padTop + chartH}
           x2={W - padRight}
           y2={padTop + chartH}
-          stroke="currentColor"
-          className="text-border"
+          stroke="var(--border)"
         />
         <text
           x={padLeft - 6}
           y={padTop + 4}
           textAnchor="end"
-          className="fill-current text-text-dim"
+          fill="var(--text-dim)"
           fontSize="10"
         >
           {fmtShort(max)}
@@ -1146,7 +1155,7 @@ function CurrencyChart({
           x={padLeft - 6}
           y={padTop + chartH + 4}
           textAnchor="end"
-          className="fill-current text-text-dim"
+          fill="var(--text-dim)"
           fontSize="10"
         >
           0
@@ -1171,7 +1180,7 @@ function CurrencyChart({
                   y={yTop}
                   width={barW}
                   height={totalH - paidH}
-                  className="fill-yellow-500/60"
+                  fill="rgba(234, 179, 8, 0.7)"
                   rx={1}
                 >
                   <title>
@@ -1186,7 +1195,7 @@ function CurrencyChart({
                   y={yPaidTop}
                   width={barW}
                   height={paidH}
-                  className="fill-green-500/80"
+                  fill="rgba(34, 197, 94, 0.85)"
                   rx={1}
                 >
                   <title>
@@ -1201,17 +1210,16 @@ function CurrencyChart({
                   y1={padTop + chartH}
                   x2={x + barW}
                   y2={padTop + chartH}
-                  stroke="currentColor"
-                  className="text-text-dim"
+                  stroke="var(--text-dim)"
                   strokeWidth={1.5}
-                  strokeOpacity={0.5}
+                  strokeOpacity={0.6}
                 />
               )}
               <text
                 x={x + barW / 2}
                 y={padTop + chartH + 16}
                 textAnchor="middle"
-                className="fill-current text-text-muted"
+                fill="var(--text-muted)"
                 fontSize="10"
               >
                 {monthShort}
