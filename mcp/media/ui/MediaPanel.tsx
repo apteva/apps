@@ -378,7 +378,11 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
           className="bg-bg-input flex items-center justify-center relative"
         >
           {previewURL ? (
-            <img src={previewURL} alt="" className="w-full h-full object-cover" />
+            <img
+              src={previewURL}
+              alt=""
+              style={{ width: "100%", height: "100%", objectFit: "cover" }}
+            />
           ) : (
             <span className="text-text-dim">
               <KindIcon row={r} className="w-8 h-8" />
