@@ -373,7 +373,10 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
         onClick={() => setSelected(r)}
         className="text-left bg-bg-input/40 border border-border rounded overflow-hidden hover:border-accent/50 transition-colors flex flex-col"
       >
-        <div className="aspect-video bg-bg-input flex items-center justify-center relative">
+        <div
+          style={{ aspectRatio: "1 / 1" }}
+          className="bg-bg-input flex items-center justify-center relative"
+        >
           {previewURL ? (
             <img src={previewURL} alt="" className="w-full h-full object-cover" />
           ) : (
