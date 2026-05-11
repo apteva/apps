@@ -148,13 +148,21 @@ interface SuppressionRow {
   last_seen?: string;
 }
 interface SenderRow {
+  id?: number;
   channel: "email" | "sms" | "whatsapp";
   address: string;
   kind: "email" | "domain" | "phone";
   verified: boolean;
+  verification_status?: string;
   dkim_status?: string;
   dkim_tokens?: string[];
-  sending_enabled: boolean;
+  sending_enabled?: boolean;
+  // v0.9 local-table additions.
+  is_default?: boolean;
+  inbound_bootstrapped?: boolean;
+  display_name?: string;
+  provider?: string;
+  last_synced_at?: string;
 }
 interface QuotaInfo {
   sandboxed: boolean;
@@ -708,6 +716,18 @@ function SendersView({
     if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
+  const makeDefault = async (address: string, channel: string) => {
+    try {
+      await api("POST", "/tools/call", {}, {
+        tool: "senders_set_default",
+        args: { address, channel },
+      });
+      reload();
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  };
+
   const recheck = async (address: string) => {
     try {
       await api("POST", "/tools/call", {}, { tool: "senders_get", args: { address } });
@@ -808,20 +828,37 @@ function SendersView({
           <thead className="text-xs text-text-dim">
             <tr className="border-b border-border">
               <th className="text-left px-4 py-2">Address</th>
+              <th className="text-left px-4 py-2">Channel</th>
               <th className="text-left px-4 py-2">Kind</th>
               <th className="text-left px-4 py-2">Verified</th>
-              <th className="text-left px-4 py-2">DKIM</th>
+              <th className="text-left px-4 py-2">DKIM / Inbound</th>
               <th></th>
             </tr>
           </thead>
           <tbody>
             {rows.map((s) => (
-              <tr key={s.address} className="border-b border-border">
-                <td className="px-4 py-2">{stripScheme(s.address)}</td>
+              <tr key={`${s.channel}:${s.address}`} className="border-b border-border">
+                <td className="px-4 py-2">
+                  <span>{stripScheme(s.address)}</span>
+                  {s.is_default && <span className="ml-2 bg-blue-500/20 text-blue-400 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded">default</span>}
+                </td>
+                <td className="px-4 py-2 text-text-dim">{s.channel}</td>
                 <td className="px-4 py-2 text-text-dim">{s.kind}</td>
                 <td className="px-4 py-2"><StatusPill status={s.verified ? "verified" : "pending"} /></td>
-                <td className="px-4 py-2 text-text-dim">{s.dkim_status || "—"}</td>
+                <td className="px-4 py-2 text-text-dim text-xs space-x-1">
+                  {s.dkim_status && <span>DKIM: {s.dkim_status}</span>}
+                  {s.inbound_bootstrapped && <span className="text-green-400">· inbound wired</span>}
+                  {!s.dkim_status && !s.inbound_bootstrapped && <span>—</span>}
+                </td>
                 <td className="px-4 py-2 text-right space-x-3">
+                  {!s.is_default && (
+                    <button
+                      type="button"
+                      className="text-text-dim hover:text-accent text-xs"
+                      onClick={() => makeDefault(s.address, s.channel)}
+                      title="Make this the default sender for this channel. send_message uses the default when 'from' is omitted."
+                    >Make default</button>
+                  )}
                   {s.kind === "domain" && (
                     <button
                       type="button"

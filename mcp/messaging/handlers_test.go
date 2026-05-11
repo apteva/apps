@@ -499,15 +499,33 @@ func TestSenders_List_NormalisesShape(t *testing.T) {
 	if r["count"].(int) != 3 {
 		t.Errorf("count=%v", r["count"])
 	}
-	rows := r["senders"].([]Sender)
-	if rows[0].Address != "notifications@acme.com" || !rows[0].Verified || rows[0].Kind != "email" || rows[0].Channel != "email" {
-		t.Errorf("row 0: %+v", rows[0])
+	// v0.9: senders_list returns []map[string]any (panel-friendly
+	// projection of senderRow) instead of []Sender. The empty-table
+	// path triggered a synchronous refresh that seeded the local DB
+	// from the list_identities stub above.
+	rows := r["senders"].([]map[string]any)
+	// Order is is_default DESC then alphabetical by address, so
+	// "acme.com" sorts before "notifications@..." and "pending@...".
+	addresses := []string{}
+	for _, row := range rows {
+		addresses = append(addresses, row["address"].(string))
 	}
-	if rows[1].Address != "acme.com" || rows[1].Kind != "domain" || rows[1].Channel != "email" {
-		t.Errorf("row 1: %+v", rows[1])
+	wantAddrs := []string{"acme.com", "notifications@acme.com", "pending@acme.com"}
+	for i, want := range wantAddrs {
+		if i >= len(addresses) || addresses[i] != want {
+			t.Errorf("row %d: addr=%q, want %q", i, addresses[i], want)
+		}
 	}
-	if rows[2].Verified {
-		t.Errorf("pending row should not be verified: %+v", rows[2])
+	// Verify the kind / verified shape on a known row.
+	for _, row := range rows {
+		if row["address"] == "acme.com" {
+			if row["kind"] != "domain" || row["channel"] != "email" {
+				t.Errorf("acme.com row: %+v", row)
+			}
+		}
+		if row["address"] == "pending@acme.com" && row["verified"] != false {
+			t.Errorf("pending row should not be verified: %+v", row)
+		}
 	}
 }
 
@@ -528,8 +546,13 @@ func TestSenders_List_VerifiedOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.(map[string]any)["count"].(int) != 1 {
-		t.Errorf("verified_only filter broken: %+v", out)
+	r := out.(map[string]any)
+	if r["count"].(int) != 1 {
+		t.Errorf("verified_only filter broken: %+v", r)
+	}
+	rows := r["senders"].([]map[string]any)
+	if len(rows) != 1 || rows[0]["address"] != "good@x.com" {
+		t.Errorf("unexpected rows: %+v", rows)
 	}
 }
 
@@ -614,13 +637,27 @@ func TestSenders_GetQuota_ReportsSandboxFlag(t *testing.T) {
 
 func TestSenders_NoBoundProvider(t *testing.T) {
 	// stubPlatform with WhoAmI bindings *empty* — no email_provider.
+	// v0.9: senders_list reads from the local table and the empty-
+	// table refresh path silently skips unbound providers. So with no
+	// provider AND no local rows, we return an empty list — not an
+	// error. Errors only surface from senders_create (which actually
+	// needs a provider to do its work).
 	plat := &stubPlatform{}
-	plat.bindingsOverride = map[string]any{} // explicit empty
+	plat.bindingsOverride = map[string]any{}
 	ctx := newTestCtx(t, plat)
 	app := &App{}
-	_, err := app.toolSendersList(ctx, map[string]any{})
-	if err == nil || !strings.Contains(err.Error(), "no email_provider bound") {
-		t.Errorf("expected unbound error, got %v", err)
+	out, err := app.toolSendersList(ctx, map[string]any{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	r := out.(map[string]any)
+	if r["count"].(int) != 0 {
+		t.Errorf("expected empty senders list with no provider bound, got %+v", r)
+	}
+	// senders_create is the right place for the unbound-provider error.
+	_, err = app.toolSendersCreate(ctx, map[string]any{"address": "x.com"})
+	if err == nil || !strings.Contains(err.Error(), "email_provider") {
+		t.Errorf("senders_create with no email_provider should error, got %v", err)
 	}
 }
 
@@ -1197,6 +1234,50 @@ func TestSendersCreate_NoEmailProviderBound_Errors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "email_provider") {
 		t.Errorf("error doesn't mention email_provider: %v", err)
+	}
+}
+
+func TestSenders_SetDefault_OneDefaultPerCohort(t *testing.T) {
+	plat := &stubPlatform{}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+	// Seed two email senders.
+	for _, addr := range []string{"a@x.com", "b@x.com"} {
+		if _, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{
+			ProjectID: "test-proj", Channel: "email", Address: addr,
+			Kind: "email", Provider: "aws-ses", ProviderIdentityID: addr,
+			Verified: true, VerificationStatus: "verified", SendingEnabled: true,
+			MarkSyncedNow: true,
+		}); err != nil {
+			t.Fatalf("seed %s: %v", addr, err)
+		}
+	}
+	// Set b as default.
+	if _, err := app.toolSendersSetDefault(ctx, map[string]any{"address": "b@x.com"}); err != nil {
+		t.Fatal(err)
+	}
+	def, _ := dbDefaultSender(ctx.AppDB(), "test-proj", "email")
+	if def == nil || def.Address != "b@x.com" {
+		t.Fatalf("expected b@x.com as default, got %+v", def)
+	}
+	// Flip to a — partial unique index must allow this (b's flag clears first).
+	if _, err := app.toolSendersSetDefault(ctx, map[string]any{"address": "a@x.com"}); err != nil {
+		t.Fatal(err)
+	}
+	def, _ = dbDefaultSender(ctx.AppDB(), "test-proj", "email")
+	if def == nil || def.Address != "a@x.com" {
+		t.Fatalf("expected a@x.com as default after flip, got %+v", def)
+	}
+	// Confirm there's exactly one default by counting.
+	rows, _ := dbListSenders(ctx.AppDB(), "test-proj", "email", false)
+	defaults := 0
+	for _, r := range rows {
+		if r.IsDefault {
+			defaults++
+		}
+	}
+	if defaults != 1 {
+		t.Errorf("expected 1 default sender, got %d", defaults)
 	}
 }
 

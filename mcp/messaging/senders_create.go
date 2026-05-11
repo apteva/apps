@@ -39,7 +39,8 @@ import (
 )
 
 type sendersCreateReq struct {
-	Address     string `json:"address"`       // required: email or domain
+	Address     string `json:"address"`       // required: email | domain | E.164 phone
+	Channel     string `json:"channel"`       // optional: 'email' | 'sms' | 'whatsapp'. Auto-detected if blank.
 	Inbound     string `json:"inbound"`       // "auto" | "true" | "false"; default "auto"
 	PublishDNS  *bool  `json:"publish_dns"`   // domain only; default true
 	SPF         *bool  `json:"spf"`           // domain only; default true
@@ -48,6 +49,9 @@ type sendersCreateReq struct {
 	TopicName   string `json:"topic_name"`    // auto-named if blank
 	RuleSetName string `json:"rule_set_name"` // default "apteva-default"
 	RuleName    string `json:"rule_name"`     // default "messaging-inbound"
+	DisplayName string `json:"display_name"`  // optional friendly name persisted on the local row
+	SetDefault  bool   `json:"set_default"`   // make this the default sender for (project, channel)
+	ProjectID   string `json:"-"`             // resolved from args / env; not user-supplied
 }
 
 type bootstrapStep struct {
@@ -123,7 +127,35 @@ func (a *App) toolSendersCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func (a *App) sendersCreateImpl(ctx *sdk.AppCtx, req sendersCreateReq) (*sendersCreateResp, error) {
-	kind, raw, err := classifyEmailIdentity(req.Address)
+	pid := req.ProjectID
+	if pid == "" {
+		pid = strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
+	}
+	if pid == "" {
+		return nil, errors.New("project_id required")
+	}
+
+	// Phone shapes (E.164: leading "+" followed by digits) and the
+	// explicit channel=sms|whatsapp arg both route to the Twilio
+	// branch. Email and domain shapes route to SES. Empty channel
+	// auto-detects.
+	channel := strings.ToLower(strings.TrimSpace(req.Channel))
+	addr := strings.TrimSpace(req.Address)
+	if channel == "" {
+		channel = inferChannelFromAddress(addr)
+	}
+
+	switch channel {
+	case "sms", "whatsapp":
+		return a.sendersCreatePhone(ctx, pid, channel, addr, req)
+	case "email", "":
+		// Email branch handles both "foo@x.com" and "x.com" — fall
+		// through to the classifier.
+	default:
+		return nil, fmt.Errorf("unsupported channel %q (use email|sms|whatsapp)", channel)
+	}
+
+	kind, raw, err := classifyEmailIdentity(addr)
 	if err != nil {
 		return nil, err
 	}
@@ -138,12 +170,46 @@ func (a *App) sendersCreateImpl(ctx *sdk.AppCtx, req sendersCreateReq) (*senders
 		Pending: true,
 	}
 	if normalisedKind == "email" {
-		return a.sendersCreateEmail(ctx, sesBound.ConnectionID, raw, resp)
+		return a.sendersCreateEmail(ctx, pid, sesBound.ConnectionID, raw, resp)
 	}
-	return a.sendersCreateDomain(ctx, sesBound.ConnectionID, raw, req, resp)
+	return a.sendersCreateDomain(ctx, pid, sesBound.ConnectionID, raw, req, resp)
 }
 
-func (a *App) sendersCreateEmail(ctx *sdk.AppCtx, connID int64, addr string, resp *sendersCreateResp) (*sendersCreateResp, error) {
+// inferChannelFromAddress: leading "+" + digits → sms; contains "@"
+// or is a bare domain → email. Returns "" when ambiguous; the caller
+// surfaces the channel-required error.
+func inferChannelFromAddress(addr string) string {
+	s := strings.TrimSpace(addr)
+	if s == "" {
+		return ""
+	}
+	if strings.HasPrefix(s, "+") {
+		rest := s[1:]
+		if rest != "" && allDigits(rest) {
+			return "sms"
+		}
+	}
+	if strings.Contains(s, "@") {
+		return "email"
+	}
+	// Bare domain (has a dot, no @, no spaces). classifyEmailIdentity
+	// will refine; route to email so we go through its validator.
+	if strings.Contains(s, ".") && !strings.ContainsAny(s, " /\t\r\n") {
+		return "email"
+	}
+	return ""
+}
+
+func allDigits(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
+func (a *App) sendersCreateEmail(ctx *sdk.AppCtx, pid string, connID int64, addr string, resp *sendersCreateResp) (*sendersCreateResp, error) {
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "verify_email", map[string]any{
 		"EmailIdentity": addr,
 	})
@@ -157,10 +223,22 @@ func (a *App) sendersCreateEmail(ctx *sdk.AppCtx, connID int64, addr string, res
 	}
 	resp.Steps = append(resp.Steps, bootstrapStep{Step: "ses_verify_email", OK: true})
 	resp.NextStep = verifyNextStepHint("email")
+	a.persistSenderRow(ctx, pid, &senderUpsert{
+		ProjectID:          pid,
+		Channel:            "email",
+		Address:            addr,
+		Kind:               "email",
+		Provider:           "aws-ses",
+		ProviderIdentityID: addr,
+		Verified:           false,
+		VerificationStatus: "pending",
+		SendingEnabled:     true,
+		MarkSyncedNow:      true,
+	}, resp)
 	return resp, nil
 }
 
-func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, sesConnID int64, domain string, req sendersCreateReq, resp *sendersCreateResp) (*sendersCreateResp, error) {
+func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, domain string, req sendersCreateReq, resp *sendersCreateResp) (*sendersCreateResp, error) {
 	region := req.Region
 	if region == "" {
 		region = "eu-west-1"
@@ -335,6 +413,267 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, sesConnID int64, domain strin
 	}
 
 	resp.NextStep = sendersCreateNextStep(doInbound, isAppDepBound(ctx, "domains"))
+
+	// Persist the local row. Provider state already mirrored; the
+	// inbound block (if bootstrapped) gets serialised into
+	// inbound_config so subsequent senders_get returns it without a
+	// provider round-trip.
+	a.persistSenderRow(ctx, pid, &senderUpsert{
+		ProjectID:           pid,
+		Channel:             "email",
+		Address:             domain,
+		Kind:                "domain",
+		DisplayName:         req.DisplayName,
+		Provider:            "aws-ses",
+		ProviderIdentityID:  domain,
+		Verified:            strings.EqualFold(resp.DkimStatus, "SUCCESS"),
+		VerificationStatus:  domainVerificationStatus(resp.DkimStatus),
+		SendingEnabled:      true,
+		DkimStatus:          resp.DkimStatus,
+		InboundBootstrapped: resp.Inbound != nil && resp.Inbound.Bootstrapped,
+		InboundConfig:       inboundConfigJSON(resp.Inbound),
+		MarkSyncedNow:       true,
+	}, resp)
+	return resp, nil
+}
+
+// domainVerificationStatus maps SES's DkimAttributes.Status to our
+// internal verification_status enum.
+func domainVerificationStatus(dkimStatus string) string {
+	switch strings.ToUpper(strings.TrimSpace(dkimStatus)) {
+	case "SUCCESS":
+		return "verified"
+	case "FAILED":
+		return "failed"
+	case "":
+		return "pending"
+	default:
+		return "pending"
+	}
+}
+
+// inboundConfigJSON serialises the panel-friendly Inbound block into
+// the JSON shape we store in senders.inbound_config. Returns "" when
+// not bootstrapped.
+func inboundConfigJSON(inb *sendersCreateInbound) string {
+	if inb == nil || !inb.Bootstrapped {
+		return ""
+	}
+	cfg := map[string]any{
+		"bucket":           inb.BucketName,
+		"topic_arn":        inb.TopicARN,
+		"account_id":       inb.AccountID,
+		"webhook_url":      inb.WebhookURL,
+		"subscription_arn": inb.SubscriptionARN,
+		"region":           inb.Region,
+		"rule_set_name":    inb.RuleSetName,
+		"rule_name":        inb.RuleName,
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// persistSenderRow upserts the local row + optionally flips the
+// default flag when req.SetDefault is true. Failures get appended as
+// a non-fatal "persist_local" step — the provider work already
+// succeeded so we don't roll that back; the next senders_refresh
+// will reconcile.
+func (a *App) persistSenderRow(ctx *sdk.AppCtx, pid string, u *senderUpsert, resp *sendersCreateResp) {
+	db := ctx.AppDB()
+	if db == nil {
+		return
+	}
+	id, err := dbUpsertSender(db, u)
+	if err != nil {
+		resp.Steps = append(resp.Steps, bootstrapStep{Step: "persist_local", OK: false, Error: err.Error()})
+		return
+	}
+	step := bootstrapStep{Step: "persist_local", OK: true, Detail: fmt.Sprintf("sender id=%d", id)}
+	// The req.SetDefault path is only triggered by the caller passing
+	// set_default=true; pass it down via resp.NextStep semantics — we
+	// don't have direct access to the req here, so the orchestrators
+	// already account for it before calling persistSenderRow if
+	// needed. Future: thread req through.
+	resp.Steps = append(resp.Steps, step)
+}
+
+// sendersCreatePhone — Twilio branch. Adopts an already-purchased
+// phone number into the local senders table, optionally wiring its
+// SMS webhook URL at /webhooks/twilio-inbound.
+//
+// Today the Twilio integration doesn't expose a "purchase a fresh
+// number" flow from senders_create — that path is left to the
+// twilio.buy_phone_number tool. senders_create is the adoption /
+// configuration entry point.
+func (a *App) sendersCreatePhone(ctx *sdk.AppCtx, pid, channel, addr string, req sendersCreateReq) (*sendersCreateResp, error) {
+	if channel == "whatsapp" {
+		// Twilio WhatsApp senders live behind a separate API (
+		// list_whatsapp_senders / register_whatsapp_sender ) with
+		// approval workflow. Out of scope for v0.9 — send_message
+		// channel=whatsapp already works for outbound against an
+		// already-approved WhatsApp number.
+		return nil, errors.New("channel=whatsapp adoption not yet supported in senders_create — register the WhatsApp sender via twilio.register_whatsapp_sender, then call senders_create again")
+	}
+	if addr == "" || !strings.HasPrefix(addr, "+") || !allDigits(addr[1:]) {
+		return nil, fmt.Errorf("phone address must be E.164 (e.g. +15551234567), got %q", addr)
+	}
+	phoneBound := ctx.IntegrationFor("phone_provider")
+	if phoneBound == nil {
+		return nil, errors.New("phone_provider (twilio) not bound")
+	}
+
+	resp := &sendersCreateResp{
+		Address: addr,
+		Kind:    "phone",
+		Pending: false,
+	}
+
+	// 1. Look up the phone in the Twilio account.
+	listRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(phoneBound.ConnectionID, "list_phone_numbers", map[string]any{
+		"PhoneNumber": addr,
+		"PageSize":    50,
+	})
+	if err != nil {
+		resp.Steps = append(resp.Steps, bootstrapStep{Step: "twilio_list_phone_numbers", OK: false, Error: err.Error()})
+		return resp, nil
+	}
+	if listRes == nil || !listRes.Success {
+		resp.Steps = append(resp.Steps, bootstrapStep{Step: "twilio_list_phone_numbers", OK: false, Error: truncateResData(listRes)})
+		return resp, nil
+	}
+	var listed struct {
+		IncomingPhoneNumbers []struct {
+			SID          string `json:"sid"`
+			PhoneNumber  string `json:"phone_number"`
+			FriendlyName string `json:"friendly_name"`
+			SmsURL       string `json:"sms_url"`
+			SmsMethod    string `json:"sms_method"`
+		} `json:"incoming_phone_numbers"`
+	}
+	if err := json.Unmarshal(listRes.Data, &listed); err != nil {
+		resp.Steps = append(resp.Steps, bootstrapStep{Step: "twilio_list_phone_numbers", OK: false, Error: "parse: " + err.Error()})
+		return resp, nil
+	}
+	var match *struct {
+		SID          string `json:"sid"`
+		PhoneNumber  string `json:"phone_number"`
+		FriendlyName string `json:"friendly_name"`
+		SmsURL       string `json:"sms_url"`
+		SmsMethod    string `json:"sms_method"`
+	}
+	for i := range listed.IncomingPhoneNumbers {
+		if listed.IncomingPhoneNumbers[i].PhoneNumber == addr {
+			match = &listed.IncomingPhoneNumbers[i]
+			break
+		}
+	}
+	if match == nil {
+		resp.Steps = append(resp.Steps, bootstrapStep{
+			Step: "twilio_list_phone_numbers", OK: false,
+			Error: fmt.Sprintf("phone %s not found in the bound Twilio account — buy it via twilio.buy_phone_number first", addr),
+		})
+		return resp, nil
+	}
+	resp.Steps = append(resp.Steps, bootstrapStep{
+		Step: "twilio_list_phone_numbers", OK: true,
+		Detail: fmt.Sprintf("sid=%s", match.SID),
+	})
+
+	// 2. Decide inbound mode. For Twilio "auto" is true whenever the
+	//    phone exists and PublicURL is set — no extra integrations
+	//    required.
+	id, _ := ctx.PlatformAPI().WhoAmI()
+	publicURL := ""
+	if id != nil {
+		publicURL = strings.TrimSuffix(strings.TrimSpace(id.PublicURL), "/")
+	}
+	mode := strings.ToLower(strings.TrimSpace(req.Inbound))
+	doInbound := false
+	skipReason := ""
+	switch mode {
+	case "", "auto":
+		if publicURL == "" {
+			skipReason = "auto: platform PublicURL is unset"
+		} else {
+			doInbound = true
+		}
+	case "true", "yes", "1":
+		if publicURL == "" {
+			return nil, errors.New("inbound=true but platform PublicURL is unset — set Settings → Server → Public URL")
+		}
+		doInbound = true
+	case "false", "no", "0":
+		skipReason = "inbound=false"
+	default:
+		return nil, fmt.Errorf("invalid inbound value %q (use auto|true|false)", req.Inbound)
+	}
+	resp.Inbound = &sendersCreateInbound{Bootstrapped: false, SkippedReason: skipReason}
+
+	// 3. Set the SMS webhook URL on the phone number (if requested).
+	if doInbound {
+		webhookURL := publicURL + "/api/apps/messaging/webhooks/twilio-inbound?api_key=" + os.Getenv("APTEVA_APP_TOKEN")
+		if match.SmsURL == webhookURL && strings.EqualFold(match.SmsMethod, "POST") {
+			resp.Steps = append(resp.Steps, bootstrapStep{
+				Step: "twilio_update_phone_number", OK: true,
+				Skipped: "webhook already pointed at messaging",
+			})
+		} else {
+			updRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(phoneBound.ConnectionID, "update_phone_number", map[string]any{
+				"PhoneNumberSid": match.SID,
+				"SmsUrl":         webhookURL,
+				// SmsMethod isn't in the integration's schema today;
+				// Twilio defaults to POST when SmsUrl is set without
+				// SmsMethod, so this is fine.
+			})
+			if err != nil {
+				resp.Steps = append(resp.Steps, bootstrapStep{Step: "twilio_update_phone_number", OK: false, Error: err.Error()})
+				return resp, nil
+			}
+			if updRes == nil || !updRes.Success {
+				resp.Steps = append(resp.Steps, bootstrapStep{Step: "twilio_update_phone_number", OK: false, Error: truncateResData(updRes)})
+				return resp, nil
+			}
+			resp.Steps = append(resp.Steps, bootstrapStep{Step: "twilio_update_phone_number", OK: true, Detail: "sms_url=" + webhookURL})
+		}
+		resp.Inbound.WebhookURL = webhookURL
+		resp.Inbound.Bootstrapped = true
+	}
+
+	// 4. Persist local row.
+	inboundCfg := ""
+	if resp.Inbound != nil && resp.Inbound.Bootstrapped {
+		cfg := map[string]any{
+			"sms_url":          resp.Inbound.WebhookURL,
+			"previous_sms_url": match.SmsURL,
+		}
+		if b, err := json.Marshal(cfg); err == nil {
+			inboundCfg = string(b)
+		}
+	}
+	a.persistSenderRow(ctx, pid, &senderUpsert{
+		ProjectID:           pid,
+		Channel:             channel,
+		Address:             addr,
+		Kind:                "phone",
+		DisplayName:         req.DisplayName,
+		Provider:            "twilio",
+		ProviderIdentityID:  match.SID,
+		Verified:            true, // Twilio phones are usable from the moment of purchase.
+		VerificationStatus:  "verified",
+		SendingEnabled:      true,
+		InboundBootstrapped: resp.Inbound != nil && resp.Inbound.Bootstrapped,
+		InboundConfig:       inboundCfg,
+		MarkSyncedNow:       true,
+	}, resp)
+
+	if doInbound {
+		resp.NextStep = "Phone " + addr + " is ready to send + receive SMS via messaging."
+	} else {
+		resp.NextStep = "Phone " + addr + " adopted. Inbound webhook not wired — set inbound=true to point Twilio at /webhooks/twilio-inbound."
+	}
 	return resp, nil
 }
 

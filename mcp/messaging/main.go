@@ -48,7 +48,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.8.1
+version: 0.9.0
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -133,7 +133,9 @@ provides:
     - { name: senders_get,            description: "Get one identity's verification + DKIM state." }
     - { name: senders_delete,         description: "Remove a sending identity from the provider." }
     - { name: senders_get_quota,      description: "Provider sandbox + send-quota status." }
-    - { name: senders_create,         description: "Unified sender registration. Email → SES verify_email. Domain → SES verify_domain + publish DKIM/SPF via domains app + (if aws-s3 and aws-sns bound, auto by default) full inbound bootstrap: S3 bucket + SNS topic + receipt rule + MX + webhook subscribe." }
+    - { name: senders_create,         description: "Register a sender across email (SES) + SMS (Twilio). Domain → DKIM + DNS + optional inbound bootstrap. Phone → adopt + optional SmsUrl wiring." }
+    - { name: senders_refresh,        description: "Reconcile local senders with bound providers." }
+    - { name: senders_set_default,    description: "Flip the per-(project, channel) default sender." }
   ui_panels:
     - slot: project.page
       label: Messaging
@@ -430,12 +432,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "senders_create",
-			Description: "Register a sender end-to-end. The address shape picks the path: " +
-				"\"foo@x.com\" runs SES verify_email; \"x.com\" runs verify_domain, publishes DKIM CNAMEs (and SPF unless spf=false) via the domains app, and — when aws-s3 + aws-sns are bound — auto-bootstraps inbound (S3 bucket + SNS topic with policies, SES receipt rule + activation, MX record, webhook subscribe). " +
-				"Args: address (required), inbound? (auto|true|false, default auto), publish_dns? (default true), spf? (default true), region? (default eu-west-1), bucket_name?, topic_name?, rule_set_name?, rule_name?. " +
-				"Idempotent — safe to re-run. Returns {address, kind, dkim_tokens?, dns_records?, inbound:{bootstrapped, bucket_name?, topic_arn?, …}, steps[]}.",
+			Description: "Register a sender end-to-end across email + SMS providers. The address shape picks the path: " +
+				"\"foo@x.com\" → SES verify_email; \"x.com\" → SES verify_domain + DKIM/SPF DNS + (auto when aws-s3+aws-sns bound) full inbound bootstrap; \"+15551234567\" → adopt the Twilio phone + (when inbound=auto/true) wire SmsUrl to /webhooks/twilio-inbound. " +
+				"Args: address (required), channel? (email|sms|whatsapp; auto-detected if blank), inbound? (auto|true|false; default auto), publish_dns? (default true), spf? (default true), region? (email/SES inbound, default eu-west-1), bucket_name?, topic_name?, rule_set_name?, rule_name?, display_name?, set_default? (bool). " +
+				"Idempotent. Writes a row in the local senders table. Returns {address, kind, dkim_tokens?, dns_records?, inbound:{bootstrapped, …}, steps[]}.",
 			InputSchema: schemaObject(map[string]any{
 				"address":       map[string]any{"type": "string"},
+				"channel":       map[string]any{"type": "string"},
 				"inbound":       map[string]any{"type": "string"},
 				"publish_dns":   map[string]any{"type": "boolean"},
 				"spf":           map[string]any{"type": "boolean"},
@@ -444,8 +447,25 @@ func (a *App) MCPTools() []sdk.Tool {
 				"topic_name":    map[string]any{"type": "string"},
 				"rule_set_name": map[string]any{"type": "string"},
 				"rule_name":     map[string]any{"type": "string"},
+				"display_name":  map[string]any{"type": "string"},
+				"set_default":   map[string]any{"type": "boolean"},
 			}, []string{"address"}),
 			Handler: a.toolSendersCreate,
+		},
+		{
+			Name:        "senders_refresh",
+			Description: "Reconcile the local senders table with every bound provider (SES + Twilio). Paginates each provider's identity list, upserts rows, and soft-deletes locals that no longer exist upstream. Idempotent. Returns {refreshed, count}.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler:     a.toolSendersRefresh,
+		},
+		{
+			Name:        "senders_set_default",
+			Description: "Flip the per-(project, channel) default sender. send_message uses the default when 'from' is omitted. Args: address, channel? (auto-detected if blank). At most one default per (project, channel) enforced at SQL level.",
+			InputSchema: schemaObject(map[string]any{
+				"address": map[string]any{"type": "string"},
+				"channel": map[string]any{"type": "string"},
+			}, []string{"address"}),
+			Handler: a.toolSendersSetDefault,
 		},
 	}
 }
@@ -1794,94 +1814,104 @@ func emailProviderConn(ctx *sdk.AppCtx) (connID int64, toolFor func(string) stri
 	return bound.ConnectionID, bound.ToolFor, nil
 }
 
+// toolSendersList reads from the local senders table. On the first
+// call after an upgrade the table is empty — we trigger a synchronous
+// senders_refresh to seed it from the provider so the panel renders
+// something useful on the first mount. Subsequent calls are pure
+// local reads; staleness (> senderStaleThreshold) triggers a
+// background refresh that updates rows without blocking the response.
+//
+// Filters: channel? (email|sms|whatsapp), verified_only? (bool).
 func (a *App) toolSendersList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	connID, _, err := emailProviderConn(ctx)
+	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
+	channel := strArg(args, "channel")
 	verifiedOnly, _ := args["verified_only"].(bool)
-	// PageSize is capped at 100 by SES; for accounts with many identities
-	// we follow NextToken until exhausted. Practical ceiling: 1000 to
-	// keep the panel snappy and bound memory.
-	const maxIdentitiesToList = 1000
-	out := make([]Sender, 0, 64)
-	nextToken := ""
-	for {
-		args := map[string]any{"PageSize": 100}
-		if nextToken != "" {
-			args["NextToken"] = nextToken
+
+	rows, err := dbListSenders(ctx.AppDB(), pid, channel, verifiedOnly)
+	if err != nil {
+		return nil, fmt.Errorf("list senders (local): %w", err)
+	}
+	// Empty table → seed synchronously from any bound providers so
+	// the very first call returns useful data instead of an empty array.
+	if len(rows) == 0 {
+		if err := a.refreshSendersFromProviders(ctx, pid); err != nil {
+			ctx.Logger().Warn("senders refresh on empty seed", "err", err)
 		}
-		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_identities", args)
-		if err != nil {
-			return nil, fmt.Errorf("list_identities: %w", err)
-		}
-		if res == nil || !res.Success {
-			body := ""
-			if res != nil {
-				body = string(res.Data)
+		rows, _ = dbListSenders(ctx.AppDB(), pid, channel, verifiedOnly)
+	} else if stale, _ := dbHasStaleSenders(ctx.AppDB(), pid, channel); stale {
+		// Stale → fire-and-forget background refresh.
+		go func() {
+			if err := a.refreshSendersFromProviders(ctx, pid); err != nil {
+				ctx.Logger().Warn("senders background refresh", "err", err)
 			}
-			return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
-		}
-		// SES v2 ListEmailIdentities response shape (the JSON key is
-		// `EmailIdentities`, NOT `Identities` — that's the v1/legacy
-		// API; we hit v2 via /v2/email/identities):
-		//   { EmailIdentities: [{ IdentityName, IdentityType, SendingEnabled, VerificationStatus }], NextToken? }
-		var raw struct {
-			EmailIdentities []struct {
-				IdentityName       string `json:"IdentityName"`
-				IdentityType       string `json:"IdentityType"`       // EMAIL_ADDRESS | DOMAIN | MANAGED_DOMAIN
-				SendingEnabled     bool   `json:"SendingEnabled"`
-				VerificationStatus string `json:"VerificationStatus"` // SUCCESS | PENDING | FAILED | TEMPORARY_FAILURE | NOT_STARTED
-			} `json:"EmailIdentities"`
-			NextToken string `json:"NextToken"`
-		}
-		_ = json.Unmarshal(res.Data, &raw)
-		for _, id := range raw.EmailIdentities {
-			kind := "email"
-			if id.IdentityType == "DOMAIN" || id.IdentityType == "MANAGED_DOMAIN" {
-				kind = "domain"
-			}
-			verified := strings.EqualFold(id.VerificationStatus, "SUCCESS")
-			if verifiedOnly && !verified {
-				continue
-			}
-			out = append(out, Sender{
-				Channel:  channelEmail,
-				Address:  canonicalSenderAddress(kind, id.IdentityName),
-				Kind:     kind,
-				Verified: verified,
-				Sending:  id.SendingEnabled,
-			})
-		}
-		if raw.NextToken == "" || len(out) >= maxIdentitiesToList {
-			break
-		}
-		nextToken = raw.NextToken
+		}()
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, senderRowToMap(r))
 	}
 	return map[string]any{"senders": out, "count": len(out)}, nil
 }
 
+// toolSendersGet reads the local row + does an opportunistic provider
+// probe to refresh DKIM / verification status. This is the "I clicked
+// re-check on a row" path — always picks up the latest.
 func (a *App) toolSendersGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	connID, _, err := emailProviderConn(ctx)
+	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	_, raw, err := classifyEmailIdentity(strArg(args, "address"))
-	if err != nil {
-		return nil, err
+	addr := strArg(args, "address")
+	// Default channel = email when address looks like one; phones can
+	// be probed by explicit channel arg.
+	channel := strArg(args, "channel")
+	if channel == "" {
+		channel = inferChannelFromAddress(addr)
+		if channel == "" {
+			channel = "email"
+		}
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_identity_verification", map[string]any{
+	local, _ := dbFindSender(ctx.AppDB(), pid, channel, addr)
+	// Probe the provider for the freshest state — best-effort. If
+	// the probe fails we still return the local row.
+	if channel == "email" {
+		_ = a.refreshOneSESIdentity(ctx, pid, addr)
+	} else if channel == "sms" || channel == "whatsapp" {
+		_ = a.refreshOneTwilioNumber(ctx, pid, channel, addr)
+	}
+	local, _ = dbFindSender(ctx.AppDB(), pid, channel, addr)
+	if local == nil {
+		return nil, fmt.Errorf("sender %s not found in project %s", addr, pid)
+	}
+	return senderRowToMap(local), nil
+}
+
+// refreshOneSESIdentity probes SES for a single identity and upserts
+// the local row. Used by senders_get for the click-to-recheck path.
+func (a *App) refreshOneSESIdentity(ctx *sdk.AppCtx, pid, addr string) error {
+	bound := ctx.IntegrationFor("email_provider")
+	if bound == nil {
+		return errors.New("email_provider not bound")
+	}
+	_, raw, err := classifyEmailIdentity(addr)
+	if err != nil {
+		return err
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "get_identity_verification", map[string]any{
 		"EmailIdentity": raw,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("get_identity_verification: %w", err)
+		return err
 	}
 	if res == nil || !res.Success {
 		body := ""
 		if res != nil {
 			body = string(res.Data)
 		}
-		return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
+		return fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
 	}
 	// SES v2 GetEmailIdentity:
 	//   { IdentityType, VerifiedForSendingStatus, DkimAttributes:{Status, Tokens, SigningEnabled},
@@ -1901,43 +1931,143 @@ func (a *App) toolSendersGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if inner.IdentityType == "DOMAIN" || inner.IdentityType == "MANAGED_DOMAIN" {
 		kind = "domain"
 	}
-	out := Sender{
-		Channel:    channelEmail,
-		Address:    canonicalSenderAddress(kind, raw),
-		Kind:       kind,
-		Verified:   inner.VerifiedForSendingStatus,
-		DKIMStatus: inner.DkimAttributes.Status,
-		DKIMTokens: inner.DkimAttributes.Tokens,
-	}
-	return map[string]any{
-		"sender":                     out,
-		"feedback_forwarding_enabled": inner.FeedbackForwardingStatus,
-	}, nil
+	dkimStatus := inner.DkimAttributes.Status
+	_, err = dbUpsertSender(ctx.AppDB(), &senderUpsert{
+		ProjectID:          pid,
+		Channel:            "email",
+		Address:            raw,
+		Kind:               kind,
+		Provider:           "aws-ses",
+		ProviderIdentityID: raw,
+		Verified:           inner.VerifiedForSendingStatus,
+		VerificationStatus: domainVerificationStatus(dkimStatus),
+		SendingEnabled:     true,
+		DkimStatus:         dkimStatus,
+		MarkSyncedNow:      true,
+	})
+	return err
 }
 
-func (a *App) toolSendersDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	connID, _, err := emailProviderConn(ctx)
-	if err != nil {
-		return nil, err
+// refreshOneTwilioNumber probes Twilio for a single phone number and
+// upserts the local row.
+func (a *App) refreshOneTwilioNumber(ctx *sdk.AppCtx, pid, channel, addr string) error {
+	bound := ctx.IntegrationFor("phone_provider")
+	if bound == nil {
+		return errors.New("phone_provider not bound")
 	}
-	_, raw, err := classifyEmailIdentity(strArg(args, "address"))
-	if err != nil {
-		return nil, err
-	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "delete_identity", map[string]any{
-		"EmailIdentity": raw,
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_phone_numbers", map[string]any{
+		"PhoneNumber": addr,
+		"PageSize":    10,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("delete_identity: %w", err)
+		return err
 	}
 	if res == nil || !res.Success {
 		body := ""
 		if res != nil {
 			body = string(res.Data)
 		}
-		return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
+		return fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
 	}
-	return map[string]any{"deleted": true, "address": canonicalSenderAddress("", raw)}, nil
+	var listed struct {
+		IncomingPhoneNumbers []struct {
+			SID         string `json:"sid"`
+			PhoneNumber string `json:"phone_number"`
+			SmsURL      string `json:"sms_url"`
+		} `json:"incoming_phone_numbers"`
+	}
+	_ = json.Unmarshal(res.Data, &listed)
+	for _, pn := range listed.IncomingPhoneNumbers {
+		if pn.PhoneNumber == addr {
+			_, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{
+				ProjectID:          pid,
+				Channel:            channel,
+				Address:            addr,
+				Kind:               "phone",
+				Provider:           "twilio",
+				ProviderIdentityID: pn.SID,
+				Verified:           true,
+				VerificationStatus: "verified",
+				SendingEnabled:     true,
+				MarkSyncedNow:      true,
+			})
+			return err
+		}
+	}
+	// Not found — the number was released. Soft-delete the local row.
+	return dbSoftDeleteSender(ctx.AppDB(), pid, channel, addr)
+}
+
+func (a *App) toolSendersDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	addr := strArg(args, "address")
+	channel := strArg(args, "channel")
+	if channel == "" {
+		channel = inferChannelFromAddress(addr)
+		if channel == "" {
+			channel = "email"
+		}
+	}
+	// Look up provider from the local row (so we know which integration
+	// to call). Fall back to channel-based default if the row is missing.
+	local, _ := dbFindSender(ctx.AppDB(), pid, channel, addr)
+	provider := ""
+	if local != nil {
+		provider = local.Provider
+	} else if channel == "email" {
+		provider = "aws-ses"
+	} else {
+		provider = "twilio"
+	}
+
+	switch provider {
+	case "aws-ses":
+		connID, _, err := emailProviderConn(ctx)
+		if err != nil {
+			return nil, err
+		}
+		_, raw, err := classifyEmailIdentity(addr)
+		if err != nil {
+			return nil, err
+		}
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "delete_identity", map[string]any{
+			"EmailIdentity": raw,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("delete_identity: %w", err)
+		}
+		if res == nil || !res.Success {
+			body := ""
+			if res != nil {
+				body = string(res.Data)
+			}
+			return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
+		}
+	case "twilio":
+		// Releasing a Twilio number stops billing for it but is destructive
+		// (the number goes back to the pool). For now we just clear the
+		// SmsUrl webhook + soft-delete locally — operators who want to
+		// fully release the number do it via twilio.release_phone_number.
+		if local != nil && local.ProviderIdentityID != "" {
+			phoneBound := ctx.IntegrationFor("phone_provider")
+			if phoneBound != nil {
+				_, _ = ctx.PlatformAPI().ExecuteIntegrationTool(phoneBound.ConnectionID, "update_phone_number", map[string]any{
+					"PhoneNumberSid": local.ProviderIdentityID,
+					"SmsUrl":         "",
+				})
+			}
+		}
+	default:
+		return nil, fmt.Errorf("unsupported provider %q for senders_delete", provider)
+	}
+
+	if err := dbSoftDeleteSender(ctx.AppDB(), pid, channel, addr); err != nil {
+		return nil, fmt.Errorf("soft delete: %w", err)
+	}
+	return map[string]any{"deleted": true, "address": addr, "channel": channel}, nil
 }
 
 // dkimCNAMERecords formats SES's three DKIM tokens as ready-to-paste
@@ -3185,8 +3315,14 @@ func (a *App) handleSuppressionsList(w http.ResponseWriter, r *http.Request) {
 // Errors (no provider bound, provider 5xx) surface as JSON {error}.
 func (a *App) handleSendersList(w http.ResponseWriter, r *http.Request) {
 	args := map[string]any{}
+	if pid := strings.TrimSpace(r.URL.Query().Get("project_id")); pid != "" {
+		args["_project_id"] = pid
+	}
 	if r.URL.Query().Get("verified_only") == "true" {
 		args["verified_only"] = true
+	}
+	if ch := strings.TrimSpace(r.URL.Query().Get("channel")); ch != "" {
+		args["channel"] = ch
 	}
 	out, err := a.toolSendersList(globalCtx, args)
 	if err != nil {
