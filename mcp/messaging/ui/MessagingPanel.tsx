@@ -665,33 +665,47 @@ function SendersView({
   reload: () => void;
   error: string;
 }) {
-  const [verifyAddr, setVerifyAddr] = useState("");
+  const [addr, setAddr] = useState("");
+  const [inbound, setInbound] = useState<"auto" | "true" | "false">("auto");
+  const [spf, setSpf] = useState(true);
+  const [region, setRegion] = useState("eu-west-1");
+  const [advanced, setAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [verifyResult, setVerifyResult] = useState<{
-    address: string;
-    kind: string;
-    dns_records?: { name: string; type: string; value: string }[];
-    next_step?: string;
-  } | null>(null);
+  const [result, setResult] = useState<SendersCreateResp | null>(null);
   const [err, setErr] = useState("");
-  const [setupDomain, setSetupDomain] = useState<string | null>(null);
 
-  const onVerify = async (e: React.FormEvent) => {
+  const addressIsDomain = addr.length > 0 && !addr.includes("@");
+
+  const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setBusy(true); setErr(""); setVerifyResult(null);
+    setBusy(true); setErr(""); setResult(null);
     try {
-      const out = await api<typeof verifyResult>("POST", "/tools/call", {}, {
+      const args: Record<string, unknown> = { address: addr };
+      if (addressIsDomain) {
+        args.inbound = inbound;
+        args.spf = spf;
+        if (inbound !== "false") args.region = region;
+      }
+      const out = await api<SendersCreateResp>("POST", "/tools/call", {}, {
         tool: "senders_create",
-        args: { address: verifyAddr },
+        args,
       });
-      setVerifyResult(out);
-      setVerifyAddr("");
+      setResult(out);
+      setAddr("");
       reload();
     } catch (e) {
       setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
+  };
+
+  const rerun = (address: string) => {
+    setAddr(stripScheme(address));
+    setResult(null);
+    setErr("");
+    // Scroll to top so the form is visible.
+    if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   const recheck = async (address: string) => {
@@ -722,40 +736,70 @@ function SendersView({
           )}
         </div>
       )}
-      <form onSubmit={onVerify} className="p-4 flex gap-2 items-end border-b border-border flex-wrap">
-        <Field label="Verify email or domain" hint="alice@acme.com or acme.com">
-          <input className={inputCls + " w-72"} value={verifyAddr} onChange={(e) => setVerifyAddr(e.target.value)} required />
-        </Field>
-        <button type="submit" disabled={busy} className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50">
-          {busy ? "Verifying…" : "Verify"}
-        </button>
+      <form onSubmit={onSubmit} className="p-4 border-b border-border space-y-3">
+        <div className="flex gap-2 items-end flex-wrap">
+          <Field label="Add sender" hint="alice@acme.com (one mailbox) or acme.com (whole domain)">
+            <input
+              className={inputCls + " w-80"}
+              value={addr}
+              onChange={(e) => setAddr(e.target.value)}
+              placeholder="email or domain"
+              required
+            />
+          </Field>
+          <button type="submit" disabled={busy} className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50">
+            {busy ? "Working…" : "Add"}
+          </button>
+          {addressIsDomain && (
+            <button
+              type="button"
+              className="text-xs text-text-dim hover:text-text underline"
+              onClick={() => setAdvanced((v) => !v)}
+            >
+              {advanced ? "Hide" : "Show"} domain options
+            </button>
+          )}
+        </div>
+
+        {addressIsDomain && advanced && (
+          <div className="ml-1 pl-3 border-l border-border space-y-2 text-sm">
+            <Field label="Inbound mail" hint="auto = enable when aws-s3 + aws-sns are bound">
+              <select
+                className={inputCls + " w-44"}
+                value={inbound}
+                onChange={(e) => setInbound(e.target.value as "auto" | "true" | "false")}
+              >
+                <option value="auto">Auto (default)</option>
+                <option value="true">Yes — bootstrap inbound</option>
+                <option value="false">No — outbound only</option>
+              </select>
+            </Field>
+            {inbound !== "false" && (
+              <Field label="AWS region (inbound MX target)">
+                <select className={inputCls + " w-44"} value={region} onChange={(e) => setRegion(e.target.value)}>
+                  <option value="eu-west-1">eu-west-1</option>
+                  <option value="us-east-1">us-east-1</option>
+                  <option value="us-west-2">us-west-2</option>
+                  <option value="eu-central-1">eu-central-1</option>
+                  <option value="ap-southeast-1">ap-southeast-1</option>
+                  <option value="ap-southeast-2">ap-southeast-2</option>
+                  <option value="ap-south-1">ap-south-1</option>
+                  <option value="ap-northeast-1">ap-northeast-1</option>
+                  <option value="ca-central-1">ca-central-1</option>
+                  <option value="eu-north-1">eu-north-1</option>
+                </select>
+              </Field>
+            )}
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={spf} onChange={(e) => setSpf(e.target.checked)} />
+              <span>Publish SPF TXT record <span className="text-text-dim text-xs">(<code>v=spf1 include:amazonses.com ~all</code>)</span></span>
+            </label>
+          </div>
+        )}
       </form>
 
       {err && <div className="p-4 text-red-500 text-sm">{err}</div>}
-      {verifyResult && (
-        <div className="m-4 p-3 rounded border border-border bg-surface-2 text-sm space-y-2">
-          <div>
-            <strong>{stripScheme(verifyResult.address)}</strong> — verification pending.
-            {verifyResult.next_step && <span className="text-text-dim ml-1">{verifyResult.next_step}</span>}
-          </div>
-          {verifyResult.dns_records && verifyResult.dns_records.length > 0 && (
-            <div>
-              <div className="text-xs uppercase tracking-wide text-text-dim mb-1">Publish these CNAME records</div>
-              <table className="text-xs font-mono">
-                <tbody>
-                  {verifyResult.dns_records.map((r, i) => (
-                    <tr key={i}>
-                      <td className="px-2 py-0.5">{r.name}</td>
-                      <td className="px-2 py-0.5 text-text-dim">{r.type}</td>
-                      <td className="px-2 py-0.5">{r.value}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
+      {result && <SendersCreateResult result={result} onDismiss={() => setResult(null)} />}
 
       {rows.length === 0 ? (
         <div className="p-6 text-text-dim text-sm">No senders configured. Verify an email or domain above.</div>
@@ -782,8 +826,9 @@ function SendersView({
                     <button
                       type="button"
                       className="text-accent hover:underline text-xs"
-                      onClick={() => setSetupDomain(stripScheme(s.address))}
-                    >Setup DNS</button>
+                      onClick={() => rerun(s.address)}
+                      title="Pre-fills the Add sender form with this address. senders_create is idempotent — safe to re-run with different options."
+                    >Re-run</button>
                   )}
                   <button type="button" className="text-text-dim hover:text-text text-xs" onClick={() => recheck(s.address)}>Re-check</button>
                   <button type="button" className="text-text-dim hover:text-red-500 text-xs" onClick={() => remove(s.address)}>Delete</button>
@@ -792,15 +837,6 @@ function SendersView({
             ))}
           </tbody>
         </table>
-      )}
-
-      {setupDomain && (
-        <SetupDomainDialog
-          domain={setupDomain}
-          api={api}
-          onClose={() => setSetupDomain(null)}
-          onDone={() => { setSetupDomain(null); reload(); }}
-        />
       )}
 
       {quota && (
@@ -968,160 +1004,115 @@ function SuppressionsView({ rows, api, reload }: { rows: SuppressionRow[]; api: 
   );
 }
 
-// ─── Setup-domain dialog ─────────────────────────────────────────
+// ─── senders_create result renderer ──────────────────────────────
 
-interface SetupResponse {
-  domain: string;
-  region: string;
-  ses_dkim_status: string;
-  domains_app_used: boolean;
-  records: { step: string; name: string; type: string; value: string }[];
-  actions?: { step: string; ok: boolean; action?: string; error?: string }[];
-  next_step: string;
+interface SendersCreateStep {
+  step: string;
+  ok: boolean;
+  detail?: string;
+  skipped?: string;
+  error?: string;
 }
 
-function SetupDomainDialog({
-  domain, api, onClose, onDone,
-}: {
-  domain: string;
-  api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
-  onClose: () => void;
-  onDone: () => void;
-}) {
-  const [dkim, setDkim] = useState(true);
-  const [inbound, setInbound] = useState(false);
-  const [spf, setSpf] = useState(false);
-  const [region, setRegion] = useState("eu-west-1");
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<SetupResponse | null>(null);
-  const [err, setErr] = useState("");
+interface SendersCreateInboundInfo {
+  bootstrapped: boolean;
+  skipped_reason?: string;
+  bucket_name?: string;
+  topic_arn?: string;
+  account_id?: string;
+  webhook_url?: string;
+  subscription_arn?: string;
+  region?: string;
+  rule_set_name?: string;
+  rule_name?: string;
+}
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setBusy(true); setErr(""); setResult(null);
-    try {
-      const out = await api<SetupResponse>("POST", "/senders/setup-domain", {}, {
-        domain,
-        outbound_dkim: dkim,
-        inbound,
-        spf,
-        region,
-      });
-      setResult(out);
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+interface SendersCreateResp {
+  address: string;
+  kind: "email" | "domain";
+  pending: boolean;
+  next_step?: string;
+  dkim_tokens?: string[];
+  dkim_status?: string;
+  dns_records?: { name: string; type: string; value: string }[];
+  inbound?: SendersCreateInboundInfo;
+  steps: SendersCreateStep[];
+}
 
+function SendersCreateResult({ result, onDismiss }: { result: SendersCreateResp; onDismiss: () => void }) {
+  const failed = result.steps.filter((s) => !s.ok).length;
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-surface w-[44rem] max-h-[90vh] overflow-auto rounded border border-border p-5 space-y-3">
-        <div className="flex items-center justify-between">
-          <h3 className="font-semibold">Set up DNS for {domain}</h3>
-          <button type="button" className="text-text-dim hover:text-text" onClick={onClose}>×</button>
+    <div className="m-4 p-3 rounded border border-border bg-surface-2 text-sm space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div>
+            <strong>{stripScheme(result.address)}</strong>
+            <span className="text-text-dim text-xs ml-2">({result.kind})</span>
+            {failed === 0 && <span className="ml-2 inline-block"><StatusPill status="ok" /></span>}
+            {failed > 0 && (
+              <span className="ml-2 inline-block">
+                <span className="bg-red-500/20 text-red-400 text-xs px-2 py-0.5 rounded">{failed} step{failed === 1 ? "" : "s"} failed</span>
+              </span>
+            )}
+          </div>
+          {result.next_step && <div className="text-text-dim text-xs mt-1">{result.next_step}</div>}
         </div>
-        <p className="text-xs text-text-dim">
-          Verifies the domain in SES, then publishes the necessary DNS records via the <code>domains</code> app
-          (when bound) or returns them for you to paste into your registrar manually.
-        </p>
-
-        <form onSubmit={submit} className="space-y-2">
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={dkim} onChange={(e) => setDkim(e.target.checked)} />
-            <span>DKIM CNAMEs <span className="text-text-dim text-xs">(3 records — required for SES outbound + inbound auth)</span></span>
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={inbound} onChange={(e) => setInbound(e.target.checked)} />
-            <span>MX record for SES inbound <span className="text-text-dim text-xs">(only if you want this domain to receive mail)</span></span>
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={spf} onChange={(e) => setSpf(e.target.checked)} />
-            <span>SPF TXT record <span className="text-text-dim text-xs">(<code>v=spf1 include:amazonses.com ~all</code>)</span></span>
-          </label>
-          {inbound && (
-            <Field label="SES region (for the MX target)">
-              <select className={inputCls + " w-44"} value={region} onChange={(e) => setRegion(e.target.value)}>
-                <option value="eu-west-1">eu-west-1</option>
-                <option value="us-east-1">us-east-1</option>
-                <option value="us-west-2">us-west-2</option>
-                <option value="eu-central-1">eu-central-1</option>
-                <option value="ap-southeast-1">ap-southeast-1</option>
-                <option value="ap-southeast-2">ap-southeast-2</option>
-                <option value="ap-south-1">ap-south-1</option>
-                <option value="ap-northeast-1">ap-northeast-1</option>
-                <option value="ca-central-1">ca-central-1</option>
-                <option value="eu-north-1">eu-north-1</option>
-              </select>
-            </Field>
-          )}
-          {err && <div className="text-red-400 text-sm">{err}</div>}
-          <div className="flex justify-end gap-2 pt-2">
-            <button type="button" className="px-3 py-1.5 border border-border rounded" onClick={onClose}>Cancel</button>
-            <button type="submit" disabled={busy} className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50">
-              {busy ? "Working…" : "Set up"}
-            </button>
-          </div>
-        </form>
-
-        {result && (
-          <div className="mt-3 pt-3 border-t border-border space-y-2 text-sm">
-            {result.domains_app_used ? (
-              <>
-                <div className="text-text">
-                  <strong>{result.actions?.filter(a => a.ok).length}</strong> of {result.actions?.length} records published via the domains app.
-                </div>
-                <table className="w-full text-xs font-mono">
-                  <tbody>
-                    {result.actions?.map((a, i) => (
-                      <tr key={i} className="border-b border-border">
-                        <td className="px-2 py-1">
-                          <StatusPill status={a.ok ? "ok" : "failed"} />
-                        </td>
-                        <td className="px-2 py-1 text-text-dim">{a.step}</td>
-                        <td className="px-2 py-1 text-text-dim">{a.action || a.error || ""}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </>
-            ) : (
-              <>
-                <div className="rounded border border-yellow-500/30 bg-yellow-500/10 p-2 text-xs text-yellow-300">
-                  <strong>domains app not bound.</strong> The records below need to be pasted manually
-                  into your registrar. Install + bind the <code>domains</code> app to automate this next time.
-                </div>
-                <div className="text-text-dim text-xs uppercase tracking-wide">Records to publish manually</div>
-                <table className="w-full text-xs font-mono">
-                  <thead>
-                    <tr className="border-b border-border text-text-dim">
-                      <th className="text-left px-2 py-1">Name</th>
-                      <th className="text-left px-2 py-1">Type</th>
-                      <th className="text-left px-2 py-1">Value</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {result.records.map((r, i) => (
-                      <tr key={i} className="border-b border-border">
-                        <td className="px-2 py-1">{r.name}</td>
-                        <td className="px-2 py-1 text-text-dim">{r.type}</td>
-                        <td className="px-2 py-1 break-all">{r.value}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </>
-            )}
-            {result.next_step && (
-              <div className="text-xs text-text-dim mt-2">{result.next_step}</div>
-            )}
-            <div className="flex justify-end gap-2 pt-2">
-              <button type="button" className="px-3 py-1.5 bg-accent text-white rounded" onClick={onDone}>Done</button>
-            </div>
-          </div>
-        )}
+        <button type="button" className="text-text-dim hover:text-text" onClick={onDismiss}>×</button>
       </div>
+
+      {result.inbound && (result.inbound.bootstrapped || result.inbound.skipped_reason) && (
+        <div className="rounded border border-border p-2 text-xs space-y-1">
+          <div className="uppercase tracking-wide text-text-dim text-[10px]">Inbound</div>
+          {result.inbound.bootstrapped ? (
+            <>
+              <div>S3 bucket: <span className="font-mono">{result.inbound.bucket_name}</span></div>
+              <div>SNS topic: <span className="font-mono break-all">{result.inbound.topic_arn}</span></div>
+              {result.inbound.webhook_url && (
+                <div>Webhook: <span className="font-mono break-all">{result.inbound.webhook_url}</span></div>
+              )}
+              {result.inbound.subscription_arn && (
+                <div className="text-text-dim">Subscription: <span className="font-mono break-all">{result.inbound.subscription_arn}</span></div>
+              )}
+            </>
+          ) : (
+            <div className="text-yellow-300">Skipped: {result.inbound.skipped_reason}</div>
+          )}
+        </div>
+      )}
+
+      {result.dns_records && result.dns_records.length > 0 && (
+        <div>
+          <div className="text-xs uppercase tracking-wide text-text-dim mb-1">DKIM CNAMEs</div>
+          <table className="text-xs font-mono w-full">
+            <tbody>
+              {result.dns_records.map((r, i) => (
+                <tr key={i} className="border-b border-border">
+                  <td className="px-2 py-0.5 break-all">{r.name}</td>
+                  <td className="px-2 py-0.5 text-text-dim">{r.type}</td>
+                  <td className="px-2 py-0.5 break-all">{r.value}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <details className="text-xs">
+        <summary className="cursor-pointer text-text-dim">Step details ({result.steps.length})</summary>
+        <table className="w-full font-mono mt-1">
+          <tbody>
+            {result.steps.map((s, i) => (
+              <tr key={i} className="border-b border-border">
+                <td className="px-2 py-1 w-20">
+                  <StatusPill status={s.error ? "failed" : s.skipped ? "pending" : "ok"} />
+                </td>
+                <td className="px-2 py-1 text-text-dim">{s.step}</td>
+                <td className="px-2 py-1 text-text-dim break-all">{s.error || s.skipped || s.detail || ""}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </details>
     </div>
   );
 }

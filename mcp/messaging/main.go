@@ -48,7 +48,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.8.0
+version: 0.8.1
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -199,10 +199,6 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// the panel hits these from a button + per-row action; agents
 		// don't trigger Twilio list calls.
 		{Pattern: "/templates/sync", Handler: a.handleTemplatesSync},
-		// Sender domain setup — outbound-only DNS publishing helper used
-		// by the panel's "Set up DNS" button. Kept for backward compat;
-		// senders_create is the canonical entry point.
-		{Pattern: "/senders/setup-domain", Handler: a.handleSetupDomain},
 		// Unified sender registration. Email → SES verify_email. Domain
 		// → verify_domain + DNS publish + (auto if aws-s3 + aws-sns
 		// bound) full inbound bootstrap (S3 + SNS + receipt rule + MX
@@ -3231,176 +3227,6 @@ func (a *App) handleTemplatesSync(w http.ResponseWriter, r *http.Request) {
 	httpJSON(w, out)
 }
 
-// handleSetupDomain orchestrates "set up SES inbound + outbound DNS
-// for a domain." Two paths depending on whether the domains app is
-// installed and bound:
-//
-//  1. domains is bound — we call domain_records_set via CallApp for
-//     each DKIM CNAME (and MX/SPF if requested). The records actually
-//     get written upstream at Porkbun/Namecheap. Operator just clicks
-//     "next" once SES marks the domain verified.
-//
-//  2. domains not bound — we still call SES verify_domain to mint
-//     DKIM tokens, but return them as a JSON list of records the
-//     operator can paste into their registrar manually. No upstream
-//     DNS writes happen.
-//
-// In either case, SES verify_domain is the one mandatory step — that's
-// what generates the DKIM tokens we publish.
-//
-// Body: {
-//   domain:        "inbound.acme.com" | "acme.com",
-//   inbound:       bool — write the MX record for SES inbound (default false),
-//   outbound_dkim: bool — write the 3 DKIM CNAMEs (default true),
-//   spf:           bool — write the SES SPF TXT (default false),
-//   region:        "eu-west-1" — used for the inbound MX target (default eu-west-1)
-// }
-func (a *App) handleSetupDomain(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		httpErr(w, http.StatusMethodNotAllowed, "POST only")
-		return
-	}
-	var body struct {
-		Domain        string `json:"domain"`
-		Inbound       bool   `json:"inbound"`
-		OutboundDKIM  *bool  `json:"outbound_dkim"`
-		SPF           bool   `json:"spf"`
-		Region        string `json:"region"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		httpErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-		return
-	}
-	if body.Domain == "" {
-		httpErr(w, http.StatusBadRequest, "domain required")
-		return
-	}
-	dkim := true
-	if body.OutboundDKIM != nil {
-		dkim = *body.OutboundDKIM
-	}
-	if body.Region == "" {
-		body.Region = "eu-west-1"
-	}
-
-	// 1. Verify domain in SES (idempotent — re-verify returns the same DKIM tokens).
-	bound := globalCtx.IntegrationFor("email_provider")
-	if bound == nil {
-		httpErr(w, http.StatusServiceUnavailable, "no email_provider bound")
-		return
-	}
-	res, err := globalCtx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "verify_domain", map[string]any{
-		"EmailIdentity": strings.ToLower(strings.TrimSpace(body.Domain)),
-	})
-	if err != nil {
-		httpErr(w, http.StatusBadGateway, "ses verify_domain: "+err.Error())
-		return
-	}
-	if res == nil || !res.Success {
-		probe := ""
-		if res != nil {
-			probe = string(res.Data)
-		}
-		httpErr(w, http.StatusBadGateway, "ses verify_domain non-2xx: "+truncate(probe, 400))
-		return
-	}
-	var verifyResp struct {
-		DkimAttributes struct {
-			Tokens []string `json:"Tokens"`
-			Status string   `json:"Status"`
-		} `json:"DkimAttributes"`
-	}
-	_ = json.Unmarshal(res.Data, &verifyResp)
-	tokens := verifyResp.DkimAttributes.Tokens
-
-	type recordSpec struct {
-		Step  string `json:"step"`
-		Name  string `json:"name"`
-		Type  string `json:"type"`
-		Value string `json:"value"`
-		TTL   int    `json:"ttl"`
-	}
-	specs := []recordSpec{}
-	if dkim {
-		for i, t := range tokens {
-			specs = append(specs, recordSpec{
-				Step:  fmt.Sprintf("dkim_cname_%d", i+1),
-				Name:  t + "._domainkey." + body.Domain,
-				Type:  "CNAME",
-				Value: t + ".dkim.amazonses.com",
-				TTL:   1800,
-			})
-		}
-	}
-	if body.Inbound {
-		specs = append(specs, recordSpec{
-			Step:  "mx_inbound",
-			Name:  body.Domain,
-			Type:  "MX",
-			Value: "10 inbound-smtp." + body.Region + ".amazonaws.com",
-			TTL:   1800,
-		})
-	}
-	if body.SPF {
-		specs = append(specs, recordSpec{
-			Step:  "spf_txt",
-			Name:  body.Domain,
-			Type:  "TXT",
-			Value: "v=spf1 include:amazonses.com ~all",
-			TTL:   1800,
-		})
-	}
-
-	// 2. Try to publish records via the domains app.
-	type actionResult struct {
-		Step   string `json:"step"`
-		OK     bool   `json:"ok"`
-		Action string `json:"action,omitempty"`
-		Error  string `json:"error,omitempty"`
-	}
-	domainsBound := isAppDepBound(globalCtx, "domains")
-	actions := []actionResult{}
-	if domainsBound {
-		for _, s := range specs {
-			args := map[string]any{
-				"domain": body.Domain,
-				"name":   shortNameFor(body.Domain, s.Name),
-				"type":   s.Type,
-				"value":  s.Value,
-				"ttl":    s.TTL,
-			}
-			var probe struct {
-				Action string `json:"action"`
-				Error  string `json:"error"`
-			}
-			if err := globalCtx.PlatformAPI().CallAppResult("domains", "domain_records_set", args, &probe); err != nil {
-				actions = append(actions, actionResult{Step: s.Step, OK: false, Error: err.Error()})
-				continue
-			}
-			if probe.Error != "" {
-				actions = append(actions, actionResult{Step: s.Step, OK: false, Error: probe.Error})
-				continue
-			}
-			actions = append(actions, actionResult{Step: s.Step, OK: true, Action: probe.Action})
-		}
-	}
-
-	out := map[string]any{
-		"domain":           body.Domain,
-		"region":           body.Region,
-		"ses_dkim_status":  verifyResp.DkimAttributes.Status,
-		"records":          specs,
-		"domains_app_used": domainsBound,
-	}
-	if domainsBound {
-		out["actions"] = actions
-		out["next_step"] = "Wait ~5–30min for DNS propagation, then refresh the senders list to see SES mark the domain verified."
-	} else {
-		out["next_step"] = "Domains app not bound. Publish the records above manually in your registrar, then refresh the senders list once SES verifies."
-	}
-	httpJSON(w, out)
-}
-
 // isAppDepBound checks whether a kind=app dependency is currently
 // bound on this install. We don't have a clean SDK helper for "is app
 // X reachable?", so we attempt the lightest possible CallApp probe.
@@ -3414,22 +3240,6 @@ func isAppDepBound(ctx *sdk.AppCtx, name string) bool {
 		return v != nil
 	}
 	return false
-}
-
-// shortNameFor strips the trailing "." + domain from an FQDN-shape
-// name, since the domains app expects either "@" (apex) or the
-// short form ("www", "abc._domainkey").
-func shortNameFor(domain, fqdn string) string {
-	domain = strings.ToLower(strings.TrimSpace(domain))
-	fqdn = strings.ToLower(strings.TrimSpace(fqdn))
-	if fqdn == domain {
-		return "@"
-	}
-	suffix := "." + domain
-	if strings.HasSuffix(fqdn, suffix) {
-		return fqdn[:len(fqdn)-len(suffix)]
-	}
-	return fqdn
 }
 
 // handleTemplateItem dispatches /templates/<id>/<action>. Today the
