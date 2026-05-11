@@ -62,11 +62,16 @@ func runStorageEventSubscriber(app *sdk.AppCtx) {
 		log.Warn("storage event subscriber: APTEVA_GATEWAY_URL not set; reverting to indexer-poll-only delete cleanup")
 		return
 	}
+	// Subscription scope:
+	//
+	//   Project-scoped install (APTEVA_PROJECT_ID set) → subscribe
+	//     to that one project's lane. URL carries ?project_id=<X>.
+	//   Global install (env empty) → subscribe to the firehose
+	//     (?project_id absent). The platform delivers events for
+	//     every project the install can dispatch against, and the
+	//     dispatcher routes per-event into the right per-project
+	//     handler via app.WithProject(ev.ProjectID).
 	projectID := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
-	if projectID == "" {
-		log.Info("storage event subscriber: no APTEVA_PROJECT_ID; skipping")
-		return
-	}
 	token := os.Getenv("APTEVA_OUTBOUND_TOKEN")
 	if token == "" {
 		token = os.Getenv("APTEVA_APP_TOKEN")
@@ -117,9 +122,19 @@ func runStorageEventSubscriber(app *sdk.AppCtx) {
 // connectAndStream opens the SSE connection and processes events
 // until the connection drops. Updates *sinceSeq as it goes so a
 // reconnect resumes correctly.
+//
+// projectID="" requests the firehose (cross-project). The platform
+// allows that only when the caller install is global-scope; for
+// project-scoped installs the empty value is bug-shape and the
+// platform 403s, which the backoff loop will surface in logs.
 func connectAndStream(app *sdk.AppCtx, gatewayURL, projectID, token string, sinceSeq *uint64) error {
-	url := fmt.Sprintf("%s/api/app-events/storage?project_id=%s&since=%d",
-		gatewayURL, projectID, *sinceSeq)
+	var url string
+	if projectID == "" {
+		url = fmt.Sprintf("%s/api/app-events/storage?since=%d", gatewayURL, *sinceSeq)
+	} else {
+		url = fmt.Sprintf("%s/api/app-events/storage?project_id=%s&since=%d",
+			gatewayURL, projectID, *sinceSeq)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -217,7 +232,7 @@ func handleStorageEvent(app *sdk.AppCtx, raw []byte) {
 // from the payload (some non-folder PATCH).
 func updateFolderFromEvent(app *sdk.AppCtx, data map[string]any, projectID string) {
 	if projectID == "" {
-		projectID = strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
+		projectID = app.CurrentProject()
 	}
 	if projectID == "" {
 		return
@@ -268,7 +283,7 @@ func indexFromEvent(app *sdk.AppCtx, data map[string]any, projectID string) {
 		return
 	}
 	if projectID == "" {
-		projectID = strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
+		projectID = app.CurrentProject()
 	}
 	if projectID == "" {
 		return
@@ -339,7 +354,7 @@ func storageFileFromEvent(data map[string]any) *StorageFile {
 func cascadeDeleteFromEvent(app *sdk.AppCtx, data map[string]any, projectID string) {
 	log := app.Logger()
 	if projectID == "" {
-		projectID = strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
+		projectID = app.CurrentProject()
 	}
 	if projectID == "" {
 		return

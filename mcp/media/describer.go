@@ -26,7 +26,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -34,27 +33,36 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-// describerNotify carries file_ids that need a describer pass NOW
-// rather than waiting for the next periodic tick. Buffered so a
-// burst of indexer/transcriber writes never blocks the producer;
-// notifyDescriber drops on overflow because the periodic sweep is
-// the safety net for anything we miss.
+// describerMsg carries one eligibility signal from indexer/transcriber
+// to the describer loop. ProjectID accompanies FileID so a global
+// install's single describer goroutine can dispatch per-row work
+// against the right project's binding + storage scope.
+type describerMsg struct {
+	ProjectID string
+	FileID    string
+}
+
+// describerNotify carries (project, file_id) pairs that need a
+// describer pass NOW rather than waiting for the next periodic
+// tick. Buffered so a burst of indexer/transcriber writes never
+// blocks the producer; notifyDescriber drops on overflow because
+// the periodic sweep is the safety net for anything we miss.
 //
 // Set in startDescriber; nil otherwise (auto_describe_enabled=false
 // installs don't run the loop). notifyDescriber is a no-op then.
-var describerNotify chan string
+var describerNotify chan describerMsg
 
 // notifyDescriber is called by the indexer + transcriber when a
 // file might be newly eligible for description (probe just
 // completed, transcript just landed, etc.). Non-blocking — the
 // channel buffer is bounded so a backlog falls back to the
 // periodic sweep.
-func notifyDescriber(fileID string) {
-	if describerNotify == nil || fileID == "" {
+func notifyDescriber(projectID, fileID string) {
+	if describerNotify == nil || fileID == "" || projectID == "" {
 		return
 	}
 	select {
-	case describerNotify <- fileID:
+	case describerNotify <- describerMsg{ProjectID: projectID, FileID: fileID}:
 	default:
 		// queue full — periodic sweep will pick it up on the next tick
 	}
@@ -69,7 +77,7 @@ func startDescriber(app *sdk.AppCtx) {
 		app.Logger().Info("auto_describe_enabled=false — auto-describer disabled (manual still works)")
 		return
 	}
-	describerNotify = make(chan string, 100)
+	describerNotify = make(chan describerMsg, 100)
 	go describerLoop(app)
 	app.Logger().Info("auto-describer started")
 }
@@ -93,11 +101,11 @@ func describerLoop(app *sdk.AppCtx) {
 			// notify path missed (channel overflow, app restart
 			// while file was queued, integration newly bound, etc).
 			describerSweep(app)
-		case fid := <-describerNotify:
+		case msg := <-describerNotify:
 			// Indexer or transcriber just made this file eligible.
 			// Process just THIS row immediately rather than wait
 			// up to interval seconds for the next tick.
-			describerOne(app, fid)
+			describerOne(app, msg)
 		}
 	}
 }
@@ -106,25 +114,46 @@ func describerLoop(app *sdk.AppCtx) {
 // via notifyDescriber. Goes through runOneDescription so all the
 // normal guards (human-set check, cooldown, integration binding,
 // no-input skip) still apply.
-func describerOne(app *sdk.AppCtx, fileID string) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
-	if pid == "" || fileID == "" {
+func describerOne(app *sdk.AppCtx, msg describerMsg) {
+	if msg.ProjectID == "" || msg.FileID == "" {
 		return
 	}
+	// Pin the project for IntegrationFor + downstream cross-app calls.
+	app = app.WithProject(msg.ProjectID)
 	bound := app.IntegrationFor("descriptions")
 	if bound == nil {
 		return
 	}
-	runOneDescription(app, bound, pid, fileID)
+	runOneDescription(app, bound, msg.ProjectID, msg.FileID)
 }
 
+// describerSweep fans out across every project this install can
+// dispatch against, then runs sweepOne per project. See
+// transcriberSweep for the rationale — same pattern.
 func describerSweep(app *sdk.AppCtx) {
+	log := app.Logger()
+	projects, err := app.PlatformAPI().ListProjects()
+	if err != nil || len(projects) == 0 {
+		if err != nil {
+			log.Warn("describer: list projects failed; sweeping current project only", "err", err)
+		}
+		describerSweepOne(app)
+		return
+	}
+	for _, p := range projects {
+		if p.ID == "" {
+			continue
+		}
+		describerSweepOne(app.WithProject(p.ID))
+	}
+}
+
+func describerSweepOne(app *sdk.AppCtx) {
 	log := app.Logger()
 	db := app.AppDB()
 	cfg := app.Config()
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := app.CurrentProject()
 	if pid == "" {
-		log.Info("describer: no APTEVA_PROJECT_ID; skipping sweep")
 		return
 	}
 

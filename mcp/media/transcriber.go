@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -31,23 +30,33 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-// transcriberNotify carries file_ids that just became eligible —
-// indexer fires it the moment probe_status=ok AND has_audio=1.
-// Buffered so a burst of file.added events never blocks the
-// indexer; on overflow we drop and let the periodic sweep catch
+// transcriberMsg carries one eligibility signal from the indexer to
+// the transcriber loop. ProjectID is included because the indexer can
+// be running for any project under a global install — the loop has
+// to dispatch the per-row work against the originating project's
+// integration binding + storage scope.
+type transcriberMsg struct {
+	ProjectID string
+	FileID    string
+}
+
+// transcriberNotify carries (project, file_id) pairs that just became
+// eligible — indexer fires it the moment probe_status=ok AND
+// has_audio=1. Buffered so a burst of file.added events never blocks
+// the indexer; on overflow we drop and let the periodic sweep catch
 // up. Set in startTranscriber; nil otherwise (auto-transcribe
 // disabled), notifyTranscriber is a no-op then.
-var transcriberNotify chan string
+var transcriberNotify chan transcriberMsg
 
 // notifyTranscriber is called by the indexer when a media row
 // finishes probing and has audio. Non-blocking — channel buffer
 // is bounded so a backlog falls back to the periodic sweep.
-func notifyTranscriber(fileID string) {
-	if transcriberNotify == nil || fileID == "" {
+func notifyTranscriber(projectID, fileID string) {
+	if transcriberNotify == nil || fileID == "" || projectID == "" {
 		return
 	}
 	select {
-	case transcriberNotify <- fileID:
+	case transcriberNotify <- transcriberMsg{ProjectID: projectID, FileID: fileID}:
 	default:
 	}
 }
@@ -61,7 +70,7 @@ func startTranscriber(app *sdk.AppCtx) {
 		app.Logger().Info("transcribe_auto=false — auto-transcriber disabled (manual still works)")
 		return
 	}
-	transcriberNotify = make(chan string, 100)
+	transcriberNotify = make(chan transcriberMsg, 100)
 	go transcriberLoop(app)
 	app.Logger().Info("transcriber started")
 }
@@ -87,10 +96,10 @@ func transcriberLoop(app *sdk.AppCtx) {
 			// path missed (channel overflow, app restart while a row
 			// was queued, integration newly bound, etc).
 			transcriberSweep(app)
-		case fid := <-transcriberNotify:
+		case msg := <-transcriberNotify:
 			// Indexer just made this file eligible. Process just
 			// THIS row immediately rather than wait the next tick.
-			transcriberOne(app, fid)
+			transcriberOne(app, msg)
 		}
 	}
 }
@@ -99,20 +108,25 @@ func transcriberLoop(app *sdk.AppCtx) {
 // via notifyTranscriber. Goes through insertPendingTranscript +
 // runOneTranscription so all the normal guards (duration cap,
 // integration binding, dedup-on-source-sha) still apply.
-func transcriberOne(app *sdk.AppCtx, fileID string) {
+func transcriberOne(app *sdk.AppCtx, msg transcriberMsg) {
 	log := app.Logger()
-	pid := os.Getenv("APTEVA_PROJECT_ID")
-	if pid == "" || fileID == "" {
+	if msg.ProjectID == "" || msg.FileID == "" {
 		return
 	}
+	// Rebind app to the originating project so IntegrationFor and
+	// downstream cross-app calls resolve to the right scope. For
+	// project-scoped installs WithProject(msg.ProjectID) matches the
+	// install's own project; for global installs it pins the right
+	// project for this row.
+	app = app.WithProject(msg.ProjectID)
 	bound := app.IntegrationFor("transcripts")
 	if bound == nil {
 		// No integration — fall through silently. Periodic sweep
 		// will mark candidates as skipped with a clearer message.
 		return
 	}
-	if err := insertPendingTranscript(app.AppDB(), pid, fileID, "auto"); err != nil {
-		log.Error("queue pending transcript failed", "file_id", fileID, "err", err)
+	if err := insertPendingTranscript(app.AppDB(), msg.ProjectID, msg.FileID, "auto"); err != nil {
+		log.Error("queue pending transcript failed", "file_id", msg.FileID, "err", err)
 		return
 	}
 	row, err := claimNextPendingTranscript(app.AppDB())
@@ -125,16 +139,44 @@ func transcriberOne(app *sdk.AppCtx, fileID string) {
 	runOneTranscription(app, bound, row)
 }
 
-// transcriberSweep does one pass: queue eligible candidates, then
-// drain pending rows. Each row is run synchronously — we don't
-// parallelise (cost + Deepgram throughput).
+// transcriberSweep iterates every project this install can dispatch
+// against and runs sweepOne per project. Project-scoped installs see
+// a singleton list (the install's own project); global installs
+// iterate the operator's full project set. A failed ListProjects
+// degrades to a single-project sweep on whatever ctx.CurrentProject()
+// returns (typically empty under a global install — sweepOne then
+// no-ops).
 func transcriberSweep(app *sdk.AppCtx) {
+	log := app.Logger()
+	projects, err := app.PlatformAPI().ListProjects()
+	if err != nil || len(projects) == 0 {
+		// Fall back to whatever the AppCtx already has pinned.
+		if err != nil {
+			log.Warn("transcriber: list projects failed; sweeping current project only", "err", err)
+		}
+		transcriberSweepOne(app)
+		return
+	}
+	for _, p := range projects {
+		if p.ID == "" {
+			continue
+		}
+		transcriberSweepOne(app.WithProject(p.ID))
+	}
+}
+
+// transcriberSweepOne does the original single-project sweep: queue
+// eligible candidates, then drain pending rows. Each row is run
+// synchronously — we don't parallelise (cost + Deepgram throughput).
+func transcriberSweepOne(app *sdk.AppCtx) {
 	log := app.Logger()
 	db := app.AppDB()
 	cfg := app.Config()
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := app.CurrentProject()
 	if pid == "" {
-		log.Info("transcriber: no APTEVA_PROJECT_ID; skipping sweep")
+		// No project context — skip silently. Under a global install
+		// this means ListProjects returned empty (no projects yet);
+		// next tick will retry.
 		return
 	}
 
@@ -160,7 +202,7 @@ func transcriberSweep(app *sdk.AppCtx) {
 		for _, fid := range candidates {
 			_ = transcriptMarkSkipped(db, fid, "no transcripts integration bound — connect Deepgram in app settings")
 		}
-		log.Info("no transcripts integration bound; skipping pending rows")
+		log.Info("no transcripts integration bound; skipping pending rows", "project", pid)
 		return
 	}
 
@@ -307,7 +349,7 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 	// deliberately wait for the transcript before describing so the
 	// LLM call gets the multimodal {thumbnail + transcript} input.
 	// No-op when describer isn't running or queue is full.
-	notifyDescriber(row.FileID)
+	notifyDescriber(row.ProjectID, row.FileID)
 }
 
 // ─── Deepgram response parsing ─────────────────────────────────────

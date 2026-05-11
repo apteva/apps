@@ -74,7 +74,18 @@ func runIndexer(ctx context.Context, app *sdk.AppCtx) error {
 	ffmpegPath := c.ffmpegPath
 	ffprobePath := c.ffprobePath
 
-	projectID := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
+	// SDK dispatches this worker once per project per tick. For a
+	// project-scoped install ctx.CurrentProject() returns the
+	// install's pinned project; for a global install it returns the
+	// project the SDK is currently fanning out to. Treating "" as
+	// "skip this tick" makes the worker safe when the SDK hasn't
+	// resolved a project yet (e.g. fresh boot before ListProjects
+	// returned).
+	projectID := strings.TrimSpace(app.CurrentProject())
+	if projectID == "" {
+		app.Logger().Info("indexer: no project context for this dispatch; skipping")
+		return nil
+	}
 	sc := newStorageClient()
 
 	// Pull the file inventory once per tick. Storage's /files paginates;
@@ -271,9 +282,9 @@ func processOne(
 	// periodic tick to notice the new row. Periodic sweep stays as
 	// the safety net for both paths.
 	if probe.HasAudio {
-		notifyTranscriber(fid)
+		notifyTranscriber(projectID, fid)
 	} else {
-		notifyDescriber(fid)
+		notifyDescriber(projectID, fid)
 	}
 }
 

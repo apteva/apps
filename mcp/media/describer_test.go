@@ -397,7 +397,7 @@ func TestNotifyDescriber_RunsImmediately(t *testing.T) {
 	// a notify. No goroutine, no waiting on a real channel.
 	app := &App{}
 	_ = app
-	describerOne(ctx, "1")
+	describerOne(ctx, describerMsg{ProjectID: testProj, FileID: "1"})
 
 	got, _ := getMedia(ctx.AppDB(), testProj, "1")
 	if got.Description == "" {
@@ -416,7 +416,7 @@ func TestNotifyDescriber_NoOpsWhenNotStarted(t *testing.T) {
 	saved := describerNotify
 	describerNotify = nil
 	defer func() { describerNotify = saved }()
-	notifyDescriber("anything") // should silently no-op
+	notifyDescriber("p1", "anything") // should silently no-op
 }
 
 func TestNotifyDescriber_DropsOnFullQueue(t *testing.T) {
@@ -424,16 +424,16 @@ func TestNotifyDescriber_DropsOnFullQueue(t *testing.T) {
 	// when consumer is slow / queue full — we'd rather drop and
 	// let the periodic sweep catch up than wedge the indexer.
 	saved := describerNotify
-	describerNotify = make(chan string, 1)
+	describerNotify = make(chan describerMsg, 1)
 	defer func() {
 		describerNotify = saved
 	}()
 
-	notifyDescriber("1") // fills the buffer
+	notifyDescriber("p1", "1") // fills the buffer
 	// Second call must not block (no consumer drained the channel).
 	done := make(chan struct{})
 	go func() {
-		notifyDescriber("2")
+		notifyDescriber("p1", "2")
 		close(done)
 	}()
 	select {
