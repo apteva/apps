@@ -163,6 +163,33 @@ func TestEmit_DataPayloadShape(t *testing.T) {
 	}
 }
 
+// Storage's file events must carry the file row's project_id on the
+// emit envelope (not just inside the data payload). This is what
+// lets a global storage install's events route to the right per-
+// project lane on the bus and reach a global media install's
+// per-project subscriber. Before EmitWithProject was wired through,
+// the wire-level project_id came from the install row — empty for a
+// global install — and media's indexer silently dropped every event.
+func TestEmit_FileEventsCarryFilesProjectID(t *testing.T) {
+	ctx, rec := newRecordedCtx(t)
+	app := &App{}
+	out, err := app.toolUpload(ctx, map[string]any{
+		"name":           "tagged.txt",
+		"content_base64": base64.StdEncoding.EncodeToString([]byte("x")),
+	})
+	if err != nil {
+		t.Fatalf("toolUpload: %v", err)
+	}
+	_ = out
+	got := rec.EventsByTopic("file.added")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 file.added, got %d", len(got))
+	}
+	if got[0].ProjectID != "test-proj" {
+		t.Errorf("emit envelope ProjectID = %q, want test-proj (from file row, via EmitWithProject)", got[0].ProjectID)
+	}
+}
+
 func mapKeys(m map[string]any) string {
 	keys := make([]string, 0, len(m))
 	for k := range m {

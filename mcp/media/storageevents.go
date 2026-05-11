@@ -230,10 +230,13 @@ func handleStorageEvent(app *sdk.AppCtx, raw []byte) {
 // our row. Silently no-ops when the file isn't in our index yet
 // (storage updated a non-media file) or when the folder is missing
 // from the payload (some non-folder PATCH).
+//
+// projectID comes from ev.ProjectID — storage stamps it from the
+// file row's project on emit, so it is always the file's actual
+// project regardless of whether the storage install is global or
+// project-scoped. An empty projectID here means storage emitted a
+// truly cross-project event (no file row anchor); we can't act on it.
 func updateFolderFromEvent(app *sdk.AppCtx, data map[string]any, projectID string) {
-	if projectID == "" {
-		projectID = app.CurrentProject()
-	}
 	if projectID == "" {
 		return
 	}
@@ -282,9 +285,10 @@ func indexFromEvent(app *sdk.AppCtx, data map[string]any, projectID string) {
 	if existed, _ := data["was_existing"].(bool); existed {
 		return
 	}
-	if projectID == "" {
-		projectID = app.CurrentProject()
-	}
+	// projectID is ev.ProjectID — storage tags every file event with
+	// the file's own project even when the storage install is global,
+	// so a global media install can dispatch indexOneFile against the
+	// right project without consulting CurrentProject().
 	if projectID == "" {
 		return
 	}
@@ -353,9 +357,9 @@ func storageFileFromEvent(data map[string]any) *StorageFile {
 // linger as orphan bytes.
 func cascadeDeleteFromEvent(app *sdk.AppCtx, data map[string]any, projectID string) {
 	log := app.Logger()
-	if projectID == "" {
-		projectID = app.CurrentProject()
-	}
+	// projectID is ev.ProjectID from the bus envelope. See
+	// indexFromEvent — storage tags every file event with its row's
+	// project_id, so this is always the right project to cascade in.
 	if projectID == "" {
 		return
 	}

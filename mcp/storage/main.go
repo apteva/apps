@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: storage
 display_name: Storage
-version: 0.9.7
+version: 0.10.2
 description: |
   File storage with virtual folders, signed URLs, dedup. Pluggable
   backend: local disk by default, S3-compatible (AWS / R2 / B2 /
@@ -1485,16 +1485,23 @@ func (a *App) httpDelete(w http.ResponseWriter, r *http.Request, id int64) {
 }
 
 // emitFileEvent broadcasts a single file change onto the platform's
-// app-event bus. Best-effort: ctx.Emit is fire-and-forget, so a
-// flapping platform can't slow down the upload/delete handler.
+// app-event bus. Best-effort: ctx.EmitWithProject is fire-and-forget,
+// so a flapping platform can't slow down the upload/delete handler.
 // Pass `existed=true` for dedup-resolved uploads so subscribers can
 // skip a duplicate row in the UI when the same content was already
 // present (the file is reused, not re-added).
+//
+// We pass f.ProjectID explicitly via EmitWithProject rather than
+// relying on ctx.CurrentProject() because storage's HTTP handlers
+// run from the parent (unscoped) AppCtx — the project anchor is on
+// the *row*, not on the dispatch context. When the install is
+// global, this is the only way subscribers (media, the dashboard's
+// per-project tab) can route the event to the right project.
 func emitFileEvent(ctx *sdk.AppCtx, topic string, f *File, existed bool) {
 	if ctx == nil || f == nil {
 		return
 	}
-	ctx.Emit(topic, map[string]any{
+	ctx.EmitWithProject(topic, f.ProjectID, map[string]any{
 		"id":           f.ID,
 		"name":         f.Name,
 		"folder":       f.Folder,
