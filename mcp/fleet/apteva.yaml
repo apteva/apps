@@ -1,0 +1,76 @@
+schema: apteva-app/v1
+
+name: fleet
+display_name: Fleet
+version: 0.1.0
+description: |
+  Control plane for a fleet of client apteva instances. v0.1 runs
+  every tenant as a local apteva process on the parent host — its
+  own data dir, its own port, supervised by fleet. Zero cross-app
+  deps. Same registry + tool surface works later for remote /
+  containerized provisioning.
+
+  Each tenant is a fully independent apteva install: own DB, own
+  users, own dashboard. The parent goes away → tenants keep running.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/fleet
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/fleet/icon.png
+tags: [fleet, tenants, multi-instance, control-plane, ops]
+
+scopes: [global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: tenant_create
+      description: Spawn a new local apteva instance as a tenant. Allocates a data dir + port, supervises the child process. Args: slug, owner_email.
+    - name: tenant_connect
+      description: Register an existing apteva-server (local or remote) as a tenant without spawning it. Args: base_url, api_key, owner_email, slug?.
+    - name: tenant_list
+      description: List managed tenants.
+    - name: tenant_get
+      description: Full record for one tenant + recent events. Args: tenant_id.
+    - name: tenant_start
+      description: Start a stopped local tenant. Args: tenant_id.
+    - name: tenant_stop
+      description: Stop a running local tenant (process SIGTERM → SIGKILL). Registry only for remote-connected tenants. Args: tenant_id.
+    - name: tenant_delete
+      description: Stop and remove a tenant. For local tenants also wipes the data dir (only with confirm=true). Args: tenant_id, confirm? (required for data wipe).
+    - name: tenant_support_login
+      description: Mint a short-lived super-admin URL on the tenant. Args: tenant_id, reason.
+    - name: tenant_run_remote
+      description: Proxy an MCP tool call to a tenant's gateway using its api_key. Args: tenant_id, app, tool, input.
+  ui_panels:
+    - slot: project.page
+      label: Fleet
+      icon: server
+      entry: /ui/FleetPanel.mjs
+
+db:
+  driver: sqlite
+  path: /data/fleet.db
+  migrations: migrations/
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/fleet
+  image: ghcr.io/apteva/fleet:0.1.0
+  port: 8080
+  health_check: /health
+  resources:
+    cpu: 0.05
+    memory: 64
+    cpu_limit: 1
+
+upgrade_policy: auto-patch
