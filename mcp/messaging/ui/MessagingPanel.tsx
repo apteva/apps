@@ -681,7 +681,7 @@ function SendersView({
     setBusy(true); setErr(""); setVerifyResult(null);
     try {
       const out = await api<typeof verifyResult>("POST", "/tools/call", {}, {
-        tool: "senders_verify_email",
+        tool: "senders_create",
         args: { address: verifyAddr },
       });
       setVerifyResult(out);

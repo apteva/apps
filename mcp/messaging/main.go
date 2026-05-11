@@ -48,7 +48,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.7.0
+version: 0.8.0
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -132,9 +132,8 @@ provides:
     - { name: senders_list,           description: "List sending identities. Returns canonical URI rows." }
     - { name: senders_get,            description: "Get one identity's verification + DKIM state." }
     - { name: senders_delete,         description: "Remove a sending identity from the provider." }
-    - { name: senders_verify_email,   description: "Verify an email or domain. Domain returns DKIM CNAMEs." }
     - { name: senders_get_quota,      description: "Provider sandbox + send-quota status." }
-    - { name: senders_bootstrap_inbound, description: "End-to-end SES inbound bootstrap: creates S3 bucket + SNS topic + receipt rule + subscribes webhook." }
+    - { name: senders_create,         description: "Unified sender registration. Email → SES verify_email. Domain → SES verify_domain + publish DKIM/SPF via domains app + (if aws-s3 and aws-sns bound, auto by default) full inbound bootstrap: S3 bucket + SNS topic + receipt rule + MX + webhook subscribe." }
   ui_panels:
     - slot: project.page
       label: Messaging
@@ -200,13 +199,16 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// the panel hits these from a button + per-row action; agents
 		// don't trigger Twilio list calls.
 		{Pattern: "/templates/sync", Handler: a.handleTemplatesSync},
-		// Sender domain setup — orchestrates SES verify_domain + (optional)
-		// DNS record writes via the domains app. Internal/panel only.
+		// Sender domain setup — outbound-only DNS publishing helper used
+		// by the panel's "Set up DNS" button. Kept for backward compat;
+		// senders_create is the canonical entry point.
 		{Pattern: "/senders/setup-domain", Handler: a.handleSetupDomain},
-		// Full inbound bootstrap — creates S3 bucket + SNS topic + SES
-		// receipt rule + subscribes the inbound webhook. Requires aws-ses
-		// + aws-s3 + aws-sns integrations bound. Idempotent.
-		{Pattern: "/senders/bootstrap-inbound", Handler: a.handleBootstrapInbound},
+		// Unified sender registration. Email → SES verify_email. Domain
+		// → verify_domain + DNS publish + (auto if aws-s3 + aws-sns
+		// bound) full inbound bootstrap (S3 + SNS + receipt rule + MX
+		// + webhook subscribe). Idempotent. Mirrors the senders_create
+		// MCP tool.
+		{Pattern: "/senders/create", Handler: a.handleSendersCreate},
 		{Pattern: "/templates/", Handler: a.handleTemplateItem}, // /templates/<id>/refresh-status
 		// Generic dispatcher so the panel can invoke any MCP tool via
 		// HTTP — saves declaring a per-tool route for every mutation.
@@ -425,32 +427,29 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler:     a.toolSendersDelete,
 		},
 		{
-			Name: "senders_verify_email",
-			Description: "Verify an email address or domain with the email provider. The shape of the input picks the operation: " +
-				"\"foo@bar.com\" verifies an address (provider sends a confirmation link); \"bar.com\" verifies a domain (returns DKIM CNAME records to publish in DNS).",
-			InputSchema: schemaObject(map[string]any{"address": map[string]any{"type": "string"}}, []string{"address"}),
-			Handler:     a.toolSendersVerifyEmail,
-		},
-		{
 			Name:        "senders_get_quota",
 			Description: "Provider-account stats: sandbox flag, 24h send quota, current usage, sending-enabled flag. Drives the sandbox banner.",
 			InputSchema: schemaObject(map[string]any{}, nil),
 			Handler:     a.toolSendersGetQuota,
 		},
 		{
-			Name: "senders_bootstrap_inbound",
-			Description: "End-to-end SES inbound setup. Creates an S3 bucket + SNS topic with the right access policies, verifies the domain in SES (publishes DKIM CNAMEs + MX via the domains app if bound), creates a receipt rule set + rule routing inbound mail to S3+SNS, activates the rule set, and subscribes the messaging webhook to the SNS topic. Idempotent — safe to re-run. " +
-				"Args: domain (required), region? (default eu-west-1), bucket_name? (default apteva-ses-inbound-<install_id>), topic_name? (default apteva-ses-inbound-<install_id>), rule_set_name? (default apteva-default), rule_name? (default messaging-inbound). " +
-				"Requires aws-ses + aws-s3 + aws-sns integrations bound. Returns a step-by-step results array.",
+			Name: "senders_create",
+			Description: "Register a sender end-to-end. The address shape picks the path: " +
+				"\"foo@x.com\" runs SES verify_email; \"x.com\" runs verify_domain, publishes DKIM CNAMEs (and SPF unless spf=false) via the domains app, and — when aws-s3 + aws-sns are bound — auto-bootstraps inbound (S3 bucket + SNS topic with policies, SES receipt rule + activation, MX record, webhook subscribe). " +
+				"Args: address (required), inbound? (auto|true|false, default auto), publish_dns? (default true), spf? (default true), region? (default eu-west-1), bucket_name?, topic_name?, rule_set_name?, rule_name?. " +
+				"Idempotent — safe to re-run. Returns {address, kind, dkim_tokens?, dns_records?, inbound:{bootstrapped, bucket_name?, topic_arn?, …}, steps[]}.",
 			InputSchema: schemaObject(map[string]any{
-				"domain":        map[string]any{"type": "string"},
+				"address":       map[string]any{"type": "string"},
+				"inbound":       map[string]any{"type": "string"},
+				"publish_dns":   map[string]any{"type": "boolean"},
+				"spf":           map[string]any{"type": "boolean"},
 				"region":        map[string]any{"type": "string"},
 				"bucket_name":   map[string]any{"type": "string"},
 				"topic_name":    map[string]any{"type": "string"},
 				"rule_set_name": map[string]any{"type": "string"},
 				"rule_name":     map[string]any{"type": "string"},
-			}, []string{"domain"}),
-			Handler: a.toolBootstrapInbound,
+			}, []string{"address"}),
+			Handler: a.toolSendersCreate,
 		},
 	}
 }
@@ -1943,56 +1942,6 @@ func (a *App) toolSendersDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
 	}
 	return map[string]any{"deleted": true, "address": canonicalSenderAddress("", raw)}, nil
-}
-
-// toolSendersVerifyEmail picks verify_email vs verify_domain from
-// the address shape. Domains return DKIM CNAME tokens for DNS.
-func (a *App) toolSendersVerifyEmail(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	connID, _, err := emailProviderConn(ctx)
-	if err != nil {
-		return nil, err
-	}
-	kind, raw, err := classifyEmailIdentity(strArg(args, "address"))
-	if err != nil {
-		return nil, err
-	}
-	tool := "verify_email"
-	if kind == "domain" {
-		tool = "verify_domain"
-	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, map[string]any{
-		"EmailIdentity": raw,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", tool, err)
-	}
-	if res == nil || !res.Success {
-		body := ""
-		if res != nil {
-			body = string(res.Data)
-		}
-		return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
-	}
-	// verify_email has empty body. verify_domain returns DkimAttributes.Tokens.
-	out := map[string]any{
-		"address":          canonicalSenderAddress(kind, raw),
-		"kind":             normaliseSenderKind(kind),
-		"pending":          true,
-		"next_step":        verifyNextStepHint(kind),
-	}
-	if kind == "domain" {
-		var inner struct {
-			DkimAttributes struct {
-				Tokens []string `json:"Tokens"`
-				Status string   `json:"Status"`
-			} `json:"DkimAttributes"`
-		}
-		_ = json.Unmarshal(res.Data, &inner)
-		out["dkim_tokens"] = inner.DkimAttributes.Tokens
-		out["dkim_status"] = inner.DkimAttributes.Status
-		out["dns_records"] = dkimCNAMERecords(raw, inner.DkimAttributes.Tokens)
-	}
-	return out, nil
 }
 
 // dkimCNAMERecords formats SES's three DKIM tokens as ready-to-paste

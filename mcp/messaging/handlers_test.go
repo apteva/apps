@@ -533,7 +533,7 @@ func TestSenders_List_VerifiedOnly(t *testing.T) {
 	}
 }
 
-func TestSenders_VerifyEmail_DispatchesByShape(t *testing.T) {
+func TestSendersCreate_DispatchesByShape(t *testing.T) {
 	plat := &stubPlatform{
 		replyByTool: map[string]*sdk.ExecuteResult{
 			"verify_email":  {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
@@ -543,34 +543,41 @@ func TestSenders_VerifyEmail_DispatchesByShape(t *testing.T) {
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 
-	// email → verify_email
-	emailOut, err := app.toolSendersVerifyEmail(ctx, map[string]any{"address": "new@acme.com"})
+	// email → verify_email. Inbound branch never runs.
+	emailOutRaw, err := app.toolSendersCreate(ctx, map[string]any{"address": "new@acme.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if emailOut.(map[string]any)["kind"] != "email" {
-		t.Errorf("email kind=%v", emailOut.(map[string]any)["kind"])
+	emailOut := emailOutRaw.(*sendersCreateResp)
+	if emailOut.Kind != "email" {
+		t.Errorf("email kind=%q", emailOut.Kind)
+	}
+	if !hasStep(emailOut.Steps, "ses_verify_email", true) {
+		t.Errorf("expected ok ses_verify_email step, got %+v", emailOut.Steps)
 	}
 
-	// domain → verify_domain + DKIM tokens
-	domainOut, err := app.toolSendersVerifyEmail(ctx, map[string]any{"address": "newdomain.com"})
+	// domain → verify_domain + DKIM records. inbound=auto with no
+	// aws-s3 / aws-sns bindings should *not* touch SNS or S3.
+	domainOutRaw, err := app.toolSendersCreate(ctx, map[string]any{"address": "newdomain.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := domainOut.(map[string]any)
-	if d["kind"] != "domain" {
-		t.Errorf("domain kind=%v", d["kind"])
+	d := domainOutRaw.(*sendersCreateResp)
+	if d.Kind != "domain" {
+		t.Errorf("domain kind=%q", d.Kind)
 	}
-	tokens := d["dkim_tokens"].([]string)
-	if len(tokens) != 3 || tokens[0] != "aaa" {
-		t.Errorf("dkim_tokens=%v", tokens)
+	if len(d.DkimTokens) != 3 || d.DkimTokens[0] != "aaa" {
+		t.Errorf("dkim_tokens=%v", d.DkimTokens)
 	}
-	records := d["dns_records"].([]map[string]string)
-	if records[0]["name"] != "aaa._domainkey.newdomain.com" || records[0]["value"] != "aaa.dkim.amazonses.com" {
-		t.Errorf("dns_records[0]=%+v", records[0])
+	if len(d.DnsRecords) == 0 || d.DnsRecords[0]["name"] != "aaa._domainkey.newdomain.com" || d.DnsRecords[0]["value"] != "aaa.dkim.amazonses.com" {
+		t.Errorf("dns_records[0]=%+v", d.DnsRecords)
+	}
+	if d.Inbound == nil || d.Inbound.Bootstrapped {
+		t.Errorf("expected inbound.bootstrapped=false, got %+v", d.Inbound)
 	}
 
-	// Confirm dispatch by tool name.
+	// Confirm dispatch by tool name — only the two SES verify_* calls,
+	// no SNS / S3 traffic on the unbound auto path.
 	tools := []string{}
 	for _, c := range plat.executeCalls {
 		tools = append(tools, c.Tool)
@@ -578,6 +585,15 @@ func TestSenders_VerifyEmail_DispatchesByShape(t *testing.T) {
 	if len(tools) != 2 || tools[0] != "verify_email" || tools[1] != "verify_domain" {
 		t.Errorf("tool dispatch=%v", tools)
 	}
+}
+
+func hasStep(steps []bootstrapStep, name string, wantOK bool) bool {
+	for _, s := range steps {
+		if s.Step == name && s.OK == wantOK {
+			return true
+		}
+	}
+	return false
 }
 
 func TestSenders_GetQuota_ReportsSandboxFlag(t *testing.T) {

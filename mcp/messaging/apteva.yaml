@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.7.0
+version: 0.8.0
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES; SMS and push are reserved channel namespaces. Tracks
@@ -114,9 +114,8 @@ provides:
     - { name: senders_list,           description: "List sending identities (verified emails, domains; later phones, push apps). Args: channel?, verified_only?. Returns [{address, kind, verified, dkim_status?}]." }
     - { name: senders_get,            description: "Get a single identity's status — verification, DKIM, feedback forwarding. Args: address (URI or bare)." }
     - { name: senders_delete,         description: "Remove a sending identity from the provider. Args: address." }
-    - { name: senders_verify_email,   description: "Verify an email address or domain with the email provider. Args: address. Email: provider sends a confirmation link. Domain: returns 3 DKIM CNAMEs to publish in DNS." }
     - { name: senders_get_quota,      description: "Provider account stats — sandbox flag, 24h send quota, current usage. Powers the sandbox banner." }
-    - { name: senders_bootstrap_inbound, description: "End-to-end SES inbound setup. Creates S3 bucket + SNS topic with the right access policies, verifies the domain in SES (and publishes DKIM/MX DNS via the domains app if bound), creates a receipt rule set + rule routing inbound mail to S3+SNS, activates the rule set, and subscribes the messaging webhook to the SNS topic. Idempotent — safe to re-run. Args: domain, region? (default eu-west-1), bucket_name?, topic_name?, rule_set_name?, rule_name?. Requires aws-ses + aws-s3 + aws-sns integrations bound." }
+    - { name: senders_create,         description: "Unified sender registration. Email → SES verify_email. Domain → verify_domain + publish DKIM/SPF via domains app + (auto if aws-s3 + aws-sns bound) full inbound bootstrap: S3 bucket + SNS topic + policies + receipt rule + MX + webhook subscribe. Args: address (required), inbound? (auto|true|false, default auto), publish_dns? (default true), spf? (default true), region?, bucket_name?, topic_name?, rule_set_name?, rule_name?. Idempotent." }
   ui_panels:
     - slot: project.page
       label: Messaging
