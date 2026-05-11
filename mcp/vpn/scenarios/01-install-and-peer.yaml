@@ -1,0 +1,25 @@
+name: vpn-install-and-peer
+description: |
+  Install the VPN server on the local Instances host, then add two
+  peers (a laptop and a phone) and list active connections.
+steps:
+  - tool: vpn_install
+    args: {}
+    expect:
+      contains: ["public_key", "endpoint", "listen_port"]
+  - tool: vpn_peer_add
+    args: { name: "marco-macbook" }
+    expect:
+      contains: ["config", "qr_svg", "address"]
+  - tool: vpn_peer_add
+    args: { name: "marco-iphone" }
+    expect:
+      contains: ["address"]
+  - tool: vpn_peer_list
+    args: {}
+    expect:
+      contains: ["marco-macbook", "marco-iphone"]
+  - tool: vpn_announce
+    args: {}
+    expect:
+      contains: ["polled"]

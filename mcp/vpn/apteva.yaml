@@ -1,0 +1,134 @@
+schema: apteva-app/v1
+
+name: vpn
+display_name: VPN
+version: 0.1.0
+description: |
+  Backend-agnostic VPN orchestrator. Provisions a VPN server on an
+  Instances host (local id 0 or a Hetzner VPS), generates keys,
+  uploads daemon config, brings the interface up, and polls peer
+  statistics on a timer.
+
+  v0.1 ships a single backend (WireGuard). The internal Backend
+  interface is shaped so an OpenVPN / strongSwan IKEv2 impl can be
+  added later without touching the MCP tool surface or panel —
+  tools are named protocol-neutrally (`vpn_peer_add`, not
+  `wg_peer_add`).
+
+  The panel is monitor-only: server state + peer table with last
+  handshake, rx/tx. Peers are created and revoked exclusively via
+  MCP tools so the agent stays in the loop.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/vpn
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/vpn/icon.png
+tags: [vpn, wireguard, network, infrastructure]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.apps.call
+  integrations: []
+  apps:
+    - name: instances
+      reason: "Provision the host, run wg / wg-quick, upload daemon config."
+    - name: storage
+      reason: "Optional: archive generated peer configs under /.vpn/peers/."
+      optional: true
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: vpn_status,       description: "Server state: backend, host_id, endpoint, port, installed_at, kernel reachability, active/revoked peer counts, last stats-poll outcome." }
+    - { name: vpn_install,      description: "One-time per install: install the VPN daemon on the bound Instances host, generate server keys, push daemon config, enable as a service. Args: host_id?, endpoint?, listen_port?, network_cidr?." }
+    - { name: vpn_uninstall,    description: "Stop the daemon and remove generated configs from the host. Refuses if any active peers exist unless force=true. Args: force?." }
+    - { name: vpn_peer_add,     description: "Allocate the next free IP, generate peer credentials, push to the daemon (hot reload, no peer drop), return the client config text + an inline SVG QR code. Args: name (req), allowed_ips?, dns?, keepalive?." }
+    - { name: vpn_peer_remove,  description: "Revoke a peer and re-render the daemon config without it. Args: name." }
+    - { name: vpn_peer_list,    description: "All peers with last_handshake_at, rx_bytes, tx_bytes, address, revoked_at. Args: include_revoked? (default false)." }
+    - { name: vpn_peer_config,  description: "Re-emit the client config text + QR for an existing peer (credentials are stored server-side). Args: name." }
+    - { name: vpn_announce,     description: "Force an immediate stats poll instead of waiting for the next periodic tick. No args." }
+  ui_panels:
+    - slot: project.page
+      label: VPN
+      icon: shield
+      entry: /ui/VPNPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/vpn
+  port: 8210
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/vpn.db
+  migrations: migrations/
+
+config_schema:
+  - name: backend
+    type: select
+    options: ["wireguard"]
+    default: "wireguard"
+    label: Backend
+    description: VPN protocol. v0.1 ships WireGuard; OpenVPN / IKEv2 land in later versions via the same Backend interface.
+  - name: host_id
+    type: text
+    default: "0"
+    label: Instances host_id
+    description: Which Instances host runs the daemon. 0 = the local Apteva machine. Provision a VPS via the Instances app first if you want a public endpoint.
+  - name: listen_port
+    type: text
+    default: "51820"
+    label: UDP listen port
+    description: WireGuard default is 51820. Pick something else only if 51820 is taken.
+  - name: network_cidr
+    type: text
+    default: "10.13.13.0/24"
+    label: Peer subnet
+    description: Server takes .1; peers are allocated sequentially from .2.
+  - name: endpoint
+    type: text
+    default: ""
+    label: Public endpoint
+    description: "host:port advertised to clients. Empty → auto-detect from instances.instance_get (public_ipv4). Pin if the host has multiple public IPs or you front it with a DNS name."
+  - name: dns_servers
+    type: text
+    default: "1.1.1.1,1.0.0.1"
+    label: DNS servers for peers
+    description: Comma-separated. Applied while the tunnel is up; clients revert to system DNS when disconnected.
+  - name: default_allowed_ips
+    type: text
+    default: "0.0.0.0/0,::/0"
+    label: Default AllowedIPs
+    description: Full tunnel by default. Override per-peer at create time (e.g. 10.13.13.0/24 for split tunnel).
+  - name: persistent_keepalive
+    type: text
+    default: "25"
+    label: Keepalive (seconds)
+    description: Sends a small UDP packet every N seconds so NAT mappings on hotel WiFi don't expire. 0 disables.
+  - name: mtu
+    type: text
+    default: "1420"
+    label: Interface MTU
+    description: Lower (1280) if you see fragmentation on flaky links.
+  - name: metrics_poll_seconds
+    type: text
+    default: "30"
+    label: Stats poll interval (seconds)
+    description: How often the worker runs `wg show wg0 dump` (or backend-equivalent) and updates peer stats.
+  - name: archive_configs
+    type: select
+    options: ["true", "false"]
+    default: "false"
+    label: Archive peer configs to storage
+    description: If true and the storage app is bound, also write generated configs to /.vpn/peers/<name>.conf. Off by default — configs already contain everything the agent needs and storing them is duplicate state.
+
+upgrade_policy: auto-patch
