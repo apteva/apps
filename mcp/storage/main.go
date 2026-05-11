@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: storage
 display_name: Storage
-version: 0.10.2
+version: 0.10.3
 description: |
   File storage with virtual folders, signed URLs, dedup. Pluggable
   backend: local disk by default, S3-compatible (AWS / R2 / B2 /
@@ -1247,9 +1247,24 @@ func (a *App) httpUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := r.ParseMultipartForm(maxUploadBytes(ctx)); err != nil {
-		// Fallback: JSON body with content_base64.
+		// Fallback: JSON body with content_base64. Used by sibling
+		// apps like media that upload derivations (thumbnails,
+		// waveforms) via the HTTP path because building a multipart
+		// envelope for an in-memory byte slice is gratuitous.
+		//
+		// pid was already resolved from the query string above; thread
+		// it into the body as _project_id so toolUpload's
+		// resolveProjectFromArgs path finds it. Without this, JSON
+		// uploads from global-scope callers hit a confusing
+		// "project_id missing — pass _project_id when scope=global"
+		// error even though the caller did pass project_id (just in
+		// the query string, not the body).
 		var body map[string]any
 		if jerr := json.NewDecoder(r.Body).Decode(&body); jerr == nil {
+			if body == nil {
+				body = map[string]any{}
+			}
+			body["_project_id"] = pid
 			out, err := a.toolUpload(ctx, body)
 			if err != nil {
 				httpErr(w, http.StatusBadRequest, err.Error())
