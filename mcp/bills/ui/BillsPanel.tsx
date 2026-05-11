@@ -993,16 +993,53 @@ function AttachedDocumentSection({
   );
 }
 
+// Rough FX rates expressed in USD per 1 unit of currency, snapshotted
+// May 2026. Hardcoded on purpose — the user explicitly opted for an
+// estimate now and a proper currency app later. Keep this table tight:
+// only currencies the user actually bills in. When a bill's currency
+// isn't here, the combined chart treats its converted value as 0 and
+// the per-currency chart still renders below (so the spend isn't lost,
+// it just doesn't roll into the rough total).
+const FX_USD_PER: Record<string, number> = {
+  USD: 1.0,
+  EUR: 1.08,
+  GBP: 1.27,
+  CAD: 0.73,
+  AUD: 0.66,
+  CHF: 1.12,
+  JPY: 0.0065,
+  INR: 0.012,
+  MXN: 0.058,
+  BRL: 0.20,
+};
+
+// convertCents converts a money amount expressed in `from` cents into
+// `to` cents using the FX table. Returns 0 if either currency is
+// missing from the table — caller decides how to render that.
+function convertCents(amountCents: number, from: string, to: string): number {
+  const f = FX_USD_PER[from];
+  const t = FX_USD_PER[to];
+  if (!f || !t) return 0;
+  return Math.round((amountCents * f) / t);
+}
+
 // SpendChart — purely client-side summary built from the already-
 // loaded bills list. Buckets by month and currency, splits each
 // monthly bar into paid (bottom) and not-yet-paid (top, dimmer).
 // Hover tooltips via native <title>. No new endpoints, no fetches;
 // reflects whatever filter / search the user has applied to the
 // list. Mounts in the no-bill-selected area of the right pane.
+//
+// When the bills span multiple currencies, an estimated combined
+// chart sits on top (converted to the dominant currency using rough
+// hardcoded FX rates) so the user gets a single "total spend"
+// picture. The per-currency charts stay underneath as the source of
+// truth.
 function SpendChart({ bills }: { bills: Bill[] }) {
   type MonthBucket = { paid: number; unpaid: number };
-  const byCurrency = useMemo(() => {
-    const out: Record<string, Record<string, MonthBucket>> = {};
+  const { byCurrency, base, combined, totals } = useMemo(() => {
+    const byCur: Record<string, Record<string, MonthBucket>> = {};
+    const curTotals: Record<string, number> = {};
     for (const b of bills) {
       if (b.status === "void") continue;
       // Prefer the invoice date (when the expense was actually
@@ -1014,15 +1051,42 @@ function SpendChart({ bills }: { bills: Bill[] }) {
       if (Number.isNaN(d.getTime())) continue;
       const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
       const cur = (b.currency || "USD").toUpperCase();
-      if (!out[cur]) out[cur] = {};
-      if (!out[cur][ym]) out[cur][ym] = { paid: 0, unpaid: 0 };
-      if (b.status === "paid") out[cur][ym].paid += b.total_cents;
-      else out[cur][ym].unpaid += b.total_cents;
+      if (!byCur[cur]) byCur[cur] = {};
+      if (!byCur[cur][ym]) byCur[cur][ym] = { paid: 0, unpaid: 0 };
+      if (b.status === "paid") byCur[cur][ym].paid += b.total_cents;
+      else byCur[cur][ym].unpaid += b.total_cents;
+      curTotals[cur] = (curTotals[cur] || 0) + b.total_cents;
     }
-    return out;
+    // Pick base = the currency with the highest total spend. Tie-break
+    // is alphabetical (stable). If everything is one currency, base is
+    // that one and the combined chart is skipped below.
+    const baseCur =
+      Object.keys(curTotals).sort((a, b) => {
+        const diff = (curTotals[b] || 0) - (curTotals[a] || 0);
+        return diff !== 0 ? diff : a.localeCompare(b);
+      })[0] || "USD";
+    // Build the combined chart by converting every per-currency bucket
+    // into the base currency.
+    const combinedBuckets: Record<string, MonthBucket> = {};
+    for (const cur of Object.keys(byCur)) {
+      for (const ym of Object.keys(byCur[cur])) {
+        const b = byCur[cur][ym];
+        if (!combinedBuckets[ym]) combinedBuckets[ym] = { paid: 0, unpaid: 0 };
+        combinedBuckets[ym].paid += convertCents(b.paid, cur, baseCur);
+        combinedBuckets[ym].unpaid += convertCents(b.unpaid, cur, baseCur);
+      }
+    }
+    return {
+      byCurrency: byCur,
+      base: baseCur,
+      combined: combinedBuckets,
+      totals: curTotals,
+    };
   }, [bills]);
 
-  const currencies = Object.keys(byCurrency).sort();
+  const currencies = Object.keys(byCurrency).sort(
+    (a, b) => (totals[b] || 0) - (totals[a] || 0) || a.localeCompare(b),
+  );
   if (currencies.length === 0) {
     return (
       <div className="text-text-muted text-sm">
@@ -1030,6 +1094,7 @@ function SpendChart({ bills }: { bills: Bill[] }) {
       </div>
     );
   }
+  const showCombined = currencies.length > 1;
   return (
     <div className="space-y-6 max-w-2xl">
       <div>
@@ -1038,6 +1103,14 @@ function SpendChart({ bills }: { bills: Bill[] }) {
           Last 6 months · grouped by invoice date · matches the bills shown on the left.
         </p>
       </div>
+      {showCombined && (
+        <CurrencyChart
+          currency={base}
+          months={combined}
+          subtitle={`combined · ≈ converted at static rates`}
+          estimate
+        />
+      )}
       {currencies.map((cur) => (
         <CurrencyChart key={cur} currency={cur} months={byCurrency[cur]} />
       ))}
@@ -1048,9 +1121,13 @@ function SpendChart({ bills }: { bills: Bill[] }) {
 function CurrencyChart({
   currency,
   months,
+  subtitle,
+  estimate,
 }: {
   currency: string;
   months: Record<string, { paid: number; unpaid: number }>;
+  subtitle?: string;
+  estimate?: boolean;
 }) {
   // Always plot the trailing 6 months ending this month, even when
   // some buckets are empty — gaps in spend are signal too.
@@ -1091,11 +1168,16 @@ function CurrencyChart({
   return (
     <div>
       <div className="flex items-baseline justify-between gap-3 mb-2">
-        <div className="flex items-baseline gap-3">
-          <h3 className="text-xs uppercase tracking-wide text-text-dim">{currency}</h3>
+        <div className="flex items-baseline gap-3 flex-wrap">
+          <h3 className="text-xs uppercase tracking-wide text-text-dim">
+            {estimate ? `≈ ${currency}` : currency}
+          </h3>
           <span className="text-xs text-text-muted">
             {fmtMoney(total, currency)} total · {fmtMoney(paidTotal, currency)} paid
           </span>
+          {subtitle && (
+            <span className="text-[10px] text-text-dim italic">{subtitle}</span>
+          )}
         </div>
         <div className="flex items-center gap-3 text-[10px] text-text-muted">
           <span className="inline-flex items-center gap-1">
