@@ -48,6 +48,29 @@ export interface UploadResumableOptions {
    *  surface a Cancel button + later trigger DELETE /uploads/<id> if
    *  the user tears the row down out-of-band. */
   onUploadIdAssigned?: (id: string) => void;
+  /** Project + install IDs threaded onto every URL the uploader
+   *  builds (POST /files, POST /uploads init, PUT parts, complete,
+   *  DELETE). Required for global installs: the storage sidecar
+   *  reads project_id from query when APTEVA_PROJECT_ID is empty,
+   *  and refuses with 400 if neither is present. Before v0.10.1
+   *  this was missing — every other panel fetch went through api()
+   *  / withParams() which appended these automatically, but the
+   *  upload path bypassed the wrapper. Latent bug, only surfaced
+   *  once anyone moved storage to global scope. */
+  projectId?: string;
+  installId?: number;
+}
+
+/** Build "?project_id=…&install_id=…" if either is set. Empty when
+ *  both are absent (matches pre-global-install behaviour for
+ *  project-scoped sidecars whose APTEVA_PROJECT_ID env supplies
+ *  the value). The same URL serves project + global installs —
+ *  storage's resolver prefers the env, falls back to the query. */
+function scopeQS(opts: UploadResumableOptions): string {
+  const parts: string[] = [];
+  if (opts.projectId) parts.push(`project_id=${encodeURIComponent(opts.projectId)}`);
+  if (opts.installId != null) parts.push(`install_id=${opts.installId}`);
+  return parts.length === 0 ? "" : "?" + parts.join("&");
 }
 
 export async function uploadResumable(
@@ -72,7 +95,7 @@ async function uploadSimple(
   if (opts.visibility) fd.append("visibility", opts.visibility);
   if (opts.tags?.length) fd.append("tags", JSON.stringify(opts.tags));
 
-  const res = await fetch(`${STORAGE_API}/files`, {
+  const res = await fetch(`${STORAGE_API}/files${scopeQS(opts)}`, {
     method: "POST",
     credentials: "same-origin",
     body: fd,
@@ -103,7 +126,7 @@ async function uploadChunked(
   file: File,
   opts: UploadResumableOptions,
 ): Promise<UploadedFile> {
-  const init = (await jsonFetch<InitResponse>("POST", `${STORAGE_API}/uploads`, {
+  const init = (await jsonFetch<InitResponse>("POST", `${STORAGE_API}/uploads${scopeQS(opts)}`, {
     body: {
       filename: file.name,
       size: file.size,
@@ -170,7 +193,7 @@ async function uploadChunked(
       while (attempt < maxRetriesPerPart) {
         try {
           const blob = file.slice(part.start, part.end);
-          const res = await fetch(`${STORAGE_API}/uploads/${id}/parts/${part.n}`, {
+          const res = await fetch(`${STORAGE_API}/uploads/${id}/parts/${part.n}${scopeQS(opts)}`, {
             method: "PUT",
             credentials: "same-origin",
             headers: { "Content-Type": "application/octet-stream" },
@@ -211,7 +234,7 @@ async function uploadChunked(
     // All parts are on the server. Complete.
     const completion = (await jsonFetch<{ file: UploadedFile; was_existing: boolean }>(
       "POST",
-      `${STORAGE_API}/uploads/${id}/complete`,
+      `${STORAGE_API}/uploads/${id}/complete${scopeQS(opts)}`,
       { body: {}, signal: opts.signal },
     )).body;
     return completion.file;
@@ -220,21 +243,29 @@ async function uploadChunked(
     // bytes on disk if we don't wipe the session. Fire-and-forget
     // DELETE — server is idempotent on missing sessions, so a
     // race with the sweeper is harmless.
-    abortServerSession(id).catch(() => undefined);
+    abortServerSession(id, opts).catch(() => undefined);
     throw e;
   }
 }
 
 /** Cancel a multipart upload server-side. Idempotent. The panel
  *  calls this from its per-row Cancel button after aborting the
- *  in-flight AbortController. */
-export async function abortUploadServer(uploadId: string): Promise<void> {
-  return abortServerSession(uploadId);
+ *  in-flight AbortController. Pass the same project/install IDs the
+ *  upload was started with — required for global installs where the
+ *  sidecar reads scope from the query string. */
+export async function abortUploadServer(
+  uploadId: string,
+  opts: { projectId?: string; installId?: number } = {},
+): Promise<void> {
+  return abortServerSession(uploadId, opts);
 }
 
-async function abortServerSession(id: string): Promise<void> {
+async function abortServerSession(
+  id: string,
+  opts: { projectId?: string; installId?: number },
+): Promise<void> {
   try {
-    await fetch(`${STORAGE_API}/uploads/${id}`, {
+    await fetch(`${STORAGE_API}/uploads/${id}${scopeQS(opts)}`, {
       method: "DELETE",
       credentials: "same-origin",
       // Deliberately no AbortSignal here: the user's AbortController

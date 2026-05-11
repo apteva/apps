@@ -230,6 +230,8 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
         try {
           await uploadResumable(file, {
             folder,
+            projectId,
+            installId,
             signal: job.controller!.signal,
             onUploadIdAssigned: (sid) => {
               updateJob(job.id, { serverUploadId: sid });
@@ -284,7 +286,7 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
         if (j.status !== "uploading") return j;
         try { j.controller?.abort(); } catch {}
         if (j.serverUploadId) {
-          abortUploadServer(j.serverUploadId).catch(() => undefined);
+          abortUploadServer(j.serverUploadId, { projectId, installId }).catch(() => undefined);
         }
         return { ...j, status: "cancelled" };
       }),
