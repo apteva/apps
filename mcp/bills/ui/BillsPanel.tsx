@@ -6,6 +6,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent as ReactChangeEvent,
@@ -992,6 +993,237 @@ function AttachedDocumentSection({
   );
 }
 
+// SpendChart — purely client-side summary built from the already-
+// loaded bills list. Buckets by month and currency, splits each
+// monthly bar into paid (bottom) and not-yet-paid (top, dimmer).
+// Hover tooltips via native <title>. No new endpoints, no fetches;
+// reflects whatever filter / search the user has applied to the
+// list. Mounts in the no-bill-selected area of the right pane.
+function SpendChart({ bills }: { bills: Bill[] }) {
+  type MonthBucket = { paid: number; unpaid: number };
+  const byCurrency = useMemo(() => {
+    const out: Record<string, Record<string, MonthBucket>> = {};
+    for (const b of bills) {
+      if (b.status === "void") continue;
+      // Prefer the invoice date (when the expense was actually
+      // incurred); fall back to created_at so bills without an
+      // OCR'd date still show up.
+      const src = b.vendor_invoice_date || b.created_at;
+      if (!src) continue;
+      const d = new Date(src);
+      if (Number.isNaN(d.getTime())) continue;
+      const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      const cur = (b.currency || "USD").toUpperCase();
+      if (!out[cur]) out[cur] = {};
+      if (!out[cur][ym]) out[cur][ym] = { paid: 0, unpaid: 0 };
+      if (b.status === "paid") out[cur][ym].paid += b.total_cents;
+      else out[cur][ym].unpaid += b.total_cents;
+    }
+    return out;
+  }, [bills]);
+
+  const currencies = Object.keys(byCurrency).sort();
+  if (currencies.length === 0) {
+    return (
+      <div className="text-text-muted text-sm">
+        No spend data in the current view yet — upload a bill or clear the filters.
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-6 max-w-2xl">
+      <div>
+        <h2 className="text-sm font-medium text-text">Spend over time</h2>
+        <p className="text-xs text-text-muted mt-1">
+          Last 6 months · grouped by invoice date · matches the bills shown on the left.
+        </p>
+      </div>
+      {currencies.map((cur) => (
+        <CurrencyChart key={cur} currency={cur} months={byCurrency[cur]} />
+      ))}
+    </div>
+  );
+}
+
+function CurrencyChart({
+  currency,
+  months,
+}: {
+  currency: string;
+  months: Record<string, { paid: number; unpaid: number }>;
+}) {
+  // Always plot the trailing 6 months ending this month, even when
+  // some buckets are empty — gaps in spend are signal too.
+  const labels: string[] = useMemo(() => {
+    const now = new Date();
+    const arr: string[] = [];
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      arr.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+    }
+    return arr;
+  }, []);
+  const data = labels.map((ym) => months[ym] || { paid: 0, unpaid: 0 });
+  const max = Math.max(1, ...data.map((d) => d.paid + d.unpaid));
+  const total = data.reduce((s, d) => s + d.paid + d.unpaid, 0);
+  const paidTotal = data.reduce((s, d) => s + d.paid, 0);
+
+  // SVG viewBox in arbitrary units; the wrapper scales it to the
+  // container width.
+  const W = 520;
+  const H = 180;
+  const padTop = 16;
+  const padBottom = 32;
+  const padLeft = 56;
+  const padRight = 12;
+  const chartH = H - padTop - padBottom;
+  const chartW = W - padLeft - padRight;
+  const slotW = chartW / labels.length;
+  const barW = slotW * 0.7;
+  const barOff = slotW * 0.15;
+
+  const fmtShort = (cents: number) => {
+    const v = cents / 100;
+    if (v >= 1000) return `${(v / 1000).toFixed(1)}k`;
+    return v.toFixed(0);
+  };
+
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-3 mb-2">
+        <div className="flex items-baseline gap-3">
+          <h3 className="text-xs uppercase tracking-wide text-text-dim">{currency}</h3>
+          <span className="text-xs text-text-muted">
+            {fmtMoney(total, currency)} total · {fmtMoney(paidTotal, currency)} paid
+          </span>
+        </div>
+        <div className="flex items-center gap-3 text-[10px] text-text-muted">
+          <span className="inline-flex items-center gap-1">
+            <span className="inline-block h-2 w-2 rounded-sm bg-green-500/80" />
+            paid
+          </span>
+          <span className="inline-flex items-center gap-1">
+            <span className="inline-block h-2 w-2 rounded-sm bg-yellow-500/60" />
+            pending
+          </span>
+        </div>
+      </div>
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className="w-full"
+        preserveAspectRatio="xMidYMid meet"
+        role="img"
+        aria-label={`Spend over the last 6 months in ${currency}`}
+      >
+        {/* y=max + y=0 reference lines */}
+        <line
+          x1={padLeft}
+          y1={padTop}
+          x2={W - padRight}
+          y2={padTop}
+          stroke="currentColor"
+          className="text-border"
+          strokeOpacity={0.5}
+        />
+        <line
+          x1={padLeft}
+          y1={padTop + chartH}
+          x2={W - padRight}
+          y2={padTop + chartH}
+          stroke="currentColor"
+          className="text-border"
+        />
+        <text
+          x={padLeft - 6}
+          y={padTop + 4}
+          textAnchor="end"
+          className="fill-current text-text-dim"
+          fontSize="10"
+        >
+          {fmtShort(max)}
+        </text>
+        <text
+          x={padLeft - 6}
+          y={padTop + chartH + 4}
+          textAnchor="end"
+          className="fill-current text-text-dim"
+          fontSize="10"
+        >
+          0
+        </text>
+
+        {data.map((d, i) => {
+          const total = d.paid + d.unpaid;
+          const totalH = (total / max) * chartH;
+          const paidH = (d.paid / max) * chartH;
+          const x = padLeft + i * slotW + barOff;
+          const yTop = padTop + chartH - totalH;
+          const yPaidTop = padTop + chartH - paidH;
+          const monthShort = new Date(labels[i] + "-01").toLocaleDateString(undefined, {
+            month: "short",
+          });
+          return (
+            <g key={labels[i]}>
+              {/* unpaid stack (top) */}
+              {totalH - paidH > 0 && (
+                <rect
+                  x={x}
+                  y={yTop}
+                  width={barW}
+                  height={totalH - paidH}
+                  className="fill-yellow-500/60"
+                  rx={1}
+                >
+                  <title>
+                    {labels[i]} pending: {fmtMoney(d.unpaid, currency)}
+                  </title>
+                </rect>
+              )}
+              {/* paid stack (bottom) */}
+              {paidH > 0 && (
+                <rect
+                  x={x}
+                  y={yPaidTop}
+                  width={barW}
+                  height={paidH}
+                  className="fill-green-500/80"
+                  rx={1}
+                >
+                  <title>
+                    {labels[i]} paid: {fmtMoney(d.paid, currency)}
+                  </title>
+                </rect>
+              )}
+              {/* empty-bucket dotted baseline so the eye picks up the gap */}
+              {total === 0 && (
+                <line
+                  x1={x}
+                  y1={padTop + chartH}
+                  x2={x + barW}
+                  y2={padTop + chartH}
+                  stroke="currentColor"
+                  className="text-text-dim"
+                  strokeWidth={1.5}
+                  strokeOpacity={0.5}
+                />
+              )}
+              <text
+                x={x + barW / 2}
+                y={padTop + chartH + 16}
+                textAnchor="middle"
+                className="fill-current text-text-muted"
+                fontSize="10"
+              >
+                {monthShort}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
 function BillsTab({
   projectId,
   installId,
@@ -1686,9 +1918,11 @@ function BillsTab({
 
       <main className="flex-1 overflow-auto p-6">
         {!detail ? (
-          <div className="text-text-muted text-sm text-center mt-12">
-            {selectedId ? "Loading…" : "Select a bill to see details."}
-          </div>
+          selectedId ? (
+            <div className="text-text-muted text-sm text-center mt-12">Loading…</div>
+          ) : (
+            <SpendChart bills={list} />
+          )
         ) : (
           <BillDetail
             bill={detail}
