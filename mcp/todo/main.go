@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: todo
 display_name: Todo
-version: 0.4.0
+version: 0.4.1
 description: Personal todo list — human-first, agent-helpful.
 author: Apteva
 scopes: [project, global]
@@ -472,6 +472,14 @@ func setTodoTags(db *sql.DB, pid string, todoID int64, names []string) error {
 		); err != nil {
 			return err
 		}
+	}
+	// GC: drop tag rows in this scope that no todo references anymore,
+	// so the sidebar doesn't accrete zero-count zombies over time.
+	if _, err := db.Exec(
+		`DELETE FROM tags WHERE project_id = ?
+		   AND id NOT IN (SELECT DISTINCT tag_id FROM todo_tags)`, pid,
+	); err != nil {
+		return err
 	}
 	return nil
 }

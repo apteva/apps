@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: todo
 display_name: Todo
-version: 0.4.0
+version: 0.4.1
 description: |
   Personal todo list — human-first counterpart to the agent mission
   board (`tasks`). Inbox / Today / Upcoming views, lists (the

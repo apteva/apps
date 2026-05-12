@@ -356,10 +356,10 @@ export default function TodoPanel({}: NativePanelProps) {
           );
         })}
 
-        {tags.length > 0 && (
+        {tags.filter((t) => t.count > 0).length > 0 && (
           <>
             <div className="text-xs uppercase text-text-dim px-2 mt-3 mb-1">Tags</div>
-            {tags.map((t) => (
+            {tags.filter((t) => t.count > 0).map((t) => (
               <button
                 key={t.id}
                 onClick={() => setPickedTag(pickedTag === t.name ? null : t.name)}
