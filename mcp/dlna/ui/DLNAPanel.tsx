@@ -20,7 +20,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 const API = "/api/apps/dlna";
-const STORAGE_API = "/api/apps/storage";
 
 interface NativePanelProps {
   appName: string;
@@ -207,14 +206,14 @@ function AddFolderModal({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  // Walk storage's top-level folders. Two clicks deep is enough for
+  // Walk storage's top-level folders via the DLNA sidecar (which calls
+  // storage via PlatformAPI.CallAppResult, picking up the right project
+  // context). Hitting /api/apps/storage/folders from the browser fails
+  // when storage is installed globally — its handler demands a
+  // ?project_id= the panel doesn't have. Two clicks deep is enough for
   // the modal — anything more demanding belongs in the storage panel.
-  // Storage returns `{folders: ["a","b"], parent: "/"}` — an envelope
-  // with the names as a plain string array, NOT a list of objects.
-  // (Earlier versions of this panel called rows.map(...) directly on
-  // the envelope and crashed with "H.map is not a function".)
   useEffect(() => {
-    fetch(`${STORAGE_API}/folders?parent=/`)
+    fetch(`${API}/storage_folders?parent=/`)
       .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText)))
       .then((env: { folders?: string[] }) => {
         const names = Array.isArray(env?.folders) ? env.folders : [];

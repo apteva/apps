@@ -199,6 +199,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/published_folders/", Handler: a.handlePublishedFoldersItem},
 		{Pattern: "/clients", Handler: a.handleClientsRecent},
 		{Pattern: "/status", Handler: a.handleStatus},
+		{Pattern: "/storage_folders", Handler: a.handleStorageFolders},
 	}
 }
 
@@ -429,6 +430,29 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, out)
+}
+
+// handleStorageFolders proxies the panel's folder-picker to storage via
+// PlatformAPI.CallAppResult. The panel can't call /api/apps/storage/folders
+// directly because storage's HTTP handler demands a ?project_id= the panel
+// doesn't have when storage is installed at global scope; CallAppResult
+// goes through the MCP gateway which carries the calling install's
+// project context for it.
+func (a *App) handleStorageFolders(w http.ResponseWriter, r *http.Request) {
+	parent := r.URL.Query().Get("parent")
+	if parent == "" {
+		parent = "/"
+	}
+	subs, err := a.storageListFolders(r.Context(), parent)
+	if err != nil {
+		http.Error(w, err.Error(), 502)
+		return
+	}
+	names := make([]string, 0, len(subs))
+	for _, s := range subs {
+		names = append(names, s.Name)
+	}
+	writeJSON(w, map[string]any{"folders": names, "parent": parent})
 }
 
 // ─── MCP tools ──────────────────────────────────────────────────────
