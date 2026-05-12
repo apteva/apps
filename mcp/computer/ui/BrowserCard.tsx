@@ -53,7 +53,7 @@ export default function BrowserCard(props: Props) {
         items={[
           { label: "Backend", value: BACKEND_LABEL[props.backend] ?? props.backend },
           { label: "URL", value: props.url },
-          { label: "Instance", value: props.instance_id },
+          { label: "Agent", value: props.instance_id },
         ]}
       />
       {!props.preview && (

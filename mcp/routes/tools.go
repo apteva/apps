@@ -187,14 +187,14 @@ func ownerKindForInstallID(ctx *sdk.AppCtx, id int64) string {
 	if id == 0 {
 		return "manual"
 	}
-	inst, err := ctx.PlatformAPI().GetInstance(id)
-	if err != nil || inst == nil {
+	agent, err := ctx.GetAgent(id)
+	if err != nil || agent == nil {
 		return "app"
 	}
-	// PlatformInstance.Name is the install's display name; close
-	// enough for v0.1. When deploy/code grow well-known kinds, the
-	// caller can override owner_kind via a new arg.
-	return inst.Name
+	// PlatformAgent.Name is the install's display name; close enough
+	// for v0.1. When deploy/code grow well-known kinds, the caller
+	// can override owner_kind via a new arg.
+	return agent.Name
 }
 
 // strArg pulls a string from MCP args; mirrors the helper in code/.
