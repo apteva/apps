@@ -1,0 +1,22 @@
+name: default
+display_name: Default
+version: "1"
+description: |
+  Minimal magazine-style theme shipped with the content app. System
+  fonts, narrow centered content column, dark-mode friendly via CSS
+  variables. Designed to be readable on any device without
+  configuration; meant as the reference for custom themes.
+supports:
+  - posts
+  - pages
+  - feed
+  - sitemap
+  - per_page_templates
+templates:
+  - landing
+  - about
+color_vars:
+  - --content-fg
+  - --content-bg
+  - --content-muted
+  - --content-accent

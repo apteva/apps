@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+<channel>
+<title>{{ .SiteTitle }}</title>
+<link>{{ .PublicBaseURL }}/</link>
+<description>{{ .SiteTagline }}</description>
+{{ range .Posts }}
+<item>
+<title>{{ .Title }}</title>
+<link>{{ $.PublicBaseURL }}/posts/{{ .Slug }}</link>
+<pubDate>{{ formatDate .PublishedAt "Mon, 02 Jan 2006 15:04:05 -0700" }}</pubDate>
+<guid>{{ $.PublicBaseURL }}/posts/{{ .Slug }}</guid>
+{{ if .Excerpt }}<description>{{ .Excerpt }}</description>{{ end }}
+</item>
+{{ end }}
+</channel>
+</rss>

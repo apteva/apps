@@ -1,0 +1,6 @@
+{{- /* attrs: { media_ids[], columns } */ -}}
+<div class="block-gallery" style="grid-template-columns: repeat({{ if .Attrs.columns }}{{ .Attrs.columns }}{{ else }}3{{ end }}, 1fr);">
+  {{ range .Attrs.media_ids }}
+  <figure><img src="{{ media . }}" alt=""></figure>
+  {{ end }}
+</div>

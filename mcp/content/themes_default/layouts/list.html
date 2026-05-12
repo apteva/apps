@@ -1,0 +1,18 @@
+{{ define "main" }}
+<section class="post-list">
+  {{ if .ListTitle }}<h1 class="list-title">{{ .ListTitle }}</h1>{{ end }}
+  {{ if .Posts }}
+    {{ range .Posts }}
+      {{ template "post_card" . }}
+    {{ end }}
+    {{ if .Pagination }}
+    <nav class="pagination">
+      {{ if .Pagination.Prev }}<a href="{{ .Pagination.Prev }}">&larr; Newer</a>{{ end }}
+      {{ if .Pagination.Next }}<a href="{{ .Pagination.Next }}">Older &rarr;</a>{{ end }}
+    </nav>
+    {{ end }}
+  {{ else }}
+    <p class="empty">No posts yet.</p>
+  {{ end }}
+</section>
+{{ end }}

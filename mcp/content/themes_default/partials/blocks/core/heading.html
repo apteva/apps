@@ -1,0 +1,9 @@
+{{- /* attrs: { level, text }. Default level 2. */ -}}
+{{- $level := int .Attrs.level -}}
+{{- if eq $level 0 -}}{{- $level = 2 -}}{{- end -}}
+{{- if eq $level 1 -}}<h1>{{ .Attrs.text }}</h1>
+{{- else if eq $level 2 -}}<h2>{{ .Attrs.text }}</h2>
+{{- else if eq $level 3 -}}<h3>{{ .Attrs.text }}</h3>
+{{- else if eq $level 4 -}}<h4>{{ .Attrs.text }}</h4>
+{{- else if eq $level 5 -}}<h5>{{ .Attrs.text }}</h5>
+{{- else -}}<h6>{{ .Attrs.text }}</h6>{{- end -}}

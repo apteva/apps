@@ -1,0 +1,6 @@
+{{- /* container: each .Inner block becomes one column */ -}}
+<div class="block-columns" data-columns="{{ len .Inner }}">
+  {{ range .Inner }}
+  <div class="column">{{ renderBlock . }}</div>
+  {{ end }}
+</div>

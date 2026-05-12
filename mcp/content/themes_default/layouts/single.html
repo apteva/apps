@@ -1,0 +1,30 @@
+{{ define "main" }}
+<article class="post-single">
+  <header class="post-header">
+    <h1 class="post-title">{{ .Post.Title }}</h1>
+    {{ if and (eq .Post.Kind "post") .Post.PublishedAt }}
+    <p class="post-meta">
+      <time datetime="{{ .Post.PublishedAt }}">{{ formatDate .Post.PublishedAt "January 2, 2006" }}</time>
+      {{ if .Post.Author }} &middot; {{ .Post.Author }}{{ end }}
+    </p>
+    {{ end }}
+    {{ if .FeaturedMediaURL }}
+    <figure class="post-hero">
+      <img src="{{ .FeaturedMediaURL }}" alt="{{ .FeaturedMediaAlt }}">
+    </figure>
+    {{ end }}
+  </header>
+  <div class="post-body">
+    {{ renderBlocks .Post.BodyBlocks.Blocks }}
+  </div>
+  {{ if .Terms }}
+  <footer class="post-footer">
+    <ul class="post-terms">
+      {{ range .Terms }}
+      <li><a href="/{{ .Kind }}/{{ .Slug }}">{{ .Name }}</a></li>
+      {{ end }}
+    </ul>
+  </footer>
+  {{ end }}
+</article>
+{{ end }}

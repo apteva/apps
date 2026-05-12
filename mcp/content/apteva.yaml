@@ -1,0 +1,213 @@
+schema: apteva-app/v1
+
+name: content
+display_name: Content
+version: 1.0.0
+description: |
+  Block-based CMS for Apteva. Posts, pages, media, taxonomies, menus,
+  revisions, redirects. Renders themed HTML and exposes a headless REST
+  API from the same database, so external frontends can pull the same
+  content. Block authoring designed for agent ergonomics — every block
+  has a stable id the agent can target across edits.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/content
+tags: [content, cms, blog, website]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.instances.read
+    - platform.apps.call
+  integrations:
+    - role: storage
+      kind: app
+      compatible_app_names: [storage]
+      capabilities: [files.write, files.read]
+      required: false
+      label: "Storage (media + theme bundles)"
+      hint: "Optional. When bound, uploaded media bytes live at /.media/<uuid> in storage; custom themes at /.themes/<slug>/. Without it, content runs against the embedded default theme and rejects media uploads."
+    - role: image
+      kind: app
+      compatible_app_names: [image-studio]
+      required: false
+      label: "Image Studio (AI hero images)"
+    - role: social
+      kind: app
+      compatible_app_names: [social]
+      capabilities: [post.publish]
+      required: false
+      label: "Social (cross-post on publish)"
+    - role: newsletter
+      kind: app
+      compatible_app_names: [messaging]
+      capabilities: [message.send]
+      required: false
+      label: "Messaging (newsletter delivery)"
+    - role: audience
+      kind: app
+      compatible_app_names: [crm]
+      capabilities: [contacts.read, lists.read]
+      required: false
+      label: "CRM (subscribers + forms)"
+    - role: seo
+      kind: app
+      compatible_app_names: [seo]
+      required: false
+    - role: analytics
+      kind: app
+      compatible_app_names: [analytics]
+      required: false
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    # Posts + pages (kind-agnostic)
+    - name: posts_search
+      description: Filtered post/page search. Args filters by status, kind, term, parent.
+    - name: posts_get
+      description: Fetch one post or page (snapshot only).
+    - name: posts_get_context
+      description: Snapshot + revisions + terms + media + analytics — the agent's pre-flight read.
+    - name: posts_create
+      description: Create a post or page with optional block tree, terms, featured media, SEO.
+    - name: posts_update
+      description: Partial-patch a post or page. Always creates a revision.
+    - name: posts_publish
+      description: Publish immediately or schedule for a future time.
+    - name: posts_unpublish
+      description: Move back to draft.
+    - name: posts_archive
+      description: Soft-delete (archived).
+    - name: posts_set_homepage
+      description: Pin a page as the site homepage.
+    - name: posts_revisions_list
+      description: List revisions for a post.
+    - name: posts_revision_restore
+      description: Restore a prior revision as the current body.
+    # Blocks — structured authoring
+    - name: blocks_get
+      description: Return the full block tree for a post.
+    - name: blocks_insert
+      description: Insert a block at a position (after, before, or index). Returns new block id.
+    - name: blocks_update
+      description: Update attrs or inner of a block by id.
+    - name: blocks_move
+      description: Move a block to a new position within its parent.
+    - name: blocks_delete
+      description: Remove a block by id.
+    - name: blocks_replace_all
+      description: Replace the entire body block array atomically.
+    - name: blocks_duplicate
+      description: Duplicate a block in place; returns new block id.
+    - name: blocks_registry
+      description: List installed block types with their attribute schemas.
+    # Taxonomy
+    - name: terms_create
+      description: Create a category or tag.
+    - name: terms_list
+      description: List categories or tags.
+    - name: terms_assign
+      description: Assign terms to a post.
+    - name: terms_unassign
+      description: Remove terms from a post.
+    # Media
+    - name: media_upload
+      description: Upload media bytes (base64) or fetch from URL; stores via the bound storage app.
+    - name: media_list
+      description: List media items.
+    - name: media_set_meta
+      description: Update alt text or caption.
+    # Menus
+    - name: menus_create
+      description: Create a navigation menu.
+    - name: menus_list
+      description: List menus in this project.
+    - name: menus_get
+      description: Fetch a menu with its items.
+    - name: menus_set_items
+      description: Replace a menu's items atomically with a new tree.
+    # Redirects + settings + themes
+    - name: redirects_create
+      description: Create a redirect rule (301 or 302).
+    - name: redirects_list
+      description: List redirects.
+    - name: settings_get
+      description: Read site-wide settings (one key or all).
+    - name: settings_set
+      description: Write a site-wide setting.
+    - name: themes_list
+      description: List installed themes (always includes the embedded default).
+    - name: themes_set_active
+      description: Switch the active theme by slug.
+  ui_panels:
+    - slot: project.page
+      label: Content
+      icon: edit-3
+      entry: /ui/ContentPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/content
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/content.db
+  migrations: migrations/
+
+config_schema:
+  - name: site_title
+    type: text
+    label: Site title
+    default: "My Site"
+  - name: site_tagline
+    type: text
+    label: Tagline
+  - name: default_locale
+    type: text
+    default: "en"
+    label: Default locale
+  - name: timezone
+    type: text
+    default: "UTC"
+  - name: public_base_url
+    type: text
+    label: Public base URL
+    description: "Canonical link prefix used in sitemaps, feeds, and social cards."
+  - name: active_theme
+    type: text
+    default: "default"
+    label: Active theme slug
+  - name: render_mode
+    type: select
+    default: "server"
+    label: Render mode
+    options: [server, headless, hybrid]
+    description: "server = themed HTML on /. headless = REST only. hybrid = both."
+  - name: homepage_page_id
+    type: text
+    label: Homepage page id (optional)
+    description: "If set, / renders this page instead of the blog index."
+  - name: blog_root_path
+    type: text
+    default: "/posts"
+    label: Blog index path
+  - name: posts_per_page
+    type: text
+    default: "10"
+    label: Posts per index page
+  - name: autopost_social
+    type: toggle
+    default: "false"
+    label: Cross-post to bound social app on publish
+
+upgrade_policy: auto-patch

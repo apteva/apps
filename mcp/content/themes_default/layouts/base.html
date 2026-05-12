@@ -1,0 +1,27 @@
+{{- /* base layout: every page is wrapped in this. The `main` block is
+       redefined by single.html / list.html / per-page templates. */ -}}
+<!doctype html>
+<html lang="{{ .Locale }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ if .PageTitle }}{{ .PageTitle }} &middot; {{ end }}{{ .SiteTitle }}</title>
+{{ if .MetaDescription }}<meta name="description" content="{{ .MetaDescription }}">{{ end }}
+{{ if .Canonical }}<link rel="canonical" href="{{ .Canonical }}">{{ end }}
+<link rel="alternate" type="application/rss+xml" title="{{ .SiteTitle }}" href="/feed.xml">
+<link rel="stylesheet" href="{{ asset "style.css" }}">
+{{ if .OpenGraph }}
+<meta property="og:title" content="{{ .OpenGraph.Title }}">
+<meta property="og:description" content="{{ .OpenGraph.Description }}">
+{{ if .OpenGraph.Image }}<meta property="og:image" content="{{ .OpenGraph.Image }}">{{ end }}
+<meta property="og:type" content="{{ .OpenGraph.Type }}">
+{{ end }}
+</head>
+<body>
+{{ template "header" . }}
+<main class="content-main">
+{{ block "main" . }}{{ end }}
+</main>
+{{ template "footer" . }}
+</body>
+</html>

@@ -1,0 +1,2 @@
+{{- /* attrs: { label, url, style } */ -}}
+<p class="block-button"><a href="{{ .Attrs.url }}" class="button style-{{ if .Attrs.style }}{{ .Attrs.style }}{{ else }}primary{{ end }}">{{ .Attrs.label }}</a></p>
