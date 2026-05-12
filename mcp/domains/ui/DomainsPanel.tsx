@@ -24,6 +24,7 @@ interface Domain {
   name: string;
   registrar_slug?: string;
   dns_provider_slug?: string;
+  connection_id?: number;
   expires_at?: string;
   notes?: string;
   created_at?: string;
@@ -40,6 +41,19 @@ interface DNSRecord {
   notes?: string;
 }
 
+interface Connection {
+  id: number;
+  app_slug: string;
+  name: string;
+  status: string;
+}
+
+function providerLabel(slug: string): string {
+  if (slug === "porkbun") return "Porkbun";
+  if (slug === "namecheap") return "Namecheap";
+  return slug;
+}
+
 const API = "/api/apps/domains";
 const RECORD_TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV", "CAA", "ALIAS"] as const;
 
@@ -52,6 +66,7 @@ const inputCls =
 
 export default function DomainsPanel({ projectId, installId }: NativePanelProps) {
   const [domains, setDomains] = useState<Domain[]>([]);
+  const [connections, setConnections] = useState<Connection[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [selected, setSelected] = useState<Domain | null>(null);
@@ -97,6 +112,15 @@ export default function DomainsPanel({ projectId, installId }: NativePanelProps)
 
   useEffect(() => { reload(); }, [reload]);
 
+  // Fetch the project's compatible DNS connections so the Add form
+  // can offer per-domain pinning. Soft-fail: if the platform doesn't
+  // grant connections.read, the form falls back to "Default" only.
+  useEffect(() => {
+    api<{ connections: Connection[] }>("GET", "/connections")
+      .then((r) => setConnections(r.connections || []))
+      .catch(() => setConnections([]));
+  }, [api]);
+
   const callTool = useCallback(async (tool: string, args: Record<string, unknown>) => {
     return api<Record<string, unknown>>("POST", "/tools/call", {}, { tool, args });
   }, [api]);
@@ -124,7 +148,8 @@ export default function DomainsPanel({ projectId, installId }: NativePanelProps)
       <div className="flex-1 min-h-0 flex">
         <div className="flex-1 min-w-0 overflow-auto">
           <AddDomainForm
-            onAdded={() => reload()}
+            connections={connections}
+            onAdded={(d) => { reload(); if (d) setSelected(d); }}
             callTool={callTool}
           />
           <DomainList
@@ -150,14 +175,20 @@ export default function DomainsPanel({ projectId, installId }: NativePanelProps)
 
 // ─── Add domain form ─────────────────────────────────────────────
 
+// "default"  → no connection_id sent; backend snapshots the role binding.
+// "other"    → no connection_id, sends skip_validation; provider unknown.
+// "<id>"     → pin this domain to that specific connection.
+type ConnectionChoice = "default" | "other" | string;
+
 function AddDomainForm({
-  onAdded, callTool,
+  connections, onAdded, callTool,
 }: {
-  onAdded: () => void;
+  connections: Connection[];
+  onAdded: (domain?: Domain) => void;
   callTool: (tool: string, args: Record<string, unknown>) => Promise<Record<string, unknown>>;
 }) {
   const [name, setName] = useState("");
-  const [registrar, setRegistrar] = useState("porkbun");
+  const [pick, setPick] = useState<ConnectionChoice>("default");
   const [notes, setNotes] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -167,15 +198,20 @@ function AddDomainForm({
     setBusy(true);
     setErr("");
     try {
-      await callTool("domain_add", {
+      const args: Record<string, unknown> = {
         name: name.trim(),
-        registrar,
-        dns_provider: registrar, // assume same; v0.2 splits these
         notes: notes.trim(),
-      });
+      };
+      if (pick === "other") {
+        args.skip_validation = true;
+      } else if (pick !== "default") {
+        args.connection_id = parseInt(pick, 10);
+      }
+      const result = await callTool("domain_add", args);
       setName("");
       setNotes("");
-      onAdded();
+      setPick("default");
+      onAdded(result.domain as Domain | undefined);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -194,15 +230,19 @@ function AddDomainForm({
           required
         />
       </Field>
-      <Field label="Registrar / DNS provider">
+      <Field label="DNS connection">
         <select
-          className={inputCls + " w-44"}
-          value={registrar}
-          onChange={(e) => setRegistrar(e.target.value)}
+          className={inputCls + " w-56"}
+          value={pick}
+          onChange={(e) => setPick(e.target.value as ConnectionChoice)}
         >
-          <option value="porkbun">Porkbun</option>
-          <option value="namecheap">Namecheap</option>
-          <option value="">Other / unknown</option>
+          <option value="default">Default (install binding)</option>
+          {connections.map((c) => (
+            <option key={c.id} value={String(c.id)}>
+              {providerLabel(c.app_slug)} — {c.name || `connection ${c.id}`}
+            </option>
+          ))}
+          <option value="other">Other / unknown</option>
         </select>
       </Field>
       <Field label="Notes (optional)">

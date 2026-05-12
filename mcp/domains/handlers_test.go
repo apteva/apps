@@ -37,6 +37,7 @@ func (s *stubPlatform) ExecuteIntegrationTool(connID int64, tool string, input m
 	// Default empty success.
 	return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"status":"SUCCESS"}`)}, nil
 }
+
 func (s *stubPlatform) CallApp(string, string, map[string]any) (json.RawMessage, error) {
 	return nil, nil
 }
@@ -145,6 +146,163 @@ func TestDomainRemove_SoftDeletes(t *testing.T) {
 	// the partial-unique index doesn't conflict).
 	if _, err := app.toolDomainAdd(ctx, map[string]any{"name": "acme.com"}); err != nil {
 		t.Errorf("re-add after remove should work: %v", err)
+	}
+}
+
+// ─── Validate-on-add ──────────────────────────────────────────────
+
+func TestDomainAdd_ValidatesAtProvider(t *testing.T) {
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"list_dns_records": {Success: false, Status: 404, Data: json.RawMessage(`{"status":"ERROR","message":"unknown domain"}`)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	_, err := app.toolDomainAdd(ctx, map[string]any{
+		"name":         "typo.com",
+		"registrar":    "porkbun",
+		"dns_provider": "porkbun",
+	})
+	if err == nil || !strings.Contains(err.Error(), "validate") {
+		t.Fatalf("expected validation error, got %v", err)
+	}
+	// Add must NOT have written to the DB.
+	listed, _ := app.toolDomainList(ctx, map[string]any{})
+	if listed.(map[string]any)["count"].(int) != 0 {
+		t.Errorf("expected 0 domains after failed validation, got %v", listed)
+	}
+}
+
+func TestDomainAdd_SkipValidation(t *testing.T) {
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"list_dns_records": {Success: false, Status: 404, Data: json.RawMessage(`{"status":"ERROR"}`)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	_, err := app.toolDomainAdd(ctx, map[string]any{
+		"name":            "preregistered.com",
+		"registrar":       "porkbun",
+		"dns_provider":    "porkbun",
+		"skip_validation": true,
+	})
+	if err != nil {
+		t.Fatalf("skip_validation should bypass probe: %v", err)
+	}
+	// Provider should not have been hit at all.
+	for _, c := range plat.calls {
+		if c.Tool == "list_dns_records" {
+			t.Errorf("skip_validation=true but provider was probed anyway: %+v", c)
+		}
+	}
+}
+
+func TestDomainAdd_NoProviderSkipsValidation(t *testing.T) {
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{}, // no dns_provider bound
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	if _, err := app.toolDomainAdd(ctx, map[string]any{"name": "acme.com"}); err != nil {
+		t.Fatalf("unbound provider should skip validation, got %v", err)
+	}
+	for _, c := range plat.calls {
+		if c.Tool == "list_dns_records" {
+			t.Errorf("provider unbound but probe was attempted: %+v", c)
+		}
+	}
+}
+
+// ─── Per-domain connection pinning ────────────────────────────────
+
+func TestDomainAdd_SnapshotsRoleBindingConnection(t *testing.T) {
+	// stubPlatform's WhoAmI binds dns_provider → connection 1.
+	ctx := newTestCtx(t, &stubPlatform{})
+	app := &App{}
+
+	out, err := app.toolDomainAdd(ctx, map[string]any{
+		"name":         "acme.com",
+		"registrar":    "porkbun",
+		"dns_provider": "porkbun",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := out.(map[string]any)["domain"].(*Domain)
+	if d.ConnectionID != 1 {
+		t.Errorf("expected role binding (1) snapshotted onto row, got connection_id=%d", d.ConnectionID)
+	}
+}
+
+func TestDomainAdd_HonorsExplicitConnectionID(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+	app := &App{}
+
+	out, err := app.toolDomainAdd(ctx, map[string]any{
+		"name":          "shop.example",
+		"connection_id": 7,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := out.(map[string]any)["domain"].(*Domain)
+	if d.ConnectionID != 7 {
+		t.Errorf("expected explicit connection_id=7 stored, got %d", d.ConnectionID)
+	}
+}
+
+func TestDomainRecordsList_RoutesViaPinnedConnection(t *testing.T) {
+	plat := newPorkbunStub(nil)
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	// Add domain pinned to connection 42 — explicit pin overrides
+	// the role binding's id (1).
+	if _, err := app.toolDomainAdd(ctx, map[string]any{
+		"name":            "shop.example",
+		"connection_id":   42,
+		"skip_validation": true, // don't pollute call recording with a probe
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := app.toolDomainRecordsList(ctx, map[string]any{"domain": "shop.example"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the list_dns_records call hit connection 42, not 1.
+	var listCalls []executeCall
+	for _, c := range plat.calls {
+		if c.Tool == "list_dns_records" {
+			listCalls = append(listCalls, c)
+		}
+	}
+	if len(listCalls) != 1 {
+		t.Fatalf("expected exactly one list_dns_records call, got %d", len(listCalls))
+	}
+	if listCalls[0].ConnID != 42 {
+		t.Errorf("expected list to route via connection 42, got %d", listCalls[0].ConnID)
+	}
+}
+
+func TestDomainRecordsList_FallsBackToRoleBindingForUnknownDomain(t *testing.T) {
+	plat := newPorkbunStub(nil)
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	// Domain not in inventory → no row → fall back to role binding (1).
+	if _, err := app.toolDomainRecordsList(ctx, map[string]any{"domain": "uninventoried.com"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range plat.calls {
+		if c.Tool == "list_dns_records" && c.ConnID != 1 {
+			t.Errorf("expected fall-back to role binding (1), got connID %d", c.ConnID)
+		}
 	}
 }
 
@@ -311,7 +469,7 @@ func TestDomainRecordsList_NoProviderBound(t *testing.T) {
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 	_, err := app.toolDomainRecordsList(ctx, map[string]any{"domain": "acme.com"})
-	if err == nil || err.Error() != "no dns_provider bound — install/select a Porkbun or Namecheap connection" {
+	if err == nil || !strings.Contains(err.Error(), "no dns_provider bound") {
 		t.Errorf("expected unbound-provider error, got %v", err)
 	}
 }

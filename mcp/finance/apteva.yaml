@@ -1,0 +1,104 @@
+schema: apteva-app/v1
+
+name: finance
+display_name: Finance
+version: 0.1.0
+description: |
+  Unified personal-wealth tracker. Cash, stocks, ETFs, crypto, P2P,
+  real estate, vehicles, pensions, loans — all in one ledger. v0.1
+  is manual-entry; v0.2 adds integrations (Trading 212 first, then
+  Plaid, Mintos, Binance, …) via the platform integrations engine.
+  Net worth, allocation, performance, cashflow reports.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/finance
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/finance/icon.png
+tags: [finance, wealth, portfolio, net-worth, investing]
+
+scopes: [project]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+  integrations: []
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: settings_get,        description: "Read project settings (base_currency, week_starts_on)." }
+    - { name: settings_set,        description: "Update project settings. Args: base_currency?, week_starts_on?." }
+
+    - { name: accounts_list,       description: "List accounts (archived included; filter client-side)." }
+    - { name: accounts_get,        description: "Read one account with current balance + holdings." }
+    - { name: accounts_create,     description: "Create an account. Args: name, kind, currency?, opening_balance?, opening_at?, color?." }
+    - { name: accounts_update,     description: "Update an account. Args: id, name?, color?, archived?, opening_balance?, opening_at?." }
+    - { name: accounts_delete,     description: "Delete an account and all its holdings + transactions." }
+
+    - { name: instruments_search,  description: "Search instruments by symbol / ISIN / name. Args: query, kind?, project_only?." }
+    - { name: instruments_get,     description: "Read one instrument." }
+    - { name: instruments_create,  description: "Create an instrument (typically for real_estate / vehicle / private p2p). Args: kind, symbol, name, quote_currency, isin?, exchange?, metadata?." }
+    - { name: instruments_update,  description: "Update an instrument. Args: id, name?, exchange?, metadata?." }
+
+    - { name: holdings_list,       description: "List holdings, optionally filtered. Args: account_id?, instrument_id?, include_closed?." }
+    - { name: holdings_get,        description: "Read one holding with computed current value + P&L." }
+    - { name: holdings_set,        description: "Manual upsert of a holding's quantity / cost_basis (no ledger entry). Args: account_id, instrument_id, quantity, cost_basis?." }
+
+    - { name: txns_list,           description: "List transactions. Args: account_id?, holding_id?, kind?, category_id?, from?, to?, payee?, limit?." }
+    - { name: txns_get,            description: "Read one transaction." }
+    - { name: txns_create,         description: "Create a generic transaction (deposit/withdraw/income/expense/fee/tax). For buy/sell/dividend/interest/transfer/valuation use the convenience tools." }
+    - { name: txns_update,         description: "Update a transaction's metadata (payee, memo, category). Amount/quantity edits require delete + recreate to keep holdings consistent." }
+    - { name: txns_delete,         description: "Delete a transaction and reverse its holding impact." }
+
+    - { name: txns_buy,            description: "Record a buy. Args: account_id, instrument_id, quantity, amount (positive — gross spent), posted_at, fee?, memo?." }
+    - { name: txns_sell,           description: "Record a sell. Args: account_id, instrument_id, quantity, amount (positive — gross received), posted_at, fee?, memo?." }
+    - { name: txns_dividend,       description: "Record a dividend. Args: account_id, instrument_id, amount, posted_at, memo?." }
+    - { name: txns_interest,       description: "Record interest (P2P / savings). Args: account_id, amount, posted_at, instrument_id?, memo?." }
+    - { name: txns_transfer,       description: "Move cash between two accounts (same currency in v0.1). Args: from_account_id, to_account_id, amount, posted_at, memo?." }
+
+    - { name: valuation_set,       description: "Re-value an illiquid holding (real estate / vehicle / private). Writes a price-series row + audit 'valuation' transaction. Args: instrument_id, value, as_of?, account_id? (for the audit row)." }
+
+    - { name: categories_list,     description: "List categories." }
+    - { name: categories_create,   description: "Create a category. Args: name, kind (income|expense), parent_id?, color?." }
+    - { name: categories_update,   description: "Update a category. Args: id, name?, color?, archived?, parent_id?." }
+    - { name: categories_delete,   description: "Delete a category (transactions get NULL category)." }
+    - { name: categories_seed,     description: "Idempotent seed of a default category tree (Income/Salary, Food/Groceries, Housing/Rent, …)." }
+
+    - { name: prices_set,          description: "Manually set a price for an instrument at as_of (RFC3339 date). Args: instrument_id, price (minor units), as_of?, source?." }
+    - { name: prices_get,          description: "Get the latest price for an instrument ≤ as_of. Args: instrument_id, as_of?." }
+
+    - { name: fx_set,              description: "Manually set an FX rate. Args: base, quote, rate, as_of?." }
+
+    - { name: reports_net_worth,   description: "Net worth at a point or as a series. Args: at? (RFC3339; default now), series? ('monthly'|'weekly'|null), from?, to?. Returns total in base_currency + per-account / per-kind / per-currency breakdowns." }
+    - { name: reports_allocation,  description: "Current asset allocation. Returns groups by account.kind, instrument.kind, currency, and top instruments." }
+    - { name: reports_performance, description: "Per-holding & portfolio cost basis vs current value, unrealised P&L, realised P&L from sells. Args: from?, to?." }
+    - { name: reports_cashflow,    description: "Income vs expense per period bucket. Args: from, to, bucket? ('weekly'|'monthly'; default monthly)." }
+
+    - { name: import_csv,          description: "Import a CSV of transactions. Args: account_id, csv (string), mapping ({date,amount,memo,payee,category? → column index/name})." }
+
+    - { name: budgets_list,        description: "List active budgets." }
+    - { name: budgets_set,         description: "Upsert a per-category budget. Args: category_id? (NULL for total-spend), period? (default monthly), amount (minor units, base currency)." }
+    - { name: budgets_delete,      description: "Delete a budget. Args: id." }
+    - { name: budgets_status,      description: "Per-budget spent/remaining/over for the period containing as_of. Hierarchical: a parent-category budget rolls up its descendants. Args: as_of?, period? (default monthly)." }
+  ui_panels:
+    - slot: project.page
+      label: Finance
+      icon: wallet
+      entry: /ui/FinancePanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/finance
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/finance.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch

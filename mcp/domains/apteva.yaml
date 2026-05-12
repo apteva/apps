@@ -28,6 +28,7 @@ requires:
     - db.write.app
     - net.egress
     - platform.connections.execute
+    - platform.connections.read
   integrations:
     - role: dns_provider
       kind: integration
@@ -51,7 +52,7 @@ provides:
     - prefix: /
   mcp_tools:
     # local inventory
-    - { name: domain_add,            description: "Register a domain with this app. Args: name (e.g. acme.com), registrar?, dns_provider?. The domain itself must already be registered with the bound provider — this just records it locally so other apps can reference it." }
+    - { name: domain_add,            description: "Register a domain with this app. By default the bound DNS provider is probed to confirm the domain exists there before recording it locally — pass skip_validation:true to bypass. Args: name (e.g. acme.com), registrar?, dns_provider?, notes?, skip_validation?." }
     - { name: domain_remove,         description: "Soft-delete a domain from this app's inventory. Doesn't touch the actual registration. Args: name." }
     - { name: domain_list,           description: "List domains registered with this app for the current project." }
     - { name: domain_get,            description: "Fetch one domain's local record. Args: name." }

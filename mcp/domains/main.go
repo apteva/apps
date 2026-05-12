@@ -47,6 +47,7 @@ requires:
     - db.write.app
     - net.egress
     - platform.connections.execute
+    - platform.connections.read
   integrations:
     - role: dns_provider
       kind: integration
@@ -122,6 +123,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/domains", Handler: a.handleDomainsList},
 		{Pattern: "/domains/", Handler: a.handleDomainItem},
+		{Pattern: "/connections", Handler: a.handleConnectionsList},
 		{Pattern: "/tools/call", Handler: a.handleToolsCall},
 	}
 }
@@ -130,12 +132,14 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "domain_add",
-			Description: "Register a domain with this app. The domain itself must already exist at the bound DNS provider — this just records it locally for other apps to reference. Args: name (e.g. 'acme.com'), registrar?, dns_provider?, notes?.",
+			Description: "Register a domain with this app. By default the bound DNS provider is probed to confirm the domain exists there before recording it locally — pass skip_validation:true to bypass (just-registered domains, provider outage, externally-hosted DNS). Args: name (e.g. 'acme.com'), connection_id? (specific provider connection; defaults to the install's role binding), registrar?, dns_provider?, notes?, skip_validation?.",
 			InputSchema: schemaObject(map[string]any{
-				"name":              map[string]any{"type": "string"},
-				"registrar":         map[string]any{"type": "string"},
-				"dns_provider":      map[string]any{"type": "string"},
-				"notes":             map[string]any{"type": "string"},
+				"name":            map[string]any{"type": "string"},
+				"connection_id":   map[string]any{"type": "integer"},
+				"registrar":       map[string]any{"type": "string"},
+				"dns_provider":    map[string]any{"type": "string"},
+				"notes":           map[string]any{"type": "string"},
+				"skip_validation": map[string]any{"type": "boolean"},
 			}, []string{"name"}),
 			Handler: a.toolDomainAdd,
 		},
@@ -226,10 +230,14 @@ type Domain struct {
 	Name            string `json:"name"`
 	RegistrarSlug   string `json:"registrar_slug,omitempty"`
 	DNSProviderSlug string `json:"dns_provider_slug,omitempty"`
-	ExpiresAt       string `json:"expires_at,omitempty"`
-	Notes           string `json:"notes,omitempty"`
-	CreatedAt       string `json:"created_at,omitempty"`
-	UpdatedAt       string `json:"updated_at,omitempty"`
+	// ConnectionID pins this domain to one specific DNS provider
+	// connection. Zero means fall back to the install's role
+	// binding (legacy / pre-v0.3 / "Other" rows).
+	ConnectionID int64  `json:"connection_id,omitempty"`
+	ExpiresAt    string `json:"expires_at,omitempty"`
+	Notes        string `json:"notes,omitempty"`
+	CreatedAt    string `json:"created_at,omitempty"`
+	UpdatedAt    string `json:"updated_at,omitempty"`
 }
 
 // DNSRecord is the canonical shape we hand back to callers — flat,
@@ -330,29 +338,62 @@ func (a *App) toolDomainAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	reg := strings.ToLower(strings.TrimSpace(strArg(args, "registrar")))
 	dns := strings.ToLower(strings.TrimSpace(strArg(args, "dns_provider")))
-	if dns == "" {
-		dns = reg
+
+	// Resolve which connection this domain pins to. Explicit
+	// connection_id wins; otherwise snapshot the install's role
+	// binding so re-binding the role later doesn't quietly
+	// reroute existing domains. Zero means "no pin" — record ops
+	// will fall back to the role binding at call time.
+	connID := int64(intArg(args, "connection_id", 0))
+	if connID == 0 {
+		if bound := ctx.IntegrationFor("dns_provider"); bound != nil {
+			connID = bound.ConnectionID
+		}
 	}
-	if dns == "" {
-		// Best-effort: read the bound dns_provider's slug.
-		if bound := ctx.IntegrationFor("dns_provider"); bound != nil && bound.AppSlug != "" {
-			dns = bound.AppSlug
+
+	// If we have a connection, derive its slug and use that as the
+	// authoritative dns_provider_slug. The free-text dns_provider arg
+	// is now just a hint for the "Other / unknown" path.
+	if connID > 0 {
+		if conn, cerr := ctx.PlatformAPI().GetConnection(connID); cerr == nil && conn != nil && conn.AppSlug != "" {
+			dns = conn.AppSlug
 			if reg == "" {
 				reg = dns
 			}
 		}
 	}
+	if dns == "" {
+		dns = reg
+	}
 	notes := strArg(args, "notes")
+
+	// Validate the domain exists at the resolved provider before
+	// recording it. Catches typos and wrong-provider bindings up
+	// front. Skipped when no provider can be resolved (no connection
+	// pinned and no role bound), the slug is unsupported, or the
+	// caller opts out.
+	if !boolArg(args, "skip_validation", false) {
+		if prov, _, perr := a.providerFor(ctx, connID); perr == nil {
+			if _, lerr := prov.List(ctx, name); lerr != nil {
+				return nil, fmt.Errorf("validate %q at provider: %w (pass skip_validation:true to add anyway)", name, lerr)
+			}
+		}
+	}
+
+	// SQLite NULLIF(?, 0) → NULL when the caller passed no
+	// connection, so the COALESCE preserves the existing pin on
+	// re-add instead of clobbering it.
 	res, err := ctx.AppDB().Exec(
-		`INSERT INTO domains (project_id, name, registrar_slug, dns_provider_slug, notes)
-		 VALUES (?, ?, ?, ?, ?)
+		`INSERT INTO domains (project_id, name, registrar_slug, dns_provider_slug, notes, connection_id)
+		 VALUES (?, ?, ?, ?, ?, NULLIF(?, 0))
 		 ON CONFLICT(project_id, name) WHERE deleted_at IS NULL
 		 DO UPDATE SET
 		   registrar_slug    = COALESCE(NULLIF(excluded.registrar_slug,''), domains.registrar_slug),
 		   dns_provider_slug = COALESCE(NULLIF(excluded.dns_provider_slug,''), domains.dns_provider_slug),
+		   connection_id     = COALESCE(excluded.connection_id, domains.connection_id),
 		   notes             = COALESCE(NULLIF(excluded.notes,''), domains.notes),
 		   updated_at        = CURRENT_TIMESTAMP`,
-		pid, name, reg, dns, notes,
+		pid, name, reg, dns, notes, connID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert domain: %w", err)
@@ -433,10 +474,36 @@ type dnsProviderImpl interface {
 	Delete(ctx *sdk.AppCtx, domain, sub, rtype string) error
 }
 
-func (a *App) provider(ctx *sdk.AppCtx) (dnsProviderImpl, *sdk.BoundIntegration, error) {
+// providerFor resolves the DNS provider to use for a given connection
+// id. When connID==0 it falls back to the install's role binding (the
+// pre-v0.3 path and the default for new domains added without an
+// explicit connection_id).
+func (a *App) providerFor(ctx *sdk.AppCtx, connID int64) (dnsProviderImpl, *sdk.BoundIntegration, error) {
+	if connID > 0 {
+		conn, err := ctx.PlatformAPI().GetConnection(connID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("look up connection %d: %w", connID, err)
+		}
+		if conn == nil {
+			return nil, nil, fmt.Errorf("connection %d not found", connID)
+		}
+		bound := &sdk.BoundIntegration{
+			Role:         "dns_provider",
+			Kind:         "integration",
+			ConnectionID: connID,
+			AppSlug:      conn.AppSlug,
+		}
+		switch conn.AppSlug {
+		case "porkbun":
+			return &porkbunProvider{bound: bound}, bound, nil
+		case "namecheap":
+			return &namecheapProvider{bound: bound}, bound, nil
+		}
+		return nil, bound, fmt.Errorf("unsupported provider slug %q on connection %d (compatible: porkbun, namecheap)", conn.AppSlug, connID)
+	}
 	bound := ctx.IntegrationFor("dns_provider")
 	if bound == nil {
-		return nil, nil, errors.New("no dns_provider bound — install/select a Porkbun or Namecheap connection")
+		return nil, nil, errors.New("no dns_provider bound — install/select a Porkbun or Namecheap connection, or pass connection_id explicitly")
 	}
 	switch bound.AppSlug {
 	case "porkbun":
@@ -445,6 +512,12 @@ func (a *App) provider(ctx *sdk.AppCtx) (dnsProviderImpl, *sdk.BoundIntegration,
 		return &namecheapProvider{bound: bound}, bound, nil
 	}
 	return nil, bound, fmt.Errorf("unsupported dns_provider slug %q (compatible: porkbun, namecheap)", bound.AppSlug)
+}
+
+// provider is the legacy entry point — kept for callers that don't
+// yet have a domain row in hand. Equivalent to providerFor(ctx, 0).
+func (a *App) provider(ctx *sdk.AppCtx) (dnsProviderImpl, *sdk.BoundIntegration, error) {
+	return a.providerFor(ctx, 0)
 }
 
 func providerCall(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, tool string, payload map[string]any) (json.RawMessage, error) {
@@ -785,12 +858,27 @@ func splitSLDTLD(domain string) (sld, tld string) {
 
 // ─── Tool handlers (use dnsProviderImpl) ───────────────────────────
 
+// resolveProviderForDomain looks up the connection pinned on the
+// domain row (when one exists) and returns the matching provider.
+// Falls back to the role binding for domains not in the inventory or
+// rows added before per-domain pinning landed.
+func (a *App) resolveProviderForDomain(ctx *sdk.AppCtx, args map[string]any, name string) (dnsProviderImpl, error) {
+	var connID int64
+	if pid, perr := resolveProjectFromArgs(args); perr == nil {
+		if d, _ := dbDomainGetByName(ctx.AppDB(), pid, name); d != nil {
+			connID = d.ConnectionID
+		}
+	}
+	prov, _, err := a.providerFor(ctx, connID)
+	return prov, err
+}
+
 func (a *App) toolDomainRecordsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	domain, err := normaliseDomainName(strArg(args, "domain"))
 	if err != nil {
 		return nil, fmt.Errorf("domain: %w", err)
 	}
-	prov, _, err := a.provider(ctx)
+	prov, err := a.resolveProviderForDomain(ctx, args, domain)
 	if err != nil {
 		return nil, err
 	}
@@ -826,7 +914,7 @@ func (a *App) toolDomainRecordsSet(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}
 	ttl := intArg(args, "ttl", 600)
 
-	prov, _, err := a.provider(ctx)
+	prov, err := a.resolveProviderForDomain(ctx, args, domain)
 	if err != nil {
 		return nil, err
 	}
@@ -854,7 +942,7 @@ func (a *App) toolDomainRecordsDelete(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	prov, _, err := a.provider(ctx)
+	prov, err := a.resolveProviderForDomain(ctx, args, domain)
 	if err != nil {
 		return nil, err
 	}
@@ -961,6 +1049,36 @@ func (a *App) handleDomainItem(w http.ResponseWriter, r *http.Request) {
 	httpJSON(w, map[string]any{"domain": d})
 }
 
+// handleConnectionsList — feeds the panel's connection picker. Returns
+// every Porkbun + Namecheap connection in this project so the operator
+// can pin one specifically when adding a domain. Not an MCP tool because
+// agents shouldn't be picking connections for users; this is operator UI.
+func (a *App) handleConnectionsList(w http.ResponseWriter, r *http.Request) {
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	type conn struct {
+		ID      int64  `json:"id"`
+		AppSlug string `json:"app_slug"`
+		Name    string `json:"name"`
+		Status  string `json:"status"`
+	}
+	out := []conn{}
+	for _, slug := range []string{"porkbun", "namecheap"} {
+		rows, err := globalCtx.PlatformAPI().ListConnections(sdk.ConnectionFilter{ProjectID: pid, AppSlug: slug})
+		if err != nil {
+			httpErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		for _, c := range rows {
+			out = append(out, conn{ID: c.ID, AppSlug: c.AppSlug, Name: c.Name, Status: c.Status})
+		}
+	}
+	httpJSON(w, map[string]any{"connections": out})
+}
+
 // handleToolsCall — same generic dispatcher messaging uses, so the
 // panel can call any tool via a single HTTP path.
 func (a *App) handleToolsCall(w http.ResponseWriter, r *http.Request) {
@@ -1004,11 +1122,30 @@ func (a *App) handleToolsCall(w http.ResponseWriter, r *http.Request) {
 
 // ─── DB helpers ────────────────────────────────────────────────────
 
+const domainSelectCols = `id, project_id, name,
+	COALESCE(registrar_slug,''), COALESCE(dns_provider_slug,''),
+	COALESCE(connection_id, 0),
+	COALESCE(expires_at,''), COALESCE(notes,''),
+	COALESCE(created_at,''), COALESCE(updated_at,'')`
+
+func scanDomain(s interface{ Scan(...any) error }) (*Domain, error) {
+	d := &Domain{}
+	err := s.Scan(&d.ID, &d.ProjectID, &d.Name,
+		&d.RegistrarSlug, &d.DNSProviderSlug,
+		&d.ConnectionID,
+		&d.ExpiresAt, &d.Notes, &d.CreatedAt, &d.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
 func dbDomainList(db *sql.DB, pid string) ([]*Domain, error) {
 	rows, err := db.Query(
-		`SELECT id, project_id, name, COALESCE(registrar_slug,''), COALESCE(dns_provider_slug,''),
-		        COALESCE(expires_at,''), COALESCE(notes,''),
-		        COALESCE(created_at,''), COALESCE(updated_at,'')
+		`SELECT `+domainSelectCols+`
 		 FROM domains WHERE project_id = ? AND deleted_at IS NULL
 		 ORDER BY name`, pid)
 	if err != nil {
@@ -1017,9 +1154,7 @@ func dbDomainList(db *sql.DB, pid string) ([]*Domain, error) {
 	defer rows.Close()
 	out := []*Domain{}
 	for rows.Next() {
-		d := &Domain{}
-		if err := rows.Scan(&d.ID, &d.ProjectID, &d.Name, &d.RegistrarSlug, &d.DNSProviderSlug,
-			&d.ExpiresAt, &d.Notes, &d.CreatedAt, &d.UpdatedAt); err == nil {
+		if d, err := scanDomain(rows); err == nil && d != nil {
 			out = append(out, d)
 		}
 	}
@@ -1027,43 +1162,19 @@ func dbDomainList(db *sql.DB, pid string) ([]*Domain, error) {
 }
 
 func dbDomainGet(db *sql.DB, pid string, id int64) (*Domain, error) {
-	row := db.QueryRow(
-		`SELECT id, project_id, name, COALESCE(registrar_slug,''), COALESCE(dns_provider_slug,''),
-		        COALESCE(expires_at,''), COALESCE(notes,''),
-		        COALESCE(created_at,''), COALESCE(updated_at,'')
+	return scanDomain(db.QueryRow(
+		`SELECT `+domainSelectCols+`
 		 FROM domains WHERE id = ? AND project_id = ? AND deleted_at IS NULL`,
 		id, pid,
-	)
-	d := &Domain{}
-	err := row.Scan(&d.ID, &d.ProjectID, &d.Name, &d.RegistrarSlug, &d.DNSProviderSlug,
-		&d.ExpiresAt, &d.Notes, &d.CreatedAt, &d.UpdatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return d, nil
+	))
 }
 
 func dbDomainGetByName(db *sql.DB, pid, name string) (*Domain, error) {
-	row := db.QueryRow(
-		`SELECT id, project_id, name, COALESCE(registrar_slug,''), COALESCE(dns_provider_slug,''),
-		        COALESCE(expires_at,''), COALESCE(notes,''),
-		        COALESCE(created_at,''), COALESCE(updated_at,'')
+	return scanDomain(db.QueryRow(
+		`SELECT `+domainSelectCols+`
 		 FROM domains WHERE project_id = ? AND name = ? AND deleted_at IS NULL`,
 		pid, name,
-	)
-	d := &Domain{}
-	err := row.Scan(&d.ID, &d.ProjectID, &d.Name, &d.RegistrarSlug, &d.DNSProviderSlug,
-		&d.ExpiresAt, &d.Notes, &d.CreatedAt, &d.UpdatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return d, nil
+	))
 }
 
 // ─── Tiny utilities ────────────────────────────────────────────────
@@ -1080,6 +1191,21 @@ func intArg(args map[string]any, key string, def int) int {
 		n, err := strconv.Atoi(strings.TrimSpace(v))
 		if err == nil {
 			return n
+		}
+	}
+	return def
+}
+
+func boolArg(args map[string]any, key string, def bool) bool {
+	switch v := args[key].(type) {
+	case bool:
+		return v
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "true", "1", "yes":
+			return true
+		case "false", "0", "no":
+			return false
 		}
 	}
 	return def

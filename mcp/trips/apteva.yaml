@@ -1,0 +1,90 @@
+schema: apteva-app/v1
+
+name: trips
+display_name: Trips
+version: 0.1.0
+description: |
+  Plan trips end-to-end: destinations, transport, accommodation,
+  activities, packing, budget. Calendar-synced — each trip owns a
+  dedicated calendar that mirrors its itinerary, kept in step as
+  items are added / moved / removed. v0.2 will layer in optional
+  finance + storage integration; v0.1 is calendar-only.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/trips
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/trips/icon.png
+tags: [trips, travel, itinerary, planning]
+
+scopes: [project]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call          # talks to calendar
+  apps:
+    - name: calendar
+      optional: false
+      reason: "Mirror itinerary into a dedicated per-trip calendar"
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: trips_list,                 description: "List trips with derived planned/actual totals + days-until." }
+    - { name: trips_get,                  description: "Read one trip with its child items + budget summary." }
+    - { name: trips_create,               description: "Create a trip. Also creates its dedicated calendar via calendar.calendars_create." }
+    - { name: trips_update,               description: "Update a trip's name/dates/status/color/sync_calendar/notes. Renames the linked calendar when name changes." }
+    - { name: trips_delete,               description: "Delete a trip and its child rows. Cascade-deletes the linked calendar." }
+
+    - { name: destinations_add,           description: "Add a destination. Args: trip_id, place_name, country?, arrive_at, depart_at, lat?, lng?, notes?." }
+    - { name: destinations_update,        description: "Update a destination." }
+    - { name: destinations_delete,        description: "Delete a destination." }
+    - { name: destinations_reorder,       description: "Reorder destinations. Args: trip_id, order (array of destination ids in new order)." }
+
+    - { name: transport_legs_add,         description: "Add a transport leg. Mirrors into the trip's calendar when sync is on. Args: trip_id, kind (flight|train|car|bus|ferry|other), depart_at, arrive_at, provider?, reference?, depart_location?, arrive_location?, cost_estimated?, currency?, confirmation_number?, from_destination_id?, to_destination_id?, notes?." }
+    - { name: transport_legs_update,      description: "Update a transport leg. Upserts the calendar event." }
+    - { name: transport_legs_delete,      description: "Delete a transport leg. Removes the calendar event." }
+    - { name: transport_legs_mark_booked, description: "Convenience: flip booked=1 and optionally set cost_actual + confirmation_number. Args: id, cost_actual?, confirmation_number?." }
+
+    - { name: accommodations_add,         description: "Add an accommodation. Mirrors into the calendar as an all-day event from check_in_at to check_out_at." }
+    - { name: accommodations_update,      description: "Update an accommodation. Upserts the calendar event." }
+    - { name: accommodations_delete,      description: "Delete an accommodation." }
+    - { name: accommodations_mark_booked, description: "Mark booked + optionally set cost_actual + confirmation_number." }
+
+    - { name: activities_add,             description: "Add an activity. Mirrors into the calendar when start_at is set. Args: trip_id, name, category (food|activity|shopping|transport_local|other), start_at?, end_at?, location?, cost_estimated?, currency?, destination_id?, notes?." }
+    - { name: activities_update,          description: "Update an activity. Upserts the calendar event." }
+    - { name: activities_delete,          description: "Delete an activity." }
+    - { name: activities_mark_booked,     description: "Mark booked + optional cost_actual." }
+
+    - { name: todos_list,                 description: "List todos for a trip. Args: trip_id, include_done?." }
+    - { name: todos_add,                  description: "Add a todo. Args: trip_id, label, due_at?." }
+    - { name: todos_toggle,               description: "Toggle done / not-done. Args: id." }
+    - { name: todos_delete,               description: "Delete a todo." }
+
+    - { name: budget_set,                 description: "Set a per-category cap on a trip. Args: trip_id, category (transport|lodging|food|activities|shopping|other), amount (minor units, trip.home_currency). Pass amount=0 to clear the cap." }
+    - { name: budget_summary,             description: "Per-category planned (sum of estimates) + actual (sum of cost_actual) + cap + delta, plus a totals row. Args: trip_id." }
+
+    - { name: dashboard,                  description: "One mega-payload for the trip detail page: trip row + destinations + transport_legs + accommodations + activities + todos + budget summary. Args: trip_id." }
+
+  ui_panels:
+    - slot: project.page
+      label: Trips
+      icon: map
+      entry: /ui/TripsPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/trips
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/trips.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch

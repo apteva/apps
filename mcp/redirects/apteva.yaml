@@ -1,0 +1,72 @@
+schema: apteva-app/v1
+
+name: redirects
+display_name: Redirects
+version: 0.1.0
+description: |
+  Branded short links and domain redirects. Each rule maps a
+  (hostname, path) pair to an external URL and returns a 301/302/
+  307/308 with the right Location header. Think Bitly on your own
+  domain, or EasyRedir for post-rebrand 301s.
+
+  Composes on top of two existing apps:
+    - routes  — apteva-server's ingress map; redirects claims a
+                hostname here so inbound traffic for go.acme.com
+                lands on this sidecar.
+    - domains — DNS provider integration; when the hostname is
+                managed by Apteva, redirects upserts a CNAME so
+                the hostname points at the platform.
+
+  Domains is optional — if you manage DNS elsewhere, point the
+  hostname at the platform yourself and just call redirect_add.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/redirects
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/redirects/icon.png
+tags: [redirects, short-links, marketing, infrastructure]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: routes
+      required: true
+      label: "Hostname routing"
+      hint: "Routes claims the public hostname for this app's sidecar so inbound HTTP lands here."
+    - name: domains
+      required: false
+      label: "DNS auto-config (optional)"
+      hint: "When the hostname is in domains, redirects upserts a CNAME so DNS points at the platform. Skip this app to manage DNS elsewhere."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: redirect_add,    description: "Create a redirect rule. Args: hostname (req), destination (req URL), path? (default '/'), match? ('exact'|'prefix', default 'exact'), status_code? (301|302|307|308, default 302), preserve_path? (default false; prefix-only), preserve_query? (default true), notes?." }
+    - { name: redirect_update, description: "Update a rule by id. Same arg shape as redirect_add; only provided fields are changed." }
+    - { name: redirect_remove, description: "Delete a rule. Args: id." }
+    - { name: redirect_list,   description: "List rules. Args: hostname? (filter), limit? (default 100), offset? (default 0)." }
+    - { name: redirect_get,    description: "Fetch one rule. Args: id." }
+    - { name: redirect_test,   description: "Dry-run: given a hostname + path + query, return what would be redirected to. Args: hostname (req), path? (default '/'), query?." }
+  ui_panels:
+    - { slot: project.page, label: "Redirects", icon: corner-up-right, entry: /ui/RedirectsPanel.mjs }
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/redirects
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/redirects.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
