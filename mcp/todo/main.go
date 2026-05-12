@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: todo
 display_name: Todo
-version: 0.3.2
+version: 0.4.0
 description: Personal todo list — human-first, agent-helpful.
 author: Apteva
 scopes: [project, global]
@@ -64,6 +64,10 @@ provides:
     - { name: lists_create,     description: "Create a list." }
     - { name: lists_update,     description: "Update a list." }
     - { name: lists_delete,     description: "Delete a list (todos move to inbox)." }
+    - { name: list_groups_list,   description: "List list-groups (containers above lists)." }
+    - { name: list_groups_create, description: "Create a list-group." }
+    - { name: list_groups_update, description: "Update a list-group." }
+    - { name: list_groups_delete, description: "Delete a list-group (member lists become ungrouped)." }
     - { name: tags_list,        description: "List tags with usage counts." }
   ui_panels:
     - slot: project.page
@@ -117,6 +121,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/lists", Handler: a.handleLists},
 		{Pattern: "/lists/", Handler: a.handleListsItem},
+		{Pattern: "/list_groups", Handler: a.handleListGroups},
+		{Pattern: "/list_groups/", Handler: a.handleListGroupsItem},
 		{Pattern: "/todos", Handler: a.handleTodos},
 		{Pattern: "/todos/", Handler: a.handleTodosItem},
 		{Pattern: "/quick_add", Handler: a.handleQuickAdd},
@@ -206,18 +212,43 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"name"}),
 			Handler: a.toolListsCreate},
 		{Name: "lists_update",
-			Description: "Update a list. Args: id (required), name?, color?, archived?.",
+			Description: "Update a list. Args: id (required), name?, color?, archived?, group_id? (0 to ungroup).",
 			InputSchema: schemaObject(map[string]any{
 				"id":       map[string]any{"type": "integer"},
 				"name":     map[string]any{"type": "string"},
 				"color":    map[string]any{"type": "string"},
 				"archived": map[string]any{"type": "boolean"},
+				"group_id": map[string]any{"type": "integer"},
 			}, []string{"id"}),
 			Handler: a.toolListsUpdate},
 		{Name: "lists_delete",
 			Description: "Delete a list. Existing todos drop list_id to NULL (move to inbox). Args: id.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			Handler:     a.toolListsDelete},
+		{Name: "list_groups_list",
+			Description: "List the list-groups in this scope (containers above lists). Lists with no group are 'ungrouped'.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler:     a.toolListGroupsList},
+		{Name: "list_groups_create",
+			Description: "Create a list-group. Args: name (required), color? (#hex, default #6b7280).",
+			InputSchema: schemaObject(map[string]any{
+				"name":  map[string]any{"type": "string"},
+				"color": map[string]any{"type": "string"},
+			}, []string{"name"}),
+			Handler: a.toolListGroupsCreate},
+		{Name: "list_groups_update",
+			Description: "Update a list-group. Args: id (required), name?, color?, archived?.",
+			InputSchema: schemaObject(map[string]any{
+				"id":       map[string]any{"type": "integer"},
+				"name":     map[string]any{"type": "string"},
+				"color":    map[string]any{"type": "string"},
+				"archived": map[string]any{"type": "boolean"},
+			}, []string{"id"}),
+			Handler: a.toolListGroupsUpdate},
+		{Name: "list_groups_delete",
+			Description: "Delete a list-group. Member lists become ungrouped (group_id → NULL). Args: id.",
+			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
+			Handler:     a.toolListGroupsDelete},
 		{Name: "tags_list",
 			Description: "List tags in this scope with usage counts.",
 			InputSchema: schemaObject(map[string]any{}, nil),
@@ -228,6 +259,17 @@ func (a *App) MCPTools() []sdk.Tool {
 // ─── Models ──────────────────────────────────────────────────────
 
 type List struct {
+	ID        int64  `json:"id"`
+	ProjectID string `json:"project_id"`
+	GroupID   *int64 `json:"group_id"`
+	Name      string `json:"name"`
+	Color     string `json:"color"`
+	Archived  bool   `json:"archived"`
+	SortOrder int64  `json:"sort_order"`
+	CreatedAt string `json:"created_at"`
+}
+
+type ListGroup struct {
 	ID        int64  `json:"id"`
 	ProjectID string `json:"project_id"`
 	Name      string `json:"name"`
@@ -264,56 +306,63 @@ func projectScope() string {
 	return "default"
 }
 
+const listCols = `id, project_id, group_id, name, color, archived, sort_order, created_at`
+
+func scanList(scan func(...any) error) (List, error) {
+	var l List
+	var grp sql.NullInt64
+	var arch int
+	if err := scan(&l.ID, &l.ProjectID, &grp, &l.Name, &l.Color, &arch, &l.SortOrder, &l.CreatedAt); err != nil {
+		return l, err
+	}
+	if grp.Valid {
+		v := grp.Int64
+		l.GroupID = &v
+	}
+	l.Archived = arch == 1
+	return l, nil
+}
+
 func listLists(db *sql.DB, pid string) ([]List, error) {
 	rows, err := db.Query(
-		`SELECT id, project_id, name, color, archived, sort_order, created_at
-		   FROM lists WHERE project_id = ? ORDER BY sort_order, id`, pid)
+		`SELECT `+listCols+` FROM lists WHERE project_id = ? ORDER BY sort_order, id`, pid)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []List{}
 	for rows.Next() {
-		var l List
-		var arch int
-		if err := rows.Scan(&l.ID, &l.ProjectID, &l.Name, &l.Color, &arch, &l.SortOrder, &l.CreatedAt); err != nil {
+		l, err := scanList(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
-		l.Archived = arch == 1
 		out = append(out, l)
 	}
 	return out, nil
 }
 
 func getList(db *sql.DB, pid string, id int64) (*List, error) {
-	var l List
-	var arch int
-	err := db.QueryRow(
-		`SELECT id, project_id, name, color, archived, sort_order, created_at
-		   FROM lists WHERE id = ? AND project_id = ?`, id, pid,
-	).Scan(&l.ID, &l.ProjectID, &l.Name, &l.Color, &arch, &l.SortOrder, &l.CreatedAt)
+	row := db.QueryRow(
+		`SELECT `+listCols+` FROM lists WHERE id = ? AND project_id = ?`, id, pid)
+	l, err := scanList(row.Scan)
 	if err != nil {
 		return nil, err
 	}
-	l.Archived = arch == 1
 	return &l, nil
 }
 
 func findListByName(db *sql.DB, pid, name string) (*List, error) {
-	var l List
-	var arch int
-	err := db.QueryRow(
-		`SELECT id, project_id, name, color, archived, sort_order, created_at
-		   FROM lists WHERE project_id = ? AND lower(name) = lower(?) LIMIT 1`,
-		pid, name,
-	).Scan(&l.ID, &l.ProjectID, &l.Name, &l.Color, &arch, &l.SortOrder, &l.CreatedAt)
+	row := db.QueryRow(
+		`SELECT `+listCols+` FROM lists
+		  WHERE project_id = ? AND lower(name) = lower(?) LIMIT 1`,
+		pid, name)
+	l, err := scanList(row.Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	l.Archived = arch == 1
 	return &l, nil
 }
 
@@ -329,6 +378,62 @@ func insertList(db *sql.DB, pid, name, color string) (*List, error) {
 	}
 	id, _ := res.LastInsertId()
 	return getList(db, pid, id)
+}
+
+// ─── List Group helpers ──────────────────────────────────────────
+
+const listGroupCols = `id, project_id, name, color, archived, sort_order, created_at`
+
+func scanListGroup(scan func(...any) error) (ListGroup, error) {
+	var g ListGroup
+	var arch int
+	if err := scan(&g.ID, &g.ProjectID, &g.Name, &g.Color, &arch, &g.SortOrder, &g.CreatedAt); err != nil {
+		return g, err
+	}
+	g.Archived = arch == 1
+	return g, nil
+}
+
+func listGroups(db *sql.DB, pid string) ([]ListGroup, error) {
+	rows, err := db.Query(
+		`SELECT `+listGroupCols+` FROM list_groups WHERE project_id = ? ORDER BY sort_order, id`, pid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ListGroup{}
+	for rows.Next() {
+		g, err := scanListGroup(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, nil
+}
+
+func getListGroup(db *sql.DB, pid string, id int64) (*ListGroup, error) {
+	row := db.QueryRow(
+		`SELECT `+listGroupCols+` FROM list_groups WHERE id = ? AND project_id = ?`, id, pid)
+	g, err := scanListGroup(row.Scan)
+	if err != nil {
+		return nil, err
+	}
+	return &g, nil
+}
+
+func insertListGroup(db *sql.DB, pid, name, color string) (*ListGroup, error) {
+	if color == "" {
+		color = "#6b7280"
+	}
+	res, err := db.Exec(
+		`INSERT INTO list_groups (project_id, name, color) VALUES (?, ?, ?)`,
+		pid, name, color)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return getListGroup(db, pid, id)
 }
 
 func upsertTag(db *sql.DB, pid, name string) (int64, error) {
@@ -731,6 +836,19 @@ func (a *App) handleListsItem(w http.ResponseWriter, r *http.Request) {
 			}
 			cols = append(cols, "archived = ?")
 			args = append(args, arch)
+		}
+		if v, ok := fields["group_id"]; ok {
+			gid := toInt64(v)
+			if gid == 0 {
+				cols = append(cols, "group_id = NULL")
+			} else {
+				if _, err := getListGroup(ctx.AppDB(), pid, gid); err != nil {
+					http.Error(w, fmt.Sprintf("group %d not found in scope", gid), 400)
+					return
+				}
+				cols = append(cols, "group_id = ?")
+				args = append(args, gid)
+			}
 		}
 		if len(cols) == 0 {
 			w.WriteHeader(http.StatusNoContent)
@@ -1322,6 +1440,18 @@ func (a *App) toolListsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		cols = append(cols, "archived = ?")
 		qa = append(qa, arch)
 	}
+	if v, ok := args["group_id"]; ok {
+		gid := toInt64(v)
+		if gid == 0 {
+			cols = append(cols, "group_id = NULL")
+		} else {
+			if _, err := getListGroup(ctx.AppDB(), pid, gid); err != nil {
+				return nil, fmt.Errorf("group %d not found in scope", gid)
+			}
+			cols = append(cols, "group_id = ?")
+			qa = append(qa, gid)
+		}
+	}
 	if len(cols) > 0 {
 		qa = append(qa, id, pid)
 		if _, err := ctx.AppDB().Exec(
@@ -1331,6 +1461,150 @@ func (a *App) toolListsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 	}
 	return getList(ctx.AppDB(), pid, id)
+}
+
+// ─── List Group HTTP + tool handlers ─────────────────────────────
+
+func (a *App) handleListGroups(w http.ResponseWriter, r *http.Request) {
+	ctx := mustCtx(r)
+	pid := projectScope()
+	switch r.Method {
+	case http.MethodGet:
+		out, err := listGroups(ctx.AppDB(), pid)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		writeJSON(w, out)
+	case http.MethodPost:
+		var body struct{ Name, Color string }
+		json.NewDecoder(r.Body).Decode(&body)
+		if body.Name == "" {
+			http.Error(w, "name required", 400)
+			return
+		}
+		g, err := insertListGroup(ctx.AppDB(), pid, body.Name, body.Color)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		writeJSON(w, g)
+	default:
+		http.Error(w, "GET or POST", 405)
+	}
+}
+
+func (a *App) handleListGroupsItem(w http.ResponseWriter, r *http.Request) {
+	ctx := mustCtx(r)
+	id := pathSuffixInt(r.URL.Path, "/list_groups/")
+	pid := projectScope()
+	switch r.Method {
+	case http.MethodPut:
+		var fields map[string]any
+		json.NewDecoder(r.Body).Decode(&fields)
+		cols, args := []string{}, []any{}
+		if v, ok := fields["name"]; ok {
+			cols = append(cols, "name = ?")
+			args = append(args, fmt.Sprint(v))
+		}
+		if v, ok := fields["color"]; ok {
+			cols = append(cols, "color = ?")
+			args = append(args, fmt.Sprint(v))
+		}
+		if v, ok := fields["archived"]; ok {
+			arch := 0
+			if b, ok := v.(bool); ok && b {
+				arch = 1
+			}
+			cols = append(cols, "archived = ?")
+			args = append(args, arch)
+		}
+		if len(cols) == 0 {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		args = append(args, id, pid)
+		if _, err := ctx.AppDB().Exec(
+			`UPDATE list_groups SET `+strings.Join(cols, ", ")+` WHERE id = ? AND project_id = ?`,
+			args...,
+		); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		g, _ := getListGroup(ctx.AppDB(), pid, id)
+		writeJSON(w, g)
+	case http.MethodDelete:
+		// ON DELETE SET NULL on lists.group_id handles ungrouping.
+		if _, err := ctx.AppDB().Exec(
+			`DELETE FROM list_groups WHERE id = ? AND project_id = ?`, id, pid,
+		); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "PUT or DELETE", 405)
+	}
+}
+
+func (a *App) toolListGroupsList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	return listGroups(ctx.AppDB(), projectScope())
+}
+
+func (a *App) toolListGroupsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	name, _ := args["name"].(string)
+	if name == "" {
+		return nil, errors.New("name required")
+	}
+	return insertListGroup(ctx.AppDB(), projectScope(), name, strArg(args, "color", ""))
+}
+
+func (a *App) toolListGroupsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := toInt64(args["id"])
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	pid := projectScope()
+	cols, qa := []string{}, []any{}
+	if v, ok := args["name"]; ok {
+		cols = append(cols, "name = ?")
+		qa = append(qa, fmt.Sprint(v))
+	}
+	if v, ok := args["color"]; ok {
+		cols = append(cols, "color = ?")
+		qa = append(qa, fmt.Sprint(v))
+	}
+	if v, ok := args["archived"]; ok {
+		arch := 0
+		if b, ok := v.(bool); ok && b {
+			arch = 1
+		}
+		cols = append(cols, "archived = ?")
+		qa = append(qa, arch)
+	}
+	if len(cols) > 0 {
+		qa = append(qa, id, pid)
+		if _, err := ctx.AppDB().Exec(
+			`UPDATE list_groups SET `+strings.Join(cols, ", ")+` WHERE id = ? AND project_id = ?`, qa...,
+		); err != nil {
+			return nil, err
+		}
+	}
+	return getListGroup(ctx.AppDB(), pid, id)
+}
+
+func (a *App) toolListGroupsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := toInt64(args["id"])
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	pid := projectScope()
+	if _, err := ctx.AppDB().Exec(
+		`DELETE FROM list_groups WHERE id = ? AND project_id = ?`, id, pid,
+	); err != nil {
+		return nil, err
+	}
+	return map[string]any{"status": "deleted", "id": id}, nil
 }
 
 func (a *App) toolListsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {

@@ -52,6 +52,14 @@ interface List {
   name: string;
   color: string;
   archived: boolean;
+  group_id: number | null;
+}
+
+interface ListGroup {
+  id: number;
+  name: string;
+  color: string;
+  archived: boolean;
 }
 
 interface Tag {
@@ -84,12 +92,15 @@ export default function TodoPanel({}: NativePanelProps) {
   const [pickedTag, setPickedTag] = useState<string | null>(null);
   const [todos, setTodos] = useState<Todo[]>([]);
   const [lists, setLists] = useState<List[]>([]);
+  const [groups, setGroups] = useState<ListGroup[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
   const [quick, setQuick] = useState("");
   const [statusMsg, setStatusMsg] = useState("");
   const [editing, setEditing] = useState<Todo | null>(null);
   const [creating, setCreating] = useState(false);
   const [newListOpen, setNewListOpen] = useState(false);
+  const [newGroupOpen, setNewGroupOpen] = useState(false);
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<number, boolean>>({});
 
   const params = useMemo(() => {
     const p = new URLSearchParams();
@@ -118,6 +129,13 @@ export default function TodoPanel({}: NativePanelProps) {
     } catch {}
   }, []);
 
+  const loadGroups = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/list_groups`, { credentials: "same-origin" });
+      if (res.ok) setGroups(await res.json() || []);
+    } catch {}
+  }, []);
+
   const loadTags = useCallback(async () => {
     try {
       const res = await fetch(`${API}/tags`, { credentials: "same-origin" });
@@ -126,11 +144,11 @@ export default function TodoPanel({}: NativePanelProps) {
   }, []);
 
   useEffect(() => { loadTodos(); }, [loadTodos]);
-  useEffect(() => { loadLists(); loadTags(); }, [loadLists, loadTags]);
+  useEffect(() => { loadLists(); loadGroups(); loadTags(); }, [loadLists, loadGroups, loadTags]);
 
   const refreshAll = useCallback(() => {
-    loadTodos(); loadLists(); loadTags();
-  }, [loadTodos, loadLists, loadTags]);
+    loadTodos(); loadLists(); loadGroups(); loadTags();
+  }, [loadTodos, loadLists, loadGroups, loadTags]);
 
   const submitQuick = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -203,6 +221,36 @@ export default function TodoPanel({}: NativePanelProps) {
     refreshAll();
   };
 
+  const createGroup = async (name: string, color: string) => {
+    const res = await fetch(`${API}/list_groups`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, color }),
+    });
+    if (!res.ok) { setStatusMsg("New group: " + (await res.text())); return; }
+    setNewGroupOpen(false);
+    loadGroups();
+  };
+
+  const updateGroup = async (id: number, fields: Record<string, unknown>) => {
+    await fetch(`${API}/list_groups/${id}`, {
+      method: "PUT",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(fields),
+    });
+    loadGroups();
+  };
+
+  const deleteGroup = async (id: number) => {
+    await fetch(`${API}/list_groups/${id}`, { method: "DELETE", credentials: "same-origin" });
+    refreshAll();
+  };
+
+  const toggleGroup = (id: number) =>
+    setCollapsedGroups((s) => ({ ...s, [id]: !s[id] }));
+
   const headerLabel = useMemo(() => {
     const parts: string[] = [];
     if (pickedList) {
@@ -235,13 +283,22 @@ export default function TodoPanel({}: NativePanelProps) {
 
         <div className="flex items-center justify-between px-2 mt-3 mb-1">
           <span className="text-xs uppercase text-text-dim">Lists</span>
-          <button
-            onClick={() => setNewListOpen((o) => !o)}
-            className="text-text-muted hover:text-text text-base leading-none px-1"
-            title="New list"
-          >
-            +
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => { setNewListOpen((o) => !o); setNewGroupOpen(false); }}
+              className="text-text-muted hover:text-text text-base leading-none px-1"
+              title="New list"
+            >
+              +
+            </button>
+            <button
+              onClick={() => { setNewGroupOpen((o) => !o); setNewListOpen(false); }}
+              className="text-text-muted hover:text-text text-xs leading-none px-1 border border-border rounded"
+              title="New group"
+            >
+              +grp
+            </button>
+          </div>
         </div>
         {newListOpen && (
           <NewListForm
@@ -249,16 +306,55 @@ export default function TodoPanel({}: NativePanelProps) {
             onCancel={() => setNewListOpen(false)}
           />
         )}
-        {lists.filter((l) => !l.archived).map((l) => (
+        {newGroupOpen && (
+          <NewGroupForm
+            onSave={createGroup}
+            onCancel={() => setNewGroupOpen(false)}
+          />
+        )}
+
+        {/* Ungrouped lists first */}
+        {lists.filter((l) => !l.archived && !l.group_id).map((l) => (
           <ListRow
             key={l.id}
             list={l}
+            groups={groups}
             active={pickedList === l.id}
             onClick={() => { setPickedList(l.id); setView("today"); }}
             onUpdate={(fields) => updateList(l.id, fields)}
             onDelete={() => deleteList(l.id)}
           />
         ))}
+
+        {/* Groups, each containing its member lists */}
+        {groups.filter((g) => !g.archived).map((g) => {
+          const collapsed = !!collapsedGroups[g.id];
+          const members = lists.filter((l) => !l.archived && l.group_id === g.id);
+          return (
+            <div key={`g-${g.id}`} className="mt-1">
+              <GroupRow
+                group={g}
+                collapsed={collapsed}
+                memberCount={members.length}
+                onToggle={() => toggleGroup(g.id)}
+                onUpdate={(fields) => updateGroup(g.id, fields)}
+                onDelete={() => deleteGroup(g.id)}
+              />
+              {!collapsed && members.map((l) => (
+                <ListRow
+                  key={l.id}
+                  list={l}
+                  groups={groups}
+                  nested
+                  active={pickedList === l.id}
+                  onClick={() => { setPickedList(l.id); setView("today"); }}
+                  onUpdate={(fields) => updateList(l.id, fields)}
+                  onDelete={() => deleteList(l.id)}
+                />
+              ))}
+            </div>
+          );
+        })}
 
         {tags.length > 0 && (
           <>
@@ -427,9 +523,11 @@ function TodoRow({
 }
 
 function ListRow({
-  list, active, onClick, onUpdate, onDelete,
+  list, groups, nested, active, onClick, onUpdate, onDelete,
 }: {
   list: List;
+  groups: ListGroup[];
+  nested?: boolean;
   active: boolean;
   onClick: () => void;
   onUpdate: (fields: Record<string, unknown>) => void;
@@ -437,7 +535,7 @@ function ListRow({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   return (
-    <div className="relative group">
+    <div className={`relative group ${nested ? "pl-4" : ""}`}>
       <button
         onClick={onClick}
         className={`w-full text-left px-2 py-1 rounded flex items-center gap-2 pr-7 ${
@@ -462,7 +560,7 @@ function ListRow({
             className="fixed inset-0 z-10"
             onClick={() => setMenuOpen(false)}
           />
-          <div className="absolute right-0 top-full z-20 bg-bg-card border border-border rounded shadow text-sm flex flex-col w-32 py-1">
+          <div className="absolute right-0 top-full z-20 bg-bg-card border border-border rounded shadow text-sm flex flex-col w-40 py-1">
             <button
               onClick={() => {
                 const name = prompt("Rename list", list.name);
@@ -483,12 +581,32 @@ function ListRow({
             >
               Recolor
             </button>
+            {groups.length > 0 && (
+              <>
+                <div className="px-3 pt-1 pb-0.5 text-[10px] uppercase text-text-dim">Move to</div>
+                <button
+                  onClick={() => { onUpdate({ group_id: 0 }); setMenuOpen(false); }}
+                  className={`text-left px-3 py-0.5 hover:bg-bg-input ${list.group_id ? "" : "text-accent"}`}
+                >
+                  — ungrouped —
+                </button>
+                {groups.filter((g) => !g.archived).map((g) => (
+                  <button
+                    key={g.id}
+                    onClick={() => { onUpdate({ group_id: g.id }); setMenuOpen(false); }}
+                    className={`text-left px-3 py-0.5 hover:bg-bg-input ${list.group_id === g.id ? "text-accent" : ""}`}
+                  >
+                    {g.name}
+                  </button>
+                ))}
+              </>
+            )}
             <button
               onClick={() => {
                 onUpdate({ archived: true });
                 setMenuOpen(false);
               }}
-              className="text-left px-3 py-1 hover:bg-bg-input"
+              className="text-left px-3 py-1 hover:bg-bg-input mt-1 border-t border-border"
             >
               Archive
             </button>
@@ -507,6 +625,112 @@ function ListRow({
         </>
       )}
     </div>
+  );
+}
+
+function GroupRow({
+  group, collapsed, memberCount, onToggle, onUpdate, onDelete,
+}: {
+  group: ListGroup;
+  collapsed: boolean;
+  memberCount: number;
+  onToggle: () => void;
+  onUpdate: (fields: Record<string, unknown>) => void;
+  onDelete: () => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  return (
+    <div className="relative group mt-2">
+      <button
+        onClick={onToggle}
+        className="w-full text-left px-2 py-1 rounded flex items-center gap-2 pr-7 text-text"
+      >
+        <span className="text-text-dim text-xs w-3 inline-block">{collapsed ? "▸" : "▾"}</span>
+        <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: group.color }} />
+        <span className="truncate text-xs uppercase tracking-wider">{group.name}</span>
+        <span className="ml-auto text-text-dim text-[10px]">{memberCount}</span>
+      </button>
+      <button
+        onClick={(e) => { e.stopPropagation(); setMenuOpen((o) => !o); }}
+        className="absolute right-0 top-1 opacity-0 group-hover:opacity-100 text-text-muted hover:text-text px-1 leading-none"
+        title="Group options"
+      >
+        ⋯
+      </button>
+      {menuOpen && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
+          <div className="absolute right-0 top-full z-20 bg-bg-card border border-border rounded shadow text-sm flex flex-col w-32 py-1">
+            <button
+              onClick={() => {
+                const name = prompt("Rename group", group.name);
+                if (name && name.trim() && name !== group.name) onUpdate({ name: name.trim() });
+                setMenuOpen(false);
+              }}
+              className="text-left px-3 py-1 hover:bg-bg-input"
+            >
+              Rename
+            </button>
+            <button
+              onClick={() => {
+                const color = prompt("Color (hex)", group.color);
+                if (color && color.trim()) onUpdate({ color: color.trim() });
+                setMenuOpen(false);
+              }}
+              className="text-left px-3 py-1 hover:bg-bg-input"
+            >
+              Recolor
+            </button>
+            <button
+              onClick={() => {
+                if (confirm(`Delete group "${group.name}"? Its ${memberCount} list(s) become ungrouped.`)) {
+                  onDelete();
+                }
+                setMenuOpen(false);
+              }}
+              className="text-left px-3 py-1 hover:bg-bg-input text-error"
+            >
+              Delete
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function NewGroupForm({
+  onSave, onCancel,
+}: {
+  onSave: (name: string, color: string) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [color, setColor] = useState("#6b7280");
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (name.trim()) onSave(name.trim(), color);
+      }}
+      className="flex items-center gap-1 px-2 py-1"
+    >
+      <input
+        type="color"
+        value={color}
+        onChange={(e) => setColor(e.target.value)}
+        className="w-5 h-5 rounded border border-border bg-transparent shrink-0 cursor-pointer"
+        title="Group color"
+      />
+      <input
+        autoFocus
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="Group name"
+        onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}
+        className="flex-1 bg-bg-input border border-border rounded px-2 py-0.5 text-sm min-w-0"
+      />
+    </form>
   );
 }
 

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: todo
 display_name: Todo
-version: 0.3.2
+version: 0.4.0
 description: |
   Personal todo list — human-first counterpart to the agent mission
   board (`tasks`). Inbox / Today / Upcoming views, lists (the
@@ -40,8 +40,12 @@ provides:
     - { name: todos_delete,      description: "Delete a todo. Args: id." }
     - { name: lists_list,        description: "List the user-facing buckets in this scope." }
     - { name: lists_create,      description: "Create a list. Args: name, color?." }
-    - { name: lists_update,      description: "Update a list. Args: id, name?, color?, archived?." }
+    - { name: lists_update,      description: "Update a list. Args: id, name?, color?, archived?, group_id? (0 to ungroup)." }
     - { name: lists_delete,      description: "Delete a list. Todos in it move to inbox. Args: id." }
+    - { name: list_groups_list,   description: "List the list-groups (sidebar containers above lists) in this scope." }
+    - { name: list_groups_create, description: "Create a list-group. Args: name, color?." }
+    - { name: list_groups_update, description: "Update a list-group. Args: id, name?, color?, archived?." }
+    - { name: list_groups_delete, description: "Delete a list-group. Member lists become ungrouped (group_id → NULL). Args: id." }
     - { name: tags_list,         description: "List tags in this scope with usage counts." }
   ui_panels:
     - slot: project.page
