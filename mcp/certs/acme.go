@@ -45,10 +45,19 @@ func (a *App) issueCert(ctx *sdk.AppCtx, projectID, fqdn string) error {
 	_ = dbSetCertStatus(ctx.AppDB(), row.ID, "issuing", "")
 	emit("certs.issuance.started", map[string]any{"cert_id": row.ID, "fqdn": fqdn})
 
-	apex, sub, err := resolveApex(ctx, fqdn)
-	if err != nil {
-		_ = dbSetCertStatus(ctx.AppDB(), row.ID, "failed", fmtErr("resolve apex", err))
-		return err
+	challengeType := a.selectChallengeType(ctx)
+
+	// resolveApex talks to the Domains app to find the apex under
+	// which fqdn lives. Only dns-01 needs it (TXT-write target);
+	// http-01 puts the challenge at /.well-known/acme-challenge/<token>
+	// on the FQDN itself.
+	var apex, sub string
+	if challengeType == "dns-01" {
+		apex, sub, err = resolveApex(ctx, fqdn)
+		if err != nil {
+			_ = dbSetCertStatus(ctx.AppDB(), row.ID, "failed", fmtErr("resolve apex", err))
+			return err
+		}
 	}
 
 	parent, cancel := shortCtx()
@@ -77,48 +86,25 @@ func (a *App) issueCert(ctx *sdk.AppCtx, projectID, fqdn string) error {
 		if authz.Status == acme.StatusValid {
 			continue // already authorized (cached for this account)
 		}
-		var dnsChal *acme.Challenge
-		for _, ch := range authz.Challenges {
-			if ch.Type == "dns-01" {
-				dnsChal = ch
-				break
-			}
+		var (
+			chal    *acme.Challenge
+			cleanup func()
+			prepErr error
+		)
+		switch challengeType {
+		case "dns-01":
+			chal, cleanup, prepErr = a.prepareDNS01(ctx, parent, client, authz, apex, sub, fqdn, row.ID)
+		case "http-01":
+			chal, cleanup, prepErr = a.prepareHTTP01(client, authz, row.ID, ctx.AppDB())
+		default:
+			prepErr = fmt.Errorf("unsupported challenge_type %q", challengeType)
 		}
-		if dnsChal == nil {
-			err := errors.New("ACME server didn't offer a dns-01 challenge")
-			_ = dbSetCertStatus(ctx.AppDB(), row.ID, "failed", err.Error())
-			return err
-		}
-		txtValue, err := client.DNS01ChallengeRecord(dnsChal.Token)
-		if err != nil {
-			_ = dbSetCertStatus(ctx.AppDB(), row.ID, "failed", fmtErr("dns01 record", err))
-			return err
-		}
-
-		// Write the TXT, then poll public DNS until it's visible.
-		// Cleanup happens in defer regardless of success — we don't
-		// want stale challenge records lying around.
-		if err := setChallengeTXT(ctx, apex, sub, txtValue); err != nil {
-			_ = dbSetCertStatus(ctx.AppDB(), row.ID, "failed", fmtErr("set TXT", err))
-			return err
-		}
-		cleaned := false
-		cleanup := func() {
-			if cleaned {
-				return
-			}
-			cleaned = true
-			_ = deleteChallengeTXT(ctx, apex, sub)
+		if prepErr != nil {
+			return prepErr // helpers already wrote status=failed
 		}
 		defer cleanup()
 
-		fullName := "_acme-challenge." + fqdn
-		if err := waitForTXT(parent, fullName, txtValue, a.dnsTimeout); err != nil {
-			_ = dbSetCertStatus(ctx.AppDB(), row.ID, "failed", fmtErr("wait TXT", err))
-			return err
-		}
-
-		if _, err := client.Accept(parent, dnsChal); err != nil {
+		if _, err := client.Accept(parent, chal); err != nil {
 			_ = dbSetCertStatus(ctx.AppDB(), row.ID, "failed", fmtErr("accept challenge", err))
 			return err
 		}
@@ -291,6 +277,98 @@ func waitForTXT(parent context.Context, name, want string, timeout time.Duration
 		}
 	}
 	return fmt.Errorf("TXT for %q not visible after %s", name, timeout)
+}
+
+// prepareDNS01 sets up the TXT record for a dns-01 challenge and
+// waits for public resolvers to see it. Returns the challenge to
+// Accept and a once-guarded cleanup that deletes the TXT. On failure
+// the helper writes status=failed itself; caller just returns err.
+func (a *App) prepareDNS01(
+	ctx *sdk.AppCtx,
+	parent context.Context,
+	client *acme.Client,
+	authz *acme.Authorization,
+	apex, sub, fqdn string,
+	rowID int64,
+) (*acme.Challenge, func(), error) {
+	var dnsChal *acme.Challenge
+	for _, ch := range authz.Challenges {
+		if ch.Type == "dns-01" {
+			dnsChal = ch
+			break
+		}
+	}
+	if dnsChal == nil {
+		err := errors.New("ACME server didn't offer a dns-01 challenge")
+		_ = dbSetCertStatus(ctx.AppDB(), rowID, "failed", err.Error())
+		return nil, func() {}, err
+	}
+	txtValue, err := client.DNS01ChallengeRecord(dnsChal.Token)
+	if err != nil {
+		_ = dbSetCertStatus(ctx.AppDB(), rowID, "failed", fmtErr("dns01 record", err))
+		return nil, func() {}, err
+	}
+	if err := setChallengeTXT(ctx, apex, sub, txtValue); err != nil {
+		_ = dbSetCertStatus(ctx.AppDB(), rowID, "failed", fmtErr("set TXT", err))
+		return nil, func() {}, err
+	}
+	cleaned := false
+	cleanup := func() {
+		if cleaned {
+			return
+		}
+		cleaned = true
+		_ = deleteChallengeTXT(ctx, apex, sub)
+	}
+	fullName := "_acme-challenge." + fqdn
+	if err := waitForTXT(parent, fullName, txtValue, a.dnsTimeout); err != nil {
+		cleanup()
+		_ = dbSetCertStatus(ctx.AppDB(), rowID, "failed", fmtErr("wait TXT", err))
+		return nil, func() {}, err
+	}
+	return dnsChal, cleanup, nil
+}
+
+// prepareHTTP01 writes the keyAuth to the webroot at
+// .well-known/acme-challenge/<token>. The operator's reverse proxy
+// (Caddy / nginx / …) serves that directory. No propagation wait
+// needed — local-disk writes are immediately visible to the proxy.
+func (a *App) prepareHTTP01(
+	client *acme.Client,
+	authz *acme.Authorization,
+	rowID int64,
+	db *sql.DB,
+) (*acme.Challenge, func(), error) {
+	var httpChal *acme.Challenge
+	for _, ch := range authz.Challenges {
+		if ch.Type == "http-01" {
+			httpChal = ch
+			break
+		}
+	}
+	if httpChal == nil {
+		err := errors.New("ACME server didn't offer an http-01 challenge")
+		_ = dbSetCertStatus(db, rowID, "failed", err.Error())
+		return nil, func() {}, err
+	}
+	keyAuth, err := client.HTTP01ChallengeResponse(httpChal.Token)
+	if err != nil {
+		_ = dbSetCertStatus(db, rowID, "failed", fmtErr("http01 response", err))
+		return nil, func() {}, err
+	}
+	if err := writeChallenge(a.webrootPath, httpChal.Token, keyAuth); err != nil {
+		_ = dbSetCertStatus(db, rowID, "failed", fmtErr("write challenge", err))
+		return nil, func() {}, err
+	}
+	cleaned := false
+	cleanup := func() {
+		if cleaned {
+			return
+		}
+		cleaned = true
+		_ = deleteChallenge(a.webrootPath, httpChal.Token)
+	}
+	return httpChal, cleanup, nil
 }
 
 func resolverLookupTXT(parent context.Context, server, name string) ([]string, error) {

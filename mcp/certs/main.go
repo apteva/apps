@@ -27,8 +27,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: certs
 display_name: Certs
-version: 0.1.0
-description: TLS certificate issuance via ACME DNS-01, routed through the Domains app.
+version: 0.2.0
+description: TLS certificate issuance via ACME DNS-01 (through Domains app) or HTTP-01 (webroot).
 author: Apteva
 scopes: [project, global]
 requires:
@@ -39,10 +39,10 @@ requires:
   integrations:
     - role: domains
       kind: app
-      required: true
+      required: false
       compatible_app_names: [domains]
       label: Domains app
-      hint: Required — DNS-01 challenges write TXT records via the Domains app.
+      hint: Required for DNS-01. Optional — HTTP-01 (webroot) works without it.
 provides:
   http_routes:
     - prefix: /
@@ -73,13 +73,15 @@ upgrade_policy: auto-patch
 // ─── App ───────────────────────────────────────────────────────────
 
 type App struct {
-	directoryURL string
-	contactEmail string
-	renewWindow  time.Duration
-	dnsTimeout   time.Duration
+	directoryURL  string
+	contactEmail  string
+	renewWindow   time.Duration
+	dnsTimeout    time.Duration
+	challengeType string // "dns-01" | "http-01" | "auto"
+	webrootPath   string // filesystem dir for http-01 challenge files
 
 	// Per-FQDN issuance lock so concurrent cert_issue / renew calls
-	// for the same name don't collide on the TXT slot.
+	// for the same name don't collide on the challenge slot.
 	mu       sync.Mutex
 	inFlight map[string]bool
 
@@ -110,6 +112,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.contactEmail = strings.TrimSpace(configOr(ctx, "acme_email", ""))
 	a.renewWindow = time.Duration(atoiOr(configOr(ctx, "renewal_window_days", "30"), 30)) * 24 * time.Hour
 	a.dnsTimeout = time.Duration(atoiOr(configOr(ctx, "dns_propagation_timeout_seconds", "180"), 180)) * time.Second
+	a.challengeType = strings.TrimSpace(configOr(ctx, "challenge_type", "auto"))
+	a.webrootPath = strings.TrimSpace(configOr(ctx, "webroot_path", "/var/www/acme"))
 	a.inFlight = map[string]bool{}
 	a.stopCh = make(chan struct{})
 
@@ -117,6 +121,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		"directory", a.directoryURL,
 		"email_configured", a.contactEmail != "",
 		"renew_window", a.renewWindow.String(),
+		"challenge_type", a.challengeType,
+		"webroot_path", a.webrootPath,
 	)
 
 	// Daily renewal pass. Runs once on boot too — cheap when there's
@@ -243,4 +249,39 @@ func shortCtx() (context.Context, context.CancelFunc) {
 // fmtErr makes a stable, single-line error string for the DB.
 func fmtErr(stage string, err error) string {
 	return fmt.Sprintf("%s: %s", stage, strings.ReplaceAll(err.Error(), "\n", " "))
+}
+
+// selectChallengeType resolves the configured choice. Explicit values
+// win and are returned as-is (so misconfigurations fail loudly at
+// issuance time with a clear error). "auto" picks dns-01 when the
+// Domains app is installed AND has at least one registered domain —
+// the existing, proven path; otherwise falls back to http-01.
+func (a *App) selectChallengeType(ctx *sdk.AppCtx) string {
+	switch a.challengeType {
+	case "dns-01", "http-01":
+		return a.challengeType
+	case "", "auto":
+		if domainsAvailable(ctx) {
+			return "dns-01"
+		}
+		return "http-01"
+	default:
+		// Unrecognised value — bias toward the proven path so a typo
+		// doesn't silently route to the newer http-01 code.
+		return "dns-01"
+	}
+}
+
+// domainsAvailable returns true when the Domains app is installed AND
+// has at least one registered domain. An empty domains list is
+// treated as "not available" because dns-01 would fail at resolveApex
+// anyway — better to fall through to http-01 in auto mode.
+func domainsAvailable(ctx *sdk.AppCtx) bool {
+	var resp struct {
+		Domains []any `json:"domains"`
+	}
+	if err := callDomainsTool(ctx, "domain_list", map[string]any{}, &resp); err != nil {
+		return false
+	}
+	return len(resp.Domains) > 0
 }

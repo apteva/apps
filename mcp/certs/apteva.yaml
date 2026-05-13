@@ -2,15 +2,22 @@ schema: apteva-app/v1
 
 name: certs
 display_name: Certs
-version: 0.1.0
+version: 0.2.0
 description: |
   TLS certificate issuance for Apteva projects. Talks to Let's
-  Encrypt (or any RFC 8555 ACME directory) using DNS-01 challenges,
-  routing the TXT record writes through the Domains app so we never
-  hold the registrar's API keys here.
+  Encrypt (or any RFC 8555 ACME directory) using DNS-01 or HTTP-01
+  challenges.
 
-  v0.1: single-name certs. SAN / wildcard support is a v0.2 schema
-  add (sans_json column) and an extra DNS round-trip.
+  - DNS-01 routes TXT-record writes through the Domains app so we
+    never hold the registrar's API keys here.
+  - HTTP-01 uses the webroot pattern: certs writes the challenge
+    token to webroot_path; whatever reverse proxy is on :80 (Caddy,
+    nginx, traefik, …) serves it at /.well-known/acme-challenge/*.
+    Set challenge_type=http-01 (or leave auto: it picks dns-01 if
+    the Domains app is installed AND has domains, else http-01).
+
+  Single-name certs only in this release; SAN / wildcards are a
+  later schema add.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/certs
@@ -28,10 +35,10 @@ requires:
   integrations:
     - role: domains
       kind: app
-      required: true
+      required: false
       compatible_app_names: [domains]
       label: Domains app
-      hint: Required — DNS-01 challenges go through the Domains app's record API.
+      hint: Required for DNS-01 challenges (TXT records). Optional — HTTP-01 (webroot) works without it.
 
 provides:
   http_routes:
@@ -83,6 +90,16 @@ config_schema:
     type: text
     default: "180"
     label: DNS propagation timeout (s)
-    description: How long to poll public resolvers for the _acme-challenge TXT record before giving up. Slow registrars (Namecheap) may need 300+.
+    description: How long to poll public resolvers for the _acme-challenge TXT record before giving up. Slow registrars (Namecheap) may need 300+. Only used for dns-01.
+  - name: challenge_type
+    type: text
+    default: "auto"
+    label: ACME challenge type
+    description: One of `dns-01`, `http-01`, or `auto`. `auto` picks dns-01 when the Domains app is installed and has at least one registered domain, else http-01.
+  - name: webroot_path
+    type: text
+    default: "/var/www/acme"
+    label: HTTP-01 webroot path
+    description: Filesystem path where _acme-challenge files are written for http-01. Your reverse proxy (Caddy / nginx / traefik) must serve this directory at `/.well-known/acme-challenge/`. The directory must exist and be writable by the certs sidecar user.
 
 upgrade_policy: auto-patch
