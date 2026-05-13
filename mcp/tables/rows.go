@@ -137,7 +137,11 @@ func (a *App) toolRowsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	row, found, err := fetchRowByID(ctx.AppDB(), t, id)
+	selectClause, err := parseSelect(args, t)
+	if err != nil {
+		return nil, err
+	}
+	row, found, err := fetchRowByID(ctx.AppDB(), t, id, selectClause)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +210,7 @@ func (a *App) toolRowsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if n == 0 {
 		return nil, errf("row id=%d not found in table %q", id, tableName)
 	}
-	row, _, err := fetchRowByID(ctx.AppDB(), t, id)
+	row, _, err := fetchRowByID(ctx.AppDB(), t, id, "")
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +331,11 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		offset = 0
 	}
 
-	stmt := buildSelectAll(t) + " FROM " + quote(t.PhysicalName)
+	selectClause, err := parseSelect(args, t)
+	if err != nil {
+		return nil, err
+	}
+	stmt := selectClause + " FROM " + quote(t.PhysicalName)
 	if clause != "" {
 		stmt += " " + clause
 	}
@@ -385,6 +393,58 @@ func buildSelectAll(t *Table) string {
 	return "SELECT " + strings.Join(cols, ", ")
 }
 
+// buildSelect returns a SELECT clause restricted to picks. Each name
+// must be either a reserved column (id, created_at, updated_at) or a
+// user column declared on t. Duplicates are silently deduped. Empty
+// picks is an error — callers should fall through to buildSelectAll
+// when select is omitted, not pass an empty list.
+func buildSelect(t *Table, picks []string) (string, error) {
+	if len(picks) == 0 {
+		return "", errf("select must be non-empty if provided")
+	}
+	valid := map[string]bool{"id": true, "created_at": true, "updated_at": true}
+	for _, c := range t.Columns {
+		valid[c.Name] = true
+	}
+	seen := map[string]bool{}
+	cols := make([]string, 0, len(picks))
+	for _, p := range picks {
+		if !valid[p] {
+			return "", errf("select: unknown column %q", p)
+		}
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		cols = append(cols, quote(p))
+	}
+	return "SELECT " + strings.Join(cols, ", "), nil
+}
+
+// parseSelect resolves the optional `select` arg into a SELECT clause.
+// When the arg is absent or null, returns buildSelectAll (full row,
+// matches pre-projection behavior). When present, validates each name
+// against the table schema via buildSelect.
+func parseSelect(args map[string]any, t *Table) (string, error) {
+	raw, ok := args["select"]
+	if !ok || raw == nil {
+		return buildSelectAll(t), nil
+	}
+	arr, isArr := raw.([]any)
+	if !isArr {
+		return "", errf("select: must be array of column names")
+	}
+	picks := make([]string, 0, len(arr))
+	for i, v := range arr {
+		s, ok := v.(string)
+		if !ok {
+			return "", errf("select[%d]: must be string", i)
+		}
+		picks = append(picks, s)
+	}
+	return buildSelect(t, picks)
+}
+
 func scanRows(rows *sql.Rows, t *Table) ([]map[string]any, error) {
 	out := []map[string]any{}
 	cols, err := rows.Columns()
@@ -405,9 +465,19 @@ func scanRows(rows *sql.Rows, t *Table) ([]map[string]any, error) {
 			return nil, err
 		}
 		row := map[string]any{}
-		row["id"] = scalarOrInt(dest[colIdx["id"]])
-		row["created_at"] = scalarString(dest[colIdx["created_at"]])
-		row["updated_at"] = scalarString(dest[colIdx["updated_at"]])
+		// Reserved columns are populated only if actually present in
+		// the result set — column projection (rows_search/rows_get's
+		// `select` arg) may legitimately omit them. Indexing colIdx
+		// unconditionally would silently read dest[0] when missing.
+		if i, ok := colIdx["id"]; ok {
+			row["id"] = scalarOrInt(dest[i])
+		}
+		if i, ok := colIdx["created_at"]; ok {
+			row["created_at"] = scalarString(dest[i])
+		}
+		if i, ok := colIdx["updated_at"]; ok {
+			row["updated_at"] = scalarString(dest[i])
+		}
 		for _, c := range t.Columns {
 			i, ok := colIdx[c.Name]
 			if !ok {
@@ -440,8 +510,14 @@ func scalarString(v any) any {
 	return v
 }
 
-func fetchRowByID(db *sql.DB, t *Table, id int64) (map[string]any, bool, error) {
-	stmt := buildSelectAll(t) + " FROM " + quote(t.PhysicalName) + " WHERE id = ?"
+// fetchRowByID runs the supplied selectClause (e.g. buildSelectAll(t)
+// or a projection produced by buildSelect) against t for the given id.
+// Pass "" to default to a full-row select.
+func fetchRowByID(db *sql.DB, t *Table, id int64, selectClause string) (map[string]any, bool, error) {
+	if selectClause == "" {
+		selectClause = buildSelectAll(t)
+	}
+	stmt := selectClause + " FROM " + quote(t.PhysicalName) + " WHERE id = ?"
 	rows, err := db.Query(stmt, id)
 	if err != nil {
 		return nil, false, err

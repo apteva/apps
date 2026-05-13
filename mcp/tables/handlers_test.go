@@ -388,3 +388,184 @@ func TestTablesQuery_RefusesWrites(t *testing.T) {
 		t.Fatal("DELETE should have been refused")
 	}
 }
+
+// ─── column projection (`select` arg on rows_search / rows_get) ───────
+
+// seedBooks puts three rows in the books table for the projection tests.
+func seedBooks(t *testing.T, app *App, ctx *sdk.AppCtx) {
+	t.Helper()
+	booksTable(t, app, ctx)
+	mustCall(t, app, ctx, "rows_insert", map[string]any{
+		"table": "books",
+		"rows": []any{
+			map[string]any{"title": "Three-Body Problem", "author": "Liu Cixin", "rating": 5.0, "finished": true},
+			map[string]any{"title": "Project Hail Mary", "author": "Andy Weir", "rating": 4.5, "finished": false},
+		},
+	})
+}
+
+func TestRowsSearch_SelectProjection(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	seedBooks(t, app, ctx)
+
+	out := mustCall(t, app, ctx, "rows_search", map[string]any{
+		"table":    "books",
+		"select":   []any{"title", "rating"},
+		"order_by": "rating desc",
+	})
+	rows := out["rows"].([]map[string]any)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	for i, r := range rows {
+		gotKeys := keySet(r)
+		want := map[string]bool{"title": true, "rating": true}
+		if !sameSet(gotKeys, want) {
+			t.Errorf("row[%d]: keys=%v, want exactly title+rating", i, gotKeys)
+		}
+	}
+}
+
+func TestRowsSearch_OmitSelectIsBackwardsCompat(t *testing.T) {
+	// Pins the contract that callers who don't pass `select` see the
+	// pre-projection behavior: every user column + id/created_at/updated_at.
+	ctx := newTestCtx(t)
+	app := &App{}
+	seedBooks(t, app, ctx)
+
+	out := mustCall(t, app, ctx, "rows_search", map[string]any{"table": "books"})
+	rows := out["rows"].([]map[string]any)
+	if len(rows) == 0 {
+		t.Fatal("expected rows")
+	}
+	want := []string{"id", "created_at", "updated_at", "title", "author", "rating", "finished", "started_at", "tags"}
+	for _, k := range want {
+		if _, ok := rows[0][k]; !ok {
+			t.Errorf("missing key %q in default-select row: keys=%v", k, keySet(rows[0]))
+		}
+	}
+}
+
+func TestRowsSearch_SelectEmptyArrayErrors(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	seedBooks(t, app, ctx)
+	_, err := callTool(app, ctx, "rows_search", map[string]any{
+		"table":  "books",
+		"select": []any{},
+	})
+	if err == nil {
+		t.Fatal("empty select should error")
+	}
+}
+
+func TestRowsSearch_SelectUnknownColumnErrors(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	seedBooks(t, app, ctx)
+	_, err := callTool(app, ctx, "rows_search", map[string]any{
+		"table":  "books",
+		"select": []any{"title", "no_such_col"},
+	})
+	if err == nil {
+		t.Fatal("unknown column in select should error")
+	}
+}
+
+func TestRowsSearch_SelectDedupesDuplicates(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	seedBooks(t, app, ctx)
+	out := mustCall(t, app, ctx, "rows_search", map[string]any{
+		"table":  "books",
+		"select": []any{"title", "title", "rating"},
+	})
+	rows := out["rows"].([]map[string]any)
+	if len(rows) == 0 {
+		t.Fatal("expected rows")
+	}
+	gotKeys := keySet(rows[0])
+	want := map[string]bool{"title": true, "rating": true}
+	if !sameSet(gotKeys, want) {
+		t.Errorf("dupe title should dedupe — got keys=%v", gotKeys)
+	}
+}
+
+func TestRowsSearch_SelectReservedColumns(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	seedBooks(t, app, ctx)
+	out := mustCall(t, app, ctx, "rows_search", map[string]any{
+		"table":  "books",
+		"select": []any{"id", "created_at"},
+	})
+	rows := out["rows"].([]map[string]any)
+	if len(rows) == 0 {
+		t.Fatal("expected rows")
+	}
+	gotKeys := keySet(rows[0])
+	want := map[string]bool{"id": true, "created_at": true}
+	if !sameSet(gotKeys, want) {
+		t.Errorf("reserved cols should be selectable — got keys=%v", gotKeys)
+	}
+}
+
+func TestRowsGet_SelectProjection(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	seedBooks(t, app, ctx)
+
+	// Grab any row's id via a full search first.
+	full := mustCall(t, app, ctx, "rows_search", map[string]any{"table": "books", "limit": 1})
+	id := full["rows"].([]map[string]any)[0]["id"].(int64)
+
+	out := mustCall(t, app, ctx, "rows_get", map[string]any{
+		"table":  "books",
+		"id":     id,
+		"select": []any{"title"},
+	})
+	if out["found"].(bool) != true {
+		t.Fatal("expected found=true")
+	}
+	row := out["row"].(map[string]any)
+	gotKeys := keySet(row)
+	want := map[string]bool{"title": true}
+	if !sameSet(gotKeys, want) {
+		t.Errorf("rows_get with select=[title]: keys=%v, want exactly title", gotKeys)
+	}
+}
+
+func TestRowsGet_SelectUnknownColumnErrors(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	seedBooks(t, app, ctx)
+	_, err := callTool(app, ctx, "rows_get", map[string]any{
+		"table":  "books",
+		"id":     int64(1),
+		"select": []any{"no_such_col"},
+	})
+	if err == nil {
+		t.Fatal("unknown column in select should error")
+	}
+}
+
+func keySet(m map[string]any) map[string]bool {
+	out := make(map[string]bool, len(m))
+	for k := range m {
+		out[k] = true
+	}
+	return out
+}
+
+func sameSet(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if !b[k] {
+			return false
+		}
+	}
+	return true
+}

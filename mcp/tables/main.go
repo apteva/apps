@@ -173,10 +173,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "rows_get",
-			Description: "Fetch one row by id. Args: table, id, hydrate_files? (resolve file_id columns to {id, url}). Returns {row, found}.",
+			Description: "Fetch one row by id. Args: table, id, select? (list of column names — defaults to all columns; reserved id/created_at/updated_at are valid picks), hydrate_files? (resolve file_id columns to {id, url}). Returns {row, found}.",
 			InputSchema: schemaObject(map[string]any{
 				"table":         map[string]any{"type": "string"},
 				"id":            map[string]any{"type": "integer"},
+				"select":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 				"hydrate_files": map[string]any{"type": "boolean"},
 			}, []string{"table", "id"}),
 			Handler: a.toolRowsGet,
@@ -204,13 +205,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "rows_search",
-			Description: "Filter, sort, paginate. Args: table, where? (array of {col, op, value}), order_by? (\"col\" | \"col desc\"), limit?, offset?. Returns {rows, total}.",
+			Description: "Filter, sort, paginate. Args: table, where? (array of {col, op, value}), order_by? (\"col\" | \"col desc\"), limit?, offset?, select? (list of column names — defaults to all columns; lets callers skip heavy/unused columns over the wire). Returns {rows, total}.",
 			InputSchema: schemaObject(map[string]any{
 				"table":    map[string]any{"type": "string"},
 				"where":    whereSchema,
 				"order_by": map[string]any{"type": "string"},
 				"limit":    map[string]any{"type": "integer"},
 				"offset":   map[string]any{"type": "integer"},
+				"select":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			}, []string{"table"}),
 			Handler: a.toolRowsSearch,
 		},
