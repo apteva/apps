@@ -89,7 +89,7 @@ func (s *store) insert(t *Tenant, apiKeyEnc, setupTokenEnc []byte) error {
 	}
 	_, err := s.db.Exec(`
 		INSERT INTO fleet_tenants (id, slug, kind, base_url, config_dir, api_key_enc, setup_token_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, t.ID, t.Slug, t.Kind, t.BaseURL, nullStr(t.ConfigDir), apiKeyEnc, stTok, t.OwnerEmail, nullStr(t.OwnerUserID),
 		nullStr(t.CurrentVersion), nullStr(t.TargetVersion), t.Status,
 		nil, nil, t.CreatedAt, t.UpdatedAt)

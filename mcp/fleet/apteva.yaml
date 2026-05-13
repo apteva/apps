@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.2.3
+version: 0.2.4
 description: |
   Control plane for a fleet of client apteva instances. v0.2 spawns
   every tenant as a local apteva process on the parent host with
