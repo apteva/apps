@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.2.0
+version: 0.2.1
 description: |
   Control plane for a fleet of client apteva instances. v0.2 spawns
   every tenant as a local apteva process on the parent host with
@@ -32,26 +32,29 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    # Descriptions are double-quoted because YAML disallows ": "
+    # inside unquoted scalars — every "Args: …" suffix would trip the
+    # parser otherwise (see fleet/v0.2.0's install bug).
     - name: tenant_create
-      description: Spawn a new local apteva instance in setup_pending state. Allocates a data dir + port, mints a setup token, returns setup_url + setup_token for the operator to register an admin in the browser. Args: slug, owner_email.
+      description: "Spawn a new local apteva instance in setup_pending state. Allocates a data dir + port, mints a setup token, returns setup_url + setup_token for the operator to register an admin in the browser. Args: slug, owner_email."
     - name: tenant_attach_key
-      description: Finish admin-driven setup by attaching the tenant's api_key (created via the tenant dashboard after admin registration). Flips status to active. Args: tenant_id, api_key.
+      description: "Finish admin-driven setup by attaching the tenant's api_key (created via the tenant dashboard after admin registration). Flips status to active. Args: tenant_id, api_key."
     - name: tenant_connect
-      description: Register an existing apteva-server (local or remote) as a tenant without spawning it. Args: base_url, api_key, owner_email, slug?.
+      description: "Register an existing apteva-server (local or remote) as a tenant without spawning it. Args: base_url, api_key, owner_email, slug?."
     - name: tenant_list
-      description: List managed tenants.
+      description: "List managed tenants."
     - name: tenant_get
-      description: Full record for one tenant + recent events. Args: tenant_id.
+      description: "Full record for one tenant + recent events. Args: tenant_id."
     - name: tenant_start
-      description: Start a stopped local tenant. Args: tenant_id.
+      description: "Start a stopped local tenant. Args: tenant_id."
     - name: tenant_stop
-      description: Stop a running local tenant (process SIGTERM → SIGKILL). Registry only for remote-connected tenants. Args: tenant_id.
+      description: "Stop a running local tenant (process SIGTERM → SIGKILL). Registry only for remote-connected tenants. Args: tenant_id."
     - name: tenant_delete
-      description: Stop and remove a tenant. For local tenants also wipes the data dir (only with confirm=true). Args: tenant_id, confirm? (required for data wipe).
+      description: "Stop and remove a tenant. For local tenants also wipes the data dir (only with confirm=true). Args: tenant_id, confirm? (required for data wipe)."
     - name: tenant_support_login
-      description: Mint a short-lived super-admin URL on the tenant. Args: tenant_id, reason.
+      description: "Mint a short-lived super-admin URL on the tenant. Args: tenant_id, reason."
     - name: tenant_run_remote
-      description: Proxy an MCP tool call to a tenant's gateway using its api_key. Args: tenant_id, app, tool, input.
+      description: "Proxy an MCP tool call to a tenant's gateway using its api_key. Args: tenant_id, app, tool, input."
   ui_panels:
     - slot: project.page
       label: Fleet
