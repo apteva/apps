@@ -24,8 +24,23 @@ type Builder interface {
 }
 
 type BuildOverrides struct {
-	BuildCmd string // explicit override; if non-empty, runs as `sh -c <build_cmd>` in srcDir
-	StartCmd string // (used by runtime, not builder; passed through for context)
+	BuildCmd string            // explicit override; if non-empty, runs as `sh -c <build_cmd>` in srcDir
+	StartCmd string            // (used by runtime, not builder; passed through for context)
+	Env      map[string]string // user-provided env from the deployment's env_json (e.g. VITE_*, NEXT_PUBLIC_*); applied to every build process
+}
+
+// buildEnv composes the env each builder hands to exec.Cmd. Starts
+// from the sidecar's process env, then appends any toolchain hints
+// the caller wants (e.g. CGO_ENABLED=0), then user-provided keys last
+// so they override host env on collision — same precedence rule as
+// the runtime's mergeEnv.
+func buildEnv(user map[string]string, extra ...string) []string {
+	out := append([]string{}, os.Environ()...)
+	out = append(out, extra...)
+	for k, v := range user {
+		out = append(out, k+"="+v)
+	}
+	return out
 }
 
 // detectFramework picks a builder when the deployment doesn't pin
@@ -88,13 +103,13 @@ func (*goBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.W
 	if ov.BuildCmd != "" {
 		// Honour the override but still write to artifactDir/app so
 		// the runtime knows where to find the binary.
-		return runShellInSrc(srcDir, ov.BuildCmd, logW, binPath)
+		return runShellInSrc(srcDir, ov.BuildCmd, logW, binPath, ov.Env)
 	}
 	cmd := exec.Command("go", args...)
 	cmd.Dir = srcDir
 	cmd.Stdout = logW
 	cmd.Stderr = logW
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=0") // static binary by default
+	cmd.Env = buildEnv(ov.Env, "CGO_ENABLED=0") // static binary by default
 	fmt.Fprintf(logW, "+ go %s (cwd=%s)\n", strings.Join(args, " "), srcDir)
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("go build: %w", err)
@@ -118,6 +133,7 @@ func (*staticBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW 
 		c.Dir = srcDir
 		c.Stdout = logW
 		c.Stderr = logW
+		c.Env = buildEnv(ov.Env)
 		if err := c.Run(); err != nil {
 			return "", fmt.Errorf("static build_cmd: %w", err)
 		}
@@ -161,6 +177,7 @@ func (*nodeBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io
 		c.Dir = srcDir
 		c.Stdout = logW
 		c.Stderr = logW
+		c.Env = buildEnv(ov.Env)
 		if err := c.Run(); err != nil {
 			return "", fmt.Errorf("node build_cmd: %w", err)
 		}
@@ -170,6 +187,7 @@ func (*nodeBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io
 		ic.Dir = srcDir
 		ic.Stdout = logW
 		ic.Stderr = logW
+		ic.Env = buildEnv(ov.Env)
 		if err := ic.Run(); err != nil {
 			return "", fmt.Errorf("%s install: %w", pm, err)
 		}
@@ -179,6 +197,7 @@ func (*nodeBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io
 			bc.Dir = srcDir
 			bc.Stdout = logW
 			bc.Stderr = logW
+			bc.Env = buildEnv(ov.Env)
 			if err := bc.Run(); err != nil {
 				return "", fmt.Errorf("%s run build: %w", pm, err)
 			}
@@ -195,6 +214,7 @@ func (*nodeBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io
 				bc.Dir = srcDir
 				bc.Stdout = logW
 				bc.Stderr = logW
+				bc.Env = buildEnv(ov.Env)
 				if err := bc.Run(); err != nil {
 					return "", fmt.Errorf("bun run %s: %w", buildScript, err)
 				}
@@ -256,6 +276,7 @@ func (*bunBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 		c.Dir = srcDir
 		c.Stdout = logW
 		c.Stderr = logW
+		c.Env = buildEnv(ov.Env)
 		if err := c.Run(); err != nil {
 			return "", fmt.Errorf("bun build_cmd: %w", err)
 		}
@@ -265,6 +286,7 @@ func (*bunBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 		ic.Dir = srcDir
 		ic.Stdout = logW
 		ic.Stderr = logW
+		ic.Env = buildEnv(ov.Env)
 		if err := ic.Run(); err != nil {
 			return "", fmt.Errorf("bun install: %w", err)
 		}
@@ -275,6 +297,7 @@ func (*bunBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 			bc.Dir = srcDir
 			bc.Stdout = logW
 			bc.Stderr = logW
+			bc.Env = buildEnv(ov.Env)
 			if err := bc.Run(); err != nil {
 				return "", fmt.Errorf("bun run build: %w", err)
 			}
@@ -285,6 +308,7 @@ func (*bunBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 				bc.Dir = srcDir
 				bc.Stdout = logW
 				bc.Stderr = logW
+				bc.Env = buildEnv(ov.Env)
 				if err := bc.Run(); err != nil {
 					return "", fmt.Errorf("bun run %s: %w", buildScript, err)
 				}
@@ -396,6 +420,7 @@ func (*blankBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW i
 	c.Dir = srcDir
 	c.Stdout = logW
 	c.Stderr = logW
+	c.Env = buildEnv(ov.Env)
 	if err := c.Run(); err != nil {
 		return "", fmt.Errorf("build_cmd: %w", err)
 	}
@@ -410,12 +435,13 @@ func (*blankBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW i
 // runShellInSrc executes a build_cmd in srcDir. Always returns the
 // binPath the caller suggested — the override is responsible for
 // producing a binary at that path.
-func runShellInSrc(srcDir, cmd string, logW io.Writer, expectedOutput string) (string, error) {
+func runShellInSrc(srcDir, cmd string, logW io.Writer, expectedOutput string, env map[string]string) (string, error) {
 	fmt.Fprintf(logW, "+ %s (cwd=%s)\n", cmd, srcDir)
 	c := exec.Command("sh", "-c", cmd)
 	c.Dir = srcDir
 	c.Stdout = logW
 	c.Stderr = logW
+	c.Env = buildEnv(env)
 	if err := c.Run(); err != nil {
 		return "", err
 	}

@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.4.6
+version: 0.5.0
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
@@ -402,6 +402,7 @@ func (a *App) runBuild(d *Deployment) (*Build, error) {
 	entrypoint, err := builder.Build(srcDir, distDir, BuildOverrides{
 		BuildCmd: d.BuildCmd,
 		StartCmd: d.StartCmd,
+		Env:      parseEnvJSON(d.EnvJSON),
 	}, logF)
 	if err != nil {
 		return a.failBuild(build, err.Error()), nil
