@@ -49,14 +49,11 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 
-	setupToken, err := mintSetupToken()
-	if err != nil {
-		return nil, err
-	}
-
 	// Insert in "starting" so a concurrent caller doesn't reuse the
-	// slug while we're spawning. Both api_key_enc and setup_token_enc
-	// hold sealed placeholders/values from the moment the row exists.
+	// slug while we're spawning. api_key_enc holds a sentinel; the
+	// real setup_token_enc is filled in after spawn (the apteva CLI
+	// is what mints it — see spawnTenant comment for why fleet can't
+	// inject one in advance).
 	t := &Tenant{
 		Slug:       slug,
 		Kind:       KindLocal,
@@ -69,11 +66,7 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	setupTokenEnc, err := a.keys.seal([]byte(setupToken))
-	if err != nil {
-		return nil, err
-	}
-	if err := a.store.insert(t, apiKeyStub, setupTokenEnc); err != nil {
+	if err := a.store.insert(t, apiKeyStub, nil); err != nil {
 		return nil, err
 	}
 	_ = a.store.recordEvent(t.ID, "spawn_start", "user", map[string]any{"port": port, "config_dir": configDir})
@@ -82,7 +75,7 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// disk). Boot timeout = tenant marked failed + data dir removed.
 	spawnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	proc, err := a.spawnTenant(spawnCtx, slug, configDir, getStr(args, "apteva_bin"), port, setupToken)
+	setupToken, proc, err := a.spawnTenant(spawnCtx, slug, configDir, getStr(args, "apteva_bin"), port, true /* freshSetup */)
 	if err != nil {
 		_ = a.store.setStatus(t.ID, StatusFailed, "user")
 		_ = a.store.recordEvent(t.ID, "spawn_failed", "user", map[string]any{"error": err.Error()})
@@ -91,7 +84,17 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 
-	if err := a.store.setStatus(t.ID, StatusSetupPending, "user"); err != nil {
+	// Seal the scraped token and persist it now that we have it.
+	setupTokenEnc, err := a.keys.seal([]byte(setupToken))
+	if err != nil {
+		_ = stopProcess(proc, 2*time.Second)
+		return nil, err
+	}
+	if _, err := a.store.db.Exec(
+		`UPDATE fleet_tenants SET setup_token_enc = ?, status = ?, updated_at = ? WHERE id = ?`,
+		setupTokenEnc, StatusSetupPending, time.Now().UTC(), t.ID,
+	); err != nil {
+		_ = stopProcess(proc, 2*time.Second)
 		return nil, err
 	}
 
@@ -304,13 +307,13 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return map[string]any{"tenant_id": t.ID, "status": StatusActive, "note": "process already listening on port"}, nil
 	}
 	// Re-spawning a previously-bootstrapped tenant: the server already
-	// has a users table, so registration isn't in setup mode — no
-	// setup token needed. The stored api_key remains valid.
+	// has a users table, so registration isn't in setup mode and we
+	// don't need to scrape a token. The stored api_key remains valid.
 	prevStatus := t.Status
 	_ = a.store.setStatus(t.ID, StatusStarting, "user")
 	spawnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	proc, err := a.spawnTenant(spawnCtx, t.Slug, t.ConfigDir, "", port, "")
+	_, proc, err := a.spawnTenant(spawnCtx, t.Slug, t.ConfigDir, "", port, false /* freshSetup */)
 	if err != nil {
 		_ = a.store.setStatus(t.ID, StatusFailed, "user")
 		return nil, err

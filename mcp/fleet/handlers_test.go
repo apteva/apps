@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -205,6 +206,43 @@ func TestUnwrapMCP_Envelope(t *testing.T) {
 	m := got.(map[string]any)
 	if m["ok"] != true || int(m["n"].(float64)) != 42 {
 		t.Errorf("unwrapped wrong: %+v", m)
+	}
+}
+
+func TestScrapeSetupToken_FindsBannerToken(t *testing.T) {
+	// Mimics what the apteva CLI prints to fleet-child.log on first
+	// boot. The scraper has to find the token whether it's on its
+	// own line or inline with prose.
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "fleet-child.log")
+	if err := os.WriteFile(logPath, []byte(`
+  Apteva is running.
+
+    Dashboard:  http://localhost:53217
+    First run — open the dashboard and use this setup token to create your admin account:
+        apt_dce09898473aa033f389855eca23a6eb
+    Server log: /tmp/server.log
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := scrapeSetupToken(logPath, 200*time.Millisecond)
+	if err != nil {
+		t.Fatalf("scrape: %v", err)
+	}
+	if got != "apt_dce09898473aa033f389855eca23a6eb" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestScrapeSetupToken_TimesOutOnMissing(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "fleet-child.log")
+	if err := os.WriteFile(logPath, []byte("nothing useful here\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := scrapeSetupToken(logPath, 200*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected scrape to time out when token is absent")
 	}
 }
 

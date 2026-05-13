@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -11,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -28,53 +27,50 @@ type tenantProc struct {
 //
 //	<apteva-bin> --data-dir <configDir> --port <port> --no-browser
 //
-// In dashboard / --no-browser mode the apteva CLI deliberately does
-// NOT auto-register an admin user — registration happens in the
-// browser using a setup token that apteva-server reads from the
-// APTEVA_SETUP_TOKEN env var. We mint the token here, inject it on
-// spawn, and return it to the caller so the operator can finish
-// registration via the setup URL. The capture-from-apteva.json path
-// is gone: there is no api_key to read at spawn time.
+// In --no-browser mode the apteva CLI deliberately doesn't auto-
+// register an admin user — registration happens in the browser
+// using a setup token apteva-server prints on stderr during its
+// first boot. The CLI re-prints the same token to its own banner
+// (cli.log + our captured fleet-child.log), so we scrape it from
+// there once /api/health responds.
 //
-// Caller owns persisting the row + handing the token to the operator.
-// For respawn paths (tenant_start), pass an empty setupToken — the
-// server keeps its first-boot token in the DB and ignores re-injection.
-func (a *App) spawnTenant(ctx context.Context, slug, configDir, aptevaBin string, port int, setupToken string) (proc *tenantProc, err error) {
+// Why we don't pass APTEVA_SETUP_TOKEN ourselves: the apteva CLI's
+// process-spawn path doesn't propagate that env to its apteva-server
+// child (the CLI's exec strips fleet's env). The server then mints
+// its own random token and ignores anything we set. Scraping the
+// real value is the workaround until the CLI propagates that env.
+//
+// For respawn paths (tenant_start, pass freshSetup=false) we don't
+// look for a token — the tenant already has a users table from its
+// first boot, registration is locked.
+func (a *App) spawnTenant(ctx context.Context, slug, configDir, aptevaBin string, port int, freshSetup bool) (setupToken string, proc *tenantProc, err error) {
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		return nil, fmt.Errorf("mkdir configDir: %w", err)
+		return "", nil, fmt.Errorf("mkdir configDir: %w", err)
 	}
 	bin, err := resolveAptevaBin(aptevaBin)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	cmd := exec.Command(bin, "--data-dir", configDir, "--port", strconv.Itoa(port), "--no-browser")
-	env := append(os.Environ(),
+	cmd.Env = append(os.Environ(),
 		"APTEVA_HOME="+configDir,
 		"PORT="+strconv.Itoa(port),
 		"QUIET=1",
 	)
-	if setupToken != "" {
-		// Server reads this on boot and uses it as the required
-		// X-Setup-Token for the first /auth/register call. Without
-		// this, the server mints its own random token, prints it to
-		// stderr, and we'd have no way to surface it to the operator.
-		env = append(env, "APTEVA_SETUP_TOKEN="+setupToken, "APTEVA_REGISTRATION=setup")
-	}
-	cmd.Env = env
 	// New process group: child survives if fleet itself restarts.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Wire stdout/stderr into a logs file per tenant.
 	logsPath := filepath.Join(configDir, "fleet-child.log")
 	logFile, err := os.OpenFile(logsPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("open logs: %w", err)
+		return "", nil, fmt.Errorf("open logs: %w", err)
 	}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
-		return nil, fmt.Errorf("start apteva: %w", err)
+		return "", nil, fmt.Errorf("start apteva: %w", err)
 	}
 	proc = &tenantProc{cmd: cmd, port: port, started: time.Now()}
 
@@ -96,22 +92,46 @@ func (a *App) spawnTenant(ctx context.Context, slug, configDir, aptevaBin string
 	// don't need an api_key to probe it.
 	if err := waitForReady(ctx, port, 30*time.Second); err != nil {
 		_ = stopProcess(proc, 2*time.Second)
-		return nil, fmt.Errorf("tenant did not become ready: %w", err)
+		return "", nil, fmt.Errorf("tenant did not become ready: %w", err)
 	}
-	return proc, nil
+
+	if freshSetup {
+		// Scrape the setup token from the CLI's first-boot banner.
+		// It's there by the time /api/health responds; if it isn't,
+		// give the CLI a brief grace period (its log write can lag
+		// the readiness response by a few hundred ms).
+		token, scrapeErr := scrapeSetupToken(logsPath, 5*time.Second)
+		if scrapeErr != nil {
+			_ = stopProcess(proc, 2*time.Second)
+			return "", nil, fmt.Errorf("scrape setup token: %w", scrapeErr)
+		}
+		return token, proc, nil
+	}
+	return "", proc, nil
 }
 
-// mintSetupToken generates a fresh setup token in the same shape
-// apteva-server itself uses ("apt_" + 32 hex chars). The server
-// accepts whatever we pass via APTEVA_SETUP_TOKEN, but staying on
-// the canonical shape keeps the operator-visible token recognizable
-// against the stand-alone CLI's own setup banner.
-func mintSetupToken() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("mint setup token: %w", err)
+// setupTokenRe matches the canonical apteva setup token shape that
+// apteva-server prints on stderr ("apt_" + 32 lowercase hex chars)
+// and the apteva CLI re-prints in its first-run banner.
+var setupTokenRe = regexp.MustCompile(`apt_[0-9a-f]{32}`)
+
+// scrapeSetupToken reads the captured CLI log and returns the first
+// setup token it finds. Polls with backoff up to timeout because the
+// CLI may write its banner asynchronously after /api/health goes 200.
+func scrapeSetupToken(logPath string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		raw, err := os.ReadFile(logPath)
+		if err == nil {
+			if m := setupTokenRe.Find(raw); m != nil {
+				return string(m), nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return "", errors.New("setup token did not appear in CLI log within " + timeout.String() + " (apteva CLI banner format may have changed)")
+		}
+		time.Sleep(150 * time.Millisecond)
 	}
-	return "apt_" + hex.EncodeToString(b), nil
 }
 
 // stopTenant signals the tenant proc to exit. SIGTERM, wait, then KILL.
