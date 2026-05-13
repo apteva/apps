@@ -16,6 +16,7 @@ package main
 // decorate-view, attach-key validation.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -467,6 +468,169 @@ func TestToolCreate_RejectsDuplicateSlug(t *testing.T) {
 	}
 	if !contains(err.Error(), "already in use") {
 		t.Errorf("error %q should mention 'already in use'", err.Error())
+	}
+}
+
+// ─── Auto-setup orchestrator ────────────────────────────────────────
+
+// fakeAptevaServer mimics the apteva-server endpoints autoSetupTenant
+// exercises. Configurable failure points so we can prove fleet falls
+// back to setup_pending cleanly when the tenant misbehaves.
+type fakeAptevaServer struct {
+	srv             *httptest.Server
+	expectedToken   string
+	failRegister    bool
+	failLogin       bool
+	failKeys        bool
+	registeredEmail string
+	registeredPw    string
+}
+
+func newFakeAptevaServer(t *testing.T, expectedToken string) *fakeAptevaServer {
+	t.Helper()
+	f := &fakeAptevaServer{expectedToken: expectedToken}
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/api/auth/register", func(w http.ResponseWriter, r *http.Request) {
+		if f.failRegister {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		if r.Header.Get("X-Setup-Token") != f.expectedToken {
+			http.Error(w, "setup token required for first registration", http.StatusForbidden)
+			return
+		}
+		var body struct{ Email, Password string }
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.registeredEmail = body.Email
+		f.registeredPw = body.Password
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 1, "email": body.Email})
+	})
+
+	mux.HandleFunc("/api/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		if f.failLogin {
+			http.Error(w, "auth down", http.StatusInternalServerError)
+			return
+		}
+		var body struct{ Email, Password string }
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Email != f.registeredEmail || body.Password != f.registeredPw {
+			http.Error(w, "invalid", http.StatusUnauthorized)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: "session", Value: "test-session", Path: "/"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"user_id": 1})
+	})
+
+	mux.HandleFunc("/api/auth/keys", func(w http.ResponseWriter, r *http.Request) {
+		if f.failKeys {
+			http.Error(w, "keys broken", http.StatusInternalServerError)
+			return
+		}
+		c, _ := r.Cookie("session")
+		if c == nil || c.Value != "test-session" {
+			http.Error(w, "no session", http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"key": "sk-autotest-key"})
+	})
+
+	mux.HandleFunc("/api/auth/status", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"user_id": 1})
+	})
+
+	f.srv = httptest.NewServer(mux)
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func TestAutoSetup_HappyPath(t *testing.T) {
+	app, _ := newTestApp(t)
+	f := newFakeAptevaServer(t, "apt_testtoken")
+
+	got, err := app.autoSetupTenant(context.Background(), f.srv.URL, "apt_testtoken", "ops@acme.com", "")
+	if err != nil {
+		t.Fatalf("autoSetupTenant: %v", err)
+	}
+	if got.APIKey != "sk-autotest-key" {
+		t.Errorf("api_key=%q want sk-autotest-key", got.APIKey)
+	}
+	if len(got.Password) != 32 {
+		t.Errorf("generated password should be 32 hex chars, got %d", len(got.Password))
+	}
+	if f.registeredEmail != "ops@acme.com" {
+		t.Errorf("fake recorded email=%q", f.registeredEmail)
+	}
+}
+
+func TestAutoSetup_RegisterFailure(t *testing.T) {
+	app, _ := newTestApp(t)
+	f := newFakeAptevaServer(t, "apt_testtoken")
+	f.failRegister = true
+
+	_, err := app.autoSetupTenant(context.Background(), f.srv.URL, "apt_testtoken", "ops@acme.com", "")
+	if err == nil {
+		t.Fatal("expected autoSetupTenant to fail when register 500s")
+	}
+	if !contains(err.Error(), "register") {
+		t.Errorf("error %q should mention register", err.Error())
+	}
+}
+
+func TestAutoSetup_BadSetupToken(t *testing.T) {
+	app, _ := newTestApp(t)
+	f := newFakeAptevaServer(t, "apt_realone")
+
+	_, err := app.autoSetupTenant(context.Background(), f.srv.URL, "apt_wrongone", "ops@acme.com", "")
+	if err == nil {
+		t.Fatal("expected register to reject wrong setup token")
+	}
+}
+
+func TestAutoSetup_KeysFailure(t *testing.T) {
+	app, _ := newTestApp(t)
+	f := newFakeAptevaServer(t, "apt_testtoken")
+	f.failKeys = true
+
+	_, err := app.autoSetupTenant(context.Background(), f.srv.URL, "apt_testtoken", "ops@acme.com", "")
+	if err == nil {
+		t.Fatal("expected autoSetupTenant to fail when /api/auth/keys 500s")
+	}
+	if !contains(err.Error(), "keys") {
+		t.Errorf("error %q should mention keys", err.Error())
+	}
+}
+
+func TestAutoSetup_OperatorPassword(t *testing.T) {
+	app, _ := newTestApp(t)
+	f := newFakeAptevaServer(t, "apt_testtoken")
+
+	got, err := app.autoSetupTenant(context.Background(), f.srv.URL, "apt_testtoken", "ops@acme.com", "manual-pw-1234")
+	if err != nil {
+		t.Fatalf("autoSetupTenant: %v", err)
+	}
+	if got.Password != "manual-pw-1234" {
+		t.Errorf("operator-supplied password should pass through, got %q", got.Password)
+	}
+	if f.registeredPw != "manual-pw-1234" {
+		t.Errorf("fake recorded pw=%q", f.registeredPw)
+	}
+}
+
+func TestRandomPassword_Format(t *testing.T) {
+	pw := randomPassword()
+	if len(pw) != 32 {
+		t.Errorf("len=%d want 32", len(pw))
+	}
+	for _, c := range pw {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Errorf("password char %q outside hex alphabet", c)
+		}
+	}
+	// Sanity: two calls must produce different values. crypto/rand
+	// collision rate is astronomically low.
+	if pw == randomPassword() {
+		t.Error("randomPassword returned identical value twice")
 	}
 }
 

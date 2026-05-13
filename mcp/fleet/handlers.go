@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"strings"
@@ -84,37 +87,67 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 
-	// Seal the scraped token and persist it now that we have it.
-	setupTokenEnc, err := a.keys.seal([]byte(setupToken))
-	if err != nil {
-		_ = stopProcess(proc, 2*time.Second)
-		return nil, err
-	}
-	if _, err := a.store.db.Exec(
-		`UPDATE fleet_tenants SET setup_token_enc = ?, status = ?, updated_at = ? WHERE id = ?`,
-		setupTokenEnc, StatusSetupPending, time.Now().UTC(), t.ID,
-	); err != nil {
-		_ = stopProcess(proc, 2*time.Second)
-		return nil, err
-	}
-
 	a.procMu.Lock()
 	a.procs[slug] = proc
 	a.procMu.Unlock()
 
 	_ = a.store.recordEvent(t.ID, "spawned", "user", map[string]any{"port": port})
-	ctx.Logger().Info("fleet: tenant spawned (setup_pending)", "tenant", t.ID, "slug", slug, "port", port)
+
+	// Auto-setup path: run register → login → mint_key. On success
+	// the tenant flips straight to active and we surface the admin
+	// credentials + api_key in the response (one-shot reveal). On
+	// failure we persist the setup_token and fall back to the manual
+	// setup_pending flow so the operator can finish by hand.
+	autoSetup, err := a.autoSetupTenant(context.Background(), t.BaseURL, setupToken, owner, "")
+	if err != nil {
+		ctx.Logger().Warn("fleet: auto-setup failed, falling back to setup_pending", "tenant", t.ID, "err", err)
+		setupTokenEnc, sealErr := a.keys.seal([]byte(setupToken))
+		if sealErr != nil {
+			_ = stopProcess(proc, 2*time.Second)
+			return nil, sealErr
+		}
+		if _, dbErr := a.store.db.Exec(
+			`UPDATE fleet_tenants SET setup_token_enc = ?, status = ?, updated_at = ? WHERE id = ?`,
+			setupTokenEnc, StatusSetupPending, time.Now().UTC(), t.ID,
+		); dbErr != nil {
+			_ = stopProcess(proc, 2*time.Second)
+			return nil, dbErr
+		}
+		_ = a.store.recordEvent(t.ID, "auto_setup_failed", "user", map[string]any{"error": err.Error()})
+		return map[string]any{
+			"tenant_id":         t.ID,
+			"slug":              slug,
+			"base_url":          t.BaseURL,
+			"status":            StatusSetupPending,
+			"setup_url":         t.BaseURL + "/?setup=1",
+			"setup_token":       setupToken,
+			"auto_setup_error":  err.Error(),
+			"next_steps":        "Auto-setup failed (see auto_setup_error). Manual recovery: open setup_url, register admin with the setup_token, generate an api_key, call tenant_attach_key.",
+		}, nil
+	}
+
+	// Persist the freshly-minted api_key + flip status to active.
+	apiKeyEnc, err := a.keys.seal([]byte(autoSetup.APIKey))
+	if err != nil {
+		_ = stopProcess(proc, 2*time.Second)
+		return nil, err
+	}
+	if err := a.store.attachAPIKey(t.ID, apiKeyEnc); err != nil {
+		_ = stopProcess(proc, 2*time.Second)
+		return nil, err
+	}
+	_ = a.store.recordEvent(t.ID, "auto_setup_complete", "user", map[string]any{"admin_email": owner})
+	ctx.Logger().Info("fleet: tenant auto-setup complete", "tenant", t.ID, "slug", slug, "port", port)
 
 	return map[string]any{
-		"tenant_id":   t.ID,
-		"slug":        slug,
-		"base_url":    t.BaseURL,
-		"status":      StatusSetupPending,
-		"setup_url":   t.BaseURL + "/?setup=1",
-		"setup_token": setupToken,
-		"next_steps": "1. Open setup_url and register an admin (email + password); paste setup_token when asked. " +
-			"2. In the tenant dashboard, create an API key (e.g. named 'fleet'). " +
-			"3. Call tenant_attach_key with the tenant_id and the new api_key to finish linking.",
+		"tenant_id":      t.ID,
+		"slug":           slug,
+		"base_url":       t.BaseURL,
+		"status":         StatusActive,
+		"admin_email":    owner,
+		"admin_password": autoSetup.Password,
+		"api_key":        autoSetup.APIKey,
+		"next_steps":     "Save admin_password and api_key — they're shown ONCE. The admin_password lets the operator (or the client) log into the tenant dashboard at base_url; api_key is the long-lived bearer fleet uses internally.",
 	}, nil
 }
 
@@ -499,4 +532,106 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeJSONErr(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]any{"error": err.Error()})
+}
+
+// -- Auto-setup orchestrator --------------------------------------------
+//
+// Runs the three HTTP steps every fresh apteva tenant needs to become
+// usable from fleet's perspective:
+//
+//   1. POST /api/auth/register with X-Setup-Token → creates the admin
+//      user (the server flips out of setup mode on success).
+//   2. POST /api/auth/login (cookie jar captures the session cookie).
+//   3. POST /api/auth/keys with session cookie → mints the api_key.
+//
+// Each step is a hard error: a partial success (e.g. registered admin
+// but key minting failed) is surfaced so the caller can decide whether
+// to roll back or fall back to manual setup_pending mode.
+
+type autoSetupResult struct {
+	APIKey   string
+	Password string
+}
+
+func (a *App) autoSetupTenant(parent context.Context, baseURL, setupToken, email, password string) (*autoSetupResult, error) {
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+
+	if password == "" {
+		// 16 random bytes → 32 hex chars. Well past the server's
+		// 8-char minimum and indistinguishable enough that the
+		// operator can't memorise it (the point — they should treat
+		// it as one-shot output to be saved somewhere).
+		password = randomPassword()
+	}
+
+	// Step 1: register the admin. The server enforces password >= 8
+	// chars; randomPassword() comfortably clears that.
+	body, _ := json.Marshal(map[string]string{"email": email, "password": password})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/auth/register", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Setup-Token", setupToken)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("register: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		buf, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("register: %d: %s", resp.StatusCode, strings.TrimSpace(string(buf)))
+	}
+
+	// Step 2: log in with a cookie jar so /api/auth/keys sees a
+	// session. Using a per-call jar (not the shared httpClient) so
+	// concurrent setups don't share cookies.
+	jar, _ := cookiejar.New(nil)
+	authedClient := &http.Client{Timeout: httpClient.Timeout, Jar: jar}
+	req, _ = http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/auth/login", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = authedClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("login: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		buf, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("login: %d: %s", resp.StatusCode, strings.TrimSpace(string(buf)))
+	}
+
+	// Step 3: mint the api_key. The "fleet" name surfaces in the
+	// tenant's API Keys list so the operator can later identify
+	// which key is fleet-owned vs human-created.
+	keyBody, _ := json.Marshal(map[string]string{"name": "fleet"})
+	req, _ = http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/auth/keys", strings.NewReader(string(keyBody)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = authedClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("keys: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		buf, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("keys: %d: %s", resp.StatusCode, strings.TrimSpace(string(buf)))
+	}
+	var keyResp struct {
+		Key string `json:"key"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&keyResp); err != nil {
+		return nil, fmt.Errorf("keys: parse: %w", err)
+	}
+	if keyResp.Key == "" {
+		return nil, errors.New("keys: server returned empty api_key")
+	}
+	return &autoSetupResult{APIKey: keyResp.Key, Password: password}, nil
+}
+
+func randomPassword() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand failing is a process-level disaster; we don't
+		// have a sensible fallback that's actually secure. Panic
+		// rather than silently emit a predictable password.
+		panic("crypto/rand failed: " + err.Error())
+	}
+	return hex.EncodeToString(b)
 }

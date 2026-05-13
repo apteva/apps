@@ -63,6 +63,32 @@ interface ListResp {
   count: number;
 }
 
+// Auto-setup response shape from tenant_create when the orchestrator
+// succeeds. status==="active" and the three reveal fields are
+// populated. On orchestrator failure the response degrades to the
+// setup_pending shape (no admin_password/api_key) and we surface the
+// auto_setup_error to the operator instead.
+interface CreateResp {
+  tenant_id: string;
+  slug: string;
+  base_url: string;
+  status: TenantStatus;
+  admin_email?: string;
+  admin_password?: string;
+  api_key?: string;
+  setup_url?: string;
+  setup_token?: string;
+  auto_setup_error?: string;
+}
+
+interface CredentialsReveal {
+  slug: string;
+  base_url: string;
+  admin_email: string;
+  admin_password: string;
+  api_key: string;
+}
+
 interface GetResp {
   tenant: Tenant;
   events: FleetEvent[] | null;
@@ -97,6 +123,11 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
   const [status, setStatus] = useState<string>("");
   const [showCreate, setShowCreate] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
+  // Credentials returned by a successful auto-setup. Held in panel
+  // state because tenant_create is the only chance to see the admin
+  // password and api_key — fleet doesn't store the plaintext anywhere
+  // after this. Cleared when the operator clicks "I've saved them".
+  const [credentialsReveal, setCredentialsReveal] = useState<CredentialsReveal | null>(null);
 
   // Two query params travel on every call. The platform proxy uses
   // these to scope per-install state — same convention as tables/crm.
@@ -241,18 +272,37 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
           onClose={() => setShowCreate(false)}
           onSubmit={async ({ slug, owner_email }) => {
             try {
-              const r = await callTool<{ tenant_id: string }>("tenant_create", {
+              const r = await callTool<CreateResp>("tenant_create", {
                 slug,
                 owner_email,
               });
               await refreshList({ quiet: true });
               if (r.tenant_id) setSelectedId(r.tenant_id);
               setShowCreate(false);
+              // Auto-setup happy path returns admin_password + api_key.
+              // Surface them in a one-shot modal — fleet stores the
+              // api_key sealed and never the plaintext password, so
+              // this is the operator's only chance to capture them.
+              if (r.admin_password && r.api_key && r.admin_email) {
+                setCredentialsReveal({
+                  slug: r.slug,
+                  base_url: r.base_url,
+                  admin_email: r.admin_email,
+                  admin_password: r.admin_password,
+                  api_key: r.api_key,
+                });
+              }
               return { ok: true };
             } catch (e) {
               return { ok: false, error: (e as Error).message };
             }
           }}
+        />
+      )}
+      {credentialsReveal && (
+        <CredentialsRevealDialog
+          creds={credentialsReveal}
+          onClose={() => setCredentialsReveal(null)}
         />
       )}
       {showConnect && (
@@ -861,6 +911,91 @@ function ActionButton({
 
 // ─── Dialogs ────────────────────────────────────────────────────────
 
+// ─── Credentials reveal (one-shot) ──────────────────────────────────
+
+function CredentialsRevealDialog({
+  creds,
+  onClose,
+}: {
+  creds: CredentialsReveal;
+  onClose: () => void;
+}) {
+  return (
+    <DialogFrame title={`Tenant ${creds.slug} ready — save these credentials`} onClose={onClose}>
+      <div className="bg-warn/10 border border-warn/30 rounded-md px-3 py-2 mb-3 text-xs text-amber-700 dark:text-amber-400">
+        These are shown only once. The admin password and API key are not
+        recoverable from the fleet registry — copy them somewhere safe
+        before dismissing.
+      </div>
+
+      <CredentialRow label="Tenant URL" value={creds.base_url} />
+      <CredentialRow label="Admin email" value={creds.admin_email} />
+      <CredentialRow label="Admin password" value={creds.admin_password} sensitive />
+      <CredentialRow label="API key (fleet)" value={creds.api_key} sensitive />
+
+      <DialogActions>
+        <button
+          type="button"
+          onClick={onClose}
+          className="px-2.5 py-1 rounded-md text-xs font-medium bg-accent/10 text-blue-700 dark:text-blue-400 hover:bg-accent/15"
+        >
+          I've saved them
+        </button>
+      </DialogActions>
+    </DialogFrame>
+  );
+}
+
+function CredentialRow({
+  label,
+  value,
+  sensitive,
+}: {
+  label: string;
+  value: string;
+  sensitive?: boolean;
+}) {
+  const [revealed, setRevealed] = useState(!sensitive);
+  const [copied, setCopied] = useState(false);
+
+  return (
+    <div className="mb-2">
+      <div className="text-[10px] uppercase tracking-wider text-text-dim font-medium mb-1">
+        {label}
+      </div>
+      <div className="flex items-center gap-2">
+        <code className="flex-1 font-mono text-xs px-2 py-1.5 rounded-md bg-bg-hover text-text truncate">
+          {revealed ? value : "•".repeat(Math.min(value.length, 32))}
+        </code>
+        {sensitive && (
+          <button
+            type="button"
+            onClick={() => setRevealed((v) => !v)}
+            className="px-2 py-1 rounded-md text-xs text-text-dim hover:text-text hover:bg-bg-hover"
+          >
+            {revealed ? "Hide" : "Show"}
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(value);
+              setCopied(true);
+              window.setTimeout(() => setCopied(false), 1500);
+            } catch {
+              // Clipboard blocked — value is still on-screen if revealed.
+            }
+          }}
+          className="px-2 py-1 rounded-md text-xs font-medium bg-zinc-100 dark:bg-bg-hover hover:bg-zinc-200 dark:hover:bg-zinc-800 text-text"
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function CreateTenantDialog({
   onClose,
   onSubmit,
@@ -876,8 +1011,11 @@ function CreateTenantDialog({
   return (
     <DialogFrame title="Create local tenant" onClose={onClose}>
       <p className="text-xs text-text-dim mb-3">
-        Spawns a fresh apteva process with its own data dir and port. Slug
-        must be <code className="font-mono">[a-z0-9_-]</code>.
+        Spawns a fresh apteva process with its own data dir and port,
+        registers an admin using <code className="font-mono">owner_email</code>,
+        and returns a one-shot password + api_key. Slug must be{" "}
+        <code className="font-mono">[a-z0-9_-]</code>. May take 15-45s
+        the first time (server + core boot).
       </p>
       <Label text="Slug">
         <input
