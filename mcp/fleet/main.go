@@ -16,7 +16,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.2.2
+version: 0.2.3
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -113,13 +113,13 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 func (a *App) OnUnmount(*sdk.AppCtx) error { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
+	// /health is registered by the SDK framework itself (see app-sdk
+	// run.go); declaring another here panics on duplicate ServeMux
+	// pattern registration. We only need to expose the registry
+	// read-only HTTP routes the panel uses.
 	return []sdk.Route{
 		{Method: http.MethodGet, Pattern: "/tenants", Handler: a.httpList},
 		{Method: http.MethodGet, Pattern: "/tenants/", Handler: a.httpGet},
-		{Method: http.MethodGet, Pattern: "/health", Handler: func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"ok":true}`))
-		}},
 	}
 }
 
