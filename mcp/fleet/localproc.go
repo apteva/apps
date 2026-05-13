@@ -216,20 +216,33 @@ func waitForReady(ctx context.Context, port int, timeout time.Duration) error {
 //
 //	1. explicit arg from tenant_create
 //	2. FLEET_APTEVA_BIN env
-//	3. `apteva` on $PATH
+//	3. `apteva` on $PATH (sidecar PATH may not include the npm install dir)
+//	4. $HOME/.apteva/bin/apteva   — canonical npm-shim location
+//	5. /usr/local/bin/apteva       — common Homebrew / manual install location
+//	6. /opt/homebrew/bin/apteva    — Apple Silicon Homebrew default
+//
+// The sidecar process inherits PATH from apteva-server's launcher, which
+// in practice often skips the user's npm bin dir. Adding well-known
+// fallbacks lets the install work out of the box on a default setup.
 func resolveAptevaBin(explicit string) (string, error) {
-	for _, candidate := range []string{explicit, os.Getenv("FLEET_APTEVA_BIN")} {
-		if candidate == "" {
+	candidates := []string{explicit, os.Getenv("FLEET_APTEVA_BIN")}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, ".apteva", "bin", "apteva"))
+	}
+	candidates = append(candidates, "/usr/local/bin/apteva", "/opt/homebrew/bin/apteva")
+
+	for _, c := range candidates {
+		if c == "" {
 			continue
 		}
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate, nil
+		if _, err := os.Stat(c); err == nil {
+			return c, nil
 		}
 	}
 	if p, err := exec.LookPath("apteva"); err == nil {
 		return p, nil
 	}
-	return "", errors.New("apteva binary not found — set FLEET_APTEVA_BIN or pass apteva_bin")
+	return "", errors.New("apteva binary not found — set FLEET_APTEVA_BIN or pass apteva_bin (tried PATH, ~/.apteva/bin/apteva, /usr/local/bin/apteva, /opt/homebrew/bin/apteva)")
 }
 
 // portFromBaseURL extracts the port from "http://localhost:5301".
