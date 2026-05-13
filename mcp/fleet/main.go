@@ -16,10 +16,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.2.1
+version: 0.2.2
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
-scopes: [global]
+scopes: [project, global]
 requires:
   permissions:
     - db.write.app
