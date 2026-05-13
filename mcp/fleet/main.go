@@ -16,7 +16,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.2.8
+version: 0.2.9
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -78,6 +78,14 @@ type App struct {
 	// each local tenant's port instead of trying to recover PIDs.
 	procMu sync.Mutex
 	procs  map[string]*tenantProc
+
+	// publicHost is the host name shown to operators in API responses
+	// and the panel. Determined once at OnMount via detectPublicHost
+	// (UDP-dial trick to 8.8.8.8 reads back the outbound interface IP),
+	// then frozen for the process lifetime — we don't expect the host's
+	// outbound interface to change at runtime. Falls back to "localhost"
+	// when network detection fails (offline dev box, locked-down VPS).
+	publicHost string
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -99,10 +107,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.keys = k
 	a.store = &store{db: ctx.AppDB()}
 	a.procs = map[string]*tenantProc{}
+	a.publicHost = detectPublicHost()
 	if err := a.reconcileOnBoot(); err != nil {
 		ctx.Logger().Warn("fleet: reconcile on boot", "err", err)
 	}
-	ctx.Logger().Info("fleet mounted", "data_root", localDataRoot())
+	ctx.Logger().Info("fleet mounted", "data_root", localDataRoot(), "public_host", a.publicHost)
 	return nil
 }
 

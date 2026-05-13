@@ -23,6 +23,50 @@ import (
 // blocking the parent.
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
+// publicBaseURL rewrites a stored loopback URL to one operators can
+// open from outside the fleet host. Storage keeps the loopback form
+// because fleet's INTERNAL calls (auto-setup orchestrator, health
+// poller, run_remote) all run on the same machine as the tenant —
+// loopback is the most reliable path. The public form is only for
+// what we display + return to operators.
+//
+// Only the host is rewritten (port preserved); if the stored host
+// is already non-local (a tenant connected via tenant_connect against
+// a remote apteva-server) we pass it through unchanged.
+func (a *App) publicBaseURL(stored string) string {
+	if a == nil || a.publicHost == "" || a.publicHost == "localhost" {
+		return stored
+	}
+	u, err := url.Parse(stored)
+	if err != nil {
+		return stored
+	}
+	host := u.Hostname()
+	if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+		return stored
+	}
+	if u.Port() != "" {
+		u.Host = a.publicHost + ":" + u.Port()
+	} else {
+		u.Host = a.publicHost
+	}
+	return u.String()
+}
+
+// publicTenantView returns the tenant shape we send out to operators
+// with base_url rewritten to the public form. We can't mutate the
+// pointer Tenant in place because the same row may be cached / shared
+// across callers and we don't want to corrupt the canonical stored
+// URL — copy the struct first.
+func (a *App) publicTenantView(t *Tenant) *Tenant {
+	if t == nil {
+		return nil
+	}
+	cp := *t
+	cp.BaseURL = a.publicBaseURL(t.BaseURL)
+	return &cp
+}
+
 // -- tenant_create: spawn a fresh local tenant ---------------------------
 //
 // New contract (v0.2 admin-driven bootstrap): spawn the child with a
@@ -114,12 +158,13 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			return nil, dbErr
 		}
 		_ = a.store.recordEvent(t.ID, "auto_setup_failed", "user", map[string]any{"error": err.Error()})
+		publicURL := a.publicBaseURL(t.BaseURL)
 		return map[string]any{
 			"tenant_id":         t.ID,
 			"slug":              slug,
-			"base_url":          t.BaseURL,
+			"base_url":          publicURL,
 			"status":            StatusSetupPending,
-			"setup_url":         t.BaseURL + "/?setup=1",
+			"setup_url":         publicURL + "/?setup=1",
 			"setup_token":       setupToken,
 			"auto_setup_error":  err.Error(),
 			"next_steps":        "Auto-setup failed (see auto_setup_error). Manual recovery: open setup_url, register admin with the setup_token, generate an api_key, call tenant_attach_key.",
@@ -142,7 +187,7 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{
 		"tenant_id":      t.ID,
 		"slug":           slug,
-		"base_url":       t.BaseURL,
+		"base_url":       a.publicBaseURL(t.BaseURL),
 		"status":         StatusActive,
 		"admin_email":    owner,
 		"admin_password": autoSetup.Password,
@@ -280,7 +325,11 @@ func (a *App) toolList(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"tenants": list, "count": len(list)}, nil
+	out := make([]*Tenant, len(list))
+	for i, t := range list {
+		out[i] = a.publicTenantView(t)
+	}
+	return map[string]any{"tenants": out, "count": len(out)}, nil
 }
 
 func (a *App) toolGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
@@ -301,8 +350,13 @@ func (a *App) toolGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
 // so the operator can recover the info on refresh without re-running
 // tenant_create. Once attached (status flips, token is NULLed) these
 // fields naturally fall away.
+//
+// The tenant's base_url and setup_url are rewritten through
+// publicBaseURL so operators see the host's public IP/hostname
+// rather than the loopback form fleet uses internally.
 func (a *App) decorateView(t *Tenant, events []Event) map[string]any {
-	out := map[string]any{"tenant": t, "events": events}
+	pub := a.publicTenantView(t)
+	out := map[string]any{"tenant": pub, "events": events}
 	if t.Status != StatusSetupPending {
 		return out
 	}
@@ -315,7 +369,7 @@ func (a *App) decorateView(t *Tenant, events []Event) map[string]any {
 		return out
 	}
 	out["setup_token"] = string(tok)
-	out["setup_url"] = t.BaseURL + "/?setup=1"
+	out["setup_url"] = pub.BaseURL + "/?setup=1"
 	return out
 }
 

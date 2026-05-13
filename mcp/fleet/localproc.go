@@ -265,6 +265,32 @@ func resolveAptevaBin(explicit string) (string, error) {
 	return "", errors.New("apteva binary not found — set FLEET_APTEVA_BIN or pass apteva_bin (tried PATH, ~/.apteva/bin/apteva, /usr/local/bin/apteva, /opt/homebrew/bin/apteva)")
 }
 
+// detectPublicHost returns the IP the host uses to reach the public
+// internet. Mechanism: dial UDP to 8.8.8.8:80, read back the local
+// addr the kernel chose. No packets actually go over the wire — UDP
+// "Dial" is just a route-resolution that fills the local addr field.
+//
+// On a single-NIC Hetzner/DO box this returns the public IPv4. On a
+// dev laptop it returns the LAN address (e.g. 192.168.1.42). On a
+// completely offline / IPv6-only host the Dial fails and we fall
+// back to "localhost" — better than a confusing wrong value.
+//
+// Operators on multi-homed hosts where the auto-detected interface
+// isn't the right one should look at v0.3's planned FLEET_PUBLIC_HOST
+// override; v0.2.x sticks to pure auto-detect per design pick.
+func detectPublicHost() string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return "localhost"
+	}
+	defer conn.Close()
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || addr.IP == nil {
+		return "localhost"
+	}
+	return addr.IP.String()
+}
+
 // portFromBaseURL extracts the port from "http://localhost:5301".
 // Returns 0 when no port is present (e.g., https without explicit
 // port — out of scope for local tenants but doesn't error).

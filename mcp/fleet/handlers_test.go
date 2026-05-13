@@ -44,6 +44,10 @@ func newTestApp(t *testing.T, opts ...tk.Option) (*App, *sdk.AppCtx) {
 	if err := app.OnMount(ctx); err != nil {
 		t.Fatalf("OnMount: %v", err)
 	}
+	// Force the public host to "localhost" inside tests so assertions
+	// on returned URLs aren't dependent on the dev machine's outbound
+	// IP. Tests that exercise the rewrite explicitly set publicHost.
+	app.publicHost = "localhost"
 	return app, ctx
 }
 
@@ -257,6 +261,49 @@ func TestUnwrapMCP_AlreadyFlat(t *testing.T) {
 	m := got.(map[string]any)
 	if m["ok"] != true {
 		t.Errorf("got %+v", m)
+	}
+}
+
+// ─── Public host rewrite ────────────────────────────────────────────
+
+func TestPublicBaseURL_LocalhostDisablesRewrite(t *testing.T) {
+	a := &App{publicHost: "localhost"}
+	got := a.publicBaseURL("http://localhost:53217")
+	if got != "http://localhost:53217" {
+		t.Errorf("got %q, want passthrough when publicHost==localhost", got)
+	}
+}
+
+func TestPublicBaseURL_EmptyDisablesRewrite(t *testing.T) {
+	a := &App{publicHost: ""}
+	got := a.publicBaseURL("http://localhost:53217")
+	if got != "http://localhost:53217" {
+		t.Errorf("got %q, want passthrough when publicHost empty", got)
+	}
+}
+
+func TestPublicBaseURL_RewritesLoopback(t *testing.T) {
+	a := &App{publicHost: "91.99.117.197"}
+	cases := map[string]string{
+		"http://localhost:53217":    "http://91.99.117.197:53217",
+		"http://127.0.0.1:8080":     "http://91.99.117.197:8080",
+		"https://localhost:53217/x": "https://91.99.117.197:53217/x",
+	}
+	for in, want := range cases {
+		if got := a.publicBaseURL(in); got != want {
+			t.Errorf("publicBaseURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestPublicBaseURL_PreservesRemoteHosts(t *testing.T) {
+	a := &App{publicHost: "91.99.117.197"}
+	// tenant_connect rows store a real public hostname already —
+	// we must not rewrite those (especially not to the fleet host's
+	// IP, which would break health probes silently).
+	got := a.publicBaseURL("https://tenant.example.com")
+	if got != "https://tenant.example.com" {
+		t.Errorf("got %q, expected remote host passthrough", got)
 	}
 }
 
