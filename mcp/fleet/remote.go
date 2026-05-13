@@ -37,6 +37,9 @@ func (a *App) toolRunRemote(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if t.Status == StatusSetupPending {
+		return nil, errors.New("tenant is in setup_pending — finish admin registration and call tenant_attach_key before proxying tool calls")
+	}
 	key, err := a.keys.open(enc)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt tenant api_key: %w", err)

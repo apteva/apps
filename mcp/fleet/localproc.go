@@ -2,7 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -27,36 +28,53 @@ type tenantProc struct {
 //
 //	<apteva-bin> --data-dir <configDir> --port <port> --no-browser
 //
-// Returns the api_key the CLI wrote to <configDir>/apteva.json once
-// /api/health responds. Caller owns persisting the tenant row.
-func (a *App) spawnTenant(ctx context.Context, slug, configDir, aptevaBin string, port int) (apiKey string, proc *tenantProc, err error) {
+// In dashboard / --no-browser mode the apteva CLI deliberately does
+// NOT auto-register an admin user — registration happens in the
+// browser using a setup token that apteva-server reads from the
+// APTEVA_SETUP_TOKEN env var. We mint the token here, inject it on
+// spawn, and return it to the caller so the operator can finish
+// registration via the setup URL. The capture-from-apteva.json path
+// is gone: there is no api_key to read at spawn time.
+//
+// Caller owns persisting the row + handing the token to the operator.
+// For respawn paths (tenant_start), pass an empty setupToken — the
+// server keeps its first-boot token in the DB and ignores re-injection.
+func (a *App) spawnTenant(ctx context.Context, slug, configDir, aptevaBin string, port int, setupToken string) (proc *tenantProc, err error) {
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		return "", nil, fmt.Errorf("mkdir configDir: %w", err)
+		return nil, fmt.Errorf("mkdir configDir: %w", err)
 	}
 	bin, err := resolveAptevaBin(aptevaBin)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 	cmd := exec.Command(bin, "--data-dir", configDir, "--port", strconv.Itoa(port), "--no-browser")
-	cmd.Env = append(os.Environ(),
+	env := append(os.Environ(),
 		"APTEVA_HOME="+configDir,
 		"PORT="+strconv.Itoa(port),
 		"QUIET=1",
 	)
+	if setupToken != "" {
+		// Server reads this on boot and uses it as the required
+		// X-Setup-Token for the first /auth/register call. Without
+		// this, the server mints its own random token, prints it to
+		// stderr, and we'd have no way to surface it to the operator.
+		env = append(env, "APTEVA_SETUP_TOKEN="+setupToken, "APTEVA_REGISTRATION=setup")
+	}
+	cmd.Env = env
 	// New process group: child survives if fleet itself restarts.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Wire stdout/stderr into a logs file per tenant.
 	logsPath := filepath.Join(configDir, "fleet-child.log")
 	logFile, err := os.OpenFile(logsPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		return "", nil, fmt.Errorf("open logs: %w", err)
+		return nil, fmt.Errorf("open logs: %w", err)
 	}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
-		return "", nil, fmt.Errorf("start apteva: %w", err)
+		return nil, fmt.Errorf("start apteva: %w", err)
 	}
 	proc = &tenantProc{cmd: cmd, port: port, started: time.Now()}
 
@@ -73,18 +91,27 @@ func (a *App) spawnTenant(ctx context.Context, slug, configDir, aptevaBin string
 		a.procMu.Unlock()
 	}()
 
-	// Wait for /api/health to come up. The CLI takes a few seconds to
-	// boot server + core + write apteva.json.
+	// Wait for /api/health to come up. The CLI takes a few seconds
+	// to boot server + core; the health endpoint is public so we
+	// don't need an api_key to probe it.
 	if err := waitForReady(ctx, port, 30*time.Second); err != nil {
 		_ = stopProcess(proc, 2*time.Second)
-		return "", nil, fmt.Errorf("tenant did not become ready: %w", err)
+		return nil, fmt.Errorf("tenant did not become ready: %w", err)
 	}
-	key, err := readAPIKey(configDir)
-	if err != nil {
-		_ = stopProcess(proc, 2*time.Second)
-		return "", nil, fmt.Errorf("read api_key from %s/apteva.json: %w", configDir, err)
+	return proc, nil
+}
+
+// mintSetupToken generates a fresh setup token in the same shape
+// apteva-server itself uses ("apt_" + 32 hex chars). The server
+// accepts whatever we pass via APTEVA_SETUP_TOKEN, but staying on
+// the canonical shape keeps the operator-visible token recognizable
+// against the stand-alone CLI's own setup banner.
+func mintSetupToken() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("mint setup token: %w", err)
 	}
-	return key, proc, nil
+	return "apt_" + hex.EncodeToString(b), nil
 }
 
 // stopTenant signals the tenant proc to exit. SIGTERM, wait, then KILL.
@@ -125,7 +152,11 @@ func (a *App) reconcileOnBoot() error {
 		switch {
 		case alive && t.Status == StatusStopped:
 			_ = a.store.setStatus(t.ID, StatusActive, "worker:reconcile")
-		case !alive && (t.Status == StatusActive || t.Status == StatusStarting):
+		case !alive && (t.Status == StatusActive || t.Status == StatusStarting || t.Status == StatusSetupPending):
+			// setup_pending tenants whose process died mid-setup get
+			// the same treatment as everything else — flip to stopped
+			// so tenant_start respawns them; toolStart preserves the
+			// setup_pending status across the respawn.
 			_ = a.store.setStatus(t.ID, StatusStopped, "worker:reconcile")
 		}
 	}
@@ -179,25 +210,6 @@ func waitForReady(ctx context.Context, port int, timeout time.Duration) error {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-}
-
-// readAPIKey extracts api_key from <configDir>/apteva.json. The CLI
-// writes this file on first boot.
-func readAPIKey(configDir string) (string, error) {
-	raw, err := os.ReadFile(filepath.Join(configDir, "apteva.json"))
-	if err != nil {
-		return "", err
-	}
-	var parsed struct {
-		APIKey string `json:"api_key"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return "", err
-	}
-	if parsed.APIKey == "" {
-		return "", errors.New("apteva.json has empty api_key")
-	}
-	return parsed.APIKey, nil
 }
 
 // resolveAptevaBin finds the apteva CLI binary in this order:

@@ -29,11 +29,14 @@ func (a *App) runHealthPoller(ctx context.Context, app *sdk.AppCtx) error {
 			return ctx.Err()
 		default:
 		}
-		// Skip tenants that aren't expected to respond. Stopped /
-		// suspended are intentional; failed had a real error already
-		// surfaced — re-poll only after the operator starts it.
+		// Skip tenants that aren't expected to respond OR for which
+		// we don't yet have credentials. Stopped/suspended are
+		// intentional; failed had a real error surfaced; starting is
+		// mid-spawn; setup_pending is awaiting tenant_attach_key —
+		// the row's api_key_enc is still the "pending" sentinel and
+		// would fail auth on any /api/health probe.
 		switch t.Status {
-		case StatusDeleted, StatusStopped, StatusSuspended, StatusFailed, StatusStarting:
+		case StatusDeleted, StatusStopped, StatusSuspended, StatusFailed, StatusStarting, StatusSetupPending:
 			continue
 		}
 		a.probeOnce(ctx, app, t)

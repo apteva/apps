@@ -21,6 +21,12 @@ import (
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 // -- tenant_create: spawn a fresh local tenant ---------------------------
+//
+// New contract (v0.2 admin-driven bootstrap): spawn the child with a
+// fleet-minted APTEVA_SETUP_TOKEN, wait for /api/health to come up,
+// return the setup info to the caller. NO admin is auto-registered —
+// the operator finishes registration in the browser, then calls
+// tenant_attach_key to hand fleet the resulting api_key.
 
 func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	slug := strings.ToLower(strings.TrimSpace(getStr(args, "slug")))
@@ -43,8 +49,14 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 
-	// Insert in "starting" status so a concurrent caller observes the
-	// in-progress provision and doesn't reuse the slug.
+	setupToken, err := mintSetupToken()
+	if err != nil {
+		return nil, err
+	}
+
+	// Insert in "starting" so a concurrent caller doesn't reuse the
+	// slug while we're spawning. Both api_key_enc and setup_token_enc
+	// hold sealed placeholders/values from the moment the row exists.
 	t := &Tenant{
 		Slug:       slug,
 		Kind:       KindLocal,
@@ -53,35 +65,33 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		OwnerEmail: owner,
 		Status:     StatusStarting,
 	}
-	stub, err := a.keys.seal([]byte("pending"))
+	apiKeyStub, err := a.keys.seal([]byte("pending"))
 	if err != nil {
 		return nil, err
 	}
-	if err := a.store.insert(t, stub); err != nil {
+	setupTokenEnc, err := a.keys.seal([]byte(setupToken))
+	if err != nil {
+		return nil, err
+	}
+	if err := a.store.insert(t, apiKeyStub, setupTokenEnc); err != nil {
 		return nil, err
 	}
 	_ = a.store.recordEvent(t.ID, "spawn_start", "user", map[string]any{"port": port, "config_dir": configDir})
 
-	// Spawn — 30s readiness budget. Boot timeout = tenant marked failed.
+	// Spawn — 60s budget (server + core boot can run 10-30s on cold
+	// disk). Boot timeout = tenant marked failed + data dir removed.
 	spawnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	apiKey, proc, err := a.spawnTenant(spawnCtx, slug, configDir, getStr(args, "apteva_bin"), port)
+	proc, err := a.spawnTenant(spawnCtx, slug, configDir, getStr(args, "apteva_bin"), port, setupToken)
 	if err != nil {
 		_ = a.store.setStatus(t.ID, StatusFailed, "user")
 		_ = a.store.recordEvent(t.ID, "spawn_failed", "user", map[string]any{"error": err.Error()})
-		// Best-effort cleanup of the half-built data dir.
 		_ = os.RemoveAll(configDir)
 		_ = a.store.hardDelete(t.ID)
 		return nil, err
 	}
 
-	// Replace the stub api_key with the real one.
-	enc, err := a.keys.seal([]byte(apiKey))
-	if err != nil {
-		return nil, err
-	}
-	if _, err := a.store.db.Exec(`UPDATE fleet_tenants SET api_key_enc = ?, status = ?, updated_at = ? WHERE id = ?`,
-		enc, StatusActive, time.Now().UTC(), t.ID); err != nil {
+	if err := a.store.setStatus(t.ID, StatusSetupPending, "user"); err != nil {
 		return nil, err
 	}
 
@@ -90,13 +100,92 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	a.procMu.Unlock()
 
 	_ = a.store.recordEvent(t.ID, "spawned", "user", map[string]any{"port": port})
-	ctx.Logger().Info("fleet: tenant spawned", "tenant", t.ID, "slug", slug, "port", port)
+	ctx.Logger().Info("fleet: tenant spawned (setup_pending)", "tenant", t.ID, "slug", slug, "port", port)
+
 	return map[string]any{
-		"tenant_id": t.ID,
-		"slug":      slug,
-		"base_url":  t.BaseURL,
-		"status":    StatusActive,
+		"tenant_id":   t.ID,
+		"slug":        slug,
+		"base_url":    t.BaseURL,
+		"status":      StatusSetupPending,
+		"setup_url":   t.BaseURL + "/?setup=1",
+		"setup_token": setupToken,
+		"next_steps": "1. Open setup_url and register an admin (email + password); paste setup_token when asked. " +
+			"2. In the tenant dashboard, create an API key (e.g. named 'fleet'). " +
+			"3. Call tenant_attach_key with the tenant_id and the new api_key to finish linking.",
 	}, nil
+}
+
+// -- tenant_attach_key: complete the admin-driven bootstrap ---------------
+
+func (a *App) toolAttachKey(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := getStr(args, "tenant_id")
+	apiKey := getStr(args, "api_key")
+	if id == "" || apiKey == "" {
+		return nil, errors.New("tenant_id and api_key are required")
+	}
+	t, _, err := a.store.get(id)
+	if err != nil {
+		return nil, err
+	}
+	if t.Status == StatusActive {
+		return nil, errors.New("tenant already linked; use a fresh tenant_create or rotate manually")
+	}
+	if t.Status != StatusSetupPending && t.Status != StatusStarting {
+		return nil, fmt.Errorf("tenant in status %q is not awaiting a key", t.Status)
+	}
+
+	// Validate the key by hitting /api/health with auth. We accept
+	// any 200 — health is unauthenticated, so a wrong key still
+	// returns 200 with the version body. The real "is this an admin
+	// key?" check is /api/auth/status which 401s on bad keys.
+	if err := verifyAPIKey(context.Background(), t.BaseURL, apiKey); err != nil {
+		return nil, fmt.Errorf("verify api_key: %w", err)
+	}
+
+	enc, err := a.keys.seal([]byte(apiKey))
+	if err != nil {
+		return nil, err
+	}
+	if err := a.store.attachAPIKey(t.ID, enc); err != nil {
+		return nil, err
+	}
+	_ = a.store.recordEvent(t.ID, "key_attached", "user", nil)
+	ctx.Logger().Info("fleet: tenant key attached", "tenant", t.ID)
+
+	// Best-effort: refresh last_seen + version now so the operator
+	// sees the row as live immediately rather than waiting up to 60s
+	// for the next health poller pass.
+	if ok, version, body, herr := probeHealth(context.Background(), t.BaseURL, apiKey); herr == nil && ok {
+		_ = a.store.updateHealth(t.ID, true, version, body)
+	}
+
+	return map[string]any{"tenant_id": t.ID, "status": StatusActive}, nil
+}
+
+// verifyAPIKey GETs /api/auth/status with the supplied bearer and
+// asserts a 200. 401 here means the key is bad or doesn't resolve to
+// a user; any other non-2xx is treated as a transient failure rather
+// than a hard reject so we don't lose a perfectly good key when the
+// tenant is briefly slow.
+func verifyAPIKey(ctx context.Context, baseURL, apiKey string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/auth/status", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return errors.New("tenant rejected the key (401) — wrong key, or it isn't tied to a registered user")
+	}
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("tenant returned %d on auth status: %s", resp.StatusCode, string(body))
+	}
+	return nil
 }
 
 // -- tenant_connect: register a pre-existing apteva ----------------------
@@ -134,7 +223,7 @@ func (a *App) toolConnect(_ *sdk.AppCtx, args map[string]any) (any, error) {
 		CurrentVersion: version,
 		Status:         StatusActive,
 	}
-	if err := a.store.insert(t, enc); err != nil {
+	if err := a.store.insert(t, enc, nil); err != nil {
 		return nil, err
 	}
 	_ = a.store.updateHealth(t.ID, true, version, body)
@@ -168,7 +257,30 @@ func (a *App) toolGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"tenant": t, "events": events}, nil
+	return a.decorateView(t, events), nil
+}
+
+// decorateView builds the operator-facing get response. For tenants
+// still in setup_pending it surfaces the decrypted setup_token + URL
+// so the operator can recover the info on refresh without re-running
+// tenant_create. Once attached (status flips, token is NULLed) these
+// fields naturally fall away.
+func (a *App) decorateView(t *Tenant, events []Event) map[string]any {
+	out := map[string]any{"tenant": t, "events": events}
+	if t.Status != StatusSetupPending {
+		return out
+	}
+	enc, err := a.store.getSetupToken(t.ID)
+	if err != nil || len(enc) == 0 {
+		return out
+	}
+	tok, err := a.keys.open(enc)
+	if err != nil {
+		return out
+	}
+	out["setup_token"] = string(tok)
+	out["setup_url"] = t.BaseURL + "/?setup=1"
+	return out
 }
 
 // -- tenant_start / stop -------------------------------------------------
@@ -191,24 +303,32 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		_ = a.store.setStatus(t.ID, StatusActive, "user")
 		return map[string]any{"tenant_id": t.ID, "status": StatusActive, "note": "process already listening on port"}, nil
 	}
+	// Re-spawning a previously-bootstrapped tenant: the server already
+	// has a users table, so registration isn't in setup mode — no
+	// setup token needed. The stored api_key remains valid.
+	prevStatus := t.Status
 	_ = a.store.setStatus(t.ID, StatusStarting, "user")
 	spawnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	apiKey, proc, err := a.spawnTenant(spawnCtx, t.Slug, t.ConfigDir, "", port)
+	proc, err := a.spawnTenant(spawnCtx, t.Slug, t.ConfigDir, "", port, "")
 	if err != nil {
 		_ = a.store.setStatus(t.ID, StatusFailed, "user")
 		return nil, err
 	}
-	// api_key may have rotated if the operator wiped apteva.json — re-seal.
-	enc, _ := a.keys.seal([]byte(apiKey))
-	_, _ = a.store.db.Exec(`UPDATE fleet_tenants SET api_key_enc = ?, status = ?, updated_at = ? WHERE id = ?`,
-		enc, StatusActive, time.Now().UTC(), t.ID)
+	// If we interrupted mid-setup (never attached a key), preserve
+	// the setup_pending status so the operator can still complete it.
+	// Otherwise flip to active.
+	newStatus := StatusActive
+	if prevStatus == StatusSetupPending {
+		newStatus = StatusSetupPending
+	}
+	_ = a.store.setStatus(t.ID, newStatus, "user")
 	a.procMu.Lock()
 	a.procs[t.Slug] = proc
 	a.procMu.Unlock()
 	_ = a.store.recordEvent(t.ID, "started", "user", nil)
-	ctx.Logger().Info("fleet: tenant started", "tenant", t.ID, "port", port)
-	return map[string]any{"tenant_id": t.ID, "status": StatusActive}, nil
+	ctx.Logger().Info("fleet: tenant started", "tenant", t.ID, "port", port, "status", newStatus)
+	return map[string]any{"tenant_id": t.ID, "status": newStatus}, nil
 }
 
 func (a *App) toolStop(_ *sdk.AppCtx, args map[string]any) (any, error) {
@@ -288,6 +408,9 @@ func (a *App) toolSupportLogin(_ *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
+	if t.Status == StatusSetupPending {
+		return nil, errors.New("tenant is in setup_pending — finish admin registration and call tenant_attach_key before minting a support session")
+	}
 	key, err := a.keys.open(enc)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt tenant api_key: %w", err)
@@ -343,7 +466,7 @@ func (a *App) httpGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	events, _ := a.store.recentEvents(id, 20)
-	writeJSON(w, http.StatusOK, map[string]any{"tenant": t, "events": events})
+	writeJSON(w, http.StatusOK, a.decorateView(t, events))
 }
 
 // -- shared helpers ------------------------------------------------------

@@ -19,6 +19,8 @@ mcp/docs/docs
 mcp/domains/domains
 mcp/email-checker/email-checker
 mcp/ffmpeg/ffmpeg
+mcp/finance/finance
+mcp/fleet/fleet
 mcp/health/health
 mcp/image-studio/image-studio
 mcp/jobs/jobs
@@ -26,6 +28,7 @@ mcp/live-link/live-link
 mcp/media/media
 mcp/messaging/messaging
 mcp/mqtt/mqtt
+mcp/redirects/redirects
 mcp/robot/robot
 mcp/social/social
 mcp/status/status
@@ -36,6 +39,7 @@ mcp/tasks/tasks
 mcp/todo/todo
 mcp/torrent/torrent
 mcp/trading/trading
+mcp/trips/trips
 
 # Stray apps-root binary from accidental `go build` in the wrong dir.
 /media

@@ -2,19 +2,27 @@
 
 Control plane for a fleet of local apteva tenants. Each tenant is a separate `apteva` process the parent host runs as a supervised child, with its own data dir (`~/.apteva-fleet/<slug>/`) and port. Zero cross-app deps.
 
-## Status — v0.1 (local processes, single host)
+## Status — v0.2 (admin-driven bootstrap)
+
+v0.2 changes the auth model: fleet no longer tries to auto-register a user inside the spawned tenant. Instead it mints a setup token, injects it via `APTEVA_SETUP_TOKEN`, and surfaces token + URL back to the operator. The operator finishes admin registration in the browser, then hands fleet the resulting api_key. Three reasons for the change:
+
+- The old v0.1 path read `api_key` from the freshly-created `apteva.json`, but the apteva CLI's `--no-browser` mode deliberately doesn't bootstrap a user — so the key was always empty and `tenant_create` always errored.
+- Fleet never has to handle a password. The operator picks credentials directly on the tenant's own dashboard.
+- The tenant's setup mode is the existing apteva-server mechanism — no CLI or server changes needed.
 
 What works today:
 
-- `tenant_create` — spawns a fresh apteva tenant: allocates port, makes data dir, runs the apteva CLI with `--data-dir <dir> --port <N> --no-browser`, waits for `/api/health`, reads `api_key` from the generated `apteva.json`, encrypts it, persists the row.
-- `tenant_connect` — registers a pre-existing apteva-server (local or remote) without spawning anything.
-- `tenant_list` / `tenant_get` — registry queries, filterable by status/owner/version/kind.
-- `tenant_start` / `tenant_stop` — process lifecycle for local tenants (re-spawn at the same port + data dir / SIGTERM → 10s → SIGKILL).
+- `tenant_create` — spawns a fresh apteva tenant in setup-pending mode. Allocates port, makes data dir, runs the apteva CLI with `--data-dir <dir> --port <N> --no-browser` + `APTEVA_SETUP_TOKEN`/`APTEVA_REGISTRATION=setup`, waits for `/api/health`. Returns `{ tenant_id, base_url, status: setup_pending, setup_url, setup_token, next_steps }`.
+- `tenant_attach_key` — operator pastes the api_key generated on the tenant dashboard. Fleet validates against `/api/auth/status`, encrypts and stores it, clears the setup token, flips status to `active`.
+- `tenant_connect` — registers a pre-existing apteva-server (local or remote) without spawning anything. Skips setup entirely.
+- `tenant_list` / `tenant_get` — registry queries, filterable by status/owner/version/kind. `tenant_get` returns the decrypted setup token + URL while status is `setup_pending` so refreshes don't lose the info.
+- `tenant_start` / `tenant_stop` — process lifecycle for local tenants. `tenant_start` preserves `setup_pending` status if the tenant was mid-bootstrap.
 - `tenant_delete` — stops the process and removes the registry row. For local tenants, wipes the data dir only when `confirm=true`.
-- `tenant_support_login` — POST to tenant's `/api/admin/support_session`, returns a short-lived URL.
-- `tenant_run_remote` — proxy any tenant-side MCP tool call, with JSON-RPC envelope unwrap.
-- **health poller** — every 60s probes active tenants; flips to `disconnected` after 5 consecutive failures.
+- `tenant_support_login` — POSTs to tenant's `/api/admin/support_session`, returns a short-lived URL. **Server route not yet implemented** — falls through with a friendly 404 message.
+- `tenant_run_remote` — proxies any tenant-side MCP tool call, JSON-RPC envelope unwrapped. Refuses if tenant is still `setup_pending`.
+- **health poller** — every 60s probes active tenants; flips to `disconnected` after 5 consecutive failures. Skips tenants in `setup_pending` / `starting` / `stopped` / `suspended` / `failed`.
 - **boot reconciler** — on parent restart, probes each local tenant's port and reattaches by URL (children survive fleet restart because they're spawned in their own process group).
+- **UI panel** — full tenant list + detail view + setup-pending banner with copy-token / open-URL / attach-key form. Lives at `ui/FleetPanel.tsx`, slot `project.page`.
 
 ## Quick start
 
@@ -22,14 +30,31 @@ What works today:
 # 1. Make sure `apteva` is on $PATH (or set FLEET_APTEVA_BIN).
 which apteva
 
-# 2. Install fleet on your parent apteva instance (via the dashboard
-#    or whatever app-install flow you use). Then call:
+# 2. Install fleet on your parent apteva instance. Then call:
 tenant_create  { "slug": "acme", "owner_email": "ops@acme.com" }
 
-# 3. fleet logs:
-#   fleet: tenant spawned tenant=tnt_… slug=acme port=53217
-#   → http://localhost:53217/  (data dir: ~/.apteva-fleet/acme/)
+# → {
+#     "tenant_id":   "tnt_…",
+#     "base_url":    "http://localhost:53217",
+#     "status":      "setup_pending",
+#     "setup_url":   "http://localhost:53217/?setup=1",
+#     "setup_token": "apt_a1b2…",
+#     "next_steps":  "..."
+#   }
+
+# 3. Open setup_url in a browser. Register an admin email + password,
+#    pasting the setup_token when asked. The tenant's setup mode locks
+#    after this first registration.
+
+# 4. In the tenant dashboard → API Keys → "New key". Copy the sk-… key.
+
+# 5. Hand it back to fleet:
+tenant_attach_key  { "tenant_id": "tnt_…", "api_key": "sk-…" }
+
+# → { "tenant_id": "tnt_…", "status": "active" }
 ```
+
+In the **Fleet** project page panel, all of the above is one screen — the create dialog returns you to the detail view, which shows the setup banner until you paste the api_key.
 
 ## Honest limits of v0.1
 
@@ -50,10 +75,10 @@ tenant_create  { "slug": "acme", "owner_email": "ops@acme.com" }
 
 Two tables (both prefixed `fleet_`):
 
-- **`fleet_tenants`** — id, slug, kind (`local`/`remote`), base_url, config_dir (local only), encrypted api_key, owner, current/target version, status, last_seen, last_health.
-- **`fleet_events`** — append-only audit timeline (spawn_start, spawned, spawn_failed, started, stopped, status_changed, support_login, health_failed, remote_call). FK-cascaded on tenant delete.
+- **`fleet_tenants`** — id, slug, kind (`local`/`remote`), base_url, config_dir (local only), encrypted api_key, encrypted setup_token (cleared once attached), owner, current/target version, status, last_seen, last_health.
+- **`fleet_events`** — append-only audit timeline (spawn_start, spawned, spawn_failed, started, stopped, status_changed, key_attached, support_login, health_failed, remote_call). FK-cascaded on tenant delete.
 
-Statuses: `starting | active | suspended | stopped | disconnected | failed | deleted`.
+Statuses: `starting | setup_pending | active | suspended | stopped | disconnected | failed | deleted`.
 
 ## What lives where
 

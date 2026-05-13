@@ -2,11 +2,13 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.1.0
+version: 0.2.0
 description: |
-  Control plane for a fleet of client apteva instances. v0.1 runs
-  every tenant as a local apteva process on the parent host — its
-  own data dir, its own port, supervised by fleet. Zero cross-app
+  Control plane for a fleet of client apteva instances. v0.2 spawns
+  every tenant as a local apteva process on the parent host with
+  admin-driven setup: fleet mints a setup token and returns it via
+  tenant_create; the operator finishes admin registration in the
+  browser; tenant_attach_key completes the link. Zero cross-app
   deps. Same registry + tool surface works later for remote /
   containerized provisioning.
 
@@ -31,7 +33,9 @@ provides:
     - prefix: /
   mcp_tools:
     - name: tenant_create
-      description: Spawn a new local apteva instance as a tenant. Allocates a data dir + port, supervises the child process. Args: slug, owner_email.
+      description: Spawn a new local apteva instance in setup_pending state. Allocates a data dir + port, mints a setup token, returns setup_url + setup_token for the operator to register an admin in the browser. Args: slug, owner_email.
+    - name: tenant_attach_key
+      description: Finish admin-driven setup by attaching the tenant's api_key (created via the tenant dashboard after admin registration). Flips status to active. Args: tenant_id, api_key.
     - name: tenant_connect
       description: Register an existing apteva-server (local or remote) as a tenant without spawning it. Args: base_url, api_key, owner_email, slug?.
     - name: tenant_list

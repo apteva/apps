@@ -12,9 +12,11 @@ import (
 )
 
 // Tenant statuses. Kept in lockstep with the CHECK constraint in
-// migrations/001_init.sql.
+// migrations/001_init.sql + 002_setup_token.sql (which broadens the
+// allowed set to include setup_pending).
 const (
 	StatusStarting     = "starting"
+	StatusSetupPending = "setup_pending" // server up, no admin registered yet; api_key not captured
 	StatusActive       = "active"
 	StatusSuspended    = "suspended"
 	StatusStopped      = "stopped"
@@ -66,7 +68,10 @@ func newID() string {
 	return "tnt_" + hex.EncodeToString(b)
 }
 
-func (s *store) insert(t *Tenant, apiKeyEnc []byte) error {
+// insert persists a new tenant row. setupTokenEnc is the sealed
+// setup token for setup_pending tenants; pass nil for tenants that
+// already have an api_key (remote connect, etc.).
+func (s *store) insert(t *Tenant, apiKeyEnc, setupTokenEnc []byte) error {
 	if t.ID == "" {
 		t.ID = newID()
 	}
@@ -78,12 +83,37 @@ func (s *store) insert(t *Tenant, apiKeyEnc []byte) error {
 	if t.Kind == "" {
 		t.Kind = KindRemote
 	}
+	var stTok any
+	if len(setupTokenEnc) > 0 {
+		stTok = setupTokenEnc
+	}
 	_, err := s.db.Exec(`
-		INSERT INTO fleet_tenants (id, slug, kind, base_url, config_dir, api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, t.ID, t.Slug, t.Kind, t.BaseURL, nullStr(t.ConfigDir), apiKeyEnc, t.OwnerEmail, nullStr(t.OwnerUserID),
+		INSERT INTO fleet_tenants (id, slug, kind, base_url, config_dir, api_key_enc, setup_token_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, t.ID, t.Slug, t.Kind, t.BaseURL, nullStr(t.ConfigDir), apiKeyEnc, stTok, t.OwnerEmail, nullStr(t.OwnerUserID),
 		nullStr(t.CurrentVersion), nullStr(t.TargetVersion), t.Status,
 		nil, nil, t.CreatedAt, t.UpdatedAt)
+	return err
+}
+
+// getSetupToken returns the sealed setup_token_enc for a tenant, or
+// nil if none was stored (post-attach, or tenants that never had one).
+func (s *store) getSetupToken(id string) ([]byte, error) {
+	var blob []byte
+	err := s.db.QueryRow(`SELECT setup_token_enc FROM fleet_tenants WHERE id = ?`, id).Scan(&blob)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return blob, err
+}
+
+// attachAPIKey replaces the sentinel api_key_enc with the real key,
+// clears the setup_token, and flips the row to active in one step.
+func (s *store) attachAPIKey(id string, apiKeyEnc []byte) error {
+	_, err := s.db.Exec(
+		`UPDATE fleet_tenants SET api_key_enc = ?, setup_token_enc = NULL, status = ?, updated_at = ? WHERE id = ?`,
+		apiKeyEnc, StatusActive, time.Now().UTC(), id,
+	)
 	return err
 }
 

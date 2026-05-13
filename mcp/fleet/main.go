@@ -16,7 +16,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.1.0
+version: 0.2.0
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [global]
@@ -30,6 +30,8 @@ provides:
   mcp_tools:
     - name: tenant_create
       description: Spawn a new local apteva tenant.
+    - name: tenant_attach_key
+      description: Finish admin-driven setup by attaching the tenant's api_key.
     - name: tenant_connect
       description: Register an existing apteva-server as a tenant.
     - name: tenant_list
@@ -46,6 +48,11 @@ provides:
       description: Mint a short-lived super-admin URL on the tenant.
     - name: tenant_run_remote
       description: Proxy an MCP tool call to a tenant.
+  ui_panels:
+    - slot: project.page
+      label: Fleet
+      icon: server
+      entry: /ui/FleetPanel.mjs
 runtime:
   kind: source
   source:
@@ -120,7 +127,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "tenant_create",
-			Description: "Spawn a new local apteva tenant. Allocates a data dir (~/.apteva-fleet/<slug>/) and free port, runs the apteva CLI with --data-dir + --port + --no-browser, waits for /api/health, then reads the api_key out of the freshly-created apteva.json. Args: slug (required), owner_email (required), apteva_bin (optional — path to apteva binary; defaults to $FLEET_APTEVA_BIN or `apteva` on PATH).",
+			Description: "Spawn a new local apteva tenant in admin-driven setup mode. Allocates a data dir (~/.apteva-fleet/<slug>/) and free port, mints a setup token, runs the apteva CLI with --data-dir + --port + --no-browser + APTEVA_SETUP_TOKEN env, waits for /api/health. Returns status=setup_pending plus a setup_url and setup_token the operator uses to register the admin in the browser. Call tenant_attach_key afterwards with the api_key generated on the tenant dashboard. Args: slug (required), owner_email (required), apteva_bin (optional — path to apteva binary; defaults to $FLEET_APTEVA_BIN or `apteva` on PATH).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -131,6 +138,19 @@ func (a *App) MCPTools() []sdk.Tool {
 				"required": []string{"slug", "owner_email"},
 			},
 			Handler: a.toolCreate,
+		},
+		{
+			Name: "tenant_attach_key",
+			Description: "Finish admin-driven setup. After tenant_create returns status=setup_pending and the operator has (1) opened the setup URL, (2) registered an admin email + password using the setup_token, and (3) generated an api_key on the tenant dashboard — call this with the api_key to flip the tenant to active. Validates by GETing /api/auth/status with the key. Args: tenant_id, api_key.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id": map[string]any{"type": "string"},
+					"api_key":   map[string]any{"type": "string"},
+				},
+				"required": []string{"tenant_id", "api_key"},
+			},
+			Handler: a.toolAttachKey,
 		},
 		{
 			Name:        "tenant_connect",
