@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: routes
 display_name: Routes
-version: 0.1.0
+version: 0.2.0
 description: |
   Hostname-based routing for Apteva. Owns the table mapping public
   hostnames (blog.example.com) to local backend targets
@@ -46,7 +46,7 @@ provides:
     - name: routes_get
       description: Fetch one route by hostname. Returns null when no route exists.
   ui_panels:
-    - slot: install.settings
+    - slot: project.page
       label: Routes
       icon: route
       entry: /ui/RoutesPanel.mjs

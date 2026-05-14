@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: routes
 display_name: Routes
-version: 0.1.0
+version: 0.2.0
 description: |
   Hostname-based routing for Apteva. Owns the table mapping public
   hostnames to local backend targets. Apps register routes; apteva-
@@ -60,7 +60,7 @@ provides:
     - { name: routes_list,       description: "List routes. Args: owner_install_id? (filter)." }
     - { name: routes_get,        description: "Fetch one route by hostname. Args: hostname." }
   ui_panels:
-    - { slot: install.settings, label: "Routes", icon: route, entry: /ui/RoutesPanel.mjs }
+    - { slot: project.page, label: "Routes", icon: route, entry: /ui/RoutesPanel.mjs }
 runtime:
   kind: source
   source:
