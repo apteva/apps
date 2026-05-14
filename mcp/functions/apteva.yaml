@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 0.1.0
+version: 0.2.0
 description: |
   Lambda-style serverless functions. Each function gets an
   auto-routed HTTP endpoint at /fn/<name>; the dispatcher spawns
@@ -11,6 +11,7 @@ description: |
   for cron-fired schedules; stand-alone for HTTP webhooks.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/functions
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/functions/icon.svg
 tags: [functions, faas, serverless, scripts, agent]
 
 scopes: [project, global]
@@ -41,6 +42,11 @@ provides:
       description: "Recent invocations for a function. Args: id (or name), limit (default 50, max 200)."
     - name: functions_logs
       description: "stdout + stderr of a single invocation. Args: invocation_id."
+  ui_panels:
+    - slot: project.page
+      label: Functions
+      icon: code
+      entry: /ui/FunctionsPanel.mjs
 
 runtime:
   kind: source

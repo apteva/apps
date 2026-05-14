@@ -1,0 +1,42 @@
+name: create-and-invoke
+description: |
+  Agent creates an inline bun function and invokes it once, verifying
+  the create + synchronous-invoke path end-to-end with a real LLM.
+  The function just echoes a field from its event, so the assertion
+  can stay on observable side-effects (tools called, REST count).
+
+timeout: 90s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Use the functions app — call the tools by their exact names; do not
+  invent other tools.
+
+  Step 1: functions_create with these args:
+    name:    "hello-world"
+    runtime: "bun"
+    source:  "const e = await Bun.stdin.json(); console.log(JSON.stringify({ hello: e?.name ?? 'world' }));"
+
+  Step 2: functions_invoke with:
+    name:  "hello-world"
+    event: { "name": "Apteva" }
+
+  Then stop.
+
+assert:
+  - tool_called: functions_create
+  - tool_called: functions_invoke
+  - http: GET /api/apps/functions/functions
+    expect_status: 200
+    expect_count_at: functions
+    expect_count: 1
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 12000
+  cost_usd: 0.20

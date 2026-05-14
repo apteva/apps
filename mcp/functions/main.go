@@ -31,7 +31,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: functions
 display_name: Functions
-version: 0.1.0
+version: 0.2.0
 description: |
   Lambda-style serverless functions. Each function gets an
   auto-routed HTTP endpoint at /fn/<name>; the dispatcher spawns
@@ -63,6 +63,11 @@ provides:
       description: Recent invocations for a function.
     - name: functions_logs
       description: stdout + stderr of a single invocation.
+  ui_panels:
+    - slot: project.page
+      label: Functions
+      icon: code
+      entry: /ui/FunctionsPanel.mjs
 runtime:
   kind: source
   source:
