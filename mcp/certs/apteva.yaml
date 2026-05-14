@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: certs
 display_name: Certs
-version: 0.2.1
+version: 0.2.2
 description: |
   TLS certificate issuance for Apteva projects. Talks to Let's
   Encrypt (or any RFC 8555 ACME directory) using DNS-01 or HTTP-01

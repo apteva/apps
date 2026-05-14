@@ -32,7 +32,10 @@ interface Cert {
   updated_at: string;
 }
 
-const API = "/api/apps/certs";
+// The certs app registers its HTTP routes at /api/certs and /api/certs/
+// (handlers.go), so the panel-visible base includes that /api segment:
+// /api/apps/certs (platform mount) + /api (app's own prefix).
+const API = "/api/apps/certs/api";
 
 // Shared input class — same tokens the domains panel uses so the look
 // matches across the dashboard's dark theme.
