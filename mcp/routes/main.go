@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: routes
 display_name: Routes
-version: 0.3.0
+version: 0.3.1
 description: |
   Hostname-based routing for Apteva. Owns the table mapping public
   hostnames to local backend targets. Apps register routes; apteva-
@@ -125,7 +125,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	globalCtx = ctx
 	a.routingMode = configOr(ctx, "routing_mode", "hostrouter")
-	a.certDir = configOr(ctx, "cert_dir", "")
+	a.certDir = configOr(ctx, "cert_dir", "/var/lib/apteva/certs")
 	a.stopCh = make(chan struct{})
 
 	ctx.Logger().Info("routes mounted",

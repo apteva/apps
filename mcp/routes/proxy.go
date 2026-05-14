@@ -42,8 +42,9 @@ type proxyTarget struct {
 // bootstrap, initial sync, then a periodic resync loop.
 func (a *App) startProxyMode(ctx *sdk.AppCtx) {
 	kind := configOr(ctx, "proxy_kind", "auto")
+	configPath := configOr(ctx, "proxy_config_path", "")
 	reloadOverride := configOr(ctx, "proxy_reload_command", "")
-	p, err := detectProxy(kind, reloadOverride)
+	p, err := detectProxy(kind, configPath, reloadOverride)
 	if err != nil {
 		ctx.Logger().Warn("routes: proxy mode set but no reverse proxy detected — staying inert",
 			"proxy_kind", kind, "err", err)
@@ -117,19 +118,21 @@ func (a *App) proxySyncLoop(ctx *sdk.AppCtx) {
 // ─── detection ─────────────────────────────────────────────────────
 
 // detectProxy finds the installed reverse proxy. kind is "auto",
-// "caddy", or "nginx". reloadOverride, when non-empty, replaces the
-// per-kind default reload command.
-func detectProxy(kind, reloadOverride string) (*proxyTarget, error) {
+// "caddy", or "nginx". configPath, when non-empty, is used as the
+// proxy's main config instead of auto-locating it (the escape hatch
+// for non-standard installs). reloadOverride, when non-empty,
+// replaces the per-kind default reload command.
+func detectProxy(kind, configPath, reloadOverride string) (*proxyTarget, error) {
 	switch kind {
 	case "caddy":
-		return detectCaddy(reloadOverride)
+		return detectCaddy(configPath, reloadOverride)
 	case "nginx":
-		return detectNginx(reloadOverride)
+		return detectNginx(configPath, reloadOverride)
 	case "", "auto":
-		if p, err := detectCaddy(reloadOverride); err == nil {
+		if p, err := detectCaddy(configPath, reloadOverride); err == nil {
 			return p, nil
 		}
-		if p, err := detectNginx(reloadOverride); err == nil {
+		if p, err := detectNginx(configPath, reloadOverride); err == nil {
 			return p, nil
 		}
 		return nil, fmt.Errorf("no caddy or nginx found on PATH")
@@ -138,15 +141,24 @@ func detectProxy(kind, reloadOverride string) (*proxyTarget, error) {
 	}
 }
 
-func detectCaddy(reloadOverride string) (*proxyTarget, error) {
+func detectCaddy(configPath, reloadOverride string) (*proxyTarget, error) {
 	bin, err := exec.LookPath("caddy")
 	if err != nil {
 		return nil, fmt.Errorf("caddy not on PATH: %w", err)
 	}
-	main := findMainConfig("caddy", "--config",
-		"/etc/caddy/Caddyfile", "/usr/local/etc/caddy/Caddyfile")
+	main := configPath
 	if main == "" {
-		return nil, fmt.Errorf("caddy found but no Caddyfile located")
+		// Linux: /etc/caddy/Caddyfile. macOS Homebrew: <prefix>/etc/
+		// Caddyfile (no caddy/ subdir) — /opt/homebrew on Apple
+		// Silicon, /usr/local on Intel.
+		main = findMainConfig("caddy", "--config",
+			"/etc/caddy/Caddyfile",
+			"/opt/homebrew/etc/Caddyfile",
+			"/usr/local/etc/Caddyfile",
+			"/usr/local/etc/caddy/Caddyfile")
+	}
+	if main == "" || !fileExists(main) {
+		return nil, fmt.Errorf("caddy found but no Caddyfile located — set proxy_config_path")
 	}
 	includeDir := filepath.Join(filepath.Dir(main), "apteva.d")
 	reload := []string{bin, "reload", "--config", main}
@@ -165,15 +177,20 @@ func detectCaddy(reloadOverride string) (*proxyTarget, error) {
 	}, nil
 }
 
-func detectNginx(reloadOverride string) (*proxyTarget, error) {
+func detectNginx(configPath, reloadOverride string) (*proxyTarget, error) {
 	bin, err := exec.LookPath("nginx")
 	if err != nil {
 		return nil, fmt.Errorf("nginx not on PATH: %w", err)
 	}
-	main := findMainConfig("nginx", "-c",
-		"/etc/nginx/nginx.conf", "/usr/local/etc/nginx/nginx.conf")
+	main := configPath
 	if main == "" {
-		return nil, fmt.Errorf("nginx found but no nginx.conf located")
+		main = findMainConfig("nginx", "-c",
+			"/etc/nginx/nginx.conf",
+			"/opt/homebrew/etc/nginx/nginx.conf",
+			"/usr/local/etc/nginx/nginx.conf")
+	}
+	if main == "" || !fileExists(main) {
+		return nil, fmt.Errorf("nginx found but no nginx.conf located — set proxy_config_path")
 	}
 	includeDir := filepath.Join(filepath.Dir(main), "apteva.d")
 	reload := []string{bin, "-s", "reload"}

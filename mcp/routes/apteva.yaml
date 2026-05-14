@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: routes
 display_name: Routes
-version: 0.3.0
+version: 0.3.1
 description: |
   Hostname-based routing for Apteva. Owns the table mapping public
   hostnames (blog.example.com) to local backend targets
@@ -76,6 +76,11 @@ config_schema:
     default: "auto"
     label: Proxy kind
     description: Which reverse proxy to drive in `proxy` mode — `auto` (detect Caddy then nginx), `caddy`, or `nginx`. Ignored in `hostrouter` mode.
+  - name: proxy_config_path
+    type: text
+    default: ""
+    label: Proxy main config path
+    description: Override the path to the proxy's main config file. Empty = auto-locate (the proxy's systemd `--config`/`-c` flag, then standard locations incl. Homebrew paths on macOS). Set this when auto-detection misses — e.g. a non-standard install.
   - name: proxy_reload_command
     type: text
     default: ""
@@ -83,8 +88,8 @@ config_schema:
     description: Override the command used to gracefully reload the proxy after a config change. Empty = per-kind default (`caddy reload --config <main>` / `nginx -s reload`). Set this if your proxy needs e.g. `systemctl reload caddy` or an admin-API call. The routes sidecar must be able to run it.
   - name: cert_dir
     type: text
-    default: ""
+    default: "/var/lib/apteva/certs"
     label: Cert directory
-    description: Filesystem path where the certs app writes PEM files (its `cert_output_dir`). When set, `proxy` mode points the proxy's TLS at `<cert_dir>/<cert_fqdn>/fullchain.pem` + `privkey.pem`. Empty = no explicit TLS lines (Caddy then uses its own automatic HTTPS; nginx routes stay HTTP-only). Must match the certs app's `cert_output_dir`.
+    description: Filesystem path where the certs app writes PEM files (its `cert_output_dir`). In `proxy` mode the proxy's TLS is pointed at `<cert_dir>/<cert_fqdn>/fullchain.pem` + `privkey.pem`. Default `/var/lib/apteva/certs` matches the certs app's default, so the chain works out of the box. Set empty for no explicit TLS lines (Caddy then uses its own automatic HTTPS; nginx routes stay HTTP-only). For local macOS testing, point it at the same writable path you gave certs.
 
 upgrade_policy: auto-patch
