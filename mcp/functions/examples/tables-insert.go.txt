@@ -1,0 +1,46 @@
+// tables-insert (go) — writes a row into a table owned by the Tables
+// app via ctx.Call. The Tables app does the database work; this
+// function never touches another app's DB directly.
+//
+// Pre-req: a `leads` table (see examples/README.md).
+//
+//   POST /fn/tables-insert  { "email": "marco@example.com" }
+//   → { "inserted": 1, "id": 1 }
+
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+)
+
+func Handle(event json.RawMessage, ctx *Context) (any, error) {
+	var e struct {
+		Email string `json:"email"`
+	}
+	_ = json.Unmarshal(event, &e)
+	if e.Email == "" {
+		return nil, fmt.Errorf("event.email is required")
+	}
+
+	raw, err := ctx.Call("tables", "rows_insert", map[string]any{
+		"table": "leads",
+		"rows":  []any{map[string]any{"email": e.Email}},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var out struct {
+		IDs      []int64 `json:"ids"`
+		Inserted int     `json:"inserted"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	var id int64
+	if len(out.IDs) > 0 {
+		id = out.IDs[0]
+	}
+	return map[string]any{"inserted": out.Inserted, "id": id}, nil
+}

@@ -134,13 +134,25 @@ interface Invocation {
 
 const API = "/api/apps/functions";
 
-// Starter handler shown in the create dialog.
+// Starter handlers shown in the create dialog.
 const SAMPLE_HANDLER =
   `export default async function handler(event, context) {\n` +
   `  // event: the JSON payload. context.call(app, tool, input)\n` +
   `  // reaches other Apteva apps. Return any JSON.\n` +
   `  return { hello: event?.name ?? "world" };\n` +
   `}`;
+
+const SAMPLE_GO =
+  "// Go: package main + a Handle func. The harness supplies main()\n" +
+  "// and the Context type — don't write your own main().\n" +
+  "package main\n\n" +
+  "import \"encoding/json\"\n\n" +
+  "func Handle(event json.RawMessage, ctx *Context) (any, error) {\n" +
+  "\tvar e struct{ Name string `json:\"name\"` }\n" +
+  "\t_ = json.Unmarshal(event, &e)\n" +
+  "\tif e.Name == \"\" { e.Name = \"world\" }\n" +
+  "\treturn map[string]any{\"hello\": e.Name}, nil\n" +
+  "}";
 
 function relTime(s?: string): string {
   if (!s) return "—";
@@ -776,13 +788,22 @@ function CreateFunctionDialog({
   api: ApiFn;
 }) {
   const [name, setName] = useState("");
+  const [runtime, setRuntime] = useState<"node" | "go">("node");
   const [source, setSource] = useState(SAMPLE_HANDLER);
+  const [touchedSource, setTouchedSource] = useState(false);
   const [packageJSON, setPackageJSON] = useState("");
   const [envText, setEnvText] = useState("");
   const [timeoutSec, setTimeoutSec] = useState("30");
   const [maxMemoryMb, setMaxMemoryMb] = useState("256");
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState("");
+
+  // Swap the starter handler to match the runtime — but only while
+  // the author hasn't typed their own.
+  const pickRuntime = (r: "node" | "go") => {
+    setRuntime(r);
+    if (!touchedSource) setSource(r === "go" ? SAMPLE_GO : SAMPLE_HANDLER);
+  };
 
   const submit = async () => {
     setErr("");
@@ -795,11 +816,11 @@ function CreateFunctionDialog({
 
     const body: Record<string, unknown> = {
       name: name.trim(),
-      runtime: "node",
+      runtime,
       source_kind: "inline",
       source,
     };
-    if (packageJSON.trim()) body.package_json = packageJSON;
+    if (runtime === "node" && packageJSON.trim()) body.package_json = packageJSON;
     if (envText.trim()) {
       const env = envLinesToMap(envText);
       if (typeof env === "string") { setErr(env); return; }
@@ -846,25 +867,49 @@ function CreateFunctionDialog({
         </div>
 
         <div className="flex flex-col gap-1">
-          <label className={labelCls}>Handler (node) — export default async (event, context) =&gt; result</label>
+          <label className={labelCls}>Runtime</label>
+          <div className="flex gap-1">
+            {(["node", "go"] as const).map((r) => (
+              <button
+                key={r}
+                type="button"
+                onClick={() => pickRuntime(r)}
+                className={`flex-1 px-2 py-1 text-xs border rounded font-mono ${
+                  runtime === r
+                    ? "border-accent text-accent bg-accent/10"
+                    : "border-border text-text-muted hover:bg-bg-input"
+                }`}
+              >{r}</button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <label className={labelCls}>
+            {runtime === "go"
+              ? "Handler (go) — func Handle(event json.RawMessage, ctx *Context) (any, error)"
+              : "Handler (node) — export default async (event, context) => result"}
+          </label>
           <textarea
             value={source}
-            onChange={(e) => setSource(e.target.value)}
+            onChange={(e) => { setSource(e.target.value); setTouchedSource(true); }}
             spellCheck={false}
             className={inputCls + " font-mono min-h-[160px]"}
           />
         </div>
 
-        <div className="flex flex-col gap-1">
-          <label className={labelCls}>package.json (optional — deps installed at deploy)</label>
-          <textarea
-            value={packageJSON}
-            onChange={(e) => setPackageJSON(e.target.value)}
-            spellCheck={false}
-            placeholder='{"dependencies":{"ky":"^1.0.0"}}'
-            className={inputCls + " font-mono min-h-[48px]"}
-          />
-        </div>
+        {runtime === "node" && (
+          <div className="flex flex-col gap-1">
+            <label className={labelCls}>package.json (optional — deps installed at deploy)</label>
+            <textarea
+              value={packageJSON}
+              onChange={(e) => setPackageJSON(e.target.value)}
+              spellCheck={false}
+              placeholder='{"dependencies":{"ky":"^1.0.0"}}'
+              className={inputCls + " font-mono min-h-[48px]"}
+            />
+          </div>
+        )}
 
         <div className="flex flex-col gap-1">
           <label className={labelCls}>Environment (one KEY=value per line, optional)</label>

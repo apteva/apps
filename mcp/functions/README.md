@@ -1,14 +1,14 @@
-# Functions (v1.0)
+# Functions (v1.1)
 
 Lambda-style serverless functions for Apteva. Each function is an
 immutable, built **version** served by a pool of **warm worker
-processes**: the runtime boots once, imports your handler module, and
-then serves invocations over a socketpair — no per-request process
-spawn, no per-request cold start.
+processes**: the runtime boots once, loads your handler, and then
+serves invocations over a socketpair — no per-request process spawn,
+no per-request cold start.
 
 ## The handler contract
 
-A function is a module that default-exports a handler:
+**node** — a module that default-exports a handler:
 
 ```js
 export default async function handler(event, context) {
@@ -18,18 +18,33 @@ export default async function handler(event, context) {
 }
 ```
 
-`context` gives you:
+**go** — `package main` with a `Handle` func and **no `main()`**. The
+harness supplies `main()` and the `Context` type; `go build` compiles
+them together at deploy:
 
-- **`context.call(app, tool, input)`** — invoke another Apteva app's
-  MCP tool. The sidecar mediates it; your code never holds a platform
-  token. `const row = await context.call("tables", "tables_insert_row", {...})`.
+```go
+package main
+
+import "encoding/json"
+
+func Handle(event json.RawMessage, ctx *Context) (any, error) {
+  return map[string]any{"hello": "world"}, nil
+}
+```
+
+Either way, `context` / `ctx` gives you:
+
+- **`context.call(app, tool, input)`** (`ctx.Call` in Go) — invoke
+  another Apteva app's MCP tool. The sidecar mediates it; your code
+  never holds a platform token.
+  `await context.call("tables", "rows_insert", {...})`.
 - **`context.env`** — a *scrubbed* environment: your function's own
   `env` map plus a small host allowlist (`PATH`, `HOME`, …). The
   sidecar's secrets (`APTEVA_APP_TOKEN`, gateway URL) are **not** here.
 - **`context.log(...)`**, **`context.functionName/functionId/runtime`**.
 
-Top-level module code runs once per worker (cold start) — put client
-setup there; it's reused across warm invocations.
+Top-level / package-level code runs once per worker (cold start) —
+put client setup there; it's reused across warm invocations.
 
 ## Lifecycle: deploy ≠ invoke
 
@@ -44,10 +59,17 @@ setup there; it's reused across warm invocations.
 
 ## Runtimes
 
-**node** only. bun was a candidate but its `node:net` can't adopt the
-inherited socketpair fd the pool uses; python is a planned follow-on.
-Node 18+ ships a global `fetch`, so functions can make outbound HTTP
-with no dependency.
+- **node** — interpreted; Node 18+ ships a global `fetch`, so
+  functions can make outbound HTTP with no dependency. `package_json`
+  deps are `npm install`ed once at deploy.
+- **go** — compiled; deploy runs `go build`, and the harness is
+  compiled into the worker binary. apteva-server already needs a Go
+  toolchain on PATH to build kind:source apps, so the runtime is
+  guaranteed present. stdlib only for now — third-party Go modules
+  are a planned follow-on.
+
+bun is out (its `node:net` can't adopt the inherited socketpair fd);
+python is a planned follow-on.
 
 ## Triggers
 
@@ -123,10 +145,12 @@ interaction — live in [`examples/`](./examples).
 { "name": "hello-world", "version": 1 }
 ```
 
-## What's deferred (post-v1.0)
+## What's deferred
 
 - **python runtime** — needs its own harness; same socketpair
   protocol, so it's additive.
+- **third-party Go modules** — go functions are stdlib-only for now;
+  a future version takes a user-supplied `go.mod`.
 - **memory enforcement** — `max_memory_mb` is stored but not yet
   applied to the worker process (`prlimit`/cgroup).
 - **`allowed_apps` allowlist** — `context.call` currently reaches any

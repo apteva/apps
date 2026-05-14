@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -80,9 +81,10 @@ type callResult struct {
 }
 
 // startWorker spawns a runtime process for fn against version
-// versionID, hands it one end of a socketpair as fd 3, and blocks
-// until it reports ready (or the cold-start budget elapses).
-func startWorker(spec runtimeSpec, harnessPath, stageDir, entryPath string, fn *Function, versionID int64) (*worker, error) {
+// versionID from the version's already-built buildDir, hands it one
+// end of a socketpair as fd 3, and blocks until it reports ready (or
+// the cold-start budget elapses).
+func startWorker(spec runtimeSpec, buildDir string, fn *Function, versionID int64) (*worker, error) {
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
 	if err != nil {
 		return nil, fmt.Errorf("socketpair: %w", err)
@@ -90,18 +92,18 @@ func startWorker(spec runtimeSpec, harnessPath, stageDir, entryPath string, fn *
 	parentFile := os.NewFile(uintptr(fds[0]), "fn-sock-parent")
 	childFile := os.NewFile(uintptr(fds[1]), "fn-sock-child")
 
-	bin, args := spec.WorkerArgv(harnessPath)
+	bin, args := spec.WorkerCmd(buildDir)
 	resolvedBin, err := exec.LookPath(bin)
 	if err != nil {
 		_ = parentFile.Close()
 		_ = childFile.Close()
-		return nil, fmt.Errorf("runtime binary %q not in PATH", bin)
+		return nil, fmt.Errorf("worker binary %q not runnable: %v", bin, err)
 	}
 
 	stderr := newCapBuffer(stderrCap)
 	cmd := exec.Command(resolvedBin, args...)
-	cmd.Dir = stageDir
-	cmd.Env = workerEnv(fn, entryPath)
+	cmd.Dir = buildDir
+	cmd.Env = workerEnv(fn, filepath.Join(buildDir, spec.EntryFile))
 	cmd.ExtraFiles = []*os.File{childFile} // becomes fd 3 in the child
 	cmd.Stdout = stderr
 	cmd.Stderr = stderr

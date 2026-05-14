@@ -7,12 +7,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
-// buildTimeout bounds a dependency install. Generous — a cold
-// `bun install` with a real dep tree can take a while — but finite.
+// buildTimeout bounds a build step. Generous — a cold `npm install`
+// or a `go build` with a populated module cache can take a while —
+// but finite.
 const buildTimeout = 2 * time.Minute
 
 // poolBuildBase returns the root under which version artifact dirs
@@ -31,12 +31,13 @@ func versionDir(base string, v *FunctionVersion) string {
 	return filepath.Join(base, fmt.Sprintf("fn-%d", v.FunctionID), fmt.Sprintf("v%d", v.Version))
 }
 
-// ensureBuilt makes sure version v's artifact dir exists and is
-// populated: the entry file written, and `npm`/`bun install` run if
-// the version ships a package.json. Idempotent — a `.ready` marker
+// ensureBuilt makes sure version v's artifact dir exists and is fully
+// built: the entry file written, the runtime's support files staged
+// (Stage), and the runtime's build step run (Build — `npm install`
+// for node deps, `go build` for go). Idempotent — a `.ready` marker
 // lets it no-op on a dir that's already built, so it's safe to call
-// from both deploy (first build) and the pool's cold-start path
-// (rebuild after a restart cleared an ephemeral build base).
+// from both deploy and the pool's cold-start path (e.g. a rebuild
+// after a restart cleared an ephemeral build base).
 func ensureBuilt(base string, v *FunctionVersion, spec runtimeSpec, src []byte) (string, error) {
 	dir := versionDir(base, v)
 	marker := filepath.Join(dir, ".ready")
@@ -49,13 +50,11 @@ func ensureBuilt(base string, v *FunctionVersion, spec runtimeSpec, src []byte) 
 	if err := os.WriteFile(filepath.Join(dir, spec.EntryFile), src, 0o600); err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(v.PackageJSON) != "" {
-		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(v.PackageJSON), 0o600); err != nil {
-			return "", err
-		}
-		if err := runInstall(dir, spec); err != nil {
-			return "", err
-		}
+	if err := spec.Stage(dir); err != nil {
+		return "", fmt.Errorf("stage: %w", err)
+	}
+	if err := spec.Build(dir, v.PackageJSON); err != nil {
+		return "", err
 	}
 	// Marker written last — its presence means "fully built".
 	if err := os.WriteFile(marker, []byte(v.SourceHash), 0o600); err != nil {
@@ -64,19 +63,12 @@ func ensureBuilt(base string, v *FunctionVersion, spec runtimeSpec, src []byte) 
 	return dir, nil
 }
 
-// runInstall runs the runtime's dependency installer in dir.
-func runInstall(dir string, spec runtimeSpec) error {
-	var bin string
-	var args []string
-	switch spec.Name {
-	case "node":
-		bin, args = "npm", []string{"install", "--no-audit", "--no-fund", "--loglevel", "error"}
-	default: // bun
-		bin, args = "bun", []string{"install"}
-	}
+// runBuildCmd runs a runtime build step in dir, capturing combined
+// output for the error message. Bounded by buildTimeout.
+func runBuildCmd(dir, label, bin string, args ...string) error {
 	resolved, err := exec.LookPath(bin)
 	if err != nil {
-		return fmt.Errorf("dependency install needs %q on PATH", bin)
+		return fmt.Errorf("%s needs %q on PATH", label, bin)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
 	defer cancel()
@@ -85,7 +77,16 @@ func runInstall(dir string, spec runtimeSpec) error {
 	out := newCapBuffer(16 * 1024)
 	cmd.Stdout, cmd.Stderr = out, out
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s install failed: %v\n%s", bin, err, out.String())
+		return fmt.Errorf("%s failed: %v\n%s", label, err, out.String())
 	}
 	return nil
+}
+
+func runNpmInstall(dir string) error {
+	return runBuildCmd(dir, "npm install", "npm",
+		"install", "--no-audit", "--no-fund", "--loglevel", "error")
+}
+
+func runGoBuild(dir string) error {
+	return runBuildCmd(dir, "go build", "go", "build", "-o", "worker", ".")
 }

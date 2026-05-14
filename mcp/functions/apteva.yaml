@@ -2,13 +2,13 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.0.0
+version: 1.1.0
 description: |
-  Lambda-style serverless functions. Each function is an immutable,
-  built version served by a pool of warm worker processes; handlers
-  export `default async (event, context) => result` and reach other
-  Apteva apps via context.call. Auto-routed HTTP endpoint at
-  /fn/<name>; pair with the Jobs app for cron-fired schedules.
+  Lambda-style serverless functions in node or Go. Each function is
+  an immutable, built version served by a pool of warm worker
+  processes; handlers reach other Apteva apps via context.call.
+  Auto-routed HTTP endpoint at /fn/<name>; pair with the Jobs app
+  for cron-fired schedules.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/functions
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/functions/icon.svg

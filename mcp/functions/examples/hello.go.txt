@@ -1,0 +1,23 @@
+// hello (go) — echoes a name from the event.
+//
+// A Go function is `package main` with a `Handle` func. The harness
+// supplies main() and the Context type, so DON'T write your own
+// main(). This file is .go.txt so it stays out of the functions
+// app's own `go build`; deploy it by passing the contents as source:
+//
+//   functions_create { name: "hello", runtime: "go", source: <this file> }
+
+package main
+
+import "encoding/json"
+
+func Handle(event json.RawMessage, ctx *Context) (any, error) {
+	var e struct {
+		Name string `json:"name"`
+	}
+	_ = json.Unmarshal(event, &e)
+	if e.Name == "" {
+		e.Name = "world"
+	}
+	return map[string]any{"hello": e.Name}, nil
+}

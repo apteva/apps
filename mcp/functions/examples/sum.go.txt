@@ -1,0 +1,21 @@
+// sum (go) — adds the numbers in the event. Shows decoding a shaped
+// event payload and returning a JSON object.
+//
+//   POST /fn/sum  { "numbers": [1, 2, 3] }
+//   → { "sum": 6, "count": 3 }
+
+package main
+
+import "encoding/json"
+
+func Handle(event json.RawMessage, ctx *Context) (any, error) {
+	var e struct {
+		Numbers []float64 `json:"numbers"`
+	}
+	_ = json.Unmarshal(event, &e)
+	var sum float64
+	for _, n := range e.Numbers {
+		sum += n
+	}
+	return map[string]any{"sum": sum, "count": len(e.Numbers)}, nil
+}

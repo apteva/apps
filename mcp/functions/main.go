@@ -28,12 +28,16 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// nodeHarness is the JS worker harness — serves both the node and bun
-// runtimes. Embedded so the running binary is self-contained; the
-// worker pool stages it to disk at OnMount.
+// nodeHarness / goHarness are the worker harnesses, embedded so the
+// running binary is self-contained. ensureBuilt stages the right one
+// into a version's build dir: node.mjs runs as the node entrypoint;
+// gomain.txt is written as harness.go and compiled into the worker.
 //
 //go:embed harness/node.mjs
 var nodeHarness []byte
+
+//go:embed harness/gomain.txt
+var goHarness []byte
 
 // ─── Manifest (also lives in apteva.yaml; embedded so the running
 // binary is self-describing). ─────────────────────────────────────
@@ -41,12 +45,12 @@ var nodeHarness []byte
 const manifestYAML = `schema: apteva-app/v1
 name: functions
 display_name: Functions
-version: 1.0.0
+version: 1.1.0
 description: |
-  Lambda-style serverless functions. Each function is an immutable,
-  built version served by a pool of warm worker processes; handlers
-  export an (event, context) handler and reach other apps via
-  context.call. Auto-routed HTTP endpoint at /fn/<name>.
+  Lambda-style serverless functions in node or Go. Each function is
+  an immutable, built version served by a pool of warm worker
+  processes; handlers reach other apps via context.call. Auto-routed
+  HTTP endpoint at /fn/<name>.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -153,10 +157,10 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "functions_create",
-			Description: "Create a function and deploy v1. Args: name, runtime (node), source (inline handler: `export default async (event, context) => result`) OR (repo_id+repo_path), package_json?, env?, timeout_ms?, max_memory_mb?.",
+			Description: "Create a function and deploy v1. Args: name, runtime (node|go), source (inline handler — node: `export default async (event, context) => result`; go: `func Handle(event json.RawMessage, ctx *Context) (any, error)`) OR (repo_id+repo_path), package_json?, env?, timeout_ms?, max_memory_mb?.",
 			InputSchema: schemaObject(map[string]any{
 				"name":          map[string]any{"type": "string"},
-				"runtime":       map[string]any{"type": "string", "enum": []any{"node"}},
+				"runtime":       map[string]any{"type": "string", "enum": []any{"node", "go"}},
 				"source_kind":   map[string]any{"type": "string", "enum": []any{"inline", "repo"}},
 				"source":        map[string]any{"type": "string", "description": "Inline handler module body (when source_kind=inline)."},
 				"repo_id":       map[string]any{"type": "integer", "description": "Code app repo id (when source_kind=repo)."},

@@ -82,10 +82,10 @@ type FunctionFilter struct {
 // at create time.
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
-// validRuntimes is the create-time guard. node only, for now —
-// see runtime.go for why bun is out and python is deferred.
+// validRuntimes is the create-time guard. node + go; see runtime.go
+// for why bun is out and python is deferred.
 var validRuntimes = map[string]bool{
-	"node": true,
+	"node": true, "go": true,
 }
 
 const (
@@ -112,7 +112,7 @@ func dbCreateFunction(db *sql.DB, pid string, fn *Function) (*Function, error) {
 		return nil, errors.New("name must match [a-z0-9][a-z0-9-]{0,62}")
 	}
 	if !validRuntimes[fn.Runtime] {
-		return nil, fmt.Errorf("runtime %q not supported (node)", fn.Runtime)
+		return nil, fmt.Errorf("runtime %q not supported (node|go)", fn.Runtime)
 	}
 	if fn.SourceKind == "" {
 		fn.SourceKind = "inline"

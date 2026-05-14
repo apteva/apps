@@ -1,0 +1,229 @@
+// Apteva Functions — Go worker harness.
+//
+// Embedded in the functions sidecar and staged as harness.go into a
+// Go function's build dir, next to the user's entry.go. Both files
+// are `package main`, so `go build` compiles them together: this file
+// provides main(), the Context type, and the socketpair protocol; the
+// user's entry.go provides `func Handle(event, ctx) (any, error)`.
+//
+// Protocol (4-byte big-endian length prefix + JSON, both directions):
+//   sidecar -> worker:  { id, event }                       (invocation)
+//                       { type:"call_result", callId, ok, result?, error? }
+//   worker  -> sidecar:  { type:"ready", ok }               (once, on boot)
+//                        { type:"call", callId, app, tool, input }
+//                        { id, ok, result?, error?, logs? }  (invocation result)
+
+package main
+
+import (
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"runtime/debug"
+	"sync"
+)
+
+// Context is handed to Handle. Call reaches other Apteva apps through
+// the sidecar — the worker never holds a platform token itself.
+type Context struct {
+	FunctionName string
+	FunctionID   string
+	Runtime      string
+	Env          map[string]string
+
+	h *harness
+}
+
+// Call invokes another Apteva app's MCP tool. input is marshalled to
+// JSON; the result is the tool's (unwrapped) JSON response.
+func (c *Context) Call(app, tool string, input any) (json.RawMessage, error) {
+	return c.h.call(app, tool, input)
+}
+
+// Log appends a line to the captured output returned with the
+// invocation result.
+func (c *Context) Log(args ...any) {
+	c.h.appendLog(fmt.Sprintln(args...))
+}
+
+type harness struct {
+	conn    net.Conn
+	writeMu sync.Mutex
+
+	mu      sync.Mutex
+	seq     int64
+	pending map[int64]chan callAnswer
+	logs    []string
+}
+
+type callAnswer struct {
+	ok     bool
+	result json.RawMessage
+	errMsg string
+}
+
+type inFrame struct {
+	Type   string          `json:"type"`
+	ID     int64           `json:"id"`
+	Event  json.RawMessage `json:"event"`
+	CallID int64           `json:"callId"`
+	OK     bool            `json:"ok"`
+	Result json.RawMessage `json:"result"`
+	Error  string          `json:"error"`
+}
+
+func (h *harness) writeFrame(v any) error {
+	payload, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	h.writeMu.Lock()
+	defer h.writeMu.Unlock()
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(payload)))
+	if _, err := h.conn.Write(hdr[:]); err != nil {
+		return err
+	}
+	_, err = h.conn.Write(payload)
+	return err
+}
+
+func readFrame(r io.Reader) ([]byte, error) {
+	var hdr [4]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return nil, err
+	}
+	n := binary.BigEndian.Uint32(hdr[:])
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+func (h *harness) call(app, tool string, input any) (json.RawMessage, error) {
+	if app == "" || tool == "" {
+		return nil, fmt.Errorf("context.Call: app and tool are required")
+	}
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("marshal call input: %w", err)
+	}
+
+	h.mu.Lock()
+	h.seq++
+	id := h.seq
+	ch := make(chan callAnswer, 1)
+	h.pending[id] = ch
+	h.mu.Unlock()
+
+	if err := h.writeFrame(map[string]any{
+		"type": "call", "callId": id, "app": app, "tool": tool,
+		"input": json.RawMessage(inputJSON),
+	}); err != nil {
+		return nil, err
+	}
+	ans := <-ch
+	if !ans.ok {
+		return nil, fmt.Errorf("%s", ans.errMsg)
+	}
+	if len(ans.result) == 0 {
+		return json.RawMessage("null"), nil
+	}
+	return ans.result, nil
+}
+
+func (h *harness) appendLog(line string) {
+	h.mu.Lock()
+	h.logs = append(h.logs, line)
+	h.mu.Unlock()
+}
+
+func (h *harness) takeLogs() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	logs := h.logs
+	h.logs = nil
+	return logs
+}
+
+func main() {
+	conn, err := net.FileConn(os.NewFile(3, "apteva-fn-sock"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "harness: fd 3 is not a socket:", err)
+		os.Exit(1)
+	}
+	h := &harness{conn: conn, pending: map[int64]chan callAnswer{}}
+
+	if err := h.writeFrame(map[string]any{"type": "ready", "ok": true}); err != nil {
+		os.Exit(1)
+	}
+
+	env := map[string]string{}
+	for _, kv := range os.Environ() {
+		for i := 0; i < len(kv); i++ {
+			if kv[i] == '=' {
+				env[kv[:i]] = kv[i+1:]
+				break
+			}
+		}
+	}
+	baseCtx := &Context{
+		FunctionName: os.Getenv("APTEVA_FUNCTION_NAME"),
+		FunctionID:   os.Getenv("APTEVA_FUNCTION_ID"),
+		Runtime:      os.Getenv("APTEVA_FUNCTION_RUNTIME"),
+		Env:          env,
+		h:            h,
+	}
+
+	for {
+		raw, err := readFrame(conn)
+		if err != nil {
+			os.Exit(0) // sidecar closed the socket
+		}
+		var msg inFrame
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			continue
+		}
+		if msg.Type == "call_result" {
+			h.mu.Lock()
+			ch := h.pending[msg.CallID]
+			delete(h.pending, msg.CallID)
+			h.mu.Unlock()
+			if ch != nil {
+				ch <- callAnswer{ok: msg.OK, result: msg.Result, errMsg: msg.Error}
+			}
+			continue
+		}
+		// Invocation request — run in a goroutine so the read loop
+		// stays free to route call_result frames back to a Handle
+		// that's blocked mid-context.Call.
+		go runInvocation(h, baseCtx, msg.ID, msg.Event)
+	}
+}
+
+func runInvocation(h *harness, ctx *Context, id int64, event json.RawMessage) {
+	var result any
+	var handlerErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				handlerErr = fmt.Errorf("handler panic: %v\n%s", r, debug.Stack())
+			}
+		}()
+		result, handlerErr = Handle(event, ctx)
+	}()
+
+	frame := map[string]any{"id": id, "logs": h.takeLogs()}
+	if handlerErr != nil {
+		frame["ok"] = false
+		frame["error"] = handlerErr.Error()
+	} else {
+		frame["ok"] = true
+		frame["result"] = result
+	}
+	_ = h.writeFrame(frame)
+}

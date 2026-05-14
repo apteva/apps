@@ -1,10 +1,8 @@
-# Function examples (node)
+# Function examples
 
-Working node handler modules you can deploy as-is. Each file is a
-complete handler — `export default async (event, context) => result`.
-
-node is the only runtime in v1.0 (see the app README for why); python
-and Go are planned follow-ons.
+Working handler modules you can deploy as-is — node (`.mjs`) and Go
+(`.go.txt`). The Go examples use a `.go.txt` extension so they stay
+out of the functions app's own `go build`; the content is real Go.
 
 ## Deploying one
 
@@ -12,13 +10,13 @@ and Go are planned follow-ons.
 
 ```json
 { "name": "hello", "runtime": "node", "source": "<contents of hello.mjs>" }
+{ "name": "hello", "runtime": "go",   "source": "<contents of hello.go.txt>" }
 ```
 
-…or paste it into the Functions panel's **New function** dialog. A new
-revision goes out with `functions_deploy` (same args, existing
-function).
+…or paste it into the Functions panel's **New function** dialog and
+pick the runtime. A new revision goes out with `functions_deploy`.
 
-## Simple — return JSON
+## node — `export default async (event, context) => result`
 
 | File | What it shows |
 |---|---|
@@ -26,13 +24,28 @@ function).
 | `sum.mjs` | reading a shaped event payload |
 | `fetch-json.mjs` | the built-in global `fetch` (Node 18+) — no dependencies |
 | `context-info.mjs` | what `context` exposes; the scrubbed `context.env` |
+| `tables-insert.mjs` | write a row — `context.call("tables", "rows_insert", …)` |
+| `tables-search.mjs` | read rows back — `rows_search` with a filter |
+| `lead-capture.mjs` | a realistic webhook: dedupe + insert + receipt |
 
-## Interacting with other apps — `context.call`
+## go — `func Handle(event json.RawMessage, ctx *Context) (any, error)`
 
-These call the **Tables** app to read and write a database. The
-function never touches another app's DB directly — `context.call`
-goes through the sidecar, which holds the platform token. They assume
-a `leads` table:
+A Go function is `package main` with a `Handle` func and **no
+`main()`** — the harness supplies `main()` and the `Context` type,
+and `go build` compiles them together at deploy. stdlib only for now
+(third-party Go modules are a planned follow-on).
+
+| File | What it shows |
+|---|---|
+| `hello.go.txt` | the canonical echo handler |
+| `sum.go.txt` | decoding a shaped event payload into a struct |
+| `tables-insert.go.txt` | write a row via `ctx.Call`, decode the result |
+
+## The Tables examples
+
+The cross-app examples call the **Tables** app — the function never
+touches another app's DB directly; `context.call` / `ctx.Call` goes
+through the sidecar. They assume a `leads` table:
 
 ```json
 // tables_create
@@ -46,12 +59,6 @@ a `leads` table:
 }
 ```
 
-| File | What it shows |
-|---|---|
-| `tables-insert.mjs` | write a row — `context.call("tables", "rows_insert", …)` |
-| `tables-search.mjs` | read rows back — `rows_search` with a filter |
-| `lead-capture.mjs` | a realistic webhook: dedupe (`rows_count`) + insert + receipt |
-
-The target app (`tables` here) must be installed in the project for
-`context.call` to reach it; an unreachable app surfaces as a thrown
-error the handler can catch.
+The target app must be installed in the project for the call to
+reach it; an unreachable app surfaces as an error the handler can
+catch.

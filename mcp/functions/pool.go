@@ -33,10 +33,8 @@ var globalPool *pool
 type pool struct {
 	ctx *sdk.AppCtx
 
-	stageDir   string            // <tmp>/apteva-functions-XXXX — holds the harness dir
-	harnessDir string            // <stageDir>/harness
-	harness    map[string]string // harness filename -> abs path on disk
-	buildBase  string            // root for version artifact dirs
+	stageDir  string // <tmp>/apteva-functions-XXXX — the build-base fallback root
+	buildBase string // root for version artifact dirs
 
 	mu   sync.Mutex
 	byFn map[int64]*fnPool
@@ -50,29 +48,19 @@ type fnPool struct {
 	idle chan *worker  // cap = workersPerFunction
 }
 
-// nodeHarness is embedded in main.go via //go:embed.
-
-// newPool stages the embedded harnesses to disk and starts the idle
-// reaper. The harness dir is a fresh temp dir per boot — the
-// harnesses are tiny and embedded, so rewriting them is free.
+// newPool picks the build-artifact root and starts the idle reaper.
+// Harnesses aren't staged here — ensureBuilt writes the right one
+// into each version's build dir at build time.
 func newPool(ctx *sdk.AppCtx) (*pool, error) {
 	stageDir, err := os.MkdirTemp("", "apteva-functions-")
 	if err != nil {
 		return nil, err
 	}
-	harnessDir := filepath.Join(stageDir, "harness")
-	if err := os.MkdirAll(harnessDir, 0o700); err != nil {
-		return nil, err
-	}
-	// node.mjs serves both the node and bun runtimes.
-	nodePath := filepath.Join(harnessDir, "node.mjs")
-	if err := os.WriteFile(nodePath, nodeHarness, 0o600); err != nil {
-		return nil, err
-	}
 
 	// Build artifacts: persistent under APTEVA_DATA_DIR when set (so
-	// dependency trees survive a restart), otherwise under the
-	// per-boot stage dir — ensureBuilt rebuilds lazily either way.
+	// built dependency trees / compiled workers survive a restart),
+	// otherwise under the per-boot stage dir — ensureBuilt rebuilds
+	// lazily either way.
 	buildBase := filepath.Join(stageDir, "build")
 	if d := strings.TrimSpace(os.Getenv("APTEVA_DATA_DIR")); d != "" {
 		buildBase = filepath.Join(d, "functions-build")
@@ -82,13 +70,11 @@ func newPool(ctx *sdk.AppCtx) (*pool, error) {
 	}
 
 	p := &pool{
-		ctx:        ctx,
-		stageDir:   stageDir,
-		harnessDir: harnessDir,
-		harness:    map[string]string{"node.mjs": nodePath},
-		buildBase:  buildBase,
-		byFn:       map[int64]*fnPool{},
-		stop:       make(chan struct{}),
+		ctx:       ctx,
+		stageDir:  stageDir,
+		buildBase: buildBase,
+		byFn:      map[int64]*fnPool{},
+		stop:      make(chan struct{}),
 	}
 	go p.reapLoop()
 	return p, nil
@@ -129,12 +115,7 @@ func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, ver
 	}
 
 	if w == nil {
-		harnessPath, ok := p.harness[spec.Harness]
-		if !ok {
-			return nil, fmt.Errorf("no harness for runtime %q", fn.Runtime)
-		}
-		entryPath := filepath.Join(buildDir, spec.EntryFile)
-		started, err := startWorker(spec, harnessPath, buildDir, entryPath, fn, ver.ID)
+		started, err := startWorker(spec, buildDir, fn, ver.ID)
 		if err != nil {
 			return nil, fmt.Errorf("cold start: %w", err)
 		}
