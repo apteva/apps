@@ -103,12 +103,15 @@ curl -X POST https://<host>/api/apps/functions/fn/hello-world \
 
 ```js
 export default async function handler(event, context) {
-  const row = await context.call("tables", "tables_insert_row", {
-    table: "leads", row: { email: event.email },
+  const { ids } = await context.call("tables", "rows_insert", {
+    table: "leads", rows: [{ email: event.email }],
   });
-  return { inserted: row.id };
+  return { inserted: ids[0] };
 }
 ```
+
+More worked examples — simple JSON returns and Tables-app
+interaction — live in [`examples/`](./examples).
 
 ### Deploy a new version, then roll back
 

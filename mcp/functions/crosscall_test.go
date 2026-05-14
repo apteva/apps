@@ -104,15 +104,17 @@ func TestContextCallNoPlatform(t *testing.T) {
 // reaches another app and the handler gets the result back.
 func TestContextCallSuccess(t *testing.T) {
 	requireBin(t, "node")
-	stub := &stubPlatform{result: json.RawMessage(`{"id":42}`)}
+	stub := &stubPlatform{result: json.RawMessage(`{"ids":[42],"inserted":1}`)}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithPlatform(stub))
 	app := mountApp(t, ctx)
 
 	fn := createFn(t, app, ctx, map[string]any{
 		"name": "writer",
 		"source": `export default async (event, context) => {
-			const row = await context.call("tables", "tables_insert_row", { name: event.name });
-			return { inserted: row.id };
+			const { ids } = await context.call("tables", "rows_insert", {
+				table: "leads", rows: [{ name: event.name }],
+			});
+			return { inserted: ids[0] };
 		};`,
 	})
 
@@ -126,10 +128,10 @@ func TestContextCallSuccess(t *testing.T) {
 	if !strings.Contains(res.Response, `"inserted":42`) {
 		t.Errorf("response = %q, want inserted:42", res.Response)
 	}
-	if stub.lastApp != "tables" || stub.lastTool != "tables_insert_row" {
-		t.Errorf("platform call = %q/%q, want tables/tables_insert_row", stub.lastApp, stub.lastTool)
+	if stub.lastApp != "tables" || stub.lastTool != "rows_insert" {
+		t.Errorf("platform call = %q/%q, want tables/rows_insert", stub.lastApp, stub.lastTool)
 	}
-	if stub.lastInput["name"] != "marco" {
-		t.Errorf("call input name = %v, want marco", stub.lastInput["name"])
+	if stub.lastInput["table"] != "leads" {
+		t.Errorf("call input table = %v, want leads", stub.lastInput["table"])
 	}
 }
