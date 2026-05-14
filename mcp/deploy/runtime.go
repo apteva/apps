@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -26,6 +27,11 @@ type Runtime interface {
 	Start(spec ReleaseSpec) (*RunningRelease, error)
 	// Stop terminates a running release; idempotent.
 	Stop(release *RunningRelease) error
+	// Adopt re-attaches the supervisor to a release process that
+	// outlived a previous supervisor instance (e.g. an app upgrade).
+	// Returns an error when the process is no longer there — the
+	// caller should then treat the release as stopped.
+	Adopt(releaseID int64, pid, port int) (*RunningRelease, error)
 	// LogPath returns the absolute path of the runtime log file.
 	LogPath(releaseID int64) string
 }
@@ -46,14 +52,21 @@ type ReleaseSpec struct {
 // store holds the persistent record; this struct is the in-memory
 // handle for stop/restart.
 type RunningRelease struct {
-	ReleaseID  int64
-	Port       int
-	PID        int
-	cmd        *exec.Cmd       // nil for static (in-process FileServer)
-	server     *http.Server    // non-nil for static
-	cancel     context.CancelFunc
-	logFile    *os.File
-	stopCh     chan struct{}   // closed when supervisor exits
+	ReleaseID int64
+	Port      int
+	PID       int
+	cmd       *exec.Cmd    // nil for static (in-process) and adopted releases
+	server    *http.Server // non-nil for static
+	cancel    context.CancelFunc
+	logFile   *os.File
+	stopCh    chan struct{} // closed when supervisor exits
+
+	// adopted marks a release we re-attached to on boot rather than
+	// spawned ourselves — no cmd handle, so Stop signals by pid.
+	adopted bool
+	// stopping is set by Stop so the adopted-release watcher can tell
+	// an operator-requested stop from a genuine crash.
+	stopping atomic.Bool
 }
 
 // ─── LocalRuntime ─────────────────────────────────────────────────
@@ -171,6 +184,56 @@ func (r *LocalRuntime) startProcess(spec ReleaseSpec, logF *os.File, logPath str
 	return rr, nil
 }
 
+// Adopt re-attaches the supervisor to a release process spawned by an
+// earlier instance of this sidecar. Such processes are launched in
+// their own process group and don't get signalled when we exit, so
+// they survive an app upgrade — this lets the new instance pick them
+// back up instead of declaring them dead.
+//
+// Both the recorded pid AND the recorded port must check out before
+// we agree to supervise: pid liveness alone is unsafe because the OS
+// can recycle a pid, but a recycled pid that *also* serves our exact
+// port is not a real-world risk. The port check doubles as a "is it
+// actually serving" probe.
+func (r *LocalRuntime) Adopt(releaseID int64, pid, port int) (*RunningRelease, error) {
+	if pid <= 0 {
+		return nil, errors.New("adopt: no pid recorded")
+	}
+	// Signal 0 probes existence without delivering anything.
+	if err := syscall.Kill(pid, 0); err != nil {
+		return nil, fmt.Errorf("adopt: pid %d not alive: %w", pid, err)
+	}
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond)
+	if err != nil {
+		return nil, fmt.Errorf("adopt: pid %d alive but port %d not listening: %w", pid, port, err)
+	}
+	_ = conn.Close()
+
+	rr := &RunningRelease{
+		ReleaseID: releaseID, Port: port, PID: pid,
+		adopted: true, stopCh: make(chan struct{}),
+	}
+	// Watcher: we can't cmd.Wait() a non-child, so poll the pid. When
+	// it goes away, update DB state the same way the spawn-path
+	// supervisor goroutine does — distinguishing an operator stop
+	// (stopping flag set) from a crash.
+	go func() {
+		defer close(rr.stopCh)
+		for {
+			time.Sleep(3 * time.Second)
+			if syscall.Kill(pid, 0) != nil {
+				if rr.stopping.Load() {
+					r.app.markStopped(releaseID)
+				} else {
+					r.app.markCrashed(releaseID, errors.New("adopted process exited"))
+				}
+				return
+			}
+		}
+	}()
+	return rr, nil
+}
+
 func (r *LocalRuntime) Stop(rr *RunningRelease) error {
 	if rr == nil {
 		return nil
@@ -180,6 +243,20 @@ func (r *LocalRuntime) Stop(rr *RunningRelease) error {
 		defer cancel()
 		_ = rr.server.Shutdown(ctx)
 		<-rr.stopCh
+		return nil
+	}
+	if rr.adopted {
+		// No cmd handle — signal the process group by pid. The process
+		// was spawned as its own group leader, so pgid == pid. The
+		// watcher goroutine observes the death and closes stopCh.
+		rr.stopping.Store(true)
+		_ = syscall.Kill(-rr.PID, syscall.SIGTERM)
+		select {
+		case <-rr.stopCh:
+		case <-time.After(5 * time.Second):
+			_ = syscall.Kill(-rr.PID, syscall.SIGKILL)
+			<-rr.stopCh
+		}
 		return nil
 	}
 	if rr.cancel != nil {

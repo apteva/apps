@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.6.1
+version: 0.7.0
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
@@ -177,39 +177,60 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		"max_build_concurrency", a.maxBuilds,
 	)
 
-	// Releases that were "live" or "starting" when the app last
-	// stopped are now orphans (the child processes died with us).
-	// Mark them stopped so the panel reflects reality.
-	if err := a.reconcileOrphanReleases(); err != nil {
-		ctx.Logger().Warn("orphan reconciliation failed", "err", err)
+	// Releases the DB still thinks are "live"/"starting" were spawned
+	// by a previous instance of this sidecar. Re-adopt the ones whose
+	// processes survived (the common case across an app upgrade); mark
+	// the rest stopped so the panel reflects reality.
+	if err := a.reconcileReleases(); err != nil {
+		ctx.Logger().Warn("release reconciliation failed", "err", err)
 	}
 	return nil
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error {
-	// Stop everything we're supervising before the host exits.
-	for _, rr := range a.registry.All() {
-		_ = a.runtime.Stop(rr)
-	}
+	// Deliberately do NOT stop supervised releases here. They're
+	// spawned in their own process groups and aren't signalled when
+	// this sidecar exits, so they outlive an app upgrade; the next
+	// OnMount re-adopts them via reconcileReleases. Killing them here
+	// would take every deployment down on every upgrade.
+	//
+	// Caveat: "static" framework releases run in-process (no child
+	// process), so they genuinely die with the sidecar and need a
+	// re-release to come back — reconcileReleases marks those stopped.
 	return nil
 }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
-func (a *App) reconcileOrphanReleases() error {
+// reconcileReleases runs on boot. For every release the DB still
+// considers running, try to re-adopt the underlying process: if it
+// survived (an app upgrade left it running in its own process group),
+// pull it back into the registry so stop/destroy/route still work.
+// If the process is gone, mark the release stopped.
+func (a *App) reconcileReleases() error {
 	rows, err := dbListLiveReleases(globalCtx.AppDB())
 	if err != nil {
 		return err
 	}
 	for _, r := range rows {
-		_ = dbUpdateRelease(globalCtx.AppDB(), r.ID, map[string]any{
-			"status":      "stopped",
-			"stopped_at":  nowUTC(),
-			"error":       "supervisor restarted; release marked stopped on cold boot",
-		})
-		_ = dbReleasePortLease(globalCtx.AppDB(), r.Port)
-		_ = dbAppendReleaseEvent(globalCtx.AppDB(), r.ID, "stop", `{"reason":"supervisor_restart"}`)
+		rr, adoptErr := a.runtime.Adopt(r.ID, r.PID, r.Port)
+		if adoptErr != nil {
+			// Genuine orphan — the process didn't survive the restart.
+			_ = dbUpdateRelease(globalCtx.AppDB(), r.ID, map[string]any{
+				"status":     "stopped",
+				"stopped_at": nowUTC(),
+				"error":      "supervisor restarted; process did not survive",
+			})
+			_ = dbReleasePortLease(globalCtx.AppDB(), r.Port)
+			_ = dbAppendReleaseEvent(globalCtx.AppDB(), r.ID, "stop", `{"reason":"orphan_not_alive"}`)
+			continue
+		}
+		a.registry.Put(rr)
+		// The release may have been "starting"; it's serving now.
+		_ = dbUpdateRelease(globalCtx.AppDB(), r.ID, map[string]any{"status": "live"})
+		_ = dbAppendReleaseEvent(globalCtx.AppDB(), r.ID, "adopted", fmt.Sprintf(`{"pid":%d,"port":%d}`, r.PID, r.Port))
+		globalCtx.Logger().Info("re-adopted release", "release_id", r.ID, "pid", r.PID, "port", r.Port)
 	}
 	return nil
 }
