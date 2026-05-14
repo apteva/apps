@@ -24,9 +24,22 @@ import (
 
 // callDomainsTool invokes a tool on the Domains app and unwraps the
 // MCP envelope into the tool's `any` result, decoded into out.
-func callDomainsTool(ctx *sdk.AppCtx, tool string, args map[string]any, out any) error {
+//
+// projectID is injected as `_project_id` so the call still resolves
+// when the Domains app is installed global-scoped (no APTEVA_PROJECT_ID
+// in its env). Pass "" only when the caller genuinely has no project
+// context — a global Domains install will then reject the call.
+func callDomainsTool(ctx *sdk.AppCtx, projectID, tool string, args map[string]any, out any) error {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return errors.New("platform unavailable")
+	}
+	if projectID != "" {
+		if args == nil {
+			args = map[string]any{}
+		}
+		if _, ok := args["_project_id"]; !ok {
+			args["_project_id"] = projectID
+		}
 	}
 	raw, err := ctx.PlatformAPI().CallApp("domains", tool, args)
 	if err != nil {
@@ -86,10 +99,19 @@ func (a *App) certsAvailable(ctx *sdk.AppCtx) bool {
 }
 
 // callCertsTool mirrors callDomainsTool: invoke a tool on the Certs
-// app and unwrap the MCP envelope.
-func callCertsTool(ctx *sdk.AppCtx, tool string, args map[string]any, out any) error {
+// app and unwrap the MCP envelope. projectID is injected as
+// `_project_id` for the same global-scope reason as callDomainsTool.
+func callCertsTool(ctx *sdk.AppCtx, projectID, tool string, args map[string]any, out any) error {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return errors.New("platform unavailable")
+	}
+	if projectID != "" {
+		if args == nil {
+			args = map[string]any{}
+		}
+		if _, ok := args["_project_id"]; !ok {
+			args["_project_id"] = projectID
+		}
 	}
 	raw, err := ctx.PlatformAPI().CallApp("certs", tool, args)
 	if err != nil {
@@ -127,13 +149,13 @@ func callCertsTool(ctx *sdk.AppCtx, tool string, args map[string]any, out any) e
 // that's a suffix of fqdn ("app.acme.com" → "acme.com"). Errors if
 // the fqdn doesn't sit under any registered domain — that's the
 // validation the picker UI is built around.
-func resolveApex(ctx *sdk.AppCtx, fqdn string) (apex, sub string, err error) {
+func resolveApex(ctx *sdk.AppCtx, projectID, fqdn string) (apex, sub string, err error) {
 	var resp struct {
 		Domains []struct {
 			Name string `json:"name"`
 		} `json:"domains"`
 	}
-	if err := callDomainsTool(ctx, "domain_list", map[string]any{}, &resp); err != nil {
+	if err := callDomainsTool(ctx, projectID, "domain_list", map[string]any{}, &resp); err != nil {
 		return "", "", err
 	}
 	fqdn = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(fqdn, ".")))
@@ -266,7 +288,7 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec
 		ttl = 600
 	}
 
-	apex, sub, err := resolveApex(ctx, fqdn)
+	apex, sub, err := resolveApex(ctx, d.ProjectID, fqdn)
 	if err != nil {
 		return err
 	}
@@ -280,7 +302,7 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec
 		return errors.New("apex CNAME isn't allowed; use type=A with an IP, or attach a subdomain")
 	}
 
-	if err := callDomainsTool(ctx, "domain_records_set", map[string]any{
+	if err := callDomainsTool(ctx, d.ProjectID, "domain_records_set", map[string]any{
 		"domain": apex,
 		"name":   subArg,
 		"type":   rtype,
@@ -302,7 +324,7 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec
 	// Issuance is async on the certs side too — the panel polls
 	// cert status via /api/_meta and renders the badge.
 	if a.certsAvailable(ctx) {
-		if err := callCertsTool(ctx, "cert_issue", map[string]any{"fqdn": fqdn}, nil); err != nil {
+		if err := callCertsTool(ctx, d.ProjectID, "cert_issue", map[string]any{"fqdn": fqdn}, nil); err != nil {
 			// Don't fail attach: the DNS record is good and the user
 			// can retry cert_issue later. Log via emit.
 			emit("deploy.domain.cert_kickoff_failed", map[string]any{
@@ -347,7 +369,7 @@ func (a *App) detachDomain(ctx *sdk.AppCtx, d *Deployment) error {
 			if subArg == "" {
 				subArg = "@"
 			}
-			deleteErr = callDomainsTool(ctx, "domain_records_delete", map[string]any{
+			deleteErr = callDomainsTool(ctx, d.ProjectID, "domain_records_delete", map[string]any{
 				"domain": apex, "name": subArg, "type": rtype,
 			}, nil)
 		}
@@ -356,7 +378,7 @@ func (a *App) detachDomain(ctx *sdk.AppCtx, d *Deployment) error {
 		return err
 	}
 	if a.certsAvailable(ctx) && d.Domain != "" {
-		_ = callCertsTool(ctx, "cert_revoke", map[string]any{"fqdn": d.Domain}, nil)
+		_ = callCertsTool(ctx, d.ProjectID, "cert_revoke", map[string]any{"fqdn": d.Domain}, nil)
 	}
 	// Drop the route entry so apteva-server stops proxying to a
 	// deployment the user just severed from its domain. No-op when
@@ -380,7 +402,7 @@ type certStatusEntry struct {
 	Error     string `json:"error,omitempty"`
 }
 
-func (a *App) certStatusFor(ctx *sdk.AppCtx, fqdn string) *certStatusEntry {
+func (a *App) certStatusFor(ctx *sdk.AppCtx, projectID, fqdn string) *certStatusEntry {
 	if !a.certsAvailable(ctx) || fqdn == "" {
 		return nil
 	}
@@ -392,7 +414,7 @@ func (a *App) certStatusFor(ctx *sdk.AppCtx, fqdn string) *certStatusEntry {
 			Error     string `json:"error,omitempty"`
 		} `json:"cert"`
 	}
-	if err := callCertsTool(ctx, "cert_get", map[string]any{"fqdn": fqdn}, &resp); err != nil {
+	if err := callCertsTool(ctx, projectID, "cert_get", map[string]any{"fqdn": fqdn}, &resp); err != nil {
 		return nil
 	}
 	if resp.Cert == nil {

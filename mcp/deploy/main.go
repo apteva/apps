@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.6.0
+version: 0.6.1
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
@@ -233,6 +233,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 func (a *App) handleMeta(w http.ResponseWriter, r *http.Request) {
 	domAvail := a.domainsAvailable(globalCtx)
 	certsOn := a.certsAvailable(globalCtx)
+	// Project context is needed when Domains/Certs are global-scoped.
+	// Soft failure: if it's missing we still report availability, just
+	// with empty domains/certs lists rather than 400ing the panel.
+	projectID, _ := resolveProjectFromRequest(r)
 	out := map[string]any{
 		"domains_available": domAvail,
 		"certs_available":   certsOn,
@@ -246,7 +250,7 @@ func (a *App) handleMeta(w http.ResponseWriter, r *http.Request) {
 				Name string `json:"name"`
 			} `json:"domains"`
 		}
-		if err := callDomainsTool(globalCtx, "domain_list", map[string]any{}, &resp); err == nil {
+		if err := callDomainsTool(globalCtx, projectID, "domain_list", map[string]any{}, &resp); err == nil {
 			names := make([]map[string]any, 0, len(resp.Domains))
 			for _, d := range resp.Domains {
 				names = append(names, map[string]any{"name": d.Name})
@@ -265,7 +269,7 @@ func (a *App) handleMeta(w http.ResponseWriter, r *http.Request) {
 				Error     string `json:"error,omitempty"`
 			} `json:"certs"`
 		}
-		if err := callCertsTool(globalCtx, "cert_list", map[string]any{}, &resp); err == nil {
+		if err := callCertsTool(globalCtx, projectID, "cert_list", map[string]any{}, &resp); err == nil {
 			byFQDN := make(map[string]any, len(resp.Certs))
 			for _, c := range resp.Certs {
 				byFQDN[c.FQDN] = map[string]any{
