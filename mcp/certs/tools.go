@@ -150,6 +150,7 @@ func (a *App) toolRevoke(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := dbSetCertStatus(ctx.AppDB(), c.ID, "revoked", ""); err != nil {
 		return nil, err
 	}
+	_ = removeCertFiles(a.certOutputDir, c.FQDN)
 	emit("certs.revoked", map[string]any{"cert_id": c.ID, "fqdn": c.FQDN})
 	return map[string]any{"revoked": true, "id": c.ID, "fqdn": c.FQDN}, nil
 }

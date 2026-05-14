@@ -27,7 +27,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: certs
 display_name: Certs
-version: 0.4.1
+version: 0.5.0
 description: TLS certificate issuance via ACME DNS-01 (through Domains app) or HTTP-01 (webroot).
 author: Apteva
 scopes: [project, global]
@@ -79,6 +79,7 @@ type App struct {
 	dnsTimeout    time.Duration
 	challengeType string // "dns-01" | "http-01" | "auto"
 	webrootPath   string // filesystem dir for http-01 challenge files
+	certOutputDir string // if set, issued certs are also written here as PEM files for a reverse proxy to consume
 
 	// Per-FQDN issuance lock so concurrent cert_issue / renew calls
 	// for the same name don't collide on the challenge slot.
@@ -114,6 +115,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.dnsTimeout = time.Duration(atoiOr(configOr(ctx, "dns_propagation_timeout_seconds", "180"), 180)) * time.Second
 	a.challengeType = strings.TrimSpace(configOr(ctx, "challenge_type", "auto"))
 	a.webrootPath = strings.TrimSpace(configOr(ctx, "webroot_path", "/var/www/acme"))
+	a.certOutputDir = strings.TrimSpace(configOr(ctx, "cert_output_dir", ""))
 	a.inFlight = map[string]bool{}
 	a.stopCh = make(chan struct{})
 
@@ -123,6 +125,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		"renew_window", a.renewWindow.String(),
 		"challenge_type", a.challengeType,
 		"webroot_path", a.webrootPath,
+		"cert_output_dir", a.certOutputDir,
 	)
 
 	// Daily renewal pass. Runs once on boot too — cheap when there's

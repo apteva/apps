@@ -72,6 +72,7 @@ func (a *App) handleMeta(w http.ResponseWriter, r *http.Request) {
 		"challenge_type":    a.selectChallengeType(globalCtx, pid),
 		"domains_available": false,
 		"domains":           []string{},
+		"cert_output_dir":   a.certOutputDir,
 	}
 	var resp struct {
 		Domains []struct {
@@ -146,6 +147,7 @@ func (a *App) httpCertDetail(w http.ResponseWriter, r *http.Request, c *Cert) {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		_ = removeCertFiles(a.certOutputDir, c.FQDN)
 		emit("certs.revoked", map[string]any{"cert_id": c.ID, "fqdn": c.FQDN})
 		httpJSON(w, map[string]any{"revoked": true, "id": c.ID})
 	default:
@@ -172,6 +174,7 @@ func (a *App) httpCertRevoke(w http.ResponseWriter, r *http.Request, c *Cert) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	_ = removeCertFiles(a.certOutputDir, c.FQDN)
 	emit("certs.revoked", map[string]any{"cert_id": c.ID, "fqdn": c.FQDN})
 	httpJSON(w, map[string]any{"revoked": true, "id": c.ID})
 }

@@ -164,6 +164,16 @@ func (a *App) issueCert(ctx *sdk.AppCtx, projectID, fqdn string) error {
 		return err
 	}
 
+	// Mirror the cert to disk for a reverse proxy to consume, when
+	// cert_output_dir is configured. Best-effort: the cert is already
+	// persisted, so a file-write failure is a warning, not a failure.
+	if a.certOutputDir != "" {
+		if err := writeCertFiles(a.certOutputDir, fqdn, certPEM, keyPEM); err != nil {
+			ctx.Logger().Warn("cert issued but PEM file write failed",
+				"fqdn", fqdn, "dir", a.certOutputDir, "err", err)
+		}
+	}
+
 	emit("certs.issuance.live", map[string]any{
 		"cert_id": row.ID, "fqdn": fqdn,
 		"expires_at": leaf.NotAfter.UTC().Format(time.RFC3339),
