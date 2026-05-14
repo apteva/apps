@@ -260,8 +260,10 @@ func bootstrapProxy(p *proxyTarget) error {
 	if err != nil {
 		return fmt.Errorf("read main config: %w", err)
 	}
-	// Idempotent: already references our include dir → done forever.
-	if strings.Contains(string(main), p.includeDir) {
+	// Idempotent: already references our include dir via a real
+	// directive → done forever. Checked line-by-line with comments
+	// stripped, so a mention of the path in a comment doesn't count.
+	if alreadyImported(string(main), p.includeDir) {
 		return nil
 	}
 	// Back up before touching the operator's file.
@@ -407,6 +409,22 @@ func nginxLocation(target string) string {
 func fileExists(p string) bool {
 	st, err := os.Stat(p)
 	return err == nil && !st.IsDir()
+}
+
+// alreadyImported reports whether the main config pulls in includeDir
+// via a real directive — not just a mention in a comment. Both Caddy
+// and nginx use '#' for comments, so stripping from the first '#' on
+// each line is enough.
+func alreadyImported(config, includeDir string) bool {
+	for _, line := range strings.Split(config, "\n") {
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = line[:i]
+		}
+		if strings.Contains(line, includeDir) {
+			return true
+		}
+	}
+	return false
 }
 
 // atomicWriteFile writes data to a sibling temp file then renames it

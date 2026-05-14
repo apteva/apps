@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: routes
 display_name: Routes
-version: 0.3.1
+version: 0.3.2
 description: |
   Hostname-based routing for Apteva. Owns the table mapping public
   hostnames to local backend targets. Apps register routes; apteva-
