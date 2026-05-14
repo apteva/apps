@@ -145,13 +145,14 @@ export default function DomainsPanel({ projectId, installId }: NativePanelProps)
         </div>
       )}
 
+      <AddDomainForm
+        connections={connections}
+        onAdded={(d) => { reload(); if (d) setSelected(d); }}
+        callTool={callTool}
+      />
+
       <div className="flex-1 min-h-0 flex">
-        <div className="flex-1 min-w-0 overflow-auto">
-          <AddDomainForm
-            connections={connections}
-            onAdded={(d) => { reload(); if (d) setSelected(d); }}
-            callTool={callTool}
-          />
+        <div className="w-72 overflow-auto">
           <DomainList
             rows={domains}
             onSelect={setSelected}
@@ -160,14 +161,20 @@ export default function DomainsPanel({ projectId, installId }: NativePanelProps)
             selectedId={selected?.id}
           />
         </div>
-        {selected && (
-          <RecordsPane
-            domain={selected}
-            onClose={() => setSelected(null)}
-            api={api}
-            callTool={callTool}
-          />
-        )}
+        <div className="flex-1 min-w-0 border-l border-border">
+          {selected ? (
+            <RecordsPane
+              domain={selected}
+              onClose={() => setSelected(null)}
+              api={api}
+              callTool={callTool}
+            />
+          ) : (
+            <div className="p-6 text-text-dim text-sm">
+              Select a domain to view its DNS records.
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -289,38 +296,28 @@ function DomainList({
     }
   };
   return (
-    <table className="w-full text-sm">
-      <thead className="text-xs text-text-dim">
-        <tr className="border-b border-border">
-          <th className="text-left px-4 py-2">Domain</th>
-          <th className="text-left px-4 py-2">Registrar</th>
-          <th className="text-left px-4 py-2">DNS provider</th>
-          <th className="text-left px-4 py-2">Notes</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((d) => (
-          <tr
-            key={d.id}
-            className={`border-b border-border cursor-pointer hover:bg-surface-2 ${selectedId === d.id ? "bg-surface-2" : ""}`}
-            onClick={() => onSelect(d)}
-          >
-            <td className="px-4 py-2 font-medium">{d.name}</td>
-            <td className="px-4 py-2 text-text-dim">{d.registrar_slug || "—"}</td>
-            <td className="px-4 py-2 text-text-dim">{d.dns_provider_slug || "—"}</td>
-            <td className="px-4 py-2 text-text-dim truncate max-w-md">{d.notes || ""}</td>
-            <td className="px-4 py-2 text-right">
-              <button
-                type="button"
-                className="text-text-dim hover:text-red-400 text-xs"
-                onClick={(e) => { e.stopPropagation(); remove(d); }}
-              >Remove</button>
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <div className="text-sm">
+      {rows.map((d) => (
+        <div
+          key={d.id}
+          className={`border-b border-border cursor-pointer hover:bg-surface-2 px-4 py-3 ${selectedId === d.id ? "bg-surface-2" : ""}`}
+          onClick={() => onSelect(d)}
+        >
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <span className="font-medium truncate">{d.name}</span>
+            <button
+              type="button"
+              className="text-text-dim hover:text-red-400 text-xs"
+              onClick={(e) => { e.stopPropagation(); remove(d); }}
+            >Remove</button>
+          </div>
+          <div className="text-xs text-text-dim truncate">
+            {d.dns_provider_slug ? providerLabel(d.dns_provider_slug) : "no provider"}
+            {d.notes ? ` · ${d.notes}` : ""}
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -365,73 +362,77 @@ function RecordsPane({
   }, [records, filter]);
 
   return (
-    <div className="w-[36rem] border-l border-border overflow-auto p-5 text-sm">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="font-semibold">
-          {domain.name}
-          {domain.dns_provider_slug && (
-            <span className="ml-2 text-xs text-text-dim">via {domain.dns_provider_slug}</span>
-          )}
-        </h3>
-        <button type="button" className="text-text-dim hover:text-text" onClick={onClose}>×</button>
-      </div>
-
-      <AddRecordForm
-        domain={domain.name}
-        onAdded={reload}
-        callTool={callTool}
-      />
-
-      <div className="flex items-center gap-2 my-3">
-        <span className="text-xs text-text-dim">Filter</span>
-        <select
-          className={inputCls + " w-32 py-1"}
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-        >
-          <option value="ALL">All types</option>
-          {RECORD_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-        </select>
-        <div className="flex-1" />
-        <button
-          type="button"
-          className="text-xs px-2 py-1 rounded border border-border hover:bg-surface-2"
-          onClick={reload}
-        >{busy ? "Loading…" : "Refresh"}</button>
-      </div>
-
-      {err && (
-        <div className="mb-3 p-2 rounded border border-red-500/30 bg-red-500/10 text-xs text-red-300 whitespace-pre-wrap">
-          {err}
+    <div className="h-full flex flex-col text-sm">
+      <div className="p-5 pb-3 border-b border-border">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-semibold">
+            {domain.name}
+            {domain.dns_provider_slug && (
+              <span className="ml-2 text-xs text-text-dim">via {domain.dns_provider_slug}</span>
+            )}
+          </h3>
+          <button type="button" className="text-text-dim hover:text-text" onClick={onClose}>×</button>
         </div>
-      )}
 
-      {visible.length === 0 && !err ? (
-        <div className="text-text-dim text-xs">No records.</div>
-      ) : (
-        <table className="w-full text-xs">
-          <thead className="text-xs text-text-dim">
-            <tr className="border-b border-border">
-              <th className="text-left px-2 py-1">Name</th>
-              <th className="text-left px-2 py-1">Type</th>
-              <th className="text-left px-2 py-1">Value</th>
-              <th className="text-left px-2 py-1">TTL</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {visible.map((r) => (
-              <RecordRow
-                key={`${r.id}-${r.name}-${r.type}`}
-                record={r}
-                domain={domain.name}
-                onChanged={reload}
-                callTool={callTool}
-              />
-            ))}
-          </tbody>
-        </table>
-      )}
+        <AddRecordForm
+          domain={domain.name}
+          onAdded={reload}
+          callTool={callTool}
+        />
+
+        <div className="flex items-center gap-2 my-3">
+          <span className="text-xs text-text-dim">Filter</span>
+          <select
+            className={inputCls + " w-32 py-1"}
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+          >
+            <option value="ALL">All types</option>
+            {RECORD_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+          <div className="flex-1" />
+          <button
+            type="button"
+            className="text-xs px-2 py-1 rounded border border-border hover:bg-surface-2"
+            onClick={reload}
+          >{busy ? "Loading…" : "Refresh"}</button>
+        </div>
+
+        {err && (
+          <div className="p-2 rounded border border-red-500/30 bg-red-500/10 text-xs text-red-300 whitespace-pre-wrap">
+            {err}
+          </div>
+        )}
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-auto p-5">
+        {visible.length === 0 && !err ? (
+          <div className="text-text-dim text-xs">No records.</div>
+        ) : (
+          <table className="w-full text-xs">
+            <thead className="text-xs text-text-dim">
+              <tr className="border-b border-border">
+                <th className="text-left px-2 py-1">Name</th>
+                <th className="text-left px-2 py-1">Type</th>
+                <th className="text-left px-2 py-1">Value</th>
+                <th className="text-left px-2 py-1">TTL</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((r) => (
+                <RecordRow
+                  key={`${r.id}-${r.name}-${r.type}`}
+                  record={r}
+                  domain={domain.name}
+                  onChanged={reload}
+                  callTool={callTool}
+                />
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }
@@ -596,7 +597,7 @@ function RecordRow({
 
   return (
     <tr className="border-b border-border align-top">
-      <td className="px-2 py-1 font-mono text-text">{shortName}</td>
+      <td className="px-2 py-1 font-mono text-text break-all">{shortName}</td>
       <td className="px-2 py-1 text-text-dim">{record.type}</td>
       <td className="px-2 py-1">
         {editing ? (
