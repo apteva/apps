@@ -1,15 +1,20 @@
 // CertsPanel — operator UI for the certs app.
 //
-// One view: the project's TLS certs, with an issue form and per-row
-// renew / revoke. Issuance is async (pending → issuing → live|failed)
-// so the panel light-polls while anything is in flight.
+// Layout: when the Domains app is linked, the body is a list of
+// registered apexes. Each apex is a group: a header with a "+ Issue
+// cert" toggle (expands an inline subdomain field) and, nested under
+// it, the certs that live under that apex. Certs that don't sit under
+// any registered apex (http-01 certs, or certs whose domain was
+// removed from the Domains app) fall into an "Other" group.
 //
-// Pure REST against /api/apps/certs — every handler resolves the
-// project from the ?project_id= query param, so this works for both
-// project-scoped and global installs without the _project_id-in-args
-// dance the tool dispatcher needs.
+// When no domains are linked, the body falls back to a plain FQDN
+// issue form + a flat cert list.
+//
+// Pure REST against /api/apps/certs/api — every handler resolves the
+// project from ?project_id=, so this works for project-scoped and
+// global installs alike.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 interface NativePanelProps {
   appName: string;
@@ -43,8 +48,7 @@ interface Meta {
 // /api/apps/certs (platform mount) + /api (app's own prefix).
 const API = "/api/apps/certs/api";
 
-// Shared input class — same tokens the domains panel uses so the look
-// matches across the dashboard's dark theme.
+// Shared input class — same tokens the domains panel uses.
 const inputCls =
   "w-full bg-surface-2 text-text border border-border rounded px-3 py-1.5 " +
   "placeholder:text-text-dim/70 focus:outline-none focus:ring-1 focus:ring-accent " +
@@ -80,17 +84,29 @@ function daysLeft(iso?: string): string {
   return `in ${days}d`;
 }
 
-// challengeStatusLine summarises which ACME path issuance will take,
-// so the panel confirms (or warns about) the Domains-app link.
+// challengeStatusLine summarises which ACME path issuance will take.
 function challengeStatusLine(m: Meta): string {
   if (m.challenge_type === "http-01") {
     return "Challenge: HTTP-01 · served from webroot";
   }
-  // dns-01
   if (m.domains_available && m.domains.length > 0) {
     return `Challenge: DNS-01 · via Domains app · ${m.domains.join(", ")}`;
   }
   return "Challenge: DNS-01 · Domains app not linked or has no registered domains — issuance will fail";
+}
+
+// apexForFqdn finds the longest registered apex that fqdn sits under,
+// or null when none matches. Mirrors the backend's resolveApex.
+function apexForFqdn(fqdn: string, apexes: string[]): string | null {
+  const f = fqdn.toLowerCase().replace(/\.$/, "");
+  let best: string | null = null;
+  for (const a of apexes) {
+    const ap = a.toLowerCase();
+    if (f === ap || f.endsWith("." + ap)) {
+      if (!best || ap.length > best.length) best = ap;
+    }
+  }
+  return best;
 }
 
 export default function CertsPanel({ projectId, installId }: NativePanelProps) {
@@ -144,21 +160,22 @@ export default function CertsPanel({ projectId, installId }: NativePanelProps) {
 
   useEffect(() => { reload(); }, [reload]);
 
-  // Resolved challenge type + linked Domains-app state. Soft-fail: if
-  // the endpoint errors, the status line just doesn't render.
+  // Resolved challenge type + linked Domains-app state. On failure we
+  // store an empty Meta (not null) so `meta === null` strictly means
+  // "first load hasn't finished" — and the body falls back to the
+  // plain issue form rather than rendering nothing forever.
   const loadMeta = useCallback(async () => {
     try {
       setMeta(await api<Meta>("GET", "/_meta", {}));
     } catch {
-      setMeta(null);
+      setMeta({ challenge_type: "", domains_available: false, domains: [] });
     }
   }, [api]);
 
   useEffect(() => { loadMeta(); }, [loadMeta]);
 
-  // Light-poll while any cert is mid-issuance. The effect re-arms each
-  // time `certs` changes, so it keeps ticking every 4s until every row
-  // has settled to live / failed / revoked, then stops on its own.
+  // Light-poll while any cert is mid-issuance. Re-arms on every `certs`
+  // change, so it ticks every 4s until everything settles, then stops.
   useEffect(() => {
     const inflight = certs.some((c) => c.status === "pending" || c.status === "issuing");
     if (!inflight) return;
@@ -190,6 +207,21 @@ export default function CertsPanel({ projectId, installId }: NativePanelProps) {
     }
   }, [api, reload]);
 
+  const domains = useMemo(() => meta?.domains ?? [], [meta]);
+
+  // Group certs under their apex; anything unmatched goes to `other`.
+  const { byApex, other } = useMemo(() => {
+    const byApex: Record<string, Cert[]> = {};
+    for (const d of domains) byApex[d] = [];
+    const other: Cert[] = [];
+    for (const c of certs) {
+      const apex = apexForFqdn(c.fqdn, domains);
+      if (apex && byApex[apex]) byApex[apex].push(c);
+      else other.push(c);
+    }
+    return { byApex, other };
+  }, [certs, domains]);
+
   return (
     <div className="h-full flex flex-col">
       <div className="px-6 pt-6 pb-3 flex items-center justify-between border-b border-border">
@@ -204,7 +236,7 @@ export default function CertsPanel({ projectId, installId }: NativePanelProps) {
         </div>
       </div>
 
-      {meta && (
+      {meta && meta.challenge_type && (
         <div className="px-6 py-2 border-b border-border text-xs text-text-dim">
           {challengeStatusLine(meta)}
         </div>
@@ -215,8 +247,6 @@ export default function CertsPanel({ projectId, installId }: NativePanelProps) {
           {err}
         </div>
       )}
-
-      <IssueCertForm onIssue={issue} />
 
       <div className="px-4 py-2 flex items-center gap-2 border-b border-border text-xs text-text-dim">
         <label className="flex items-center gap-1.5 cursor-pointer">
@@ -230,33 +260,189 @@ export default function CertsPanel({ projectId, installId }: NativePanelProps) {
       </div>
 
       <div className="flex-1 min-h-0 overflow-auto">
-        {certs.length === 0 ? (
-          <div className="p-6 text-text-dim text-sm">
-            No certs yet. Issue one above — the FQDN must resolve to this host (HTTP-01) or sit under a domain managed by the Domains app (DNS-01).
-          </div>
-        ) : (
-          <table className="w-full text-sm">
-            <thead className="text-xs text-text-dim">
-              <tr className="border-b border-border">
-                <th className="text-left px-4 py-2">FQDN</th>
-                <th className="text-left px-4 py-2">Status</th>
-                <th className="text-left px-4 py-2">Expires</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {certs.map((c) => (
-                <CertRow key={c.id} cert={c} onRenew={renew} onRevoke={revoke} />
-              ))}
-            </tbody>
-          </table>
+        {domains.map((apex) => (
+          <DomainGroup
+            key={apex}
+            apex={apex}
+            certs={byApex[apex] || []}
+            onIssue={issue}
+            onRenew={renew}
+            onRevoke={revoke}
+          />
+        ))}
+
+        {other.length > 0 && (
+          <OtherGroup certs={other} onRenew={renew} onRevoke={revoke} />
+        )}
+
+        {/* No domains linked — fall back to a plain FQDN issue form. */}
+        {meta && domains.length === 0 && (
+          <>
+            <IssueCertForm onIssue={issue} />
+            {certs.length === 0 ? (
+              <div className="p-6 text-text-dim text-sm">
+                No certs yet. Issue one above — for DNS-01, link the Domains app and register a domain so you can pick it here.
+              </div>
+            ) : (
+              <div className="pb-1">
+                {certs.map((c) => (
+                  <CertRow key={c.id} cert={c} onRenew={renew} onRevoke={revoke} />
+                ))}
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
   );
 }
 
-// ─── Issue form ──────────────────────────────────────────────────
+// ─── Domain group ────────────────────────────────────────────────
+
+function DomainGroup({
+  apex, certs, onIssue, onRenew, onRevoke,
+}: {
+  apex: string;
+  certs: Cert[];
+  onIssue: (fqdn: string) => Promise<void>;
+  onRenew: (c: Cert) => void;
+  onRevoke: (c: Cert) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [sub, setSub] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const s = sub.trim().replace(/\.$/, "");
+    const fqdn = s ? `${s}.${apex}` : apex;
+    setBusy(true);
+    setErr("");
+    try {
+      await onIssue(fqdn);
+      setSub("");
+      setExpanded(false);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="border-b border-border">
+      <div className="flex items-center justify-between px-4 py-3">
+        <span className="font-medium">{apex}</span>
+        <button
+          type="button"
+          className="text-xs text-accent hover:underline"
+          onClick={() => { setExpanded((v) => !v); setErr(""); }}
+        >{expanded ? "Cancel" : "+ Issue cert"}</button>
+      </div>
+
+      {expanded && (
+        <form onSubmit={submit} className="px-4 pb-3 flex items-end gap-2 flex-wrap">
+          <div className="flex items-center gap-1">
+            <input
+              className={inputCls + " w-44"}
+              value={sub}
+              onChange={(e) => setSub(e.target.value)}
+              placeholder="app  (blank = apex)"
+              autoFocus
+            />
+            <span className="text-text-dim text-sm">.{apex}</span>
+          </div>
+          <button
+            type="submit"
+            disabled={busy}
+            className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50 text-xs"
+          >{busy ? "Issuing…" : "Issue"}</button>
+          {err && <div className="text-xs text-red-400 w-full">{err}</div>}
+        </form>
+      )}
+
+      {certs.length === 0 ? (
+        <div className="px-4 pb-3 text-xs text-text-dim">no certs yet</div>
+      ) : (
+        <div className="pb-1">
+          {certs.map((c) => (
+            <CertRow key={c.id} cert={c} onRenew={onRenew} onRevoke={onRevoke} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Other group (certs under no registered apex) ────────────────
+
+function OtherGroup({
+  certs, onRenew, onRevoke,
+}: {
+  certs: Cert[];
+  onRenew: (c: Cert) => void;
+  onRevoke: (c: Cert) => void;
+}) {
+  return (
+    <div className="border-b border-border">
+      <div className="px-4 py-3">
+        <span className="font-medium">Other</span>
+        <span className="text-xs text-text-dim ml-2">not under a registered domain</span>
+      </div>
+      <div className="pb-1">
+        {certs.map((c) => (
+          <CertRow key={c.id} cert={c} onRenew={onRenew} onRevoke={onRevoke} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Cert row ────────────────────────────────────────────────────
+
+function CertRow({
+  cert, onRenew, onRevoke,
+}: {
+  cert: Cert;
+  onRenew: (c: Cert) => void;
+  onRevoke: (c: Cert) => void;
+}) {
+  const expiry = daysLeft(cert.expires_at);
+  const revoked = cert.status === "revoked";
+  return (
+    <div className="px-4 py-1.5 flex items-center justify-between gap-2 hover:bg-surface-2">
+      <div className="min-w-0">
+        <div className="font-mono text-sm text-text break-all">{cert.fqdn}</div>
+        {cert.status === "failed" && cert.error && (
+          <div className="text-xs text-red-400 whitespace-pre-wrap break-all">{cert.error}</div>
+        )}
+      </div>
+      <div className="flex items-center gap-2 text-xs whitespace-nowrap">
+        <span className={statusColor(cert.status) + " font-medium"}>{cert.status}</span>
+        <span className="text-text-dim">
+          {fmtDate(cert.expires_at)}{expiry && ` (${expiry})`}
+        </span>
+        {!revoked && (
+          <>
+            <button
+              type="button"
+              className="text-text-dim hover:text-text ml-1"
+              onClick={() => onRenew(cert)}
+            >Renew</button>
+            <button
+              type="button"
+              className="text-text-dim hover:text-red-400 ml-1"
+              onClick={() => onRevoke(cert)}
+            >Revoke</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Plain issue form (fallback when no domains are linked) ──────
 
 function IssueCertForm({ onIssue }: { onIssue: (fqdn: string) => Promise<void> }) {
   const [fqdn, setFqdn] = useState("");
@@ -292,66 +478,11 @@ function IssueCertForm({ onIssue }: { onIssue: (fqdn: string) => Promise<void> }
         type="submit"
         disabled={busy || !fqdn.trim()}
         className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50"
-      >
-        {busy ? "Issuing…" : "Issue cert"}
-      </button>
+      >{busy ? "Issuing…" : "Issue cert"}</button>
       {err && <div className="text-xs text-red-400 w-full">{err}</div>}
-      <div className="text-xs text-text-dim w-full">
-        Issuance is async — the cert appears as <span className="text-blue">pending</span>, then
-        {" "}<span className="text-blue">issuing</span>, then{" "}
-        <span className="text-green">live</span>. This panel refreshes itself while it runs.
-      </div>
     </form>
   );
 }
-
-// ─── Cert row ────────────────────────────────────────────────────
-
-function CertRow({
-  cert, onRenew, onRevoke,
-}: {
-  cert: Cert;
-  onRenew: (c: Cert) => void;
-  onRevoke: (c: Cert) => void;
-}) {
-  const expiry = daysLeft(cert.expires_at);
-  const revoked = cert.status === "revoked";
-  return (
-    <tr className="border-b border-border align-top">
-      <td className="px-4 py-2">
-        <div className="font-mono text-text break-all">{cert.fqdn}</div>
-        {cert.status === "failed" && cert.error && (
-          <div className="text-xs text-red-400 mt-1 whitespace-pre-wrap break-all">{cert.error}</div>
-        )}
-      </td>
-      <td className="px-4 py-2">
-        <span className={statusColor(cert.status) + " font-medium"}>{cert.status}</span>
-      </td>
-      <td className="px-4 py-2 text-text-dim whitespace-nowrap">
-        {fmtDate(cert.expires_at)}
-        {expiry && <span className="text-xs ml-1">({expiry})</span>}
-      </td>
-      <td className="px-4 py-2 text-right whitespace-nowrap">
-        {!revoked && (
-          <>
-            <button
-              type="button"
-              className="text-xs text-text-dim hover:text-text"
-              onClick={() => onRenew(cert)}
-            >Renew</button>
-            <button
-              type="button"
-              className="text-xs text-text-dim hover:text-red-400 ml-3"
-              onClick={() => onRevoke(cert)}
-            >Revoke</button>
-          </>
-        )}
-      </td>
-    </tr>
-  );
-}
-
-// ─── Tiny shared primitives ──────────────────────────────────────
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
