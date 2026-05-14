@@ -14,7 +14,7 @@
 // project from ?project_id=, so this works for project-scoped and
 // global installs alike.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 interface NativePanelProps {
   appName: string;
@@ -41,6 +41,88 @@ interface Meta {
   challenge_type: string;    // resolved: "dns-01" | "http-01"
   domains_available: boolean;
   domains: string[];         // registered apexes — dns-01 only
+}
+
+// ─── Live app-event subscription ─────────────────────────────────
+//
+// Copied verbatim from DeployPanel (and ~25 other panels) — there's
+// no shared hooks module, so each panel keeps its own copy. The certs
+// app emits certs.* events onto the platform bus; this subscribes the
+// panel to them so status flips land instantly instead of on a poll.
+
+interface AppEventEnvelope<T = unknown> {
+  topic: string;
+  app: string;
+  project_id: string;
+  install_id: number;
+  seq: number;
+  time: string;
+  data: T;
+}
+
+function useAppEvents<T = unknown>(
+  app: string,
+  projectId: string | undefined | null,
+  onEvent: (ev: AppEventEnvelope<T>) => void,
+) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+  useEffect(() => {
+    if (!app || !projectId) return;
+    const handler = (ev: AppEventEnvelope<T>) => handlerRef.current(ev);
+    // Cross-bundle multiplexer: the dashboard publishes a shared
+    // (app, project) channel pool on window.__aptevaAppEvents. Every
+    // panel mounted in the same realm reuses one EventSource per
+    // (app, project) instead of opening its own. Without this, a few
+    // panels mounted in the agent detail page burn the browser's
+    // per-origin HTTP/1.1 connection budget and stuck POSTs follow.
+    const bridge = (window as unknown as {
+      __aptevaAppEvents?: {
+        subscribe(
+          app: string,
+          projectId: string,
+          fn: (ev: AppEventEnvelope<T>) => void,
+        ): () => void;
+      };
+    }).__aptevaAppEvents;
+    if (bridge) {
+      return bridge.subscribe(app, projectId, handler);
+    }
+    // Fallback: panel running outside the dashboard (or before its
+    // hook module loaded). Open an EventSource directly.
+    let lastSeq = 0;
+    let es: EventSource | null = null;
+    let cancelled = false;
+    let reconnectTimer: number | null = null;
+    const connect = () => {
+      if (cancelled) return;
+      const url =
+        `/api/app-events/${encodeURIComponent(app)}` +
+        `?project_id=${encodeURIComponent(projectId)}` +
+        (lastSeq > 0 ? `&since=${lastSeq}` : "");
+      es = new EventSource(url, { withCredentials: true });
+      es.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data) as AppEventEnvelope<T>;
+          if (ev.seq <= lastSeq) return;
+          lastSeq = ev.seq;
+          handlerRef.current(ev);
+        } catch {}
+      };
+      es.onerror = () => {
+        if (es && es.readyState === EventSource.CLOSED) {
+          if (reconnectTimer) window.clearTimeout(reconnectTimer);
+          reconnectTimer = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (es) es.close();
+    };
+  }, [app, projectId]);
 }
 
 // The certs app registers its HTTP routes at /api/certs and /api/certs/
@@ -211,14 +293,13 @@ export default function CertsPanel({ projectId, installId }: NativePanelProps) {
     setAcmeEmail(email);
   }, [installId]);
 
-  // Light-poll while any cert is mid-issuance. Re-arms on every `certs`
-  // change, so it ticks every 4s until everything settles, then stops.
-  useEffect(() => {
-    const inflight = certs.some((c) => c.status === "pending" || c.status === "issuing");
-    if (!inflight) return;
-    const t = setTimeout(() => { reload(); }, 4000);
-    return () => clearTimeout(t);
-  }, [certs, reload]);
+  // Live updates: the certs app emits certs.* events (issuance.requested,
+  // issuance.started, issuance.live, issuance.failed, revoked) onto the
+  // platform bus. Reload on any of them — covers panel actions, agent
+  // MCP calls, and the daily renewal worker alike, with no polling.
+  useAppEvents("certs", projectId, (ev) => {
+    if (ev.topic.startsWith("certs.")) reload();
+  });
 
   const issue = useCallback(async (fqdn: string) => {
     await api("POST", "/certs", {}, { fqdn });

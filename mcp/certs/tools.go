@@ -76,6 +76,7 @@ func (a *App) toolIssue(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	emit("certs.issuance.requested", map[string]any{"cert_id": row.ID, "fqdn": row.FQDN})
 	a.kickIssuance(ctx, pid, fqdn)
 	return map[string]any{"cert": row}, nil
 }

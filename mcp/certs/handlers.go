@@ -125,6 +125,7 @@ func (a *App) httpIssueCert(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	emit("certs.issuance.requested", map[string]any{"cert_id": c.ID, "fqdn": c.FQDN})
 	a.kickIssuance(globalCtx, pid, body.FQDN)
 	httpJSON(w, map[string]any{"cert": c})
 }
