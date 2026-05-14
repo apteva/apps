@@ -213,7 +213,7 @@ func finalizeAndFetch(
 		case acme.StatusValid:
 			return client.FetchCert(ctx, o.CertURL, true)
 		case acme.StatusInvalid:
-			return nil, &acme.OrderError{OrderURL: o.URI, Status: o.Status, Problem: o.Error}
+			return nil, &acme.OrderError{OrderURL: o.URI, Status: o.Status}
 		}
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("order %s stuck in %q after finalize", orderURL, o.Status)
