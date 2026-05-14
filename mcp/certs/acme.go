@@ -136,9 +136,9 @@ func (a *App) issueCert(ctx *sdk.AppCtx, projectID, fqdn string) error {
 		return err
 	}
 
-	chainDER, _, err := client.CreateOrderCert(parent, order.FinalizeURL, csrDER, true)
+	chainDER, err := finalizeAndFetch(parent, client, order.FinalizeURL, order.URI, csrDER)
 	if err != nil {
-		_ = dbSetCertStatus(ctx.AppDB(), row.ID, "failed", fmtErr("create order cert", err))
+		_ = dbSetCertStatus(ctx.AppDB(), row.ID, "failed", fmtErr("finalize order", err))
 		return err
 	}
 
@@ -169,6 +169,61 @@ func (a *App) issueCert(ctx *sdk.AppCtx, projectID, fqdn string) error {
 		"expires_at": leaf.NotAfter.UTC().Format(time.RFC3339),
 	})
 	return nil
+}
+
+// finalizeAndFetch submits the CSR and returns the issued cert chain,
+// working around a bug in x/crypto/acme's CreateOrderCert.
+//
+// CreateOrderCert POSTs the CSR (finalize), then — if the order isn't
+// already valid — calls WaitOrder to await issuance. But WaitOrder
+// returns the moment the order is "ready", treating that as terminal:
+// correct when waiting for authorizations to complete, wrong when
+// waiting for issuance. If Let's Encrypt hasn't flipped the order
+// ready→processing by WaitOrder's first poll, CreateOrderCert bails
+// with a spurious OrderError{Status:"ready"} even though the CSR was
+// accepted and issuance is already underway.
+//
+// So: call CreateOrderCert; on a ready/processing OrderError the
+// finalize POST already landed (CreateOrderCert returns early on a POST
+// error) — recover by polling the order with GetOrder, which unlike
+// WaitOrder doesn't treat "ready" as final, until it's valid, then
+// fetch the cert. Any other error is a genuine failure.
+func finalizeAndFetch(
+	ctx context.Context,
+	client *acme.Client,
+	finalizeURL, orderURL string,
+	csrDER []byte,
+) ([][]byte, error) {
+	chain, _, err := client.CreateOrderCert(ctx, finalizeURL, csrDER, true)
+	if err == nil {
+		return chain, nil
+	}
+	var oerr *acme.OrderError
+	if !errors.As(err, &oerr) ||
+		(oerr.Status != acme.StatusReady && oerr.Status != acme.StatusProcessing) {
+		return nil, err
+	}
+	deadline := time.Now().Add(3 * time.Minute)
+	for {
+		o, err := client.GetOrder(ctx, orderURL)
+		if err != nil {
+			return nil, err
+		}
+		switch o.Status {
+		case acme.StatusValid:
+			return client.FetchCert(ctx, o.CertURL, true)
+		case acme.StatusInvalid:
+			return nil, &acme.OrderError{OrderURL: o.URI, Status: o.Status, Problem: o.Error}
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("order %s stuck in %q after finalize", orderURL, o.Status)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 // acmeClient builds (or rehydrates) a *acme.Client backed by the
