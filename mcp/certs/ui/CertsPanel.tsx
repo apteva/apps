@@ -112,6 +112,8 @@ function apexForFqdn(fqdn: string, apexes: string[]): string | null {
 export default function CertsPanel({ projectId, installId }: NativePanelProps) {
   const [certs, setCerts] = useState<Cert[]>([]);
   const [meta, setMeta] = useState<Meta | null>(null);
+  const [acmeEmail, setAcmeEmail] = useState("");
+  const [emailLoaded, setEmailLoaded] = useState(false);
   const [includeRevoked, setIncludeRevoked] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -174,6 +176,41 @@ export default function CertsPanel({ projectId, installId }: NativePanelProps) {
 
   useEffect(() => { loadMeta(); }, [loadMeta]);
 
+  // acme_email lives in the platform's install config, not the certs
+  // app's own surface — read/write it via /api/apps/installs/:id/config
+  // so the operator can set it without leaving the panel. Soft-fail on
+  // read: emailLoaded still flips, so the banner shows either way.
+  const loadEmail = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/apps/installs/${installId}/config`, {
+        credentials: "same-origin",
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      const j = await res.json();
+      setAcmeEmail((j.config?.acme_email as string) || "");
+    } catch {
+      // leave acmeEmail empty — the banner will prompt for it
+    } finally {
+      setEmailLoaded(true);
+    }
+  }, [installId]);
+
+  useEffect(() => { loadEmail(); }, [loadEmail]);
+
+  const saveEmail = useCallback(async (email: string) => {
+    const res = await fetch(`/api/apps/installs/${installId}/config`, {
+      method: "PUT",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: { acme_email: email } }),
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      throw new Error(`${res.status}: ${t}`);
+    }
+    setAcmeEmail(email);
+  }, [installId]);
+
   // Light-poll while any cert is mid-issuance. Re-arms on every `certs`
   // change, so it ticks every 4s until everything settles, then stops.
   useEffect(() => {
@@ -209,6 +246,10 @@ export default function CertsPanel({ projectId, installId }: NativePanelProps) {
 
   const domains = useMemo(() => meta?.domains ?? [], [meta]);
 
+  // Issuance fails server-side without acme_email; gate the issue
+  // affordances on it so the blocking banner is actually blocking.
+  const issueDisabled = emailLoaded && !acmeEmail;
+
   // Group certs under their apex; anything unmatched goes to `other`.
   const { byApex, other } = useMemo(() => {
     const byApex: Record<string, Cert[]> = {};
@@ -231,7 +272,7 @@ export default function CertsPanel({ projectId, installId }: NativePanelProps) {
           <button
             type="button"
             className="px-2 py-1 rounded border border-border hover:bg-surface-2"
-            onClick={() => { reload(); loadMeta(); }}
+            onClick={() => { reload(); loadMeta(); loadEmail(); }}
           >Refresh</button>
         </div>
       </div>
@@ -241,6 +282,8 @@ export default function CertsPanel({ projectId, installId }: NativePanelProps) {
           {challengeStatusLine(meta)}
         </div>
       )}
+
+      {emailLoaded && !acmeEmail && <EmailBanner onSave={saveEmail} />}
 
       {err && (
         <div className="m-4 p-3 rounded border border-red-500/30 bg-red-500/10 text-sm text-red-300 whitespace-pre-wrap">
@@ -265,6 +308,7 @@ export default function CertsPanel({ projectId, installId }: NativePanelProps) {
             key={apex}
             apex={apex}
             certs={byApex[apex] || []}
+            issueDisabled={issueDisabled}
             onIssue={issue}
             onRenew={renew}
             onRevoke={revoke}
@@ -278,7 +322,7 @@ export default function CertsPanel({ projectId, installId }: NativePanelProps) {
         {/* No domains linked — fall back to a plain FQDN issue form. */}
         {meta && domains.length === 0 && (
           <>
-            <IssueCertForm onIssue={issue} />
+            <IssueCertForm onIssue={issue} issueDisabled={issueDisabled} />
             {certs.length === 0 ? (
               <div className="p-6 text-text-dim text-sm">
                 No certs yet. Issue one above — for DNS-01, link the Domains app and register a domain so you can pick it here.
@@ -300,10 +344,11 @@ export default function CertsPanel({ projectId, installId }: NativePanelProps) {
 // ─── Domain group ────────────────────────────────────────────────
 
 function DomainGroup({
-  apex, certs, onIssue, onRenew, onRevoke,
+  apex, certs, issueDisabled, onIssue, onRenew, onRevoke,
 }: {
   apex: string;
   certs: Cert[];
+  issueDisabled?: boolean;
   onIssue: (fqdn: string) => Promise<void>;
   onRenew: (c: Cert) => void;
   onRevoke: (c: Cert) => void;
@@ -336,7 +381,8 @@ function DomainGroup({
         <span className="font-medium">{apex}</span>
         <button
           type="button"
-          className="text-xs text-accent hover:underline"
+          disabled={issueDisabled}
+          className="text-xs text-accent hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
           onClick={() => { setExpanded((v) => !v); setErr(""); }}
         >{expanded ? "Cancel" : "+ Issue cert"}</button>
       </div>
@@ -444,7 +490,12 @@ function CertRow({
 
 // ─── Plain issue form (fallback when no domains are linked) ──────
 
-function IssueCertForm({ onIssue }: { onIssue: (fqdn: string) => Promise<void> }) {
+function IssueCertForm({
+  onIssue, issueDisabled,
+}: {
+  onIssue: (fqdn: string) => Promise<void>;
+  issueDisabled?: boolean;
+}) {
   const [fqdn, setFqdn] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -476,10 +527,55 @@ function IssueCertForm({ onIssue }: { onIssue: (fqdn: string) => Promise<void> }
       </Field>
       <button
         type="submit"
-        disabled={busy || !fqdn.trim()}
+        disabled={busy || !fqdn.trim() || issueDisabled}
         className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50"
       >{busy ? "Issuing…" : "Issue cert"}</button>
       {err && <div className="text-xs text-red-400 w-full">{err}</div>}
+    </form>
+  );
+}
+
+// ─── ACME email banner (blocking — certs can't issue without it) ──
+
+function EmailBanner({ onSave }: { onSave: (email: string) => Promise<void> }) {
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setErr("");
+    try {
+      await onSave(email.trim());
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className="m-4 p-3 rounded border border-red-500/30 bg-red-500/10">
+      <div className="text-sm text-red-300 mb-2">
+        Set an ACME contact email before issuing certs — Let's Encrypt requires it to register an account.
+      </div>
+      <div className="flex items-end gap-2 flex-wrap">
+        <input
+          className={inputCls + " w-72"}
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="you@example.com"
+          required
+        />
+        <button
+          type="submit"
+          disabled={busy || !email.trim()}
+          className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50 text-xs"
+        >{busy ? "Saving…" : "Save"}</button>
+        {err && <div className="text-xs text-red-400 w-full">{err}</div>}
+      </div>
     </form>
   );
 }
