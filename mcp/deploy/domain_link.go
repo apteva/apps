@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -160,9 +162,73 @@ func resolveApex(ctx *sdk.AppCtx, fqdn string) (apex, sub string, err error) {
 // the tool/HTTP/init paths from drifting.
 type attachDomainSpec struct {
 	FQDN   string
-	Target string // CNAME target or A-record IP. Falls back to public_host config.
-	Type   string // "CNAME" (default) | "A"
+	Target string // record value; empty → public_host config → auto-derived box IP
+	Type   string // "CNAME" | "A"; empty → inferred from the resolved Target
 	TTL    int
+}
+
+// resolveTarget picks the DNS record value for an attach. An explicit
+// target arg wins, then the public_host config, then the box's own
+// public IP — auto-derived so a zero-config attach still works. An
+// empty return means nothing resolved.
+func resolveTarget(spec attachDomainSpec) string {
+	if t := strings.TrimSpace(spec.Target); t != "" {
+		return t
+	}
+	if t := strings.TrimSpace(configOr(globalCtx, "public_host", "")); t != "" {
+		return t
+	}
+	return deriveHostIP()
+}
+
+// deriveHostIP best-effort discovers the IP this box is reachable at.
+// First choice: the host of APTEVA_PUBLIC_URL (the public URL the
+// platform injects into every sidecar) — used directly if it's already
+// an IP, else resolved via DNS. Fallback: the first non-loopback,
+// non-private IPv4 on a local interface. Returns "" if neither yields
+// anything.
+//
+// Caveat: if APTEVA_PUBLIC_URL's hostname sits behind a CDN/proxy, the
+// DNS lookup returns the edge IP, not the origin — the operator should
+// then set public_host or pass target explicitly.
+func deriveHostIP() string {
+	if pu := strings.TrimSpace(os.Getenv("APTEVA_PUBLIC_URL")); pu != "" {
+		host := pu
+		if u, err := url.Parse(pu); err == nil && u.Host != "" {
+			host = u.Hostname()
+		}
+		if net.ParseIP(host) != nil {
+			return host
+		}
+		if ips, err := net.LookupIP(host); err == nil {
+			for _, ip := range ips {
+				if v4 := ip.To4(); v4 != nil {
+					return v4.String()
+				}
+			}
+		}
+	}
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			ipNet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			if v4 := ipNet.IP.To4(); v4 != nil && !v4.IsLoopback() && !v4.IsPrivate() {
+				return v4.String()
+			}
+		}
+	}
+	return ""
+}
+
+// inferRecordType picks the record type when the caller didn't pin
+// one: a literal IP → A, a hostname → CNAME.
+func inferRecordType(target string) string {
+	if net.ParseIP(target) != nil {
+		return "A"
+	}
+	return "CNAME"
 }
 
 // attachDomain validates the FQDN against the Domains app and writes
@@ -177,19 +243,19 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec
 	if fqdn == "" {
 		return errors.New("fqdn required")
 	}
+	// Resolve the record value first (explicit target → public_host →
+	// auto-derived box IP), then the type — inferred from the value's
+	// shape unless the caller pinned it.
+	target := resolveTarget(spec)
+	if target == "" {
+		return errors.New("target required — pass target, set public_host on the deploy app, or ensure APTEVA_PUBLIC_URL is set so the box IP can be auto-derived")
+	}
 	rtype := strings.ToUpper(strings.TrimSpace(spec.Type))
 	if rtype == "" {
-		rtype = "CNAME"
+		rtype = inferRecordType(target)
 	}
 	if rtype != "CNAME" && rtype != "A" {
 		return fmt.Errorf("unsupported record type %q (CNAME or A)", rtype)
-	}
-	target := strings.TrimSpace(spec.Target)
-	if target == "" {
-		target = strings.TrimSpace(configOr(globalCtx, "public_host", ""))
-	}
-	if target == "" {
-		return errors.New("target required (no public_host configured) — set public_host on the deploy app or pass target")
 	}
 	if rtype == "CNAME" {
 		// CNAME values are domain names; ensure no trailing dot.

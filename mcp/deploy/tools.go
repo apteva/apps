@@ -126,7 +126,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_attach_domain", Handler: a.toolAttachDomain,
-			Description: "Attach an FQDN to a deployment via the Domains app. Validates the FQDN sits under a registered domain, then upserts a DNS record (CNAME by default) pointing at the deploy's public_host. Args: name OR id, fqdn, target?, type? (CNAME|A, default CNAME), ttl?.",
+			Description: "Attach an FQDN to a deployment via the Domains app. Validates the FQDN sits under a registered domain, then upserts a DNS record pointing at the deploy. Target resolves: explicit `target` -> the deploy app's `public_host` config -> the box's own IP (auto-derived from APTEVA_PUBLIC_URL). Record type is inferred from the target -- IP -> A, hostname -> CNAME -- unless `type` is passed. Args: name OR id, fqdn, target?, type? (CNAME|A), ttl?.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.5.0
+version: 0.6.0
 description: |
   Local-first builds and runtime supervision for Apteva projects.
   Takes a code repo (from the Code app, a local path, or a git URL),
@@ -75,7 +75,7 @@ provides:
     - name: deploy_destroy
       description: Stop, drop deployment, delete builds and artifacts on disk.
     - name: deploy_attach_domain
-      description: "Attach an FQDN to a deployment. Validates ownership against the Domains app and upserts a CNAME (or A) record pointing at this deployment's public host. Args: name (deployment) OR id, fqdn, target?, type? (CNAME|A, default CNAME), ttl?."
+      description: "Attach an FQDN to a deployment. Validates ownership against the Domains app and upserts a DNS record pointing at the deployment. Target resolves: explicit target, then public_host config, then the box's auto-derived IP. Type is inferred from the target (IP -> A, hostname -> CNAME) unless given. Args: name (deployment) OR id, fqdn, target?, type? (CNAME|A), ttl?."
     - name: deploy_detach_domain
       description: "Clear a deployment's domain. Deletes the DNS record via the Domains app (if known) and clears the link. Args: name OR id."
     - name: deploy_list_routes
@@ -123,6 +123,6 @@ config_schema:
     type: text
     default: ""
     label: Public host
-    description: Host this deploy is reachable at from the public internet (e.g. "edge.acme.com" or an IP). Used as the default CNAME/A target when attaching a domain. Leave empty if you'll pass `target` explicitly on each attach.
+    description: Host this deploy is reachable at from the public internet (e.g. "edge.acme.com" or an IP). Used as the default record target when attaching a domain. Leave empty to auto-derive the box's own IP from APTEVA_PUBLIC_URL on each attach, or pass `target` explicitly.
 
 upgrade_policy: auto-patch
