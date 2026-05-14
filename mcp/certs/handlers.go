@@ -57,6 +57,35 @@ func (a *App) handleCertItem(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleMeta exposes the certs app's resolved config so the panel can
+// show a one-line status without talking to other apps directly:
+// which challenge type is in effect, and — for dns-01 — whether the
+// Domains app is bound and which apexes it manages. Mirrors the
+// deploy app's /api/_meta pattern.
+func (a *App) handleMeta(w http.ResponseWriter, r *http.Request) {
+	out := map[string]any{
+		"challenge_type":    a.selectChallengeType(globalCtx),
+		"domains_available": false,
+		"domains":           []string{},
+	}
+	var resp struct {
+		Domains []struct {
+			Name string `json:"name"`
+		} `json:"domains"`
+	}
+	if err := callDomainsTool(globalCtx, "domain_list", map[string]any{}, &resp); err == nil {
+		names := make([]string, 0, len(resp.Domains))
+		for _, d := range resp.Domains {
+			if d.Name != "" {
+				names = append(names, d.Name)
+			}
+		}
+		out["domains"] = names
+		out["domains_available"] = len(names) > 0
+	}
+	httpJSON(w, out)
+}
+
 // ─── Collection ────────────────────────────────────────────────────
 
 func (a *App) httpListCerts(w http.ResponseWriter, r *http.Request) {

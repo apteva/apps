@@ -27,7 +27,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: certs
 display_name: Certs
-version: 0.2.2
+version: 0.3.0
 description: TLS certificate issuance via ACME DNS-01 (through Domains app) or HTTP-01 (webroot).
 author: Apteva
 scopes: [project, global]
@@ -147,6 +147,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/api/certs", Handler: a.handleCertsCollection},
 		{Pattern: "/api/certs/", Handler: a.handleCertItem},
+		{Pattern: "/api/_meta", Handler: a.handleMeta},
 	}
 }
 

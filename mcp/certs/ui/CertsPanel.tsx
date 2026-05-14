@@ -32,6 +32,12 @@ interface Cert {
   updated_at: string;
 }
 
+interface Meta {
+  challenge_type: string;    // resolved: "dns-01" | "http-01"
+  domains_available: boolean;
+  domains: string[];         // registered apexes — dns-01 only
+}
+
 // The certs app registers its HTTP routes at /api/certs and /api/certs/
 // (handlers.go), so the panel-visible base includes that /api segment:
 // /api/apps/certs (platform mount) + /api (app's own prefix).
@@ -74,8 +80,22 @@ function daysLeft(iso?: string): string {
   return `in ${days}d`;
 }
 
+// challengeStatusLine summarises which ACME path issuance will take,
+// so the panel confirms (or warns about) the Domains-app link.
+function challengeStatusLine(m: Meta): string {
+  if (m.challenge_type === "http-01") {
+    return "Challenge: HTTP-01 · served from webroot";
+  }
+  // dns-01
+  if (m.domains_available && m.domains.length > 0) {
+    return `Challenge: DNS-01 · via Domains app · ${m.domains.join(", ")}`;
+  }
+  return "Challenge: DNS-01 · Domains app not linked or has no registered domains — issuance will fail";
+}
+
 export default function CertsPanel({ projectId, installId }: NativePanelProps) {
   const [certs, setCerts] = useState<Cert[]>([]);
+  const [meta, setMeta] = useState<Meta | null>(null);
   const [includeRevoked, setIncludeRevoked] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -124,6 +144,18 @@ export default function CertsPanel({ projectId, installId }: NativePanelProps) {
 
   useEffect(() => { reload(); }, [reload]);
 
+  // Resolved challenge type + linked Domains-app state. Soft-fail: if
+  // the endpoint errors, the status line just doesn't render.
+  const loadMeta = useCallback(async () => {
+    try {
+      setMeta(await api<Meta>("GET", "/_meta", {}));
+    } catch {
+      setMeta(null);
+    }
+  }, [api]);
+
+  useEffect(() => { loadMeta(); }, [loadMeta]);
+
   // Light-poll while any cert is mid-issuance. The effect re-arms each
   // time `certs` changes, so it keeps ticking every 4s until every row
   // has settled to live / failed / revoked, then stops on its own.
@@ -167,10 +199,16 @@ export default function CertsPanel({ projectId, installId }: NativePanelProps) {
           <button
             type="button"
             className="px-2 py-1 rounded border border-border hover:bg-surface-2"
-            onClick={reload}
+            onClick={() => { reload(); loadMeta(); }}
           >Refresh</button>
         </div>
       </div>
+
+      {meta && (
+        <div className="px-6 py-2 border-b border-border text-xs text-text-dim">
+          {challengeStatusLine(meta)}
+        </div>
+      )}
 
       {err && (
         <div className="m-4 p-3 rounded border border-red-500/30 bg-red-500/10 text-sm text-red-300 whitespace-pre-wrap">
