@@ -63,8 +63,13 @@ func (a *App) handleCertItem(w http.ResponseWriter, r *http.Request) {
 // Domains app is bound and which apexes it manages. Mirrors the
 // deploy app's /api/_meta pattern.
 func (a *App) handleMeta(w http.ResponseWriter, r *http.Request) {
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	out := map[string]any{
-		"challenge_type":    a.selectChallengeType(globalCtx),
+		"challenge_type":    a.selectChallengeType(globalCtx, pid),
 		"domains_available": false,
 		"domains":           []string{},
 	}
@@ -73,7 +78,7 @@ func (a *App) handleMeta(w http.ResponseWriter, r *http.Request) {
 			Name string `json:"name"`
 		} `json:"domains"`
 	}
-	if err := callDomainsTool(globalCtx, "domain_list", map[string]any{}, &resp); err == nil {
+	if err := callDomainsTool(globalCtx, pid, "domain_list", map[string]any{}, &resp); err == nil {
 		names := make([]string, 0, len(resp.Domains))
 		for _, d := range resp.Domains {
 			if d.Name != "" {

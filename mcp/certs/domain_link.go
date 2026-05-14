@@ -13,10 +13,19 @@ import (
 // deploy app's domain_link.go — the MCP JSON-RPC response carries
 // the tool result as JSON inside result.content[0].text.
 
-func callDomainsTool(ctx *sdk.AppCtx, tool string, args map[string]any, out any) error {
+func callDomainsTool(ctx *sdk.AppCtx, projectID, tool string, args map[string]any, out any) error {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return errors.New("platform unavailable")
 	}
+	// The Domains app resolves the project from its APTEVA_PROJECT_ID
+	// env when project-scoped, or from _project_id in the args when
+	// installed globally. Always pass it: ignored in the former case,
+	// required in the latter — without it a global Domains install
+	// rejects every call with "project_id missing".
+	if args == nil {
+		args = map[string]any{}
+	}
+	args["_project_id"] = projectID
 	raw, err := ctx.PlatformAPI().CallApp("domains", tool, args)
 	if err != nil {
 		return fmt.Errorf("call domains.%s: %w", tool, err)
@@ -55,13 +64,13 @@ func callDomainsTool(ctx *sdk.AppCtx, tool string, args map[string]any, out any)
 // resolveApex looks up the registered apex domain that's a suffix of
 // fqdn. Used both for the ACME challenge TXT placement and to
 // validate that this project even owns the FQDN.
-func resolveApex(ctx *sdk.AppCtx, fqdn string) (apex, sub string, err error) {
+func resolveApex(ctx *sdk.AppCtx, projectID, fqdn string) (apex, sub string, err error) {
 	var resp struct {
 		Domains []struct {
 			Name string `json:"name"`
 		} `json:"domains"`
 	}
-	if err := callDomainsTool(ctx, "domain_list", map[string]any{}, &resp); err != nil {
+	if err := callDomainsTool(ctx, projectID, "domain_list", map[string]any{}, &resp); err != nil {
 		return "", "", err
 	}
 	fqdn = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(fqdn, ".")))
@@ -98,8 +107,8 @@ func challengeRecordName(apex, sub string) string {
 
 // setChallengeTXT and deleteChallengeTXT thin wrappers — the tool
 // names match the Domains app exactly.
-func setChallengeTXT(ctx *sdk.AppCtx, apex, sub, value string) error {
-	return callDomainsTool(ctx, "domain_records_set", map[string]any{
+func setChallengeTXT(ctx *sdk.AppCtx, projectID, apex, sub, value string) error {
+	return callDomainsTool(ctx, projectID, "domain_records_set", map[string]any{
 		"domain": apex,
 		"name":   challengeRecordName(apex, sub),
 		"type":   "TXT",
@@ -108,8 +117,8 @@ func setChallengeTXT(ctx *sdk.AppCtx, apex, sub, value string) error {
 	}, nil)
 }
 
-func deleteChallengeTXT(ctx *sdk.AppCtx, apex, sub string) error {
-	return callDomainsTool(ctx, "domain_records_delete", map[string]any{
+func deleteChallengeTXT(ctx *sdk.AppCtx, projectID, apex, sub string) error {
+	return callDomainsTool(ctx, projectID, "domain_records_delete", map[string]any{
 		"domain": apex,
 		"name":   challengeRecordName(apex, sub),
 		"type":   "TXT",

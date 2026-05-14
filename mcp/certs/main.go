@@ -27,7 +27,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: certs
 display_name: Certs
-version: 0.4.0
+version: 0.4.1
 description: TLS certificate issuance via ACME DNS-01 (through Domains app) or HTTP-01 (webroot).
 author: Apteva
 scopes: [project, global]
@@ -257,12 +257,12 @@ func fmtErr(stage string, err error) string {
 // issuance time with a clear error). "auto" picks dns-01 when the
 // Domains app is installed AND has at least one registered domain —
 // the existing, proven path; otherwise falls back to http-01.
-func (a *App) selectChallengeType(ctx *sdk.AppCtx) string {
+func (a *App) selectChallengeType(ctx *sdk.AppCtx, projectID string) string {
 	switch a.challengeType {
 	case "dns-01", "http-01":
 		return a.challengeType
 	case "", "auto":
-		if domainsAvailable(ctx) {
+		if domainsAvailable(ctx, projectID) {
 			return "dns-01"
 		}
 		return "http-01"
@@ -274,14 +274,16 @@ func (a *App) selectChallengeType(ctx *sdk.AppCtx) string {
 }
 
 // domainsAvailable returns true when the Domains app is installed AND
-// has at least one registered domain. An empty domains list is
-// treated as "not available" because dns-01 would fail at resolveApex
-// anyway — better to fall through to http-01 in auto mode.
-func domainsAvailable(ctx *sdk.AppCtx) bool {
+// has at least one registered domain for the given project. An empty
+// domains list is treated as "not available" because dns-01 would
+// fail at resolveApex anyway — better to fall through to http-01 in
+// auto mode. projectID is required: a globally-scoped Domains install
+// resolves the project from it.
+func domainsAvailable(ctx *sdk.AppCtx, projectID string) bool {
 	var resp struct {
 		Domains []any `json:"domains"`
 	}
-	if err := callDomainsTool(ctx, "domain_list", map[string]any{}, &resp); err != nil {
+	if err := callDomainsTool(ctx, projectID, "domain_list", map[string]any{}, &resp); err != nil {
 		return false
 	}
 	return len(resp.Domains) > 0

@@ -45,7 +45,7 @@ func (a *App) issueCert(ctx *sdk.AppCtx, projectID, fqdn string) error {
 	_ = dbSetCertStatus(ctx.AppDB(), row.ID, "issuing", "")
 	emit("certs.issuance.started", map[string]any{"cert_id": row.ID, "fqdn": fqdn})
 
-	challengeType := a.selectChallengeType(ctx)
+	challengeType := a.selectChallengeType(ctx, projectID)
 
 	// resolveApex talks to the Domains app to find the apex under
 	// which fqdn lives. Only dns-01 needs it (TXT-write target);
@@ -53,7 +53,7 @@ func (a *App) issueCert(ctx *sdk.AppCtx, projectID, fqdn string) error {
 	// on the FQDN itself.
 	var apex, sub string
 	if challengeType == "dns-01" {
-		apex, sub, err = resolveApex(ctx, fqdn)
+		apex, sub, err = resolveApex(ctx, projectID, fqdn)
 		if err != nil {
 			_ = dbSetCertStatus(ctx.AppDB(), row.ID, "failed", fmtErr("resolve apex", err))
 			return err
@@ -93,7 +93,7 @@ func (a *App) issueCert(ctx *sdk.AppCtx, projectID, fqdn string) error {
 		)
 		switch challengeType {
 		case "dns-01":
-			chal, cleanup, prepErr = a.prepareDNS01(ctx, parent, client, authz, apex, sub, fqdn, row.ID)
+			chal, cleanup, prepErr = a.prepareDNS01(ctx, projectID, parent, client, authz, apex, sub, fqdn, row.ID)
 		case "http-01":
 			chal, cleanup, prepErr = a.prepareHTTP01(client, authz, row.ID, ctx.AppDB())
 		default:
@@ -340,6 +340,7 @@ func waitForTXT(parent context.Context, name, want string, timeout time.Duration
 // the helper writes status=failed itself; caller just returns err.
 func (a *App) prepareDNS01(
 	ctx *sdk.AppCtx,
+	projectID string,
 	parent context.Context,
 	client *acme.Client,
 	authz *acme.Authorization,
@@ -363,7 +364,7 @@ func (a *App) prepareDNS01(
 		_ = dbSetCertStatus(ctx.AppDB(), rowID, "failed", fmtErr("dns01 record", err))
 		return nil, func() {}, err
 	}
-	if err := setChallengeTXT(ctx, apex, sub, txtValue); err != nil {
+	if err := setChallengeTXT(ctx, projectID, apex, sub, txtValue); err != nil {
 		_ = dbSetCertStatus(ctx.AppDB(), rowID, "failed", fmtErr("set TXT", err))
 		return nil, func() {}, err
 	}
@@ -373,7 +374,7 @@ func (a *App) prepareDNS01(
 			return
 		}
 		cleaned = true
-		_ = deleteChallengeTXT(ctx, apex, sub)
+		_ = deleteChallengeTXT(ctx, projectID, apex, sub)
 	}
 	fullName := "_acme-challenge." + fqdn
 	if err := waitForTXT(parent, fullName, txtValue, a.dnsTimeout); err != nil {
