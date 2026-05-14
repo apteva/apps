@@ -27,7 +27,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: certs
 display_name: Certs
-version: 0.3.5
+version: 0.4.0
 description: TLS certificate issuance via ACME DNS-01 (through Domains app) or HTTP-01 (webroot).
 author: Apteva
 scopes: [project, global]
@@ -108,7 +108,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	globalCtx = ctx
 
 	a.directoryURL = strings.TrimSpace(configOr(ctx, "acme_directory_url",
-		"https://acme-staging-v02.api.letsencrypt.org/directory"))
+		"https://acme-v02.api.letsencrypt.org/directory"))
 	a.contactEmail = strings.TrimSpace(configOr(ctx, "acme_email", ""))
 	a.renewWindow = time.Duration(atoiOr(configOr(ctx, "renewal_window_days", "30"), 30)) * 24 * time.Hour
 	a.dnsTimeout = time.Duration(atoiOr(configOr(ctx, "dns_propagation_timeout_seconds", "180"), 180)) * time.Second

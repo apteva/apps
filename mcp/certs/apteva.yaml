@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: certs
 display_name: Certs
-version: 0.3.5
+version: 0.4.0
 description: |
   TLS certificate issuance for Apteva projects. Talks to Let's
   Encrypt (or any RFC 8555 ACME directory) using DNS-01 or HTTP-01
@@ -73,9 +73,9 @@ db:
 config_schema:
   - name: acme_directory_url
     type: text
-    default: "https://acme-staging-v02.api.letsencrypt.org/directory"
+    default: "https://acme-v02.api.letsencrypt.org/directory"
     label: ACME directory URL
-    description: Defaults to Let's Encrypt **staging** so first-time setup doesn't burn rate limits. Switch to https://acme-v02.api.letsencrypt.org/directory when you've issued a successful staging cert end-to-end.
+    description: Defaults to Let's Encrypt **production** — issued certs are browser-trusted. To test the flow without spending production rate limits, point this at the staging directory https://acme-staging-v02.api.letsencrypt.org/directory (staging certs are structurally valid but signed by an untrusted root, so browsers still warn).
   - name: acme_email
     type: text
     default: ""
