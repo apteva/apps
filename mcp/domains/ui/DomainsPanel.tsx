@@ -122,8 +122,15 @@ export default function DomainsPanel({ projectId, installId }: NativePanelProps)
   }, [api]);
 
   const callTool = useCallback(async (tool: string, args: Record<string, unknown>) => {
-    return api<Record<string, unknown>>("POST", "/tools/call", {}, { tool, args });
-  }, [api]);
+    // Inject _project_id so globally-scoped installs resolve the project:
+    // a global sidecar has no APTEVA_PROJECT_ID env, so the tool's
+    // resolveProjectFromArgs falls back to this. Project-scoped installs
+    // ignore it — the env var wins. Mirrors the CRM panel.
+    return api<Record<string, unknown>>("POST", "/tools/call", {}, {
+      tool,
+      args: { ...args, _project_id: projectId },
+    });
+  }, [api, projectId]);
 
   return (
     <div className="h-full flex flex-col">

@@ -36,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: domains
 display_name: Domains
-version: 0.2.1
+version: 0.2.2
 description: |
   DNS + domain inventory. Other apps call this for record CRUD
   instead of talking to registrars directly. v0.1: Porkbun.

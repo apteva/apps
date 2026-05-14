@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: domains
 display_name: Domains
-version: 0.2.1
+version: 0.2.2
 description: |
   DNS + domain inventory for Apteva projects. Other apps that need
   to write DNS records (messaging for SES MX/DKIM, storage for CDN
