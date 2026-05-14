@@ -83,7 +83,7 @@ func (a *App) toolRoutesRegister(ctx *sdk.AppCtx, args map[string]any) (any, err
 		}
 		return nil, err
 	}
-	emitRouteChanged(ctx, action, route)
+	a.emitRouteChanged(ctx, action, route)
 	return map[string]any{"route": route, "action": action}, nil
 }
 
@@ -104,7 +104,7 @@ func (a *App) toolRoutesUnregister(ctx *sdk.AppCtx, args map[string]any) (any, e
 		return nil, err
 	}
 	if removed {
-		emitRouteChanged(ctx, "removed", &Route{Hostname: host, OwnerInstallID: owner})
+		a.emitRouteChanged(ctx, "removed", &Route{Hostname: host, OwnerInstallID: owner})
 	}
 	return map[string]any{"removed": removed}, nil
 }
@@ -230,9 +230,11 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 }
 
 // emitRouteChanged fires the platform event that apteva-server
-// subscribes to for cache invalidation. Best-effort — if the emit
-// fails the cache will catch up on the next poll cycle (or restart).
-func emitRouteChanged(ctx *sdk.AppCtx, action string, route *Route) {
+// subscribes to for cache invalidation, and — in proxy mode — kicks
+// an async re-render of the external proxy's config. Best-effort: a
+// failed emit is caught by apteva-server's next poll; a failed
+// re-render is logged and retried by the periodic sync loop.
+func (a *App) emitRouteChanged(ctx *sdk.AppCtx, action string, route *Route) {
 	payload := map[string]any{
 		"action":   action,
 		"hostname": route.Hostname,
@@ -245,4 +247,7 @@ func emitRouteChanged(ctx *sdk.AppCtx, action string, route *Route) {
 		payload["owner_kind"] = route.OwnerKind
 	}
 	ctx.Emit("routes.changed", payload)
+	if a.proxy != nil {
+		go a.syncProxy(ctx, "routes.changed:"+action)
+	}
 }

@@ -108,7 +108,7 @@ func (a *App) httpUpsertRoute(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	emitRouteChanged(globalCtx, action, route)
+	a.emitRouteChanged(globalCtx, action, route)
 	httpJSON(w, map[string]any{"route": route, "action": action})
 }
 
@@ -151,7 +151,7 @@ func (a *App) httpDeleteRoute(w http.ResponseWriter, r *http.Request, hostname s
 		}
 	}
 	if removed {
-		emitRouteChanged(globalCtx, "removed", &Route{Hostname: hostname, OwnerInstallID: owner})
+		a.emitRouteChanged(globalCtx, "removed", &Route{Hostname: hostname, OwnerInstallID: owner})
 	}
 	httpJSON(w, map[string]any{"removed": removed})
 }

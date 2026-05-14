@@ -27,6 +27,8 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -37,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: routes
 display_name: Routes
-version: 0.2.0
+version: 0.3.0
 description: |
   Hostname-based routing for Apteva. Owns the table mapping public
   hostnames to local backend targets. Apps register routes; apteva-
@@ -78,9 +80,36 @@ upgrade_policy: auto-patch
 
 // ─── App ───────────────────────────────────────────────────────────
 
-type App struct{}
+type App struct {
+	// routingMode: "hostrouter" (default — apteva-server's HostRouter
+	// reads the table) or "proxy" (this app drives an external reverse
+	// proxy: Caddy / nginx).
+	routingMode string
+	// certDir mirrors the certs app's cert_output_dir. When set, the
+	// rendered proxy config points TLS at <certDir>/<fqdn>/*.pem.
+	certDir string
+
+	// proxy is the detected reverse proxy. nil in hostrouter mode, or
+	// in proxy mode when nothing was detected (the app stays inert).
+	proxy *proxyTarget
+
+	syncMu      sync.Mutex // serialises renders
+	lastInclude string     // last include content written — diff before reload
+	stopCh      chan struct{}
+}
 
 var globalCtx *sdk.AppCtx
+
+// configOr reads an install-config value, falling back to def.
+func configOr(ctx *sdk.AppCtx, key, def string) string {
+	if ctx == nil {
+		return def
+	}
+	if v := strings.TrimSpace(ctx.Config().Get(key)); v != "" {
+		return v
+	}
+	return def
+}
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
@@ -95,12 +124,29 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("routes requires a db block")
 	}
 	globalCtx = ctx
+	a.routingMode = configOr(ctx, "routing_mode", "hostrouter")
+	a.certDir = configOr(ctx, "cert_dir", "")
+	a.stopCh = make(chan struct{})
+
 	ctx.Logger().Info("routes mounted",
-		"data_dir", ctx.DataDir())
+		"data_dir", ctx.DataDir(),
+		"routing_mode", a.routingMode)
+
+	// proxy mode: detect the reverse proxy, wire ourselves in, and
+	// keep its config in sync. hostrouter mode is the default and
+	// leaves everything to apteva-server's HostRouter — no change.
+	if a.routingMode == "proxy" {
+		a.startProxyMode(ctx)
+	}
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if a.stopCh != nil {
+		close(a.stopCh)
+	}
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }

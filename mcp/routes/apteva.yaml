@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: routes
 display_name: Routes
-version: 0.2.0
+version: 0.3.0
 description: |
   Hostname-based routing for Apteva. Owns the table mapping public
   hostnames (blog.example.com) to local backend targets
@@ -64,5 +64,27 @@ db:
   driver: sqlite
   path: /data/routes.db
   migrations: migrations/
+
+config_schema:
+  - name: routing_mode
+    type: text
+    default: "hostrouter"
+    label: Routing mode
+    description: "`hostrouter` (default) — apteva-server's built-in HostRouter reads the routes table and reverse-proxies. `proxy` — this app instead drives an external reverse proxy (Caddy / nginx): it detects the proxy, makes a one-time guarded edit so the proxy imports an app-owned include file, and keeps that file in sync with the routes table. Use `proxy` on hosts where Caddy/nginx already fronts :443."
+  - name: proxy_kind
+    type: text
+    default: "auto"
+    label: Proxy kind
+    description: Which reverse proxy to drive in `proxy` mode — `auto` (detect Caddy then nginx), `caddy`, or `nginx`. Ignored in `hostrouter` mode.
+  - name: proxy_reload_command
+    type: text
+    default: ""
+    label: Proxy reload command
+    description: Override the command used to gracefully reload the proxy after a config change. Empty = per-kind default (`caddy reload --config <main>` / `nginx -s reload`). Set this if your proxy needs e.g. `systemctl reload caddy` or an admin-API call. The routes sidecar must be able to run it.
+  - name: cert_dir
+    type: text
+    default: ""
+    label: Cert directory
+    description: Filesystem path where the certs app writes PEM files (its `cert_output_dir`). When set, `proxy` mode points the proxy's TLS at `<cert_dir>/<cert_fqdn>/fullchain.pem` + `privkey.pem`. Empty = no explicit TLS lines (Caddy then uses its own automatic HTTPS; nginx routes stay HTTP-only). Must match the certs app's `cert_output_dir`.
 
 upgrade_policy: auto-patch
