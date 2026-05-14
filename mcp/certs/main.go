@@ -27,7 +27,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: certs
 display_name: Certs
-version: 0.5.0
+version: 0.5.1
 description: TLS certificate issuance via ACME DNS-01 (through Domains app) or HTTP-01 (webroot).
 author: Apteva
 scopes: [project, global]
@@ -115,7 +115,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.dnsTimeout = time.Duration(atoiOr(configOr(ctx, "dns_propagation_timeout_seconds", "180"), 180)) * time.Second
 	a.challengeType = strings.TrimSpace(configOr(ctx, "challenge_type", "auto"))
 	a.webrootPath = strings.TrimSpace(configOr(ctx, "webroot_path", "/var/www/acme"))
-	a.certOutputDir = strings.TrimSpace(configOr(ctx, "cert_output_dir", ""))
+	a.certOutputDir = strings.TrimSpace(configOr(ctx, "cert_output_dir", "/var/lib/apteva/certs"))
 	a.inFlight = map[string]bool{}
 	a.stopCh = make(chan struct{})
 

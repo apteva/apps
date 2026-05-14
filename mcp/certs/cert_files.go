@@ -13,11 +13,18 @@ import (
 // also written to disk as standard PEM files alongside the DB row:
 //
 //   <cert_output_dir>/<fqdn>/fullchain.pem   (0644)
-//   <cert_output_dir>/<fqdn>/privkey.pem     (0600)
+//   <cert_output_dir>/<fqdn>/privkey.pem     (0644)
 //
 // A reverse proxy (driven by the routes app, or wired by hand) points
 // its TLS config at these. The certs app stays proxy-agnostic — it
 // just drops standard files; it doesn't know or care what reads them.
+//
+// privkey is 0644 on purpose: the reverse proxy usually runs as a
+// different user (caddy / www-data) than this sidecar, and a
+// world-readable key is what lets it work with zero coordination.
+// On a dedicated single-purpose host that's an acceptable trade for
+// "works out of the box"; lock it down by pointing cert_output_dir
+// somewhere group-restricted if your threat model needs it.
 
 // safeFQDNComponent rejects anything that can't be a single path
 // component. fqdns come from our own DB, but a stray "/" or ".." must
@@ -47,7 +54,7 @@ func writeCertFiles(dir, fqdn string, certPEM, keyPEM []byte) error {
 	if err := atomicWrite(filepath.Join(d, "fullchain.pem"), certPEM, 0o644); err != nil {
 		return err
 	}
-	if err := atomicWrite(filepath.Join(d, "privkey.pem"), keyPEM, 0o600); err != nil {
+	if err := atomicWrite(filepath.Join(d, "privkey.pem"), keyPEM, 0o644); err != nil {
 		return err
 	}
 	return nil

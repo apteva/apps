@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: certs
 display_name: Certs
-version: 0.5.0
+version: 0.5.1
 description: |
   TLS certificate issuance for Apteva projects. Talks to Let's
   Encrypt (or any RFC 8555 ACME directory) using DNS-01 or HTTP-01
@@ -103,8 +103,8 @@ config_schema:
     description: Filesystem path where _acme-challenge files are written for http-01. Your reverse proxy (Caddy / nginx / traefik) must serve this directory at `/.well-known/acme-challenge/`. The directory must exist and be writable by the certs sidecar user.
   - name: cert_output_dir
     type: text
-    default: ""
+    default: "/var/lib/apteva/certs"
     label: Cert output directory
-    description: When set, every issued and renewed cert is also written here as `<dir>/<fqdn>/fullchain.pem` + `privkey.pem` for a reverse proxy to consume. Leave empty to keep certs DB-only (default). The routes app's proxy mode auto-discovers this path via /api/_meta.
+    description: Every issued and renewed cert is written here as `<dir>/<fqdn>/fullchain.pem` + `privkey.pem` (both 0644) for a reverse proxy to consume. Default `/var/lib/apteva/certs` matches the routes app's `cert_dir` default, so proxy mode works out of the box. Best-effort — a write failure (path not writable) is a logged warning, not an issuance failure. Set empty to keep certs DB-only. For local macOS testing, point this at a writable path (e.g. `/tmp/apteva-certs`).
 
 upgrade_policy: auto-patch
