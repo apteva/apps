@@ -15,21 +15,42 @@ import (
 // ─── Domain types ──────────────────────────────────────────────────
 
 type Function struct {
-	ID           int64             `json:"id"`
-	ProjectID    string            `json:"project_id,omitempty"`
-	Name         string            `json:"name"`
-	Runtime      string            `json:"runtime"`
-	SourceKind   string            `json:"source_kind"`
-	Source       string            `json:"source,omitempty"`
-	RepoID       *int64            `json:"repo_id,omitempty"`
-	RepoPath     string            `json:"repo_path,omitempty"`
-	SourceHash   string            `json:"source_hash"`
-	Env          map[string]string `json:"env,omitempty"`
-	TimeoutMS    int               `json:"timeout_ms"`
-	MaxMemoryMB  int               `json:"max_memory_mb"`
-	Status       string            `json:"status"`
-	CreatedAt    string            `json:"created_at,omitempty"`
-	UpdatedAt    string            `json:"updated_at,omitempty"`
+	ID              int64             `json:"id"`
+	ProjectID       string            `json:"project_id,omitempty"`
+	Name            string            `json:"name"`
+	Runtime         string            `json:"runtime"`
+	SourceKind      string            `json:"source_kind"`
+	Source          string            `json:"source,omitempty"`
+	RepoID          *int64            `json:"repo_id,omitempty"`
+	RepoPath        string            `json:"repo_path,omitempty"`
+	SourceHash      string            `json:"source_hash"`
+	Env             map[string]string `json:"env,omitempty"`
+	TimeoutMS       int               `json:"timeout_ms"`
+	MaxMemoryMB     int               `json:"max_memory_mb"`
+	Status          string            `json:"status"`
+	ActiveVersionID *int64            `json:"active_version_id,omitempty"`
+	CreatedAt       string            `json:"created_at,omitempty"`
+	UpdatedAt       string            `json:"updated_at,omitempty"`
+}
+
+// FunctionVersion is one immutable deploy of a function. Created by
+// functions_deploy (and by functions_create for v1); built once;
+// becomes the function's active version on a successful build.
+type FunctionVersion struct {
+	ID          int64  `json:"id"`
+	ProjectID   string `json:"project_id,omitempty"`
+	FunctionID  int64  `json:"function_id"`
+	Version     int    `json:"version"`
+	SourceKind  string `json:"source_kind"`
+	Source      string `json:"source,omitempty"`
+	RepoID      *int64 `json:"repo_id,omitempty"`
+	RepoPath    string `json:"repo_path,omitempty"`
+	SourceHash  string `json:"source_hash"`
+	PackageJSON string `json:"package_json,omitempty"`
+	BuildStatus string `json:"build_status"`        // pending | building | ready | failed
+	BuildLog    string `json:"build_log,omitempty"`
+	BuildDir    string `json:"build_dir,omitempty"`
+	CreatedAt   string `json:"created_at,omitempty"`
 }
 
 type Invocation struct {
@@ -61,8 +82,10 @@ type FunctionFilter struct {
 // at create time.
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
+// validRuntimes is the create-time guard. node only, for now —
+// see runtime.go for why bun is out and python is deferred.
 var validRuntimes = map[string]bool{
-	"bun": true, "node": true, "python": true, "sh": true,
+	"node": true,
 }
 
 const (
@@ -89,7 +112,7 @@ func dbCreateFunction(db *sql.DB, pid string, fn *Function) (*Function, error) {
 		return nil, errors.New("name must match [a-z0-9][a-z0-9-]{0,62}")
 	}
 	if !validRuntimes[fn.Runtime] {
-		return nil, fmt.Errorf("runtime %q not supported (bun|node|python|sh)", fn.Runtime)
+		return nil, fmt.Errorf("runtime %q not supported (node)", fn.Runtime)
 	}
 	if fn.SourceKind == "" {
 		fn.SourceKind = "inline"
@@ -288,7 +311,7 @@ const fnColumns = `id, project_id, name, runtime, source_kind,
 		COALESCE(source,''), repo_id, COALESCE(repo_path,''),
 		source_hash, COALESCE(env_json,''),
 		timeout_ms, max_memory_mb, status,
-		created_at, updated_at`
+		active_version_id, created_at, updated_at`
 
 type scanRow interface {
 	Scan(dest ...any) error
@@ -296,14 +319,14 @@ type scanRow interface {
 
 func scanFunction(row scanRow) (*Function, error) {
 	fn := &Function{}
-	var repoID sql.NullInt64
+	var repoID, activeVer sql.NullInt64
 	var envJSON string
 	err := row.Scan(
 		&fn.ID, &fn.ProjectID, &fn.Name, &fn.Runtime, &fn.SourceKind,
 		&fn.Source, &repoID, &fn.RepoPath,
 		&fn.SourceHash, &envJSON,
 		&fn.TimeoutMS, &fn.MaxMemoryMB, &fn.Status,
-		&fn.CreatedAt, &fn.UpdatedAt)
+		&activeVer, &fn.CreatedAt, &fn.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -311,10 +334,137 @@ func scanFunction(row scanRow) (*Function, error) {
 		v := repoID.Int64
 		fn.RepoID = &v
 	}
+	if activeVer.Valid {
+		v := activeVer.Int64
+		fn.ActiveVersionID = &v
+	}
 	if envJSON != "" {
 		_ = json.Unmarshal([]byte(envJSON), &fn.Env)
 	}
 	return fn, nil
+}
+
+// ─── Versions ──────────────────────────────────────────────────────
+
+const fnVerColumns = `id, project_id, function_id, version,
+		source_kind, COALESCE(source,''), repo_id, COALESCE(repo_path,''),
+		source_hash, COALESCE(package_json,''),
+		build_status, COALESCE(build_log,''), COALESCE(build_dir,''),
+		created_at`
+
+func scanVersion(row scanRow) (*FunctionVersion, error) {
+	v := &FunctionVersion{}
+	var repoID sql.NullInt64
+	err := row.Scan(
+		&v.ID, &v.ProjectID, &v.FunctionID, &v.Version,
+		&v.SourceKind, &v.Source, &repoID, &v.RepoPath,
+		&v.SourceHash, &v.PackageJSON,
+		&v.BuildStatus, &v.BuildLog, &v.BuildDir,
+		&v.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if repoID.Valid {
+		r := repoID.Int64
+		v.RepoID = &r
+	}
+	return v, nil
+}
+
+// dbCreateVersion inserts a version row, stamping the next monotonic
+// version number for the function. Caller resolves the source bytes
+// and computes source_hash; build_status starts at "building".
+func dbCreateVersion(db *sql.DB, pid string, v *FunctionVersion) (*FunctionVersion, error) {
+	var next int
+	if err := db.QueryRow(
+		`SELECT COALESCE(MAX(version),0)+1 FROM function_versions WHERE function_id = ?`,
+		v.FunctionID).Scan(&next); err != nil {
+		return nil, err
+	}
+	v.Version = next
+	if v.BuildStatus == "" {
+		v.BuildStatus = "pending"
+	}
+	res, err := db.Exec(
+		`INSERT INTO function_versions (
+			project_id, function_id, version, source_kind, source,
+			repo_id, repo_path, source_hash, package_json, build_status
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pid, v.FunctionID, v.Version, v.SourceKind, nullStr(v.Source),
+		nullableInt64Ptr(v.RepoID), nullStr(v.RepoPath), v.SourceHash,
+		nullStr(v.PackageJSON), v.BuildStatus)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return dbGetVersion(db, pid, id)
+}
+
+func dbGetVersion(db *sql.DB, pid string, id int64) (*FunctionVersion, error) {
+	row := db.QueryRow(`SELECT `+fnVerColumns+` FROM function_versions WHERE id = ? AND project_id = ?`, id, pid)
+	v, err := scanVersion(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return v, err
+}
+
+func dbGetVersionByNumber(db *sql.DB, pid string, fnID int64, version int) (*FunctionVersion, error) {
+	row := db.QueryRow(
+		`SELECT `+fnVerColumns+` FROM function_versions WHERE function_id = ? AND version = ? AND project_id = ?`,
+		fnID, version, pid)
+	v, err := scanVersion(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return v, err
+}
+
+func dbListVersions(db *sql.DB, pid string, fnID int64, limit int) ([]*FunctionVersion, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	rows, err := db.Query(
+		`SELECT `+fnVerColumns+` FROM function_versions
+		 WHERE function_id = ? AND project_id = ? ORDER BY version DESC LIMIT ?`,
+		fnID, pid, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*FunctionVersion{}
+	for rows.Next() {
+		v, err := scanVersion(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+// dbUpdateVersionBuild records the outcome of a build attempt.
+func dbUpdateVersionBuild(db *sql.DB, pid string, id int64, status, buildLog, buildDir string) error {
+	_, err := db.Exec(
+		`UPDATE function_versions SET build_status = ?, build_log = ?, build_dir = ?
+		 WHERE id = ? AND project_id = ?`,
+		status, nullStr(buildLog), nullStr(buildDir), id, pid)
+	return err
+}
+
+// dbSetActiveVersion points the function at v and denormalises v's
+// source columns onto the functions row so the hot invoke path needs
+// no join. Used by both deploy and rollback.
+func dbSetActiveVersion(db *sql.DB, pid string, fnID int64, v *FunctionVersion) error {
+	_, err := db.Exec(
+		`UPDATE functions SET active_version_id = ?, source_kind = ?, source = ?,
+			repo_id = ?, repo_path = ?, source_hash = ?, updated_at = ?
+		 WHERE id = ? AND project_id = ?`,
+		v.ID, v.SourceKind, nullStr(v.Source),
+		nullableInt64Ptr(v.RepoID), nullStr(v.RepoPath), v.SourceHash,
+		time.Now().UTC().Format(time.RFC3339),
+		fnID, pid)
+	return err
 }
 
 // ─── Invocations ───────────────────────────────────────────────────

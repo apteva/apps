@@ -7,57 +7,50 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-// resolveSource returns the function body bytes for one invocation.
+// resolveVersionSource returns the function body bytes for one
+// version.
 //
-// inline — the bytes already live on the function row.
+// inline — the bytes already live on the version row.
 // repo   — fetch via CallAppResult("code","code_read_file",...) per
 //          the project's cross-app convention. Cached in-memory by
-//          (repo_id, repo_path, source_hash); the hash key keeps the
-//          cache correct across functions_update without us needing
-//          to plumb invalidation calls.
-//
-// On cache miss we re-fetch and overwrite. On miss without a stored
-// hash we still fetch but skip caching — first call after a fresh
-// boot pays the round-trip, subsequent calls reuse.
-func resolveSource(ctx *sdk.AppCtx, fn *Function) ([]byte, error) {
-	if fn.SourceKind == "inline" {
-		return []byte(fn.Source), nil
+//          (repo_id, repo_path, source_hash) so a fresh boot pays the
+//          round-trip once and subsequent reads reuse.
+func resolveVersionSource(ctx *sdk.AppCtx, v *FunctionVersion) ([]byte, error) {
+	if v.SourceKind == "inline" {
+		return []byte(v.Source), nil
 	}
-	if fn.RepoID == nil || fn.RepoPath == "" {
+	if v.RepoID == nil || v.RepoPath == "" {
 		return nil, errors.New("repo source missing repo_id or repo_path")
 	}
-	if cached, ok := sourceCache.get(*fn.RepoID, fn.RepoPath, fn.SourceHash); ok {
+	if cached, ok := sourceCache.get(*v.RepoID, v.RepoPath, v.SourceHash); ok {
 		return cached, nil
 	}
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return nil, errors.New("repo source requires PlatformAPI; not available in this context")
 	}
-	// code_read_file returns {"path","content","line_count","..."}.
-	// We only care about content.
+	// code_read_file returns {"path","content","line_count",...}.
 	var resp struct {
 		Content string `json:"content"`
 	}
 	if err := ctx.PlatformAPI().CallAppResult("code", "code_read_file", map[string]any{
-		"repo_id": *fn.RepoID,
-		"path":    fn.RepoPath,
+		"repo_id": *v.RepoID,
+		"path":    v.RepoPath,
 	}, &resp); err != nil {
 		return nil, err
 	}
 	bytes := []byte(resp.Content)
-	if fn.SourceHash != "" {
-		sourceCache.put(*fn.RepoID, fn.RepoPath, fn.SourceHash, bytes)
+	if v.SourceHash != "" {
+		sourceCache.put(*v.RepoID, v.RepoPath, v.SourceHash, bytes)
 	}
 	return bytes, nil
 }
 
 // repoSourceCache memoises repo-fetched function bodies. The key
-// includes source_hash so that an update which doesn't change bytes
-// (re-saving the same file) still validates against existing cache,
-// while an update that does change bytes evicts the previous entry
-// at next read.
+// includes source_hash so a deploy that changes bytes naturally
+// misses and re-fetches, while one that re-uses identical bytes hits.
 //
 // In-memory only. A sidecar restart cold-starts the cache, which is
-// fine — we'd just re-fetch on first invocation.
+// fine — first invocation re-fetches.
 type repoSourceCache struct {
 	mu sync.RWMutex
 	m  map[repoKey]repoEntry

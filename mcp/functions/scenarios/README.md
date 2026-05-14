@@ -6,5 +6,5 @@ asserts on observable side-effects (tools called, REST results).
 
 | Scenario | What it covers |
 |---|---|
-| `01-create-and-invoke.yaml` | create an inline `bun` function, then `functions_invoke` it |
-| `02-create-update-delete.yaml` | full lifecycle: create → update (disable) → delete |
+| `01-create-and-invoke.yaml` | create a node function (deploys v1), then `functions_invoke` it against a warm worker |
+| `02-deploy-and-rollback.yaml` | immutable-version lifecycle: create → `functions_deploy` v2 → `functions_rollback` to v1 |

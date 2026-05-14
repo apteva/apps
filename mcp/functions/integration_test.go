@@ -1,35 +1,33 @@
 package main
 
 import (
-	"os/exec"
 	"testing"
 
 	tk "github.com/apteva/app-sdk/testkit"
 )
 
-// TestEndToEndMCP: walk the same code path the platform calls into
-// at runtime — toolCreate -> toolInvoke -> toolInvocations. Skips
-// if sh isn't on PATH (CI may run minimal images).
+// TestEndToEndMCP walks the platform's runtime path — toolCreate
+// (which deploys v1) → toolInvoke → toolInvocations → toolLogs —
+// against a real warm worker.
 func TestEndToEndMCP(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh not installed")
-	}
-
+	requireBin(t, "node")
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
-	app := &App{}
+	app := mountApp(t, ctx)
 
 	created, err := app.toolCreate(ctx, map[string]any{
 		"name":    "echo",
-		"runtime": "sh",
-		"source":  "cat",
+		"runtime": "node",
+		"source":  echoHandler,
 	})
 	if err != nil {
 		t.Fatalf("toolCreate: %v", err)
 	}
-	createdMap := created.(map[string]any)
-	fn := createdMap["function"].(*Function)
+	fn := created.(map[string]any)["function"].(*Function)
 	if fn.ID == 0 {
 		t.Fatal("expected non-zero ID")
+	}
+	if fn.ActiveVersionID == nil {
+		t.Fatal("create did not deploy + activate v1")
 	}
 
 	invokeOut, err := app.toolInvoke(ctx, map[string]any{
@@ -39,14 +37,11 @@ func TestEndToEndMCP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("toolInvoke: %v", err)
 	}
-	invokeMap := invokeOut.(map[string]any)
-	if invokeMap["status"] != "ok" {
-		t.Errorf("status = %v, want ok", invokeMap["status"])
+	if invokeOut.(map[string]any)["status"] != "ok" {
+		t.Errorf("status = %v, want ok", invokeOut.(map[string]any)["status"])
 	}
 
-	listOut, err := app.toolInvocations(ctx, map[string]any{
-		"name": "echo",
-	})
+	listOut, err := app.toolInvocations(ctx, map[string]any{"name": "echo"})
 	if err != nil {
 		t.Fatalf("toolInvocations: %v", err)
 	}
@@ -58,9 +53,7 @@ func TestEndToEndMCP(t *testing.T) {
 		t.Errorf("TriggerKind = %q, want manual", invs[0].TriggerKind)
 	}
 
-	logsOut, err := app.toolLogs(ctx, map[string]any{
-		"invocation_id": invs[0].ID,
-	})
+	logsOut, err := app.toolLogs(ctx, map[string]any{"invocation_id": invs[0].ID})
 	if err != nil {
 		t.Fatalf("toolLogs: %v", err)
 	}
@@ -69,31 +62,24 @@ func TestEndToEndMCP(t *testing.T) {
 	}
 }
 
-// TestUpdateChangesHash: updating the source updates source_hash so
-// the repo cache (keyed by hash) invalidates correctly.
-func TestUpdateChangesHash(t *testing.T) {
+// TestUpdateMetadataOnly: functions_update changes metadata; source
+// changes are rejected and must go through functions_deploy.
+func TestUpdateMetadataOnly(t *testing.T) {
+	requireBin(t, "node")
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
-	app := &App{}
+	app := mountApp(t, ctx)
 
-	out, err := app.toolCreate(ctx, map[string]any{
-		"name":    "h",
-		"runtime": "sh",
-		"source":  "echo v1",
-	})
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	beforeHash := out.(map[string]any)["function"].(*Function).SourceHash
+	createFn(t, app, ctx, map[string]any{"name": "m", "source": echoHandler})
 
-	out, err = app.toolUpdate(ctx, map[string]any{
-		"name":   "h",
-		"source": "echo v2",
-	})
+	out, err := app.toolUpdate(ctx, map[string]any{"name": "m", "timeout_ms": 5000})
 	if err != nil {
-		t.Fatalf("update: %v", err)
+		t.Fatalf("update timeout: %v", err)
 	}
-	afterHash := out.(map[string]any)["function"].(*Function).SourceHash
-	if beforeHash == afterHash {
-		t.Errorf("hash unchanged after source edit: %q", beforeHash)
+	if out.(map[string]any)["function"].(*Function).TimeoutMS != 5000 {
+		t.Error("timeout_ms not updated")
+	}
+
+	if _, err := app.toolUpdate(ctx, map[string]any{"name": "m", "source": "x"}); err == nil {
+		t.Error("expected source change via functions_update to be rejected")
 	}
 }

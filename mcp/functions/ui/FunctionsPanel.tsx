@@ -1,9 +1,12 @@
-// FunctionsPanel — native React panel for the functions app. List of
-// functions on the left as a table; clicking one opens a detail modal
-// with source, env, recent invocations, and a live "Invoke" console.
-// Loaded by the dashboard via dynamic import; uses host React via
-// importmap; talks to the functions sidecar through
-// /api/apps/functions/* with same-origin cookies.
+// FunctionsPanel — native React panel for the functions app.
+//
+// A function is a thin definition that points at an immutable, built
+// version. The panel lists functions, creates them (which deploys
+// v1), deploys new versions, rolls back, and runs an inline invoke
+// console against the active version. Loaded by the dashboard via
+// dynamic import; uses host React via importmap; talks to the
+// functions sidecar through /api/apps/functions/* with same-origin
+// cookies.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -28,10 +31,6 @@ function useAppEvents<T = unknown>(
   useEffect(() => {
     if (!app || !projectId) return;
     const handler = (ev: AppEventEnvelope<T>) => handlerRef.current(ev);
-    // Cross-bundle multiplexer: the dashboard publishes a shared
-    // (app, project) channel pool on window.__aptevaAppEvents. Every
-    // panel mounted in the same realm reuses one EventSource per
-    // (app, project) instead of opening its own.
     const bridge = (window as unknown as {
       __aptevaAppEvents?: {
         subscribe(
@@ -44,8 +43,6 @@ function useAppEvents<T = unknown>(
     if (bridge) {
       return bridge.subscribe(app, projectId, handler);
     }
-    // Fallback: panel running outside the dashboard (or before its
-    // hook module loaded). Open an EventSource directly.
     let lastSeq = 0;
     let es: EventSource | null = null;
     let cancelled = false;
@@ -88,25 +85,36 @@ interface NativePanelProps {
   instanceId?: number;
 }
 
-type Runtime = "bun" | "node" | "python" | "sh";
 type Status = "active" | "disabled";
 type InvStatus = "ok" | "error" | "timeout";
+type BuildStatus = "pending" | "building" | "ready" | "failed";
 
 interface FunctionRow {
   id: number;
   name: string;
-  runtime: Runtime;
+  runtime: string;
   source_kind: "inline" | "repo";
   source?: string;
   repo_id?: number;
   repo_path?: string;
-  source_hash: string;
-  env?: Record<string, string>;
   timeout_ms: number;
   max_memory_mb: number;
   status: Status;
+  active_version_id?: number;
+}
+
+interface Version {
+  id: number;
+  function_id: number;
+  version: number;
+  source_kind: "inline" | "repo";
+  source?: string;
+  repo_id?: number;
+  repo_path?: string;
+  package_json?: string;
+  build_status: BuildStatus;
+  build_log?: string;
   created_at?: string;
-  updated_at?: string;
 }
 
 interface Invocation {
@@ -126,7 +134,13 @@ interface Invocation {
 
 const API = "/api/apps/functions";
 
-const RUNTIMES: Runtime[] = ["bun", "node", "python", "sh"];
+// Starter handler shown in the create dialog.
+const SAMPLE_HANDLER =
+  `export default async function handler(event, context) {\n` +
+  `  // event: the JSON payload. context.call(app, tool, input)\n` +
+  `  // reaches other Apteva apps. Return any JSON.\n` +
+  `  return { hello: event?.name ?? "world" };\n` +
+  `}`;
 
 function relTime(s?: string): string {
   if (!s) return "—";
@@ -141,9 +155,7 @@ function relTime(s?: string): string {
 }
 
 function fnStatusTone(s: Status): string {
-  return s === "active"
-    ? "bg-green/15 text-green"
-    : "bg-border text-text-muted";
+  return s === "active" ? "bg-green/15 text-green" : "bg-border text-text-muted";
 }
 
 function invStatusTone(s: InvStatus): string {
@@ -155,29 +167,23 @@ function invStatusTone(s: InvStatus): string {
   }
 }
 
-// A function's runtime decides the source-editor language hint and the
-// placeholder shown in the create dialog. Kept here so both the create
-// and edit paths agree.
-const RUNTIME_HINT: Record<Runtime, string> = {
-  bun: "TypeScript — read the event from stdin, write the response to stdout.",
-  node: "JavaScript (ESM) — read the event from stdin, write the response to stdout.",
-  python: "Python 3 — read the event from sys.stdin, print the response.",
-  sh: "POSIX shell — the event JSON arrives on stdin; echo the response.",
-};
+function buildStatusTone(s: BuildStatus): string {
+  switch (s) {
+    case "ready":    return "bg-green/15 text-green";
+    case "failed":   return "bg-red/15 text-red";
+    case "building": return "bg-blue/15 text-blue";
+    default:         return "bg-border text-text-muted";
+  }
+}
 
-const RUNTIME_SAMPLE: Record<Runtime, string> = {
-  bun: `const event = await Bun.stdin.json();\nconsole.log(JSON.stringify({ hello: event.name ?? "world" }));`,
-  node: `let raw = "";\nprocess.stdin.on("data", (c) => (raw += c));\nprocess.stdin.on("end", () => {\n  const event = JSON.parse(raw || "null");\n  console.log(JSON.stringify({ hello: event?.name ?? "world" }));\n});`,
-  python: `import sys, json\nevent = json.load(sys.stdin)\nprint(json.dumps({"hello": event.get("name", "world")}))`,
-  sh: `event=$(cat)\necho "{\\"received\\": $event}"`,
-};
+type ApiFn = <T,>(method: string, path: string, body?: unknown, extra?: Record<string, string>) => Promise<T>;
 
 export default function FunctionsPanel({ projectId, installId }: NativePanelProps) {
   const [functions, setFunctions] = useState<FunctionRow[]>([]);
-  const [runtimeFilter, setRuntimeFilter] = useState<Runtime | "">("");
   const [statusFilter, setStatusFilter] = useState<Status | "">("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<FunctionRow | null>(null);
+  const [versions, setVersions] = useState<Version[]>([]);
   const [invocations, setInvocations] = useState<Invocation[]>([]);
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
@@ -194,7 +200,7 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
     [projectId, installId],
   );
 
-  const api = useCallback(
+  const api: ApiFn = useCallback(
     async <T,>(method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<T> => {
       const res = await fetch(`${API}${path}?${withParams(extra)}`, {
         method,
@@ -211,7 +217,6 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
   const loadList = useCallback(async () => {
     try {
       const extra: Record<string, string> = {};
-      if (runtimeFilter) extra.runtime = runtimeFilter;
       if (statusFilter) extra.status = statusFilter;
       const r = await api<{ functions?: FunctionRow[] }>("GET", "/functions", undefined, extra);
       setFunctions(r.functions || []);
@@ -219,14 +224,16 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
     } catch (e) {
       setError((e as Error).message);
     }
-  }, [api, runtimeFilter, statusFilter]);
+  }, [api, statusFilter]);
 
   const loadDetail = useCallback(
     async (id: number) => {
       try {
         const f = await api<{ function: FunctionRow }>("GET", `/functions/${id}`);
+        const v = await api<{ versions?: Version[] }>("GET", `/functions/${id}/versions`);
         const r = await api<{ invocations?: Invocation[] }>("GET", `/functions/${id}/invocations`);
         setDetail(f.function);
+        setVersions(v.versions || []);
         setInvocations(r.invocations || []);
       } catch (e) {
         setDetail(null);
@@ -238,11 +245,11 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
 
   useEffect(() => { loadList(); }, [loadList]);
 
-  // Live refresh: react instantly to create/update/delete events.
   useAppEvents("functions", projectId, (ev) => {
     if (
       ev.topic === "function.created" ||
       ev.topic === "function.updated" ||
+      ev.topic === "function.deployed" ||
       ev.topic === "function.deleted"
     ) {
       loadList();
@@ -258,54 +265,31 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
   const closeDetail = () => {
     setSelectedId(null);
     setDetail(null);
+    setVersions([]);
     setInvocations([]);
   };
 
-  const handleToggleStatus = async () => {
-    if (!detail) return;
-    const next: Status = detail.status === "active" ? "disabled" : "active";
-    try {
-      await api("PATCH", `/functions/${detail.id}`, { status: next });
-      await loadDetail(detail.id);
-      await loadList();
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  };
+  const refreshDetail = useCallback(async () => {
+    if (selectedId) await loadDetail(selectedId);
+    await loadList();
+  }, [selectedId, loadDetail, loadList]);
 
-  const handleDelete = async () => {
-    if (!detail) return;
-    try {
-      await api("DELETE", `/functions/${detail.id}`);
-      closeDetail();
-      await loadList();
-    } catch (e) {
-      setError("Delete failed: " + (e as Error).message);
-    }
+  const activeVersionNo = (f: FunctionRow): string => {
+    const v = versions.find((x) => x.id === f.active_version_id);
+    return v ? `v${v.version}` : f.active_version_id ? "…" : "—";
   };
 
   return (
     <div className="h-full flex flex-col">
-      {/* Header */}
       <header className="px-6 py-3 border-b border-border flex items-center gap-3">
         <h1 className="text-text font-medium">Functions</h1>
         <span className="text-text-dim text-xs">
           {functions.length} function{functions.length !== 1 ? "s" : ""}
         </span>
         <select
-          value={runtimeFilter}
-          onChange={(e) => setRuntimeFilter(e.target.value as Runtime | "")}
-          className="bg-bg-input border border-border rounded px-2 py-1 text-sm ml-4"
-        >
-          <option value="">all runtimes</option>
-          {RUNTIMES.map((r) => (
-            <option key={r} value={r}>{r}</option>
-          ))}
-        </select>
-        <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value as Status | "")}
-          className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+          className="bg-bg-input border border-border rounded px-2 py-1 text-sm ml-4"
         >
           <option value="">all statuses</option>
           <option value="active">active</option>
@@ -323,18 +307,15 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
         >+ New function</button>
       </header>
 
-      {/* List */}
       <main className="flex-1 overflow-auto">
         {error ? (
           <div className="p-6 text-red text-sm">{error}</div>
         ) : functions.length === 0 ? (
           <div className="py-12 px-6 text-center text-text-muted text-sm">
             No functions yet.{" "}
-            <button
-              type="button"
-              onClick={() => setCreating(true)}
-              className="text-accent"
-            >Create one</button>
+            <button type="button" onClick={() => setCreating(true)} className="text-accent">
+              Create one
+            </button>
             .
           </div>
         ) : (
@@ -343,10 +324,9 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
               <tr>
                 <th className="text-left px-4 py-2 font-normal">Name</th>
                 <th className="text-left px-4 py-2 font-normal w-24">Runtime</th>
-                <th className="text-left px-4 py-2 font-normal w-28">Source</th>
                 <th className="text-left px-4 py-2 font-normal w-24">Status</th>
                 <th className="text-left px-4 py-2 font-normal w-24">Timeout</th>
-                <th className="text-left px-4 py-2 font-normal w-40">Endpoint</th>
+                <th className="text-left px-4 py-2 font-normal w-44">Endpoint</th>
               </tr>
             </thead>
             <tbody>
@@ -358,7 +338,6 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
                 >
                   <td className="px-4 py-2 text-text font-medium truncate max-w-md">{f.name}</td>
                   <td className="px-4 py-2 text-text-muted font-mono text-xs">{f.runtime}</td>
-                  <td className="px-4 py-2 text-text-muted">{f.source_kind}</td>
                   <td className="px-4 py-2">
                     <span className={`text-[10px] px-1.5 py-0.5 rounded ${fnStatusTone(f.status)}`}>
                       {f.status}
@@ -373,7 +352,6 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
         )}
       </main>
 
-      {/* Create dialog */}
       {creating && (
         <CreateFunctionDialog
           onClose={() => setCreating(false)}
@@ -385,15 +363,15 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
         />
       )}
 
-      {/* Detail dialog */}
       {detail && (
         <DetailDialog
           fn={detail}
+          versions={versions}
           invocations={invocations}
+          api={api}
+          activeVersionNo={activeVersionNo(detail)}
           onClose={closeDetail}
-          onToggleStatus={handleToggleStatus}
-          onDelete={handleDelete}
-          onInvoked={() => loadDetail(detail.id)}
+          onChanged={refreshDetail}
           withParams={withParams}
         />
       )}
@@ -402,28 +380,55 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
 }
 
 // ─── Detail dialog ────────────────────────────────────────────────────
-// Modal showing one function's metadata, source, env, an inline invoke
-// console, and the recent-invocations table.
 
 function DetailDialog({
-  fn, invocations, onClose, onToggleStatus, onDelete, onInvoked, withParams,
+  fn, versions, invocations, api, activeVersionNo, onClose, onChanged, withParams,
 }: {
   fn: FunctionRow;
+  versions: Version[];
   invocations: Invocation[];
+  api: ApiFn;
+  activeVersionNo: string;
   onClose: () => void;
-  onToggleStatus: () => void | Promise<void>;
-  onDelete: () => void | Promise<void>;
-  onInvoked: () => void | Promise<void>;
+  onChanged: () => void | Promise<void>;
   withParams: (extra?: Record<string, string>) => string;
 }) {
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [deploying, setDeploying] = useState(false);
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [busy, setBusy] = useState("");
 
-  const handleConfirmDelete = async () => {
+  const handleToggleStatus = async () => {
+    const next: Status = fn.status === "active" ? "disabled" : "active";
+    try {
+      await api("PATCH", `/functions/${fn.id}`, { status: next });
+      await onChanged();
+    } catch (e) {
+      setBusy("status: " + (e as Error).message);
+    }
+  };
+
+  const handleDelete = async () => {
     setDeleting(true);
-    try { await onDelete(); }
-    finally { setDeleting(false); setConfirming(false); }
+    try {
+      await api("DELETE", `/functions/${fn.id}`);
+      onClose();
+    } catch (e) {
+      setBusy("delete: " + (e as Error).message);
+    } finally {
+      setDeleting(false);
+      setConfirming(false);
+    }
+  };
+
+  const handleRollback = async (version: number) => {
+    try {
+      await api("POST", `/functions/${fn.id}/rollback`, { version });
+      await onChanged();
+    } catch (e) {
+      setBusy(`rollback to v${version}: ` + (e as Error).message);
+    }
   };
 
   return (
@@ -443,13 +448,12 @@ function DetailDialog({
               <span className="text-[11px] px-2 py-0.5 rounded bg-border text-text-muted font-mono">
                 {fn.runtime}
               </span>
+              <span className="text-[11px] px-2 py-0.5 rounded bg-accent/15 text-accent font-mono">
+                {activeVersionNo} active
+              </span>
             </div>
             <p className="text-text-muted text-sm">
-              {fn.source_kind === "inline"
-                ? "inline source"
-                : `repo #${fn.repo_id} · ${fn.repo_path}`}
-              {" · "}timeout {(fn.timeout_ms / 1000).toFixed(0)}s
-              {" · "}mem {fn.max_memory_mb}MB
+              timeout {(fn.timeout_ms / 1000).toFixed(0)}s · mem {fn.max_memory_mb}MB
             </p>
             <p className="text-text-dim text-xs mt-1 font-mono">
               POST /api/apps/functions/fn/{fn.name}
@@ -458,43 +462,80 @@ function DetailDialog({
           <button onClick={onClose} className="text-text-muted hover:text-text text-xl leading-none">×</button>
         </header>
 
-        {/* Invoke console */}
-        <InvokeConsole fn={fn} withParams={withParams} onInvoked={onInvoked} />
+        {busy && <div className="text-red text-xs">{busy}</div>}
 
-        {/* Source */}
-        {fn.source_kind === "inline" && fn.source && (
-          <section>
-            <h3 className="text-xs uppercase tracking-wide text-text-dim mb-2">Source</h3>
-            <pre className="text-[11px] bg-bg-input border border-border rounded p-3 overflow-auto max-h-48 whitespace-pre-wrap font-mono">
-              {fn.source}
-            </pre>
-          </section>
-        )}
+        <InvokeConsole fn={fn} withParams={withParams} onInvoked={onChanged} />
 
-        {/* Env */}
-        {fn.env && Object.keys(fn.env).length > 0 && (
-          <section>
-            <h3 className="text-xs uppercase tracking-wide text-text-dim mb-2">Environment</h3>
-            <div className="flex flex-wrap gap-1">
-              {Object.keys(fn.env).map((k) => (
-                <span key={k} className="text-[11px] px-1.5 py-0.5 rounded bg-bg-input border border-border font-mono">
-                  {k}
-                </span>
-              ))}
-            </div>
-          </section>
-        )}
+        {/* Versions */}
+        <section>
+          <div className="flex items-center gap-2 mb-2">
+            <h3 className="text-xs uppercase tracking-wide text-text-dim">
+              Versions ({versions.length})
+            </h3>
+            <button
+              type="button"
+              onClick={() => setDeploying(true)}
+              className="ml-auto px-2 py-0.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+            >Deploy new version</button>
+          </div>
+          {versions.length === 0 ? (
+            <p className="text-text-muted text-sm">No versions.</p>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="text-text-dim text-xs uppercase tracking-wide bg-bg-input/50">
+                <tr>
+                  <th className="text-left px-3 py-2 font-normal w-20">Version</th>
+                  <th className="text-left px-3 py-2 font-normal w-24">Build</th>
+                  <th className="text-left px-3 py-2 font-normal w-20">Deps</th>
+                  <th className="text-left px-3 py-2 font-normal">Deployed</th>
+                  <th className="text-left px-3 py-2 font-normal w-28"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {versions.map((v) => {
+                  const isActive = v.id === fn.active_version_id;
+                  return (
+                    <tr key={v.id} className="border-t border-border">
+                      <td className="px-3 py-2 text-text font-mono">
+                        v{v.version}
+                        {isActive && <span className="ml-1 text-accent text-[10px]">● active</span>}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded ${buildStatusTone(v.build_status)}`}>
+                          {v.build_status}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-text-muted text-xs">
+                        {v.package_json ? "package.json" : "—"}
+                      </td>
+                      <td className="px-3 py-2 text-text-muted">{relTime(v.created_at)}</td>
+                      <td className="px-3 py-2">
+                        {!isActive && v.build_status === "ready" && (
+                          <button
+                            type="button"
+                            onClick={() => handleRollback(v.version)}
+                            className="px-2 py-0.5 text-xs border border-border text-text-muted rounded hover:bg-bg-input"
+                          >Activate</button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </section>
 
         {/* Actions */}
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={onToggleStatus}
+            onClick={handleToggleStatus}
             className="px-3 py-1 text-sm border border-border text-text-muted rounded hover:bg-bg-input"
           >{fn.status === "active" ? "Disable" : "Enable"}</button>
           {confirming ? (
             <div className="ml-auto flex items-center gap-2">
-              <span className="text-text-muted text-xs">Delete this function and all its invocations?</span>
+              <span className="text-text-muted text-xs">Delete this function, all its versions + invocations?</span>
               <button
                 type="button"
                 onClick={() => setConfirming(false)}
@@ -503,7 +544,7 @@ function DetailDialog({
               >Keep</button>
               <button
                 type="button"
-                onClick={handleConfirmDelete}
+                onClick={handleDelete}
                 disabled={deleting}
                 className="px-3 py-1 text-sm bg-red text-white rounded font-bold disabled:opacity-50"
               >{deleting ? "Deleting…" : "Yes, delete"}</button>
@@ -569,6 +610,18 @@ function DetailDialog({
             </table>
           )}
         </section>
+
+        {deploying && (
+          <DeployDialog
+            fn={fn}
+            api={api}
+            onClose={() => setDeploying(false)}
+            onDeployed={async () => {
+              setDeploying(false);
+              await onChanged();
+            }}
+          />
+        )}
       </div>
     </div>
   );
@@ -585,27 +638,22 @@ function InvocationDetail({ inv }: { inv: Invocation }) {
       )}
       {inv.response_body && (
         <div>
-          <div className="text-[10px] uppercase tracking-wide text-text-dim mb-1">stdout</div>
+          <div className="text-[10px] uppercase tracking-wide text-text-dim mb-1">Return value</div>
           <pre className="text-[11px] bg-bg border border-border rounded p-2 overflow-auto max-h-32 whitespace-pre-wrap font-mono">{inv.response_body}</pre>
         </div>
       )}
       {inv.stderr && (
         <div>
-          <div className="text-[10px] uppercase tracking-wide text-text-dim mb-1">stderr</div>
-          <pre className="text-[11px] bg-bg border border-border rounded p-2 overflow-auto max-h-32 whitespace-pre-wrap font-mono text-red">{inv.stderr}</pre>
+          <div className="text-[10px] uppercase tracking-wide text-text-dim mb-1">Console output</div>
+          <pre className="text-[11px] bg-bg border border-border rounded p-2 overflow-auto max-h-32 whitespace-pre-wrap font-mono text-text-muted">{inv.stderr}</pre>
         </div>
       )}
-      {inv.error && (
-        <div className="text-red text-xs">error: {inv.error}</div>
-      )}
+      {inv.error && <div className="text-red text-xs">error: {inv.error}</div>}
     </div>
   );
 }
 
 // ─── Invoke console ───────────────────────────────────────────────────
-// Inline, in the detail dialog. Posts the event JSON straight to
-// /functions/<id>/invoke; the response body is the function's stdout,
-// and X-Apteva-Function-Status carries ok / error / timeout.
 
 function InvokeConsole({
   fn, withParams, onInvoked,
@@ -616,11 +664,7 @@ function InvokeConsole({
 }) {
   const [eventText, setEventText] = useState("{}");
   const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<{
-    status: string;
-    body: string;
-    invocationId: string;
-  } | null>(null);
+  const [result, setResult] = useState<{ status: string; body: string; invocationId: string } | null>(null);
   const [err, setErr] = useState("");
 
   const run = async () => {
@@ -707,12 +751,22 @@ function InvokeConsole({
   );
 }
 
-// ─── Create-function dialog ───────────────────────────────────────────
-// Posts to /functions with the schema buildAndCreateFunction expects:
-// { name, runtime, source_kind, source | repo_id+repo_path, env?,
-//   timeout_ms?, max_memory_mb? }.
+// ─── Create / Deploy dialogs ──────────────────────────────────────────
 
-type ApiFn = <T,>(method: string, path: string, body?: unknown, extra?: Record<string, string>) => Promise<T>;
+function envLinesToMap(envText: string): Record<string, string> | string {
+  const env: Record<string, string> = {};
+  for (const line of envText.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    const eq = t.indexOf("=");
+    if (eq < 1) return `Bad env line (want KEY=value): ${t}`;
+    env[t.slice(0, eq).trim()] = t.slice(eq + 1);
+  }
+  return env;
+}
+
+const inputCls = "w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm";
+const labelCls = "text-xs uppercase tracking-wide text-text-dim";
 
 function CreateFunctionDialog({
   onClose, onCreated, api,
@@ -722,24 +776,13 @@ function CreateFunctionDialog({
   api: ApiFn;
 }) {
   const [name, setName] = useState("");
-  const [runtime, setRuntime] = useState<Runtime>("bun");
-  const [sourceKind, setSourceKind] = useState<"inline" | "repo">("inline");
-  const [source, setSource] = useState(RUNTIME_SAMPLE.bun);
-  const [touchedSource, setTouchedSource] = useState(false);
-  const [repoId, setRepoId] = useState("");
-  const [repoPath, setRepoPath] = useState("");
+  const [source, setSource] = useState(SAMPLE_HANDLER);
+  const [packageJSON, setPackageJSON] = useState("");
   const [envText, setEnvText] = useState("");
   const [timeoutSec, setTimeoutSec] = useState("30");
   const [maxMemoryMb, setMaxMemoryMb] = useState("256");
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState("");
-
-  // Swap the inline sample to match the chosen runtime — but only
-  // while the author hasn't typed their own body yet.
-  const pickRuntime = (r: Runtime) => {
-    setRuntime(r);
-    if (!touchedSource) setSource(RUNTIME_SAMPLE[r]);
-  };
 
   const submit = async () => {
     setErr("");
@@ -748,36 +791,20 @@ function CreateFunctionDialog({
       setErr("Name must be a lowercase slug: [a-z0-9][a-z0-9-]{0,62}.");
       return;
     }
+    if (!source.trim()) { setErr("Handler source is required."); return; }
 
     const body: Record<string, unknown> = {
       name: name.trim(),
-      runtime,
-      source_kind: sourceKind,
+      runtime: "node",
+      source_kind: "inline",
+      source,
     };
-
-    if (sourceKind === "inline") {
-      if (!source.trim()) { setErr("Source body is required for an inline function."); return; }
-      body.source = source;
-    } else {
-      const rid = Number(repoId);
-      if (!Number.isInteger(rid) || rid <= 0) { setErr("Repo id must be a positive integer."); return; }
-      if (!repoPath.trim()) { setErr("Repo path is required for a repo function."); return; }
-      body.repo_id = rid;
-      body.repo_path = repoPath.trim();
-    }
-
+    if (packageJSON.trim()) body.package_json = packageJSON;
     if (envText.trim()) {
-      const env: Record<string, string> = {};
-      for (const line of envText.split("\n")) {
-        const t = line.trim();
-        if (!t) continue;
-        const eq = t.indexOf("=");
-        if (eq < 1) { setErr(`Bad env line (want KEY=value): ${t}`); return; }
-        env[t.slice(0, eq).trim()] = t.slice(eq + 1);
-      }
+      const env = envLinesToMap(envText);
+      if (typeof env === "string") { setErr(env); return; }
       body.env = env;
     }
-
     const tSec = Number(timeoutSec);
     if (Number.isFinite(tSec) && tSec > 0) body.timeout_ms = Math.round(tSec * 1000);
     const mem = Number(maxMemoryMb);
@@ -793,9 +820,6 @@ function CreateFunctionDialog({
       setSubmitting(false);
     }
   };
-
-  const inputCls = "w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm";
-  const labelCls = "text-xs uppercase tracking-wide text-text-dim";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
@@ -822,66 +846,24 @@ function CreateFunctionDialog({
         </div>
 
         <div className="flex flex-col gap-1">
-          <label className={labelCls}>Runtime</label>
-          <div className="flex gap-1">
-            {RUNTIMES.map((r) => (
-              <button
-                key={r}
-                type="button"
-                onClick={() => pickRuntime(r)}
-                className={`flex-1 px-2 py-1 text-xs border rounded font-mono ${
-                  runtime === r
-                    ? "border-accent text-accent bg-accent/10"
-                    : "border-border text-text-muted hover:bg-bg-input"
-                }`}
-              >{r}</button>
-            ))}
-          </div>
-          <p className="text-text-dim text-[11px] mt-0.5">{RUNTIME_HINT[runtime]}</p>
+          <label className={labelCls}>Handler (node) — export default async (event, context) =&gt; result</label>
+          <textarea
+            value={source}
+            onChange={(e) => setSource(e.target.value)}
+            spellCheck={false}
+            className={inputCls + " font-mono min-h-[160px]"}
+          />
         </div>
 
         <div className="flex flex-col gap-1">
-          <label className={labelCls}>Source</label>
-          <div className="flex gap-1">
-            {(["inline", "repo"] as const).map((k) => (
-              <button
-                key={k}
-                type="button"
-                onClick={() => setSourceKind(k)}
-                className={`flex-1 px-2 py-1 text-xs border rounded ${
-                  sourceKind === k
-                    ? "border-accent text-accent bg-accent/10"
-                    : "border-border text-text-muted hover:bg-bg-input"
-                }`}
-              >{k}</button>
-            ))}
-          </div>
-          {sourceKind === "inline" ? (
-            <textarea
-              value={source}
-              onChange={(e) => { setSource(e.target.value); setTouchedSource(true); }}
-              spellCheck={false}
-              className={inputCls + " mt-1 font-mono min-h-[140px]"}
-            />
-          ) : (
-            <div className="flex gap-2 mt-1">
-              <input
-                type="number"
-                min="1"
-                value={repoId}
-                onChange={(e) => setRepoId(e.target.value)}
-                placeholder="repo id"
-                className="w-28 bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
-              />
-              <input
-                type="text"
-                value={repoPath}
-                onChange={(e) => setRepoPath(e.target.value)}
-                placeholder="entry file path within the repo"
-                className="flex-1 min-w-0 bg-bg-input border border-border rounded px-2 py-1.5 text-sm font-mono"
-              />
-            </div>
-          )}
+          <label className={labelCls}>package.json (optional — deps installed at deploy)</label>
+          <textarea
+            value={packageJSON}
+            onChange={(e) => setPackageJSON(e.target.value)}
+            spellCheck={false}
+            placeholder='{"dependencies":{"ky":"^1.0.0"}}'
+            className={inputCls + " font-mono min-h-[48px]"}
+          />
         </div>
 
         <div className="flex flex-col gap-1">
@@ -898,42 +880,104 @@ function CreateFunctionDialog({
         <div className="flex gap-2">
           <div className="flex flex-col gap-1 flex-1">
             <label className={labelCls}>Timeout (seconds)</label>
-            <input
-              type="number"
-              min="1"
-              max="300"
-              value={timeoutSec}
-              onChange={(e) => setTimeoutSec(e.target.value)}
-              className={inputCls}
-            />
+            <input type="number" min="1" max="300" value={timeoutSec}
+              onChange={(e) => setTimeoutSec(e.target.value)} className={inputCls} />
           </div>
           <div className="flex flex-col gap-1 flex-1">
             <label className={labelCls}>Max memory (MB)</label>
-            <input
-              type="number"
-              min="1"
-              max="1024"
-              value={maxMemoryMb}
-              onChange={(e) => setMaxMemoryMb(e.target.value)}
-              className={inputCls}
-            />
+            <input type="number" min="1" max="1024" value={maxMemoryMb}
+              onChange={(e) => setMaxMemoryMb(e.target.value)} className={inputCls} />
           </div>
         </div>
 
         {err && <div className="text-red text-xs">{err}</div>}
 
         <div className="flex gap-2 justify-end mt-1">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-3 py-1.5 text-sm text-text-muted"
-          >Cancel</button>
+          <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted">Cancel</button>
           <button
             type="button"
             onClick={submit}
             disabled={submitting || !name.trim()}
             className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
-          >{submitting ? "Creating…" : "Create"}</button>
+          >{submitting ? "Deploying…" : "Create + deploy v1"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeployDialog({
+  fn, api, onClose, onDeployed,
+}: {
+  fn: FunctionRow;
+  api: ApiFn;
+  onClose: () => void;
+  onDeployed: () => void;
+}) {
+  const [source, setSource] = useState(fn.source ?? SAMPLE_HANDLER);
+  const [packageJSON, setPackageJSON] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async () => {
+    setErr("");
+    if (!source.trim()) { setErr("Handler source is required."); return; }
+    const body: Record<string, unknown> = { source_kind: "inline", source };
+    if (packageJSON.trim()) body.package_json = packageJSON;
+    setSubmitting(true);
+    try {
+      await api("POST", `/functions/${fn.id}/deploy`, body);
+      onDeployed();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center" onClick={onClose}>
+      <div className="absolute inset-0 bg-bg/80 backdrop-blur-sm" />
+      <div
+        className="relative bg-bg-card border border-border rounded-lg shadow-lg max-w-2xl w-full mx-4 overflow-auto flex flex-col max-h-[90vh] p-4 gap-3"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <div className="text-text font-medium">Deploy new version of {fn.name}</div>
+          <button onClick={onClose} className="text-text-muted hover:text-text">×</button>
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <label className={labelCls}>Handler source</label>
+          <textarea
+            value={source}
+            onChange={(e) => setSource(e.target.value)}
+            spellCheck={false}
+            className={inputCls + " font-mono min-h-[200px]"}
+          />
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <label className={labelCls}>package.json (optional — deps installed at deploy)</label>
+          <textarea
+            value={packageJSON}
+            onChange={(e) => setPackageJSON(e.target.value)}
+            spellCheck={false}
+            placeholder='{"dependencies":{}}'
+            className={inputCls + " font-mono min-h-[48px]"}
+          />
+        </div>
+
+        {err && <div className="text-red text-xs">{err}</div>}
+
+        <div className="flex gap-2 justify-end mt-1">
+          <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted">Cancel</button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={submitting}
+            className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+          >{submitting ? "Building…" : "Build + activate"}</button>
         </div>
       </div>
     </div>

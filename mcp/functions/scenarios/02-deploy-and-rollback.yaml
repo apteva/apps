@@ -1,0 +1,46 @@
+name: deploy-and-rollback
+description: |
+  Agent creates a function, deploys a second version, then rolls back
+  to v1 — exercising the immutable-version lifecycle (create → deploy
+  → rollback) in a single session with a real LLM.
+
+timeout: 90s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Three steps using the functions app — call the tools by their exact
+  names.
+
+  Step 1: functions_create with these args:
+    name:    "greeter"
+    runtime: "node"
+    source:  "export default async () => ({ v: 1 });"
+
+  Step 2: functions_deploy with:
+    name:    "greeter"
+    source:  "export default async () => ({ v: 2 });"
+
+  Step 3: functions_rollback with:
+    name:    "greeter"
+    version: 1
+
+  Then stop.
+
+assert:
+  - tool_called: functions_create
+  - tool_called: functions_deploy
+  - tool_called: functions_rollback
+  - http: GET /api/apps/functions/functions/1/versions
+    expect_status: 200
+    expect_count_at: versions
+    expect_count: 2
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 16000
+  cost_usd: 0.25

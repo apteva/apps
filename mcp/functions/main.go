@@ -1,10 +1,11 @@
-// Functions v0.1 — Lambda-style serverless functions.
+// Functions v1.0 — Lambda-style serverless functions.
 //
-// One sidecar; each function defined here gets an auto-routed HTTP
-// endpoint at /fn/<name>. The dispatcher spawns the configured
-// runtime per invocation with stdin = event JSON, captures stdout
-// as the response, kills on timeout. No long-running processes; no
-// build step beyond writing the source to a temp dir.
+// A function is an immutable, built version (functions_deploy) served
+// by a pool of warm worker processes (pool.go / worker.go). The
+// runtime boots once, imports the handler module, then serves
+// invocations over a socketpair — no per-request process spawn.
+// Handlers export `default async (event, context) => result`;
+// context.call reaches other Apteva apps through the sidecar.
 //
 // Triggers:
 //   - HTTP   — POST /fn/<name> (auto-routed, gateway-reachable).
@@ -12,12 +13,14 @@
 //              target={kind:http, app:"functions", path:"/fn/<name>"}.
 //   - Manual — functions_invoke MCP tool.
 //
-// No deploy integration in v0.1; functions never become long-running
-// supervised releases. If you need that, use the deploy app.
+// Deferred post-v1.0: the python runtime, max_memory_mb enforcement,
+// and a per-function context.call allowlist.
 package main
 
 import (
+	_ "embed"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 
@@ -25,18 +28,25 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// nodeHarness is the JS worker harness — serves both the node and bun
+// runtimes. Embedded so the running binary is self-contained; the
+// worker pool stages it to disk at OnMount.
+//
+//go:embed harness/node.mjs
+var nodeHarness []byte
+
 // ─── Manifest (also lives in apteva.yaml; embedded so the running
 // binary is self-describing). ─────────────────────────────────────
 
 const manifestYAML = `schema: apteva-app/v1
 name: functions
 display_name: Functions
-version: 0.2.0
+version: 1.0.0
 description: |
-  Lambda-style serverless functions. Each function gets an
-  auto-routed HTTP endpoint at /fn/<name>; the dispatcher spawns
-  the runtime per invocation with stdin=event JSON, captures
-  stdout as response, kills on timeout.
+  Lambda-style serverless functions. Each function is an immutable,
+  built version served by a pool of warm worker processes; handlers
+  export an (event, context) handler and reach other apps via
+  context.call. Auto-routed HTTP endpoint at /fn/<name>.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -48,21 +58,27 @@ provides:
     - prefix: /
   mcp_tools:
     - name: functions_create
-      description: Create a function with an inline source body or a code-app repo path.
+      description: Create a function and deploy its first version.
     - name: functions_update
-      description: Update a function's source, env, or limits.
+      description: Update a function's metadata (env, limits, status).
     - name: functions_delete
-      description: Delete a function and all its invocations.
+      description: Delete a function and all its versions + invocations.
     - name: functions_list
       description: List functions in the project.
     - name: functions_get
       description: Fetch one function by id or name.
     - name: functions_invoke
-      description: Synchronously invoke a function with an event payload.
+      description: Synchronously invoke a function's active version.
     - name: functions_invocations
       description: Recent invocations for a function.
     - name: functions_logs
-      description: stdout + stderr of a single invocation.
+      description: Return value + console output of a single invocation.
+    - name: functions_deploy
+      description: Deploy a new immutable version and make it active.
+    - name: functions_rollback
+      description: Make an older built version active again.
+    - name: functions_versions
+      description: List a function's deploy history.
   ui_panels:
     - slot: project.page
       label: Functions
@@ -98,12 +114,23 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("functions requires a db block")
 	}
 	globalCtx = ctx
+	p, err := newPool(ctx)
+	if err != nil {
+		return fmt.Errorf("init worker pool: %w", err)
+	}
+	globalPool = p
 	ctx.Logger().Info("functions mounted",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if globalPool != nil {
+		globalPool.shutdown()
+		globalPool = nil
+	}
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
@@ -126,31 +153,27 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "functions_create",
-			Description: "Create a function. Args: name, runtime (bun|node|python|sh), source (inline) OR (repo_id+repo_path), env?, timeout_ms?, max_memory_mb?.",
+			Description: "Create a function and deploy v1. Args: name, runtime (node), source (inline handler: `export default async (event, context) => result`) OR (repo_id+repo_path), package_json?, env?, timeout_ms?, max_memory_mb?.",
 			InputSchema: schemaObject(map[string]any{
 				"name":          map[string]any{"type": "string"},
-				"runtime":       map[string]any{"type": "string", "enum": []any{"bun", "node", "python", "sh"}},
+				"runtime":       map[string]any{"type": "string", "enum": []any{"node"}},
 				"source_kind":   map[string]any{"type": "string", "enum": []any{"inline", "repo"}},
-				"source":        map[string]any{"type": "string", "description": "Inline source body (when source_kind=inline)."},
+				"source":        map[string]any{"type": "string", "description": "Inline handler module body (when source_kind=inline)."},
 				"repo_id":       map[string]any{"type": "integer", "description": "Code app repo id (when source_kind=repo)."},
 				"repo_path":     map[string]any{"type": "string", "description": "Entry file path within the repo."},
-				"env":           map[string]any{"type": "object", "description": "String map merged into spawn env."},
+				"package_json":  map[string]any{"type": "string", "description": "Optional package.json — dependencies installed once at deploy."},
+				"env":           map[string]any{"type": "object", "description": "String map merged into the worker env."},
 				"timeout_ms":    map[string]any{"type": "integer", "description": "Hard timeout per invocation. Default 30000, max 300000."},
-				"max_memory_mb": map[string]any{"type": "integer", "description": "Soft memory cap. Default 256."},
+				"max_memory_mb": map[string]any{"type": "integer", "description": "Memory cap (MB). Default 256."},
 			}, []string{"name", "runtime"}),
 			Handler: a.toolCreate,
 		},
 		{
 			Name:        "functions_update",
-			Description: "Update a function. Args: id (or name), and any field from create.",
+			Description: "Update a function's metadata: env, timeout_ms, max_memory_mb, status. Source / runtime changes go through functions_deploy. Args: id (or name) + the fields to change.",
 			InputSchema: schemaObject(map[string]any{
 				"id":            map[string]any{"type": "integer"},
 				"name":          map[string]any{"type": "string"},
-				"runtime":       map[string]any{"type": "string"},
-				"source_kind":   map[string]any{"type": "string"},
-				"source":        map[string]any{"type": "string"},
-				"repo_id":       map[string]any{"type": "integer"},
-				"repo_path":     map[string]any{"type": "string"},
 				"env":           map[string]any{"type": "object"},
 				"timeout_ms":    map[string]any{"type": "integer"},
 				"max_memory_mb": map[string]any{"type": "integer"},
@@ -188,11 +211,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "functions_invoke",
-			Description: "Synchronously invoke a function. Args: id (or name), event (any JSON; passed via stdin).",
+			Description: "Synchronously invoke a function's active version. Args: id (or name), event (any JSON; passed to the handler).",
 			InputSchema: schemaObject(map[string]any{
 				"id":    map[string]any{"type": "integer"},
 				"name":  map[string]any{"type": "string"},
-				"event": map[string]any{"description": "JSON payload passed to the function via stdin."},
+				"event": map[string]any{"description": "JSON payload passed to the handler as its first argument."},
 			}, nil),
 			Handler: a.toolInvoke,
 		},
@@ -208,11 +231,45 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "functions_logs",
-			Description: "stdout + stderr of one invocation. Args: invocation_id.",
+			Description: "Return value + captured console output of one invocation. Args: invocation_id.",
 			InputSchema: schemaObject(map[string]any{
 				"invocation_id": map[string]any{"type": "integer"},
 			}, []string{"invocation_id"}),
 			Handler: a.toolLogs,
+		},
+		{
+			Name:        "functions_deploy",
+			Description: "Deploy a new immutable version of a function and make it active. Args: id (or name), source OR (repo_id+repo_path), source_kind?, package_json?.",
+			InputSchema: schemaObject(map[string]any{
+				"id":           map[string]any{"type": "integer"},
+				"name":         map[string]any{"type": "string"},
+				"source":       map[string]any{"type": "string"},
+				"source_kind":  map[string]any{"type": "string", "enum": []any{"inline", "repo"}},
+				"repo_id":      map[string]any{"type": "integer"},
+				"repo_path":    map[string]any{"type": "string"},
+				"package_json": map[string]any{"type": "string", "description": "Optional package.json — dependencies installed once at deploy."},
+			}, nil),
+			Handler: a.toolDeploy,
+		},
+		{
+			Name:        "functions_rollback",
+			Description: "Make an older, already-built version active again. Args: id (or name), version (the version number to roll back to).",
+			InputSchema: schemaObject(map[string]any{
+				"id":      map[string]any{"type": "integer"},
+				"name":    map[string]any{"type": "string"},
+				"version": map[string]any{"type": "integer"},
+			}, []string{"version"}),
+			Handler: a.toolRollback,
+		},
+		{
+			Name:        "functions_versions",
+			Description: "List a function's deploy history. Args: id (or name), limit (default 50, max 100).",
+			InputSchema: schemaObject(map[string]any{
+				"id":    map[string]any{"type": "integer"},
+				"name":  map[string]any{"type": "string"},
+				"limit": map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolVersions,
 		},
 	}
 }

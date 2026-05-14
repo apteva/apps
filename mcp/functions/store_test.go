@@ -17,7 +17,7 @@ func TestCreateAndGet(t *testing.T) {
 	src := []byte("console.log(JSON.stringify({hello:'world'}))")
 	fn, err := dbCreateFunction(db, testProj, &Function{
 		Name:       "hello",
-		Runtime:    "bun",
+		Runtime:    "node",
 		SourceKind: "inline",
 		Source:     string(src),
 		SourceHash: hashSource(src),
@@ -55,7 +55,7 @@ func TestNameValidation(t *testing.T) {
 	bad := []string{"", "Has-Caps", "starts/with/slash", "has spaces", "x", strRepeat("x", 64)}
 	for _, name := range bad {
 		_, err := dbCreateFunction(ctx.AppDB(), testProj, &Function{
-			Name: name, Runtime: "bun",
+			Name: name, Runtime: "node",
 			SourceKind: "inline", Source: "echo", SourceHash: "abc",
 		})
 		if err == nil && name != "x" { // single-char name is actually allowed by the regex
@@ -81,7 +81,7 @@ func TestRuntimeValidation(t *testing.T) {
 func TestProjectPartition(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("a"))
 	_, err := dbCreateFunction(ctx.AppDB(), "a", &Function{
-		Name: "fn", Runtime: "bun",
+		Name: "fn", Runtime: "node",
 		SourceKind: "inline", Source: "x", SourceHash: "h",
 	})
 	if err != nil {
@@ -103,7 +103,7 @@ func TestUpdateRehashesOnSourceChange(t *testing.T) {
 	db := ctx.AppDB()
 
 	fn, err := dbCreateFunction(db, testProj, &Function{
-		Name: "u", Runtime: "bun",
+		Name: "u", Runtime: "node",
 		SourceKind: "inline", Source: "v1", SourceHash: hashSource([]byte("v1")),
 	})
 	if err != nil {
@@ -131,7 +131,7 @@ func TestInvocationsRoundtrip(t *testing.T) {
 	db := ctx.AppDB()
 
 	fn, err := dbCreateFunction(db, testProj, &Function{
-		Name: "i", Runtime: "bun",
+		Name: "i", Runtime: "node",
 		SourceKind: "inline", Source: "x", SourceHash: "h",
 	})
 	if err != nil {

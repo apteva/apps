@@ -1,9 +1,9 @@
 name: create-and-invoke
 description: |
-  Agent creates an inline bun function and invokes it once, verifying
-  the create + synchronous-invoke path end-to-end with a real LLM.
-  The function just echoes a field from its event, so the assertion
-  can stay on observable side-effects (tools called, REST count).
+  Agent creates a node function (which deploys v1) and invokes it
+  once. Verifies the create + build + warm-invoke path end-to-end with
+  a real LLM. The handler just echoes a field from its event, so the
+  assertion can stay on observable side-effects.
 
 timeout: 90s
 max_iterations: 8
@@ -19,8 +19,8 @@ directive: |
 
   Step 1: functions_create with these args:
     name:    "hello-world"
-    runtime: "bun"
-    source:  "const e = await Bun.stdin.json(); console.log(JSON.stringify({ hello: e?.name ?? 'world' }));"
+    runtime: "node"
+    source:  "export default async (event) => ({ hello: event?.name ?? 'world' });"
 
   Step 2: functions_invoke with:
     name:  "hello-world"

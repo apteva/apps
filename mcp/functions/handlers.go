@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -74,6 +75,27 @@ func (a *App) handleHTTPFunctionItem(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			a.handleHTTPInvokeByID(w, r, id)
+			return
+		case "versions":
+			if r.Method != http.MethodGet {
+				httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			a.handleHTTPFunctionVersions(w, r, id)
+			return
+		case "deploy":
+			if r.Method != http.MethodPost {
+				httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			a.handleHTTPDeployFunction(w, r, id)
+			return
+		case "rollback":
+			if r.Method != http.MethodPost {
+				httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			a.handleHTTPRollbackFunction(w, r, id)
 			return
 		}
 		httpErr(w, http.StatusNotFound, "not found")
@@ -159,12 +181,74 @@ func (a *App) handleHTTPUpdateFunction(w http.ResponseWriter, r *http.Request, i
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	fn, err := updateAndRehashFunction(globalCtx, pid, id, patch)
+	fn, err := updateFunctionMeta(globalCtx, pid, id, patch)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	httpJSON(w, map[string]any{"function": fn})
+}
+
+// handleHTTPDeployFunction builds a new version and makes it active.
+func (a *App) handleHTTPDeployFunction(w http.ResponseWriter, r *http.Request, id int64) {
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	fn, ver, err := deployFromArgs(globalCtx, pid, id, body)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"function": fn, "version": ver})
+}
+
+// handleHTTPRollbackFunction repoints the active version at an older one.
+func (a *App) handleHTTPRollbackFunction(w http.ResponseWriter, r *http.Request, id int64) {
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	version := intArg(body, "version", 0)
+	if version <= 0 {
+		httpErr(w, http.StatusBadRequest, "version (positive integer) required")
+		return
+	}
+	ver, err := rollbackFunction(globalCtx, pid, id, version)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	fn, _ := dbGetFunction(globalCtx.AppDB(), pid, id, "")
+	httpJSON(w, map[string]any{"function": fn, "version": ver})
+}
+
+// handleHTTPFunctionVersions lists a function's deploy history.
+func (a *App) handleHTTPFunctionVersions(w http.ResponseWriter, r *http.Request, id int64) {
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	limit := atoiDefault(r.URL.Query().Get("limit"), 50, 100)
+	out, err := dbListVersions(globalCtx.AppDB(), pid, id, limit)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"versions": out})
 }
 
 func (a *App) handleHTTPDeleteFunction(w http.ResponseWriter, r *http.Request, id int64) {
@@ -384,7 +468,7 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	fn, err := updateAndRehashFunction(ctx, pid, id, args)
+	fn, err := updateFunctionMeta(ctx, pid, id, args)
 	if err != nil {
 		return nil, err
 	}
@@ -392,6 +476,69 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		ctx.Emit("function.updated", map[string]any{"id": fn.ID, "name": fn.Name})
 	}
 	return map[string]any{"function": fn}, nil
+}
+
+// toolDeploy builds a new version of an existing function and makes
+// it active.
+func (a *App) toolDeploy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	id, err := resolveFunctionID(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	fn, ver, err := deployFromArgs(ctx, pid, id, args)
+	if err != nil {
+		return nil, err
+	}
+	if ctx != nil {
+		ctx.Emit("function.deployed", map[string]any{"id": id, "name": fn.Name, "version": ver.Version})
+	}
+	return map[string]any{"function": fn, "version": ver}, nil
+}
+
+// toolRollback repoints a function's active version at an older one.
+func (a *App) toolRollback(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	id, err := resolveFunctionID(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	version := intArg(args, "version", 0)
+	if version <= 0 {
+		return nil, errors.New("version (positive integer) required")
+	}
+	ver, err := rollbackFunction(ctx, pid, id, version)
+	if err != nil {
+		return nil, err
+	}
+	if ctx != nil {
+		ctx.Emit("function.deployed", map[string]any{"id": id, "version": ver.Version, "rollback": true})
+	}
+	fn, _ := dbGetFunction(dbFor(ctx), pid, id, "")
+	return map[string]any{"function": fn, "version": ver}, nil
+}
+
+// toolVersions lists a function's deploy history.
+func (a *App) toolVersions(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	id, err := resolveFunctionID(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	out, err := dbListVersions(dbFor(ctx), pid, id, intArg(args, "limit", 50))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"versions": out}, nil
 }
 
 func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -521,13 +668,14 @@ func (a *App) toolLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}, nil
 }
 
-// ─── Shared create / update plumbing ───────────────────────────────
+// ─── Shared create / update / deploy plumbing ──────────────────────
 //
 // Both HTTP POST /functions and the MCP functions_create tool funnel
-// through buildAndCreateFunction so the (a) field-coercion and
-// (b) source-resolution rules stay in one place. Same idea for
-// updates.
+// through buildAndCreateFunction; deploy + rollback live in deploy.go.
 
+// buildAndCreateFunction inserts the function definition row, then
+// deploys v1 (which builds it and makes it active). A failed first
+// build rolls the bare row back so no unrunnable function lingers.
 func buildAndCreateFunction(ctx *sdk.AppCtx, pid string, args map[string]any) (*Function, error) {
 	fn := &Function{
 		ProjectID:   pid,
@@ -551,55 +699,44 @@ func buildAndCreateFunction(ctx *sdk.AppCtx, pid string, args map[string]any) (*
 		}
 	}
 	if fn.SourceKind == "" {
-		// Imply source_kind from the fields the caller actually
-		// supplied. Keeps "create with just source" ergonomic for
-		// the inline-only path.
+		// Imply source_kind from the fields the caller supplied.
 		if fn.Source != "" {
 			fn.SourceKind = "inline"
 		} else if fn.RepoID != nil {
 			fn.SourceKind = "repo"
 		}
 	}
+	// Stamp a hash for the bare row; deployVersion overwrites the
+	// denormalised source columns once v1 is resolved + built.
+	if fn.SourceKind == "inline" {
+		fn.SourceHash = hashSource([]byte(fn.Source))
+	} else {
+		fn.SourceHash = "pending"
+	}
 
-	bytes, err := preCreateResolveSource(ctx, fn)
+	created, err := dbCreateFunction(dbFor(ctx), pid, fn)
 	if err != nil {
 		return nil, err
 	}
-	fn.SourceHash = hashSource(bytes)
 
-	return dbCreateFunction(dbFor(ctx), pid, fn)
-}
-
-// preCreateResolveSource fetches the source bytes for hashing at
-// create/update time. Inline is the source field itself; repo
-// fetches via the code app. Errors here become 400s — caller passed
-// a bad spec.
-func preCreateResolveSource(ctx *sdk.AppCtx, fn *Function) ([]byte, error) {
-	if fn.SourceKind == "inline" {
-		return []byte(fn.Source), nil
-	}
-	if fn.RepoID == nil || fn.RepoPath == "" {
-		return nil, errors.New("repo_id and repo_path required for repo source")
-	}
-	if ctx == nil || ctx.PlatformAPI() == nil {
-		// Hash a deterministic placeholder so repo functions can be
-		// created in test contexts without a code-app stub. The
-		// first real invocation will surface the missing platform.
-		return []byte("repo://" + fn.RepoPath), nil
-	}
-	var resp struct {
-		Content string `json:"content"`
-	}
-	if err := ctx.PlatformAPI().CallAppResult("code", "code_read_file", map[string]any{
-		"repo_id": *fn.RepoID,
-		"path":    fn.RepoPath,
-	}, &resp); err != nil {
+	if _, err := deployVersion(ctx, created, created.SourceKind, created.Source,
+		created.RepoID, created.RepoPath, strArg(args, "package_json")); err != nil {
+		_ = dbDeleteFunction(dbFor(ctx), pid, created.ID)
 		return nil, err
 	}
-	return []byte(resp.Content), nil
+	return dbGetFunction(dbFor(ctx), pid, created.ID, "")
 }
 
-func updateAndRehashFunction(ctx *sdk.AppCtx, pid string, id int64, patch map[string]any) (*Function, error) {
+// updateFunctionMeta patches metadata only — env, timeout_ms,
+// max_memory_mb, status. Source / runtime changes are immutable per
+// version: they go through functions_deploy, which builds a fresh
+// version, not functions_update.
+func updateFunctionMeta(ctx *sdk.AppCtx, pid string, id int64, patch map[string]any) (*Function, error) {
+	for _, k := range []string{"source", "source_kind", "repo_id", "repo_path", "package_json", "runtime"} {
+		if _, has := patch[k]; has {
+			return nil, fmt.Errorf("%q can't be changed with functions_update — use functions_deploy", k)
+		}
+	}
 	cur, err := dbGetFunction(dbFor(ctx), pid, id, "")
 	if err != nil {
 		return nil, err
@@ -607,39 +744,7 @@ func updateAndRehashFunction(ctx *sdk.AppCtx, pid string, id int64, patch map[st
 	if cur == nil {
 		return nil, errors.New("function not found")
 	}
-
-	// If the patch touches anything that affects source bytes, recompute the hash.
-	rehash := false
-	for _, k := range []string{"source", "source_kind", "repo_id", "repo_path"} {
-		if _, has := patch[k]; has {
-			rehash = true
-			break
-		}
-	}
-
-	newHash := ""
-	if rehash {
-		merged := *cur
-		if v, ok := patch["source_kind"].(string); ok && v != "" {
-			merged.SourceKind = v
-		}
-		if _, has := patch["source"]; has {
-			merged.Source = strArg(patch, "source")
-		}
-		if rid := int64Arg(patch, "repo_id"); rid != 0 {
-			merged.RepoID = &rid
-		}
-		if v, ok := patch["repo_path"].(string); ok {
-			merged.RepoPath = v
-		}
-		bytes, err := preCreateResolveSource(ctx, &merged)
-		if err != nil {
-			return nil, err
-		}
-		newHash = hashSource(bytes)
-	}
-
-	return dbUpdateFunction(dbFor(ctx), pid, id, patch, newHash)
+	return dbUpdateFunction(dbFor(ctx), pid, id, patch, "")
 }
 
 // resolveFunctionID accepts either id or name and returns the row's
