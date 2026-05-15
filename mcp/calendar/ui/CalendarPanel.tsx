@@ -524,6 +524,14 @@ function DayColumn({
   onEventCommit: (e: Occurrence, newStart: Date, newEnd: Date) => void;
 }) {
   const [drag, setDrag] = useState<DragState | null>(null);
+  // After a pointerup on an event block (whether it was a click, a
+  // drag, or a resize), the browser still synthesizes a `click` event
+  // that bubbles up to the column's onClick — and that handler treats
+  // it as "user clicked an empty slot" and opens the new-event modal.
+  // setDrag(null) in pointerup runs synchronously BEFORE that click
+  // fires, so the `if (drag) return` guard is already stale. This ref
+  // bridges the one-tick gap between pointerup and the click.
+  const suppressNextClickRef = useRef(false);
 
   // Document-level pointer listeners while dragging — events that
   // start in an event block continue tracking even when the pointer
@@ -567,6 +575,11 @@ function DayColumn({
     const onUp = () => {
       const d = drag;
       setDrag(null);
+      // Always set the suppress flag — fires for both click-on-event
+      // and drag-released-on-column-background. Cleared on the next
+      // task tick, well after the synthesized click bubbles.
+      suppressNextClickRef.current = true;
+      setTimeout(() => { suppressNextClickRef.current = false; }, 0);
       // If the pointer barely moved, treat this as a click.
       if (!d.moved) {
         onEventClick(d.ev);
@@ -595,9 +608,11 @@ function DayColumn({
         className="relative"
         style={{ height: HOUR_HEIGHT * 24 }}
         onClick={(e) => {
-          // Suppressed while a drag is in flight — onPointerUp on the
-          // event block handles the click case directly.
-          if (drag) return;
+          // Suppressed while a drag is in flight, AND for the synthesized
+          // click that fires right after a pointerup on an event block —
+          // see suppressNextClickRef above for why the drag state is
+          // already null by the time we get here.
+          if (drag || suppressNextClickRef.current) return;
           const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
           const y = e.clientY - rect.top;
           const hour = Math.floor(y / HOUR_HEIGHT);
