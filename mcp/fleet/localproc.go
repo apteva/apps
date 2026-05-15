@@ -51,13 +51,15 @@ func (a *App) spawnTenant(ctx context.Context, slug, configDir, aptevaBin string
 	if err != nil {
 		return "", nil, err
 	}
-	cmd := exec.Command(bin, "--data-dir", configDir, "--port", strconv.Itoa(port), "--no-browser")
+	cmd := buildSpawnCmd(slug, bin,
+		[]string{"--data-dir", configDir, "--port", strconv.Itoa(port), "--no-browser"})
 	cmd.Env = append(os.Environ(),
 		"APTEVA_HOME="+configDir,
 		"PORT="+strconv.Itoa(port),
 		"QUIET=1",
 	)
 	// New process group: child survives if fleet itself restarts.
+	// (Setpgid is also set redundantly inside buildSpawnCmd; harmless.)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Wire stdout/stderr into a logs file per tenant.
 	logsPath := filepath.Join(configDir, "fleet-child.log")
@@ -155,14 +157,21 @@ func stopProcess(p *tenantProc, grace time.Duration) error {
 }
 
 // reconcileOnBoot probes every local tenant's port to recover state
-// after a fleet restart. We don't try to re-attach PIDs — if the child
-// survived (orphan in its own pgrp), the port is still bound and the
-// tenant is treated as live; if not, it gets flipped to stopped.
+// after a fleet restart. Two paths:
+//
+//   - port still bound → tenant survived (its own pgrp, or — better —
+//     its own systemd-run scope outside our cgroup); just unstale the
+//     status. Reset the respawn counter since we're observing healthy.
+//   - port empty → process died (systemd cgroup kill on parent
+//     restart, crash, oom). For active/starting tenants we ATTEMPT to
+//     respawn instead of flipping to stopped. setup_pending tenants
+//     also get respawned (toolStart preserves their status).
 func (a *App) reconcileOnBoot() error {
 	tenants, err := a.store.list(map[string]string{"kind": KindLocal})
 	if err != nil {
 		return err
 	}
+	ctx := context.Background()
 	for _, t := range tenants {
 		port, err := portFromBaseURL(t.BaseURL)
 		if err != nil || port == 0 {
@@ -170,14 +179,13 @@ func (a *App) reconcileOnBoot() error {
 		}
 		alive := portInUse(port)
 		switch {
-		case alive && t.Status == StatusStopped:
-			_ = a.store.setStatus(t.ID, StatusActive, "worker:reconcile")
+		case alive:
+			if t.Status == StatusStopped {
+				_ = a.store.setStatus(t.ID, StatusActive, "worker:reconcile")
+			}
+			_ = a.store.resetRespawn(t.ID)
 		case !alive && (t.Status == StatusActive || t.Status == StatusStarting || t.Status == StatusSetupPending):
-			// setup_pending tenants whose process died mid-setup get
-			// the same treatment as everything else — flip to stopped
-			// so tenant_start respawns them; toolStart preserves the
-			// setup_pending status across the respawn.
-			_ = a.store.setStatus(t.ID, StatusStopped, "worker:reconcile")
+			a.tryRespawn(ctx, t)
 		}
 	}
 	return nil
@@ -304,6 +312,102 @@ func portFromBaseURL(baseURL string) (int, error) {
 		return 0, nil
 	}
 	return strconv.Atoi(p)
+}
+
+// buildSpawnCmd constructs the *exec.Cmd that launches a tenant. On
+// systemd hosts it wraps the call in `systemd-run --scope` so the
+// tenant lands in its own transient scope cgroup, outside the
+// fleet/apteva.service cgroup. That way a `systemctl restart apteva`
+// (default KillMode=control-group) doesn't take the tenant with it.
+//
+// Fallback to plain exec.Command when systemd-run isn't on PATH (dev
+// machines, macOS, non-systemd Linux); then survival depends on
+// reconcileOnBoot + auto-respawn instead.
+//
+// The unit name is fleet-tenant-<slug>.scope. --collect lets systemd
+// remove the scope's residue once the process exits without an
+// explicit `systemctl reset-failed`.
+func buildSpawnCmd(slug, bin string, args []string) *exec.Cmd {
+	systemdRun, err := exec.LookPath("systemd-run")
+	if err != nil || systemdRun == "" {
+		return exec.Command(bin, args...)
+	}
+	// `systemd-run --scope`: foreground; PID is the actual command,
+	// cmd.Wait() works as if exec was direct. Quiet to keep our
+	// captured stderr clean.
+	unit := "fleet-tenant-" + sanitizeUnit(slug)
+	full := append([]string{
+		"--quiet", "--collect", "--scope", "--unit=" + unit, "--", bin,
+	}, args...)
+	return exec.Command(systemdRun, full...)
+}
+
+// sanitizeUnit replaces anything outside [a-zA-Z0-9-_] with '_' so
+// the slug is a legal systemd unit name suffix.
+func sanitizeUnit(s string) string {
+	out := make([]rune, 0, len(s))
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '-', r == '_':
+			out = append(out, r)
+		default:
+			out = append(out, '_')
+		}
+	}
+	return string(out)
+}
+
+// tryRespawn is called from the health poller when it sees an active
+// local tenant whose port is empty. It bumps the per-tenant counter,
+// respawns up to maxRespawnAttempts within the recent window, and
+// flips to failed beyond that to avoid a crash loop.
+const (
+	maxRespawnAttempts = 5
+	respawnGraceTime   = 30 * time.Second // min wait between respawns
+)
+
+func (a *App) tryRespawn(ctx context.Context, t *Tenant) {
+	if t.Kind != KindLocal {
+		return
+	}
+	// Respect a small grace so we don't hammer a tenant that's mid-boot.
+	if t.LastRespawnAt != nil && time.Since(*t.LastRespawnAt) < respawnGraceTime {
+		return
+	}
+	if t.RespawnAttempts >= maxRespawnAttempts {
+		if t.Status != StatusFailed {
+			_ = a.store.setStatus(t.ID, StatusFailed, "worker:auto_respawn")
+			_ = a.store.recordEvent(t.ID, "auto_respawn_gave_up", "worker:auto_respawn",
+				map[string]any{"attempts": t.RespawnAttempts})
+		}
+		return
+	}
+	port, _ := portFromBaseURL(t.BaseURL)
+	if port == 0 || t.ConfigDir == "" {
+		// Can't respawn without these; surface and stop trying for now.
+		_ = a.store.setStatus(t.ID, StatusFailed, "worker:auto_respawn")
+		_ = a.store.recordEvent(t.ID, "auto_respawn_failed", "worker:auto_respawn",
+			map[string]any{"reason": "missing port or config_dir"})
+		return
+	}
+	_ = a.store.bumpRespawn(t.ID)
+	// Use the pinned version if set, else default-resolve. An empty
+	// path falls back transparently inside resolveAptevaBin.
+	_, proc, err := a.spawnTenant(ctx, t.Slug, t.ConfigDir, tenantAptevaBin(t.TargetVersion), port, false)
+	if err != nil {
+		_ = a.store.recordEvent(t.ID, "auto_respawn_failed", "worker:auto_respawn",
+			map[string]any{"error": err.Error()})
+		return
+	}
+	a.procMu.Lock()
+	a.procs[t.Slug] = proc
+	a.procMu.Unlock()
+	_ = a.store.setStatus(t.ID, StatusActive, "worker:auto_respawn")
+	_ = a.store.recordEvent(t.ID, "auto_respawn_ok", "worker:auto_respawn",
+		map[string]any{"port": port})
 }
 
 // slugDataDir returns the per-tenant data directory under the fleet

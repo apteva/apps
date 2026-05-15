@@ -2,18 +2,24 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.2.9
+version: 0.3.0
 description: |
-  Control plane for a fleet of client apteva instances. v0.2 spawns
-  every tenant as a local apteva process on the parent host with
-  admin-driven setup: fleet mints a setup token and returns it via
+  Control plane for a fleet of client apteva instances. Spawns every
+  tenant as a local apteva process on the parent host with admin-
+  driven setup: fleet mints a setup token and returns it via
   tenant_create; the operator finishes admin registration in the
-  browser; tenant_attach_key completes the link. Zero cross-app
-  deps. Same registry + tool surface works later for remote /
-  containerized provisioning.
+  browser; tenant_attach_key completes the link.
+
+  v0.3 adds optional domain orchestration (Domains + Certs + Routes
+  integrations) so each tenant can be reached at a public hostname
+  via the parent's reverse proxy, plus auto-respawn for tenants that
+  don't survive a parent restart, plus per-tenant apteva version
+  management via tenant_update.
 
   Each tenant is a fully independent apteva install: own DB, own
-  users, own dashboard. The parent goes away → tenants keep running.
+  users, own dashboard. The parent goes away → tenants are auto-
+  restarted; the box reboots → reconcileOnBoot re-adopts surviving
+  tenants and respawns dead ones.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/fleet
@@ -27,6 +33,26 @@ requires:
   permissions:
     - db.write.app
     - net.egress
+    - platform.apps.call
+  integrations:
+    - role: domains
+      kind: app
+      required: false
+      compatible_app_names: [domains]
+      label: Domains app
+      hint: Install the Domains app to attach custom hostnames to tenants.
+    - role: certs
+      kind: app
+      required: false
+      compatible_app_names: [certs]
+      label: Certs app
+      hint: Install the Certs app to auto-issue Let's Encrypt certs on attach.
+    - role: routes
+      kind: app
+      required: false
+      compatible_app_names: [routes]
+      label: Routes app
+      hint: Install the Routes app (in proxy mode) to publish tenants at public hostnames via the parent's reverse proxy.
 
 provides:
   http_routes:
@@ -55,6 +81,16 @@ provides:
       description: "Mint a short-lived super-admin URL on the tenant. Args: tenant_id, reason."
     - name: tenant_run_remote
       description: "Proxy an MCP tool call to a tenant's gateway using its api_key. Args: tenant_id, app, tool, input."
+    - name: tenant_attach_domain
+      description: "Attach a public hostname to a tenant. Orchestrates Domains (DNS record) → Certs (Let's Encrypt DNS-01) → Routes (register fqdn → tenant apteva-server port on the parent's routes table). Idempotent; partial-failure tolerant. Args: tenant_id, fqdn, target?, type?, ttl?."
+    - name: tenant_detach_domain
+      description: "Clear a tenant's domain link — DNS delete, cert revoke, route unregister, local clear. Local clear runs even on remote failure. Args: tenant_id."
+    - name: tenant_update
+      description: "Per-tenant apteva version update. Installs the requested version into a fleet-owned npm prefix at ~/.apteva-fleet/versions/<v>/, records target_version, stops the running tenant, respawns with the new binary. Other tenants are unaffected. Local-only. Args: tenant_id, version? (empty → npm latest)."
+    - name: tenant_check_updates
+      description: "Read-only: return npm's apteva@latest plus every local tenant whose current_version is behind. Args: (none)."
+    - name: tenant_set_target_version
+      description: "Pin a tenant's desired apteva version without applying — the panel surfaces drift between current and target. Args: tenant_id, version (empty to clear)."
   ui_panels:
     - slot: project.page
       label: Fleet

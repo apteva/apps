@@ -45,6 +45,16 @@ func (a *App) runHealthPoller(ctx context.Context, app *sdk.AppCtx) error {
 }
 
 func (a *App) probeOnce(ctx context.Context, app *sdk.AppCtx, t *Tenant) {
+	// Local tenants get a port-presence pre-check: when the port is
+	// empty the process is gone, attempt respawn before the regular
+	// HTTP probe (which would just timeout and add 60s of latency
+	// before we react). Skip for remote — we don't manage their proc.
+	if t.Kind == KindLocal {
+		if port, _ := portFromBaseURL(t.BaseURL); port > 0 && !portInUse(port) {
+			a.tryRespawn(ctx, t)
+			return // come back next tick to evaluate health
+		}
+	}
 	_, enc, err := a.store.get(t.ID)
 	if err != nil {
 		return
@@ -67,6 +77,9 @@ func (a *App) probeOnce(ctx context.Context, app *sdk.AppCtx, t *Tenant) {
 		return
 	}
 	_ = a.store.updateHealth(t.ID, true, version, body)
+	// Healthy probe → reset the auto-respawn counter so the next
+	// blip starts fresh from 0.
+	_ = a.store.resetRespawn(t.ID)
 	if t.Status == StatusDisconnected {
 		_ = a.store.setStatus(t.ID, StatusActive, "worker:health_poller")
 	}

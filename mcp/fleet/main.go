@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 
 	sdk "github.com/apteva/app-sdk"
@@ -16,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.2.9
+version: 0.3.0
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -24,6 +25,26 @@ requires:
   permissions:
     - db.write.app
     - net.egress
+    - platform.apps.call
+  integrations:
+    - role: domains
+      kind: app
+      required: false
+      compatible_app_names: [domains]
+      label: Domains app
+      hint: Install the Domains app to attach custom hostnames to tenants.
+    - role: certs
+      kind: app
+      required: false
+      compatible_app_names: [certs]
+      label: Certs app
+      hint: Install the Certs app to auto-issue Let's Encrypt certs on attach.
+    - role: routes
+      kind: app
+      required: false
+      compatible_app_names: [routes]
+      label: Routes app
+      hint: Install the Routes app to publish tenants at public hostnames via the parent's reverse proxy.
 provides:
   http_routes:
     - prefix: /
@@ -48,6 +69,16 @@ provides:
       description: Mint a short-lived super-admin URL on the tenant.
     - name: tenant_run_remote
       description: Proxy an MCP tool call to a tenant.
+    - name: tenant_attach_domain
+      description: Attach a public hostname to a tenant via the Domains/Certs/Routes apps.
+    - name: tenant_detach_domain
+      description: Clear a tenant's domain link (DNS delete, cert revoke, route unregister).
+    - name: tenant_update
+      description: Update a tenant's apteva version. Installs the requested version into a fleet-owned npm prefix, then respawns.
+    - name: tenant_check_updates
+      description: Report npm's apteva latest version + which tenants are behind. Read-only.
+    - name: tenant_set_target_version
+      description: Pin a tenant's desired apteva version without applying. Surfaces drift on the panel.
   ui_panels:
     - slot: project.page
       label: Fleet
@@ -88,6 +119,11 @@ type App struct {
 	publicHost string
 }
 
+// globalCtx captures the platform context at OnMount so HTTP handlers
+// (which don't get a ctx parameter from the SDK) can issue cross-app
+// calls. Same pattern deploy uses.
+var globalCtx *sdk.AppCtx
+
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
 	if err != nil {
@@ -108,6 +144,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.store = &store{db: ctx.AppDB()}
 	a.procs = map[string]*tenantProc{}
 	a.publicHost = detectPublicHost()
+	globalCtx = ctx
 	if err := a.reconcileOnBoot(); err != nil {
 		ctx.Logger().Warn("fleet: reconcile on boot", "err", err)
 	}
@@ -124,11 +161,39 @@ func (a *App) OnUnmount(*sdk.AppCtx) error { return nil }
 func (a *App) HTTPRoutes() []sdk.Route {
 	// /health is registered by the SDK framework itself (see app-sdk
 	// run.go); declaring another here panics on duplicate ServeMux
-	// pattern registration. We only need to expose the registry
-	// read-only HTTP routes the panel uses.
+	// pattern registration.
+	//
+	// /tenants/ is a tail-prefix route; we dispatch on the sub-path
+	// inside httpTenantItem so /tenants/<id>, /tenants/<id>/attach-domain,
+	// and /tenants/<id>/update can all share one ServeMux pattern.
 	return []sdk.Route{
 		{Method: http.MethodGet, Pattern: "/tenants", Handler: a.httpList},
-		{Method: http.MethodGet, Pattern: "/tenants/", Handler: a.httpGet},
+		{Pattern: "/tenants/", Handler: a.httpTenantItem},
+		{Method: http.MethodGet, Pattern: "/_meta", Handler: a.httpMeta},
+	}
+}
+
+// httpTenantItem dispatches /tenants/<id>[/sub] to the right handler.
+// Putting sub-routes under one ServeMux entry avoids the SDK's "one
+// pattern per route" friction without giving up clean URLs.
+func (a *App) httpTenantItem(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/tenants/")
+	id, sub, _ := strings.Cut(rest, "/")
+	if id == "" {
+		writeJSONErr(w, http.StatusBadRequest, errors.New("tenant id required"))
+		return
+	}
+	switch sub {
+	case "":
+		a.httpGet(w, r)
+	case "attach-domain":
+		a.httpAttachDomain(w, r)
+	case "detach-domain":
+		a.httpDetachDomain(w, r)
+	case "update":
+		a.httpUpdate(w, r)
+	default:
+		writeJSONErr(w, http.StatusNotFound, errors.New("no such sub-resource: "+sub))
 	}
 }
 
@@ -252,6 +317,60 @@ func (a *App) MCPTools() []sdk.Tool {
 				"required": []string{"tenant_id", "app", "tool"},
 			},
 			Handler: a.toolRunRemote,
+		},
+		{
+			Name:        "tenant_attach_domain",
+			Description: "Attach a public hostname to a tenant. Orchestrates: Domains app writes the DNS record → Certs app issues a Let's Encrypt cert via DNS-01 → Routes app registers (fqdn → tenant apteva-server port) on the parent's routes table. Idempotent; partial-failure tolerant. Args: tenant_id, fqdn, target? (defaults to fleet's public_host), type? (A or CNAME; inferred from target), ttl?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id": map[string]any{"type": "string"},
+					"fqdn":      map[string]any{"type": "string"},
+					"target":    map[string]any{"type": "string"},
+					"type":      map[string]any{"type": "string"},
+					"ttl":       map[string]any{"type": "integer"},
+				},
+				"required": []string{"tenant_id", "fqdn"},
+			},
+			Handler: a.toolAttachDomain,
+		},
+		{
+			Name:        "tenant_detach_domain",
+			Description: "Clear a tenant's domain link: best-effort DNS record delete (via Domains app), cert revoke (Certs app), route unregister (Routes app), and local clear. Local clear runs even on remote failure. Args: tenant_id.",
+			InputSchema: idOnlySchema(),
+			Handler:     a.toolDetachDomain,
+		},
+		{
+			Name:        "tenant_update",
+			Description: "Update a tenant's apteva version. Resolves the version (npm latest if omitted), installs into a fleet-owned npm prefix at ~/.apteva-fleet/versions/<v>/, records target_version, stops the running tenant, respawns with the new binary. Other tenants are unaffected. Local-only. Args: tenant_id, version?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id": map[string]any{"type": "string"},
+					"version":   map[string]any{"type": "string"},
+				},
+				"required": []string{"tenant_id"},
+			},
+			Handler: a.toolUpdate,
+		},
+		{
+			Name:        "tenant_check_updates",
+			Description: "Read-only: return npm's apteva@latest plus every local tenant whose current_version is behind. Args: (none).",
+			InputSchema: map[string]any{"type": "object"},
+			Handler:     a.toolCheckUpdates,
+		},
+		{
+			Name:        "tenant_set_target_version",
+			Description: "Pin a tenant's desired apteva version without applying — the panel surfaces drift between current and target. Pass empty version to clear. Args: tenant_id, version.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id": map[string]any{"type": "string"},
+					"version":   map[string]any{"type": "string"},
+				},
+				"required": []string{"tenant_id", "version"},
+			},
+			Handler: a.toolSetTargetVersion,
 		},
 	}
 }

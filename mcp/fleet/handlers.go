@@ -400,7 +400,7 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	_ = a.store.setStatus(t.ID, StatusStarting, "user")
 	spawnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	_, proc, err := a.spawnTenant(spawnCtx, t.Slug, t.ConfigDir, "", port, false /* freshSetup */)
+	_, proc, err := a.spawnTenant(spawnCtx, t.Slug, t.ConfigDir, tenantAptevaBin(t.TargetVersion), port, false /* freshSetup */)
 	if err != nil {
 		_ = a.store.setStatus(t.ID, StatusFailed, "user")
 		return nil, err
@@ -688,4 +688,252 @@ func randomPassword() string {
 		panic("crypto/rand failed: " + err.Error())
 	}
 	return hex.EncodeToString(b)
+}
+
+// -- Project resolution -------------------------------------------------
+//
+// Fleet's manifest declares scopes: [project, global]. The cross-app
+// calls fleet makes (domains_records_set, cert_issue, …) target apps
+// that ARE project-scoped — so we must thread a project id through.
+// Same pattern as deploy: APTEVA_PROJECT_ID env when scope=project,
+// _project_id arg when scope=global. See
+// feedback_project_id_global_calls in user memory.
+
+func resolveProjectFromArgs(args map[string]any) (string, error) {
+	if env := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); env != "" {
+		return env, nil
+	}
+	if v, ok := args["_project_id"].(string); ok && v != "" {
+		return v, nil
+	}
+	return "", errors.New("project_id missing — pass _project_id when fleet is global-scoped")
+}
+
+func resolveProjectFromRequest(r *http.Request) (string, error) {
+	if env := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); env != "" {
+		return env, nil
+	}
+	if v := r.URL.Query().Get("project_id"); v != "" {
+		return v, nil
+	}
+	return "", errors.New("project_id required in query string")
+}
+
+// -- tenant_attach_domain / tenant_detach_domain -----------------------
+
+func (a *App) toolAttachDomain(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	id := strings.TrimSpace(getStr(args, "tenant_id"))
+	if id == "" {
+		return nil, errors.New("tenant_id required")
+	}
+	projectID, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	t, _, err := a.store.get(id)
+	if err != nil {
+		return nil, err
+	}
+	spec := attachDomainSpec{
+		FQDN:   getStr(args, "fqdn"),
+		Target: getStr(args, "target"),
+		Type:   getStr(args, "type"),
+	}
+	if ttlF, ok := args["ttl"].(float64); ok {
+		spec.TTL = int(ttlF)
+	}
+	if err := a.attachDomain(globalCtx, projectID, t, spec); err != nil {
+		return nil, err
+	}
+	out, _, _ := a.store.get(id)
+	return map[string]any{"tenant": a.publicTenantView(out)}, nil
+}
+
+func (a *App) toolDetachDomain(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	id := strings.TrimSpace(getStr(args, "tenant_id"))
+	if id == "" {
+		return nil, errors.New("tenant_id required")
+	}
+	projectID, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	t, _, err := a.store.get(id)
+	if err != nil {
+		return nil, err
+	}
+	derr := a.detachDomain(globalCtx, projectID, t)
+	out, _, _ := a.store.get(id)
+	res := map[string]any{"tenant": a.publicTenantView(out), "detached": true}
+	if derr != nil {
+		res["registrar_error"] = derr.Error()
+	}
+	return res, nil
+}
+
+// toolSetTargetVersion just records desired version without applying.
+// The auto-update worker (4c, deferred) would consume this; for now
+// it lets the panel show "pinned to vX" intent.
+func (a *App) toolSetTargetVersion(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	id := strings.TrimSpace(getStr(args, "tenant_id"))
+	if id == "" {
+		return nil, errors.New("tenant_id required")
+	}
+	version := strings.TrimSpace(getStr(args, "version"))
+	if err := a.store.setTargetVersion(id, version); err != nil {
+		return nil, err
+	}
+	t, _, _ := a.store.get(id)
+	return map[string]any{"tenant": a.publicTenantView(t)}, nil
+}
+
+// -- HTTP variants for the panel ---------------------------------------
+
+func (a *App) httpAttachDomain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONErr(w, http.StatusMethodNotAllowed, errors.New("POST"))
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/tenants/")
+	if i := strings.Index(id, "/"); i > 0 {
+		id = id[:i]
+	}
+	projectID, err := resolveProjectFromRequest(r)
+	if err != nil {
+		writeJSONErr(w, http.StatusBadRequest, err)
+		return
+	}
+	t, _, err := a.store.get(id)
+	if err != nil {
+		writeJSONErr(w, http.StatusNotFound, err)
+		return
+	}
+	var body struct {
+		FQDN   string `json:"fqdn"`
+		Target string `json:"target"`
+		Type   string `json:"type"`
+		TTL    int    `json:"ttl"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := a.attachDomain(globalCtx, projectID, t, attachDomainSpec{
+		FQDN: body.FQDN, Target: body.Target, Type: body.Type, TTL: body.TTL,
+	}); err != nil {
+		writeJSONErr(w, http.StatusBadRequest, err)
+		return
+	}
+	out, _, _ := a.store.get(id)
+	writeJSON(w, http.StatusOK, map[string]any{"tenant": a.publicTenantView(out)})
+}
+
+func (a *App) httpDetachDomain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONErr(w, http.StatusMethodNotAllowed, errors.New("POST"))
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/tenants/")
+	if i := strings.Index(id, "/"); i > 0 {
+		id = id[:i]
+	}
+	projectID, err := resolveProjectFromRequest(r)
+	if err != nil {
+		writeJSONErr(w, http.StatusBadRequest, err)
+		return
+	}
+	t, _, err := a.store.get(id)
+	if err != nil {
+		writeJSONErr(w, http.StatusNotFound, err)
+		return
+	}
+	derr := a.detachDomain(globalCtx, projectID, t)
+	out, _, _ := a.store.get(id)
+	res := map[string]any{"tenant": a.publicTenantView(out), "detached": true}
+	if derr != nil {
+		res["registrar_error"] = derr.Error()
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// httpMeta — panel calls this once per load + on relevant events.
+// Reports integration availability + the registered-domains picker
+// list + cert status per tenant FQDN + the latest npm version. The
+// panel doesn't talk to domains/certs/routes/npm directly.
+func (a *App) httpMeta(w http.ResponseWriter, r *http.Request) {
+	projectID, _ := resolveProjectFromRequest(r) // soft — empty is OK
+	out := map[string]any{
+		"domains_available": a.domainsAvailable(globalCtx),
+		"certs_available":   a.certsAvailable(globalCtx),
+		"routes_available":  a.routesAvailable(globalCtx),
+		"public_host":       a.publicHost,
+		"domains":           []any{},
+		"certs":             map[string]any{},
+	}
+	if a.domainsAvailable(globalCtx) {
+		var resp struct {
+			Domains []struct {
+				Name string `json:"name"`
+			} `json:"domains"`
+		}
+		if err := callDomainsTool(globalCtx, projectID, "domain_list", map[string]any{}, &resp); err == nil {
+			names := make([]map[string]any, 0, len(resp.Domains))
+			for _, d := range resp.Domains {
+				names = append(names, map[string]any{"name": d.Name})
+			}
+			out["domains"] = names
+		}
+	}
+	if a.certsAvailable(globalCtx) {
+		var resp struct {
+			Certs []struct {
+				FQDN      string `json:"fqdn"`
+				Status    string `json:"status"`
+				ExpiresAt string `json:"expires_at,omitempty"`
+				Error     string `json:"error,omitempty"`
+			} `json:"certs"`
+		}
+		if err := callCertsTool(globalCtx, projectID, "cert_list", map[string]any{}, &resp); err == nil {
+			byFQDN := make(map[string]any, len(resp.Certs))
+			for _, c := range resp.Certs {
+				byFQDN[c.FQDN] = map[string]any{
+					"status":     c.Status,
+					"expires_at": c.ExpiresAt,
+					"error":      c.Error,
+				}
+			}
+			out["certs"] = byFQDN
+		}
+	}
+	// npm latest — best-effort; failure leaves the field absent so
+	// the panel doesn't render an empty version pill.
+	if v, err := npmLatestVersion(r.Context()); err == nil {
+		out["apteva_latest"] = v
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// httpUpdate — POST /tenants/<id>/update?project_id=...  body: {version?}
+func (a *App) httpUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONErr(w, http.StatusMethodNotAllowed, errors.New("POST"))
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/tenants/")
+	if i := strings.Index(id, "/"); i > 0 {
+		id = id[:i]
+	}
+	var body struct {
+		Version string `json:"version"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	res, err := a.toolUpdate(nil, map[string]any{
+		"tenant_id": id,
+		"version":   body.Version,
+	})
+	if err != nil {
+		writeJSONErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }

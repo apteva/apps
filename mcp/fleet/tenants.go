@@ -47,6 +47,19 @@ type Tenant struct {
 	LastHealth     any        `json:"last_health,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
+
+	// Domain link — populated by tenant_attach_domain via the optional
+	// Domains/Certs/Routes apps. domain_record_id encodes "<apex>|<type>"
+	// so detach can target the same registrar record.
+	Domain           string     `json:"domain,omitempty"`
+	DomainRecordID   string     `json:"domain_record_id,omitempty"`
+	DomainAttachedAt *time.Time `json:"domain_attached_at,omitempty"`
+
+	// Respawn bookkeeping — set by the auto-respawn worker when a
+	// local tenant's port goes empty. Reset on a successful health
+	// probe. Capped in code (see localproc.go).
+	RespawnAttempts int        `json:"respawn_attempts,omitempty"`
+	LastRespawnAt   *time.Time `json:"last_respawn_at,omitempty"`
 }
 
 type Event struct {
@@ -119,7 +132,7 @@ func (s *store) attachAPIKey(id string, apiKeyEnc []byte) error {
 
 func (s *store) get(id string) (*Tenant, []byte, error) {
 	row := s.db.QueryRow(`
-		SELECT id, slug, kind, base_url, config_dir, api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at
+		SELECT id, slug, kind, base_url, config_dir, api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at
 		FROM fleet_tenants WHERE id = ?
 	`, id)
 	return scanTenant(row)
@@ -127,7 +140,7 @@ func (s *store) get(id string) (*Tenant, []byte, error) {
 
 func (s *store) getBySlug(slug string) (*Tenant, []byte, error) {
 	row := s.db.QueryRow(`
-		SELECT id, slug, kind, base_url, config_dir, api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at
+		SELECT id, slug, kind, base_url, config_dir, api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at
 		FROM fleet_tenants WHERE slug = ?
 	`, slug)
 	return scanTenant(row)
@@ -136,7 +149,7 @@ func (s *store) getBySlug(slug string) (*Tenant, []byte, error) {
 func (s *store) list(filter map[string]string) ([]*Tenant, error) {
 	q := strings.Builder{}
 	// api_key_enc is intentionally elided from list results.
-	q.WriteString(`SELECT id, slug, kind, base_url, config_dir, X'00' AS api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at FROM fleet_tenants WHERE 1=1`)
+	q.WriteString(`SELECT id, slug, kind, base_url, config_dir, X'00' AS api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at FROM fleet_tenants WHERE 1=1`)
 	args := []any{}
 	cols := map[string]string{
 		"status":      "status",
@@ -255,8 +268,17 @@ func scanTenant(r rowScanner) (*Tenant, []byte, error) {
 		lastSeen      sql.NullTime
 		lastHealthRaw sql.NullString
 		apiKeyEnc     []byte
+		domain        sql.NullString
+		domainRec     sql.NullString
+		domainAt      sql.NullTime
+		lastRespawn   sql.NullTime
 	)
-	err := r.Scan(&t.ID, &t.Slug, &t.Kind, &t.BaseURL, &configDir, &apiKeyEnc, &t.OwnerEmail, &ownerUID, &curVer, &tgtVer, &t.Status, &lastSeen, &lastHealthRaw, &t.CreatedAt, &t.UpdatedAt)
+	err := r.Scan(
+		&t.ID, &t.Slug, &t.Kind, &t.BaseURL, &configDir, &apiKeyEnc,
+		&t.OwnerEmail, &ownerUID, &curVer, &tgtVer, &t.Status,
+		&lastSeen, &lastHealthRaw, &t.CreatedAt, &t.UpdatedAt,
+		&domain, &domainRec, &domainAt, &t.RespawnAttempts, &lastRespawn,
+	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil, ErrNotFound
@@ -282,7 +304,75 @@ func scanTenant(r rowScanner) (*Tenant, []byte, error) {
 	if lastHealthRaw.Valid && lastHealthRaw.String != "" {
 		_ = json.Unmarshal([]byte(lastHealthRaw.String), &t.LastHealth)
 	}
+	if domain.Valid {
+		t.Domain = domain.String
+	}
+	if domainRec.Valid {
+		t.DomainRecordID = domainRec.String
+	}
+	if domainAt.Valid {
+		da := domainAt.Time
+		t.DomainAttachedAt = &da
+	}
+	if lastRespawn.Valid {
+		lr := lastRespawn.Time
+		t.LastRespawnAt = &lr
+	}
 	return &t, apiKeyEnc, nil
+}
+
+// setDomain stamps the domain link triple atomically. Called by
+// attachDomain after the DNS write succeeds.
+func (s *store) setDomain(id, fqdn, recordID string, at time.Time) error {
+	_, err := s.db.Exec(
+		`UPDATE fleet_tenants SET domain = ?, domain_record_id = ?, domain_attached_at = ?, updated_at = ? WHERE id = ?`,
+		nullStr(fqdn), nullStr(recordID), at, time.Now().UTC(), id,
+	)
+	return err
+}
+
+// clearDomain undoes setDomain — called from detachDomain after the
+// registrar delete. We clear the row even if the remote delete failed
+// since the operator's recourse is the registrar UI, not retrying
+// here against a phantom local record.
+func (s *store) clearDomain(id string) error {
+	_, err := s.db.Exec(
+		`UPDATE fleet_tenants SET domain = NULL, domain_record_id = NULL, domain_attached_at = NULL, updated_at = ? WHERE id = ?`,
+		time.Now().UTC(), id,
+	)
+	return err
+}
+
+// setTargetVersion records the operator's desired apteva version. The
+// auto-update worker (not in v0.3.0) reads it; for v0.3.0 it just lets
+// the panel show "update available" when current != target.
+func (s *store) setTargetVersion(id, version string) error {
+	_, err := s.db.Exec(
+		`UPDATE fleet_tenants SET target_version = ?, updated_at = ? WHERE id = ?`,
+		nullStr(version), time.Now().UTC(), id,
+	)
+	return err
+}
+
+// bumpRespawn records an auto-respawn attempt. The counter caps in code
+// (see tryRespawn); this is just the persistence half.
+func (s *store) bumpRespawn(id string) error {
+	now := time.Now().UTC()
+	_, err := s.db.Exec(
+		`UPDATE fleet_tenants SET respawn_attempts = respawn_attempts + 1, last_respawn_at = ?, updated_at = ? WHERE id = ?`,
+		now, now, id,
+	)
+	return err
+}
+
+// resetRespawn clears the respawn counter — called when a tenant is
+// observed healthy after a respawn so the next blip starts fresh.
+func (s *store) resetRespawn(id string) error {
+	_, err := s.db.Exec(
+		`UPDATE fleet_tenants SET respawn_attempts = 0, updated_at = ? WHERE id = ? AND respawn_attempts > 0`,
+		time.Now().UTC(), id,
+	)
+	return err
 }
 
 func nullStr(s string) any {
