@@ -168,6 +168,8 @@ interface AuditEntry {
 interface Invoice {
   id: number;
   customer_id: number;
+  customer_name?: string;
+  customer_email?: string;
   provider: "local" | "stripe";
   number?: string;
   status: "draft" | "open" | "paid" | "void" | "uncollectible";
@@ -502,7 +504,7 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
                   </div>
                   <div className="text-xs text-text-muted mt-0.5 flex items-center justify-between gap-2">
                     <span className="truncate">
-                      Customer #{inv.customer_id}
+                      {inv.customer_name || `Customer #${inv.customer_id}`}
                     </span>
                     <span className="text-text">
                       {fmtMoney(inv.total_cents, inv.currency)}
@@ -620,7 +622,7 @@ function InvoiceDetail({
             </span>
           </h1>
           <p className="text-text-muted text-sm mt-1">
-            Customer #{invoice.customer_id}
+            {invoice.customer_name || `Customer #${invoice.customer_id}`}
             {invoice.due_date ? ` · due ${fmtDate(invoice.due_date)}` : ""}
           </p>
         </div>

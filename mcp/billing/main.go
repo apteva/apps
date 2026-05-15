@@ -489,6 +489,12 @@ type Invoice struct {
 	ID              int64           `json:"id"`
 	ProjectID       string          `json:"project_id,omitempty"`
 	CustomerID      int64           `json:"customer_id"`
+	// Customer fields denormalised by the LEFT JOIN in dbInvoiceSearch /
+	// dbInvoiceGetByID — the panel renders these in the sidebar list so
+	// users don't have to fetch every customer separately. Empty when
+	// the customer row has been soft-deleted out from under the invoice.
+	CustomerName    string          `json:"customer_name,omitempty"`
+	CustomerEmail   string          `json:"customer_email,omitempty"`
 	Provider        string          `json:"provider"`
 	Number          string          `json:"number,omitempty"`
 	Status          string          `json:"status"`
@@ -1885,14 +1891,22 @@ func dbInvoiceSearch(db *sql.DB, pid string, f invoiceFilters) ([]*Invoice, erro
 		limit = 50
 	}
 	args = append(args, limit)
+	// Rewrite WHERE clause column refs to use the `i.` alias since we're
+	// joining now. Cheap string replace — column names here are
+	// hand-controlled above so no ambiguity.
+	for k, w := range where {
+		where[k] = "i." + w
+	}
 	rows, err := db.Query(
-		`SELECT id, project_id, customer_id, provider, number, status, currency,
-		        subtotal_cents, tax_cents, total_cents, amount_paid_cents,
-		        due_date, notes, external_id, external_url, last_synced_at, metadata,
-		        finalized_at, paid_at, voided_at, created_at, updated_at
-		 FROM invoices
+		`SELECT i.id, i.project_id, i.customer_id, i.provider, i.number, i.status, i.currency,
+		        i.subtotal_cents, i.tax_cents, i.total_cents, i.amount_paid_cents,
+		        i.due_date, i.notes, i.external_id, i.external_url, i.last_synced_at, i.metadata,
+		        i.finalized_at, i.paid_at, i.voided_at, i.created_at, i.updated_at,
+		        COALESCE(c.name, ''), COALESCE(c.email, '')
+		 FROM invoices i
+		 LEFT JOIN customers c ON c.id = i.customer_id AND c.deleted_at IS NULL
 		 WHERE `+strings.Join(where, " AND ")+`
-		 ORDER BY updated_at DESC
+		 ORDER BY i.updated_at DESC
 		 LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
@@ -1911,12 +1925,14 @@ func dbInvoiceSearch(db *sql.DB, pid string, f invoiceFilters) ([]*Invoice, erro
 
 func dbInvoiceGetByID(db *sql.DB, pid string, id int64) (*Invoice, error) {
 	row := db.QueryRow(
-		`SELECT id, project_id, customer_id, provider, number, status, currency,
-		        subtotal_cents, tax_cents, total_cents, amount_paid_cents,
-		        due_date, notes, external_id, external_url, last_synced_at, metadata,
-		        finalized_at, paid_at, voided_at, created_at, updated_at
-		 FROM invoices
-		 WHERE id = ? AND project_id = ? AND deleted_at IS NULL`, id, pid)
+		`SELECT i.id, i.project_id, i.customer_id, i.provider, i.number, i.status, i.currency,
+		        i.subtotal_cents, i.tax_cents, i.total_cents, i.amount_paid_cents,
+		        i.due_date, i.notes, i.external_id, i.external_url, i.last_synced_at, i.metadata,
+		        i.finalized_at, i.paid_at, i.voided_at, i.created_at, i.updated_at,
+		        COALESCE(c.name, ''), COALESCE(c.email, '')
+		 FROM invoices i
+		 LEFT JOIN customers c ON c.id = i.customer_id AND c.deleted_at IS NULL
+		 WHERE i.id = ? AND i.project_id = ? AND i.deleted_at IS NULL`, id, pid)
 	inv, err := scanInvoice(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1926,12 +1942,14 @@ func dbInvoiceGetByID(db *sql.DB, pid string, id int64) (*Invoice, error) {
 
 func dbInvoiceGetByNumber(db *sql.DB, pid, number string) (*Invoice, error) {
 	row := db.QueryRow(
-		`SELECT id, project_id, customer_id, provider, number, status, currency,
-		        subtotal_cents, tax_cents, total_cents, amount_paid_cents,
-		        due_date, notes, external_id, external_url, last_synced_at, metadata,
-		        finalized_at, paid_at, voided_at, created_at, updated_at
-		 FROM invoices
-		 WHERE project_id = ? AND number = ? AND deleted_at IS NULL`, pid, number)
+		`SELECT i.id, i.project_id, i.customer_id, i.provider, i.number, i.status, i.currency,
+		        i.subtotal_cents, i.tax_cents, i.total_cents, i.amount_paid_cents,
+		        i.due_date, i.notes, i.external_id, i.external_url, i.last_synced_at, i.metadata,
+		        i.finalized_at, i.paid_at, i.voided_at, i.created_at, i.updated_at,
+		        COALESCE(c.name, ''), COALESCE(c.email, '')
+		 FROM invoices i
+		 LEFT JOIN customers c ON c.id = i.customer_id AND c.deleted_at IS NULL
+		 WHERE i.project_id = ? AND i.number = ? AND i.deleted_at IS NULL`, pid, number)
 	inv, err := scanInvoice(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -2833,18 +2851,23 @@ func scanCustomer(s rowScanner) (*Customer, error) {
 	return &c, nil
 }
 
+// scanInvoice expects the SELECT to end with two extra LEFT-JOINed
+// columns: customer name and customer email. They're populated via
+// COALESCE in the query so missing/deleted customers scan as empty.
 func scanInvoice(s rowScanner) (*Invoice, error) {
 	var inv Invoice
 	var number, dueDate, notes sql.NullString
 	var ext, extURL, syncedAt sql.NullString
 	var meta sql.NullString
 	var finalizedAt, paidAt, voidedAt sql.NullString
+	var custName, custEmail sql.NullString
 	if err := s.Scan(
 		&inv.ID, &inv.ProjectID, &inv.CustomerID, &inv.Provider, &number,
 		&inv.Status, &inv.Currency, &inv.SubtotalCents, &inv.TaxCents,
 		&inv.TotalCents, &inv.AmountPaidCents,
 		&dueDate, &notes, &ext, &extURL, &syncedAt, &meta,
-		&finalizedAt, &paidAt, &voidedAt, &inv.CreatedAt, &inv.UpdatedAt); err != nil {
+		&finalizedAt, &paidAt, &voidedAt, &inv.CreatedAt, &inv.UpdatedAt,
+		&custName, &custEmail); err != nil {
 		return nil, err
 	}
 	inv.Number = number.String
@@ -2859,6 +2882,8 @@ func scanInvoice(s rowScanner) (*Invoice, error) {
 	if meta.Valid {
 		inv.Metadata = json.RawMessage(meta.String)
 	}
+	inv.CustomerName = custName.String
+	inv.CustomerEmail = custEmail.String
 	return &inv, nil
 }
 
