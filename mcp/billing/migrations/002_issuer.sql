@@ -10,7 +10,7 @@ CREATE TABLE issuer_settings (
 
   -- Display + legal. display_name is the prominent header on the PDF;
   -- legal_name is the registered entity name compliance bodies want
-  -- on the invoice ("G Swift" vs "G Swift Cloud OÜ").
+  -- on the invoice (e.g. trading "Acme Co" vs registered "Acme Holdings Ltd").
   display_name    TEXT    NOT NULL DEFAULT '',
   legal_name      TEXT,
 

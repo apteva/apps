@@ -358,8 +358,8 @@ func parseBank(raw []byte) bankInfo {
 	}
 }
 
-// formatIBAN groups the IBAN into 4-char blocks: "EE2477007710073329 32"
-// → "EE24 7700 7710 0733 2932". Cosmetic only.
+// formatIBAN groups the IBAN into 4-char blocks for readability.
+// "XX00BANK0000000000" → "XX00 BANK 0000 0000 00". Cosmetic only.
 func formatIBAN(s string) string {
 	s = strings.ToUpper(strings.ReplaceAll(s, " ", ""))
 	var b strings.Builder

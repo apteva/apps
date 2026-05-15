@@ -187,23 +187,23 @@ func TestRenderInvoiceHTML_HandlesMissingCustomer(t *testing.T) {
 // instructions on both the HTML print and the PDF byte stream.
 func TestRenderInvoice_IncludesConfiguredIssuer(t *testing.T) {
 	addr, _ := json.Marshal(map[string]any{
-		"line1": "Tartu mnt 2", "postal_code": "10145",
-		"city": "Tallinn", "country": "EE",
+		"line1": "1 Test Way", "postal_code": "00000",
+		"city": "Testville", "country": "ZZ",
 	})
 	tids, _ := json.Marshal([]map[string]string{
-		{"type": "vat", "value": "EE100530247"},
-		{"type": "company_reg", "value": "10539549"},
+		{"type": "vat", "value": "ZZ123456789"},
+		{"type": "company_reg", "value": "9999999"},
 	})
 	bank, _ := json.Marshal(map[string]string{
-		"iban":      "EE247700771007332932",
-		"bic":       "LHVBEE22",
-		"bank_name": "LHV Pank",
-		"bank_code": "689",
+		"iban":      "XX00BANK00000000000000",
+		"bic":       "TESTBIC0XXX",
+		"bank_name": "Test Bank",
+		"bank_code": "000",
 	})
 	issuer := &Issuer{
-		DisplayName: "G Swift",
-		LegalName:   "G Swift Cloud OÜ",
-		Email:       "billing@gswift.fr",
+		DisplayName: "Acme Co",
+		LegalName:   "Acme Holdings Ltd",
+		Email:       "billing@example.com",
 		Address:     addr,
 		TaxIDs:      tids,
 		Bank:        bank,
@@ -212,15 +212,15 @@ func TestRenderInvoice_IncludesConfiguredIssuer(t *testing.T) {
 	}
 	html := renderInvoiceHTML(sampleInvoice(), sampleCustomer(), issuer)
 	for _, frag := range []string{
-		"G Swift",          // display_name in BILL FROM
-		"G Swift Cloud OÜ", // legal_name (html.EscapeString passes non-ASCII through)
-		"Tartu mnt 2",      // address
-		"VAT EE100530247",          // tax ID with friendly label
-		"Reg 10539549",             // company reg label
+		"Acme Co",                  // display_name in BILL FROM
+		"Acme Holdings Ltd",        // legal_name
+		"1 Test Way",               // address
+		"VAT ZZ123456789",          // tax ID with friendly label
+		"Reg 9999999",              // company reg label
 		"Pay by bank transfer",     // bank section heading
-		"EE24 7700 7710 0733 2932", // IBAN spaced
-		"LHVBEE22",
-		"Bank code 689",
+		"XX00 BANK 0000 0000 0000 00", // IBAN spaced every 4
+		"TESTBIC0XXX",
+		"Bank code 000",
 		"Thank you for your business.",
 	} {
 		if !strings.Contains(html, frag) {

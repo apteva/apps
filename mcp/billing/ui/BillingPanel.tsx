@@ -1738,7 +1738,7 @@ function CreateCustomerModal({
               type="text"
               value={website}
               onChange={(e) => setWebsite(e.target.value)}
-              placeholder="Website (e.g. www.gswift.fr)"
+              placeholder="Website"
               className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
             />
           </section>
@@ -2050,7 +2050,7 @@ function SettingsTab({ apiCall }: { apiCall: ApiCall }) {
               type="text"
               value={legalName}
               onChange={(e) => setLegalName(e.target.value)}
-              placeholder="Legal name (e.g. G Swift Cloud OÜ)"
+              placeholder="Legal name (registered entity)"
               className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
             />
             <input

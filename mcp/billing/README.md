@@ -1,4 +1,4 @@
-# Billing (v0.4.0)
+# Billing (v0.4.1)
 
 Customers, invoices, and payments for Apteva agents and human teams.
 
