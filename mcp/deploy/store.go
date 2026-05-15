@@ -153,6 +153,27 @@ func dbGetDeploymentByID(db *sql.DB, id int64) (*Deployment, error) {
 	return d, err
 }
 
+// dbListDeploymentsWithDomain returns every deployment in any project
+// that has a non-empty Domain field. Used by the phantom-route sweep
+// on boot: we need to know which hostnames are still legitimately
+// owned by some deployment under this install, regardless of project.
+func dbListDeploymentsWithDomain(db *sql.DB) ([]Deployment, error) {
+	rows, err := db.Query(`SELECT ` + deploymentColumns + ` FROM deployments WHERE domain != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Deployment{}
+	for rows.Next() {
+		d, err := scanDeployment(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *d)
+	}
+	return out, nil
+}
+
 func dbGetDeploymentByName(db *sql.DB, projectID, name string) (*Deployment, error) {
 	row := db.QueryRow(`SELECT `+deploymentColumns+` FROM deployments WHERE project_id = ? AND name = ?`, projectID, name)
 	d, err := scanDeployment(row)

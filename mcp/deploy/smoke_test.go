@@ -666,6 +666,71 @@ func httpGet(t *testing.T, port int, path string) string {
 	return ""
 }
 
+// TestParseLoopbackPort guards the routes-app cross-check in the
+// allocator: a target like "http://127.0.0.1:7101" must yield 7101
+// so we can skip allocating that port. Non-loopback targets must
+// NOT be picked up (a deployment on a public IP isn't competing
+// for our loopback range).
+func TestParseLoopbackPort(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+		ok   bool
+	}{
+		{"http://127.0.0.1:7101", 7101, true},
+		{"http://localhost:7100", 7100, true},
+		{"http://[::1]:7100", 7100, true},
+		{"https://127.0.0.1:8443/", 8443, true},
+		{"http://10.0.0.1:7100", 0, false},     // non-loopback host
+		{"http://example.com:7100", 0, false},  // public hostname
+		{"http://127.0.0.1", 0, false},         // no port
+		{"unix:///run/app.sock", 0, false},     // unix socket
+		{"", 0, false},
+		{"not a url", 0, false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.in, func(t *testing.T) {
+			got, ok := parseLoopbackPort(tc.in)
+			if ok != tc.ok || (ok && got != tc.want) {
+				t.Fatalf("parseLoopbackPort(%q) = (%d, %v); want (%d, %v)", tc.in, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// TestDbListDeploymentsWithDomain pins the phantom-route sweep's
+// data source. The sweep treats this as the authoritative list of
+// "domains we still claim ownership of" — if it ever silently
+// returns nothing, every route owned by deploy@myInstallID would
+// get dropped on boot.
+func TestDbListDeploymentsWithDomain(t *testing.T) {
+	db := openSchemaDB(t)
+	defer db.Close()
+
+	// Deployment without a domain.
+	_, err := dbCreateDeployment(db, "p1", CreateDeploymentInput{Name: "no-dom", SourceKind: "local", SourceRef: "/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Deployment with a domain in a different project.
+	d2, err := dbCreateDeployment(db, "p2", CreateDeploymentInput{Name: "with-dom", SourceKind: "local", SourceRef: "/y"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbSetDeploymentDomain(db, d2.ID, "app.acme.com", "acme.com|CNAME", nowUTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := dbListDeploymentsWithDomain(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Domain != "app.acme.com" {
+		t.Fatalf("got %d rows %+v; want 1 with app.acme.com", len(got), got)
+	}
+}
+
 // stripSQLComments removes -- line comments. The migration has no
 // /* */ blocks so this is enough.
 func stripSQLComments(s string) string {

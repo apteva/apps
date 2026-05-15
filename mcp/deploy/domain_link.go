@@ -257,27 +257,46 @@ func inferRecordType(target string) string {
 // the DNS record. Persists (domain, record_id, attached_at) on the
 // deployment. record_id encodes "<apex>|<type>" so detach can target
 // the same record without re-resolving.
-func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec) error {
+// attachDomainResult is what attachDomain reports back. A DNS-only
+// failure is no longer a hard error — pre-v0.10.0, a 406 from the
+// upstream registrar (often a duplicate-record case) tanked the
+// whole attach, leaving the route unwritten even though apteva-server
+// would have routed traffic just fine. Now each leg reports its own
+// status; the caller decides how loud to be about partial success.
+type attachDomainResult struct {
+	FQDN        string `json:"fqdn"`
+	Apex        string `json:"apex"`
+	Type        string `json:"type"`
+	Target      string `json:"target"`
+	DNSStatus   string `json:"dns_status"`  // ok | error | skipped
+	DNSError    string `json:"dns_error,omitempty"`
+	RouteStatus string `json:"route_status"` // ok | skipped | error
+	RouteError  string `json:"route_error,omitempty"`
+	CertStatus  string `json:"cert_status"`  // ok | skipped | error
+	CertError   string `json:"cert_error,omitempty"`
+}
+
+func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec) (*attachDomainResult, error) {
 	if !a.domainsAvailable(ctx) {
-		return errors.New("domains app not installed — install it or clear the domain field")
+		return nil, errors.New("domains app not installed — install it or clear the domain field")
 	}
 	fqdn := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(spec.FQDN, ".")))
 	if fqdn == "" {
-		return errors.New("fqdn required")
+		return nil, errors.New("fqdn required")
 	}
 	// Resolve the record value first (explicit target → public_host →
 	// auto-derived box IP), then the type — inferred from the value's
 	// shape unless the caller pinned it.
 	target := resolveTarget(spec)
 	if target == "" {
-		return errors.New("target required — pass target, set public_host on the deploy app, or ensure APTEVA_PUBLIC_URL is set so the box IP can be auto-derived")
+		return nil, errors.New("target required — pass target, set public_host on the deploy app, or ensure APTEVA_PUBLIC_URL is set so the box IP can be auto-derived")
 	}
 	rtype := strings.ToUpper(strings.TrimSpace(spec.Type))
 	if rtype == "" {
 		rtype = inferRecordType(target)
 	}
 	if rtype != "CNAME" && rtype != "A" {
-		return fmt.Errorf("unsupported record type %q (CNAME or A)", rtype)
+		return nil, fmt.Errorf("unsupported record type %q (CNAME or A)", rtype)
 	}
 	if rtype == "CNAME" {
 		// CNAME values are domain names; ensure no trailing dot.
@@ -290,7 +309,7 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec
 
 	apex, sub, err := resolveApex(ctx, d.ProjectID, fqdn)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	subArg := sub
 	if subArg == "" {
@@ -299,25 +318,42 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec
 	// CNAME at the apex isn't valid per RFC. Block it explicitly with
 	// a friendlier message than whatever the registrar will say.
 	if rtype == "CNAME" && sub == "" {
-		return errors.New("apex CNAME isn't allowed; use type=A with an IP, or attach a subdomain")
+		return nil, errors.New("apex CNAME isn't allowed; use type=A with an IP, or attach a subdomain")
 	}
 
-	if err := callDomainsTool(ctx, d.ProjectID, "domain_records_set", map[string]any{
+	res := &attachDomainResult{FQDN: fqdn, Apex: apex, Type: rtype, Target: target}
+
+	// DNS write — failure no longer fails the whole attach.
+	dnsErr := callDomainsTool(ctx, d.ProjectID, "domain_records_set", map[string]any{
 		"domain": apex,
 		"name":   subArg,
 		"type":   rtype,
 		"value":  target,
 		"ttl":    ttl,
-	}, nil); err != nil {
-		return err
+	}, nil)
+	if dnsErr != nil {
+		res.DNSStatus = "error"
+		res.DNSError = dnsErr.Error()
+		emit("deploy.domain.dns_failed", map[string]any{
+			"deployment_id": d.ID, "fqdn": fqdn, "error": dnsErr.Error(),
+		})
+	} else {
+		res.DNSStatus = "ok"
 	}
 
-	recordID := apex + "|" + rtype
+	// Persist the link either way. record_id is left empty when DNS
+	// didn't write — detach checks for that and skips the registrar
+	// delete; a later deploy_retry_dns fills it in.
+	recordID := ""
+	if dnsErr == nil {
+		recordID = apex + "|" + rtype
+	}
 	if err := dbSetDeploymentDomain(globalCtx.AppDB(), d.ID, fqdn, recordID, nowUTC()); err != nil {
-		return err
+		return res, err
 	}
 	emit("deploy.domain.attached", map[string]any{
 		"deployment_id": d.ID, "fqdn": fqdn, "apex": apex, "type": rtype,
+		"dns_status": res.DNSStatus,
 	})
 
 	// Fire-and-forget cert issuance when the Certs app is installed.
@@ -325,26 +361,83 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec
 	// cert status via /api/_meta and renders the badge.
 	if a.certsAvailable(ctx) {
 		if err := callCertsTool(ctx, d.ProjectID, "cert_issue", map[string]any{"fqdn": fqdn}, nil); err != nil {
-			// Don't fail attach: the DNS record is good and the user
-			// can retry cert_issue later. Log via emit.
+			res.CertStatus = "error"
+			res.CertError = err.Error()
 			emit("deploy.domain.cert_kickoff_failed", map[string]any{
 				"deployment_id": d.ID, "fqdn": fqdn, "error": err.Error(),
 			})
+		} else {
+			res.CertStatus = "ok"
 		}
+	} else {
+		res.CertStatus = "skipped"
 	}
 
-	// Register the route with the Routes app so apteva-server's host
-	// router can proxy public requests for this fqdn to the live
-	// release. Re-fetch the deployment so we see the freshly-stamped
-	// Domain field. No-op when Routes isn't installed; no-op when
-	// no release is live yet (the next deploy_release will register
-	// it via runRelease's hook below).
+	// Register the route with the Routes app regardless of DNS state —
+	// the Caddy block is what actually serves traffic, and apteva.ai-
+	// style setups often have DNS provisioned out-of-band anyway. The
+	// route only registers if a release is live (registerRouteForDeployment
+	// gates on rel.Status == "live").
 	fresh, _ := dbGetDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
 	if fresh == nil {
 		fresh = d
 	}
-	registerRouteForDeployment(ctx, a, fresh)
-	return nil
+	if !a.routesAvailable(ctx) {
+		res.RouteStatus = "skipped"
+	} else if fresh.CurrentReleaseID == nil {
+		res.RouteStatus = "skipped" // No live release; registers on next deploy_release.
+	} else {
+		registerRouteForDeployment(ctx, a, fresh)
+		res.RouteStatus = "ok"
+	}
+	return res, nil
+}
+
+// retryDNS re-runs only the DNS write for a deployment whose attach
+// previously partial-failed (DNS error, route + cert succeeded).
+// Operator-driven retry; idempotent on success. The use case is
+// "the upstream registrar returned 406 on duplicate-record-exists,
+// but I've cleared / fixed the record, now re-link it."
+func (a *App) retryDNS(ctx *sdk.AppCtx, d *Deployment) (*attachDomainResult, error) {
+	if d.Domain == "" {
+		return nil, errors.New("no domain attached — call deploy_attach_domain first")
+	}
+	if !a.domainsAvailable(ctx) {
+		return nil, errors.New("domains app not installed")
+	}
+	// Re-resolve apex + type from what we have. We don't have the
+	// original target/type once DNS failed, so derive again from
+	// public_host / box IP. Same shape as attachDomain's prefix.
+	target := resolveTarget(attachDomainSpec{FQDN: d.Domain})
+	if target == "" {
+		return nil, errors.New("target required for retry — set public_host or APTEVA_PUBLIC_URL")
+	}
+	rtype := inferRecordType(target)
+	apex, sub, err := resolveApex(ctx, d.ProjectID, d.Domain)
+	if err != nil {
+		return nil, err
+	}
+	if sub == "" {
+		sub = "@"
+	}
+	res := &attachDomainResult{FQDN: d.Domain, Apex: apex, Type: rtype, Target: target, RouteStatus: "unchanged", CertStatus: "unchanged"}
+	dnsErr := callDomainsTool(ctx, d.ProjectID, "domain_records_set", map[string]any{
+		"domain": apex, "name": sub, "type": rtype, "value": target, "ttl": 600,
+	}, nil)
+	if dnsErr != nil {
+		res.DNSStatus = "error"
+		res.DNSError = dnsErr.Error()
+		return res, nil
+	}
+	res.DNSStatus = "ok"
+	// Stamp the record_id so future detach knows what to delete.
+	if err := dbSetDeploymentDomain(globalCtx.AppDB(), d.ID, d.Domain, apex+"|"+rtype, nowUTC()); err != nil {
+		return res, err
+	}
+	emit("deploy.domain.dns_retried", map[string]any{
+		"deployment_id": d.ID, "fqdn": d.Domain, "apex": apex, "type": rtype,
+	})
+	return res, nil
 }
 
 // detachDomain best-effort deletes the DNS record (if we know what we
@@ -453,6 +546,62 @@ func (a *App) routesAvailable(ctx *sdk.AppCtx) bool {
 	}
 	bound := ctx.IntegrationFor("routes")
 	return bound != nil && bound.Kind == "app"
+}
+
+// routesTargetedPorts returns the set of TCP ports the routes app
+// currently has Caddy/proxy entries pointing at, parsed from each
+// route's target (e.g. "http://127.0.0.1:7101" → 7101). The
+// allocator skips these so a fresh release can never grab a port
+// some hostname is still resolving to — the cross-bleed class of
+// bug (apteva.ai → :7101 served the wrong content because :7101
+// was OS-free but Caddy still routed to it).
+//
+// Best-effort: routes app missing or unreachable → empty map +
+// the existing allocator gates (DB lease, procfs scan, bind-probe)
+// still apply. Targets that don't parse as host:port (unix sockets,
+// non-loopback hosts) are ignored — they can't collide with our
+// loopback bind anyway.
+func routesTargetedPorts(ctx *sdk.AppCtx, app *App) map[int]bool {
+	out := map[int]bool{}
+	if app == nil || !app.routesAvailable(ctx) {
+		return out
+	}
+	var resp struct {
+		Routes []struct {
+			Target string `json:"target"`
+		} `json:"routes"`
+	}
+	if err := callRoutesTool(ctx, "routes_list", map[string]any{}, &resp); err != nil {
+		// Don't log noisily — routes_list is called once per allocation
+		// and a transient error shouldn't poison the build log.
+		return out
+	}
+	for _, r := range resp.Routes {
+		if p, ok := parseLoopbackPort(r.Target); ok {
+			out[p] = true
+		}
+	}
+	return out
+}
+
+// parseLoopbackPort extracts the port from a routes-app target URL
+// targeting 127.0.0.1 / localhost / [::1]. Returns (0, false) for
+// anything else — non-loopback targets aren't ports we'd allocate
+// to anyway.
+func parseLoopbackPort(target string) (int, bool) {
+	u, err := url.Parse(target)
+	if err != nil || u.Host == "" {
+		return 0, false
+	}
+	host := u.Hostname()
+	if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+		return 0, false
+	}
+	p, err := strconv.Atoi(u.Port())
+	if err != nil || p <= 0 {
+		return 0, false
+	}
+	return p, true
 }
 
 // callRoutesTool mirrors callDomainsTool / callCertsTool. Pass

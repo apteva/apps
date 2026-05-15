@@ -191,6 +191,16 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		ctx.Logger().Warn("release reconciliation failed", "err", err)
 	}
 
+	// Phantom-route sweep: drop any routes in the routes-app DB that
+	// claim to be owned by this deploy install but don't correspond
+	// to a still-live deployment + release here. Cleans up stale
+	// blocks left behind by pre-v0.10.0 instances (e.g., the
+	// marcoschwartz.com Caddy block that survived the incident's
+	// release teardown). Best-effort; logs the count.
+	if n := a.sweepPhantomRoutes(ctx); n > 0 {
+		ctx.Logger().Info("dropped phantom routes", "count", n)
+	}
+
 	// Watchdog promotes slow-bind "starting" releases and demotes
 	// "live" releases whose port owner changed (cross-instance port
 	// theft). Tick interval is 60s; pidOwnsPort is a no-op true on
@@ -232,7 +242,9 @@ func (a *App) reconcileReleases() error {
 	for _, r := range rows {
 		rr, adoptErr := a.runtime.Adopt(r.ID, r.PID, r.Port)
 		if adoptErr != nil {
-			// Genuine orphan — the process didn't survive the restart.
+			// Genuine orphan — the process didn't survive the restart,
+			// or its port was taken by an unrelated process while we
+			// were down (pidOwnsPort gate in Adopt rejects that).
 			_ = dbUpdateRelease(globalCtx.AppDB(), r.ID, map[string]any{
 				"status":     "stopped",
 				"stopped_at": nowUTC(),
@@ -240,6 +252,12 @@ func (a *App) reconcileReleases() error {
 			})
 			_ = dbReleasePortLease(globalCtx.AppDB(), r.Port)
 			_ = dbAppendReleaseEvent(globalCtx.AppDB(), r.ID, "stop", `{"reason":"orphan_not_alive"}`)
+			// Cascade: a domain attached to this orphaned release still
+			// has a route entry. Pre-v0.10.0 this was the *exact* shape
+			// of the marcoschwartz.com incident — the route survived
+			// the orphan's death and pointed the domain at a port that
+			// another instance later bound.
+			a.cascadeUnregisterRoute(r.DeploymentID)
 			continue
 		}
 		a.registry.Put(rr)
@@ -610,6 +628,10 @@ func (a *App) markCrashed(releaseID int64, cause error) {
 		emit("deploy.release.crashed", map[string]any{
 			"deployment_id": rel.DeploymentID, "release_id": releaseID, "error": cause.Error(),
 		})
+		// Cascade: a crashed release's route would otherwise stay live
+		// in the routes-app DB pointing at a now-freed port — the next
+		// allocator pick lands on it and the wrong site is served.
+		a.cascadeUnregisterRoute(rel.DeploymentID)
 	}
 	a.registry.Delete(releaseID)
 }
@@ -626,8 +648,95 @@ func (a *App) markStopped(releaseID int64) {
 		emit("deploy.release.stopped", map[string]any{
 			"deployment_id": rel.DeploymentID, "release_id": releaseID,
 		})
+		a.cascadeUnregisterRoute(rel.DeploymentID)
 	}
 	a.registry.Delete(releaseID)
+}
+
+// cascadeUnregisterRoute removes the routes-app entry for a
+// deployment whose only release just transitioned out of "live".
+// Without this, the route persists pointing at a stale (and likely
+// re-allocatable) port — feeding straight into the cross-bleed bug
+// the routes cross-check in allocatePort guards against. Best-effort
+// — routes app missing → no-op.
+func (a *App) cascadeUnregisterRoute(deploymentID int64) {
+	if globalCtx == nil || globalCtx.AppDB() == nil {
+		return
+	}
+	d, _ := dbGetDeploymentByID(globalCtx.AppDB(), deploymentID)
+	if d == nil || d.Domain == "" {
+		return
+	}
+	unregisterRouteForDeployment(globalCtx, a, d.Domain)
+}
+
+// sweepPhantomRoutes runs once on boot. It asks the routes app for
+// every route owned by this install + owner_kind=deploy, then drops
+// any whose hostname doesn't match a deployment with a live release
+// in our DB. Catches:
+//
+//   - The marcoschwartz.com class of stale block (release destroyed
+//     but the route never got cleaned by pre-v0.10.0 code).
+//   - Routes that survived an OS-level migration / data restore
+//     where the deploy DB came back but the routes DB was newer.
+//   - Routes for deployments that were destroyed via deploy_destroy
+//     before the cascade-cleanup code existed.
+//
+// Returns the count of routes dropped. Routes whose owner_kind
+// isn't "deploy" — or whose owner_install_id is some other
+// install's — are not touched.
+func (a *App) sweepPhantomRoutes(ctx *sdk.AppCtx) int {
+	if ctx == nil || !a.routesAvailable(ctx) {
+		return 0
+	}
+	var resp struct {
+		Routes []struct {
+			Hostname       string `json:"hostname"`
+			OwnerInstallID int64  `json:"owner_install_id"`
+			OwnerKind      string `json:"owner_kind"`
+		} `json:"routes"`
+	}
+	myID := myInstallID()
+	if err := callRoutesTool(ctx, "routes_list", map[string]any{"owner_install_id": myID}, &resp); err != nil {
+		return 0
+	}
+	// Live set: deployments under this install whose domain is set AND
+	// whose current release is still alive. The route is only legitimate
+	// when both halves hold.
+	liveDomains := map[string]bool{}
+	if globalCtx != nil && globalCtx.AppDB() != nil {
+		ds, _ := dbListDeploymentsWithDomain(globalCtx.AppDB())
+		for _, d := range ds {
+			if d.CurrentReleaseID == nil {
+				continue
+			}
+			rel, _ := dbGetRelease(globalCtx.AppDB(), *d.CurrentReleaseID)
+			if rel == nil {
+				continue
+			}
+			if rel.Status == "live" || rel.Status == "starting" {
+				liveDomains[d.Domain] = true
+			}
+		}
+	}
+	dropped := 0
+	for _, r := range resp.Routes {
+		if r.OwnerInstallID != myID || r.OwnerKind != "deploy" {
+			continue
+		}
+		if liveDomains[r.Hostname] {
+			continue
+		}
+		if err := callRoutesTool(ctx, "routes_unregister", map[string]any{
+			"hostname":         r.Hostname,
+			"owner_install_id": myID,
+		}, nil); err != nil {
+			continue
+		}
+		emit("deploy.route.phantom_dropped", map[string]any{"hostname": r.Hostname})
+		dropped++
+	}
+	return dropped
 }
 
 // probeReady waits up to timeout for `pid` to be the process holding
@@ -774,10 +883,7 @@ func (a *App) markPortOwnerChanged(rel *Release) {
 		"reason": "port_owner_changed",
 	})
 	a.registry.Delete(rel.ID)
-	d, _ := dbGetDeploymentByID(globalCtx.AppDB(), rel.DeploymentID)
-	if d != nil && d.Domain != "" {
-		unregisterRouteForDeployment(globalCtx, a, d.Domain)
-	}
+	a.cascadeUnregisterRoute(rel.DeploymentID)
 }
 
 // ─── Port allocator ───────────────────────────────────────────────
@@ -812,11 +918,21 @@ func (a *App) allocatePort(hint int, releaseID int64) (int, error) {
 	// On non-Linux this returns an empty map; we fall back to
 	// bind-probe alone, which is fine for single-tenant dev hosts.
 	listening := systemListeningPorts()
+	// Cross-app check: a port may be OS-free *but* the routes app
+	// could still be pointing a hostname at it (stale route, partial
+	// failure, manual reverse_proxy edit). Allocating it would silently
+	// hijack whichever domain currently maps to it — the apteva.ai
+	// cross-bleed class. routes app missing → empty map, allocator
+	// behaves as before.
+	targeted := routesTargetedPorts(globalCtx, a)
 	for _, p := range candidates {
 		if held[p] {
 			continue
 		}
 		if listening[p] {
+			continue
+		}
+		if targeted[p] {
 			continue
 		}
 		if !portFreeForServer(p) {

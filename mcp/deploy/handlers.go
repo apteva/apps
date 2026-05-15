@@ -190,11 +190,13 @@ func (a *App) httpCreateDeployment(w http.ResponseWriter, r *http.Request) {
 	emit("deploy.created", map[string]any{"deployment_id": d.ID, "name": d.Name, "source_kind": d.SourceKind})
 	resp := map[string]any{"deployment": d}
 	if domainsOn {
-		if err := a.attachDomain(globalCtx, d, attachDomainSpec{FQDN: domainArg}); err != nil {
+		attachRes, err := a.attachDomain(globalCtx, d, attachDomainSpec{FQDN: domainArg})
+		if err != nil {
 			resp["domain_error"] = err.Error()
 		} else {
 			d, _ = dbGetDeployment(globalCtx.AppDB(), pid, d.ID)
 			resp["deployment"] = d
+			resp["attach"] = attachRes
 		}
 	}
 	httpJSON(w, resp)
@@ -354,14 +356,15 @@ func (a *App) httpDeploymentAttachDomain(w http.ResponseWriter, r *http.Request,
 		httpErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	if err := a.attachDomain(globalCtx, d, attachDomainSpec{
+	attachRes, err := a.attachDomain(globalCtx, d, attachDomainSpec{
 		FQDN: body.FQDN, Target: body.Target, Type: body.Type, TTL: body.TTL,
-	}); err != nil {
+	})
+	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	out, _ := dbGetDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
-	httpJSON(w, map[string]any{"deployment": out})
+	httpJSON(w, map[string]any{"deployment": out, "attach": attachRes})
 }
 
 func (a *App) httpDeploymentDetachDomain(w http.ResponseWriter, r *http.Request, d *Deployment) {
