@@ -27,7 +27,9 @@ import (
 
 // renderInvoicePDF builds the PDF document and returns its bytes.
 // customer is optional; when nil, bill-to falls back to "Customer #<id>".
-func renderInvoicePDF(inv *Invoice, customer *Customer) ([]byte, error) {
+// issuer is optional; when nil or not configured, the BILL FROM block
+// shows a single placeholder line so the layout doesn't collapse.
+func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte, error) {
 	pdf := fpdf.New("P", "mm", "A4", "")
 	pdf.SetMargins(20, 20, 20)
 	pdf.SetAutoPageBreak(true, 20)
@@ -49,57 +51,68 @@ func renderInvoicePDF(inv *Invoice, customer *Customer) ([]byte, error) {
 
 	pdf.SetFont("Helvetica", "", 9)
 	pdf.SetTextColor(120, 120, 120)
-	pdf.Cell(usableWidth/2, 5, "Issued by your Apteva project")
 	pdf.SetX(20 + usableWidth/2)
 	pdf.CellFormat(usableWidth/2, 5, statusLabel(inv.Status), "", 0, "R", false, 0, "")
-	pdf.Ln(12)
+	pdf.Ln(8)
 
 	// Thin rule under the header.
 	pdf.SetDrawColor(200, 200, 200)
 	pdf.Line(20, pdf.GetY(), pageWidth-20, pdf.GetY())
-	pdf.Ln(8)
+	pdf.Ln(6)
 
-	// ── Bill-to / Details two-column ──
+	// ── BILL FROM / BILL TO two-column ──
 	colW := usableWidth / 2
 	yStart := pdf.GetY()
 
 	pdf.SetFont("Helvetica", "B", 8)
 	pdf.SetTextColor(120, 120, 120)
-	pdf.CellFormat(colW, 5, "BILL TO", "", 0, "L", false, 0, "")
+	pdf.CellFormat(colW, 5, "BILL FROM", "", 0, "L", false, 0, "")
 	pdf.SetX(20 + colW)
-	pdf.CellFormat(colW, 5, "DETAILS", "", 0, "L", false, 0, "")
+	pdf.CellFormat(colW, 5, "BILL TO", "", 0, "L", false, 0, "")
 	pdf.Ln(6)
 
-	// Render two columns side by side. fpdf doesn't have native
-	// columns, so we measure both blocks and advance to the taller.
-	pdf.SetFont("Helvetica", "", 10)
-	pdf.SetTextColor(40, 40, 40)
-	leftLines := buildBillToLines(inv, customer)
-	rightLines := buildDetailsLines(inv)
+	leftLines := buildIssuerLines(issuer)
+	rightLines := buildBillToLines(inv, customer)
 
 	maxLines := len(leftLines)
 	if len(rightLines) > maxLines {
 		maxLines = len(rightLines)
 	}
 	for i := 0; i < maxLines; i++ {
-		pdf.SetXY(20, yStart+6+float64(i)*5)
+		// LEFT — issuer
 		if i < len(leftLines) {
+			pdf.SetXY(20, yStart+6+float64(i)*5)
 			if i == 0 {
 				pdf.SetFont("Helvetica", "B", 10)
+				pdf.SetTextColor(40, 40, 40)
 			} else {
 				pdf.SetFont("Helvetica", "", 9)
 				pdf.SetTextColor(110, 110, 110)
 			}
 			pdf.CellFormat(colW, 5, leftLines[i], "", 0, "L", false, 0, "")
 		}
+		// RIGHT — bill-to
 		if i < len(rightLines) {
 			pdf.SetXY(20+colW, yStart+6+float64(i)*5)
-			pdf.SetFont("Helvetica", "", 9)
-			pdf.SetTextColor(110, 110, 110)
+			if i == 0 {
+				pdf.SetFont("Helvetica", "B", 10)
+				pdf.SetTextColor(40, 40, 40)
+			} else {
+				pdf.SetFont("Helvetica", "", 9)
+				pdf.SetTextColor(110, 110, 110)
+			}
 			pdf.CellFormat(colW, 5, rightLines[i], "", 0, "L", false, 0, "")
 		}
 	}
-	pdf.SetXY(20, yStart+6+float64(maxLines)*5+6)
+	pdf.SetXY(20, yStart+6+float64(maxLines)*5+4)
+
+	// Inline details: Issued · Due · Currency · Provider.
+	if details := buildDetailsInline(inv); details != "" {
+		pdf.SetFont("Helvetica", "", 9)
+		pdf.SetTextColor(110, 110, 110)
+		pdf.CellFormat(usableWidth, 5, details, "", 0, "L", false, 0, "")
+		pdf.Ln(6)
+	}
 
 	// ── Line item table ──
 	pdf.SetFont("Helvetica", "B", 8)
@@ -175,6 +188,9 @@ func renderInvoicePDF(inv *Invoice, customer *Customer) ([]byte, error) {
 		drawTotalRow("Balance due", formatMoney(balance, inv.Currency), true, false)
 	}
 
+	// ── PAY BY BANK TRANSFER ──
+	drawBankBlock(pdf, issuer, pageWidth, usableWidth)
+
 	// ── Notes ──
 	if inv.Notes != "" {
 		pdf.Ln(8)
@@ -188,6 +204,14 @@ func renderInvoicePDF(inv *Invoice, customer *Customer) ([]byte, error) {
 		pdf.SetFont("Helvetica", "", 9)
 		pdf.SetTextColor(80, 80, 80)
 		pdf.MultiCell(usableWidth, 4.5, inv.Notes, "", "L", false)
+	}
+
+	// ── Footer text from issuer settings ──
+	if issuer != nil && issuer.FooterText != "" {
+		pdf.Ln(6)
+		pdf.SetFont("Helvetica", "I", 8)
+		pdf.SetTextColor(140, 140, 140)
+		pdf.MultiCell(usableWidth, 4, issuer.FooterText, "", "C", false)
 	}
 
 	var buf bytes.Buffer
@@ -212,22 +236,192 @@ func buildBillToLines(inv *Invoice, customer *Customer) []string {
 			out = append(out, ln)
 		}
 	}
+	if tids := formatTaxIDs(customer.TaxIDs); tids != "" {
+		out = append(out, tids)
+	}
 	return out
 }
 
-func buildDetailsLines(inv *Invoice) []string {
-	var out []string
+// buildIssuerLines is the BILL FROM analogue of buildBillToLines.
+// Falls back to a single placeholder line when nothing's configured —
+// keeps the column from collapsing and signals to the user that the
+// Settings tab still needs filling in.
+func buildIssuerLines(issuer *Issuer) []string {
+	if issuer == nil || !issuer.Configured || issuer.DisplayName == "" {
+		return []string{"Issued by your Apteva project"}
+	}
+	out := []string{issuer.DisplayName}
+	if issuer.LegalName != "" && issuer.LegalName != issuer.DisplayName {
+		out = append(out, issuer.LegalName)
+	}
+	if addr := formatBillingAddress(issuer.Address); addr != "" {
+		for _, ln := range strings.Split(addr, "\n") {
+			out = append(out, ln)
+		}
+	}
+	if tids := formatTaxIDs(issuer.TaxIDs); tids != "" {
+		out = append(out, tids)
+	}
+	if issuer.Email != "" {
+		out = append(out, issuer.Email)
+	}
+	return out
+}
+
+// buildDetailsInline collapses the old DETAILS column into a single
+// dot-separated row that sits under the BILL FROM / BILL TO blocks.
+func buildDetailsInline(inv *Invoice) string {
+	var parts []string
 	if inv.FinalizedAt != "" {
-		out = append(out, "Issued: "+formatDateOnly(inv.FinalizedAt))
+		parts = append(parts, "Issued: "+formatDateOnly(inv.FinalizedAt))
 	} else if inv.CreatedAt != "" {
-		out = append(out, "Created: "+formatDateOnly(inv.CreatedAt))
+		parts = append(parts, "Created: "+formatDateOnly(inv.CreatedAt))
 	}
 	if inv.DueDate != "" {
-		out = append(out, "Due: "+formatDateOnly(inv.DueDate))
+		parts = append(parts, "Due: "+formatDateOnly(inv.DueDate))
 	}
-	out = append(out, fmt.Sprintf("Currency: %s", inv.Currency))
-	out = append(out, fmt.Sprintf("Provider: %s", inv.Provider))
-	return out
+	parts = append(parts, "Currency: "+inv.Currency)
+	if inv.Provider != "" && inv.Provider != "local" {
+		parts = append(parts, "Provider: "+inv.Provider)
+	}
+	return strings.Join(parts, " · ")
+}
+
+// formatTaxIDs renders a JSON array of {type,value} as a single line
+// with friendly type labels. Returns "" when there are no usable IDs.
+func formatTaxIDs(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var arr []struct {
+		Type  string `json:"type"`
+		Value string `json:"value"`
+	}
+	if err := jsonDecodeRaw(raw, &arr); err != nil || len(arr) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(arr))
+	for _, t := range arr {
+		if t.Type == "" || t.Value == "" {
+			continue
+		}
+		label := strings.ToUpper(t.Type)
+		switch strings.ToLower(t.Type) {
+		case "vat":
+			label = "VAT"
+		case "ein":
+			label = "EIN"
+		case "gst":
+			label = "GST"
+		case "abn":
+			label = "ABN"
+		case "company_reg":
+			label = "Reg"
+		case "siret":
+			label = "SIRET"
+		}
+		parts = append(parts, label+" "+t.Value)
+	}
+	return strings.Join(parts, " · ")
+}
+
+// bankInfo + parseBank decode the issuer's bank JSON. Stays struct-
+// internal because both pdf.go and print.go need the same fields.
+type bankInfo struct {
+	IBAN        string
+	BIC         string
+	BankName    string
+	BankCode    string
+	Beneficiary string
+}
+
+func parseBank(raw []byte) bankInfo {
+	if len(raw) == 0 {
+		return bankInfo{}
+	}
+	var m struct {
+		IBAN        string `json:"iban"`
+		BIC         string `json:"bic"`
+		BankName    string `json:"bank_name"`
+		BankCode    string `json:"bank_code"`
+		Beneficiary string `json:"beneficiary"`
+	}
+	if err := jsonDecodeRaw(raw, &m); err != nil {
+		return bankInfo{}
+	}
+	return bankInfo{
+		IBAN:        m.IBAN,
+		BIC:         m.BIC,
+		BankName:    m.BankName,
+		BankCode:    m.BankCode,
+		Beneficiary: m.Beneficiary,
+	}
+}
+
+// formatIBAN groups the IBAN into 4-char blocks: "EE2477007710073329 32"
+// → "EE24 7700 7710 0733 2932". Cosmetic only.
+func formatIBAN(s string) string {
+	s = strings.ToUpper(strings.ReplaceAll(s, " ", ""))
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 && i%4 == 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// drawBankBlock paints the "PAY BY BANK TRANSFER" section between
+// the totals box and the notes block. Skipped silently when the
+// issuer has no IBAN configured — most users on Stripe never need this.
+func drawBankBlock(pdf *fpdf.Fpdf, issuer *Issuer, pageWidth, usableWidth float64) {
+	if issuer == nil || !issuer.Configured {
+		return
+	}
+	bank := parseBank(issuer.Bank)
+	if bank.IBAN == "" {
+		return
+	}
+	pdf.Ln(6)
+	pdf.SetDrawColor(220, 220, 220)
+	pdf.Line(20, pdf.GetY(), pageWidth-20, pdf.GetY())
+	pdf.Ln(3)
+	pdf.SetFont("Helvetica", "B", 8)
+	pdf.SetTextColor(120, 120, 120)
+	pdf.CellFormat(usableWidth, 5, "PAY BY BANK TRANSFER", "", 0, "L", false, 0, "")
+	pdf.Ln(5)
+
+	pdf.SetFont("Helvetica", "", 9)
+	pdf.SetTextColor(60, 60, 60)
+	beneficiary := bank.Beneficiary
+	if beneficiary == "" {
+		beneficiary = issuer.LegalName
+	}
+	if beneficiary == "" {
+		beneficiary = issuer.DisplayName
+	}
+	if beneficiary != "" {
+		pdf.CellFormat(usableWidth, 4.5, "Beneficiary: "+beneficiary, "", 0, "L", false, 0, "")
+		pdf.Ln(4.5)
+	}
+	pdf.CellFormat(usableWidth, 4.5, "IBAN: "+formatIBAN(bank.IBAN), "", 0, "L", false, 0, "")
+	pdf.Ln(4.5)
+	if bank.BIC != "" {
+		line := "BIC: " + bank.BIC
+		if bank.BankCode != "" {
+			line += " · Bank code " + bank.BankCode
+		}
+		pdf.CellFormat(usableWidth, 4.5, line, "", 0, "L", false, 0, "")
+		pdf.Ln(4.5)
+	} else if bank.BankCode != "" {
+		pdf.CellFormat(usableWidth, 4.5, "Bank code: "+bank.BankCode, "", 0, "L", false, 0, "")
+		pdf.Ln(4.5)
+	}
+	if bank.BankName != "" {
+		pdf.CellFormat(usableWidth, 4.5, "Bank: "+bank.BankName, "", 0, "L", false, 0, "")
+		pdf.Ln(4.5)
+	}
 }
 
 func invoiceTitle(inv *Invoice) string {

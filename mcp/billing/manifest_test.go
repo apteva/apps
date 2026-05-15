@@ -48,6 +48,7 @@ func TestMCPTools_ManifestMatchesHandlers(t *testing.T) {
 		"invoices_void", "invoices_get", "invoices_search",
 		"invoices_render_pdf",
 		"payments_record", "payments_list",
+		"issuer_get", "issuer_set",
 	}
 	for _, name := range want {
 		if !implemented[name] {

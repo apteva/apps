@@ -52,7 +52,7 @@ func sampleCustomer() *Customer {
 func TestRenderInvoicePDF_ProducesValidPDF(t *testing.T) {
 	inv := sampleInvoice()
 	cust := sampleCustomer()
-	bytes, err := renderInvoicePDF(inv, cust)
+	bytes, err := renderInvoicePDF(inv, cust, nil)
 	if err != nil {
 		t.Fatalf("renderInvoicePDF: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestRenderInvoicePDF_ProducesValidPDF(t *testing.T) {
 func TestRenderInvoicePDF_HandlesMissingCustomer(t *testing.T) {
 	inv := sampleInvoice()
 	// nil customer is allowed (e.g. soft-deleted after finalize).
-	bytes, err := renderInvoicePDF(inv, nil)
+	bytes, err := renderInvoicePDF(inv, nil, nil)
 	if err != nil {
 		t.Fatalf("renderInvoicePDF without customer: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestRenderInvoicePDF_HandlesEmptyLineItems(t *testing.T) {
 	inv := sampleInvoice()
 	inv.LineItems = nil
 	inv.SubtotalCents, inv.TaxCents, inv.TotalCents = 0, 0, 0
-	bytes, err := renderInvoicePDF(inv, sampleCustomer())
+	bytes, err := renderInvoicePDF(inv, sampleCustomer(), nil)
 	if err != nil {
 		t.Fatalf("renderInvoicePDF empty: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestRenderInvoicePDF_HandlesEmptyLineItems(t *testing.T) {
 
 func TestRenderInvoiceHTML_ContainsKeyFields(t *testing.T) {
 	inv := sampleInvoice()
-	html := renderInvoiceHTML(inv, sampleCustomer())
+	html := renderInvoiceHTML(inv, sampleCustomer(), nil)
 	for _, fragment := range []string{
 		"INV-2026-0042",
 		"Acme Corp",
@@ -152,7 +152,7 @@ func TestRenderInvoiceHTML_EscapesUserInput(t *testing.T) {
 	cust.Name = `Mallory <img src=x onerror=alert(1)>`
 	cust.Email = `evil@example.com" onmouseover="alert(1)`
 
-	got := renderInvoiceHTML(inv, cust)
+	got := renderInvoiceHTML(inv, cust, nil)
 
 	// The dangerous shapes must NOT appear unescaped: a real <script>
 	// tag, a real <img> tag, or a stray closing-quote-then-handler in
@@ -177,9 +177,63 @@ func TestRenderInvoiceHTML_EscapesUserInput(t *testing.T) {
 
 func TestRenderInvoiceHTML_HandlesMissingCustomer(t *testing.T) {
 	inv := sampleInvoice()
-	html := renderInvoiceHTML(inv, nil)
+	html := renderInvoiceHTML(inv, nil, nil)
 	if !strings.Contains(html, "Customer #1") {
 		t.Error("expected fallback 'Customer #<id>' when customer is nil")
+	}
+}
+
+// Configured issuer should surface its name, address, tax IDs, and bank
+// instructions on both the HTML print and the PDF byte stream.
+func TestRenderInvoice_IncludesConfiguredIssuer(t *testing.T) {
+	addr, _ := json.Marshal(map[string]any{
+		"line1": "Tartu mnt 2", "postal_code": "10145",
+		"city": "Tallinn", "country": "EE",
+	})
+	tids, _ := json.Marshal([]map[string]string{
+		{"type": "vat", "value": "EE100530247"},
+		{"type": "company_reg", "value": "10539549"},
+	})
+	bank, _ := json.Marshal(map[string]string{
+		"iban":      "EE247700771007332932",
+		"bic":       "LHVBEE22",
+		"bank_name": "LHV Pank",
+		"bank_code": "689",
+	})
+	issuer := &Issuer{
+		DisplayName: "G Swift",
+		LegalName:   "G Swift Cloud OÜ",
+		Email:       "billing@gswift.fr",
+		Address:     addr,
+		TaxIDs:      tids,
+		Bank:        bank,
+		FooterText:  "Thank you for your business.",
+		Configured:  true,
+	}
+	html := renderInvoiceHTML(sampleInvoice(), sampleCustomer(), issuer)
+	for _, frag := range []string{
+		"G Swift",          // display_name in BILL FROM
+		"G Swift Cloud OÜ", // legal_name (html.EscapeString passes non-ASCII through)
+		"Tartu mnt 2",      // address
+		"VAT EE100530247",          // tax ID with friendly label
+		"Reg 10539549",             // company reg label
+		"Pay by bank transfer",     // bank section heading
+		"EE24 7700 7710 0733 2932", // IBAN spaced
+		"LHVBEE22",
+		"Bank code 689",
+		"Thank you for your business.",
+	} {
+		if !strings.Contains(html, frag) {
+			t.Errorf("rendered HTML missing %q", frag)
+		}
+	}
+
+	pdfBytes, err := renderInvoicePDF(sampleInvoice(), sampleCustomer(), issuer)
+	if err != nil {
+		t.Fatalf("renderInvoicePDF with issuer: %v", err)
+	}
+	if len(pdfBytes) < 500 {
+		t.Errorf("PDF too small with configured issuer: %d bytes", len(pdfBytes))
 	}
 }
 

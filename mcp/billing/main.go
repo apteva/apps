@@ -116,6 +116,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/invoices", Handler: a.handleHTTPInvoicesCollection},
 		{Pattern: "/invoices/", Handler: a.handleHTTPInvoiceItem},
 		{Pattern: "/payments", Handler: a.handleHTTPPaymentsCollection},
+		{Pattern: "/issuer", Handler: a.handleHTTPIssuer},
 	}
 }
 
@@ -372,6 +373,32 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"invoice_id"}),
 			Handler: a.toolInvoicesRenderPDF,
 		},
+		// ── Issuer ───────────────────────────────────────────────────
+		{
+			Name:        "issuer_get",
+			Description: "Fetch this install's billing identity (display/legal name, address, tax IDs, bank coordinates). Returns {issuer: {..., configured: bool}}. Singleton across the install.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler:     a.toolIssuerGet,
+		},
+		{
+			Name:        "issuer_set",
+			Description: "Upsert this install's billing identity. Singleton — calling this overwrites the existing settings. Args: display_name (required), legal_name, email, phone, website, brand_color, address {line1,line2,postal_code,city,state,country}, tax_ids [{type,value}], bank {iban,bic,bank_name,bank_code,beneficiary}, footer_text, default_terms.",
+			InputSchema: schemaObject(map[string]any{
+				"display_name":  map[string]any{"type": "string"},
+				"legal_name":    map[string]any{"type": "string"},
+				"email":         map[string]any{"type": "string"},
+				"phone":         map[string]any{"type": "string"},
+				"website":       map[string]any{"type": "string"},
+				"brand_color":   map[string]any{"type": "string"},
+				"address":       map[string]any{"type": "object"},
+				"tax_ids":       map[string]any{"type": "array"},
+				"bank":          map[string]any{"type": "object"},
+				"footer_text":   map[string]any{"type": "string"},
+				"default_terms": map[string]any{"type": "string"},
+			}, []string{"display_name"}),
+			Handler: a.toolIssuerSet,
+		},
+
 		{
 			Name:        "payments_list",
 			Description: "List payments. Args: customer_id, invoice_id, method, since (RFC3339), until (RFC3339), limit (default 50, max 200).",
@@ -918,7 +945,8 @@ func (a *App) toolInvoicesRenderPDF(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if inv == nil {
 		return nil, fmt.Errorf("invoice %d not found", id)
 	}
-	pdfBytes, err := renderInvoicePDF(inv, cust)
+	issuer, _ := dbIssuerGet(ctx.AppDB())
+	pdfBytes, err := renderInvoicePDF(inv, cust, issuer)
 	if err != nil {
 		return nil, err
 	}
@@ -997,9 +1025,10 @@ func (a *App) handleHTTPInvoicePrint(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "not found")
 		return
 	}
+	issuer, _ := dbIssuerGet(ctx.AppDB())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "private, no-store")
-	_, _ = w.Write([]byte(renderInvoiceHTML(inv, cust)))
+	_, _ = w.Write([]byte(renderInvoiceHTML(inv, cust, issuer)))
 }
 
 func (a *App) handleHTTPInvoicePDF(w http.ResponseWriter, r *http.Request) {
@@ -1023,7 +1052,8 @@ func (a *App) handleHTTPInvoicePDF(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "not found")
 		return
 	}
-	pdfBytes, err := renderInvoicePDF(inv, cust)
+	issuer, _ := dbIssuerGet(ctx.AppDB())
+	pdfBytes, err := renderInvoicePDF(inv, cust, issuer)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -2798,4 +2828,157 @@ func configIntBps(ctx *sdk.AppCtx, key string) int {
 		return 0
 	}
 	return n
+}
+
+// ─── Issuer settings (singleton) ────────────────────────────────────
+//
+// The entity that emits invoices — your own business identity, rendered
+// as the "BILL FROM" block on PDFs and the bank-transfer instructions
+// in the footer. One row total per install; the CHECK(id=1) constraint
+// plus the INSERT…ON CONFLICT shape below makes that physical.
+
+type Issuer struct {
+	DisplayName  string          `json:"display_name"`
+	LegalName    string          `json:"legal_name,omitempty"`
+	Email        string          `json:"email,omitempty"`
+	Phone        string          `json:"phone,omitempty"`
+	Website      string          `json:"website,omitempty"`
+	BrandColor   string          `json:"brand_color,omitempty"`
+	Address      json.RawMessage `json:"address,omitempty"`
+	TaxIDs       json.RawMessage `json:"tax_ids,omitempty"`
+	Bank         json.RawMessage `json:"bank,omitempty"`
+	FooterText   string          `json:"footer_text,omitempty"`
+	DefaultTerms string          `json:"default_terms,omitempty"`
+	Metadata     json.RawMessage `json:"metadata,omitempty"`
+	CreatedAt    string          `json:"created_at,omitempty"`
+	UpdatedAt    string          `json:"updated_at,omitempty"`
+	// Configured is true once a row exists; consumers (PDF, panel)
+	// fall back to a placeholder when false.
+	Configured bool `json:"configured"`
+}
+
+func dbIssuerGet(db *sql.DB) (*Issuer, error) {
+	var iss Issuer
+	var addr, taxes, bank, meta string
+	err := db.QueryRow(
+		`SELECT display_name, COALESCE(legal_name,''), COALESCE(email,''),
+		        COALESCE(phone,''), COALESCE(website,''), COALESCE(brand_color,''),
+		        address, tax_ids, bank,
+		        COALESCE(footer_text,''), COALESCE(default_terms,''), metadata,
+		        created_at, updated_at
+		 FROM issuer_settings WHERE id = 1`).Scan(
+		&iss.DisplayName, &iss.LegalName, &iss.Email,
+		&iss.Phone, &iss.Website, &iss.BrandColor,
+		&addr, &taxes, &bank,
+		&iss.FooterText, &iss.DefaultTerms, &meta,
+		&iss.CreatedAt, &iss.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return &Issuer{
+			Address:    json.RawMessage("{}"),
+			TaxIDs:     json.RawMessage("[]"),
+			Bank:       json.RawMessage("{}"),
+			Metadata:   json.RawMessage("{}"),
+			Configured: false,
+		}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	iss.Address = json.RawMessage(addr)
+	iss.TaxIDs = json.RawMessage(taxes)
+	iss.Bank = json.RawMessage(bank)
+	iss.Metadata = json.RawMessage(meta)
+	iss.Configured = true
+	return &iss, nil
+}
+
+func dbIssuerSet(db *sql.DB, patch map[string]any) (*Issuer, error) {
+	display := strings.TrimSpace(strArg(patch, "display_name"))
+	if display == "" {
+		return nil, errors.New("display_name required")
+	}
+	addr := jsonOrEmpty(patch["address"], "{}")
+	taxes := jsonOrEmpty(patch["tax_ids"], "[]")
+	bank := jsonOrEmpty(patch["bank"], "{}")
+	meta := jsonOrEmpty(patch["metadata"], "{}")
+	now := nowRFC3339()
+	if _, err := db.Exec(
+		`INSERT INTO issuer_settings
+		     (id, display_name, legal_name, email, phone, website, brand_color,
+		      address, tax_ids, bank, footer_text, default_terms, metadata,
+		      created_at, updated_at)
+		 VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		     display_name  = excluded.display_name,
+		     legal_name    = excluded.legal_name,
+		     email         = excluded.email,
+		     phone         = excluded.phone,
+		     website       = excluded.website,
+		     brand_color   = excluded.brand_color,
+		     address       = excluded.address,
+		     tax_ids       = excluded.tax_ids,
+		     bank          = excluded.bank,
+		     footer_text   = excluded.footer_text,
+		     default_terms = excluded.default_terms,
+		     metadata      = excluded.metadata,
+		     updated_at    = excluded.updated_at`,
+		display,
+		strArg(patch, "legal_name"),
+		strArg(patch, "email"),
+		strArg(patch, "phone"),
+		strArg(patch, "website"),
+		strArg(patch, "brand_color"),
+		addr, taxes, bank,
+		strArg(patch, "footer_text"),
+		strArg(patch, "default_terms"),
+		meta,
+		now, now,
+	); err != nil {
+		return nil, err
+	}
+	return dbIssuerGet(db)
+}
+
+func (a *App) handleHTTPIssuer(w http.ResponseWriter, r *http.Request) {
+	ctx := getAppCtx(r)
+	switch r.Method {
+	case http.MethodGet:
+		iss, err := dbIssuerGet(ctx.AppDB())
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"issuer": iss})
+	case http.MethodPut, http.MethodPost:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		iss, err := dbIssuerSet(ctx.AppDB(), body)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"issuer": iss})
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (a *App) toolIssuerGet(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	iss, err := dbIssuerGet(ctx.AppDB())
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"issuer": iss}, nil
+}
+
+func (a *App) toolIssuerSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	iss, err := dbIssuerSet(ctx.AppDB(), args)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"issuer": iss}, nil
 }

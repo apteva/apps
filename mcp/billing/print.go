@@ -21,8 +21,9 @@ import (
 
 // renderInvoiceHTML produces the self-contained print page for one
 // invoice. customer is optional — when nil, the bill-to block falls
-// back to "Customer #<id>".
-func renderInvoiceHTML(inv *Invoice, customer *Customer) string {
+// back to "Customer #<id>". issuer is optional; when nil/unconfigured,
+// the BILL FROM column shows a single placeholder line.
+func renderInvoiceHTML(inv *Invoice, customer *Customer, issuer *Issuer) string {
 	var b bytes.Buffer
 
 	title := inv.Number
@@ -60,10 +61,17 @@ func renderInvoiceHTML(inv *Invoice, customer *Customer) string {
     padding: 48px 56px;
     box-shadow: 0 1px 4px rgba(0,0,0,0.08);
   }
-  header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 32px; }
+  header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; }
   .from h1 { margin: 0; font-size: 22px; font-weight: 600; }
   .from .tagline { color: var(--muted); font-size: 12px; margin-top: 2px; }
   .meta { text-align: right; }
+  .details-line { color: var(--muted); font-size: 12px; margin: 16px 0; padding: 8px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .bank { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }
+  .bank h2 { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; margin: 0 0 6px 0; }
+  .bank .row { font-size: 13px; line-height: 1.6; }
+  .bank .row .label { display: inline-block; min-width: 90px; color: var(--muted); }
+  .bank .iban { font-variant-numeric: tabular-nums; font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+  .footer-text { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; font-style: italic; text-align: center; }
   .meta .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
   .meta .value { font-size: 18px; font-weight: 600; margin-top: 2px; }
   .pill {
@@ -112,7 +120,6 @@ func renderInvoiceHTML(inv *Invoice, customer *Customer) string {
   <header>
     <div class="from">
       <h1>Invoice</h1>
-      <div class="tagline">Issued by your Apteva project</div>
     </div>
     <div class="meta">
       <div class="label">Invoice</div>
@@ -129,14 +136,20 @@ func renderInvoiceHTML(inv *Invoice, customer *Customer) string {
 
   <div class="grid">
     <div>
+      <h2>Bill from</h2>
+      <p>`)
+	writeIssuerHTML(&b, issuer)
+	b.WriteString(`</p>
+    </div>
+    <div>
       <h2>Bill to</h2>
       <p>`)
 	if customer != nil {
 		b.WriteString(`<strong>`)
 		b.WriteString(html.EscapeString(customer.Name))
-		b.WriteString(`</strong><br>`)
+		b.WriteString(`</strong>`)
 		if customer.Email != "" {
-			b.WriteString(`<span class="secondary">`)
+			b.WriteString(`<br><span class="secondary">`)
 			b.WriteString(html.EscapeString(customer.Email))
 			b.WriteString(`</span>`)
 		}
@@ -145,27 +158,34 @@ func renderInvoiceHTML(inv *Invoice, customer *Customer) string {
 			b.WriteString(strings.ReplaceAll(html.EscapeString(addr), "\n", "<br>"))
 			b.WriteString(`</span>`)
 		}
+		if tids := formatTaxIDs(customer.TaxIDs); tids != "" {
+			b.WriteString(`<br><span class="secondary">`)
+			b.WriteString(html.EscapeString(tids))
+			b.WriteString(`</span>`)
+		}
 	} else {
 		fmt.Fprintf(&b, `Customer #%d`, inv.CustomerID)
 	}
 	b.WriteString(`</p>
     </div>
-    <div>
-      <h2>Details</h2>
-      <p>`)
+  </div>
+
+  <div class="details-line">`)
+	var detailsParts []string
 	if d := inv.FinalizedAt; d != "" {
-		fmt.Fprintf(&b, "Issued: %s<br>", html.EscapeString(formatDateOnly(d)))
+		detailsParts = append(detailsParts, "Issued: "+formatDateOnly(d))
 	} else if d := inv.CreatedAt; d != "" {
-		fmt.Fprintf(&b, "Created: %s<br>", html.EscapeString(formatDateOnly(d)))
+		detailsParts = append(detailsParts, "Created: "+formatDateOnly(d))
 	}
 	if inv.DueDate != "" {
-		fmt.Fprintf(&b, "Due: %s<br>", html.EscapeString(formatDateOnly(inv.DueDate)))
+		detailsParts = append(detailsParts, "Due: "+formatDateOnly(inv.DueDate))
 	}
-	fmt.Fprintf(&b, `<span class="secondary">Currency: %s · Provider: %s</span>`,
-		html.EscapeString(inv.Currency), html.EscapeString(inv.Provider))
-	b.WriteString(`</p>
-    </div>
-  </div>
+	detailsParts = append(detailsParts, "Currency: "+inv.Currency)
+	if inv.Provider != "" && inv.Provider != "local" {
+		detailsParts = append(detailsParts, "Provider: "+inv.Provider)
+	}
+	b.WriteString(html.EscapeString(strings.Join(detailsParts, " · ")))
+	b.WriteString(`</div>
 
   <table>
     <thead>
@@ -231,9 +251,56 @@ func renderInvoiceHTML(inv *Invoice, customer *Customer) string {
   </table>
 `)
 
+	// PAY BY BANK TRANSFER block (only when issuer has IBAN)
+	if issuer != nil && issuer.Configured {
+		bank := parseBank(issuer.Bank)
+		if bank.IBAN != "" {
+			beneficiary := bank.Beneficiary
+			if beneficiary == "" {
+				beneficiary = issuer.LegalName
+			}
+			if beneficiary == "" {
+				beneficiary = issuer.DisplayName
+			}
+			b.WriteString(`  <div class="bank">
+    <h2>Pay by bank transfer</h2>
+`)
+			if beneficiary != "" {
+				fmt.Fprintf(&b, `    <div class="row"><span class="label">Beneficiary</span>%s</div>
+`, html.EscapeString(beneficiary))
+			}
+			fmt.Fprintf(&b, `    <div class="row"><span class="label">IBAN</span><span class="iban">%s</span></div>
+`, html.EscapeString(formatIBAN(bank.IBAN)))
+			if bank.BIC != "" {
+				bicLine := bank.BIC
+				if bank.BankCode != "" {
+					bicLine += " · Bank code " + bank.BankCode
+				}
+				fmt.Fprintf(&b, `    <div class="row"><span class="label">BIC / SWIFT</span>%s</div>
+`, html.EscapeString(bicLine))
+			} else if bank.BankCode != "" {
+				fmt.Fprintf(&b, `    <div class="row"><span class="label">Bank code</span>%s</div>
+`, html.EscapeString(bank.BankCode))
+			}
+			if bank.BankName != "" {
+				fmt.Fprintf(&b, `    <div class="row"><span class="label">Bank</span>%s</div>
+`, html.EscapeString(bank.BankName))
+			}
+			b.WriteString(`  </div>
+`)
+		}
+	}
+
 	if inv.Notes != "" {
 		b.WriteString(`  <div class="notes">`)
 		b.WriteString(html.EscapeString(inv.Notes))
+		b.WriteString(`</div>
+`)
+	}
+
+	if issuer != nil && issuer.FooterText != "" {
+		b.WriteString(`  <div class="footer-text">`)
+		b.WriteString(html.EscapeString(issuer.FooterText))
 		b.WriteString(`</div>
 `)
 	}
@@ -243,6 +310,39 @@ func renderInvoiceHTML(inv *Invoice, customer *Customer) string {
 </html>
 `)
 	return b.String()
+}
+
+// writeIssuerHTML emits the BILL FROM column body. Falls back to a
+// single placeholder line when nothing's configured so the column
+// doesn't collapse.
+func writeIssuerHTML(b *bytes.Buffer, issuer *Issuer) {
+	if issuer == nil || !issuer.Configured || issuer.DisplayName == "" {
+		b.WriteString(`<span class="secondary">Issued by your Apteva project</span>`)
+		return
+	}
+	b.WriteString(`<strong>`)
+	b.WriteString(html.EscapeString(issuer.DisplayName))
+	b.WriteString(`</strong>`)
+	if issuer.LegalName != "" && issuer.LegalName != issuer.DisplayName {
+		b.WriteString(`<br><span class="secondary">`)
+		b.WriteString(html.EscapeString(issuer.LegalName))
+		b.WriteString(`</span>`)
+	}
+	if addr := formatBillingAddress(issuer.Address); addr != "" {
+		b.WriteString(`<br><span class="secondary">`)
+		b.WriteString(strings.ReplaceAll(html.EscapeString(addr), "\n", "<br>"))
+		b.WriteString(`</span>`)
+	}
+	if tids := formatTaxIDs(issuer.TaxIDs); tids != "" {
+		b.WriteString(`<br><span class="secondary">`)
+		b.WriteString(html.EscapeString(tids))
+		b.WriteString(`</span>`)
+	}
+	if issuer.Email != "" {
+		b.WriteString(`<br><span class="secondary">`)
+		b.WriteString(html.EscapeString(issuer.Email))
+		b.WriteString(`</span>`)
+	}
 }
 
 // ─── Format helpers ─────────────────────────────────────────────────

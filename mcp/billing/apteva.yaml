@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.3.0
+version: 0.4.0
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Per-invoice provider — local for internal/wire/cash records, stripe
@@ -61,6 +61,10 @@ provides:
       description: Record a non-Stripe payment (wire / cash / check / other). Updates invoice status when fully covered.
     - name: payments_list
       description: List payments for a customer or invoice, optionally filtered by method or date range.
+    - name: issuer_get
+      description: Fetch this install's billing identity (the entity that emits invoices). Singleton.
+    - name: issuer_set
+      description: Upsert this install's billing identity — display/legal name, address, tax IDs, bank coordinates.
   ui_panels:
     - slot: project.page
       label: Billing
