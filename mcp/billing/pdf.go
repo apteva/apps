@@ -156,13 +156,35 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 		pdf.CellFormat(usableWidth, 8, e("No line items."), "", 0, "C", false, 0, "")
 		pdf.Ln(8)
 	} else {
+		// Description column uses MultiCell so long descriptions WRAP
+		// rather than overflow into the QTY/UNIT/TAX/AMOUNT columns —
+		// gofpdf's CellFormat doesn't clip, it just keeps drawing past
+		// the cell boundary, which is what produced the
+		// "letters-overlapping-numbers" mess in v0.6.2.
+		//
+		// The four numeric columns are rendered at the row's original
+		// Y so they stay anchored to the first line, then we advance
+		// to whichever bottom is lower (description wrap vs single
+		// row height). Matches Stripe/QBO line-item conventions.
+		const lineH = 5.0
+		const leftX = 20.0
 		for _, li := range inv.LineItems {
-			pdf.CellFormat(descW, 6, e(li.Description), "", 0, "L", false, 0, "")
-			pdf.CellFormat(20, 6, e(formatQty(li.Quantity)), "", 0, "R", false, 0, "")
-			pdf.CellFormat(30, 6, e(formatMoney(li.UnitPriceCents, inv.Currency)), "", 0, "R", false, 0, "")
-			pdf.CellFormat(20, 6, e(fmt.Sprintf("%.2f%%", float64(li.TaxRateBps)/100)), "", 0, "R", false, 0, "")
-			pdf.CellFormat(30, 6, e(formatMoney(li.AmountCents, inv.Currency)), "", 0, "R", false, 0, "")
-			pdf.Ln(6)
+			yStart := pdf.GetY()
+			pdf.SetX(leftX)
+			pdf.MultiCell(descW, lineH, e(li.Description), "", "L", false)
+			descEndY := pdf.GetY()
+			// Numeric columns at row 1
+			pdf.SetXY(leftX+descW, yStart)
+			pdf.CellFormat(20, lineH, e(formatQty(li.Quantity)), "", 0, "R", false, 0, "")
+			pdf.CellFormat(30, lineH, e(formatMoney(li.UnitPriceCents, inv.Currency)), "", 0, "R", false, 0, "")
+			pdf.CellFormat(20, lineH, e(fmt.Sprintf("%.2f%%", float64(li.TaxRateBps)/100)), "", 0, "R", false, 0, "")
+			pdf.CellFormat(30, lineH, e(formatMoney(li.AmountCents, inv.Currency)), "", 0, "R", false, 0, "")
+			// Advance to the bottom of whichever side is taller.
+			bottomY := descEndY
+			if yStart+lineH > bottomY {
+				bottomY = yStart + lineH
+			}
+			pdf.SetXY(leftX, bottomY+1) // +1mm row gutter
 		}
 	}
 
