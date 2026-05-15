@@ -190,6 +190,29 @@ function buildStatusTone(s: BuildStatus): string {
 
 type ApiFn = <T,>(method: string, path: string, body?: unknown, extra?: Record<string, string>) => Promise<T>;
 
+// handleCodeTab makes Tab insert two spaces in a code textarea
+// (instead of moving focus). Uses execCommand("insertText") when
+// available so the textarea's native undo history survives the
+// edit; falls back to a manual splice otherwise.
+function handleCodeTab(
+  e: { key: string; preventDefault: () => void; currentTarget: HTMLTextAreaElement },
+  current: string,
+  setValue: (v: string) => void,
+) {
+  if (e.key !== "Tab") return;
+  e.preventDefault();
+  let ok = false;
+  try { ok = document.execCommand("insertText", false, "  "); } catch {}
+  if (ok) return;
+  const ta = e.currentTarget;
+  const start = ta.selectionStart;
+  const end = ta.selectionEnd;
+  setValue(current.substring(0, start) + "  " + current.substring(end));
+  requestAnimationFrame(() => {
+    ta.selectionStart = ta.selectionEnd = start + 2;
+  });
+}
+
 export default function FunctionsPanel({ projectId, installId }: NativePanelProps) {
   const [functions, setFunctions] = useState<FunctionRow[]>([]);
   const [statusFilter, setStatusFilter] = useState<Status | "">("");
@@ -846,7 +869,7 @@ function CreateFunctionDialog({
     <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
       <div className="absolute inset-0 bg-bg/80 backdrop-blur-sm" />
       <div
-        className="relative bg-bg-card border border-border rounded-lg shadow-lg max-w-2xl w-full mx-4 overflow-auto flex flex-col max-h-[90vh] p-4 gap-3"
+        className="relative bg-bg-card border border-border rounded-lg shadow-lg max-w-5xl w-full mx-4 overflow-auto flex flex-col max-h-[90vh] p-4 gap-3"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
@@ -893,8 +916,11 @@ function CreateFunctionDialog({
           <textarea
             value={source}
             onChange={(e) => { setSource(e.target.value); setTouchedSource(true); }}
+            onKeyDown={(e) => handleCodeTab(e, source, (v) => { setSource(v); setTouchedSource(true); })}
             spellCheck={false}
-            className={inputCls + " font-mono min-h-[160px]"}
+            wrap="off"
+            style={{ tabSize: 2 }}
+            className={inputCls + " font-mono text-[13px] leading-snug min-h-[480px]"}
           />
         </div>
 
@@ -984,7 +1010,7 @@ function DeployDialog({
     <div className="fixed inset-0 z-[60] flex items-center justify-center" onClick={onClose}>
       <div className="absolute inset-0 bg-bg/80 backdrop-blur-sm" />
       <div
-        className="relative bg-bg-card border border-border rounded-lg shadow-lg max-w-2xl w-full mx-4 overflow-auto flex flex-col max-h-[90vh] p-4 gap-3"
+        className="relative bg-bg-card border border-border rounded-lg shadow-lg max-w-5xl w-full mx-4 overflow-auto flex flex-col max-h-[90vh] p-4 gap-3"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
@@ -997,8 +1023,11 @@ function DeployDialog({
           <textarea
             value={source}
             onChange={(e) => setSource(e.target.value)}
+            onKeyDown={(e) => handleCodeTab(e, source, setSource)}
             spellCheck={false}
-            className={inputCls + " font-mono min-h-[200px]"}
+            wrap="off"
+            style={{ tabSize: 2 }}
+            className={inputCls + " font-mono text-[13px] leading-snug min-h-[520px]"}
           />
         </div>
 
