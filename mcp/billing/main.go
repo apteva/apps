@@ -284,7 +284,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		// ── Invoices ─────────────────────────────────────────────────
 		{
 			Name: "invoices_create",
-			Description: "Create a DRAFT invoice with optional initial line items. Provider arg ('local'|'stripe') falls back to install default. PROVIDER IS FROZEN: to switch, delete and recreate. Args: customer_id, currency (default install setting), provider, due_date, notes, line_items [{description, quantity, unit_price_cents, tax_rate_bps?}].",
+			Description: "Create a DRAFT invoice with optional initial line items. Provider arg ('local'|'stripe') falls back to install default. PROVIDER IS FROZEN. Line items can be either free-form ({description, quantity, unit_price_cents, tax_rate_bps?}) OR catalog references ({price_id, quantity}) — when price_id is set, billing calls the catalog app to snapshot description + unit_price_cents + currency into the line. Free-form and catalog-ref lines can mix on the same invoice. Args: customer_id, currency (catalog price wins; falls back to install default), provider, due_date, notes, line_items, metadata.",
 			InputSchema: schemaObject(map[string]any{
 				"customer_id": map[string]any{"type": "integer"},
 				"currency":    map[string]any{"type": "string"},
@@ -298,15 +298,16 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "invoices_add_line_item",
-			Description: "Append a line item to a DRAFT invoice. Errors on non-draft invoices. Args: invoice_id, description, quantity (default 1), unit_price_cents, tax_rate_bps (default install setting).",
+			Description: "Append a line item to a DRAFT invoice. Errors on non-draft invoices. Free-form OR catalog-ref: pass price_id to snapshot from the catalog app, or pass description+unit_price_cents for an ad-hoc line. Args: invoice_id, price_id, description, quantity (default 1), unit_price_cents, tax_rate_bps (default install setting).",
 			InputSchema: schemaObject(map[string]any{
 				"invoice_id":       map[string]any{"type": "integer"},
+				"price_id":         map[string]any{"type": "integer"},
 				"description":      map[string]any{"type": "string"},
 				"quantity":         map[string]any{"type": "number"},
 				"unit_price_cents": map[string]any{"type": "integer"},
 				"tax_rate_bps":     map[string]any{"type": "integer"},
 				"metadata":         map[string]any{"type": "object"},
-			}, []string{"invoice_id", "description", "unit_price_cents"}),
+			}, []string{"invoice_id"}),
 			Handler: a.toolInvoicesAddLineItem,
 		},
 		{
@@ -529,7 +530,15 @@ type LineItem struct {
 	AmountCents    int64           `json:"amount_cents"`
 	TaxRateBps     int             `json:"tax_rate_bps"`
 	ExternalID     string          `json:"external_id,omitempty"`
-	Metadata       json.RawMessage `json:"metadata,omitempty"`
+	// Optional cross-app FKs into the catalog app — populated when the
+	// caller passes price_id at create time, and snapshot fields above
+	// (description, unit_price_cents) are filled from catalog. NULL on
+	// free-form/ad-hoc lines (one-off custom work, refunds, manual
+	// adjustments). Used for analytics ("revenue by product") not for
+	// PDF rendering — the snapshot fields are what the customer sees.
+	PriceID   *int64 `json:"price_id,omitempty"`
+	ProductID *int64 `json:"product_id,omitempty"`
+	Metadata  json.RawMessage `json:"metadata,omitempty"`
 }
 
 type Payment struct {
@@ -708,7 +717,18 @@ func (a *App) toolInvoicesCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if provider != "local" {
 		return nil, fmt.Errorf("unknown provider %q (expected 'local' or 'stripe')", provider)
 	}
+	rawItems, _ := args["line_items"].([]any)
+	// Resolve any catalog price_id references first — this lookup
+	// fills in description / unit_price_cents on those lines and
+	// surfaces the catalog's currency if the caller didn't pin one.
+	catalogCurrency, err := resolveCatalogRefs(ctx, rawItems)
+	if err != nil {
+		return nil, err
+	}
 	currency := strings.ToUpper(strArg(args, "currency"))
+	if currency == "" && catalogCurrency != "" {
+		currency = strings.ToUpper(catalogCurrency)
+	}
 	if currency == "" {
 		currency = strings.ToUpper(configString(ctx, "default_currency", "USD"))
 	}
@@ -716,7 +736,6 @@ func (a *App) toolInvoicesCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, fmt.Errorf("currency %q not a 3-letter ISO 4217 code", currency)
 	}
 
-	rawItems, _ := args["line_items"].([]any)
 	items, err := normaliseLineItems(rawItems, configIntBps(ctx, "tax_default_rate_bps"))
 	if err != nil {
 		return nil, err
@@ -752,10 +771,20 @@ func (a *App) toolInvoicesAddLineItem(ctx *sdk.AppCtx, args map[string]any) (any
 		return nil, err
 	}
 	id := int64Arg(args, "invoice_id")
+	if id == 0 {
+		return nil, errors.New("invoice_id required")
+	}
+	// If price_id is set, snapshot description/unit_price_cents from
+	// catalog (caller-provided values still win). resolveCatalogRefs
+	// mutates the map in place — maps are reference types, so args
+	// reflects the snapshot after this returns.
+	if _, err := resolveCatalogRefs(ctx, []any{args}); err != nil {
+		return nil, err
+	}
 	desc := strArg(args, "description")
 	unit := int64Arg(args, "unit_price_cents")
-	if id == 0 || desc == "" {
-		return nil, errors.New("invoice_id and description required")
+	if desc == "" {
+		return nil, errors.New("description required")
 	}
 	qty := float64Arg(args, "quantity", 1)
 	if qty <= 0 {
@@ -771,6 +800,12 @@ func (a *App) toolInvoicesAddLineItem(ctx *sdk.AppCtx, args map[string]any) (any
 		UnitPriceCents: unit,
 		AmountCents:    roundCents(qty * float64(unit)),
 		TaxRateBps:     taxBps,
+	}
+	if v := int64Arg(args, "price_id"); v != 0 {
+		li.PriceID = &v
+	}
+	if v := int64Arg(args, "product_id"); v != 0 {
+		li.ProductID = &v
 	}
 	if md, ok := args["metadata"].(map[string]any); ok {
 		if raw, err := json.Marshal(md); err == nil {
@@ -817,6 +852,13 @@ func (a *App) toolInvoicesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	patch, _ := args["patch"].(map[string]any)
 	if patch == nil {
 		return nil, errors.New("patch required (object)")
+	}
+	// If patch.line_items references catalog prices, resolve before the
+	// DB call so dbInvoiceUpdate stays catalog-agnostic.
+	if rawItems, ok := patch["line_items"].([]any); ok {
+		if _, err := resolveCatalogRefs(ctx, rawItems); err != nil {
+			return nil, err
+		}
 	}
 	inv, err := dbInvoiceUpdate(ctx.AppDB(), pid, id, patch, callerActor(args))
 	if err != nil {
@@ -1358,7 +1400,16 @@ func (a *App) handleHTTPInvoiceCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "unknown provider")
 		return
 	}
+	rawItems, _ := body["line_items"].([]any)
+	catalogCurrency, err := resolveCatalogRefs(ctx, rawItems)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	currency := strings.ToUpper(strArg(body, "currency"))
+	if currency == "" && catalogCurrency != "" {
+		currency = strings.ToUpper(catalogCurrency)
+	}
 	if currency == "" {
 		currency = strings.ToUpper(configString(ctx, "default_currency", "USD"))
 	}
@@ -1366,7 +1417,6 @@ func (a *App) handleHTTPInvoiceCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "currency must be 3-letter ISO 4217")
 		return
 	}
-	rawItems, _ := body["line_items"].([]any)
 	items, err := normaliseLineItems(rawItems, configIntBps(ctx, "tax_default_rate_bps"))
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -1441,6 +1491,12 @@ func (a *App) handleHTTPInvoiceUpdate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
+	if rawItems, ok := patch["line_items"].([]any); ok {
+		if _, err := resolveCatalogRefs(ctx, rawItems); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	inv, err := dbInvoiceUpdate(ctx.AppDB(), pid, id, patch, actorFromRequest(r))
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -1514,6 +1570,10 @@ func (a *App) handleHTTPInvoiceAddLineItem(w http.ResponseWriter, r *http.Reques
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
+	if _, err := resolveCatalogRefs(ctx, []any{body}); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	desc := strArg(body, "description")
 	unit := int64Arg(body, "unit_price_cents")
 	qty := float64Arg(body, "quantity", 1)
@@ -1528,6 +1588,12 @@ func (a *App) handleHTTPInvoiceAddLineItem(w http.ResponseWriter, r *http.Reques
 		UnitPriceCents: unit,
 		AmountCents:    roundCents(qty * float64(unit)),
 		TaxRateBps:     taxBps,
+	}
+	if v := int64Arg(body, "price_id"); v != 0 {
+		li.PriceID = &v
+	}
+	if v := int64Arg(body, "product_id"); v != 0 {
+		li.ProductID = &v
 	}
 	inv, err := dbInvoiceAddLineItem(ctx.AppDB(), pid, id, li, actorFromRequest(r))
 	if err != nil {
@@ -2005,10 +2071,11 @@ func dbInvoiceCreate(db *sql.DB, inv *Invoice, actor string) (*Invoice, error) {
 		if _, err := tx.Exec(
 			`INSERT INTO invoice_line_items
 			   (invoice_id, position, description, quantity, unit_price_cents,
-			    amount_cents, tax_rate_bps, metadata)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			    amount_cents, tax_rate_bps, metadata, price_id, product_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			id, i, li.Description, li.Quantity, li.UnitPriceCents,
-			li.AmountCents, li.TaxRateBps, jsonOrEmpty(li.Metadata, "{}")); err != nil {
+			li.AmountCents, li.TaxRateBps, jsonOrEmpty(li.Metadata, "{}"),
+			nullInt(li.PriceID), nullInt(li.ProductID)); err != nil {
 			return nil, err
 		}
 	}
@@ -2064,10 +2131,11 @@ func dbInvoiceAddLineItem(db *sql.DB, pid string, id int64, li LineItem, actor s
 	if _, err := tx.Exec(
 		`INSERT INTO invoice_line_items
 		   (invoice_id, position, description, quantity, unit_price_cents,
-		    amount_cents, tax_rate_bps, metadata)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		    amount_cents, tax_rate_bps, metadata, price_id, product_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, li.Position, li.Description, li.Quantity, li.UnitPriceCents,
-		li.AmountCents, li.TaxRateBps, jsonOrEmpty(li.Metadata, "{}")); err != nil {
+		li.AmountCents, li.TaxRateBps, jsonOrEmpty(li.Metadata, "{}"),
+		nullInt(li.PriceID), nullInt(li.ProductID)); err != nil {
 		return nil, err
 	}
 	if err := recomputeInvoiceTotalsTx(tx, id); err != nil {
@@ -2345,10 +2413,11 @@ func dbInvoiceUpdate(db *sql.DB, pid string, id int64, patch map[string]any, act
 				if _, err := tx.Exec(
 					`INSERT INTO invoice_line_items
 					    (invoice_id, position, description, quantity, unit_price_cents,
-					     amount_cents, tax_rate_bps, metadata)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+					     amount_cents, tax_rate_bps, metadata, price_id, product_id)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 					id, i, it.Description, it.Quantity, it.UnitPriceCents,
-					it.AmountCents, it.TaxRateBps, meta); err != nil {
+					it.AmountCents, it.TaxRateBps, meta,
+					nullInt(it.PriceID), nullInt(it.ProductID)); err != nil {
 					return nil, err
 				}
 			}
@@ -2407,7 +2476,8 @@ func toString(v any) string {
 func loadInvoiceChildren(db *sql.DB, pid string, inv *Invoice) error {
 	rows, err := db.Query(
 		`SELECT id, invoice_id, position, description, quantity, unit_price_cents,
-		        amount_cents, tax_rate_bps, external_id, metadata
+		        amount_cents, tax_rate_bps, external_id, metadata,
+		        price_id, product_id
 		 FROM invoice_line_items
 		 WHERE invoice_id = ?
 		 ORDER BY position ASC`, inv.ID)
@@ -2418,15 +2488,24 @@ func loadInvoiceChildren(db *sql.DB, pid string, inv *Invoice) error {
 		var li LineItem
 		var ext sql.NullString
 		var meta sql.NullString
+		var priceID, productID sql.NullInt64
 		if err := rows.Scan(&li.ID, &li.InvoiceID, &li.Position, &li.Description,
 			&li.Quantity, &li.UnitPriceCents, &li.AmountCents, &li.TaxRateBps,
-			&ext, &meta); err != nil {
+			&ext, &meta, &priceID, &productID); err != nil {
 			rows.Close()
 			return err
 		}
 		li.ExternalID = ext.String
 		if meta.Valid {
 			li.Metadata = json.RawMessage(meta.String)
+		}
+		if priceID.Valid {
+			v := priceID.Int64
+			li.PriceID = &v
+		}
+		if productID.Valid {
+			v := productID.Int64
+			li.ProductID = &v
 		}
 		inv.LineItems = append(inv.LineItems, li)
 	}
@@ -2782,6 +2861,16 @@ func normaliseLineItems(raw []any, defaultBps int) ([]LineItem, error) {
 			AmountCents:    roundCents(qty * float64(unit)),
 			TaxRateBps:     bps,
 		}
+		// Optional catalog FKs — populated by resolveCatalogRefs before
+		// this function runs. Stored as analytics-only references; the
+		// snapshot fields above (description, unit_price_cents) are
+		// what the customer-facing PDF renders from.
+		if v := int64Arg(m, "price_id"); v != 0 {
+			li.PriceID = &v
+		}
+		if v := int64Arg(m, "product_id"); v != 0 {
+			li.ProductID = &v
+		}
 		if md, ok := m["metadata"].(map[string]any); ok {
 			if raw, err := json.Marshal(md); err == nil {
 				li.Metadata = raw
@@ -2790,6 +2879,82 @@ func normaliseLineItems(raw []any, defaultBps int) ([]LineItem, error) {
 		out = append(out, li)
 	}
 	return out, nil
+}
+
+// resolveCatalogRefs walks the raw line items and, for any that carry
+// a `price_id`, calls the catalog app to fetch the price + product so
+// we can snapshot description/unit_price_cents/currency/product_id into
+// the line. Mutates the input maps in place: the caller-provided
+// description/unit_price_cents WIN if set, so callers can override.
+//
+// Catalog is an optional dep — when it isn't installed, this returns
+// a clear error pointing at the install gap. Free-form line items
+// (no price_id) pass through untouched, so existing flows keep
+// working without catalog.
+func resolveCatalogRefs(ctx *sdk.AppCtx, raw []any) (string, error) {
+	if ctx == nil {
+		return "", nil
+	}
+	currencyHint := ""
+	api := ctx.PlatformAPI()
+	for i, r := range raw {
+		m, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		priceID := int64Arg(m, "price_id")
+		if priceID == 0 {
+			continue
+		}
+		if api == nil {
+			return "", errors.New("price_id requires platform API (catalog app must be installed)")
+		}
+		var price struct {
+			ID              int64  `json:"id"`
+			ProductID       int64  `json:"product_id"`
+			Nickname        string `json:"nickname"`
+			UnitAmountCents int64  `json:"unit_amount_cents"`
+			Currency        string `json:"currency"`
+			Active          bool   `json:"active"`
+			ArchivedAt      string `json:"archived_at"`
+		}
+		if err := api.CallAppResult("catalog", "catalog_prices_get",
+			map[string]any{"id": priceID}, &price); err != nil {
+			return "", fmt.Errorf("line_items[%d]: catalog price %d lookup failed (is the catalog app installed?): %w", i, priceID, err)
+		}
+		if price.ArchivedAt != "" {
+			return "", fmt.Errorf("line_items[%d]: catalog price %d is archived; pick a different price", i, priceID)
+		}
+		// Fill missing fields from the snapshot. Caller's explicit
+		// values always win (lets you override description per invoice).
+		if strArg(m, "description") == "" {
+			desc := price.Nickname
+			if desc == "" {
+				// Fall back to product name when the price has no nickname.
+				var product struct {
+					Name string `json:"name"`
+				}
+				if err := api.CallAppResult("catalog", "catalog_products_get",
+					map[string]any{"id": price.ProductID}, &product); err == nil && product.Name != "" {
+					desc = product.Name
+				} else {
+					desc = fmt.Sprintf("Product #%d", price.ProductID)
+				}
+			}
+			m["description"] = desc
+		}
+		if int64Arg(m, "unit_price_cents") == 0 {
+			m["unit_price_cents"] = price.UnitAmountCents
+		}
+		// product_id is always taken from the catalog (caller can't override).
+		m["product_id"] = price.ProductID
+		// Currency hint — first line's catalog currency wins as the
+		// invoice's currency if the caller didn't set one explicitly.
+		if currencyHint == "" {
+			currencyHint = price.Currency
+		}
+	}
+	return currencyHint, nil
 }
 
 func looksLikeISO4217(s string) bool {
@@ -2975,6 +3140,13 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 
 func nullStr(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: s != ""}
+}
+
+func nullInt(p *int64) sql.NullInt64 {
+	if p == nil {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: *p, Valid: true}
 }
 
 func nowRFC3339() string {

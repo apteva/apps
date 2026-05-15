@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.6.4
+version: 0.7.0
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Per-invoice provider — local for internal/wire/cash records, stripe
@@ -23,6 +23,10 @@ min_apteva_version: "0.10.0"
 requires:
   permissions:
     - db.write.app
+    - platform.apps.call               # billing calls catalog when line items reference price_id
+  apps:
+    - name: catalog
+      optional: true                   # free-form line items keep working without catalog
 
 provides:
   http_routes:

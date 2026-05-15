@@ -547,6 +547,7 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
       {showCreate && (
         <CreateInvoiceModal
           apiCall={apiCall}
+          projectId={projectId}
           onClose={() => setShowCreate(false)}
           onCreated={(inv) => {
             setShowCreate(false);
@@ -831,20 +832,119 @@ interface LineDraft {
   quantity: string;      // user-edited; converted to number on submit
   unit_price: string;    // dollars (decimal); converted to cents on submit
   tax_rate: string;      // percent (decimal); converted to bps on submit
+  // Optional catalog references — set when the user picks a catalog
+  // price via the "+ Add from catalog" flow. Carried through to the
+  // POST body so billing snapshots the catalog price + records FKs
+  // for analytics. NULL on ad-hoc / free-form lines.
+  price_id?: number;
+  product_id?: number;
+  // Cosmetic — shown next to description in the line row so the user
+  // sees the line came from the catalog (and which product).
+  catalog_label?: string;
 }
 
 function emptyLine(): LineDraft {
   return { description: "", quantity: "1", unit_price: "", tax_rate: "" };
 }
 
+// Catalog price picker: fetches active prices grouped by product on
+// open; lets the user pick one, returns it via onPick.
+interface CatalogPriceOption {
+  price_id: number;
+  product_id: number;
+  product_name: string;
+  product_color?: string;
+  nickname: string;
+  unit_amount_cents: number;
+  currency: string;
+  interval?: string;
+}
+
+// Cross-app fetch — billing panel calls catalog through the dashboard
+// proxy, same as agents do via MCP. project_id is the only required
+// scope; install_id is catalog's internal concern, not billing's.
+async function fetchCatalogPriceOptions(
+  projectId: string,
+): Promise<CatalogPriceOption[]> {
+  const r = await fetch(
+    `/api/apps/catalog/products?project_id=${encodeURIComponent(projectId)}&archived=false`,
+    { credentials: "same-origin" },
+  );
+  if (!r.ok) {
+    if (r.status === 404) {
+      throw new Error(
+        "The Catalog app isn't installed. Install it from the app marketplace to pick prices from your catalog.",
+      );
+    }
+    throw new Error(`Catalog unreachable (HTTP ${r.status}).`);
+  }
+  const data = (await r.json()) as { products: CatalogProductWithPrices[] };
+  const out: CatalogPriceOption[] = [];
+  for (const p of data.products || []) {
+    // Inner products list endpoint doesn't include prices by default —
+    // fetch each product's prices for the picker. Tradeoff is one
+    // extra round-trip per product; for small catalogs this is fine.
+    // Larger catalogs would warrant a /products?include=prices flag
+    // on the catalog side, but defer until the use case shows up.
+    try {
+      const pr = await fetch(
+        `/api/apps/catalog/products/${p.id}?project_id=${encodeURIComponent(projectId)}`,
+        { credentials: "same-origin" },
+      );
+      if (!pr.ok) continue;
+      const detail = (await pr.json()) as { product: CatalogProductWithPrices };
+      for (const price of detail.product.prices || []) {
+        if (!price.active || price.archived_at) continue;
+        out.push({
+          price_id: price.id,
+          product_id: p.id,
+          product_name: p.name,
+          product_color: p.color,
+          nickname: price.nickname || "",
+          unit_amount_cents: price.unit_amount_cents,
+          currency: price.currency,
+          interval: price.interval,
+        });
+      }
+    } catch {
+      // skip; rest of the list still loads
+    }
+  }
+  return out;
+}
+
+interface CatalogProductWithPrices {
+  id: number;
+  name: string;
+  color?: string;
+  prices?: Array<{
+    id: number;
+    nickname?: string;
+    unit_amount_cents: number;
+    currency: string;
+    interval?: string;
+    active: boolean;
+    archived_at?: string;
+  }>;
+}
+
+function fmtCatalogOption(o: CatalogPriceOption): string {
+  const amount = (o.unit_amount_cents / 100).toFixed(2);
+  const period = o.interval ? `/${o.interval}` : "";
+  const label = o.nickname || "(no nickname)";
+  return `${o.product_name} — ${label}: ${amount} ${o.currency}${period}`;
+}
+
 function CreateInvoiceModal({
   apiCall,
   onClose,
   onCreated,
+  projectId,
 }: {
   apiCall: ApiCall;
   onClose: () => void;
   onCreated: (invoice: Invoice) => void;
+  projectId: string;
 }) {
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [customerSearch, setCustomerSearch] = useState("");
@@ -855,6 +955,13 @@ function CreateInvoiceModal({
   const [dueDate, setDueDate] = useState("");
   const [notes, setNotes] = useState("");
   const [items, setItems] = useState<LineDraft[]>([emptyLine()]);
+
+  const [catalogPicker, setCatalogPicker] = useState<{
+    open: boolean;
+    loading: boolean;
+    error: string;
+    options: CatalogPriceOption[];
+  }>({ open: false, loading: false, error: "", options: [] });
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>("");
@@ -915,6 +1022,8 @@ function CreateInvoiceModal({
       quantity: number;
       unit_price_cents: number;
       tax_rate_bps: number;
+      price_id?: number;
+      product_id?: number;
     }> = [];
     try {
       lineItems = items
@@ -935,6 +1044,8 @@ function CreateInvoiceModal({
             quantity: qty,
             unit_price_cents: Math.round(unit * 100),
             tax_rate_bps: isFinite(pct) ? Math.round(pct * 100) : 0,
+            ...(it.price_id ? { price_id: it.price_id } : {}),
+            ...(it.product_id ? { product_id: it.product_id } : {}),
           };
         })
         .filter((x): x is NonNullable<typeof x> => x !== null);
@@ -1097,20 +1208,161 @@ function CreateInvoiceModal({
               <label className="text-xs uppercase tracking-wide text-text-dim">
                 Line items
               </label>
-              <button
-                type="button"
-                onClick={addItem}
-                className="text-xs text-accent hover:underline"
-              >
-                + Add line
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setCatalogPicker((p) => ({
+                      ...p,
+                      open: true,
+                      loading: true,
+                      error: "",
+                    }));
+                    try {
+                      const opts = await fetchCatalogPriceOptions(projectId);
+                      setCatalogPicker({
+                        open: true,
+                        loading: false,
+                        error: "",
+                        options: opts,
+                      });
+                    } catch (err) {
+                      setCatalogPicker({
+                        open: true,
+                        loading: false,
+                        error: (err as Error).message,
+                        options: [],
+                      });
+                    }
+                  }}
+                  className="text-xs text-accent hover:underline"
+                >
+                  + From catalog
+                </button>
+                <button
+                  type="button"
+                  onClick={addItem}
+                  className="text-xs text-accent hover:underline"
+                >
+                  + Add line
+                </button>
+              </div>
             </div>
+
+            {catalogPicker.open && (
+              <div className="mb-2 border border-border rounded bg-bg-input/50">
+                <div className="px-2 py-1 border-b border-border flex items-center justify-between">
+                  <span className="text-xs uppercase tracking-wide text-text-dim">
+                    Pick a catalog price
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setCatalogPicker((p) => ({ ...p, open: false }))
+                    }
+                    className="text-xs text-text-muted hover:text-text"
+                  >
+                    Close
+                  </button>
+                </div>
+                {catalogPicker.loading ? (
+                  <div className="p-3 text-xs text-text-dim">Loading…</div>
+                ) : catalogPicker.error ? (
+                  <div className="p-3 text-xs text-yellow-500">
+                    {catalogPicker.error}
+                  </div>
+                ) : catalogPicker.options.length === 0 ? (
+                  <div className="p-3 text-xs text-text-dim">
+                    No active catalog prices. Add one in the Catalog app first.
+                  </div>
+                ) : (
+                  <ul
+                    className="overflow-auto"
+                    style={{ maxHeight: "240px" }}
+                  >
+                    {catalogPicker.options.map((o) => (
+                      <li
+                        key={o.price_id}
+                        onClick={() => {
+                          // Add a new line from this catalog option.
+                          const dollars = (o.unit_amount_cents / 100).toFixed(2);
+                          setItems((prev) => [
+                            ...prev,
+                            {
+                              description:
+                                o.nickname || o.product_name,
+                              quantity: "1",
+                              unit_price: dollars,
+                              tax_rate: "",
+                              price_id: o.price_id,
+                              product_id: o.product_id,
+                              catalog_label: `${o.product_name}${o.nickname ? " — " + o.nickname : ""}`,
+                            },
+                          ]);
+                          // Adopt the catalog's currency if invoice has none yet.
+                          if (!currency.trim()) setCurrency(o.currency);
+                          setCatalogPicker((p) => ({ ...p, open: false }));
+                        }}
+                        className="px-2 py-1 cursor-pointer hover:bg-bg-input border-b border-border last:border-b-0 text-sm"
+                      >
+                        <div className="flex items-center gap-2">
+                          {o.product_color && (
+                            <span
+                              className="inline-block w-2 h-2 rounded-full"
+                              style={{ backgroundColor: o.product_color }}
+                            />
+                          )}
+                          <span className="text-text truncate">
+                            {o.product_name}
+                            {o.nickname ? (
+                              <span className="text-text-muted">
+                                {" "}
+                                — {o.nickname}
+                              </span>
+                            ) : null}
+                          </span>
+                          <span className="ml-auto text-text">
+                            {(o.unit_amount_cents / 100).toFixed(2)}{" "}
+                            {o.currency}
+                            {o.interval ? (
+                              <span className="text-text-dim">
+                                /{o.interval}
+                              </span>
+                            ) : null}
+                          </span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
             <div className="space-y-2">
               {items.map((it, i) => (
                 <div
                   key={i}
                   className="bg-bg-input border border-border rounded p-2 space-y-2"
                 >
+                  {it.catalog_label && (
+                    <div className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-accent">
+                      <svg
+                        width="10"
+                        height="10"
+                        viewBox="0 0 16 16"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M2 5 L8 2 L14 5 L8 8 Z" />
+                        <path d="M2 5 L2 11 L8 14 L14 11 L14 5" />
+                        <path d="M8 8 L8 14" />
+                      </svg>
+                      <span>{it.catalog_label}</span>
+                    </div>
+                  )}
                   <input
                     type="text"
                     value={it.description}
