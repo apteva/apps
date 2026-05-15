@@ -403,13 +403,14 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
           </div>
           {r.description ? (
             <div
-              className="text-[11px] text-text-muted line-clamp-2"
+              style={{ fontSize: 11 }}
+              className="text-text-muted line-clamp-2"
               title={r.description}
             >
               {r.description}
             </div>
           ) : null}
-          <div className="text-[11px] text-text-muted flex flex-wrap gap-1">
+          <div style={{ fontSize: 11 }} className="text-text-muted flex flex-wrap gap-1">
             {r.duration_ms ? <span>{formatDuration(r.duration_ms)}</span> : null}
             {r.width && r.height ? <span>· {r.width}×{r.height}</span> : null}
             {r.video_codec ? <span>· {r.video_codec}</span> : null}
@@ -526,7 +527,13 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
                 ))}
               </div>
             )}
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-3">
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+                gap: "0.75rem",
+              }}
+            >
               {rows.map(renderTile)}
             </div>
           </>
@@ -595,7 +602,8 @@ function DetailDrawer({
       <div className="flex-1 bg-black/50" />
       <aside
         onClick={(e) => e.stopPropagation()}
-        className="w-[480px] max-w-full bg-bg border-l border-border h-full overflow-auto"
+        style={{ width: 480, maxWidth: "100%" }}
+        className="bg-bg border-l border-border h-full overflow-auto"
       >
         <div className="p-4 border-b border-border flex items-center justify-between">
           <div>
@@ -722,7 +730,7 @@ function DetailDrawer({
             <summary className="text-xs text-text-dim cursor-pointer hover:text-text">
               raw ffprobe
             </summary>
-            <pre className="text-[11px] bg-bg-input border border-border rounded p-2 mt-2 overflow-auto max-h-96">
+            <pre style={{ fontSize: 11 }} className="bg-bg-input border border-border rounded p-2 mt-2 overflow-auto max-h-96">
               {JSON.stringify(row.raw_probe, null, 2)}
             </pre>
           </details>
@@ -743,7 +751,10 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   return (
     <section>
       <h3 className="text-xs uppercase tracking-wide text-text-dim mb-1">{title}</h3>
-      <div className="grid grid-cols-[100px_1fr] gap-y-1 text-sm">{children}</div>
+      <div
+        style={{ display: "grid", gridTemplateColumns: "100px 1fr" }}
+        className="gap-y-1 text-sm"
+      >{children}</div>
     </section>
   );
 }
