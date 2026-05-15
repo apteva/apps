@@ -72,6 +72,9 @@ func renderInvoiceHTML(inv *Invoice, customer *Customer, issuer *Issuer) string 
   .bank .row .label { display: inline-block; min-width: 90px; color: var(--muted); }
   .bank .iban { font-variant-numeric: tabular-nums; font-family: ui-monospace, "SF Mono", Consolas, monospace; }
   .footer-text { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; font-style: italic; text-align: center; }
+  .reverse-charge { margin-top: 16px; padding: 10px 12px; border: 1px solid var(--line); border-left: 3px solid var(--accent); background: #f7fafc; font-size: 12px; }
+  .reverse-charge .label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; margin-bottom: 4px; }
+  .reverse-charge .body { color: var(--ink); }
   .meta .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
   .meta .value { font-size: 18px; font-weight: 600; margin-top: 2px; }
   .pill {
@@ -251,6 +254,17 @@ func renderInvoiceHTML(inv *Invoice, customer *Customer, issuer *Issuer) string 
   </table>
 `)
 
+	// EU reverse-charge legal notice (appears before bank block).
+	if qualifiesForEUReverseCharge(issuer, customer, inv) {
+		b.WriteString(`  <div class="reverse-charge">
+    <div class="label">Reverse charge — EU intra-community supply</div>
+    <div class="body">`)
+		b.WriteString(html.EscapeString(reverseChargeNotice))
+		b.WriteString(`</div>
+  </div>
+`)
+	}
+
 	// PAY BY BANK TRANSFER block (only when issuer has IBAN)
 	if issuer != nil && issuer.Configured {
 		bank := parseBank(issuer.Bank)
@@ -400,7 +414,8 @@ func formatDateOnly(rfc3339 string) string {
 
 // formatBillingAddress unmarshals the JSON blob into a multi-line
 // human-readable string. Returns "" when empty / unparseable rather
-// than leaking JSON into the page.
+// than leaking JSON into the page. Country code is rendered as a full
+// name (e.g. "EE" → "Estonia") when known; falls back to the code.
 func formatBillingAddress(raw []byte) string {
 	if len(raw) == 0 {
 		return ""
@@ -428,10 +443,121 @@ func formatBillingAddress(raw []byte) string {
 		lines = append(lines, cityStateZip)
 	}
 	if addr.Country != "" {
-		lines = append(lines, addr.Country)
+		lines = append(lines, countryName(addr.Country))
 	}
 	return strings.Join(lines, "\n")
 }
+
+// addressCountry extracts the country code from a billing-address JSON
+// blob. Returns "" when missing/unparseable. Uppercased ISO-2.
+func addressCountry(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var addr struct {
+		Country string `json:"country"`
+	}
+	if err := jsonDecodeRaw(raw, &addr); err != nil {
+		return ""
+	}
+	return strings.ToUpper(strings.TrimSpace(addr.Country))
+}
+
+// countryName looks up the English name for an ISO-3166-1 alpha-2 code.
+// Falls back to the code itself for entries not in the table — we'd
+// rather print "ZZ" than nothing when an unfamiliar country shows up.
+func countryName(code string) string {
+	c := strings.ToUpper(strings.TrimSpace(code))
+	if name, ok := countryByCode[c]; ok {
+		return name
+	}
+	return c
+}
+
+// Subset of ISO-3166-1 covering the EU + common trading partners.
+// Extend as new customers come in. Not localized — English only.
+var countryByCode = map[string]string{
+	// EU 27
+	"AT": "Austria", "BE": "Belgium", "BG": "Bulgaria", "HR": "Croatia",
+	"CY": "Cyprus", "CZ": "Czech Republic", "DK": "Denmark", "EE": "Estonia",
+	"FI": "Finland", "FR": "France", "DE": "Germany", "GR": "Greece",
+	"HU": "Hungary", "IE": "Ireland", "IT": "Italy", "LV": "Latvia",
+	"LT": "Lithuania", "LU": "Luxembourg", "MT": "Malta", "NL": "Netherlands",
+	"PL": "Poland", "PT": "Portugal", "RO": "Romania", "SK": "Slovakia",
+	"SI": "Slovenia", "ES": "Spain", "SE": "Sweden",
+	// EEA + commonly-billed neighbours
+	"GB": "United Kingdom", "CH": "Switzerland", "NO": "Norway",
+	"IS": "Iceland", "LI": "Liechtenstein",
+	// Anglosphere + major markets
+	"US": "United States", "CA": "Canada", "AU": "Australia",
+	"NZ": "New Zealand", "JP": "Japan", "CN": "China", "IN": "India",
+	"BR": "Brazil", "MX": "Mexico", "AR": "Argentina", "ZA": "South Africa",
+	"IL": "Israel", "AE": "United Arab Emirates", "SG": "Singapore",
+	"HK": "Hong Kong", "KR": "South Korea", "TR": "Turkey",
+}
+
+// isEUMember reports whether code is one of the 27 EU member states.
+// Used by the reverse-charge predicate; not exported as a country
+// "fact" because the membership list is policy, not geography.
+func isEUMember(code string) bool {
+	switch strings.ToUpper(strings.TrimSpace(code)) {
+	case "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR",
+		"DE", "GR", "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL",
+		"PL", "PT", "RO", "SK", "SI", "ES", "SE":
+		return true
+	}
+	return false
+}
+
+// hasVATID reports whether the tax_ids JSON array contains at least
+// one entry with type="vat" and a non-empty value.
+func hasVATID(raw []byte) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var arr []struct {
+		Type  string `json:"type"`
+		Value string `json:"value"`
+	}
+	if err := jsonDecodeRaw(raw, &arr); err != nil {
+		return false
+	}
+	for _, t := range arr {
+		if strings.EqualFold(strings.TrimSpace(t.Type), "vat") &&
+			strings.TrimSpace(t.Value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// qualifiesForEUReverseCharge: both parties are EU businesses with
+// valid VAT IDs, billing across borders, and the invoice has no VAT
+// charged. When true, the rendered invoice must surface the legal
+// notice citing Article 196 of Directive 2006/112/EC — otherwise the
+// invoice isn't compliant with intra-community supply rules.
+//
+// Same-country EU B2B uses domestic VAT, not reverse charge, so we
+// require issuer.country != customer.country.
+func qualifiesForEUReverseCharge(issuer *Issuer, customer *Customer, inv *Invoice) bool {
+	if inv == nil || inv.TaxCents != 0 {
+		return false
+	}
+	if issuer == nil || !issuer.Configured || customer == nil {
+		return false
+	}
+	ic := addressCountry(issuer.Address)
+	cc := addressCountry(customer.BillingAddress)
+	if ic == "" || cc == "" || ic == cc {
+		return false
+	}
+	if !isEUMember(ic) || !isEUMember(cc) {
+		return false
+	}
+	return hasVATID(issuer.TaxIDs) && hasVATID(customer.TaxIDs)
+}
+
+const reverseChargeNotice = "Reverse charge — VAT to be accounted for by the recipient. Article 196 of Council Directive 2006/112/EC."
 
 func maxInt(a, b int64) int64 {
 	if a > b {

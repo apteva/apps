@@ -237,6 +237,110 @@ func TestRenderInvoice_IncludesConfiguredIssuer(t *testing.T) {
 	}
 }
 
+// EU intra-community supply with both parties holding VAT IDs and a
+// zero-tax invoice must surface the Article 196 reverse-charge notice
+// on the rendered HTML. Cross-country requirement: same-country B2B
+// uses domestic VAT and does NOT trigger reverse charge.
+func TestRenderInvoice_EUReverseChargeNotice(t *testing.T) {
+	euCustomerAddr, _ := json.Marshal(map[string]any{
+		"line1": "1 Pärnu mnt", "postal_code": "10141",
+		"city": "Tallinn", "country": "EE",
+	})
+	euCustomerTax, _ := json.Marshal([]map[string]string{
+		{"type": "vat", "value": "EE100000000"},
+	})
+	euCustomer := &Customer{
+		ID: 2, Name: "EU Buyer Co", Email: "ap@eubuyer.example",
+		BillingAddress: euCustomerAddr,
+		TaxIDs:         euCustomerTax,
+	}
+
+	issuerAddr, _ := json.Marshal(map[string]any{
+		"line1": "Calle Falsa 1", "postal_code": "08930",
+		"city": "Barcelona", "country": "ES",
+	})
+	issuerTax, _ := json.Marshal([]map[string]string{
+		{"type": "vat", "value": "ESB00000000"},
+	})
+	issuer := &Issuer{
+		DisplayName: "Acme Co",
+		LegalName:   "Acme Holdings SL",
+		Address:     issuerAddr,
+		TaxIDs:      issuerTax,
+		Configured:  true,
+	}
+
+	// Make every line zero-tax so inv.TaxCents == 0.
+	inv := sampleInvoice()
+	for i := range inv.LineItems {
+		inv.LineItems[i].TaxRateBps = 0
+	}
+	inv.TaxCents = 0
+
+	html := renderInvoiceHTML(inv, euCustomer, issuer)
+	for _, frag := range []string{
+		"Reverse charge — EU intra-community supply",
+		"Article 196 of Council Directive 2006/112/EC",
+		"Estonia", // country code rendered as name
+		"Spain",
+	} {
+		if !strings.Contains(html, frag) {
+			t.Errorf("rendered HTML missing reverse-charge fragment %q", frag)
+		}
+	}
+
+	// Domestic (same-country) B2B must NOT show the notice — domestic
+	// VAT rules apply, not Article 196.
+	domesticAddr, _ := json.Marshal(map[string]any{
+		"line1": "Calle Falsa 2", "city": "Madrid", "country": "ES",
+	})
+	domesticTax, _ := json.Marshal([]map[string]string{
+		{"type": "vat", "value": "ESB99999999"},
+	})
+	domestic := &Customer{
+		ID: 3, Name: "ES Buyer", BillingAddress: domesticAddr,
+		TaxIDs: domesticTax,
+	}
+	htmlDomestic := renderInvoiceHTML(inv, domestic, issuer)
+	if strings.Contains(htmlDomestic, "Reverse charge") {
+		t.Error("domestic B2B EU sale must NOT include reverse-charge notice")
+	}
+
+	// PDF must also not crash and should be non-trivial size.
+	pdfBytes, err := renderInvoicePDF(inv, euCustomer, issuer)
+	if err != nil {
+		t.Fatalf("renderInvoicePDF with reverse charge: %v", err)
+	}
+	if len(pdfBytes) < 500 {
+		t.Errorf("PDF too small: %d bytes", len(pdfBytes))
+	}
+}
+
+// Country code rendering: ISO-2 codes in billing_address.country must
+// appear as full names in the rendered output. Unknown codes fall back
+// to the raw code so we never drop information.
+func TestFormatBillingAddress_RendersCountryName(t *testing.T) {
+	cases := []struct {
+		country string
+		want    string
+	}{
+		{"ES", "Spain"},
+		{"EE", "Estonia"},
+		{"FR", "France"},
+		{"US", "United States"},
+		{"ZZ", "ZZ"}, // unknown — fall back to code
+	}
+	for _, tc := range cases {
+		addr, _ := json.Marshal(map[string]string{
+			"line1": "1 Test St", "country": tc.country,
+		})
+		got := formatBillingAddress(addr)
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("country=%q: expected %q in %q", tc.country, tc.want, got)
+		}
+	}
+}
+
 // ─── Money formatter ────────────────────────────────────────────────
 
 func TestFormatMoney_AllSupportedCurrencies(t *testing.T) {

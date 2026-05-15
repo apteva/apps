@@ -4,9 +4,18 @@ package main
 // line items fit; gofpdf paginates automatically when they don't.
 //
 // Produces a clean A4 layout: title block (invoice number + status),
-// bill-to + meta two-column, line item table, totals, optional notes.
-// Uses only the standard 14 fonts (Helvetica) so no embedding +
-// no external font assets ship with the binary.
+// bill-from / bill-to two-column, line item table, totals, bank info,
+// optional notes and a reverse-charge notice for EU intra-community
+// supplies. Uses only the standard 14 fonts (Helvetica) so no font
+// assets ship with the binary.
+//
+// CHARACTER ENCODING: the standard 14 fonts speak CP-1252, not UTF-8.
+// Every dynamic string MUST go through the translator returned by
+// pdf.UnicodeTranslatorFromDescriptor("") — otherwise UTF-8 bytes get
+// rendered as garbage (€ → â,¬, à → Ã, etc.). The "e" local closure
+// below does the translation; if you add a new pdf.Cell/MultiCell call
+// site, route the string through e() or you'll re-introduce v0.4.3's
+// PDF-mojibake bug.
 //
 // Two surfaces use this:
 //   - GET /invoices/{id}/pdf            → application/pdf bytes
@@ -34,8 +43,13 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 	pdf.SetMargins(20, 20, 20)
 	pdf.SetAutoPageBreak(true, 20)
 	pdf.AddPage()
-	pdf.SetTitle(invoiceTitle(inv), false)
-	pdf.SetCreator("Apteva billing", false)
+
+	// CP-1252 translator — see the file header. Every Cell/MultiCell
+	// string MUST route through e() to render Unicode correctly.
+	e := pdf.UnicodeTranslatorFromDescriptor("")
+
+	pdf.SetTitle(e(invoiceTitle(inv)), false)
+	pdf.SetCreator(e("Apteva billing"), false)
 
 	pageWidth, _ := pdf.GetPageSize()
 	usableWidth := pageWidth - 40 // page minus L+R margins
@@ -43,16 +57,16 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 	// ── Header ──
 	pdf.SetFont("Helvetica", "B", 22)
 	pdf.SetTextColor(20, 20, 20)
-	pdf.CellFormat(usableWidth/2, 10, "Invoice", "", 0, "L", false, 0, "")
+	pdf.CellFormat(usableWidth/2, 10, e("Invoice"), "", 0, "L", false, 0, "")
 	pdf.SetFont("Helvetica", "", 10)
 	pdf.SetTextColor(100, 100, 100)
-	pdf.CellFormat(usableWidth/2, 10, invoiceTitle(inv), "", 0, "R", false, 0, "")
+	pdf.CellFormat(usableWidth/2, 10, e(invoiceTitle(inv)), "", 0, "R", false, 0, "")
 	pdf.Ln(10)
 
 	pdf.SetFont("Helvetica", "", 9)
 	pdf.SetTextColor(120, 120, 120)
 	pdf.SetX(20 + usableWidth/2)
-	pdf.CellFormat(usableWidth/2, 5, statusLabel(inv.Status), "", 0, "R", false, 0, "")
+	pdf.CellFormat(usableWidth/2, 5, e(statusLabel(inv.Status)), "", 0, "R", false, 0, "")
 	pdf.Ln(8)
 
 	// Thin rule under the header.
@@ -66,9 +80,9 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 
 	pdf.SetFont("Helvetica", "B", 8)
 	pdf.SetTextColor(120, 120, 120)
-	pdf.CellFormat(colW, 5, "BILL FROM", "", 0, "L", false, 0, "")
+	pdf.CellFormat(colW, 5, e("BILL FROM"), "", 0, "L", false, 0, "")
 	pdf.SetX(20 + colW)
-	pdf.CellFormat(colW, 5, "BILL TO", "", 0, "L", false, 0, "")
+	pdf.CellFormat(colW, 5, e("BILL TO"), "", 0, "L", false, 0, "")
 	pdf.Ln(6)
 
 	leftLines := buildIssuerLines(issuer)
@@ -89,7 +103,7 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 				pdf.SetFont("Helvetica", "", 9)
 				pdf.SetTextColor(110, 110, 110)
 			}
-			pdf.CellFormat(colW, 5, leftLines[i], "", 0, "L", false, 0, "")
+			pdf.CellFormat(colW, 5, e(leftLines[i]), "", 0, "L", false, 0, "")
 		}
 		// RIGHT — bill-to
 		if i < len(rightLines) {
@@ -101,7 +115,7 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 				pdf.SetFont("Helvetica", "", 9)
 				pdf.SetTextColor(110, 110, 110)
 			}
-			pdf.CellFormat(colW, 5, rightLines[i], "", 0, "L", false, 0, "")
+			pdf.CellFormat(colW, 5, e(rightLines[i]), "", 0, "L", false, 0, "")
 		}
 	}
 	pdf.SetXY(20, yStart+6+float64(maxLines)*5+4)
@@ -110,7 +124,7 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 	if details := buildDetailsInline(inv); details != "" {
 		pdf.SetFont("Helvetica", "", 9)
 		pdf.SetTextColor(110, 110, 110)
-		pdf.CellFormat(usableWidth, 5, details, "", 0, "L", false, 0, "")
+		pdf.CellFormat(usableWidth, 5, e(details), "", 0, "L", false, 0, "")
 		pdf.Ln(6)
 	}
 
@@ -119,11 +133,11 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 	pdf.SetTextColor(120, 120, 120)
 	pdf.SetFillColor(245, 245, 245)
 	descW := usableWidth - 100 // 4 fixed cols of 25mm
-	pdf.CellFormat(descW, 7, "DESCRIPTION", "", 0, "L", false, 0, "")
-	pdf.CellFormat(20, 7, "QTY", "", 0, "R", false, 0, "")
-	pdf.CellFormat(30, 7, "UNIT", "", 0, "R", false, 0, "")
-	pdf.CellFormat(20, 7, "TAX", "", 0, "R", false, 0, "")
-	pdf.CellFormat(30, 7, "AMOUNT", "", 0, "R", false, 0, "")
+	pdf.CellFormat(descW, 7, e("DESCRIPTION"), "", 0, "L", false, 0, "")
+	pdf.CellFormat(20, 7, e("QTY"), "", 0, "R", false, 0, "")
+	pdf.CellFormat(30, 7, e("UNIT"), "", 0, "R", false, 0, "")
+	pdf.CellFormat(20, 7, e("TAX"), "", 0, "R", false, 0, "")
+	pdf.CellFormat(30, 7, e("AMOUNT"), "", 0, "R", false, 0, "")
 	pdf.Ln(7)
 	pdf.SetDrawColor(220, 220, 220)
 	pdf.Line(20, pdf.GetY(), pageWidth-20, pdf.GetY())
@@ -133,15 +147,15 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 	pdf.SetTextColor(40, 40, 40)
 	if len(inv.LineItems) == 0 {
 		pdf.SetTextColor(160, 160, 160)
-		pdf.CellFormat(usableWidth, 8, "No line items.", "", 0, "C", false, 0, "")
+		pdf.CellFormat(usableWidth, 8, e("No line items."), "", 0, "C", false, 0, "")
 		pdf.Ln(8)
 	} else {
 		for _, li := range inv.LineItems {
-			pdf.CellFormat(descW, 6, li.Description, "", 0, "L", false, 0, "")
-			pdf.CellFormat(20, 6, formatQty(li.Quantity), "", 0, "R", false, 0, "")
-			pdf.CellFormat(30, 6, formatMoney(li.UnitPriceCents, inv.Currency), "", 0, "R", false, 0, "")
-			pdf.CellFormat(20, 6, fmt.Sprintf("%.2f%%", float64(li.TaxRateBps)/100), "", 0, "R", false, 0, "")
-			pdf.CellFormat(30, 6, formatMoney(li.AmountCents, inv.Currency), "", 0, "R", false, 0, "")
+			pdf.CellFormat(descW, 6, e(li.Description), "", 0, "L", false, 0, "")
+			pdf.CellFormat(20, 6, e(formatQty(li.Quantity)), "", 0, "R", false, 0, "")
+			pdf.CellFormat(30, 6, e(formatMoney(li.UnitPriceCents, inv.Currency)), "", 0, "R", false, 0, "")
+			pdf.CellFormat(20, 6, e(fmt.Sprintf("%.2f%%", float64(li.TaxRateBps)/100)), "", 0, "R", false, 0, "")
+			pdf.CellFormat(30, 6, e(formatMoney(li.AmountCents, inv.Currency)), "", 0, "R", false, 0, "")
 			pdf.Ln(6)
 		}
 	}
@@ -164,9 +178,9 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 			pdf.SetFont("Helvetica", "", 10)
 			pdf.SetTextColor(110, 110, 110)
 		}
-		pdf.CellFormat(totalsLabelW, 6, label, "", 0, "L", false, 0, "")
+		pdf.CellFormat(totalsLabelW, 6, e(label), "", 0, "L", false, 0, "")
 		pdf.SetTextColor(40, 40, 40)
-		pdf.CellFormat(totalsValueW, 6, value, "", 0, "R", false, 0, "")
+		pdf.CellFormat(totalsValueW, 6, e(value), "", 0, "R", false, 0, "")
 		pdf.Ln(6)
 		if separator {
 			pdf.SetX(totalsX)
@@ -188,8 +202,13 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 		drawTotalRow("Balance due", formatMoney(balance, inv.Currency), true, false)
 	}
 
+	// ── EU reverse-charge legal notice ──
+	if qualifiesForEUReverseCharge(issuer, customer, inv) {
+		drawReverseChargeBlock(pdf, e, pageWidth, usableWidth)
+	}
+
 	// ── PAY BY BANK TRANSFER ──
-	drawBankBlock(pdf, issuer, pageWidth, usableWidth)
+	drawBankBlock(pdf, e, issuer, pageWidth, usableWidth)
 
 	// ── Notes ──
 	if inv.Notes != "" {
@@ -199,11 +218,11 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 		pdf.Ln(3)
 		pdf.SetFont("Helvetica", "B", 8)
 		pdf.SetTextColor(120, 120, 120)
-		pdf.CellFormat(usableWidth, 5, "NOTES", "", 0, "L", false, 0, "")
+		pdf.CellFormat(usableWidth, 5, e("NOTES"), "", 0, "L", false, 0, "")
 		pdf.Ln(5)
 		pdf.SetFont("Helvetica", "", 9)
 		pdf.SetTextColor(80, 80, 80)
-		pdf.MultiCell(usableWidth, 4.5, inv.Notes, "", "L", false)
+		pdf.MultiCell(usableWidth, 4.5, e(inv.Notes), "", "L", false)
 	}
 
 	// ── Footer text from issuer settings ──
@@ -211,7 +230,7 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 		pdf.Ln(6)
 		pdf.SetFont("Helvetica", "I", 8)
 		pdf.SetTextColor(140, 140, 140)
-		pdf.MultiCell(usableWidth, 4, issuer.FooterText, "", "C", false)
+		pdf.MultiCell(usableWidth, 4, e(issuer.FooterText), "", "C", false)
 	}
 
 	var buf bytes.Buffer
@@ -219,6 +238,23 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 		return nil, fmt.Errorf("pdf output: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// drawReverseChargeBlock renders the EU intra-community-supply notice.
+// Conditions are checked by qualifiesForEUReverseCharge upstream; this
+// just paints the block.
+func drawReverseChargeBlock(pdf *fpdf.Fpdf, e func(string) string, pageWidth, usableWidth float64) {
+	pdf.Ln(6)
+	pdf.SetDrawColor(220, 220, 220)
+	pdf.Line(20, pdf.GetY(), pageWidth-20, pdf.GetY())
+	pdf.Ln(3)
+	pdf.SetFont("Helvetica", "B", 8)
+	pdf.SetTextColor(120, 120, 120)
+	pdf.CellFormat(usableWidth, 5, e("REVERSE CHARGE — EU INTRA-COMMUNITY SUPPLY"), "", 0, "L", false, 0, "")
+	pdf.Ln(5)
+	pdf.SetFont("Helvetica", "", 9)
+	pdf.SetTextColor(60, 60, 60)
+	pdf.MultiCell(usableWidth, 4.5, e(reverseChargeNotice), "", "L", false)
 }
 
 // buildBillToLines returns the customer block as a slice of lines
@@ -375,7 +411,8 @@ func formatIBAN(s string) string {
 // drawBankBlock paints the "PAY BY BANK TRANSFER" section between
 // the totals box and the notes block. Skipped silently when the
 // issuer has no IBAN configured — most users on Stripe never need this.
-func drawBankBlock(pdf *fpdf.Fpdf, issuer *Issuer, pageWidth, usableWidth float64) {
+// `e` is the CP-1252 translator from renderInvoicePDF — see file header.
+func drawBankBlock(pdf *fpdf.Fpdf, e func(string) string, issuer *Issuer, pageWidth, usableWidth float64) {
 	if issuer == nil || !issuer.Configured {
 		return
 	}
@@ -389,7 +426,7 @@ func drawBankBlock(pdf *fpdf.Fpdf, issuer *Issuer, pageWidth, usableWidth float6
 	pdf.Ln(3)
 	pdf.SetFont("Helvetica", "B", 8)
 	pdf.SetTextColor(120, 120, 120)
-	pdf.CellFormat(usableWidth, 5, "PAY BY BANK TRANSFER", "", 0, "L", false, 0, "")
+	pdf.CellFormat(usableWidth, 5, e("PAY BY BANK TRANSFER"), "", 0, "L", false, 0, "")
 	pdf.Ln(5)
 
 	pdf.SetFont("Helvetica", "", 9)
@@ -402,24 +439,24 @@ func drawBankBlock(pdf *fpdf.Fpdf, issuer *Issuer, pageWidth, usableWidth float6
 		beneficiary = issuer.DisplayName
 	}
 	if beneficiary != "" {
-		pdf.CellFormat(usableWidth, 4.5, "Beneficiary: "+beneficiary, "", 0, "L", false, 0, "")
+		pdf.CellFormat(usableWidth, 4.5, e("Beneficiary: "+beneficiary), "", 0, "L", false, 0, "")
 		pdf.Ln(4.5)
 	}
-	pdf.CellFormat(usableWidth, 4.5, "IBAN: "+formatIBAN(bank.IBAN), "", 0, "L", false, 0, "")
+	pdf.CellFormat(usableWidth, 4.5, e("IBAN: "+formatIBAN(bank.IBAN)), "", 0, "L", false, 0, "")
 	pdf.Ln(4.5)
 	if bank.BIC != "" {
 		line := "BIC: " + bank.BIC
 		if bank.BankCode != "" {
 			line += " · Bank code " + bank.BankCode
 		}
-		pdf.CellFormat(usableWidth, 4.5, line, "", 0, "L", false, 0, "")
+		pdf.CellFormat(usableWidth, 4.5, e(line), "", 0, "L", false, 0, "")
 		pdf.Ln(4.5)
 	} else if bank.BankCode != "" {
-		pdf.CellFormat(usableWidth, 4.5, "Bank code: "+bank.BankCode, "", 0, "L", false, 0, "")
+		pdf.CellFormat(usableWidth, 4.5, e("Bank code: "+bank.BankCode), "", 0, "L", false, 0, "")
 		pdf.Ln(4.5)
 	}
 	if bank.BankName != "" {
-		pdf.CellFormat(usableWidth, 4.5, "Bank: "+bank.BankName, "", 0, "L", false, 0, "")
+		pdf.CellFormat(usableWidth, 4.5, e("Bank: "+bank.BankName), "", 0, "L", false, 0, "")
 		pdf.Ln(4.5)
 	}
 }
