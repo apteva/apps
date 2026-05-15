@@ -1,0 +1,126 @@
+schema: apteva-app/v1
+
+name: catalog
+display_name: Catalog
+version: 0.1.0
+description: |
+  Products and prices — the source of truth for what your business
+  sells. Modelled after Stripe's Product + Price split: one product,
+  many prices (currencies, intervals, tiers). Lower-layer app:
+  catalog calls nothing, downstream apps (billing, future
+  subscriptions/checkout/finance) call catalog.
+
+  Per-project partitioning matches billing — a project running
+  multiple businesses keeps separate catalogs even in a global-scope
+  install.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/catalog
+tags: [catalog, products, pricing, commerce, ecommerce, saas]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: catalog_products_list
+      description: List products. Filter by type, archived, q (search), limit.
+    - name: catalog_products_create
+      description: Create a product. Args — name (req), type (req: one_time|recurring|service), slug, description, category, color, tax_category, metadata.
+    - name: catalog_products_get
+      description: Fetch one product by id or slug.
+    - name: catalog_products_update
+      description: Partial-patch a product. Args — id, patch (any subset of editable fields).
+    - name: catalog_products_archive
+      description: Soft-delete a product. Existing invoice/subscription references continue resolving; the picker hides it from new uses.
+    - name: catalog_products_search
+      description: Free-text search across product name + description + slug + category.
+    - name: catalog_prices_list
+      description: List prices. Filter by product_id, active, archived, limit.
+    - name: catalog_prices_create
+      description: Create a price under a product. Args — product_id, unit_amount_cents, currency (req), nickname, interval, interval_count, trial_days, tax_inclusive, metadata.
+    - name: catalog_prices_get
+      description: Fetch one price.
+    - name: catalog_prices_update
+      description: Patch a price — limited fields only (nickname, active, metadata, tax_inclusive). Amount/currency/interval changes are rejected; create a new price and archive the old one.
+    - name: catalog_prices_archive
+      description: Soft-delete a price. Existing references keep resolving.
+  ui_panels:
+    - slot: project.page
+      label: Catalog
+      icon: tag
+      entry: /ui/CatalogPanel.mjs
+  ui_components:
+    - name: product-card
+      entry: /ui/ProductCard.mjs
+      slots:
+        - chat.message_attachment
+      props_schema:
+        type: object
+        required: [product_id]
+        properties:
+          product_id:
+            type: integer
+      preview_props:
+        preview: true
+    - name: price-card
+      entry: /ui/PriceCard.mjs
+      slots:
+        - chat.message_attachment
+      props_schema:
+        type: object
+        required: [price_id]
+        properties:
+          price_id:
+            type: integer
+      preview_props:
+        preview: true
+  skills:
+    - name: how-to-use-catalog
+      command: /catalog
+      body_file: skills/how-to-use-catalog.md
+      description: |
+        Catalog's mental model + conventions. Load when working with
+        products and prices. Triggers on: "product", "price", "plan",
+        "subscription tier", "catalog", or any catalog tool call.
+      metadata:
+        category: commerce
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/catalog
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/catalog.db
+  migrations: migrations/
+
+config_schema:
+  - name: default_currency
+    type: text
+    default: "USD"
+    label: Default currency
+    description: ISO 4217 code used when creating prices without an explicit currency.
+  - name: stripe_mirror_enabled
+    type: select
+    options: ["true", "false"]
+    default: "false"
+    label: Stripe mirror
+    description: |
+      When true (post-v0.1.0), catalog products and prices are mirrored
+      to Stripe automatically. Requires billing's Stripe integration to
+      be installed and connected. Today this is a forward-compat flag —
+      v0.1.0 ignores it.
+
+upgrade_policy: auto-patch

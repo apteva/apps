@@ -8,6 +8,7 @@ mcp/backup/backup
 mcp/billing/billing
 mcp/bills/bills
 mcp/calendar/calendar
+mcp/catalog/catalog
 mcp/certs/certs
 mcp/code/code
 mcp/computer/computer
