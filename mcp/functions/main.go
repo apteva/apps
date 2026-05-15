@@ -18,7 +18,7 @@
 package main
 
 import (
-	_ "embed"
+	"embed"
 	"errors"
 	"fmt"
 	"os"
@@ -39,13 +39,21 @@ var nodeHarness []byte
 //go:embed harness/gomain.txt
 var goHarness []byte
 
+// examplesFS exposes the on-disk examples/ dir so the panel can list
+// + load real working handlers via GET /examples. The compiler fails
+// the build if a glob matches no files, so a missing example file
+// surfaces as a build error rather than a runtime 404.
+//
+//go:embed examples/*.mjs examples/*.go.txt
+var examplesFS embed.FS
+
 // ─── Manifest (also lives in apteva.yaml; embedded so the running
 // binary is self-describing). ─────────────────────────────────────
 
 const manifestYAML = `schema: apteva-app/v1
 name: functions
 display_name: Functions
-version: 1.1.2
+version: 1.2.0
 description: |
   Lambda-style serverless functions in node or Go. Each function is
   an immutable, built version served by a pool of warm worker
@@ -150,6 +158,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/fn/", Handler: a.handleHTTPInvokeByName},
 		// Recent invocations across the project (dashboard).
 		{Pattern: "/invocations", Handler: a.handleHTTPInvocationsCollection},
+		// Built-in handler examples for the panel's "Load" picker.
+		{Pattern: "/examples", Handler: a.handleHTTPExamples},
 	}
 }
 

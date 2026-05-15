@@ -778,3 +778,86 @@ func dbFor(ctx *sdk.AppCtx) *sql.DB {
 	}
 	return nil
 }
+
+// ─── Examples endpoint ─────────────────────────────────────────────
+//
+// GET /examples?runtime=node|go → { examples: [{ name, runtime,
+// source, description }] }. The handler files live in examples/ on
+// disk and are embedded into the binary at build time; the panel's
+// "Load" picker calls this to populate itself.
+
+func (a *App) handleHTTPExamples(w http.ResponseWriter, r *http.Request) {
+	runtimeFilter := r.URL.Query().Get("runtime")
+	entries, err := examplesFS.ReadDir("examples")
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	type exDTO struct {
+		Name        string `json:"name"`
+		Runtime     string `json:"runtime"`
+		Source      string `json:"source"`
+		Description string `json:"description,omitempty"`
+	}
+	out := []exDTO{}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name, rt := parseExampleFilename(e.Name())
+		if rt == "" {
+			continue
+		}
+		if runtimeFilter != "" && rt != runtimeFilter {
+			continue
+		}
+		src, err := examplesFS.ReadFile("examples/" + e.Name())
+		if err != nil {
+			continue
+		}
+		out = append(out, exDTO{
+			Name:        name,
+			Runtime:     rt,
+			Source:      string(src),
+			Description: firstDescLine(src),
+		})
+	}
+	httpJSON(w, map[string]any{"examples": out})
+}
+
+// parseExampleFilename maps an example filename to (name, runtime).
+// Returns ("", "") for files that aren't a recognised example.
+func parseExampleFilename(name string) (string, string) {
+	switch {
+	case strings.HasSuffix(name, ".mjs"):
+		return strings.TrimSuffix(name, ".mjs"), "node"
+	case strings.HasSuffix(name, ".go.txt"):
+		return strings.TrimSuffix(name, ".go.txt"), "go"
+	}
+	return "", ""
+}
+
+// firstDescLine pulls a short description from the first comment
+// line of an example file, with the leading "// " and any
+// "<name> —" prefix stripped. Returns "" if the file doesn't start
+// with a comment.
+func firstDescLine(src []byte) string {
+	for _, line := range strings.Split(string(src), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "//") {
+			return ""
+		}
+		line = strings.TrimSpace(strings.TrimPrefix(line, "//"))
+		if line == "" {
+			continue
+		}
+		if i := strings.Index(line, " — "); i > 0 {
+			line = line[i+len(" — "):]
+		}
+		return line
+	}
+	return ""
+}

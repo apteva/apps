@@ -132,6 +132,13 @@ interface Invocation {
   error?: string;
 }
 
+interface Example {
+  name: string;
+  runtime: string;
+  source: string;
+  description?: string;
+}
+
 const API = "/api/apps/functions";
 
 // Starter handlers shown in the create dialog.
@@ -821,12 +828,26 @@ function CreateFunctionDialog({
   const [maxMemoryMb, setMaxMemoryMb] = useState("256");
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState("");
+  const [examples, setExamples] = useState<Example[]>([]);
+
+  useEffect(() => {
+    api<{ examples?: Example[] }>("GET", "/examples")
+      .then((r) => setExamples(r.examples ?? []))
+      .catch(() => { /* missing endpoint shouldn't break the dialog */ });
+  }, [api]);
+
+  const runtimeExamples = examples.filter((e) => e.runtime === runtime);
 
   // Swap the starter handler to match the runtime — but only while
   // the author hasn't typed their own.
   const pickRuntime = (r: "node" | "go") => {
     setRuntime(r);
     if (!touchedSource) setSource(r === "go" ? SAMPLE_GO : SAMPLE_HANDLER);
+  };
+
+  const loadExample = (ex: Example) => {
+    setSource(ex.source);
+    setTouchedSource(true);
   };
 
   const submit = async () => {
@@ -909,11 +930,27 @@ function CreateFunctionDialog({
         </div>
 
         <div className="flex flex-col gap-1">
-          <label className={labelCls}>
-            {runtime === "go"
-              ? "Handler (go) — func Handle(event json.RawMessage, ctx *Context) (any, error)"
-              : "Handler (node) — export default async (event, context) => result"}
-          </label>
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className={labelCls}>
+              {runtime === "go"
+                ? "Handler (go) — func Handle(event json.RawMessage, ctx *Context) (any, error)"
+                : "Handler (node) — export default async (event, context) => result"}
+            </label>
+            {runtimeExamples.length > 0 && (
+              <div className="ml-auto flex items-center gap-1 flex-wrap text-xs">
+                <span className="text-text-dim">Load:</span>
+                {runtimeExamples.map((ex) => (
+                  <button
+                    key={ex.name}
+                    type="button"
+                    onClick={() => loadExample(ex)}
+                    title={ex.description || ex.name}
+                    className="px-2 py-0.5 border border-border text-text-muted rounded hover:bg-bg-input hover:text-text font-mono"
+                  >{ex.name}</button>
+                ))}
+              </div>
+            )}
+          </div>
           <textarea
             value={source}
             onChange={(e) => { setSource(e.target.value); setTouchedSource(true); }}
@@ -992,6 +1029,13 @@ function DeployDialog({
   const [packageJSON, setPackageJSON] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState("");
+  const [examples, setExamples] = useState<Example[]>([]);
+
+  useEffect(() => {
+    api<{ examples?: Example[] }>("GET", "/examples", undefined, { runtime: fn.runtime })
+      .then((r) => setExamples(r.examples ?? []))
+      .catch(() => {});
+  }, [api, fn.runtime]);
 
   const submit = async () => {
     setErr("");
@@ -1022,7 +1066,23 @@ function DeployDialog({
         </div>
 
         <div className="flex flex-col gap-1">
-          <label className={labelCls}>Handler source</label>
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className={labelCls}>Handler source</label>
+            {examples.length > 0 && (
+              <div className="ml-auto flex items-center gap-1 flex-wrap text-xs">
+                <span className="text-text-dim">Load:</span>
+                {examples.map((ex) => (
+                  <button
+                    key={ex.name}
+                    type="button"
+                    onClick={() => setSource(ex.source)}
+                    title={ex.description || ex.name}
+                    className="px-2 py-0.5 border border-border text-text-muted rounded hover:bg-bg-input hover:text-text font-mono"
+                  >{ex.name}</button>
+                ))}
+              </div>
+            )}
+          </div>
           <textarea
             value={source}
             onChange={(e) => setSource(e.target.value)}
