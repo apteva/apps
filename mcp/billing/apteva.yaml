@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.4.2
+version: 0.4.3
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Per-invoice provider — local for internal/wire/cash records, stripe
@@ -160,6 +160,16 @@ config_schema:
     description: |
       Tokens — {yyyy}/{yy}/{mm}/{dd} (UTC), {seq} (project-scoped sequence;
       :04 zero-pads to four digits). Minted on finalize.
+  - name: invoice_seq_start
+    type: text
+    default: "1001"
+    label: First invoice number
+    description: |
+      The starting value for {seq} each year. Default 1001 — your first
+      invoice looks like INV-2026-1001, not INV-2026-0001 (the latter
+      announces "this is my very first invoice"). Set to 1 if you want
+      strict 1,2,3 numbering; or pick any non-round value (1042, 1058)
+      to look more established.
   - name: tax_default_rate_bps
     type: text
     default: "0"

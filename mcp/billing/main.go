@@ -779,6 +779,7 @@ func (a *App) toolInvoicesFinalize(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}
 	inv, err := dbInvoiceFinalize(ctx.AppDB(), pid, id,
 		configString(ctx, "invoice_number_format", "INV-{yyyy}-{seq:04}"),
+		configInt64(ctx, "invoice_seq_start", 1001),
 		callerActor(args))
 	if err != nil {
 		return nil, err
@@ -1399,6 +1400,7 @@ func (a *App) handleHTTPInvoiceFinalize(w http.ResponseWriter, r *http.Request) 
 	}
 	inv, err := dbInvoiceFinalize(ctx.AppDB(), pid, id,
 		configString(ctx, "invoice_number_format", "INV-{yyyy}-{seq:04}"),
+		configInt64(ctx, "invoice_seq_start", 1001),
 		actorFromRequest(r))
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -2018,8 +2020,10 @@ func dbInvoiceAddLineItem(db *sql.DB, pid string, id int64, li LineItem, actor s
 }
 
 // dbInvoiceFinalize transitions draft → open. Idempotent: re-finalizing
-// an already-open invoice returns the existing record.
-func dbInvoiceFinalize(db *sql.DB, pid string, id int64, format, actor string) (*Invoice, error) {
+// an already-open invoice returns the existing record. seqStart is the
+// first sequence value to use for the current year; defaults to 1001
+// for a professional-looking starting number.
+func dbInvoiceFinalize(db *sql.DB, pid string, id int64, format string, seqStart int64, actor string) (*Invoice, error) {
 	// Single-Tx finalize so the count-based number mint is consistent.
 	// v0.1.0 is single-replica; v0.2 HA will switch this to an
 	// IMMEDIATE Tx (or an advisory lock) so concurrent finalizes
@@ -2076,7 +2080,7 @@ func dbInvoiceFinalize(db *sql.DB, pid string, id int64, format, actor string) (
 	}
 
 	// Mint number.
-	num, err := mintInvoiceNumberTx(tx, pid, format)
+	num, err := mintInvoiceNumberTx(tx, pid, format, seqStart)
 	if err != nil {
 		return nil, err
 	}
@@ -2413,12 +2417,19 @@ func writeAuditTx(tx *sql.Tx, invoiceID int64, actor, action string, details map
 // ─── Invoice number minting ─────────────────────────────────────────
 
 // mintInvoiceNumberTx renders the format string with project-scoped
-// {seq} resolved to count-of-invoices-this-year + 1. Year tokens use
-// UTC. The unique partial index on (project_id, number) catches the
-// rare race; callers retry.
-func mintInvoiceNumberTx(tx *sql.Tx, pid, format string) (string, error) {
+// {seq} resolved to (count-of-numbered-invoices-this-year + seqStart).
+// Year tokens use UTC. The unique partial index on (project_id, number)
+// catches the rare race; callers retry.
+//
+// seqStart defaults to 1001 so the first invoice of the year looks
+// like INV-2026-1001 rather than INV-2026-0001 — the "0001" pattern
+// is the universal tell of "first invoice this project ever sent."
+func mintInvoiceNumberTx(tx *sql.Tx, pid, format string, seqStart int64) (string, error) {
 	if strings.TrimSpace(format) == "" {
 		format = "INV-{yyyy}-{seq:04}"
+	}
+	if seqStart < 1 {
+		seqStart = 1001
 	}
 	now := time.Now().UTC()
 	yyyy := fmt.Sprintf("%04d", now.Year())
@@ -2426,23 +2437,21 @@ func mintInvoiceNumberTx(tx *sql.Tx, pid, format string) (string, error) {
 	mm := fmt.Sprintf("%02d", int(now.Month()))
 	dd := fmt.Sprintf("%02d", now.Day())
 
-	// Project-scoped sequence: count invoices already created this year
-	// for this project + 1. Includes drafts (which can be discarded
-	// without burning a number — drafts have NULL `number`). Counts
-	// rows that already have a number too, so re-finalizes never
-	// overlap.
+	// Project-scoped sequence: count of numbered invoices already
+	// finalized this year, offset by seqStart. Drafts (number IS NULL)
+	// don't burn a slot — they can be discarded freely.
 	yearStart := fmt.Sprintf("%04d-01-01T00:00:00Z", now.Year())
 	yearEnd := fmt.Sprintf("%04d-01-01T00:00:00Z", now.Year()+1)
-	var seq int64
+	var count int64
 	if err := tx.QueryRow(
 		`SELECT COUNT(*) FROM invoices
 		 WHERE project_id = ?
 		   AND number IS NOT NULL
 		   AND finalized_at >= ? AND finalized_at < ?`,
-		pid, yearStart, yearEnd).Scan(&seq); err != nil {
+		pid, yearStart, yearEnd).Scan(&count); err != nil {
 		return "", err
 	}
-	seq++
+	seq := count + seqStart
 
 	out := format
 	out = strings.ReplaceAll(out, "{yyyy}", yyyy)
@@ -2826,6 +2835,23 @@ func configIntBps(ctx *sdk.AppCtx, key string) int {
 	n, err := strconv.Atoi(v)
 	if err != nil || n < 0 || n > 100000 {
 		return 0
+	}
+	return n
+}
+
+// configInt64 reads a non-negative int64 config value with a default
+// fallback. Used by the invoice-number minter to read seq_start.
+func configInt64(ctx *sdk.AppCtx, key string, def int64) int64 {
+	if ctx == nil || ctx.Config() == nil {
+		return def
+	}
+	v := strings.TrimSpace(ctx.Config().Get(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 {
+		return def
 	}
 	return n
 }

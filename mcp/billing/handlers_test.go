@@ -418,13 +418,14 @@ func TestInvoiceFinalize_MintsNumberAndSequences(t *testing.T) {
 	if !strings.HasPrefix(gotA.Number, "INV-") {
 		t.Errorf("expected default INV- prefix, got %q", gotA.Number)
 	}
-	// Default format ends in :04 → 4-digit padded sequence; the first
-	// finalize this year should be ...0001, second ...0002.
-	if !strings.HasSuffix(gotA.Number, "0001") {
-		t.Errorf("first invoice number=%q, expected ...0001 suffix", gotA.Number)
+	// Default format ends in :04 → 4-digit padded sequence; default
+	// seq_start is 1001, so the first finalize this year is ...1001,
+	// second is ...1002. (Avoids the "0001" first-invoice tell.)
+	if !strings.HasSuffix(gotA.Number, "1001") {
+		t.Errorf("first invoice number=%q, expected ...1001 suffix", gotA.Number)
 	}
-	if !strings.HasSuffix(gotB.Number, "0002") {
-		t.Errorf("second invoice number=%q, expected ...0002 suffix", gotB.Number)
+	if !strings.HasSuffix(gotB.Number, "1002") {
+		t.Errorf("second invoice number=%q, expected ...1002 suffix", gotB.Number)
 	}
 	if gotA.Status != "open" {
 		t.Errorf("post-finalize status=%q, want open", gotA.Status)
