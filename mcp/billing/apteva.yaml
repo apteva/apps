@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.5.0
+version: 0.6.0
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Per-invoice provider — local for internal/wire/cash records, stripe
@@ -46,6 +46,8 @@ provides:
       description: Append a line item to a DRAFT invoice. Errors on non-draft invoices.
     - name: invoices_finalize
       description: Transition draft → open. Mints invoice number. v0.1.0 supports provider=local only.
+    - name: invoices_update
+      description: Patch an invoice. Always-allowed fields (any status) — notes, due_date, metadata. Draft-only fields — customer_id, currency, line_items (replaces array).
     - name: invoices_void
       description: Void an open invoice. Cannot void paid invoices.
     - name: invoices_get

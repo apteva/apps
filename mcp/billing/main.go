@@ -201,6 +201,8 @@ func (a *App) handleHTTPInvoiceItem(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		a.handleHTTPInvoiceGet(w, r)
+	case http.MethodPatch:
+		a.handleHTTPInvoiceUpdate(w, r)
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -314,6 +316,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"invoice_id": map[string]any{"type": "integer"},
 			}, []string{"invoice_id"}),
 			Handler: a.toolInvoicesFinalize,
+		},
+		{
+			Name:        "invoices_update",
+			Description: "Patch an invoice. Args: id, patch (object). Always-allowed fields: notes, due_date, metadata. Draft-only fields: customer_id, currency, line_items (full replacement). Rejects voided invoices. Recomputes totals when line_items change; writes an audit entry.",
+			InputSchema: schemaObject(map[string]any{
+				"id":    map[string]any{"type": "integer"},
+				"patch": map[string]any{"type": "object"},
+			}, []string{"id", "patch"}),
+			Handler: a.toolInvoicesUpdate,
 		},
 		{
 			Name:        "invoices_void",
@@ -785,6 +796,27 @@ func (a *App) toolInvoicesFinalize(ctx *sdk.AppCtx, args map[string]any) (any, e
 		return nil, err
 	}
 	emitInvoice(ctx, "invoice.finalized", inv)
+	return map[string]any{"invoice": inv}, nil
+}
+
+func (a *App) toolInvoicesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	patch, _ := args["patch"].(map[string]any)
+	if patch == nil {
+		return nil, errors.New("patch required (object)")
+	}
+	inv, err := dbInvoiceUpdate(ctx.AppDB(), pid, id, patch, callerActor(args))
+	if err != nil {
+		return nil, err
+	}
+	emitInvoice(ctx, "invoice.updated", inv)
 	return map[string]any{"invoice": inv}, nil
 }
 
@@ -1383,6 +1415,32 @@ func (a *App) handleHTTPInvoiceGet(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	httpJSON(w, map[string]any{"invoice": inv})
+}
+
+func (a *App) handleHTTPInvoiceUpdate(w http.ResponseWriter, r *http.Request) {
+	ctx := getAppCtx(r)
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	id := pathIntSegment(r.URL.Path, "/invoices/", 0)
+	if id == 0 {
+		httpErr(w, http.StatusBadRequest, "id required")
+		return
+	}
+	var patch map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	inv, err := dbInvoiceUpdate(ctx.AppDB(), pid, id, patch, actorFromRequest(r))
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	emitInvoice(ctx, "invoice.updated", inv)
 	httpJSON(w, map[string]any{"invoice": inv})
 }
 
@@ -2157,6 +2215,175 @@ func dbInvoiceVoid(db *sql.DB, pid string, id int64, reason, actor string) (*Inv
 		return nil, err
 	}
 	return inv, nil
+}
+
+// dbInvoiceUpdate patches an invoice. Field rules:
+//   - notes, due_date, metadata: any status
+//   - customer_id, currency, line_items: drafts only
+//
+// line_items, when present, replaces the entire array (drafts only).
+// We DELETE + INSERT inside the same tx so totals stay consistent;
+// recomputeInvoiceTotalsTx is called at the end if any quantity-affecting
+// field changed.
+func dbInvoiceUpdate(db *sql.DB, pid string, id int64, patch map[string]any, actor string) (*Invoice, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var status string
+	if err := tx.QueryRow(
+		`SELECT status FROM invoices WHERE id = ? AND project_id = ? AND deleted_at IS NULL`,
+		id, pid).Scan(&status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("invoice %d not found", id)
+		}
+		return nil, err
+	}
+	if status == "void" {
+		return nil, errors.New("cannot edit a voided invoice")
+	}
+	isDraft := status == "draft"
+
+	// Reject draft-only fields when not a draft.
+	if !isDraft {
+		for _, k := range []string{"customer_id", "currency", "line_items"} {
+			if _, ok := patch[k]; ok {
+				return nil, fmt.Errorf("%s can only be changed while invoice is draft (status=%s)", k, status)
+			}
+		}
+	}
+
+	var sets []string
+	var args []any
+	auditDetails := map[string]any{}
+
+	if v, ok := patch["notes"]; ok {
+		sets = append(sets, "notes = ?")
+		s, _ := v.(string)
+		args = append(args, s)
+		auditDetails["notes_changed"] = true
+	}
+	if v, ok := patch["due_date"]; ok {
+		s, _ := v.(string)
+		sets = append(sets, "due_date = ?")
+		if s == "" {
+			args = append(args, nil)
+		} else {
+			args = append(args, s)
+		}
+		auditDetails["due_date"] = s
+	}
+	if v, ok := patch["metadata"]; ok {
+		sets = append(sets, "metadata = ?")
+		args = append(args, jsonOrEmpty(v, "{}"))
+	}
+
+	totalsAffected := false
+
+	if isDraft {
+		if v, ok := patch["customer_id"]; ok {
+			cid := int64Arg(map[string]any{"customer_id": v}, "customer_id")
+			if cid == 0 {
+				return nil, errors.New("customer_id must be a positive integer")
+			}
+			// Verify customer exists in this project (and isn't soft-deleted).
+			var n int
+			if err := tx.QueryRow(
+				`SELECT COUNT(*) FROM customers WHERE id = ? AND project_id = ? AND deleted_at IS NULL`,
+				cid, pid).Scan(&n); err != nil {
+				return nil, err
+			}
+			if n == 0 {
+				return nil, fmt.Errorf("customer %d not found in this project", cid)
+			}
+			sets = append(sets, "customer_id = ?")
+			args = append(args, cid)
+			auditDetails["customer_id"] = cid
+		}
+		if v, ok := patch["currency"]; ok {
+			cur := strings.ToUpper(strings.TrimSpace(toString(v)))
+			if !looksLikeISO4217(cur) {
+				return nil, fmt.Errorf("currency %q not a 3-letter ISO 4217 code", cur)
+			}
+			sets = append(sets, "currency = ?")
+			args = append(args, cur)
+			auditDetails["currency"] = cur
+		}
+		if rawItems, ok := patch["line_items"].([]any); ok {
+			items, err := normaliseLineItems(rawItems, 0)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := tx.Exec(`DELETE FROM invoice_line_items WHERE invoice_id = ?`, id); err != nil {
+				return nil, err
+			}
+			for i, it := range items {
+				meta := "{}"
+				if len(it.Metadata) > 0 {
+					meta = string(it.Metadata)
+				}
+				if _, err := tx.Exec(
+					`INSERT INTO invoice_line_items
+					    (invoice_id, position, description, quantity, unit_price_cents,
+					     amount_cents, tax_rate_bps, metadata)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+					id, i, it.Description, it.Quantity, it.UnitPriceCents,
+					it.AmountCents, it.TaxRateBps, meta); err != nil {
+					return nil, err
+				}
+			}
+			totalsAffected = true
+			auditDetails["line_items"] = len(items)
+		}
+	}
+
+	if len(sets) > 0 {
+		sets = append(sets, "updated_at = CURRENT_TIMESTAMP")
+		args = append(args, id, pid)
+		q := `UPDATE invoices SET ` + strings.Join(sets, ", ") +
+			` WHERE id = ? AND project_id = ? AND deleted_at IS NULL`
+		if _, err := tx.Exec(q, args...); err != nil {
+			return nil, err
+		}
+	}
+	if totalsAffected {
+		if err := recomputeInvoiceTotalsTx(tx, id); err != nil {
+			return nil, err
+		}
+	}
+	if len(auditDetails) > 0 {
+		if err := writeAuditTx(tx, id, actor, "update", auditDetails); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	inv, err := dbInvoiceGetByID(db, pid, id)
+	if err != nil || inv == nil {
+		return nil, err
+	}
+	if err := loadInvoiceChildren(db, pid, inv); err != nil {
+		return nil, err
+	}
+	return inv, nil
+}
+
+// toString coerces common JSON-decoded types to a string. nil → "".
+func toString(v any) string {
+	switch s := v.(type) {
+	case string:
+		return s
+	case fmt.Stringer:
+		return s.String()
+	case nil:
+		return ""
+	default:
+		return fmt.Sprint(v)
+	}
 }
 
 func loadInvoiceChildren(db *sql.DB, pid string, inv *Invoice) error {

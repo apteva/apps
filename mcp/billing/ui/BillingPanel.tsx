@@ -106,6 +106,33 @@ interface Customer {
   external_id?: string;
   created_at?: string;
   updated_at?: string;
+  billing_address?: CustomerAddress;
+  tax_ids?: TaxIdDraft[];
+  metadata?: {
+    bank?: {
+      iban?: string;
+      bic?: string;
+      bank_name?: string;
+      bank_code?: string;
+      beneficiary?: string;
+    };
+    contact?: {
+      name?: string;
+      title?: string;
+    };
+    website?: string;
+    notes?: string;
+    [key: string]: unknown;
+  };
+}
+
+interface CustomerAddress {
+  line1?: string;
+  line2?: string;
+  postal_code?: string;
+  city?: string;
+  state?: string;
+  country?: string;
 }
 
 interface LineItem {
@@ -301,6 +328,7 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
   const [detail, setDetail] = useState<Invoice | null>(null);
   const [status, setStatus] = useState<string>("");
   const [showCreate, setShowCreate] = useState<boolean>(false);
+  const [showEdit, setShowEdit] = useState<boolean>(false);
   const [showFinalize, setShowFinalize] = useState<boolean>(false);
   const [showVoid, setShowVoid] = useState<boolean>(false);
   const [showPayment, setShowPayment] = useState<boolean>(false);
@@ -367,6 +395,14 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
     [loadDetail],
   );
 
+  const editInvoice = () => {
+    if (detail) setShowEdit(true);
+  };
+  const onInvoiceUpdated = async (inv: Invoice) => {
+    setShowEdit(false);
+    setDetail(inv);
+    await loadList();
+  };
   const finalize = () => {
     if (detail) setShowFinalize(true);
   };
@@ -489,12 +525,22 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
           <InvoiceDetail
             invoice={detail}
             projectId={projectId}
+            onEdit={editInvoice}
             onFinalize={finalize}
             onVoid={voidIt}
             onRecordPayment={recordPayment}
           />
         )}
       </main>
+
+      {showEdit && detail && (
+        <EditInvoiceModal
+          apiCall={apiCall}
+          invoice={detail}
+          onClose={() => setShowEdit(false)}
+          onUpdated={onInvoiceUpdated}
+        />
+      )}
 
       {showCreate && (
         <CreateInvoiceModal
@@ -538,12 +584,14 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
 function InvoiceDetail({
   invoice,
   projectId,
+  onEdit,
   onFinalize,
   onVoid,
   onRecordPayment,
 }: {
   invoice: Invoice;
   projectId: string;
+  onEdit: () => void;
   onFinalize: () => void;
   onVoid: () => void;
   onRecordPayment: () => void;
@@ -713,6 +761,15 @@ function InvoiceDetail({
       )}
 
       <div className="flex items-center gap-2 pt-2 border-t border-border">
+        {invoice.status !== "void" && (
+          <button
+            type="button"
+            onClick={onEdit}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input"
+          >
+            Edit
+          </button>
+        )}
         {invoice.status === "draft" && (
           <button
             type="button"
@@ -1171,6 +1228,481 @@ function CreateInvoiceModal({
   );
 }
 
+// ─── Edit invoice modal (status-aware) ──────────────────────────────
+//
+// Drafts: full edit — customer, currency, line items, notes, due_date.
+// Finalized (open/paid/uncollectible): notes + due_date only — those
+// are the fields the server's dbInvoiceUpdate still accepts post-
+// finalize. Void invoices can't be edited at all; the panel hides the
+// Edit button for them and the backend rejects voided patches.
+//
+// Pre-populates from the invoice. Line items live as decimal strings
+// for editing comfort, then convert to integer cents on submit (matches
+// CreateInvoiceModal's quirk).
+
+function EditInvoiceModal({
+  apiCall,
+  invoice,
+  onClose,
+  onUpdated,
+}: {
+  apiCall: ApiCall;
+  invoice: Invoice;
+  onClose: () => void;
+  onUpdated: (invoice: Invoice) => void;
+}) {
+  const isDraft = invoice.status === "draft";
+
+  // Always-editable fields.
+  const [notes, setNotes] = useState(invoice.notes || "");
+  const [dueDate, setDueDate] = useState(
+    invoice.due_date ? invoice.due_date.slice(0, 10) : "",
+  );
+
+  // Draft-only fields.
+  const [customer, setCustomer] = useState<Customer | null>(null);
+  const [customerSearch, setCustomerSearch] = useState("");
+  const [customerResults, setCustomerResults] = useState<Customer[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [currency, setCurrency] = useState(invoice.currency || "");
+  const [items, setItems] = useState<LineDraft[]>(
+    isDraft && invoice.line_items && invoice.line_items.length > 0
+      ? invoice.line_items.map((li) => ({
+          description: li.description,
+          quantity: String(li.quantity),
+          unit_price: (li.unit_price_cents / 100).toFixed(2),
+          tax_rate: (li.tax_rate_bps / 100).toString(),
+        }))
+      : [emptyLine()],
+  );
+
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  // Load the current customer on mount so the picker shows who we're
+  // billing without making the user search again. Only matters for
+  // drafts (since non-drafts hide the picker).
+  useEffect(() => {
+    if (!isDraft) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiCall<{ customer: Customer }>(
+          "GET",
+          `/customers/${invoice.customer_id}`,
+        );
+        if (!cancelled) setCustomer(res.customer);
+      } catch {
+        // Customer might have been soft-deleted — leave picker empty
+        // and let the user pick a replacement.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiCall, invoice.customer_id, isDraft]);
+
+  // Debounced customer search (only when picker is open).
+  useEffect(() => {
+    if (!isDraft || !pickerOpen) return;
+    const q = customerSearch.trim();
+    const t = setTimeout(async () => {
+      setSearching(true);
+      try {
+        const res = await apiCall<{ customers: Customer[] }>(
+          "GET",
+          "/customers",
+          undefined,
+          q ? { q } : {},
+        );
+        setCustomerResults((res.customers || []).slice(0, 20));
+      } catch {
+        setCustomerResults([]);
+      } finally {
+        setSearching(false);
+      }
+    }, 200);
+    return () => clearTimeout(t);
+  }, [customerSearch, isDraft, pickerOpen, apiCall]);
+
+  const setItem = (i: number, patch: Partial<LineDraft>) =>
+    setItems((prev) => prev.map((it, j) => (j === i ? { ...it, ...patch } : it)));
+  const addItem = () => setItems((prev) => [...prev, emptyLine()]);
+  const removeItem = (i: number) =>
+    setItems((prev) => (prev.length <= 1 ? prev : prev.filter((_, j) => j !== i)));
+
+  // Live totals preview (drafts only).
+  const previewCurrency = (currency || "USD").toUpperCase();
+  let subtotal = 0;
+  let taxTotal = 0;
+  for (const it of items) {
+    if (!it.description.trim()) continue;
+    const qty = parseFloat(it.quantity || "0");
+    const unit = parseFloat(it.unit_price || "0");
+    if (!isFinite(qty) || qty <= 0 || !isFinite(unit)) continue;
+    const lineCents = Math.round(qty * unit * 100);
+    subtotal += lineCents;
+    const pct = parseFloat(it.tax_rate || "0");
+    if (isFinite(pct) && pct > 0) {
+      taxTotal += Math.round((lineCents * pct) / 100);
+    }
+  }
+  const total = subtotal + taxTotal;
+
+  const submit = async () => {
+    setError("");
+    const patch: Record<string, unknown> = {
+      notes: notes,
+      due_date: dueDate,
+    };
+    if (isDraft) {
+      if (!customer) {
+        setError("Pick a customer.");
+        return;
+      }
+      const cur = currency.trim().toUpperCase();
+      if (!cur || cur.length !== 3) {
+        setError("Currency must be a 3-letter ISO code.");
+        return;
+      }
+      let lineItems: Array<{
+        description: string;
+        quantity: number;
+        unit_price_cents: number;
+        tax_rate_bps: number;
+      }> = [];
+      try {
+        lineItems = items
+          .map((it, i) => {
+            const desc = it.description.trim();
+            if (!desc) return null;
+            const qty = parseFloat(it.quantity || "0");
+            if (!isFinite(qty) || qty <= 0) {
+              throw new Error(`Line ${i + 1}: quantity must be > 0`);
+            }
+            const unit = parseFloat(it.unit_price || "0");
+            if (!isFinite(unit)) {
+              throw new Error(`Line ${i + 1}: unit price required`);
+            }
+            const pct = parseFloat(it.tax_rate || "0");
+            return {
+              description: desc,
+              quantity: qty,
+              unit_price_cents: Math.round(unit * 100),
+              tax_rate_bps: isFinite(pct) ? Math.round(pct * 100) : 0,
+            };
+          })
+          .filter((x): x is NonNullable<typeof x> => x !== null);
+      } catch (err) {
+        setError((err as Error).message);
+        return;
+      }
+      if (lineItems.length === 0) {
+        setError("Add at least one line item with a description.");
+        return;
+      }
+      patch.customer_id = customer.id;
+      patch.currency = cur;
+      patch.line_items = lineItems;
+    }
+
+    setSubmitting(true);
+    try {
+      const res = await apiCall<{ invoice: Invoice }>(
+        "PATCH",
+        `/invoices/${invoice.id}`,
+        patch,
+      );
+      onUpdated(res.invoice);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-6"
+      onClick={onClose}
+    >
+      <div
+        className="bg-bg border border-border rounded-lg w-full overflow-auto"
+        style={{ maxWidth: "640px", maxHeight: "90vh" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="p-4 border-b border-border flex items-center justify-between sticky top-0 bg-bg z-10">
+          <h2 className="text-text font-semibold">
+            Edit {invoice.number || `draft #${invoice.id}`}
+          </h2>
+          <ModalCloseButton onClose={onClose} />
+        </header>
+
+        <div className="p-4 space-y-4">
+          {!isDraft && (
+            <div className="text-xs text-text-muted border border-border bg-bg-input/50 rounded px-2 py-1">
+              This invoice is <strong>{invoice.status}</strong>. Only notes and
+              due date can be changed after finalization. To change line items
+              or customer, void this invoice and create a new one.
+            </div>
+          )}
+
+          {isDraft && (
+            <>
+              <div>
+                <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+                  Customer
+                </label>
+                {customer && !pickerOpen ? (
+                  <div className="flex items-center justify-between bg-bg-input border border-border rounded px-2 py-1">
+                    <div className="text-sm text-text">
+                      {customer.name}
+                      {customer.email ? (
+                        <span className="text-text-muted">
+                          {" "}
+                          · {customer.email}
+                        </span>
+                      ) : null}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPickerOpen(true);
+                        setCustomerSearch("");
+                      }}
+                      className="text-xs text-accent hover:underline"
+                    >
+                      Change
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    <input
+                      type="text"
+                      value={customerSearch}
+                      onChange={(e) => setCustomerSearch(e.target.value)}
+                      placeholder="Search customers by name or email…"
+                      className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                      autoFocus
+                    />
+                    {customerResults.length > 0 && (
+                      <ul
+                        className="border border-border rounded overflow-auto"
+                        style={{ maxHeight: "192px" }}
+                      >
+                        {customerResults.map((c) => (
+                          <li
+                            key={c.id}
+                            onClick={() => {
+                              setCustomer(c);
+                              setPickerOpen(false);
+                            }}
+                            className="px-2 py-1 cursor-pointer hover:bg-bg-input border-b border-border last:border-b-0"
+                          >
+                            <div className="text-sm text-text">{c.name}</div>
+                            <div className="text-xs text-text-muted">
+                              {c.email || "—"}
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {searching && customerResults.length === 0 && (
+                      <div className="text-xs text-text-dim">Searching…</div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+                    Currency
+                  </label>
+                  <input
+                    type="text"
+                    value={currency}
+                    onChange={(e) =>
+                      setCurrency(e.target.value.toUpperCase().slice(0, 3))
+                    }
+                    placeholder="EUR"
+                    className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+                    Due date
+                  </label>
+                  <input
+                    type="date"
+                    value={dueDate}
+                    onChange={(e) => setDueDate(e.target.value)}
+                    className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs uppercase tracking-wide text-text-dim">
+                    Line items
+                  </label>
+                  <button
+                    type="button"
+                    onClick={addItem}
+                    className="text-xs text-accent hover:underline"
+                  >
+                    + Add line
+                  </button>
+                </div>
+                <div className="space-y-2">
+                  {items.map((it, i) => (
+                    <div
+                      key={i}
+                      className="bg-bg-input border border-border rounded p-2 space-y-2"
+                    >
+                      <input
+                        type="text"
+                        value={it.description}
+                        onChange={(e) =>
+                          setItem(i, { description: e.target.value })
+                        }
+                        placeholder="Description"
+                        className="w-full bg-bg border border-border rounded px-2 py-1 text-sm"
+                      />
+                      <div className="grid grid-cols-3 gap-2">
+                        <div>
+                          <label className="block text-xs text-text-dim mb-0.5">
+                            Qty
+                          </label>
+                          <input
+                            type="number"
+                            step="any"
+                            min="0"
+                            value={it.quantity}
+                            onChange={(e) =>
+                              setItem(i, { quantity: e.target.value })
+                            }
+                            className="w-full bg-bg border border-border rounded px-2 py-1 text-sm"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-text-dim mb-0.5">
+                            Unit price
+                          </label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={it.unit_price}
+                            onChange={(e) =>
+                              setItem(i, { unit_price: e.target.value })
+                            }
+                            placeholder="0.00"
+                            className="w-full bg-bg border border-border rounded px-2 py-1 text-sm"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-text-dim mb-0.5">
+                            Tax %
+                          </label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={it.tax_rate}
+                            onChange={(e) =>
+                              setItem(i, { tax_rate: e.target.value })
+                            }
+                            placeholder="0"
+                            className="w-full bg-bg border border-border rounded px-2 py-1 text-sm"
+                          />
+                        </div>
+                      </div>
+                      {items.length > 1 && (
+                        <div className="text-right">
+                          <button
+                            type="button"
+                            onClick={() => removeItem(i)}
+                            className="text-xs text-red hover:underline"
+                          >
+                            Remove line
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="border-t border-border pt-3 text-sm space-y-0.5">
+                <div className="flex justify-between text-text-muted">
+                  <span>Subtotal</span>
+                  <span>{fmtMoney(subtotal, previewCurrency)}</span>
+                </div>
+                <div className="flex justify-between text-text-muted">
+                  <span>Tax</span>
+                  <span>{fmtMoney(taxTotal, previewCurrency)}</span>
+                </div>
+                <div className="flex justify-between text-text font-medium">
+                  <span>Total</span>
+                  <span>{fmtMoney(total, previewCurrency)}</span>
+                </div>
+              </div>
+            </>
+          )}
+
+          {!isDraft && (
+            <div>
+              <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+                Due date
+              </label>
+              <input
+                type="date"
+                value={dueDate}
+                onChange={(e) => setDueDate(e.target.value)}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              />
+            </div>
+          )}
+
+          <div>
+            <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+              Notes
+            </label>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              rows={3}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            />
+          </div>
+
+          {error && <div className="text-sm text-red">{error}</div>}
+        </div>
+
+        <footer className="p-4 border-t border-border flex items-center justify-end gap-2 sticky bottom-0 bg-bg">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={submitting}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={submitting}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+          >
+            {submitting ? "Saving…" : "Save changes"}
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
 // ─── Invoice action modals ──────────────────────────────────────────
 
 function FinalizeConfirmModal({
@@ -1519,6 +2051,7 @@ function CustomersTab({
   const [lifetime, setLifetime] = useState<Record<string, number> | null>(null);
   const [status, setStatus] = useState("");
   const [showCreate, setShowCreate] = useState(false);
+  const [showEdit, setShowEdit] = useState(false);
 
   const load = useCallback(
     async (q = "") => {
@@ -1588,6 +2121,12 @@ function CustomersTab({
     select(c);
   };
 
+  const onUpdated = async (c: Customer) => {
+    setShowEdit(false);
+    setSelected(c);
+    await load(search.trim());
+  };
+
   const currency = selected?.currency || "USD";
 
   return (
@@ -1645,13 +2184,24 @@ function CustomersTab({
           </div>
         ) : (
           <div className="max-w-2xl space-y-6">
-            <header>
-              <h1 className="text-xl text-text font-semibold">{selected.name}</h1>
-              <p className="text-text-muted text-sm">
-                {selected.email || "—"}
-                {selected.phone ? ` · ${selected.phone}` : ""}
-                {selected.currency ? ` · ${selected.currency}` : ""}
-              </p>
+            <header className="flex items-start justify-between gap-4">
+              <div>
+                <h1 className="text-xl text-text font-semibold">
+                  {selected.name}
+                </h1>
+                <p className="text-text-muted text-sm">
+                  {selected.email || "—"}
+                  {selected.phone ? ` · ${selected.phone}` : ""}
+                  {selected.currency ? ` · ${selected.currency}` : ""}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowEdit(true)}
+                className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+              >
+                Edit
+              </button>
             </header>
 
             {lifetime && (
@@ -1731,6 +2281,15 @@ function CustomersTab({
           apiCall={apiCall}
           onClose={() => setShowCreate(false)}
           onCreated={onCreated}
+        />
+      )}
+
+      {showEdit && selected && (
+        <EditCustomerModal
+          apiCall={apiCall}
+          customer={selected}
+          onClose={() => setShowEdit(false)}
+          onUpdated={onUpdated}
         />
       )}
     </div>
@@ -2167,6 +2726,431 @@ function Stat({ label, value }: { label: string; value: string }) {
         {label}
       </div>
       <div className="text-sm text-text mt-0.5">{value}</div>
+    </div>
+  );
+}
+
+// ─── Edit customer modal ────────────────────────────────────────────
+//
+// Mirrors CreateCustomerModal but pre-populates from the existing
+// customer and PATCHes /customers/{id}. PATCH applies every field
+// the user changed (we always send the full field set; absent values
+// become empty strings server-side, which the update handler ignores
+// only when the value is unchanged from the existing row — see
+// dbCustomerUpdate). Same field surface: identity / address / tax IDs
+// / contact / bank / notes.
+
+function EditCustomerModal({
+  apiCall,
+  customer,
+  onClose,
+  onUpdated,
+}: {
+  apiCall: ApiCall;
+  customer: Customer;
+  onClose: () => void;
+  onUpdated: (customer: Customer) => void;
+}) {
+  const initialBank = customer.metadata?.bank || {};
+  const initialContact = customer.metadata?.contact || {};
+  const initialAddress = customer.billing_address || {};
+
+  const [name, setName] = useState(customer.name || "");
+  const [email, setEmail] = useState(customer.email || "");
+  const [phone, setPhone] = useState(customer.phone || "");
+  const [currency, setCurrency] = useState(customer.currency || "");
+
+  const [line1, setLine1] = useState(initialAddress.line1 || "");
+  const [line2, setLine2] = useState(initialAddress.line2 || "");
+  const [city, setCity] = useState(initialAddress.city || "");
+  const [region, setRegion] = useState(initialAddress.state || "");
+  const [postalCode, setPostalCode] = useState(initialAddress.postal_code || "");
+  const [country, setCountry] = useState(initialAddress.country || "");
+
+  const [taxIds, setTaxIds] = useState<TaxIdDraft[]>(
+    customer.tax_ids && customer.tax_ids.length > 0
+      ? customer.tax_ids.map((t) => ({ type: t.type, value: t.value }))
+      : [{ type: "vat", value: "" }],
+  );
+
+  const [contactName, setContactName] = useState(initialContact.name || "");
+  const [contactTitle, setContactTitle] = useState(initialContact.title || "");
+  const [website, setWebsite] = useState(
+    (customer.metadata?.website as string) || "",
+  );
+
+  const [iban, setIban] = useState(initialBank.iban || "");
+  const [bic, setBic] = useState(initialBank.bic || "");
+  const [bankName, setBankName] = useState(initialBank.bank_name || "");
+  const [bankCode, setBankCode] = useState(initialBank.bank_code || "");
+
+  const [notes, setNotes] = useState(
+    (customer.metadata?.notes as string) || "",
+  );
+
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  const setTaxId = (i: number, patch: Partial<TaxIdDraft>) =>
+    setTaxIds((prev) => prev.map((t, j) => (j === i ? { ...t, ...patch } : t)));
+  const addTaxId = () =>
+    setTaxIds((prev) => [...prev, { type: "vat", value: "" }]);
+  const removeTaxId = (i: number) =>
+    setTaxIds((prev) =>
+      prev.length <= 1 ? prev : prev.filter((_, j) => j !== i),
+    );
+
+  const submit = async () => {
+    setError("");
+    const cleanName = name.trim();
+    const cleanEmail = email.trim();
+    if (!cleanName) {
+      setError("Name is required.");
+      return;
+    }
+    if (!cleanEmail) {
+      setError("Email is required.");
+      return;
+    }
+
+    const billingAddress: Record<string, string> = {};
+    if (line1.trim()) billingAddress.line1 = line1.trim();
+    if (line2.trim()) billingAddress.line2 = line2.trim();
+    if (postalCode.trim()) billingAddress.postal_code = postalCode.trim();
+    if (city.trim()) billingAddress.city = city.trim();
+    if (region.trim()) billingAddress.state = region.trim();
+    if (country.trim())
+      billingAddress.country = country.trim().toUpperCase();
+
+    const cleanTaxIds = taxIds
+      .map((t) => ({ type: t.type.trim(), value: t.value.trim() }))
+      .filter((t) => t.type && t.value);
+
+    const metadata: Record<string, unknown> = { ...(customer.metadata || {}) };
+    const bank: Record<string, string> = {};
+    if (iban.trim()) bank.iban = iban.trim().toUpperCase().replace(/\s+/g, "");
+    if (bic.trim()) bank.bic = bic.trim().toUpperCase().replace(/\s+/g, "");
+    if (bankName.trim()) bank.bank_name = bankName.trim();
+    if (bankCode.trim()) bank.bank_code = bankCode.trim();
+    if (Object.keys(bank).length > 0) {
+      metadata.bank = bank;
+    } else {
+      delete metadata.bank;
+    }
+
+    const contact: Record<string, string> = {};
+    if (contactName.trim()) contact.name = contactName.trim();
+    if (contactTitle.trim()) contact.title = contactTitle.trim();
+    if (Object.keys(contact).length > 0) {
+      metadata.contact = contact;
+    } else {
+      delete metadata.contact;
+    }
+
+    if (website.trim()) {
+      metadata.website = website.trim();
+    } else {
+      delete metadata.website;
+    }
+    if (notes.trim()) {
+      metadata.notes = notes.trim();
+    } else {
+      delete metadata.notes;
+    }
+
+    // PATCH /customers/{id} accepts {name, email, phone, currency,
+    // billing_address, tax_ids, metadata} — send all, server overwrites
+    // each field with what we provide.
+    const body: Record<string, unknown> = {
+      name: cleanName,
+      email: cleanEmail,
+      phone: phone.trim(),
+      currency: currency.trim().toUpperCase(),
+      billing_address: billingAddress,
+      tax_ids: cleanTaxIds,
+      metadata,
+    };
+
+    setSubmitting(true);
+    try {
+      const res = await apiCall<{ customer: Customer }>(
+        "PATCH",
+        `/customers/${customer.id}`,
+        body,
+      );
+      onUpdated(res.customer);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-6"
+      onClick={onClose}
+    >
+      <div
+        className="bg-bg border border-border rounded-lg w-full overflow-auto"
+        style={{ maxWidth: "640px", maxHeight: "90vh" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="p-4 border-b border-border flex items-center justify-between sticky top-0 bg-bg z-10">
+          <h2 className="text-text font-semibold">Edit customer</h2>
+          <ModalCloseButton onClose={onClose} />
+        </header>
+
+        <div className="p-4 space-y-5">
+          <section className="space-y-2">
+            <h3 className="text-xs uppercase tracking-wide text-text-dim">
+              Identity
+            </h3>
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Name or company *"
+                className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              />
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="Email *"
+                className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              />
+              <input
+                type="tel"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder="Phone"
+                className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              />
+              <input
+                type="text"
+                value={currency}
+                onChange={(e) =>
+                  setCurrency(e.target.value.toUpperCase().slice(0, 3))
+                }
+                placeholder="Default currency (e.g. EUR)"
+                className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              />
+            </div>
+          </section>
+
+          <section className="space-y-2">
+            <h3 className="text-xs uppercase tracking-wide text-text-dim">
+              Billing address
+            </h3>
+            <input
+              type="text"
+              value={line1}
+              onChange={(e) => setLine1(e.target.value)}
+              placeholder="Street address"
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            />
+            <input
+              type="text"
+              value={line2}
+              onChange={(e) => setLine2(e.target.value)}
+              placeholder="Address line 2 (optional)"
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            />
+            <div className="grid grid-cols-3 gap-2">
+              <input
+                type="text"
+                value={postalCode}
+                onChange={(e) => setPostalCode(e.target.value)}
+                placeholder="Postal code"
+                className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              />
+              <input
+                type="text"
+                value={city}
+                onChange={(e) => setCity(e.target.value)}
+                placeholder="City"
+                className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              />
+              <input
+                type="text"
+                value={region}
+                onChange={(e) => setRegion(e.target.value)}
+                placeholder="State / region"
+                className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              />
+            </div>
+            <input
+              type="text"
+              value={country}
+              onChange={(e) =>
+                setCountry(e.target.value.toUpperCase().slice(0, 2))
+              }
+              placeholder="Country (2-char ISO, e.g. FR, EE, US)"
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            />
+          </section>
+
+          <section className="space-y-2">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs uppercase tracking-wide text-text-dim">
+                Tax IDs
+              </h3>
+              <button
+                type="button"
+                onClick={addTaxId}
+                className="text-xs text-accent hover:underline"
+              >
+                + Add ID
+              </button>
+            </div>
+            {taxIds.map((t, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <select
+                  value={t.type}
+                  onChange={(e) => setTaxId(i, { type: e.target.value })}
+                  className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                >
+                  <option value="vat">VAT</option>
+                  <option value="ein">EIN</option>
+                  <option value="gst">GST</option>
+                  <option value="abn">ABN</option>
+                  <option value="company_reg">Company reg.</option>
+                  <option value="siret">SIRET</option>
+                  <option value="other">Other</option>
+                </select>
+                <input
+                  type="text"
+                  value={t.value}
+                  onChange={(e) => setTaxId(i, { value: e.target.value })}
+                  placeholder="Value"
+                  className="flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                />
+                {taxIds.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => removeTaxId(i)}
+                    aria-label="Remove tax ID"
+                    className="text-text-muted hover:text-red"
+                  >
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 16 16"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                    >
+                      <path d="M4 4 L12 12" />
+                      <path d="M12 4 L4 12" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+            ))}
+          </section>
+
+          <section className="space-y-2">
+            <h3 className="text-xs uppercase tracking-wide text-text-dim">
+              Contact (optional)
+            </h3>
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                type="text"
+                value={contactName}
+                onChange={(e) => setContactName(e.target.value)}
+                placeholder="Contact name"
+                className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              />
+              <input
+                type="text"
+                value={contactTitle}
+                onChange={(e) => setContactTitle(e.target.value)}
+                placeholder="Title"
+                className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              />
+            </div>
+            <input
+              type="text"
+              value={website}
+              onChange={(e) => setWebsite(e.target.value)}
+              placeholder="Website"
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            />
+          </section>
+
+          <section className="space-y-2">
+            <h3 className="text-xs uppercase tracking-wide text-text-dim">
+              Bank details (optional)
+            </h3>
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                type="text"
+                value={iban}
+                onChange={(e) => setIban(e.target.value)}
+                placeholder="IBAN"
+                className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              />
+              <input
+                type="text"
+                value={bic}
+                onChange={(e) => setBic(e.target.value)}
+                placeholder="BIC / SWIFT"
+                className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              />
+              <input
+                type="text"
+                value={bankName}
+                onChange={(e) => setBankName(e.target.value)}
+                placeholder="Bank name"
+                className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              />
+              <input
+                type="text"
+                value={bankCode}
+                onChange={(e) => setBankCode(e.target.value)}
+                placeholder="Bank code"
+                className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              />
+            </div>
+          </section>
+
+          <section className="space-y-2">
+            <h3 className="text-xs uppercase tracking-wide text-text-dim">
+              Notes
+            </h3>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              rows={2}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            />
+          </section>
+
+          {error && <div className="text-sm text-red">{error}</div>}
+        </div>
+
+        <footer className="p-4 border-t border-border flex items-center justify-end gap-2 sticky bottom-0 bg-bg">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={submitting}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={submitting}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+          >
+            {submitting ? "Saving…" : "Save changes"}
+          </button>
+        </footer>
+      </div>
     </div>
   );
 }
