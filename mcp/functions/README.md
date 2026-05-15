@@ -153,9 +153,12 @@ interaction — live in [`examples/`](./examples).
   a future version takes a user-supplied `go.mod`.
 - **memory enforcement** — `max_memory_mb` is stored but not yet
   applied to the worker process (`prlimit`/cgroup).
-- **`allowed_apps` allowlist** — `context.call` currently reaches any
-  app as the functions app's identity; a per-function allowlist is
-  the next hardening step.
+- **Per-function `allowed_apps` allowlist** — `context.call` reaches
+  any installed app the platform identifies functions as authorised
+  to call (via the dynamic-call bypass in apteva-server). A
+  per-function allowlist that narrows which apps each individual
+  function may call is the next hardening step. The current grant is
+  app-wide; the proper per-call permission model is v2.
 
 ## Local development
 

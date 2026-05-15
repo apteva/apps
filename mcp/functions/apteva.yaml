@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.2.0
+version: 1.3.0
 description: |
   Lambda-style serverless functions in node or Go. Each function is
   an immutable, built version served by a pool of warm worker
@@ -20,6 +20,11 @@ requires:
   permissions:
     - db.write.app
     - platform.apps.call
+  # functions is a generic FaaS — user-authored handlers call any
+  # installed app at runtime via context.call. This opts the app into
+  # the platform's dynamic-call bypass; honoured by apteva-server only
+  # because functions is identified as official (apteva-org source).
+  dynamic_app_calls: true
 
 provides:
   http_routes:
