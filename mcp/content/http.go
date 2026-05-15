@@ -47,8 +47,10 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Try the page cache.
-	key := cacheKey(r.Host, r.URL.Path, "")
+	// Try the page cache. Prefix segments the key so the dashboard
+	// proxy and a domain-link can't return each other's cached pages.
+	prefix := computeURLPrefix(r)
+	key := cacheKey(r.Host, r.URL.Path, "", prefix)
 	if e, ok := cacheGet(key); ok {
 		w.Header().Set("Content-Type", e.contentType)
 		w.Header().Set("ETag", e.etag)
@@ -438,45 +440,91 @@ func verifyPreviewToken(token string) (int64, error) {
 // ── shared helpers ──────────────────────────────────────────────
 
 func basePageData(ctx *sdk.AppCtx, pid string, settings map[string]string, r *http.Request) PageData {
+	prefix := computeURLPrefix(r)
 	mainMenu, _ := dbGetMenuBySlug(ctx.AppDB(), pid, "primary")
 	var rendered []RenderedMenuItem
 	if mainMenu != nil {
-		rendered = renderMenuItems(mainMenu.Items)
+		rendered = renderMenuItems(mainMenu.Items, prefix)
 	}
 	return PageData{
 		SiteTitle:     firstNonEmpty(settings["site_title"], "My Site"),
 		SiteTagline:   settings["site_tagline"],
 		Locale:        firstNonEmpty(settings["default_locale"], "en"),
 		PublicBaseURL: settings["public_base_url"],
+		URLPrefix:     prefix,
 		PrimaryMenu:   rendered,
 		Now:           time.Now().UTC().Format(time.RFC3339),
 	}
 }
 
-func renderMenuItems(items []MenuItem) []RenderedMenuItem {
+// computeURLPrefix figures out the mount path the current request
+// came in through, so the renderer can emit a <base href> that makes
+// every relative URL on the page resolve back to the right path.
+//
+// Detection order:
+//
+//   1. X-Forwarded-Prefix — preferred (apteva-server can set this
+//      explicitly in the proxy Director once we patch it). Honored
+//      verbatim, with a trailing slash appended.
+//   2. X-Apteva-App-Install-ID — set only by the dashboard proxy in
+//      apteva-server's handleAppProxy. If present and X-Forwarded-Host
+//      is NOT (which would indicate domain-link mode), we're behind
+//      the dashboard proxy, so the prefix is /api/apps/<our-name>/.
+//   3. Otherwise — domain-link / direct access — the app is mounted
+//      at /, so the prefix is just "/".
+//
+// The name comes from globalCtx.Manifest().Name so this remains
+// correct if the app is ever renamed at install time.
+func computeURLPrefix(r *http.Request) string {
+	if v := strings.TrimSpace(r.Header.Get("X-Forwarded-Prefix")); v != "" {
+		if !strings.HasSuffix(v, "/") {
+			v += "/"
+		}
+		return v
+	}
+	throughDashboardProxy := r.Header.Get("X-Apteva-App-Install-ID") != "" &&
+		r.Header.Get("X-Forwarded-Host") == ""
+	if throughDashboardProxy {
+		name := "content"
+		if globalCtx != nil && globalCtx.Manifest() != nil && globalCtx.Manifest().Name != "" {
+			name = globalCtx.Manifest().Name
+		}
+		return "/api/apps/" + name + "/"
+	}
+	return "/"
+}
+
+func renderMenuItems(items []MenuItem, prefix string) []RenderedMenuItem {
 	out := make([]RenderedMenuItem, 0, len(items))
 	for _, it := range items {
 		out = append(out, RenderedMenuItem{
 			Label:    it.Label,
-			URL:      resolveMenuURL(it),
-			Children: renderMenuItems(it.Children),
+			URL:      resolveMenuURL(it, prefix),
+			Children: renderMenuItems(it.Children, prefix),
 		})
 	}
 	return out
 }
 
-func resolveMenuURL(it MenuItem) string {
+// resolveMenuURL builds an absolute URL for a menu item. Internal
+// links (post/page/term) are prefixed with the request's mount path
+// so they work from both dashboard-proxy and domain-link contexts;
+// external URLs pass through verbatim.
+func resolveMenuURL(it MenuItem, prefix string) string {
 	if it.TargetURL != "" {
 		return it.TargetURL
 	}
 	if it.TargetID == nil {
 		return "#"
 	}
+	id := strconv.FormatInt(*it.TargetID, 10)
 	switch it.TargetKind {
 	case "post":
-		return "/posts/" + strconv.FormatInt(*it.TargetID, 10)
+		return prefix + "posts/" + id
 	case "page":
-		return "/" + strconv.FormatInt(*it.TargetID, 10)
+		return prefix + id
+	case "term":
+		return prefix + "category/" + id
 	default:
 		return "#"
 	}
@@ -494,7 +542,7 @@ func firstNonEmpty(vals ...string) string {
 func cacheAndWrite(w http.ResponseWriter, r *http.Request, body, contentType string) {
 	sum := sha256.Sum256([]byte(body))
 	etag := `"` + hex.EncodeToString(sum[:8]) + `"`
-	key := cacheKey(r.Host, r.URL.Path, "")
+	key := cacheKey(r.Host, r.URL.Path, "", computeURLPrefix(r))
 	cacheSet(key, body, contentType, etag)
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("ETag", etag)

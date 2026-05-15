@@ -21,7 +21,7 @@
   <footer class="post-footer">
     <ul class="post-terms">
       {{ range .Terms }}
-      <li><a href="/{{ .Kind }}/{{ .Slug }}">{{ .Name }}</a></li>
+      <li><a href="{{ .Kind }}/{{ .Slug }}">{{ .Name }}</a></li>
       {{ end }}
     </ul>
   </footer>

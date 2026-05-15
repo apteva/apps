@@ -5,10 +5,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{{- /* <base> makes every relative URL on the page resolve against the
+       app's mount point (e.g. /api/apps/content/ when accessed via the
+       dashboard proxy, or / when accessed via a domain-link). All
+       in-template URLs below are relative; never use leading slashes. */ -}}
+<base href="{{ .URLPrefix }}">
 <title>{{ if .PageTitle }}{{ .PageTitle }} &middot; {{ end }}{{ .SiteTitle }}</title>
 {{ if .MetaDescription }}<meta name="description" content="{{ .MetaDescription }}">{{ end }}
 {{ if .Canonical }}<link rel="canonical" href="{{ .Canonical }}">{{ end }}
-<link rel="alternate" type="application/rss+xml" title="{{ .SiteTitle }}" href="/feed.xml">
+<link rel="alternate" type="application/rss+xml" title="{{ .SiteTitle }}" href="feed.xml">
 <link rel="stylesheet" href="{{ asset "style.css" }}">
 {{ if .OpenGraph }}
 <meta property="og:title" content="{{ .OpenGraph.Title }}">

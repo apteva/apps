@@ -84,6 +84,11 @@ func sanitizeHTML(src string) template.HTML {
 
 // ── theme funcs (injected at theme load time) ────────────────────
 
+// buildThemeFuncMap builds the funcs used by every page render. URL
+// generators (asset, media) return paths *without* a leading slash —
+// the base.html injects <base href="{{.URLPrefix}}"> so relative URLs
+// resolve against the app's mount point automatically. This same set
+// works for both dashboard-proxy mode and domain-link mode.
 func buildThemeFuncMap(_ *sdk.AppCtx) template.FuncMap {
 	return template.FuncMap{
 		// int coerces JSON-derived numbers (float64) into int so
@@ -101,23 +106,18 @@ func buildThemeFuncMap(_ *sdk.AppCtx) template.FuncMap {
 			if t != nil {
 				v = t.Version
 			}
-			return "/_theme/" + v + "/" + strings.TrimPrefix(path, "/")
+			return "_theme/" + v + "/" + strings.TrimPrefix(path, "/")
 		},
 		"media": func(mediaID any) string {
 			id, _ := asInt64(mediaID)
 			if id == 0 {
 				return ""
 			}
-			// Look up the media row to get the storage_path; serve
-			// via /_media/<storage_path>.
 			ctx := globalCtx
 			if ctx == nil {
 				return ""
 			}
-			pid := ""
-			if env := strings.TrimSpace(getEnvFunc("APTEVA_PROJECT_ID")); env != "" {
-				pid = env
-			}
+			pid := strings.TrimSpace(getEnvFunc("APTEVA_PROJECT_ID"))
 			if pid == "" {
 				return ""
 			}
@@ -125,7 +125,8 @@ func buildThemeFuncMap(_ *sdk.AppCtx) template.FuncMap {
 			if err != nil || m == nil {
 				return ""
 			}
-			return "/_media" + strings.TrimPrefix(m.StoragePath, "/.media")
+			// `_media/<uuid>.<ext>` (relative to base).
+			return "_media" + strings.TrimPrefix(m.StoragePath, "/.media")
 		},
 		"markdown": renderInlineMarkdown,
 		"safeHTML": sanitizeHTML,
@@ -192,6 +193,24 @@ type PageData struct {
 	SiteTagline      string
 	Locale           string
 	PublicBaseURL    string
+	// URLPrefix is the path under which the app is currently mounted,
+	// with a trailing slash. Two cases:
+	//
+	//   "/api/apps/content/"  — accessed via the dashboard's platform
+	//                           proxy (the common case during install
+	//                           preview); every in-page URL needs this
+	//                           prefix so the browser resolves
+	//                           /_theme/* and /posts/* paths back
+	//                           through the proxy.
+	//   "/"                   — accessed via a domain-link (the
+	//                           production case where a real host is
+	//                           routed to the sidecar); paths are
+	//                           served at the host root.
+	//
+	// The renderer injects <base href="{{.URLPrefix}}"> at the top of
+	// every page; every in-template URL is relative (no leading slash)
+	// so the base resolution does the right thing in both modes.
+	URLPrefix        string
 	PageTitle        string
 	MetaDescription  string
 	Canonical        string
@@ -314,13 +333,18 @@ var (
 	pageCacheMu sync.RWMutex
 )
 
-func cacheKey(host, path, locale string) string {
+// cacheKey segments by (host, path, locale, urlPrefix, themeVersion).
+// urlPrefix has to be in the key — the same path served direct
+// (prefix="/") and via the dashboard proxy (prefix="/api/apps/content/")
+// emits different <base href> and absolute URLs, so a cache hit across
+// the two would serve broken assets to one side.
+func cacheKey(host, path, locale, prefix string) string {
 	t := getCurrentTheme()
 	ver := ""
 	if t != nil {
 		ver = t.Version
 	}
-	return host + "|" + path + "|" + locale + "|" + ver
+	return host + "|" + path + "|" + locale + "|" + prefix + "|" + ver
 }
 
 func cacheGet(key string) (cacheEntry, bool) {
