@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: redirects
 display_name: Redirects
-version: 0.1.0
+version: 0.1.1
 description: |
   Branded short links and domain redirects. Each rule maps a
   (hostname, path) pair to an external URL and returns a 301/302/
@@ -34,13 +34,10 @@ requires:
     - platform.apps.call
   apps:
     - name: routes
-      required: true
-      label: "Hostname routing"
-      hint: "Routes claims the public hostname for this app's sidecar so inbound HTTP lands here."
+      reason: "Claims the public hostname for this app's sidecar so apteva-server reverse-proxies inbound HTTP here."
     - name: domains
-      required: false
-      label: "DNS auto-config (optional)"
-      hint: "When the hostname is in domains, redirects upserts a CNAME so DNS points at the platform. Skip this app to manage DNS elsewhere."
+      optional: true
+      reason: "When the hostname is in domains, redirects upserts a CNAME so DNS points at the platform. Skip this app to manage DNS elsewhere."
 
 provides:
   http_routes:
