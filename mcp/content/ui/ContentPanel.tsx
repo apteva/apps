@@ -278,11 +278,15 @@ function ListView({
                 </button>
               )}
               <a
-                href={`/api/apps/content/admin/posts/${p.id}?project_id=${encodeURIComponent(projectId)}`}
+                href={
+                  p.status === "published"
+                    ? `/api/apps/content/${p.kind === "post" ? "posts/" : ""}${p.slug}?project_id=${encodeURIComponent(projectId)}`
+                    : `/api/apps/content/admin/posts/${p.id}?project_id=${encodeURIComponent(projectId)}`
+                }
                 target="_blank"
                 rel="noreferrer"
                 className="flex items-center px-2 py-1 text-xs rounded border border-border"
-                title="View JSON"
+                title={p.status === "published" ? "View rendered page" : "View JSON (drafts can't render publicly)"}
               >
                 <Icon name="eye" />
               </a>

@@ -11,6 +11,7 @@ package main
 import (
 	"embed"
 	"errors"
+	"fmt"
 	"html/template"
 	"io"
 	"io/fs"
@@ -26,15 +27,33 @@ import (
 var embeddedThemeFS embed.FS
 
 // Theme holds the parsed templates + the asset filesystem for one
-// theme. Templates is rebuilt on theme swap; assetFS is the source for
-// /_theme/<version>/* requests.
+// theme.
+//
+// html/template forbids Clone() after the first Execute() — so we
+// can't share one master set across requests and clone per call. Each
+// per-route layout (single, list, plus any post-template overrides
+// from templates/) gets its OWN pre-built template set built once at
+// theme-load time. Renderers Execute against those directly without
+// cloning, which makes them safe to call concurrently.
+//
+// Per-block partials are duplicated into each route set so renderBlock
+// can look them up there. Feed XML lives in its own set because
+// html/template would escape the <?xml ?> declaration; we build the
+// feed body in Go and only the .xml file is reserved for future use.
 type Theme struct {
-	Name        string
-	Version     string
-	Templates   *template.Template
-	AssetFS     fs.FS
-	BlockTpls   map[string]*template.Template // type → cloned template for that block
-	source      string                        // "embedded" | "storage:<slug>"
+	Name      string
+	Version   string
+	AssetFS   fs.FS
+	BlockTpls map[string]*template.Template // type → cloned template for that block
+	source    string                        // "embedded" | "storage:<slug>"
+
+	// One per layout: each binds base.html + that layout's "main"
+	// definition + all partials. Cloning these per request is unsafe
+	// post-Execute; we Execute against the master directly (which is
+	// concurrent-read-safe per the html/template docs).
+	singleTpl    *template.Template
+	listTpl      *template.Template
+	pageTemplates map[string]*template.Template // posts.template name → built set
 }
 
 var (
@@ -82,12 +101,15 @@ func loadEmbeddedDefaultTheme() (*Theme, error) {
 	if err != nil {
 		return nil, err
 	}
-	tpls := template.New("").Funcs(themeFuncMap)
 
-	// Parse partials (header / footer / post_card) and per-block
-	// partials. base.html + single.html / list.html are parsed too;
-	// the renderer composes them per-request.
-	files := []string{}
+	// Read every file once.
+	type fileBody struct{ name, body string }
+	var (
+		baseBody  string
+		layouts   = map[string]string{}  // "single", "list" — without the .html suffix
+		pageTpls  = map[string]string{}  // templates/<name>.html → name → body
+		partials  []fileBody             // header/footer/post_card + blocks/*
+	)
 	err = fs.WalkDir(root, ".", func(p string, d fs.DirEntry, werr error) error {
 		if werr != nil {
 			return werr
@@ -95,30 +117,82 @@ func loadEmbeddedDefaultTheme() (*Theme, error) {
 		if d.IsDir() {
 			return nil
 		}
-		if strings.HasSuffix(p, ".html") || strings.HasSuffix(p, ".xml") {
-			files = append(files, p)
+		if !strings.HasSuffix(p, ".html") && !strings.HasSuffix(p, ".xml") {
+			return nil
+		}
+		raw, err := fs.ReadFile(root, p)
+		if err != nil {
+			return err
+		}
+		body := string(raw)
+		switch {
+		case p == "layouts/base.html":
+			baseBody = body
+		case strings.HasPrefix(p, "layouts/") && strings.HasSuffix(p, ".html"):
+			name := strings.TrimSuffix(strings.TrimPrefix(p, "layouts/"), ".html")
+			layouts[name] = body
+		case strings.HasPrefix(p, "templates/") && strings.HasSuffix(p, ".html"):
+			name := strings.TrimSuffix(strings.TrimPrefix(p, "templates/"), ".html")
+			pageTpls[name] = body
+		case strings.HasPrefix(p, "partials/"):
+			partials = append(partials, fileBody{name: p, body: body})
+		case p == "layouts/feed.xml":
+			// reserved for future use; the feed is built in Go (see
+			// renderFeed) to avoid html/template's XML escaping.
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	for _, f := range files {
-		body, err := fs.ReadFile(root, f)
+	if baseBody == "" {
+		return nil, fmt.Errorf("theme: layouts/base.html missing")
+	}
+
+	// buildSet stitches base + a layout's body + every partial into one
+	// fresh template set. Built once per layout at theme-load time;
+	// rendered against directly thereafter (no per-request Clone, which
+	// html/template forbids after Execute).
+	buildSet := func(layoutName, layoutBody string) (*template.Template, error) {
+		t := template.New("").Funcs(themeFuncMap)
+		if _, err := t.New("layouts/base.html").Parse(baseBody); err != nil {
+			return nil, fmt.Errorf("parse base.html: %w", err)
+		}
+		if _, err := t.New("layouts/" + layoutName + ".html").Parse(layoutBody); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", layoutName, err)
+		}
+		for _, p := range partials {
+			if _, err := t.New(p.name).Parse(p.body); err != nil {
+				return nil, fmt.Errorf("parse %s: %w", p.name, err)
+			}
+		}
+		return t, nil
+	}
+
+	singleSet, err := buildSet("single", layouts["single"])
+	if err != nil {
+		return nil, err
+	}
+	listSet, err := buildSet("list", layouts["list"])
+	if err != nil {
+		return nil, err
+	}
+	pageSets := map[string]*template.Template{}
+	for name, body := range pageTpls {
+		// A per-page template is structured like single.html (defines
+		// "main"); it's parsed in place of layouts/single.html.
+		s, err := buildSet(name, body)
 		if err != nil {
 			return nil, err
 		}
-		// Per-block templates get named by their slash-path so the
-		// renderer can look them up by block type.
-		name := f
-		if _, err := tpls.New(name).Parse(string(body)); err != nil {
-			return nil, err
-		}
+		pageSets[name] = s
 	}
 
-	// Index block templates by type ("core/heading") for fast lookup.
+	// Index block partials by type ("core/heading") for fast lookup.
+	// Build from singleSet — partials are identical across sets so any
+	// set will do for the lookup table.
 	blockTpls := map[string]*template.Template{}
-	for _, t := range tpls.Templates() {
+	for _, t := range singleSet.Templates() {
 		n := t.Name()
 		if strings.HasPrefix(n, "partials/blocks/") {
 			typ := strings.TrimSuffix(strings.TrimPrefix(n, "partials/blocks/"), ".html")
@@ -132,12 +206,14 @@ func loadEmbeddedDefaultTheme() (*Theme, error) {
 	}
 
 	return &Theme{
-		Name:      "default",
-		Version:   "1",
-		Templates: tpls,
-		AssetFS:   assets,
-		BlockTpls: blockTpls,
-		source:    "embedded",
+		Name:          "default",
+		Version:       "1",
+		AssetFS:       assets,
+		BlockTpls:     blockTpls,
+		source:        "embedded",
+		singleTpl:     singleSet,
+		listTpl:       listSet,
+		pageTemplates: pageSets,
 	}, nil
 }
 

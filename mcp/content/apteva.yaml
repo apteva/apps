@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: content
 display_name: Content
-version: 1.1.0
+version: 1.1.1
 description: |
   Block-based CMS for Apteva. Posts, pages, media, taxonomies, menus,
   revisions, redirects. Renders themed HTML and exposes a headless REST

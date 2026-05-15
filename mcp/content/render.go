@@ -224,19 +224,21 @@ type Pagination struct {
 
 // renderSingle composes base.html + single.html (or a per-page template
 // if Post.Template is set and exists) and returns the HTML.
+//
+// Each layout has its own pre-built template set (see themes.go) so
+// rendering is just an Execute — no cloning, no Race conditions.
 func renderSingle(data PageData) (string, error) {
 	t := getCurrentTheme()
 	if t == nil {
 		return "", fmt.Errorf("no theme loaded")
 	}
-	layout := "layouts/single.html"
+	set := t.singleTpl
 	if data.Post != nil && data.Post.Template != "" {
-		alt := "templates/" + data.Post.Template + ".html"
-		if t.Templates.Lookup(alt) != nil {
-			layout = alt
+		if alt, ok := t.pageTemplates[data.Post.Template]; ok {
+			set = alt
 		}
 	}
-	return composeLayout(t, layout, data)
+	return executeBase(set, data)
 }
 
 func renderList(data PageData) (string, error) {
@@ -244,24 +246,22 @@ func renderList(data PageData) (string, error) {
 	if t == nil {
 		return "", fmt.Errorf("no theme loaded")
 	}
-	return composeLayout(t, "layouts/list.html", data)
+	return executeBase(t.listTpl, data)
 }
 
-// composeLayout clones the theme template set, parses base.html, then
-// includes the per-route layout that defines the "main" block.
-func composeLayout(t *Theme, layoutName string, data PageData) (string, error) {
-	cloned, err := t.Templates.Clone()
-	if err != nil {
-		return "", err
+// executeBase runs base.html against a pre-built layout set. Each set
+// owns its own "main" block (single.html or list.html or templates/<x>),
+// so the same base.html composes differently per route without us
+// having to Clone — which html/template forbids post-Execute.
+//
+// Calls are concurrency-safe: html/template ExecuteTemplate is safe to
+// call from multiple goroutines on the same set.
+func executeBase(set *template.Template, data PageData) (string, error) {
+	if set == nil {
+		return "", fmt.Errorf("layout template set missing")
 	}
-	if cloned.Lookup(layoutName) == nil {
-		return "", fmt.Errorf("layout %q not in theme", layoutName)
-	}
-	// Render base.html which references "main" via {{ block "main" . }};
-	// the per-route layout (single.html or list.html) defines "main"
-	// since we parsed it into the same set.
 	var buf bytes.Buffer
-	if err := cloned.ExecuteTemplate(&buf, "layouts/base.html", data); err != nil {
+	if err := set.ExecuteTemplate(&buf, "layouts/base.html", data); err != nil {
 		return "", err
 	}
 	return buf.String(), nil
