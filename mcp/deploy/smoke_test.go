@@ -2,11 +2,14 @@ package main
 
 import (
 	"database/sql"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -474,6 +477,193 @@ func openSchemaDB(t *testing.T) *sql.DB {
 		}
 	}
 	return db
+}
+
+// TestDetectStaticOutput pins the priority chain for the runtime's
+// static-output routing (Next.js export / Vite / Astro / Gatsby).
+// Order matters: "out" must beat "dist" must beat "public", and a
+// subdir without index.html doesn't count (a server project might
+// emit a JS-only dist/ that must not be misrouted to FileServer).
+func TestDetectStaticOutput(t *testing.T) {
+	t.Run("empty dir → none", func(t *testing.T) {
+		if got := detectStaticOutput(t.TempDir()); got != "" {
+			t.Fatalf("got %q, want empty", got)
+		}
+	})
+	t.Run("out/index.html → out", func(t *testing.T) {
+		tmp := t.TempDir()
+		mkFile(t, filepath.Join(tmp, "out", "index.html"), "<html></html>")
+		if got := detectStaticOutput(tmp); got != "out" {
+			t.Fatalf("got %q, want out", got)
+		}
+	})
+	t.Run("dist/index.html → dist", func(t *testing.T) {
+		tmp := t.TempDir()
+		mkFile(t, filepath.Join(tmp, "dist", "index.html"), "<html></html>")
+		if got := detectStaticOutput(tmp); got != "dist" {
+			t.Fatalf("got %q, want dist", got)
+		}
+	})
+	t.Run("public/index.html → public", func(t *testing.T) {
+		tmp := t.TempDir()
+		mkFile(t, filepath.Join(tmp, "public", "index.html"), "<html></html>")
+		if got := detectStaticOutput(tmp); got != "public" {
+			t.Fatalf("got %q, want public", got)
+		}
+	})
+	t.Run("out beats dist beats public", func(t *testing.T) {
+		tmp := t.TempDir()
+		mkFile(t, filepath.Join(tmp, "out", "index.html"), "<html></html>")
+		mkFile(t, filepath.Join(tmp, "dist", "index.html"), "<html></html>")
+		mkFile(t, filepath.Join(tmp, "public", "index.html"), "<html></html>")
+		if got := detectStaticOutput(tmp); got != "out" {
+			t.Fatalf("got %q, want out", got)
+		}
+	})
+	t.Run("dist without index.html does not count", func(t *testing.T) {
+		// A Bun server project may bundle a JS-only dist/ with no
+		// index.html. Must NOT be routed to FileServer — that would
+		// turn a working server into a 404 page.
+		tmp := t.TempDir()
+		mkFile(t, filepath.Join(tmp, "dist", "server.js"), "// bundle")
+		if got := detectStaticOutput(tmp); got != "" {
+			t.Fatalf("got %q, want empty (no index.html)", got)
+		}
+	})
+}
+
+// TestDetectNextStaticExport covers the build-time warning's config
+// scanner. It's a string match, not a parser — assert the variants
+// it has to catch (single/double quotes, ts/js/mjs filenames) and
+// the cases it must miss (no output line, output: 'standalone').
+func TestDetectNextStaticExport(t *testing.T) {
+	cases := []struct {
+		name string
+		file string
+		body string
+		want string
+	}{
+		{"single-quote export ts", "next.config.ts", "export default { output: 'export' }", "next.config.ts"},
+		{"double-quote export js", "next.config.js", `module.exports = { output: "export" }`, "next.config.js"},
+		{"mjs", "next.config.mjs", "export default { output: 'export' }\n", "next.config.mjs"},
+		{"cjs", "next.config.cjs", "module.exports = { output: 'export' }\n", "next.config.cjs"},
+		{"standalone is not export", "next.config.ts", "export default { output: 'standalone' }", ""},
+		{"no output key", "next.config.ts", "export default {}\n", ""},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			mkFile(t, filepath.Join(tmp, tc.file), tc.body)
+			if got := detectNextStaticExport(tmp); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+	t.Run("no config files → empty", func(t *testing.T) {
+		if got := detectNextStaticExport(t.TempDir()); got != "" {
+			t.Fatalf("got %q, want empty", got)
+		}
+	})
+	t.Run("ts wins over js", func(t *testing.T) {
+		// Reported filename should be deterministic if both exist.
+		tmp := t.TempDir()
+		mkFile(t, filepath.Join(tmp, "next.config.ts"), "export default { output: 'export' }")
+		mkFile(t, filepath.Join(tmp, "next.config.js"), "module.exports = { output: 'export' }")
+		if got := detectNextStaticExport(tmp); got != "next.config.ts" {
+			t.Fatalf("got %q, want next.config.ts", got)
+		}
+	})
+}
+
+// TestLocalRuntime_StaticOutputRouting is the end-to-end guard for
+// the bug this fix exists for: a Next.js export deployed under
+// framework=bun (or node) would crash on `next start` because the
+// runtime's resolveCommand fell back to `bun run start`. With the
+// fix, the same artifact shape gets served by the in-process
+// FileServer — no child process, no `bunx serve` per host.
+func TestLocalRuntime_StaticOutputRouting(t *testing.T) {
+	for _, framework := range []string{"bun", "node"} {
+		framework := framework
+		t.Run(framework, func(t *testing.T) {
+			artifactDir := t.TempDir()
+			// Mimic a finished Next.js export: package.json with a
+			// "start" script that would fail (resolveCommand picks it
+			// up), and an out/ with the actual content.
+			mkFile(t, filepath.Join(artifactDir, "package.json"),
+				`{"scripts":{"start":"next start"}}`)
+			mkFile(t, filepath.Join(artifactDir, "out", "index.html"),
+				"<!doctype html><title>hi</title>")
+
+			port := freePortForTest(t)
+			rt := NewLocalRuntime(t.TempDir(), &App{})
+			rr, err := rt.Start(ReleaseSpec{
+				ReleaseID:   1,
+				Framework:   framework,
+				ArtifactDir: artifactDir,
+				Port:        port,
+			})
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			defer func() { _ = rt.Stop(rr) }()
+
+			if rr.server == nil {
+				t.Fatal("expected in-process server (server!=nil), got child process")
+			}
+			if rr.cmd != nil {
+				t.Fatal("expected no cmd handle; static-output should not spawn a process")
+			}
+
+			// Fetch / and confirm we get our index.html.
+			body := httpGet(t, port, "/")
+			if !strings.Contains(body, "<title>hi</title>") {
+				t.Fatalf("body did not contain index.html content; got %q", body)
+			}
+		})
+	}
+}
+
+func mkFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func freePortForTest(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	return port
+}
+
+func httpGet(t *testing.T, port int, path string) string {
+	t.Helper()
+	url := "http://127.0.0.1:" + itoa(port) + path
+	// Server starts asynchronously inside startStatic; retry briefly.
+	deadline := time.Now().Add(2 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		if err != nil {
+			lastErr = err
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return string(body)
+	}
+	t.Fatalf("GET %s: %v", url, lastErr)
+	return ""
 }
 
 // stripSQLComments removes -- line comments. The migration has no

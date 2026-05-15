@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -167,6 +168,9 @@ func (*nodeBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		return "", err
 	}
+	if cfg := detectNextStaticExport(srcDir); cfg != "" {
+		fmt.Fprintf(logW, "note: %s sets output: 'export' — this release will be served as a static export from out/\n", cfg)
+	}
 	pm := detectPackageManager(srcDir)
 	if _, err := exec.LookPath(pm); err != nil {
 		return "", fmt.Errorf("%s not found on PATH; install it or set start_cmd / build_cmd to use a different toolchain", pm)
@@ -269,6 +273,9 @@ func (*bunBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	}
 	if _, err := exec.LookPath("bun"); err != nil {
 		return "", errors.New("bun not on PATH; install Bun (https://bun.sh) or pick framework=node to use npm/pnpm/yarn")
+	}
+	if cfg := detectNextStaticExport(srcDir); cfg != "" {
+		fmt.Fprintf(logW, "note: %s sets output: 'export' — this release will be served as a static export from out/\n", cfg)
 	}
 	if ov.BuildCmd != "" {
 		fmt.Fprintf(logW, "+ %s (cwd=%s)\n", ov.BuildCmd, srcDir)
@@ -451,4 +458,40 @@ func runShellInSrc(srcDir, cmd string, logW io.Writer, expectedOutput string, en
 func exists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// detectStaticOutput returns the subdirectory of artifactDir that
+// looks like a static export: "out" (Next.js export), "dist" (Vite
+// SPA, Astro static, Eleventy), or "public" (Gatsby) — whichever
+// contains an index.html. Empty string means none qualifies. Order
+// matters: Next.js export wins over a "dist" that some tools also
+// drop alongside it.
+func detectStaticOutput(artifactDir string) string {
+	for _, sub := range []string{"out", "dist", "public"} {
+		if fileExists(filepath.Join(artifactDir, sub, "index.html")) {
+			return sub
+		}
+	}
+	return ""
+}
+
+// detectNextStaticExport scans next.config.{ts,js,mjs,cjs} in srcDir
+// for `output: 'export'` and returns the matching filename (or "").
+// String-match only — parsing JS/TS for one config line isn't worth a
+// dependency. False positives (e.g. the literal in a comment) just
+// produce an extra log line; the runtime decides serving mode from
+// the artifact, not from this scan.
+var nextStaticExportRE = regexp.MustCompile(`\boutput\s*:\s*['"]export['"]`)
+
+func detectNextStaticExport(srcDir string) string {
+	for _, name := range []string{"next.config.ts", "next.config.js", "next.config.mjs", "next.config.cjs"} {
+		body, err := os.ReadFile(filepath.Join(srcDir, name))
+		if err != nil {
+			continue
+		}
+		if nextStaticExportRE.Match(body) {
+			return name
+		}
+	}
+	return ""
 }

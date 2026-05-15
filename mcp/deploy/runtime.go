@@ -97,14 +97,27 @@ func (r *LocalRuntime) Start(spec ReleaseSpec) (*RunningRelease, error) {
 
 	// Static gets a tiny in-process FileServer; no child process.
 	if spec.Framework == "static" {
-		return r.startStatic(spec, logF, logPath)
+		return r.startStatic(spec, spec.ArtifactDir, logF, logPath)
+	}
+	// Static-output detection: bun/node builds that produced a static
+	// export (Next.js `output: 'export'` → out/, Vite/Astro static →
+	// dist/, Gatsby → public/) get served by the same in-process
+	// FileServer rather than spawning `<pm> run start`. The script
+	// usually assumes SSR (`next start`) and exits immediately for
+	// `output: 'export'`. start_cmd skips this — operators get the
+	// last word.
+	if spec.StartCmd == "" && (spec.Framework == "bun" || spec.Framework == "node") {
+		if sub := detectStaticOutput(spec.ArtifactDir); sub != "" {
+			fmt.Fprintf(logF, "static output detected at %s/ — serving via in-process FileServer\n", sub)
+			return r.startStatic(spec, filepath.Join(spec.ArtifactDir, sub), logF, logPath)
+		}
 	}
 	return r.startProcess(spec, logF, logPath)
 }
 
-func (r *LocalRuntime) startStatic(spec ReleaseSpec, logF *os.File, logPath string) (*RunningRelease, error) {
+func (r *LocalRuntime) startStatic(spec ReleaseSpec, root string, logF *os.File, logPath string) (*RunningRelease, error) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", staticHandler(spec.ArtifactDir))
+	mux.HandleFunc("/", staticHandler(root))
 	srv := &http.Server{
 		Addr:    fmt.Sprintf("127.0.0.1:%d", spec.Port),
 		Handler: mux,
