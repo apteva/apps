@@ -47,6 +47,31 @@ interface Tenant {
   last_health?: unknown;
   created_at: string;
   updated_at: string;
+  // v0.3 — domain link (populated by tenant_attach_domain orchestration)
+  domain?: string;
+  domain_record_id?: string;
+  domain_attached_at?: string;
+  // v0.3 — auto-respawn bookkeeping
+  respawn_attempts?: number;
+  last_respawn_at?: string;
+}
+
+// Fleet's /api/_meta response. The panel calls this once per refresh
+// so it knows whether the optional Domains/Certs/Routes integrations
+// are bound, what apexes are picker-eligible, and the cert state for
+// every tenant FQDN. Also returns the npm latest apteva version for
+// the version-drift indicator.
+interface MetaResp {
+  domains_available: boolean;
+  certs_available: boolean;
+  routes_available: boolean;
+  public_host: string;
+  domains: Array<{ name: string }>;
+  certs: Record<
+    string,
+    { status: string; expires_at?: string; error?: string }
+  >;
+  apteva_latest?: string;
 }
 
 interface FleetEvent {
@@ -128,6 +153,14 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
   // password and api_key — fleet doesn't store the plaintext anywhere
   // after this. Cleared when the operator clicks "I've saved them".
   const [credentialsReveal, setCredentialsReveal] = useState<CredentialsReveal | null>(null);
+  // /api/_meta snapshot. Populated on mount + every refresh tick. The
+  // panel uses it to decide whether to render attach/update controls,
+  // and to seed picker lists. Null until first fetch — the detail pane
+  // hides those controls in that brief window rather than disabling
+  // them, which is less jumpy.
+  const [meta, setMeta] = useState<MetaResp | null>(null);
+  const [showAttachDomain, setShowAttachDomain] = useState<Tenant | null>(null);
+  const [showUpdate, setShowUpdate] = useState<Tenant | null>(null);
 
   // Two query params travel on every call. The platform proxy uses
   // these to scope per-install state — same convention as tables/crm.
@@ -212,9 +245,21 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
     [httpGet],
   );
 
+  const refreshMeta = useCallback(async () => {
+    try {
+      const r = await httpGet<MetaResp>("/_meta");
+      setMeta(r);
+    } catch {
+      // _meta is opportunistic — a transient failure shouldn't toast
+      // an error in the list status bar. The UI degrades to "no
+      // integrations visible" until the next tick succeeds.
+    }
+  }, [httpGet]);
+
   useEffect(() => {
     refreshList();
-  }, [refreshList]);
+    refreshMeta();
+  }, [refreshList, refreshMeta]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -225,15 +270,16 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
   }, [selectedId, refreshDetail]);
 
   // Background polling. Quiet refresh so the spinner doesn't blink
-  // every 8s — the list updates in place. Detail refreshes only when
-  // a tenant is selected.
+  // every 8s — the list updates in place. Detail + meta refresh in
+  // lockstep so the version-drift / cert badges don't lag the row data.
   useEffect(() => {
     const t = window.setInterval(() => {
       refreshList({ quiet: true });
+      refreshMeta();
       if (selectedId) refreshDetail(selectedId);
     }, REFRESH_MS);
     return () => window.clearInterval(t);
-  }, [refreshList, refreshDetail, selectedId]);
+  }, [refreshList, refreshDetail, refreshMeta, selectedId]);
 
   const selected = useMemo(
     () => tenants.find((t) => t.id === selectedId) || detail?.tenant || null,
@@ -257,9 +303,13 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
         events={detail?.events ?? null}
         setupToken={detail?.setup_token ?? null}
         setupURL={detail?.setup_url ?? null}
+        meta={meta}
         callTool={callTool}
+        onOpenAttachDomain={(t) => setShowAttachDomain(t)}
+        onOpenUpdate={(t) => setShowUpdate(t)}
         onAfterAction={async (after) => {
           await refreshList({ quiet: true });
+          await refreshMeta();
           if (after === "deselect") {
             setSelectedId(null);
           } else if (selectedId) {
@@ -314,6 +364,49 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
               await refreshList({ quiet: true });
               if (r.tenant_id) setSelectedId(r.tenant_id);
               setShowConnect(false);
+              return { ok: true };
+            } catch (e) {
+              return { ok: false, error: (e as Error).message };
+            }
+          }}
+        />
+      )}
+      {showAttachDomain && meta && (
+        <AttachDomainDialog
+          tenant={showAttachDomain}
+          meta={meta}
+          onClose={() => setShowAttachDomain(null)}
+          onSubmit={async (args) => {
+            try {
+              await callTool("tenant_attach_domain", {
+                tenant_id: showAttachDomain.id,
+                ...args,
+              });
+              await refreshList({ quiet: true });
+              await refreshMeta();
+              if (selectedId) await refreshDetail(selectedId);
+              setShowAttachDomain(null);
+              return { ok: true };
+            } catch (e) {
+              return { ok: false, error: (e as Error).message };
+            }
+          }}
+        />
+      )}
+      {showUpdate && (
+        <UpdateVersionDialog
+          tenant={showUpdate}
+          latest={meta?.apteva_latest}
+          onClose={() => setShowUpdate(null)}
+          onSubmit={async (version) => {
+            try {
+              await callTool("tenant_update", {
+                tenant_id: showUpdate.id,
+                ...(version ? { version } : {}),
+              });
+              await refreshList({ quiet: true });
+              if (selectedId) await refreshDetail(selectedId);
+              setShowUpdate(null);
               return { ok: true };
             } catch (e) {
               return { ok: false, error: (e as Error).message };
@@ -398,10 +491,22 @@ function TenantList({
               </span>
             }
             subtitle={
-              <span className="font-mono text-[10px]">{shortBaseURL(t.base_url)}</span>
+              <span className="font-mono text-[10px]">
+                {t.domain ? t.domain : shortBaseURL(t.base_url)}
+              </span>
             }
             trailing={
-              <StatusPill variant={STATUS_VARIANT[t.status]}>{t.status}</StatusPill>
+              <div className="flex items-center gap-1.5">
+                {(t.respawn_attempts ?? 0) > 0 && (
+                  <span
+                    title={`${t.respawn_attempts} auto-respawn${t.respawn_attempts === 1 ? "" : "s"}`}
+                    className="text-[10px] font-medium text-amber-700 dark:text-amber-400 px-1.5 py-0.5 rounded bg-warn/10"
+                  >
+                    ↻{t.respawn_attempts}
+                  </span>
+                )}
+                <StatusPill variant={STATUS_VARIANT[t.status]}>{t.status}</StatusPill>
+              </div>
             }
           />
         ))}
@@ -461,14 +566,20 @@ function TenantDetail({
   events,
   setupToken,
   setupURL,
+  meta,
   callTool,
+  onOpenAttachDomain,
+  onOpenUpdate,
   onAfterAction,
 }: {
   tenant: Tenant | null;
   events: FleetEvent[] | null;
   setupToken: string | null;
   setupURL: string | null;
+  meta: MetaResp | null;
   callTool: <T>(tool: string, args: Record<string, unknown>) => Promise<T>;
+  onOpenAttachDomain: (t: Tenant) => void;
+  onOpenUpdate: (t: Tenant) => void;
   onAfterAction: (after?: "deselect") => Promise<void>;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
@@ -676,6 +787,26 @@ function TenantDetail({
         />
       )}
 
+      {!isSetupPending && (
+        <DomainBlock
+          tenant={tenant}
+          meta={meta}
+          busy={busy === "detach-domain"}
+          onAttach={() => onOpenAttachDomain(tenant)}
+          onDetach={() =>
+            run("detach-domain", "tenant_detach_domain", { tenant_id: tenant.id })
+          }
+        />
+      )}
+
+      {!isSetupPending && isLocal && (
+        <VersionBlock
+          tenant={tenant}
+          latest={meta?.apteva_latest}
+          onUpdate={() => onOpenUpdate(tenant)}
+        />
+      )}
+
       <div className="grid grid-cols-2 gap-0 border-b border-border">
         <Field label="Owner">{tenant.owner_email}</Field>
         <Field label="Kind">{tenant.kind}</Field>
@@ -700,6 +831,16 @@ function TenantDetail({
           </Field>
         )}
         <Field label="Created">{formatTime(tenant.created_at)}</Field>
+        {(tenant.respawn_attempts ?? 0) > 0 && (
+          <Field label="Auto-respawns">
+            <span className="text-amber-700 dark:text-amber-400 font-medium">
+              {tenant.respawn_attempts}
+            </span>
+            {tenant.last_respawn_at && (
+              <span className="text-text-dim"> · last {formatTime(tenant.last_respawn_at)}</span>
+            )}
+          </Field>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto">
@@ -867,15 +1008,38 @@ function EventRow({ ev }: { ev: FleetEvent }) {
 }
 
 function EventKindPill({ kind }: { kind: string }) {
-  const variant: StatusPillVariant =
-    kind === "spawned" || kind === "started" || kind === "connected"
-      ? "success"
-      : kind === "spawn_failed" || kind === "health_failed"
-        ? "error"
-        : kind === "stopped" || kind === "status_changed"
-          ? "neutral"
-          : kind === "support_login" || kind === "remote_call"
-            ? "info"
+  // Bucketed for visual scanning. New v0.3 kinds: domain.*, route.*,
+  // updated, auto_respawn_*. Anything unknown falls through to neutral.
+  const success = [
+    "spawned",
+    "started",
+    "connected",
+    "domain.attached",
+    "domain.detached",
+    "route.registered",
+    "updated",
+    "auto_respawn_ok",
+  ];
+  const error = [
+    "spawn_failed",
+    "health_failed",
+    "auto_respawn_failed",
+    "auto_respawn_gave_up",
+    "update_failed",
+    "route.register_failed",
+  ];
+  const warn = ["domain.cert_kickoff_failed", "route.register_skipped"];
+  const info = ["support_login", "remote_call"];
+  const variant: StatusPillVariant = success.includes(kind)
+    ? "success"
+    : error.includes(kind)
+      ? "error"
+      : warn.includes(kind)
+        ? "warn"
+        : info.includes(kind)
+          ? "info"
+          : kind === "stopped" || kind === "status_changed"
+            ? "neutral"
             : "neutral";
   return <StatusPill variant={variant}>{kind}</StatusPill>;
 }
@@ -1191,6 +1355,310 @@ function Label({ text, children }: { text: string; children: React.ReactNode }) 
       </span>
       {children}
     </label>
+  );
+}
+
+// ─── Domain block ───────────────────────────────────────────────────
+
+function DomainBlock({
+  tenant,
+  meta,
+  busy,
+  onAttach,
+  onDetach,
+}: {
+  tenant: Tenant;
+  meta: MetaResp | null;
+  busy: boolean;
+  onAttach: () => void;
+  onDetach: () => void;
+}) {
+  const hasIntegrations =
+    !!meta && (meta.domains_available || meta.certs_available || meta.routes_available);
+  // No integration AND no domain attached → render a quiet hint so the
+  // pane doesn't go silent on what's actually a configurable feature.
+  if (!tenant.domain && !hasIntegrations) {
+    return (
+      <div className="px-4 py-2 border-b border-border text-[11px] text-text-dim">
+        <span className="font-medium">Public hostname</span> ·{" "}
+        Install + bind the Domains / Certs / Routes apps to attach custom hostnames.
+      </div>
+    );
+  }
+  if (!tenant.domain) {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2 border-b border-border bg-accent/5">
+        <span className="text-[11px] uppercase tracking-wider text-text-dim font-semibold">
+          Domain
+        </span>
+        <span className="text-xs text-text-dim flex-1">Not attached</span>
+        <ActionButton label="Attach domain" onClick={onAttach} />
+      </div>
+    );
+  }
+  const cert = meta?.certs?.[tenant.domain];
+  const certVariant: StatusPillVariant = !cert
+    ? "neutral"
+    : cert.status === "live"
+      ? "success"
+      : cert.status === "pending" || cert.status === "issuing"
+        ? "info"
+        : cert.status === "error" || cert.status === "failed"
+          ? "error"
+          : "warn";
+  return (
+    <div className="flex items-center gap-2 px-4 py-2 border-b border-border bg-accent/5 flex-wrap">
+      <span className="text-[11px] uppercase tracking-wider text-text-dim font-semibold">
+        Domain
+      </span>
+      <a
+        href={`https://${tenant.domain}`}
+        target="_blank"
+        rel="noopener"
+        className="font-mono text-xs text-accent hover:underline"
+      >
+        {tenant.domain}
+      </a>
+      {cert && (
+        <span title={cert.error || cert.expires_at || ""}>
+          <StatusPill variant={certVariant}>{`cert · ${cert.status}`}</StatusPill>
+        </span>
+      )}
+      {!cert && tenant.domain && (
+        <StatusPill variant="neutral">no cert</StatusPill>
+      )}
+      {meta?.routes_available && (
+        <StatusPill variant="info">routed</StatusPill>
+      )}
+      <span className="flex-1" />
+      <ActionButton
+        label={busy ? "Detaching…" : "Detach"}
+        busy={busy}
+        tone="danger"
+        onClick={onDetach}
+      />
+    </div>
+  );
+}
+
+// ─── Version block ──────────────────────────────────────────────────
+
+function VersionBlock({
+  tenant,
+  latest,
+  onUpdate,
+}: {
+  tenant: Tenant;
+  latest?: string;
+  onUpdate: () => void;
+}) {
+  const current = tenant.current_version || "";
+  const target = tenant.target_version || "";
+  // Drift detection prioritises target over latest: if the operator
+  // pinned target_version, that's the intent and we surface drift
+  // against THAT. Otherwise compare against npm latest.
+  const expected = target || latest || "";
+  const driftFromExpected = !!current && !!expected && current !== expected;
+  const pendingApply = !!target && !!current && target !== current;
+  return (
+    <div className="flex items-center gap-2 px-4 py-2 border-b border-border flex-wrap">
+      <span className="text-[11px] uppercase tracking-wider text-text-dim font-semibold">
+        Version
+      </span>
+      <span className="font-mono text-xs text-text">{current || "—"}</span>
+      {pendingApply && (
+        <span className="font-mono text-[11px] text-amber-700 dark:text-amber-400">
+          → target {target}
+        </span>
+      )}
+      {!pendingApply && latest && current && current !== latest && (
+        <StatusPill variant="warn">{`update available · ${latest}`}</StatusPill>
+      )}
+      {!pendingApply && latest && current === latest && (
+        <StatusPill variant="success">up to date</StatusPill>
+      )}
+      <span className="flex-1" />
+      {latest && (
+        <span className="text-[11px] text-text-dim font-mono">npm: {latest}</span>
+      )}
+      <ActionButton
+        label={driftFromExpected ? "Update" : "Update…"}
+        onClick={onUpdate}
+      />
+    </div>
+  );
+}
+
+// ─── Attach-domain dialog ───────────────────────────────────────────
+
+function AttachDomainDialog({
+  tenant,
+  meta,
+  onClose,
+  onSubmit,
+}: {
+  tenant: Tenant;
+  meta: MetaResp;
+  onClose: () => void;
+  onSubmit: (args: {
+    fqdn: string;
+    target?: string;
+    type?: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
+}) {
+  const [fqdn, setFqdn] = useState("");
+  const [apex, setApex] = useState(meta.domains[0]?.name || "");
+  const [target, setTarget] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const composedFqdn = useMemo(() => {
+    const sub = fqdn.trim().replace(/\.$/, "");
+    if (!apex) return sub;
+    if (!sub) return apex;
+    return `${sub}.${apex}`;
+  }, [fqdn, apex]);
+
+  const noDomains = meta.domains.length === 0;
+  const helpText = noDomains
+    ? "No domains registered in the Domains app yet. Add one there first, then come back."
+    : "Pick the apex you've registered with the Domains app, then a subdomain (leave empty to attach the apex itself). target defaults to the parent host's public IP.";
+
+  return (
+    <DialogFrame title={`Attach domain to ${tenant.slug}`} onClose={onClose}>
+      <p className="text-xs text-text-dim mb-3">{helpText}</p>
+      <Label text="Apex">
+        <select
+          value={apex}
+          onChange={(e) => setApex(e.target.value)}
+          className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
+          disabled={noDomains}
+        >
+          {meta.domains.map((d) => (
+            <option key={d.name} value={d.name}>
+              {d.name}
+            </option>
+          ))}
+        </select>
+      </Label>
+      <Label text="Subdomain (optional)">
+        <input
+          type="text"
+          value={fqdn}
+          onChange={(e) => setFqdn(e.target.value)}
+          placeholder={`e.g. ${tenant.slug}`}
+          className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
+        />
+      </Label>
+      <Label text="Target (optional)">
+        <input
+          type="text"
+          value={target}
+          onChange={(e) => setTarget(e.target.value)}
+          placeholder={meta.public_host || "default: parent host's public IP"}
+          className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
+        />
+      </Label>
+      <div className="text-[11px] text-text-dim font-mono">
+        Will attach: <span className="text-text">{composedFqdn || "—"}</span>
+      </div>
+      {err && <p className="text-xs text-error mt-2">{err}</p>}
+      <DialogActions>
+        <ActionButton label="Cancel" onClick={onClose} />
+        <ActionButton
+          label={busy ? "Attaching…" : "Attach"}
+          busy={busy}
+          onClick={async () => {
+            if (!composedFqdn) {
+              setErr("pick an apex (subdomain optional)");
+              return;
+            }
+            setBusy(true);
+            setErr(null);
+            const r = await onSubmit({
+              fqdn: composedFqdn,
+              ...(target ? { target } : {}),
+            });
+            setBusy(false);
+            if (!r.ok) setErr(r.error || "failed");
+          }}
+        />
+      </DialogActions>
+    </DialogFrame>
+  );
+}
+
+// ─── Update-version dialog ──────────────────────────────────────────
+
+function UpdateVersionDialog({
+  tenant,
+  latest,
+  onClose,
+  onSubmit,
+}: {
+  tenant: Tenant;
+  latest?: string;
+  onClose: () => void;
+  onSubmit: (version: string) => Promise<{ ok: boolean; error?: string }>;
+}) {
+  const [version, setVersion] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const resolved = version.trim() || latest || "(latest)";
+
+  return (
+    <DialogFrame title={`Update ${tenant.slug}`} onClose={onClose}>
+      <p className="text-xs text-text-dim mb-3">
+        Installs the requested apteva version into a fleet-owned npm prefix
+        at <code className="font-mono">~/.apteva-fleet/versions/&lt;v&gt;/</code>,
+        stops the tenant, and respawns it. Other tenants are unaffected.
+        Leave empty to track npm latest.
+      </p>
+      <div className="text-xs text-text-dim font-mono mb-2 space-y-0.5">
+        <div>
+          current: <span className="text-text">{tenant.current_version || "—"}</span>
+        </div>
+        {tenant.target_version && (
+          <div>
+            target: <span className="text-text">{tenant.target_version}</span>
+          </div>
+        )}
+        {latest && (
+          <div>
+            npm latest: <span className="text-text">{latest}</span>
+          </div>
+        )}
+      </div>
+      <Label text="Version (empty = latest)">
+        <input
+          type="text"
+          value={version}
+          onChange={(e) => setVersion(e.target.value)}
+          placeholder={latest || "0.10.0"}
+          className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
+          autoFocus
+        />
+      </Label>
+      <div className="text-[11px] text-text-dim font-mono">
+        Will install + respawn at: <span className="text-text">{resolved}</span>
+      </div>
+      {err && <p className="text-xs text-error mt-2">{err}</p>}
+      <DialogActions>
+        <ActionButton label="Cancel" onClick={onClose} />
+        <ActionButton
+          label={busy ? "Updating…" : "Update"}
+          busy={busy}
+          onClick={async () => {
+            setBusy(true);
+            setErr(null);
+            const r = await onSubmit(version.trim());
+            setBusy(false);
+            if (!r.ok) setErr(r.error || "failed");
+          }}
+        />
+      </DialogActions>
+    </DialogFrame>
   );
 }
 
