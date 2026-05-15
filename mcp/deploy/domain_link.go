@@ -513,6 +513,12 @@ func myInstallID() int64 {
 // same args updates the route in place. Skipped (no error) when
 // Routes isn't installed or when there's no live release to point
 // at; callers can rely on this being safe to fan out from anywhere.
+//
+// Defense-in-depth gate: even though promoteToLive only calls us
+// after pidOwnsPort succeeds, we re-verify here. Any caller (e.g.
+// the panel triggering a manual re-register, future code paths) gets
+// the same guarantee — the route never points at a port whose owner
+// we can't prove.
 func registerRouteForDeployment(ctx *sdk.AppCtx, app *App, d *Deployment) {
 	if d == nil || d.Domain == "" {
 		return
@@ -520,11 +526,28 @@ func registerRouteForDeployment(ctx *sdk.AppCtx, app *App, d *Deployment) {
 	if app == nil || !app.routesAvailable(ctx) {
 		return
 	}
-	port := currentReleasePort(ctx, d)
-	if port == 0 {
-		return // No live release; route registration waits until release.
+	if d.CurrentReleaseID == nil {
+		return
 	}
-	target := fmt.Sprintf("http://127.0.0.1:%d", port)
+	rel, err := dbGetRelease(ctx.AppDB(), *d.CurrentReleaseID)
+	if err != nil || rel == nil {
+		return
+	}
+	if rel.Status != "live" {
+		emit("deploy.route.register_skipped", map[string]any{
+			"deployment_id": d.ID, "fqdn": d.Domain,
+			"reason": "release_not_live", "status": rel.Status,
+		})
+		return
+	}
+	if !pidOwnsPort(rel.PID, rel.Port) {
+		emit("deploy.route.register_skipped", map[string]any{
+			"deployment_id": d.ID, "fqdn": d.Domain,
+			"reason": "pid_does_not_own_port", "pid": rel.PID, "port": rel.Port,
+		})
+		return
+	}
+	target := fmt.Sprintf("http://127.0.0.1:%d", rel.Port)
 	if err := callRoutesTool(ctx, "routes_register", map[string]any{
 		"hostname":         d.Domain,
 		"target":           target,
@@ -538,7 +561,7 @@ func registerRouteForDeployment(ctx *sdk.AppCtx, app *App, d *Deployment) {
 		return
 	}
 	emit("deploy.route.registered", map[string]any{
-		"deployment_id": d.ID, "fqdn": d.Domain, "port": port,
+		"deployment_id": d.ID, "fqdn": d.Domain, "port": rel.Port,
 	})
 }
 

@@ -140,6 +140,19 @@ func dbGetDeployment(db *sql.DB, projectID string, id int64) (*Deployment, error
 	return scanDeployment(row)
 }
 
+// dbGetDeploymentByID fetches by id without a project_id filter.
+// Used by the release-lifecycle code paths (probeReady, watchdog)
+// where the release row has deployment_id but not project_id; the
+// project_id is on the deployment itself.
+func dbGetDeploymentByID(db *sql.DB, id int64) (*Deployment, error) {
+	row := db.QueryRow(`SELECT `+deploymentColumns+` FROM deployments WHERE id = ?`, id)
+	d, err := scanDeployment(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return d, err
+}
+
 func dbGetDeploymentByName(db *sql.DB, projectID, name string) (*Deployment, error) {
 	row := db.QueryRow(`SELECT `+deploymentColumns+` FROM deployments WHERE project_id = ? AND name = ?`, projectID, name)
 	d, err := scanDeployment(row)

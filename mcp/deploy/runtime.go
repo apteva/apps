@@ -141,6 +141,12 @@ func (r *LocalRuntime) startStatic(spec ReleaseSpec, root string, logF *os.File,
 		ReleaseID: spec.ReleaseID, Port: spec.Port, PID: os.Getpid(),
 		server: srv, logFile: logF, stopCh: stop,
 	}
+	// Promote to "live" via the same probe path the spawn-based
+	// releases use, so route registration and current_release pointer
+	// updates happen in a single code path. The port is already bound
+	// (net.Listen succeeded above) so pidOwnsPort flips true on the
+	// first poll — sub-millisecond.
+	go r.app.probeReady(spec.ReleaseID, os.Getpid(), spec.Port, 5*time.Second)
 	return rr, nil
 }
 
@@ -190,9 +196,13 @@ func (r *LocalRuntime) startProcess(spec ReleaseSpec, logF *os.File, logPath str
 		}
 	}()
 
-	// Tiny health probe: TCP-connect to the port for up to 5s. If
-	// the process started cleanly the listener should appear quickly.
-	go r.app.probeReady(rr.ReleaseID, spec.Port, 5*time.Second)
+	// Health probe verifies the child PID owns a LISTEN socket on the
+	// port (procfs check on linux, stub-true elsewhere). On success it
+	// flips status starting→live, registers the route, sets the
+	// current_release pointer. On timeout the release stays "starting"
+	// — the watchdog (60s tick) promotes slow-bootstrap apps once they
+	// finally bind.
+	go r.app.probeReady(rr.ReleaseID, rr.PID, spec.Port, 5*time.Second)
 
 	return rr, nil
 }
@@ -203,11 +213,14 @@ func (r *LocalRuntime) startProcess(spec ReleaseSpec, logF *os.File, logPath str
 // they survive an app upgrade — this lets the new instance pick them
 // back up instead of declaring them dead.
 //
-// Both the recorded pid AND the recorded port must check out before
-// we agree to supervise: pid liveness alone is unsafe because the OS
-// can recycle a pid, but a recycled pid that *also* serves our exact
-// port is not a real-world risk. The port check doubles as a "is it
-// actually serving" probe.
+// Three gates must pass:
+//  1. The recorded pid is alive (Signal 0).
+//  2. Something is listening on the recorded port.
+//  3. That pid is the one holding the LISTEN socket (pidOwnsPort,
+//     procfs on linux). The third gate is what makes adopt safe in
+//     a multi-instance host. The older two-gate version could re-adopt
+//     an unrelated process bound to our port — that is exactly the
+//     bug that pointed marcoschwartz.com at flexylead's frontend.
 func (r *LocalRuntime) Adopt(releaseID int64, pid, port int) (*RunningRelease, error) {
 	if pid <= 0 {
 		return nil, errors.New("adopt: no pid recorded")
@@ -221,6 +234,9 @@ func (r *LocalRuntime) Adopt(releaseID int64, pid, port int) (*RunningRelease, e
 		return nil, fmt.Errorf("adopt: pid %d alive but port %d not listening: %w", pid, port, err)
 	}
 	_ = conn.Close()
+	if !pidOwnsPort(pid, port) {
+		return nil, fmt.Errorf("adopt: pid %d is alive but no longer holds port %d (owner changed)", pid, port)
+	}
 
 	rr := &RunningRelease{
 		ReleaseID: releaseID, Port: port, PID: pid,

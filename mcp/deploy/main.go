@@ -118,7 +118,8 @@ type App struct {
 	portRangeEnd   int
 	maxBuilds      int
 
-	buildSem chan struct{} // throttle concurrent builds
+	buildSem     chan struct{} // throttle concurrent builds
+	watchdogStop chan struct{} // closed on unmount; pid-owns-port poller
 }
 
 var globalCtx *sdk.AppCtx
@@ -161,8 +162,13 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.cfg = sourceConfig{
 		ProjectID: os.Getenv("APTEVA_PROJECT_ID"),
 	}
-	a.portRangeStart = atoiOr(configOr(ctx, "port_range_start", "7100"), 7100)
-	a.portRangeEnd = atoiOr(configOr(ctx, "port_range_end", "7999"), 7999)
+	// Port range resolution: env (per-instance override) > config block
+	// (manifest knob) > built-in default. Two apteva-servers on the
+	// same host must use disjoint ranges to avoid cross-instance port
+	// collisions — DEPLOY_RELEASE_PORT_RANGE_START/END is the operator
+	// knob for that. Mirrors the code app's CODE_DEV_PORT_RANGE_*.
+	a.portRangeStart = atoiOr(os.Getenv("DEPLOY_RELEASE_PORT_RANGE_START"), atoiOr(configOr(ctx, "port_range_start", "7100"), 7100))
+	a.portRangeEnd = atoiOr(os.Getenv("DEPLOY_RELEASE_PORT_RANGE_END"), atoiOr(configOr(ctx, "port_range_end", "7999"), 7999))
 	a.maxBuilds = atoiOr(configOr(ctx, "max_build_concurrency", "2"), 2)
 	if a.maxBuilds < 1 {
 		a.maxBuilds = 1
@@ -184,6 +190,13 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := a.reconcileReleases(); err != nil {
 		ctx.Logger().Warn("release reconciliation failed", "err", err)
 	}
+
+	// Watchdog promotes slow-bind "starting" releases and demotes
+	// "live" releases whose port owner changed (cross-instance port
+	// theft). Tick interval is 60s; pidOwnsPort is a no-op true on
+	// non-Linux, so this is harmless on dev hosts.
+	a.watchdogStop = make(chan struct{})
+	go a.runWatchdog(a.watchdogStop)
 	return nil
 }
 
@@ -197,6 +210,9 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 	// Caveat: "static" framework releases run in-process (no child
 	// process), so they genuinely die with the sidecar and need a
 	// re-release to come back — reconcileReleases marks those stopped.
+	if a.watchdogStop != nil {
+		close(a.watchdogStop)
+	}
 	return nil
 }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
@@ -227,9 +243,16 @@ func (a *App) reconcileReleases() error {
 			continue
 		}
 		a.registry.Put(rr)
-		// The release may have been "starting"; it's serving now.
-		_ = dbUpdateRelease(globalCtx.AppDB(), r.ID, map[string]any{"status": "live"})
+		// Mark "starting" — the watchdog (next tick) will promote to
+		// "live" only after pidOwnsPort confirms the recorded pid is
+		// still the one holding the port. The old code unconditionally
+		// stamped "live" here, which is exactly how an adopted-orphan
+		// scenario poisoned a domain on prod.
+		_ = dbUpdateRelease(globalCtx.AppDB(), r.ID, map[string]any{"status": "starting"})
 		_ = dbAppendReleaseEvent(globalCtx.AppDB(), r.ID, "adopted", fmt.Sprintf(`{"pid":%d,"port":%d}`, r.PID, r.Port))
+		// Run an immediate probe so a healthy adopt doesn't sit in
+		// "starting" for up to 60s waiting for the watchdog.
+		go a.probeReady(r.ID, r.PID, r.Port, 5*time.Second)
 		globalCtx.Logger().Info("re-adopted release", "release_id", r.ID, "pid", r.PID, "port", r.Port)
 	}
 	return nil
@@ -493,6 +516,16 @@ func (a *App) runRelease(d *Deployment, b *Build) (*Release, error) {
 			"status":     "stopped",
 			"stopped_at": nowUTC(),
 		})
+		// Unregister the route while we're between releases. The new
+		// release only re-registers once probeReady confirms it owns
+		// its port. Without this, during the rebuild gap the route
+		// keeps pointing at a dead (and potentially-recycled) port —
+		// the smaller-blast-radius cousin of the false-live incident.
+		// promoteToLive will register the fresh target when the new
+		// release verifies.
+		if d.Domain != "" {
+			unregisterRouteForDeployment(globalCtx, a, d.Domain)
+		}
 	}
 
 	rel, err := dbCreateRelease(globalCtx.AppDB(), d.ID, b.ID)
@@ -541,31 +574,24 @@ func (a *App) runRelease(d *Deployment, b *Build) (*Release, error) {
 	}
 
 	a.registry.Put(rr)
+	// Status starts at "starting" — only probeReady's pidOwnsPort
+	// success flips it to "live", at which point current_release is
+	// set and the route is registered. This prevents the false-live
+	// + wrong-target-route class of bug: a release that crashes
+	// during startup, or whose port gets stolen, never reaches the
+	// pointer or the host router. Today's "5s probe, then mark live
+	// no matter what" behavior is what poisoned marcoschwartz.com.
 	_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
-		"status":     "live",
+		"status":     "starting",
 		"port":       port,
 		"pid":        rr.PID,
 		"started_at": nowUTC(),
 		"log_path":   a.runtime.LogPath(rel.ID),
 	})
 	_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "start", "{}")
-	_ = dbSetCurrentRelease(globalCtx.AppDB(), d.ID, &rel.ID)
-
-	emit("deploy.release.live", map[string]any{
+	emit("deploy.release.started", map[string]any{
 		"deployment_id": d.ID, "release_id": rel.ID, "port": port, "pid": rr.PID,
 	})
-	// If this deployment has a domain attached, refresh the routes
-	// app so apteva-server's host router proxies to the new port.
-	// Each release gets a fresh port from the supervisor's allocator,
-	// so this catches the rebuild case where attach_domain ran before
-	// release and the route hasn't been registered yet, plus the
-	// re-release case where the previous route's target is stale.
-	if d.Domain != "" {
-		fresh, _ := dbGetDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
-		if fresh != nil {
-			registerRouteForDeployment(globalCtx, a, fresh)
-		}
-	}
 	return dbGetRelease(globalCtx.AppDB(), rel.ID)
 }
 
@@ -604,21 +630,154 @@ func (a *App) markStopped(releaseID int64) {
 	a.registry.Delete(releaseID)
 }
 
-// probeReady waits up to timeout for the release's port to accept TCP
-// connections, then writes a health_ok event. Best-effort.
-func (a *App) probeReady(releaseID int64, port int, timeout time.Duration) {
+// probeReady waits up to timeout for `pid` to be the process holding
+// a LISTEN socket on `port`. On success it promotes the release to
+// live (setting current_release_id, registering the route). On
+// timeout it leaves the release in "starting" — slow-bootstrap apps
+// catch up on the next watchdog tick, never-bind apps stay starting
+// until the supervisor reports a crash. The release is NEVER marked
+// "live" without pid-owns-port verification.
+//
+// Authoritative test is pidOwnsPort (procfs on linux, always-true
+// stub elsewhere). The TCP dial used to be the only check; relying
+// on "something answers" is what let a co-located apteva instance's
+// process poison marcoschwartz.com.
+func (a *App) probeReady(releaseID int64, pid, port int, timeout time.Duration) {
+	// Tests instantiate LocalRuntime directly with a zero-value App
+	// and no globalCtx, so probeReady becomes a no-op there. In a
+	// real run OnMount always sets globalCtx before runtime.Start can
+	// be called.
+	if globalCtx == nil || globalCtx.AppDB() == nil {
+		return
+	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			_ = dbUpdateRelease(globalCtx.AppDB(), releaseID, map[string]any{"last_health_at": nowUTC()})
-			_ = dbAppendReleaseEvent(globalCtx.AppDB(), releaseID, "health_ok", "{}")
+		if pidOwnsPort(pid, port) {
+			a.promoteToLive(releaseID, pid, port)
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	_ = dbAppendReleaseEvent(globalCtx.AppDB(), releaseID, "health_fail", `{"reason":"port_not_listening"}`)
+	_ = dbAppendReleaseEvent(globalCtx.AppDB(), releaseID, "health_pending",
+		fmt.Sprintf(`{"reason":"port_not_owned_after_%s","pid":%d,"port":%d}`, timeout, pid, port))
+}
+
+// promoteToLive flips a "starting" release to "live", sets the
+// deployment's current_release pointer, and registers the route. It
+// is idempotent — calling it twice for the same release is a no-op
+// after the first call, which is what makes the watchdog safe to
+// run alongside probeReady.
+func (a *App) promoteToLive(releaseID int64, pid, port int) {
+	if globalCtx == nil || globalCtx.AppDB() == nil {
+		return
+	}
+	rel, err := dbGetRelease(globalCtx.AppDB(), releaseID)
+	if err != nil || rel == nil {
+		return
+	}
+	if rel.Status == "live" {
+		// Already promoted; just refresh the health stamp.
+		_ = dbUpdateRelease(globalCtx.AppDB(), releaseID, map[string]any{"last_health_at": nowUTC()})
+		return
+	}
+	if rel.Status != "starting" {
+		// Stopped/crashed/failed releases can't be promoted; the
+		// supervisor path that set the terminal state wins.
+		return
+	}
+	_ = dbUpdateRelease(globalCtx.AppDB(), releaseID, map[string]any{
+		"status":         "live",
+		"last_health_at": nowUTC(),
+	})
+	_ = dbAppendReleaseEvent(globalCtx.AppDB(), releaseID, "health_ok", "{}")
+	_ = dbSetCurrentRelease(globalCtx.AppDB(), rel.DeploymentID, &releaseID)
+	emit("deploy.release.live", map[string]any{
+		"deployment_id": rel.DeploymentID, "release_id": releaseID, "port": port, "pid": pid,
+	})
+	d, _ := dbGetDeploymentByID(globalCtx.AppDB(), rel.DeploymentID)
+	if d != nil && d.Domain != "" {
+		registerRouteForDeployment(globalCtx, a, d)
+	}
+}
+
+// runWatchdog re-checks pidOwnsPort for every release in the
+// supervisor registry once per tick. Two jobs:
+//
+//   - Promote "starting" releases whose process took longer than the
+//     5s probe (slow Node/Java boot, anything with heavy init) — they
+//     bind eventually, the next tick catches them, the route appears.
+//   - Demote "live" releases whose port no longer belongs to the
+//     recorded pid: a co-located apteva instance reclaimed the port,
+//     or the kernel recycled the pid after a crash + new bind. Mark
+//     crashed, release the port lease, unregister the route. This is
+//     the watchdog half of the false-live incident class.
+//
+// Tick interval is 60s — small enough that domain-collision blast
+// radius is bounded, large enough that procfs scans don't matter.
+// pidOwnsPort is a no-op true on non-Linux, so this is a free tick.
+func (a *App) runWatchdog(stop <-chan struct{}) {
+	t := time.NewTicker(60 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			a.watchdogTick()
+		}
+	}
+}
+
+func (a *App) watchdogTick() {
+	if globalCtx == nil || globalCtx.AppDB() == nil || a.registry == nil {
+		return
+	}
+	for _, rr := range a.registry.All() {
+		if rr.PID <= 0 || rr.Port <= 0 {
+			continue
+		}
+		owns := pidOwnsPort(rr.PID, rr.Port)
+		rel, _ := dbGetRelease(globalCtx.AppDB(), rr.ReleaseID)
+		if rel == nil {
+			continue
+		}
+		switch rel.Status {
+		case "starting":
+			if owns {
+				a.promoteToLive(rr.ReleaseID, rr.PID, rr.Port)
+			}
+		case "live":
+			if !owns {
+				a.markPortOwnerChanged(rel)
+			}
+		}
+	}
+}
+
+// markPortOwnerChanged tears down a release whose port is no longer
+// ours. Differs from a clean stop in that we cannot Stop the
+// supervisor — the process the supervisor handle points at may still
+// be alive, just no longer bound (and signalling its process group
+// could kill an unrelated process if the pid was recycled). Safer to
+// release our claim and let the operator restart, plus unregister the
+// route so the domain stops resolving to the new owner.
+func (a *App) markPortOwnerChanged(rel *Release) {
+	_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+		"status":     "crashed",
+		"stopped_at": nowUTC(),
+		"error":      fmt.Sprintf("port owner changed: pid %d no longer holds :%d", rel.PID, rel.Port),
+	})
+	_ = dbReleasePortLease(globalCtx.AppDB(), rel.Port)
+	_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "crash", `{"reason":"port_owner_changed"}`)
+	emit("deploy.release.crashed", map[string]any{
+		"deployment_id": rel.DeploymentID, "release_id": rel.ID,
+		"reason": "port_owner_changed",
+	})
+	a.registry.Delete(rel.ID)
+	d, _ := dbGetDeploymentByID(globalCtx.AppDB(), rel.DeploymentID)
+	if d != nil && d.Domain != "" {
+		unregisterRouteForDeployment(globalCtx, a, d.Domain)
+	}
 }
 
 // ─── Port allocator ───────────────────────────────────────────────
@@ -645,8 +804,19 @@ func (a *App) allocatePort(hint int, releaseID int64) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Cross-instance check: a co-located apteva-server's process may
+	// hold a port we'd otherwise consider free. portFreeForServer's
+	// bind-probe catches it too, but only with a TOCTOU window —
+	// querying the kernel's listen table first shrinks that window to
+	// the time between this read and the supervised process bind.
+	// On non-Linux this returns an empty map; we fall back to
+	// bind-probe alone, which is fine for single-tenant dev hosts.
+	listening := systemListeningPorts()
 	for _, p := range candidates {
 		if held[p] {
+			continue
+		}
+		if listening[p] {
 			continue
 		}
 		if !portFreeForServer(p) {
