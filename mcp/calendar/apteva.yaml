@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: calendar
 display_name: Calendar
-version: 0.1.0
+version: 0.2.0
 description: |
   Self-contained calendar — multiple calendars per project, events with
   recurrence, holidays helper. Agents read + write via MCP tools; the
