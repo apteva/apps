@@ -176,9 +176,9 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 			// Numeric columns at row 1
 			pdf.SetXY(leftX+descW, yStart)
 			pdf.CellFormat(20, lineH, e(formatQty(li.Quantity)), "", 0, "R", false, 0, "")
-			pdf.CellFormat(30, lineH, e(formatMoney(li.UnitPriceCents, inv.Currency)), "", 0, "R", false, 0, "")
+			pdf.CellFormat(30, lineH, e(formatMoneyPDF(li.UnitPriceCents, inv.Currency)), "", 0, "R", false, 0, "")
 			pdf.CellFormat(20, lineH, e(fmt.Sprintf("%.2f%%", float64(li.TaxRateBps)/100)), "", 0, "R", false, 0, "")
-			pdf.CellFormat(30, lineH, e(formatMoney(li.AmountCents, inv.Currency)), "", 0, "R", false, 0, "")
+			pdf.CellFormat(30, lineH, e(formatMoneyPDF(li.AmountCents, inv.Currency)), "", 0, "R", false, 0, "")
 			// Advance to the bottom of whichever side is taller.
 			bottomY := descEndY
 			if yStart+lineH > bottomY {
@@ -217,17 +217,17 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 			pdf.Ln(1)
 		}
 	}
-	drawTotalRow("Subtotal", formatMoney(inv.SubtotalCents, inv.Currency), false, false)
-	drawTotalRow("Tax", formatMoney(inv.TaxCents, inv.Currency), false, true)
-	drawTotalRow("Total", formatMoney(inv.TotalCents, inv.Currency), true, false)
+	drawTotalRow("Subtotal", formatMoneyPDF(inv.SubtotalCents, inv.Currency), false, false)
+	drawTotalRow("Tax", formatMoneyPDF(inv.TaxCents, inv.Currency), false, true)
+	drawTotalRow("Total", formatMoneyPDF(inv.TotalCents, inv.Currency), true, false)
 
 	if inv.AmountPaidCents > 0 {
-		drawTotalRow("Paid", formatMoney(inv.AmountPaidCents, inv.Currency), false, false)
+		drawTotalRow("Paid", formatMoneyPDF(inv.AmountPaidCents, inv.Currency), false, false)
 		balance := inv.TotalCents - inv.AmountPaidCents
 		if balance < 0 {
 			balance = 0
 		}
-		drawTotalRow("Balance due", formatMoney(balance, inv.Currency), true, false)
+		drawTotalRow("Balance due", formatMoneyPDF(balance, inv.Currency), true, false)
 	}
 
 	// ── EU reverse-charge legal notice ──
@@ -400,6 +400,40 @@ func parseBank(raw []byte) bankInfo {
 		BankName:    m.BankName,
 		BankCode:    m.BankCode,
 		Beneficiary: m.Beneficiary,
+	}
+}
+
+// formatMoneyPDF returns the currency-prefixed amount using only
+// characters that gofpdf's standard Helvetica renders cleanly.
+//
+// The Adobe-derived 14 standard fonts ship with width tables based on
+// Adobe Standard Encoding, which predates the € symbol. gofpdf maps
+// the standard fonts to WinAnsi but inherits zero/wrong widths for
+// the 0x80–0x9F CP-1252 range (€, ’, …) — the cursor under-advances
+// after €, so the next digit lands partially on top. £ and ¥ behave
+// only slightly better.
+//
+// Workaround: use 3-letter ISO codes ("EUR 540.00") for non-ASCII
+// currencies in the PDF; keep "$" for USD-family because $ is ASCII
+// and renders correctly. HTML rendering keeps the real symbols via
+// formatMoney() — browsers have no such metric gap.
+func formatMoneyPDF(cents int64, currency string) string {
+	currency = strings.ToUpper(strings.TrimSpace(currency))
+	sign := ""
+	abs := cents
+	if abs < 0 {
+		sign = "-"
+		abs = -abs
+	}
+	whole := abs / 100
+	frac := abs % 100
+	switch currency {
+	case "USD", "CAD", "AUD", "NZD":
+		return fmt.Sprintf("%s$%d.%02d", sign, whole, frac)
+	case "JPY":
+		return fmt.Sprintf("%sJPY %d", sign, whole)
+	default:
+		return fmt.Sprintf("%s%s %d.%02d", sign, currency, whole, frac)
 	}
 }
 

@@ -368,6 +368,32 @@ func TestFormatMoney_AllSupportedCurrencies(t *testing.T) {
 	}
 }
 
+// formatMoneyPDF is the PDF-safe variant — replaces €/£/¥ with the
+// 3-letter ISO code so gofpdf's broken width metrics for those CP-1252
+// extension chars don't make the next digit overlap.
+func TestFormatMoneyPDF_NonASCIICurrenciesUseISO(t *testing.T) {
+	cases := map[string]struct {
+		cents    int64
+		currency string
+		want     string
+	}{
+		"USD keeps $":   {150000, "USD", "$1500.00"},
+		"CAD keeps $":   {500, "CAD", "$5.00"},
+		"EUR uses ISO":  {99, "EUR", "EUR 0.99"},
+		"GBP uses ISO":  {1234, "GBP", "GBP 12.34"},
+		"JPY uses ISO":  {15000, "JPY", "JPY 150"},
+		"negative EUR":  {-150, "EUR", "-EUR 1.50"},
+		"unknown 3-letter": {2500, "XYZ", "XYZ 25.00"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := formatMoneyPDF(c.cents, c.currency); got != c.want {
+				t.Errorf("formatMoneyPDF(%d, %q) = %q, want %q", c.cents, c.currency, got, c.want)
+			}
+		})
+	}
+}
+
 // ─── Filename sanitiser ─────────────────────────────────────────────
 
 func TestSuggestPDFFilename(t *testing.T) {
