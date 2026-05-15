@@ -27,7 +27,7 @@ import (
 // Returns a human-readable warning string when something failed (or
 // "" on full success); errors are not propagated because creating
 // the redirect rule should not roll back on wiring failure.
-func wireHostname(ctx *sdk.AppCtx, hostname string) string {
+func wireHostname(ctx *sdk.AppCtx, projectID, hostname string) string {
 	if hostname == "" {
 		return ""
 	}
@@ -41,7 +41,7 @@ func wireHostname(ctx *sdk.AppCtx, hostname string) string {
 	// Domains — best effort. Probe first; only call domain_records_set
 	// when the domain is actually present. This avoids creating noise
 	// in the domains app's panel when the user manages DNS elsewhere.
-	if err := maybeUpsertCNAME(ctx, hostname); err != nil {
+	if err := maybeUpsertCNAME(ctx, projectID, hostname); err != nil {
 		warnings = append(warnings, "domains: "+err.Error())
 	}
 
@@ -133,11 +133,55 @@ func sidecarTarget() string {
 
 // ─── domains ──────────────────────────────────────────────────────
 
-// maybeUpsertCNAME checks whether the hostname is known to domains. If
-// so it upserts a CNAME pointing at the platform's public host. If the
-// domains app isn't installed (or doesn't manage this hostname), it
-// returns nil — DNS wiring is optional.
-func maybeUpsertCNAME(ctx *sdk.AppCtx, hostname string) error {
+// callDomains is the one entry point to the domains app. It threads
+// _project_id explicitly: the domains app is global-scope on prod and
+// rejects calls that don't carry the caller's project. Project-scoped
+// installs receive the env-injected APTEVA_PROJECT_ID; global-scoped
+// installs depend on whichever caller path resolves it (panel passes
+// it via header / query; tools pull it from args or env). Empty
+// projectID is allowed — the call goes through unaugmented and the
+// remote-side validation surfaces the error verbatim.
+func callDomains(ctx *sdk.AppCtx, projectID, tool string, args map[string]any, out any) error {
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return errors.New("platform unavailable")
+	}
+	if args == nil {
+		args = map[string]any{}
+	}
+	if projectID != "" {
+		args["_project_id"] = projectID
+	}
+	return ctx.PlatformAPI().CallAppResult("domains", tool, args, out)
+}
+
+// domainsList returns the apex domain names known to the Domains app
+// for this project, or an empty list when domains is not installed /
+// not reachable. Never errors — meant for "best-effort UI hints"
+// where missing domains app is a normal state.
+func domainsList(ctx *sdk.AppCtx, projectID string) []string {
+	var resp struct {
+		Domains []struct {
+			Name string `json:"name"`
+		} `json:"domains"`
+	}
+	if err := callDomains(ctx, projectID, "domain_list", map[string]any{}, &resp); err != nil {
+		ctx.Logger().Info("domain_list unavailable", "err", err.Error())
+		return nil
+	}
+	names := make([]string, 0, len(resp.Domains))
+	for _, d := range resp.Domains {
+		if d.Name != "" {
+			names = append(names, d.Name)
+		}
+	}
+	return names
+}
+
+// maybeUpsertCNAME checks whether the hostname's apex is known to
+// domains. If so it upserts a CNAME pointing at the platform's public
+// host. If the domains app isn't installed (or doesn't manage this
+// hostname), it returns nil — DNS wiring is optional.
+func maybeUpsertCNAME(ctx *sdk.AppCtx, projectID, hostname string) error {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return nil
 	}
@@ -151,10 +195,7 @@ func maybeUpsertCNAME(ctx *sdk.AppCtx, hostname string) error {
 	var probe struct {
 		Domain map[string]any `json:"domain"`
 	}
-	err := ctx.PlatformAPI().CallAppResult("domains", "domain_get", map[string]any{
-		"name": apex,
-	}, &probe)
-	if err != nil {
+	if err := callDomains(ctx, projectID, "domain_get", map[string]any{"name": apex}, &probe); err != nil {
 		// domains app not installed, or no permission — skip silently.
 		ctx.Logger().Info("domain_get probe failed (skipping CNAME)", "host", hostname, "err", err.Error())
 		return nil
@@ -172,13 +213,12 @@ func maybeUpsertCNAME(ctx *sdk.AppCtx, hostname string) error {
 	var setResp struct {
 		Record any `json:"record"`
 	}
-	err = ctx.PlatformAPI().CallAppResult("domains", "domain_records_set", map[string]any{
+	if err := callDomains(ctx, projectID, "domain_records_set", map[string]any{
 		"domain": apex,
 		"name":   sub,
 		"type":   "CNAME",
 		"value":  target,
-	}, &setResp)
-	if err != nil {
+	}, &setResp); err != nil {
 		return fmt.Errorf("domain_records_set: %w", err)
 	}
 	return nil

@@ -36,8 +36,15 @@ interface Redirect {
 
 const API = "/api/apps/redirects/api";
 
+interface Meta {
+  domains_available: boolean;
+  domains: string[];
+  public_host: string;
+}
+
 export default function RedirectsPanel({ projectId, installId }: NativePanelProps) {
   const [rules, setRules] = useState<Redirect[] | null>(null);
+  const [meta, setMeta] = useState<Meta | null>(null);
   const [error, setError] = useState("");
   const [warning, setWarning] = useState("");
   const [busy, setBusy] = useState(false);
@@ -64,7 +71,24 @@ export default function RedirectsPanel({ projectId, installId }: NativePanelProp
     }
   }, [withParams]);
 
+  // Meta is best-effort — when domains app isn't installed the endpoint
+  // returns {domains_available: false, domains: []} and we fall back to
+  // a free-text hostname input.
+  const loadMeta = useCallback(async () => {
+    try {
+      const r = await fetch(`${API}/_meta?${withParams()}`, { credentials: "same-origin" });
+      if (!r.ok) {
+        setMeta({ domains_available: false, domains: [], public_host: "" });
+        return;
+      }
+      setMeta((await r.json()) as Meta);
+    } catch {
+      setMeta({ domains_available: false, domains: [], public_host: "" });
+    }
+  }, [withParams]);
+
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { loadMeta(); }, [loadMeta]);
 
   const remove = async (id: number) => {
     setBusy(true);
@@ -158,7 +182,12 @@ export default function RedirectsPanel({ projectId, installId }: NativePanelProp
         )}
       </main>
 
-      <AddForm onAdded={(warn) => { setWarning(warn || ""); load(); }} withParams={withParams} setError={setError} />
+      <AddForm
+        meta={meta}
+        onAdded={(warn) => { setWarning(warn || ""); load(); }}
+        withParams={withParams}
+        setError={setError}
+      />
     </div>
   );
 }
@@ -199,15 +228,24 @@ function EmptyState() {
 }
 
 function AddForm({
+  meta,
   onAdded,
   withParams,
   setError,
 }: {
+  meta: Meta | null;
   onAdded: (warning: string) => void;
   withParams: () => string;
   setError: (s: string) => void;
 }) {
-  const [hostname, setHostname] = useState("");
+  // Hostname is composed from either (subdomain + apex) when domains is
+  // linked, or from a free-text input otherwise. `useCustom` lets users
+  // override the picker with a typed value even when domains is linked
+  // (handy for hostnames they manage outside the Domains app).
+  const [subdomain, setSubdomain] = useState("");
+  const [apex, setApex] = useState("");
+  const [customHostname, setCustomHostname] = useState("");
+  const [useCustom, setUseCustom] = useState(false);
   const [path, setPath] = useState("/");
   const [destination, setDestination] = useState("");
   const [match, setMatch] = useState<"exact" | "prefix">("exact");
@@ -217,9 +255,21 @@ function AddForm({
   const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  // Default the apex picker to the first domain whenever the list loads.
+  useEffect(() => {
+    if (!apex && meta?.domains_available && meta.domains.length > 0) {
+      setApex(meta.domains[0]);
+    }
+  }, [meta, apex]);
+
+  const pickerMode = !useCustom && !!meta?.domains_available && meta.domains.length > 0;
+  const hostname = pickerMode
+    ? (subdomain.trim() ? `${subdomain.trim()}.${apex}` : apex)
+    : customHostname.trim();
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!hostname.trim() || !destination.trim()) return;
+    if (!hostname || !destination.trim()) return;
     setBusy(true);
     try {
       const r = await fetch(`${API}/redirects?${withParams()}`, {
@@ -227,7 +277,7 @@ function AddForm({
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          hostname: hostname.trim(),
+          hostname,
           path: path.trim() || "/",
           match_mode: match,
           destination: destination.trim(),
@@ -238,7 +288,8 @@ function AddForm({
       });
       if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
       const j = (await r.json()) as { warning?: string };
-      setHostname("");
+      setSubdomain("");
+      setCustomHostname("");
       setPath("/");
       setDestination("");
       setPreservePath(false);
@@ -253,16 +304,43 @@ function AddForm({
   return (
     <form onSubmit={submit} className="px-4 py-3 border-t border-border flex flex-col gap-2">
       <div className="flex items-end gap-2">
-        <div className="flex-1">
-          <label className="text-[11px] text-text-muted block mb-1">Hostname</label>
-          <input
-            type="text"
-            value={hostname}
-            onChange={(e) => setHostname(e.target.value)}
-            placeholder="go.example.com"
-            className="w-full bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono"
-          />
-        </div>
+        {pickerMode ? (
+          <>
+            <div className="w-32">
+              <label className="text-[11px] text-text-muted block mb-1">Subdomain</label>
+              <input
+                type="text"
+                value={subdomain}
+                onChange={(e) => setSubdomain(e.target.value)}
+                placeholder="go (or blank for apex)"
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono"
+              />
+            </div>
+            <div className="flex-1">
+              <label className="text-[11px] text-text-muted block mb-1">Domain</label>
+              <select
+                value={apex}
+                onChange={(e) => setApex(e.target.value)}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono"
+              >
+                {meta!.domains.map((d) => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
+            </div>
+          </>
+        ) : (
+          <div className="flex-1">
+            <label className="text-[11px] text-text-muted block mb-1">Hostname</label>
+            <input
+              type="text"
+              value={customHostname}
+              onChange={(e) => setCustomHostname(e.target.value)}
+              placeholder="go.example.com"
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono"
+            />
+          </div>
+        )}
         <div className="w-32">
           <label className="text-[11px] text-text-muted block mb-1">Path</label>
           <input
@@ -285,18 +363,37 @@ function AddForm({
         </div>
         <button
           type="submit"
-          disabled={busy || !hostname.trim() || !destination.trim()}
+          disabled={busy || !hostname || !destination.trim()}
           className="px-3 py-1 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
         >Add redirect</button>
       </div>
 
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="text-[11px] text-text-muted hover:text-text self-start"
-      >
-        {expanded ? "Hide" : "Show"} advanced options
-      </button>
+      {/* Preview the composed hostname when using the domain picker, so
+          users see "go.example.com" as they type the subdomain. */}
+      {pickerMode && hostname && (
+        <div className="text-[11px] text-text-muted pl-1">
+          Will redirect <span className="font-mono text-accent">{hostname}{path === "/" ? "" : path}</span>
+        </div>
+      )}
+
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="text-[11px] text-text-muted hover:text-text"
+        >
+          {expanded ? "Hide" : "Show"} advanced options
+        </button>
+        {meta?.domains_available && meta.domains.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setUseCustom((v) => !v)}
+            className="text-[11px] text-text-muted hover:text-text"
+          >
+            {useCustom ? "Pick from Domains" : "Use custom hostname"}
+          </button>
+        )}
+      </div>
 
       {expanded && (
         <div className="flex items-end gap-3 pl-1">

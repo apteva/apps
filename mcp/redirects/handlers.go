@@ -49,6 +49,22 @@ func (a *App) handleRedirectItem(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleMeta surfaces install-time context the panel needs before
+// drawing the add form — chiefly "is domains installed, and which
+// apexes does it manage." Mirrors the certs app's /api/_meta pattern.
+// Returns {domains_available, domains} plus the public host the
+// CNAME would point at, so the panel can show users what they'd
+// have to configure if they manage DNS themselves.
+func (a *App) handleMeta(w http.ResponseWriter, r *http.Request) {
+	pid := projectFromRequest(r)
+	names := domainsList(globalCtx, pid)
+	httpJSON(w, map[string]any{
+		"domains_available": len(names) > 0,
+		"domains":           names,
+		"public_host":       platformPublicHost(),
+	})
+}
+
 // ─── REST handlers ─────────────────────────────────────────────────
 
 func (a *App) httpListRedirects(w http.ResponseWriter, r *http.Request) {
@@ -87,7 +103,7 @@ func (a *App) httpCreateRedirect(w http.ResponseWriter, r *http.Request) {
 	// Best-effort glue — claim the hostname with routes (and CNAME via
 	// domains when possible). Wire failures don't roll back the rule;
 	// the panel surfaces a warning so the operator can retry.
-	wireWarning := wireHostname(globalCtx, rule.Hostname)
+	wireWarning := wireHostname(globalCtx, rule.ProjectID, rule.Hostname)
 	httpJSON(w, map[string]any{"redirect": rule, "warning": wireWarning})
 }
 
@@ -123,7 +139,7 @@ func (a *App) httpUpdateRedirect(w http.ResponseWriter, r *http.Request, id int6
 		}
 		return
 	}
-	wireWarning := wireHostname(globalCtx, rule.Hostname)
+	wireWarning := wireHostname(globalCtx, rule.ProjectID, rule.Hostname)
 	httpJSON(w, map[string]any{"redirect": rule, "warning": wireWarning})
 }
 

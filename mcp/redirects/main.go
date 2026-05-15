@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: redirects
 display_name: Redirects
-version: 0.1.1
+version: 0.1.2
 description: |
   Branded short links and domain redirects. Each rule maps a
   (hostname, path) pair to an external URL and returns a 30x.
@@ -109,6 +109,7 @@ func main() { sdk.Run(&App{}) }
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		// Admin / panel surface — auth required.
+		{Pattern: "/api/_meta", Handler: a.handleMeta},
 		{Pattern: "/api/redirects", Handler: a.handleRedirectsCollection},
 		{Pattern: "/api/redirects/", Handler: a.handleRedirectItem},
 
