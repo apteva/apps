@@ -293,6 +293,7 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<Invoice | null>(null);
   const [status, setStatus] = useState<string>("");
+  const [showCreate, setShowCreate] = useState<boolean>(false);
 
   const loadList = useCallback(
     async () => {
@@ -419,13 +420,22 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
     <div className="h-full flex">
       <aside className="w-96 border-r border-border flex flex-col">
         <div className="p-2 border-b border-border space-y-2">
-          <input
-            type="text"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            placeholder="Search invoices…"
-            className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
-          />
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="Search invoices…"
+              className="flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            />
+            <button
+              type="button"
+              onClick={() => setShowCreate(true)}
+              className="px-2 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+            >
+              + New
+            </button>
+          </div>
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
@@ -495,6 +505,18 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
           />
         )}
       </main>
+
+      {showCreate && (
+        <CreateInvoiceModal
+          apiCall={apiCall}
+          onClose={() => setShowCreate(false)}
+          onCreated={(inv) => {
+            setShowCreate(false);
+            loadList();
+            select(inv.id);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -724,6 +746,412 @@ function InvoiceDetail({
             Void
           </button>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Create invoice modal ───────────────────────────────────────────
+
+interface LineDraft {
+  description: string;
+  quantity: string;      // user-edited; converted to number on submit
+  unit_price: string;    // dollars (decimal); converted to cents on submit
+  tax_rate: string;      // percent (decimal); converted to bps on submit
+}
+
+function emptyLine(): LineDraft {
+  return { description: "", quantity: "1", unit_price: "", tax_rate: "" };
+}
+
+function CreateInvoiceModal({
+  apiCall,
+  onClose,
+  onCreated,
+}: {
+  apiCall: ApiCall;
+  onClose: () => void;
+  onCreated: (invoice: Invoice) => void;
+}) {
+  const [customer, setCustomer] = useState<Customer | null>(null);
+  const [customerSearch, setCustomerSearch] = useState("");
+  const [customerResults, setCustomerResults] = useState<Customer[]>([]);
+  const [searching, setSearching] = useState(false);
+
+  const [currency, setCurrency] = useState("");
+  const [dueDate, setDueDate] = useState("");
+  const [notes, setNotes] = useState("");
+  const [items, setItems] = useState<LineDraft[]>([emptyLine()]);
+
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string>("");
+
+  useEffect(() => {
+    if (customer) return;
+    const q = customerSearch.trim();
+    const t = setTimeout(async () => {
+      setSearching(true);
+      try {
+        const res = await apiCall<{ customers: Customer[] }>(
+          "GET",
+          "/customers",
+          undefined,
+          q ? { q } : {},
+        );
+        setCustomerResults((res.customers || []).slice(0, 20));
+      } catch {
+        setCustomerResults([]);
+      } finally {
+        setSearching(false);
+      }
+    }, 200);
+    return () => clearTimeout(t);
+  }, [customerSearch, customer, apiCall]);
+
+  const setItem = (i: number, patch: Partial<LineDraft>) =>
+    setItems((prev) => prev.map((it, j) => (j === i ? { ...it, ...patch } : it)));
+  const addItem = () => setItems((prev) => [...prev, emptyLine()]);
+  const removeItem = (i: number) =>
+    setItems((prev) => (prev.length <= 1 ? prev : prev.filter((_, j) => j !== i)));
+
+  const previewCurrency = (currency || customer?.currency || "USD").toUpperCase();
+  let subtotal = 0;
+  let taxTotal = 0;
+  for (const it of items) {
+    if (!it.description.trim()) continue;
+    const qty = parseFloat(it.quantity || "0");
+    const unit = parseFloat(it.unit_price || "0");
+    if (!isFinite(qty) || qty <= 0 || !isFinite(unit)) continue;
+    const lineCents = Math.round(qty * unit * 100);
+    subtotal += lineCents;
+    const pct = parseFloat(it.tax_rate || "0");
+    if (isFinite(pct) && pct > 0) {
+      taxTotal += Math.round((lineCents * pct) / 100);
+    }
+  }
+  const total = subtotal + taxTotal;
+
+  const submit = async () => {
+    setError("");
+    if (!customer) {
+      setError("Pick a customer.");
+      return;
+    }
+    let lineItems: Array<{
+      description: string;
+      quantity: number;
+      unit_price_cents: number;
+      tax_rate_bps: number;
+    }> = [];
+    try {
+      lineItems = items
+        .map((it, i) => {
+          const desc = it.description.trim();
+          if (!desc) return null;
+          const qty = parseFloat(it.quantity || "0");
+          if (!isFinite(qty) || qty <= 0) {
+            throw new Error(`Line ${i + 1}: quantity must be > 0`);
+          }
+          const unit = parseFloat(it.unit_price || "0");
+          if (!isFinite(unit)) {
+            throw new Error(`Line ${i + 1}: unit price required`);
+          }
+          const pct = parseFloat(it.tax_rate || "0");
+          return {
+            description: desc,
+            quantity: qty,
+            unit_price_cents: Math.round(unit * 100),
+            tax_rate_bps: isFinite(pct) ? Math.round(pct * 100) : 0,
+          };
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null);
+    } catch (err) {
+      setError((err as Error).message);
+      return;
+    }
+    if (lineItems.length === 0) {
+      setError("Add at least one line item with a description.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const body: Record<string, unknown> = {
+        customer_id: customer.id,
+        line_items: lineItems,
+      };
+      const cur = currency.trim().toUpperCase();
+      if (cur) body.currency = cur;
+      if (dueDate) body.due_date = dueDate;
+      const trimmedNotes = notes.trim();
+      if (trimmedNotes) body.notes = trimmedNotes;
+      const res = await apiCall<{ invoice: Invoice }>("POST", "/invoices", body);
+      onCreated(res.invoice);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-6"
+      onClick={onClose}
+    >
+      <div
+        className="bg-bg border border-border rounded-lg w-full overflow-auto"
+        style={{ maxWidth: "640px", maxHeight: "90vh" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="p-4 border-b border-border flex items-center justify-between">
+          <h2 className="text-text font-semibold">New invoice</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="text-text-muted hover:text-text"
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+            >
+              <path d="M4 4 L12 12" />
+              <path d="M12 4 L4 12" />
+            </svg>
+          </button>
+        </header>
+
+        <div className="p-4 space-y-4">
+          <div>
+            <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+              Customer
+            </label>
+            {customer ? (
+              <div className="flex items-center justify-between bg-bg-input border border-border rounded px-2 py-1">
+                <div className="text-sm text-text">
+                  {customer.name}
+                  {customer.email ? (
+                    <span className="text-text-muted"> · {customer.email}</span>
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCustomer(null);
+                    setCustomerSearch("");
+                  }}
+                  className="text-xs text-accent hover:underline"
+                >
+                  Change
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-1">
+                <input
+                  type="text"
+                  value={customerSearch}
+                  onChange={(e) => setCustomerSearch(e.target.value)}
+                  placeholder="Search customers by name or email…"
+                  className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                  autoFocus
+                />
+                {customerResults.length > 0 && (
+                  <ul
+                    className="border border-border rounded overflow-auto"
+                    style={{ maxHeight: "192px" }}
+                  >
+                    {customerResults.map((c) => (
+                      <li
+                        key={c.id}
+                        onClick={() => setCustomer(c)}
+                        className="px-2 py-1 cursor-pointer hover:bg-bg-input border-b border-border last:border-b-0"
+                      >
+                        <div className="text-sm text-text">{c.name}</div>
+                        <div className="text-xs text-text-muted">
+                          {c.email || "—"}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {searching && customerResults.length === 0 && (
+                  <div className="text-xs text-text-dim">Searching…</div>
+                )}
+                {!searching &&
+                  customerResults.length === 0 &&
+                  customerSearch.trim().length > 0 && (
+                    <div className="text-xs text-text-dim">No matches.</div>
+                  )}
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+                Currency
+              </label>
+              <input
+                type="text"
+                value={currency}
+                onChange={(e) =>
+                  setCurrency(e.target.value.toUpperCase().slice(0, 3))
+                }
+                placeholder={customer?.currency || "USD"}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+                Due date
+              </label>
+              <input
+                type="date"
+                value={dueDate}
+                onChange={(e) => setDueDate(e.target.value)}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              />
+            </div>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-xs uppercase tracking-wide text-text-dim">
+                Line items
+              </label>
+              <button
+                type="button"
+                onClick={addItem}
+                className="text-xs text-accent hover:underline"
+              >
+                + Add line
+              </button>
+            </div>
+            <div className="space-y-2">
+              {items.map((it, i) => (
+                <div
+                  key={i}
+                  className="bg-bg-input border border-border rounded p-2 space-y-2"
+                >
+                  <input
+                    type="text"
+                    value={it.description}
+                    onChange={(e) => setItem(i, { description: e.target.value })}
+                    placeholder="Description"
+                    className="w-full bg-bg border border-border rounded px-2 py-1 text-sm"
+                  />
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-xs text-text-dim mb-0.5">
+                        Qty
+                      </label>
+                      <input
+                        type="number"
+                        step="any"
+                        min="0"
+                        value={it.quantity}
+                        onChange={(e) => setItem(i, { quantity: e.target.value })}
+                        className="w-full bg-bg border border-border rounded px-2 py-1 text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-text-dim mb-0.5">
+                        Unit price
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={it.unit_price}
+                        onChange={(e) =>
+                          setItem(i, { unit_price: e.target.value })
+                        }
+                        placeholder="0.00"
+                        className="w-full bg-bg border border-border rounded px-2 py-1 text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-text-dim mb-0.5">
+                        Tax %
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={it.tax_rate}
+                        onChange={(e) => setItem(i, { tax_rate: e.target.value })}
+                        placeholder="0"
+                        className="w-full bg-bg border border-border rounded px-2 py-1 text-sm"
+                      />
+                    </div>
+                  </div>
+                  {items.length > 1 && (
+                    <div className="text-right">
+                      <button
+                        type="button"
+                        onClick={() => removeItem(i)}
+                        className="text-xs text-red hover:underline"
+                      >
+                        Remove line
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+              Notes
+            </label>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              rows={2}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            />
+          </div>
+
+          <div className="border-t border-border pt-3 text-sm space-y-0.5">
+            <div className="flex justify-between text-text-muted">
+              <span>Subtotal</span>
+              <span>{fmtMoney(subtotal, previewCurrency)}</span>
+            </div>
+            <div className="flex justify-between text-text-muted">
+              <span>Tax</span>
+              <span>{fmtMoney(taxTotal, previewCurrency)}</span>
+            </div>
+            <div className="flex justify-between text-text font-medium">
+              <span>Total</span>
+              <span>{fmtMoney(total, previewCurrency)}</span>
+            </div>
+          </div>
+
+          {error && <div className="text-sm text-red">{error}</div>}
+        </div>
+
+        <footer className="p-4 border-t border-border flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={submitting}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={submitting || !customer}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+          >
+            {submitting ? "Creating…" : "Create draft"}
+          </button>
+        </footer>
       </div>
     </div>
   );
