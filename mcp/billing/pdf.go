@@ -67,7 +67,21 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 	pdf.SetTextColor(120, 120, 120)
 	pdf.SetX(20 + usableWidth/2)
 	pdf.CellFormat(usableWidth/2, 5, e(statusLabel(inv.Status)), "", 0, "R", false, 0, "")
-	pdf.Ln(8)
+	pdf.Ln(5)
+
+	// Dates, right-aligned under the status. "Issued <date>" line, then
+	// "Due <date>" or "Due on receipt" when the due ≤ issue date.
+	if issueLine := formatInvoiceIssueLine(inv); issueLine != "" {
+		pdf.SetX(20 + usableWidth/2)
+		pdf.CellFormat(usableWidth/2, 4.5, e(issueLine), "", 0, "R", false, 0, "")
+		pdf.Ln(4.5)
+	}
+	if dueLine := formatInvoiceDueLine(inv); dueLine != "" {
+		pdf.SetX(20 + usableWidth/2)
+		pdf.CellFormat(usableWidth/2, 4.5, e(dueLine), "", 0, "R", false, 0, "")
+		pdf.Ln(4.5)
+	}
+	pdf.Ln(3)
 
 	// Thin rule under the header.
 	pdf.SetDrawColor(200, 200, 200)
@@ -118,15 +132,7 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 			pdf.CellFormat(colW, 5, e(rightLines[i]), "", 0, "L", false, 0, "")
 		}
 	}
-	pdf.SetXY(20, yStart+6+float64(maxLines)*5+4)
-
-	// Inline details: Issued · Due · Currency · Provider.
-	if details := buildDetailsInline(inv); details != "" {
-		pdf.SetFont("Helvetica", "", 9)
-		pdf.SetTextColor(110, 110, 110)
-		pdf.CellFormat(usableWidth, 5, e(details), "", 0, "L", false, 0, "")
-		pdf.Ln(6)
-	}
+	pdf.SetXY(20, yStart+6+float64(maxLines)*5+6)
 
 	// ── Line item table ──
 	pdf.SetFont("Helvetica", "B", 8)
@@ -302,25 +308,6 @@ func buildIssuerLines(issuer *Issuer) []string {
 		out = append(out, issuer.Email)
 	}
 	return out
-}
-
-// buildDetailsInline collapses the old DETAILS column into a single
-// dot-separated row that sits under the BILL FROM / BILL TO blocks.
-func buildDetailsInline(inv *Invoice) string {
-	var parts []string
-	if inv.FinalizedAt != "" {
-		parts = append(parts, "Issued: "+formatDateOnly(inv.FinalizedAt))
-	} else if inv.CreatedAt != "" {
-		parts = append(parts, "Created: "+formatDateOnly(inv.CreatedAt))
-	}
-	if inv.DueDate != "" {
-		parts = append(parts, "Due: "+formatDateOnly(inv.DueDate))
-	}
-	parts = append(parts, "Currency: "+inv.Currency)
-	if inv.Provider != "" && inv.Provider != "local" {
-		parts = append(parts, "Provider: "+inv.Provider)
-	}
-	return strings.Join(parts, " · ")
 }
 
 // formatTaxIDs renders a JSON array of {type,value} as a single line

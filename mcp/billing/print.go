@@ -65,7 +65,7 @@ func renderInvoiceHTML(inv *Invoice, customer *Customer, issuer *Issuer) string 
   .from h1 { margin: 0; font-size: 22px; font-weight: 600; }
   .from .tagline { color: var(--muted); font-size: 12px; margin-top: 2px; }
   .meta { text-align: right; }
-  .details-line { color: var(--muted); font-size: 12px; margin: 16px 0; padding: 8px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .meta .date-line { color: var(--muted); font-size: 12px; margin-top: 4px; }
   .bank { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }
   .bank h2 { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; margin: 0 0 6px 0; }
   .bank .row { font-size: 13px; line-height: 1.6; }
@@ -133,7 +133,20 @@ func renderInvoiceHTML(inv *Invoice, customer *Customer, issuer *Issuer) string 
 	b.WriteString(html.EscapeString(inv.Status))
 	b.WriteString(`">`)
 	b.WriteString(html.EscapeString(inv.Status))
-	b.WriteString(`</span></div>
+	b.WriteString(`</span></div>`)
+	if issueLine := formatInvoiceIssueLine(inv); issueLine != "" {
+		b.WriteString(`
+      <div class="date-line">`)
+		b.WriteString(html.EscapeString(issueLine))
+		b.WriteString(`</div>`)
+	}
+	if dueLine := formatInvoiceDueLine(inv); dueLine != "" {
+		b.WriteString(`
+      <div class="date-line">`)
+		b.WriteString(html.EscapeString(dueLine))
+		b.WriteString(`</div>`)
+	}
+	b.WriteString(`
     </div>
   </header>
 
@@ -172,23 +185,6 @@ func renderInvoiceHTML(inv *Invoice, customer *Customer, issuer *Issuer) string 
 	b.WriteString(`</p>
     </div>
   </div>
-
-  <div class="details-line">`)
-	var detailsParts []string
-	if d := inv.FinalizedAt; d != "" {
-		detailsParts = append(detailsParts, "Issued: "+formatDateOnly(d))
-	} else if d := inv.CreatedAt; d != "" {
-		detailsParts = append(detailsParts, "Created: "+formatDateOnly(d))
-	}
-	if inv.DueDate != "" {
-		detailsParts = append(detailsParts, "Due: "+formatDateOnly(inv.DueDate))
-	}
-	detailsParts = append(detailsParts, "Currency: "+inv.Currency)
-	if inv.Provider != "" && inv.Provider != "local" {
-		detailsParts = append(detailsParts, "Provider: "+inv.Provider)
-	}
-	b.WriteString(html.EscapeString(strings.Join(detailsParts, " · ")))
-	b.WriteString(`</div>
 
   <table>
     <thead>
@@ -398,6 +394,62 @@ func formatQty(q float64) string {
 	s = strings.TrimRight(s, "0")
 	s = strings.TrimRight(s, ".")
 	return s
+}
+
+// formatInvoiceIssueLine returns "Issued <date>" once finalized, or
+// "Created <date>" while a draft. Empty when neither timestamp is set.
+func formatInvoiceIssueLine(inv *Invoice) string {
+	if d := inv.FinalizedAt; d != "" {
+		return "Issued " + formatDateOnly(d)
+	}
+	if d := inv.CreatedAt; d != "" {
+		return "Created " + formatDateOnly(d)
+	}
+	return ""
+}
+
+// formatInvoiceDueLine returns "Due on receipt" when the user didn't
+// set a due date OR set it ≤ the issue date (a same-day due date
+// reads as 'pay now' in practice). Otherwise "Due <date>".
+func formatInvoiceDueLine(inv *Invoice) string {
+	if inv.DueDate == "" {
+		return "Due on receipt"
+	}
+	issuedRaw := inv.FinalizedAt
+	if issuedRaw == "" {
+		issuedRaw = inv.CreatedAt
+	}
+	if dueOnReceipt(inv.DueDate, issuedRaw) {
+		return "Due on receipt"
+	}
+	return "Due " + formatDateOnly(inv.DueDate)
+}
+
+// dueOnReceipt is true when due is at or before issued — meaning the
+// invoice is payable immediately and the literal date adds no info.
+func dueOnReceipt(due, issued string) bool {
+	if due == "" {
+		return true
+	}
+	if issued == "" {
+		return false
+	}
+	d := dateOnlyKey(due)
+	i := dateOnlyKey(issued)
+	return d != "" && i != "" && d <= i
+}
+
+// dateOnlyKey extracts a YYYY-MM-DD key from either RFC3339 or a bare
+// YYYY-MM-DD. Returns "" when unparseable. Lex-sortable so callers can
+// compare with <= without a time.Parse round-trip.
+func dateOnlyKey(s string) string {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC().Format("2006-01-02")
+	}
+	if _, err := time.Parse("2006-01-02", s); err == nil {
+		return s
+	}
+	return ""
 }
 
 func formatDateOnly(rfc3339 string) string {
