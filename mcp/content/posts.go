@@ -999,7 +999,7 @@ func (a *App) handleHTTPPostItem(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	rest := strings.TrimPrefix(r.URL.Path, "/api/posts/")
+	rest := strings.TrimPrefix(r.URL.Path, "/admin/posts/")
 	parts := strings.SplitN(rest, "/", 3)
 	id, _ := strconv.ParseInt(parts[0], 10, 64)
 	if id == 0 {

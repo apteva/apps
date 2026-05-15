@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -221,4 +222,16 @@ func (a *App) toolBlocksDuplicate(ctx *sdk.AppCtx, args map[string]any) (any, er
 func (a *App) toolBlocksRegistry(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	cat := asString(args["category"])
 	return map[string]any{"types": listBlockTypes(cat)}, nil
+}
+
+// handleHTTPBlockTypes — GET /admin/block-types. Same registry as the
+// blocks_registry MCP tool, served as plain REST so the dashboard
+// editor's insertion menu doesn't have to go through /tools/call.
+func (a *App) handleHTTPBlockTypes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	cat := r.URL.Query().Get("category")
+	httpJSON(w, map[string]any{"types": listBlockTypes(cat)})
 }

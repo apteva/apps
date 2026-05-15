@@ -89,17 +89,35 @@ func (a *App) Workers() []sdk.Worker {
 // reverse-proxies to /api/apps/content/<pattern>; when a host is
 // domain-linked via the deploy app, public paths (/, /posts/*, etc.)
 // arrive here too.
+// HTTP routes split into three buckets:
+//
+//   /admin/*    — REST surface for the dashboard panel + headless
+//                 consumers. The platform proxy mounts the sidecar at
+//                 /api/apps/content/<path>; callers reach `/admin/posts`
+//                 as `/api/apps/content/admin/posts`. Namespacing under
+//                 /admin/ keeps the bare `/posts` URL free for public
+//                 rendering.
+//
+//   /_theme/*, /_media/*, /preview/, /feed.xml, /sitemap.xml — public
+//                 framework-internal endpoints (underscore-prefix flags
+//                 "not for editorial use as a post slug"). NoAuth so
+//                 visitors can reach them without an install token.
+//
+//   /             — public catch-all that renders posts/pages/term
+//                 archives. Must register last; ServeMux longest-prefix
+//                 routing puts the others in front.
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
-		// ── headless REST ───────────────────────────────────────
-		{Pattern: "/api/posts", Handler: a.handleHTTPPostsCollection},
-		{Pattern: "/api/posts/", Handler: a.handleHTTPPostItem},
-		{Pattern: "/api/terms", Handler: a.handleHTTPTermsCollection},
-		{Pattern: "/api/media", Handler: a.handleHTTPMedia},
-		{Pattern: "/api/menus", Handler: a.handleHTTPMenus},
-		{Pattern: "/api/redirects", Handler: a.handleHTTPRedirects},
-		{Pattern: "/api/settings", Handler: a.handleHTTPSettings},
-		{Pattern: "/api/themes", Handler: a.handleHTTPThemes},
+		// ── /admin/* REST surface ──────────────────────────────
+		{Pattern: "/admin/posts", Handler: a.handleHTTPPostsCollection},
+		{Pattern: "/admin/posts/", Handler: a.handleHTTPPostItem},
+		{Pattern: "/admin/terms", Handler: a.handleHTTPTermsCollection},
+		{Pattern: "/admin/media", Handler: a.handleHTTPMedia},
+		{Pattern: "/admin/menus", Handler: a.handleHTTPMenus},
+		{Pattern: "/admin/redirects", Handler: a.handleHTTPRedirects},
+		{Pattern: "/admin/settings", Handler: a.handleHTTPSettings},
+		{Pattern: "/admin/themes", Handler: a.handleHTTPThemes},
+		{Pattern: "/admin/block-types", Handler: a.handleHTTPBlockTypes},
 
 		// ── public render surface ───────────────────────────────
 		{Pattern: "/_theme/", Handler: a.handleThemeAsset, NoAuth: true},
@@ -107,9 +125,6 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/preview/", Handler: a.handlePreview, NoAuth: true},
 		{Pattern: "/feed.xml", Handler: a.handleFeed, NoAuth: true},
 		{Pattern: "/sitemap.xml", Handler: a.handleSitemap, NoAuth: true},
-		// The catch-all renders posts/pages/archives. Has to come last;
-		// ServeMux longest-prefix routing puts the more-specific paths
-		// above this one in front anyway.
 		{Pattern: "/", Handler: a.handlePublic, NoAuth: true},
 	}
 }
