@@ -753,7 +753,8 @@ function InvokeConsole({
           onChange={(e) => setEventText(e.target.value)}
           spellCheck={false}
           placeholder='Event JSON, e.g. {"name":"world"}'
-          className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm font-mono min-h-[64px]"
+          style={{ minHeight: 96 }}
+          className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm font-mono"
         />
         <div className="flex items-center gap-2">
           <button
@@ -919,8 +920,8 @@ function CreateFunctionDialog({
             onKeyDown={(e) => handleCodeTab(e, source, (v) => { setSource(v); setTouchedSource(true); })}
             spellCheck={false}
             wrap="off"
-            style={{ tabSize: 2 }}
-            className={inputCls + " font-mono text-[13px] leading-snug min-h-[480px]"}
+            style={{ tabSize: 2, minHeight: "60vh", fontSize: 13, lineHeight: 1.45 }}
+            className={inputCls + " font-mono"}
           />
         </div>
 
@@ -932,7 +933,8 @@ function CreateFunctionDialog({
               onChange={(e) => setPackageJSON(e.target.value)}
               spellCheck={false}
               placeholder='{"dependencies":{"ky":"^1.0.0"}}'
-              className={inputCls + " font-mono min-h-[48px]"}
+              style={{ minHeight: 80, fontSize: 13 }}
+              className={inputCls + " font-mono"}
             />
           </div>
         )}
@@ -944,7 +946,8 @@ function CreateFunctionDialog({
             onChange={(e) => setEnvText(e.target.value)}
             spellCheck={false}
             placeholder="API_BASE=https://example.com"
-            className={inputCls + " font-mono min-h-[48px]"}
+            style={{ minHeight: 80, fontSize: 13 }}
+            className={inputCls + " font-mono"}
           />
         </div>
 
@@ -1026,8 +1029,8 @@ function DeployDialog({
             onKeyDown={(e) => handleCodeTab(e, source, setSource)}
             spellCheck={false}
             wrap="off"
-            style={{ tabSize: 2 }}
-            className={inputCls + " font-mono text-[13px] leading-snug min-h-[520px]"}
+            style={{ tabSize: 2, minHeight: "65vh", fontSize: 13, lineHeight: 1.45 }}
+            className={inputCls + " font-mono"}
           />
         </div>
 
@@ -1038,7 +1041,8 @@ function DeployDialog({
             onChange={(e) => setPackageJSON(e.target.value)}
             spellCheck={false}
             placeholder='{"dependencies":{}}'
-            className={inputCls + " font-mono min-h-[48px]"}
+            style={{ minHeight: 80, fontSize: 13 }}
+            className={inputCls + " font-mono"}
           />
         </div>
 
