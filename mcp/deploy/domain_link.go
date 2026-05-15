@@ -343,7 +343,8 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec
 
 	// Persist the link either way. record_id is left empty when DNS
 	// didn't write — detach checks for that and skips the registrar
-	// delete; a later deploy_retry_dns fills it in.
+	// delete; calling deploy_attach_domain again re-attempts the DNS
+	// write (the whole tool is idempotent).
 	recordID := ""
 	if dnsErr == nil {
 		recordID = apex + "|" + rtype
@@ -393,52 +394,6 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec
 	return res, nil
 }
 
-// retryDNS re-runs only the DNS write for a deployment whose attach
-// previously partial-failed (DNS error, route + cert succeeded).
-// Operator-driven retry; idempotent on success. The use case is
-// "the upstream registrar returned 406 on duplicate-record-exists,
-// but I've cleared / fixed the record, now re-link it."
-func (a *App) retryDNS(ctx *sdk.AppCtx, d *Deployment) (*attachDomainResult, error) {
-	if d.Domain == "" {
-		return nil, errors.New("no domain attached — call deploy_attach_domain first")
-	}
-	if !a.domainsAvailable(ctx) {
-		return nil, errors.New("domains app not installed")
-	}
-	// Re-resolve apex + type from what we have. We don't have the
-	// original target/type once DNS failed, so derive again from
-	// public_host / box IP. Same shape as attachDomain's prefix.
-	target := resolveTarget(attachDomainSpec{FQDN: d.Domain})
-	if target == "" {
-		return nil, errors.New("target required for retry — set public_host or APTEVA_PUBLIC_URL")
-	}
-	rtype := inferRecordType(target)
-	apex, sub, err := resolveApex(ctx, d.ProjectID, d.Domain)
-	if err != nil {
-		return nil, err
-	}
-	if sub == "" {
-		sub = "@"
-	}
-	res := &attachDomainResult{FQDN: d.Domain, Apex: apex, Type: rtype, Target: target, RouteStatus: "unchanged", CertStatus: "unchanged"}
-	dnsErr := callDomainsTool(ctx, d.ProjectID, "domain_records_set", map[string]any{
-		"domain": apex, "name": sub, "type": rtype, "value": target, "ttl": 600,
-	}, nil)
-	if dnsErr != nil {
-		res.DNSStatus = "error"
-		res.DNSError = dnsErr.Error()
-		return res, nil
-	}
-	res.DNSStatus = "ok"
-	// Stamp the record_id so future detach knows what to delete.
-	if err := dbSetDeploymentDomain(globalCtx.AppDB(), d.ID, d.Domain, apex+"|"+rtype, nowUTC()); err != nil {
-		return res, err
-	}
-	emit("deploy.domain.dns_retried", map[string]any{
-		"deployment_id": d.ID, "fqdn": d.Domain, "apex": apex, "type": rtype,
-	})
-	return res, nil
-}
 
 // detachDomain best-effort deletes the DNS record (if we know what we
 // wrote) and clears the deployment's domain link. The DB clear runs

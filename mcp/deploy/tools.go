@@ -152,17 +152,6 @@ func (a *App) MCPTools() []sdk.Tool {
 			},
 		},
 		{
-			Name: "deploy_retry_dns", Handler: a.toolRetryDNS,
-			Description: "Retry the DNS write for a deployment whose attach previously partial-failed (e.g. registrar returned 406 on a duplicate record). Route and cert are not touched. Args: name OR id.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"name": map[string]any{"type": "string"},
-					"id":   map[string]any{"type": "integer"},
-				},
-			},
-		},
-		{
 			Name: "deploy_list_routes", Handler: a.toolListRoutes,
 			Description: "List live deployments as a route table for the host-based proxy. Returns [{slug, port, domain, status}]; only deployments with a current_release in 'live' or 'starting' status are returned. Used by the server, not by agents.",
 			InputSchema: map[string]any{
@@ -424,20 +413,6 @@ func (a *App) toolAttachDomain(ctx *sdk.AppCtx, args map[string]any) (any, error
 	pid, _ := resolveProjectFromArgs(args)
 	out, _ := dbGetDeployment(ctx.AppDB(), pid, d.ID)
 	return map[string]any{"deployment": out, "attach": attachRes}, nil
-}
-
-func (a *App) toolRetryDNS(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	d, err := a.lookupDeployment(args)
-	if err != nil {
-		return nil, err
-	}
-	res, err := a.retryDNS(ctx, d)
-	if err != nil {
-		return nil, err
-	}
-	pid, _ := resolveProjectFromArgs(args)
-	out, _ := dbGetDeployment(ctx.AppDB(), pid, d.ID)
-	return map[string]any{"deployment": out, "retry": res}, nil
 }
 
 func (a *App) toolDetachDomain(ctx *sdk.AppCtx, args map[string]any) (any, error) {
