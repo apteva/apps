@@ -600,9 +600,48 @@ func (p *porkbunProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value stri
 		createPayload["prio"] = prio
 	}
 	if _, err := providerCall(ctx, p.bound, "create_dns_record", createPayload); err != nil {
+		// Idempotency rescue: Porkbun returns a non-2xx (often a
+		// generic 406 HTML page) when the record we tried to create
+		// already exists under a name our filter didn't match — apex
+		// returned as "acme.com" vs our wantFQ build, or a case-fold
+		// mismatch on TXT content. Re-list and check: if the record
+		// is now there with the value we wanted, the upsert succeeded
+		// regardless of the original error path. Otherwise we surface
+		// the create error as before.
+		if after, lErr := p.List(ctx, domain); lErr == nil && hasMatchingRecord(after, wantFQ, sub, rtype, content) {
+			return "updated", nil
+		}
 		return "", fmt.Errorf("create: %w", err)
 	}
 	return "created", nil
+}
+
+// hasMatchingRecord reports whether the provider's record set
+// already contains the (name, type, value) we wanted to upsert.
+// Used by Porkbun's Upsert to rescue a duplicate-record failure
+// after a list-miss + create-conflict — the record was there all
+// along, the filter just didn't catch it.
+func hasMatchingRecord(records []DNSRecord, wantFQ, sub, rtype, content string) bool {
+	for _, r := range records {
+		if !strings.EqualFold(r.Type, rtype) {
+			continue
+		}
+		// Match the name the same way Upsert's filter did, plus a
+		// looser fallback: providers sometimes return the apex as
+		// just the registered domain ("acme.com") when we asked for
+		// the bare apex (sub == "").
+		nameOK := strings.EqualFold(r.Name, wantFQ) || strings.EqualFold(r.Name, sub)
+		if !nameOK && sub == "" {
+			nameOK = strings.EqualFold(r.Name, wantFQ) || r.Name == "" || r.Name == "@"
+		}
+		if !nameOK {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(r.Value), strings.TrimSpace(content)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *porkbunProvider) Delete(ctx *sdk.AppCtx, domain, sub, rtype string) error {
