@@ -64,8 +64,18 @@ func (a *App) startProxyMode(ctx *sdk.AppCtx) {
 }
 
 // syncProxy renders the include file from the routes table and reloads
-// the proxy — but only when the rendered content actually changed, so
-// a periodic resync is cheap and a reload fires only on a real diff.
+// the proxy — but only when the rendered content actually differs from
+// what's on disk, so a periodic resync is cheap and a reload fires
+// only on a real diff.
+//
+// Drift detection is on-disk, not in-memory. The earlier version
+// cached the last-written content in a.lastInclude; an out-of-band
+// edit to the Caddyfile would diverge from the table forever because
+// in-memory state still matched the renderer's output. Reading the
+// file on every tick is microseconds, and the periodic sync loop
+// (45s) now auto-converges any hand-edit on the next tick — that
+// satisfies the "drift detection / reconcile pass" requirement
+// without needing a separate `routes_reconcile` tool.
 func (a *App) syncProxy(ctx *sdk.AppCtx, reason string) {
 	if a.proxy == nil {
 		return
@@ -79,8 +89,10 @@ func (a *App) syncProxy(ctx *sdk.AppCtx, reason string) {
 		return
 	}
 	content := a.proxy.renderer.render(routes, a.certDir)
-	if content == a.lastInclude {
-		return // nothing changed since last sync
+	onDisk, _ := os.ReadFile(a.proxy.includePath) // empty bytes on ENOENT, fine for the compare below
+	if string(onDisk) == content {
+		a.lastInclude = content // keep the cache in sync for the early-return fast path below
+		return                   // file matches the table — nothing to do
 	}
 	if err := os.MkdirAll(a.proxy.includeDir, 0o755); err != nil {
 		ctx.Logger().Warn("routes: sync — mkdir include dir failed", "dir", a.proxy.includeDir, "err", err)
@@ -96,7 +108,7 @@ func (a *App) syncProxy(ctx *sdk.AppCtx, reason string) {
 			"err", err)
 		return
 	}
-	ctx.Logger().Info("routes: proxy config synced", "reason", reason, "routes", len(routes))
+	ctx.Logger().Info("routes: proxy config synced", "reason", reason, "routes", len(routes), "drift", string(onDisk) != "" && string(onDisk) != content)
 }
 
 // proxySyncLoop catches drift the event path can't see — most

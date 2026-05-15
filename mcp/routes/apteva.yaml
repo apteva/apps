@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: routes
 display_name: Routes
-version: 0.3.2
+version: 0.3.3
 description: |
   Hostname-based routing for Apteva. Owns the table mapping public
   hostnames (blog.example.com) to local backend targets
