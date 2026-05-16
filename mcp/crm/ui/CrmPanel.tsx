@@ -290,6 +290,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const [status, setStatus] = useState("");
   const [edits, setEdits] = useState<Partial<Contact>>({});
   const [composer, setComposer] = useState<ComposerState | null>(null);
+  const [verifiedSenders, setVerifiedSenders] = useState<SenderOption[]>([]);
   const [errorToast, setErrorToast] = useState<string | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmState | null>(null);
   const [logActivityOpen, setLogActivityOpen] = useState(false);
@@ -383,6 +384,25 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   useEffect(() => { loadAttrDefs(); }, [loadAttrDefs]);
   useEffect(() => { loadLists(); }, [loadLists]);
   useEffect(() => { loadSegments(); }, [loadSegments]);
+
+  // Fetch the messaging app's verified senders so the composer can
+  // offer a From picker. Soft-fail: if messaging isn't bound (or the
+  // call errors), we keep an empty list and the composer just sends
+  // without an explicit `from`, letting the CRM backend fall back to
+  // the install default.
+  useEffect(() => {
+    messagingTool<{ senders?: { channel: string; address: string; display_name?: string; is_default?: boolean }[] }>("senders_list", { verified_only: true })
+      .then((r) => {
+        const out = (r.senders || []).map((s) => ({
+          channel: s.channel,
+          address: s.address,
+          label: s.display_name ? `${s.display_name} <${s.address}>` : s.address,
+          isDefault: !!s.is_default,
+        }));
+        setVerifiedSenders(out);
+      })
+      .catch(() => setVerifiedSenders([]));
+  }, [messagingTool]);
 
   // Debounced search.
   useEffect(() => {
@@ -667,11 +687,17 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   // outbound stays in-thread.
   const openCompose = (preset: Partial<ComposerState> = {}) => {
     if (!detail) return;
+    const channel = preset.channel || preferredChannel(detail) || "email";
+    // Pre-fill From with the default sender for this channel (when
+    // there is one). Operator can override via the dropdown; "" sends
+    // no `from` and the backend uses the install default.
+    const defaultForChannel = verifiedSenders.find((s) => s.channel === channel && s.isDefault);
     setComposer({
       mode: preset.mode || "new",
-      channel: preset.channel || preferredChannel(detail) || "email",
+      channel,
       subject: preset.subject || "",
       body: "",
+      from: defaultForChannel?.address || "",
       conversationId: preset.conversationId,
       replyToActivityId: preset.replyToActivityId,
       busy: false,
@@ -692,6 +718,10 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
           subject: composer.subject || undefined,
           body: composer.body,
           conversation_id: composer.conversationId,
+          // Only include `from` when the operator picked something
+          // specific. Empty string means "let the backend default
+          // kick in" — pass nothing so we don't override.
+          from: composer.from || undefined,
         },
       );
       setComposer(null);
@@ -948,6 +978,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
         <ComposerModal
           composer={composer}
           contact={detail}
+          senders={verifiedSenders}
           onCancel={() => setComposer(null)}
           onChange={(patch) => setComposer((prev) => prev ? { ...prev, ...patch } : prev)}
           onSend={handleSendFromComposer}
@@ -1142,10 +1173,24 @@ interface ComposerState {
   channel: string;
   subject: string;
   body: string;
+  // from: explicit sender override. "" = let backend pick the install
+  // default. Operator picks via the composer dropdown; defaults to
+  // the messaging-side default sender for the current channel when
+  // the composer opens.
+  from: string;
   conversationId?: number | string;
   replyToActivityId?: string;
   busy: boolean;
   error: string | null;
+}
+
+// SenderOption mirrors the verified-sender shape we pull from
+// messaging.senders_list for the From picker.
+interface SenderOption {
+  channel: string;
+  address: string;
+  label: string;
+  isDefault: boolean;
 }
 
 function preferredChannel(c: Contact): string {
@@ -1157,84 +1202,139 @@ function preferredChannel(c: Contact): string {
 function ComposerModal({
   composer,
   contact,
+  senders,
   onCancel,
   onChange,
   onSend,
 }: {
   composer: ComposerState;
   contact: Contact;
+  senders: SenderOption[];
   onCancel: () => void;
   onChange: (patch: Partial<ComposerState>) => void;
   onSend: () => void;
 }) {
   const channels = availableChannels(contact);
   const isEmail = composer.channel === "email";
+  const toAddr = addressForChannel(contact, composer.channel);
+  // Filter senders to those that match the current channel — picking
+  // an SMS sender for an email send is never what the operator wants.
+  const sendersForChannel = senders.filter((s) => s.channel === composer.channel);
+  const labelW = "w-20 shrink-0 text-text-muted text-xs uppercase tracking-wide";
+  const fieldCls = "flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm";
+
   return (
-    <div className="absolute inset-0 bg-black/40 flex items-end justify-center pointer-events-auto">
-      <div className="bg-bg border-t border-border w-full max-w-2xl rounded-t-lg shadow-lg">
-        <header className="flex items-center justify-between px-4 py-2 border-b border-border">
-          <div className="text-sm text-text">
-            {composer.mode === "reply" ? "Reply to" : "Send to"} <span className="font-medium">{displayName(contact)}</span>
+    <div className="absolute inset-0 bg-black/50 flex items-center justify-center pointer-events-auto p-6">
+      <div className="bg-bg border border-border w-full max-w-3xl rounded-lg shadow-xl flex flex-col" style={{ maxHeight: "85vh" }}>
+        <header className="flex items-center justify-between px-5 py-3 border-b border-border">
+          <div className="text-text">
+            {composer.mode === "reply" ? "Reply to " : "New message to "}
+            <span className="font-medium">{displayName(contact)}</span>
+            {composer.conversationId && (
+              <span className="ml-2 text-text-dim text-xs">· thread #{composer.conversationId}</span>
+            )}
           </div>
           <button
             type="button"
             onClick={onCancel}
-            className="text-text-dim hover:text-text px-2"
+            className="text-text-dim hover:text-text text-lg leading-none px-2"
+            aria-label="Close"
           >×</button>
         </header>
-        <div className="p-4 space-y-3 text-sm">
-          <div className="flex items-center gap-2">
-            <label className="text-text-muted w-20">Channel</label>
-            <select
-              value={composer.channel}
-              onChange={(e) => onChange({ channel: e.target.value })}
-              disabled={composer.mode === "reply"}
-              className="bg-bg-input border border-border rounded px-2 py-1 disabled:opacity-50"
-            >
-              {channels.map((ch) => <option key={ch} value={ch}>{ch}</option>)}
-            </select>
-            <span className="text-text-dim text-xs">→ {addressForChannel(contact, composer.channel)}</span>
+
+        <div className="px-5 py-4 space-y-3 overflow-auto">
+          <div className="flex items-center gap-3">
+            <label className={labelW}>From</label>
+            {sendersForChannel.length > 0 ? (
+              <select
+                value={composer.from}
+                onChange={(e) => onChange({ from: e.target.value })}
+                className={fieldCls}
+              >
+                <option value="">— install default —</option>
+                {sendersForChannel.map((s) => (
+                  <option key={s.address} value={s.address}>
+                    {s.label}{s.isDefault ? "  (default)" : ""}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span className="text-text-dim text-xs italic">
+                no verified {composer.channel} senders — backend will use install default
+              </span>
+            )}
           </div>
+
+          <div className="flex items-center gap-3">
+            <label className={labelW}>To</label>
+            <div className="flex-1 flex items-center gap-2 text-sm">
+              <span className="text-text">{toAddr || <span className="text-red italic">no {composer.channel} address on contact</span>}</span>
+              {channels.length > 1 && (
+                <select
+                  value={composer.channel}
+                  onChange={(e) => {
+                    const newCh = e.target.value;
+                    const def = senders.find((s) => s.channel === newCh && s.isDefault);
+                    onChange({ channel: newCh, from: def?.address || "" });
+                  }}
+                  disabled={composer.mode === "reply"}
+                  className="bg-bg-input border border-border rounded px-2 py-0.5 text-xs disabled:opacity-50"
+                  title="Switch channel"
+                >
+                  {channels.map((ch) => <option key={ch} value={ch}>via {ch}</option>)}
+                </select>
+              )}
+            </div>
+          </div>
+
           {isEmail && (
-            <div className="flex items-center gap-2">
-              <label className="text-text-muted w-20">Subject</label>
+            <div className="flex items-center gap-3">
+              <label className={labelW}>Subject</label>
               <input
                 type="text"
                 value={composer.subject}
                 onChange={(e) => onChange({ subject: e.target.value })}
-                className="flex-1 bg-bg-input border border-border rounded px-2 py-1"
+                placeholder={composer.mode === "reply" ? "Re: …" : "Subject"}
+                className={fieldCls}
               />
             </div>
           )}
-          <div>
-            <label className="text-text-muted text-xs uppercase tracking-wide block mb-1">Message</label>
+
+          <div className="pt-2">
             <textarea
               value={composer.body}
               onChange={(e) => onChange({ body: e.target.value })}
-              rows={8}
-              className="w-full bg-bg-input border border-border rounded px-2 py-1 font-mono text-sm"
-              placeholder="Write…"
+              rows={14}
+              className="w-full bg-bg-input border border-border rounded px-3 py-2 text-sm leading-relaxed resize-y"
+              placeholder="Write your message…"
+              autoFocus
             />
           </div>
+
           {composer.error && (
-            <div className="text-red text-xs">{composer.error}</div>
+            <div className="rounded border border-red/40 bg-red/10 text-red text-xs px-3 py-2 whitespace-pre-wrap">
+              {composer.error}
+            </div>
           )}
         </div>
-        <footer className="flex items-center gap-2 px-4 py-3 border-t border-border">
+
+        <footer className="flex items-center gap-2 px-5 py-3 border-t border-border bg-bg-input/30">
           <button
             type="button"
             onClick={onSend}
-            disabled={composer.busy || !composer.body.trim()}
-            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+            disabled={composer.busy || !composer.body.trim() || !toAddr}
+            className="px-4 py-1.5 text-sm bg-accent text-bg rounded hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
           >{composer.busy ? "Sending…" : "Send"}</button>
           <button
             type="button"
             onClick={onCancel}
-            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input"
+            className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input"
           >Cancel</button>
-          {composer.conversationId && (
-            <span className="ml-auto text-text-dim text-xs">in conversation #{composer.conversationId}</span>
-          )}
+          <span className="ml-auto text-text-dim text-xs">
+            {composer.from
+              ? <>from <span className="font-mono">{composer.from}</span></>
+              : <>using install default sender</>}
+          </span>
         </footer>
       </div>
     </div>
