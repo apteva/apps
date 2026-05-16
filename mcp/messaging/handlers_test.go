@@ -643,6 +643,85 @@ func TestSendersRefresh_UpdatesKnownButIgnoresUnknown(t *testing.T) {
 	}
 }
 
+// v0.11.2 regression: mailbox rows inherit DKIM from their parent and
+// are deliberately NOT created as SES identities — so list_identities
+// won't return them. The refresh's "missing upstream → soft-delete"
+// pass must skip these inherited rows; otherwise every panel reload
+// silently wipes them.
+func TestSendersRefresh_PreservesMailboxesInheritingFromVerifiedParent(t *testing.T) {
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"list_identities": {Success: true, Status: 200, Data: json.RawMessage(`{
+				"EmailIdentities":[
+					{"IdentityName":"socialcast.dev","IdentityType":"DOMAIN","SendingEnabled":true,"VerificationStatus":"SUCCESS"}
+				]
+			}`)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	// Pre-seed: a verified parent + an inheritance-mailbox row at it.
+	// The mailbox row is exactly what sendersCreateEmailViaParentDomain
+	// would persist.
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "socialcast.dev", Kind: "domain",
+		Provider: "aws-ses", ProviderIdentityID: "socialcast.dev",
+		Verified: true, VerificationStatus: "verified",
+		SendingEnabled: true, DkimStatus: "SUCCESS",
+	})
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "test@socialcast.dev", Kind: "email",
+		Provider: "aws-ses", ProviderIdentityID: "test@socialcast.dev",
+		Verified: true, VerificationStatus: "verified",
+		SendingEnabled: true, DkimStatus: "SUCCESS",
+	})
+
+	if _, err := app.toolSendersRefresh(ctx, map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _ := app.toolSendersList(ctx, map[string]any{})
+	r := out.(map[string]any)
+	if r["count"].(int) != 2 {
+		t.Errorf("expected both parent + inherited mailbox to survive refresh, got %v", r)
+	}
+	row, _ := dbFindSender(ctx.AppDB(), "test-proj", "email", "test@socialcast.dev")
+	if row == nil || row.DeletedAt != nil {
+		t.Errorf("inherited mailbox row was soft-deleted: %+v", row)
+	}
+}
+
+// Companion: mailbox rows whose parent ISN'T verified locally still
+// get soft-deleted when missing upstream — they're real SES identities
+// that the operator must've removed via the console, and the refresh
+// should still reflect that.
+func TestSendersRefresh_SoftDeletesStandaloneMailboxesMissingUpstream(t *testing.T) {
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"list_identities": {Success: true, Status: 200, Data: json.RawMessage(`{"EmailIdentities":[]}`)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	// Pre-seed only the mailbox — no parent-domain row exists locally,
+	// so this is a standalone SES identity, not an inheritance row.
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "lonely@x.com", Kind: "email",
+		Provider: "aws-ses", ProviderIdentityID: "lonely@x.com",
+		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
+	})
+
+	if _, err := app.toolSendersRefresh(ctx, map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := app.toolSendersList(ctx, map[string]any{})
+	if out.(map[string]any)["count"].(int) != 0 {
+		t.Errorf("standalone mailbox missing upstream should be soft-deleted, got %+v", out)
+	}
+}
+
 // If the known row vanishes from SES, refresh soft-deletes it locally.
 func TestSendersRefresh_SoftDeletesRowsMissingUpstream(t *testing.T) {
 	plat := &stubPlatform{

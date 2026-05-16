@@ -139,13 +139,40 @@ func (a *App) refreshSESIdentities(ctx *sdk.AppCtx, pid string, connID int64) er
 		}
 		nextToken = raw.NextToken
 	}
-	// Soft-delete local SES rows that didn't come back from the list.
+	// Soft-delete local SES rows that didn't come back from the list —
+	// EXCEPT mailbox rows that inherit from a verified parent domain.
+	// v0.11 added the inheritance flow (senders_create on alice@x.com
+	// when x.com is already DKIM-verified skips SES verify_email and
+	// just persists the local row); without this skip, refresh keeps
+	// soft-deleting those rows on every panel reload because they're
+	// invisible to SES's identity list by design.
+	verifiedParents := map[string]bool{}
 	for _, r := range knownRows {
-		if r.Provider == "aws-ses" && !seen[r.Address] && r.DeletedAt == nil {
-			_ = dbSoftDeleteSender(ctx.AppDB(), pid, r.Channel, r.Address)
+		if r.Kind == "domain" && r.Verified && r.Provider == "aws-ses" && r.DeletedAt == nil {
+			verifiedParents[r.Address] = true
 		}
 	}
+	for _, r := range knownRows {
+		if r.Provider != "aws-ses" || seen[r.Address] || r.DeletedAt != nil {
+			continue
+		}
+		if r.Kind == "email" && verifiedParents[parentDomainOf(r.Address)] {
+			continue
+		}
+		_ = dbSoftDeleteSender(ctx.AppDB(), pid, r.Channel, r.Address)
+	}
 	return nil
+}
+
+// parentDomainOf returns the domain part of a mailbox address — e.g.
+// "alice@acme.com" → "acme.com". Empty string for malformed input
+// (callers treat that as "no parent" and don't skip the soft-delete).
+func parentDomainOf(addr string) string {
+	at := strings.IndexByte(addr, '@')
+	if at <= 0 || at == len(addr)-1 {
+		return ""
+	}
+	return strings.ToLower(addr[at+1:])
 }
 
 // sesStatusToInternal maps SES's VerificationStatus enum to ours.
