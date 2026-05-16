@@ -936,6 +936,65 @@ func TestHandleToolsCall_RejectsGET(t *testing.T) {
 	}
 }
 
+// v0.11.5 regression: SES verify_domain returns "already exists" when
+// the domain identity is in the account from a prior bootstrap (very
+// common: the parent was never persisted locally because some earlier
+// step failed, so the inheritance flow re-runs sendersCreateDomain).
+// We must adopt the existing identity via get_identity_verification
+// and continue, not fail the whole bootstrap.
+func TestSendersCreate_Domain_AdoptsExistingIdentityWhenAlreadyAtSES(t *testing.T) {
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{
+			"email_provider": float64(1),
+			"domains":        float64(42),
+		},
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"verify_domain": {
+				Success: false, Status: 409,
+				Data: json.RawMessage(`{"message":"Email identity socialcast.dev already exist."}`),
+			},
+			"get_identity_verification": {Success: true, Status: 200, Data: json.RawMessage(
+				`{"DkimAttributes":{"Tokens":["a","b","c"],"Status":"SUCCESS"}}`)},
+		},
+		callAppReply: json.RawMessage(`{"action":"updated"}`),
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolSendersCreate(ctx, map[string]any{"address": "test@socialcast.dev"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := out.(*sendersCreateResp)
+	// ses_verify_domain step should be ok with "adopted" annotation.
+	var verifyStep *bootstrapStep
+	for i := range resp.Steps {
+		if resp.Steps[i].Step == "ses_verify_domain" {
+			verifyStep = &resp.Steps[i]
+		}
+	}
+	if verifyStep == nil || !verifyStep.OK {
+		t.Fatalf("expected ok ses_verify_domain after adoption, got %+v", resp.Steps)
+	}
+	if !strings.Contains(verifyStep.Detail, "adopted") {
+		t.Errorf("expected adoption annotation in detail, got %q", verifyStep.Detail)
+	}
+	// DKIM tokens from the existing identity should bubble up.
+	if len(resp.DkimTokens) != 3 || resp.DkimTokens[0] != "a" {
+		t.Errorf("expected adopted DKIM tokens, got %v", resp.DkimTokens)
+	}
+	// Confirm the SES dispatch: verify_domain then get_identity_verification.
+	var saw []string
+	for _, c := range plat.executeCalls {
+		if c.Tool == "verify_domain" || c.Tool == "get_identity_verification" {
+			saw = append(saw, c.Tool)
+		}
+	}
+	if len(saw) != 2 || saw[0] != "verify_domain" || saw[1] != "get_identity_verification" {
+		t.Errorf("unexpected adoption dispatch: %v", saw)
+	}
+}
+
 // ─── Mailbox inherits parent-domain DKIM (no per-mailbox verify) ──
 
 func TestSendersCreate_Mailbox_InheritsFromVerifiedParent(t *testing.T) {

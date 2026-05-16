@@ -386,8 +386,10 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 		resp.Steps = append(resp.Steps, bootstrapStep{Step: "put_s3_bucket_policy", OK: true})
 	}
 
-	// SES verify_domain — outbound + inbound both need DKIM.
-	dkimTokens, dkimStatus, err := bootstrapVerifyDomain(ctx, sesConnID, domain)
+	// SES verify_domain — outbound + inbound both need DKIM. Idempotent:
+	// if the identity already exists in SES, bootstrapVerifyDomain
+	// adopts it and returns the existing DKIM tokens.
+	dkimTokens, dkimStatus, adopted, err := bootstrapVerifyDomain(ctx, sesConnID, domain)
 	if err != nil {
 		resp.Steps = append(resp.Steps, bootstrapStep{Step: "ses_verify_domain", OK: false, Error: err.Error()})
 		return resp, nil
@@ -395,10 +397,11 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 	resp.DkimTokens = dkimTokens
 	resp.DkimStatus = dkimStatus
 	resp.DnsRecords = dkimCNAMERecords(domain, dkimTokens)
-	resp.Steps = append(resp.Steps, bootstrapStep{
-		Step: "ses_verify_domain", OK: true,
-		Detail: fmt.Sprintf("%d dkim tokens", len(dkimTokens)),
-	})
+	detail := fmt.Sprintf("%d dkim tokens", len(dkimTokens))
+	if adopted {
+		detail += " (adopted existing identity)"
+	}
+	resp.Steps = append(resp.Steps, bootstrapStep{Step: "ses_verify_domain", OK: true, Detail: detail})
 
 	if publishDNS {
 		if isAppDepBound(ctx, "domains") {
@@ -934,15 +937,34 @@ func bootstrapSetS3BucketPolicy(ctx *sdk.AppCtx, connID int64, bucket, policy st
 	return nil
 }
 
-func bootstrapVerifyDomain(ctx *sdk.AppCtx, connID int64, domain string) ([]string, string, error) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "verify_domain", map[string]any{
+// bootstrapVerifyDomain creates (or adopts) the SES email identity
+// for `domain` and returns its DKIM tokens + verification status.
+//
+// SES v2 create_email_identity errors with "already exists" if the
+// identity is already in the account — but that's exactly the state
+// the bootstrap wants. When that happens we fall through to
+// get_email_identity to read the existing DKIM tokens. The adopted
+// return flag lets the caller annotate the step.
+func bootstrapVerifyDomain(ctx *sdk.AppCtx, connID int64, domain string) (tokens []string, status string, adopted bool, err error) {
+	res, vErr := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "verify_domain", map[string]any{
 		"EmailIdentity": domain,
 	})
-	if err != nil {
-		return nil, "", fmt.Errorf("verify_domain: %w", err)
+	if vErr != nil {
+		return nil, "", false, fmt.Errorf("verify_domain: %w", vErr)
 	}
 	if res == nil || !res.Success {
-		return nil, "", fmt.Errorf("verify_domain non-2xx: %s", truncateResData(res))
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		if looksLikeAlreadyExists(res, body) {
+			t, s, gErr := getDomainDKIM(ctx, connID, domain)
+			if gErr != nil {
+				return nil, "", false, fmt.Errorf("verify_domain reported exists but get_identity_verification failed: %w", gErr)
+			}
+			return t, s, true, nil
+		}
+		return nil, "", false, fmt.Errorf("verify_domain non-2xx: %s", truncate(body, 400))
 	}
 	var probe struct {
 		DkimAttributes struct {
@@ -951,7 +973,43 @@ func bootstrapVerifyDomain(ctx *sdk.AppCtx, connID int64, domain string) ([]stri
 		} `json:"DkimAttributes"`
 	}
 	_ = json.Unmarshal(res.Data, &probe)
-	return probe.DkimAttributes.Tokens, probe.DkimAttributes.Status, nil
+	return probe.DkimAttributes.Tokens, probe.DkimAttributes.Status, false, nil
+}
+
+// looksLikeAlreadyExists classifies a SES failure as "identity is
+// already registered" — idempotency signal, not a real error.
+func looksLikeAlreadyExists(res *sdk.ExecuteResult, body string) bool {
+	if res != nil && res.Status == 409 {
+		return true
+	}
+	return strings.Contains(strings.ToLower(body), "already exist")
+}
+
+// getDomainDKIM reads the existing DKIM tokens + status for an
+// identity already at SES. Used to adopt a domain bootstrap that
+// hit "already exists".
+func getDomainDKIM(ctx *sdk.AppCtx, connID int64, domain string) ([]string, string, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_identity_verification", map[string]any{
+		"EmailIdentity": domain,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("get_identity_verification: %w", err)
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return nil, "", fmt.Errorf("get_identity_verification non-2xx: %s", truncate(body, 400))
+	}
+	var inner struct {
+		DkimAttributes struct {
+			Tokens []string `json:"Tokens"`
+			Status string   `json:"Status"`
+		} `json:"DkimAttributes"`
+	}
+	_ = json.Unmarshal(res.Data, &inner)
+	return inner.DkimAttributes.Tokens, inner.DkimAttributes.Status, nil
 }
 
 func bootstrapPublishDNSRecord(ctx *sdk.AppCtx, step, domain, name, recType, value string) bootstrapStep {
