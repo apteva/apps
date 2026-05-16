@@ -1,0 +1,25 @@
+# tables-search — read rows back from the Tables app and return them.
+#
+# Pass an email to filter; omit it to list recent rows. The step's
+# Output (tables' rows_search response: { rows: [...], total: N })
+# becomes the run's last-step result and is exposed in the run record.
+#
+# Invoke:
+#   POST /api/apps/workflows/wf/tables-search  { "email": "marco@example.com" }
+
+name: tables-search
+
+trigger:
+  kind: http
+
+steps:
+  - id: search
+    kind: app
+    app: tables
+    tool: rows_search
+    input:
+      table: leads
+      where:
+        - { col: email, op: eq, value: "{{ input.email }}" }
+      order_by: id desc
+      limit: 25

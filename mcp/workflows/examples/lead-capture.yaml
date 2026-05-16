@@ -1,0 +1,50 @@
+# lead-capture — realistic dedupe-then-insert pipeline.
+#
+# Counts existing rows for the email; if any exist, the branch step
+# ends the run early (returns the count). Otherwise inserts a new row
+# tagged with the source and a captured_at timestamp.
+#
+# Demonstrates three things at once:
+#   - templated step input ({{ input.email }})
+#   - a `branch` step using a typed comparison (count == 0)
+#   - cross-step refs (steps.<id>.<field>) — the rows_count result
+#     exposes { count: N }, hence "steps.count.count".
+#
+# Invoke:
+#   POST /api/apps/workflows/wf/lead-capture
+#   { "email": "marco@example.com", "source": "homepage" }
+
+name: lead-capture
+
+trigger:
+  kind: http
+
+steps:
+  # 1. Look up: do we already have this email?
+  - id: count
+    kind: app
+    app: tables
+    tool: rows_count
+    input:
+      table: leads
+      where:
+        - { col: email, op: eq, value: "{{ input.email }}" }
+
+  # 2. Branch: only continue when count is zero. Else: end the run
+  #    successfully (the row already exists; no-op).
+  - id: skip_if_exists
+    kind: branch
+    when: steps.count.count == 0
+    else: { end: true }
+
+  # 3. Insert the new lead.
+  - id: insert
+    kind: app
+    app: tables
+    tool: rows_insert
+    input:
+      table: leads
+      rows:
+        - email: "{{ input.email }}"
+          source: "{{ input.source }}"
+          captured_at: "{{ now }}"

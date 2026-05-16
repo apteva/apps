@@ -1,0 +1,31 @@
+# tables-insert — minimal cross-app example.
+#
+# HTTP-triggered workflow that writes one row into the Tables app's
+# `leads` table via context.call. The function never touches another
+# app's DB directly — the `app` step kind goes through the platform
+# gateway. workflows v0.2.0's requires.dynamic_app_calls=true unblocks
+# the underlying gate (the call would 403 without it).
+#
+# Deploy with workflows_create { source: "<this file>" }.
+#
+# Pre-req: a `leads` table with at least an `email` text column.
+#   tables_create { name: "leads", columns: [{ name: "email", type: "text" }] }
+#
+# Invoke:
+#   POST /api/apps/workflows/wf/tables-insert  { "email": "marco@example.com" }
+#   → { "steps": { "insert": { "ids": [1], "inserted": 1 } }, ... }
+
+name: tables-insert
+
+trigger:
+  kind: http
+
+steps:
+  - id: insert
+    kind: app
+    app: tables
+    tool: rows_insert
+    input:
+      table: leads
+      rows:
+        - email: "{{ input.email }}"
