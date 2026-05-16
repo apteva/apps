@@ -177,6 +177,9 @@ const API = "/api/apps/messaging";
 
 type Tab = "outbox" | "inbox" | "templates" | "routes" | "suppressions" | "senders" | "compose";
 
+type Notice = { kind: "error" | "info"; text: string };
+type Notify = (kind: Notice["kind"], text: string) => void;
+
 // ─── Component ────────────────────────────────────────────────────
 export default function MessagingPanel({ projectId, installId }: NativePanelProps) {
   const [tab, setTab] = useState<Tab>("outbox");
@@ -194,6 +197,18 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
   // empty Senders tab — most often this means the email_provider
   // role isn't bound to an aws-ses connection on the install.
   const [sendersError, setSendersError] = useState<string>("");
+
+  // Panel-wide transient notice (errors from handlers + info messages
+  // like "copied!"). Replaces native alert(). Auto-dismisses; errors
+  // get longer because the operator usually wants to read them.
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const notify = useCallback<Notify>((kind, text) => setNotice({ kind, text }), []);
+  useEffect(() => {
+    if (!notice) return;
+    const ms = notice.kind === "error" ? 8000 : 4000;
+    const t = setTimeout(() => setNotice(null), ms);
+    return () => clearTimeout(t);
+  }, [notice]);
 
   const [selected, setSelected] = useState<MessageRow | null>(null);
   const [selectedEvents, setSelectedEvents] = useState<DeliveryEvent[]>([]);
@@ -304,6 +319,8 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
 
   return (
     <div className="h-full flex flex-col">
+      {notice && <Toast notice={notice} onDismiss={() => setNotice(null)} />}
+
       {/* Sandbox banner — only when SES reports we're sandboxed. */}
       {quota && quota.sandboxed && (
         <div className="px-6 py-2 bg-yellow-500/10 border-b border-yellow-500/30 text-xs text-yellow-300">
@@ -357,10 +374,10 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
               gotoSenders={() => setTab("senders")}
             />
           )}
-          {tab === "senders" && <SendersView rows={senders} quota={quota} api={api} reload={reload} error={sendersError} />}
-          {tab === "templates" && <TemplatesView rows={templates} api={api} reload={reload} />}
-          {tab === "routes" && <RoutesView rows={routes} api={api} reload={reload} />}
-          {tab === "suppressions" && <SuppressionsView rows={suppressions} api={api} reload={reload} />}
+          {tab === "senders" && <SendersView rows={senders} quota={quota} api={api} reload={reload} error={sendersError} notify={notify} />}
+          {tab === "templates" && <TemplatesView rows={templates} api={api} reload={reload} notify={notify} />}
+          {tab === "routes" && <RoutesView rows={routes} api={api} reload={reload} notify={notify} />}
+          {tab === "suppressions" && <SuppressionsView rows={suppressions} api={api} reload={reload} notify={notify} />}
         </div>
 
         {/* Detail pane (only meaningful for messages) */}
@@ -665,13 +682,14 @@ function ComposeView({
 }
 
 function SendersView({
-  rows, quota, api, reload, error,
+  rows, quota, api, reload, error, notify,
 }: {
   rows: SenderRow[];
   quota: QuotaInfo | null;
   api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
   reload: () => void;
   error: string;
+  notify: Notify;
 }) {
   const [addr, setAddr] = useState("");
   const [inbound, setInbound] = useState<"auto" | "true" | "false">("auto");
@@ -772,7 +790,7 @@ function SendersView({
     try {
       await api("POST", "/tools/call", {}, { tool: "senders_get", args: { address } });
       reload();
-    } catch (e) { alert((e as Error).message); }
+    } catch (e) { notify("error", `Re-check failed: ${(e as Error).message}`); }
   };
 
   const remove = async (address: string) => {
@@ -780,7 +798,7 @@ function SendersView({
     try {
       await api("POST", "/tools/call", {}, { tool: "senders_delete", args: { address } });
       reload();
-    } catch (e) { alert((e as Error).message); }
+    } catch (e) { notify("error", `Delete failed: ${(e as Error).message}`); }
   };
 
   return (
@@ -982,7 +1000,7 @@ function SendersView({
   );
 }
 
-function TemplatesView({ rows, api, reload }: { rows: TemplateRow[]; api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>; reload: () => void }) {
+function TemplatesView({ rows, api, reload, notify }: { rows: TemplateRow[]; api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>; reload: () => void; notify: Notify }) {
   if (rows.length === 0) {
     return <div className="p-6 text-text-dim text-sm">No templates yet. Create one via the <code>template_create</code> tool.</div>;
   }
@@ -992,7 +1010,7 @@ function TemplatesView({ rows, api, reload }: { rows: TemplateRow[]; api: <T,>(m
       await api("POST", "/tools/call", {}, { tool: "template_delete", args: { id } });
       reload();
     } catch (e) {
-      alert("Delete failed: " + (e as Error).message);
+      notify("error", `Delete failed: ${(e as Error).message}`);
     }
   };
   return (
@@ -1023,7 +1041,7 @@ function TemplatesView({ rows, api, reload }: { rows: TemplateRow[]; api: <T,>(m
   );
 }
 
-function RoutesView({ rows, api, reload }: { rows: InboundRoute[]; api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>; reload: () => void }) {
+function RoutesView({ rows, api, reload, notify }: { rows: InboundRoute[]; api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>; reload: () => void; notify: Notify }) {
   const [pattern, setPattern] = useState("");
   const [targetApp, setTargetApp] = useState("");
   const [targetRoute, setTargetRoute] = useState("/inbound");
@@ -1038,7 +1056,7 @@ function RoutesView({ rows, api, reload }: { rows: InboundRoute[]; api: <T,>(m: 
       setPattern(""); setTargetApp(""); setTargetRoute("/inbound");
       reload();
     } catch (e) {
-      alert("Add failed: " + (e as Error).message);
+      notify("error", `Add failed: ${(e as Error).message}`);
     }
   };
   const remove = async (id: number) => {
@@ -1047,7 +1065,7 @@ function RoutesView({ rows, api, reload }: { rows: InboundRoute[]; api: <T,>(m: 
       await api("POST", "/tools/call", {}, { tool: "inbound_route_delete", args: { id } });
       reload();
     } catch (e) {
-      alert((e as Error).message);
+      notify("error", `Delete failed: ${(e as Error).message}`);
     }
   };
   return (
@@ -1094,14 +1112,14 @@ function RoutesView({ rows, api, reload }: { rows: InboundRoute[]; api: <T,>(m: 
   );
 }
 
-function SuppressionsView({ rows, api, reload }: { rows: SuppressionRow[]; api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>; reload: () => void }) {
+function SuppressionsView({ rows, api, reload, notify }: { rows: SuppressionRow[]; api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>; reload: () => void; notify: Notify }) {
   const remove = async (addr: string) => {
     if (!confirm(`Remove ${stripScheme(addr)} from suppression?`)) return;
     try {
       await api("POST", "/tools/call", {}, { tool: "suppression_remove", args: { address: addr } });
       reload();
     } catch (e) {
-      alert((e as Error).message);
+      notify("error", `Remove failed: ${(e as Error).message}`);
     }
   };
   if (rows.length === 0) {
@@ -1342,4 +1360,29 @@ function shortTime(s?: string): string {
   } catch {
     return s;
   }
+}
+
+// Panel-local toast. Replaces native alert() so a failed delete /
+// re-check / add doesn't yank focus into a modal that blocks the rest
+// of the UI. Auto-dismisses (see notice effect in MessagingPanel) and
+// can be cleared manually via the × button.
+function Toast({ notice, onDismiss }: { notice: Notice; onDismiss: () => void }) {
+  const palette = notice.kind === "error"
+    ? "border-red-500/30 bg-red-500/10 text-red-300"
+    : "border-accent/30 bg-accent/10 text-text";
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className={`mx-4 mt-3 px-3 py-2 rounded border ${palette} flex items-start gap-2 text-sm`}
+    >
+      <span className="flex-1 whitespace-pre-wrap break-words">{notice.text}</span>
+      <button
+        type="button"
+        onClick={onDismiss}
+        aria-label="Dismiss"
+        className="text-text-dim hover:text-text shrink-0"
+      >×</button>
+    </div>
+  );
 }
