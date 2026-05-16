@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.13.0
+version: 0.14.0
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -57,6 +57,18 @@ provides:
     - { name: post_create,                 description: "Create + publish (or schedule) a post across N social_account_ids. Args: body, social_account_ids[], schedule_at?, media_storage_ids?." }
     - { name: post_list,                   description: "List recent posts with per-target status. Args: limit?, status?." }
     - { name: post_retry,                  description: "Re-attempt failed targets on a post. Args: post_id." }
+    - { name: inbox_list,                  description: "List inbox items (comments, DMs, mentions, reviews) across connected social accounts. Filters: kinds, status, social_account_ids, since, limit." }
+    - { name: inbox_get,                   description: "Fetch one inbox item by id; with_thread=true returns the surrounding conversation." }
+    - { name: inbox_mark_read,             description: "Mark one or more inbox items as read (local-only state)." }
+    - { name: inbox_mark_unread,           description: "Mark one or more inbox items as unread (local-only state)." }
+    - { name: inbox_archive,               description: "Archive one or more inbox items (hides from default list view)." }
+    - { name: inbox_reply,                 description: "Reply to a comment or DM. Routes by kind. Returns the standard {status, reason?, error?, external_id?, permalink?} envelope." }
+    - { name: inbox_private_reply,         description: "Instagram-only: reply to a comment by sending the author a DM." }
+    - { name: inbox_hide,                  description: "Hide a comment on the platform side (Facebook, Instagram). Unsupported elsewhere." }
+    - { name: inbox_unhide,                description: "Reverse inbox_hide." }
+    - { name: inbox_like,                  description: "Like a comment on the platform side (Facebook, Instagram)." }
+    - { name: inbox_delete,                description: "Delete a comment where the platform permits it." }
+    - { name: inbox_sync,                  description: "Trigger an out-of-cycle inbox poll for one or more accounts (or all active accounts when omitted)." }
   ui_panels:
     - slot: project.page
       label: Social

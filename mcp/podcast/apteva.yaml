@@ -1,0 +1,112 @@
+schema: apteva-app/v1
+
+name: podcast
+display_name: Podcast
+version: 0.1.0
+description: |
+  Podcast hosting + management for Apteva. Owns shows, episodes, and
+  the RSS feed; serves the public feed XML and an IAB-style download
+  tracking redirect from its own sidecar. Audio bytes live in storage;
+  duration/byte-length probing and transcription run through media.
+
+  Composes on top of existing apps:
+    - storage   (required) — hosts the audio files. Apple needs range
+                requests, ETag and Cache-Control on the enclosure URL,
+                plus a public visibility tier — storage already does
+                all of that, and bytes never proxy through this sidecar.
+    - media     (required) — probes each uploaded audio file for exact
+                duration + byte length (RSS correctness), normalises
+                source uploads to MP3, and supplies transcripts.
+    - analytics (optional) — every download/play hit is forwarded via
+                analytics_track; the panel reads analytics_query/top.
+                Soft dependency: track calls fail silently if absent.
+    - routes    (optional) — claims a custom feed hostname so inbound
+                HTTP for feeds.example.com lands on this sidecar.
+                Without it, the feed is served path-based under the
+                platform host.
+    - domains   (optional) — when the feed hostname is Apteva-managed,
+                upserts a CNAME pointing at the platform. Same pattern
+                the redirects app uses.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/podcast
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/podcast/icon.png
+tags: [podcast, rss, audio, hosting, media]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: storage
+      reason: "Audio hosting — stores the episode audio files and serves the public enclosure URLs with range-request support."
+    - name: media
+      reason: "Audio probe + transcripts — probes uploads for exact duration + byte length (RSS correctness), normalises to MP3, supplies transcripts."
+    - name: analytics
+      optional: true
+      reason: "Download analytics — forwards every download/play hit via analytics_track and powers the stats panel. Skip to run without listener metrics."
+    - name: routes
+      optional: true
+      reason: "Custom feed hostname — claims feeds.example.com on apteva-server's ingress map. Without it the feed is served path-based under the platform host."
+    - name: domains
+      optional: true
+      reason: "DNS auto-config — when the feed hostname is in domains, upserts a CNAME so DNS points at the platform. Skip to manage DNS elsewhere."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: show_create,      description: "Create a podcast show. Args: title (req), description? , author? , owner_email? , language? (default 'en'), category? (iTunes category), explicit? (default false), link? (website URL), podcast_type? ('episodic'|'serial', default 'episodic'), image_file_id? (storage file id for cover art), hostname? (custom feed host), slug? (feed URL slug; derived from title when omitted), project_id? (scope=global)." }
+    - { name: show_update,      description: "Update a show by id. Same arg shape as show_create; only provided fields change." }
+    - { name: show_get,         description: "Fetch one show by id, including its feed URL. Args: id." }
+    - { name: show_list,        description: "List shows. Args: project_id?, limit? (default 100), offset? (default 0)." }
+    - { name: show_delete,      description: "Delete a show and all its episodes. Args: id." }
+    - { name: episode_create,   description: "Create an episode (status starts 'draft'). Args: show_id (req), title (req), description? (show notes HTML), season_number? , episode_number? , episode_type? ('full'|'trailer'|'bonus', default 'full'), audio_file_id? (storage file id), image_file_id? , guid? (stable id; generated when omitted)." }
+    - { name: episode_update,   description: "Update an episode by id. Same arg shape as episode_create; only provided fields change." }
+    - { name: episode_get,      description: "Fetch one episode by id. Args: id." }
+    - { name: episode_list,     description: "List episodes. Args: show_id? (filter), status? ('draft'|'scheduled'|'published'), limit? (default 100), offset? (default 0)." }
+    - { name: episode_delete,   description: "Delete an episode. Args: id." }
+    - { name: episode_set_audio, description: "Attach (or replace) an episode's audio file. Calls media to probe exact duration + byte length and caches them on the episode. Args: id (req), audio_file_id (req storage file id)." }
+    - { name: episode_publish,  description: "Publish an episode immediately. Requires an attached, probed audio file. Args: id." }
+    - { name: episode_unpublish, description: "Move a published episode back to draft (drops it from the feed). Args: id." }
+    - { name: episode_schedule, description: "Schedule an episode to publish at a future time. Args: id (req), publish_at (req RFC3339). The scheduled-publish worker flips it to 'published' at that time." }
+    - { name: feed_get_url,     description: "Return the public RSS feed URL for a show. Args: show_id." }
+    - { name: feed_validate,    description: "Dry-run feed health check: reports episodes missing audio, missing duration, missing cover art, and other directory-rejection risks. Args: show_id." }
+  ui_panels:
+    - { slot: project.page, label: "Podcast", icon: mic, entry: /ui/PodcastPanel.mjs }
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/podcast
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/podcast.db
+  migrations: migrations/
+
+config_schema:
+  - name: feed_cache_seconds
+    type: text
+    default: "300"
+    label: "Feed cache (seconds)"
+    description: "How long a generated RSS feed is cached before regeneration. Podcast clients poll feeds frequently; 300s keeps load low without delaying new episodes noticeably."
+  - name: download_dedupe_minutes
+    type: text
+    default: "1440"
+    label: "Download dedupe window (minutes)"
+    description: "IAB-style download counting: repeat hits from the same IP+User-Agent inside this window count once. 1440 = 24h, the IAB v2.1 default."
+  - name: default_explicit
+    type: text
+    default: "false"
+    label: "Default explicit flag"
+    description: "Default value for the iTunes <itunes:explicit> tag on new shows."
+
+upgrade_policy: auto-patch

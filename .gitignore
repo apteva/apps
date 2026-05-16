@@ -29,18 +29,22 @@ mcp/live-link/live-link
 mcp/media/media
 mcp/messaging/messaging
 mcp/mqtt/mqtt
+mcp/podcast/podcast
 mcp/redirects/redirects
 mcp/robot/robot
+mcp/routes/routes
 mcp/social/social
 mcp/status/status
 mcp/storage/storage
 mcp/tables/tables
 mcp/tapo/tapo
 mcp/tasks/tasks
+mcp/telephony/telephony
 mcp/todo/todo
 mcp/torrent/torrent
 mcp/trading/trading
 mcp/trips/trips
+mcp/workflows/workflows
 
 # Stray apps-root binary from accidental `go build` in the wrong dir.
 /media

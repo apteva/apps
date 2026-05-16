@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.6.1
+version: 0.14.0
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -79,6 +79,18 @@ provides:
     - { name: post_create,                description: "Create + publish (or schedule) a post across accounts." }
     - { name: post_list,                  description: "List recent posts." }
     - { name: post_retry,                 description: "Re-attempt failed targets on a post." }
+    - { name: inbox_list,                 description: "List inbox items (comments, DMs, mentions, reviews) from connected accounts." }
+    - { name: inbox_get,                  description: "Fetch one inbox item, optionally with the surrounding thread." }
+    - { name: inbox_mark_read,            description: "Mark inbox items read (local-only)." }
+    - { name: inbox_mark_unread,          description: "Mark inbox items unread (local-only)." }
+    - { name: inbox_archive,              description: "Archive inbox items (local-only)." }
+    - { name: inbox_reply,                description: "Reply to a comment or DM (routes by kind)." }
+    - { name: inbox_private_reply,        description: "Reply to an Instagram comment as a DM (IG-only)." }
+    - { name: inbox_hide,                 description: "Hide a comment on the platform side." }
+    - { name: inbox_unhide,               description: "Reverse inbox_hide." }
+    - { name: inbox_like,                 description: "Like a comment on the platform side." }
+    - { name: inbox_delete,               description: "Delete a comment where the platform permits." }
+    - { name: inbox_sync,                 description: "Trigger an out-of-cycle inbox poll for one or more accounts." }
   ui_panels:
     - slot: project.page
       label: Social
@@ -203,6 +215,25 @@ type platformDef struct {
 	// Empty for platforms with no overrides today (Twitter, FB, IG,
 	// LinkedIn, TikTok in v1).
 	OptionFields []optionField
+	// Inbox declares which inbound capabilities (comments, DMs,
+	// mentions, reviews) this platform supports. Drives the
+	// `unsupported` status returned by inbox_* tools and the cadence
+	// the poll worker uses per account. Zero-valued struct = no inbox
+	// support yet.
+	Inbox inboxCaps
+}
+
+// inboxCaps captures the per-platform inbound surface. A "Read" flag
+// means the poll worker pulls items of that kind for this platform;
+// a "Write" flag means inbox_reply / inbox_send can target it.
+// PrivateReply is Instagram-only (reply to a comment as a DM).
+type inboxCaps struct {
+	CommentsRead, CommentsWrite                          bool
+	CommentsHide, CommentsLike, CommentsDelete           bool
+	DMsRead, DMsWrite                                    bool
+	MentionsRead                                         bool
+	ReviewsRead, ReviewsReply                            bool
+	PrivateReply                                         bool
 }
 
 // optionField describes one customizable knob on a platform — its key
@@ -236,6 +267,14 @@ var platforms = map[string]platformDef{
 		ProfileAvatarField: "profile_image_url",
 		DeleteTool:         "delete_tweet",
 		DeleteIDField:      "tweet_id",
+		Inbox: inboxCaps{
+			CommentsRead:    true,
+			CommentsWrite:   true,
+			CommentsDelete:  true,
+			DMsRead:         true,
+			DMsWrite:        true,
+			MentionsRead:    true,
+		},
 	},
 	"facebook": {
 		Platform:        "facebook",
@@ -279,6 +318,16 @@ var platforms = map[string]platformDef{
 		// (same pattern + same field name as the post path).
 		DeleteTool:    "facebook_delete_post",
 		DeleteIDField: "postId",
+		Inbox: inboxCaps{
+			CommentsRead:   true,
+			CommentsWrite:  true,
+			CommentsHide:   true,
+			CommentsLike:   true,
+			CommentsDelete: true,
+			MentionsRead:   true,
+			ReviewsRead:    true,
+			ReviewsReply:   true,
+		},
 	},
 	"instagram": {
 		Platform: "instagram",
@@ -320,6 +369,17 @@ var platforms = map[string]platformDef{
 		// account, not the user-level token).
 		PageAccessTokenField: "access_token",
 		PostTokenInputField:  "access_token",
+		Inbox: inboxCaps{
+			CommentsRead:   true,
+			CommentsWrite:  true,
+			CommentsHide:   true,
+			CommentsLike:   true,
+			CommentsDelete: true,
+			DMsRead:        true,
+			DMsWrite:       true,
+			MentionsRead:   true,
+			PrivateReply:   true,
+		},
 	},
 	"tiktok": {
 		Platform:        "tiktok",
@@ -349,6 +409,12 @@ var platforms = map[string]platformDef{
 		ProfileToolArgs: map[string]any{
 			"fields": "open_id,display_name,avatar_url",
 		},
+		// TikTok exposes a "publish comment" verb but no read API for
+		// comments on others' content — leaving Comments* false until
+		// that side lands. Until then inbox_reply against tiktok is
+		// effectively a "create a top-level comment" surface; we'll
+		// expose it once we wire the write endpoint.
+		Inbox: inboxCaps{},
 	},
 	"youtube": {
 		Platform:        "youtube",
@@ -400,6 +466,11 @@ var platforms = map[string]platformDef{
 				Help: "Defaults to private if blank — safer for first-pass uploads."},
 			{Name: "category", Type: "text", Label: "Category ID",
 				Help: "YouTube numeric category id (e.g. 22 = People & Blogs, 27 = Education). Optional."},
+		},
+		Inbox: inboxCaps{
+			CommentsRead:   true,
+			CommentsWrite:  true,
+			CommentsDelete: true,
 		},
 	},
 }
@@ -612,6 +683,115 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 			}, []string{"post_id"}),
 			Handler: a.toolPostEdit,
+		},
+		// ─── inbox ────────────────────────────────────────────────
+		{
+			Name: "inbox_list",
+			Description: "List inbox items (comments, DMs, mentions, reviews) pulled from connected social accounts. Items are kind-discriminated; filter by `kinds` (comment|dm|mention|review), `status` (unread|read|replied|hidden|archived; archived hidden by default), `social_account_ids`, and `since` (RFC3339). Returns {items: [...], count}. Newest first by occurred_at. Args: social_account_ids?, kinds?, status?, since?, limit? (default 50, max 200).",
+			InputSchema: schemaObject(map[string]any{
+				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+				"kinds":              map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"status":             map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"since":              map[string]any{"type": "string"},
+				"limit":              map[string]any{"type": "integer", "default": 50},
+			}, nil),
+			Handler: a.toolInboxList,
+		},
+		{
+			Name:        "inbox_get",
+			Description: "Fetch one inbox item by id. Pass with_thread=true to also return every sibling in the same conversation (walked via parent_external_id). Args: id, with_thread?.",
+			InputSchema: schemaObject(map[string]any{
+				"id":          map[string]any{"type": "integer"},
+				"with_thread": map[string]any{"type": "boolean"},
+			}, []string{"id"}),
+			Handler: a.toolInboxGet,
+		},
+		{
+			Name:        "inbox_mark_read",
+			Description: "Mark one or more inbox items as read. Local-only — no platform call. Args: id OR ids[].",
+			InputSchema: schemaObject(map[string]any{
+				"id":  map[string]any{"type": "integer"},
+				"ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+			}, nil),
+			Handler: a.toolInboxMarkRead,
+		},
+		{
+			Name:        "inbox_mark_unread",
+			Description: "Mark one or more inbox items as unread. Local-only. Args: id OR ids[].",
+			InputSchema: schemaObject(map[string]any{
+				"id":  map[string]any{"type": "integer"},
+				"ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+			}, nil),
+			Handler: a.toolInboxMarkUnread,
+		},
+		{
+			Name:        "inbox_archive",
+			Description: "Archive one or more inbox items (removes from the default list view; reverse with inbox_mark_unread/read). Local-only. Args: id OR ids[].",
+			InputSchema: schemaObject(map[string]any{
+				"id":  map[string]any{"type": "integer"},
+				"ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+			}, nil),
+			Handler: a.toolInboxArchive,
+		},
+		{
+			Name: "inbox_reply",
+			Description: "Reply to an inbox item. Routes by kind — a `comment` produces a child comment, a `dm` produces an outbound message in the same thread. Returns {status: ok|unsupported|skipped|failed, reason?, error?, external_id?, permalink?}. " +
+				"v1 status: every platform currently returns `unsupported` with reason `platform handler not yet wired`; Instagram + Twitter implementations land first. Args: id, body, media_storage_ids?.",
+			InputSchema: schemaObject(map[string]any{
+				"id":                map[string]any{"type": "integer"},
+				"body":              map[string]any{"type": "string"},
+				"media_storage_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+			}, []string{"id", "body"}),
+			Handler: a.toolInboxReply,
+		},
+		{
+			Name:        "inbox_private_reply",
+			Description: "Reply to an Instagram comment by sending the author a DM. IG-only — returns `unsupported` for every other platform. Args: id (must be a comment kind), body.",
+			InputSchema: schemaObject(map[string]any{
+				"id":   map[string]any{"type": "integer"},
+				"body": map[string]any{"type": "string"},
+			}, []string{"id", "body"}),
+			Handler: a.toolInboxPrivateReply,
+		},
+		{
+			Name:        "inbox_hide",
+			Description: "Hide a comment on the platform side (Facebook, Instagram). Returns `unsupported` for platforms without a hide verb. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolInboxHide,
+		},
+		{
+			Name:        "inbox_unhide",
+			Description: "Reverse inbox_hide. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolInboxUnhide,
+		},
+		{
+			Name:        "inbox_like",
+			Description: "Like a comment on the platform side (Facebook, Instagram). Returns `unsupported` elsewhere. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolInboxLike,
+		},
+		{
+			Name:        "inbox_delete",
+			Description: "Delete a comment we authored (or, where the platform permits, any comment on our content). Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolInboxDelete,
+		},
+		{
+			Name:        "inbox_sync",
+			Description: "Trigger an out-of-cycle poll of the named social accounts (or all active accounts when omitted). Returns one {status, reason?, error?} per account. v1 status: poll worker not yet wired, so every account returns `unsupported`. Args: social_account_ids?.",
+			InputSchema: schemaObject(map[string]any{
+				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+			}, nil),
+			Handler: a.toolInboxSync,
 		},
 	}
 	tools = append(tools, a.profileTools()...)

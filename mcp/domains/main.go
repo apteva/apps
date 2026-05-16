@@ -677,15 +677,36 @@ type namecheapHost struct {
 	MXPref  string `xml:"MXPref,attr"`
 }
 
-type namecheapHostsResponse struct {
-	XMLName xml.Name `xml:"ApiResponse"`
-	Status  string   `xml:"Status,attr"`
-	Errors  struct {
+// namecheapStatus is the Status + Errors envelope every Namecheap API
+// response carries. Embed in per-command response structs to share the
+// error-detection helper.
+type namecheapStatus struct {
+	Status string `xml:"Status,attr"`
+	Errors struct {
 		Errors []struct {
 			Number string `xml:"Number,attr"`
 			Text   string `xml:",chardata"`
 		} `xml:"Error"`
 	} `xml:"Errors"`
+}
+
+func (s namecheapStatus) err() error {
+	if !strings.EqualFold(s.Status, "ERROR") && len(s.Errors.Errors) == 0 {
+		return nil
+	}
+	var msgs []string
+	for _, e := range s.Errors.Errors {
+		msgs = append(msgs, fmt.Sprintf("[%s] %s", e.Number, strings.TrimSpace(e.Text)))
+	}
+	if len(msgs) == 0 {
+		return fmt.Errorf("namecheap error: status=%s (no details)", s.Status)
+	}
+	return fmt.Errorf("namecheap error: %s", strings.Join(msgs, "; "))
+}
+
+type namecheapHostsResponse struct {
+	XMLName xml.Name `xml:"ApiResponse"`
+	namecheapStatus
 	CommandResponse struct {
 		Hosts struct {
 			Domain string          `xml:"Domain,attr"`
@@ -731,12 +752,8 @@ func (n *namecheapProvider) callGetHosts(ctx *sdk.AppCtx, domain string) (*namec
 	if err := xml.Unmarshal([]byte(body), &parsed); err != nil {
 		return nil, fmt.Errorf("parse namecheap XML: %w", err)
 	}
-	if strings.EqualFold(parsed.Status, "ERROR") || len(parsed.Errors.Errors) > 0 {
-		var msgs []string
-		for _, e := range parsed.Errors.Errors {
-			msgs = append(msgs, fmt.Sprintf("[%s] %s", e.Number, strings.TrimSpace(e.Text)))
-		}
-		return nil, fmt.Errorf("namecheap error: %s", strings.Join(msgs, "; "))
+	if err := parsed.err(); err != nil {
+		return nil, err
 	}
 	return &parsed, nil
 }
@@ -814,8 +831,14 @@ func (n *namecheapProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value st
 			Address: content,
 			TTL:     fmt.Sprintf("%d", ttl),
 		}
-		if prio != "" {
+		switch {
+		case prio != "":
 			newHost.MXPref = prio
+		case rtype == "MX":
+			// Namecheap rejects MX records without an MXPref. The tool
+			// docs ask for "<prio> <host>" values, but be forgiving when
+			// the caller forgets and pass a conventional default.
+			newHost.MXPref = "10"
 		}
 		keep = append(keep, newHost)
 		action = "created"
@@ -874,11 +897,18 @@ func (n *namecheapProvider) writeHosts(ctx *sdk.AppCtx, domain string, hosts []n
 	if err != nil {
 		return err
 	}
-	body, _ := xmlDataToString(raw)
-	if strings.Contains(body, "<Status>ERROR") || strings.Contains(strings.ToLower(body), "error") && strings.Contains(body, "<Number>") {
-		return fmt.Errorf("namecheap setHosts error: %s", truncate(body, 400))
+	body, err := xmlDataToString(raw)
+	if err != nil {
+		return err
 	}
-	return nil
+	var parsed struct {
+		XMLName xml.Name `xml:"ApiResponse"`
+		namecheapStatus
+	}
+	if err := xml.Unmarshal([]byte(body), &parsed); err != nil {
+		return fmt.Errorf("parse namecheap setHosts XML: %w", err)
+	}
+	return parsed.err()
 }
 
 // splitSLDTLD splits "acme.com" into ("acme", "com"). Subdomains are

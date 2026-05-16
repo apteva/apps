@@ -12,7 +12,7 @@
 
 export interface StepDef {
   id: string;
-  kind: "http" | "function" | "app" | "emit" | "branch";
+  kind: "http" | "function" | "app" | "integration" | "emit" | "branch";
   // Common
   input?: unknown;
   on_error?: GotoSpec;
@@ -24,8 +24,10 @@ export interface StepDef {
   method?: string;
   // function
   name?: string;
-  // app
+  // app / integration
   tool?: string;
+  // integration
+  connection_id?: number;
   // emit
   topic?: string;
   data?: unknown;

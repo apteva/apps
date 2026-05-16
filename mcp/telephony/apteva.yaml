@@ -1,0 +1,71 @@
+schema: apteva-app/v1
+
+name: telephony
+display_name: Telephony
+version: 0.1.0
+description: |
+  Place outbound voice calls via Twilio. Each call runs as a realtime
+  sub-thread in core that the agent controls via send/done — the same
+  shape as text workers, with carrier audio bridged through Twilio
+  Media Streams. Audio I/O stays in this sidecar; conversation state
+  lives in the realtime thread; tool decisions stay with the parent
+  agent.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/telephony
+tags: [voice, telephony, communication]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.connections.execute        # invoke Twilio API
+    - platform.connections.read_credentials  # read carrier phone_number to fill make_call's From=
+    - platform.realtime.spawn             # open realtime threads in core
+  integrations:
+    - role: carrier
+      kind: integration
+      compatible_slugs: [twilio]
+      capabilities: [voice.place, voice.update]
+      tools:
+        voice.place:  make_call
+        voice.update: update_call    # hangup via Status=completed
+      events:
+        - call.initiated
+        - call.ringing
+        - call.completed
+        - call.failed
+      required: true
+      label: "Twilio carrier"
+      hint: "Provide a Twilio connection with a voice-capable phone number. The number's From= value is read from the connection's phone_number field."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: telephony_place_call,   description: "Place an outbound voice call. Args: to (E.164), directive, voice?, timeout_sec?. The conversation runs in a realtime sub-thread; reach it via send(id=<thread_id>, text=...)." }
+    - { name: telephony_hangup,       description: "End an active call. Args: call_id." }
+    - { name: telephony_active_calls, description: "List ongoing calls with thread IDs and durations." }
+  ui_panels:
+    - slot: project.page
+      label: Calls
+      icon: phone
+      entry: /ui/CallsPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/telephony
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/telephony.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch

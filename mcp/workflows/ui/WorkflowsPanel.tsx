@@ -4,10 +4,9 @@
 // React via importmap; talks to the workflows sidecar through
 // /api/apps/workflows/* with same-origin cookies.
 //
-// Authoring is intentionally not in v0.1 of this panel — defining
-// a workflow is a YAML editing task that the agent handles via
-// `workflows_create`. The dashboard surface is for inspection,
-// manual run, and replay.
+// Authoring is via the "+ New" button: it generates a minimal
+// starter YAML from a name + trigger picker, POSTs to
+// /workflows, and drops the user straight into the graph editor.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { parse as parseYAML, stringify as stringifyYAML } from "yaml";
@@ -195,6 +194,7 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
   const [activeRun, setActiveRun] = useState<Run | null>(null);
   const [err, setErr] = useState<string>("");
   const [showRunModal, setShowRunModal] = useState(false);
+  const [showNewModal, setShowNewModal] = useState(false);
 
   const qs = useCallback(
     (extra: Record<string, string> = {}) =>
@@ -349,6 +349,16 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
     }
   };
 
+  const createWorkflow = async (name: string, source: string) => {
+    const res = await apiCall<{ workflow: Workflow }>("POST", "/workflows", {
+      name,
+      source,
+    });
+    setShowNewModal(false);
+    await loadWorkflows();
+    if (res?.workflow?.id) select(res.workflow.id);
+  };
+
   // ─── Render ──────────────────────────────────────────────────────
 
   return (
@@ -374,15 +384,32 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
         >
           Refresh
         </button>
+        <button
+          type="button"
+          onClick={() => setShowNewModal(true)}
+          className="ml-auto px-3 py-1 text-sm bg-accent text-bg rounded font-bold"
+        >
+          + New workflow
+        </button>
       </header>
 
       <main className="flex-1 overflow-auto">
         {err ? (
           <div className="p-6 text-red text-sm">{err}</div>
         ) : workflows.length === 0 ? (
-          <div className="py-12 px-6 text-center text-text-muted text-sm">
-            No workflows yet. Ask the agent to <span className="text-text">create one</span> via{" "}
-            <code className="text-accent text-xs">workflows_create</code>.
+          <div className="py-12 px-6 text-center text-text-muted text-sm flex flex-col items-center gap-3">
+            <p>No workflows yet.</p>
+            <button
+              type="button"
+              onClick={() => setShowNewModal(true)}
+              className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold"
+            >
+              + New workflow
+            </button>
+            <p className="text-text-dim text-xs">
+              Or ask the agent to create one via{" "}
+              <code className="text-accent text-xs">workflows_create</code>.
+            </p>
           </div>
         ) : (
           <table className="w-full text-sm">
@@ -445,8 +472,263 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
           onRun={runWith}
         />
       )}
+
+      {showNewModal && (
+        <NewWorkflowModal
+          onClose={() => setShowNewModal(false)}
+          onCreate={createWorkflow}
+        />
+      )}
     </div>
   );
+}
+
+// ─── New workflow modal ────────────────────────────────────────────
+//
+// Asks for a name + trigger kind, generates a minimal starter YAML,
+// then POSTs and drops the user into the graph editor. The starter
+// is intentionally a one-step "emit" so the workflow is valid as soon
+// as it lands — the user fills it in from there.
+
+type TriggerKind = "manual" | "http" | "event" | "schedule";
+
+function NewWorkflowModal({
+  onClose,
+  onCreate,
+}: {
+  onClose: () => void;
+  onCreate: (name: string, source: string) => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [kind, setKind] = useState<TriggerKind>("manual");
+  const [source, setSource] = useState("");
+  const [topic, setTopic] = useState("");
+  const [cron, setCron] = useState("0 * * * *");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const slug = slugify(name);
+  const yaml = useMemo(
+    () => starterYAML(slug || "new-workflow", kind, source, topic, cron),
+    [slug, kind, source, topic, cron],
+  );
+
+  const submit = async () => {
+    setErr("");
+    if (!slug) {
+      setErr("Name required.");
+      return;
+    }
+    if (kind === "event" && (!source.trim() || !topic.trim())) {
+      setErr("Event triggers need a source app + topic.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await onCreate(slug, yaml);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      onClick={onClose}
+    >
+      <div className="absolute inset-0 bg-bg/80 backdrop-blur-sm" />
+      <div
+        className="relative bg-bg-card border border-border rounded-lg shadow-lg w-[min(720px,95vw)] max-h-[90vh] overflow-auto flex flex-col gap-3 p-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <h2 className="text-text font-semibold">New workflow</h2>
+          <button onClick={onClose} className="text-text-muted hover:text-text text-xl leading-none">
+            ×
+          </button>
+        </div>
+
+        <div>
+          <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+            Name
+          </label>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="lead-capture"
+            className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-accent"
+            autoFocus
+          />
+          {name && slug !== name && (
+            <p className="text-text-dim text-xs mt-1">
+              Slug: <code className="text-accent">{slug}</code>
+            </p>
+          )}
+        </div>
+
+        <div>
+          <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+            Trigger
+          </label>
+          <div className="grid grid-cols-4 gap-1">
+            {(["manual", "http", "event", "schedule"] as const).map((k) => (
+              <button
+                key={k}
+                type="button"
+                onClick={() => setKind(k)}
+                className={
+                  "px-2 py-1.5 text-xs border rounded " +
+                  (kind === k
+                    ? "border-accent text-accent bg-accent/10"
+                    : "border-border text-text-muted hover:bg-bg-input")
+                }
+              >
+                {k}
+              </button>
+            ))}
+          </div>
+          <p className="text-text-dim text-xs mt-1">{triggerHint(kind)}</p>
+        </div>
+
+        {kind === "event" && (
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+                Source app
+              </label>
+              <input
+                type="text"
+                value={source}
+                onChange={(e) => setSource(e.target.value)}
+                placeholder="tables"
+                className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-accent"
+              />
+            </div>
+            <div>
+              <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+                Topic
+              </label>
+              <input
+                type="text"
+                value={topic}
+                onChange={(e) => setTopic(e.target.value)}
+                placeholder="row.inserted"
+                className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-accent"
+              />
+            </div>
+          </div>
+        )}
+
+        {kind === "schedule" && (
+          <div>
+            <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+              Cron
+            </label>
+            <input
+              type="text"
+              value={cron}
+              onChange={(e) => setCron(e.target.value)}
+              placeholder="0 * * * *"
+              className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-accent"
+            />
+            <p className="text-text-dim text-xs mt-1">
+              Note: schedule triggers are a forward-compat stub — pair with the Jobs app's cron for now.
+            </p>
+          </div>
+        )}
+
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <label className="text-xs uppercase tracking-wide text-text-dim">
+              Starter YAML
+            </label>
+            <span className="text-text-dim text-[10px]">
+              edits land here after Create — tweak now or in the editor
+            </span>
+          </div>
+          <textarea
+            value={yaml}
+            readOnly
+            className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-xs font-mono min-h-[180px] focus:outline-none"
+            spellCheck={false}
+          />
+        </div>
+
+        {err && <div className="text-red text-xs">{err}</div>}
+
+        <div className="flex gap-2 justify-end">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3 py-1.5 text-sm text-text-muted"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={busy || !slug}
+            className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+          >
+            {busy ? "Creating…" : "Create + edit"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function triggerHint(k: TriggerKind): string {
+  switch (k) {
+    case "manual":
+      return "Run from the panel or via workflows_run.";
+    case "http":
+      return "POST /api/apps/workflows/wf/<name> from anywhere.";
+    case "event":
+      return "Fires on every matching app-event in this project.";
+    case "schedule":
+      return "Cron expression (UTC).";
+  }
+}
+
+function starterYAML(
+  name: string,
+  kind: TriggerKind,
+  source: string,
+  topic: string,
+  cron: string,
+): string {
+  const trigger =
+    kind === "manual"
+      ? "  kind: manual\n"
+      : kind === "http"
+      ? "  kind: http\n"
+      : kind === "event"
+      ? `  kind: event\n  source: ${source || "tables"}\n  topic: ${topic || "row.inserted"}\n`
+      : `  kind: schedule\n  cron: "${cron}"\n`;
+  return (
+    `name: ${name}\n\n` +
+    `trigger:\n${trigger}\n` +
+    `steps:\n` +
+    `  - id: log\n` +
+    `    kind: emit\n` +
+    `    topic: ${name}.started\n` +
+    `    input:\n` +
+    `      received: "{{ input }}"\n`
+  );
+}
+
+function slugify(s: string): string {
+  return s
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 63);
 }
 
 // ─── Workflow detail (overlay): graph + editor + runs panel ────────

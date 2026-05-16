@@ -723,6 +723,132 @@ func TestNamecheap_DeleteOmitsMatchingHost(t *testing.T) {
 	}
 }
 
+// MX records without an explicit "<prio> <host>" prefix used to be sent
+// to Namecheap with an empty MXPref attribute, which Namecheap rejects.
+// New behavior: default to MXPref=10.
+func TestNamecheap_NewMXDefaultsPriority(t *testing.T) {
+	plat := &namecheapAwarePlatform{
+		stubPlatform: stubPlatform{
+			replyByTool: map[string]*sdk.ExecuteResult{
+				"get_dns_hosts": {Success: true, Status: 200, Data: jsonStringWrap(namecheapHostsXML)},
+				"set_dns_hosts": {Success: true, Status: 200, Data: jsonStringWrap(`<?xml version="1.0"?><ApiResponse Status="OK"/>`)},
+			},
+			bindingsOverride: map[string]any{"dns_provider": float64(2)},
+		},
+	}
+	ctx := newCtxNamecheap(t, plat)
+	app := &App{}
+
+	// Plain host value with no priority prefix.
+	if _, err := app.toolDomainRecordsSet(ctx, map[string]any{
+		"domain": "acme.com",
+		"name":   "fresh",
+		"type":   "MX",
+		"value":  "mail.acme.com",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var setCall *executeCall
+	for i := range plat.calls {
+		if plat.calls[i].Tool == "set_dns_hosts" {
+			setCall = &plat.calls[i]
+		}
+	}
+	if setCall == nil {
+		t.Fatal("set_dns_hosts not called")
+	}
+	// New host should be slot 4 (after the 3 existing fixture hosts).
+	if setCall.Input["HostName4"] != "fresh" || setCall.Input["RecordType4"] != "MX" {
+		t.Fatalf("new MX host not slot 4: %+v", setCall.Input)
+	}
+	if setCall.Input["MXPref4"] != "10" {
+		t.Errorf("MXPref4=%v, want default 10", setCall.Input["MXPref4"])
+	}
+	if setCall.Input["Address4"] != "mail.acme.com" {
+		t.Errorf("Address4=%v, want mail.acme.com", setCall.Input["Address4"])
+	}
+}
+
+// Updating an existing MX record with a bare hostname (no priority
+// prefix) should keep the priority that was already on the record —
+// don't silently change MXPref=20 to MXPref=10.
+func TestNamecheap_MXUpdatePreservesExistingPriority(t *testing.T) {
+	// Fixture has @ MX → mx.acme.com with MXPref=10.
+	plat := &namecheapAwarePlatform{
+		stubPlatform: stubPlatform{
+			replyByTool: map[string]*sdk.ExecuteResult{
+				"get_dns_hosts": {Success: true, Status: 200, Data: jsonStringWrap(`<?xml version="1.0" encoding="utf-8"?>
+<ApiResponse Status="OK"><CommandResponse>
+<DomainDNSGetHostsResult Domain="acme.com">
+<host HostId="3" Name="@" Type="MX" Address="oldmail.acme.com" TTL="600" MXPref="20"/>
+</DomainDNSGetHostsResult></CommandResponse></ApiResponse>`)},
+				"set_dns_hosts": {Success: true, Status: 200, Data: jsonStringWrap(`<?xml version="1.0"?><ApiResponse Status="OK"/>`)},
+			},
+			bindingsOverride: map[string]any{"dns_provider": float64(2)},
+		},
+	}
+	ctx := newCtxNamecheap(t, plat)
+	app := &App{}
+
+	// Update value only, no priority prefix.
+	if _, err := app.toolDomainRecordsSet(ctx, map[string]any{
+		"domain": "acme.com",
+		"name":   "@",
+		"type":   "MX",
+		"value":  "newmail.acme.com",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var setCall *executeCall
+	for i := range plat.calls {
+		if plat.calls[i].Tool == "set_dns_hosts" {
+			setCall = &plat.calls[i]
+		}
+	}
+	if setCall == nil {
+		t.Fatal("set_dns_hosts not called")
+	}
+	if setCall.Input["Address1"] != "newmail.acme.com" {
+		t.Errorf("Address1=%v, want newmail.acme.com", setCall.Input["Address1"])
+	}
+	if setCall.Input["MXPref1"] != "20" {
+		t.Errorf("MXPref1=%v, want existing 20 preserved", setCall.Input["MXPref1"])
+	}
+}
+
+// writeHosts must surface a Namecheap error response from setHosts as a
+// real error — not silently swallow it. The old check used fragile
+// string-Contains heuristics; the new one parses the XML envelope.
+func TestNamecheap_WriteHostsSurfacesError(t *testing.T) {
+	plat := &namecheapAwarePlatform{
+		stubPlatform: stubPlatform{
+			replyByTool: map[string]*sdk.ExecuteResult{
+				"get_dns_hosts": {Success: true, Status: 200, Data: jsonStringWrap(namecheapHostsXML)},
+				"set_dns_hosts": {Success: true, Status: 200, Data: jsonStringWrap(`<?xml version="1.0"?>
+<ApiResponse Status="ERROR">
+  <Errors><Error Number="2030280">DNS Provider not in use</Error></Errors>
+</ApiResponse>`)},
+			},
+			bindingsOverride: map[string]any{"dns_provider": float64(2)},
+		},
+	}
+	ctx := newCtxNamecheap(t, plat)
+	app := &App{}
+
+	_, err := app.toolDomainRecordsSet(ctx, map[string]any{
+		"domain": "acme.com",
+		"name":   "@",
+		"type":   "A",
+		"value":  "9.9.9.9",
+	})
+	if err == nil {
+		t.Fatal("expected setHosts error to surface")
+	}
+	if !strings.Contains(err.Error(), "2030280") {
+		t.Errorf("expected error code 2030280 in message, got %v", err)
+	}
+}
+
 func TestSplitSLDTLD(t *testing.T) {
 	cases := []struct {
 		in, sld, tld string

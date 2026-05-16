@@ -66,6 +66,7 @@ export function StepEditor({ step, onPatch, onDelete }: StepEditorProps) {
           <option value="http">http</option>
           <option value="function">function</option>
           <option value="app">app</option>
+          <option value="integration">integration</option>
           <option value="emit">emit</option>
           <option value="branch">branch</option>
         </select>
@@ -80,6 +81,9 @@ export function StepEditor({ step, onPatch, onDelete }: StepEditorProps) {
       )}
       {step.kind === "app" && (
         <AppFields step={step} patch={patch} />
+      )}
+      {step.kind === "integration" && (
+        <IntegrationFields step={step} patch={patch} />
       )}
       {step.kind === "emit" && (
         <EmitFields step={step} patch={patch} />
@@ -198,6 +202,36 @@ function AppFields({ step, patch }: { step: StepDef; patch: (mutator: (s: StepDe
         />
       </Field>
     </div>
+  );
+}
+
+function IntegrationFields({ step, patch }: { step: StepDef; patch: (mutator: (s: StepDef) => void) => void }) {
+  return (
+    <>
+      <div className="px-4 grid grid-cols-2 gap-2">
+        <Field label="Connection ID" hint="From Connections panel.">
+          <input
+            type="number"
+            value={step.connection_id ?? ""}
+            onChange={(e) => {
+              const n = Number(e.target.value);
+              patch((s) => (s.connection_id = Number.isFinite(n) && n > 0 ? n : undefined));
+            }}
+            placeholder="17"
+            className={fieldClass + " font-mono"}
+          />
+        </Field>
+        <Field label="Tool" hint="e.g. pushover_send_message.">
+          <input
+            type="text"
+            value={step.tool || ""}
+            onChange={(e) => patch((s) => (s.tool = e.target.value || undefined))}
+            placeholder="pushover_send_message"
+            className={fieldClass + " font-mono"}
+          />
+        </Field>
+      </div>
+    </>
   );
 }
 
@@ -478,6 +512,7 @@ function KindBadge({ kind }: { kind: string }) {
     http: "bg-green/15 text-green",
     function: "bg-purple/15 text-purple",
     app: "bg-blue/15 text-blue",
+    integration: "bg-accent/15 text-accent",
     emit: "bg-yellow/15 text-yellow",
     branch: "bg-pink/15 text-pink",
   };
