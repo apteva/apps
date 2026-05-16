@@ -8,7 +8,7 @@
 // fmtMoney(minor, currency) for display. Colors in SVG come from CSS
 // variables because the dashboard's Tailwind JIT doesn't scan apps/mcp/*/ui/.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 const API = "/api/apps/trips";
 
@@ -232,6 +232,118 @@ const BUDGET_LABEL: Record<string, string> = {
   other: "Other",
 };
 
+// ─── UI context (confirm + toast) ────────────────────────────────
+//
+// Replaces window.confirm() and window.alert(). The provider holds
+// both pieces of state; nested components reach for them via useUI().
+// Confirm uses an imperative Promise<boolean> API so handler code
+// reads naturally: `if (!await ui.confirm({...})) return;`.
+
+interface ConfirmOpts {
+  title: string;
+  message?: string;
+  confirmLabel?: string;
+  danger?: boolean;
+}
+interface UICtxValue {
+  confirm: (opts: ConfirmOpts) => Promise<boolean>;
+  notify: (message: string, kind?: "error" | "info") => void;
+}
+const UICtx = createContext<UICtxValue | null>(null);
+function useUI(): UICtxValue {
+  const c = useContext(UICtx);
+  if (!c) throw new Error("useUI must be used inside <UIProvider>");
+  return c;
+}
+
+function UIProvider({ children }: { children: React.ReactNode }) {
+  const [confirmState, setConfirmState] = useState<ConfirmOpts | null>(null);
+  const [toast, setToast] = useState<{ id: number; message: string; kind: "error" | "info" } | null>(null);
+  const resolverRef = useRef<((v: boolean) => void) | null>(null);
+  const toastTimer = useRef<number | null>(null);
+
+  const confirm = useCallback((opts: ConfirmOpts) => {
+    return new Promise<boolean>((resolve) => {
+      resolverRef.current = resolve;
+      setConfirmState(opts);
+    });
+  }, []);
+
+  const notify = useCallback((message: string, kind: "error" | "info" = "error") => {
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    setToast({ id: Date.now(), message, kind });
+    toastTimer.current = window.setTimeout(() => setToast(null), 5000);
+  }, []);
+
+  const close = (result: boolean) => {
+    resolverRef.current?.(result);
+    resolverRef.current = null;
+    setConfirmState(null);
+  };
+
+  return (
+    <UICtx.Provider value={{ confirm, notify }}>
+      {children}
+      {confirmState && (
+        <ConfirmDialog
+          {...confirmState}
+          onConfirm={() => close(true)}
+          onCancel={() => close(false)}
+        />
+      )}
+      {toast && (
+        <div
+          role="status"
+          className={`fixed bottom-4 right-4 z-50 max-w-sm rounded-md border px-4 py-3 text-sm shadow-lg ${
+            toast.kind === "error"
+              ? "border-error/30 bg-error/10 text-error"
+              : "border-border bg-bg-card text-text"
+          }`}
+        >
+          {toast.message}
+        </div>
+      )}
+    </UICtx.Provider>
+  );
+}
+
+function ConfirmDialog({ title, message, confirmLabel = "Delete", danger = true, onConfirm, onCancel }: ConfirmOpts & { onConfirm: () => void; onCancel: () => void }) {
+  // Esc cancels, Enter confirms. Capture both at document level so the
+  // user doesn't need to focus the buttons first.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); onCancel(); }
+      if (e.key === "Enter") { e.preventDefault(); onConfirm(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onConfirm, onCancel]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg-overlay p-4">
+      <div className="w-full max-w-sm rounded-lg border border-border bg-bg-card p-5 shadow-xl">
+        <h3 className="text-base font-semibold">{title}</h3>
+        {message && <p className="mt-2 text-sm text-text-muted">{message}</p>}
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            className="rounded-md border border-border bg-transparent px-4 py-2 text-sm text-text hover:bg-bg-hover"
+          >Cancel</button>
+          <button
+            onClick={onConfirm}
+            autoFocus
+            className={`rounded-md px-4 py-2 text-sm ${
+              danger
+                ? "bg-error text-bg hover:opacity-90"
+                : "bg-accent text-bg hover:bg-accent-hover"
+            }`}
+          >{confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Icons ───────────────────────────────────────────────────────
 
 function Icon({ name, size = 16 }: { name: string; size?: number }) {
@@ -285,7 +397,17 @@ function transportIcon(kind: string): string {
 
 // ─── Panel ───────────────────────────────────────────────────────
 
-export default function TripsPanel({ projectId }: NativePanelProps) {
+export default function TripsPanel(props: NativePanelProps) {
+  // Wrap the whole panel so every nested component can reach the
+  // confirm + toast helpers via useUI().
+  return (
+    <UIProvider>
+      <TripsPanelInner {...props} />
+    </UIProvider>
+  );
+}
+
+function TripsPanelInner({ projectId }: NativePanelProps) {
   const [trips, setTrips] = useState<Trip[]>([]);
   const [selectedID, setSelectedID] = useState<number | null>(null);
   const [showNew, setShowNew] = useState(false);
@@ -469,6 +591,7 @@ function OverallBudgetBar({ trips }: { trips: Trip[] }) {
 // ─── Detail view ─────────────────────────────────────────────────
 
 function TripDetail({ tripID, onBack, onChanged }: { tripID: number; onBack: () => void; onChanged: () => void }) {
+  const ui = useUI();
   const [data, setData] = useState<TripDashboard | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
   const [error, setError] = useState("");
@@ -486,13 +609,17 @@ function TripDetail({ tripID, onBack, onChanged }: { tripID: number; onBack: () 
   useEffect(() => { refresh(); }, [refresh]);
 
   const deleteTrip = async () => {
-    if (!confirm("Delete this trip? Its calendar + all items go with it.")) return;
+    if (!await ui.confirm({
+      title: "Delete trip?",
+      message: "All its destinations, transport, accommodation, activities and tagged calendar events go with it.",
+      confirmLabel: "Delete trip",
+    })) return;
     try {
       await api<unknown>(`/trips/${tripID}`, { method: "DELETE" });
       onChanged();
       onBack();
     } catch (e: unknown) {
-      alert(e instanceof Error ? e.message : String(e));
+      ui.notify(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -709,18 +836,24 @@ function ItineraryRow({
   onEdit: () => void;
   onChanged: () => void;
 }) {
+  const ui = useUI();
   const [busy, setBusy] = useState(false);
   const remove = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (busy) return;
-    if (!confirm("Delete this item?")) return;
+    const label = item.kind === "transport" ? "transport leg" : item.kind === "accommodation" ? "stay" : "activity";
+    if (!await ui.confirm({
+      title: `Delete this ${label}?`,
+      message: "Its calendar event is removed too.",
+      confirmLabel: "Delete",
+    })) return;
     setBusy(true);
     try {
       const path = item.kind === "transport" ? "/transport-legs/" : item.kind === "accommodation" ? "/accommodations/" : "/activities/";
       await api<unknown>(path + item.data.id, { method: "DELETE" });
       onChanged();
     } catch (e: unknown) {
-      alert(e instanceof Error ? e.message : String(e));
+      ui.notify(e instanceof Error ? e.message : String(e));
       setBusy(false);
     }
   };
@@ -736,7 +869,7 @@ function ItineraryRow({
       await api<unknown>(path, { method: "POST", body: "{}" });
       onChanged();
     } catch (e: unknown) {
-      alert(e instanceof Error ? e.message : String(e));
+      ui.notify(e instanceof Error ? e.message : String(e));
       setBusy(false);
     }
   };
@@ -806,6 +939,7 @@ function ItineraryRow({
 // ─── Destinations section ────────────────────────────────────────
 
 function DestinationsSection({ data, onChanged }: { data: TripDashboard; onChanged: () => void }) {
+  const ui = useUI();
   const [editing, setEditing] = useState<Destination | null>(null);
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -829,19 +963,23 @@ function DestinationsSection({ data, onChanged }: { data: TripDashboard; onChang
       });
       onChanged();
     } catch (e: unknown) {
-      alert(e instanceof Error ? e.message : String(e));
+      ui.notify(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
   };
   const remove = async (dest: Destination) => {
-    if (!confirm(`Delete destination "${dest.place_name}"?`)) return;
+    if (!await ui.confirm({
+      title: "Delete destination?",
+      message: `"${dest.place_name}" will be removed from this trip.`,
+      confirmLabel: "Delete",
+    })) return;
     setBusy(true);
     try {
       await api<unknown>(`/destinations/${dest.id}`, { method: "DELETE" });
       onChanged();
     } catch (e: unknown) {
-      alert(e instanceof Error ? e.message : String(e));
+      ui.notify(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
