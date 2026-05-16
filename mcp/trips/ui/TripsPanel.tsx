@@ -386,6 +386,7 @@ function TripDetail({ tripID, onBack, onChanged }: { tripID: number; onBack: () 
   const [data, setData] = useState<TripDashboard | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
   const [error, setError] = useState("");
+  const [showEdit, setShowEdit] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -397,6 +398,17 @@ function TripDetail({ tripID, onBack, onChanged }: { tripID: number; onBack: () 
     }
   }, [tripID]);
   useEffect(() => { refresh(); }, [refresh]);
+
+  const deleteTrip = async () => {
+    if (!confirm("Delete this trip? Its calendar + all items go with it.")) return;
+    try {
+      await api<unknown>(`/trips/${tripID}`, { method: "DELETE" });
+      onChanged();
+      onBack();
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   if (!data) {
     return (
@@ -415,15 +427,23 @@ function TripDetail({ tripID, onBack, onChanged }: { tripID: number; onBack: () 
         <button onClick={onBack} className="flex items-center gap-1 text-sm text-text-muted hover:text-text">
           <Icon name="chevron-left" size={14} /> Trips
         </button>
-        <nav className="flex rounded-md border border-border overflow-hidden text-sm border-border">
-          {(["overview", "itinerary", "budget", "todos"] as Tab[]).map(t => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`px-3 py-1.5 capitalize ${tab === t ? "bg-accent text-bg" : "hover:bg-bg-hover"}`}
-            >{t}</button>
-          ))}
-        </nav>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setShowEdit(true)} title="Edit trip" className="p-1 text-text-muted hover:text-text">
+            <Icon name="edit" size={14} />
+          </button>
+          <button onClick={deleteTrip} title="Delete trip" className="p-1 text-text-muted hover:text-error">
+            <Icon name="trash" size={14} />
+          </button>
+          <nav className="flex rounded-md border border-border overflow-hidden text-sm">
+            {(["overview", "itinerary", "budget", "todos"] as Tab[]).map(t => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                className={`px-3 py-1.5 capitalize ${tab === t ? "bg-accent text-bg" : "hover:bg-bg-hover"}`}
+              >{t}</button>
+            ))}
+          </nav>
+        </div>
       </header>
 
       <section className="overflow-hidden rounded-lg border border-border bg-bg-card">
@@ -433,6 +453,7 @@ function TripDetail({ tripID, onBack, onChanged }: { tripID: number; onBack: () 
             <h2 className="text-xl font-semibold">{trip.name}</h2>
             <p className="text-sm text-text-muted">
               {fmtDate(trip.start_at)} – {fmtDate(trip.end_at)} • {days.label}
+              {!trip.sync_calendar && <span className="ml-2 rounded-full bg-warn/20 px-2 py-0.5 text-xs text-warn">calendar sync off</span>}
             </p>
           </div>
           <div className="text-right">
@@ -453,6 +474,14 @@ function TripDetail({ tripID, onBack, onChanged }: { tripID: number; onBack: () 
         {tab === "budget" && <BudgetTab data={data} onChanged={() => { refresh(); onChanged(); }} />}
         {tab === "todos" && <TodosTab data={data} onChanged={() => { refresh(); onChanged(); }} />}
       </div>
+
+      {showEdit && (
+        <TripEditDialog
+          trip={trip}
+          onClose={() => setShowEdit(false)}
+          onSaved={() => { setShowEdit(false); refresh(); onChanged(); }}
+        />
+      )}
     </div>
   );
 }
@@ -521,8 +550,12 @@ function UpcomingList({ data }: { data: TripDashboard }) {
 
 // ─── Itinerary tab ───────────────────────────────────────────────
 
+type ItemKind = "transport" | "accommodation" | "activity";
+type ItemData = TransportLeg | Accommodation | Activity;
+
 function ItineraryTab({ data, onChanged }: { data: TripDashboard; onChanged: () => void }) {
-  const [showAdd, setShowAdd] = useState<"transport" | "accommodation" | "activity" | null>(null);
+  const [showAdd, setShowAdd] = useState<ItemKind | null>(null);
+  const [editItem, setEditItem] = useState<{ kind: ItemKind; data: ItemData } | null>(null);
 
   // Build a flat timeline of every dated item, sorted.
   type Item =
@@ -537,6 +570,8 @@ function ItineraryTab({ data, onChanged }: { data: TripDashboard; onChanged: () 
 
   return (
     <div className="space-y-3">
+      <DestinationsSection data={data} onChanged={onChanged} />
+
       <div className="flex flex-wrap gap-2">
         <button onClick={() => setShowAdd("transport")} className="btn-secondary"><Icon name="plane" size={14} /> Transport</button>
         <button onClick={() => setShowAdd("accommodation")} className="btn-secondary"><Icon name="bed" size={14} /> Stay</button>
@@ -546,25 +581,73 @@ function ItineraryTab({ data, onChanged }: { data: TripDashboard; onChanged: () 
         <EmptyState message="Empty itinerary — add transport, stays, or activities above." />
       ) : (
         <ol className="space-y-2">
-          {items.map((it, idx) => <ItineraryRow key={`${it.kind}-${it.data.id}`} item={it} idx={idx} trip={data.trip} onChanged={onChanged} />)}
+          {items.map((it) => (
+            <ItineraryRow
+              key={`${it.kind}-${it.data.id}`}
+              item={it}
+              trip={data.trip}
+              onEdit={() => setEditItem({ kind: it.kind, data: it.data })}
+              onChanged={onChanged}
+            />
+          ))}
         </ol>
       )}
-      {showAdd && <AddItemDialog kind={showAdd} trip={data.trip} onClose={() => setShowAdd(null)} onCreated={() => { setShowAdd(null); onChanged(); }} />}
+      {showAdd && (
+        <ItemDialog
+          kind={showAdd}
+          trip={data.trip}
+          onClose={() => setShowAdd(null)}
+          onSaved={() => { setShowAdd(null); onChanged(); }}
+        />
+      )}
+      {editItem && (
+        <ItemDialog
+          kind={editItem.kind}
+          trip={data.trip}
+          existing={editItem.data}
+          onClose={() => setEditItem(null)}
+          onSaved={() => { setEditItem(null); onChanged(); }}
+        />
+      )}
       <style>{`.btn-secondary { display: inline-flex; align-items: center; gap: 6px; padding: 0.4rem 0.75rem; border-radius: 0.375rem; background: var(--bg-card); color: var(--text); font-size: 0.875rem; border: 1px solid var(--border); }
       .btn-secondary:hover { background: var(--bg-hover); }`}</style>
     </div>
   );
 }
 
-function ItineraryRow({ item, idx: _idx, trip, onChanged }: { item: { kind: string; data: TransportLeg | Accommodation | Activity; when: string }; idx: number; trip: Trip; onChanged: () => void }) {
+function ItineraryRow({
+  item, trip, onEdit, onChanged,
+}: {
+  item: { kind: string; data: ItemData; when: string };
+  trip: Trip;
+  onEdit: () => void;
+  onChanged: () => void;
+}) {
   const [busy, setBusy] = useState(false);
-  const remove = async () => {
+  const remove = async (e: React.MouseEvent) => {
+    e.stopPropagation();
     if (busy) return;
     if (!confirm("Delete this item?")) return;
     setBusy(true);
     try {
       const path = item.kind === "transport" ? "/transport-legs/" : item.kind === "accommodation" ? "/accommodations/" : "/activities/";
       await api<unknown>(path + item.data.id, { method: "DELETE" });
+      onChanged();
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+  const markBooked = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (busy) return;
+    setBusy(true);
+    try {
+      const path =
+        item.kind === "transport" ? `/transport-legs/${item.data.id}/booked`
+        : item.kind === "accommodation" ? `/accommodations/${item.data.id}/booked`
+        : `/activities/${item.data.id}/booked`;
+      await api<unknown>(path, { method: "POST", body: "{}" });
       onChanged();
     } catch (e: unknown) {
       alert(e instanceof Error ? e.message : String(e));
@@ -599,23 +682,132 @@ function ItineraryRow({ item, idx: _idx, trip, onChanged }: { item: { kind: stri
   }
 
   return (
-    <li className="flex items-start gap-3 rounded-lg border border-border bg-bg-card p-3 border-border bg-bg-card">
+    <li
+      onClick={onEdit}
+      role="button"
+      tabIndex={0}
+      className="flex items-start gap-3 rounded-lg border border-border bg-bg-card p-3 cursor-pointer hover:border-border-strong hover:bg-bg-hover"
+    >
       <div className="mt-1 text-text-muted"><Icon name={icon} size={16} /></div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
           <span className="truncate font-medium">{title}</span>
-          {item.data.booked && <span className="rounded-full bg-success/20 px-2 py-0.5 text-xs text-success bg-success/20 text-success">Booked</span>}
+          {item.data.booked
+            ? <span className="rounded-full bg-success/20 px-2 py-0.5 text-xs text-success">Booked</span>
+            : (
+              <button
+                onClick={markBooked}
+                disabled={busy}
+                className="rounded-full border border-border px-2 py-0.5 text-xs text-text-muted hover:border-success hover:text-success"
+                title="Mark as booked"
+              >Mark booked</button>
+            )
+          }
         </div>
         {subtitle && <div className="text-xs text-text-muted">{subtitle}</div>}
         <div className="mt-0.5 text-xs text-text-dim">{when2}</div>
       </div>
-      <div className="text-right text-sm">
+      <div className="flex flex-col items-end gap-1 text-right text-sm">
         <div className="tabular-nums">{cost != null ? fmtMoney(cost, costCcy) : "—"}</div>
-        <button onClick={remove} disabled={busy} className="mt-1 text-text-dim hover:text-error">
+        <button onClick={remove} disabled={busy} className="text-text-dim hover:text-error" title="Delete">
           <Icon name="trash" size={12} />
         </button>
       </div>
     </li>
+  );
+}
+
+// ─── Destinations section ────────────────────────────────────────
+
+function DestinationsSection({ data, onChanged }: { data: TripDashboard; onChanged: () => void }) {
+  const [editing, setEditing] = useState<Destination | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const dests = data.destinations;
+  const tripID = data.trip.id;
+
+  const move = async (dest: Destination, dir: -1 | 1) => {
+    if (busy) return;
+    const idx = dests.findIndex(d => d.id === dest.id);
+    if (idx < 0) return;
+    const swapIdx = idx + dir;
+    if (swapIdx < 0 || swapIdx >= dests.length) return;
+    const order = dests.map(d => d.id);
+    [order[idx], order[swapIdx]] = [order[swapIdx], order[idx]];
+    setBusy(true);
+    try {
+      await api<unknown>("/destinations/reorder", {
+        method: "POST",
+        body: JSON.stringify({ trip_id: tripID, order }),
+      });
+      onChanged();
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const remove = async (dest: Destination) => {
+    if (!confirm(`Delete destination "${dest.place_name}"?`)) return;
+    setBusy(true);
+    try {
+      await api<unknown>(`/destinations/${dest.id}`, { method: "DELETE" });
+      onChanged();
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="rounded-lg border border-border bg-bg-card">
+      <header className="flex items-center justify-between border-b border-border-subtle px-4 py-2">
+        <span className="text-xs uppercase tracking-wide text-text-muted">Destinations</span>
+        <button onClick={() => setAdding(true)} className="flex items-center gap-1 text-xs text-text-muted hover:text-text">
+          <Icon name="plus" size={12} /> Add
+        </button>
+      </header>
+      {dests.length === 0 ? (
+        <EmptyState message="No destinations yet." />
+      ) : (
+        <ul className="divide-y divide-border-subtle text-sm">
+          {dests.map((d, i) => (
+            <li key={d.id} className="flex items-center gap-2 px-4 py-2">
+              <div className="flex-1 min-w-0">
+                <div className="truncate font-medium">
+                  {d.place_name}
+                  {d.country && <span className="ml-1.5 text-xs text-text-dim">{d.country}</span>}
+                </div>
+                <div className="text-xs text-text-muted">
+                  {fmtDateShort(d.arrive_at)} – {fmtDateShort(d.depart_at)}
+                </div>
+              </div>
+              <button onClick={() => move(d, -1)} disabled={busy || i === 0} className="p-1 text-text-dim hover:text-text disabled:opacity-30" title="Move up"><Icon name="chevron-left" size={12} /></button>
+              <button onClick={() => move(d, 1)} disabled={busy || i === dests.length - 1} className="p-1 text-text-dim hover:text-text disabled:opacity-30" title="Move down"><Icon name="chevron-right" size={12} /></button>
+              <button onClick={() => setEditing(d)} className="p-1 text-text-dim hover:text-text" title="Edit"><Icon name="edit" size={12} /></button>
+              <button onClick={() => remove(d)} disabled={busy} className="p-1 text-text-dim hover:text-error" title="Delete"><Icon name="trash" size={12} /></button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {adding && (
+        <DestinationDialog
+          trip={data.trip}
+          onClose={() => setAdding(false)}
+          onSaved={() => { setAdding(false); onChanged(); }}
+        />
+      )}
+      {editing && (
+        <DestinationDialog
+          trip={data.trip}
+          existing={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); onChanged(); }}
+        />
+      )}
+    </section>
   );
 }
 
@@ -819,83 +1011,105 @@ function NewTripDialog({ onClose, onCreated }: { onClose: () => void; onCreated:
   );
 }
 
-function AddItemDialog({ kind, trip, onClose, onCreated }: {
+function ItemDialog({ kind, trip, existing, onClose, onSaved }: {
   kind: "transport" | "accommodation" | "activity";
   trip: Trip;
+  existing?: ItemData;
   onClose: () => void;
-  onCreated: () => void;
+  onSaved: () => void;
 }) {
+  const isEdit = existing != null;
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  // Shared
-  const [name, setName] = useState("");
-  const [cost, setCost] = useState("");
-  const [currency, setCurrency] = useState(trip.home_currency);
-  const [notes, setNotes] = useState("");
+  // Prefill the right initial value per field based on what (if anything)
+  // we're editing. Each branch coerces the existing row to its concrete
+  // type — TypeScript can't narrow off `kind` for the union, so we cast.
+  const t = (kind === "transport" && existing) ? existing as TransportLeg : null;
+  const a = (kind === "accommodation" && existing) ? existing as Accommodation : null;
+  const c = (kind === "activity" && existing) ? existing as Activity : null;
 
-  // Transport
-  const [tKind, setTKind] = useState<TransportLeg["kind"]>("flight");
-  const [provider, setProvider] = useState("");
-  const [reference, setReference] = useState("");
-  const [departAt, setDepartAt] = useState(trip.start_at.slice(0, 16));
-  const [arriveAt, setArriveAt] = useState(trip.start_at.slice(0, 16));
-  const [departLoc, setDepartLoc] = useState("");
-  const [arriveLoc, setArriveLoc] = useState("");
+  const [name, setName] = useState(a?.name ?? c?.name ?? "");
+  const [cost, setCost] = useState(() => {
+    const v = existing?.cost_actual ?? existing?.cost_estimated;
+    return v != null ? (v / 100).toFixed(2) : "";
+  });
+  const [currency, setCurrency] = useState(existing?.currency ?? trip.home_currency);
+  const [notes, setNotes] = useState(existing?.notes ?? "");
 
-  // Accommodation
-  const [aKind, setAKind] = useState<Accommodation["kind"]>("hotel");
-  const [address, setAddress] = useState("");
-  const [checkIn, setCheckIn] = useState(trip.start_at.slice(0, 10));
-  const [checkOut, setCheckOut] = useState(trip.end_at.slice(0, 10));
+  const [tKind, setTKind] = useState<TransportLeg["kind"]>(t?.kind ?? "flight");
+  const [provider, setProvider] = useState(t?.provider ?? "");
+  const [reference, setReference] = useState(t?.reference ?? "");
+  const [departAt, setDepartAt] = useState(t?.depart_at.slice(0, 16) ?? trip.start_at.slice(0, 16));
+  const [arriveAt, setArriveAt] = useState(t?.arrive_at.slice(0, 16) ?? trip.start_at.slice(0, 16));
+  const [departLoc, setDepartLoc] = useState(t?.depart_location ?? "");
+  const [arriveLoc, setArriveLoc] = useState(t?.arrive_location ?? "");
 
-  // Activity
-  const [actCategory, setActCategory] = useState<Activity["category"]>("activity");
-  const [actStart, setActStart] = useState("");
-  const [actLocation, setActLocation] = useState("");
+  const [aKind, setAKind] = useState<Accommodation["kind"]>(a?.kind ?? "hotel");
+  const [address, setAddress] = useState(a?.address ?? "");
+  const [checkIn, setCheckIn] = useState(a?.check_in_at.slice(0, 10) ?? trip.start_at.slice(0, 10));
+  const [checkOut, setCheckOut] = useState(a?.check_out_at.slice(0, 10) ?? trip.end_at.slice(0, 10));
+
+  const [actCategory, setActCategory] = useState<Activity["category"]>(c?.category ?? "activity");
+  const [actStart, setActStart] = useState(c?.start_at?.slice(0, 16) ?? "");
+  const [actLocation, setActLocation] = useState(c?.location ?? "");
 
   const submit = async () => {
     setBusy(true); setErr("");
     try {
       const cents = cost.trim() ? parseMoneyDecimal(cost) : undefined;
+      // Field name for the cost field switches based on edit mode:
+      // when we already have a cost_actual we update it; otherwise we
+      // edit cost_estimated. The mark-booked button is the dedicated
+      // path for the planned→actual transition.
+      const costField = isEdit && existing?.cost_actual != null ? "cost_actual" : "cost_estimated";
       if (kind === "transport") {
-        await api<TransportLeg>("/transport-legs", {
-          method: "POST",
-          body: JSON.stringify({
-            trip_id: trip.id, kind: tKind,
-            depart_at: ensureRfc3339(departAt), arrive_at: ensureRfc3339(arriveAt),
-            provider, reference, depart_location: departLoc, arrive_location: arriveLoc,
-            cost_estimated: cents, currency, notes,
-          }),
-        });
+        const body = {
+          trip_id: trip.id, kind: tKind,
+          depart_at: ensureRfc3339(departAt), arrive_at: ensureRfc3339(arriveAt),
+          provider, reference, depart_location: departLoc, arrive_location: arriveLoc,
+          [costField]: cents, currency, notes,
+        };
+        if (isEdit) {
+          await api<TransportLeg>(`/transport-legs/${existing!.id}`, { method: "PATCH", body: JSON.stringify(body) });
+        } else {
+          await api<TransportLeg>("/transport-legs", { method: "POST", body: JSON.stringify(body) });
+        }
       } else if (kind === "accommodation") {
-        await api<Accommodation>("/accommodations", {
-          method: "POST",
-          body: JSON.stringify({
-            trip_id: trip.id, name, kind: aKind, address,
-            check_in_at: checkIn + "T15:00:00Z", check_out_at: checkOut + "T11:00:00Z",
-            cost_estimated: cents, currency, notes,
-          }),
-        });
+        const body = {
+          trip_id: trip.id, name, kind: aKind, address,
+          check_in_at: checkIn + "T15:00:00Z", check_out_at: checkOut + "T11:00:00Z",
+          [costField]: cents, currency, notes,
+        };
+        if (isEdit) {
+          await api<Accommodation>(`/accommodations/${existing!.id}`, { method: "PATCH", body: JSON.stringify(body) });
+        } else {
+          await api<Accommodation>("/accommodations", { method: "POST", body: JSON.stringify(body) });
+        }
       } else {
-        await api<Activity>("/activities", {
-          method: "POST",
-          body: JSON.stringify({
-            trip_id: trip.id, name, category: actCategory,
-            start_at: actStart ? ensureRfc3339(actStart) : undefined,
-            location: actLocation, cost_estimated: cents, currency, notes,
-          }),
-        });
+        const body = {
+          trip_id: trip.id, name, category: actCategory,
+          start_at: actStart ? ensureRfc3339(actStart) : undefined,
+          location: actLocation, [costField]: cents, currency, notes,
+        };
+        if (isEdit) {
+          await api<Activity>(`/activities/${existing!.id}`, { method: "PATCH", body: JSON.stringify(body) });
+        } else {
+          await api<Activity>("/activities", { method: "POST", body: JSON.stringify(body) });
+        }
       }
-      onCreated();
+      onSaved();
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : String(e));
       setBusy(false);
     }
   };
 
+  const titlePrefix = isEdit ? "Edit" : "Add";
+  const title = kind === "transport" ? `${titlePrefix} transport` : kind === "accommodation" ? `${titlePrefix} accommodation` : `${titlePrefix} activity`;
+
   return (
-    <Dialog title={kind === "transport" ? "Add transport" : kind === "accommodation" ? "Add accommodation" : "Add activity"} onClose={onClose}>
+    <Dialog title={title} onClose={onClose}>
       {kind === "transport" && (
         <>
           <Field label="Kind">
@@ -958,7 +1172,135 @@ function AddItemDialog({ kind, trip, onClose, onCreated }: {
       {err && <p className="text-sm text-error">{err}</p>}
       <DialogActions>
         <button onClick={onClose} className="btn-dialog-secondary">Cancel</button>
-        <button onClick={submit} disabled={busy} className="btn-dialog-primary">{busy ? "Saving…" : "Save"}</button>
+        <button onClick={submit} disabled={busy} className="btn-dialog-primary">{busy ? "Saving…" : isEdit ? "Update" : "Save"}</button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+// ─── Destination + Trip-edit dialogs ─────────────────────────────
+
+function DestinationDialog({ trip, existing, onClose, onSaved }: {
+  trip: Trip;
+  existing?: Destination;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const isEdit = existing != null;
+  const [placeName, setPlaceName] = useState(existing?.place_name ?? "");
+  const [country, setCountry] = useState(existing?.country ?? "");
+  const [arriveAt, setArriveAt] = useState(existing?.arrive_at.slice(0, 10) ?? trip.start_at.slice(0, 10));
+  const [departAt, setDepartAt] = useState(existing?.depart_at.slice(0, 10) ?? trip.end_at.slice(0, 10));
+  const [notes, setNotes] = useState(existing?.notes ?? "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async () => {
+    setBusy(true); setErr("");
+    try {
+      const body: Record<string, unknown> = {
+        trip_id: trip.id,
+        place_name: placeName,
+        country,
+        arrive_at: arriveAt + "T00:00:00Z",
+        depart_at: departAt + "T23:59:59Z",
+        notes,
+      };
+      if (isEdit) {
+        await api<Destination>(`/destinations/${existing!.id}`, { method: "PATCH", body: JSON.stringify(body) });
+      } else {
+        await api<Destination>("/destinations", { method: "POST", body: JSON.stringify(body) });
+      }
+      onSaved();
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog title={isEdit ? "Edit destination" : "Add destination"} onClose={onClose}>
+      <Field label="Place"><input value={placeName} onChange={e => setPlaceName(e.target.value)} className="input" autoFocus placeholder="Paris" /></Field>
+      <Field label="Country (ISO-2)"><input value={country} onChange={e => setCountry(e.target.value.toUpperCase())} className="input uppercase" maxLength={2} placeholder="FR" /></Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Arrive"><input type="date" value={arriveAt} onChange={e => setArriveAt(e.target.value)} className="input" /></Field>
+        <Field label="Depart"><input type="date" value={departAt} onChange={e => setDepartAt(e.target.value)} className="input" /></Field>
+      </div>
+      <Field label="Notes"><input value={notes} onChange={e => setNotes(e.target.value)} className="input" /></Field>
+      {err && <p className="text-sm text-error">{err}</p>}
+      <DialogActions>
+        <button onClick={onClose} className="btn-dialog-secondary">Cancel</button>
+        <button onClick={submit} disabled={busy || !placeName} className="btn-dialog-primary">{busy ? "Saving…" : isEdit ? "Update" : "Save"}</button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+function TripEditDialog({ trip, onClose, onSaved }: { trip: Trip; onClose: () => void; onSaved: () => void }) {
+  const [name, setName] = useState(trip.name);
+  const [startAt, setStartAt] = useState(trip.start_at.slice(0, 10));
+  const [endAt, setEndAt] = useState(trip.end_at.slice(0, 10));
+  const [status, setStatus] = useState<Trip["status"]>(trip.status);
+  const [color, setColor] = useState(trip.color);
+  const [syncCalendar, setSyncCalendar] = useState(trip.sync_calendar);
+  const [notes, setNotes] = useState(trip.notes);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async () => {
+    setBusy(true); setErr("");
+    try {
+      await api<Trip>(`/trips/${trip.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          name,
+          start_at: startAt + "T00:00:00Z",
+          end_at: endAt + "T23:59:59Z",
+          status,
+          color,
+          sync_calendar: syncCalendar,
+          notes,
+        }),
+      });
+      onSaved();
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog title="Edit trip" onClose={onClose}>
+      <Field label="Name"><input value={name} onChange={e => setName(e.target.value)} className="input" autoFocus /></Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="From"><input type="date" value={startAt} onChange={e => setStartAt(e.target.value)} className="input" /></Field>
+        <Field label="To"><input type="date" value={endAt} onChange={e => setEndAt(e.target.value)} className="input" /></Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Status">
+          <select value={status} onChange={e => setStatus(e.target.value as Trip["status"])} className="input">
+            <option value="planning">Planning</option>
+            <option value="booked">Booked</option>
+            <option value="in_progress">In progress</option>
+            <option value="done">Done</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+        </Field>
+        <Field label="Color">
+          <input type="color" value={color} onChange={e => setColor(e.target.value)} className="input" style={{ padding: "4px", height: "38px" }} />
+        </Field>
+      </div>
+      <Field label="Calendar sync">
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={syncCalendar} onChange={e => setSyncCalendar(e.target.checked)} />
+          Mirror itinerary into a dedicated calendar
+        </label>
+      </Field>
+      <Field label="Notes"><input value={notes} onChange={e => setNotes(e.target.value)} className="input" /></Field>
+      {err && <p className="text-sm text-error">{err}</p>}
+      <DialogActions>
+        <button onClick={onClose} className="btn-dialog-secondary">Cancel</button>
+        <button onClick={submit} disabled={busy || !name} className="btn-dialog-primary">{busy ? "Saving…" : "Update"}</button>
       </DialogActions>
     </Dialog>
   );

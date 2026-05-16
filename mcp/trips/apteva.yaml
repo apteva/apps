@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trips
 display_name: Trips
-version: 0.1.1
+version: 0.2.0
 description: |
   Plan trips end-to-end: destinations, transport, accommodation,
   activities, packing, budget. Calendar-synced — each trip owns a
