@@ -293,6 +293,7 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
         selectedId={selectedId}
         loading={loading}
         status={status}
+        latest={meta?.apteva_latest}
         onSelect={setSelectedId}
         onCreate={() => setShowCreate(true)}
         onConnect={() => setShowConnect(true)}
@@ -425,6 +426,7 @@ function TenantList({
   selectedId,
   loading,
   status,
+  latest,
   onSelect,
   onCreate,
   onConnect,
@@ -434,6 +436,7 @@ function TenantList({
   selectedId: string | null;
   loading: boolean;
   status: string;
+  latest?: string;
   onSelect: (id: string) => void;
   onCreate: () => void;
   onConnect: () => void;
@@ -491,8 +494,30 @@ function TenantList({
               </span>
             }
             subtitle={
-              <span className="font-mono text-[10px]">
-                {t.domain ? t.domain : shortBaseURL(t.base_url)}
+              <span className="font-mono text-[10px] flex items-center gap-1.5">
+                <span className="truncate">
+                  {t.domain ? t.domain : shortBaseURL(t.base_url)}
+                </span>
+                <span className="text-text-dim">·</span>
+                <span
+                  className={
+                    t.current_version
+                      ? "text-text-dim"
+                      : "text-text-dim italic"
+                  }
+                >
+                  {t.current_version ? `v${t.current_version}` : "v—"}
+                </span>
+                {latest &&
+                  t.current_version &&
+                  t.current_version !== latest && (
+                    <span
+                      title={`npm latest: ${latest}`}
+                      className="text-amber-700 dark:text-amber-400"
+                    >
+                      ↑
+                    </span>
+                  )}
               </span>
             }
             trailing={
@@ -813,7 +838,6 @@ function TenantDetail({
         <Field label="Status">
           <StatusPill variant={STATUS_VARIANT[tenant.status]}>{tenant.status}</StatusPill>
         </Field>
-        <Field label="Version">{tenant.current_version || "—"}</Field>
         <Field label="Base URL" mono>
           <a
             href={tenant.base_url}
@@ -1454,37 +1478,50 @@ function VersionBlock({
 }) {
   const current = tenant.current_version || "";
   const target = tenant.target_version || "";
-  // Drift detection prioritises target over latest: if the operator
-  // pinned target_version, that's the intent and we surface drift
-  // against THAT. Otherwise compare against npm latest.
-  const expected = target || latest || "";
-  const driftFromExpected = !!current && !!expected && current !== expected;
+  // Three states drive the action surface:
+  //   pendingApply   — operator pinned a target that hasn't taken effect
+  //                    yet → "Apply <target>"
+  //   updateAvailable — current is older than npm latest, no pin → "Update to <latest>"
+  //   unknownCurrent  — health poller hasn't observed a version yet
+  //                     (fresh spawn, or /api/health doesn't expose it) →
+  //                     "Set version" so the operator can still pin one
+  //   otherwise       — current matches latest (or no latest known) and
+  //                     nothing pending → hide the button entirely;
+  //                     "up to date" pill carries the message
   const pendingApply = !!target && !!current && target !== current;
+  const updateAvailable =
+    !pendingApply && !!latest && !!current && current !== latest;
+  const unknownCurrent = !current;
+  const showButton = pendingApply || updateAvailable || unknownCurrent;
+  const buttonLabel = pendingApply
+    ? `Apply ${target}`
+    : updateAvailable
+      ? `Update to ${latest}`
+      : "Set version";
   return (
     <div className="flex items-center gap-2 px-4 py-2 border-b border-border flex-wrap">
       <span className="text-[11px] uppercase tracking-wider text-text-dim font-semibold">
         Version
       </span>
-      <span className="font-mono text-xs text-text">{current || "—"}</span>
+      <span className="font-mono text-xs text-text">
+        {current || <span className="text-text-dim italic">unknown</span>}
+      </span>
       {pendingApply && (
         <span className="font-mono text-[11px] text-amber-700 dark:text-amber-400">
           → target {target}
         </span>
       )}
-      {!pendingApply && latest && current && current !== latest && (
+      {updateAvailable && (
         <StatusPill variant="warn">{`update available · ${latest}`}</StatusPill>
       )}
-      {!pendingApply && latest && current === latest && (
+      {!pendingApply && !updateAvailable && !unknownCurrent && (
         <StatusPill variant="success">up to date</StatusPill>
       )}
       <span className="flex-1" />
       {latest && (
         <span className="text-[11px] text-text-dim font-mono">npm: {latest}</span>
       )}
-      <ActionButton
-        label={driftFromExpected ? "Update" : "Update…"}
-        onClick={onUpdate}
-      />
+      {showButton && <ActionButton label={buttonLabel} onClick={onUpdate} />}
     </div>
   );
 }
