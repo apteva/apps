@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -154,6 +155,97 @@ func stopProcess(p *tenantProc, grace time.Duration) error {
 		<-done
 		return nil
 	}
+}
+
+// stopTenantBy makes "stop this tenant's process" work even when
+// fleet's in-memory procs handle is empty — e.g., after a fleet
+// upgrade re-spawned the sidecar but left the tenant running.
+//
+// Strategy:
+//  1. If we have a procs[slug] handle, use the normal stopProcess
+//     path (cmd-Wait-aware, accurate).
+//  2. Else, look up the pid currently listening on the tenant's port
+//     (ss / lsof / /proc fallback). SIGTERM that pid, wait for the
+//     port to free, SIGKILL on timeout.
+//
+// Returns nil if no process is on the port (already stopped). Errors
+// only on unexpected signal failures.
+func (a *App) stopTenantBy(slug string, port int, grace time.Duration) error {
+	a.procMu.Lock()
+	p := a.procs[slug]
+	a.procMu.Unlock()
+	if p != nil && p.cmd != nil && p.cmd.Process != nil {
+		err := stopProcess(p, grace)
+		a.procMu.Lock()
+		// Clear the handle since the process is gone (or being killed).
+		// Avoids a stale entry surviving past a clean stop.
+		if a.procs[slug] == p {
+			delete(a.procs, slug)
+		}
+		a.procMu.Unlock()
+		return err
+	}
+	if port == 0 {
+		return nil
+	}
+	pid, perr := findPidOnPort(port)
+	if perr != nil || pid <= 0 {
+		// Nothing listening — already stopped.
+		return nil
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("sigterm orphan pid %d: %w", pid, err)
+	}
+	// Poll for port to free.
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		if !portInUse(port) {
+			return nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	// Timeout — escalate to SIGKILL on the same pid (and its pgroup, since
+	// tenants were spawned with Setpgid).
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	for i := 0; i < 20; i++ { // 5s after SIGKILL
+		if !portInUse(port) {
+			return nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return fmt.Errorf("orphan pid %d still listening on :%d after SIGKILL", pid, port)
+}
+
+// findPidOnPort returns the pid of the process LISTENING on the given
+// TCP port on the loopback / wildcard, or 0+err if no listener found.
+// Tries `lsof` first (works on macOS + Linux when installed), then
+// `ss` (Linux). Pure-Go /proc parsing is the next fallback to add if
+// neither is present.
+func findPidOnPort(port int) (int, error) {
+	if lsof, err := exec.LookPath("lsof"); err == nil {
+		// -ti returns pids only, one per line; -sTCP:LISTEN excludes
+		// connected sockets owned by random clients.
+		out, _ := exec.Command(lsof, "-ti", fmt.Sprintf("tcp:%d", port), "-sTCP:LISTEN").Output()
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if n, err := strconv.Atoi(strings.TrimSpace(line)); err == nil && n > 0 {
+				return n, nil
+			}
+		}
+	}
+	if ss, err := exec.LookPath("ss"); err == nil {
+		// `ss -ltnpH 'sport = :PORT'` → users:(("name",pid=X,fd=Y))
+		out, _ := exec.Command(ss, "-ltnpH", fmt.Sprintf("sport = :%d", port)).Output()
+		if len(bytes.TrimSpace(out)) > 0 {
+			re := regexp.MustCompile(`pid=(\d+)`)
+			if m := re.FindSubmatch(out); len(m) >= 2 {
+				if n, err := strconv.Atoi(string(m[1])); err == nil && n > 0 {
+					return n, nil
+				}
+			}
+		}
+	}
+	return 0, fmt.Errorf("no listener found on port %d (and neither lsof nor ss returned a pid)", port)
 }
 
 // reconcileOnBoot probes every local tenant's port to recover state

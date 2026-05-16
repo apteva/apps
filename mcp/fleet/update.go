@@ -266,18 +266,17 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 
-	// Stop, respawn. The existing handle (procs[slug]) is from the
-	// old binary; stopProcess SIGTERMs then SIGKILLs. Then spawn with
-	// the new binary path.
-	a.procMu.Lock()
-	prev := a.procs[t.Slug]
-	a.procMu.Unlock()
-	if prev != nil {
-		_ = stopProcess(prev, 10*time.Second)
-	}
+	// Stop, respawn. stopTenantBy uses the in-memory handle when present
+	// AND falls back to "kill the pid currently listening on the port"
+	// when it isn't — so an update fired after a fleet sidecar upgrade
+	// (in-memory procs map cleared) still cleanly evicts the running
+	// tenant instead of leaving an orphan that owns the port.
 	port, _ := portFromBaseURL(t.BaseURL)
 	if port == 0 || t.ConfigDir == "" {
 		return nil, errors.New("tenant missing port or config_dir — cannot respawn")
+	}
+	if err := a.stopTenantBy(t.Slug, port, 10*time.Second); err != nil {
+		return nil, fmt.Errorf("stop tenant: %w", err)
 	}
 	_, proc, spawnErr := a.spawnTenant(context.Background(), t.Slug, t.ConfigDir, bin, port, false)
 	if spawnErr != nil {

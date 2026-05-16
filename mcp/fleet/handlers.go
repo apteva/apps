@@ -458,12 +458,12 @@ func (a *App) toolStop(_ *sdk.AppCtx, args map[string]any) (any, error) {
 		_ = a.store.setStatus(t.ID, StatusSuspended, "user")
 		return map[string]any{"tenant_id": t.ID, "status": StatusSuspended}, nil
 	}
-	a.procMu.Lock()
-	proc := a.procs[t.Slug]
-	delete(a.procs, t.Slug)
-	a.procMu.Unlock()
-	if proc != nil {
-		_ = stopProcess(proc, 10*time.Second)
+	// stopTenantBy handles both paths: in-memory handle (normal stop)
+	// and orphan-pid-by-port (fleet was upgraded since the tenant spawned,
+	// in-memory map is empty, but the process is still bound to the port).
+	port, _ := portFromBaseURL(t.BaseURL)
+	if err := a.stopTenantBy(t.Slug, port, 10*time.Second); err != nil {
+		return nil, fmt.Errorf("stop: %w", err)
 	}
 	_ = a.store.setStatus(t.ID, StatusStopped, "user")
 	_ = a.store.recordEvent(t.ID, "stopped", "user", nil)
@@ -481,13 +481,9 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 
 	if t.Kind == KindLocal {
-		a.procMu.Lock()
-		proc := a.procs[t.Slug]
-		delete(a.procs, t.Slug)
-		a.procMu.Unlock()
-		if proc != nil {
-			_ = stopProcess(proc, 10*time.Second)
-		}
+		// Same orphan-aware stop as toolStop.
+		port, _ := portFromBaseURL(t.BaseURL)
+		_ = a.stopTenantBy(t.Slug, port, 10*time.Second)
 		if !confirm {
 			// Process stopped but data dir preserved — let the operator
 			// recover by hand if delete was a mistake.
