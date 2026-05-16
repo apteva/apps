@@ -67,6 +67,63 @@ func tenantAptevaBin(targetVersion string) string {
 	return filepath.Join(versionsRoot(), v, "node_modules", ".bin", "apteva")
 }
 
+// resolveSpawnBin picks the apteva binary for a FRESH tenant_create.
+// Resolution order:
+//
+//  1. explicit apteva_bin arg (legacy override; takes a literal path)
+//  2. explicit apteva_version arg ("host" → fall through; "latest" →
+//     resolve npm; bare version → ensureVersionInstalled)
+//  3. FLEET_DEFAULT_APTEVA_VERSION env (default "latest")
+//  4. fallback: host PATH apteva via resolveAptevaBin
+//
+// Returns (binary path, resolved version string, error). The version
+// string is empty when we fell through to the host binary — caller
+// should NOT then write target_version on the tenant, because there's
+// no fleet-managed version to track.
+//
+// Network failures resolving "latest" degrade to host PATH with no
+// error; air-gapped boxes stay usable. Explicit version arg failures
+// (e.g. "0.999.0" not found on npm) bubble up — operator's intent.
+func (a *App) resolveSpawnBin(ctx context.Context, explicitBin, explicitVersion string) (binPath, resolvedVersion string, err error) {
+	// 1) Explicit binary path always wins.
+	if strings.TrimSpace(explicitBin) != "" {
+		bin, herr := resolveAptevaBin(explicitBin)
+		return bin, "", herr
+	}
+
+	// 2) + 3) Figure out what version to install.
+	requested := strings.TrimSpace(explicitVersion)
+	if requested == "" {
+		requested = strings.TrimSpace(os.Getenv("FLEET_DEFAULT_APTEVA_VERSION"))
+	}
+	if requested == "" {
+		requested = "latest"
+	}
+	// Explicit opt-out: "host" or "system" → use whatever's on PATH.
+	if requested == "host" || requested == "system" {
+		bin, herr := resolveAptevaBin("")
+		return bin, "", herr
+	}
+
+	// "latest" → ask npm. On failure fall back to host (don't fail the
+	// create on a transient network blip).
+	if requested == "latest" {
+		v, lerr := npmLatestVersion(ctx)
+		if lerr != nil {
+			bin, herr := resolveAptevaBin("")
+			return bin, "", herr
+		}
+		requested = v
+	}
+
+	// 4) Install (or hit the cache) and return.
+	bin, ierr := ensureVersionInstalled(ctx, requested)
+	if ierr != nil {
+		return "", "", ierr
+	}
+	return bin, requested, nil
+}
+
 // ─── npm registry lookup ──────────────────────────────────────────
 
 // npmLatestVersion asks the public npm registry for `apteva@latest`.

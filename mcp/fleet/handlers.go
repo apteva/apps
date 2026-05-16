@@ -118,11 +118,37 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	_ = a.store.recordEvent(t.ID, "spawn_start", "user", map[string]any{"port": port, "config_dir": configDir})
 
+	// Resolve which apteva binary to spawn under. v0.4 default: pin
+	// fresh tenants to the current npm latest so a tenant's version
+	// isn't a side effect of the operator's $PATH. Override per-create
+	// with apteva_version ("host" to fall back to PATH) or apteva_bin
+	// (literal path); fleet-wide via FLEET_DEFAULT_APTEVA_VERSION env.
+	// Install can take 10-20s on cold cache — extend the create budget
+	// so a tenant_create that has to first download apteva@latest doesn't
+	// race the spawn timeout.
+	resolveCtx, resolveCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	spawnBin, resolvedVer, err := a.resolveSpawnBin(resolveCtx,
+		getStr(args, "apteva_bin"), getStr(args, "apteva_version"))
+	resolveCancel()
+	if err != nil {
+		_ = a.store.setStatus(t.ID, StatusFailed, "user")
+		_ = a.store.recordEvent(t.ID, "spawn_failed", "user", map[string]any{"stage": "resolve_bin", "error": err.Error()})
+		_ = os.RemoveAll(configDir)
+		_ = a.store.hardDelete(t.ID)
+		return nil, fmt.Errorf("resolve apteva binary: %w", err)
+	}
+	// Pin target_version BEFORE spawn so an auto-respawn after a
+	// crash mid-create still uses the same binary (tryRespawn reads
+	// tenantAptevaBin(target_version)).
+	if resolvedVer != "" {
+		_ = a.store.setTargetVersion(t.ID, resolvedVer)
+	}
+
 	// Spawn — 60s budget (server + core boot can run 10-30s on cold
 	// disk). Boot timeout = tenant marked failed + data dir removed.
 	spawnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	setupToken, proc, err := a.spawnTenant(spawnCtx, slug, configDir, getStr(args, "apteva_bin"), port, true /* freshSetup */)
+	setupToken, proc, err := a.spawnTenant(spawnCtx, slug, configDir, spawnBin, port, true /* freshSetup */)
 	if err != nil {
 		_ = a.store.setStatus(t.ID, StatusFailed, "user")
 		_ = a.store.recordEvent(t.ID, "spawn_failed", "user", map[string]any{"error": err.Error()})

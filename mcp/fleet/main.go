@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.3.1
+version: 0.4.0
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -201,13 +201,14 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "tenant_create",
-			Description: "Spawn a new local apteva tenant in admin-driven setup mode. Allocates a data dir (~/.apteva-fleet/<slug>/) and free port, mints a setup token, runs the apteva CLI with --data-dir + --port + --no-browser + APTEVA_SETUP_TOKEN env, waits for /api/health. Returns status=setup_pending plus a setup_url and setup_token the operator uses to register the admin in the browser. Call tenant_attach_key afterwards with the api_key generated on the tenant dashboard. Args: slug (required), owner_email (required), apteva_bin (optional — path to apteva binary; defaults to $FLEET_APTEVA_BIN or `apteva` on PATH).",
+			Description: "Spawn a new local apteva tenant in admin-driven setup mode. Allocates a data dir (~/.apteva-fleet/<slug>/) and free port, mints a setup token, runs the apteva CLI with --data-dir + --port + --no-browser, waits for /api/health. Returns status=active (auto-setup happy path) or setup_pending plus a setup_url and setup_token the operator uses to register the admin in the browser. v0.4 default: pins the new tenant to npm's apteva@latest (installed into ~/.apteva-fleet/versions/<v>/ once, then re-used). Override with apteva_version (e.g. \"0.17.0\", \"latest\", or \"host\" to use whatever's on PATH); FLEET_DEFAULT_APTEVA_VERSION env sets the fleet-wide default. Args: slug (required), owner_email (required), apteva_version (optional, default \"latest\"), apteva_bin (optional — literal binary path; bypasses version resolution).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"slug":        map[string]any{"type": "string"},
-					"owner_email": map[string]any{"type": "string"},
-					"apteva_bin":  map[string]any{"type": "string"},
+					"slug":            map[string]any{"type": "string"},
+					"owner_email":     map[string]any{"type": "string"},
+					"apteva_version":  map[string]any{"type": "string"},
+					"apteva_bin":      map[string]any{"type": "string"},
 				},
 				"required": []string{"slug", "owner_email"},
 			},

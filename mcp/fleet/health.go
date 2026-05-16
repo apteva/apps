@@ -127,9 +127,20 @@ func probeHealth(ctx context.Context, baseURL, apiKey string) (bool, string, []b
 	if resp.StatusCode != http.StatusOK {
 		return false, "", body, nil
 	}
+	// apteva's /api/health returns {apteva, build, cli, core, dashboard,
+	// integrations, ok}. We prefer `apteva` (the canonical name since
+	// 0.10ish); fall back to `version` for any older / alternate shape.
+	// Either field absent → empty string → store keeps the prior value
+	// (COALESCE NULLIF in store.updateHealth), so we never overwrite
+	// good data with "".
 	var parsed struct {
 		Version string `json:"version"`
+		Apteva  string `json:"apteva"`
 	}
 	_ = json.Unmarshal(body, &parsed)
-	return true, parsed.Version, body, nil
+	v := parsed.Apteva
+	if v == "" {
+		v = parsed.Version
+	}
+	return true, v, body, nil
 }
