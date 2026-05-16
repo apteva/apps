@@ -683,19 +683,37 @@ function SendersView({
   const [err, setErr] = useState("");
 
   // Domain inventory from the Domains app, when bound. Lets the
-  // operator pick from a curated list instead of typing free-text.
-  // Soft-fails: any error here just leaves the picker hidden and the
-  // form keeps working with the plain input.
+  // operator compose <mailbox>@<domain> by picking from a curated
+  // list instead of typing free-text. Soft-fails: any error leaves
+  // the picker hidden and the form keeps working with the plain
+  // input below.
   const [inventoryDomains, setInventoryDomains] = useState<string[]>([]);
+  const [localPart, setLocalPart] = useState("");
+  const [pickedDomain, setPickedDomain] = useState("");
+  // pickerMode=true → compose via dropdown + mailbox input.
+  // false → original free-text input. Flips to false automatically
+  // when inventory loads empty / unavailable.
+  const [pickerMode, setPickerMode] = useState(true);
+
   useEffect(() => {
     api<{ available: boolean; domains: { name: string }[] }>("GET", "/senders/domains")
       .then((r) => {
-        if (r.available && Array.isArray(r.domains)) {
-          setInventoryDomains(r.domains.map((d) => d.name).filter(Boolean));
-        }
+        const names = (r.available && Array.isArray(r.domains))
+          ? r.domains.map((d) => d.name).filter(Boolean)
+          : [];
+        setInventoryDomains(names);
+        if (names.length === 0) setPickerMode(false);
       })
-      .catch(() => setInventoryDomains([]));
+      .catch(() => { setInventoryDomains([]); setPickerMode(false); });
   }, [api]);
+
+  // Compose addr from picker controls. In manual mode the user types
+  // directly into addr; this effect is a no-op there.
+  useEffect(() => {
+    if (!pickerMode) return;
+    if (!pickedDomain) { setAddr(""); return; }
+    setAddr(localPart ? `${localPart}@${pickedDomain}` : pickedDomain);
+  }, [pickerMode, pickedDomain, localPart]);
 
   const addressIsDomain = addr.length > 0 && !addr.includes("@");
 
@@ -715,6 +733,8 @@ function SendersView({
       });
       setResult(out);
       setAddr("");
+      setLocalPart("");
+      setPickedDomain("");
       reload();
     } catch (e) {
       setErr((e as Error).message);
@@ -724,6 +744,11 @@ function SendersView({
   };
 
   const rerun = (address: string) => {
+    // Switch into manual mode so the value the user wants to retry
+    // shows up verbatim in the editable input.
+    setPickerMode(false);
+    setLocalPart("");
+    setPickedDomain("");
     setAddr(stripScheme(address));
     setResult(null);
     setErr("");
@@ -773,32 +798,72 @@ function SendersView({
       )}
       <form onSubmit={onSubmit} className="p-4 border-b border-border space-y-3">
         <div className="flex gap-2 items-end flex-wrap">
-          {inventoryDomains.length > 0 && (
-            <Field label="From your domains" hint="loaded from the Domains app">
-              <select
-                className={inputCls + " w-56"}
-                value=""
-                onChange={(e) => { if (e.target.value) setAddr(e.target.value); }}
-              >
-                <option value="">— pick a domain —</option>
-                {inventoryDomains.map((d) => (
-                  <option key={d} value={d}>{d}</option>
-                ))}
-              </select>
+          {pickerMode && inventoryDomains.length > 0 ? (
+            <>
+              <Field label="Mailbox (optional)" hint="leave empty for the whole domain">
+                <input
+                  className={inputCls + " w-32"}
+                  value={localPart}
+                  onChange={(e) => setLocalPart(e.target.value.trim().toLowerCase())}
+                  placeholder="alice"
+                />
+              </Field>
+              <span className="text-text-dim pb-2 select-none">@</span>
+              <Field label="Domain" hint="loaded from the Domains app">
+                <select
+                  className={inputCls + " w-56"}
+                  value={pickedDomain}
+                  onChange={(e) => {
+                    if (e.target.value === "__manual__") {
+                      setPickerMode(false);
+                      setPickedDomain("");
+                    } else {
+                      setPickedDomain(e.target.value);
+                    }
+                  }}
+                >
+                  <option value="">— pick a domain —</option>
+                  {inventoryDomains.map((d) => (
+                    <option key={d} value={d}>{d}</option>
+                  ))}
+                  <option value="__manual__">Other / type manually…</option>
+                </select>
+              </Field>
+            </>
+          ) : (
+            <Field
+              label="Add sender"
+              hint={
+                inventoryDomains.length > 0
+                  ? "alice@acme.com / acme.com — or pick from your domains"
+                  : "alice@acme.com (one mailbox) or acme.com (whole domain)"
+              }
+            >
+              <input
+                className={inputCls + " w-80"}
+                value={addr}
+                onChange={(e) => setAddr(e.target.value)}
+                placeholder="email or domain"
+                required
+              />
             </Field>
           )}
-          <Field label="Add sender" hint="alice@acme.com (one mailbox) or acme.com (whole domain)">
-            <input
-              className={inputCls + " w-80"}
-              value={addr}
-              onChange={(e) => setAddr(e.target.value)}
-              placeholder="email or domain"
-              required
-            />
-          </Field>
-          <button type="submit" disabled={busy} className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50">
+          <button
+            type="submit"
+            disabled={busy || !addr.trim()}
+            className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50"
+          >
             {busy ? "Working…" : "Add"}
           </button>
+          {!pickerMode && inventoryDomains.length > 0 && (
+            <button
+              type="button"
+              className="text-xs text-text-dim hover:text-text underline"
+              onClick={() => { setAddr(""); setLocalPart(""); setPickedDomain(""); setPickerMode(true); }}
+            >
+              Pick from domains
+            </button>
+          )}
           {addressIsDomain && (
             <button
               type="button"
