@@ -450,6 +450,7 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
           wf={selectedWf}
           runs={runs}
           liveStatuses={liveStatuses}
+          projectId={projectId}
           onClose={closeDetail}
           onRun={() => setShowRunModal(true)}
           onOpenRun={loadRunSteps}
@@ -743,6 +744,7 @@ function WorkflowDetail({
   wf,
   runs,
   liveStatuses,
+  projectId,
   onClose,
   onRun,
   onOpenRun,
@@ -752,6 +754,7 @@ function WorkflowDetail({
   wf: Workflow;
   runs: Run[];
   liveStatuses: Record<string, StepStatus>;
+  projectId: string;
   onClose: () => void;
   onRun: () => void;
   onOpenRun: (runID: number) => void;
@@ -924,6 +927,7 @@ function WorkflowDetail({
                 {selectedStep ? (
                   <StepEditor
                     step={selectedStep}
+                    projectId={projectId}
                     onPatch={patchStep}
                     onDelete={deleteStep}
                   />

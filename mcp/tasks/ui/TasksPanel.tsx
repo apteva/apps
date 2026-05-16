@@ -1,4 +1,4 @@
-// TasksPanel — mission board for an instance.
+// TasksPanel — mission board for an agent.
 //
 // Layout: a list grouped by status (open / in_progress / blocked /
 // done / cancelled). The agent creates tasks via MCP; the panel adds
@@ -6,9 +6,11 @@
 // the app emits — for now updates only happen via re-fetch (the app
 // doesn't emit task.* events yet; v0.2 plumbs them through OnMount).
 //
-// The instance picker at the top lets the operator browse boards
-// across instances. The agent's tasks_list / tasks_create tool calls
-// are scoped by instance_id; the panel mirrors that.
+// The agent picker at the top lets the operator browse boards across
+// agents. The agent's tasks_list / tasks_create tool calls are scoped
+// by agent_id; the panel mirrors that. The platform still passes its
+// running-agent handle in as `instanceId` (NativePanelProps contract
+// shared by every app), and we use it as the initial agent id.
 
 import { useCallback, useEffect, useState } from "react";
 
@@ -23,7 +25,7 @@ interface NativePanelProps {
 
 interface Task {
   id: number;
-  instance_id: number;
+  agent_id: number;
   title: string;
   notes: string;
   status: string;
@@ -41,7 +43,7 @@ const STATUSES: { key: string; label: string; tone: string }[] = [
 
 export default function TasksPanel({ instanceId }: NativePanelProps) {
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [pickedInstance, setPickedInstance] = useState<number>(instanceId ?? 0);
+  const [pickedAgent, setPickedAgent] = useState<number>(instanceId ?? 0);
   const [status, setStatus] = useState("");
   const [adding, setAdding] = useState(false);
   const [newTitle, setNewTitle] = useState("");
@@ -49,13 +51,13 @@ export default function TasksPanel({ instanceId }: NativePanelProps) {
   const [editing, setEditing] = useState<Task | null>(null);
 
   const load = useCallback(async () => {
-    if (!pickedInstance) {
+    if (!pickedAgent) {
       setTasks([]);
       return;
     }
     try {
       const res = await fetch(
-        `${API}/instances/${pickedInstance}?status=all`,
+        `${API}/agents/${pickedAgent}?status=all`,
         { credentials: "same-origin" },
       );
       if (!res.ok) {
@@ -68,14 +70,14 @@ export default function TasksPanel({ instanceId }: NativePanelProps) {
     } catch (e) {
       setStatus("Load: " + (e as Error).message);
     }
-  }, [pickedInstance]);
+  }, [pickedAgent]);
 
   useEffect(() => { load(); }, [load]);
 
   const create = async () => {
-    if (!newTitle.trim() || !pickedInstance) return;
+    if (!newTitle.trim() || !pickedAgent) return;
     try {
-      const res = await fetch(`${API}/instances/${pickedInstance}`, {
+      const res = await fetch(`${API}/agents/${pickedAgent}`, {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -126,14 +128,14 @@ export default function TasksPanel({ instanceId }: NativePanelProps) {
         <div className="text-text font-medium">Mission board</div>
         <input
           type="number"
-          placeholder="instance id"
-          value={pickedInstance || ""}
-          onChange={(e) => setPickedInstance(parseInt(e.target.value) || 0)}
+          placeholder="agent id"
+          value={pickedAgent || ""}
+          onChange={(e) => setPickedAgent(parseInt(e.target.value) || 0)}
           className="bg-bg-input border border-border rounded px-2 py-1 text-sm w-32"
         />
         <button
           onClick={() => setAdding(true)}
-          disabled={!pickedInstance}
+          disabled={!pickedAgent}
           className="px-3 py-1 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
         >
           + Task
@@ -142,13 +144,13 @@ export default function TasksPanel({ instanceId }: NativePanelProps) {
       </header>
 
       <div className="flex-1 overflow-auto p-4">
-        {!pickedInstance ? (
+        {!pickedAgent ? (
           <div className="py-12 text-center text-text-muted text-sm">
-            Pick an instance ID to view its mission board.
+            Pick an agent ID to view its mission board.
           </div>
         ) : tasks.length === 0 ? (
           <div className="py-12 text-center text-text-muted text-sm">
-            No tasks yet for instance {pickedInstance}. Add one or have the agent call <code>tasks_create</code>.
+            No tasks yet for agent {pickedAgent}. Add one or have the agent call <code>tasks_create</code>.
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">

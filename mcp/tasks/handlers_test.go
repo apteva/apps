@@ -35,15 +35,15 @@ func TestUnit_ToolCreate_RoundTripsThroughDB(t *testing.T) {
 	ctx := newTasksCtx(t)
 	app := &App{}
 	out, err := app.toolCreate(ctx, map[string]any{
-		"instance_id": int64(7),
-		"title":       "Ship social v0.2",
-		"notes":       "remember to push panel",
+		"agent_id": int64(7),
+		"title":    "Ship social v0.2",
+		"notes":    "remember to push panel",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	task := out.(*Task)
-	if task.ID == 0 || task.InstanceID != 7 || task.Title != "Ship social v0.2" {
+	if task.ID == 0 || task.AgentID != 7 || task.Title != "Ship social v0.2" {
 		t.Errorf("task malformed: %+v", task)
 	}
 	if task.Status != "open" {
@@ -63,10 +63,10 @@ func TestUnit_ToolCreate_ValidatesArgs(t *testing.T) {
 	ctx := newTasksCtx(t)
 	app := &App{}
 	cases := []map[string]any{
-		{},                                 // missing both
-		{"instance_id": int64(7)},          // missing title
-		{"title": "x"},                     // missing instance_id
-		{"instance_id": int64(7), "title": ""}, // empty title
+		{},                                  // missing both
+		{"agent_id": int64(7)},              // missing title
+		{"title": "x"},                      // missing agent_id
+		{"agent_id": int64(7), "title": ""}, // empty title
 	}
 	for i, args := range cases {
 		if _, err := app.toolCreate(ctx, args); err == nil {
@@ -84,15 +84,15 @@ func TestUnit_ToolList_FiltersByStatus(t *testing.T) {
 			ctx.AppDB().Exec(`UPDATE tasks SET status=? WHERE id=?`, status, i+1)
 		}
 	}
-	out, _ := app.toolList(ctx, map[string]any{"instance_id": int64(1)})
+	out, _ := app.toolList(ctx, map[string]any{"agent_id": int64(1)})
 	if got := len(out.([]Task)); got != 2 {
 		t.Errorf("default 'open' filter: got %d, want 2", got)
 	}
-	out, _ = app.toolList(ctx, map[string]any{"instance_id": int64(1), "status": "all"})
+	out, _ = app.toolList(ctx, map[string]any{"agent_id": int64(1), "status": "all"})
 	if got := len(out.([]Task)); got != 4 {
 		t.Errorf("status=all: got %d, want 4", got)
 	}
-	out, _ = app.toolList(ctx, map[string]any{"instance_id": int64(1), "status": "done"})
+	out, _ = app.toolList(ctx, map[string]any{"agent_id": int64(1), "status": "done"})
 	if got := len(out.([]Task)); got != 1 {
 		t.Errorf("status=done: got %d, want 1", got)
 	}
@@ -134,17 +134,17 @@ func TestHTTP_CreateAndList(t *testing.T) {
 	defer srv.Close()
 
 	body := bytes.NewBufferString(`{"Title":"buy groceries","Notes":"milk, eggs"}`)
-	resp, err := http.Post(srv.URL+"/instances/42", "application/json", body)
+	resp, err := http.Post(srv.URL+"/agents/42", "application/json", body)
 	must200(t, resp, err)
 	var created Task
 	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
 		t.Fatal(err)
 	}
-	if created.Title != "buy groceries" || created.InstanceID != 42 {
+	if created.Title != "buy groceries" || created.AgentID != 42 {
 		t.Errorf("created malformed: %+v", created)
 	}
 
-	listResp, err := http.Get(srv.URL + "/instances/42")
+	listResp, err := http.Get(srv.URL + "/agents/42")
 	must200(t, listResp, err)
 	var list []Task
 	if err := json.NewDecoder(listResp.Body).Decode(&list); err != nil {
@@ -158,7 +158,7 @@ func TestHTTP_CreateAndList(t *testing.T) {
 func TestHTTP_Create_RequiresTitle(t *testing.T) {
 	srv := newHTTPServer(t)
 	defer srv.Close()
-	resp, _ := http.Post(srv.URL+"/instances/1", "application/json",
+	resp, _ := http.Post(srv.URL+"/agents/1", "application/json",
 		bytes.NewBufferString(`{"Title":"","Notes":"x"}`))
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 on empty title, got %d", resp.StatusCode)
@@ -168,7 +168,7 @@ func TestHTTP_Create_RequiresTitle(t *testing.T) {
 func TestHTTP_UpdateAndDelete(t *testing.T) {
 	srv := newHTTPServer(t)
 	defer srv.Close()
-	resp, err := http.Post(srv.URL+"/instances/1", "application/json",
+	resp, err := http.Post(srv.URL+"/agents/1", "application/json",
 		bytes.NewBufferString(`{"Title":"x"}`))
 	must200(t, resp, err)
 	var t1 Task
@@ -189,7 +189,7 @@ func TestHTTP_UpdateAndDelete(t *testing.T) {
 		t.Errorf("delete status = %d", del.StatusCode)
 	}
 	// Confirm gone.
-	listResp, err := http.Get(srv.URL + "/instances/1?status=all")
+	listResp, err := http.Get(srv.URL + "/agents/1?status=all")
 	must200(t, listResp, err)
 	body, _ := io.ReadAll(listResp.Body)
 	// Empty list serializes as "null\n" or "[]\n" depending on driver;
@@ -243,8 +243,8 @@ func TestMCP_ToolsCall_CreateThenList(t *testing.T) {
 	ctx := newTasksCtx(t)
 	app := &App{}
 	create := mcpDispatch(t, app, "tasks_create", map[string]any{
-		"instance_id": float64(99), // JSON numbers come in as float64
-		"title":       "via MCP",
+		"agent_id": float64(99), // JSON numbers come in as float64
+		"title":    "via MCP",
 	}, ctx)
 	if create == nil {
 		t.Fatal("create returned nil")
@@ -253,7 +253,7 @@ func TestMCP_ToolsCall_CreateThenList(t *testing.T) {
 		t.Fatalf("create result = %+v", create)
 	}
 	list := mcpDispatch(t, app, "tasks_list", map[string]any{
-		"instance_id": float64(99),
+		"agent_id": float64(99),
 	}, ctx)
 	if got := len(list.([]Task)); got != 1 {
 		t.Errorf("list returned %d tasks, want 1", got)
@@ -265,7 +265,7 @@ func TestMCP_ToolsCall_RequiredArgsEnforced(t *testing.T) {
 	app := &App{}
 	// tasks_create with missing required title — handler returns error.
 	if _, err := dispatchByName(app, "tasks_create").Handler(ctx, map[string]any{
-		"instance_id": float64(1),
+		"agent_id": float64(1),
 	}); err == nil {
 		t.Error("expected error for missing title")
 	}

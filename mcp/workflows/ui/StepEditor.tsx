@@ -10,15 +10,34 @@
 // callback shape mirrors what useReducer would give us, just
 // flattened so each form field can call onPatch directly.
 
+import { useEffect, useState } from "react";
+
 import { StepDef } from "./graph";
 
 export interface StepEditorProps {
   step: StepDef;
+  projectId: string;
   onPatch: (next: StepDef) => void;
   onDelete?: () => void;
 }
 
-export function StepEditor({ step, onPatch, onDelete }: StepEditorProps) {
+// ─── Project-scoped connection catalog (lives on the dashboard
+// host, not the workflows sidecar). Fetched lazily the first time
+// an integration step is selected.
+interface Connection {
+  id: number;
+  app_slug: string;
+  app_name?: string;
+  name?: string;
+  status?: string;
+}
+
+interface ConnectionTool {
+  name: string;
+  description?: string;
+}
+
+export function StepEditor({ step, projectId, onPatch, onDelete }: StepEditorProps) {
   const patch = (mutate: (s: StepDef) => void) => {
     // Clone shallowly + apply mutator. Avoids accidental shared
     // refs between parent and child state — the parent does the
@@ -83,7 +102,7 @@ export function StepEditor({ step, onPatch, onDelete }: StepEditorProps) {
         <AppFields step={step} patch={patch} />
       )}
       {step.kind === "integration" && (
-        <IntegrationFields step={step} patch={patch} />
+        <IntegrationFields step={step} patch={patch} projectId={projectId} />
       )}
       {step.kind === "emit" && (
         <EmitFields step={step} patch={patch} />
@@ -205,34 +224,153 @@ function AppFields({ step, patch }: { step: StepDef; patch: (mutator: (s: StepDe
   );
 }
 
-function IntegrationFields({ step, patch }: { step: StepDef; patch: (mutator: (s: StepDef) => void) => void }) {
+function IntegrationFields({
+  step,
+  patch,
+  projectId,
+}: {
+  step: StepDef;
+  patch: (mutator: (s: StepDef) => void) => void;
+  projectId: string;
+}) {
+  const [connections, setConnections] = useState<Connection[] | null>(null);
+  const [connectionsErr, setConnectionsErr] = useState<string>("");
+  const [tools, setTools] = useState<ConnectionTool[] | null>(null);
+  const [toolsErr, setToolsErr] = useState<string>("");
+  const [loadingTools, setLoadingTools] = useState(false);
+
+  // Load this project's connections. Same-origin cookies authenticate
+  // against apteva-server's /api/connections.
+  useEffect(() => {
+    if (!projectId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/connections?project_id=${encodeURIComponent(projectId)}`,
+          { credentials: "same-origin" },
+        );
+        if (!res.ok) throw new Error(`${res.status}`);
+        const data = await res.json();
+        if (cancelled) return;
+        const list: Connection[] = Array.isArray(data) ? data : data.connections || [];
+        setConnections(list);
+      } catch (e) {
+        if (!cancelled) setConnectionsErr((e as Error).message);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
+
+  // Load tools for the selected connection. Re-fetches when the
+  // user switches connections.
+  useEffect(() => {
+    if (!step.connection_id || !projectId) {
+      setTools(null);
+      return;
+    }
+    let cancelled = false;
+    setLoadingTools(true);
+    setToolsErr("");
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/connections/${step.connection_id}/tools?project_id=${encodeURIComponent(projectId)}`,
+          { credentials: "same-origin" },
+        );
+        if (!res.ok) throw new Error(`${res.status}`);
+        const data = await res.json();
+        if (cancelled) return;
+        const list: ConnectionTool[] = Array.isArray(data) ? data : data.tools || [];
+        setTools(list);
+      } catch (e) {
+        if (!cancelled) setToolsErr((e as Error).message);
+      } finally {
+        if (!cancelled) setLoadingTools(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [step.connection_id, projectId]);
+
+  const selectedTool = tools?.find((t) => t.name === step.tool);
+
   return (
     <>
-      <div className="px-4 grid grid-cols-2 gap-2">
-        <Field label="Connection ID" hint="From Connections panel.">
-          <input
-            type="number"
-            value={step.connection_id ?? ""}
-            onChange={(e) => {
-              const n = Number(e.target.value);
-              patch((s) => (s.connection_id = Number.isFinite(n) && n > 0 ? n : undefined));
-            }}
-            placeholder="17"
-            className={fieldClass + " font-mono"}
-          />
-        </Field>
-        <Field label="Tool" hint="e.g. pushover_send_message.">
-          <input
-            type="text"
-            value={step.tool || ""}
-            onChange={(e) => patch((s) => (s.tool = e.target.value || undefined))}
-            placeholder="pushover_send_message"
-            className={fieldClass + " font-mono"}
-          />
-        </Field>
-      </div>
+      <Field
+        label="Connection"
+        hint={
+          connectionsErr
+            ? `Could not load connections: ${connectionsErr}`
+            : connections === null
+            ? "Loading…"
+            : connections.length === 0
+            ? "No connections in this project. Add one from the Connections panel."
+            : "Pick a connection from this project."
+        }
+      >
+        <select
+          value={step.connection_id ?? ""}
+          onChange={(e) => {
+            const n = Number(e.target.value);
+            patch((s) => {
+              s.connection_id = Number.isFinite(n) && n > 0 ? n : undefined;
+              // Switching connection invalidates the tool choice.
+              s.tool = undefined;
+            });
+          }}
+          className={fieldClass}
+          disabled={!connections || connections.length === 0}
+        >
+          <option value="">
+            {connections === null ? "Loading…" : "— pick a connection —"}
+          </option>
+          {connections?.map((c) => (
+            <option key={c.id} value={c.id}>
+              {connectionLabel(c)}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <Field
+        label="Tool"
+        hint={
+          toolsErr
+            ? `Could not load tools: ${toolsErr}`
+            : !step.connection_id
+            ? "Pick a connection first."
+            : loadingTools
+            ? "Loading tools…"
+            : tools && tools.length === 0
+            ? "This connection exposes no tools."
+            : selectedTool?.description || "Pick a tool to call."
+        }
+      >
+        <select
+          value={step.tool || ""}
+          onChange={(e) => patch((s) => (s.tool = e.target.value || undefined))}
+          className={fieldClass + " font-mono"}
+          disabled={!tools || tools.length === 0}
+        >
+          <option value="">— pick a tool —</option>
+          {tools?.map((t) => (
+            <option key={t.name} value={t.name}>
+              {t.name}
+            </option>
+          ))}
+        </select>
+      </Field>
     </>
   );
+}
+
+function connectionLabel(c: Connection): string {
+  const name = c.name || c.app_name || c.app_slug;
+  return `${name} (id ${c.id})`;
 }
 
 function EmitFields({ step, patch }: { step: StepDef; patch: (mutator: (s: StepDef) => void) => void }) {

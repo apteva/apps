@@ -35,9 +35,9 @@ func TestSidecar_FullToolFlow(t *testing.T) {
 
 	// 1. Create a task via MCP.
 	r := sc.MCP("tasks_create", map[string]any{
-		"instance_id": 7,
-		"title":       "Ship social v0.2",
-		"notes":       "remember to push panel",
+		"agent_id": 7,
+		"title":    "Ship social v0.2",
+		"notes":    "remember to push panel",
 	})
 	id := int64(r["id"].(float64))
 	if id == 0 {
