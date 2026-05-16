@@ -161,60 +161,73 @@ func stopProcess(p *tenantProc, grace time.Duration) error {
 // fleet's in-memory procs handle is empty — e.g., after a fleet
 // upgrade re-spawned the sidecar but left the tenant running.
 //
-// Strategy:
-//  1. If we have a procs[slug] handle, use the normal stopProcess
-//     path (cmd-Wait-aware, accurate).
-//  2. Else, look up the pid currently listening on the tenant's port
-//     (ss / lsof / /proc fallback). SIGTERM that pid, wait for the
-//     port to free, SIGKILL on timeout.
+// Resolves a pid (from in-memory handle if present, else by port),
+// then signals the WHOLE PROCESS GROUP (kill -PGID). The pgrp signal
+// is critical because a tenant is a 3-deep tree:
+//
+//	node /apteva (npm shim)
+//	  apteva  (Go CLI binary; acts as a watchdog)
+//	    apteva-server  (the actual listener)
+//
+// SIGTERM to the listener alone leaves the watchdog alive and it
+// respawns apteva-server; SIGTERM to the npm shim alone may not
+// propagate. The whole tree is in one pgrp (fleet sets Setpgid on the
+// outermost cmd), so kill -PGID cascades correctly.
 //
 // Returns nil if no process is on the port (already stopped). Errors
 // only on unexpected signal failures.
 func (a *App) stopTenantBy(slug string, port int, grace time.Duration) error {
 	a.procMu.Lock()
 	p := a.procs[slug]
+	if p != nil {
+		// Clear the handle eagerly; we own the kill now.
+		delete(a.procs, slug)
+	}
 	a.procMu.Unlock()
+
+	// Pick the pid to signal. Handle's pid is preferred (we know it
+	// matches); port lookup is the orphan fallback.
+	var pid int
 	if p != nil && p.cmd != nil && p.cmd.Process != nil {
-		err := stopProcess(p, grace)
-		a.procMu.Lock()
-		// Clear the handle since the process is gone (or being killed).
-		// Avoids a stale entry surviving past a clean stop.
-		if a.procs[slug] == p {
-			delete(a.procs, slug)
-		}
-		a.procMu.Unlock()
-		return err
+		pid = p.cmd.Process.Pid
+	} else if port > 0 {
+		pid, _ = findPidOnPort(port)
 	}
-	if port == 0 {
-		return nil
+	if pid <= 0 {
+		return nil // nothing to stop
 	}
-	pid, perr := findPidOnPort(port)
-	if perr != nil || pid <= 0 {
-		// Nothing listening — already stopped.
-		return nil
+
+	pgid, err := syscall.Getpgid(pid)
+	if err != nil || pgid <= 0 {
+		pgid = pid // fall back to single-pid signalling
 	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		return fmt.Errorf("sigterm orphan pid %d: %w", pid, err)
-	}
-	// Poll for port to free.
+
+	// Graceful first: SIGTERM the whole pgrp, give the tree time to
+	// shut down cleanly, then verify by polling the port.
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
 	deadline := time.Now().Add(grace)
 	for time.Now().Before(deadline) {
-		if !portInUse(port) {
+		if port == 0 || !portInUse(port) {
 			return nil
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	// Timeout — escalate to SIGKILL on the same pid (and its pgroup, since
-	// tenants were spawned with Setpgid).
-	_ = syscall.Kill(-pid, syscall.SIGKILL)
+	// Hard kill on timeout. Signal the pgrp twice (kill -PGID and the
+	// leader directly) because some watchdogs catch and ignore the
+	// first round; SIGKILL can't be caught at all but the wait is what
+	// matters here.
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	_ = syscall.Kill(pid, syscall.SIGKILL)
-	for i := 0; i < 20; i++ { // 5s after SIGKILL
-		if !portInUse(port) {
+	for i := 0; i < 20; i++ { // up to 5s after SIGKILL
+		if port == 0 || !portInUse(port) {
 			return nil
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	return fmt.Errorf("orphan pid %d still listening on :%d after SIGKILL", pid, port)
+	if port > 0 && portInUse(port) {
+		return fmt.Errorf("pid %d (pgrp %d) still listening on :%d after SIGKILL", pid, pgid, port)
+	}
+	return nil
 }
 
 // findPidOnPort returns the pid of the process LISTENING on the given
@@ -427,7 +440,15 @@ func buildSpawnCmd(slug, bin string, args []string) *exec.Cmd {
 	// `systemd-run --scope`: foreground; PID is the actual command,
 	// cmd.Wait() works as if exec was direct. Quiet to keep our
 	// captured stderr clean.
-	unit := "fleet-tenant-" + sanitizeUnit(slug)
+	//
+	// Unit name: include a unix-nano suffix so re-spawns never collide
+	// with a stale scope. The old fixed name (fleet-tenant-<slug>) hit
+	// "Unit ... was already loaded" on every tenant_update because the
+	// pre-update scope's last process hadn't fully exited yet when
+	// the new spawn tried to register. --collect cleans up stopped
+	// scopes, but the cleanup is asynchronous; a unique name dodges
+	// the race entirely.
+	unit := fmt.Sprintf("fleet-tenant-%s-%d", sanitizeUnit(slug), time.Now().UnixNano())
 	full := append([]string{
 		"--quiet", "--collect", "--scope", "--unit=" + unit, "--", bin,
 	}, args...)
