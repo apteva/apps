@@ -14,7 +14,7 @@ setup:
     path: ./
 
 directive: |
-  You are managing the mission board for instance 5. Add two tasks:
+  You are managing the mission board for agent 5. Add two tasks:
 
     1. "Triage incoming reports"
     2. "Write weekly summary"
@@ -28,7 +28,7 @@ assert:
   - tool_called: tasks_create
   - tool_called: tasks_list
   - tool_called: tasks_update
-  - http: GET /api/apps/tasks/instances/5?status=in_progress
+  - http: GET /api/apps/tasks/agents/5?status=in_progress
     expect_status: 200
     expect_count: 1
   - iterations_at_most: 10

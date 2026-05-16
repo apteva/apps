@@ -136,7 +136,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tasks_list",
-			Description: "List tasks for an agent. Args: agent_id, status (open | done | all, default open).",
+			Description: "List tasks for an agent. Args: agent_id, status (open | in_progress | blocked | done | cancelled | all, default open).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -149,7 +149,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tasks_update",
-			Description: "Update a task. Args: task_id, title (optional), notes (optional), status (optional).",
+			Description: "Update a task. Args: task_id, title (optional), notes (optional), status (optional: open | in_progress | blocked | done | cancelled).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -181,6 +181,18 @@ func (a *App) Channels() []sdk.ChannelFactory   { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
+// validStatuses mirrors the CHECK constraint in migrations/001_init.sql.
+// Kept here so the MCP layer rejects bad inputs with a clear message
+// before they hit SQLite (which returns an opaque "CHECK constraint
+// failed" error).
+var validStatuses = map[string]bool{
+	"open":        true,
+	"in_progress": true,
+	"blocked":     true,
+	"done":        true,
+	"cancelled":   true,
+}
+
 // --- DB helpers --------------------------------------------------------------
 
 type Task struct {
@@ -188,7 +200,7 @@ type Task struct {
 	AgentID   int64  `json:"agent_id"`
 	Title     string `json:"title"`
 	Notes     string `json:"notes"`
-	Status    string `json:"status"` // open | done
+	Status    string `json:"status"` // open | in_progress | blocked | done | cancelled
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
 }
@@ -332,6 +344,9 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := toInt64(args["task_id"])
 	if id == 0 {
 		return nil, errors.New("task_id required")
+	}
+	if s, ok := args["status"].(string); ok && s != "" && !validStatuses[s] {
+		return nil, fmt.Errorf("invalid status %q: must be one of open, in_progress, blocked, done, cancelled", s)
 	}
 	if err := dbUpdate(ctx.AppDB(), id, args); err != nil {
 		return nil, err

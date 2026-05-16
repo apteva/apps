@@ -35,6 +35,21 @@ interface Connection {
 interface ConnectionTool {
   name: string;
   description?: string;
+  input_schema?: JSONSchema;
+}
+
+// JSON-Schema fragment we render against. Intentionally narrow:
+// only the parts the connection catalog actually surfaces (type,
+// description, default, enum, items.type, properties, required).
+// Anything we don't understand falls back to the JSON textarea.
+interface JSONSchema {
+  type?: string | string[];
+  description?: string;
+  default?: unknown;
+  enum?: unknown[];
+  required?: string[];
+  properties?: Record<string, JSONSchema>;
+  items?: JSONSchema;
 }
 
 export function StepEditor({ step, projectId, onPatch, onDelete }: StepEditorProps) {
@@ -111,8 +126,10 @@ export function StepEditor({ step, projectId, onPatch, onDelete }: StepEditorPro
         <BranchFields step={step} patch={patch} />
       )}
 
-      {/* Common: input (skipped for branch — it has its own when) */}
-      {step.kind !== "branch" && (
+      {/* Common: input (skipped for branch — it has its own when —
+          and for integration when a schema-driven form is already
+          rendered inline below the tool picker). */}
+      {step.kind !== "branch" && step.kind !== "integration" && (
         <Field
           label="Input"
           hint={`Available in steps as {{ steps.${step.id}.* }} after this step runs.`}
@@ -352,7 +369,16 @@ function IntegrationFields({
       >
         <select
           value={step.tool || ""}
-          onChange={(e) => patch((s) => (s.tool = e.target.value || undefined))}
+          onChange={(e) => {
+            const next = e.target.value || undefined;
+            const prev = step.tool;
+            patch((s) => {
+              s.tool = next;
+              // Clear input when switching tools so stale props from
+              // the previous tool's schema don't linger in the YAML.
+              if (next !== prev) s.input = undefined;
+            });
+          }}
           className={fieldClass + " font-mono"}
           disabled={!tools || tools.length === 0}
         >
@@ -364,6 +390,13 @@ function IntegrationFields({
           ))}
         </select>
       </Field>
+
+      <SchemaInputForm
+        stepID={step.id}
+        schema={selectedTool?.input_schema}
+        value={asRecord(step.input)}
+        onChange={(next) => patch((s) => (s.input = next))}
+      />
     </>
   );
 }
@@ -371,6 +404,272 @@ function IntegrationFields({
 function connectionLabel(c: Connection): string {
   const name = c.name || c.app_name || c.app_slug;
   return `${name} (id ${c.id})`;
+}
+
+function asRecord(v: unknown): Record<string, unknown> {
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    return v as Record<string, unknown>;
+  }
+  return {};
+}
+
+// ─── Schema-driven input form ──────────────────────────────────────
+//
+// Renders one field per property of the tool's input_schema. Falls
+// back to the raw JSON textarea when:
+//   - the tool didn't expose a schema, or
+//   - the user toggles "Raw JSON" (for shapes the per-property form
+//     can't express cleanly: arrays of objects, anyOf, etc.).
+//
+// Template strings ({{ input.x }}, {{ steps.foo.bar }}) are accepted
+// in every field — the workflow runner's template engine resolves
+// them at run time. Number/integer inputs that look like a template
+// are stored as strings so the YAML round-trip preserves the
+// expression. Plain numbers parse to JSON numbers as expected.
+
+function SchemaInputForm({
+  stepID,
+  schema,
+  value,
+  onChange,
+}: {
+  stepID: string;
+  schema?: JSONSchema;
+  value: Record<string, unknown>;
+  onChange: (next: Record<string, unknown> | undefined) => void;
+}) {
+  const [rawMode, setRawMode] = useState(false);
+  const props = schema?.properties;
+  const hasSchemaForm = !!props && Object.keys(props).length > 0;
+  const required = new Set(schema?.required || []);
+
+  // No schema → just the JSON textarea, same hint as the
+  // generic Input field.
+  if (!hasSchemaForm) {
+    return (
+      <Field
+        label="Input"
+        hint={`Available downstream as {{ steps.${stepID}.* }}.`}
+      >
+        <JSONField
+          value={value && Object.keys(value).length ? value : undefined}
+          onChange={(v) => onChange(v as Record<string, unknown> | undefined)}
+        />
+      </Field>
+    );
+  }
+
+  // Schema mode: per-property form. The raw-JSON toggle is for
+  // power users who hit a shape the form can't express.
+  if (rawMode) {
+    return (
+      <>
+        <div className="px-4 mt-2 flex items-center justify-between">
+          <label className="text-xs uppercase tracking-wide text-text-dim">Input</label>
+          <button
+            type="button"
+            onClick={() => setRawMode(false)}
+            className="text-accent text-[10px] hover:underline"
+          >
+            back to form
+          </button>
+        </div>
+        <div className="px-4 pb-2">
+          <JSONField
+            value={value && Object.keys(value).length ? value : undefined}
+            onChange={(v) => onChange(v as Record<string, unknown> | undefined)}
+          />
+          <p className="text-text-dim text-xs mt-1">
+            Available downstream as <code>{`{{ steps.${stepID}.* }}`}</code>.
+          </p>
+        </div>
+      </>
+    );
+  }
+
+  const setProp = (key: string, next: unknown) => {
+    const copy: Record<string, unknown> = { ...value };
+    if (next === undefined) {
+      delete copy[key];
+    } else {
+      copy[key] = next;
+    }
+    onChange(Object.keys(copy).length ? copy : undefined);
+  };
+
+  return (
+    <>
+      <div className="px-4 mt-2 flex items-center justify-between">
+        <label className="text-xs uppercase tracking-wide text-text-dim">Input</label>
+        <button
+          type="button"
+          onClick={() => setRawMode(true)}
+          className="text-text-dim text-[10px] hover:text-text"
+        >
+          raw JSON
+        </button>
+      </div>
+
+      {Object.entries(props!).map(([key, propSchema]) => (
+        <SchemaPropField
+          key={key}
+          name={key}
+          schema={propSchema}
+          required={required.has(key)}
+          value={value[key]}
+          onChange={(v) => setProp(key, v)}
+        />
+      ))}
+
+      <div className="px-4 pb-2">
+        <p className="text-text-dim text-xs">
+          Available downstream as <code>{`{{ steps.${stepID}.* }}`}</code>.
+          Use <code>{`{{ input.x }}`}</code> or <code>{`{{ steps.foo.bar }}`}</code> in any field.
+        </p>
+      </div>
+    </>
+  );
+}
+
+function SchemaPropField({
+  name,
+  schema,
+  required,
+  value,
+  onChange,
+}: {
+  name: string;
+  schema: JSONSchema;
+  required: boolean;
+  value: unknown;
+  onChange: (v: unknown) => void;
+}) {
+  const type = primaryType(schema);
+  const hint = describeSchema(schema);
+  const labelText = required ? `${name} *` : name;
+
+  // Enum → select
+  if (schema.enum && schema.enum.length > 0) {
+    const cur = value === undefined ? "" : String(value);
+    return (
+      <Field label={labelText} hint={hint}>
+        <select
+          value={cur}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v === "") return onChange(undefined);
+            const match = schema.enum!.find((x) => String(x) === v);
+            onChange(match !== undefined ? match : v);
+          }}
+          className={fieldClass}
+        >
+          <option value="">{required ? "— required —" : "— unset —"}</option>
+          {schema.enum.map((opt, i) => (
+            <option key={i} value={String(opt)}>
+              {String(opt)}
+            </option>
+          ))}
+        </select>
+      </Field>
+    );
+  }
+
+  // Boolean → tri-state select (unset / true / false). A checkbox
+  // can't represent "unset" vs "false", which matters for optional
+  // fields where the upstream tool's default differs from false.
+  if (type === "boolean") {
+    const cur = value === undefined ? "" : value === true ? "true" : value === false ? "false" : "";
+    return (
+      <Field label={labelText} hint={hint}>
+        <select
+          value={cur}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v === "") onChange(undefined);
+            else if (v === "true") onChange(true);
+            else if (v === "false") onChange(false);
+          }}
+          className={fieldClass}
+        >
+          <option value="">— unset —</option>
+          <option value="true">true</option>
+          <option value="false">false</option>
+        </select>
+      </Field>
+    );
+  }
+
+  // Object/array → JSON textarea (the per-property form can't
+  // recurse usefully into arbitrary nested shapes).
+  if (type === "object" || type === "array") {
+    return (
+      <Field label={labelText} hint={hint}>
+        <JSONField value={value} onChange={onChange} />
+      </Field>
+    );
+  }
+
+  // String / number / integer → text input that also accepts
+  // {{ template }} expressions.
+  const textValue =
+    value === undefined ? "" : typeof value === "object" ? JSON.stringify(value) : String(value);
+  const isMultiline = type === "string" && /(description|html|body|message|text|content)/i.test(name);
+  const placeholder =
+    schema.default !== undefined ? `default: ${String(schema.default)}` : `{{ input.${name} }}`;
+
+  const commit = (raw: string) => {
+    const trimmed = raw.trim();
+    if (trimmed === "") return onChange(undefined);
+    if (looksLikeTemplate(trimmed) || type === "string") return onChange(raw);
+    const n = Number(trimmed);
+    if (Number.isFinite(n)) return onChange(type === "integer" ? Math.trunc(n) : n);
+    onChange(raw);
+  };
+
+  if (isMultiline) {
+    return (
+      <Field label={labelText} hint={hint}>
+        <textarea
+          value={textValue}
+          onChange={(e) => commit(e.target.value)}
+          placeholder={placeholder}
+          className={fieldClass + " font-mono"}
+          style={{ minHeight: 72 }}
+          spellCheck={false}
+        />
+      </Field>
+    );
+  }
+  return (
+    <Field label={labelText} hint={hint}>
+      <input
+        type="text"
+        value={textValue}
+        onChange={(e) => commit(e.target.value)}
+        placeholder={placeholder}
+        className={fieldClass + (type === "string" ? "" : " font-mono")}
+        spellCheck={false}
+      />
+    </Field>
+  );
+}
+
+function primaryType(s: JSONSchema): string {
+  if (Array.isArray(s.type)) {
+    return s.type.find((t) => t !== "null") || "string";
+  }
+  return s.type || "string";
+}
+
+function describeSchema(s: JSONSchema): string {
+  const parts: string[] = [];
+  if (s.description) parts.push(s.description);
+  if (s.default !== undefined) parts.push(`Default: ${JSON.stringify(s.default)}`);
+  return parts.join(" · ");
+}
+
+function looksLikeTemplate(s: string): boolean {
+  return s.includes("{{") && s.includes("}}");
 }
 
 function EmitFields({ step, patch }: { step: StepDef; patch: (mutator: (s: StepDef) => void) => void }) {

@@ -24,6 +24,7 @@ mcp/finance/finance
 mcp/fleet/fleet
 mcp/health/health
 mcp/image-studio/image-studio
+mcp/instances/instances
 mcp/jobs/jobs
 mcp/live-link/live-link
 mcp/media/media

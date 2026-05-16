@@ -13,7 +13,7 @@ setup:
     path: ./
 
 directive: |
-  You are managing the mission board for instance 1. Add three tasks
+  You are managing the mission board for agent 1. Add three tasks
   to it:
 
     1. "Buy oat milk"
@@ -27,7 +27,7 @@ directive: |
 assert:
   - tool_called: tasks_create
   - tool_called: tasks_complete
-  - http: GET /api/apps/tasks/instances/1?status=all
+  - http: GET /api/apps/tasks/agents/1?status=all
     expect_status: 200
     expect_count: 3
   - iterations_at_most: 10
