@@ -330,18 +330,18 @@ export default function FinancePanel({ projectId }: NativePanelProps) {
           <h1 className="text-lg font-semibold">Finance</h1>
         </div>
         <div className="flex items-center gap-2">
-          <nav className="flex rounded-md border border-slate-200 dark:border-slate-700 overflow-hidden text-sm">
+          <nav className="flex rounded-md border border-border overflow-hidden text-sm">
             {(["overview", "accounts", "holdings"] as Tab[]).map(t => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
-                className={`px-3 py-1.5 capitalize ${tab === t ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900" : "hover:bg-slate-100 dark:hover:bg-slate-800"}`}
+                className={`px-3 py-1.5 capitalize ${tab === t ? "bg-accent text-bg" : "hover:bg-bg-hover"}`}
               >{t}</button>
             ))}
           </nav>
           <button
             onClick={() => setShowNewAccount(true)}
-            className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm text-white hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
+            className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm text-bg hover:bg-accent-hover"
           >
             <Icon name="plus" size={14} /> Account
           </button>
@@ -349,7 +349,7 @@ export default function FinancePanel({ projectId }: NativePanelProps) {
       </header>
 
       {error && (
-        <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
+        <div className="rounded-md border border-error/30 bg-error/10 px-3 py-2 text-sm text-error border-error/30 bg-error/10 text-error">
           {error}
         </div>
       )}
@@ -439,13 +439,13 @@ function OverviewTab({
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-      <section className="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900 lg:col-span-2">
+      <section className="rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card lg:col-span-2">
         <div className="flex items-start justify-between">
           <div>
-            <div className="text-xs uppercase tracking-wide text-slate-500">Net worth</div>
+            <div className="text-xs uppercase tracking-wide text-text-muted">Net worth</div>
             <div className="mt-1 text-3xl font-semibold">{fmtMoney(total, base)}</div>
             {lastDelta !== 0 && (
-              <div className={`mt-1 flex items-center gap-1 text-sm ${lastDelta > 0 ? "text-emerald-600" : "text-red-600"}`}>
+              <div className={`mt-1 flex items-center gap-1 text-sm ${lastDelta > 0 ? "text-success" : "text-error"}`}>
                 <Icon name={lastDelta > 0 ? "trending-up" : "trending-down"} size={14} />
                 {fmtMoney(Math.abs(lastDelta), base)} this month
               </div>
@@ -455,15 +455,15 @@ function OverviewTab({
         <Sparkline points={(netWorth?.points ?? []).map(p => p.total)} height={80} />
       </section>
 
-      <section className="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
-        <div className="text-xs uppercase tracking-wide text-slate-500">Allocation</div>
+      <section className="rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card">
+        <div className="text-xs uppercase tracking-wide text-text-muted">Allocation</div>
         <AllocationDonut groups={allocation?.by_account_kind ?? []} total={total} />
       </section>
 
       <BudgetsCard status={budgetStatus} base={base} onSetBudget={onSetBudget} />
 
-      <section className="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900 lg:col-span-2">
-        <div className="mb-3 text-xs uppercase tracking-wide text-slate-500">Top movers</div>
+      <section className="rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card lg:col-span-2">
+        <div className="mb-3 text-xs uppercase tracking-wide text-text-muted">Top movers</div>
         {movers.length === 0 ? (
           <EmptyState message="No price data yet — set a price on an instrument to see P&L." />
         ) : (
@@ -472,12 +472,12 @@ function OverviewTab({
               const inst = ""; // resolved via instrument id mapping if needed
               const acc = accounts.find(a => a.id === h.account_id);
               return (
-                <li key={h.id} className="flex items-center justify-between rounded-md border border-slate-200 px-3 py-2 dark:border-slate-700">
+                <li key={h.id} className="flex items-center justify-between rounded-md border border-border px-3 py-2 border-border">
                   <div>
                     <div className="text-sm font-medium">#{h.instrument_id} {inst}</div>
-                    <div className="text-xs text-slate-500">{acc?.name ?? "—"} • {h.quantity}</div>
+                    <div className="text-xs text-text-muted">{acc?.name ?? "—"} • {h.quantity}</div>
                   </div>
-                  <div className={`text-right text-sm ${h.unrealized_pl >= 0 ? "text-emerald-600" : "text-red-600"}`}>
+                  <div className={`text-right text-sm ${h.unrealized_pl >= 0 ? "text-success" : "text-error"}`}>
                     <div className="font-medium">{fmtMoney(h.current_value, acc?.currency ?? base)}</div>
                     <div className="text-xs">{fmtPct(h.unrealized_pct)}</div>
                   </div>
@@ -488,19 +488,19 @@ function OverviewTab({
         )}
       </section>
 
-      <section className="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
-        <div className="mb-3 text-xs uppercase tracking-wide text-slate-500">Recent activity</div>
+      <section className="rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card">
+        <div className="mb-3 text-xs uppercase tracking-wide text-text-muted">Recent activity</div>
         {recentTxns.length === 0 ? (
           <EmptyState message="No transactions yet." />
         ) : (
-          <ul className="divide-y divide-slate-100 dark:divide-slate-800 text-sm">
+          <ul className="divide-y divide-border-subtle text-sm">
             {recentTxns.slice(0, 8).map(t => (
               <li key={t.id} className="flex items-center justify-between py-2">
                 <div>
                   <div className="font-medium">{t.payee || t.memo || KIND_LABEL[t.kind] || t.kind}</div>
-                  <div className="text-xs text-slate-500">{fmtDate(t.posted_at)} • {t.kind}</div>
+                  <div className="text-xs text-text-muted">{fmtDate(t.posted_at)} • {t.kind}</div>
                 </div>
-                <div className={`text-right ${t.amount >= 0 ? "text-emerald-600" : "text-red-600"}`}>
+                <div className={`text-right ${t.amount >= 0 ? "text-success" : "text-error"}`}>
                   {fmtMoney(t.amount, t.currency, { signed: true })}
                 </div>
               </li>
@@ -526,14 +526,14 @@ function BudgetsCard({
   }, [status]);
 
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900 lg:col-span-2">
+    <section className="rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card lg:col-span-2">
       <header className="mb-3 flex items-center justify-between">
         <div>
-          <div className="text-xs uppercase tracking-wide text-slate-500">Budgets — {periodLabel}</div>
+          <div className="text-xs uppercase tracking-wide text-text-muted">Budgets — {periodLabel}</div>
         </div>
         <button
           onClick={onSetBudget}
-          className="flex items-center gap-1 text-xs text-slate-600 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white"
+          className="flex items-center gap-1 text-xs text-text-muted hover:text-text"
         >
           <Icon name="plus" size={12} /> Set budget
         </button>
@@ -557,13 +557,13 @@ function BudgetBar({ b, base }: { b: BudgetStatus; base: string }) {
   if (b.over) band = "over";
   else if (b.pct_used >= 75) band = "warn";
   const barColor =
-    band === "over" ? "bg-red-500"
-    : band === "warn" ? "bg-amber-500"
-    : "bg-emerald-500";
+    band === "over" ? "bg-error"
+    : band === "warn" ? "bg-warn"
+    : "bg-success";
   const textColor =
-    band === "over" ? "text-red-600 dark:text-red-400"
-    : band === "warn" ? "text-amber-700 dark:text-amber-400"
-    : "text-slate-600 dark:text-slate-300";
+    band === "over" ? "text-error"
+    : band === "warn" ? "text-warn"
+    : "text-text-muted";
   const ccy = b.currency || base;
   return (
     <li>
@@ -577,7 +577,7 @@ function BudgetBar({ b, base }: { b: BudgetStatus; base: string }) {
           <span className="ml-2">{Math.round(b.pct_used)}%</span>
         </div>
       </div>
-      <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-bg-hover">
         <div className={`h-full rounded-full ${barColor}`} style={{ width: `${pct}%` }} />
       </div>
     </li>
@@ -585,7 +585,7 @@ function BudgetBar({ b, base }: { b: BudgetStatus; base: string }) {
 }
 
 function Sparkline({ points, height = 60 }: { points: number[]; height?: number }) {
-  if (points.length < 2) return <div style={{ height }} className="mt-3 text-xs text-slate-400">Not enough data</div>;
+  if (points.length < 2) return <div style={{ height }} className="mt-3 text-xs text-text-dim">Not enough data</div>;
   const min = Math.min(...points);
   const max = Math.max(...points);
   const range = Math.max(1, max - min);
@@ -599,7 +599,7 @@ function Sparkline({ points, height = 60 }: { points: number[]; height?: number 
   // Color via CSS var so dashboard's Tailwind JIT doesn't need to scan us.
   return (
     <svg viewBox={`0 0 ${w} ${h}`} className="mt-3 w-full" preserveAspectRatio="none" style={{ height }}>
-      <polyline points={pts} fill="none" stroke="var(--finance-spark, #2563eb)" strokeWidth={2} />
+      <polyline points={pts} fill="none" stroke="var(--accent)" strokeWidth={2} />
     </svg>
   );
 }
@@ -607,7 +607,16 @@ function Sparkline({ points, height = 60 }: { points: number[]; height?: number 
 function AllocationDonut({ groups, total }: { groups: AllocationGroup[]; total: number }) {
   const data = groups.filter(g => g.value > 0);
   if (total === 0 || data.length === 0) return <EmptyState message="No allocation yet." />;
-  const colors = ["#2563eb", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#84cc16", "#ec4899"];
+  // Donut slice palette — theme-token-driven so it follows light/dark.
+  // Six semantic colors, recycled when there are more slices than entries.
+  const colors = [
+    "var(--accent)",
+    "var(--success)",
+    "var(--warn)",
+    "var(--error)",
+    "var(--accent-muted)",
+    "var(--text-dim)",
+  ];
   const radius = 50;
   const cx = 60, cy = 60;
   let cum = 0;
@@ -624,14 +633,14 @@ function AllocationDonut({ groups, total }: { groups: AllocationGroup[]; total: 
         {arcs.map((a, i) => (
           <path key={i} d={a.path} fill={a.color} />
         ))}
-        <circle cx={cx} cy={cy} r={28} fill="var(--finance-card-bg, white)" />
+        <circle cx={cx} cy={cy} r={28} fill="var(--bg-card)" />
       </svg>
       <ul className="flex-1 space-y-1 text-xs">
         {arcs.map((a, i) => (
           <li key={i} className="flex items-center gap-2">
             <span className="h-2 w-2 shrink-0 rounded-sm" style={{ background: a.color }} />
             <span className="flex-1 truncate">{KIND_LABEL[a.kind ?? ""] ?? a.kind ?? a.currency}</span>
-            <span className="tabular-nums text-slate-500">{Math.round((a.value / total) * 100)}%</span>
+            <span className="tabular-nums text-text-muted">{Math.round((a.value / total) * 100)}%</span>
           </li>
         ))}
       </ul>
@@ -679,32 +688,32 @@ function AccountsTab({ accounts, base, onChanged }: { accounts: Account[]; base:
       {grouped.map(([kind, accs]) => {
         const subtotal = accs.reduce((s, a) => s + a.total_value, 0);
         return (
-          <section key={kind} className="rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
-            <header className="flex items-center justify-between border-b border-slate-100 px-4 py-2 dark:border-slate-800">
+          <section key={kind} className="rounded-lg border border-border bg-bg-card">
+            <header className="flex items-center justify-between border-b border-border-subtle px-4 py-2 border-border-subtle">
               <div className="flex items-center gap-2">
                 <Icon name={kindIcon(kind)} size={16} />
                 <span className="text-sm font-medium">{KIND_LABEL[kind]}</span>
-                <span className="text-xs text-slate-500">{accs.length}</span>
+                <span className="text-xs text-text-muted">{accs.length}</span>
               </div>
               <span className="text-sm tabular-nums">{fmtMoney(subtotal, base)}</span>
             </header>
-            <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+            <ul className="divide-y divide-border-subtle">
               {accs.map(a => (
                 <li key={a.id}>
                   <button
                     onClick={() => setSelected(a)}
-                    className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-slate-50 dark:hover:bg-slate-800"
+                    className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-bg-hover"
                   >
                     <div>
                       <div className="text-sm font-medium">{a.name}</div>
-                      <div className="text-xs text-slate-500">
+                      <div className="text-xs text-text-muted">
                         {a.source === "manual" ? "Manual" : a.source.replace("integration:", "")} • {a.currency}
                       </div>
                     </div>
                     <div className="text-right">
                       <div className="tabular-nums">{fmtMoney(a.total_value, a.currency)}</div>
                       {a.holdings_value > 0 && (
-                        <div className="text-xs text-slate-500 tabular-nums">
+                        <div className="text-xs text-text-muted tabular-nums">
                           cash {fmtMoney(a.cash_balance, a.currency)}
                         </div>
                       )}
@@ -732,28 +741,28 @@ function AccountDetail({ account, onBack, onChanged }: { account: Account; onBac
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <button onClick={onBack} className="flex items-center gap-1 text-sm text-slate-600 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white">
+        <button onClick={onBack} className="flex items-center gap-1 text-sm text-text-muted hover:text-text">
           <Icon name="chevron-left" size={14} /> Accounts
         </button>
         <button
           onClick={() => setShowNewTxn(true)}
-          className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm text-white hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
+          className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm text-bg hover:bg-accent-hover"
         >
           <Icon name="plus" size={14} /> Transaction
         </button>
       </div>
 
-      <div className="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
+      <div className="rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card">
         <div className="flex items-center justify-between">
           <div>
-            <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-slate-500">
+            <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-text-muted">
               <Icon name={kindIcon(account.kind)} size={14} /> {KIND_LABEL[account.kind]}
             </div>
             <h2 className="mt-1 text-xl font-semibold">{account.name}</h2>
           </div>
           <div className="text-right">
             <div className="text-2xl font-semibold tabular-nums">{fmtMoney(account.total_value, account.currency)}</div>
-            <div className="text-xs text-slate-500 tabular-nums">
+            <div className="text-xs text-text-muted tabular-nums">
               cash {fmtMoney(account.cash_balance, account.currency)}
               {account.holdings_value !== 0 && <> + holdings {fmtMoney(account.holdings_value, account.currency)}</>}
             </div>
@@ -761,19 +770,19 @@ function AccountDetail({ account, onBack, onChanged }: { account: Account; onBac
         </div>
       </div>
 
-      <div className="rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
-        <header className="border-b border-slate-100 px-4 py-2 text-xs uppercase tracking-wide text-slate-500 dark:border-slate-800">Ledger</header>
+      <div className="rounded-lg border border-border bg-bg-card">
+        <header className="border-b border-border-subtle px-4 py-2 text-xs uppercase tracking-wide text-text-muted border-border-subtle">Ledger</header>
         {txns.length === 0 ? (
           <EmptyState message="No transactions yet." />
         ) : (
-          <ul className="divide-y divide-slate-100 dark:divide-slate-800 text-sm">
+          <ul className="divide-y divide-border-subtle text-sm">
             {txns.map(t => (
               <li key={t.id} className="flex items-center justify-between px-4 py-2">
                 <div>
                   <div className="font-medium">{t.payee || t.memo || KIND_LABEL[t.kind] || t.kind}</div>
-                  <div className="text-xs text-slate-500">{fmtDate(t.posted_at)} • {t.kind}{t.quantity !== 0 ? ` • ${t.quantity}` : ""}</div>
+                  <div className="text-xs text-text-muted">{fmtDate(t.posted_at)} • {t.kind}{t.quantity !== 0 ? ` • ${t.quantity}` : ""}</div>
                 </div>
-                <div className={`text-right tabular-nums ${t.amount >= 0 ? "text-emerald-600" : "text-red-600"}`}>
+                <div className={`text-right tabular-nums ${t.amount >= 0 ? "text-success" : "text-error"}`}>
                   {fmtMoney(t.amount, t.currency, { signed: true })}
                 </div>
               </li>
@@ -842,22 +851,22 @@ function HoldingsTab({ holdings, accounts }: { holdings: Holding[]; accounts: Ac
   const Header = ({ k, label, align = "left" }: { k: SortKey; label: string; align?: "left" | "right" }) => (
     <th
       onClick={() => setSortKey(k)}
-      className={`cursor-pointer select-none px-3 py-2 text-xs uppercase tracking-wide text-slate-500 ${align === "right" ? "text-right" : "text-left"} hover:text-slate-900 dark:hover:text-white`}
+      className={`cursor-pointer select-none px-3 py-2 text-xs uppercase tracking-wide text-text-muted ${align === "right" ? "text-right" : "text-left"} hover:text-text`}
     >
       {label}{sortKey === k && " ↓"}
     </th>
   );
 
   return (
-    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
+    <div className="overflow-hidden rounded-lg border border-border bg-bg-card">
       <table className="w-full text-sm">
-        <thead className="border-b border-slate-100 dark:border-slate-800">
+        <thead className="border-b border-border-subtle">
           <tr>
-            <th className="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-500">Instrument</th>
-            <th className="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-500">Account</th>
-            <th className="px-3 py-2 text-right text-xs uppercase tracking-wide text-slate-500">Qty</th>
+            <th className="px-3 py-2 text-left text-xs uppercase tracking-wide text-text-muted">Instrument</th>
+            <th className="px-3 py-2 text-left text-xs uppercase tracking-wide text-text-muted">Account</th>
+            <th className="px-3 py-2 text-right text-xs uppercase tracking-wide text-text-muted">Qty</th>
             <Header k="value" label="Value" align="right" />
-            <th className="px-3 py-2 text-right text-xs uppercase tracking-wide text-slate-500">Cost basis</th>
+            <th className="px-3 py-2 text-right text-xs uppercase tracking-wide text-text-muted">Cost basis</th>
             <Header k="pl" label="P&L" align="right" />
             <Header k="pct" label="%" align="right" />
           </tr>
@@ -867,19 +876,19 @@ function HoldingsTab({ holdings, accounts }: { holdings: Holding[]; accounts: Ac
             const acc = accounts.find(a => a.id === h.account_id);
             const ins = instruments[h.instrument_id];
             return (
-              <tr key={h.id} className="border-b border-slate-100 last:border-0 dark:border-slate-800">
+              <tr key={h.id} className="border-b border-border-subtle last:border-0 border-border-subtle">
                 <td className="px-3 py-2">
                   <div className="font-medium">{ins?.symbol ?? `#${h.instrument_id}`}</div>
-                  <div className="text-xs text-slate-500">{ins?.name ?? ""}</div>
+                  <div className="text-xs text-text-muted">{ins?.name ?? ""}</div>
                 </td>
-                <td className="px-3 py-2 text-slate-600 dark:text-slate-300">{acc?.name ?? "—"}</td>
+                <td className="px-3 py-2 text-text-muted">{acc?.name ?? "—"}</td>
                 <td className="px-3 py-2 text-right tabular-nums">{h.quantity}</td>
                 <td className="px-3 py-2 text-right tabular-nums">{fmtMoney(h.current_value, acc?.currency ?? "EUR")}</td>
-                <td className="px-3 py-2 text-right tabular-nums text-slate-600 dark:text-slate-300">{fmtMoney(h.cost_basis, acc?.currency ?? "EUR")}</td>
-                <td className={`px-3 py-2 text-right tabular-nums ${h.unrealized_pl >= 0 ? "text-emerald-600" : "text-red-600"}`}>
+                <td className="px-3 py-2 text-right tabular-nums text-text-muted">{fmtMoney(h.cost_basis, acc?.currency ?? "EUR")}</td>
+                <td className={`px-3 py-2 text-right tabular-nums ${h.unrealized_pl >= 0 ? "text-success" : "text-error"}`}>
                   {fmtMoney(h.unrealized_pl, acc?.currency ?? "EUR", { signed: true })}
                 </td>
-                <td className={`px-3 py-2 text-right tabular-nums ${h.unrealized_pct >= 0 ? "text-emerald-600" : "text-red-600"}`}>
+                <td className={`px-3 py-2 text-right tabular-nums ${h.unrealized_pct >= 0 ? "text-success" : "text-error"}`}>
                   {fmtPct(h.unrealized_pct)}
                 </td>
               </tr>
@@ -930,7 +939,7 @@ function NewAccountDialog({ onClose, onCreated, defaultCurrency }: { onClose: ()
       <Field label="Opening balance (decimal — e.g. 1234.56)">
         <input value={opening} onChange={e => setOpening(e.target.value)} className="input" placeholder="0" />
       </Field>
-      {err && <p className="text-sm text-red-600">{err}</p>}
+      {err && <p className="text-sm text-error">{err}</p>}
       <DialogActions>
         <button onClick={onClose} className="btn-secondary">Cancel</button>
         <button onClick={submit} disabled={busy || !name} className="btn-primary">{busy ? "Creating…" : "Create"}</button>
@@ -991,7 +1000,7 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
       <Field label="Memo">
         <input value={memo} onChange={e => setMemo(e.target.value)} className="input" />
       </Field>
-      {err && <p className="text-sm text-red-600">{err}</p>}
+      {err && <p className="text-sm text-error">{err}</p>}
       <DialogActions>
         <button onClick={onClose} className="btn-secondary">Cancel</button>
         <button onClick={submit} disabled={busy} className="btn-primary">{busy ? "Saving…" : "Save"}</button>
@@ -1070,7 +1079,7 @@ function NewBudgetDialog({
       <Field label={`Amount (${base})`}>
         <input value={amount} onChange={e => setAmount(e.target.value)} className="input" placeholder="500.00" autoFocus />
       </Field>
-      {err && <p className="text-sm text-red-600">{err}</p>}
+      {err && <p className="text-sm text-error">{err}</p>}
       <DialogActions>
         <button onClick={onClose} className="btn-secondary">Cancel</button>
         <button onClick={submit} disabled={busy || !amount} className="btn-primary">{busy ? "Saving…" : "Save"}</button>
@@ -1088,22 +1097,21 @@ function Dialog({ title, onClose, children }: { title: string; onClose: () => vo
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-md rounded-lg border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-900">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg-overlay p-4">
+      <div className="w-full max-w-md rounded-lg border border-border bg-bg-card p-5 shadow-xl">
         <header className="mb-3 flex items-center justify-between">
           <h3 className="text-base font-semibold">{title}</h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-700 dark:hover:text-white"><Icon name="x" size={18} /></button>
+          <button onClick={onClose} className="text-text-dim hover:text-text"><Icon name="x" size={18} /></button>
         </header>
         <div className="space-y-3">{children}</div>
         <style>{`
-          .input { width: 100%; padding: 0.5rem 0.75rem; border-radius: 0.375rem; border: 1px solid rgb(203 213 225); background: white; color: inherit; }
-          .dark .input { border-color: rgb(51 65 85); background: rgb(15 23 42); }
-          .input:focus { outline: 2px solid rgb(37 99 235); outline-offset: -1px; }
-          .btn-primary { padding: 0.5rem 1rem; border-radius: 0.375rem; background: rgb(15 23 42); color: white; font-size: 0.875rem; }
+          .input { width: 100%; padding: 0.5rem 0.75rem; border-radius: 0.375rem; border: 1px solid var(--border); background: var(--bg-input); color: var(--text); }
+          .input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+          .btn-primary { padding: 0.5rem 1rem; border-radius: 0.375rem; background: var(--accent); color: var(--bg); font-size: 0.875rem; }
           .btn-primary:disabled { opacity: 0.5; }
-          .btn-primary:hover:not(:disabled) { background: rgb(30 41 59); }
-          .btn-secondary { padding: 0.5rem 1rem; border-radius: 0.375rem; background: transparent; color: inherit; font-size: 0.875rem; border: 1px solid rgb(203 213 225); }
-          .dark .btn-secondary { border-color: rgb(51 65 85); }
+          .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+          .btn-secondary { padding: 0.5rem 1rem; border-radius: 0.375rem; background: transparent; color: var(--text); font-size: 0.875rem; border: 1px solid var(--border); }
+          .btn-secondary:hover { background: var(--bg-hover); }
         `}</style>
       </div>
     </div>
@@ -1113,7 +1121,7 @@ function Dialog({ title, onClose, children }: { title: string; onClose: () => vo
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">{label}</span>
+      <span className="mb-1 block text-xs font-medium uppercase tracking-wide text-text-muted">{label}</span>
       {children}
     </label>
   );
@@ -1125,7 +1133,7 @@ function DialogActions({ children }: { children: React.ReactNode }) {
 
 function EmptyState({ message }: { message: string }) {
   return (
-    <div className="flex flex-col items-center gap-2 px-4 py-8 text-center text-sm text-slate-500">
+    <div className="flex flex-col items-center gap-2 px-4 py-8 text-center text-sm text-text-muted">
       <Icon name="wallet" size={24} />
       <p>{message}</p>
     </div>
