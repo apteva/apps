@@ -117,26 +117,187 @@ func hetznerProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error
 	// return immediately; a separate instance_wait_ready or polling
 	// instance_get drives the transition from 'provisioning' to
 	// 'ready'. Hetzner servers come up in 30-60s typically.
+	kickReadinessProbe(inst.ID)
+
+	// Return the row as it stands now (status='provisioning', ip set).
+	return dbGetInstance(ctx.AppDB(), inst.ID)
+}
+
+// kickReadinessProbe runs probeSSHReady in a goroutine and flips the
+// instance to 'ready' (or 'error') when the probe resolves. Extracted
+// from hetznerProvision so reconcileHetznerProvisioning can restart
+// probes for rows orphaned by a sidecar restart.
+//
+// Best-effort: every error path lives inside the goroutine, the
+// caller (provision or reconcile) doesn't block on this.
+func kickReadinessProbe(id int64) {
 	go func() {
-		fresh, err := dbGetInstance(globalCtx.AppDB(), inst.ID)
+		fresh, err := dbGetInstance(globalCtx.AppDB(), id)
 		if err != nil {
 			return
 		}
 		if err := probeSSHReady(fresh, 5*time.Minute); err != nil {
-			_ = dbUpdateInstance(globalCtx.AppDB(), inst.ID, map[string]any{
+			_ = dbUpdateInstance(globalCtx.AppDB(), id, map[string]any{
 				"status":        "error",
 				"error_message": fmt.Sprintf("ssh probe: %v", err),
 			})
 			return
 		}
-		_ = dbUpdateInstance(globalCtx.AppDB(), inst.ID, map[string]any{
+		_ = dbUpdateInstance(globalCtx.AppDB(), id, map[string]any{
 			"status":   "ready",
 			"ready_at": nowUTC(),
 		})
 	}()
+}
 
-	// Return the row as it stands now (status='provisioning', ip set).
-	return dbGetInstance(ctx.AppDB(), inst.ID)
+// reconcileHetznerProvisioning recovers rows left in 'provisioning' by
+// a previous sidecar instance. Two states to handle, both caused by
+// the previous sidecar dying mid-flight:
+//
+//  1. provider_id is empty → upstream server_create may have succeeded
+//     but we never persisted the result. Query Hetzner for any server
+//     with our `name`; if found, backfill provider_id + IPs and kick
+//     the readiness probe. If not found, mark error so the operator
+//     can clean up the row (and won't be billed for a VPS we never
+//     attached to).
+//
+//  2. provider_id is set, status still 'provisioning' → the readiness
+//     probe goroutine evaporated when the sidecar died. Just kick a
+//     new one against the existing IP.
+//
+// Best-effort, errors logged but don't fail OnMount. If the Hetzner
+// integration was unbound between previous boot and now, every
+// recovery in (1) marks error with a clear message; the operator
+// re-binds the integration and re-runs reconcile (manual destroy /
+// retry) from the panel.
+func reconcileHetznerProvisioning(ctx *sdk.AppCtx) {
+	rows, err := dbListInstances(ctx.AppDB(), "hetzner", "provisioning")
+	if err != nil {
+		ctx.Logger().Warn("instances: reconcile list failed", "err", err)
+		return
+	}
+	if len(rows) == 0 {
+		return
+	}
+	ctx.Logger().Info("instances: reconciling provisioning rows", "count", len(rows))
+
+	bound := ctx.IntegrationFor("provider")
+	hasIntegration := bound != nil && bound.ConnectionID != 0
+
+	for _, inst := range rows {
+		// Path 2: just kick the probe; nothing upstream to recover.
+		if inst.ProviderID != "" {
+			ctx.Logger().Info("instances: re-kick readiness probe", "id", inst.ID, "provider_id", inst.ProviderID)
+			kickReadinessProbe(inst.ID)
+			continue
+		}
+		// Path 1: missing provider_id — we may have leaked a VPS.
+		if !hasIntegration {
+			_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{
+				"status":        "error",
+				"error_message": "provisioning interrupted; Hetzner integration not bound — re-bind and retry, then check the Hetzner dashboard for an orphan server named " + inst.Name,
+			})
+			ctx.Logger().Warn("instances: stuck provisioning, no integration bound",
+				"id", inst.ID, "name", inst.Name)
+			continue
+		}
+		recovered, recErr := tryRecoverHetznerByName(ctx, bound, inst)
+		if recErr != nil {
+			_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{
+				"status":        "error",
+				"error_message": fmt.Sprintf("provisioning interrupted; reconcile lookup failed: %v — check the Hetzner dashboard for an orphan server named %q", recErr, inst.Name),
+			})
+			continue
+		}
+		if recovered == nil {
+			// server_list succeeded but no match. Either the operator
+			// already cleaned it up, or it never got created. Safe to
+			// mark error — destroy will short-circuit (no provider_id).
+			_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{
+				"status":        "error",
+				"error_message": "provisioning interrupted; no upstream server named " + inst.Name + " found — presumed not created or already destroyed",
+			})
+			ctx.Logger().Info("instances: stuck provisioning, no upstream match", "id", inst.ID, "name", inst.Name)
+			continue
+		}
+		// Backfill and resume the readiness probe.
+		_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{
+			"provider_id": recovered.ID,
+			"public_ipv4": recovered.IPv4,
+			"public_ipv6": recovered.IPv6,
+		})
+		ctx.Logger().Info("instances: recovered orphan provisioning row",
+			"id", inst.ID, "provider_id", recovered.ID, "ipv4", recovered.IPv4)
+		kickReadinessProbe(inst.ID)
+	}
+}
+
+type hetznerServerSummary struct {
+	ID   string
+	IPv4 string
+	IPv6 string
+}
+
+// tryRecoverHetznerByName asks Hetzner for any server matching our
+// instance name. If exactly one matches, returns it. Multiple matches
+// (operator created another server with the same name out-of-band):
+// return the lexicographically-first id — arbitrary but deterministic;
+// the operator can re-destroy the wrong pick and re-reconcile.
+// No matches: returns nil, nil (not an error).
+func tryRecoverHetznerByName(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, inst *Instance) (*hetznerServerSummary, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "server_list", map[string]any{
+		"name": inst.Name,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("server_list: %w", err)
+	}
+	if res == nil || !res.Success {
+		return nil, fmt.Errorf("server_list: %s", upstreamErrorString(res))
+	}
+	servers := parseHetznerListResponse(res.Data, inst.Name)
+	if len(servers) == 0 {
+		return nil, nil
+	}
+	// Pick the first match — stable, lets operator iterate if wrong.
+	return &servers[0], nil
+}
+
+// parseHetznerListResponse extracts (id, ipv4, ipv6) tuples from a
+// server_list response, filtered to those whose name == wantName.
+// Tolerant of catalog envelope shapes — same defensive approach as
+// parseHetznerCreateResponse.
+func parseHetznerListResponse(data json.RawMessage, wantName string) []hetznerServerSummary {
+	if len(data) == 0 {
+		return nil
+	}
+	var v struct {
+		Servers []struct {
+			ID        any    `json:"id"`
+			Name      string `json:"name"`
+			PublicNet struct {
+				IPv4 struct{ IP string `json:"ip"` } `json:"ipv4"`
+				IPv6 struct{ IP string `json:"ip"` } `json:"ipv6"`
+			} `json:"public_net"`
+		} `json:"servers"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return nil
+	}
+	out := make([]hetznerServerSummary, 0, len(v.Servers))
+	for _, s := range v.Servers {
+		if s.Name != wantName {
+			continue
+		}
+		if s.ID == nil {
+			continue
+		}
+		out = append(out, hetznerServerSummary{
+			ID:   fmt.Sprintf("%v", s.ID),
+			IPv4: s.PublicNet.IPv4.IP,
+			IPv6: s.PublicNet.IPv6.IP,
+		})
+	}
+	return out
 }
 
 // hetznerDestroy terminates the upstream resource. Idempotent on

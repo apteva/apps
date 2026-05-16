@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.1.1
+version: 0.2.0
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances (Hetzner in v0.1; DO/Vultr/AWS in later releases).
@@ -120,6 +120,15 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	ctx.Logger().Info("instances mounted",
 		"data_dir", ctx.DataDir())
+
+	// Recover any rows left in 'provisioning' by a previous sidecar
+	// instance. Two states get handled: rows that may have leaked a
+	// VPS (provider_id missing) get a server_list reconciliation
+	// against Hetzner; rows whose readiness-probe goroutine
+	// evaporated mid-boot get a fresh probe. Best-effort — runs in
+	// the background so it doesn't slow OnMount on a slow API call.
+	go reconcileHetznerProvisioning(ctx)
+
 	return nil
 }
 
