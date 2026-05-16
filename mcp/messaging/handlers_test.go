@@ -820,6 +820,130 @@ func TestHandleToolsCall_RejectsGET(t *testing.T) {
 	}
 }
 
+// ─── Mailbox inherits parent-domain DKIM (no per-mailbox verify) ──
+
+func TestSendersCreate_Mailbox_InheritsFromVerifiedParent(t *testing.T) {
+	// Domains app + SES both bound; the parent domain is already a
+	// verified-domain row locally → mailbox add must not call any SES
+	// verify_* tool, and must persist the row as verified.
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{
+			"email_provider": float64(1),
+			"domains":        float64(42),
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "socialcast.dev", Kind: "domain",
+		Provider: "aws-ses", ProviderIdentityID: "socialcast.dev",
+		Verified: true, VerificationStatus: "verified",
+		SendingEnabled: true, DkimStatus: "SUCCESS",
+	})
+
+	out, err := app.toolSendersCreate(ctx, map[string]any{"address": "test@socialcast.dev"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := out.(*sendersCreateResp)
+	if resp.Pending {
+		t.Errorf("expected resp.Pending=false (inherited), got true: %+v", resp)
+	}
+	if !hasStep(resp.Steps, "parent_domain_already_verified", true) {
+		t.Errorf("expected parent_domain_already_verified step, got %+v", resp.Steps)
+	}
+	for _, c := range plat.executeCalls {
+		if c.Tool == "verify_email" || c.Tool == "verify_domain" {
+			t.Errorf("inherited path should not call SES %s, got %+v", c.Tool, c)
+		}
+	}
+	// Mailbox row persisted as verified.
+	row, _ := dbFindSender(ctx.AppDB(), "test-proj", "email", "test@socialcast.dev")
+	if row == nil || !row.Verified {
+		t.Errorf("expected verified mailbox row, got %+v", row)
+	}
+}
+
+func TestSendersCreate_Mailbox_VerifiesParentWhenMissing(t *testing.T) {
+	// Parent domain not in local table → mailbox add triggers the full
+	// domain verification flow on the parent (verify_domain + DNS
+	// publish via Domains app), no per-mailbox verify_email.
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{
+			"email_provider": float64(1),
+			"domains":        float64(42),
+		},
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"verify_domain": {Success: true, Status: 200, Data: json.RawMessage(
+				`{"DkimAttributes":{"Tokens":["t1","t2","t3"],"Status":"PENDING"}}`)},
+		},
+		callAppReply: json.RawMessage(`{"action":"created"}`),
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolSendersCreate(ctx, map[string]any{"address": "ops@newdomain.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := out.(*sendersCreateResp)
+	// Confirm the SES dispatch: verify_domain on the parent, NOT
+	// verify_email on the mailbox.
+	tools := []string{}
+	for _, c := range plat.executeCalls {
+		tools = append(tools, c.Tool)
+	}
+	hasVerifyDomain := false
+	for _, name := range tools {
+		if name == "verify_email" {
+			t.Errorf("verify_email should not be called when domains is bound, got %v", tools)
+		}
+		if name == "verify_domain" {
+			hasVerifyDomain = true
+		}
+	}
+	if !hasVerifyDomain {
+		t.Errorf("expected verify_domain call on parent, got %v", tools)
+	}
+	// Inheritance still recorded on the mailbox row.
+	row, _ := dbFindSender(ctx.AppDB(), "test-proj", "email", "ops@newdomain.com")
+	if row == nil || !row.Verified {
+		t.Errorf("expected mailbox row to be verified by inheritance, got %+v", row)
+	}
+	// DKIM token surfaced from the parent's domain flow.
+	if len(resp.DkimTokens) != 3 {
+		t.Errorf("expected parent DKIM tokens to bubble up, got %v", resp.DkimTokens)
+	}
+}
+
+// Legacy fallback: when Domains is NOT bound, the old per-mailbox
+// verify_email flow must still work for mailboxes at uncontrolled
+// domains (e.g., me@gmail.com).
+func TestSendersCreate_Mailbox_FallsBackToVerifyEmailWithoutDomains(t *testing.T) {
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{"email_provider": float64(1)},
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"verify_email": {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	if _, err := app.toolSendersCreate(ctx, map[string]any{"address": "me@gmail.com"}); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	for _, c := range plat.executeCalls {
+		if c.Tool == "verify_email" {
+			called = true
+		}
+	}
+	if !called {
+		t.Errorf("expected verify_email fallback when domains unbound, got %+v", plat.executeCalls)
+	}
+}
+
 // ─── /senders/domains (cross-app read from Domains) ───────────────
 
 func TestSendersDomains_UnboundReturnsAvailableFalse(t *testing.T) {

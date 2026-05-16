@@ -170,9 +170,76 @@ func (a *App) sendersCreateImpl(ctx *sdk.AppCtx, req sendersCreateReq) (*senders
 		Pending: true,
 	}
 	if normalisedKind == "email" {
+		// When the Domains app is bound, drive verification through the
+		// parent domain's DKIM instead of the per-mailbox click-link
+		// flow. SES inherits — every mailbox at a DKIM-verified domain
+		// can send, signed with the domain's keys. Without the Domains
+		// app, fall back to the legacy verify_email path (still useful
+		// for mailboxes at domains the operator doesn't control).
+		if isAppDepBound(ctx, "domains") {
+			return a.sendersCreateEmailViaParentDomain(ctx, pid, sesBound.ConnectionID, raw, req, resp)
+		}
 		return a.sendersCreateEmail(ctx, pid, sesBound.ConnectionID, raw, resp)
 	}
 	return a.sendersCreateDomain(ctx, pid, sesBound.ConnectionID, raw, req, resp)
+}
+
+// sendersCreateEmailViaParentDomain handles the "alice@acme.com" case
+// when the Domains app is bound. Resolves the parent (acme.com),
+// ensures it's verified through the domain flow (skipping the work
+// when a verified row already exists), then registers the mailbox row
+// as inherited-verified. No per-mailbox click-link.
+func (a *App) sendersCreateEmailViaParentDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, addr string, req sendersCreateReq, resp *sendersCreateResp) (*sendersCreateResp, error) {
+	parts := strings.SplitN(addr, "@", 2)
+	if len(parts) != 2 || parts[1] == "" {
+		return nil, fmt.Errorf("malformed email %q", addr)
+	}
+	parent := strings.ToLower(parts[1])
+
+	existing, _ := dbFindSender(ctx.AppDB(), pid, "email", parent)
+	parentReady := existing != nil && existing.Kind == "domain" && existing.Verified && existing.DeletedAt == nil
+
+	if !parentReady {
+		// Run the full domain verification on the parent. Reuses
+		// sendersCreateDomain's idempotent path — DKIM tokens, DNS
+		// publish via Domains app, optional inbound bootstrap.
+		domainResp := &sendersCreateResp{Address: parent, Kind: "domain", Pending: true}
+		if _, err := a.sendersCreateDomain(ctx, pid, sesConnID, parent, req, domainResp); err != nil {
+			return nil, err
+		}
+		// Surface the domain-setup steps + DKIM details to the operator
+		// so they can see what ran on the parent's behalf.
+		resp.DkimTokens = domainResp.DkimTokens
+		resp.DkimStatus = domainResp.DkimStatus
+		resp.DnsRecords = domainResp.DnsRecords
+		resp.Inbound = domainResp.Inbound
+		resp.Steps = append(resp.Steps, domainResp.Steps...)
+	} else {
+		resp.Steps = append(resp.Steps, bootstrapStep{
+			Step:   "parent_domain_already_verified",
+			OK:     true,
+			Detail: fmt.Sprintf("%s is already DKIM-verified — %s inherits", parent, addr),
+		})
+		resp.DkimStatus = "SUCCESS"
+	}
+
+	a.persistSenderRow(ctx, pid, &senderUpsert{
+		ProjectID:          pid,
+		Channel:            "email",
+		Address:            addr,
+		Kind:               "email",
+		DisplayName:        req.DisplayName,
+		Provider:           "aws-ses",
+		ProviderIdentityID: addr,
+		Verified:           true,
+		VerificationStatus: "verified",
+		SendingEnabled:     true,
+		DkimStatus:         "SUCCESS",
+		MarkSyncedNow:      true,
+	}, resp)
+	resp.Pending = false
+	resp.NextStep = fmt.Sprintf("inherits DKIM from %s — ready to send", parent)
+	return resp, nil
 }
 
 // inferChannelFromAddress: leading "+" + digits → sms; contains "@"
