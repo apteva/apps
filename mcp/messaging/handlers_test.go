@@ -1060,6 +1060,101 @@ func TestSendersCreate_Mailbox_FallsBackToVerifyEmailWithoutDomains(t *testing.T
 	}
 }
 
+// ─── senders_delete idempotency ───────────────────────────────────
+
+func TestSendersDelete_InheritanceMailboxSkipsUpstream(t *testing.T) {
+	plat := &stubPlatform{}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	// Verified parent + inheritance mailbox (the exact shape
+	// sendersCreateEmailViaParentDomain produces).
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "socialcast.dev", Kind: "domain",
+		Provider: "aws-ses", ProviderIdentityID: "socialcast.dev",
+		Verified: true, VerificationStatus: "verified",
+		SendingEnabled: true, DkimStatus: "SUCCESS",
+	})
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "test@socialcast.dev", Kind: "email",
+		Provider: "aws-ses", ProviderIdentityID: "test@socialcast.dev",
+		Verified: true, VerificationStatus: "verified",
+		SendingEnabled: true, DkimStatus: "SUCCESS",
+	})
+
+	if _, err := app.toolSendersDelete(ctx, map[string]any{"address": "test@socialcast.dev"}); err != nil {
+		t.Fatalf("inheritance delete should succeed without SES call, got %v", err)
+	}
+	for _, c := range plat.executeCalls {
+		if c.Tool == "delete_identity" {
+			t.Errorf("inheritance mailbox should not call SES delete_identity, got %+v", c)
+		}
+	}
+	row, _ := dbFindSender(ctx.AppDB(), "test-proj", "email", "test@socialcast.dev")
+	if row == nil || row.DeletedAt == nil {
+		t.Errorf("local row should be soft-deleted, got %+v", row)
+	}
+}
+
+func TestSendersDelete_TreatsIdentityNotFoundAsSuccess(t *testing.T) {
+	// Standalone mailbox (no local parent) — and SES says it doesn't
+	// exist. Should still soft-delete locally; "already gone" is
+	// success not failure.
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"delete_identity": {
+				Success: false, Status: 404,
+				Data: json.RawMessage(`{"message":"Email identity gone@x.com does not exist."}`),
+			},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "gone@x.com", Kind: "email",
+		Provider: "aws-ses", ProviderIdentityID: "gone@x.com",
+		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
+	})
+
+	if _, err := app.toolSendersDelete(ctx, map[string]any{"address": "gone@x.com"}); err != nil {
+		t.Fatalf("not-found delete should be idempotent success, got %v", err)
+	}
+	row, _ := dbFindSender(ctx.AppDB(), "test-proj", "email", "gone@x.com")
+	if row == nil || row.DeletedAt == nil {
+		t.Errorf("local row should be soft-deleted, got %+v", row)
+	}
+}
+
+func TestSendersDelete_PropagatesRealUpstreamError(t *testing.T) {
+	// Anything that's NOT a "not found" should still surface as an
+	// error so the panel shows the toast and the local row stays.
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"delete_identity": {
+				Success: false, Status: 500,
+				Data: json.RawMessage(`{"message":"InternalServerError"}`),
+			},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "ok@x.com", Kind: "email",
+		Provider: "aws-ses", ProviderIdentityID: "ok@x.com",
+		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
+	})
+
+	if _, err := app.toolSendersDelete(ctx, map[string]any{"address": "ok@x.com"}); err == nil {
+		t.Fatal("expected real upstream error to propagate")
+	}
+	row, _ := dbFindSender(ctx.AppDB(), "test-proj", "email", "ok@x.com")
+	if row == nil || row.DeletedAt != nil {
+		t.Errorf("row should NOT be soft-deleted when SES error is real, got %+v", row)
+	}
+}
+
 // ─── /senders/domains (cross-app read from Domains) ───────────────
 
 func TestSendersDomains_UnboundReturnsAvailableFalse(t *testing.T) {

@@ -48,7 +48,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.11.3
+version: 0.11.4
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -1993,6 +1993,17 @@ func (a *App) refreshOneTwilioNumber(ctx *sdk.AppCtx, pid, channel, addr string)
 	return dbSoftDeleteSender(ctx.AppDB(), pid, channel, addr)
 }
 
+// looksLikeIdentityNotFound classifies a delete_identity failure as a
+// no-op "already gone" rather than a real error. Used to make
+// senders_delete idempotent across inheritance mailboxes + identities
+// the operator removed in the AWS console.
+func looksLikeIdentityNotFound(res *sdk.ExecuteResult, body string) bool {
+	if res != nil && res.Status == 404 {
+		return true
+	}
+	return strings.Contains(strings.ToLower(body), "does not exist")
+}
+
 func (a *App) toolSendersDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -2028,18 +2039,41 @@ func (a *App) toolSendersDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		if err != nil {
 			return nil, err
 		}
-		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "delete_identity", map[string]any{
-			"EmailIdentity": raw,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("delete_identity: %w", err)
-		}
-		if res == nil || !res.Success {
-			body := ""
-			if res != nil {
-				body = string(res.Data)
+		// Inheritance mailboxes (kind=email at a locally-verified
+		// parent domain) were never created as SES identities — the
+		// v0.11 inheritance flow registers them locally only and
+		// relies on the parent's DKIM. Calling SES delete_identity
+		// returns "Email identity X does not exist" and 502s the
+		// panel. Skip the upstream call; soft-delete is enough.
+		skipUpstream := false
+		if local != nil && local.Kind == "email" {
+			if parent := parentDomainOf(raw); parent != "" {
+				if p, _ := dbFindSender(ctx.AppDB(), pid, "email", parent); p != nil && p.Kind == "domain" && p.Verified && p.DeletedAt == nil {
+					skipUpstream = true
+				}
 			}
-			return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
+		}
+		if !skipUpstream {
+			res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "delete_identity", map[string]any{
+				"EmailIdentity": raw,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("delete_identity: %w", err)
+			}
+			if res == nil || !res.Success {
+				body := ""
+				if res != nil {
+					body = string(res.Data)
+				}
+				// Treat "identity does not exist" as idempotent
+				// success — the upstream state already matches what
+				// the operator wants (covers inheritance mailboxes
+				// without a local parent row, plus identities the
+				// operator already removed via the AWS console).
+				if !looksLikeIdentityNotFound(res, body) {
+					return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
+				}
+			}
 		}
 	case "twilio":
 		// Releasing a Twilio number stops billing for it but is destructive
