@@ -374,6 +374,13 @@ type Trip struct {
 	Archived      bool   `json:"archived"`
 	CreatedAt     string `json:"created_at"`
 	UpdatedAt     string `json:"updated_at"`
+
+	// Aggregates populated by trips_list (and only there — toolTripsGet
+	// leaves them nil since the list rollup hits computeBudgetSummary
+	// per row and would be wasteful for a single-trip read). Sums are
+	// in trip.home_currency, minor units.
+	TotalPlanned *int64 `json:"total_planned,omitempty"`
+	TotalActual  *int64 `json:"total_actual,omitempty"`
 }
 
 type Destination struct {
@@ -516,15 +523,28 @@ func (a *App) toolTripsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := []Trip{}
+	bare := []Trip{}
 	for rows.Next() {
 		t, err := scanTrip(rows)
 		if err != nil {
 			continue
 		}
-		out = append(out, t)
+		bare = append(bare, t)
 	}
 	rows.Close()
+	// Compute per-trip budget aggregates after closing the cursor —
+	// testkit caps connections at 1 and computeBudgetSummary issues
+	// its own queries.
+	out := make([]Trip, 0, len(bare))
+	for _, t := range bare {
+		s, err := computeBudgetSummary(ctx, t.ID)
+		if err == nil {
+			planned, actual := s.TotalPlanned, s.TotalActual
+			t.TotalPlanned = &planned
+			t.TotalActual = &actual
+		}
+		out = append(out, t)
+	}
 	return map[string]any{"trips": out}, nil
 }
 

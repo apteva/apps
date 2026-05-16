@@ -34,6 +34,9 @@ interface Trip {
   calendar_id?: number;
   sync_calendar: boolean;
   archived: boolean;
+  // Populated by trips_list only — minor units in trip.home_currency.
+  total_planned?: number;
+  total_actual?: number;
 }
 
 interface Destination {
@@ -327,7 +330,7 @@ export default function TripsPanel({ projectId }: NativePanelProps) {
       </header>
 
       {error && (
-        <div className="rounded-md border border-error/30 bg-error/10 px-3 py-2 text-sm text-error border-error/30 bg-error/10 text-error">
+        <div className="rounded-md border border-error/30 bg-error/10 px-3 py-2 text-sm text-error">
           {error}
         </div>
       )}
@@ -336,8 +339,11 @@ export default function TripsPanel({ projectId }: NativePanelProps) {
         {trips.length === 0 ? (
           <EmptyState message="No trips yet. Click 'New trip' to plan one." />
         ) : (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {trips.map(t => <TripCard key={t.id} trip={t} onOpen={() => setSelectedID(t.id)} />)}
+          <div className="flex flex-col gap-3">
+            <OverallBudgetBar trips={trips} />
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {trips.map(t => <TripCard key={t.id} trip={t} onOpen={() => setSelectedID(t.id)} />)}
+            </div>
           </div>
         )}
       </div>
@@ -357,13 +363,25 @@ export default function TripsPanel({ projectId }: NativePanelProps) {
 function TripCard({ trip, onOpen }: { trip: Trip; onOpen: () => void }) {
   const days = daysUntil(trip.start_at, trip.end_at);
   const toneClass =
-    days.tone === "active" ? "bg-success/20 text-success bg-success/20 text-success"
+    days.tone === "active" ? "bg-success/20 text-success"
     : days.tone === "future" ? "bg-accent/20 text-accent"
     : "bg-bg-hover text-text-muted";
+
+  const planned = trip.total_planned ?? 0;
+  const actual = trip.total_actual ?? 0;
+  // Bar fill = actual / planned, clamped to 100%. Over-budget swaps
+  // green for red and overflows visually (still capped to 100% width
+  // so cards stay comparable).
+  const target = planned > 0 ? planned : actual;
+  const pct = target > 0 ? Math.min(100, (actual / target) * 100) : 0;
+  const over = planned > 0 && actual > planned;
+  const barColor = over ? "bg-error" : actual === 0 ? "bg-bg-hover" : "bg-success";
+  const hasAnyMoney = planned > 0 || actual > 0;
+
   return (
     <button
       onClick={onOpen}
-      className="flex flex-col overflow-hidden rounded-lg border border-border bg-bg-card text-left transition hover:border-border-strong hover:shadow-sm border-border bg-bg-card"
+      className="flex flex-col overflow-hidden rounded-lg border border-border bg-bg-card text-left transition hover:border-border-strong hover:shadow-sm"
     >
       <div className="h-1.5" style={{ background: trip.color }} />
       <div className="flex-1 p-4">
@@ -375,8 +393,76 @@ function TripCard({ trip, onOpen }: { trip: Trip; onOpen: () => void }) {
         <p className="text-xs text-text-muted">
           {fmtDateShort(trip.start_at)} – {fmtDateShort(trip.end_at)}
         </p>
+
+        {hasAnyMoney && (
+          <div className="mt-3">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-text-muted">Actual</span>
+              <span className={`tabular-nums ${over ? "text-error" : "text-text"}`}>
+                {fmtMoney(actual, trip.home_currency)}
+                {planned > 0 && <span className="text-text-dim"> / {fmtMoney(planned, trip.home_currency)}</span>}
+              </span>
+            </div>
+            <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-bg-hover">
+              <div className={`h-full ${barColor}`} style={{ width: `${pct}%` }} />
+            </div>
+          </div>
+        )}
       </div>
     </button>
+  );
+}
+
+// OverallBudgetBar aggregates planned + actual across the visible trips,
+// grouped by home_currency (no FX in v0.2, so we don't mix currencies).
+// Single-currency users see one tidy line; multi-currency users see one
+// per currency.
+function OverallBudgetBar({ trips }: { trips: Trip[] }) {
+  const totals = useMemo(() => {
+    const byCcy: Record<string, { planned: number; actual: number; count: number }> = {};
+    for (const t of trips) {
+      if (t.status === "cancelled") continue;
+      const ccy = t.home_currency || "EUR";
+      const row = byCcy[ccy] ?? { planned: 0, actual: 0, count: 0 };
+      row.planned += t.total_planned ?? 0;
+      row.actual += t.total_actual ?? 0;
+      row.count += 1;
+      byCcy[ccy] = row;
+    }
+    return Object.entries(byCcy)
+      .filter(([, r]) => r.planned > 0 || r.actual > 0)
+      .sort(([, a], [, b]) => b.planned - a.planned);
+  }, [trips]);
+
+  if (totals.length === 0) return null;
+  return (
+    <section className="rounded-lg border border-border bg-bg-card p-4">
+      <div className="mb-2 text-xs uppercase tracking-wide text-text-muted">
+        Across {trips.filter(t => t.status !== "cancelled").length} trip{trips.length === 1 ? "" : "s"}
+      </div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:gap-6">
+        {totals.map(([ccy, r]) => {
+          const target = r.planned > 0 ? r.planned : r.actual;
+          const pct = target > 0 ? Math.min(100, (r.actual / target) * 100) : 0;
+          const over = r.planned > 0 && r.actual > r.planned;
+          const barColor = over ? "bg-error" : "bg-success";
+          return (
+            <div key={ccy} className="flex-1 min-w-0">
+              <div className="flex items-baseline justify-between">
+                <span className="text-xs text-text-muted">{ccy}</span>
+                <span className={`text-sm tabular-nums ${over ? "text-error" : "text-text"}`}>
+                  {fmtMoney(r.actual, ccy)}
+                  {r.planned > 0 && <span className="text-text-dim"> / {fmtMoney(r.planned, ccy)}</span>}
+                </span>
+              </div>
+              <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-bg-hover">
+                <div className={`h-full ${barColor}`} style={{ width: `${pct}%` }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
