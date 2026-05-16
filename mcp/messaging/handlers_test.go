@@ -692,6 +692,43 @@ func TestSendersRefresh_PreservesMailboxesInheritingFromVerifiedParent(t *testin
 	}
 }
 
+// v0.11.3 regression: the parent domain may never get persisted
+// locally (e.g., sendersCreateDomain returned early on a midway
+// bootstrap failure, before reaching persistSenderRow). The refresh
+// must still treat the inheritance mailbox as alive when SES's
+// list_identities reports the parent — the prior fix only checked
+// LOCAL rows for the parent, which silently wiped mailboxes in that
+// scenario.
+func TestSendersRefresh_PreservesMailboxWhenParentOnlyExistsUpstream(t *testing.T) {
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"list_identities": {Success: true, Status: 200, Data: json.RawMessage(`{
+				"EmailIdentities":[
+					{"IdentityName":"socialcast.dev","IdentityType":"DOMAIN","SendingEnabled":true,"VerificationStatus":"SUCCESS"}
+				]
+			}`)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	// Mailbox row only — NO local kind=domain row for socialcast.dev.
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "test@socialcast.dev", Kind: "email",
+		Provider: "aws-ses", ProviderIdentityID: "test@socialcast.dev",
+		Verified: true, VerificationStatus: "verified",
+		SendingEnabled: true, DkimStatus: "SUCCESS",
+	})
+
+	if _, err := app.toolSendersRefresh(ctx, map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	row, _ := dbFindSender(ctx.AppDB(), "test-proj", "email", "test@socialcast.dev")
+	if row == nil || row.DeletedAt != nil {
+		t.Errorf("mailbox should survive when parent is in list_identities, got %+v", row)
+	}
+}
+
 // Companion: mailbox rows whose parent ISN'T verified locally still
 // get soft-deleted when missing upstream — they're real SES identities
 // that the operator must've removed via the console, and the refresh

@@ -77,6 +77,13 @@ func (a *App) refreshSESIdentities(ctx *sdk.AppCtx, pid string, connID int64) er
 	}
 
 	seen := map[string]bool{}
+	// seenDomains: every domain identity returned by SES. Used below
+	// to keep an inheritance mailbox alive even when its parent isn't
+	// persisted locally (e.g., sendersCreateDomain on the parent
+	// failed midway through inbound bootstrap before reaching
+	// persistSenderRow — happens with the AWS Query API URL-encoding
+	// bug, and shouldn't silently wipe the mailbox row).
+	seenDomains := map[string]bool{}
 	nextToken := ""
 	for {
 		args := map[string]any{"PageSize": 100}
@@ -107,6 +114,9 @@ func (a *App) refreshSESIdentities(ctx *sdk.AppCtx, pid string, connID int64) er
 		for _, id := range raw.EmailIdentities {
 			addr := strings.ToLower(id.IdentityName)
 			seen[addr] = true
+			if id.IdentityType == "DOMAIN" || id.IdentityType == "MANAGED_DOMAIN" {
+				seenDomains[addr] = true
+			}
 			if !known[addr] {
 				// Don't import — only the operator's curated rows
 				// get refreshed.
@@ -156,8 +166,20 @@ func (a *App) refreshSESIdentities(ctx *sdk.AppCtx, pid string, connID int64) er
 		if r.Provider != "aws-ses" || seen[r.Address] || r.DeletedAt != nil {
 			continue
 		}
-		if r.Kind == "email" && verifiedParents[parentDomainOf(r.Address)] {
-			continue
+		if r.Kind == "email" {
+			parent := parentDomainOf(r.Address)
+			// Keep the mailbox if either signal says the parent
+			// domain exists & is verified:
+			//   - local: a kind=domain row marked verified (operator's
+			//     curated state)
+			//   - upstream: the parent appeared in THIS refresh's
+			//     list_identities response (handles the case where
+			//     the parent was never persisted locally because
+			//     sendersCreateDomain returned early on a midway
+			//     failure)
+			if parent != "" && (verifiedParents[parent] || seenDomains[parent]) {
+				continue
+			}
 		}
 		_ = dbSoftDeleteSender(ctx.AppDB(), pid, r.Channel, r.Address)
 	}
