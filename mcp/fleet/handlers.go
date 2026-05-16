@@ -716,6 +716,148 @@ func randomPassword() string {
 	return hex.EncodeToString(b)
 }
 
+// -- tenant_reveal_api_key / tenant_reset_admin_password ---------------
+//
+// Two operator recovery paths bolted onto the auto-setup credentials
+// flow. The api_key is persisted (sealed via keyring) so we can return
+// it verbatim. The admin password is NOT — auto-setup discards it
+// after registering. Reset uses the api_key (admin-grade) to:
+//   1. GET <base>/api/auth/me              → resolve user_id
+//   2. PATCH <base>/api/users/<id>/password → set a new random password
+//      (this also revokes every session for that user)
+// and returns the freshly-minted password to the caller. The
+// operator's recourse for "I forgot the password" is therefore "rotate
+// it" rather than "show me the one I lost", which matches how managed
+// instance products usually work.
+
+func (a *App) toolRevealAPIKey(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	id := strings.TrimSpace(getStr(args, "tenant_id"))
+	if id == "" {
+		return nil, errors.New("tenant_id required")
+	}
+	t, enc, err := a.store.get(id)
+	if err != nil {
+		return nil, err
+	}
+	key, err := a.keys.open(enc)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt key: %w", err)
+	}
+	_ = a.store.recordEvent(t.ID, "api_key_revealed", "tool:reveal_api_key", nil)
+	return map[string]any{
+		"tenant_id": t.ID,
+		"slug":      t.Slug,
+		"base_url":  a.publicBaseURL(t.BaseURL),
+		"api_key":   string(key),
+	}, nil
+}
+
+func (a *App) toolResetAdminPassword(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	id := strings.TrimSpace(getStr(args, "tenant_id"))
+	if id == "" {
+		return nil, errors.New("tenant_id required")
+	}
+	t, enc, err := a.store.get(id)
+	if err != nil {
+		return nil, err
+	}
+	key, err := a.keys.open(enc)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt key: %w", err)
+	}
+	apiKey := string(key)
+
+	// Resolve the user id via /api/auth/me — the api_key belongs to
+	// the admin we registered at tenant_create, so /me identifies the
+	// right target without us hardcoding a "primary admin" notion.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	meReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, t.BaseURL+"/api/auth/me", nil)
+	meReq.Header.Set("Authorization", "Bearer "+apiKey)
+	meResp, err := httpClient.Do(meReq)
+	if err != nil {
+		return nil, fmt.Errorf("auth/me: %w", err)
+	}
+	defer meResp.Body.Close()
+	if meResp.StatusCode >= 300 {
+		body, _ := io.ReadAll(meResp.Body)
+		return nil, fmt.Errorf("auth/me: %d: %s", meResp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var me struct {
+		ID    int64  `json:"id"`
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(meResp.Body).Decode(&me); err != nil {
+		return nil, fmt.Errorf("auth/me decode: %w", err)
+	}
+	if me.ID == 0 {
+		return nil, errors.New("auth/me returned no user id")
+	}
+
+	newPassword := randomPassword()
+	body, _ := json.Marshal(map[string]string{"new_password": newPassword})
+	resetReq, _ := http.NewRequestWithContext(ctx, http.MethodPatch,
+		fmt.Sprintf("%s/api/users/%d/password", t.BaseURL, me.ID),
+		strings.NewReader(string(body)))
+	resetReq.Header.Set("Authorization", "Bearer "+apiKey)
+	resetReq.Header.Set("Content-Type", "application/json")
+	resetResp, err := httpClient.Do(resetReq)
+	if err != nil {
+		return nil, fmt.Errorf("reset password: %w", err)
+	}
+	defer resetResp.Body.Close()
+	if resetResp.StatusCode >= 300 {
+		rbody, _ := io.ReadAll(resetResp.Body)
+		return nil, fmt.Errorf("reset password: %d: %s", resetResp.StatusCode, strings.TrimSpace(string(rbody)))
+	}
+	_ = a.store.recordEvent(t.ID, "admin_password_reset", "tool:reset_admin_password",
+		map[string]any{"user_id": me.ID, "email": me.Email})
+	return map[string]any{
+		"tenant_id":      t.ID,
+		"slug":           t.Slug,
+		"base_url":       a.publicBaseURL(t.BaseURL),
+		"admin_email":    me.Email,
+		"admin_password": newPassword,
+		"note":           "All existing sessions for this user have been revoked.",
+	}, nil
+}
+
+// HTTP wrappers — same handlers, panel-friendly entry.
+
+func (a *App) httpRevealAPIKey(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONErr(w, http.StatusMethodNotAllowed, errors.New("POST"))
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/tenants/")
+	if i := strings.Index(id, "/"); i > 0 {
+		id = id[:i]
+	}
+	res, err := a.toolRevealAPIKey(nil, map[string]any{"tenant_id": id})
+	if err != nil {
+		writeJSONErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (a *App) httpResetAdminPassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONErr(w, http.StatusMethodNotAllowed, errors.New("POST"))
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/tenants/")
+	if i := strings.Index(id, "/"); i > 0 {
+		id = id[:i]
+	}
+	res, err := a.toolResetAdminPassword(nil, map[string]any{"tenant_id": id})
+	if err != nil {
+		writeJSONErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // -- Project resolution -------------------------------------------------
 //
 // Fleet's manifest declares scopes: [project, global]. The cross-app

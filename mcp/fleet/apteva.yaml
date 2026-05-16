@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.4.0
+version: 0.5.0
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -91,6 +91,10 @@ provides:
       description: "Read-only: return npm's apteva@latest plus every local tenant whose current_version is behind. Args: (none)."
     - name: tenant_set_target_version
       description: "Pin a tenant's desired apteva version without applying — the panel surfaces drift between current and target. Args: tenant_id, version (empty to clear)."
+    - name: tenant_reveal_api_key
+      description: "Return the tenant's api_key. Fleet keeps the key sealed (AES-GCM); this tool unseals + returns. Sensitive — records an api_key_revealed event on the tenant. Args: tenant_id."
+    - name: tenant_reset_admin_password
+      description: "Rotate the tenant admin user's password to a fresh random value via PATCH /api/users/<id>/password (auth'd with the stored api_key). Revokes every existing session for that user. Returns admin_email + admin_password. Use when the operator needs admin credentials again — fleet does not persist the original password. Args: tenant_id."
   ui_panels:
     - slot: project.page
       label: Fleet

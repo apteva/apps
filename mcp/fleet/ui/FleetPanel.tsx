@@ -161,6 +161,20 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
   const [meta, setMeta] = useState<MetaResp | null>(null);
   const [showAttachDomain, setShowAttachDomain] = useState<Tenant | null>(null);
   const [showUpdate, setShowUpdate] = useState<Tenant | null>(null);
+  // Held in panel state because both fleet endpoints return sensitive
+  // material the operator gets to see once and copy — same pattern as
+  // the post-create credentialsReveal.
+  const [revealedAPIKey, setRevealedAPIKey] = useState<{
+    slug: string;
+    base_url: string;
+    api_key: string;
+  } | null>(null);
+  const [resetPassword, setResetPassword] = useState<{
+    slug: string;
+    base_url: string;
+    admin_email: string;
+    admin_password: string;
+  } | null>(null);
 
   // Two query params travel on every call. The platform proxy uses
   // these to scope per-install state — same convention as tables/crm.
@@ -308,6 +322,8 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
         callTool={callTool}
         onOpenAttachDomain={(t) => setShowAttachDomain(t)}
         onOpenUpdate={(t) => setShowUpdate(t)}
+        onRevealAPIKey={setRevealedAPIKey}
+        onResetPassword={setResetPassword}
         onAfterAction={async (after) => {
           await refreshList({ quiet: true });
           await refreshMeta();
@@ -413,6 +429,18 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
               return { ok: false, error: (e as Error).message };
             }
           }}
+        />
+      )}
+      {revealedAPIKey && (
+        <RevealAPIKeyDialog
+          data={revealedAPIKey}
+          onClose={() => setRevealedAPIKey(null)}
+        />
+      )}
+      {resetPassword && (
+        <ResetPasswordDialog
+          data={resetPassword}
+          onClose={() => setResetPassword(null)}
         />
       )}
     </div>
@@ -595,6 +623,8 @@ function TenantDetail({
   callTool,
   onOpenAttachDomain,
   onOpenUpdate,
+  onRevealAPIKey,
+  onResetPassword,
   onAfterAction,
 }: {
   tenant: Tenant | null;
@@ -605,6 +635,8 @@ function TenantDetail({
   callTool: <T>(tool: string, args: Record<string, unknown>) => Promise<T>;
   onOpenAttachDomain: (t: Tenant) => void;
   onOpenUpdate: (t: Tenant) => void;
+  onRevealAPIKey: (r: { slug: string; base_url: string; api_key: string }) => void;
+  onResetPassword: (r: { slug: string; base_url: string; admin_email: string; admin_password: string }) => void;
   onAfterAction: (after?: "deselect") => Promise<void>;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
@@ -832,6 +864,53 @@ function TenantDetail({
         />
       )}
 
+      {!isSetupPending && (
+        <CredentialsBlock
+          tenantId={tenant.id}
+          busyReveal={busy === "reveal-api-key"}
+          busyReset={busy === "reset-password"}
+          onReveal={async () => {
+            setBusy("reveal-api-key");
+            setErr(null);
+            try {
+              const r = await callTool<{
+                slug: string;
+                base_url: string;
+                api_key: string;
+              }>("tenant_reveal_api_key", { tenant_id: tenant.id });
+              onRevealAPIKey(r);
+            } catch (e) {
+              setErr((e as Error).message);
+            } finally {
+              setBusy(null);
+            }
+          }}
+          onReset={async () => {
+            // Reset is destructive (revokes sessions) — confirm first.
+            if (!window.confirm(
+              "Rotate the admin password and revoke every active session for this tenant?\n\n" +
+              "The new password is shown only once — you'll need to copy it before closing the dialog.",
+            )) return;
+            setBusy("reset-password");
+            setErr(null);
+            try {
+              const r = await callTool<{
+                slug: string;
+                base_url: string;
+                admin_email: string;
+                admin_password: string;
+              }>("tenant_reset_admin_password", { tenant_id: tenant.id });
+              onResetPassword(r);
+              await onAfterAction();
+            } catch (e) {
+              setErr((e as Error).message);
+            } finally {
+              setBusy(null);
+            }
+          }}
+        />
+      )}
+
       <div className="grid grid-cols-2 gap-0 border-b border-border">
         <Field label="Owner">{tenant.owner_email}</Field>
         <Field label="Kind">{tenant.kind}</Field>
@@ -1052,7 +1131,12 @@ function EventKindPill({ kind }: { kind: string }) {
     "update_failed",
     "route.register_failed",
   ];
-  const warn = ["domain.cert_kickoff_failed", "route.register_skipped"];
+  const warn = [
+    "domain.cert_kickoff_failed",
+    "route.register_skipped",
+    "admin_password_reset",
+    "api_key_revealed",
+  ];
   const info = ["support_login", "remote_call"];
   const variant: StatusPillVariant = success.includes(kind)
     ? "success"
@@ -1694,6 +1778,96 @@ function UpdateVersionDialog({
             if (!r.ok) setErr(r.error || "failed");
           }}
         />
+      </DialogActions>
+    </DialogFrame>
+  );
+}
+
+// ─── Credentials block + reveal dialogs ─────────────────────────────
+
+function CredentialsBlock({
+  tenantId: _tenantId,
+  busyReveal,
+  busyReset,
+  onReveal,
+  onReset,
+}: {
+  tenantId: string;
+  busyReveal: boolean;
+  busyReset: boolean;
+  onReveal: () => void;
+  onReset: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-2 px-4 py-2 border-b border-border flex-wrap">
+      <span className="text-[11px] uppercase tracking-wider text-text-dim font-semibold">
+        Credentials
+      </span>
+      <span className="text-xs text-text-dim flex-1">
+        API key revealed on demand; admin password is rotated (not stored).
+      </span>
+      <ActionButton
+        label={busyReveal ? "Revealing…" : "Reveal API key"}
+        busy={busyReveal}
+        onClick={onReveal}
+      />
+      <ActionButton
+        label={busyReset ? "Rotating…" : "Reset admin password"}
+        busy={busyReset}
+        onClick={onReset}
+      />
+    </div>
+  );
+}
+
+function RevealAPIKeyDialog({
+  data,
+  onClose,
+}: {
+  data: { slug: string; base_url: string; api_key: string };
+  onClose: () => void;
+}) {
+  return (
+    <DialogFrame title={`API key — ${data.slug}`} onClose={onClose}>
+      <div className="bg-accent/5 border border-border rounded-md px-3 py-2 mb-3 text-xs text-text-dim">
+        The api_key authenticates machine-to-machine calls against this
+        tenant (Bearer auth). Fleet keeps it sealed in its keyring; revealing
+        records an event but doesn't rotate it. Use{" "}
+        <span className="font-medium text-text">Reset admin password</span> to
+        get a fresh human-login credential.
+      </div>
+      <CredentialRow label="Tenant URL" value={data.base_url} />
+      <CredentialRow label="API key" value={data.api_key} sensitive />
+      <DialogActions>
+        <ActionButton label="Done" onClick={onClose} />
+      </DialogActions>
+    </DialogFrame>
+  );
+}
+
+function ResetPasswordDialog({
+  data,
+  onClose,
+}: {
+  data: {
+    slug: string;
+    base_url: string;
+    admin_email: string;
+    admin_password: string;
+  };
+  onClose: () => void;
+}) {
+  return (
+    <DialogFrame title={`New admin password — ${data.slug}`} onClose={onClose}>
+      <div className="bg-warn/10 border border-warn/30 rounded-md px-3 py-2 mb-3 text-xs text-amber-700 dark:text-amber-400">
+        Shown only once. Every existing session for this admin has been
+        revoked — give the operator the new password before dismissing.
+      </div>
+      <CredentialRow label="Tenant URL" value={data.base_url} />
+      <CredentialRow label="Admin email" value={data.admin_email} />
+      <CredentialRow label="New password" value={data.admin_password} sensitive />
+      <DialogActions>
+        <ActionButton label="I've saved it" onClick={onClose} />
       </DialogActions>
     </DialogFrame>
   );

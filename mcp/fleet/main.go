@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.4.0
+version: 0.5.0
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -79,6 +79,10 @@ provides:
       description: Report npm's apteva latest version + which tenants are behind. Read-only.
     - name: tenant_set_target_version
       description: Pin a tenant's desired apteva version without applying. Surfaces drift on the panel.
+    - name: tenant_reveal_api_key
+      description: Return the tenant's api_key (unsealed from fleet's keyring).
+    - name: tenant_reset_admin_password
+      description: Rotate the tenant admin user's password to a fresh random one. Revokes all existing sessions for that user. Returns the new password.
   ui_panels:
     - slot: project.page
       label: Fleet
@@ -192,6 +196,10 @@ func (a *App) httpTenantItem(w http.ResponseWriter, r *http.Request) {
 		a.httpDetachDomain(w, r)
 	case "update":
 		a.httpUpdate(w, r)
+	case "reveal-api-key":
+		a.httpRevealAPIKey(w, r)
+	case "reset-admin-password":
+		a.httpResetAdminPassword(w, r)
 	default:
 		writeJSONErr(w, http.StatusNotFound, errors.New("no such sub-resource: "+sub))
 	}
@@ -372,6 +380,18 @@ func (a *App) MCPTools() []sdk.Tool {
 				"required": []string{"tenant_id", "version"},
 			},
 			Handler: a.toolSetTargetVersion,
+		},
+		{
+			Name:        "tenant_reveal_api_key",
+			Description: "Return the tenant's api_key. Fleet keeps the key sealed with its own keyring (AES-GCM); this tool unseals + returns. Sensitive — records an api_key_revealed event on the tenant. Args: tenant_id.",
+			InputSchema: idOnlySchema(),
+			Handler:     a.toolRevealAPIKey,
+		},
+		{
+			Name:        "tenant_reset_admin_password",
+			Description: "Rotate the tenant admin user's password to a fresh random value via PATCH /api/users/<id>/password on the tenant (auth'd with the stored api_key). Revokes every existing session for that user. Returns admin_email + admin_password. Use this when the operator needs admin credentials again — fleet does not persist the original password. Args: tenant_id.",
+			InputSchema: idOnlySchema(),
+			Handler:     a.toolResetAdminPassword,
 		},
 	}
 }
