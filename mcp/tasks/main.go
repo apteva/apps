@@ -25,7 +25,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: tasks
 display_name: Tasks
-version: 1.0.0
+version: 2.0.0
 description: Mission board for an Apteva agent.
 author: Apteva
 scopes: [project, global]
