@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: storage
 display_name: Storage
-version: 0.10.3
+version: 0.10.4
 description: |
   File storage with virtual folders, signed URLs, dedup. Pluggable
   backend: local disk by default, S3-compatible (AWS / R2 / B2 /
@@ -205,6 +205,12 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// /files/* dispatches in-handler by method + path tail.
 		{Pattern: "/files", Handler: a.handleFilesCollection},
 		{Pattern: "/files/", Handler: a.handleFilesItem},
+		// Exact pattern — ServeMux picks this over /files/ for this path.
+		// HTTP wrapper around the files_from_url MCP tool so non-MCP
+		// callers (ad-hoc scripts shipping a Drive/CDN URL) can have
+		// storage fetch the bytes server-side instead of proxying them
+		// through the caller.
+		{Pattern: "/files/from-url", Handler: a.httpFromURL},
 		{Pattern: "/folders", Handler: a.handleFolders},
 		// Resumable upload protocol (browser-only — not in MCP). See
 		// uploads.go for the on-disk session layout + endpoint shapes.
@@ -1061,6 +1067,52 @@ func (a *App) httpMintSignedURL(w http.ResponseWriter, r *http.Request, id int64
 			return
 		}
 		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, out)
+}
+
+// httpFromURL is the HTTP-protocol wrapper around the files_from_url
+// MCP tool. Same logic, plain-HTTP envelope. Lets non-MCP callers
+// (scripts, sibling apps that already speak HTTP) hand storage a URL
+// and have it fetch the bytes server-side rather than proxying them
+// through the caller's memory.
+//
+// Body: {url, name?, folder?, tags?, visibility?}.
+// Response: {id, url, sha256, was_existing} — same shape as the tool.
+func (a *App) httpFromURL(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	ctx := globalCtx
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(io.LimitReader(r.Body, 32*1024)).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if body == nil {
+		body = map[string]any{}
+	}
+	// Thread the query-string project_id into args so toolFromURL's
+	// resolveProjectFromArgs path finds it on global-scope installs —
+	// same reason httpUpload does this for its JSON body.
+	body["_project_id"] = pid
+	out, err := a.toolFromURL(ctx, body)
+	if err != nil {
+		// Match toolFromURL error semantics: upstream-status / url-required
+		// errors are caller mistakes (400), everything else is a 500.
+		msg := err.Error()
+		if strings.Contains(msg, "url required") || strings.Contains(msg, "status 4") {
+			httpErr(w, http.StatusBadRequest, msg)
+			return
+		}
+		httpErr(w, http.StatusInternalServerError, msg)
 		return
 	}
 	httpJSON(w, out)

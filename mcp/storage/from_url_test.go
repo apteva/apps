@@ -5,8 +5,10 @@ package main
 // the User-Agent we send (since CDNs commonly block Go's default).
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -192,6 +194,74 @@ func TestFromURL_RequiresURL(t *testing.T) {
 	_, err := app.toolFromURL(ctx, map[string]any{})
 	if err == nil || !strings.Contains(err.Error(), "url") {
 		t.Errorf("expected url-required error, got %v", err)
+	}
+}
+
+// ─── HTTP wrapper (POST /files/from-url) ────────────────────────────
+
+func TestHTTPFromURL_FetchesAndStores(t *testing.T) {
+	payload := []byte("server-side fetched bytes")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	newFromURLCtx(t)
+	// Force the global-scope code path so the test proves _project_id
+	// gets threaded from the query string into toolFromURL's args
+	// (mirrors http_upload_test.go's coverage).
+	t.Setenv("APTEVA_PROJECT_ID", "")
+	app := &App{}
+
+	body, _ := json.Marshal(map[string]any{
+		"url":    srv.URL + "/clip.txt",
+		"folder": "/.imports/",
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/files/from-url?project_id=p-from-query", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	app.httpFromURL(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := resp["id"]; !ok {
+		t.Errorf("expected response.id, got %v", resp)
+	}
+	if resp["was_existing"] != false {
+		t.Errorf("was_existing = %v on first fetch, want false", resp["was_existing"])
+	}
+	if resp["sha256"] == nil || resp["sha256"] == "" {
+		t.Errorf("expected response.sha256, got %v", resp)
+	}
+}
+
+func TestHTTPFromURL_RejectsNonPOST(t *testing.T) {
+	newFromURLCtx(t)
+	app := &App{}
+	req := httptest.NewRequest(http.MethodGet, "/files/from-url?project_id=p", nil)
+	rec := httptest.NewRecorder()
+	app.httpFromURL(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 on GET, got %d", rec.Code)
+	}
+}
+
+func TestHTTPFromURL_RejectsInvalidJSON(t *testing.T) {
+	newFromURLCtx(t)
+	app := &App{}
+	req := httptest.NewRequest(http.MethodPost,
+		"/files/from-url?project_id=p", bytes.NewReader([]byte("{not json")))
+	rec := httptest.NewRecorder()
+	app.httpFromURL(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on bad json, got %d", rec.Code)
 	}
 }
 
