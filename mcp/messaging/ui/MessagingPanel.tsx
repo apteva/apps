@@ -682,6 +682,21 @@ function SendersView({
   const [result, setResult] = useState<SendersCreateResp | null>(null);
   const [err, setErr] = useState("");
 
+  // Domain inventory from the Domains app, when bound. Lets the
+  // operator pick from a curated list instead of typing free-text.
+  // Soft-fails: any error here just leaves the picker hidden and the
+  // form keeps working with the plain input.
+  const [inventoryDomains, setInventoryDomains] = useState<string[]>([]);
+  useEffect(() => {
+    api<{ available: boolean; domains: { name: string }[] }>("GET", "/senders/domains")
+      .then((r) => {
+        if (r.available && Array.isArray(r.domains)) {
+          setInventoryDomains(r.domains.map((d) => d.name).filter(Boolean));
+        }
+      })
+      .catch(() => setInventoryDomains([]));
+  }, [api]);
+
   const addressIsDomain = addr.length > 0 && !addr.includes("@");
 
   const onSubmit = async (e: React.FormEvent) => {
@@ -758,6 +773,20 @@ function SendersView({
       )}
       <form onSubmit={onSubmit} className="p-4 border-b border-border space-y-3">
         <div className="flex gap-2 items-end flex-wrap">
+          {inventoryDomains.length > 0 && (
+            <Field label="From your domains" hint="loaded from the Domains app">
+              <select
+                className={inputCls + " w-56"}
+                value=""
+                onChange={(e) => { if (e.target.value) setAddr(e.target.value); }}
+              >
+                <option value="">— pick a domain —</option>
+                {inventoryDomains.map((d) => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
+            </Field>
+          )}
           <Field label="Add sender" hint="alice@acme.com (one mailbox) or acme.com (whole domain)">
             <input
               className={inputCls + " w-80"}

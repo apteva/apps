@@ -48,7 +48,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.10.0
+version: 0.10.1
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -197,6 +197,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/suppressions", Handler: a.handleSuppressionsList},
 		{Pattern: "/senders", Handler: a.handleSendersList},
 		{Pattern: "/senders/quota", Handler: a.handleSendersQuota},
+		{Pattern: "/senders/domains", Handler: a.handleSendersDomains},
 		// Internal/panel routes for provider-template sync. Not MCP —
 		// the panel hits these from a button + per-row action; agents
 		// don't trigger Twilio list calls.
@@ -3333,6 +3334,34 @@ func (a *App) handleSendersQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpJSON(w, out)
+}
+
+// handleSendersDomains — feeds the Add Sender form's domain picker.
+// When the Domains app is bound, returns the project's curated domain
+// list so the operator picks from it instead of typing free-text.
+// When unbound, returns {available: false, domains: []} — the panel
+// falls back to the free-text input. Never an error path; the form
+// should keep working even if the Domains app is down.
+func (a *App) handleSendersDomains(w http.ResponseWriter, r *http.Request) {
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !isAppDepBound(globalCtx, "domains") {
+		httpJSON(w, map[string]any{"available": false, "domains": []any{}})
+		return
+	}
+	domains, err := listDomainsForProject(globalCtx, pid)
+	if err != nil {
+		// Soft-fail — log and return empty so the form falls back to
+		// free-text rather than blocking the panel on a transient
+		// Domains-app blip.
+		globalCtx.Logger().Warn("senders/domains lookup", "err", err)
+		httpJSON(w, map[string]any{"available": true, "domains": []any{}, "error": err.Error()})
+		return
+	}
+	httpJSON(w, map[string]any{"available": true, "domains": domains})
 }
 
 // handleTemplatesSync — panel "Sync templates" button. Pulls Twilio

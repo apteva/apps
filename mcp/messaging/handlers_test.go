@@ -820,6 +820,76 @@ func TestHandleToolsCall_RejectsGET(t *testing.T) {
 	}
 }
 
+// ─── /senders/domains (cross-app read from Domains) ───────────────
+
+func TestSendersDomains_UnboundReturnsAvailableFalse(t *testing.T) {
+	// No "domains" binding → handler short-circuits before any CallApp.
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{"email_provider": float64(1)},
+	}
+	_ = newTestCtx(t, plat)
+	app := &App{}
+
+	r := httptest.NewRequest("GET", "/senders/domains?project_id=test-proj", nil)
+	w := httptest.NewRecorder()
+	app.handleSendersDomains(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var out map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	if out["available"] != false {
+		t.Errorf("expected available=false, got %v", out)
+	}
+	if len(plat.callAppCalls) != 0 {
+		t.Errorf("unbound shortcut should skip CallApp, got %+v", plat.callAppCalls)
+	}
+}
+
+func TestSendersDomains_BoundReturnsList(t *testing.T) {
+	// Bindings include domains → handler calls domain_list via CallApp.
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{
+			"email_provider": float64(1),
+			"domains":        float64(42), // any non-nil app install id
+		},
+		callAppReply: json.RawMessage(`{"domains":[{"name":"acme.com"},{"name":"shop.example"}],"count":2}`),
+	}
+	_ = newTestCtx(t, plat)
+	app := &App{}
+
+	r := httptest.NewRequest("GET", "/senders/domains?project_id=test-proj", nil)
+	w := httptest.NewRecorder()
+	app.handleSendersDomains(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Available bool `json:"available"`
+		Domains   []struct {
+			Name string `json:"name"`
+		} `json:"domains"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	if !out.Available || len(out.Domains) != 2 ||
+		out.Domains[0].Name != "acme.com" || out.Domains[1].Name != "shop.example" {
+		t.Errorf("unexpected response: %s", w.Body.String())
+	}
+	// Verify we hit the right app + tool, and injected _project_id.
+	if len(plat.callAppCalls) != 1 {
+		t.Fatalf("expected 1 CallApp, got %d", len(plat.callAppCalls))
+	}
+	c := plat.callAppCalls[0]
+	if c.App != "domains" || c.Tool != "domain_list" {
+		t.Errorf("wrong target: %+v", c)
+	}
+	if c.Input["_project_id"] != "test-proj" {
+		t.Errorf("missing _project_id injection: %+v", c.Input)
+	}
+}
+
 // ─── v0.4 provider-mirrored templates ─────────────────────────────
 
 // stubPlatform with phone_provider bound, returning Twilio-shaped
