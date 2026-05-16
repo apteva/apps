@@ -48,6 +48,12 @@ func (f *fakeCalendar) CallAppResult(app, tool string, input map[string]any, out
 		f.nextCalID++
 		f.calendars[f.nextCalID] = clone(input)
 		result = map[string]any{"id": f.nextCalID, "name": input["name"], "color": input["color"]}
+	case "calendar/calendars_list":
+		cals := []map[string]any{}
+		for id, c := range f.calendars {
+			cals = append(cals, map[string]any{"id": id, "name": c["name"]})
+		}
+		result = map[string]any{"calendars": cals}
 	case "calendar/calendars_update":
 		result = map[string]any{"id": input["id"]}
 	case "calendar/calendars_delete":
@@ -160,18 +166,75 @@ func TestUnit_TripsCreate_SkipsCalendarWhenSyncDisabled(t *testing.T) {
 	}
 }
 
-func TestUnit_TripsDelete_CascadesCalendar(t *testing.T) {
+// Under the shared-calendar design, trips_delete prunes the trip's
+// events but never touches the shared "Trips" calendar — other trips
+// may still be using it.
+func TestUnit_TripsDelete_DoesNotTouchSharedCalendar(t *testing.T) {
 	ctx, fake := newCtx(t)
 	app := &App{}
-	r, _ := app.toolTripsCreate(ctx, map[string]any{
-		"name": "x", "start_at": "2026-06-05T00:00:00Z", "end_at": "2026-06-08T00:00:00Z",
-	})
-	id := r.(Trip).ID
-	if _, err := app.toolTripsDelete(ctx, map[string]any{"id": float64(id)}); err != nil {
+	trip := mustCreateTrip(t, app, ctx, "Solo", true)
+	// Add an item so the prune has something to delete.
+	if _, err := app.toolTransportLegsAdd(ctx, map[string]any{
+		"trip_id": float64(trip.ID), "kind": "flight",
+		"depart_at": "2026-06-05T08:00:00Z", "arrive_at": "2026-06-05T09:30:00Z",
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if fake.countCalls("calendars_delete") != 1 {
-		t.Errorf("expected one calendars_delete call, got %d", fake.countCalls("calendars_delete"))
+	if _, err := app.toolTripsDelete(ctx, map[string]any{"id": float64(trip.ID)}); err != nil {
+		t.Fatal(err)
+	}
+	if fake.countCalls("calendars_delete") != 0 {
+		t.Errorf("calendars_delete=%d, want 0 (shared calendar must survive)", fake.countCalls("calendars_delete"))
+	}
+	if fake.countCalls("events_delete") != 1 {
+		t.Errorf("events_delete=%d, want 1 (the leg's event)", fake.countCalls("events_delete"))
+	}
+}
+
+func TestUnit_TwoTrips_ShareCalendar(t *testing.T) {
+	ctx, fake := newCtx(t)
+	app := &App{}
+	r1 := mustCreateTrip(t, app, ctx, "Paris", true)
+	r2 := mustCreateTrip(t, app, ctx, "Tokyo", true)
+	if r1.CalendarID == nil || r2.CalendarID == nil {
+		t.Fatalf("expected both trips linked, got %v %v", r1.CalendarID, r2.CalendarID)
+	}
+	if *r1.CalendarID != *r2.CalendarID {
+		t.Errorf("expected shared calendar, got %d and %d", *r1.CalendarID, *r2.CalendarID)
+	}
+	if fake.countCalls("calendars_create") != 1 {
+		t.Errorf("calendars_create=%d, want 1 (shared cal created once)", fake.countCalls("calendars_create"))
+	}
+}
+
+func TestUnit_LegacyTrip_MigratesOnNextWrite(t *testing.T) {
+	ctx, fake := newCtx(t)
+	app := &App{}
+	// Simulate a v0.1.x trip by inserting directly with a fake legacy
+	// per-trip calendar id (one no other trip uses).
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO trips (project_id, name, start_at, end_at, home_currency,
+		                    color, sync_calendar, calendar_id)
+		 VALUES (?, 'Old', '2026-06-05T00:00:00Z', '2026-06-08T00:00:00Z', 'EUR', '#3b82f6', 1, 99)`,
+		"test-proj",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tripID, _ := res.LastInsertId()
+	// First write — adding a transport leg — should migrate.
+	if _, err := app.toolTransportLegsAdd(ctx, map[string]any{
+		"trip_id": float64(tripID), "kind": "train",
+		"depart_at": "2026-06-05T08:00:00Z", "arrive_at": "2026-06-05T10:30:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t2, _ := readTrip(ctx, tripID)
+	if t2.CalendarID == nil || *t2.CalendarID == 99 {
+		t.Errorf("migration didn't switch calendar id: %v", t2.CalendarID)
+	}
+	if fake.countCalls("calendars_delete") < 1 {
+		t.Errorf("expected legacy calendar to be deleted, got calendars_delete=%d", fake.countCalls("calendars_delete"))
 	}
 }
 

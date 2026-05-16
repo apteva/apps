@@ -55,7 +55,37 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	globalCtx = ctx
 	ctx.Logger().Info("trips mounted")
+	go migrateLegacyCalendars(ctx)
 	return nil
+}
+
+// migrateLegacyCalendars walks every non-archived trip that has its
+// own per-trip calendar (the v0.1.x model) and consolidates it into
+// the shared "Trips" calendar. Idempotent — ensureSharedCalendar
+// short-circuits on already-migrated trips. Runs in a goroutine so a
+// flaky calendar dep doesn't block sidecar boot.
+func migrateLegacyCalendars(ctx *sdk.AppCtx) {
+	rows, err := ctx.AppDB().Query(
+		`SELECT id FROM trips WHERE archived=0 AND sync_calendar=1 AND calendar_id IS NOT NULL`,
+	)
+	if err != nil {
+		return
+	}
+	ids := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	for _, id := range ids {
+		trip, err := readTrip(ctx, id)
+		if err != nil {
+			continue
+		}
+		_ = ensureSharedCalendar(ctx, &trip)
+	}
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
@@ -595,14 +625,14 @@ func (a *App) toolTripsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	id, _ := res.LastInsertId()
 
-	// Calendar mirror: create the trip's dedicated calendar. Best-
-	// effort — if the call fails, the trip lives on without sync;
-	// the user can heal via trips_update.sync_calendar later.
+	// Calendar mirror: point the new trip at the project's shared
+	// "Trips" calendar (created on first use). Best-effort — failure
+	// leaves trip with calendar_id=NULL; a future write retries via
+	// the same ensureSharedCalendar path.
 	if sync {
-		if calID, err := callCreateCalendar(ctx, "Trip: "+name, color); err == nil {
-			_, _ = ctx.AppDB().Exec(`UPDATE trips SET calendar_id=? WHERE id=?`, calID, id)
-		} else {
-			ctx.Logger().Warn("calendar mirror create failed; trip created without calendar", "err", err)
+		newTrip, _ := readTrip(ctx, id)
+		if err := ensureSharedCalendar(ctx, &newTrip); err != nil {
+			ctx.Logger().Warn("shared calendar attach failed; trip created without calendar", "err", err)
 		}
 	}
 	ctx.Emit("trip.created", map[string]any{"trip_id": id, "name": name})
@@ -656,32 +686,30 @@ func (a *App) toolTripsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 
 	updated, _ := readTrip(ctx, id)
 
-	// Reflect rename into the linked calendar.
-	if name, ok := args["name"].(string); ok && name != "" && updated.CalendarID != nil && newSync {
-		_ = callUpdateCalendar(ctx, *updated.CalendarID, "Trip: "+name)
-	}
-
 	// Toggle sync_calendar — retroactive event create/delete.
 	if syncChanged {
 		if newSync {
-			// Off → On: ensure calendar exists, then create events for
-			// every item that doesn't have one yet.
-			if updated.CalendarID == nil {
-				if calID, err := callCreateCalendar(ctx, "Trip: "+updated.Name, updated.Color); err == nil {
-					_, _ = ctx.AppDB().Exec(`UPDATE trips SET calendar_id=? WHERE id=?`, calID, id)
-					updated.CalendarID = &calID
-				} else {
-					ctx.Logger().Warn("re-creating trip calendar failed", "err", err)
-				}
-			}
-			if updated.CalendarID != nil {
+			// Off → On: ensure trip points at the shared calendar (creating
+			// it if this is the first synced trip in the project), then
+			// rehydrate every item.
+			if err := ensureSharedCalendar(ctx, &updated); err != nil {
+				ctx.Logger().Warn("re-attaching shared calendar failed", "err", err)
+			} else if updated.CalendarID != nil {
 				rehydrateCalendarForTrip(ctx, updated)
 			}
 		} else {
-			// On → Off: delete all linked events, keep the calendar shell.
+			// On → Off: delete this trip's events; leave the shared
+			// calendar (other trips may be using it).
 			pruneCalendarEventsForTrip(ctx, id)
 		}
 	}
+
+	// Trip rename ripples to event titles (which carry the trip name
+	// as a prefix so trips stay distinguishable inside the shared cal).
+	if name, ok := args["name"].(string); ok && name != "" && name != old.Name && updated.SyncCalendar {
+		updateEventTitlesForTrip(ctx, updated)
+	}
+
 	ctx.Emit("trip.updated", map[string]any{"trip_id": id})
 	return updated, nil
 }
@@ -691,14 +719,12 @@ func (a *App) toolTripsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	t, err := readTrip(ctx, id)
-	if err != nil {
+	if _, err := readTrip(ctx, id); err != nil {
 		return nil, err
 	}
-	// Best-effort: drop the trip's calendar (events cascade in calendar).
-	if t.CalendarID != nil {
-		_ = callDeleteCalendar(ctx, *t.CalendarID)
-	}
+	// Delete only this trip's events; the shared "Trips" calendar is
+	// owned by the project (other trips may still be using it).
+	pruneCalendarEventsForTrip(ctx, id)
 	if _, err := ctx.AppDB().Exec(`DELETE FROM trips WHERE id=?`, id); err != nil {
 		return nil, err
 	}
@@ -950,9 +976,10 @@ func (a *App) toolTransportLegsAdd(ctx *sdk.AppCtx, args map[string]any) (any, e
 	id, _ := res.LastInsertId()
 	leg, _ := readTransport(ctx, id)
 	// Calendar mirror.
+	_ = ensureSharedCalendar(ctx, &trip)
 	if trip.SyncCalendar && trip.CalendarID != nil {
 		if evtID, err := callCreateEvent(ctx, *trip.CalendarID,
-			transportEventTitle(leg), leg.DepartAt, leg.ArriveAt, false,
+			transportEventTitle(trip, leg), leg.DepartAt, leg.ArriveAt, false,
 			leg.DepartLocation, transportEventDescription(trip, leg)); err == nil {
 			_, _ = ctx.AppDB().Exec(`UPDATE transport_legs SET calendar_event_id=? WHERE id=?`, evtID, id)
 			leg.CalendarEventID = &evtID
@@ -1000,13 +1027,14 @@ func (a *App) toolTransportLegsUpdate(ctx *sdk.AppCtx, args map[string]any) (any
 	leg, _ := readTransport(ctx, id)
 	trip, _ := readTrip(ctx, leg.TripID)
 	// Calendar upsert.
+	_ = ensureSharedCalendar(ctx, &trip)
 	if trip.SyncCalendar && trip.CalendarID != nil {
 		if old.CalendarEventID != nil {
 			_ = callUpdateEvent(ctx, *old.CalendarEventID,
-				transportEventTitle(leg), leg.DepartAt, leg.ArriveAt, false,
+				transportEventTitle(trip, leg), leg.DepartAt, leg.ArriveAt, false,
 				leg.DepartLocation, transportEventDescription(trip, leg))
 		} else if evtID, err := callCreateEvent(ctx, *trip.CalendarID,
-			transportEventTitle(leg), leg.DepartAt, leg.ArriveAt, false,
+			transportEventTitle(trip, leg), leg.DepartAt, leg.ArriveAt, false,
 			leg.DepartLocation, transportEventDescription(trip, leg)); err == nil {
 			_, _ = ctx.AppDB().Exec(`UPDATE transport_legs SET calendar_event_id=? WHERE id=?`, evtID, id)
 			leg.CalendarEventID = &evtID
@@ -1119,8 +1147,12 @@ func listTransportByTrip(ctx *sdk.AppCtx, tripID int64) ([]TransportLeg, error) 
 	return out, nil
 }
 
-func transportEventTitle(l TransportLeg) string {
-	// No emojis (per house rules). Compact form: "AF1234 CDG → LIN".
+// Event titles all live in the shared "Trips" calendar, so each one
+// is prefixed with the trip name to stay distinguishable in any
+// list/day view that doesn't carry our trip metadata.
+const titleSep = " · "
+
+func transportEventTitle(t Trip, l TransportLeg) string {
 	parts := []string{}
 	if l.Provider != "" {
 		parts = append(parts, l.Provider)
@@ -1134,11 +1166,64 @@ func transportEventTitle(l TransportLeg) string {
 	if len(parts) == 0 {
 		parts = append(parts, strings.Title(l.Kind))
 	}
-	return strings.Join(parts, " ")
+	return t.Name + titleSep + strings.Join(parts, " ")
+}
+
+func accommodationEventTitle(t Trip, a Accommodation) string {
+	return t.Name + titleSep + "Stay: " + a.Name
+}
+
+func activityEventTitle(t Trip, a Activity) string {
+	return t.Name + titleSep + a.Name
 }
 
 func transportEventDescription(t Trip, l TransportLeg) string {
 	return fmt.Sprintf("Trip: %s\nLeg id: %d\n%s", t.Name, l.ID, l.Notes)
+}
+
+func accommodationEventDescription(t Trip, a Accommodation) string {
+	return fmt.Sprintf("Trip: %s\nAccommodation id: %d\n%s", t.Name, a.ID, a.Notes)
+}
+
+func activityEventDescription(t Trip, a Activity) string {
+	return fmt.Sprintf("Trip: %s\nActivity id: %d\n%s", t.Name, a.ID, a.Notes)
+}
+
+// updateEventTitlesForTrip refreshes every linked event's title for a
+// renamed trip — titles include the trip name as a prefix so a rename
+// has to ripple. Best-effort; failed events stay with the old prefix.
+func updateEventTitlesForTrip(ctx *sdk.AppCtx, trip Trip) {
+	legs, _ := listTransportByTrip(ctx, trip.ID)
+	for _, l := range legs {
+		if l.CalendarEventID == nil {
+			continue
+		}
+		_ = callUpdateEvent(ctx, *l.CalendarEventID,
+			transportEventTitle(trip, l), l.DepartAt, l.ArriveAt, false,
+			l.DepartLocation, transportEventDescription(trip, l))
+	}
+	accs, _ := listAccommodationsByTrip(ctx, trip.ID)
+	for _, ac := range accs {
+		if ac.CalendarEventID == nil {
+			continue
+		}
+		_ = callUpdateEvent(ctx, *ac.CalendarEventID,
+			accommodationEventTitle(trip, ac), ac.CheckInAt, ac.CheckOutAt, true,
+			ac.Address, accommodationEventDescription(trip, ac))
+	}
+	acts, _ := listActivitiesByTrip(ctx, trip.ID)
+	for _, at := range acts {
+		if at.CalendarEventID == nil || at.StartAt == "" {
+			continue
+		}
+		endForEvent := at.EndAt
+		if endForEvent == "" {
+			endForEvent = at.StartAt
+		}
+		_ = callUpdateEvent(ctx, *at.CalendarEventID,
+			activityEventTitle(trip, at), at.StartAt, endForEvent, false,
+			at.Location, activityEventDescription(trip, at))
+	}
 }
 
 // ─── Accommodations ──────────────────────────────────────────────
@@ -1182,10 +1267,11 @@ func (a *App) toolAccommodationsAdd(ctx *sdk.AppCtx, args map[string]any) (any, 
 	}
 	id, _ := res.LastInsertId()
 	acc, _ := readAccommodation(ctx, id)
+	_ = ensureSharedCalendar(ctx, &trip)
 	if trip.SyncCalendar && trip.CalendarID != nil {
 		if evtID, err := callCreateEvent(ctx, *trip.CalendarID,
-			"Stay: "+acc.Name, acc.CheckInAt, acc.CheckOutAt, true,
-			acc.Address, fmt.Sprintf("Trip: %s\nAccommodation id: %d\n%s", trip.Name, acc.ID, acc.Notes)); err == nil {
+			accommodationEventTitle(trip, acc), acc.CheckInAt, acc.CheckOutAt, true,
+			acc.Address, accommodationEventDescription(trip, acc)); err == nil {
 			_, _ = ctx.AppDB().Exec(`UPDATE accommodations SET calendar_event_id=? WHERE id=?`, evtID, id)
 			acc.CalendarEventID = &evtID
 		} else {
@@ -1231,14 +1317,15 @@ func (a *App) toolAccommodationsUpdate(ctx *sdk.AppCtx, args map[string]any) (an
 	}
 	acc, _ := readAccommodation(ctx, id)
 	trip, _ := readTrip(ctx, acc.TripID)
+	_ = ensureSharedCalendar(ctx, &trip)
 	if trip.SyncCalendar && trip.CalendarID != nil {
 		if old.CalendarEventID != nil {
 			_ = callUpdateEvent(ctx, *old.CalendarEventID,
-				"Stay: "+acc.Name, acc.CheckInAt, acc.CheckOutAt, true,
-				acc.Address, fmt.Sprintf("Trip: %s\nAccommodation id: %d\n%s", trip.Name, acc.ID, acc.Notes))
+				accommodationEventTitle(trip, acc), acc.CheckInAt, acc.CheckOutAt, true,
+				acc.Address, accommodationEventDescription(trip, acc))
 		} else if evtID, err := callCreateEvent(ctx, *trip.CalendarID,
-			"Stay: "+acc.Name, acc.CheckInAt, acc.CheckOutAt, true,
-			acc.Address, fmt.Sprintf("Trip: %s\nAccommodation id: %d\n%s", trip.Name, acc.ID, acc.Notes)); err == nil {
+			accommodationEventTitle(trip, acc), acc.CheckInAt, acc.CheckOutAt, true,
+			acc.Address, accommodationEventDescription(trip, acc)); err == nil {
 			_, _ = ctx.AppDB().Exec(`UPDATE accommodations SET calendar_event_id=? WHERE id=?`, evtID, id)
 			acc.CalendarEventID = &evtID
 		}
@@ -1389,14 +1476,15 @@ func (a *App) toolActivitiesAdd(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	id, _ := res.LastInsertId()
 	act, _ := readActivity(ctx, id)
+	_ = ensureSharedCalendar(ctx, &trip)
 	if trip.SyncCalendar && trip.CalendarID != nil && act.StartAt != "" {
 		endForEvent := act.EndAt
 		if endForEvent == "" {
 			endForEvent = act.StartAt
 		}
 		if evtID, err := callCreateEvent(ctx, *trip.CalendarID,
-			act.Name, act.StartAt, endForEvent, false,
-			act.Location, fmt.Sprintf("Trip: %s\nActivity id: %d\n%s", trip.Name, act.ID, act.Notes)); err == nil {
+			activityEventTitle(trip, act), act.StartAt, endForEvent, false,
+			act.Location, activityEventDescription(trip, act)); err == nil {
 			_, _ = ctx.AppDB().Exec(`UPDATE activities SET calendar_event_id=? WHERE id=?`, evtID, id)
 			act.CalendarEventID = &evtID
 		}
@@ -1439,6 +1527,7 @@ func (a *App) toolActivitiesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}
 	act, _ := readActivity(ctx, id)
 	trip, _ := readTrip(ctx, act.TripID)
+	_ = ensureSharedCalendar(ctx, &trip)
 	if trip.SyncCalendar && trip.CalendarID != nil {
 		endForEvent := act.EndAt
 		if endForEvent == "" {
@@ -1447,11 +1536,11 @@ func (a *App) toolActivitiesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, e
 		if act.StartAt != "" {
 			if old.CalendarEventID != nil {
 				_ = callUpdateEvent(ctx, *old.CalendarEventID,
-					act.Name, act.StartAt, endForEvent, false,
-					act.Location, fmt.Sprintf("Trip: %s\nActivity id: %d\n%s", trip.Name, act.ID, act.Notes))
+					activityEventTitle(trip, act), act.StartAt, endForEvent, false,
+					act.Location, activityEventDescription(trip, act))
 			} else if evtID, err := callCreateEvent(ctx, *trip.CalendarID,
-				act.Name, act.StartAt, endForEvent, false,
-				act.Location, fmt.Sprintf("Trip: %s\nActivity id: %d\n%s", trip.Name, act.ID, act.Notes)); err == nil {
+				activityEventTitle(trip, act), act.StartAt, endForEvent, false,
+				act.Location, activityEventDescription(trip, act)); err == nil {
 				_, _ = ctx.AppDB().Exec(`UPDATE activities SET calendar_event_id=? WHERE id=?`, evtID, id)
 				act.CalendarEventID = &evtID
 			}
@@ -1831,6 +1920,78 @@ func (a *App) toolDashboard(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 // ─── Calendar coupling helpers ───────────────────────────────────
 
+// sharedTripsCalendarName is the per-project calendar every trip
+// mirrors its itinerary into. Created on demand and never deleted —
+// trip deletion only removes that trip's events. The string is
+// hard-coded so calendars_list lookups are stable.
+const sharedTripsCalendarName = "Trips"
+
+// getOrCreateSharedTripsCalendar finds the project's "Trips" calendar
+// via calendar.calendars_list; creates it if missing. Cheap enough to
+// run on every sync-bearing write — calendars_list is a small query.
+func getOrCreateSharedTripsCalendar(ctx *sdk.AppCtx) (int64, error) {
+	type calRow struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+	type listOut struct {
+		Calendars []calRow `json:"calendars"`
+	}
+	var list listOut
+	if err := ctx.PlatformAPI().CallAppResult("calendar", "calendars_list", map[string]any{}, &list); err != nil {
+		return 0, err
+	}
+	for _, c := range list.Calendars {
+		if c.Name == sharedTripsCalendarName {
+			return c.ID, nil
+		}
+	}
+	return callCreateCalendar(ctx, sharedTripsCalendarName, "#3b82f6")
+}
+
+// ensureSharedCalendar guarantees `trip.CalendarID` points at the
+// project's shared "Trips" calendar:
+//   - sync_calendar=false → no-op (caller already skips mirror writes)
+//   - trip.calendar_id == shared → no-op
+//   - trip.calendar_id is nil → set to shared
+//   - trip.calendar_id is a stale per-trip calendar (the v0.1.x model) →
+//     delete that calendar (cascading its events), reset every item's
+//     calendar_event_id to NULL, and rehydrate events on the shared one
+//
+// Idempotent on repeat calls. Mutates *trip in place when it changes
+// the calendar id so callers don't need to re-read.
+func ensureSharedCalendar(ctx *sdk.AppCtx, trip *Trip) error {
+	if trip == nil || !trip.SyncCalendar {
+		return nil
+	}
+	sharedID, err := getOrCreateSharedTripsCalendar(ctx)
+	if err != nil {
+		return err
+	}
+	if trip.CalendarID != nil && *trip.CalendarID == sharedID {
+		return nil
+	}
+	legacyID := int64(0)
+	if trip.CalendarID != nil {
+		legacyID = *trip.CalendarID
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE trips SET calendar_id=? WHERE id=?`, sharedID, trip.ID); err != nil {
+		return err
+	}
+	trip.CalendarID = &sharedID
+	if legacyID != 0 {
+		// Drop the orphan per-trip calendar — calendar app cascades
+		// its events. Then null out every item's event id so the
+		// rehydrate below creates fresh events on the shared cal.
+		_ = callDeleteCalendar(ctx, legacyID)
+		for _, table := range []string{"transport_legs", "accommodations", "activities"} {
+			_, _ = ctx.AppDB().Exec(`UPDATE `+table+` SET calendar_event_id=NULL WHERE trip_id=?`, trip.ID)
+		}
+		rehydrateCalendarForTrip(ctx, *trip)
+	}
+	return nil
+}
+
 // callCreateCalendar wraps calendar.calendars_create. Returns the new
 // calendar's id. Best-effort: a non-nil error means the caller should
 // proceed without a linked calendar.
@@ -1919,7 +2080,7 @@ func rehydrateCalendarForTrip(ctx *sdk.AppCtx, trip Trip) {
 			continue
 		}
 		if evtID, err := callCreateEvent(ctx, calID,
-			transportEventTitle(l), l.DepartAt, l.ArriveAt, false,
+			transportEventTitle(trip, l), l.DepartAt, l.ArriveAt, false,
 			l.DepartLocation, transportEventDescription(trip, l)); err == nil {
 			_, _ = ctx.AppDB().Exec(`UPDATE transport_legs SET calendar_event_id=? WHERE id=?`, evtID, l.ID)
 		}
@@ -1930,8 +2091,8 @@ func rehydrateCalendarForTrip(ctx *sdk.AppCtx, trip Trip) {
 			continue
 		}
 		if evtID, err := callCreateEvent(ctx, calID,
-			"Stay: "+ac.Name, ac.CheckInAt, ac.CheckOutAt, true,
-			ac.Address, fmt.Sprintf("Trip: %s\nAccommodation id: %d\n%s", trip.Name, ac.ID, ac.Notes)); err == nil {
+			accommodationEventTitle(trip, ac), ac.CheckInAt, ac.CheckOutAt, true,
+			ac.Address, accommodationEventDescription(trip, ac)); err == nil {
 			_, _ = ctx.AppDB().Exec(`UPDATE accommodations SET calendar_event_id=? WHERE id=?`, evtID, ac.ID)
 		}
 	}
@@ -1945,8 +2106,8 @@ func rehydrateCalendarForTrip(ctx *sdk.AppCtx, trip Trip) {
 			endForEvent = at.StartAt
 		}
 		if evtID, err := callCreateEvent(ctx, calID,
-			at.Name, at.StartAt, endForEvent, false,
-			at.Location, fmt.Sprintf("Trip: %s\nActivity id: %d\n%s", trip.Name, at.ID, at.Notes)); err == nil {
+			activityEventTitle(trip, at), at.StartAt, endForEvent, false,
+			at.Location, activityEventDescription(trip, at)); err == nil {
 			_, _ = ctx.AppDB().Exec(`UPDATE activities SET calendar_event_id=? WHERE id=?`, evtID, at.ID)
 		}
 	}
