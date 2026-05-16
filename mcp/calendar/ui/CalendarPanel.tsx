@@ -8,7 +8,7 @@
 // Live updates via useAppEvents("calendar") — when calendars/events
 // change (from another tab or an agent), the UI refreshes.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 const API = "/api/apps/calendar";
 
@@ -149,9 +149,92 @@ function fmtTime(d: Date): string {
   return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
+// --- Confirm dialog (replaces window.confirm) ------------------------
+//
+// Tiny imperative confirm() over a controlled modal: nested components
+// call useConfirm()(opts) and await a Promise<boolean>. The provider
+// at the panel root owns the state + renders the modal.
+
+interface ConfirmOpts {
+  title: string;
+  message?: string;
+  confirmLabel?: string;
+  danger?: boolean;
+}
+const ConfirmCtx = createContext<((opts: ConfirmOpts) => Promise<boolean>) | null>(null);
+function useConfirm() {
+  const c = useContext(ConfirmCtx);
+  if (!c) throw new Error("useConfirm must be used inside <ConfirmProvider>");
+  return c;
+}
+
+function ConfirmProvider({ children }: { children: React.ReactNode }) {
+  const [opts, setOpts] = useState<ConfirmOpts | null>(null);
+  const resolverRef = useRef<((v: boolean) => void) | null>(null);
+  const confirm = useCallback((o: ConfirmOpts) => {
+    return new Promise<boolean>((resolve) => {
+      resolverRef.current = resolve;
+      setOpts(o);
+    });
+  }, []);
+  const close = (result: boolean) => {
+    resolverRef.current?.(result);
+    resolverRef.current = null;
+    setOpts(null);
+  };
+  return (
+    <ConfirmCtx.Provider value={confirm}>
+      {children}
+      {opts && <ConfirmModal {...opts} onConfirm={() => close(true)} onCancel={() => close(false)} />}
+    </ConfirmCtx.Provider>
+  );
+}
+
+function ConfirmModal({ title, message, confirmLabel = "Delete", danger = true, onConfirm, onCancel }: ConfirmOpts & { onConfirm: () => void; onCancel: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); onCancel(); }
+      if (e.key === "Enter") { e.preventDefault(); onConfirm(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onConfirm, onCancel]);
+  return (
+    <div className="fixed inset-0 bg-black/60 grid place-items-center z-50">
+      <div className="bg-bg-card border border-border rounded p-5 w-full max-w-sm">
+        <h3 className="text-text text-base font-medium">{title}</h3>
+        {message && <p className="text-text-muted text-sm mt-2">{message}</p>}
+        <div className="flex justify-end gap-2 mt-4">
+          <button
+            onClick={onCancel}
+            className="px-3 py-1 text-sm border border-border rounded text-text hover:bg-bg-input"
+          >Cancel</button>
+          <button
+            onClick={onConfirm}
+            autoFocus
+            className={`px-3 py-1 text-sm rounded ${
+              danger
+                ? "bg-error text-bg hover:opacity-90"
+                : "bg-accent text-bg hover:opacity-90"
+            }`}
+          >{confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // --- Panel -----------------------------------------------------------
 
-export default function CalendarPanel({ projectId }: NativePanelProps) {
+export default function CalendarPanel(props: NativePanelProps) {
+  return (
+    <ConfirmProvider>
+      <CalendarPanelInner {...props} />
+    </ConfirmProvider>
+  );
+}
+
+function CalendarPanelInner({ projectId }: NativePanelProps) {
   const [calendars, setCalendars] = useState<Calendar[]>([]);
   const [events, setEvents] = useState<Occurrence[]>([]);
   const [view, setView] = useState<ViewMode>("week");
@@ -810,6 +893,7 @@ function CalendarDialog({
   onSaved: () => void;
   setStatus: (s: string) => void;
 }) {
+  const confirm = useConfirm();
   const [name, setName] = useState(existing?.name || "");
   const [color, setColor] = useState(existing?.color || PRESET_COLORS[0]);
   const [kind, setKind] = useState(existing?.kind || "custom");
@@ -845,7 +929,12 @@ function CalendarDialog({
   };
 
   const remove = async () => {
-    if (!existing || !confirm(`Delete "${existing.name}" and all its events?`)) return;
+    if (!existing) return;
+    if (!await confirm({
+      title: `Delete "${existing.name}"?`,
+      message: "All its events go with it. This can't be undone.",
+      confirmLabel: "Delete calendar",
+    })) return;
     try {
       await fetch(`${API}/calendars/${existing.id}`, { method: "DELETE", credentials: "same-origin" });
       onSaved();
@@ -919,6 +1008,7 @@ function EventDialog({
   const initialStart = existing ? new Date(existing.start_at) : defaults!.start;
   const initialEnd = existing ? new Date(existing.end_at) : new Date(initialStart.getTime() + 30 * 60 * 1000);
 
+  const confirm = useConfirm();
   const [calendarId, setCalendarId] = useState<number>(
     existing?.calendar_id ?? defaults?.calendarId ?? calendars[0]?.id ?? 0,
   );
@@ -969,7 +1059,12 @@ function EventDialog({
   };
 
   const remove = async () => {
-    if (!existing || !confirm(`Delete "${existing.title}"?`)) return;
+    if (!existing) return;
+    if (!await confirm({
+      title: `Delete "${existing.title}"?`,
+      message: existing.is_recurring ? "All occurrences of this recurring event will be removed." : undefined,
+      confirmLabel: "Delete event",
+    })) return;
     try {
       await fetch(`${API}/items/${existing.event_id}`, {
         method: "DELETE",
