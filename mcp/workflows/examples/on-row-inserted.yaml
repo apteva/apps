@@ -1,0 +1,35 @@
+# on-row-inserted — event-triggered workflow.
+#
+# Fires every time the Tables app emits row.inserted (i.e. any new
+# row anywhere in the project's tables). The trigger manager opens
+# one SSE subscription per (source, project) — multiplexed across
+# every event-triggered workflow that listens on the same lane.
+#
+# input shape inside the workflow:
+#   input.topic      — "row.inserted"
+#   input.source     — "tables"
+#   input.project_id — the originating project
+#   input.time       — RFC3339 of the emit
+#   input.data       — the event's payload, exactly what tables
+#                       passed to ctx.Emit (whatever shape the
+#                       producing app chose)
+#
+# This particular example: when a row lands, post a webhook to a
+# downstream system carrying the new row's id. Replace with whatever
+# integration your project actually needs.
+
+name: on-row-inserted
+
+trigger:
+  kind: event
+  source: tables
+  topic: row.inserted
+
+steps:
+  - id: notify
+    kind: emit
+    topic: workflow.tables.row.received
+    data:
+      received_at: "{{ now }}"
+      source_topic: "{{ input.topic }}"
+      payload: "{{ input.data }}"

@@ -260,6 +260,31 @@ func dbListWorkflows(db *sql.DB, pid string, f WorkflowFilter) ([]*Workflow, err
 	return out, nil
 }
 
+// dbListEventTriggeredWorkflowsAll returns every active workflow
+// across every project whose trigger_kind is "event". Used by the
+// event-trigger manager at reconcile time to decide which SSE lanes
+// to open. Skips the per-project filter dbListWorkflows enforces —
+// a global workflows install needs to see every project's set.
+func dbListEventTriggeredWorkflowsAll(db *sql.DB) ([]*Workflow, error) {
+	rows, err := db.Query(
+		`SELECT ` + wfColumns + ` FROM workflows
+		 WHERE trigger_kind = 'event' AND status = 'active'`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Workflow{}
+	for rows.Next() {
+		wf, err := scanWorkflow(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, wf)
+	}
+	return out, nil
+}
+
 func dbDeleteWorkflow(db *sql.DB, pid string, id int64) error {
 	_, err := db.Exec(`DELETE FROM workflows WHERE id = ? AND project_id = ?`, id, pid)
 	return err

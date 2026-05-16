@@ -132,6 +132,7 @@ func (a *App) handleHTTPCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	kickEventTrigger()
 	httpJSON(w, map[string]any{"workflow": wf})
 }
 
@@ -169,6 +170,7 @@ func (a *App) handleHTTPUpdateWorkflow(w http.ResponseWriter, r *http.Request, i
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	kickEventTrigger()
 	httpJSON(w, map[string]any{"workflow": wf})
 }
 
@@ -182,6 +184,7 @@ func (a *App) handleHTTPDeleteWorkflow(w http.ResponseWriter, r *http.Request, i
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	kickEventTrigger()
 	httpJSON(w, map[string]any{"deleted": true, "id": id})
 }
 
@@ -357,6 +360,7 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if ctx != nil {
 		ctx.Emit("workflow.created", map[string]any{"id": wf.ID, "name": wf.Name})
 	}
+	kickEventTrigger()
 	return map[string]any{"workflow": wf}, nil
 }
 
@@ -376,6 +380,7 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if ctx != nil {
 		ctx.Emit("workflow.updated", map[string]any{"id": wf.ID, "name": wf.Name})
 	}
+	kickEventTrigger()
 	return map[string]any{"workflow": wf}, nil
 }
 
@@ -394,6 +399,7 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if ctx != nil {
 		ctx.Emit("workflow.deleted", map[string]any{"id": id})
 	}
+	kickEventTrigger()
 	return map[string]any{"deleted": true, "id": id}, nil
 }
 
@@ -576,10 +582,20 @@ func buildAndCreateWorkflow(ctx *sdk.AppCtx, pid string, args map[string]any) (*
 	// Validate the source parses + structural checks pass before
 	// committing the row. Catches typos / bad ids at create time
 	// instead of at first run.
-	if def, err := ParseDefinition(bytes); err != nil {
+	def, err := ParseDefinition(bytes)
+	if err != nil {
 		return nil, err
-	} else if wf.TriggerKind == "" {
+	}
+	if wf.TriggerKind == "" {
 		wf.TriggerKind = def.Trigger.Kind
+	}
+	// Denormalise the parsed trigger so the event-trigger manager
+	// (event_trigger.go) can read source / topic / cron straight off
+	// the row without re-parsing Source on every reconcile.
+	if wf.TriggerJSON == "" {
+		if tb, err := json.Marshal(def.Trigger); err == nil {
+			wf.TriggerJSON = string(tb)
+		}
 	}
 
 	return dbCreateWorkflow(dbFor(ctx), pid, wf)

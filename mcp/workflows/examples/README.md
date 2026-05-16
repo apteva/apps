@@ -34,6 +34,7 @@ curl -X POST 'https://<host>/api/apps/workflows/wf/tables-insert' \
 | `tables-insert.yaml` | minimal `step.kind: app` — one row into a Tables table |
 | `tables-search.yaml` | `rows_search` with a templated `where` filter, returns the rows |
 | `lead-capture.yaml` | dedupe-then-insert: `rows_count` → `branch` → `rows_insert` (also uses `{{ now }}`) |
+| `on-row-inserted.yaml` | **event-triggered** — fires on every `tables.row.inserted` event in the project; input carries the event payload |
 
 They all assume a `leads` table; create it once with the Tables app:
 
@@ -49,13 +50,20 @@ They all assume a `leads` table; create it once with the Tables app:
 }
 ```
 
-## Not yet shippable: event triggers
+## How event triggers work (v0.3.0+)
 
-The trigger schema accepts `kind: event` and `kind: schedule` for
-forward-compat, but workflows v0.2.0 only **dispatches** `http` and
-`manual` triggers. An event-triggered workflow ("on `row.inserted` in
-tables, run me with the row as input") parses and saves, but the
-subscription machinery that would deliver events to it isn't built
-yet — that's a v0.3.0 follow-on requiring matching sidecar-auth on
-the platform's SSE endpoint. See definition.go line 31 for the
-forward-compat comment.
+`kind: event` is wired up via an in-sidecar SSE-client manager
+(`event_trigger.go`). At boot and after every workflow CRUD it
+groups active event-triggered workflows by `(source_app, project)`
+and opens one SSE connection per lane to `/api/app-events/<source>`
+on the platform — authenticated with the sidecar's own
+`APTEVA_APP_TOKEN`. Each incoming event is dispatched to every
+matching workflow on the lane (exact topic match, or `prefix.*`).
+
+Reconnect-with-`since` handles transient drops; the bus's 256-event
+ring buffer covers brief outages. A sidecar restart re-subscribes
+fresh; events that age out of the ring during a longer downtime are
+lost.
+
+`kind: schedule` is still a forward-compat stub — pair workflows
+with the Jobs app's cron + an HTTP target for now.

@@ -30,7 +30,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: workflows
 display_name: Workflows
-version: 0.2.1
+version: 0.3.0
 description: |
   Deterministic, on-demand pipelines. A workflow is a YAML/JSON
   graph of typed steps (http, function, app, emit, branch) with
@@ -109,12 +109,24 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := dbSweepStuckRuns(ctx.AppDB()); err != nil {
 		ctx.Logger().Warn("sweep stuck runs", "err", err)
 	}
+	// Start the event-trigger manager: opens one SSE per
+	// (source_app, project) lane for every active workflow whose
+	// trigger.kind=event. No-ops cleanly when the gateway URL or
+	// app token aren't set (tests / dev runs).
+	globalEventTrigger = newEventTrigger(ctx)
+	globalEventTrigger.Start()
 	ctx.Logger().Info("workflows mounted",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if globalEventTrigger != nil {
+		globalEventTrigger.Stop()
+		globalEventTrigger = nil
+	}
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
@@ -263,3 +275,9 @@ func resolveProjectFromArgs(args map[string]any) (string, error) {
 // don't get an AppCtx threaded by the SDK, so we capture it at
 // OnMount and use it in handlers.go.
 var globalCtx *sdk.AppCtx
+
+// globalEventTrigger lives next to globalCtx for the same reason:
+// HTTP and MCP handlers reach it after create/update/delete to
+// Kick() a reconcile so newly-added event triggers go live
+// immediately instead of waiting for the periodic rescan.
+var globalEventTrigger *eventTrigger
