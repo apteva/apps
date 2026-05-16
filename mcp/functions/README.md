@@ -38,6 +38,16 @@ Either way, `context` / `ctx` gives you:
   another Apteva app's MCP tool. The sidecar mediates it; your code
   never holds a platform token.
   `await context.call("tables", "rows_insert", {...})`.
+- **`context.integration(conn, tool, input)`** (`ctx.Integration` in
+  Go) — invoke a tool on an integration connection (Pushover, Slack,
+  Resend, anything in the integrations catalog). `conn` is either a
+  numeric connection id or an app slug ("pushover") — the sidecar
+  resolves slugs to the single matching connection in this project.
+  `await context.integration("pushover", "pushover_send_notification",
+  { message: "hi" })`. Returns the upstream tool's response data;
+  errors when the upstream returns non-success or the slug doesn't
+  match exactly one connection (multi-match returns the candidate
+  ids — pass the explicit id to disambiguate).
 - **`context.env`** — a *scrubbed* environment: your function's own
   `env` map plus a small host allowlist (`PATH`, `HOME`, …). The
   sidecar's secrets (`APTEVA_APP_TOKEN`, gateway URL) are **not** here.

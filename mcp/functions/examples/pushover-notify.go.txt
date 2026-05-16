@@ -1,0 +1,42 @@
+// pushover-notify (Go) — same shape as the JS version.
+// Demonstrates ctx.Integration with a slug + structured input map.
+//
+// Pre-req: a Pushover connection in this project.
+//
+//   POST /fn/pushover-notify  { "message": "deploy finished" }
+//   → { "ok": true }
+
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+)
+
+func Handle(event json.RawMessage, ctx *Context) (any, error) {
+	var in struct {
+		Message  string `json:"message"`
+		Title    string `json:"title"`
+		Priority int    `json:"priority"`
+	}
+	if len(event) > 0 {
+		if err := json.Unmarshal(event, &in); err != nil {
+			return nil, fmt.Errorf("invalid event: %w", err)
+		}
+	}
+	if in.Message == "" {
+		return nil, fmt.Errorf("event.message is required")
+	}
+	if in.Title == "" {
+		in.Title = "Apteva"
+	}
+
+	if _, err := ctx.Integration("pushover", "pushover_send_notification", map[string]any{
+		"message":  in.Message,
+		"title":    in.Title,
+		"priority": in.Priority,
+	}); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
+}

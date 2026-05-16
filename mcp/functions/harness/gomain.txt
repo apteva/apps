@@ -11,6 +11,7 @@
 //                       { type:"call_result", callId, ok, result?, error? }
 //   worker  -> sidecar:  { type:"ready", ok }               (once, on boot)
 //                        { type:"call", callId, app, tool, input }
+//                        { type:"integration", callId, conn, tool, input }
 //                        { id, ok, result?, error?, logs? }  (invocation result)
 
 package main
@@ -41,6 +42,17 @@ type Context struct {
 // JSON; the result is the tool's (unwrapped) JSON response.
 func (c *Context) Call(app, tool string, input any) (json.RawMessage, error) {
 	return c.h.call(app, tool, input)
+}
+
+// Integration invokes a tool on an integration connection in the
+// function's project. conn may be a numeric connection id (int /
+// int64) or an app slug (string, e.g. "pushover") — the sidecar
+// resolves slugs to the single matching connection. Returns the
+// upstream tool's response data; errors when the upstream tool
+// returns non-success or the slug doesn't resolve to exactly one
+// connection.
+func (c *Context) Integration(conn any, tool string, input any) (json.RawMessage, error) {
+	return c.h.integration(conn, tool, input)
 }
 
 // Log appends a line to the captured output returned with the
@@ -122,6 +134,50 @@ func (h *harness) call(app, tool string, input any) (json.RawMessage, error) {
 
 	if err := h.writeFrame(map[string]any{
 		"type": "call", "callId": id, "app": app, "tool": tool,
+		"input": json.RawMessage(inputJSON),
+	}); err != nil {
+		return nil, err
+	}
+	ans := <-ch
+	if !ans.ok {
+		return nil, fmt.Errorf("%s", ans.errMsg)
+	}
+	if len(ans.result) == 0 {
+		return json.RawMessage("null"), nil
+	}
+	return ans.result, nil
+}
+
+func (h *harness) integration(conn any, tool string, input any) (json.RawMessage, error) {
+	if conn == nil {
+		return nil, fmt.Errorf("context.Integration: conn (numeric id or slug) is required")
+	}
+	if tool == "" {
+		return nil, fmt.Errorf("context.Integration: tool is required")
+	}
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("marshal integration input: %w", err)
+	}
+	// `conn` is forwarded verbatim — json.Marshal turns ints into JSON
+	// numbers and strings into JSON strings, matching the sidecar's
+	// number-or-string parser. Other types (bool, struct, ...) marshal
+	// to something the sidecar will reject with a clear error.
+	connJSON, err := json.Marshal(conn)
+	if err != nil {
+		return nil, fmt.Errorf("marshal integration conn: %w", err)
+	}
+
+	h.mu.Lock()
+	h.seq++
+	id := h.seq
+	ch := make(chan callAnswer, 1)
+	h.pending[id] = ch
+	h.mu.Unlock()
+
+	if err := h.writeFrame(map[string]any{
+		"type": "integration", "callId": id, "tool": tool,
+		"conn":  json.RawMessage(connJSON),
 		"input": json.RawMessage(inputJSON),
 	}); err != nil {
 		return nil, err

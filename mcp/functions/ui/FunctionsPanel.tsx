@@ -144,8 +144,13 @@ const API = "/api/apps/functions";
 // Starter handlers shown in the create dialog.
 const SAMPLE_HANDLER =
   `export default async function handler(event, context) {\n` +
-  `  // event: the JSON payload. context.call(app, tool, input)\n` +
-  `  // reaches other Apteva apps. Return any JSON.\n` +
+  `  // event: the JSON payload.\n` +
+  `  // context.call(app, tool, input) reaches sibling Apteva apps.\n` +
+  `  // context.integration(slug|id, tool, input) reaches an integration\n` +
+  `  // connection in this project, e.g.:\n` +
+  `  //   await context.integration("pushover", "pushover_send_notification",\n` +
+  `  //     { message: "hi" });\n` +
+  `  // Return any JSON.\n` +
   `  return { hello: event?.name ?? "world" };\n` +
   `}`;
 

@@ -2,13 +2,14 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.3.0
+version: 1.4.0
 description: |
   Lambda-style serverless functions in node or Go. Each function is
   an immutable, built version served by a pool of warm worker
-  processes; handlers reach other Apteva apps via context.call.
-  Auto-routed HTTP endpoint at /fn/<name>; pair with the Jobs app
-  for cron-fired schedules.
+  processes; handlers reach sibling Apteva apps via context.call and
+  integration connections (Pushover, Slack, Resend, ...) via
+  context.integration. Auto-routed HTTP endpoint at /fn/<name>; pair
+  with the Jobs app for cron-fired schedules.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/functions
 tags: [functions, faas, serverless, scripts, agent]
@@ -20,11 +21,16 @@ requires:
   permissions:
     - db.write.app
     - platform.apps.call
+    - platform.connections.read
+    - platform.connections.execute
   # functions is a generic FaaS — user-authored handlers call any
-  # installed app at runtime via context.call. This opts the app into
-  # the platform's dynamic-call bypass; honoured by apteva-server only
-  # because functions is identified as official (apteva-org source).
+  # installed app or integration connection at runtime. These opt the
+  # app into the platform's dynamic bypasses; honoured by apteva-server
+  # only because functions is identified as official (apteva-org
+  # source). dynamic_app_calls covers context.call;
+  # dynamic_integration_access covers context.integration.
   dynamic_app_calls: true
+  dynamic_integration_access: true
 
 provides:
   http_routes:

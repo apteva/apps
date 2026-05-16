@@ -55,9 +55,15 @@ type wireRequest struct {
 
 // wireResponse is a frame received from the worker. Which fields are
 // populated depends on Type:
-//   - ready handshake:    Type=="ready", OK, Error
-//   - cross-app call:     Type=="call", CallID, App, Tool, Input
-//   - invocation result:  ID, OK, Result, Error, Logs
+//   - ready handshake:     Type=="ready", OK, Error
+//   - cross-app call:      Type=="call", CallID, App, Tool, Input
+//   - integration call:    Type=="integration", CallID, Conn, Tool, Input
+//   - invocation result:   ID, OK, Result, Error, Logs
+//
+// Conn is the connection reference for integration calls. The harness
+// sends a JSON number (raw connection_id) or a JSON string (app slug
+// to auto-resolve in the function's project). servicePlatformIntegration
+// handles both shapes.
 type wireResponse struct {
 	Type   string          `json:"type"`
 	ID     int64           `json:"id"`
@@ -69,6 +75,7 @@ type wireResponse struct {
 	App    string          `json:"app"`
 	Tool   string          `json:"tool"`
 	Input  json.RawMessage `json:"input"`
+	Conn   json.RawMessage `json:"conn"`
 }
 
 // callResult answers a worker's cross-app call request.
@@ -215,10 +222,16 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 			}, nil
 		}
 
-		// Cross-app call from inside the handler — service it and
-		// keep reading; the invocation result is still to come.
-		if msg.Type == "call" {
-			ans := servicePlatformCall(ctx, msg)
+		// Cross-app or integration call from inside the handler —
+		// service it and keep reading; the invocation result is still
+		// to come. Both kinds reply through the same callResult shape.
+		if msg.Type == "call" || msg.Type == "integration" {
+			var ans callResult
+			if msg.Type == "call" {
+				ans = servicePlatformCall(ctx, msg)
+			} else {
+				ans = servicePlatformIntegration(ctx, msg)
+			}
 			ansBytes, _ := json.Marshal(ans)
 			_ = w.conn.SetWriteDeadline(deadline)
 			if err := writeFrame(w.conn, ansBytes); err != nil {
@@ -284,6 +297,155 @@ func servicePlatformCall(ctx *sdk.AppCtx, msg wireResponse) callResult {
 	ans.OK = true
 	ans.Result = out
 	return ans
+}
+
+// servicePlatformIntegration executes a worker's context.integration
+// request against the sidecar's PlatformAPI. The worker never holds
+// a platform token; every integration call funnels through here.
+//
+// Conn may be a JSON number (explicit connection id) or a JSON string
+// (app slug — resolved to the single matching connection in the
+// function's project via ListConnections + TTL cache).
+func servicePlatformIntegration(ctx *sdk.AppCtx, msg wireResponse) callResult {
+	ans := callResult{Type: "call_result", CallID: msg.CallID}
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		ans.Error = "platform API not available in this context"
+		return ans
+	}
+	if msg.Tool == "" {
+		ans.Error = "context.integration needs a tool name"
+		return ans
+	}
+	connID, resolveErr := resolveConnRef(ctx, msg.Conn)
+	if resolveErr != "" {
+		ans.Error = resolveErr
+		return ans
+	}
+	input := map[string]any{}
+	if len(msg.Input) > 0 {
+		if err := json.Unmarshal(msg.Input, &input); err != nil {
+			ans.Error = fmt.Sprintf("context.integration input must be a JSON object: %v", err)
+			return ans
+		}
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, msg.Tool, input)
+	if err != nil {
+		ans.Error = err.Error()
+		return ans
+	}
+	// The platform's executor returns {success, data, status}. Surface
+	// !success as an error so the handler's await-throws like a normal
+	// JS exception — same convention as ExecuteIntegrationTool callers
+	// in workflows/steps.go.
+	if res == nil {
+		ans.OK = true
+		ans.Result = json.RawMessage("null")
+		return ans
+	}
+	if !res.Success {
+		// res.Data on a failure case is the upstream error envelope; embed
+		// it in the message so the handler can read it.
+		if len(res.Data) > 0 {
+			ans.Error = fmt.Sprintf("integration tool %q returned non-success (status=%d): %s", msg.Tool, res.Status, string(res.Data))
+		} else {
+			ans.Error = fmt.Sprintf("integration tool %q returned non-success (status=%d)", msg.Tool, res.Status)
+		}
+		return ans
+	}
+	if len(res.Data) == 0 {
+		ans.Result = json.RawMessage("null")
+	} else {
+		ans.Result = res.Data
+	}
+	ans.OK = true
+	return ans
+}
+
+// resolveConnRef turns the harness-supplied conn handle into a numeric
+// connection id. Returns the id and an error string (empty on success).
+//
+// Accepted shapes:
+//   - JSON number (e.g. 31)            → used verbatim
+//   - JSON string of digits ("31")     → parsed as id
+//   - JSON string slug ("pushover")    → looked up via ListConnections
+func resolveConnRef(ctx *sdk.AppCtx, raw json.RawMessage) (int64, string) {
+	if len(raw) == 0 {
+		return 0, "context.integration needs a connection id or slug"
+	}
+	// Try integer first.
+	var asNum int64
+	if err := json.Unmarshal(raw, &asNum); err == nil && asNum > 0 {
+		return asNum, ""
+	}
+	var asStr string
+	if err := json.Unmarshal(raw, &asStr); err != nil {
+		return 0, "context.integration: conn must be a number or string"
+	}
+	asStr = strings.TrimSpace(asStr)
+	if asStr == "" {
+		return 0, "context.integration: conn is empty"
+	}
+	// Numeric string ("31") — treat as id without a slug lookup.
+	if id := parseInt64(asStr); id > 0 {
+		return id, ""
+	}
+	// Slug — resolve in the current project.
+	return resolveConnSlug(ctx, asStr)
+}
+
+// ── slug → id resolution + cache ──────────────────────────────────
+//
+// connSlugTTL is how long a resolved (slug → id) entry stays good
+// before the next call re-checks ListConnections. A short TTL keeps
+// the path resilient to connection deletes / additions without a
+// dedicated invalidation channel; 60s comfortably amortises across a
+// tight loop of integration calls without holding a stale id past
+// the point an operator could plausibly notice.
+const connSlugTTL = 60 * time.Second
+
+type connCacheEntry struct {
+	id      int64
+	expires time.Time
+}
+
+var connSlugCache = struct {
+	sync.Mutex
+	m map[string]connCacheEntry
+}{m: map[string]connCacheEntry{}}
+
+// resolveConnSlug returns the single connection in ctx.CurrentProject()
+// whose app_slug matches `slug`. Errors when 0 (none) or >1 (ambiguous)
+// matches — multi-match disambiguation requires the explicit id.
+func resolveConnSlug(ctx *sdk.AppCtx, slug string) (int64, string) {
+	pid := ctx.CurrentProject()
+	key := pid + "|" + slug
+	now := time.Now()
+	connSlugCache.Lock()
+	if e, ok := connSlugCache.m[key]; ok && now.Before(e.expires) {
+		connSlugCache.Unlock()
+		return e.id, ""
+	}
+	connSlugCache.Unlock()
+
+	conns, err := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{ProjectID: pid, AppSlug: slug})
+	if err != nil {
+		return 0, fmt.Sprintf("context.integration: list connections failed: %v", err)
+	}
+	switch len(conns) {
+	case 0:
+		return 0, fmt.Sprintf("context.integration: no %q connection in this project. Add one from the Connections panel.", slug)
+	case 1:
+		connSlugCache.Lock()
+		connSlugCache.m[key] = connCacheEntry{id: conns[0].ID, expires: now.Add(connSlugTTL)}
+		connSlugCache.Unlock()
+		return conns[0].ID, ""
+	default:
+		ids := make([]string, 0, len(conns))
+		for _, c := range conns {
+			ids = append(ids, fmt.Sprintf("%d", c.ID))
+		}
+		return 0, fmt.Sprintf("context.integration: multiple %q connections in this project (ids %s). Pass the numeric id to disambiguate.", slug, strings.Join(ids, ", "))
+	}
 }
 
 // stale reports whether the worker was started against a version

@@ -22,6 +22,7 @@ mcp/email-checker/email-checker
 mcp/ffmpeg/ffmpeg
 mcp/finance/finance
 mcp/fleet/fleet
+mcp/functions/functions
 mcp/health/health
 mcp/image-studio/image-studio
 mcp/instances/instances

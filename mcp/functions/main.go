@@ -53,19 +53,23 @@ var examplesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: functions
 display_name: Functions
-version: 1.3.0
+version: 1.4.0
 description: |
   Lambda-style serverless functions in node or Go. Each function is
   an immutable, built version served by a pool of warm worker
-  processes; handlers reach other apps via context.call. Auto-routed
-  HTTP endpoint at /fn/<name>.
+  processes; handlers reach sibling apps via context.call and
+  integration connections via context.integration. Auto-routed HTTP
+  endpoint at /fn/<name>.
 author: Apteva
 scopes: [project, global]
 requires:
   permissions:
     - db.write.app
     - platform.apps.call
+    - platform.connections.read
+    - platform.connections.execute
   dynamic_app_calls: true
+  dynamic_integration_access: true
 provides:
   http_routes:
     - prefix: /

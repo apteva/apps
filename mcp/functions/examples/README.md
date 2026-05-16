@@ -27,6 +27,8 @@ pick the runtime. A new revision goes out with `functions_deploy`.
 | `tables-insert.mjs` | write a row — `context.call("tables", "rows_insert", …)` |
 | `tables-search.mjs` | read rows back — `rows_search` with a filter |
 | `lead-capture.mjs` | a realistic webhook: dedupe + insert + receipt |
+| `pushover-notify.mjs` | ping Pushover — `context.integration("pushover", …)` (v1.4.0) |
+| `slack-post.mjs` | post to Slack — same shape, returns the message ts (v1.4.0) |
 
 ## go — `func Handle(event json.RawMessage, ctx *Context) (any, error)`
 
@@ -40,6 +42,7 @@ and `go build` compiles them together at deploy. stdlib only for now
 | `hello.go.txt` | the canonical echo handler |
 | `sum.go.txt` | decoding a shaped event payload into a struct |
 | `tables-insert.go.txt` | write a row via `ctx.Call`, decode the result |
+| `pushover-notify.go.txt` | ping Pushover via `ctx.Integration("pushover", …)` (v1.4.0) |
 
 ## The Tables examples
 
@@ -62,3 +65,33 @@ through the sidecar. They assume a `leads` table:
 The target app must be installed in the project for the call to
 reach it; an unreachable app surfaces as an error the handler can
 catch.
+
+## The integration examples (v1.4.0)
+
+`context.integration(conn, tool, input)` reaches an integration
+connection (Pushover, Slack, Resend, anything in the integrations
+catalog) directly — same trust model as the cross-app bypass, no
+operator pre-binding. `conn` is either:
+
+- a **numeric connection id** (`31`) — what the Connections panel shows
+- an **app slug** (`"pushover"`) — auto-resolved to the single matching
+  connection in this project. The sidecar caches the lookup for 60s.
+
+Multi-match (>1 connection of the same slug) errors with the list of
+candidate ids; pass the id you want to disambiguate.
+
+The handler receives the upstream tool's response data (the `data`
+field of `{success, data, status}` — the success/status framing is
+unwrapped automatically; non-success becomes a thrown error).
+
+```js
+// What pushover-notify.mjs is doing under the hood:
+await context.integration("pushover", "pushover_send_notification", {
+  message: "deploy finished",
+  priority: 1,
+});
+```
+
+Discover available tools per connection from the Connections panel
+or via `GET /api/connections/<id>/tools` — every entry there is
+callable by the name shown.

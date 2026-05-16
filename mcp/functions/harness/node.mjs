@@ -9,13 +9,22 @@
 //                       { type:"call_result", callId, ok, result?, error? }
 //   worker  -> sidecar:  { type:"ready", ok, error? }        (once, on boot)
 //                        { type:"call", callId, app, tool, input }
+//                        { type:"integration", callId, conn, tool, input }
 //                        { id, ok, result?, error?, logs? }  (invocation result)
 //
 // The handler contract:
 //   export default async function handler(event, context) { return result }
-// context = { functionName, functionId, runtime, env, log, call }.
-// context.call(app, tool, input) reaches other Apteva apps — the
-// sidecar mediates it; the worker never holds a platform token.
+// context = { functionName, functionId, runtime, env, log, call, integration }.
+//
+// context.call(app, tool, input) reaches sibling Apteva apps.
+// context.integration(conn, tool, input) reaches an in-project
+//   integration connection (Pushover, Slack, Resend, ...). `conn` is
+//   the numeric connection_id from the Connections panel OR the app
+//   slug ("pushover") — the sidecar resolves slugs to the single
+//   matching connection in the function's project.
+//
+// In both cases the sidecar mediates the call; the worker never
+// holds a platform token.
 
 import net from "node:net";
 import { pathToFileURL } from "node:url";
@@ -109,6 +118,30 @@ async function main() {
     });
   }
 
+  function makeIntegration(conn, tool, input) {
+    return new Promise((resolve, reject) => {
+      if (conn == null || conn === "") {
+        reject(new Error("context.integration(conn, tool, input): conn (numeric id or slug) is required"));
+        return;
+      }
+      if (!tool) {
+        reject(new Error("context.integration(conn, tool, input): tool is required"));
+        return;
+      }
+      const callId = ++callSeq;
+      pendingCalls.set(callId, { resolve, reject });
+      try {
+        // `conn` is passed verbatim — the sidecar accepts a number
+        // (connection_id) or a string (app slug to resolve in the
+        // project, e.g. "pushover").
+        sock.write(encodeFrame({ type: "integration", callId, conn, tool, input: input ?? {} }));
+      } catch (e) {
+        pendingCalls.delete(callId);
+        reject(e);
+      }
+    });
+  }
+
   // ── invocation handling ─────────────────────────────────────────
   async function handle(req) {
     const { id, event } = req;
@@ -121,6 +154,7 @@ async function main() {
       env: { ...process.env },
       log: (...a) => console.log(...a),
       call: (app, tool, input) => makeCall(app, tool, input),
+      integration: (conn, tool, input) => makeIntegration(conn, tool, input),
     };
     let frame;
     try {
