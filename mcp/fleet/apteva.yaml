@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.5.2
+version: 0.6.0
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -53,6 +53,12 @@ requires:
       compatible_app_names: [routes]
       label: Routes app
       hint: Install the Routes app (in proxy mode) to publish tenants at public hostnames via the parent's reverse proxy.
+    - role: host_provider
+      kind: app
+      required: false
+      compatible_app_names: [instances]
+      label: Instances app
+      hint: Install the Instances app to host tenants on remote VPSes. Without it, all tenants live on the parent host (the existing behavior).
 
 provides:
   http_routes:
@@ -62,7 +68,7 @@ provides:
     # inside unquoted scalars — every "Args: …" suffix would trip the
     # parser otherwise (see fleet/v0.2.0's install bug).
     - name: tenant_create
-      description: "Spawn a new local apteva instance. Allocates a data dir + port, mints a setup token, runs the apteva CLI, returns setup_url + setup_token (or admin credentials when the auto-setup orchestrator succeeds). v0.4 default pins new tenants to npm apteva@latest, installed into ~/.apteva-fleet/versions/<v>/ once and re-used across tenants. Override via apteva_version (latest, host, or specific semver) or apteva_bin (literal path). Args: slug, owner_email, apteva_version? (default: latest), apteva_bin?."
+      description: "Spawn a new apteva tenant. Default (instance_id=0): local process on the parent host under ~/.apteva-fleet/<slug>/. Pass instance_id>0 (Instances app row id) to host on a remote VPS instead — fleet drives spawn/stop/install over SSH via the Instances integration. Pinned to npm apteva@latest by default; override with apteva_version. Args: slug, owner_email, instance_id? (default 0), port? (hosted), apteva_version? (default latest), apteva_bin? (local override)."
     - name: tenant_attach_key
       description: "Finish admin-driven setup by attaching the tenant's api_key (created via the tenant dashboard after admin registration). Flips status to active. Args: tenant_id, api_key."
     - name: tenant_connect

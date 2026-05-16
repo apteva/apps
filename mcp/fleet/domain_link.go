@@ -322,7 +322,14 @@ func (a *App) registerRouteForTenant(ctx *sdk.AppCtx, tenantID, fqdn string) {
 			map[string]any{"reason": "no_port_in_base_url"})
 		return
 	}
+	// Local-on-parent: route to loopback. Hosted-on-VPS: route to
+	// the VPS's public IP (the parent's reverse proxy reaches it
+	// directly). For hosted the BaseURL already carries the VPS IP
+	// in t.BaseURL, so we can re-use it as-is.
 	target := fmt.Sprintf("http://127.0.0.1:%d", port)
+	if t.IsHosted() {
+		target = t.BaseURL // already http://<vps-ip>:<port>
+	}
 	if err := callRoutesTool(ctx, "routes_register", map[string]any{
 		"hostname":         fqdn,
 		"target":           target,

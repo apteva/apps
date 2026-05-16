@@ -136,7 +136,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tasks_list",
-			Description: "List tasks for an agent. Args: agent_id, status (open | in_progress | blocked | done | cancelled | all, default open).",
+			Description: "List tasks for an agent. Args: agent_id, status (open | planning | in_progress | blocked | done | cancelled | all, default open).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -149,7 +149,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tasks_update",
-			Description: "Update a task. Args: task_id, title (optional), notes (optional), status (optional: open | in_progress | blocked | done | cancelled).",
+			Description: "Update a task. Args: task_id, title (optional), notes (optional), status (optional: open | planning | in_progress | blocked | done | cancelled). When the task is in 'planning', write your plan into notes and then flip status to in_progress to start executing.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -187,10 +187,19 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 // failed" error).
 var validStatuses = map[string]bool{
 	"open":        true,
+	"planning":    true,
 	"in_progress": true,
 	"blocked":     true,
 	"done":        true,
 	"cancelled":   true,
+}
+
+// validSeedStatuses gates what handleCreate accepts. A task can be
+// born 'open' (just do it) or 'planning' (propose before acting); any
+// other initial state would skip the lifecycle.
+var validSeedStatuses = map[string]bool{
+	"open":     true,
+	"planning": true,
 }
 
 // --- DB helpers --------------------------------------------------------------
@@ -200,21 +209,24 @@ type Task struct {
 	AgentID   int64  `json:"agent_id"`
 	Title     string `json:"title"`
 	Notes     string `json:"notes"`
-	Status    string `json:"status"` // open | in_progress | blocked | done | cancelled
+	Status    string `json:"status"` // open | planning | in_progress | blocked | done | cancelled
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
 }
 
-func dbInsert(db *sql.DB, agentID int64, title, notes string) (*Task, error) {
+func dbInsert(db *sql.DB, agentID int64, title, notes, status string) (*Task, error) {
+	if status == "" {
+		status = "open"
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := db.Exec(
-		`INSERT INTO tasks (agent_id, title, notes, status, created_at, updated_at) VALUES (?,?,?, 'open', ?, ?)`,
-		agentID, title, notes, now, now)
+		`INSERT INTO tasks (agent_id, title, notes, status, created_at, updated_at) VALUES (?,?,?,?,?,?)`,
+		agentID, title, notes, status, now, now)
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	return &Task{ID: id, AgentID: agentID, Title: title, Notes: notes, Status: "open", CreatedAt: now, UpdatedAt: now}, nil
+	return &Task{ID: id, AgentID: agentID, Title: title, Notes: notes, Status: status, CreatedAt: now, UpdatedAt: now}, nil
 }
 
 func dbList(db *sql.DB, agentID int64, status string) ([]Task, error) {
@@ -283,16 +295,29 @@ func (a *App) handleList(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleCreate(w http.ResponseWriter, r *http.Request) {
 	ctx := mustCtx(r)
 	id := pathSuffixInt(r.URL.Path, "/agents/")
-	var body struct{ Title, Notes string }
+	var body struct {
+		Title  string `json:"Title"`
+		Notes  string `json:"Notes"`
+		Status string `json:"status"`
+	}
 	json.NewDecoder(r.Body).Decode(&body)
 	if body.Title == "" {
 		http.Error(w, "title required", http.StatusBadRequest)
 		return
 	}
-	t, err := dbInsert(ctx.AppDB(), id, body.Title, body.Notes)
+	if body.Status != "" && !validSeedStatuses[body.Status] {
+		http.Error(w, "status must be open or planning", http.StatusBadRequest)
+		return
+	}
+	t, err := dbInsert(ctx.AppDB(), id, body.Title, body.Notes, body.Status)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if t.Status == "planning" {
+		nudgeAgent(ctx, t.AgentID, fmt.Sprintf(
+			"New task #%d on your mission board needs a plan: %q. Read it with tasks_list, write your proposal into notes via tasks_update, then flip status to in_progress to start executing.",
+			t.ID, t.Title))
 	}
 	writeJSON(w, t)
 }
@@ -328,7 +353,7 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if id == 0 || title == "" {
 		return nil, errors.New("agent_id and title required")
 	}
-	return dbInsert(ctx.AppDB(), id, title, notes)
+	return dbInsert(ctx.AppDB(), id, title, notes, "")
 }
 
 func (a *App) toolList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -366,6 +391,19 @@ func (a *App) toolComplete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 // --- helpers ---------------------------------------------------------------
+
+// nudgeAgent fires a one-shot platform event to wake the agent so it
+// notices a freshly-created planning task without polling. The task
+// row is the source of truth; a failed nudge just costs latency.
+func nudgeAgent(ctx *sdk.AppCtx, agentID int64, message string) {
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return
+	}
+	if err := ctx.PlatformAPI().SendEvent(agentID, message); err != nil {
+		ctx.Logger().Warn("tasks: nudge failed",
+			"agent_id", agentID, "err", err.Error())
+	}
+}
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")

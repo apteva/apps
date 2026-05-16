@@ -45,11 +45,15 @@ func (a *App) runHealthPoller(ctx context.Context, app *sdk.AppCtx) error {
 }
 
 func (a *App) probeOnce(ctx context.Context, app *sdk.AppCtx, t *Tenant) {
-	// Local tenants get a port-presence pre-check: when the port is
-	// empty the process is gone, attempt respawn before the regular
-	// HTTP probe (which would just timeout and add 60s of latency
-	// before we react). Skip for remote — we don't manage their proc.
-	if t.Kind == KindLocal {
+	// Local-on-parent tenants: port-presence pre-check. When the
+	// port is empty the process is gone — kick a respawn before the
+	// HTTP probe runs (which would just timeout and add 60s of
+	// latency). Hosted tenants on a remote VPS skip this branch:
+	// portInUse only sees the parent's loopback. We rely on the
+	// regular HTTP probe + tryRespawnHosted for those (TODO in 0.6.x);
+	// for now hosted tenants follow the same disconnect-after-5
+	// pattern as kind=remote.
+	if t.Kind == KindLocal && !t.IsHosted() {
 		if port, _ := portFromBaseURL(t.BaseURL); port > 0 && !portInUse(port) {
 			a.tryRespawn(ctx, t)
 			return // come back next tick to evaluate health

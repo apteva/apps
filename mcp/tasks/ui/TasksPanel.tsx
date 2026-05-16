@@ -35,6 +35,7 @@ interface Task {
 
 const STATUSES: { key: string; label: string; tone: string }[] = [
   { key: "open",        label: "Open",        tone: "text-text" },
+  { key: "planning",    label: "Planning",    tone: "text-accent" },
   { key: "in_progress", label: "In progress", tone: "text-info" },
   { key: "blocked",     label: "Blocked",     tone: "text-warn" },
   { key: "done",        label: "Done",        tone: "text-success" },
@@ -48,6 +49,7 @@ export default function TasksPanel({ instanceId }: NativePanelProps) {
   const [adding, setAdding] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newNotes, setNewNotes] = useState("");
+  const [newAskForPlan, setNewAskForPlan] = useState(false);
   const [editing, setEditing] = useState<Task | null>(null);
 
   const load = useCallback(async () => {
@@ -81,13 +83,17 @@ export default function TasksPanel({ instanceId }: NativePanelProps) {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ Title: newTitle, Notes: newNotes }),
+        body: JSON.stringify({
+          Title: newTitle,
+          Notes: newNotes,
+          status: newAskForPlan ? "planning" : "open",
+        }),
       });
       if (!res.ok) {
         setStatus("Create: " + (await res.text()));
         return;
       }
-      setNewTitle(""); setNewNotes(""); setAdding(false);
+      setNewTitle(""); setNewNotes(""); setNewAskForPlan(false); setAdding(false);
       load();
     } catch (e) {
       setStatus("Create: " + (e as Error).message);
@@ -153,7 +159,7 @@ export default function TasksPanel({ instanceId }: NativePanelProps) {
             No tasks yet for agent {pickedAgent}. Add one or have the agent call <code>tasks_create</code>.
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-3">
             {STATUSES.map((s) => (
               <div key={s.key} className="border border-border rounded p-2 flex flex-col">
                 <div className={`text-xs uppercase font-medium mb-2 ${s.tone}`}>
@@ -192,6 +198,14 @@ export default function TasksPanel({ instanceId }: NativePanelProps) {
             onChange={(e) => setNewNotes(e.target.value)}
             className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm min-h-[80px]"
           />
+          <label className="flex items-center gap-2 text-sm text-text-muted cursor-pointer">
+            <input
+              type="checkbox"
+              checked={newAskForPlan}
+              onChange={(e) => setNewAskForPlan(e.target.checked)}
+            />
+            Ask the agent for a plan first
+          </label>
           <div className="flex gap-2 justify-end">
             <button onClick={() => setAdding(false)} className="px-3 py-1.5 text-sm text-text-muted">
               Cancel
@@ -234,7 +248,13 @@ function TaskCard({
         <button onClick={onEdit} className="text-left flex-1 min-w-0">
           <div className="text-text text-sm truncate">{task.title}</div>
           {task.notes && (
-            <div className="text-text-dim text-xs mt-0.5 line-clamp-2">{task.notes}</div>
+            <div className={
+              task.status === "planning"
+                ? "text-text-dim text-xs mt-0.5 whitespace-pre-wrap"
+                : "text-text-dim text-xs mt-0.5 line-clamp-2"
+            }>
+              {task.notes}
+            </div>
           )}
         </button>
         <button

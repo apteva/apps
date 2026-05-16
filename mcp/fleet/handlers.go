@@ -81,6 +81,14 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if slug == "" || owner == "" {
 		return nil, errors.New("slug and owner_email are required")
 	}
+	// Hosted dispatch: when instance_id > 0, fleet drives a remote
+	// VPS (via the Instances integration) instead of spawning a
+	// local process. The hosted path shares nothing with the local
+	// path other than the auto-setup orchestrator — keeping it in
+	// hostedproc.go makes the divergence explicit.
+	if id := int64Arg(args, "instance_id"); id > 0 {
+		return a.toolCreateHosted(ctx, args, slug, owner, id)
+	}
 	if _, _, err := a.store.getBySlug(slug); err == nil {
 		return nil, fmt.Errorf("slug %q already in use", slug)
 	}
@@ -414,6 +422,39 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil || port == 0 {
 		return nil, fmt.Errorf("cannot derive port from base_url %q", t.BaseURL)
 	}
+
+	// Hosted: re-spawn on the remote VPS. freshSetup=false → no
+	// token scrape; the api_key is still valid against the existing
+	// data dir.
+	if t.IsHosted() {
+		info, infoErr := a.getInstanceInfo(ctx, t.InstanceID)
+		if infoErr != nil {
+			return nil, infoErr
+		}
+		prevStatus := t.Status
+		_ = a.store.setStatus(t.ID, StatusStarting, "user")
+		_, _, spawnErr := a.spawnHostedTenant(ctx, hostedSpawnSpec{
+			InstanceID: t.InstanceID,
+			InstanceIP: info.PublicIPv4,
+			Slug:       t.Slug,
+			Port:       port,
+			AptevaVer:  t.TargetVersion,
+			FreshSetup: false,
+		})
+		if spawnErr != nil {
+			_ = a.store.setStatus(t.ID, StatusFailed, "user")
+			return nil, spawnErr
+		}
+		newStatus := StatusActive
+		if prevStatus == StatusSetupPending {
+			newStatus = StatusSetupPending
+		}
+		_ = a.store.setStatus(t.ID, newStatus, "user")
+		_ = a.store.recordEvent(t.ID, "started", "user",
+			map[string]any{"instance_id": t.InstanceID, "port": port})
+		return map[string]any{"tenant_id": t.ID, "status": newStatus}, nil
+	}
+
 	if portInUse(port) {
 		// Already running — make the registry agree.
 		_ = a.store.setStatus(t.ID, StatusActive, "user")
@@ -447,7 +488,7 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{"tenant_id": t.ID, "status": newStatus}, nil
 }
 
-func (a *App) toolStop(_ *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := getStr(args, "tenant_id")
 	t, _, err := a.store.get(id)
 	if err != nil {
@@ -458,9 +499,19 @@ func (a *App) toolStop(_ *sdk.AppCtx, args map[string]any) (any, error) {
 		_ = a.store.setStatus(t.ID, StatusSuspended, "user")
 		return map[string]any{"tenant_id": t.ID, "status": StatusSuspended}, nil
 	}
-	// stopTenantBy handles both paths: in-memory handle (normal stop)
-	// and orphan-pid-by-port (fleet was upgraded since the tenant spawned,
-	// in-memory map is empty, but the process is still bound to the port).
+	// Hosted: ask the VPS to stop. Same kill-by-port+pgrp semantics
+	// as local, just dispatched over SSH via instance_run_command.
+	if t.IsHosted() {
+		port, _ := portFromBaseURL(t.BaseURL)
+		if err := stopHostedTenant(ctx, t.InstanceID, port, 10*time.Second); err != nil {
+			return nil, fmt.Errorf("stop hosted: %w", err)
+		}
+		_ = a.store.setStatus(t.ID, StatusStopped, "user")
+		_ = a.store.recordEvent(t.ID, "stopped", "user", nil)
+		return map[string]any{"tenant_id": t.ID, "status": StatusStopped}, nil
+	}
+	// Local: stopTenantBy handles both paths: in-memory handle and
+	// orphan-pid-by-port (fleet was upgraded since the tenant spawned).
 	port, _ := portFromBaseURL(t.BaseURL)
 	if err := a.stopTenantBy(t.Slug, port, 10*time.Second); err != nil {
 		return nil, fmt.Errorf("stop: %w", err)
@@ -481,9 +532,13 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 
 	if t.Kind == KindLocal {
-		// Same orphan-aware stop as toolStop.
 		port, _ := portFromBaseURL(t.BaseURL)
-		_ = a.stopTenantBy(t.Slug, port, 10*time.Second)
+		// Stop the process — branch on local vs hosted, same as toolStop.
+		if t.IsHosted() {
+			_ = stopHostedTenant(ctx, t.InstanceID, port, 10*time.Second)
+		} else {
+			_ = a.stopTenantBy(t.Slug, port, 10*time.Second)
+		}
 		if !confirm {
 			// Process stopped but data dir preserved — let the operator
 			// recover by hand if delete was a mistake.
@@ -494,10 +549,18 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				"note":      "process stopped; data dir preserved at " + t.ConfigDir + ". Re-run with confirm=true to wipe and remove.",
 			}, nil
 		}
+		// Wipe data dir — local fs for local tenants, SSH rm for hosted.
 		if t.ConfigDir != "" {
-			if err := os.RemoveAll(t.ConfigDir); err != nil {
-				ctx.Logger().Error("fleet: rm config dir", "tenant", t.ID, "err", err)
-				return nil, fmt.Errorf("remove data dir: %w", err)
+			if t.IsHosted() {
+				if err := destroyHostedTenant(ctx, t.InstanceID, t.Slug); err != nil {
+					ctx.Logger().Error("fleet: rm remote config dir", "tenant", t.ID, "err", err)
+					return nil, fmt.Errorf("remove remote data dir: %w", err)
+				}
+			} else {
+				if err := os.RemoveAll(t.ConfigDir); err != nil {
+					ctx.Logger().Error("fleet: rm config dir", "tenant", t.ID, "err", err)
+					return nil, fmt.Errorf("remove data dir: %w", err)
+				}
 			}
 		}
 	}
@@ -586,6 +649,37 @@ func (a *App) httpGet(w http.ResponseWriter, r *http.Request) {
 func getStr(m map[string]any, key string) string {
 	v, _ := m[key].(string)
 	return v
+}
+
+// intArg accepts int / int64 / float64 (the JSON decoder yields
+// float64 for unmarshalled numbers). Returns def when missing or a
+// non-numeric type.
+func intArg(m map[string]any, key string, def int) int {
+	if v, ok := m[key]; ok {
+		switch n := v.(type) {
+		case float64:
+			return int(n)
+		case int:
+			return n
+		case int64:
+			return int(n)
+		}
+	}
+	return def
+}
+
+func int64Arg(m map[string]any, key string) int64 {
+	if v, ok := m[key]; ok {
+		switch n := v.(type) {
+		case float64:
+			return int64(n)
+		case int:
+			return int64(n)
+		case int64:
+			return n
+		}
+	}
+	return 0
 }
 
 func deriveSlug(baseURL string) string {

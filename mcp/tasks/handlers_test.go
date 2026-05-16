@@ -79,7 +79,7 @@ func TestUnit_ToolList_FiltersByStatus(t *testing.T) {
 	ctx := newTasksCtx(t)
 	app := &App{}
 	for i, status := range []string{"open", "open", "done", "blocked"} {
-		dbInsert(ctx.AppDB(), 1, "t"+string(rune('0'+i)), "")
+		dbInsert(ctx.AppDB(), 1, "t"+string(rune('0'+i)), "", "")
 		if status != "open" {
 			ctx.AppDB().Exec(`UPDATE tasks SET status=? WHERE id=?`, status, i+1)
 		}
@@ -101,7 +101,7 @@ func TestUnit_ToolList_FiltersByStatus(t *testing.T) {
 func TestUnit_ToolUpdate_PartialFields(t *testing.T) {
 	ctx := newTasksCtx(t)
 	app := &App{}
-	tk1, _ := dbInsert(ctx.AppDB(), 1, "orig", "old notes")
+	tk1, _ := dbInsert(ctx.AppDB(), 1, "orig", "old notes", "")
 	if _, err := app.toolUpdate(ctx, map[string]any{
 		"task_id": tk1.ID,
 		"title":   "renamed",
@@ -117,7 +117,7 @@ func TestUnit_ToolUpdate_PartialFields(t *testing.T) {
 func TestUnit_ToolComplete_FlipsStatus(t *testing.T) {
 	ctx := newTasksCtx(t)
 	app := &App{}
-	tk1, _ := dbInsert(ctx.AppDB(), 1, "do thing", "")
+	tk1, _ := dbInsert(ctx.AppDB(), 1, "do thing", "", "")
 	if _, err := app.toolComplete(ctx, map[string]any{"task_id": tk1.ID}); err != nil {
 		t.Fatal(err)
 	}

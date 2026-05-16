@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.5.2
+version: 0.6.0
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -45,6 +45,12 @@ requires:
       compatible_app_names: [routes]
       label: Routes app
       hint: Install the Routes app to publish tenants at public hostnames via the parent's reverse proxy.
+    - role: host_provider
+      kind: app
+      required: false
+      compatible_app_names: [instances]
+      label: Instances app
+      hint: Install the Instances app to host tenants on remote VPSes; without it, all tenants live on the parent host.
 provides:
   http_routes:
     - prefix: /
@@ -209,12 +215,14 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "tenant_create",
-			Description: "Spawn a new local apteva tenant in admin-driven setup mode. Allocates a data dir (~/.apteva-fleet/<slug>/) and free port, mints a setup token, runs the apteva CLI with --data-dir + --port + --no-browser, waits for /api/health. Returns status=active (auto-setup happy path) or setup_pending plus a setup_url and setup_token the operator uses to register the admin in the browser. v0.4 default: pins the new tenant to npm's apteva@latest (installed into ~/.apteva-fleet/versions/<v>/ once, then re-used). Override with apteva_version (e.g. \"0.17.0\", \"latest\", or \"host\" to use whatever's on PATH); FLEET_DEFAULT_APTEVA_VERSION env sets the fleet-wide default. Args: slug (required), owner_email (required), apteva_version (optional, default \"latest\"), apteva_bin (optional — literal binary path; bypasses version resolution).",
+			Description: "Spawn a new apteva tenant. Default behavior (instance_id=0): local process on the parent host under ~/.apteva-fleet/<slug>/, pinned to npm apteva@latest. Pass instance_id>0 (a row id from the Instances app) to host the tenant on a remote VPS instead — fleet uses instance_run_command over SSH for spawn / stop / version-install / health-probe, with data living at /var/lib/apteva-fleet/<slug>/ on the VPS. Auto-setup orchestrator runs against either; on success returns admin_email + admin_password + api_key (one-shot). Args: slug (required), owner_email (required), instance_id? (default 0 = local), port? (hosted only — default 7100 + tenant-count-on-instance), apteva_version? (default \"latest\"), apteva_bin? (local override only).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"slug":            map[string]any{"type": "string"},
 					"owner_email":     map[string]any{"type": "string"},
+					"instance_id":     map[string]any{"type": "integer"},
+					"port":            map[string]any{"type": "integer"},
 					"apteva_version":  map[string]any{"type": "string"},
 					"apteva_bin":      map[string]any{"type": "string"},
 				},

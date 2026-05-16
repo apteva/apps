@@ -234,8 +234,13 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// kind=remote (tenant_connect to an external apteva-server) is
+	// out of scope — fleet doesn't supervise the binary. kind=local
+	// covers both true-local (instance_id=0) and hosted-on-VPS
+	// (instance_id>0); the hosted branch below switches based on
+	// IsHosted().
 	if t.Kind != KindLocal {
-		return nil, errors.New("tenant_update only works on local tenants; for remote, upgrade out-of-band")
+		return nil, errors.New("tenant_update only works on local + hosted tenants; for connected-remote upgrade out-of-band")
 	}
 	requested := strings.TrimSpace(getStr(args, "version"))
 	if requested == "" {
@@ -250,6 +255,52 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			"tenant":  a.publicTenantView(t),
 			"updated": false,
 			"reason":  "already at requested version",
+		}, nil
+	}
+
+	port, _ := portFromBaseURL(t.BaseURL)
+	if port == 0 || t.ConfigDir == "" {
+		return nil, errors.New("tenant missing port or config_dir — cannot respawn")
+	}
+
+	// Hosted: install the new version on the VPS (via npm-install
+	// inside spawnHostedTenant), stop the running process by port
+	// over SSH, respawn. Same shape as local but every step is
+	// dispatched via instance_run_command.
+	if t.IsHosted() {
+		info, ierr := a.getInstanceInfo(ctx, t.InstanceID)
+		if ierr != nil {
+			return nil, ierr
+		}
+		if err := a.store.setTargetVersion(t.ID, requested); err != nil {
+			return nil, err
+		}
+		if err := stopHostedTenant(ctx, t.InstanceID, port, 10*time.Second); err != nil {
+			_ = a.store.recordEvent(t.ID, "update_failed", "tool:tenant_update",
+				map[string]any{"version": requested, "stage": "stop", "error": err.Error()})
+			return nil, fmt.Errorf("stop hosted: %w", err)
+		}
+		_, _, sErr := a.spawnHostedTenant(ctx, hostedSpawnSpec{
+			InstanceID: t.InstanceID,
+			InstanceIP: info.PublicIPv4,
+			Slug:       t.Slug,
+			Port:       port,
+			AptevaVer:  requested,
+			FreshSetup: false,
+		})
+		if sErr != nil {
+			_ = a.store.recordEvent(t.ID, "update_failed", "tool:tenant_update",
+				map[string]any{"version": requested, "stage": "spawn", "error": sErr.Error()})
+			return nil, fmt.Errorf("respawn hosted with apteva@%s: %w", requested, sErr)
+		}
+		_ = a.store.recordEvent(t.ID, "updated", "tool:tenant_update",
+			map[string]any{"version": requested, "instance_id": t.InstanceID})
+		updated, _, _ := a.store.get(t.ID)
+		return map[string]any{
+			"tenant":  a.publicTenantView(updated),
+			"updated": true,
+			"version": requested,
+			"note":    "remote process respawned; current_version will reflect once the next health poll runs",
 		}, nil
 	}
 
@@ -271,10 +322,6 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// when it isn't — so an update fired after a fleet sidecar upgrade
 	// (in-memory procs map cleared) still cleanly evicts the running
 	// tenant instead of leaving an orphan that owns the port.
-	port, _ := portFromBaseURL(t.BaseURL)
-	if port == 0 || t.ConfigDir == "" {
-		return nil, errors.New("tenant missing port or config_dir — cannot respawn")
-	}
 	if err := a.stopTenantBy(t.Slug, port, 10*time.Second); err != nil {
 		return nil, fmt.Errorf("stop tenant: %w", err)
 	}

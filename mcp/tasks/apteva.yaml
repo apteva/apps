@@ -24,7 +24,7 @@ provides:
     - name: tasks_create
       description: Create a new task on this agent's mission board.
     - name: tasks_update
-      description: Update a task's status, title, or notes.
+      description: Update a task's status, title, or notes. Statuses are open | planning | in_progress | blocked | done | cancelled.
     - name: tasks_complete
       description: Mark a task as done.
     - name: tasks_list

@@ -14,6 +14,41 @@ import { useEffect, useState } from "react";
 
 import { StepDef } from "./graph";
 
+// Per-kind list of fields the StepDef carries on top of the common
+// (id, kind, input, on_error, retry). Used by stripKindFields to
+// clean the slate when the user switches a step's kind so stale
+// values from the previous kind don't survive into the YAML.
+const KIND_FIELDS: Record<StepDef["kind"], (keyof StepDef)[]> = {
+  http: ["url", "app", "path", "method"],
+  function: ["name"],
+  app: ["app", "tool"],
+  integration: ["connection_id", "tool"],
+  emit: ["topic", "data"],
+  branch: ["when", "else"],
+};
+
+// Mutates `s` in place: sets the new kind and deletes any field that
+// belonged exclusively to the previous kind. Fields shared between
+// kinds (e.g. `tool` for both `app` and `integration`, `app` for
+// both `http` and `app`) are preserved when the next kind still uses
+// them. `branch` also drops `input` since it uses `when` instead.
+function stripKindFields(s: StepDef, next: StepDef["kind"]): void {
+  const prev = s.kind;
+  s.kind = next;
+  if (prev === next) return;
+  const prevSet = new Set(KIND_FIELDS[prev]);
+  const nextSet = new Set(KIND_FIELDS[next]);
+  for (const f of prevSet) {
+    if (!nextSet.has(f)) delete (s as Record<string, unknown>)[f as string];
+  }
+  // Branch is the one kind that doesn't accept `input` — its
+  // expression goes in `when`. Strip it so the generic Input field's
+  // absence isn't confusing on a saved branch step.
+  if (next === "branch") {
+    delete (s as Record<string, unknown>).input;
+  }
+}
+
 export interface StepEditorProps {
   step: StepDef;
   projectId: string;
@@ -94,7 +129,15 @@ export function StepEditor({ step, projectId, onPatch, onDelete }: StepEditorPro
       <Field label="Kind">
         <select
           value={step.kind}
-          onChange={(e) => patch((s) => (s.kind = e.target.value as StepDef["kind"]))}
+          onChange={(e) => {
+            const next = e.target.value as StepDef["kind"];
+            // Strip the previous kind's kind-specific fields so they
+            // don't linger in the YAML when the user changes their
+            // mind. addStep defaults to emit (with topic: "todo")
+            // which would otherwise stick around after switching to
+            // integration, app, http, etc.
+            patch((s) => stripKindFields(s, next));
+          }}
           className={fieldClass}
         >
           <option value="http">http</option>

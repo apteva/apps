@@ -60,7 +60,17 @@ type Tenant struct {
 	// probe. Capped in code (see localproc.go).
 	RespawnAttempts int        `json:"respawn_attempts,omitempty"`
 	LastRespawnAt   *time.Time `json:"last_respawn_at,omitempty"`
+
+	// InstanceID picks the host:
+	//   0  = parent (local process — existing behavior)
+	//   >0 = row id in the Instances app's table; tenant runs as an
+	//        apteva-server on that VPS, driven via instance_run_command.
+	InstanceID int64 `json:"instance_id"`
 }
+
+// IsHosted returns true when this tenant runs on a remote instance
+// (managed via the Instances app), not on the parent.
+func (t *Tenant) IsHosted() bool { return t.InstanceID > 0 }
 
 type Event struct {
 	ID        int64     `json:"id"`
@@ -101,11 +111,11 @@ func (s *store) insert(t *Tenant, apiKeyEnc, setupTokenEnc []byte) error {
 		stTok = setupTokenEnc
 	}
 	_, err := s.db.Exec(`
-		INSERT INTO fleet_tenants (id, slug, kind, base_url, config_dir, api_key_enc, setup_token_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO fleet_tenants (id, slug, kind, base_url, config_dir, api_key_enc, setup_token_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, instance_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, t.ID, t.Slug, t.Kind, t.BaseURL, nullStr(t.ConfigDir), apiKeyEnc, stTok, t.OwnerEmail, nullStr(t.OwnerUserID),
 		nullStr(t.CurrentVersion), nullStr(t.TargetVersion), t.Status,
-		nil, nil, t.CreatedAt, t.UpdatedAt)
+		nil, nil, t.CreatedAt, t.UpdatedAt, t.InstanceID)
 	return err
 }
 
@@ -132,7 +142,7 @@ func (s *store) attachAPIKey(id string, apiKeyEnc []byte) error {
 
 func (s *store) get(id string) (*Tenant, []byte, error) {
 	row := s.db.QueryRow(`
-		SELECT id, slug, kind, base_url, config_dir, api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at
+		SELECT id, slug, kind, base_url, config_dir, api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at, instance_id
 		FROM fleet_tenants WHERE id = ?
 	`, id)
 	return scanTenant(row)
@@ -140,7 +150,7 @@ func (s *store) get(id string) (*Tenant, []byte, error) {
 
 func (s *store) getBySlug(slug string) (*Tenant, []byte, error) {
 	row := s.db.QueryRow(`
-		SELECT id, slug, kind, base_url, config_dir, api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at
+		SELECT id, slug, kind, base_url, config_dir, api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at, instance_id
 		FROM fleet_tenants WHERE slug = ?
 	`, slug)
 	return scanTenant(row)
@@ -149,7 +159,7 @@ func (s *store) getBySlug(slug string) (*Tenant, []byte, error) {
 func (s *store) list(filter map[string]string) ([]*Tenant, error) {
 	q := strings.Builder{}
 	// api_key_enc is intentionally elided from list results.
-	q.WriteString(`SELECT id, slug, kind, base_url, config_dir, X'00' AS api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at FROM fleet_tenants WHERE 1=1`)
+	q.WriteString(`SELECT id, slug, kind, base_url, config_dir, X'00' AS api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at, instance_id FROM fleet_tenants WHERE 1=1`)
 	args := []any{}
 	cols := map[string]string{
 		"status":      "status",
@@ -278,6 +288,7 @@ func scanTenant(r rowScanner) (*Tenant, []byte, error) {
 		&t.OwnerEmail, &ownerUID, &curVer, &tgtVer, &t.Status,
 		&lastSeen, &lastHealthRaw, &t.CreatedAt, &t.UpdatedAt,
 		&domain, &domainRec, &domainAt, &t.RespawnAttempts, &lastRespawn,
+		&t.InstanceID,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
