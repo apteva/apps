@@ -35,6 +35,35 @@ curl -X POST 'https://<host>/api/apps/workflows/wf/tables-insert' \
 | `tables-search.yaml` | `rows_search` with a templated `where` filter, returns the rows |
 | `lead-capture.yaml` | dedupe-then-insert: `rows_count` → `branch` → `rows_insert` (also uses `{{ now }}`) |
 | `on-row-inserted.yaml` | **event-triggered** — fires on every `tables.row.inserted` event in the project; input carries the event payload |
+| `notify-on-row-inserted.yaml` | event-triggered + **integration step** — Pushover ping per new row |
+| `email-on-failed-payment.yaml` | event-triggered + `branch` + Resend integration step |
+| `announce-release.yaml` | HTTP-triggered Slack post (v0.4.0 integration step) |
+
+## Calling integrations: `step.kind: integration`
+
+v0.4.0 adds a step kind that calls a tool on an integration
+connection (Pushover, Slack, Resend, anything in the integrations
+catalog) without the operator pre-binding the role at install time:
+
+```yaml
+- id: ping
+  kind: integration
+  connection_id: 17           # numeric id from the Connections panel
+  tool: pushover_send_message
+  input:
+    message: "hello"
+```
+
+The `connection_id` is the only handle the workflow author needs —
+it's the integer the dashboard shows next to the connection. The
+upstream's response body becomes the step output, so downstream
+steps can reference `{{ steps.ping.<field> }}` natively.
+
+This works because workflows' manifest declares
+`requires.dynamic_integration_access: true` and the platform
+recognises workflows as an official app — same trust model as the
+cross-app bypass. The connection must live in the calling project
+(or be global-scope); cross-project access is refused.
 
 They all assume a `leads` table; create it once with the Tables app:
 

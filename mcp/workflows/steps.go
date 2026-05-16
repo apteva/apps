@@ -42,6 +42,8 @@ func runStep(ctx context.Context, app *sdk.AppCtx, step *StepDef, renderedInput 
 		return runFunctionStep(app, step, renderedInput)
 	case "app":
 		return runAppStep(app, step, renderedInput)
+	case "integration":
+		return runIntegrationStep(app, step, renderedInput)
 	case "emit":
 		return runEmitStep(app, step, renderedInput)
 	case "branch":
@@ -186,6 +188,55 @@ func runAppStep(app *sdk.AppCtx, step *StepDef, input any) stepResult {
 	var out any
 	if err := app.PlatformAPI().CallAppResult(step.App, step.Tool, args, &out); err != nil {
 		return stepResult{Status: "error", Error: err.Error()}
+	}
+	return stepResult{Status: "ok", Output: out}
+}
+
+// ─── integration ───────────────────────────────────────────────────
+
+// runIntegrationStep calls a tool on an integration connection
+// (Pushover, Slack, Resend, …) via the platform's
+// ExecuteIntegrationTool. The author supplies a raw connection_id;
+// the platform's gate (workflows v0.4.0+ + apteva-server's
+// resolveDynamicIntegration) admits the call when the workflows
+// install is official + the connection's project_id matches.
+//
+// The integration tool's natural response shape becomes the step
+// output — same ergonomics as runAppStep, just a different platform
+// API underneath.
+func runIntegrationStep(app *sdk.AppCtx, step *StepDef, input any) stepResult {
+	if app == nil || app.PlatformAPI() == nil {
+		return stepResult{Status: "error", Error: "integration step requires PlatformAPI"}
+	}
+	if step.ConnectionID <= 0 {
+		return stepResult{Status: "error", Error: "integration step needs connection_id"}
+	}
+	if step.Tool == "" {
+		return stepResult{Status: "error", Error: "integration step needs tool"}
+	}
+	args := map[string]any{}
+	if m, ok := input.(map[string]any); ok {
+		args = m
+	} else if input != nil {
+		args["input"] = input
+	}
+	res, err := app.PlatformAPI().ExecuteIntegrationTool(step.ConnectionID, step.Tool, args)
+	if err != nil {
+		return stepResult{Status: "error", Error: err.Error()}
+	}
+	// Decode the integration's response body so downstream steps can
+	// reference {{ steps.<id>.<field> }} natively instead of carrying
+	// a raw JSON string.
+	var out any
+	if res != nil && len(res.Data) > 0 {
+		_ = json.Unmarshal(res.Data, &out)
+	}
+	if res != nil && !res.Success {
+		return stepResult{
+			Status: "error",
+			Output: out,
+			Error:  fmt.Sprintf("integration tool returned non-success (status=%d)", res.Status),
+		}
 	}
 	return stepResult{Status: "ok", Output: out}
 }

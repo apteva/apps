@@ -1,0 +1,22 @@
+# announce-release — HTTP-triggered Slack post.
+#
+# Invoke from CI / a release button:
+#   POST /api/apps/workflows/wf/announce-release
+#   { "repo": "apteva/server", "version": "0.18.0" }
+#
+# Pre-req: a Slack connection in the project. Note the connection id
+# from the Connections panel.
+
+name: announce-release
+
+trigger:
+  kind: http
+
+steps:
+  - id: post
+    kind: integration
+    connection_id: 8            # ← Slack connection id
+    tool: slack_chat_postMessage
+    input:
+      channel: "#releases"
+      text: "🚀 {{ input.repo }} v{{ input.version }} is live"

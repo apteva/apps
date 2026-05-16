@@ -64,6 +64,13 @@ type StepDef struct {
 	// (App reuses the http App field — same target slug.)
 	Tool string `yaml:"tool,omitempty" json:"tool,omitempty"`
 
+	// kind=integration — calls an integration connection (Pushover,
+	// Slack, Resend, ...) via the platform's ExecuteIntegrationTool.
+	// (Tool is reused — same field as kind=app.) ConnectionID is the
+	// integer id of an in-project connection; the workflow author
+	// copies it from the dashboard's Connections panel.
+	ConnectionID int64 `yaml:"connection_id,omitempty" json:"connection_id,omitempty"`
+
 	// kind=emit
 	Topic string `yaml:"topic,omitempty" json:"topic,omitempty"`
 	Data  any    `yaml:"data,omitempty" json:"data,omitempty"`
@@ -97,7 +104,7 @@ type RetryConfig struct {
 
 // validKinds and stepNameRE constrain what the parser accepts.
 var validKinds = map[string]bool{
-	"http": true, "function": true, "app": true, "emit": true, "branch": true,
+	"http": true, "function": true, "app": true, "integration": true, "emit": true, "branch": true,
 }
 
 var validTriggerKinds = map[string]bool{
@@ -197,6 +204,13 @@ func validateKind(s *StepDef) error {
 	case "app":
 		if s.App == "" || s.Tool == "" {
 			return errors.New("app step needs app and tool")
+		}
+	case "integration":
+		if s.ConnectionID <= 0 {
+			return errors.New("integration step needs connection_id")
+		}
+		if s.Tool == "" {
+			return errors.New("integration step needs tool")
 		}
 	case "emit":
 		if s.Topic == "" {

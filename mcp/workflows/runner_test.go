@@ -20,11 +20,21 @@ type stubPlatform struct {
 	// Per-(app,tool) override map; if absent we return a default
 	// shape so most tests don't need to wire anything.
 	results map[string]any
+	// Integration step coverage — recorded by ExecuteIntegrationTool,
+	// keyed by connection_id in integrationResults.
+	integrationCalls   []integrationStubCall
+	integrationResults map[int64]*sdk.ExecuteResult
 }
 
 type stubCall struct {
 	app, tool string
 	input     map[string]any
+}
+
+type integrationStubCall struct {
+	connID int64
+	tool   string
+	input  map[string]any
 }
 
 func (s *stubPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
@@ -41,6 +51,15 @@ func (s *stubPlatform) CallAppResult(app, tool string, input map[string]any, out
 		"response": "stub",
 	})
 	return json.Unmarshal(bs, out)
+}
+
+func (s *stubPlatform) ExecuteIntegrationTool(connID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	s.integrationCalls = append(s.integrationCalls, integrationStubCall{connID, tool, input})
+	if res, ok := s.integrationResults[connID]; ok {
+		return res, nil
+	}
+	// Default success with an empty body.
+	return &sdk.ExecuteResult{Success: true, Status: 200, Data: []byte("null")}, nil
 }
 
 func newRunCtx(t *testing.T, plat *stubPlatform) *sdk.AppCtx {

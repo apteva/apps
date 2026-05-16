@@ -1,0 +1,36 @@
+# email-on-failed-payment — branched event handler hitting Resend.
+#
+# Listens for finance.payment.failed events; sends an email via the
+# Resend integration, but only when the amount clears a threshold
+# (cheap branch — no function call needed for trivial filtering).
+#
+# Pre-reqs: a Resend connection in this project. The finance app
+# emitting payment.failed events is hypothetical here — substitute
+# whatever payment app your project uses, and adjust the topic to
+# match its emit.
+
+name: email-on-failed-payment
+
+trigger:
+  kind: event
+  source: finance
+  topic: payment.failed
+
+steps:
+  # Skip low-value failures — branch ends the run when amount ≤ 50.
+  - id: gate
+    kind: branch
+    when: input.data.amount > 50
+    else: { end: true }
+
+  - id: send
+    kind: integration
+    connection_id: 23           # ← Resend connection id
+    tool: resend_send_email
+    input:
+      to: "{{ input.data.email }}"
+      subject: "Payment failed: {{ input.data.amount }} {{ input.data.currency }}"
+      html: |
+        <p>Hi,</p>
+        <p>Your payment of {{ input.data.amount }} {{ input.data.currency }}
+        failed at {{ input.time }}. Please retry from your account page.</p>

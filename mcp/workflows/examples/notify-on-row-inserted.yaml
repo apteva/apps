@@ -1,0 +1,27 @@
+# notify-on-row-inserted — event-triggered Pushover ping.
+#
+# Listens to tables.row.inserted (any new row in any table within
+# this project) and pings a Pushover device for each one. Combines
+# v0.3.0's event triggers with v0.4.0's integration step kind.
+#
+# Pre-reqs:
+#   1. A Pushover connection exists in this project. Note its id
+#      from Connections → Pushover → "Connection id".
+#   2. workflows + apteva-server are on the v0.4.0 / matching bypass
+#      build (so requires.dynamic_integration_access is honoured).
+
+name: notify-on-row-inserted
+
+trigger:
+  kind: event
+  source: tables
+  topic: row.inserted
+
+steps:
+  - id: ping
+    kind: integration
+    connection_id: 17           # ← swap for your Pushover connection id
+    tool: pushover_send_message
+    input:
+      message: "new row id={{ input.data.id }} in tables"
+      title: "Apteva · tables"

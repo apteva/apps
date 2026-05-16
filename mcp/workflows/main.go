@@ -30,7 +30,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: workflows
 display_name: Workflows
-version: 0.3.0
+version: 0.4.0
 description: |
   Deterministic, on-demand pipelines. A workflow is a YAML/JSON
   graph of typed steps (http, function, app, emit, branch) with
@@ -44,6 +44,7 @@ requires:
     - platform.apps.call
     - platform.connections.execute
   dynamic_app_calls: true
+  dynamic_integration_access: true
 provides:
   http_routes:
     - prefix: /
