@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.9.0
+version: 0.10.0
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES; SMS and push are reserved channel namespaces. Tracks
@@ -116,7 +116,7 @@ provides:
     - { name: senders_delete,         description: "Remove a sending identity from the provider. Args: address." }
     - { name: senders_get_quota,      description: "Provider account stats — sandbox flag, 24h send quota, current usage. Powers the sandbox banner." }
     - { name: senders_create,         description: "Unified sender registration across email (SES) + SMS (Twilio). Address shape dispatches: \"foo@x.com\" → SES verify_email; \"x.com\" → verify_domain + DKIM/SPF DNS + (auto when aws-s3+aws-sns bound) full inbound bootstrap (S3 bucket + SNS topic + receipt rule + MX + webhook subscribe); \"+15551234567\" → adopt Twilio phone + (when inbound=auto/true) wire SmsUrl. Writes a row to the local senders table. Args: address (req), channel?, inbound? (auto|true|false), publish_dns?, spf?, region?, bucket_name?, topic_name?, rule_set_name?, rule_name?, display_name?, set_default?. Idempotent." }
-    - { name: senders_refresh,        description: "Reconcile local senders with bound providers — paginates SES identities + Twilio phone numbers, upserts each, soft-deletes locals that no longer exist upstream. Returns {refreshed, count}." }
+    - { name: senders_refresh,        description: "Refresh verification/DKIM + sending status for locally-tracked senders by re-listing each bound provider. Does NOT import unknown upstream identities — use senders_create to add. Soft-deletes locals missing upstream. Returns {refreshed, count}." }
     - { name: senders_set_default,    description: "Flip the per-(project, channel) default sender. send_message uses the default when 'from' is omitted. Args: address, channel? (auto-detected if blank)." }
   ui_panels:
     - slot: project.page

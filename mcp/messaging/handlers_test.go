@@ -476,20 +476,41 @@ func TestSuppression_AddRemove(t *testing.T) {
 
 // ─── senders ──────────────────────────────────────────────────────
 
-func TestSenders_List_NormalisesShape(t *testing.T) {
-	plat := &stubPlatform{
-		replyByTool: map[string]*sdk.ExecuteResult{
-			"list_identities": {Success: true, Status: 200, Data: json.RawMessage(`{
-				"EmailIdentities":[
-					{"IdentityName":"notifications@acme.com","IdentityType":"EMAIL_ADDRESS","SendingEnabled":true,"VerificationStatus":"SUCCESS"},
-					{"IdentityName":"acme.com","IdentityType":"DOMAIN","SendingEnabled":true,"VerificationStatus":"SUCCESS"},
-					{"IdentityName":"pending@acme.com","IdentityType":"EMAIL_ADDRESS","SendingEnabled":false,"VerificationStatus":"PENDING"}
-				]
-			}`)},
-		},
+// preseedSender writes a row directly via dbUpsertSender so list/refresh
+// tests don't have to round-trip through senders_create (which also
+// calls upstream verify_email / verify_domain).
+func preseedSender(t *testing.T, ctx *sdk.AppCtx, u senderUpsert) {
+	t.Helper()
+	u.ProjectID = "test-proj"
+	u.MarkSyncedNow = true
+	if _, err := dbUpsertSender(ctx.AppDB(), &u); err != nil {
+		t.Fatalf("preseed %s: %v", u.Address, err)
 	}
-	ctx := newTestCtx(t, plat)
+}
+
+func TestSenders_List_NormalisesShape(t *testing.T) {
+	// v0.10: no auto-import. List returns whatever's in the local
+	// table; the list_identities stub here doesn't influence the
+	// result (it would only matter for a background refresh after
+	// rows have aged past senderStaleThreshold).
+	ctx := newTestCtx(t, &stubPlatform{})
 	app := &App{}
+
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "notifications@acme.com", Kind: "email",
+		Provider: "aws-ses", ProviderIdentityID: "notifications@acme.com",
+		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
+	})
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "acme.com", Kind: "domain",
+		Provider: "aws-ses", ProviderIdentityID: "acme.com",
+		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
+	})
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "pending@acme.com", Kind: "email",
+		Provider: "aws-ses", ProviderIdentityID: "pending@acme.com",
+		Verified: false, VerificationStatus: "pending", SendingEnabled: false,
+	})
 
 	out, err := app.toolSendersList(ctx, map[string]any{})
 	if err != nil {
@@ -499,13 +520,8 @@ func TestSenders_List_NormalisesShape(t *testing.T) {
 	if r["count"].(int) != 3 {
 		t.Errorf("count=%v", r["count"])
 	}
-	// v0.9: senders_list returns []map[string]any (panel-friendly
-	// projection of senderRow) instead of []Sender. The empty-table
-	// path triggered a synchronous refresh that seeded the local DB
-	// from the list_identities stub above.
 	rows := r["senders"].([]map[string]any)
-	// Order is is_default DESC then alphabetical by address, so
-	// "acme.com" sorts before "notifications@..." and "pending@...".
+	// Order is is_default DESC then alphabetical by address.
 	addresses := []string{}
 	for _, row := range rows {
 		addresses = append(addresses, row["address"].(string))
@@ -516,7 +532,6 @@ func TestSenders_List_NormalisesShape(t *testing.T) {
 			t.Errorf("row %d: addr=%q, want %q", i, addresses[i], want)
 		}
 	}
-	// Verify the kind / verified shape on a known row.
 	for _, row := range rows {
 		if row["address"] == "acme.com" {
 			if row["kind"] != "domain" || row["channel"] != "email" {
@@ -530,18 +545,20 @@ func TestSenders_List_NormalisesShape(t *testing.T) {
 }
 
 func TestSenders_List_VerifiedOnly(t *testing.T) {
-	plat := &stubPlatform{
-		replyByTool: map[string]*sdk.ExecuteResult{
-			"list_identities": {Success: true, Status: 200, Data: json.RawMessage(`{
-				"EmailIdentities":[
-					{"IdentityName":"good@x.com","IdentityType":"EMAIL_ADDRESS","SendingEnabled":true,"VerificationStatus":"SUCCESS"},
-					{"IdentityName":"pending@x.com","IdentityType":"EMAIL_ADDRESS","SendingEnabled":false,"VerificationStatus":"PENDING"}
-				]
-			}`)},
-		},
-	}
-	ctx := newTestCtx(t, plat)
+	ctx := newTestCtx(t, &stubPlatform{})
 	app := &App{}
+
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "good@x.com", Kind: "email",
+		Provider: "aws-ses", ProviderIdentityID: "good@x.com",
+		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
+	})
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "pending@x.com", Kind: "email",
+		Provider: "aws-ses", ProviderIdentityID: "pending@x.com",
+		Verified: false, VerificationStatus: "pending", SendingEnabled: false,
+	})
+
 	out, err := app.toolSendersList(ctx, map[string]any{"verified_only": true})
 	if err != nil {
 		t.Fatal(err)
@@ -553,6 +570,101 @@ func TestSenders_List_VerifiedOnly(t *testing.T) {
 	rows := r["senders"].([]map[string]any)
 	if len(rows) != 1 || rows[0]["address"] != "good@x.com" {
 		t.Errorf("unexpected rows: %+v", rows)
+	}
+}
+
+// v0.10 guarantee: empty local table stays empty even when SES has
+// identities. Operators add senders explicitly via senders_create.
+func TestSenders_List_DoesNotImportFromUpstream(t *testing.T) {
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"list_identities": {Success: true, Status: 200, Data: json.RawMessage(`{
+				"EmailIdentities":[
+					{"IdentityName":"leftover@x.com","IdentityType":"EMAIL_ADDRESS","SendingEnabled":true,"VerificationStatus":"SUCCESS"},
+					{"IdentityName":"old-test.com","IdentityType":"DOMAIN","SendingEnabled":true,"VerificationStatus":"SUCCESS"}
+				]
+			}`)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolSendersList(ctx, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := out.(map[string]any)
+	if r["count"].(int) != 0 {
+		t.Errorf("empty local table should stay empty; got %v", r)
+	}
+	// list_identities must not have been called either — with zero
+	// known rows, the refresh short-circuits before hitting SES.
+	for _, c := range plat.executeCalls {
+		if c.Tool == "list_identities" {
+			t.Errorf("expected zero list_identities calls on empty-local refresh, got %+v", c)
+		}
+	}
+}
+
+// Refresh updates known rows but never inserts unknowns.
+func TestSendersRefresh_UpdatesKnownButIgnoresUnknown(t *testing.T) {
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"list_identities": {Success: true, Status: 200, Data: json.RawMessage(`{
+				"EmailIdentities":[
+					{"IdentityName":"known@x.com","IdentityType":"EMAIL_ADDRESS","SendingEnabled":true,"VerificationStatus":"SUCCESS"},
+					{"IdentityName":"unknown@x.com","IdentityType":"EMAIL_ADDRESS","SendingEnabled":true,"VerificationStatus":"SUCCESS"}
+				]
+			}`)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	// Pre-seed the row that's about to flip from pending → verified
+	// at SES. Status starts out stale locally.
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "known@x.com", Kind: "email",
+		Provider: "aws-ses", ProviderIdentityID: "known@x.com",
+		Verified: false, VerificationStatus: "pending", SendingEnabled: false,
+	})
+
+	if _, err := app.toolSendersRefresh(ctx, map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _ := app.toolSendersList(ctx, map[string]any{})
+	rows := out.(map[string]any)["senders"].([]map[string]any)
+	if len(rows) != 1 {
+		t.Fatalf("refresh imported unknown row: %+v", rows)
+	}
+	if rows[0]["address"] != "known@x.com" || rows[0]["verified"] != true {
+		t.Errorf("known row should be refreshed to verified=true, got %+v", rows[0])
+	}
+}
+
+// If the known row vanishes from SES, refresh soft-deletes it locally.
+func TestSendersRefresh_SoftDeletesRowsMissingUpstream(t *testing.T) {
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"list_identities": {Success: true, Status: 200, Data: json.RawMessage(`{"EmailIdentities":[]}`)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "gone@x.com", Kind: "email",
+		Provider: "aws-ses", ProviderIdentityID: "gone@x.com",
+		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
+	})
+
+	if _, err := app.toolSendersRefresh(ctx, map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := app.toolSendersList(ctx, map[string]any{})
+	if out.(map[string]any)["count"].(int) != 0 {
+		t.Errorf("row missing upstream should be soft-deleted, got %+v", out)
 	}
 }
 

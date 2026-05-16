@@ -1,13 +1,25 @@
 package main
 
 // senders_sync.go — reconcile the local senders table with the
-// bound providers. Two entrypoints:
+// bound providers.
 //
-//   - refreshSendersFromProviders: paginate every bound provider's
-//     identity list, upsert each into the local table, soft-delete
-//     local rows that no longer exist upstream. Used on first-call
-//     seeding (empty table), TTL-driven background refresh from
-//     toolSendersList, and the explicit senders_refresh tool.
+// As of v0.10 reconciliation is strictly "refresh-known", never
+// import. The local senders table is the operator's curated set;
+// upstream identities the operator hasn't explicitly added via
+// senders_create stay invisible. The pre-v0.10 behavior (import
+// every SES identity on first panel mount) flooded fresh installs
+// with leftover test identities from the AWS account and gave
+// operators no clean way to curate the list. Adopting an existing
+// upstream identity is still a one-liner: call senders_create with
+// the address, which short-circuits on the upstream side when
+// already verified and just writes the local row.
+//
+// Two entrypoints:
+//
+//   - refreshSendersFromProviders: for every bound provider, list
+//     upstream identities and update the matching local rows. Rows
+//     present locally but missing upstream get soft-deleted. Rows
+//     present upstream but not locally are ignored.
 //
 //   - toolSendersRefresh / toolSendersSetDefault: small MCP wrappers
 //     over the reconciliation + dbSetDefaultSender.
@@ -39,12 +51,31 @@ func (a *App) refreshSendersFromProviders(ctx *sdk.AppCtx, pid string) error {
 }
 
 // refreshSESIdentities lists every identity in the SES account
-// (paginated by NextToken) and upserts each into the local senders
-// table. Local rows whose address didn't come back from SES are
+// (paginated by NextToken) and updates the matching local senders
+// rows. Upstream identities not already tracked locally are
+// ignored; local rows whose address didn't come back from SES are
 // soft-deleted — handles the "operator removed it via AWS console"
 // case.
 func (a *App) refreshSESIdentities(ctx *sdk.AppCtx, pid string, connID int64) error {
 	const maxIdentitiesToList = 1000
+
+	// Build the set of addresses we already track. Skip the upstream
+	// list entirely if there's nothing local to refresh — saves one
+	// list_identities round-trip per panel mount on fresh installs.
+	knownRows, err := dbListSenders(ctx.AppDB(), pid, "email", false)
+	if err != nil {
+		return fmt.Errorf("list local senders: %w", err)
+	}
+	known := map[string]bool{}
+	for _, r := range knownRows {
+		if r.Provider == "aws-ses" {
+			known[r.Address] = true
+		}
+	}
+	if len(known) == 0 {
+		return nil
+	}
+
 	seen := map[string]bool{}
 	nextToken := ""
 	for {
@@ -74,13 +105,18 @@ func (a *App) refreshSESIdentities(ctx *sdk.AppCtx, pid string, connID int64) er
 		}
 		_ = json.Unmarshal(res.Data, &raw)
 		for _, id := range raw.EmailIdentities {
+			addr := strings.ToLower(id.IdentityName)
+			seen[addr] = true
+			if !known[addr] {
+				// Don't import — only the operator's curated rows
+				// get refreshed.
+				continue
+			}
 			kind := "email"
 			if id.IdentityType == "DOMAIN" || id.IdentityType == "MANAGED_DOMAIN" {
 				kind = "domain"
 			}
-			addr := strings.ToLower(id.IdentityName)
 			verified := strings.EqualFold(id.VerificationStatus, "SUCCESS")
-			seen[addr] = true
 			_, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{
 				ProjectID:          pid,
 				Channel:            "email",
@@ -104,12 +140,9 @@ func (a *App) refreshSESIdentities(ctx *sdk.AppCtx, pid string, connID int64) er
 		nextToken = raw.NextToken
 	}
 	// Soft-delete local SES rows that didn't come back from the list.
-	rows, err := dbListSenders(ctx.AppDB(), pid, "email", false)
-	if err == nil {
-		for _, r := range rows {
-			if r.Provider == "aws-ses" && !seen[r.Address] && r.DeletedAt == nil {
-				_ = dbSoftDeleteSender(ctx.AppDB(), pid, r.Channel, r.Address)
-			}
+	for _, r := range knownRows {
+		if r.Provider == "aws-ses" && !seen[r.Address] && r.DeletedAt == nil {
+			_ = dbSoftDeleteSender(ctx.AppDB(), pid, r.Channel, r.Address)
 		}
 	}
 	return nil
@@ -131,15 +164,26 @@ func sesStatusToInternal(s string) string {
 }
 
 // refreshTwilioNumbers lists every phone number in the Twilio account
-// and upserts it. Twilio's IncomingPhoneNumbers don't have
-// "verification status" — owning the number IS verification. We mark
-// every adopted number verified=true.
-//
-// NOTE: this only refreshes existing local rows (or imports
-// previously-unknown numbers). Twilio also has Messaging Services and
-// alphanumeric Sender IDs which live behind different list APIs; both
-// are future scope.
+// and updates the matching local sms/whatsapp rows. Upstream numbers
+// not already tracked locally are ignored; local rows whose number
+// didn't come back from Twilio are soft-deleted.
 func (a *App) refreshTwilioNumbers(ctx *sdk.AppCtx, pid string, connID int64) error {
+	// Collect known Twilio numbers across the channels we surface
+	// them on (sms + whatsapp share the same upstream identity).
+	knownRows, err := dbListSenders(ctx.AppDB(), pid, "", false)
+	if err != nil {
+		return fmt.Errorf("list local senders: %w", err)
+	}
+	known := map[string]bool{}
+	for _, r := range knownRows {
+		if r.Provider == "twilio" {
+			known[r.Address] = true
+		}
+	}
+	if len(known) == 0 {
+		return nil
+	}
+
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_phone_numbers", map[string]any{
 		"PageSize": 1000,
 	})
@@ -164,9 +208,11 @@ func (a *App) refreshTwilioNumbers(ctx *sdk.AppCtx, pid string, connID int64) er
 	seen := map[string]bool{}
 	for _, pn := range listed.IncomingPhoneNumbers {
 		seen[pn.PhoneNumber] = true
-		// We don't know which channel the operator wired the number on.
+		if !known[pn.PhoneNumber] {
+			continue
+		}
 		// Default to "sms"; if there's an existing row on whatsapp we
-		// don't touch it.
+		// don't touch it (the upsert keys on (project, channel, address)).
 		_, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{
 			ProjectID:          pid,
 			Channel:            "sms",
@@ -183,13 +229,10 @@ func (a *App) refreshTwilioNumbers(ctx *sdk.AppCtx, pid string, connID int64) er
 			ctx.Logger().Warn("upsert sender during twilio refresh", "addr", pn.PhoneNumber, "err", err)
 		}
 	}
-	// Soft-delete Twilio SMS rows that no longer exist upstream.
-	rows, err := dbListSenders(ctx.AppDB(), pid, "sms", false)
-	if err == nil {
-		for _, r := range rows {
-			if r.Provider == "twilio" && !seen[r.Address] && r.DeletedAt == nil {
-				_ = dbSoftDeleteSender(ctx.AppDB(), pid, r.Channel, r.Address)
-			}
+	// Soft-delete Twilio rows that no longer exist upstream.
+	for _, r := range knownRows {
+		if r.Provider == "twilio" && !seen[r.Address] && r.DeletedAt == nil {
+			_ = dbSoftDeleteSender(ctx.AppDB(), pid, r.Channel, r.Address)
 		}
 	}
 	return nil

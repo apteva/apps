@@ -48,7 +48,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.9.0
+version: 0.10.0
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -454,7 +454,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "senders_refresh",
-			Description: "Reconcile the local senders table with every bound provider (SES + Twilio). Paginates each provider's identity list, upserts rows, and soft-deletes locals that no longer exist upstream. Idempotent. Returns {refreshed, count}.",
+			Description: "Refresh verification/DKIM and sending-enabled status for senders already tracked locally, by re-listing identities at each bound provider. Does NOT import unknown upstream identities — use senders_create to add a sender. Soft-deletes local rows whose address no longer exists upstream. Idempotent. Returns {refreshed, count}.",
 			InputSchema: schemaObject(map[string]any{}, nil),
 			Handler:     a.toolSendersRefresh,
 		},
@@ -1814,12 +1814,13 @@ func emailProviderConn(ctx *sdk.AppCtx) (connID int64, toolFor func(string) stri
 	return bound.ConnectionID, bound.ToolFor, nil
 }
 
-// toolSendersList reads from the local senders table. On the first
-// call after an upgrade the table is empty — we trigger a synchronous
-// senders_refresh to seed it from the provider so the panel renders
-// something useful on the first mount. Subsequent calls are pure
-// local reads; staleness (> senderStaleThreshold) triggers a
-// background refresh that updates rows without blocking the response.
+// toolSendersList reads from the local senders table. The local
+// table is the operator's curated set — empty means empty, even if
+// the bound SES/Twilio accounts have identities. To add a sender,
+// call senders_create (which also adopts already-verified upstream
+// identities). Staleness on known rows (> senderStaleThreshold)
+// triggers a background refresh that updates DKIM / verification
+// status without blocking the response or importing unknowns.
 //
 // Filters: channel? (email|sms|whatsapp), verified_only? (bool).
 func (a *App) toolSendersList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1834,15 +1835,8 @@ func (a *App) toolSendersList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, fmt.Errorf("list senders (local): %w", err)
 	}
-	// Empty table → seed synchronously from any bound providers so
-	// the very first call returns useful data instead of an empty array.
-	if len(rows) == 0 {
-		if err := a.refreshSendersFromProviders(ctx, pid); err != nil {
-			ctx.Logger().Warn("senders refresh on empty seed", "err", err)
-		}
-		rows, _ = dbListSenders(ctx.AppDB(), pid, channel, verifiedOnly)
-	} else if stale, _ := dbHasStaleSenders(ctx.AppDB(), pid, channel); stale {
-		// Stale → fire-and-forget background refresh.
+	if stale, _ := dbHasStaleSenders(ctx.AppDB(), pid, channel); stale {
+		// Stale known rows → fire-and-forget background refresh.
 		go func() {
 			if err := a.refreshSendersFromProviders(ctx, pid); err != nil {
 				ctx.Logger().Warn("senders background refresh", "err", err)
