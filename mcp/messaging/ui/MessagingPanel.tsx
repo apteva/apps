@@ -147,6 +147,22 @@ interface SuppressionRow {
   source: string;
   last_seen?: string;
 }
+// v0.12: senders + identities split. Identities = DKIM-verified
+// domain / WhatsApp Business Account anchors. Never appear in From
+// dropdowns; rendered in a separate panel section.
+interface IdentityRow {
+  id: number;
+  kind: string;          // 'email_domain' | 'whatsapp_business_account'
+  address: string;
+  provider: string;
+  verified: boolean;
+  verification_status: string;
+  dkim_status?: string;
+  inbound_bootstrapped: boolean;
+  inbound_config?: Record<string, unknown>;
+  last_synced_at?: string;
+}
+
 interface SenderRow {
   id?: number;
   channel: "email" | "sms" | "whatsapp";
@@ -192,6 +208,7 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
   const [routes, setRoutes] = useState<InboundRoute[]>([]);
   const [suppressions, setSuppressions] = useState<SuppressionRow[]>([]);
   const [senders, setSenders] = useState<SenderRow[]>([]);
+  const [identities, setIdentities] = useState<IdentityRow[]>([]);
   const [quota, setQuota] = useState<QuotaInfo | null>(null);
   // Surface the SES-side failure rather than silently rendering an
   // empty Senders tab — most often this means the email_provider
@@ -263,6 +280,16 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
       setSendersError(parseSendersError((e as Error).message));
     }
   }, [api]);
+  // Anchors are the v0.12 split's other half. Soft-fail: empty on
+  // error so a hiccup doesn't take down the Senders tab.
+  const loadIdentities = useCallback(async () => {
+    try {
+      const r = await api<{ identities: IdentityRow[] }>("GET", "/identities", {});
+      setIdentities(r.identities || []);
+    } catch {
+      setIdentities([]);
+    }
+  }, [api]);
   const loadQuota = useCallback(async () => {
     try {
       const q = await api<QuotaInfo>("GET", "/senders/quota", {});
@@ -277,7 +304,7 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
     try {
       await Promise.all([
         loadOutbox(), loadInbox(), loadTemplates(), loadRoutes(),
-        loadSuppressions(), loadSenders(), loadQuota(),
+        loadSuppressions(), loadSenders(), loadIdentities(), loadQuota(),
       ]);
       setStatus("");
     } catch (e) {
@@ -285,7 +312,7 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
     } finally {
       setBusy(false);
     }
-  }, [loadOutbox, loadInbox, loadTemplates, loadRoutes, loadSuppressions, loadSenders, loadQuota]);
+  }, [loadOutbox, loadInbox, loadTemplates, loadRoutes, loadSuppressions, loadSenders, loadIdentities, loadQuota]);
 
   useEffect(() => { reload(); }, [reload]);
 
@@ -374,7 +401,7 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
               gotoSenders={() => setTab("senders")}
             />
           )}
-          {tab === "senders" && <SendersView rows={senders} quota={quota} api={api} reload={reload} error={sendersError} notify={notify} />}
+          {tab === "senders" && <SendersView rows={senders} identities={identities} quota={quota} api={api} reload={reload} error={sendersError} notify={notify} />}
           {tab === "templates" && <TemplatesView rows={templates} api={api} reload={reload} notify={notify} />}
           {tab === "routes" && <RoutesView rows={routes} api={api} reload={reload} notify={notify} />}
           {tab === "suppressions" && <SuppressionsView rows={suppressions} api={api} reload={reload} notify={notify} />}
@@ -682,9 +709,10 @@ function ComposeView({
 }
 
 function SendersView({
-  rows, quota, api, reload, error, notify,
+  rows, identities, quota, api, reload, error, notify,
 }: {
   rows: SenderRow[];
+  identities: IdentityRow[];
   quota: QuotaInfo | null;
   api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
   reload: () => void;
@@ -988,6 +1016,8 @@ function SendersView({
         </table>
       )}
 
+      <IdentitiesSection identities={identities} />
+
       {quota && (
         <div className="p-4 text-xs text-text-dim border-t border-border mt-4">
           24h quota: {quota.sent_last_24h.toFixed(0)} / {quota.send_quota_24h.toFixed(0)} ·
@@ -996,6 +1026,55 @@ function SendersView({
           {!quota.sending_enabled && <span className="text-red-400"> · sending disabled</span>}
         </div>
       )}
+    </div>
+  );
+}
+
+// IdentitiesSection — anchors (DKIM-verified domains, future WABA)
+// rendered below the senders table in the Senders tab. Operator sees
+// what's verified upstream without these rows polluting any From
+// dropdown (they're not in the senders table at all).
+function IdentitiesSection({ identities }: { identities: IdentityRow[] }) {
+  if (identities.length === 0) return null;
+  return (
+    <div className="border-t border-border mt-6 pt-4">
+      <div className="px-4 pb-2 flex items-baseline justify-between">
+        <h3 className="text-sm font-medium text-text">Verified domains & accounts</h3>
+        <span className="text-xs text-text-dim">
+          authentication anchors — not sendable, but enable inheritance + inbound
+        </span>
+      </div>
+      <table className="w-full text-sm">
+        <thead className="text-xs text-text-dim">
+          <tr className="border-b border-border">
+            <th className="text-left px-4 py-2">Address</th>
+            <th className="text-left px-4 py-2">Kind</th>
+            <th className="text-left px-4 py-2">Provider</th>
+            <th className="text-left px-4 py-2">Status</th>
+            <th className="text-left px-4 py-2">Inbound</th>
+          </tr>
+        </thead>
+        <tbody>
+          {identities.map((i) => (
+            <tr key={i.id} className="border-b border-border">
+              <td className="px-4 py-2 font-mono">{i.address}</td>
+              <td className="px-4 py-2 text-text-dim">{i.kind}</td>
+              <td className="px-4 py-2 text-text-dim">{i.provider}</td>
+              <td className="px-4 py-2">
+                <span className={i.verified ? "text-green-400" : "text-yellow-400"}>
+                  {i.verification_status}
+                </span>
+                {i.dkim_status && (
+                  <span className="ml-2 text-xs text-text-dim">DKIM: {i.dkim_status}</span>
+                )}
+              </td>
+              <td className="px-4 py-2 text-text-dim text-xs">
+                {i.inbound_bootstrapped ? "wired" : "—"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

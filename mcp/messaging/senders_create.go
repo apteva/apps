@@ -196,24 +196,28 @@ func (a *App) sendersCreateEmailViaParentDomain(ctx *sdk.AppCtx, pid string, ses
 	}
 	parent := strings.ToLower(parts[1])
 
-	existing, _ := dbFindSender(ctx.AppDB(), pid, "email", parent)
-	parentReady := existing != nil && existing.Kind == "domain" && existing.Verified && existing.DeletedAt == nil
+	// v0.12: parent lives in identities (kind=email_domain), not in
+	// senders. Verified state on the identity row is the inheritance
+	// signal.
+	parentIdentity, _ := dbFindIdentity(ctx.AppDB(), pid, "email_domain", parent)
+	parentReady := parentIdentity != nil && parentIdentity.Verified && parentIdentity.DeletedAt == nil
 
 	if !parentReady {
 		// Run the full domain verification on the parent. Reuses
 		// sendersCreateDomain's idempotent path — DKIM tokens, DNS
 		// publish via Domains app, optional inbound bootstrap.
+		// sendersCreateDomain writes the parent into identities, so
+		// after this returns we can re-fetch to grab the FK target.
 		domainResp := &sendersCreateResp{Address: parent, Kind: "domain", Pending: true}
 		if _, err := a.sendersCreateDomain(ctx, pid, sesConnID, parent, req, domainResp); err != nil {
 			return nil, err
 		}
-		// Surface the domain-setup steps + DKIM details to the operator
-		// so they can see what ran on the parent's behalf.
 		resp.DkimTokens = domainResp.DkimTokens
 		resp.DkimStatus = domainResp.DkimStatus
 		resp.DnsRecords = domainResp.DnsRecords
 		resp.Inbound = domainResp.Inbound
 		resp.Steps = append(resp.Steps, domainResp.Steps...)
+		parentIdentity, _ = dbFindIdentity(ctx.AppDB(), pid, "email_domain", parent)
 	} else {
 		resp.Steps = append(resp.Steps, bootstrapStep{
 			Step:   "parent_domain_already_verified",
@@ -223,11 +227,15 @@ func (a *App) sendersCreateEmailViaParentDomain(ctx *sdk.AppCtx, pid string, ses
 		resp.DkimStatus = "SUCCESS"
 	}
 
+	var parentID int64
+	if parentIdentity != nil {
+		parentID = parentIdentity.ID
+	}
 	a.persistSenderRow(ctx, pid, &senderUpsert{
 		ProjectID:          pid,
 		Channel:            "email",
 		Address:            addr,
-		Kind:               "email",
+		Kind:               "email_mailbox",
 		DisplayName:        req.DisplayName,
 		Provider:           "aws-ses",
 		ProviderIdentityID: addr,
@@ -235,6 +243,7 @@ func (a *App) sendersCreateEmailViaParentDomain(ctx *sdk.AppCtx, pid string, ses
 		VerificationStatus: "verified",
 		SendingEnabled:     true,
 		DkimStatus:         "SUCCESS",
+		ParentIdentityID:   parentID,
 		MarkSyncedNow:      true,
 	}, resp)
 	resp.Pending = false
@@ -294,7 +303,7 @@ func (a *App) sendersCreateEmail(ctx *sdk.AppCtx, pid string, connID int64, addr
 		ProjectID:          pid,
 		Channel:            "email",
 		Address:            addr,
-		Kind:               "email",
+		Kind:               "email_mailbox",
 		Provider:           "aws-ses",
 		ProviderIdentityID: addr,
 		Verified:           false,
@@ -484,26 +493,28 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 
 	resp.NextStep = sendersCreateNextStep(doInbound, isAppDepBound(ctx, "domains"))
 
-	// Persist the local row. Provider state already mirrored; the
-	// inbound block (if bootstrapped) gets serialised into
-	// inbound_config so subsequent senders_get returns it without a
-	// provider round-trip.
-	a.persistSenderRow(ctx, pid, &senderUpsert{
+	// v0.12: persist the local row to identities, not senders. Domain
+	// identities aren't valid From values so they have no business in
+	// the senders table; the inbound bootstrap state belongs with the
+	// anchor anyway (per-domain config, not per-mailbox).
+	identityID, persistErr := dbUpsertIdentity(ctx.AppDB(), &identityUpsert{
 		ProjectID:           pid,
-		Channel:             "email",
+		Kind:                "email_domain",
 		Address:             domain,
-		Kind:                "domain",
-		DisplayName:         req.DisplayName,
 		Provider:            "aws-ses",
 		ProviderIdentityID:  domain,
 		Verified:            strings.EqualFold(resp.DkimStatus, "SUCCESS"),
 		VerificationStatus:  domainVerificationStatus(resp.DkimStatus),
-		SendingEnabled:      true,
 		DkimStatus:          resp.DkimStatus,
 		InboundBootstrapped: resp.Inbound != nil && resp.Inbound.Bootstrapped,
 		InboundConfig:       inboundConfigJSON(resp.Inbound),
 		MarkSyncedNow:       true,
-	}, resp)
+	})
+	if persistErr != nil {
+		resp.Steps = append(resp.Steps, bootstrapStep{Step: "persist_local", OK: false, Error: persistErr.Error()})
+	} else {
+		resp.Steps = append(resp.Steps, bootstrapStep{Step: "persist_local", OK: true, Detail: fmt.Sprintf("identity id=%d", identityID)})
+	}
 	return resp, nil
 }
 

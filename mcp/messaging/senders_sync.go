@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -51,38 +52,43 @@ func (a *App) refreshSendersFromProviders(ctx *sdk.AppCtx, pid string) error {
 }
 
 // refreshSESIdentities lists every identity in the SES account
-// (paginated by NextToken) and updates the matching local senders
-// rows. Upstream identities not already tracked locally are
-// ignored; local rows whose address didn't come back from SES are
-// soft-deleted — handles the "operator removed it via AWS console"
-// case.
+// (paginated by NextToken) and demuxes into the two local tables:
+// kind=email_mailbox rows update senders, kind=email_domain rows
+// update identities. Upstream identities not already tracked locally
+// are ignored (the v0.10 no-auto-import rule still holds). Local rows
+// whose address didn't come back from SES get soft-deleted — EXCEPT
+// inheritance mailboxes whose parent identity is still alive (the
+// parent_identity_id FK gives us a clean check; no more string-suffix
+// gymnastics from v0.11.3).
 func (a *App) refreshSESIdentities(ctx *sdk.AppCtx, pid string, connID int64) error {
 	const maxIdentitiesToList = 1000
 
-	// Build the set of addresses we already track. Skip the upstream
-	// list entirely if there's nothing local to refresh — saves one
-	// list_identities round-trip per panel mount on fresh installs.
-	knownRows, err := dbListSenders(ctx.AppDB(), pid, "email", false)
+	knownSenders, err := dbListSenders(ctx.AppDB(), pid, "email", false)
 	if err != nil {
 		return fmt.Errorf("list local senders: %w", err)
 	}
-	known := map[string]bool{}
-	for _, r := range knownRows {
-		if r.Provider == "aws-ses" {
-			known[r.Address] = true
+	knownIdentities, err := dbListIdentities(ctx.AppDB(), pid, "email_domain")
+	if err != nil {
+		return fmt.Errorf("list local identities: %w", err)
+	}
+
+	sesSenderSet := map[string]bool{}
+	for _, r := range knownSenders {
+		if r.Provider == "aws-ses" && r.Kind == "email_mailbox" {
+			sesSenderSet[r.Address] = true
 		}
 	}
-	if len(known) == 0 {
+	sesIdentitySet := map[string]bool{}
+	for _, r := range knownIdentities {
+		if r.Provider == "aws-ses" {
+			sesIdentitySet[r.Address] = true
+		}
+	}
+	if len(sesSenderSet) == 0 && len(sesIdentitySet) == 0 {
 		return nil
 	}
 
-	seen := map[string]bool{}
-	// seenDomains: every domain identity returned by SES. Used below
-	// to keep an inheritance mailbox alive even when its parent isn't
-	// persisted locally (e.g., sendersCreateDomain on the parent
-	// failed midway through inbound bootstrap before reaching
-	// persistSenderRow — happens with the AWS Query API URL-encoding
-	// bug, and shouldn't silently wipe the mailbox row).
+	seenMailboxes := map[string]bool{}
 	seenDomains := map[string]bool{}
 	nextToken := ""
 	for {
@@ -113,75 +119,94 @@ func (a *App) refreshSESIdentities(ctx *sdk.AppCtx, pid string, connID int64) er
 		_ = json.Unmarshal(res.Data, &raw)
 		for _, id := range raw.EmailIdentities {
 			addr := strings.ToLower(id.IdentityName)
-			seen[addr] = true
+			verified := strings.EqualFold(id.VerificationStatus, "SUCCESS")
+			internalStatus := sesStatusToInternal(id.VerificationStatus)
 			if id.IdentityType == "DOMAIN" || id.IdentityType == "MANAGED_DOMAIN" {
 				seenDomains[addr] = true
-			}
-			if !known[addr] {
-				// Don't import — only the operator's curated rows
-				// get refreshed.
+				if !sesIdentitySet[addr] {
+					continue
+				}
+				_, err := dbUpsertIdentity(ctx.AppDB(), &identityUpsert{
+					ProjectID:          pid,
+					Kind:               "email_domain",
+					Address:            addr,
+					Provider:           "aws-ses",
+					ProviderIdentityID: addr,
+					Verified:           verified,
+					VerificationStatus: internalStatus,
+					DkimStatus:         id.VerificationStatus,
+					MarkSyncedNow:      true,
+				})
+				if err != nil {
+					ctx.Logger().Warn("upsert identity during ses refresh", "addr", addr, "err", err)
+				}
 				continue
 			}
-			kind := "email"
-			if id.IdentityType == "DOMAIN" || id.IdentityType == "MANAGED_DOMAIN" {
-				kind = "domain"
+			seenMailboxes[addr] = true
+			if !sesSenderSet[addr] {
+				continue
 			}
-			verified := strings.EqualFold(id.VerificationStatus, "SUCCESS")
 			_, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{
 				ProjectID:          pid,
 				Channel:            "email",
 				Address:            addr,
-				Kind:               kind,
+				Kind:               "email_mailbox",
 				Provider:           "aws-ses",
 				ProviderIdentityID: addr,
 				Verified:           verified,
-				VerificationStatus: sesStatusToInternal(id.VerificationStatus),
+				VerificationStatus: internalStatus,
 				SendingEnabled:     id.SendingEnabled,
-				DkimStatus:         id.VerificationStatus, // best-effort; full DKIM status needs get_identity_verification per row
+				DkimStatus:         id.VerificationStatus,
 				MarkSyncedNow:      true,
 			})
 			if err != nil {
 				ctx.Logger().Warn("upsert sender during ses refresh", "addr", addr, "err", err)
 			}
 		}
-		if raw.NextToken == "" || len(seen) >= maxIdentitiesToList {
+		totalSeen := len(seenMailboxes) + len(seenDomains)
+		if raw.NextToken == "" || totalSeen >= maxIdentitiesToList {
 			break
 		}
 		nextToken = raw.NextToken
 	}
-	// Soft-delete local SES rows that didn't come back from the list —
-	// EXCEPT mailbox rows that inherit from a verified parent domain.
-	// v0.11 added the inheritance flow (senders_create on alice@x.com
-	// when x.com is already DKIM-verified skips SES verify_email and
-	// just persists the local row); without this skip, refresh keeps
-	// soft-deleting those rows on every panel reload because they're
-	// invisible to SES's identity list by design.
-	verifiedParents := map[string]bool{}
-	for _, r := range knownRows {
-		if r.Kind == "domain" && r.Verified && r.Provider == "aws-ses" && r.DeletedAt == nil {
-			verifiedParents[r.Address] = true
-		}
-	}
-	for _, r := range knownRows {
-		if r.Provider != "aws-ses" || seen[r.Address] || r.DeletedAt != nil {
+
+	// Soft-delete senders missing upstream — except inheritance
+	// mailboxes whose parent identity is alive. The FK + the seen
+	// sets together cover the two cases (parent persisted locally vs.
+	// parent only visible at SES via this refresh's list).
+	for _, r := range knownSenders {
+		if r.Provider != "aws-ses" || seenMailboxes[r.Address] || r.DeletedAt != nil {
 			continue
 		}
-		if r.Kind == "email" {
-			parent := parentDomainOf(r.Address)
-			// Keep the mailbox if either signal says the parent
-			// domain exists & is verified:
-			//   - local: a kind=domain row marked verified (operator's
-			//     curated state)
-			//   - upstream: the parent appeared in THIS refresh's
-			//     list_identities response (handles the case where
-			//     the parent was never persisted locally because
-			//     sendersCreateDomain returned early on a midway
-			//     failure)
-			if parent != "" && (verifiedParents[parent] || seenDomains[parent]) {
+		if r.Kind == "email_mailbox" && r.ParentIdentityID != nil {
+			parent, _ := dbGetIdentity(ctx.AppDB(), *r.ParentIdentityID)
+			if parent != nil && parent.DeletedAt == nil {
+				continue
+			}
+		}
+		if r.Kind == "email_mailbox" {
+			// Edge case: FK never got set (pre-v0.12 row or inheritance
+			// row whose parent didn't persist). Fall back to seenDomains
+			// from this refresh so we don't wipe a legit mailbox.
+			if seenDomains[parentDomainOf(r.Address)] {
 				continue
 			}
 		}
 		_ = dbSoftDeleteSender(ctx.AppDB(), pid, r.Channel, r.Address)
+	}
+
+	// Soft-delete identities missing upstream — only when no active
+	// senders inherit from them. Killing an anchor while mailboxes
+	// still depend on it would orphan those mailboxes.
+	for _, r := range knownIdentities {
+		if r.Provider != "aws-ses" || seenDomains[r.Address] || r.DeletedAt != nil {
+			continue
+		}
+		n, _ := dbCountSendersForIdentity(ctx.AppDB(), r.ID)
+		if n > 0 {
+			continue
+		}
+		_ = dbSoftDeleteIdentity(ctx.AppDB(), pid, r.Kind, r.Address)
 	}
 	return nil
 }
@@ -329,4 +354,48 @@ func (a *App) toolSendersSetDefault(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, err
 	}
 	return map[string]any{"ok": true, "address": addr, "channel": channel}, nil
+}
+
+// toolIdentitiesList exposes the anchor table to MCP. Operator-facing
+// admin surface; agents typically don't need it. Args: kind? to filter
+// by anchor kind (currently only email_domain ships; whatsapp_business_
+// account etc. land later).
+func (a *App) toolIdentitiesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	kind := strArg(args, "kind")
+	rows, err := dbListIdentities(ctx.AppDB(), pid, kind)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, identityRowToMap(r))
+	}
+	return map[string]any{"identities": out, "count": len(out)}, nil
+}
+
+func identityRowToMap(r *identityRow) map[string]any {
+	m := map[string]any{
+		"id":                   r.ID,
+		"kind":                 r.Kind,
+		"address":              r.Address,
+		"provider":             r.Provider,
+		"verified":             r.Verified,
+		"verification_status":  r.VerificationStatus,
+		"dkim_status":          r.DkimStatus,
+		"inbound_bootstrapped": r.InboundBootstrapped,
+	}
+	if r.InboundConfig != "" {
+		var cfg map[string]any
+		if err := json.Unmarshal([]byte(r.InboundConfig), &cfg); err == nil {
+			m["inbound_config"] = cfg
+		}
+	}
+	if r.LastSyncedAt != nil {
+		m["last_synced_at"] = r.LastSyncedAt.Format(time.RFC3339)
+	}
+	return m
 }

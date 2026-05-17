@@ -42,11 +42,16 @@ type senderRow struct {
 	IsDefault           bool
 	Notes               string
 	Metadata            string // JSON
-	LastSyncedAt        *time.Time
-	LastSyncError       string
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
-	DeletedAt           *time.Time
+	// ParentIdentityID is the inheritance edge: a mailbox whose parent
+	// domain is verified at SES gets this set on senders_create. Used
+	// by refresh to keep inheritance mailboxes alive even though SES
+	// doesn't list them, and by delete to skip the bogus SES call.
+	ParentIdentityID *int64
+	LastSyncedAt     *time.Time
+	LastSyncError    string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	DeletedAt        *time.Time
 }
 
 // senderUpsert is the input shape for upsertSender — leaves the
@@ -66,6 +71,10 @@ type senderUpsert struct {
 	InboundBootstrapped bool
 	InboundConfig       string
 	Metadata            string
+	// ParentIdentityID points to the anchor identity this sender
+	// inherits from (mailbox → email_domain in identities table).
+	// Zero means standalone.
+	ParentIdentityID int64
 	// MarkSyncedNow toggles last_synced_at = CURRENT_TIMESTAMP on the
 	// upsert — set true when the row comes from the provider; false
 	// when it's a local-only edit (e.g. set_default).
@@ -80,6 +89,7 @@ const senderColumns = `id, project_id, channel, address, kind,
 	COALESCE(dkim_status,''),
 	inbound_bootstrapped, COALESCE(inbound_config,''),
 	is_default, COALESCE(notes,''), COALESCE(metadata,''),
+	parent_identity_id,
 	last_synced_at, COALESCE(last_sync_error,''),
 	created_at, updated_at, deleted_at`
 
@@ -89,6 +99,7 @@ func scanSender(row interface {
 	var s senderRow
 	var lastSynced sql.NullTime
 	var deletedAt sql.NullTime
+	var parentIdentityID sql.NullInt64
 	err := row.Scan(
 		&s.ID, &s.ProjectID, &s.Channel, &s.Address, &s.Kind,
 		&s.DisplayName,
@@ -97,11 +108,15 @@ func scanSender(row interface {
 		&s.DkimStatus,
 		&s.InboundBootstrapped, &s.InboundConfig,
 		&s.IsDefault, &s.Notes, &s.Metadata,
+		&parentIdentityID,
 		&lastSynced, &s.LastSyncError,
 		&s.CreatedAt, &s.UpdatedAt, &deletedAt,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if parentIdentityID.Valid {
+		s.ParentIdentityID = &parentIdentityID.Int64
 	}
 	if lastSynced.Valid {
 		s.LastSyncedAt = &lastSynced.Time
@@ -129,7 +144,9 @@ func dbUpsertSender(db *sql.DB, u *senderUpsert) (int64, error) {
 		syncedClause = ", last_synced_at = CURRENT_TIMESTAMP, last_sync_error = ?"
 	}
 
-	// Try INSERT first; on UNIQUE conflict, UPDATE the mirrored fields.
+	// NULLIF(?, 0) for parent_identity_id so a caller passing 0 (the
+	// zero value of int64) means "no parent" without us tripping the
+	// FK on a row that never had one.
 	_, err := db.Exec(
 		`INSERT INTO senders (
 			project_id, channel, address, kind, display_name,
@@ -137,8 +154,9 @@ func dbUpsertSender(db *sql.DB, u *senderUpsert) (int64, error) {
 			verified, verification_status, sending_enabled, dkim_status,
 			inbound_bootstrapped, inbound_config,
 			metadata,
+			parent_identity_id,
 			last_synced_at, last_sync_error
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, `+
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, 0), `+
 			conditionalTS(u.MarkSyncedNow)+`, ?)
 		ON CONFLICT (project_id, channel, address) DO UPDATE SET
 			kind = excluded.kind,
@@ -152,6 +170,7 @@ func dbUpsertSender(db *sql.DB, u *senderUpsert) (int64, error) {
 			inbound_bootstrapped = excluded.inbound_bootstrapped,
 			inbound_config = COALESCE(NULLIF(excluded.inbound_config,''), inbound_config),
 			metadata = COALESCE(NULLIF(excluded.metadata,''), metadata),
+			parent_identity_id = COALESCE(excluded.parent_identity_id, parent_identity_id),
 			last_synced_at = excluded.last_synced_at,
 			last_sync_error = excluded.last_sync_error,
 			updated_at = CURRENT_TIMESTAMP,
@@ -161,6 +180,7 @@ func dbUpsertSender(db *sql.DB, u *senderUpsert) (int64, error) {
 		boolInt(u.Verified), u.VerificationStatus, boolInt(u.SendingEnabled), u.DkimStatus,
 		boolInt(u.InboundBootstrapped), u.InboundConfig,
 		u.Metadata,
+		u.ParentIdentityID,
 		u.SyncError,
 	)
 	if err != nil {

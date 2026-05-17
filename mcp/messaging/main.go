@@ -48,7 +48,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.11.5
+version: 0.12.0
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -136,6 +136,7 @@ provides:
     - { name: senders_create,         description: "Register a sender across email (SES) + SMS (Twilio). Domain → DKIM + DNS + optional inbound bootstrap. Phone → adopt + optional SmsUrl wiring." }
     - { name: senders_refresh,        description: "Reconcile local senders with bound providers." }
     - { name: senders_set_default,    description: "Flip the per-(project, channel) default sender." }
+    - { name: identities_list,        description: "List anchor identities (DKIM domains, WABAs)." }
   ui_panels:
     - slot: project.page
       label: Messaging
@@ -198,6 +199,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/senders", Handler: a.handleSendersList},
 		{Pattern: "/senders/quota", Handler: a.handleSendersQuota},
 		{Pattern: "/senders/domains", Handler: a.handleSendersDomains},
+		{Pattern: "/identities", Handler: a.handleIdentitiesList},
 		// Internal/panel routes for provider-template sync. Not MCP —
 		// the panel hits these from a button + per-row action; agents
 		// don't trigger Twilio list calls.
@@ -467,6 +469,14 @@ func (a *App) MCPTools() []sdk.Tool {
 				"channel": map[string]any{"type": "string"},
 			}, []string{"address"}),
 			Handler: a.toolSendersSetDefault,
+		},
+		{
+			Name:        "identities_list",
+			Description: "List authentication anchors (DKIM-verified domains, WhatsApp Business Accounts, etc.) — the verify-once identities that enable sending without being valid From values themselves. NOT for compose/From dropdowns; use senders_list for that. Args: kind? (filter, e.g. 'email_domain').",
+			InputSchema: schemaObject(map[string]any{
+				"kind": map[string]any{"type": "string"},
+			}, nil),
+			Handler: a.toolIdentitiesList,
 		},
 	}
 }
@@ -1922,20 +1932,32 @@ func (a *App) refreshOneSESIdentity(ctx *sdk.AppCtx, pid, addr string) error {
 		FeedbackForwardingStatus bool `json:"FeedbackForwardingStatus"`
 	}
 	_ = json.Unmarshal(res.Data, &inner)
-	kind := "email"
-	if inner.IdentityType == "DOMAIN" || inner.IdentityType == "MANAGED_DOMAIN" {
-		kind = "domain"
-	}
 	dkimStatus := inner.DkimAttributes.Status
+	verifiedStatus := domainVerificationStatus(dkimStatus)
+	// Route to the right table by what SES says this identity is.
+	if inner.IdentityType == "DOMAIN" || inner.IdentityType == "MANAGED_DOMAIN" {
+		_, err = dbUpsertIdentity(ctx.AppDB(), &identityUpsert{
+			ProjectID:          pid,
+			Kind:               "email_domain",
+			Address:            raw,
+			Provider:           "aws-ses",
+			ProviderIdentityID: raw,
+			Verified:           inner.VerifiedForSendingStatus,
+			VerificationStatus: verifiedStatus,
+			DkimStatus:         dkimStatus,
+			MarkSyncedNow:      true,
+		})
+		return err
+	}
 	_, err = dbUpsertSender(ctx.AppDB(), &senderUpsert{
 		ProjectID:          pid,
 		Channel:            "email",
 		Address:            raw,
-		Kind:               kind,
+		Kind:               "email_mailbox",
 		Provider:           "aws-ses",
 		ProviderIdentityID: raw,
 		Verified:           inner.VerifiedForSendingStatus,
-		VerificationStatus: domainVerificationStatus(dkimStatus),
+		VerificationStatus: verifiedStatus,
 		SendingEnabled:     true,
 		DkimStatus:         dkimStatus,
 		MarkSyncedNow:      true,
@@ -2039,18 +2061,16 @@ func (a *App) toolSendersDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		if err != nil {
 			return nil, err
 		}
-		// Inheritance mailboxes (kind=email at a locally-verified
-		// parent domain) were never created as SES identities — the
-		// v0.11 inheritance flow registers them locally only and
-		// relies on the parent's DKIM. Calling SES delete_identity
-		// returns "Email identity X does not exist" and 502s the
-		// panel. Skip the upstream call; soft-delete is enough.
+		// Inheritance mailboxes weren't created as SES identities —
+		// v0.11's inheritance flow registers them locally only and
+		// relies on the parent's DKIM. v0.12 makes that inheritance
+		// explicit via senders.parent_identity_id, so the skip check
+		// is now a single FK existence test instead of a string-
+		// suffix walk.
 		skipUpstream := false
-		if local != nil && local.Kind == "email" {
-			if parent := parentDomainOf(raw); parent != "" {
-				if p, _ := dbFindSender(ctx.AppDB(), pid, "email", parent); p != nil && p.Kind == "domain" && p.Verified && p.DeletedAt == nil {
-					skipUpstream = true
-				}
+		if local != nil && local.Kind == "email_mailbox" && local.ParentIdentityID != nil {
+			if p, _ := dbGetIdentity(ctx.AppDB(), *local.ParentIdentityID); p != nil && p.Verified && p.DeletedAt == nil {
+				skipUpstream = true
 			}
 		}
 		if !skipUpstream {
@@ -3363,6 +3383,25 @@ func (a *App) handleSendersList(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleSendersQuota(w http.ResponseWriter, r *http.Request) {
 	out, err := a.toolSendersGetQuota(globalCtx, map[string]any{})
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	httpJSON(w, out)
+}
+
+// handleIdentitiesList — thin HTTP wrapper over the identities_list
+// MCP tool. Feeds the messaging panel's "Verified domains & accounts"
+// section.
+func (a *App) handleIdentitiesList(w http.ResponseWriter, r *http.Request) {
+	args := map[string]any{}
+	if pid := strings.TrimSpace(r.URL.Query().Get("project_id")); pid != "" {
+		args["_project_id"] = pid
+	}
+	if k := strings.TrimSpace(r.URL.Query().Get("kind")); k != "" {
+		args["kind"] = k
+	}
+	out, err := a.toolIdentitiesList(globalCtx, args)
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
 		return

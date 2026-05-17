@@ -488,26 +488,40 @@ func preseedSender(t *testing.T, ctx *sdk.AppCtx, u senderUpsert) {
 	}
 }
 
+// preseedIdentity writes an anchor row directly via dbUpsertIdentity.
+// Used by tests that need a verified domain (or future WABA) in
+// place — these live in identities, not senders, after v0.12.
+// Returns the row id so callers can wire FK references.
+func preseedIdentity(t *testing.T, ctx *sdk.AppCtx, u identityUpsert) int64 {
+	t.Helper()
+	u.ProjectID = "test-proj"
+	u.MarkSyncedNow = true
+	id, err := dbUpsertIdentity(ctx.AppDB(), &u)
+	if err != nil {
+		t.Fatalf("preseed identity %s: %v", u.Address, err)
+	}
+	return id
+}
+
 func TestSenders_List_NormalisesShape(t *testing.T) {
-	// v0.10: no auto-import. List returns whatever's in the local
-	// table; the list_identities stub here doesn't influence the
-	// result (it would only matter for a background refresh after
-	// rows have aged past senderStaleThreshold).
+	// v0.12: senders_list returns sendable rows only. The DKIM
+	// anchor (acme.com) lives in identities now, not senders — it's
+	// preseeded here to prove it does NOT leak into the senders list.
 	ctx := newTestCtx(t, &stubPlatform{})
 	app := &App{}
 
 	preseedSender(t, ctx, senderUpsert{
-		Channel: "email", Address: "notifications@acme.com", Kind: "email",
+		Channel: "email", Address: "notifications@acme.com", Kind: "email_mailbox",
 		Provider: "aws-ses", ProviderIdentityID: "notifications@acme.com",
 		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
 	})
-	preseedSender(t, ctx, senderUpsert{
-		Channel: "email", Address: "acme.com", Kind: "domain",
+	preseedIdentity(t, ctx, identityUpsert{
+		Kind: "email_domain", Address: "acme.com",
 		Provider: "aws-ses", ProviderIdentityID: "acme.com",
-		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
+		Verified: true, VerificationStatus: "verified", DkimStatus: "SUCCESS",
 	})
 	preseedSender(t, ctx, senderUpsert{
-		Channel: "email", Address: "pending@acme.com", Kind: "email",
+		Channel: "email", Address: "pending@acme.com", Kind: "email_mailbox",
 		Provider: "aws-ses", ProviderIdentityID: "pending@acme.com",
 		Verified: false, VerificationStatus: "pending", SendingEnabled: false,
 	})
@@ -517,29 +531,27 @@ func TestSenders_List_NormalisesShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := out.(map[string]any)
-	if r["count"].(int) != 3 {
-		t.Errorf("count=%v", r["count"])
+	// Only mailboxes appear; the domain anchor stays out.
+	if r["count"].(int) != 2 {
+		t.Errorf("expected 2 mailboxes, got %v (anchor leaking?)", r["count"])
 	}
 	rows := r["senders"].([]map[string]any)
-	// Order is is_default DESC then alphabetical by address.
 	addresses := []string{}
 	for _, row := range rows {
 		addresses = append(addresses, row["address"].(string))
 	}
-	wantAddrs := []string{"acme.com", "notifications@acme.com", "pending@acme.com"}
+	wantAddrs := []string{"notifications@acme.com", "pending@acme.com"}
 	for i, want := range wantAddrs {
 		if i >= len(addresses) || addresses[i] != want {
 			t.Errorf("row %d: addr=%q, want %q", i, addresses[i], want)
 		}
 	}
 	for _, row := range rows {
-		if row["address"] == "acme.com" {
-			if row["kind"] != "domain" || row["channel"] != "email" {
-				t.Errorf("acme.com row: %+v", row)
-			}
-		}
 		if row["address"] == "pending@acme.com" && row["verified"] != false {
 			t.Errorf("pending row should not be verified: %+v", row)
+		}
+		if row["kind"] == "email_domain" {
+			t.Errorf("domain anchor leaked into senders_list: %+v", row)
 		}
 	}
 }
@@ -549,12 +561,12 @@ func TestSenders_List_VerifiedOnly(t *testing.T) {
 	app := &App{}
 
 	preseedSender(t, ctx, senderUpsert{
-		Channel: "email", Address: "good@x.com", Kind: "email",
+		Channel: "email", Address: "good@x.com", Kind: "email_mailbox",
 		Provider: "aws-ses", ProviderIdentityID: "good@x.com",
 		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
 	})
 	preseedSender(t, ctx, senderUpsert{
-		Channel: "email", Address: "pending@x.com", Kind: "email",
+		Channel: "email", Address: "pending@x.com", Kind: "email_mailbox",
 		Provider: "aws-ses", ProviderIdentityID: "pending@x.com",
 		Verified: false, VerificationStatus: "pending", SendingEnabled: false,
 	})
@@ -624,7 +636,7 @@ func TestSendersRefresh_UpdatesKnownButIgnoresUnknown(t *testing.T) {
 	// Pre-seed the row that's about to flip from pending → verified
 	// at SES. Status starts out stale locally.
 	preseedSender(t, ctx, senderUpsert{
-		Channel: "email", Address: "known@x.com", Kind: "email",
+		Channel: "email", Address: "known@x.com", Kind: "email_mailbox",
 		Provider: "aws-ses", ProviderIdentityID: "known@x.com",
 		Verified: false, VerificationStatus: "pending", SendingEnabled: false,
 	})
@@ -661,20 +673,20 @@ func TestSendersRefresh_PreservesMailboxesInheritingFromVerifiedParent(t *testin
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 
-	// Pre-seed: a verified parent + an inheritance-mailbox row at it.
-	// The mailbox row is exactly what sendersCreateEmailViaParentDomain
-	// would persist.
-	preseedSender(t, ctx, senderUpsert{
-		Channel: "email", Address: "socialcast.dev", Kind: "domain",
+	// Pre-seed: a verified parent identity + an inheritance-mailbox
+	// row pointing at it via the FK. Exactly the shape
+	// sendersCreateEmailViaParentDomain produces under v0.12.
+	parentID := preseedIdentity(t, ctx, identityUpsert{
+		Kind: "email_domain", Address: "socialcast.dev",
 		Provider: "aws-ses", ProviderIdentityID: "socialcast.dev",
-		Verified: true, VerificationStatus: "verified",
-		SendingEnabled: true, DkimStatus: "SUCCESS",
+		Verified: true, VerificationStatus: "verified", DkimStatus: "SUCCESS",
 	})
 	preseedSender(t, ctx, senderUpsert{
-		Channel: "email", Address: "test@socialcast.dev", Kind: "email",
+		Channel: "email", Address: "test@socialcast.dev", Kind: "email_mailbox",
 		Provider: "aws-ses", ProviderIdentityID: "test@socialcast.dev",
 		Verified: true, VerificationStatus: "verified",
 		SendingEnabled: true, DkimStatus: "SUCCESS",
+		ParentIdentityID: parentID,
 	})
 
 	if _, err := app.toolSendersRefresh(ctx, map[string]any{}); err != nil {
@@ -683,8 +695,10 @@ func TestSendersRefresh_PreservesMailboxesInheritingFromVerifiedParent(t *testin
 
 	out, _ := app.toolSendersList(ctx, map[string]any{})
 	r := out.(map[string]any)
-	if r["count"].(int) != 2 {
-		t.Errorf("expected both parent + inherited mailbox to survive refresh, got %v", r)
+	// Only the mailbox shows up in senders_list (anchor lives in
+	// identities now). Surviving the refresh is what matters.
+	if r["count"].(int) != 1 {
+		t.Errorf("expected mailbox to survive in senders_list, got %v", r)
 	}
 	row, _ := dbFindSender(ctx.AppDB(), "test-proj", "email", "test@socialcast.dev")
 	if row == nil || row.DeletedAt != nil {
@@ -714,7 +728,7 @@ func TestSendersRefresh_PreservesMailboxWhenParentOnlyExistsUpstream(t *testing.
 
 	// Mailbox row only — NO local kind=domain row for socialcast.dev.
 	preseedSender(t, ctx, senderUpsert{
-		Channel: "email", Address: "test@socialcast.dev", Kind: "email",
+		Channel: "email", Address: "test@socialcast.dev", Kind: "email_mailbox",
 		Provider: "aws-ses", ProviderIdentityID: "test@socialcast.dev",
 		Verified: true, VerificationStatus: "verified",
 		SendingEnabled: true, DkimStatus: "SUCCESS",
@@ -745,7 +759,7 @@ func TestSendersRefresh_SoftDeletesStandaloneMailboxesMissingUpstream(t *testing
 	// Pre-seed only the mailbox — no parent-domain row exists locally,
 	// so this is a standalone SES identity, not an inheritance row.
 	preseedSender(t, ctx, senderUpsert{
-		Channel: "email", Address: "lonely@x.com", Kind: "email",
+		Channel: "email", Address: "lonely@x.com", Kind: "email_mailbox",
 		Provider: "aws-ses", ProviderIdentityID: "lonely@x.com",
 		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
 	})
@@ -770,7 +784,7 @@ func TestSendersRefresh_SoftDeletesRowsMissingUpstream(t *testing.T) {
 	app := &App{}
 
 	preseedSender(t, ctx, senderUpsert{
-		Channel: "email", Address: "gone@x.com", Kind: "email",
+		Channel: "email", Address: "gone@x.com", Kind: "email_mailbox",
 		Provider: "aws-ses", ProviderIdentityID: "gone@x.com",
 		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
 	})
@@ -1010,11 +1024,10 @@ func TestSendersCreate_Mailbox_InheritsFromVerifiedParent(t *testing.T) {
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 
-	preseedSender(t, ctx, senderUpsert{
-		Channel: "email", Address: "socialcast.dev", Kind: "domain",
+	preseedIdentity(t, ctx, identityUpsert{
+		Kind: "email_domain", Address: "socialcast.dev",
 		Provider: "aws-ses", ProviderIdentityID: "socialcast.dev",
-		Verified: true, VerificationStatus: "verified",
-		SendingEnabled: true, DkimStatus: "SUCCESS",
+		Verified: true, VerificationStatus: "verified", DkimStatus: "SUCCESS",
 	})
 
 	out, err := app.toolSendersCreate(ctx, map[string]any{"address": "test@socialcast.dev"})
@@ -1126,19 +1139,18 @@ func TestSendersDelete_InheritanceMailboxSkipsUpstream(t *testing.T) {
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 
-	// Verified parent + inheritance mailbox (the exact shape
-	// sendersCreateEmailViaParentDomain produces).
-	preseedSender(t, ctx, senderUpsert{
-		Channel: "email", Address: "socialcast.dev", Kind: "domain",
+	// Verified parent identity + inheritance mailbox pointing at it.
+	parentID := preseedIdentity(t, ctx, identityUpsert{
+		Kind: "email_domain", Address: "socialcast.dev",
 		Provider: "aws-ses", ProviderIdentityID: "socialcast.dev",
-		Verified: true, VerificationStatus: "verified",
-		SendingEnabled: true, DkimStatus: "SUCCESS",
+		Verified: true, VerificationStatus: "verified", DkimStatus: "SUCCESS",
 	})
 	preseedSender(t, ctx, senderUpsert{
-		Channel: "email", Address: "test@socialcast.dev", Kind: "email",
+		Channel: "email", Address: "test@socialcast.dev", Kind: "email_mailbox",
 		Provider: "aws-ses", ProviderIdentityID: "test@socialcast.dev",
 		Verified: true, VerificationStatus: "verified",
 		SendingEnabled: true, DkimStatus: "SUCCESS",
+		ParentIdentityID: parentID,
 	})
 
 	if _, err := app.toolSendersDelete(ctx, map[string]any{"address": "test@socialcast.dev"}); err != nil {
@@ -1171,7 +1183,7 @@ func TestSendersDelete_TreatsIdentityNotFoundAsSuccess(t *testing.T) {
 	app := &App{}
 
 	preseedSender(t, ctx, senderUpsert{
-		Channel: "email", Address: "gone@x.com", Kind: "email",
+		Channel: "email", Address: "gone@x.com", Kind: "email_mailbox",
 		Provider: "aws-ses", ProviderIdentityID: "gone@x.com",
 		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
 	})
@@ -1200,7 +1212,7 @@ func TestSendersDelete_PropagatesRealUpstreamError(t *testing.T) {
 	app := &App{}
 
 	preseedSender(t, ctx, senderUpsert{
-		Channel: "email", Address: "ok@x.com", Kind: "email",
+		Channel: "email", Address: "ok@x.com", Kind: "email_mailbox",
 		Provider: "aws-ses", ProviderIdentityID: "ok@x.com",
 		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
 	})
@@ -1211,6 +1223,111 @@ func TestSendersDelete_PropagatesRealUpstreamError(t *testing.T) {
 	row, _ := dbFindSender(ctx.AppDB(), "test-proj", "email", "ok@x.com")
 	if row == nil || row.DeletedAt != nil {
 		t.Errorf("row should NOT be soft-deleted when SES error is real, got %+v", row)
+	}
+}
+
+// ─── v0.12 split: senders / identities ─────────────────────────────
+
+func TestIdentitiesList_ReturnsAnchors(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+	app := &App{}
+
+	preseedIdentity(t, ctx, identityUpsert{
+		Kind: "email_domain", Address: "acme.com",
+		Provider: "aws-ses", ProviderIdentityID: "acme.com",
+		Verified: true, VerificationStatus: "verified", DkimStatus: "SUCCESS",
+		InboundBootstrapped: true,
+		InboundConfig:       `{"bucket":"apteva-ses-inbound-1","topic_arn":"arn:aws:sns:eu-west-1:111:apteva"}`,
+	})
+	preseedIdentity(t, ctx, identityUpsert{
+		Kind: "email_domain", Address: "other.io",
+		Provider: "aws-ses", ProviderIdentityID: "other.io",
+		Verified: false, VerificationStatus: "pending", DkimStatus: "PENDING",
+	})
+
+	out, err := app.toolIdentitiesList(ctx, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := out.(map[string]any)
+	if r["count"].(int) != 2 {
+		t.Errorf("expected 2 identities, got %v", r)
+	}
+	rows := r["identities"].([]map[string]any)
+	for _, row := range rows {
+		if row["address"] == "acme.com" {
+			if row["verified"] != true || row["dkim_status"] != "SUCCESS" {
+				t.Errorf("acme.com row: %+v", row)
+			}
+			if row["inbound_bootstrapped"] != true {
+				t.Errorf("expected inbound_bootstrapped=true: %+v", row)
+			}
+			cfg, _ := row["inbound_config"].(map[string]any)
+			if cfg["bucket"] != "apteva-ses-inbound-1" {
+				t.Errorf("inbound_config not parsed: %+v", row["inbound_config"])
+			}
+		}
+	}
+}
+
+// senders_create on a bare domain should now write to identities, not
+// senders. Confirms the v0.12 storage split actually happens through
+// the normal create path (not just through pre-seeding).
+func TestSendersCreate_Domain_WritesToIdentities(t *testing.T) {
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"verify_domain": {Success: true, Status: 200, Data: json.RawMessage(
+				`{"DkimAttributes":{"Tokens":["a","b","c"],"Status":"SUCCESS"}}`)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	if _, err := app.toolSendersCreate(ctx, map[string]any{"address": "freshdomain.io"}); err != nil {
+		t.Fatal(err)
+	}
+	// Domain row is in identities…
+	ident, _ := dbFindIdentity(ctx.AppDB(), "test-proj", "email_domain", "freshdomain.io")
+	if ident == nil {
+		t.Fatal("expected freshdomain.io in identities, not found")
+	}
+	if !ident.Verified || ident.DkimStatus != "SUCCESS" {
+		t.Errorf("identity not verified: %+v", ident)
+	}
+	// …and NOT in senders.
+	s, _ := dbFindSender(ctx.AppDB(), "test-proj", "email", "freshdomain.io")
+	if s != nil {
+		t.Errorf("domain leaked into senders: %+v", s)
+	}
+}
+
+// Inheritance mailbox add must set parent_identity_id pointing at the
+// (created-or-found) parent identity row.
+func TestSendersCreate_Mailbox_SetsParentIdentityFK(t *testing.T) {
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{
+			"email_provider": float64(1),
+			"domains":        float64(42),
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	parentID := preseedIdentity(t, ctx, identityUpsert{
+		Kind: "email_domain", Address: "socialcast.dev",
+		Provider: "aws-ses", ProviderIdentityID: "socialcast.dev",
+		Verified: true, VerificationStatus: "verified", DkimStatus: "SUCCESS",
+	})
+
+	if _, err := app.toolSendersCreate(ctx, map[string]any{"address": "test@socialcast.dev"}); err != nil {
+		t.Fatal(err)
+	}
+	row, _ := dbFindSender(ctx.AppDB(), "test-proj", "email", "test@socialcast.dev")
+	if row == nil {
+		t.Fatal("mailbox row not persisted")
+	}
+	if row.ParentIdentityID == nil || *row.ParentIdentityID != parentID {
+		t.Errorf("expected parent_identity_id=%d, got %v", parentID, row.ParentIdentityID)
 	}
 }
 
@@ -1821,7 +1938,7 @@ func TestSenders_SetDefault_OneDefaultPerCohort(t *testing.T) {
 	for _, addr := range []string{"a@x.com", "b@x.com"} {
 		if _, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{
 			ProjectID: "test-proj", Channel: "email", Address: addr,
-			Kind: "email", Provider: "aws-ses", ProviderIdentityID: addr,
+			Kind: "email_mailbox", Provider: "aws-ses", ProviderIdentityID: addr,
 			Verified: true, VerificationStatus: "verified", SendingEnabled: true,
 			MarkSyncedNow: true,
 		}); err != nil {
