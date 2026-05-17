@@ -23,6 +23,13 @@ type recorded struct {
 }
 
 func (r *recorder) Emit(topic string, data any) {
+	r.EmitWithProject(topic, "", data)
+}
+
+// EmitWithProject — satisfies sdk.Emitter. AppCtx.Emit dispatches via
+// this method, so it's the one tests must implement; project id is
+// ignored by the recorder.
+func (r *recorder) EmitWithProject(topic, projectID string, data any) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	m, _ := data.(map[string]any)

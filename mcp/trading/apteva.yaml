@@ -2,20 +2,20 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.2.0
+version: 0.4.0
 description: |
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
-  crypto, polymarket prediction markets). Each portfolio runs in one of
-  two modes:
+  etf, crypto, polymarket prediction markets). Each portfolio runs in
+  one of two modes:
 
     paper — deterministic in-process execution engine; no broker, no
             real money. The default. Useful for strategy work and dry
             runs.
-    live  — orders route through a bound broker integration (v0.2 ships
-            with Binance). Real fills, real cash, real positions. Live
-            requires the operator to bind a connection to the `broker`
-            role; without one, all portfolios stay paper and existing
-            behaviour is unchanged.
+    live  — orders route through a per-portfolio broker. v0.3 ships
+            with Binance (crypto) and Alpaca (equity/etf/crypto); each
+            portfolio names its broker at creation via broker_slug.
+            Bind a broker via Settings → Integrations to enable
+            mode=live. Without any binding, every portfolio stays paper.
 
   Each portfolio has its own mandate, allowed asset classes, and
   daily-loss halt. Approval flow lives in the agent's directive (via
@@ -34,39 +34,59 @@ requires:
   permissions:
     - db.write.app
     - platform.instances.read
-    - net.egress                  # public market-data endpoints (Binance, Polymarket gamma-api)
+    - net.egress                   # public market-data endpoints (Binance, Polymarket gamma-api)
     - platform.connections.execute # broker calls (live mode)
+    - platform.connections.read    # discover bound brokers per slug — see brokers_list, brokerFor()
   integrations:
-    # Optional. Bind a broker to enable mode=live on new portfolios.
-    # Without a binding, every portfolio stays paper — existing v0.1
-    # installs see no behaviour change. v0.2 ships Binance only; new
-    # brokers (alpaca, ig-trading, kraken) slot in here as a one-line
-    # addition to compatible_slugs once their adapter is implemented.
+    # Optional. Bind one or more brokers to enable mode=live on new
+    # portfolios. Each portfolio names its broker at creation via
+    # broker_slug. Without any binding, every portfolio stays paper.
+    #
+    # Adding a new broker = drop a new adapter file in the sidecar
+    # implementing brokerAdapter + a one-line addition to
+    # compatible_slugs here.
     - role: broker
       kind: integration
       required: false
-      compatible_slugs: [binance-trading]
+      compatible_slugs: [binance-trading, alpaca-trading, polymarket-clob]
       capabilities:
         - order.place
         - order.cancel
         - order.status
         - account.summary
-        - market.quote
+        - positions.list
       tools:
         order.place:     create_order
         order.cancel:    cancel_order
         order.status:    get_order
         account.summary: get_account
-        market.quote:    get_price
+        positions.list:  list_positions  # alpaca-only; binance returns holdings in get_account; polymarket-clob has no positions endpoint
       label: "Broker (optional — enables live trading)"
-      hint: "Bind a Binance connection to enable mode=live on new portfolios. Unbound = everything stays paper."
+      hint: "Bind Binance (crypto), Alpaca (equity/etf/crypto), or Polymarket-CLOB (prediction markets). Portfolios pick a broker at creation."
+    # Optional market-data integration. Required to trade equity/etf live
+    # with real-time prices (pre-trade cash check + position MTM). Same
+    # API key as alpaca-trading; bind both for a fully-live equity
+    # workflow. Without it, equity marks fall back to mock walks — fine
+    # for paper, NOT safe for live agents trading real money.
+    - role: market_data_equity
+      kind: integration
+      required: false
+      compatible_slugs: [alpaca-market-data]
+      capabilities:
+        - quotes.equity
+      tools:
+        quotes.equity: stock_snapshots
+      label: "Market Data — Equity (optional — real prices for live equity portfolios)"
+      hint: "Bind alpaca-market-data to switch equity/etf marks from mock walks to real Alpaca snapshots."
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
     - name: portfolio_create
-      description: "Create a new paper portfolio with mandate, allowed asset classes, and starting cash."
+      description: "Create a new paper or live portfolio. Live portfolios pass broker_slug — use brokers_list to enumerate."
+    - name: brokers_list
+      description: "Enumerate registered broker adapters and their currently-bound connections."
     - name: portfolio_list
       description: "List portfolios visible to this agent."
     - name: portfolio_get
@@ -110,7 +130,7 @@ provides:
     - slot: project.page
       label: Trading
       icon: trending-up
-      entry: /ui/panel/TradingPanel.html
+      entry: /ui/TradingPanel.mjs
   # No prompt_fragments. Trading policy (approval gates, position-sizing
   # opinions) belongs in the operator's per-instance directive, not
   # baked into every install. The MCP tool descriptions carry the

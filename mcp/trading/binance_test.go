@@ -247,8 +247,10 @@ func TestParseBinanceAccount(t *testing.T) {
 	if len(acct.Holdings) != 2 {
 		t.Errorf("expected 2 non-zero non-USDT holdings, got %d (%+v)", len(acct.Holdings), acct.Holdings)
 	}
-	if btc, ok := acct.Holdings["BTC"]; !ok || btc.Free != 0.05 {
-		t.Errorf("BTC holding wrong: %+v", btc)
+	// v0.3 canonicalized broker holdings keys to local form (BTC-USD)
+	// so the multi-broker reconcile path can treat every adapter the same.
+	if btc, ok := acct.Holdings["BTC-USD"]; !ok || btc.Free != 0.05 {
+		t.Errorf("BTC-USD holding wrong: %+v", btc)
 	}
 }
 

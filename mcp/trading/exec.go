@@ -608,30 +608,31 @@ func tryReconcile(e *engine, pf *Portfolio, o *Order) error {
 	if globalCtx == nil {
 		return errors.New("no app ctx — engine not fully mounted")
 	}
-	bound := globalCtx.IntegrationFor("broker")
-	if bound == nil {
-		// Operator unbound the broker while orders are working. We don't
-		// reject — the order may resume when rebound. Log once per tick.
-		e.logger.Warn("live order has no broker bound; staying working", "order_id", o.ID)
+	bb, ferr := brokerFor(globalCtx, pf)
+	if ferr != nil {
+		// Operator unbound the broker (or the slug isn't registered).
+		// Don't reject — the order may resume when rebound. Log once per
+		// tick. The agent sees the order stay 'working' which is the
+		// truthful state given we can't poll.
+		e.logger.Warn("live order has no broker bound; staying working",
+			"order_id", o.ID, "broker_slug", pf.BrokerSlug, "err", ferr)
 		return nil
 	}
-	args := map[string]any{
-		"symbol":            toBinanceSymbol(o.Symbol),
-		"origClientOrderId": o.ID, // stable across broker orderId reuse
-	}
+	brokerOrderID, _ := dbBrokerOrderIDFor(e.db, o.ID)
+	args := bb.Adapter.StatusArgs(o, brokerOrderID)
 	res, err := globalCtx.PlatformAPI().ExecuteIntegrationTool(
-		bound.ConnectionID, bound.ToolFor("order.status"), args,
+		bb.ConnectionID, bb.toolFor("order.status"), args,
 	)
 	if err != nil {
 		// Transient — retry next tick.
 		return err
 	}
 	if res == nil || !res.Success {
-		code, detail := brokerErrText(res, nil)
-		// -2013 "Order does not exist" can mean the order placement
-		// itself failed silently between place + first poll. Reject
-		// locally so the agent stops waiting on a phantom order.
-		if code == "binance_-2013" || strings.Contains(detail, "does not exist") {
+		code, detail := bb.Adapter.ErrText(res, nil)
+		// Broker confirms the order doesn't exist on its side — likely
+		// the placement itself failed silently. Reject locally so the
+		// agent stops waiting on a phantom.
+		if bb.Adapter.IsUnknownOrderError(code, detail) {
 			_ = dbRejectOrder(e.db, o.ID, "broker_unknown_order",
 				"broker reports order does not exist; treating as failed-to-place")
 			emit("order.rejected", map[string]any{
@@ -641,7 +642,7 @@ func tryReconcile(e *engine, pf *Portfolio, o *Order) error {
 		}
 		return fmt.Errorf("broker get_order: %s: %s", code, detail)
 	}
-	br, perr := parseBinanceOrder(res.Data)
+	br, perr := bb.Adapter.ParseOrder(res.Data)
 	if perr != nil {
 		return perr
 	}
@@ -699,22 +700,33 @@ func applyBrokerProgress(db *sql.DB, projectID string, pf *Portfolio, o *Order, 
 		if err != nil {
 			return false, err
 		}
+		// CAS guard: claim the delta by updating filled_qty conditioned on
+		// the value we read into `o`. Two overlapping ticks (or an
+		// order_place inline-apply racing with a tryReconcile) can both
+		// observe the same stale FilledQty and otherwise both apply the
+		// same delta. The conditional UPDATE serializes them: the second
+		// arrival sees rows_affected = 0 and bails before touching fills,
+		// positions, or cash.
+		cumAvg := deltaPrice
+		if br.CummulativeQuoteQty > 0 && br.ExecutedQty > 0 {
+			cumAvg = br.CummulativeQuoteQty / br.ExecutedQty
+		}
+		casRes, err := tx.Exec(`UPDATE orders SET filled_qty = ?, avg_fill_price = ?
+			WHERE id = ? AND ABS(filled_qty - ?) < 1e-9`,
+			br.ExecutedQty, cumAvg, o.ID, o.FilledQty)
+		if err != nil {
+			_ = tx.Rollback()
+			return false, err
+		}
+		if n, _ := casRes.RowsAffected(); n == 0 {
+			_ = tx.Rollback()
+			return false, nil // another tick already applied this fill
+		}
 		if err := dbInsertFill(tx, projectID, o.ID, pf.ID, deltaQty, deltaPrice, fee); err != nil {
 			_ = tx.Rollback()
 			return false, err
 		}
 		if err := dbApplyFill(tx, pf.ID, projectID, o, deltaQty, deltaPrice); err != nil {
-			_ = tx.Rollback()
-			return false, err
-		}
-		// Update cumulative state on the order itself. Final status flips
-		// happen below — here we just record progress.
-		cumAvg := deltaPrice
-		if br.CummulativeQuoteQty > 0 && br.ExecutedQty > 0 {
-			cumAvg = br.CummulativeQuoteQty / br.ExecutedQty
-		}
-		if _, err := tx.Exec(`UPDATE orders SET filled_qty = ?, avg_fill_price = ? WHERE id = ?`,
-			br.ExecutedQty, cumAvg, o.ID); err != nil {
 			_ = tx.Rollback()
 			return false, err
 		}
@@ -760,38 +772,52 @@ func applyBrokerProgress(db *sql.DB, projectID string, pf *Portfolio, o *Order, 
 
 	// Terminal status flips. Status moves are independent of fills —
 	// PARTIALLY_FILLED stays "working", FILLED resolves, CANCELED /
-	// REJECTED close out.
+	// REJECTED close out. UPDATEs are conditional on the row still being
+	// 'working' so racing reconciles don't re-emit the terminal event.
 	switch br.Status {
 	case "filled":
 		if o.Status != "filled" {
-			if _, err := db.Exec(`UPDATE orders SET status='filled', resolved_at=CURRENT_TIMESTAMP WHERE id = ?`, o.ID); err != nil {
+			res, err := db.Exec(`UPDATE orders SET status='filled', resolved_at=CURRENT_TIMESTAMP
+				WHERE id = ? AND status = 'working'`, o.ID)
+			if err != nil {
 				return changed, err
 			}
-			o.Status = "filled"
-			changed = true
+			if n, _ := res.RowsAffected(); n > 0 {
+				o.Status = "filled"
+				changed = true
+			}
 		}
 	case "cancelled":
 		if o.Status != "cancelled" {
-			if _, err := db.Exec(`UPDATE orders SET status='cancelled', resolved_at=CURRENT_TIMESTAMP, rejection_detail=? WHERE id = ?`,
-				"broker_"+br.BrokerStatus, o.ID); err != nil {
+			res, err := db.Exec(`UPDATE orders SET status='cancelled', resolved_at=CURRENT_TIMESTAMP, rejection_detail=?
+				WHERE id = ? AND status = 'working'`,
+				"broker_"+br.BrokerStatus, o.ID)
+			if err != nil {
 				return changed, err
 			}
-			o.Status = "cancelled"
-			emit("order.cancelled", map[string]any{
-				"order_id": o.ID, "broker_status": br.BrokerStatus,
-			})
-			changed = true
+			if n, _ := res.RowsAffected(); n > 0 {
+				o.Status = "cancelled"
+				emit("order.cancelled", map[string]any{
+					"order_id": o.ID, "broker_status": br.BrokerStatus,
+				})
+				changed = true
+			}
 		}
 	case "rejected":
 		if o.Status != "rejected" {
-			if err := dbRejectOrder(db, o.ID, "broker_rejected", br.BrokerStatus); err != nil {
+			res, err := db.Exec(`UPDATE orders SET status='rejected', rejection_code=?, rejection_detail=?,
+				resolved_at=CURRENT_TIMESTAMP WHERE id = ? AND status = 'working'`,
+				"broker_rejected", br.BrokerStatus, o.ID)
+			if err != nil {
 				return changed, err
 			}
-			o.Status = "rejected"
-			emit("order.rejected", map[string]any{
-				"order_id": o.ID, "code": "broker_rejected", "detail": br.BrokerStatus,
-			})
-			changed = true
+			if n, _ := res.RowsAffected(); n > 0 {
+				o.Status = "rejected"
+				emit("order.rejected", map[string]any{
+					"order_id": o.ID, "code": "broker_rejected", "detail": br.BrokerStatus,
+				})
+				changed = true
+			}
 		}
 	}
 
@@ -814,10 +840,6 @@ func reconcileLiveAccounts(e *engine) {
 	if globalCtx == nil {
 		return
 	}
-	bound := globalCtx.IntegrationFor("broker")
-	if bound == nil {
-		return
-	}
 	pfs, err := dbAllPortfolios(e.db)
 	if err != nil {
 		return
@@ -826,16 +848,57 @@ func reconcileLiveAccounts(e *engine) {
 		if p.Mode != "live" || p.Status == "halted" {
 			continue
 		}
-		res, err := globalCtx.PlatformAPI().ExecuteIntegrationTool(
-			bound.ConnectionID, bound.ToolFor("account.summary"), map[string]any{},
-		)
-		if err != nil || res == nil || !res.Success {
-			e.logger.Warn("account reconcile failed", "portfolio_id", p.ID)
+		bb, ferr := brokerFor(globalCtx, p)
+		if ferr != nil {
+			// Broker not bound for this portfolio's slug — skip silently;
+			// next reconcile after rebind will catch up.
 			continue
 		}
-		acct, perr := parseBinanceAccount(res.Data)
+		// Stamp BEFORE the broker call so we can detect any fill that
+		// landed while we were waiting on the response. A snapshot taken
+		// pre-fill but applied post-fill would otherwise wipe out the
+		// fill's cash debit and re-introduce phantom buying power.
+		snapshotBefore := time.Now().UTC()
+		res, err := globalCtx.PlatformAPI().ExecuteIntegrationTool(
+			bb.ConnectionID, bb.toolFor("account.summary"), map[string]any{},
+		)
+		if err != nil || res == nil || !res.Success {
+			e.logger.Warn("account reconcile failed", "portfolio_id", p.ID, "broker", bb.Adapter.Slug())
+			continue
+		}
+		acct, perr := bb.Adapter.ParseAccount(res.Data)
 		if perr != nil {
 			e.logger.Warn("account parse failed", "portfolio_id", p.ID, "err", perr)
+			continue
+		}
+		// Adapters with a separate holdings call (Alpaca) — fetch +
+		// merge here so the downstream discovery logic sees a single
+		// unified acct view.
+		if tool := bb.Adapter.HoldingsTool(); tool != "" {
+			posRaw, herr := globalCtx.PlatformAPI().ExecuteIntegrationTool(
+				bb.ConnectionID, tool, map[string]any{},
+			)
+			if herr == nil && posRaw != nil && posRaw.Success {
+				if holdings, perr2 := bb.Adapter.ParseHoldings(posRaw.Data); perr2 == nil {
+					if acct.Holdings == nil {
+						acct.Holdings = map[string]brokerBalance{}
+					}
+					for k, v := range holdings {
+						acct.Holdings[k] = v
+					}
+				}
+			}
+		}
+		// Did anything fill on this portfolio after the snapshot was
+		// captured? If yes, the broker's reported balances pre-date local
+		// state — skip cash + position writes this round and let the next
+		// reconcile (after fills settle) catch up.
+		var fillsSince int
+		_ = e.db.QueryRow(`SELECT COUNT(*) FROM fills WHERE portfolio_id = ? AND filled_at > ?`,
+			p.ID, snapshotBefore.Format("2006-01-02 15:04:05")).Scan(&fillsSince)
+		if fillsSince > 0 {
+			e.logger.Info("reconcile: skipping write — fill(s) landed during broker snapshot",
+				"portfolio_id", p.ID, "fills_since_snapshot", fillsSince)
 			continue
 		}
 		// Cash drift.
@@ -851,30 +914,42 @@ func reconcileLiveAccounts(e *engine) {
 		// Position drift — discover-only in v0.2. Reducing positions by
 		// reconcile is risky (might reflect an in-flight tx); we leave
 		// over-sized local positions alone and surface them via a
-		// journal note. New holdings get inserted.
+		// journal note. New holdings get inserted with avg_cost = 0 so
+		// downstream P&L is honest about cost basis being unknown rather
+		// than fabricating one from the current mark (which understates
+		// realized P&L on subsequent sells and lies on the panel).
+		// Also: skip symbols with a working live order so we don't race
+		// an in-flight order_place that's about to write the position.
 		positions, _ := dbListPositions(e.db, p.ID)
-		known := map[string]float64{}
+		known := map[string]bool{}
 		for _, q := range positions {
-			known[strings.TrimSuffix(strings.ToUpper(q.Symbol), "-USD")] = q.Qty
+			known[strings.ToUpper(q.Symbol)] = true
 		}
-		for asset, bal := range acct.Holdings {
-			if _, exists := known[asset]; exists {
+		workingBySymbol := map[string]bool{}
+		if wo, werr := dbListOrders(e.db, p.ID, "working", 200); werr == nil {
+			for _, w := range wo {
+				workingBySymbol[strings.ToUpper(w.Symbol)] = true
+			}
+		}
+		for canonical, bal := range acct.Holdings {
+			key := strings.ToUpper(canonical)
+			if known[key] {
 				continue
 			}
-			sym := asset + "-USD"
-			price := 0.0
-			if mark, _ := dbGetMark(e.db, sym); mark != nil {
-				price = mark.Price
+			if workingBySymbol[key] {
+				continue
 			}
-			if err := dbInsertPositionRaw(e.db, p.ProjectID, p.ID, sym, "crypto", "", bal.Free, price); err == nil {
-				body := fmt.Sprintf("Discovered %v %s on broker (no prior local position). Seeded with avg_cost=$%.2f from current mark; reconciler will track future trades.", bal.Free, sym, price)
+			cls := inferAssetClass(canonical)
+			if err := dbInsertPositionRaw(e.db, p.ProjectID, p.ID, canonical, cls, "", bal.Free, 0); err == nil {
+				body := fmt.Sprintf("Discovered %v %s on broker (no prior local position). avg_cost = 0 — true cost basis unknown; sells will overstate realized P&L until operator sets it.", bal.Free, canonical)
 				_, _ = dbInsertJournal(e.db, p.ProjectID, p.ID, "note", body, map[string]any{
 					"source": "broker_reconcile", "kind": "discovered_position",
-					"symbol": sym, "qty": bal.Free, "seed_price": price,
+					"broker_slug": bb.Adapter.Slug(),
+					"symbol":      canonical, "qty": bal.Free, "avg_cost": 0,
 				})
 				emit("position.changed", map[string]any{
-					"portfolio_id": p.ID, "symbol": sym, "qty": bal.Free,
-					"avg_cost": price, "discovered": true,
+					"portfolio_id": p.ID, "symbol": canonical, "qty": bal.Free,
+					"avg_cost": 0.0, "discovered": true,
 				})
 			}
 		}
@@ -889,8 +964,8 @@ func cancelLiveWorkingOrders(e *engine, p *Portfolio, reason string) {
 	if globalCtx == nil {
 		return
 	}
-	bound := globalCtx.IntegrationFor("broker")
-	if bound == nil {
+	bb, ferr := brokerFor(globalCtx, p)
+	if ferr != nil {
 		return
 	}
 	working, err := dbListOrders(e.db, p.ID, "working", 200)
@@ -898,16 +973,23 @@ func cancelLiveWorkingOrders(e *engine, p *Portfolio, reason string) {
 		return
 	}
 	for _, o := range working {
-		args := map[string]any{
-			"symbol":            toBinanceSymbol(o.Symbol),
-			"origClientOrderId": o.ID,
-		}
-		_, err := globalCtx.PlatformAPI().ExecuteIntegrationTool(
-			bound.ConnectionID, bound.ToolFor("order.cancel"), args,
-		)
-		if err != nil {
-			e.logger.Warn("halt-cancel broker call failed", "order_id", o.ID, "err", err)
-			continue
+		brokerOrderID, _ := dbBrokerOrderIDFor(e.db, o.ID)
+		// Adapters without cancel-by-client-id need the broker order
+		// id. If we can't find one (rare — see toolOrderCancel), still
+		// flip locally; next reconcile will fix any state drift.
+		if brokerOrderID == "" && !bb.Adapter.Capabilities().CancelByClientID {
+			e.logger.Warn("halt-cancel: missing broker_order_id; local-only",
+				"order_id", o.ID, "broker", bb.Adapter.Slug())
+		} else {
+			args := bb.Adapter.CancelArgs(o, brokerOrderID)
+			_, err := globalCtx.PlatformAPI().ExecuteIntegrationTool(
+				bb.ConnectionID, bb.toolFor("order.cancel"), args,
+			)
+			if err != nil {
+				e.logger.Warn("halt-cancel broker call failed",
+					"order_id", o.ID, "broker", bb.Adapter.Slug(), "err", err)
+				continue
+			}
 		}
 		if _, err := e.db.Exec(`UPDATE orders SET status='cancelled', resolved_at=CURRENT_TIMESTAMP, rejection_detail=? WHERE id = ?`,
 			"halt_cancel_"+reason, o.ID); err == nil {

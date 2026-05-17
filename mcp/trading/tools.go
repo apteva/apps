@@ -19,15 +19,20 @@ import (
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		// ─── Lifecycle ────────────────────────────────────────────
-		{Name: "portfolio_create", Description: "Create a new portfolio. Args: name, mandate, allowed_classes, starting_cash (paper only — live pulls from broker), mode (paper|live; default paper). Live requires a broker integration bound to the install.",
+		{Name: "portfolio_create", Description: "Create a new portfolio. Args: name, mandate, allowed_classes, starting_cash (paper only — live pulls from broker), mode (paper|live; default paper), broker_slug (live only — e.g. binance-trading, alpaca-trading; optional if exactly one broker is bound). Use brokers_list first to see what's available.",
 			InputSchema: schemaObject(map[string]any{
 				"name":            map[string]any{"type": "string"},
 				"mandate":         map[string]any{"type": "string"},
 				"allowed_classes": map[string]any{"type": "array"},
 				"starting_cash":   map[string]any{"type": "number"},
 				"mode":            map[string]any{"type": "string", "enum": []string{"paper", "live"}},
+				"broker_slug":     map[string]any{"type": "string"},
 			}, []string{"name"}),
 			Handler: a.toolPortfolioCreate},
+
+		{Name: "brokers_list", Description: "List broker adapters registered in this build and their currently-bound connections. Use before portfolio_create with mode=live to pick a broker_slug.",
+			InputSchema: schemaObject(nil, nil),
+			Handler: a.toolBrokersList},
 
 		// ─── Reads ────────────────────────────────────────────────
 		{Name: "portfolio_list", Description: "List portfolios visible in this project.",
@@ -184,49 +189,96 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 
 	// ─── Live: broker required, cash + holdings come from the broker ──
 	if mode == "live" {
-		bound := ctx.IntegrationFor("broker")
-		if bound == nil {
-			return rejectStruct("broker_unbound",
-				"mode=live requires a broker connection bound to the 'broker' role; bind one in app settings or use mode=paper"), nil
+		brokerSlug := strings.TrimSpace(strArg(args, "broker_slug"))
+		if brokerSlug == "" {
+			// Single-broker-bound installs can default. Multi-broker
+			// installs surface an error so the agent picks explicitly.
+			defaulted, err := defaultBrokerSlug(ctx)
+			if err != nil {
+				return rejectStruct("broker_slug_required",
+					"mode=live requires broker_slug; "+err.Error()), nil
+			}
+			brokerSlug = defaulted
 		}
-		// Live portfolios are crypto-only on the Binance adapter.
-		// Reject mandates that try to mix in equity/etf/polymarket.
+		adapter := adapterBySlug(brokerSlug)
+		if adapter == nil {
+			return rejectStruct("unsupported_broker",
+				fmt.Sprintf("no adapter registered for %q (known: %v)", brokerSlug, registeredSlugs())), nil
+		}
+		// Validate every requested class against the adapter's capabilities.
 		for _, c := range classes {
-			if c != "crypto" {
-				return rejectStruct("invalid_args",
-					fmt.Sprintf("live mode (binance adapter) supports allowed_classes=[crypto] only; got %v", classes)), nil
+			if !adapterSupportsClass(adapter, c) {
+				return rejectStruct("class_unsupported_by_broker",
+					fmt.Sprintf("broker %s supports %v; cannot trade class %q",
+						brokerSlug, adapter.Capabilities().AssetClasses, c)), nil
 			}
 		}
-		acct, summaryErr := callBrokerAccount(ctx, bound)
-		if summaryErr != nil {
-			return rejectStruct("broker_error",
-				"could not read broker account: "+summaryErr.Error()), nil
+		// Resolve a live connection of this slug + pull initial account.
+		// brokerFor needs a Portfolio to know the slug, so we build a
+		// throwaway and reuse the same lookup at runtime later.
+		probe := &Portfolio{Mode: "live", BrokerSlug: brokerSlug}
+		bb, ferr := brokerFor(ctx, probe)
+		if ferr != nil {
+			return rejectStruct("broker_unbound",
+				fmt.Sprintf("broker %s has no active connection bound; bind one in app settings", brokerSlug)), nil
 		}
-		cash := acct.QuoteCash // USDT free
+		acctRaw, callErr := ctx.PlatformAPI().ExecuteIntegrationTool(
+			bb.ConnectionID, bb.toolFor("account.summary"), map[string]any{},
+		)
+		if callErr != nil || acctRaw == nil || !acctRaw.Success {
+			code, detail := adapter.ErrText(acctRaw, callErr)
+			return rejectStruct("broker_error",
+				fmt.Sprintf("could not read broker account (%s): %s", code, detail)), nil
+		}
+		acct, parseErr := adapter.ParseAccount(acctRaw.Data)
+		if parseErr != nil {
+			return rejectStruct("broker_error",
+				"could not parse broker account: "+parseErr.Error()), nil
+		}
+		// Adapters with a separate holdings call (Alpaca) — issue the
+		// second tool now and merge.
+		if tool := adapter.HoldingsTool(); tool != "" {
+			posRaw, perr := ctx.PlatformAPI().ExecuteIntegrationTool(
+				bb.ConnectionID, tool, map[string]any{},
+			)
+			if perr == nil && posRaw != nil && posRaw.Success {
+				if holdings, herr := adapter.ParseHoldings(posRaw.Data); herr == nil {
+					if acct.Holdings == nil {
+						acct.Holdings = map[string]brokerBalance{}
+					}
+					for k, v := range holdings {
+						acct.Holdings[k] = v
+					}
+				}
+			}
+		}
+		cash := acct.QuoteCash
 		id, err := dbCreatePortfolio(ctx.AppDB(), &Portfolio{
 			ProjectID: pid, Name: name, Mandate: mandate,
-			AllowedClasses: classes, StartingCash: cash, Mode: "live",
+			AllowedClasses: classes, StartingCash: cash,
+			Mode: "live", BrokerSlug: brokerSlug,
 		})
 		if err != nil { return nil, err }
 
-		// Seed positions from the broker's holdings — anything non-zero
-		// becomes a position with source=broker_reconcile semantics.
-		// avg_cost is unknown (broker doesn't ship it); we mark at the
-		// current price the engine knows about, falling back to 0.
+		// Seed positions from broker holdings. Symbols arrive in the
+		// adapter's canonical form (BTC-USD for binance, AAPL / BTC-USD
+		// for alpaca via fromAlpacaSymbol). avg_cost is unknown at seed
+		// time; subsequent fills weight in via dbApplyFill.
 		seeded := 0
-		for asset, bal := range acct.Holdings {
-			sym := asset + "-USD"
+		for canonical, bal := range acct.Holdings {
+			cls := inferAssetClass(canonical)
 			price := 0.0
-			if mark, _ := dbGetMark(ctx.AppDB(), sym); mark != nil {
+			if mark, _ := dbGetMark(ctx.AppDB(), canonical); mark != nil {
 				price = mark.Price
 			}
-			_ = dbInsertPositionRaw(ctx.AppDB(), pid, id, sym, "crypto", "", bal.Free, price)
+			_ = dbInsertPositionRaw(ctx.AppDB(), pid, id, canonical, cls, "", bal.Free, price)
 			seeded++
 		}
 		if seeded > 0 {
-			body := fmt.Sprintf("Seeded %d position(s) from broker holdings on portfolio create. avg_cost is unknown — reconciler tracks future trades from here.", seeded)
+			body := fmt.Sprintf("Seeded %d position(s) from %s holdings on portfolio create. avg_cost is unknown — reconciler tracks future trades from here.", seeded, brokerSlug)
 			if entryID, jerr := dbInsertJournal(ctx.AppDB(), pid, id, "note", body, map[string]any{
-				"source": "broker_reconcile", "kind": "create_seed", "broker_connection_id": bound.ConnectionID,
+				"source": "broker_reconcile", "kind": "create_seed",
+				"broker_slug": brokerSlug, "broker_connection_id": bb.ConnectionID,
 			}); jerr == nil {
 				emit("journal.appended", map[string]any{
 					"id": entryID, "portfolio_id": id, "kind": "note", "body": body,
@@ -237,13 +289,14 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 			"id": id, "name": name, "mandate": mandate,
 			"allowed_classes": classes, "starting_cash": cash,
 			"mode": "live", "project_id": pid,
-			"broker_connection_id": bound.ConnectionID,
+			"broker_slug": brokerSlug, "broker_connection_id": bb.ConnectionID,
 		})
 		return map[string]any{
-			"portfolio_id":  id,
-			"name":          name,
-			"starting_cash": cash,
-			"mode":          "live",
+			"portfolio_id":     id,
+			"name":             name,
+			"starting_cash":    cash,
+			"mode":             "live",
+			"broker_slug":      brokerSlug,
 			"seeded_positions": seeded,
 		}, nil
 	}
@@ -271,26 +324,85 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	return map[string]any{"portfolio_id": id, "name": name, "starting_cash": cash, "mode": "paper"}, nil
 }
 
-// callBrokerAccount — wraps ExecuteIntegrationTool + parseBinanceAccount.
-// Lives here (not binance.go) because future brokers will switch on
-// bound.AppSlug; the parse step itself is delegated to the adapter.
-func callBrokerAccount(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) (*brokerAccount, error) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(
-		bound.ConnectionID, bound.ToolFor("account.summary"), map[string]any{},
-	)
-	if err != nil {
-		return nil, err
+// defaultBrokerSlug — when portfolio_create's `broker_slug` arg is
+// absent, infer it from what's actually bound. If exactly one broker
+// slug has an active connection, use it. Otherwise the agent must pick
+// explicitly to avoid binding crypto to an equity-only broker by
+// accident.
+func defaultBrokerSlug(ctx *sdk.AppCtx) (string, error) {
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return "", errors.New("platform unavailable")
 	}
-	if res == nil || !res.Success {
-		code, detail := brokerErrText(res, nil)
-		return nil, fmt.Errorf("%s: %s", code, detail)
+	seen := map[string]bool{}
+	for _, a := range allAdapters() {
+		conns, err := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{AppSlug: a.Slug()})
+		if err != nil {
+			continue
+		}
+		for _, c := range conns {
+			if c.Status != "" && c.Status != "active" && c.Status != "connected" {
+				continue
+			}
+			seen[a.Slug()] = true
+		}
 	}
-	switch bound.AppSlug {
-	case "binance-trading", "":
-		return parseBinanceAccount(res.Data)
-	default:
-		return nil, fmt.Errorf("broker %q not supported in v0.2 (binance only)", bound.AppSlug)
+	switch len(seen) {
+	case 0:
+		return "", fmt.Errorf("no broker connection bound (known adapters: %v)", registeredSlugs())
+	case 1:
+		for slug := range seen {
+			return slug, nil
+		}
 	}
+	// Multiple bound: ambiguous, force the agent to choose.
+	bound := make([]string, 0, len(seen))
+	for slug := range seen {
+		bound = append(bound, slug)
+	}
+	return "", fmt.Errorf("multiple brokers bound (%v) — pass broker_slug to disambiguate", bound)
+}
+
+func registeredSlugs() []string {
+	as := allAdapters()
+	out := make([]string, 0, len(as))
+	for _, a := range as {
+		out = append(out, a.Slug())
+	}
+	return out
+}
+
+// toolBrokersList — enumerate registered adapters + bound connections,
+// so the agent can decide which slug to pass to portfolio_create. Pure
+// read; safe to call without a portfolio.
+func (a *App) toolBrokersList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	out := make([]map[string]any, 0)
+	for _, ad := range allAdapters() {
+		caps := ad.Capabilities()
+		row := map[string]any{
+			"slug":          ad.Slug(),
+			"asset_classes": caps.AssetClasses,
+			"order_types":   caps.OrderTypes,
+			"tifs":          caps.TIFs,
+			"fractional":    caps.Fractional,
+			"quote":         caps.QuoteCurrency,
+			"connections":   []map[string]any{},
+		}
+		if ctx != nil && ctx.PlatformAPI() != nil {
+			conns, err := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{AppSlug: ad.Slug()})
+			if err == nil {
+				rows := make([]map[string]any, 0, len(conns))
+				for _, c := range conns {
+					rows = append(rows, map[string]any{
+						"id": c.ID, "name": c.Name, "status": c.Status,
+					})
+				}
+				row["connections"] = rows
+				row["bound"] = len(rows) > 0
+			}
+		}
+		out = append(out, row)
+	}
+	return map[string]any{"brokers": out}, nil
 }
 
 // ─── Read handlers ────────────────────────────────────────────────
@@ -551,39 +663,19 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 
 	// ─── Live: forward to broker, apply response inline ─────────────
 	if pf.Mode == "live" {
-		bound := ctx.IntegrationFor("broker")
-		if bound == nil {
-			// Unbound mid-flight (operator unbound after portfolio create).
-			// Local order is rolled to rejected; agent gets a clear code.
-			_ = dbRejectOrder(ctx.AppDB(), o.ID, "broker_unbound",
-				"portfolio is mode=live but no broker is bound; rebind to resume")
-			emit("order.rejected", map[string]any{
-				"order_id": o.ID, "portfolio_id": pf.ID,
-				"code": "broker_unbound", "detail": "broker integration is not bound",
-			})
-			return rejectStruct("broker_unbound",
-				"portfolio is mode=live but no broker is bound"), nil
-		}
-		// Polymarket / equity / etf are not supported on the Binance adapter.
-		// Pre-trade caught this via allowed_classes, but be explicit.
-		if class != "crypto" {
-			_ = dbRejectOrder(ctx.AppDB(), o.ID, "broker_unsupported_class",
-				fmt.Sprintf("Binance adapter handles crypto only, got %q", class))
-			emit("order.rejected", map[string]any{"order_id": o.ID, "code": "broker_unsupported_class"})
-			return rejectStruct("broker_unsupported_class",
-				fmt.Sprintf("Binance adapter handles crypto only, got %q", class)), nil
-		}
-		brokerArgs, terr := translateOrder(o)
-		if terr != nil {
-			_ = dbRejectOrder(ctx.AppDB(), o.ID, "translate_failed", terr.Error())
-			emit("order.rejected", map[string]any{"order_id": o.ID, "code": "translate_failed", "detail": terr.Error()})
-			return rejectStruct("translate_failed", terr.Error()), nil
-		}
-		res, callErr := ctx.PlatformAPI().ExecuteIntegrationTool(
-			bound.ConnectionID, bound.ToolFor("order.place"), brokerArgs,
-		)
-		if callErr != nil || res == nil || !res.Success {
-			code, detail := brokerErrText(res, callErr)
+		bb, ferr := brokerFor(ctx, pf)
+		if ferr != nil {
+			// Unbound mid-flight (operator unbound after portfolio create),
+			// or the slug isn't registered. Local order flips rejected; agent
+			// gets a clear code so they can stop retrying.
+			code := "broker_unbound"
+			detail := "portfolio is mode=live but no broker is bound; rebind to resume"
+			if errors.Is(ferr, errBrokerUnbound) {
+				detail = fmt.Sprintf("broker %s has no active connection bound; rebind in app settings", pf.BrokerSlug)
+			} else if ferr != errPaper {
+				code = "broker_lookup_failed"
+				detail = ferr.Error()
+			}
 			_ = dbRejectOrder(ctx.AppDB(), o.ID, code, detail)
 			emit("order.rejected", map[string]any{
 				"order_id": o.ID, "portfolio_id": pf.ID,
@@ -591,11 +683,99 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			})
 			return rejectStruct(code, detail), nil
 		}
-		br, perr := parseBinanceOrder(res.Data)
+		adapter := bb.Adapter
+		// Capability check — defense in depth; portfolio_create already
+		// validated allowed_classes against the adapter, but a watchlist
+		// add could have widened the agent's reach.
+		if !adapterSupportsClass(adapter, class) {
+			_ = dbRejectOrder(ctx.AppDB(), o.ID, "broker_unsupported_class",
+				fmt.Sprintf("%s adapter does not support %q (supports %v)", adapter.Slug(), class, adapter.Capabilities().AssetClasses))
+			emit("order.rejected", map[string]any{"order_id": o.ID, "code": "broker_unsupported_class"})
+			return rejectStruct("broker_unsupported_class",
+				fmt.Sprintf("%s adapter does not support %q", adapter.Slug(), class)), nil
+		}
+		// Pre-trade cash check (live). Mirrors the paper-engine check in
+		// tryFill. Uses local pf.Cash (broker-reconciled, ≤60s stale) and
+		// the best price estimate we have. Broker will reject if we
+		// somehow get past this, but burning an API call on an obviously
+		// underfunded order isn't worth it.
+		if isBuySide(side) {
+			estPrice := 0.0
+			if lp != nil {
+				estPrice = *lp
+			} else if mark, mErr := dbGetMark(ctx.AppDB(), symbol); mErr == nil && mark != nil {
+				estPrice = mark.Price
+			}
+			if estPrice > 0 {
+				needed := qty * estPrice * 1.005 // 0.5% buffer for slippage + fees
+				if pf.Cash < needed {
+					detail := fmt.Sprintf("estimated need %.2f, local cash %.2f (broker-synced ≤60s ago)", needed, pf.Cash)
+					_ = dbRejectOrder(ctx.AppDB(), o.ID, "insufficient_cash", detail)
+					emit("order.rejected", map[string]any{
+						"order_id": o.ID, "portfolio_id": pf.ID,
+						"code": "insufficient_cash", "detail": detail,
+					})
+					return rejectStruct("insufficient_cash", detail), nil
+				}
+			}
+		}
+		brokerArgs, terr := adapter.TranslateOrder(o)
+		if terr != nil {
+			_ = dbRejectOrder(ctx.AppDB(), o.ID, "translate_failed", terr.Error())
+			emit("order.rejected", map[string]any{"order_id": o.ID, "code": "translate_failed", "detail": terr.Error()})
+			return rejectStruct("translate_failed", terr.Error()), nil
+		}
+		res, callErr := ctx.PlatformAPI().ExecuteIntegrationTool(
+			bb.ConnectionID, bb.toolFor("order.place"), brokerArgs,
+		)
+		// Ambiguous broker outcomes (network error, non-success response,
+		// parse failure of a successful response) leave the local order in
+		// 'working' state instead of marking it rejected. The broker may
+		// have accepted the order even when the response didn't make it
+		// back cleanly — rejecting locally while real money is working at
+		// the broker is the unrecoverable case. tryReconcile polls by
+		// client id next tick; if the broker reports "unknown order" the
+		// reconciler rejects locally then (exec.go).
+		uncertain := func(code, detail string) (any, error) {
+			if _, jerr := dbInsertJournal(ctx.AppDB(), pid, pf.ID, "rationale", rationale, map[string]any{
+				"order_id": o.ID, "symbol": symbol, "side": side, "qty": qty, "type": otype,
+				"broker_slug":          adapter.Slug(),
+				"broker_connection_id": bb.ConnectionID,
+				"client_order_id":      o.ID,
+				"broker_call_status":   "uncertain",
+				"broker_call_code":     code,
+				"broker_call_detail":   detail,
+			}); jerr == nil {
+				emit("journal.appended", map[string]any{
+					"portfolio_id": pf.ID, "kind": "rationale", "body": rationale,
+				})
+			}
+			emit("order.placed", map[string]any{
+				"order_id": o.ID, "portfolio_id": pf.ID, "symbol": symbol, "asset_class": class,
+				"side": side, "type": otype, "qty": qty,
+				"limit_price": o.LimitPrice, "stop_price": o.StopPrice,
+				"status": "working", "rationale": rationale, "mode": "live",
+				"broker_slug": adapter.Slug(),
+				"uncertain": true, "broker_call_code": code, "broker_call_detail": detail,
+			})
+			ctx.Logger().Warn("broker call uncertain — leaving order working for reconciler",
+				"order_id", o.ID, "broker", adapter.Slug(), "code", code, "detail", detail)
+			return map[string]any{
+				"order_id":  o.ID,
+				"status":    "working",
+				"uncertain": true,
+				"code":      code,
+				"detail":    detail,
+				"note":      "broker response was ambiguous; local order kept working — reconciler will poll by client_order_id",
+			}, nil
+		}
+		if callErr != nil || res == nil || !res.Success {
+			code, detail := adapter.ErrText(res, callErr)
+			return uncertain(code, detail)
+		}
+		br, perr := adapter.ParseOrder(res.Data)
 		if perr != nil {
-			_ = dbRejectOrder(ctx.AppDB(), o.ID, "broker_parse_failed", perr.Error())
-			emit("order.rejected", map[string]any{"order_id": o.ID, "code": "broker_parse_failed", "detail": perr.Error()})
-			return rejectStruct("broker_parse_failed", perr.Error()), nil
+			return uncertain("broker_parse_failed", perr.Error())
 		}
 
 		// Persist broker linkage in the rationale journal row before any
@@ -603,7 +783,8 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		// kind='rationale' alone.
 		if entryID, jerr := dbInsertJournal(ctx.AppDB(), pid, pf.ID, "rationale", rationale, map[string]any{
 			"order_id": o.ID, "symbol": symbol, "side": side, "qty": qty, "type": otype,
-			"broker_connection_id": bound.ConnectionID,
+			"broker_slug":          adapter.Slug(),
+			"broker_connection_id": bb.ConnectionID,
 			"broker_order_id":      br.BrokerOrderID,
 			"client_order_id":      o.ID,
 		}); jerr == nil {
@@ -627,11 +808,12 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			"status":           "working",
 			"rationale":        rationale,
 			"mode":             "live",
+			"broker_slug":      adapter.Slug(),
 			"broker_order_id":  br.BrokerOrderID,
 		})
 
-		// Apply any inline fills (Binance returns these synchronously for
-		// market orders) + reflect terminal status.
+		// Apply any inline fills (e.g. Binance market orders return them
+		// synchronously) + reflect terminal status.
 		if _, ferr := applyBrokerProgress(ctx.AppDB(), pid, pf, o, br); ferr != nil {
 			ctx.Logger().Warn("apply broker progress failed", "order_id", o.ID, "err", ferr)
 		}
@@ -695,32 +877,39 @@ func (a *App) toolOrderCancel(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	// "not found", we still flip locally — the reconciler would have
 	// caught it on the next tick anyway.
 	if pf.Mode == "live" {
-		bound := ctx.IntegrationFor("broker")
-		if bound == nil {
-			return rejectStruct("broker_unbound", "live cancel needs broker bound"), nil
+		bb, ferr := brokerFor(ctx, pf)
+		if ferr != nil {
+			return rejectStruct("broker_unbound",
+				fmt.Sprintf("live cancel needs broker bound (slug=%s): %s", pf.BrokerSlug, ferr.Error())), nil
 		}
+		adapter := bb.Adapter
 		brokerOrderID, _ := dbBrokerOrderIDFor(ctx.AppDB(), id)
-		if brokerOrderID == "" {
-			// No broker id stored — order was placed pre-binding or the
-			// rationale journal is missing. Flip locally only and warn.
-			ctx.Logger().Warn("live order missing broker_order_id; local-cancel only", "order_id", id)
+		caps := adapter.Capabilities()
+		if brokerOrderID == "" && !caps.CancelByClientID {
+			// Adapter requires the broker id and we don't have one (order
+			// placed pre-binding, or rationale journal is missing). Best
+			// we can do is flip locally; reconciler will reconcile when
+			// it next polls.
+			ctx.Logger().Warn("live order missing broker_order_id and adapter requires it; local-cancel only",
+				"order_id", id, "broker", adapter.Slug())
 		} else {
-			cancelArgs := map[string]any{
-				"symbol":            toBinanceSymbol(o.Symbol),
-				"origClientOrderId": id, // our newClientOrderId — stable across orderId reuse
-			}
+			cancelArgs := adapter.CancelArgs(o, brokerOrderID)
 			res, cerr := ctx.PlatformAPI().ExecuteIntegrationTool(
-				bound.ConnectionID, bound.ToolFor("order.cancel"), cancelArgs,
+				bb.ConnectionID, bb.toolFor("order.cancel"), cancelArgs,
 			)
 			if cerr != nil || res == nil || !res.Success {
-				code, detail := brokerErrText(res, cerr)
-				// Common case: -2011 "Unknown order sent" → already
-				// resolved upstream. Treat as success and let the
-				// reconciler reflect actual state.
-				if !strings.Contains(detail, "Unknown order") && code != "binance_-2011" {
+				code, detail := adapter.ErrText(res, cerr)
+				// "Already gone" cases (Binance -2011 / Alpaca 422 'order
+				// is not cancelable') are not failures from the local
+				// perspective — the order is already in a terminal state
+				// upstream; the reconciler will mirror it.
+				if !adapter.IsUnknownOrderError(code, detail) &&
+					!strings.Contains(strings.ToLower(detail), "not cancelable") &&
+					!strings.Contains(strings.ToLower(detail), "unknown order") {
 					return rejectStruct("broker_cancel_failed", code+": "+detail), nil
 				}
-				ctx.Logger().Info("broker reports order unknown — proceeding with local cancel", "order_id", id, "broker_order_id", brokerOrderID)
+				ctx.Logger().Info("broker reports order already resolved — proceeding with local cancel",
+					"order_id", id, "broker", adapter.Slug(), "broker_order_id", brokerOrderID)
 			}
 		}
 	}

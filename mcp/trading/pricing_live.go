@@ -14,6 +14,8 @@ package main
 import (
 	"sync"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 const (
@@ -23,11 +25,12 @@ const (
 )
 
 type liveProvider struct {
-	crypto     *binancePublic
-	poly       *polymarketPublic
-	fallback   Provider
-	cache      *markCache
-	health     *providerHealth
+	crypto   *binancePublic
+	poly     *polymarketPublic
+	equity   *alpacaMarketData // nil until SetPlatform is called from OnMount
+	fallback Provider
+	cache    *markCache
+	health   *providerHealth
 }
 
 func newLiveProvider(fallback Provider) *liveProvider {
@@ -38,6 +41,14 @@ func newLiveProvider(fallback Provider) *liveProvider {
 		cache:    newMarkCache(cacheTTL),
 		health:   newProviderHealth(),
 	}
+}
+
+// SetPlatform wires the alpaca-market-data path. Called from OnMount
+// after globalCtx is set so the equity provider can dial the platform
+// for the bound connection. Safe to call multiple times; subsequent
+// calls swap the platform reference.
+func (p *liveProvider) SetPlatform(platform sdk.PlatformClient, logger sdk.Logger) {
+	p.equity = newAlpacaMarketData(platform, logger)
 }
 
 // Quote — single-symbol fetch with cache + fallback.
@@ -65,9 +76,23 @@ func (p *liveProvider) Quote(symbol string) (*Mark, error) {
 		p.health.ok("polymarket", "polymarket-public")
 		p.cache.put(m)
 		return m, nil
+	case "equity", "etf":
+		// Route to Alpaca Market Data when bound; otherwise fall back to
+		// mock walks so paper portfolios keep ticking on a fresh install.
+		if p.equity != nil && p.equity.available() {
+			m, err := p.equity.Quote(symbol)
+			if err != nil {
+				p.health.note(cls, err)
+				return p.fallback.Quote(symbol)
+			}
+			p.health.ok(cls, alpacaMarketDataSlug)
+			p.cache.put(m)
+			return m, nil
+		}
+		p.health.ok(cls, "mock")
+		return p.fallback.Quote(symbol)
 	default:
-		// Equity / ETF — mock for v0.2.
-		p.health.ok("equity", "mock")
+		p.health.ok(cls, "mock")
 		return p.fallback.Quote(symbol)
 	}
 }
@@ -117,12 +142,32 @@ func (p *liveProvider) Universe() []*Mark {
 		out = append(out, filterByClass(p.fallback.Universe(), "polymarket")...)
 	}
 
-	// Equity / ETF — always from mock in v0.2. Stamp health so the
-	// UI's data-source pill renders something explicit per class.
-	p.health.ok("equity", "mock")
-	p.health.ok("etf", "mock")
-	out = append(out, filterByClass(p.fallback.Universe(), "equity")...)
-	out = append(out, filterByClass(p.fallback.Universe(), "etf")...)
+	// Equity / ETF — Alpaca Market Data when bound, mock otherwise.
+	// Batched snapshot call covers all tracked equity tickers in one
+	// HTTP request; per-class failure falls back to mock.
+	if p.equity != nil && p.equity.available() {
+		eqSyms := alpacaEquitySymbolsKnown()
+		if eMarks, err := p.equity.UniverseBatch(eqSyms); err == nil && len(eMarks) > 0 {
+			p.health.ok("equity", alpacaMarketDataSlug)
+			p.health.ok("etf", alpacaMarketDataSlug)
+			for _, m := range eMarks {
+				p.cache.put(m)
+			}
+			out = append(out, eMarks...)
+		} else {
+			if err != nil {
+				p.health.note("equity", err)
+				p.health.note("etf", err)
+			}
+			out = append(out, filterByClass(p.fallback.Universe(), "equity")...)
+			out = append(out, filterByClass(p.fallback.Universe(), "etf")...)
+		}
+	} else {
+		p.health.ok("equity", "mock")
+		p.health.ok("etf", "mock")
+		out = append(out, filterByClass(p.fallback.Universe(), "equity")...)
+		out = append(out, filterByClass(p.fallback.Universe(), "etf")...)
+	}
 
 	return out
 }

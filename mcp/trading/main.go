@@ -40,8 +40,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.2.0
-description: Trading desk for Apteva agents (paper + live via broker integration).
+version: 0.4.0
+description: Trading desk for Apteva agents (paper + live via per-portfolio broker integration).
 author: Apteva
 scopes: [project, global]
 requires:
@@ -50,30 +50,42 @@ requires:
     - platform.instances.read
     - net.egress
     - platform.connections.execute
+    - platform.connections.read
   integrations:
     - role: broker
       kind: integration
       required: false
-      compatible_slugs: [binance-trading]
+      compatible_slugs: [binance-trading, alpaca-trading, polymarket-clob]
       capabilities:
         - order.place
         - order.cancel
         - order.status
         - account.summary
-        - market.quote
+        - positions.list
       tools:
         order.place: create_order
         order.cancel: cancel_order
         order.status: get_order
         account.summary: get_account
-        market.quote: get_price
+        positions.list: list_positions
       label: "Broker (optional — enables live trading)"
+    - role: market_data_equity
+      kind: integration
+      required: false
+      compatible_slugs: [alpaca-market-data]
+      capabilities:
+        - quotes.equity
+      tools:
+        quotes.equity: stock_snapshots
+      label: "Market Data — Equity (optional — real prices for live equity portfolios)"
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
     - name: portfolio_create
-      description: "Create a new paper portfolio."
+      description: "Create a paper or live portfolio (live: pass broker_slug)."
+    - name: brokers_list
+      description: "List registered broker adapters + bound connections."
     - name: portfolio_list
       description: "List portfolios visible to this agent."
     - name: portfolio_get
@@ -110,7 +122,7 @@ provides:
     - slot: project.page
       label: Trading
       icon: trending-up
-      entry: /ui/panel/TradingPanel.html
+      entry: /ui/TradingPanel.mjs
 runtime:
   kind: source
   source:
@@ -157,6 +169,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// Engine bootstrap — pricing provider, then the shared engine
 	// pointer the workers read.
 	provider := newProvider(ctx.Config().Get("pricing_provider"))
+	// Live provider needs the platform client to pull equity/etf
+	// snapshots from a bound alpaca-market-data connection. Wired
+	// post-construction so newProvider stays a pure factory.
+	if lp, ok := provider.(*liveProvider); ok {
+		lp.SetPlatform(ctx.PlatformAPI(), ctx.Logger())
+	}
 	globalEngine = &engine{
 		db:       ctx.AppDB(),
 		provider: provider,
@@ -224,7 +242,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/portfolios",   Handler: a.handleHTTPPortfoliosCollection},
 		{Pattern: "/portfolios/",  Handler: a.handleHTTPPortfolioItem},
 		{Pattern: "/quotes/",      Handler: a.handleHTTPQuote},
+		{Pattern: "/history/",     Handler: a.handleHTTPHistory},
 		{Pattern: "/universe",     Handler: a.handleHTTPUniverse},
+		{Pattern: "/brokers",      Handler: a.handleHTTPBrokers},
 		{Pattern: "/healthz/details", Handler: a.handleHTTPHealthDetails},
 	}
 }
@@ -256,6 +276,10 @@ func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
 	}
 	sub := ""
 	if len(parts) > 1 { sub = parts[1] }
+	subID := ""
+	if len(parts) > 2 { subID = parts[2] }
+	action := ""
+	if len(parts) > 3 { action = parts[3] }
 
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil { httpErr(w, http.StatusBadRequest, err.Error()); return }
@@ -334,9 +358,48 @@ func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
 		if entries == nil { entries = []*JournalEntry{} }
 		httpJSON(w, 200, map[string]any{"entries": entries})
 
+	// POST /portfolios/{id}/orders/{oid}/cancel — UI cancel button.
+	// Mirrors the order_cancel MCP tool; same broker-fan-out logic.
+	case sub == "orders" && subID != "" && action == "cancel" && r.Method == http.MethodPost:
+		reason := r.URL.Query().Get("reason")
+		out, err := a.toolOrderCancel(globalCtx, map[string]any{
+			"_project_id": pid, "order_id": subID, "reason": reason,
+		})
+		if err != nil { httpErr(w, 400, err.Error()); return }
+		httpJSON(w, 200, out)
+
+	// Watchlist — add via POST {symbol}, remove via DELETE ?symbol=X.
+	case sub == "watchlist" && r.Method == http.MethodPost:
+		var body struct{ Symbol string `json:"symbol"` }
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		out, err := a.toolWatchlistAdd(globalCtx, map[string]any{
+			"_project_id": pid, "portfolio_id": float64(pf.ID), "symbol": body.Symbol,
+		})
+		if err != nil { httpErr(w, 400, err.Error()); return }
+		httpJSON(w, 200, out)
+
+	case sub == "watchlist" && r.Method == http.MethodDelete:
+		sym := r.URL.Query().Get("symbol")
+		out, err := a.toolWatchlistRemove(globalCtx, map[string]any{
+			"_project_id": pid, "portfolio_id": float64(pf.ID), "symbol": sym,
+		})
+		if err != nil { httpErr(w, 400, err.Error()); return }
+		httpJSON(w, 200, out)
+
 	default:
 		httpErr(w, http.StatusNotFound, "no such route")
 	}
+}
+
+// handleHTTPBrokers — list every registered broker adapter + its
+// currently-bound connections. Mirrors the brokers_list MCP tool so the
+// panel's Brokers tab + portfolio_create's broker_slug picker don't
+// have to call MCP from the browser.
+func (a *App) handleHTTPBrokers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet { httpErr(w, 405, "GET only"); return }
+	out, err := a.toolBrokersList(globalCtx, map[string]any{})
+	if err != nil { httpErr(w, 500, err.Error()); return }
+	httpJSON(w, 200, out)
 }
 
 func (a *App) httpListPortfolios(w http.ResponseWriter, r *http.Request) {
@@ -362,36 +425,23 @@ func (a *App) httpListPortfolios(w http.ResponseWriter, r *http.Request) {
 func (a *App) httpCreatePortfolio(w http.ResponseWriter, r *http.Request) {
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil { httpErr(w, 400, err.Error()); return }
-	var body struct {
-		Name           string   `json:"name"`
-		AgentID        string   `json:"agent_id"`
-		Mandate        string   `json:"mandate"`
-		AllowedClasses []string `json:"allowed_classes"`
-		StartingCash   float64  `json:"starting_cash"`
-	}
+	var body map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, 400, "invalid json"); return
 	}
-	if body.Name == "" { httpErr(w, 400, "name required"); return }
-	if body.StartingCash <= 0 {
-		// fall back to install default
-		def := globalCtx.Config().Get("starting_cash")
-		if v, err := strconv.ParseFloat(def, 64); err == nil && v > 0 {
-			body.StartingCash = v
-		} else {
-			body.StartingCash = 100_000
-		}
+	if name, _ := body["name"].(string); name == "" {
+		httpErr(w, 400, "name required"); return
 	}
-	if len(body.AllowedClasses) == 0 {
-		body.AllowedClasses = []string{"equity", "etf"}
-	}
-	id, err := dbCreatePortfolio(globalCtx.AppDB(), &Portfolio{
-		ProjectID: pid, Name: body.Name, AgentID: body.AgentID,
-		Mandate: body.Mandate, AllowedClasses: body.AllowedClasses,
-		StartingCash: body.StartingCash,
-	})
+	// Route through the MCP tool handler so HTTP + agent paths share
+	// the full pre-trade pipeline: broker validation for live mode,
+	// allowed_classes ↔ adapter capability check, holdings seeding,
+	// emit events. Paper mode falls through to the same code path
+	// dbCreatePortfolio used to handle directly.
+	body["_project_id"] = pid
+	body["source_override"] = "human"
+	out, err := a.toolPortfolioCreate(globalCtx, body)
 	if err != nil { httpErr(w, 500, err.Error()); return }
-	httpJSON(w, 201, map[string]any{"portfolio_id": id})
+	httpJSON(w, 201, out)
 }
 
 func (a *App) handleHTTPQuote(w http.ResponseWriter, r *http.Request) {
@@ -399,6 +449,22 @@ func (a *App) handleHTTPQuote(w http.ResponseWriter, r *http.Request) {
 	symbol := strings.TrimPrefix(r.URL.Path, "/quotes/")
 	if symbol == "" { httpErr(w, 400, "symbol required"); return }
 	out, err := (&App{}).toolMarketQuote(globalCtx, map[string]any{"symbol": symbol})
+	if err != nil { httpErr(w, 404, err.Error()); return }
+	httpJSON(w, 200, out)
+}
+
+// handleHTTPHistory — OHLCV bars (or polymarket YES probability) for a
+// symbol. Wraps the market_history MCP tool. UI uses this for the Trade
+// tab's price chart and the Positions tab's sparklines.
+func (a *App) handleHTTPHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet { httpErr(w, 405, "GET only"); return }
+	symbol := strings.TrimPrefix(r.URL.Path, "/history/")
+	if symbol == "" { httpErr(w, 400, "symbol required"); return }
+	rng := r.URL.Query().Get("range")
+	if rng == "" { rng = "1D" }
+	out, err := (&App{}).toolMarketHistory(globalCtx, map[string]any{
+		"symbol": symbol, "range": rng,
+	})
 	if err != nil { httpErr(w, 404, err.Error()); return }
 	httpJSON(w, 200, out)
 }

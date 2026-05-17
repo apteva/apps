@@ -26,6 +26,7 @@ type Portfolio struct {
 	Cash           float64  `json:"cash"`
 	Status         string   `json:"status"`
 	Mode           string   `json:"mode"`
+	BrokerSlug     string   `json:"broker_slug,omitempty"` // "binance-trading", "alpaca-trading", … — NULL for paper
 	CreatedAt      string   `json:"created_at,omitempty"`
 	UpdatedAt      string   `json:"updated_at,omitempty"`
 
@@ -127,10 +128,14 @@ func dbCreatePortfolio(db *sql.DB, p *Portfolio) (int64, error) {
 	if mode == "" {
 		mode = "paper"
 	}
+	var brokerArg any
+	if strings.TrimSpace(p.BrokerSlug) != "" {
+		brokerArg = p.BrokerSlug
+	}
 	res, err := db.Exec(`
-		INSERT INTO portfolios (project_id, name, agent_id, mandate, allowed_classes, starting_cash, cash, mode)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ProjectID, p.Name, p.AgentID, p.Mandate, string(classesJSON), p.StartingCash, p.StartingCash, mode)
+		INSERT INTO portfolios (project_id, name, agent_id, mandate, allowed_classes, starting_cash, cash, mode, broker_slug)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ProjectID, p.Name, p.AgentID, p.Mandate, string(classesJSON), p.StartingCash, p.StartingCash, mode, brokerArg)
 	if err != nil {
 		return 0, err
 	}
@@ -140,7 +145,7 @@ func dbCreatePortfolio(db *sql.DB, p *Portfolio) (int64, error) {
 func dbGetPortfolio(db *sql.DB, projectID string, id int64) (*Portfolio, error) {
 	row := db.QueryRow(`
 		SELECT id, project_id, name, COALESCE(agent_id, ''), mandate, allowed_classes,
-		       starting_cash, cash, status, mode, created_at, updated_at
+		       starting_cash, cash, status, mode, COALESCE(broker_slug, ''), created_at, updated_at
 		FROM portfolios WHERE id = ? AND project_id = ?`, id, projectID)
 	return scanPortfolio(row)
 }
@@ -150,7 +155,7 @@ func dbGetPortfolio(db *sql.DB, projectID string, id int64) (*Portfolio, error) 
 func dbGetPortfolioAnyProject(db *sql.DB, id int64) (*Portfolio, error) {
 	row := db.QueryRow(`
 		SELECT id, project_id, name, COALESCE(agent_id, ''), mandate, allowed_classes,
-		       starting_cash, cash, status, mode, created_at, updated_at
+		       starting_cash, cash, status, mode, COALESCE(broker_slug, ''), created_at, updated_at
 		FROM portfolios WHERE id = ?`, id)
 	return scanPortfolio(row)
 }
@@ -158,7 +163,7 @@ func dbGetPortfolioAnyProject(db *sql.DB, id int64) (*Portfolio, error) {
 func dbListPortfolios(db *sql.DB, projectID string) ([]*Portfolio, error) {
 	rows, err := db.Query(`
 		SELECT id, project_id, name, COALESCE(agent_id, ''), mandate, allowed_classes,
-		       starting_cash, cash, status, mode, created_at, updated_at
+		       starting_cash, cash, status, mode, COALESCE(broker_slug, ''), created_at, updated_at
 		FROM portfolios WHERE project_id = ? ORDER BY id`, projectID)
 	if err != nil {
 		return nil, err
@@ -179,7 +184,7 @@ func dbListPortfolios(db *sql.DB, projectID string) ([]*Portfolio, error) {
 func dbAllPortfolios(db *sql.DB) ([]*Portfolio, error) {
 	rows, err := db.Query(`
 		SELECT id, project_id, name, COALESCE(agent_id, ''), mandate, allowed_classes,
-		       starting_cash, cash, status, mode, created_at, updated_at
+		       starting_cash, cash, status, mode, COALESCE(broker_slug, ''), created_at, updated_at
 		FROM portfolios ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -200,7 +205,7 @@ func scanPortfolio(row *sql.Row) (*Portfolio, error) {
 	var p Portfolio
 	var classesJSON string
 	if err := row.Scan(&p.ID, &p.ProjectID, &p.Name, &p.AgentID, &p.Mandate,
-		&classesJSON, &p.StartingCash, &p.Cash, &p.Status, &p.Mode,
+		&classesJSON, &p.StartingCash, &p.Cash, &p.Status, &p.Mode, &p.BrokerSlug,
 		&p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
 	}
@@ -214,7 +219,7 @@ func scanPortfolioRows(rows *sql.Rows) (*Portfolio, error) {
 	var p Portfolio
 	var classesJSON string
 	if err := rows.Scan(&p.ID, &p.ProjectID, &p.Name, &p.AgentID, &p.Mandate,
-		&classesJSON, &p.StartingCash, &p.Cash, &p.Status, &p.Mode,
+		&classesJSON, &p.StartingCash, &p.Cash, &p.Status, &p.Mode, &p.BrokerSlug,
 		&p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
 	}

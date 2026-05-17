@@ -8,8 +8,11 @@ package main
 // orders translate to STOP_LOSS_LIMIT (Binance spot doesn't ship a
 // pure stop-market). Polymarket is paper-only on this adapter.
 //
-// Adding a second broker means a sibling file (alpaca.go, …) with the
-// same four entry points — no changes to tools.go or exec.go.
+// The package-level functions stay for backwards-compatibility with
+// tests + callers that want raw access; the brokerAdapter implementation
+// at the bottom of this file is what tools.go and exec.go dispatch
+// through. Adding a sibling broker = a new file mirroring the same
+// structure plus a single registerAdapter() call in init().
 
 import (
 	"encoding/json"
@@ -20,6 +23,72 @@ import (
 
 	sdk "github.com/apteva/app-sdk"
 )
+
+func init() { registerAdapter(&binanceAdapter{}) }
+
+type binanceAdapter struct{}
+
+func (binanceAdapter) Slug() string { return "binance-trading" }
+
+func (binanceAdapter) Capabilities() brokerCapabilities {
+	return brokerCapabilities{
+		AssetClasses:     []string{"crypto"},
+		OrderTypes:       []string{"market", "limit", "stop"},
+		TIFs:             []string{"day", "gtc", "ioc", "fok"},
+		Fractional:       true,
+		CancelByClientID: true, // origClientOrderId
+		QuoteCurrency:    "USDT",
+	}
+}
+
+func (binanceAdapter) ToolMap() map[string]string {
+	return map[string]string{
+		"order.place":     "create_order",
+		"order.cancel":    "cancel_order",
+		"order.status":    "get_order",
+		"account.summary": "get_account",
+	}
+}
+
+func (binanceAdapter) ToBrokerSymbol(canonical string) string { return toBinanceSymbol(canonical) }
+func (binanceAdapter) TranslateOrder(o *Order) (map[string]any, error) {
+	return translateOrder(o)
+}
+func (binanceAdapter) ParseOrder(raw json.RawMessage) (*brokerOrderResult, error) {
+	return parseBinanceOrder(raw)
+}
+func (binanceAdapter) ParseAccount(raw json.RawMessage) (*brokerAccount, error) {
+	return parseBinanceAccount(raw)
+}
+
+// Binance's get_account already includes holdings — no second call.
+func (binanceAdapter) HoldingsTool() string { return "" }
+func (binanceAdapter) ParseHoldings(raw json.RawMessage) (map[string]brokerBalance, error) {
+	return map[string]brokerBalance{}, nil
+}
+
+func (binanceAdapter) CancelArgs(o *Order, brokerOrderID string) map[string]any {
+	// origClientOrderId is stable across orderId reuse — prefer it.
+	return map[string]any{
+		"symbol":            toBinanceSymbol(o.Symbol),
+		"origClientOrderId": o.ID,
+	}
+}
+
+func (binanceAdapter) StatusArgs(o *Order, brokerOrderID string) map[string]any {
+	return map[string]any{
+		"symbol":            toBinanceSymbol(o.Symbol),
+		"origClientOrderId": o.ID,
+	}
+}
+
+func (binanceAdapter) IsUnknownOrderError(code, detail string) bool {
+	return code == "binance_-2013" || strings.Contains(detail, "does not exist")
+}
+
+func (binanceAdapter) ErrText(res *sdk.ExecuteResult, err error) (code, detail string) {
+	return brokerErrText(res, err)
+}
 
 // ─── Symbol mapping ────────────────────────────────────────────────
 //
@@ -261,8 +330,11 @@ func parseBinanceAccount(raw json.RawMessage) (*brokerAccount, error) {
 			out.QuoteCash = free
 			continue
 		}
-		out.Holdings[strings.ToUpper(b.Asset)] = brokerBalance{
-			Asset: strings.ToUpper(b.Asset),
+		// Canonicalize to local form (BTC-USD) so reconcile code can
+		// treat every adapter's holdings map the same way.
+		canonical := strings.ToUpper(b.Asset) + "-USD"
+		out.Holdings[canonical] = brokerBalance{
+			Asset: canonical,
 			Free:  free,
 		}
 	}
