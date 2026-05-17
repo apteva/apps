@@ -258,6 +258,8 @@ function PriceChart({ symbol, assetClass, api }: {
   const [bars, setBars] = useState<Bar[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
 
   useEffect(() => {
     if (!symbol) return;
@@ -272,20 +274,65 @@ function PriceChart({ symbol, assetClass, api }: {
 
   if (!symbol) return null;
 
-  const W = 600, H = 180, padX = 8, padY = 12;
+  // SVG viewBox: 1000 wide, 300 tall. Chart pane reserves 56px on the
+  // right for Y-axis labels + 24px at the bottom for X-axis labels.
+  const W = 1000, H = 300;
+  const padL = 6, padR = 60, padT = 8, padB = 28;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+
   const values = bars.map(barValue);
-  const min = values.length ? Math.min(...values) : 0;
-  const max = values.length ? Math.max(...values) : 1;
+  const times = bars.map((b) => b.t);
+  const minRaw = values.length ? Math.min(...values) : 0;
+  const maxRaw = values.length ? Math.max(...values) : 1;
+  // Pad y-range 5% above/below so the line never touches the edges.
+  const headroom = (maxRaw - minRaw || maxRaw) * 0.08;
+  const min = minRaw - headroom;
+  const max = maxRaw + headroom;
   const range01 = max - min || 1;
   const first = values[0] ?? 0;
   const last = values[values.length - 1] ?? 0;
   const up = last >= first;
-  const lineColor = up ? "#16a34a" : "#dc2626";
-  const toX = (i: number) => padX + (i / Math.max(values.length - 1, 1)) * (W - 2 * padX);
-  const toY = (v: number) => H - padY - ((v - min) / range01) * (H - 2 * padY);
-  const pathD = values.map((v, i) => `${i === 0 ? "M" : "L"} ${toX(i).toFixed(2)} ${toY(v).toFixed(2)}`).join(" ");
-  const fillD = pathD + ` L ${toX(values.length - 1).toFixed(2)} ${H - padY} L ${toX(0).toFixed(2)} ${H - padY} Z`;
-  const lastY = values.length ? toY(last) : H / 2;
+  // Soft accent + a tint for direction. Real trading platforms use the
+  // accent for "no change" then green/red only when there's signal —
+  // avoids the chart screaming red the whole day for a 0.1% move.
+  const trendStrong = first > 0 && Math.abs((last - first) / first) > 0.001;
+  const lineColor = !trendStrong ? "#60a5fa" : up ? "#22c55e" : "#ef4444";
+  const lineColorSoft = lineColor;
+
+  const toX = (i: number) => padL + (i / Math.max(values.length - 1, 1)) * plotW;
+  const toY = (v: number) => padT + (1 - (v - min) / range01) * plotH;
+
+  // Smooth path via Catmull-Rom → cubic-Bezier conversion. Real
+  // chart libs do this; gives a continuous-looking curve instead
+  // of the jagged polyline at low bar counts.
+  const pts = values.map((v, i) => [toX(i), toY(v)] as [number, number]);
+  const linePath = catmullRomPath(pts);
+  const fillPath = linePath + ` L ${toX(values.length - 1).toFixed(2)} ${H - padB} L ${toX(0).toFixed(2)} ${H - padB} Z`;
+
+  // Hover: snap to nearest bar based on cursor X.
+  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (!svgRef.current || values.length === 0) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const xPx = e.clientX - rect.left;
+    const pctX = xPx / rect.width;
+    const xVB = pctX * W;
+    if (xVB < padL || xVB > W - padR) { setHoverIdx(null); return; }
+    const i = Math.round(((xVB - padL) / plotW) * (values.length - 1));
+    setHoverIdx(Math.max(0, Math.min(values.length - 1, i)));
+  };
+  const onLeave = () => setHoverIdx(null);
+
+  const hoverV = hoverIdx != null ? values[hoverIdx] : null;
+  const hoverT = hoverIdx != null ? times[hoverIdx] : null;
+
+  // Y-axis ticks: 4 values across the range (max, two middle, min)
+  const yTicks = values.length
+    ? [maxRaw, minRaw + (maxRaw - minRaw) * 0.66, minRaw + (maxRaw - minRaw) * 0.33, minRaw]
+    : [];
+
+  // X-axis ticks: 4 evenly spaced timestamps.
+  const xTicks = values.length >= 2 ? [0, Math.floor(values.length / 3), Math.floor((values.length * 2) / 3), values.length - 1] : [];
 
   return (
     <Section
@@ -306,46 +353,236 @@ function PriceChart({ symbol, assetClass, api }: {
         </div>
       }
     >
-      <div className="border border-border rounded bg-bg-card p-2">
-        {error ? (
-          <div className="h-44 flex items-center justify-center text-text-dim text-xs">{error}</div>
-        ) : loading && values.length === 0 ? (
-          <div className="h-44 flex items-center justify-center text-text-dim text-xs">Loading…</div>
-        ) : values.length < 2 ? (
-          <div className="h-44 flex items-center justify-center text-text-dim text-xs">No history available</div>
-        ) : (
-          <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="w-full h-44 block">
-            <defs>
-              <linearGradient id="trading-chart-fill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor={lineColor} stopOpacity="0.18" />
-                <stop offset="100%" stopColor={lineColor} stopOpacity="0" />
-              </linearGradient>
-            </defs>
-            {[0.25, 0.5, 0.75].map((p) => {
-              const y = padY + p * (H - 2 * padY);
-              return (
-                <line key={p} x1={padX} x2={W - padX} y1={y} y2={y}
-                  stroke="currentColor" className="text-border" strokeWidth="1" strokeDasharray="2 4" />
-              );
-            })}
-            <path d={fillD} fill="url(#trading-chart-fill)" />
-            <path d={pathD} fill="none" stroke={lineColor} strokeWidth="1.5" />
-            <circle cx={toX(values.length - 1)} cy={lastY} r="3" fill={lineColor} />
-          </svg>
-        )}
-        <div className="flex justify-between text-xs text-text-dim px-2 pt-1">
-          <span>{values.length > 0 ? formatPrice(min, assetClass) : "—"}</span>
-          <span className={`font-semibold ${up ? "text-green" : "text-red"}`}>
-            {values.length > 0 ? formatPrice(last, assetClass) : "—"}
-            {first > 0 && values.length > 1 && (
-              <span className="ml-1 opacity-80">({formatPct(((last - first) / first) * 100)})</span>
-            )}
-          </span>
-          <span>{values.length > 0 ? formatPrice(max, assetClass) : "—"}</span>
+      <div className="border border-border rounded bg-bg-card overflow-hidden">
+        {/* Header strip: symbol + last + change */}
+        <div className="px-3 py-2 flex items-baseline gap-2 border-b border-border">
+          <span className="text-sm font-semibold text-text">{symbol}</span>
+          <span className={`text-xs px-1.5 py-0.5 rounded font-semibold ${classBadgeClass(assetClass)}`}>{assetClass}</span>
+          <span className="flex-1" />
+          {values.length > 0 && (
+            <>
+              <span className="text-base font-semibold tabular-nums text-text">{formatPrice(last, assetClass)}</span>
+              {first > 0 && (
+                <span className={`text-xs tabular-nums ${trendStrong ? (up ? "text-green" : "text-red") : "text-text-muted"}`}>
+                  {formatPct(((last - first) / first) * 100)}
+                </span>
+              )}
+            </>
+          )}
         </div>
+
+        {error ? (
+          <div className="h-56 flex items-center justify-center text-text-dim text-xs">{error}</div>
+        ) : loading && values.length === 0 ? (
+          <div className="h-56 flex items-center justify-center text-text-dim text-xs">Loading…</div>
+        ) : values.length < 2 ? (
+          <div className="h-56 flex items-center justify-center text-text-dim text-xs">No history available</div>
+        ) : (
+          <div className="relative">
+            <svg
+              ref={svgRef}
+              viewBox={`0 0 ${W} ${H}`}
+              preserveAspectRatio="none"
+              className="block w-full"
+              style={{ height: 240 }}
+              onMouseMove={onMove}
+              onMouseLeave={onLeave}
+            >
+              <defs>
+                <linearGradient id="trading-chart-fill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={lineColorSoft} stopOpacity="0.28" />
+                  <stop offset="100%" stopColor={lineColorSoft} stopOpacity="0" />
+                </linearGradient>
+              </defs>
+
+              {/* Horizontal gridlines, one per Y-tick value */}
+              {yTicks.map((v, i) => {
+                const y = toY(v);
+                return (
+                  <line
+                    key={`gy-${i}`}
+                    x1={padL} x2={W - padR} y1={y} y2={y}
+                    stroke="currentColor"
+                    className="text-border"
+                    strokeWidth="1"
+                    vectorEffect="non-scaling-stroke"
+                    strokeDasharray="2 4"
+                    strokeOpacity="0.5"
+                  />
+                );
+              })}
+
+              {/* Area fill */}
+              <path d={fillPath} fill="url(#trading-chart-fill)" />
+
+              {/* The price line — vector-effect keeps the stroke width
+                  constant regardless of horizontal SVG stretching, which
+                  is what fixes the old "fat blob" rendering. */}
+              <path
+                d={linePath}
+                fill="none"
+                stroke={lineColor}
+                strokeWidth="1.5"
+                vectorEffect="non-scaling-stroke"
+                strokeLinejoin="round"
+                strokeLinecap="round"
+              />
+
+              {/* Last-price horizontal dashed line + tick on the right */}
+              <line
+                x1={padL} x2={W - padR}
+                y1={toY(last)} y2={toY(last)}
+                stroke={lineColor}
+                strokeWidth="1"
+                vectorEffect="non-scaling-stroke"
+                strokeDasharray="3 4"
+                strokeOpacity="0.5"
+              />
+
+              {/* Hover crosshair + price dot */}
+              {hoverIdx != null && (
+                <>
+                  <line
+                    x1={toX(hoverIdx)} x2={toX(hoverIdx)}
+                    y1={padT} y2={H - padB}
+                    stroke="currentColor"
+                    className="text-text-dim"
+                    strokeWidth="1"
+                    vectorEffect="non-scaling-stroke"
+                    strokeDasharray="2 3"
+                  />
+                  <circle
+                    cx={toX(hoverIdx)} cy={toY(values[hoverIdx])}
+                    r="3"
+                    fill={lineColor}
+                    stroke="var(--bg-card, #111)"
+                    strokeWidth="1.5"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                </>
+              )}
+            </svg>
+
+            {/* Y-axis price labels overlaid on the right side (DOM, not SVG,
+                so they're crisp and don't stretch with viewBox). */}
+            <div className="absolute top-0 bottom-0 right-0 pointer-events-none" style={{ width: 56 }}>
+              {yTicks.map((v, i) => {
+                // toY returns a value in viewBox units (0..H); convert to
+                // a CSS percentage of the SVG container's height.
+                const pctTop = (toY(v) / H) * 100;
+                return (
+                  <div
+                    key={`yl-${i}`}
+                    className="absolute right-1 text-xs text-text-dim tabular-nums"
+                    style={{ top: `calc(${pctTop}% - 7px)` }}
+                  >
+                    {formatYTick(v, assetClass)}
+                  </div>
+                );
+              })}
+              {/* Last-price chip — sits on the right edge at lastY,
+                  highlighted with the line color. */}
+              <div
+                className="absolute right-0 px-1.5 py-0.5 text-xs font-semibold tabular-nums rounded-sm pointer-events-none"
+                style={{
+                  top: `calc(${(toY(last) / H) * 100}% - 9px)`,
+                  background: lineColor,
+                  color: "var(--bg, #fff)",
+                }}
+              >
+                {formatYTick(last, assetClass)}
+              </div>
+            </div>
+
+            {/* X-axis time labels at the bottom (DOM, so font stays
+                pixel-accurate). */}
+            <div className="absolute left-0 bottom-1 right-14 flex justify-between text-xs text-text-dim tabular-nums px-1">
+              {xTicks.map((i, k) => (
+                <span key={k}>{formatTimeTick(times[i], range)}</span>
+              ))}
+            </div>
+
+            {/* Hover tooltip — floating chip above the crosshair */}
+            {hoverIdx != null && hoverV != null && hoverT != null && (
+              <div
+                className="absolute pointer-events-none px-2 py-1 text-xs rounded bg-bg border border-border shadow"
+                style={{
+                  left: `calc(${(toX(hoverIdx) / W) * 100}% + 6px)`,
+                  top: `calc(${(toY(hoverV) / H) * 100}% - 32px)`,
+                  // Don't let the tooltip run past the right edge into
+                  // the Y-axis label gutter.
+                  maxWidth: 160,
+                }}
+              >
+                <div className="text-text font-semibold tabular-nums">{formatPrice(hoverV, assetClass)}</div>
+                <div className="text-text-dim">{formatTimeTick(hoverT, range)}</div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </Section>
   );
+}
+
+// ─── Chart helpers ────────────────────────────────────────────────
+
+// catmullRomPath — converts a list of points to an SVG `d` string that
+// smoothly interpolates between them with cubic Bezier curves derived
+// from the Catmull-Rom spline. Tension = 0.5 (the canonical "uniform"
+// flavor used by most chart libraries).
+function catmullRomPath(points: [number, number][]): string {
+  if (points.length === 0) return "";
+  if (points.length === 1) return `M ${points[0][0]} ${points[0][1]}`;
+  if (points.length === 2) return `M ${points[0][0]} ${points[0][1]} L ${points[1][0]} ${points[1][1]}`;
+  let d = `M ${points[0][0]} ${points[0][1]}`;
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[Math.max(i - 1, 0)];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[Math.min(i + 2, points.length - 1)];
+    const cp1x = p1[0] + (p2[0] - p0[0]) / 6;
+    const cp1y = p1[1] + (p2[1] - p0[1]) / 6;
+    const cp2x = p2[0] - (p3[0] - p1[0]) / 6;
+    const cp2y = p2[1] - (p3[1] - p1[1]) / 6;
+    d += ` C ${cp1x.toFixed(2)} ${cp1y.toFixed(2)}, ${cp2x.toFixed(2)} ${cp2y.toFixed(2)}, ${p2[0].toFixed(2)} ${p2[1].toFixed(2)}`;
+  }
+  return d;
+}
+
+// formatYTick — terse number formatter for axis labels. The bottom-row
+// formatPrice has the dollar sign + commas; here we want the smallest
+// readable form (no `$` to save horizontal room, since the chip is
+// narrow and the asset-class chip in the header already conveys the
+// currency).
+function formatYTick(v: number, assetClass: string): string {
+  if (!isFinite(v)) return "—";
+  if (assetClass === "polymarket") return `${(v * 100).toFixed(0)}¢`;
+  const abs = Math.abs(v);
+  if (abs >= 10_000) return v.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  if (abs >= 100)    return v.toLocaleString(undefined, { maximumFractionDigits: 1 });
+  if (abs >= 1)      return v.toFixed(2);
+  return v.toFixed(4);
+}
+
+// formatTimeTick — chart x-axis labels per range. Time-of-day for
+// intraday, dates for multi-day. Uses Intl.DateTimeFormat for proper
+// locale handling.
+function formatTimeTick(unixSeconds: number, range: ChartRange): string {
+  const d = new Date(unixSeconds * 1000);
+  if (!isFinite(d.getTime())) return "";
+  switch (range) {
+    case "1D":
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+    case "5D":
+      return d.toLocaleString([], { weekday: "short", hour: "2-digit", hour12: false });
+    case "1M":
+    case "3M":
+      return d.toLocaleDateString([], { month: "short", day: "numeric" });
+    case "1Y":
+    case "ALL":
+      return d.toLocaleDateString([], { month: "short", year: "2-digit" });
+  }
 }
 
 function Sparkline({ values, up, width = 80, height = 24 }: {
@@ -356,12 +593,13 @@ function Sparkline({ values, up, width = 80, height = 24 }: {
   const max = Math.max(...values);
   const range = max - min || 1;
   const toX = (i: number) => (i / (values.length - 1)) * width;
-  const toY = (v: number) => height - ((v - min) / range) * (height - 2);
-  const d = values.map((v, i) => `${i === 0 ? "M" : "L"} ${toX(i).toFixed(1)} ${toY(v).toFixed(1)}`).join(" ");
-  const color = up ? "#16a34a" : "#dc2626";
+  const toY = (v: number) => 1 + (height - 2) * (1 - (v - min) / range);
+  const pts = values.map((v, i) => [toX(i), toY(v)] as [number, number]);
+  const d = catmullRomPath(pts);
+  const color = up ? "#22c55e" : "#ef4444";
   return (
     <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="block">
-      <path d={d} fill="none" stroke={color} strokeWidth="1.2" />
+      <path d={d} fill="none" stroke={color} strokeWidth="1.2" strokeLinejoin="round" strokeLinecap="round" />
     </svg>
   );
 }
