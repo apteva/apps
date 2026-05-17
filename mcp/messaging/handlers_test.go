@@ -1226,6 +1226,45 @@ func TestSendersDelete_PropagatesRealUpstreamError(t *testing.T) {
 	}
 }
 
+// ─── senders_update (local-only patch) ─────────────────────────────
+
+func TestSendersUpdate_SetsDisplayName(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+	app := &App{}
+
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "marco@socialcast.dev", Kind: "email_mailbox",
+		Provider: "aws-ses", ProviderIdentityID: "marco@socialcast.dev",
+		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
+	})
+
+	if _, err := app.toolSendersUpdate(ctx, map[string]any{
+		"address":      "marco@socialcast.dev",
+		"display_name": "Marco at Socialcast",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	row, _ := dbFindSender(ctx.AppDB(), "test-proj", "email", "marco@socialcast.dev")
+	if row == nil || row.DisplayName != "Marco at Socialcast" {
+		t.Errorf("display_name not persisted: %+v", row)
+	}
+}
+
+func TestSendersUpdate_EmptyArgsErrors(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+	app := &App{}
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "marco@socialcast.dev", Kind: "email_mailbox",
+		Provider: "aws-ses", Verified: true,
+	})
+	_, err := app.toolSendersUpdate(ctx, map[string]any{
+		"address": "marco@socialcast.dev",
+	})
+	if err == nil {
+		t.Fatal("expected error when neither display_name nor notes is set")
+	}
+}
+
 // ─── v0.12.1 friendly From ─────────────────────────────────────────
 
 func TestSendMessage_UsesSenderDisplayNameAsFriendlyFrom(t *testing.T) {

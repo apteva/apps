@@ -48,7 +48,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.12.1
+version: 0.12.2
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -136,6 +136,7 @@ provides:
     - { name: senders_create,         description: "Register a sender across email (SES) + SMS (Twilio). Domain → DKIM + DNS + optional inbound bootstrap. Phone → adopt + optional SmsUrl wiring." }
     - { name: senders_refresh,        description: "Reconcile local senders with bound providers." }
     - { name: senders_set_default,    description: "Flip the per-(project, channel) default sender." }
+    - { name: senders_update,         description: "Patch local-mutable fields on a sender (display_name, notes)." }
     - { name: identities_list,        description: "List anchor identities (DKIM domains, WABAs)." }
   ui_panels:
     - slot: project.page
@@ -471,6 +472,17 @@ func (a *App) MCPTools() []sdk.Tool {
 				"channel": map[string]any{"type": "string"},
 			}, []string{"address"}),
 			Handler: a.toolSendersSetDefault,
+		},
+		{
+			Name:        "senders_update",
+			Description: "Patch local-mutable fields on a sender — display_name (used as the friendly From: \"Name\" <addr>) and notes. No provider round-trip. For the default-sender flag use senders_set_default. To change verification / DKIM / inbound state, use senders_create (idempotent) or senders_refresh. Empty values preserve existing.",
+			InputSchema: schemaObject(map[string]any{
+				"address":      map[string]any{"type": "string"},
+				"channel":      map[string]any{"type": "string"},
+				"display_name": map[string]any{"type": "string"},
+				"notes":        map[string]any{"type": "string"},
+			}, []string{"address"}),
+			Handler: a.toolSendersUpdate,
 		},
 		{
 			Name:        "identities_list",

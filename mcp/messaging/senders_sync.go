@@ -356,6 +356,42 @@ func (a *App) toolSendersSetDefault(ctx *sdk.AppCtx, args map[string]any) (any, 
 	return map[string]any{"ok": true, "address": addr, "channel": channel}, nil
 }
 
+// toolSendersUpdate patches local-mutable fields on a sender row
+// (display_name, notes). No provider round-trip — pure DB write.
+// Mirror of the panel-side POST /senders/edit route, exposed via MCP
+// so agents can rename a sender ("Marco at Socialcast") without
+// going through the panel.
+func (a *App) toolSendersUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	addr := strArg(args, "address")
+	if addr == "" {
+		return nil, fmt.Errorf("address required")
+	}
+	channel := strArg(args, "channel")
+	if channel == "" {
+		channel = inferChannelFromAddress(addr)
+		if channel == "" {
+			channel = "email"
+		}
+	}
+	displayName := strArg(args, "display_name")
+	notes := strArg(args, "notes")
+	if displayName == "" && notes == "" {
+		return nil, fmt.Errorf("at least one of display_name, notes must be set (empty values preserve existing)")
+	}
+	if err := dbUpdateSenderLocal(ctx.AppDB(), pid, channel, addr, displayName, notes); err != nil {
+		return nil, err
+	}
+	row, _ := dbFindSender(ctx.AppDB(), pid, channel, addr)
+	if row == nil {
+		return nil, fmt.Errorf("sender %s not found in channel %s", addr, channel)
+	}
+	return senderRowToMap(row), nil
+}
+
 // toolIdentitiesList exposes the anchor table to MCP. Operator-facing
 // admin surface; agents typically don't need it. Args: kind? to filter
 // by anchor kind (currently only email_domain ships; whatsapp_business_
