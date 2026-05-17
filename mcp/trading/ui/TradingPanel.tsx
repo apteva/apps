@@ -874,12 +874,134 @@ function PlaceOrderFormWithChart({ portfolio, api, onPlaced, setError }: {
   const assetClass = inferAssetClass(symbol);
   return (
     <>
+      <WatchlistChips
+        portfolio={portfolio}
+        api={api}
+        currentSymbol={symbol}
+        onSelect={setSymbol}
+        setError={setError}
+      />
       <PriceChart symbol={symbol.trim()} assetClass={assetClass} api={api} />
       <PlaceOrderForm
         portfolio={portfolio} api={api} onPlaced={onPlaced} setError={setError}
         symbol={symbol} setSymbol={setSymbol}
       />
     </>
+  );
+}
+
+// WatchlistChips — click-to-load symbol chips above the chart. Each
+// chip shows the symbol's current mark + 24h change; clicking sets
+// the symbol input so the chart renders and the order form is ready
+// to fill. The "+" button on the right adds the current symbol input
+// to the watchlist if it's typed in but not yet tracked.
+function WatchlistChips({ portfolio, api, currentSymbol, onSelect, setError }: {
+  portfolio: Portfolio;
+  api: <T>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
+  currentSymbol: string;
+  onSelect: (s: string) => void;
+  setError: (e: string | null) => void;
+}) {
+  const watchlist = portfolio.watchlist || [];
+  const [quotes, setQuotes] = useState<Record<string, Mark>>({});
+  const [busy, setBusy] = useState(false);
+
+  // Per-symbol quote fetch. Parallel, stale-while-revalidate — the
+  // chips render with whatever marks we already cached; new arrivals
+  // patch into the map.
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(
+      watchlist.map(async (sym) => {
+        try {
+          const r = await api<Mark>("GET", `/quotes/${encodeURIComponent(sym)}`);
+          return [sym, r] as const;
+        } catch { return null; }
+      }),
+    ).then((rows) => {
+      if (cancelled) return;
+      const next: Record<string, Mark> = {};
+      for (const r of rows) if (r) next[r[0]] = r[1];
+      setQuotes(next);
+    });
+    return () => { cancelled = true; };
+  }, [watchlist.join(","), api]);
+
+  const typed = currentSymbol.trim();
+  const inWatchlist = typed && watchlist.some((s) => s.toUpperCase() === typed.toUpperCase());
+  const canAdd = typed && !inWatchlist;
+
+  const addToWatchlist = async () => {
+    if (!canAdd) return;
+    setBusy(true);
+    try {
+      await api("POST", `/portfolios/${portfolio.id}/watchlist`, undefined, { symbol: typed });
+      // No need to mutate local watchlist — the portfolio reload via
+      // SSE (watchlist.changed) will refresh selected.watchlist.
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+
+  const removeFromWatchlist = async (sym: string) => {
+    setBusy(true);
+    try {
+      await api("DELETE", `/portfolios/${portfolio.id}/watchlist`, { symbol: sym });
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+
+  return (
+    <Section
+      title="Watchlist"
+      action={canAdd && (
+        <button
+          onClick={addToWatchlist}
+          disabled={busy}
+          className="px-2 py-0.5 text-xs rounded border border-border text-text-muted hover:bg-bg-hover inline-flex items-center gap-1"
+          title={`Track ${typed}`}
+        ><Icon.Plus /> Add {typed}</button>
+      )}
+    >
+      {watchlist.length === 0 ? (
+        <div className="px-3 py-2 text-xs text-text-dim bg-bg-card border border-border rounded">
+          No symbols tracked. Type a symbol below (e.g. <code>BTC-USD</code>, <code>AAPL</code>, <code>POLY:btc-100k-2026</code>) and click + Add.
+        </div>
+      ) : (
+        <div className="flex gap-2 flex-wrap">
+          {watchlist.map((sym) => {
+            const q = quotes[sym];
+            const active = currentSymbol.trim().toUpperCase() === sym.toUpperCase();
+            const cls = inferAssetClass(sym);
+            const price = q?.price ?? q?.yes_price;
+            const chg = q?.change_pct_24h;
+            return (
+              <div
+                key={sym}
+                className={`group flex items-center gap-2 px-2 py-1 rounded border cursor-pointer transition-colors ${
+                  active
+                    ? "border-accent bg-accent/15"
+                    : "border-border bg-bg-card hover:bg-bg-hover"
+                }`}
+                onClick={() => onSelect(sym)}
+              >
+                <span className={`text-xs font-semibold ${active ? "text-accent" : "text-text"}`}>{sym}</span>
+                {price != null && (
+                  <span className="text-xs text-text-muted tabular-nums">
+                    {formatPrice(price, cls)}
+                  </span>
+                )}
+                {chg != null && (
+                  <span className={`text-xs tabular-nums ${pnlClass(chg)}`}>{formatPct(chg, 1)}</span>
+                )}
+                <button
+                  onClick={(e) => { e.stopPropagation(); removeFromWatchlist(sym); }}
+                  className="opacity-0 group-hover:opacity-100 text-text-dim hover:text-red"
+                  title="Remove"
+                ><Icon.X /></button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Section>
   );
 }
 
