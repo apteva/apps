@@ -172,11 +172,26 @@ func (p *liveProvider) Universe() []*Mark {
 	return out
 }
 
-// Bars passthrough. Live history is a v0.3 problem (rate-limited,
-// caching strategy is its own design); for v0.2 we keep history on
-// the deterministic walk so chart panels stay populated.
+// Bars routes history fetches by asset class. Crypto uses Binance's
+// public klines (no auth, ~200ms typical). Equity/etf + polymarket
+// fall back to the mock walk for now — Alpaca stock_bars + gamma
+// prices-history are wired in a follow-up. Errors anywhere also
+// fall back to mock so the chart pane never goes blank.
 func (p *liveProvider) Bars(symbol, rng string) ([]Bar, error) {
-	return p.fallback.Bars(symbol, rng)
+	cls := inferAssetClass(symbol)
+	switch cls {
+	case "crypto":
+		bars, err := p.crypto.Bars(symbol, rng)
+		if err != nil {
+			p.health.note("crypto", err)
+			return p.fallback.Bars(symbol, rng)
+		}
+		p.health.ok("crypto", "binance-public")
+		return bars, nil
+	default:
+		// equity / etf / polymarket — mock for now.
+		return p.fallback.Bars(symbol, rng)
+	}
 }
 
 // Health — read-only snapshot of per-class status.

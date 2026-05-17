@@ -122,7 +122,16 @@ func (m *mockProvider) Quote(symbol string) (*Mark, error) {
 }
 
 // Bars synthesises a longer series anchored to the symbol's current
-// mark; polymarket returns YES probability history.
+// mark. Uses a cumulative Brownian-style walk (each bar = previous
+// close + small random delta) so the chart actually looks like a
+// price series rather than white noise around a mean. Without this
+// the chart panel renders a sawtooth — the LCG produces correlated
+// outputs for sequential bar indexes, and rendering them as absolute
+// offsets from anchor amplifies the artifact into visible spikes.
+//
+// Polymarket bars return YES probability history bounded to (0.01,
+// 0.99) with a mild mean-reversion pull toward the anchor so the
+// random walk doesn't drift off the playable range over 720 bars.
 func (m *mockProvider) Bars(symbol, rng string) ([]Bar, error) {
 	var anchor, noAnchor float64
 	var class string
@@ -139,25 +148,53 @@ func (m *mockProvider) Bars(symbol, rng string) ([]Bar, error) {
 	}
 	n := bucketsForRange(rng)
 	now := time.Now().UTC().Unix()
-	step := stepForRange(rng) // seconds per bar
+	step := stepForRange(rng)
 	out := make([]Bar, 0, n)
+
+	// Start the walk at anchor, accumulate deltas. Per-bar volatility:
+	//   prices: 0.3% of anchor (≈ realistic intraday for liquid names)
+	//   polymarket: 1.5% absolute (probability moves further per bar)
+	prev := anchor
+	priceVol := 0.003
+	polyVol := 0.015
+	if class == "polymarket" {
+		priceVol = polyVol
+	}
 	for i := 0; i < n; i++ {
 		t := now - int64(n-i)*step
-		w := walk(symbol+rng, int64(i))
+		w := walk(symbol+rng, int64(i)) // ∈ [-1, +1], now well-mixed via SplitMix
+		delta := w * anchor * priceVol
 		if class == "polymarket" {
-			yes := anchor + w*0.04
-			if yes < 0.01 { yes = 0.01 }
-			if yes > 0.99 { yes = 0.99 }
-			out = append(out, Bar{T: t, Yes: round4(yes)})
-		} else {
-			c := anchor + w*anchor*0.005
-			o := c - w*anchor*0.001
-			h := c + 0.002*anchor
-			l := c - 0.002*anchor
-			out = append(out, Bar{T: t, O: o, H: h, L: l, C: c, V: 1_000_000})
+			// For probabilities, scale by 1 (not by anchor) so the
+			// walk lives in probability-space.
+			delta = w * polyVol
 		}
+		// Gentle mean-reversion toward anchor — keeps long ranges
+		// (1Y / ALL) from drifting into nonsense without killing the
+		// short-range variability.
+		revert := (anchor - prev) * 0.02
+		next := prev + delta + revert
+		if class == "polymarket" {
+			if next < 0.01 { next = 0.01 }
+			if next > 0.99 { next = 0.99 }
+			out = append(out, Bar{T: t, Yes: round4(next)})
+		} else {
+			// OHLC: open at previous close, close at new; high/low
+			// brush a few bps outside the open-close band so candles
+			// have a body without looking square.
+			o := prev
+			c := next
+			hi := o
+			lo := o
+			if c > hi { hi = c }
+			if c < lo { lo = c }
+			hi *= 1.0008
+			lo *= 0.9992
+			out = append(out, Bar{T: t, O: o, H: hi, L: lo, C: c, V: 1_000_000})
+		}
+		prev = next
 	}
-	_ = noAnchor // reserved for richer poly history
+	_ = noAnchor // reserved for richer poly history (YES + NO twin series)
 	return out, nil
 }
 
@@ -186,15 +223,27 @@ func stepForRange(rng string) int64 {
 }
 
 // walk — deterministic [-1, +1] given a string seed and a tick index.
+// Uses SplitMix64 mixing (golden-ratio multiplier + two avalanche
+// rounds) so sequential ticks decorrelate properly. The previous
+// Numerical-Recipes-LCG implementation produced a visible sawtooth
+// in the chart panel because adjacent inputs landed in nearby output
+// regions — one LCG step isn't enough mixing for low-bit perturbations.
 func walk(seed string, tick int64) float64 {
-	var s int64
+	// FNV-1a-style seed hash.
+	var s uint64 = 14695981039346656037
 	for i := 0; i < len(seed); i++ {
-		s = s*31 + int64(seed[i])
+		s ^= uint64(seed[i])
+		s *= 1099511628211
 	}
-	s += tick * 1664525
-	s = s*1664525 + 1013904223
-	u := uint32(s)
-	return (float64(u)/float64(0xffffffff))*2 - 1
+	// Stripe in the tick with the golden-ratio constant — same
+	// multiplier SplitMix64 uses on its state increment.
+	s += uint64(tick) * 0x9E3779B97F4A7C15
+	// SplitMix64 finalizer.
+	s = (s ^ (s >> 30)) * 0xBF58476D1CE4E5B9
+	s = (s ^ (s >> 27)) * 0x94D049BB133111EB
+	s ^= s >> 31
+	// Take the top 53 bits → IEEE-754 mantissa precision, map to [-1, +1].
+	return (float64(s>>11)/float64(1<<53))*2 - 1
 }
 
 func ptr(v float64) *float64 { return &v }

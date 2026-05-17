@@ -117,6 +117,84 @@ func (b *binancePublic) UniverseBatch(symbols []string) ([]*Mark, error) {
 	return out, nil
 }
 
+// Bars returns OHLCV history via /api/v3/klines — Binance's
+// candlestick endpoint, free + no auth. Maps our ChartRange to
+// Binance's interval string + the bar count that matches the
+// engine's bucketsForRange (so the chart "1D" view shows the same
+// resolution as it would in mock mode).
+//
+// Returns ([]Bar, error). Caller falls back to mock on error so the
+// chart stays populated when Binance is down or rate-limiting.
+func (b *binancePublic) Bars(symbol, rng string) ([]Bar, error) {
+	wire, ok := binanceUSDPairs[symbol]
+	if !ok {
+		return nil, fmt.Errorf("binancePublic: unknown internal symbol %q", symbol)
+	}
+	interval, limit := binanceIntervalForRange(rng)
+	q := url.Values{}
+	q.Set("symbol", wire)
+	q.Set("interval", interval)
+	q.Set("limit", strconv.Itoa(limit))
+	raw, err := b.fetch(b.base + "/klines?" + q.Encode())
+	if err != nil {
+		return nil, err
+	}
+	// Klines come back as an array of arrays; each inner array's
+	// elements are positional: [openTime, open, high, low, close,
+	// volume, closeTime, quoteVolume, trades, ...]. We unmarshal
+	// into []any then pluck by index — sturdy against trailing
+	// fields Binance might add.
+	var rows [][]any
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("binancePublic: decode klines: %w", err)
+	}
+	out := make([]Bar, 0, len(rows))
+	for _, row := range rows {
+		if len(row) < 6 {
+			continue
+		}
+		// openTime is ms-since-epoch as a JSON number → float64.
+		openMS, _ := row[0].(float64)
+		o := parseKlineFloat(row[1])
+		h := parseKlineFloat(row[2])
+		l := parseKlineFloat(row[3])
+		c := parseKlineFloat(row[4])
+		v := parseKlineFloat(row[5])
+		if c <= 0 {
+			continue
+		}
+		out = append(out, Bar{
+			T: int64(openMS / 1000),
+			O: o, H: h, L: l, C: c, V: v,
+		})
+	}
+	return out, nil
+}
+
+func parseKlineFloat(v any) float64 {
+	if s, ok := v.(string); ok {
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return f
+		}
+	}
+	return 0
+}
+
+// binanceIntervalForRange — maps the panel's range chip to a Binance
+// interval + bar count. Aligned with engine.bucketsForRange so live
+// + mock paths show the same chart resolution.
+func binanceIntervalForRange(rng string) (string, int) {
+	switch strings.ToUpper(rng) {
+	case "1D":  return "5m",  78
+	case "5D":  return "30m", 130
+	case "1M":  return "4h",  220
+	case "3M":  return "8h",  320
+	case "1Y":  return "1d",  540
+	case "ALL": return "1d",  720
+	default:    return "5m",  78
+	}
+}
+
 // fetch wraps the HTTP call with a context deadline + status-code
 // check. Body is read in full; callers decode.
 func (b *binancePublic) fetch(u string) ([]byte, error) {
