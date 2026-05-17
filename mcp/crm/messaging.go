@@ -451,7 +451,7 @@ func (a *App) toolSendTest(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool) (any, error) {
 	if messagingBound(ctx) == nil {
-		return nil, errors.New("messaging app not installed: bind the messaging integration in app settings")
+		return nil, errors.New("messaging app not bound to CRM: open CRM in the dashboard → Bindings → bind the messaging install to the 'messaging' role. (The app may already be installed in the project; binding is a separate explicit step.)")
 	}
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -670,7 +670,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 
 func (a *App) toolReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if messagingBound(ctx) == nil {
-		return nil, errors.New("messaging app not installed: bind the messaging integration in app settings")
+		return nil, errors.New("messaging app not bound to CRM: open CRM in the dashboard → Bindings → bind the messaging install to the 'messaging' role. (The app may already be installed in the project; binding is a separate explicit step.)")
 	}
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
