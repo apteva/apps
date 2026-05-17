@@ -1,21 +1,14 @@
-// TradingPanel — native React port of the trading app's dashboard panel.
-// Replaces the legacy iframe-mounted ui/panel/TradingPanel.html. Talks
-// to /api/apps/trading/* through the platform proxy (the dashboard
-// injects the per-install bearer token).
+// TradingPanel — native React panel for the trading app. Styled with
+// the dashboard's Tailwind theme tokens (bg-bg, text-text, border-border,
+// text-accent, …) so it matches CRM / Messaging / Storage / Finance.
+//
+// Talks to /api/apps/trading/* through the platform proxy.
 //
 // Tabs: Portfolios | Trade | Positions | Brokers | Journal.
-//
-// All v1 features (portfolio CRUD, place + cancel orders, watchlist,
-// broker browser, journal reads, account stats) ship in one bundle.
-// The richer SPA at /ui/desk/ stays for charts + multi-portfolio
-// dashboards.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 // ─── Inlined SDK app-event subscription ────────────────────────────
-// Same boilerplate StoragePanel inlines. Panels are runtime-bundled
-// standalone .mjs files and apps install independently, so shared
-// hooks across app directories would break standalone installs.
 
 interface AppEventEnvelope<T = unknown> {
   topic: string;
@@ -89,7 +82,6 @@ interface NativePanelProps {
   projectId: string;
   instanceId?: number;
 }
-
 interface Portfolio {
   id: number;
   name: string;
@@ -109,7 +101,6 @@ interface Portfolio {
   buying_power?: number;
   watchlist?: string[];
 }
-
 interface Position {
   symbol: string;
   asset_class: string;
@@ -123,7 +114,6 @@ interface Position {
   realized_pnl: number;
   weight_pct: number;
 }
-
 interface Order {
   id: string;
   portfolio_id: number;
@@ -145,7 +135,6 @@ interface Order {
   placed_at: string;
   resolved_at?: string;
 }
-
 interface JournalEntry {
   id: number;
   portfolio_id: number;
@@ -154,7 +143,6 @@ interface JournalEntry {
   metadata?: Record<string, unknown>;
   created_at: string;
 }
-
 interface BrokerInfo {
   slug: string;
   asset_classes: string[];
@@ -165,7 +153,6 @@ interface BrokerInfo {
   bound?: boolean;
   connections: { id: number; name: string; status: string }[];
 }
-
 interface Mark {
   symbol: string;
   asset_class: string;
@@ -177,18 +164,12 @@ interface Mark {
   volume_24h?: number;
   marked_at: string;
 }
-
 interface Bar {
-  t: number;            // unix seconds
+  t: number;
   o?: number; h?: number; l?: number; c?: number; v?: number;
-  yes?: number;         // polymarket YES probability
+  yes?: number;
 }
-interface HistoryResp {
-  symbol: string;
-  range: string;
-  bars: Bar[];
-}
-
+interface HistoryResp { symbol: string; range: string; bars: Bar[] }
 const CHART_RANGES = ["1D", "5D", "1M", "3M", "1Y", "ALL"] as const;
 type ChartRange = typeof CHART_RANGES[number];
 
@@ -218,15 +199,6 @@ function formatPrice(n: number | undefined, assetClass: string): string {
   if (assetClass === "polymarket") return `${(n * 100).toFixed(1)}¢`;
   return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
 }
-function classColor(c: string): string {
-  switch (c) {
-    case "crypto": return "var(--apteva-amber, #d97706)";
-    case "equity":
-    case "etf": return "var(--apteva-blue, #2563eb)";
-    case "polymarket": return "var(--apteva-purple, #7c3aed)";
-    default: return "var(--apteva-text-muted, #6b7280)";
-  }
-}
 function relTime(iso: string | undefined): string {
   if (!iso) return "";
   const t = new Date(iso).getTime();
@@ -238,62 +210,37 @@ function relTime(iso: string | undefined): string {
   if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ago`;
   return `${Math.floor(seconds / 86_400)}d ago`;
 }
+function inferAssetClass(symbol: string): string {
+  const s = symbol.toUpperCase().trim();
+  if (s.startsWith("POLY:")) return "polymarket";
+  if (s.endsWith("-USD")) return "crypto";
+  return "equity";
+}
+// Per-asset-class accent — used for chips and badges so the operator
+// can scan a mixed-class portfolio quickly. Maps to standard Tailwind
+// utility colors the dashboard already ships.
+function classBadgeClass(c: string): string {
+  switch (c) {
+    case "crypto": return "bg-amber/10 text-amber border-amber/40";
+    case "equity":
+    case "etf": return "bg-blue-500/20 text-blue-400 border-blue-500/30";
+    case "polymarket": return "bg-accent/15 text-accent border-accent/50";
+    default: return "bg-bg-input text-text-muted border-border";
+  }
+}
 
 // ─── Icons (SVG, theme-aware via currentColor) ─────────────────────
 
 const Icon = {
-  Plus: () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-      <path d="M12 5v14M5 12h14" />
-    </svg>
-  ),
-  X: () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-      <path d="M18 6 6 18M6 6l12 12" />
-    </svg>
-  ),
-  Pause: () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-      <rect x="6" y="5" width="4" height="14" rx="1" />
-      <rect x="14" y="5" width="4" height="14" rx="1" />
-    </svg>
-  ),
-  Play: () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-      <path d="M8 5v14l11-7z" />
-    </svg>
-  ),
-  Refresh: () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
-      <path d="M21 3v5h-5" />
-      <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
-      <path d="M3 21v-5h5" />
-    </svg>
-  ),
-  ExternalLink: () => (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M15 3h6v6" />
-      <path d="M10 14 21 3" />
-      <path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
-    </svg>
-  ),
-  Trash: () => (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 6h18" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-    </svg>
-  ),
-  Dot: ({ color }: { color: string }) => (
-    <svg width="8" height="8" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3" fill={color} /></svg>
-  ),
+  Plus:  () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>,
+  X:     () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>,
+  Pause: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>,
+  Play:  () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>,
+  Refresh: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>,
+  ExternalLink: () => <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>,
 };
 
-// ─── Chart components (hand-rolled SVG, no chart-lib dep) ────────
-//
-// Same pattern as ui/desk/src/components/PriceChart: build a normalized
-// [0..1] series, project into the SVG viewbox, draw a single polyline
-// + area fill. Light, theme-aware via currentColor + CSS vars.
+// ─── Chart components (hand-rolled SVG, no chart-lib dep) ─────────
 
 function barValue(b: Bar): number {
   if (b.yes != null) return b.yes;
@@ -324,7 +271,6 @@ function PriceChart({ symbol, assetClass, api }: {
   }, [symbol, range, api]);
 
   if (!symbol) return null;
-  if (error) return <div style={chartShellStyle}><EmptyState title="No history" hint={error} /></div>;
 
   const W = 600, H = 180, padX = 8, padY = 12;
   const values = bars.map(barValue);
@@ -335,10 +281,8 @@ function PriceChart({ symbol, assetClass, api }: {
   const last = values[values.length - 1] ?? 0;
   const up = last >= first;
   const lineColor = up ? "#16a34a" : "#dc2626";
-
   const toX = (i: number) => padX + (i / Math.max(values.length - 1, 1)) * (W - 2 * padX);
   const toY = (v: number) => H - padY - ((v - min) / range01) * (H - 2 * padY);
-
   const pathD = values.map((v, i) => `${i === 0 ? "M" : "L"} ${toX(i).toFixed(2)} ${toY(v).toFixed(2)}`).join(" ");
   const fillD = pathD + ` L ${toX(values.length - 1).toFixed(2)} ${H - padY} L ${toX(0).toFixed(2)} ${H - padY} Z`;
   const lastY = values.length ? toY(last) : H / 2;
@@ -347,66 +291,54 @@ function PriceChart({ symbol, assetClass, api }: {
     <Section
       title="Chart"
       action={
-        <div style={{ display: "flex", gap: 4 }}>
+        <div className="flex gap-1">
           {CHART_RANGES.map((r) => (
             <button
               key={r}
               onClick={() => setRange(r)}
-              style={{
-                fontSize: 10, padding: "3px 8px", borderRadius: 4,
-                border: "1px solid var(--apteva-border, #e5e7eb)",
-                background: r === range ? "var(--apteva-primary, #2563eb)" : "transparent",
-                color: r === range ? "white" : "var(--apteva-text-muted, #6b7280)",
-                cursor: "pointer", fontWeight: 600, letterSpacing: 0.3,
-              }}
+              className={`px-2 py-0.5 text-xs rounded border ${
+                r === range
+                  ? "bg-accent text-bg border-accent"
+                  : "border-border text-text-muted hover:bg-bg-hover"
+              }`}
             >{r}</button>
           ))}
         </div>
       }
     >
-      <div style={chartShellStyle}>
-        {loading && values.length === 0 ? (
-          <div style={{ height: H, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--apteva-text-muted, #6b7280)", fontSize: 11 }}>
-            Loading…
-          </div>
+      <div className="border border-border rounded bg-bg-card p-2">
+        {error ? (
+          <div className="h-44 flex items-center justify-center text-text-dim text-xs">{error}</div>
+        ) : loading && values.length === 0 ? (
+          <div className="h-44 flex items-center justify-center text-text-dim text-xs">Loading…</div>
         ) : values.length < 2 ? (
-          <div style={{ height: H, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--apteva-text-muted, #6b7280)", fontSize: 11 }}>
-            No history available
-          </div>
+          <div className="h-44 flex items-center justify-center text-text-dim text-xs">No history available</div>
         ) : (
-          <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: "100%", height: H, display: "block" }}>
+          <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="w-full h-44 block">
             <defs>
               <linearGradient id="trading-chart-fill" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stopColor={lineColor} stopOpacity="0.18" />
                 <stop offset="100%" stopColor={lineColor} stopOpacity="0" />
               </linearGradient>
             </defs>
-            {/* Horizontal gridlines at 25/50/75% */}
             {[0.25, 0.5, 0.75].map((p) => {
               const y = padY + p * (H - 2 * padY);
               return (
-                <line
-                  key={p}
-                  x1={padX} x2={W - padX} y1={y} y2={y}
-                  stroke="var(--apteva-border, #e5e7eb)" strokeWidth="1" strokeDasharray="2 4"
-                />
+                <line key={p} x1={padX} x2={W - padX} y1={y} y2={y}
+                  stroke="currentColor" className="text-border" strokeWidth="1" strokeDasharray="2 4" />
               );
             })}
-            {/* Area fill, then the line on top */}
             <path d={fillD} fill="url(#trading-chart-fill)" />
             <path d={pathD} fill="none" stroke={lineColor} strokeWidth="1.5" />
-            {/* Last-value dot */}
             <circle cx={toX(values.length - 1)} cy={lastY} r="3" fill={lineColor} />
           </svg>
         )}
-        <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 8px 0", fontSize: 10, color: "var(--apteva-text-muted, #6b7280)" }}>
+        <div className="flex justify-between text-xs text-text-dim px-2 pt-1">
           <span>{values.length > 0 ? formatPrice(min, assetClass) : "—"}</span>
-          <span style={{ color: up ? "#16a34a" : "#dc2626", fontWeight: 600 }}>
+          <span className={`font-semibold ${up ? "text-green" : "text-red"}`}>
             {values.length > 0 ? formatPrice(last, assetClass) : "—"}
             {first > 0 && values.length > 1 && (
-              <span style={{ marginLeft: 4, opacity: 0.8 }}>
-                ({formatPct(((last - first) / first) * 100)})
-              </span>
+              <span className="ml-1 opacity-80">({formatPct(((last - first) / first) * 100)})</span>
             )}
           </span>
           <span>{values.length > 0 ? formatPrice(max, assetClass) : "—"}</span>
@@ -416,20 +348,8 @@ function PriceChart({ symbol, assetClass, api }: {
   );
 }
 
-const chartShellStyle: React.CSSProperties = {
-  border: "1px solid var(--apteva-border, #e5e7eb)",
-  borderRadius: 6,
-  background: "var(--apteva-bg, #fff)",
-  padding: 6,
-};
-
-// Sparkline — tiny inline chart for table cells. Single polyline,
-// theme-aware via CSS variable hint passed by caller.
 function Sparkline({ values, up, width = 80, height = 24 }: {
-  values: number[];
-  up: boolean;
-  width?: number;
-  height?: number;
+  values: number[]; up: boolean; width?: number; height?: number;
 }) {
   if (values.length < 2) return <svg width={width} height={height} />;
   const min = Math.min(...values);
@@ -440,13 +360,79 @@ function Sparkline({ values, up, width = 80, height = 24 }: {
   const d = values.map((v, i) => `${i === 0 ? "M" : "L"} ${toX(i).toFixed(1)} ${toY(v).toFixed(1)}`).join(" ");
   const color = up ? "#16a34a" : "#dc2626";
   return (
-    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} style={{ display: "block" }}>
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="block">
       <path d={d} fill="none" stroke={color} strokeWidth="1.2" />
     </svg>
   );
 }
 
-// ─── Main component ────────────────────────────────────────────────
+// ─── Layout primitives ─────────────────────────────────────────────
+
+function Section({ title, action, children }: {
+  title: string;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="mb-6">
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-xs font-semibold uppercase tracking-wider text-text-dim">{title}</h2>
+        {action}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function EmptyState({ title, hint }: { title: string; hint?: string }) {
+  return (
+    <div className="p-8 text-center text-text-muted text-sm">
+      <div className="font-medium text-text mb-1">{title}</div>
+      {hint && <div className="opacity-80 text-xs">{hint}</div>}
+    </div>
+  );
+}
+
+function ErrorBar({ text, onDismiss }: { text: string; onDismiss: () => void }) {
+  return (
+    <div className="px-4 py-2 bg-error/10 text-error text-sm flex items-center gap-2 border-b border-error/30">
+      <span className="flex-1">{text}</span>
+      <button onClick={onDismiss} className="p-1 rounded hover:bg-error/20"><Icon.X /></button>
+    </div>
+  );
+}
+
+function PortfolioStatusPill({ status, mode }: { status: string; mode: string }) {
+  const cls =
+    status === "active"
+      ? "bg-green/10 text-green border-green/40"
+      : status === "halted"
+      ? "bg-red/10 text-red border-red/40"
+      : "bg-amber/10 text-amber border-amber/40";
+  return (
+    <span className={`text-xs px-2 py-0.5 rounded-full border uppercase tracking-wide font-semibold inline-flex items-center gap-1 ${cls}`}>
+      {status}
+      {mode === "live" && <span className="opacity-70 normal-case">· live</span>}
+    </span>
+  );
+}
+
+function OrderStatusPill({ status }: { status: string }) {
+  const cls =
+    status === "working"   ? "bg-blue-500/20 text-blue-400" :
+    status === "filled"    ? "bg-green/10 text-green" :
+    status === "cancelled" ? "bg-bg-input text-text-muted" :
+    status === "rejected"  ? "bg-red/10 text-red" :
+                              "bg-bg-input text-text-muted";
+  return <span className={`text-xs px-2 py-0.5 rounded uppercase font-semibold tracking-wide ${cls}`}>{status}</span>;
+}
+
+function pnlClass(n: number | undefined): string {
+  if (n == null || n === 0) return "text-text";
+  return n > 0 ? "text-green" : "text-red";
+}
+
+// ─── Main ──────────────────────────────────────────────────────────
 
 type TabId = "portfolios" | "trade" | "positions" | "brokers" | "journal";
 
@@ -468,11 +454,9 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
       (opts.headers as Record<string, string>)["Content-Type"] = "application/json";
       opts.body = JSON.stringify(body);
     }
-    const qs = withParams(params || {});
-    const res = await fetch(`${API}${path}?${qs}`, opts);
+    const res = await fetch(`${API}${path}?${withParams(params || {})}`, opts);
     if (!res.ok) {
-      let detail = "";
-      try { detail = await res.text(); } catch {}
+      let detail = ""; try { detail = await res.text(); } catch {}
       throw new Error(`${res.status}: ${detail || res.statusText}`);
     }
     return res.json() as Promise<T>;
@@ -483,26 +467,15 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
       const r = await api<{ portfolios?: Portfolio[] }>("GET", "/portfolios");
       const list = r.portfolios || [];
       setPortfolios(list);
-      // Auto-select first portfolio so other tabs aren't empty.
       setSelectedId((cur) => cur ?? (list.length > 0 ? list[0].id : null));
       setError(null);
-    } catch (e) {
-      setError((e as Error).message);
-    }
+    } catch (e) { setError((e as Error).message); }
   }, [api]);
 
   useEffect(() => { loadPortfolios(); }, [loadPortfolios]);
 
-  // Live updates: any portfolio mutation reloads the list. Per-tab
-  // refreshes for positions/orders/journal are wired inside each tab
-  // so they only run when that tab is mounted.
   useAppEvents("trading", projectId, (ev) => {
-    if (
-      ev.topic === "portfolio.created" ||
-      ev.topic === "portfolio.status.changed" ||
-      ev.topic === "order.filled" ||
-      ev.topic === "position.changed"
-    ) {
+    if (["portfolio.created", "portfolio.status.changed", "order.filled", "position.changed"].includes(ev.topic)) {
       loadPortfolios();
     }
   });
@@ -513,39 +486,66 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
   );
 
   return (
-    <div className="trading-panel" style={panelStyle}>
-      <PanelHeader
-        portfolios={portfolios}
-        selectedId={selectedId}
-        onSelect={setSelectedId}
-        onRefresh={loadPortfolios}
-        busy={busy}
-      />
+    <div className="h-full flex flex-col bg-bg text-text text-sm">
+      <header className="px-4 py-2 flex items-center gap-3 border-b border-border">
+        <h1 className="text-sm font-semibold m-0">Trading</h1>
+        <select
+          value={selectedId ?? ""}
+          onChange={(e) => setSelectedId(e.target.value ? Number(e.target.value) : null)}
+          className="text-xs px-2 py-1 bg-bg-input border border-border rounded text-text"
+        >
+          <option value="">— Select portfolio —</option>
+          {portfolios.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name} {p.mode === "live" ? "(LIVE)" : ""}
+            </option>
+          ))}
+        </select>
+        {selected && <PortfolioStatusPill status={selected.status} mode={selected.mode} />}
+        <span className="flex-1" />
+        <button
+          onClick={loadPortfolios}
+          title="Refresh"
+          disabled={busy}
+          className="p-1.5 rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50"
+        ><Icon.Refresh /></button>
+        <a
+          href="../desk/dist/"
+          target="_blank"
+          rel="noopener"
+          className="text-xs text-text-dim hover:text-accent inline-flex items-center gap-1"
+          title="Open the rich desk SPA"
+        >Desk <Icon.ExternalLink /></a>
+      </header>
 
-      <Tabs current={tab} onChange={setTab} />
+      <nav className="flex border-b border-border px-3 text-xs">
+        {(["portfolios","trade","positions","brokers","journal"] as TabId[]).map((id) => {
+          const active = id === tab;
+          return (
+            <button
+              key={id}
+              onClick={() => setTab(id)}
+              className={`px-3 py-2 capitalize ${
+                active
+                  ? "text-text font-semibold border-b-2 border-accent -mb-px"
+                  : "text-text-muted hover:text-text border-b-2 border-transparent -mb-px"
+              }`}
+            >{id}</button>
+          );
+        })}
+      </nav>
 
       {error && <ErrorBar text={error} onDismiss={() => setError(null)} />}
 
-      <div style={contentStyle}>
+      <div className="flex-1 overflow-auto p-4">
         {tab === "portfolios" && (
           <PortfoliosTab
-            portfolios={portfolios}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-            api={api}
-            onChanged={loadPortfolios}
-            setBusy={setBusy}
-            setError={setError}
+            portfolios={portfolios} selectedId={selectedId} onSelect={setSelectedId}
+            api={api} onChanged={loadPortfolios} setBusy={setBusy} setError={setError}
           />
         )}
         {tab === "trade" && (
-          <TradeTab
-            portfolio={selected}
-            api={api}
-            setBusy={setBusy}
-            setError={setError}
-            projectId={projectId}
-          />
+          <TradeTab portfolio={selected} api={api} setBusy={setBusy} setError={setError} projectId={projectId} />
         )}
         {tab === "positions" && (
           <PositionsTab portfolio={selected} api={api} setError={setError} />
@@ -561,226 +561,9 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
   );
 }
 
-// ─── Layout primitives ─────────────────────────────────────────────
-
-const panelStyle: React.CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  height: "100%",
-  minHeight: 600,
-  background: "var(--apteva-bg, #fff)",
-  color: "var(--apteva-text, #111)",
-  fontFamily: "system-ui, -apple-system, sans-serif",
-  fontSize: 13,
-};
-const contentStyle: React.CSSProperties = {
-  flex: 1,
-  overflow: "auto",
-  padding: 16,
-};
-
-function PanelHeader({
-  portfolios, selectedId, onSelect, onRefresh, busy,
-}: {
-  portfolios: Portfolio[];
-  selectedId: number | null;
-  onSelect: (id: number | null) => void;
-  onRefresh: () => void;
-  busy: boolean;
-}) {
-  const sel = portfolios.find((p) => p.id === selectedId);
-  return (
-    <header style={{
-      display: "flex", alignItems: "center", gap: 12,
-      padding: "10px 16px", borderBottom: "1px solid var(--apteva-border, #e5e7eb)",
-    }}>
-      <h1 style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>Trading</h1>
-      <select
-        value={selectedId ?? ""}
-        onChange={(e) => onSelect(e.target.value ? Number(e.target.value) : null)}
-        style={{
-          fontSize: 12, padding: "4px 8px",
-          background: "var(--apteva-bg-subtle, #f9fafb)",
-          border: "1px solid var(--apteva-border, #e5e7eb)",
-          borderRadius: 4,
-        }}
-      >
-        <option value="">— Select portfolio —</option>
-        {portfolios.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.name} {p.mode === "live" ? "(LIVE)" : ""}
-          </option>
-        ))}
-      </select>
-      {sel && <PortfolioStatusPill status={sel.status} mode={sel.mode} />}
-      <span style={{ flex: 1 }} />
-      <button
-        onClick={onRefresh}
-        title="Refresh"
-        disabled={busy}
-        style={iconBtnStyle}
-      ><Icon.Refresh /></button>
-      <a
-        href="../desk/dist/"
-        target="_blank"
-        rel="noopener"
-        style={{
-          fontSize: 11, color: "var(--apteva-text-muted, #6b7280)",
-          textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 4,
-        }}
-        title="Open the rich desk SPA"
-      >
-        Desk <Icon.ExternalLink />
-      </a>
-    </header>
-  );
-}
-
-function PortfolioStatusPill({ status, mode }: { status: string; mode: string }) {
-  const color = status === "active" ? "#16a34a" : status === "halted" ? "#dc2626" : "#d97706";
-  const bg = status === "active" ? "#dcfce7" : status === "halted" ? "#fee2e2" : "#fef3c7";
-  return (
-    <span style={{
-      fontSize: 11, padding: "2px 8px", borderRadius: 12,
-      background: bg, color, display: "inline-flex", alignItems: "center", gap: 4,
-      textTransform: "uppercase", letterSpacing: 0.3, fontWeight: 600,
-    }}>
-      <Icon.Dot color={color} />
-      {status}
-      {mode === "live" && <span style={{ opacity: 0.7 }}>· live</span>}
-    </span>
-  );
-}
-
-function Tabs({ current, onChange }: { current: TabId; onChange: (t: TabId) => void }) {
-  const items: { id: TabId; label: string }[] = [
-    { id: "portfolios", label: "Portfolios" },
-    { id: "trade", label: "Trade" },
-    { id: "positions", label: "Positions" },
-    { id: "brokers", label: "Brokers" },
-    { id: "journal", label: "Journal" },
-  ];
-  return (
-    <nav style={{
-      display: "flex", gap: 0,
-      borderBottom: "1px solid var(--apteva-border, #e5e7eb)",
-      padding: "0 16px",
-    }}>
-      {items.map((it) => {
-        const active = it.id === current;
-        return (
-          <button
-            key={it.id}
-            onClick={() => onChange(it.id)}
-            style={{
-              background: "none", border: "none",
-              padding: "10px 14px", fontSize: 12, fontWeight: active ? 600 : 500,
-              color: active ? "var(--apteva-text, #111)" : "var(--apteva-text-muted, #6b7280)",
-              borderBottom: active ? "2px solid var(--apteva-primary, #2563eb)" : "2px solid transparent",
-              marginBottom: -1, cursor: "pointer",
-            }}
-          >
-            {it.label}
-          </button>
-        );
-      })}
-    </nav>
-  );
-}
-
-const iconBtnStyle: React.CSSProperties = {
-  background: "none",
-  border: "1px solid var(--apteva-border, #e5e7eb)",
-  color: "var(--apteva-text-muted, #6b7280)",
-  borderRadius: 4,
-  padding: "4px 6px",
-  cursor: "pointer",
-  display: "inline-flex",
-  alignItems: "center",
-};
-const btnStyle: React.CSSProperties = {
-  background: "var(--apteva-primary, #2563eb)",
-  color: "white",
-  border: "none",
-  borderRadius: 4,
-  padding: "6px 12px",
-  fontSize: 12,
-  fontWeight: 500,
-  cursor: "pointer",
-};
-const btnSecondaryStyle: React.CSSProperties = {
-  ...btnStyle,
-  background: "var(--apteva-bg-subtle, #f3f4f6)",
-  color: "var(--apteva-text, #111)",
-  border: "1px solid var(--apteva-border, #e5e7eb)",
-};
-const inputStyle: React.CSSProperties = {
-  width: "100%",
-  fontSize: 12,
-  padding: "6px 8px",
-  background: "var(--apteva-bg, #fff)",
-  border: "1px solid var(--apteva-border, #d1d5db)",
-  borderRadius: 4,
-  boxSizing: "border-box",
-};
-const labelStyle: React.CSSProperties = {
-  display: "block",
-  fontSize: 11,
-  fontWeight: 500,
-  color: "var(--apteva-text-muted, #6b7280)",
-  marginBottom: 4,
-  textTransform: "uppercase",
-  letterSpacing: 0.4,
-};
-
-function ErrorBar({ text, onDismiss }: { text: string; onDismiss: () => void }) {
-  return (
-    <div style={{
-      padding: "8px 16px", background: "#fee2e2", color: "#991b1b",
-      fontSize: 12, display: "flex", alignItems: "center", gap: 8,
-    }}>
-      <span style={{ flex: 1 }}>{text}</span>
-      <button onClick={onDismiss} style={{ ...iconBtnStyle, color: "#991b1b", borderColor: "#fca5a5" }}>
-        <Icon.X />
-      </button>
-    </div>
-  );
-}
-
-function EmptyState({ title, hint }: { title: string; hint?: string }) {
-  return (
-    <div style={{
-      padding: 32, textAlign: "center",
-      color: "var(--apteva-text-muted, #6b7280)", fontSize: 12,
-    }}>
-      <div style={{ fontWeight: 500, marginBottom: 4, fontSize: 13 }}>{title}</div>
-      {hint && <div style={{ opacity: 0.8 }}>{hint}</div>}
-    </div>
-  );
-}
-
-function Section({ title, action, children }: {
-  title: string;
-  action?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <section style={{ marginBottom: 24 }}>
-      <div style={{
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-        marginBottom: 8,
-      }}>
-        <h2 style={{ margin: 0, fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.5, color: "var(--apteva-text-muted, #6b7280)" }}>{title}</h2>
-        {action}
-      </div>
-      {children}
-    </section>
-  );
-}
-
 // ─── Portfolios tab ────────────────────────────────────────────────
 
-interface PortfoliosTabProps {
+function PortfoliosTab({ portfolios, selectedId, onSelect, api, onChanged, setBusy, setError }: {
   portfolios: Portfolio[];
   selectedId: number | null;
   onSelect: (id: number) => void;
@@ -788,9 +571,7 @@ interface PortfoliosTabProps {
   onChanged: () => void;
   setBusy: (b: boolean) => void;
   setError: (e: string | null) => void;
-}
-
-function PortfoliosTab({ portfolios, selectedId, onSelect, api, onChanged, setBusy, setError }: PortfoliosTabProps) {
+}) {
   const [showCreate, setShowCreate] = useState(false);
 
   const togglePause = async (p: Portfolio) => {
@@ -803,110 +584,86 @@ function PortfoliosTab({ portfolios, selectedId, onSelect, api, onChanged, setBu
   };
 
   return (
-    <>
-      <Section
-        title="Portfolios"
-        action={
-          <button onClick={() => setShowCreate((s) => !s)} style={btnStyle}>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-              <Icon.Plus /> New
-            </span>
-          </button>
-        }
-      >
-        {showCreate && (
-          <CreatePortfolioForm
-            api={api}
-            onCreated={() => { setShowCreate(false); onChanged(); }}
-            onCancel={() => setShowCreate(false)}
-            setError={setError}
-          />
-        )}
-        {portfolios.length === 0 && !showCreate && (
-          <EmptyState title="No portfolios yet" hint="Click New to create your first paper portfolio." />
-        )}
-        {portfolios.length > 0 && (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
-            {portfolios.map((p) => {
-              const isSelected = p.id === selectedId;
-              return (
-                <div
-                  key={p.id}
-                  onClick={() => onSelect(p.id)}
-                  style={{
-                    cursor: "pointer",
-                    padding: 12,
-                    border: isSelected ? "2px solid var(--apteva-primary, #2563eb)" : "1px solid var(--apteva-border, #e5e7eb)",
-                    borderRadius: 6,
-                    background: isSelected ? "var(--apteva-primary-bg, #eff6ff)" : "var(--apteva-bg, #fff)",
-                  }}
-                >
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-                    <strong style={{ fontSize: 13 }}>{p.name}</strong>
-                    <PortfolioStatusPill status={p.status} mode={p.mode} />
-                  </div>
-                  {p.broker_slug && (
-                    <div style={{ fontSize: 11, color: "var(--apteva-text-muted, #6b7280)", marginBottom: 4 }}>
-                      via {p.broker_slug}
-                    </div>
-                  )}
-                  {p.mandate && (
-                    <div style={{ fontSize: 11, color: "var(--apteva-text-muted, #6b7280)", marginBottom: 8, fontStyle: "italic" }}>
-                      "{p.mandate.length > 80 ? p.mandate.slice(0, 80) + "…" : p.mandate}"
-                    </div>
-                  )}
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: 11 }}>
-                    <div>
-                      <div style={labelStyle}>Equity</div>
-                      <div style={{ fontWeight: 600 }}>{formatUSD(p.equity)}</div>
-                    </div>
-                    <div>
-                      <div style={labelStyle}>Cash</div>
-                      <div>{formatUSD(p.cash)}</div>
-                    </div>
-                    <div>
-                      <div style={labelStyle}>Day P&L</div>
-                      <div style={{ color: pnlColor(p.day_pnl) }}>
-                        {formatUSD(p.day_pnl)} <span style={{ opacity: 0.7 }}>({formatPct(p.day_pnl_pct)})</span>
-                      </div>
-                    </div>
-                    <div>
-                      <div style={labelStyle}>Open P&L</div>
-                      <div style={{ color: pnlColor(p.open_pnl) }}>
-                        {formatUSD(p.open_pnl)} <span style={{ opacity: 0.7 }}>({formatPct(p.open_pnl_pct)})</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }}>
-                    {p.allowed_classes.map((c) => (
-                      <span key={c} style={{
-                        fontSize: 10, padding: "1px 6px", borderRadius: 10,
-                        background: "var(--apteva-bg-subtle, #f3f4f6)",
-                        color: classColor(c), fontWeight: 600,
-                      }}>{c}</span>
-                    ))}
-                    <span style={{ flex: 1 }} />
-                    <button
-                      onClick={(e) => { e.stopPropagation(); togglePause(p); }}
-                      style={iconBtnStyle}
-                      title={p.status === "active" ? "Pause" : "Resume"}
-                    >
-                      {p.status === "active" ? <Icon.Pause /> : <Icon.Play />}
-                    </button>
-                  </div>
+    <Section
+      title="Portfolios"
+      action={
+        <button
+          onClick={() => setShowCreate((s) => !s)}
+          className="px-3 py-1 text-xs rounded bg-accent text-bg font-medium inline-flex items-center gap-1 hover:opacity-90"
+        ><Icon.Plus /> New</button>
+      }
+    >
+      {showCreate && (
+        <CreatePortfolioForm
+          api={api}
+          onCreated={() => { setShowCreate(false); onChanged(); }}
+          onCancel={() => setShowCreate(false)}
+          setError={setError}
+        />
+      )}
+      {portfolios.length === 0 && !showCreate ? (
+        <EmptyState title="No portfolios yet" hint="Click New to create your first paper portfolio." />
+      ) : (
+        <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))" }}>
+          {portfolios.map((p) => {
+            const isSelected = p.id === selectedId;
+            return (
+              <div
+                key={p.id}
+                onClick={() => onSelect(p.id)}
+                className={`p-3 rounded border cursor-pointer transition-colors ${
+                  isSelected
+                    ? "border-accent bg-accent/15"
+                    : "border-border bg-bg-card hover:bg-bg-hover"
+                }`}
+              >
+                <div className="flex items-center justify-between mb-2">
+                  <strong className="text-sm">{p.name}</strong>
+                  <PortfolioStatusPill status={p.status} mode={p.mode} />
                 </div>
-              );
-            })}
-          </div>
-        )}
-      </Section>
-    </>
+                {p.broker_slug && (
+                  <div className="text-xs text-text-dim mb-1">via {p.broker_slug}</div>
+                )}
+                {p.mandate && (
+                  <div className="text-xs text-text-muted italic mb-2">
+                    "{p.mandate.length > 80 ? p.mandate.slice(0, 80) + "…" : p.mandate}"
+                  </div>
+                )}
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <Stat label="Equity" value={formatUSD(p.equity)} />
+                  <Stat label="Cash" value={formatUSD(p.cash)} />
+                  <Stat label="Day P&L" value={formatUSD(p.day_pnl)} sub={formatPct(p.day_pnl_pct)} colorClass={pnlClass(p.day_pnl)} />
+                  <Stat label="Open P&L" value={formatUSD(p.open_pnl)} sub={formatPct(p.open_pnl_pct)} colorClass={pnlClass(p.open_pnl)} />
+                </div>
+                <div className="flex gap-1 mt-2 flex-wrap items-center">
+                  {p.allowed_classes.map((c) => (
+                    <span key={c} className={`text-xs px-2 py-0.5 rounded-full border font-semibold ${classBadgeClass(c)}`}>{c}</span>
+                  ))}
+                  <span className="flex-1" />
+                  <button
+                    onClick={(e) => { e.stopPropagation(); togglePause(p); }}
+                    className="p-1 rounded border border-border text-text-muted hover:bg-bg-hover"
+                    title={p.status === "active" ? "Pause" : "Resume"}
+                  >{p.status === "active" ? <Icon.Pause /> : <Icon.Play />}</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Section>
   );
 }
 
-function pnlColor(n: number | undefined): string {
-  if (n == null || n === 0) return "inherit";
-  return n > 0 ? "#16a34a" : "#dc2626";
+function Stat({ label, value, sub, colorClass }: { label: string; value: string; sub?: string; colorClass?: string }) {
+  return (
+    <div>
+      <div className="text-xs uppercase tracking-wide text-text-dim font-medium">{label}</div>
+      <div className={`font-semibold ${colorClass || "text-text"}`}>
+        {value}{sub && <span className="text-xs font-normal opacity-80 ml-1">{sub}</span>}
+      </div>
+    </div>
+  );
 }
 
 function CreatePortfolioForm({ api, onCreated, onCancel, setError }: {
@@ -931,133 +688,106 @@ function CreatePortfolioForm({ api, onCreated, onCancel, setError }: {
   }, [api]);
 
   const adapter = brokers.find((b) => b.slug === brokerSlug);
-
-  // When the operator picks a broker, default allowed_classes to the
-  // intersection with the broker's capabilities so they don't have to
-  // think about which asset classes the broker supports.
-  useEffect(() => {
-    if (adapter) setClasses(adapter.asset_classes);
-  }, [adapter]);
+  useEffect(() => { if (adapter) setClasses(adapter.asset_classes); }, [adapter]);
 
   const submit = async () => {
     if (!name.trim()) return;
     setSubmitting(true);
     try {
       const body: Record<string, unknown> = {
-        name: name.trim(),
-        mandate: mandate.trim(),
-        mode,
-        allowed_classes: classes,
+        name: name.trim(), mandate: mandate.trim(), mode, allowed_classes: classes,
       };
       if (mode === "paper") body.starting_cash = Number(startingCash);
       if (mode === "live") body.broker_slug = brokerSlug;
       await api("POST", "/portfolios", undefined, body);
       onCreated();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setSubmitting(false);
-    }
+    } catch (e) { setError((e as Error).message); } finally { setSubmitting(false); }
   };
 
   const liveBrokers = brokers.filter((b) => b.bound);
 
   return (
-    <div style={{
-      padding: 16, marginBottom: 16,
-      border: "1px solid var(--apteva-border, #e5e7eb)",
-      borderRadius: 6, background: "var(--apteva-bg-subtle, #f9fafb)",
-    }}>
-      <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
-        <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+    <div className="p-4 mb-4 border border-border rounded bg-bg-card">
+      <div className="flex gap-4 mb-3">
+        <label className="text-sm flex items-center gap-2 cursor-pointer">
           <input type="radio" checked={mode === "paper"} onChange={() => setMode("paper")} />
           Paper
         </label>
-        <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
-          <input
-            type="radio"
-            checked={mode === "live"}
-            onChange={() => setMode("live")}
-            disabled={liveBrokers.length === 0}
-          />
+        <label className="text-sm flex items-center gap-2 cursor-pointer">
+          <input type="radio" checked={mode === "live"} onChange={() => setMode("live")} disabled={liveBrokers.length === 0} />
           Live
           {liveBrokers.length === 0 && (
-            <span style={{ fontSize: 10, color: "var(--apteva-text-muted, #6b7280)" }}>
-              (no broker bound — see Brokers tab)
-            </span>
+            <span className="text-xs text-text-dim">(no broker bound — see Brokers tab)</span>
           )}
         </label>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+      <div className="grid grid-cols-2 gap-3 mb-3">
         <div>
-          <label style={labelStyle}>Name</label>
-          <input value={name} onChange={(e) => setName(e.target.value)} style={inputStyle} placeholder="e.g. tech-longs" />
+          <FieldLabel>Name</FieldLabel>
+          <input value={name} onChange={(e) => setName(e.target.value)} className={inputClass} placeholder="e.g. tech-longs" />
         </div>
         {mode === "paper" ? (
           <div>
-            <label style={labelStyle}>Starting cash (USD)</label>
-            <input value={startingCash} onChange={(e) => setStartingCash(e.target.value)} style={inputStyle} type="number" />
+            <FieldLabel>Starting cash (USD)</FieldLabel>
+            <input value={startingCash} onChange={(e) => setStartingCash(e.target.value)} className={inputClass} type="number" />
           </div>
         ) : (
           <div>
-            <label style={labelStyle}>Broker</label>
-            <select value={brokerSlug} onChange={(e) => setBrokerSlug(e.target.value)} style={inputStyle}>
+            <FieldLabel>Broker</FieldLabel>
+            <select value={brokerSlug} onChange={(e) => setBrokerSlug(e.target.value)} className={inputClass}>
               <option value="">— Pick —</option>
               {liveBrokers.map((b) => (
-                <option key={b.slug} value={b.slug}>
-                  {b.slug} ({b.asset_classes.join(", ")})
-                </option>
+                <option key={b.slug} value={b.slug}>{b.slug} ({b.asset_classes.join(", ")})</option>
               ))}
             </select>
           </div>
         )}
       </div>
 
-      <div style={{ marginBottom: 12 }}>
-        <label style={labelStyle}>Mandate</label>
+      <div className="mb-3">
+        <FieldLabel>Mandate</FieldLabel>
         <textarea
           value={mandate} onChange={(e) => setMandate(e.target.value)}
-          style={{ ...inputStyle, minHeight: 60, resize: "vertical" }}
+          className={`${inputClass} min-h-16 resize-y`}
           placeholder="What this portfolio is for (free-text; surfaced to the agent's prompt)."
         />
       </div>
 
-      <div style={{ marginBottom: 12 }}>
-        <label style={labelStyle}>Asset classes</label>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+      <div className="mb-3">
+        <FieldLabel>Asset classes</FieldLabel>
+        <div className="flex gap-1.5 flex-wrap">
           {(adapter?.asset_classes || ["equity", "etf", "crypto", "polymarket"]).map((c) => {
             const on = classes.includes(c);
             return (
               <button
                 key={c}
                 onClick={() => setClasses((cs) => on ? cs.filter((x) => x !== c) : [...cs, c])}
-                style={{
-                  fontSize: 11, padding: "4px 10px", borderRadius: 12,
-                  border: "1px solid " + (on ? classColor(c) : "var(--apteva-border, #e5e7eb)"),
-                  background: on ? classColor(c) : "transparent",
-                  color: on ? "white" : "var(--apteva-text, #111)",
-                  cursor: "pointer", fontWeight: 500,
-                }}
+                className={`text-xs px-3 py-1 rounded-full border font-medium ${
+                  on ? classBadgeClass(c) : "border-border text-text-muted hover:bg-bg-hover"
+                }`}
               >{c}</button>
             );
           })}
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-        <button onClick={onCancel} style={btnSecondaryStyle}>Cancel</button>
+      <div className="flex gap-2 justify-end">
+        <button onClick={onCancel} className="px-3 py-1 text-sm rounded border border-border text-text hover:bg-bg-hover">Cancel</button>
         <button
           onClick={submit}
           disabled={submitting || !name.trim() || (mode === "live" && !brokerSlug)}
-          style={btnStyle}
-        >
-          {submitting ? "Creating…" : "Create portfolio"}
-        </button>
+          className="px-3 py-1 text-sm rounded bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50"
+        >{submitting ? "Creating…" : "Create portfolio"}</button>
       </div>
     </div>
   );
 }
+
+function FieldLabel({ children }: { children: React.ReactNode }) {
+  return <label className="block text-xs uppercase tracking-wide font-medium text-text-dim mb-1">{children}</label>;
+}
+const inputClass = "w-full text-sm px-2 py-1.5 bg-bg-input border border-border rounded text-text";
 
 // ─── Trade tab ────────────────────────────────────────────────────
 
@@ -1103,24 +833,37 @@ function TradeTab({ portfolio, api, setBusy, setError, projectId }: {
       <StatsCard portfolio={portfolio} />
       <PlaceOrderFormWithChart portfolio={portfolio} api={api} onPlaced={reload} setError={setError} />
       <Section title="Working orders">
-        {working.length === 0
-          ? <EmptyState title="No working orders" />
-          : <OrdersTable orders={working} onCancel={cancel} />}
+        {working.length === 0 ? <EmptyState title="No working orders" /> : <OrdersTable orders={working} onCancel={cancel} />}
       </Section>
       <Section title="Recent orders">
-        {orders.length === 0
-          ? <EmptyState title="No orders yet" />
-          : <OrdersTable orders={orders} />}
+        {orders.length === 0 ? <EmptyState title="No orders yet" /> : <OrdersTable orders={orders} />}
       </Section>
     </>
   );
 }
 
-// PlaceOrderFormWithChart — wraps PlaceOrderForm + PriceChart with a
-// shared symbol input. The chart updates whenever the user types a
-// resolvable symbol; the form does the actual order submission against
-// the same value. Keeping the chart visible while the operator fills in
-// qty/price gives them context for the order they're about to place.
+function StatsCard({ portfolio }: { portfolio: Portfolio }) {
+  const cells = [
+    { label: "Equity", value: formatUSD(portfolio.equity) },
+    { label: "Cash", value: formatUSD(portfolio.cash) },
+    { label: "Buying power", value: formatUSD(portfolio.buying_power) },
+    { label: "Day P&L", value: formatUSD(portfolio.day_pnl), sub: formatPct(portfolio.day_pnl_pct), colorClass: pnlClass(portfolio.day_pnl) },
+    { label: "Open P&L", value: formatUSD(portfolio.open_pnl), sub: formatPct(portfolio.open_pnl_pct), colorClass: pnlClass(portfolio.open_pnl) },
+  ];
+  return (
+    <div className="grid gap-2 mb-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))" }}>
+      {cells.map((c) => (
+        <div key={c.label} className="px-3 py-2 bg-bg-card border border-border rounded">
+          <div className="text-xs uppercase tracking-wide text-text-dim font-medium">{c.label}</div>
+          <div className={`text-base font-semibold ${c.colorClass || "text-text"}`}>
+            {c.value} {c.sub && <span className="text-xs opacity-80 font-normal">{c.sub}</span>}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function PlaceOrderFormWithChart({ portfolio, api, onPlaced, setError }: {
   portfolio: Portfolio;
   api: <T>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
@@ -1137,46 +880,6 @@ function PlaceOrderFormWithChart({ portfolio, api, onPlaced, setError }: {
         symbol={symbol} setSymbol={setSymbol}
       />
     </>
-  );
-}
-
-// Match the engine's classifier in pricing.go: POLY:* → polymarket,
-// *-USD → crypto, everything else → equity. Lets the chart format the
-// y-axis label correctly without an extra round-trip.
-function inferAssetClass(symbol: string): string {
-  const s = symbol.toUpperCase().trim();
-  if (s.startsWith("POLY:")) return "polymarket";
-  if (s.endsWith("-USD")) return "crypto";
-  return "equity";
-}
-
-function StatsCard({ portfolio }: { portfolio: Portfolio }) {
-  const cells = [
-    { label: "Equity", value: formatUSD(portfolio.equity) },
-    { label: "Cash", value: formatUSD(portfolio.cash) },
-    { label: "Buying power", value: formatUSD(portfolio.buying_power) },
-    { label: "Day P&L", value: formatUSD(portfolio.day_pnl), sub: formatPct(portfolio.day_pnl_pct), color: pnlColor(portfolio.day_pnl) },
-    { label: "Open P&L", value: formatUSD(portfolio.open_pnl), sub: formatPct(portfolio.open_pnl_pct), color: pnlColor(portfolio.open_pnl) },
-  ];
-  return (
-    <div style={{
-      display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
-      gap: 8, marginBottom: 16,
-    }}>
-      {cells.map((c) => (
-        <div key={c.label} style={{
-          padding: "10px 12px",
-          background: "var(--apteva-bg-subtle, #f9fafb)",
-          border: "1px solid var(--apteva-border, #e5e7eb)",
-          borderRadius: 4,
-        }}>
-          <div style={labelStyle}>{c.label}</div>
-          <div style={{ fontWeight: 600, fontSize: 14, color: c.color }}>
-            {c.value} {c.sub && <span style={{ fontSize: 11, opacity: 0.8, fontWeight: 400 }}>{c.sub}</span>}
-          </div>
-        </div>
-      ))}
-    </div>
   );
 }
 
@@ -1198,8 +901,6 @@ function PlaceOrderForm({ portfolio, api, onPlaced, setError, symbol, setSymbol 
   const [quote, setQuote] = useState<Mark | null>(null);
   const isPoly = symbol.toUpperCase().startsWith("POLY:");
 
-  // Quote fetch on symbol blur — small affordance so the agent sees
-  // the live mark before they pick a price.
   const fetchQuote = useCallback(async () => {
     if (!symbol.trim()) { setQuote(null); return; }
     try {
@@ -1213,10 +914,8 @@ function PlaceOrderForm({ portfolio, api, onPlaced, setError, symbol, setSymbol 
     setSubmitting(true);
     try {
       const body: Record<string, unknown> = {
-        symbol: symbol.trim(),
-        side, type,
-        qty: Number(qty),
-        rationale: rationale.trim(),
+        symbol: symbol.trim(), side, type,
+        qty: Number(qty), rationale: rationale.trim(),
       };
       if (limitPrice) body.limit_price = Number(limitPrice);
       if (stopPrice) body.stop_price = Number(stopPrice);
@@ -1235,31 +934,24 @@ function PlaceOrderForm({ portfolio, api, onPlaced, setError, symbol, setSymbol 
 
   return (
     <Section title="Place order">
-      <div style={{
-        padding: 12,
-        border: "1px solid var(--apteva-border, #e5e7eb)",
-        borderRadius: 6,
-        background: "var(--apteva-bg, #fff)",
-      }}>
-        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+      <div className="p-3 border border-border rounded bg-bg-card">
+        <div className="grid gap-2 mb-2" style={{ gridTemplateColumns: "2fr 1fr 1fr 1fr" }}>
           <div>
-            <label style={labelStyle}>Symbol</label>
+            <FieldLabel>Symbol</FieldLabel>
             <input value={symbol} onChange={(e) => setSymbol(e.target.value)} onBlur={fetchQuote}
-              style={inputStyle} placeholder="AAPL · BTC-USD · POLY:slug" />
+              className={inputClass} placeholder="AAPL · BTC-USD · POLY:slug" />
             {quote && (
-              <div style={{ fontSize: 11, marginTop: 2, color: "var(--apteva-text-muted, #6b7280)" }}>
+              <div className="text-xs mt-1 text-text-dim">
                 Mark: {formatPrice(quote.price ?? quote.yes_price, quote.asset_class)}
                 {quote.change_pct_24h != null && (
-                  <span style={{ marginLeft: 6, color: pnlColor(quote.change_pct_24h) }}>
-                    {formatPct(quote.change_pct_24h)}
-                  </span>
+                  <span className={`ml-1.5 ${pnlClass(quote.change_pct_24h)}`}>{formatPct(quote.change_pct_24h)}</span>
                 )}
               </div>
             )}
           </div>
           <div>
-            <label style={labelStyle}>Side</label>
-            <select value={side} onChange={(e) => setSide(e.target.value)} style={inputStyle}>
+            <FieldLabel>Side</FieldLabel>
+            <select value={side} onChange={(e) => setSide(e.target.value)} className={inputClass}>
               {isPoly ? (
                 <>
                   <option value="yes">YES (buy)</option>
@@ -1274,57 +966,53 @@ function PlaceOrderForm({ portfolio, api, onPlaced, setError, symbol, setSymbol 
             </select>
           </div>
           <div>
-            <label style={labelStyle}>Type</label>
-            <select value={type} onChange={(e) => setType(e.target.value)} style={inputStyle}>
+            <FieldLabel>Type</FieldLabel>
+            <select value={type} onChange={(e) => setType(e.target.value)} className={inputClass}>
               <option value="market">Market</option>
               <option value="limit">Limit</option>
               {!isPoly && <option value="stop">Stop</option>}
             </select>
           </div>
           <div>
-            <label style={labelStyle}>Qty</label>
-            <input value={qty} onChange={(e) => setQty(e.target.value)} type="number" step="any" style={inputStyle} />
+            <FieldLabel>Qty</FieldLabel>
+            <input value={qty} onChange={(e) => setQty(e.target.value)} type="number" step="any" className={inputClass} />
           </div>
         </div>
 
         {(type === "limit" || type === "stop") && (
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+          <div className="grid grid-cols-2 gap-2 mb-2">
             {type === "limit" && (
               <div>
-                <label style={labelStyle}>Limit price</label>
-                <input value={limitPrice} onChange={(e) => setLimitPrice(e.target.value)} type="number" step="any" style={inputStyle}
-                  placeholder={isPoly ? "0–1 (probability)" : "USD"} />
+                <FieldLabel>Limit price</FieldLabel>
+                <input value={limitPrice} onChange={(e) => setLimitPrice(e.target.value)} type="number" step="any"
+                  className={inputClass} placeholder={isPoly ? "0–1 (probability)" : "USD"} />
               </div>
             )}
             {type === "stop" && (
               <div>
-                <label style={labelStyle}>Stop price</label>
-                <input value={stopPrice} onChange={(e) => setStopPrice(e.target.value)} type="number" step="any" style={inputStyle} />
+                <FieldLabel>Stop price</FieldLabel>
+                <input value={stopPrice} onChange={(e) => setStopPrice(e.target.value)} type="number" step="any" className={inputClass} />
               </div>
             )}
           </div>
         )}
 
-        <div style={{ marginBottom: 12 }}>
-          <label style={labelStyle}>Rationale (≥30 chars, required)</label>
+        <div className="mb-3">
+          <FieldLabel>Rationale (≥30 chars, required)</FieldLabel>
           <textarea
             value={rationale} onChange={(e) => setRationale(e.target.value)}
-            style={{ ...inputStyle, minHeight: 50, resize: "vertical" }}
+            className={`${inputClass} min-h-14 resize-y`}
             placeholder="Why are you placing this order? Used for audit + agent introspection."
           />
-          <div style={{ fontSize: 10, color: "var(--apteva-text-muted, #6b7280)", marginTop: 2 }}>
-            {rationale.length}/30
-          </div>
+          <div className="text-xs text-text-dim mt-0.5">{rationale.length}/30</div>
         </div>
 
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <div className="flex justify-end">
           <button
             onClick={submit}
             disabled={submitting || !symbol.trim() || !qty || rationale.trim().length < 30}
-            style={btnStyle}
-          >
-            {submitting ? "Placing…" : `Place ${side.toUpperCase()} ${type}`}
-          </button>
+            className="px-3 py-1.5 rounded bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50"
+          >{submitting ? "Placing…" : `Place ${side.toUpperCase()} ${type}`}</button>
         </div>
       </div>
     </Section>
@@ -1333,30 +1021,30 @@ function PlaceOrderForm({ portfolio, api, onPlaced, setError, symbol, setSymbol 
 
 function OrdersTable({ orders, onCancel }: { orders: Order[]; onCancel?: (id: string) => void }) {
   return (
-    <div style={{
-      border: "1px solid var(--apteva-border, #e5e7eb)",
-      borderRadius: 6, overflow: "hidden",
-    }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
-        <thead>
-          <tr style={{ background: "var(--apteva-bg-subtle, #f9fafb)" }}>
+    <div className="border border-border rounded overflow-hidden bg-bg-card">
+      <table className="w-full text-xs border-collapse">
+        <thead className="bg-bg-input text-text-dim">
+          <tr>
             {["Order", "Symbol", "Side", "Type", "Qty", "Status", ""].map((h) => (
-              <th key={h} style={thStyle}>{h}</th>
+              <th key={h} className="px-3 py-2 text-left font-semibold uppercase tracking-wide">{h}</th>
             ))}
           </tr>
         </thead>
         <tbody>
           {orders.map((o) => (
-            <tr key={o.id} style={{ borderTop: "1px solid var(--apteva-border, #e5e7eb)" }}>
-              <td style={tdStyle}><code style={{ fontSize: 10 }}>{o.id}</code></td>
-              <td style={tdStyle}><strong>{o.symbol}</strong></td>
-              <td style={{ ...tdStyle, textTransform: "uppercase", color: o.side === "buy" || o.side === "yes" ? "#16a34a" : "#dc2626" }}>{o.side}</td>
-              <td style={tdStyle}>{o.type}{o.limit_price ? ` @ ${formatPrice(o.limit_price, o.asset_class)}` : ""}</td>
-              <td style={tdStyle}>{formatQty(o.qty)}{o.filled_qty > 0 && o.filled_qty < o.qty && ` (${formatQty(o.filled_qty)} filled)`}</td>
-              <td style={tdStyle}><OrderStatusPill status={o.status} /></td>
-              <td style={{ ...tdStyle, textAlign: "right" }}>
+            <tr key={o.id} className="border-t border-border">
+              <td className="px-3 py-2"><code className="text-xs">{o.id}</code></td>
+              <td className="px-3 py-2 font-semibold">{o.symbol}</td>
+              <td className={`px-3 py-2 uppercase font-semibold ${o.side === "buy" || o.side === "yes" ? "text-green" : "text-red"}`}>{o.side}</td>
+              <td className="px-3 py-2">{o.type}{o.limit_price ? ` @ ${formatPrice(o.limit_price, o.asset_class)}` : ""}</td>
+              <td className="px-3 py-2">{formatQty(o.qty)}{o.filled_qty > 0 && o.filled_qty < o.qty && ` (${formatQty(o.filled_qty)} filled)`}</td>
+              <td className="px-3 py-2"><OrderStatusPill status={o.status} /></td>
+              <td className="px-3 py-2 text-right">
                 {onCancel && o.status === "working" && (
-                  <button onClick={() => onCancel(o.id)} style={iconBtnStyle} title="Cancel"><Icon.X /></button>
+                  <button onClick={() => onCancel(o.id)} title="Cancel"
+                    className="p-1 rounded border border-border text-text-muted hover:bg-bg-hover">
+                    <Icon.X />
+                  </button>
                 )}
               </td>
             </tr>
@@ -1366,29 +1054,6 @@ function OrdersTable({ orders, onCancel }: { orders: Order[]; onCancel?: (id: st
     </div>
   );
 }
-
-function OrderStatusPill({ status }: { status: string }) {
-  const map: Record<string, { c: string; bg: string }> = {
-    working:   { c: "#1d4ed8", bg: "#dbeafe" },
-    filled:    { c: "#15803d", bg: "#dcfce7" },
-    cancelled: { c: "#6b7280", bg: "#f3f4f6" },
-    rejected:  { c: "#b91c1c", bg: "#fee2e2" },
-  };
-  const s = map[status] || { c: "#6b7280", bg: "#f3f4f6" };
-  return (
-    <span style={{
-      fontSize: 10, padding: "2px 6px", borderRadius: 10,
-      background: s.bg, color: s.c, fontWeight: 600, textTransform: "uppercase",
-    }}>{status}</span>
-  );
-}
-
-const thStyle: React.CSSProperties = {
-  padding: "6px 10px", textAlign: "left", fontSize: 10, fontWeight: 600,
-  textTransform: "uppercase", letterSpacing: 0.4,
-  color: "var(--apteva-text-muted, #6b7280)",
-};
-const tdStyle: React.CSSProperties = { padding: "6px 10px", verticalAlign: "middle" };
 
 // ─── Positions tab ────────────────────────────────────────────────
 
@@ -1410,8 +1075,6 @@ function PositionsTab({ portfolio, api, setError }: {
 
   useEffect(() => { load(); }, [load]);
 
-  // Fetch a 1D sparkline per position symbol. Stale-while-revalidate
-  // is OK; we don't block the table render on these.
   useEffect(() => {
     let cancelled = false;
     const fetchAll = async () => {
@@ -1420,7 +1083,7 @@ function PositionsTab({ portfolio, api, setError }: {
         try {
           const r = await api<HistoryResp>("GET", `/history/${encodeURIComponent(p.symbol)}`, { range: "1D" });
           results[p.symbol] = (r.bars || []).map(barValue);
-        } catch { /* skip — sparkline is optional */ }
+        } catch {}
       }));
       if (!cancelled) setSparklines(results);
     };
@@ -1433,15 +1096,12 @@ function PositionsTab({ portfolio, api, setError }: {
 
   return (
     <Section title={`Open positions · ${portfolio.name}`}>
-      <div style={{
-        border: "1px solid var(--apteva-border, #e5e7eb)",
-        borderRadius: 6, overflow: "hidden",
-      }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
-          <thead>
-            <tr style={{ background: "var(--apteva-bg-subtle, #f9fafb)" }}>
-              {["Symbol", "Class", "Qty", "Avg cost", "Mark", "Market value", "Unrealized", "Weight", "1D"].map((h) => (
-                <th key={h} style={thStyle}>{h}</th>
+      <div className="border border-border rounded overflow-hidden bg-bg-card">
+        <table className="w-full text-xs border-collapse">
+          <thead className="bg-bg-input text-text-dim">
+            <tr>
+              {["Symbol","Class","Qty","Avg cost","Mark","Market value","Unrealized","Weight","1D"].map((h) => (
+                <th key={h} className="px-3 py-2 text-left font-semibold uppercase tracking-wide">{h}</th>
               ))}
             </tr>
           </thead>
@@ -1450,21 +1110,23 @@ function PositionsTab({ portfolio, api, setError }: {
               const spark = sparklines[p.symbol] || [];
               const sparkUp = spark.length >= 2 ? spark[spark.length - 1] >= spark[0] : true;
               return (
-                <tr key={p.symbol + (p.outcome || "")} style={{ borderTop: "1px solid var(--apteva-border, #e5e7eb)" }}>
-                  <td style={tdStyle}>
+                <tr key={p.symbol + (p.outcome || "")} className="border-t border-border">
+                  <td className="px-3 py-2">
                     <strong>{p.symbol}</strong>
-                    {p.outcome && <span style={{ marginLeft: 6, fontSize: 10, color: "var(--apteva-text-muted, #6b7280)" }}>{p.outcome}</span>}
+                    {p.outcome && <span className="ml-1.5 text-xs text-text-dim">{p.outcome}</span>}
                   </td>
-                  <td style={tdStyle}><span style={{ color: classColor(p.asset_class), fontWeight: 600 }}>{p.asset_class}</span></td>
-                  <td style={tdStyle}>{formatQty(p.qty)}</td>
-                  <td style={tdStyle}>{formatPrice(p.avg_cost, p.asset_class)}</td>
-                  <td style={tdStyle}>{formatPrice(p.market_price, p.asset_class)}</td>
-                  <td style={tdStyle}>{formatUSD(p.market_value)}</td>
-                  <td style={{ ...tdStyle, color: pnlColor(p.unrealized_pnl) }}>
-                    {formatUSD(p.unrealized_pnl)} <span style={{ opacity: 0.7 }}>({formatPct(p.unrealized_pnl_pct)})</span>
+                  <td className="px-3 py-2">
+                    <span className={`text-xs px-2 py-0.5 rounded-full border font-semibold ${classBadgeClass(p.asset_class)}`}>{p.asset_class}</span>
                   </td>
-                  <td style={tdStyle}>{formatPct(p.weight_pct, 1)}</td>
-                  <td style={tdStyle}><Sparkline values={spark} up={sparkUp} /></td>
+                  <td className="px-3 py-2">{formatQty(p.qty)}</td>
+                  <td className="px-3 py-2">{formatPrice(p.avg_cost, p.asset_class)}</td>
+                  <td className="px-3 py-2">{formatPrice(p.market_price, p.asset_class)}</td>
+                  <td className="px-3 py-2">{formatUSD(p.market_value)}</td>
+                  <td className={`px-3 py-2 ${pnlClass(p.unrealized_pnl)}`}>
+                    {formatUSD(p.unrealized_pnl)} <span className="opacity-70 text-xs">({formatPct(p.unrealized_pnl_pct)})</span>
+                  </td>
+                  <td className="px-3 py-2">{formatPct(p.weight_pct, 1)}</td>
+                  <td className="px-3 py-2"><Sparkline values={spark} up={sparkUp} /></td>
                 </tr>
               );
             })}
@@ -1500,74 +1162,45 @@ function BrokersTab({ api, setError }: {
           href="/dashboard/integrations"
           target="_blank"
           rel="noopener"
-          style={{ ...btnStyle, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 4 }}
-        >
-          Bind broker <Icon.ExternalLink />
-        </a>
+          className="px-3 py-1 text-xs rounded bg-accent text-bg font-medium inline-flex items-center gap-1 hover:opacity-90 no-underline"
+        >Bind broker <Icon.ExternalLink /></a>
       }
     >
-      <div style={{
-        marginBottom: 12,
-        padding: 10,
-        fontSize: 11,
-        background: "var(--apteva-bg-subtle, #f9fafb)",
-        border: "1px solid var(--apteva-border, #e5e7eb)",
-        borderRadius: 4,
-        color: "var(--apteva-text-muted, #6b7280)",
-      }}>
+      <div className="mb-3 p-3 text-xs bg-bg-input border border-border rounded text-text-muted">
         Each portfolio binds to one broker at creation. Bind a connection
         via the dashboard's integrations page, then come back and create a
         live portfolio under the Portfolios tab.
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))" }}>
         {brokers.map((b) => (
-          <div key={b.slug} style={{
-            padding: 12,
-            border: "1px solid var(--apteva-border, #e5e7eb)",
-            borderRadius: 6,
-            background: b.bound ? "var(--apteva-bg, #fff)" : "var(--apteva-bg-subtle, #f9fafb)",
-          }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-              <strong style={{ fontSize: 13 }}>{b.slug}</strong>
-              <span style={{
-                fontSize: 10, padding: "2px 8px", borderRadius: 10,
-                background: b.bound ? "#dcfce7" : "#f3f4f6",
-                color: b.bound ? "#15803d" : "#6b7280",
-                fontWeight: 600, textTransform: "uppercase",
-              }}>
-                {b.bound ? "bound" : "unbound"}
-              </span>
+          <div key={b.slug} className={`p-3 border border-border rounded ${b.bound ? "bg-bg-card" : "bg-bg-input"}`}>
+            <div className="flex items-center justify-between mb-2">
+              <strong className="text-sm">{b.slug}</strong>
+              <span className={`text-xs px-2 py-0.5 rounded-full font-semibold uppercase tracking-wide ${
+                b.bound ? "bg-green/10 text-green" : "bg-bg-input text-text-muted"
+              }`}>{b.bound ? "bound" : "unbound"}</span>
             </div>
-            <div style={{ marginBottom: 6, fontSize: 11 }}>
-              <span style={labelStyle}>Classes</span>
-              <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 2 }}>
+            <div className="mb-2 text-xs">
+              <FieldLabel>Classes</FieldLabel>
+              <div className="flex gap-1 flex-wrap mt-0.5">
                 {b.asset_classes.map((c) => (
-                  <span key={c} style={{
-                    fontSize: 10, padding: "1px 6px", borderRadius: 10,
-                    background: "var(--apteva-bg-subtle, #f3f4f6)",
-                    color: classColor(c), fontWeight: 600,
-                  }}>{c}</span>
+                  <span key={c} className={`text-xs px-2 py-0.5 rounded-full border font-semibold ${classBadgeClass(c)}`}>{c}</span>
                 ))}
               </div>
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: 11, marginTop: 8 }}>
-              <div><span style={labelStyle}>Quote</span><div>{b.quote}</div></div>
-              <div><span style={labelStyle}>Fractional</span><div>{b.fractional ? "yes" : "no"}</div></div>
+            <div className="grid grid-cols-2 gap-2 text-xs mt-2">
+              <div><FieldLabel>Quote</FieldLabel><div className="text-text">{b.quote}</div></div>
+              <div><FieldLabel>Fractional</FieldLabel><div className="text-text">{b.fractional ? "yes" : "no"}</div></div>
             </div>
-            <div style={{ marginTop: 8, fontSize: 11 }}>
-              <span style={labelStyle}>TIFs</span>
-              <div>{b.tifs.join(", ")}</div>
+            <div className="mt-2 text-xs">
+              <FieldLabel>TIFs</FieldLabel>
+              <div className="text-text">{b.tifs.join(", ")}</div>
             </div>
             {b.connections.length > 0 && (
-              <div style={{ marginTop: 8, fontSize: 11 }}>
-                <span style={labelStyle}>Connections</span>
+              <div className="mt-2 text-xs">
+                <FieldLabel>Connections</FieldLabel>
                 {b.connections.map((c) => (
-                  <div key={c.id} style={{
-                    padding: "4px 8px", marginTop: 4, fontSize: 11,
-                    background: "var(--apteva-bg-subtle, #f3f4f6)",
-                    border: "1px solid var(--apteva-border, #e5e7eb)",
-                    borderRadius: 4,
-                  }}>
+                  <div key={c.id} className="px-2 py-1 mt-1 text-xs bg-bg-input border border-border rounded">
                     #{c.id} · {c.name || "(unnamed)"} · {c.status}
                   </div>
                 ))}
@@ -1608,7 +1241,7 @@ function JournalTab({ portfolio, api, setError }: {
     <Section
       title="Journal"
       action={
-        <select value={kind} onChange={(e) => setKind(e.target.value)} style={{ ...inputStyle, width: "auto" }}>
+        <select value={kind} onChange={(e) => setKind(e.target.value)} className={`${inputClass} w-auto`}>
           <option value="">All kinds</option>
           <option value="rationale">Rationale</option>
           <option value="fill">Fill</option>
@@ -1620,22 +1253,14 @@ function JournalTab({ portfolio, api, setError }: {
       {entries.length === 0 ? (
         <EmptyState title="No journal entries" />
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <div className="flex flex-col gap-2">
           {entries.map((e) => (
-            <div key={e.id} style={{
-              padding: 10,
-              border: "1px solid var(--apteva-border, #e5e7eb)",
-              borderRadius: 4,
-              background: "var(--apteva-bg, #fff)",
-            }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, fontSize: 11 }}>
-                <span style={{
-                  textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600,
-                  color: kindColor(e.kind),
-                }}>{e.kind}</span>
-                <span style={{ color: "var(--apteva-text-muted, #6b7280)" }}>{relTime(e.created_at)}</span>
+            <div key={e.id} className="p-3 border border-border rounded bg-bg-card">
+              <div className="flex justify-between mb-1 text-xs">
+                <span className={`uppercase tracking-wide font-semibold ${kindClass(e.kind)}`}>{e.kind}</span>
+                <span className="text-text-dim">{relTime(e.created_at)}</span>
               </div>
-              <div style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{e.body}</div>
+              <div className="text-sm whitespace-pre-wrap">{e.body}</div>
             </div>
           ))}
         </div>
@@ -1644,12 +1269,12 @@ function JournalTab({ portfolio, api, setError }: {
   );
 }
 
-function kindColor(kind: string): string {
+function kindClass(kind: string): string {
   switch (kind) {
-    case "fill": return "#15803d";
-    case "alert": return "#b91c1c";
-    case "rationale": return "#1d4ed8";
-    case "note": return "#6b7280";
-    default: return "#6b7280";
+    case "fill": return "text-green";
+    case "alert": return "text-red";
+    case "rationale": return "text-accent";
+    case "note": return "text-text-dim";
+    default: return "text-text-dim";
   }
 }
