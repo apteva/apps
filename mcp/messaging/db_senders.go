@@ -264,6 +264,25 @@ func dbListSenders(db *sql.DB, projectID, channel string, verifiedOnly bool) ([]
 // dbSoftDeleteSender flips deleted_at = now. Idempotent — re-running
 // against a soft-deleted row is a no-op (deleted_at not overwritten
 // for the same reason a closed support ticket isn't re-closed).
+// dbUpdateSenderLocal updates only fields the operator owns locally
+// (no provider round-trip). Currently scoped to display_name + notes;
+// add more fields here as inline-edit surfaces them. Empty strings
+// preserve existing values (use NULL/explicit clear via a different
+// path if you ever need real "blank it out" semantics).
+func dbUpdateSenderLocal(db *sql.DB, projectID, channel, address, displayName, notes string) error {
+	addr := strings.ToLower(strings.TrimSpace(address))
+	_, err := db.Exec(
+		`UPDATE senders
+		 SET display_name = COALESCE(NULLIF(?, ''), display_name),
+		     notes        = COALESCE(NULLIF(?, ''), notes),
+		     updated_at   = CURRENT_TIMESTAMP
+		 WHERE project_id = ? AND channel = ? AND address = ?
+		   AND deleted_at IS NULL`,
+		displayName, notes, projectID, channel, addr,
+	)
+	return err
+}
+
 func dbSoftDeleteSender(db *sql.DB, projectID, channel, address string) error {
 	addr := strings.ToLower(strings.TrimSpace(address))
 	_, err := db.Exec(

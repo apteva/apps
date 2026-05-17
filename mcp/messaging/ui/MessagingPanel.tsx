@@ -724,6 +724,7 @@ function SendersView({
   const [spf, setSpf] = useState(true);
   const [region, setRegion] = useState("eu-west-1");
   const [advanced, setAdvanced] = useState(false);
+  const [displayName, setDisplayName] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<SendersCreateResp | null>(null);
   const [err, setErr] = useState("");
@@ -773,6 +774,9 @@ function SendersView({
         args.spf = spf;
         if (inbound !== "false") args.region = region;
       }
+      if (displayName.trim()) {
+        args.display_name = displayName.trim();
+      }
       const out = await api<SendersCreateResp>("POST", "/tools/call", {}, {
         tool: "senders_create",
         args,
@@ -781,6 +785,7 @@ function SendersView({
       setAddr("");
       setLocalPart("");
       setPickedDomain("");
+      setDisplayName("");
       reload();
     } catch (e) {
       setErr((e as Error).message);
@@ -819,6 +824,18 @@ function SendersView({
       await api("POST", "/tools/call", {}, { tool: "senders_get", args: { address } });
       reload();
     } catch (e) { notify("error", `Re-check failed: ${(e as Error).message}`); }
+  };
+
+  // saveDisplayName — inline-edit save. Calls the local-only edit
+  // endpoint (no provider round-trip). The next send from this sender
+  // will use the new display name as the friendly From.
+  const saveDisplayName = async (address: string, channel: string, displayName: string) => {
+    try {
+      await api("POST", "/senders/edit", {}, { address, channel, display_name: displayName });
+      reload();
+    } catch (e) {
+      notify("error", `Save display name failed: ${(e as Error).message}`);
+    }
   };
 
   const remove = async (address: string) => {
@@ -894,6 +911,14 @@ function SendersView({
               />
             </Field>
           )}
+          <Field label="Display name (optional)" hint='shown as "Name" <addr> in From'>
+            <input
+              className={inputCls + " w-48"}
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="Marco at Socialcast"
+            />
+          </Field>
           <button
             type="submit"
             disabled={busy || !addr.trim()}
@@ -968,6 +993,7 @@ function SendersView({
           <thead className="text-xs text-text-dim">
             <tr className="border-b border-border">
               <th className="text-left px-4 py-2">Address</th>
+              <th className="text-left px-4 py-2">Display name</th>
               <th className="text-left px-4 py-2">Channel</th>
               <th className="text-left px-4 py-2">Kind</th>
               <th className="text-left px-4 py-2">Verified</th>
@@ -981,6 +1007,13 @@ function SendersView({
                 <td className="px-4 py-2">
                   <span>{stripScheme(s.address)}</span>
                   {s.is_default && <span className="ml-2 bg-blue-500/20 text-blue-400 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded">default</span>}
+                </td>
+                <td className="px-4 py-2">
+                  <DisplayNameCell
+                    value={s.display_name || ""}
+                    onSave={(v) => saveDisplayName(s.address, s.channel, v)}
+                    placeholder="Set display name…"
+                  />
                 </td>
                 <td className="px-4 py-2 text-text-dim">{s.channel}</td>
                 <td className="px-4 py-2 text-text-dim">{s.kind}</td>
@@ -1027,6 +1060,61 @@ function SendersView({
         </div>
       )}
     </div>
+  );
+}
+
+// DisplayNameCell — click-to-edit display_name cell for the senders
+// table. The next send from this sender will use the new name as the
+// friendly From (`"Name" <addr>`). Empty value clears (well — keeps
+// the existing one: the backend's COALESCE+NULLIF preserves on empty;
+// to truly blank it out we'd need a dedicated path, which can wait).
+function DisplayNameCell({ value, onSave, placeholder }: {
+  value: string;
+  onSave: (v: string) => void | Promise<void>;
+  placeholder?: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+
+  // Keep draft in sync if the parent reloads with a new value while
+  // we're not editing — otherwise the cell shows stale state.
+  useEffect(() => { if (!editing) setDraft(value); }, [value, editing]);
+
+  const commit = () => {
+    setEditing(false);
+    if (draft !== value) onSave(draft);
+  };
+  const cancel = () => {
+    setEditing(false);
+    setDraft(value);
+  };
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        onClick={() => setEditing(true)}
+        className={`text-left w-full hover:bg-bg-input/50 rounded px-1 py-0.5 ${value ? "text-text" : "text-text-dim italic"}`}
+        title="Click to edit"
+      >
+        {value || placeholder || "—"}
+      </button>
+    );
+  }
+  return (
+    <input
+      type="text"
+      autoFocus
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commit();
+        if (e.key === "Escape") cancel();
+      }}
+      placeholder={placeholder}
+      className="w-full bg-bg-input border border-accent/50 rounded px-1 py-0.5 text-sm"
+    />
   );
 }
 

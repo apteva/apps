@@ -48,7 +48,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.12.0
+version: 0.12.1
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -199,6 +199,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/senders", Handler: a.handleSendersList},
 		{Pattern: "/senders/quota", Handler: a.handleSendersQuota},
 		{Pattern: "/senders/domains", Handler: a.handleSendersDomains},
+		{Pattern: "/senders/edit", Handler: a.handleSendersEdit},
 		{Pattern: "/identities", Handler: a.handleIdentitiesList},
 		// Internal/panel routes for provider-template sync. Not MCP —
 		// the panel hits these from a button + per-row action; agents
@@ -231,6 +232,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"channel":                map[string]any{"type": "string", "enum": []string{"email", "sms", "whatsapp"}},
 				"from":                   map[string]any{"type": "string"},
+				"from_name":              map[string]any{"type": "string", "description": "Email-only friendly From display name. Composes \"Name\" <addr>. Defaults to sender.display_name when unset."},
 				"to":                     map[string]any{},
 				"body":                   map[string]any{"type": "string"},
 				"subject":                map[string]any{"type": "string"},
@@ -551,6 +553,24 @@ func stripScheme(s string) string {
 }
 
 // normaliseAddress validates and canonicalises a single address for
+// formatFriendlyAddress builds an RFC 5322 mailbox-list entry of the
+// form `"Display Name" <addr>`. The display name is always quoted
+// even when it doesn't strictly need to be — quoting handles every
+// edge (commas, parentheses, dots in names) without us re-implementing
+// RFC 5322's atext rules. Inner quotes and backslashes get escaped.
+//
+// SES's FromEmailAddress accepts this shape directly; mail clients
+// render the display name in the inbox instead of the bare address.
+func formatFriendlyAddress(displayName, addr string) string {
+	dn := strings.TrimSpace(displayName)
+	if dn == "" {
+		return addr
+	}
+	escaped := strings.ReplaceAll(dn, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	return fmt.Sprintf(`"%s" <%s>`, escaped, addr)
+}
+
 // the given channel. Returns the plain-form address ready to store.
 func normaliseAddress(channel, raw string) (string, error) {
 	raw = strings.TrimSpace(stripScheme(strings.TrimSpace(raw)))
@@ -877,6 +897,22 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	from, err = normaliseAddress(channel, from)
 	if err != nil {
 		return nil, fmt.Errorf("from: %w", err)
+	}
+	// Compose RFC 5322 friendly-form From for email: "Display Name"
+	// <addr>. Precedence: explicit from_name arg > sender.display_name
+	// looked up from the local senders row > none (raw address).
+	// SES's FromEmailAddress accepts the friendly form directly; SMS
+	// has no analogous concept so we skip it on non-email channels.
+	if channel == "email" {
+		fromName := strArg(args, "from_name")
+		if fromName == "" {
+			if s, _ := dbFindSender(ctx.AppDB(), pid, "email", from); s != nil {
+				fromName = s.DisplayName
+			}
+		}
+		if fromName != "" {
+			from = formatFriendlyAddress(fromName, from)
+		}
 	}
 	replyTo := strArg(args, "reply_to")
 	if replyTo != "" {
@@ -3388,6 +3424,49 @@ func (a *App) handleSendersQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpJSON(w, out)
+}
+
+// handleSendersEdit — panel-only inline-edit affordance for local-
+// mutable sender fields (display_name today; notes when surfaced).
+// Doesn't fire any provider calls — pure DB write. Deliberately not
+// an MCP tool: agents shouldn't be renaming senders without operator
+// intent, and the operator already has senders_create for the
+// "create-or-update both local+provider state" case.
+func (a *App) handleSendersEdit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var body struct {
+		Address     string `json:"address"`
+		Channel     string `json:"channel"`
+		DisplayName string `json:"display_name"`
+		Notes       string `json:"notes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.Address == "" {
+		httpErr(w, http.StatusBadRequest, "address required")
+		return
+	}
+	if body.Channel == "" {
+		body.Channel = inferChannelFromAddress(body.Address)
+		if body.Channel == "" {
+			body.Channel = "email"
+		}
+	}
+	if err := dbUpdateSenderLocal(globalCtx.AppDB(), pid, body.Channel, body.Address, body.DisplayName, body.Notes); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"ok": true, "address": body.Address, "channel": body.Channel})
 }
 
 // handleIdentitiesList — thin HTTP wrapper over the identities_list

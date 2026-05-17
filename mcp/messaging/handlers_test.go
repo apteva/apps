@@ -1226,6 +1226,104 @@ func TestSendersDelete_PropagatesRealUpstreamError(t *testing.T) {
 	}
 }
 
+// ─── v0.12.1 friendly From ─────────────────────────────────────────
+
+func TestSendMessage_UsesSenderDisplayNameAsFriendlyFrom(t *testing.T) {
+	plat := &stubPlatform{}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "marco@socialcast.dev", Kind: "email_mailbox",
+		DisplayName: "Marco at Socialcast",
+		Provider:    "aws-ses", ProviderIdentityID: "marco@socialcast.dev",
+		Verified:    true, VerificationStatus: "verified", SendingEnabled: true,
+	})
+
+	if _, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "email",
+		"from":    "marco@socialcast.dev",
+		"to":      "alice@example.com",
+		"subject": "hi",
+		"body":    "test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	call := plat.executeCalls[0]
+	got := call.Input["FromEmailAddress"].(string)
+	want := `"Marco at Socialcast" <marco@socialcast.dev>`
+	if got != want {
+		t.Errorf("FromEmailAddress=%q, want %q", got, want)
+	}
+}
+
+func TestSendMessage_FromNameArgOverridesSenderDisplayName(t *testing.T) {
+	plat := &stubPlatform{}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "marco@socialcast.dev", Kind: "email_mailbox",
+		DisplayName: "Marco at Socialcast",
+		Provider:    "aws-ses", ProviderIdentityID: "marco@socialcast.dev",
+		Verified:    true, VerificationStatus: "verified", SendingEnabled: true,
+	})
+
+	if _, err := app.toolSendMessage(ctx, map[string]any{
+		"channel":   "email",
+		"from":      "marco@socialcast.dev",
+		"from_name": "Apteva Support",
+		"to":        "alice@example.com",
+		"subject":   "hi",
+		"body":      "test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := plat.executeCalls[0].Input["FromEmailAddress"].(string)
+	want := `"Apteva Support" <marco@socialcast.dev>`
+	if got != want {
+		t.Errorf("FromEmailAddress=%q, want %q (per-call override should beat sender.display_name)", got, want)
+	}
+}
+
+func TestSendMessage_NoDisplayNameUsesBareAddress(t *testing.T) {
+	plat := &stubPlatform{}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "email", Address: "marco@socialcast.dev", Kind: "email_mailbox",
+		// No DisplayName.
+		Provider: "aws-ses", ProviderIdentityID: "marco@socialcast.dev",
+		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
+	})
+
+	if _, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "email",
+		"from":    "marco@socialcast.dev",
+		"to":      "alice@example.com",
+		"subject": "hi",
+		"body":    "test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := plat.executeCalls[0].Input["FromEmailAddress"].(string)
+	if got != "marco@socialcast.dev" {
+		t.Errorf("FromEmailAddress=%q, want bare address (no friendly form when display_name unset)", got)
+	}
+}
+
+func TestFormatFriendlyAddress_EscapesQuotes(t *testing.T) {
+	// Display names with embedded quotes / backslashes must not break
+	// the RFC 5322 quoted form. SES would otherwise reject the address
+	// (or render confusingly in clients).
+	got := formatFriendlyAddress(`Marco "M" Schwartz`, "marco@x.com")
+	want := `"Marco \"M\" Schwartz" <marco@x.com>`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 // ─── v0.12 split: senders / identities ─────────────────────────────
 
 func TestIdentitiesList_ReturnsAnchors(t *testing.T) {
