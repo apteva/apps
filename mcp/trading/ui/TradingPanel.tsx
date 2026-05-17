@@ -871,7 +871,22 @@ function PlaceOrderFormWithChart({ portfolio, api, onPlaced, setError }: {
   setError: (e: string | null) => void;
 }) {
   const [symbol, setSymbol] = useState("");
+  const [universe, setUniverse] = useState<Mark[]>([]);
   const assetClass = inferAssetClass(symbol);
+
+  // Pull the engine's known universe once — these are the symbols we
+  // have marks for + the symbols the provider knows how to quote
+  // (mock universe, plus binance-public crypto, plus polymarket gamma,
+  // plus equity via alpaca-market-data when bound). Refreshed on the
+  // panel's lifecycle; live ticks update marks server-side and the
+  // SymbolSelect's per-symbol formatPrice picks up new prices from
+  // the cached snapshot if needed.
+  useEffect(() => {
+    api<{ symbols: Mark[] }>("GET", "/universe")
+      .then((r) => setUniverse(r.symbols || []))
+      .catch(() => undefined);
+  }, [api]);
+
   return (
     <>
       <WatchlistChips
@@ -885,8 +900,121 @@ function PlaceOrderFormWithChart({ portfolio, api, onPlaced, setError }: {
       <PlaceOrderForm
         portfolio={portfolio} api={api} onPlaced={onPlaced} setError={setError}
         symbol={symbol} setSymbol={setSymbol}
+        universe={universe}
       />
     </>
+  );
+}
+
+// SymbolSelect — combobox over the engine's known universe. Filters by
+// case-insensitive prefix as the operator types, shows asset-class
+// chip + current mark per row, commits on click / Enter (so the chart
+// doesn't refetch on every keystroke). Free-form text submission still
+// works — useful for live brokers (Alpaca, Binance) that support
+// thousands of symbols beyond what our universe knows about.
+function SymbolSelect({ value, onCommit, universe, allowedClasses }: {
+  value: string;
+  onCommit: (s: string) => void;
+  universe: Mark[];
+  allowedClasses?: string[];
+}) {
+  const [query, setQuery] = useState(value);
+  const [open, setOpen] = useState(false);
+  const [activeIdx, setActiveIdx] = useState(0);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+
+  // Sync local query with parent's committed value (so click-a-chip
+  // updates what's in the box).
+  useEffect(() => { setQuery(value); }, [value]);
+
+  // Close dropdown on outside click.
+  useEffect(() => {
+    const onDocClick = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
+
+  const q = query.trim().toUpperCase();
+  const matches = useMemo(() => {
+    let pool = universe;
+    if (allowedClasses && allowedClasses.length > 0) {
+      pool = pool.filter((m) => allowedClasses.includes(m.asset_class));
+    }
+    if (q === "") return pool.slice(0, 50);
+    return pool
+      .filter((m) => m.symbol.toUpperCase().includes(q))
+      .slice(0, 50);
+  }, [q, universe, allowedClasses?.join(",")]);
+
+  const commit = (s: string) => {
+    const v = s.trim();
+    setQuery(v);
+    onCommit(v);
+    setOpen(false);
+  };
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <input
+        value={query}
+        onChange={(e) => { setQuery(e.target.value); setOpen(true); setActiveIdx(0); }}
+        onFocus={() => setOpen(true)}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown") { e.preventDefault(); setActiveIdx((i) => Math.min(i + 1, matches.length - 1)); }
+          else if (e.key === "ArrowUp") { e.preventDefault(); setActiveIdx((i) => Math.max(i - 1, 0)); }
+          else if (e.key === "Enter") {
+            e.preventDefault();
+            if (open && matches[activeIdx]) commit(matches[activeIdx].symbol);
+            else commit(query);
+          } else if (e.key === "Escape") setOpen(false);
+        }}
+        onBlur={() => { /* commit happens via Enter/click; blur just commits typed value too */ commit(query); }}
+        className={inputClass}
+        placeholder="Search BTC, AAPL, POLY:… (type or pick)"
+        autoComplete="off"
+      />
+      {open && matches.length > 0 && (
+        <div className="absolute z-10 left-0 right-0 mt-1 max-h-64 overflow-auto bg-bg-card border border-border rounded shadow-lg">
+          {matches.map((m, i) => {
+            const active = i === activeIdx;
+            const price = m.price ?? m.yes_price;
+            const chg = m.change_pct_24h;
+            return (
+              <div
+                key={m.symbol}
+                onMouseDown={(e) => { e.preventDefault(); commit(m.symbol); }}
+                onMouseEnter={() => setActiveIdx(i)}
+                className={`flex items-center gap-2 px-2 py-1.5 text-xs cursor-pointer ${active ? "bg-bg-hover" : ""}`}
+              >
+                <span className={`px-2 py-0.5 rounded-full border font-semibold text-xs ${classBadgeClass(m.asset_class)}`}
+                  style={{ minWidth: 60, textAlign: "center" }}>
+                  {m.asset_class}
+                </span>
+                <span className="font-semibold text-text flex-1">{m.symbol}</span>
+                {price != null && (
+                  <span className="text-text-muted tabular-nums">{formatPrice(price, m.asset_class)}</span>
+                )}
+                {chg != null && (
+                  <span className={`tabular-nums ${pnlClass(chg)}`} style={{ minWidth: 56, textAlign: "right" }}>
+                    {formatPct(chg, 1)}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {open && q !== "" && matches.length === 0 && (
+        <div className="absolute z-10 left-0 right-0 mt-1 px-2 py-2 bg-bg-card border border-border rounded text-xs text-text-dim">
+          No match in known universe — press Enter to use "{query.trim()}" anyway
+          (live brokers may support more symbols than we track).
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1005,13 +1133,14 @@ function WatchlistChips({ portfolio, api, currentSymbol, onSelect, setError }: {
   );
 }
 
-function PlaceOrderForm({ portfolio, api, onPlaced, setError, symbol, setSymbol }: {
+function PlaceOrderForm({ portfolio, api, onPlaced, setError, symbol, setSymbol, universe }: {
   portfolio: Portfolio;
   api: <T>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
   onPlaced: () => void;
   setError: (e: string | null) => void;
   symbol: string;
   setSymbol: (s: string) => void;
+  universe: Mark[];
 }) {
   const [side, setSide] = useState<string>("buy");
   const [type, setType] = useState<string>("market");
@@ -1023,12 +1152,16 @@ function PlaceOrderForm({ portfolio, api, onPlaced, setError, symbol, setSymbol 
   const [quote, setQuote] = useState<Mark | null>(null);
   const isPoly = symbol.toUpperCase().startsWith("POLY:");
 
-  const fetchQuote = useCallback(async () => {
+  // Refresh the inline quote whenever the committed symbol changes.
+  // Effect-driven (not callback-driven) so click-a-chip / pick-from-
+  // dropdown both fire the fetch without the closure-staleness trap.
+  useEffect(() => {
     if (!symbol.trim()) { setQuote(null); return; }
-    try {
-      const r = await api<Mark>("GET", `/quotes/${encodeURIComponent(symbol.trim())}`);
-      setQuote(r);
-    } catch { setQuote(null); }
+    let cancelled = false;
+    api<Mark>("GET", `/quotes/${encodeURIComponent(symbol.trim())}`)
+      .then((r) => { if (!cancelled) setQuote(r); })
+      .catch(() => { if (!cancelled) setQuote(null); });
+    return () => { cancelled = true; };
   }, [symbol, api]);
 
   const submit = async () => {
@@ -1060,8 +1193,12 @@ function PlaceOrderForm({ portfolio, api, onPlaced, setError, symbol, setSymbol 
         <div className="grid gap-2 mb-2" style={{ gridTemplateColumns: "2fr 1fr 1fr 1fr" }}>
           <div>
             <FieldLabel>Symbol</FieldLabel>
-            <input value={symbol} onChange={(e) => setSymbol(e.target.value)} onBlur={fetchQuote}
-              className={inputClass} placeholder="AAPL · BTC-USD · POLY:slug" />
+            <SymbolSelect
+              value={symbol}
+              onCommit={(s) => setSymbol(s)}
+              universe={universe}
+              allowedClasses={portfolio.allowed_classes}
+            />
             {quote && (
               <div className="text-xs mt-1 text-text-dim">
                 Mark: {formatPrice(quote.price ?? quote.yes_price, quote.asset_class)}
