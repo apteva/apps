@@ -55,9 +55,9 @@ type RunningRelease struct {
 	ReleaseID int64
 	Port      int
 	PID       int
-	cmd       *exec.Cmd    // nil for static (in-process) and adopted releases
-	server    *http.Server // non-nil for static
-	cancel    context.CancelFunc
+	cmd     *exec.Cmd // nil for adopted releases (we didn't spawn them);
+	                  // set for every spawn including static-server subprocess (v0.11)
+	cancel  context.CancelFunc
 	logFile   *os.File
 	stopCh    chan struct{} // closed when supervisor exits
 
@@ -95,58 +95,89 @@ func (r *LocalRuntime) Start(spec ReleaseSpec) (*RunningRelease, error) {
 	}
 	fmt.Fprintf(logF, "\n=== release %d starting at %s ===\n", spec.ReleaseID, nowUTC())
 
-	// Static gets a tiny in-process FileServer; no child process.
+	// Static: spawn the deploy binary in --static-server mode as its
+	// own subprocess (v0.11+). Same supervision shape as bun/node/go
+	// releases — survives deploy.app restarts via Adopt(pid, port).
 	if spec.Framework == "static" {
 		return r.startStatic(spec, spec.ArtifactDir, logF, logPath)
 	}
 	// Static-output detection: bun/node builds that produced a static
 	// export (Next.js `output: 'export'` → out/, Vite/Astro static →
-	// dist/, Gatsby → public/) get served by the same in-process
-	// FileServer rather than spawning `<pm> run start`. The script
-	// usually assumes SSR (`next start`) and exits immediately for
-	// `output: 'export'`. start_cmd skips this — operators get the
-	// last word.
+	// dist/, Gatsby → public/) get served by the static-server
+	// subprocess rather than spawning `<pm> run start`. The npm start
+	// script usually assumes SSR (`next start`) and exits immediately
+	// for `output: 'export'`. start_cmd skips this — operators get
+	// the last word.
 	if spec.StartCmd == "" && (spec.Framework == "bun" || spec.Framework == "node") {
 		if sub := detectStaticOutput(spec.ArtifactDir); sub != "" {
-			fmt.Fprintf(logF, "static output detected at %s/ — serving via in-process FileServer\n", sub)
+			fmt.Fprintf(logF, "static output detected at %s/ — serving via deploy --static-server\n", sub)
 			return r.startStatic(spec, filepath.Join(spec.ArtifactDir, sub), logF, logPath)
 		}
 	}
 	return r.startProcess(spec, logF, logPath)
 }
 
+// startStatic spawns the deploy binary in --static-server mode against
+// `root`. v0.11.0+ — same supervision lifecycle as bun/node/go
+// releases (own pgrp, cmd.Wait supervisor goroutine, Adopt-by-port on
+// boot). Replaces the in-process http.Server that lived inside
+// deploy.app itself and died with every apteva-server restart.
+//
+// `root` is already resolved by the caller (Start) — it may be
+// spec.ArtifactDir itself (framework=static) or a subdir like dist/
+// for a Next.js / Vite / Astro static export.
 func (r *LocalRuntime) startStatic(spec ReleaseSpec, root string, logF *os.File, logPath string) (*RunningRelease, error) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", staticHandler(root))
-	srv := &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", spec.Port),
-		Handler: mux,
-	}
-	ln, err := net.Listen("tcp", srv.Addr)
+	// Re-exec ourselves with --static-server. os.Executable() is the
+	// canonical way to get the current binary path; os.Args[0] is
+	// usually the same but Args[0] is whatever the parent set, which
+	// may be a relative path that no longer resolves from spec.ArtifactDir.
+	self, err := os.Executable()
 	if err != nil {
 		logF.Close()
-		return nil, fmt.Errorf("listen :%d: %w", spec.Port, err)
+		return nil, fmt.Errorf("locate self for static-server re-exec: %w", err)
 	}
-	stop := make(chan struct{})
-	go func() {
-		defer close(stop)
-		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			fmt.Fprintf(logF, "static server error: %v\n", err)
-			r.app.markCrashed(spec.ReleaseID, err)
-			return
-		}
-		fmt.Fprintf(logF, "static server stopped\n")
-	}()
+	args := []string{
+		"--static-server",
+		"--port", strconv.Itoa(spec.Port),
+		"--root", root,
+		"--log-path", logPath,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, self, args...)
+	cmd.Dir = root
+	cmd.Stdout = logF
+	cmd.Stderr = logF
+	cmd.Env = mergeEnv(spec.Env, spec.Port)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	fmt.Fprintf(logF, "+ %s %s (static-server, root=%s, port=%d)\n",
+		self, strings.Join(args, " "), root, spec.Port)
+	if err := cmd.Start(); err != nil {
+		cancel()
+		logF.Close()
+		return nil, fmt.Errorf("spawn static-server: %w", err)
+	}
+
 	rr := &RunningRelease{
-		ReleaseID: spec.ReleaseID, Port: spec.Port, PID: os.Getpid(),
-		server: srv, logFile: logF, stopCh: stop,
+		ReleaseID: spec.ReleaseID, Port: spec.Port, PID: cmd.Process.Pid,
+		cmd: cmd, cancel: cancel, logFile: logF, stopCh: make(chan struct{}),
 	}
-	// Promote to "live" via the same probe path the spawn-based
-	// releases use, so route registration and current_release pointer
-	// updates happen in a single code path. The port is already bound
-	// (net.Listen succeeded above) so pidOwnsPort flips true on the
-	// first poll — sub-millisecond.
-	go r.app.probeReady(spec.ReleaseID, os.Getpid(), spec.Port, 5*time.Second)
+	go func() {
+		defer close(rr.stopCh)
+		err := cmd.Wait()
+		exit := -1
+		if cmd.ProcessState != nil {
+			exit = cmd.ProcessState.ExitCode()
+		}
+		fmt.Fprintf(logF, "=== static-server exited at %s (exit=%d, err=%v) ===\n", nowUTC(), exit, err)
+		_ = logF.Close()
+		if ctx.Err() != nil {
+			r.app.markStopped(rr.ReleaseID)
+		} else {
+			r.app.markCrashed(rr.ReleaseID, fmt.Errorf("exit %d", exit))
+		}
+	}()
+	go r.app.probeReady(rr.ReleaseID, rr.PID, spec.Port, 5*time.Second)
 	return rr, nil
 }
 
@@ -265,13 +296,6 @@ func (r *LocalRuntime) Adopt(releaseID int64, pid, port int) (*RunningRelease, e
 
 func (r *LocalRuntime) Stop(rr *RunningRelease) error {
 	if rr == nil {
-		return nil
-	}
-	if rr.server != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = rr.server.Shutdown(ctx)
-		<-rr.stopCh
 		return nil
 	}
 	if rr.adopted {

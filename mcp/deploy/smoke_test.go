@@ -14,6 +14,20 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// TestMain doubles as the --static-server shim for tests. When
+// startStatic re-execs the test binary (os.Executable()), control
+// lands here first; if --static-server is present we serve files and
+// exit, otherwise we run the test suite normally. Mirrors main.go's
+// branch so the test binary behaves identically to the deploy binary
+// in the spawn path.
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "--static-server" {
+		runStaticServer(os.Args[2:])
+		return
+	}
+	os.Exit(m.Run())
+}
+
 // Smoke test: bring up the schema in an in-memory DB, run the
 // store helpers end-to-end so refactors break loudly.
 func TestStoreSmoke(t *testing.T) {
@@ -608,11 +622,22 @@ func TestLocalRuntime_StaticOutputRouting(t *testing.T) {
 			}
 			defer func() { _ = rt.Stop(rr) }()
 
-			if rr.server == nil {
-				t.Fatal("expected in-process server (server!=nil), got child process")
+			// v0.11+: static releases run as a re-exec'd subprocess, so
+			// cmd is set (vs the pre-0.11 in-process model where cmd
+			// was nil and a server field held the http.Server). The
+			// subprocess re-execs the test binary itself; TestMain
+			// detects --static-server and runs runStaticServer.
+			if rr.cmd == nil {
+				t.Fatal("expected static-server subprocess (cmd!=nil)")
 			}
-			if rr.cmd != nil {
-				t.Fatal("expected no cmd handle; static-output should not spawn a process")
+			foundFlag := false
+			for _, a := range rr.cmd.Args {
+				if a == "--static-server" {
+					foundFlag = true
+				}
+			}
+			if !foundFlag {
+				t.Fatalf("expected --static-server in cmd.Args, got %v", rr.cmd.Args)
 			}
 
 			// Fetch / and confirm we get our index.html.

@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.7.0
+version: 0.11.0
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
@@ -347,6 +347,16 @@ func (a *App) handleMeta(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	// Sub-mode: when invoked with --static-server, this binary is a
+	// static file server for one release, not the deploy sidecar.
+	// startStatic re-execs os.Args[0] with this flag so static
+	// releases share the exact pid+port supervision pattern as
+	// bun/node/go releases (and survive deploy.app restarts via
+	// v0.7's Adopt). See static_server.go.
+	if len(os.Args) > 1 && os.Args[1] == "--static-server" {
+		runStaticServer(os.Args[2:])
+		return
+	}
 	app := &App{}
 	wrapped := wrapApp{app: app}
 	sdk.Run(&wrapped)
@@ -616,6 +626,13 @@ func (a *App) runRelease(d *Deployment, b *Build) (*Release, error) {
 // markCrashed is called by the runtime when a supervised process
 // exits unexpectedly.
 func (a *App) markCrashed(releaseID int64, cause error) {
+	// Defensive: tests can run the runtime without an apteva-server
+	// context (no OnMount → no globalCtx, no AppDB). Skipping the DB
+	// updates is safe — the test owns the lifecycle and isn't reading
+	// status back.
+	if globalCtx == nil || globalCtx.AppDB() == nil {
+		return
+	}
 	_ = dbUpdateRelease(globalCtx.AppDB(), releaseID, map[string]any{
 		"status":     "crashed",
 		"stopped_at": nowUTC(),
@@ -637,6 +654,10 @@ func (a *App) markCrashed(releaseID int64, cause error) {
 }
 
 func (a *App) markStopped(releaseID int64) {
+	// Same defensive skip as markCrashed — see comment there.
+	if globalCtx == nil || globalCtx.AppDB() == nil {
+		return
+	}
 	_ = dbUpdateRelease(globalCtx.AppDB(), releaseID, map[string]any{
 		"status":     "stopped",
 		"stopped_at": nowUTC(),
