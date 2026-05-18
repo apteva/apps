@@ -84,6 +84,31 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			Handler:     a.toolMetrics,
 		},
+		{
+			Name: "instance_list_server_types",
+			Description: "List the VPS server types (sizes) available from the bound provider, live from the upstream API. " +
+				"Returns name + cores + memory_gb + disk_gb + monthly/hourly price + deprecation flag + available_in (locations). " +
+				"Use this to discover valid `size` values for instance_create instead of hardcoding — Hetzner deprecates types over time. " +
+				"Args: provider? (default 'hetzner').",
+			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}}, nil),
+			Handler:     a.toolListServerTypes,
+		},
+		{
+			Name: "instance_list_locations",
+			Description: "List the VPS regions available from the bound provider, live from upstream. " +
+				"Returns name + city + country + network_zone for each. " +
+				"Use to discover valid `region` values for instance_create. Args: provider? (default 'hetzner').",
+			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}}, nil),
+			Handler:     a.toolListLocations,
+		},
+		{
+			Name: "instance_list_images",
+			Description: "List OS images available from the bound provider, live from upstream (system images only — snapshots/backups/apps excluded). " +
+				"Returns name + os_flavor + os_version + architecture. " +
+				"Use to discover valid `image` values for instance_create. Args: provider? (default 'hetzner').",
+			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}}, nil),
+			Handler:     a.toolListImages,
+		},
 	}
 }
 
@@ -251,6 +276,30 @@ func (a *App) toolMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"instance_id": id, "metrics": m}, nil
+}
+
+func (a *App) toolListServerTypes(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	types, err := listServerTypes(ctx, strArg(args, "provider"))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"server_types": types, "count": len(types)}, nil
+}
+
+func (a *App) toolListLocations(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	locs, err := listLocations(ctx, strArg(args, "provider"))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"locations": locs, "count": len(locs)}, nil
+}
+
+func (a *App) toolListImages(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	imgs, err := listImages(ctx, strArg(args, "provider"))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"images": imgs, "count": len(imgs)}, nil
 }
 
 // ─── arg helpers ──────────────────────────────────────────────────

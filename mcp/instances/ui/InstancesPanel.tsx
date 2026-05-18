@@ -262,6 +262,36 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
+interface ServerTypeWire {
+  name: string;
+  description?: string;
+  cores: number;
+  memory_gb: number;
+  disk_gb: number;
+  cpu_type?: string;
+  architecture?: string;
+  deprecated?: boolean;
+  monthly_price_eur?: number;
+  hourly_price_eur?: number;
+  available_in?: string[];
+}
+
+interface LocationWire {
+  name: string;
+  city?: string;
+  country?: string;
+  description?: string;
+  network_zone?: string;
+}
+
+interface ImageWire {
+  name: string;
+  description?: string;
+  os_flavor?: string;
+  os_version?: string;
+  architecture?: string;
+}
+
 function CreateDialog({
   onClose, onCreated, withParams, setError,
 }: {
@@ -271,9 +301,68 @@ function CreateDialog({
   setError: (s: string) => void;
 }) {
   const [name, setName] = useState("");
-  const [size, setSize] = useState("cx22");
-  const [region, setRegion] = useState("fsn1");
+  const [size, setSize] = useState("");
+  const [region, setRegion] = useState("");
+  const [image, setImage] = useState("");
   const [busy, setBusy] = useState(false);
+  // Live catalog from the bound provider — populated on mount via
+  // the new /api/instances-server-types|locations|images routes.
+  // Empty arrays mean either still-loading or the provider isn't
+  // bound; catalogError carries the failure message in the latter
+  // case so the operator sees what to fix instead of an empty form.
+  const [serverTypes, setServerTypes] = useState<ServerTypeWire[]>([]);
+  const [locations, setLocations] = useState<LocationWire[]>([]);
+  const [images, setImages] = useState<ImageWire[]>([]);
+  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      setCatalogLoading(true);
+      setCatalogError(null);
+      const qs = withParams();
+      try {
+        const [stRes, locRes, imgRes] = await Promise.all([
+          fetch(`${API}/instances-server-types?${qs}`, { credentials: "same-origin" }),
+          fetch(`${API}/instances-locations?${qs}`, { credentials: "same-origin" }),
+          fetch(`${API}/instances-images?${qs}`, { credentials: "same-origin" }),
+        ]);
+        if (!stRes.ok) throw new Error(`server_types: ${stRes.status} ${await stRes.text().catch(() => "")}`);
+        if (!locRes.ok) throw new Error(`locations: ${locRes.status} ${await locRes.text().catch(() => "")}`);
+        if (!imgRes.ok) throw new Error(`images: ${imgRes.status} ${await imgRes.text().catch(() => "")}`);
+        const stJson = await stRes.json();
+        const locJson = await locRes.json();
+        const imgJson = await imgRes.json();
+        // Hide deprecated server types from the default view —
+        // they still come back in the API for completeness but
+        // operators shouldn't pick them for a new server.
+        const types: ServerTypeWire[] = (stJson.server_types || []).filter((t: ServerTypeWire) => !t.deprecated);
+        const locs: LocationWire[] = locJson.locations || [];
+        const imgs: ImageWire[] = imgJson.images || [];
+        // Stable, predictable orderings. Price for sizes (cheapest
+        // first), alphabetical for locations + images.
+        types.sort((a, b) => (a.monthly_price_eur ?? 0) - (b.monthly_price_eur ?? 0));
+        locs.sort((a, b) => a.name.localeCompare(b.name));
+        imgs.sort((a, b) => a.name.localeCompare(b.name));
+        setServerTypes(types);
+        setLocations(locs);
+        setImages(imgs);
+        // Sensible defaults: cheapest size, first location
+        // alphabetically, ubuntu LTS if present otherwise first image.
+        if (types.length && !size) setSize(types[0].name);
+        if (locs.length && !region) setRegion(locs[0].name);
+        if (imgs.length && !image) {
+          const ubuntu = imgs.find((i) => i.os_flavor === "ubuntu" && i.os_version?.endsWith(".04"));
+          setImage(ubuntu?.name || imgs[0].name);
+        }
+      } catch (e) {
+        setCatalogError((e as Error).message);
+      } finally {
+        setCatalogLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -284,7 +373,7 @@ function CreateDialog({
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim(), provider: "hetzner", size, region }),
+        body: JSON.stringify({ name: name.trim(), provider: "hetzner", size, region, image }),
       });
       if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
       onCreated();
@@ -295,17 +384,46 @@ function CreateDialog({
     }
   };
 
+  // Compact spec/price suffix shown next to a server-type's name in
+  // the dropdown. Falls through to whatever fields are present.
+  const sizeLabel = (t: ServerTypeWire): string => {
+    const parts: string[] = [];
+    if (t.cores) parts.push(`${t.cores} ${t.cpu_type === "dedicated" ? "vCPU dedicated" : "vCPU"}`);
+    if (t.memory_gb) parts.push(`${t.memory_gb} GB`);
+    if (t.disk_gb) parts.push(`${t.disk_gb} GB disk`);
+    if (t.architecture && t.architecture !== "x86") parts.push(t.architecture.toUpperCase());
+    const specs = parts.join(", ");
+    const price = t.monthly_price_eur ? `€${t.monthly_price_eur.toFixed(2)}/mo` : "";
+    return [t.name, price && `(${price}`, specs && (price ? `, ${specs})` : `(${specs})`)]
+      .filter(Boolean)
+      .join(" ");
+  };
+
+  const locLabel = (l: LocationWire): string => {
+    const place = [l.city, l.country].filter(Boolean).join(", ");
+    return place ? `${place} (${l.name})` : l.name;
+  };
+
   return (
     <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50" onClick={onClose}>
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
-        className="w-[420px] bg-bg border border-border rounded p-5 space-y-4"
+        className="w-[480px] bg-bg border border-border rounded p-5 space-y-4"
       >
         <h2 className="text-text font-semibold">Provision a new instance</h2>
-        <p className="text-xs text-text-muted">
-          v0.1 supports Hetzner Cloud. Bind a Hetzner connection on this install before provisioning.
-        </p>
+        {catalogError ? (
+          <p className="text-xs text-red-500">
+            Couldn't load provider catalog: {catalogError}. Bind a Hetzner connection on this
+            install (Integrations → Add → Hetzner Cloud), then reopen this dialog.
+          </p>
+        ) : catalogLoading ? (
+          <p className="text-xs text-text-muted">Loading server types, regions, and images from Hetzner…</p>
+        ) : (
+          <p className="text-xs text-text-muted">
+            Live from Hetzner: {serverTypes.length} types · {locations.length} regions · {images.length} images.
+          </p>
+        )}
         <div>
           <label className="text-xs text-text-muted block mb-1">Name</label>
           <input
@@ -317,32 +435,50 @@ function CreateDialog({
             className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
           />
         </div>
-        <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-2">
           <div>
             <label className="text-xs text-text-muted block mb-1">Size</label>
             <select
               value={size}
               onChange={(e) => setSize(e.target.value)}
-              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              disabled={catalogLoading || !!catalogError}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
             >
-              <option value="cx22">cx22 (€3.79/mo, 2 vCPU shared, 4 GB)</option>
-              <option value="cx32">cx32 (€6.49/mo, 4 vCPU shared, 8 GB)</option>
-              <option value="ccx13">ccx13 (€12.49/mo, 2 vCPU dedicated, 8 GB)</option>
+              {serverTypes.length === 0 && <option value="">—</option>}
+              {serverTypes.map((t) => (
+                <option key={t.name} value={t.name}>{sizeLabel(t)}</option>
+              ))}
             </select>
           </div>
-          <div>
-            <label className="text-xs text-text-muted block mb-1">Region</label>
-            <select
-              value={region}
-              onChange={(e) => setRegion(e.target.value)}
-              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
-            >
-              <option value="fsn1">Falkenstein (fsn1)</option>
-              <option value="nbg1">Nuremberg (nbg1)</option>
-              <option value="hel1">Helsinki (hel1)</option>
-              <option value="ash">Ashburn US (ash)</option>
-              <option value="hil">Hillsboro US (hil)</option>
-            </select>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-xs text-text-muted block mb-1">Region</label>
+              <select
+                value={region}
+                onChange={(e) => setRegion(e.target.value)}
+                disabled={catalogLoading || !!catalogError}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
+              >
+                {locations.length === 0 && <option value="">—</option>}
+                {locations.map((l) => (
+                  <option key={l.name} value={l.name}>{locLabel(l)}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs text-text-muted block mb-1">Image</label>
+              <select
+                value={image}
+                onChange={(e) => setImage(e.target.value)}
+                disabled={catalogLoading || !!catalogError}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
+              >
+                {images.length === 0 && <option value="">—</option>}
+                {images.map((i) => (
+                  <option key={i.name} value={i.name}>{i.description || i.name}</option>
+                ))}
+              </select>
+            </div>
           </div>
         </div>
         <div className="flex justify-end gap-2 pt-1">
@@ -354,7 +490,7 @@ function CreateDialog({
           >Cancel</button>
           <button
             type="submit"
-            disabled={busy || !name.trim()}
+            disabled={busy || !name.trim() || catalogLoading || !!catalogError || !size || !region}
             className="px-3 py-1.5 text-sm rounded bg-blue text-white hover:bg-blue/90 disabled:opacity-50"
           >{busy ? "Provisioning…" : "Provision"}</button>
         </div>

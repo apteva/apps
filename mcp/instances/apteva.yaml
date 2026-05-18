@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.2.0
+version: 0.3.0
 description: |
   Compute-host inventory + lifecycle for Apteva. The local Apteva
   machine is always available as a built-in instance (id 0); remote
@@ -67,6 +67,21 @@ provides:
       description: Poll the instance until SSH is reachable.
     - name: instance_metrics
       description: CPU / memory / disk / network / load / uptime (local gopsutil, remote /proc parse). 5s cache.
+    - name: instance_list_server_types
+      description: |
+        Live list of VPS server types (sizes) from the bound provider, pulled from upstream at call time.
+        Returns name + cores + memory_gb + disk_gb + monthly_price_eur + hourly_price_eur + deprecated + available_in.
+        Discovery surface for instance_create's `size` arg — Hetzner deprecates types over time, so hardcoded
+        defaults age out. Args: provider? (default 'hetzner').
+    - name: instance_list_locations
+      description: |
+        Live list of VPS regions from the bound provider. Returns name + city + country + network_zone.
+        Discovery surface for instance_create's `region` arg. Args: provider? (default 'hetzner').
+    - name: instance_list_images
+      description: |
+        Live list of bootable OS images from the bound provider (system images only — snapshots/backups/apps excluded).
+        Returns name + os_flavor + os_version + architecture. Discovery surface for instance_create's `image` arg.
+        Args: provider? (default 'hetzner').
   ui_panels:
     - slot: project.page
       label: Instances

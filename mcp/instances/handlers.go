@@ -31,6 +31,47 @@ func (a *App) handleInstancesCollection(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+// ─── catalog routes (panel-facing) ────────────────────────────────
+
+func (a *App) handleListServerTypes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	types, err := listServerTypes(globalCtx, r.URL.Query().Get("provider"))
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"server_types": types, "count": len(types)})
+}
+
+func (a *App) handleListLocations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	locs, err := listLocations(globalCtx, r.URL.Query().Get("provider"))
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"locations": locs, "count": len(locs)})
+}
+
+func (a *App) handleListImages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	imgs, err := listImages(globalCtx, r.URL.Query().Get("provider"))
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"images": imgs, "count": len(imgs)})
+}
+
 func (a *App) handleInstanceItem(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/instances/")
 	if rest == "" {

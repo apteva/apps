@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.2.0
+version: 0.3.0
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances (Hetzner in v0.1; DO/Vultr/AWS in later releases).
@@ -74,6 +74,9 @@ provides:
     - { name: instance_upload_file,  description: "Write a file. Local: filesystem (path-allowlisted); remote: SCP. Args: id, path, content_b64." }
     - { name: instance_wait_ready,   description: "Poll the instance until SSH is reachable. Args: id, timeout_s?." }
     - { name: instance_metrics,      description: "CPU / memory / disk / network / load / uptime. Args: id." }
+    - { name: instance_list_server_types, description: "Live list of VPS server types (sizes) from the bound provider — name, cores, memory_gb, disk_gb, price, deprecation. Use to discover valid sizes for instance_create. Args: provider? (default 'hetzner')." }
+    - { name: instance_list_locations,    description: "Live list of VPS regions from the bound provider — name, city, country, network_zone. Args: provider? (default 'hetzner')." }
+    - { name: instance_list_images,       description: "Live list of bootable OS images from the bound provider (system images only). Args: provider? (default 'hetzner')." }
   ui_panels:
     - { slot: project.page, label: "Instances", icon: server, entry: /ui/InstancesPanel.mjs }
 runtime:
@@ -145,6 +148,12 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/api/instances", Handler: a.handleInstancesCollection},
 		{Pattern: "/api/instances/", Handler: a.handleInstanceItem},
+		// Live provider catalog. Sister surface to the MCP tools so the
+		// panel doesn't need an MCP client; ?provider= defaults to
+		// hetzner. Returns the same shape as the MCP tools wrap.
+		{Pattern: "/api/instances-server-types", Handler: a.handleListServerTypes},
+		{Pattern: "/api/instances-locations", Handler: a.handleListLocations},
+		{Pattern: "/api/instances-images", Handler: a.handleListImages},
 	}
 }
 
