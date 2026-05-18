@@ -4,6 +4,10 @@ package main
 // in-memory SQLite. Fast (whole suite <1s), runs on every commit.
 
 import (
+	"bytes"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -177,6 +181,146 @@ func TestUpdate_PartialPatch(t *testing.T) {
 	got := out.(map[string]any)["contact"].(*Contact)
 	if got.JobTitle != "Engineering Manager" {
 		t.Errorf("job_title=%q", got.JobTitle)
+	}
+}
+
+// v0.5.4 regression: contacts_update's patch.attributes was silently
+// dropped — the tool returned success but nothing was written. Backfill
+// scripts thought 55 attrs landed; zero actually did. Now the patch
+// routes attributes through dbSetAttribute, surfacing any missing-def
+// errors per item.
+func TestUpdate_PatchAttributesWritesValues(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+
+	// Attribute defs must exist before write.
+	if _, err := app.toolDefineAttribute(ctx, map[string]any{"key": "tier", "label": "Tier", "type": "text"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolDefineAttribute(ctx, map[string]any{"key": "lifecycle", "label": "Lifecycle", "type": "text"}); err != nil {
+		t.Fatal(err)
+	}
+	c := mustCreate(t, ctx, map[string]any{"first_name": "Alice"})
+
+	if _, err := app.toolUpdate(ctx, map[string]any{
+		"id": c.ID,
+		"patch": map[string]any{
+			"job_title":  "Director",
+			"attributes": []any{
+				map[string]any{"key": "tier", "value": "gold"},
+				map[string]any{"key": "lifecycle", "value": "customer"},
+			},
+		},
+		"source": "human:1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _ := app.toolGetContext(ctx, map[string]any{"id": c.ID})
+	got := out.(map[string]any)["contact"].(*Contact)
+	if got.JobTitle != "Director" {
+		t.Errorf("scalar field not updated: job_title=%q", got.JobTitle)
+	}
+	if len(got.Attributes) != 2 {
+		t.Fatalf("expected 2 attributes persisted, got %d", len(got.Attributes))
+	}
+	seen := map[string]any{}
+	for _, a := range got.Attributes {
+		seen[a.Key] = a.Value
+	}
+	if seen["tier"] != "gold" || seen["lifecycle"] != "customer" {
+		t.Errorf("attribute values not persisted: %+v", seen)
+	}
+}
+
+func TestUpdate_PatchAttributesSurfacesMissingDef(t *testing.T) {
+	// No define_attribute call: the write should error explicitly,
+	// not silently no-op. The reporter's bug class: scripts thought
+	// they succeeded because the tool returned no error.
+	ctx := newTestCtx(t)
+	app := &App{}
+	c := mustCreate(t, ctx, map[string]any{"first_name": "Alice"})
+	_, err := app.toolUpdate(ctx, map[string]any{
+		"id": c.ID,
+		"patch": map[string]any{
+			"attributes": []any{
+				map[string]any{"key": "nonexistent", "value": "x"},
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error when writing to undefined attribute")
+	}
+	if !strings.Contains(err.Error(), "not defined") {
+		t.Errorf("error should point at the missing def, got %v", err)
+	}
+}
+
+func TestUpdate_RejectsUnknownPatchField(t *testing.T) {
+	// Catches typos like 'firts_name' before they become silent
+	// drops. Pre-v0.5.4 this would have returned success without
+	// writing anything.
+	ctx := newTestCtx(t)
+	app := &App{}
+	c := mustCreate(t, ctx, map[string]any{"first_name": "Alice"})
+	_, err := app.toolUpdate(ctx, map[string]any{
+		"id":    c.ID,
+		"patch": map[string]any{"firts_name": "Bob"},
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown patch field")
+	}
+	if !strings.Contains(err.Error(), "unknown patch field") {
+		t.Errorf("expected unknown-field error, got %v", err)
+	}
+}
+
+func TestCreate_AttributesAreWritten(t *testing.T) {
+	// Bug found while fixing the update path: contacts_create's
+	// schema advertised attributes as an input but dbCreate dropped
+	// the field. Fixed alongside.
+	ctx := newTestCtx(t)
+	app := &App{}
+	if _, err := app.toolDefineAttribute(ctx, map[string]any{"key": "tier", "label": "Tier", "type": "text"}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := app.toolCreate(ctx, map[string]any{
+		"first_name": "Alice",
+		"attributes": []any{
+			map[string]any{"key": "tier", "value": "gold"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := out.(map[string]any)["contact"].(*Contact)
+	got, _ := app.toolGetContext(ctx, map[string]any{"id": c.ID})
+	contact := got.(map[string]any)["contact"].(*Contact)
+	if len(contact.Attributes) != 1 || contact.Attributes[0].Value != "gold" {
+		t.Errorf("create-time attribute not persisted: %+v", contact.Attributes)
+	}
+}
+
+func TestHandleHTTPContactItem_AcceptsPUT(t *testing.T) {
+	// Bug 2: PUT /contacts/<id> used to 405. Accepts now (same
+	// partial-patch handler as PATCH). The HTTP body is the patch
+	// directly (not {"patch":{...}}) — same shape handleHTTPUpdate
+	// has always expected.
+	ctx := newTestCtx(t)
+	globalCtx = ctx // getAppCtx(r) reads this; tests don't auto-wire it
+	app := &App{}
+	c := mustCreate(t, ctx, map[string]any{"first_name": "Alice"})
+
+	body := bytes.NewBufferString(`{"job_title":"VP"}`)
+	r := httptest.NewRequest("PUT", "/contacts/"+strconv.FormatInt(c.ID, 10)+"?project_id=test-proj", body)
+	w := httptest.NewRecorder()
+	app.handleHTTPContactItem(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT status=%d, body=%s", w.Code, w.Body.String())
+	}
+	got, _ := app.toolGet(ctx, map[string]any{"id": c.ID})
+	if got.(map[string]any)["contact"].(*Contact).JobTitle != "VP" {
+		t.Errorf("PUT didn't apply patch")
 	}
 }
 

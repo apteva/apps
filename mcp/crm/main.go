@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.5.3
+version: 0.5.4
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -253,7 +253,11 @@ func (a *App) handleHTTPContactItem(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		a.handleHTTPGetOrChild(w, r)
-	case http.MethodPatch:
+	case http.MethodPatch, http.MethodPut:
+		// PATCH is canonical (partial-update semantics match the body
+		// shape); PUT is accepted as a convenience for clients that
+		// don't easily emit PATCH. Both route to the same partial-
+		// patch handler — true PUT-as-replacement isn't supported.
 		a.handleHTTPUpdate(w, r)
 	case http.MethodDelete:
 		a.handleHTTPArchive(w, r)
@@ -1367,6 +1371,17 @@ func dbCreate(db *sql.DB, pid string, args map[string]any) (*Contact, error) {
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+
+	// Attributes. Done after commit because dbSetAttribute is its own
+	// statement and any def-missing error should surface as a contact-
+	// created-but-attributes-failed signal rather than swallowing the
+	// contact itself (the create succeeded; attribute writes are a
+	// separate write path with their own validation).
+	if rawAttrs, ok := args["attributes"]; ok {
+		if err := applyAttributesPatch(db, pid, c.ID, rawAttrs, c.Source); err != nil {
+			return c, fmt.Errorf("contact created (id=%d) but attribute write failed: %w", c.ID, err)
+		}
+	}
 	return c, nil
 }
 
@@ -1569,6 +1584,21 @@ func dbUpdate(db *sql.DB, pid string, id int64, patch map[string]any, source str
 		"primary_email": true, "primary_phone": true,
 		"status": true, "first_contact_at": true, "last_contact_at": true,
 	}
+	// Validate keys: surface unknown fields rather than silently drop.
+	// Pre-v0.5.4 the loop just skipped non-allowed keys, which made
+	// patch.attributes a silent no-op — backfill scripts thought they
+	// were succeeding. Now we either route the key (attributes →
+	// dbSetAttribute) or error.
+	known := map[string]bool{"attributes": true}
+	for k := range allowed {
+		known[k] = true
+	}
+	for k := range patch {
+		if !known[k] {
+			return nil, fmt.Errorf("unknown patch field %q (allowed: scalar contact columns + 'attributes')", k)
+		}
+	}
+
 	sets := []string{}
 	args := []any{}
 	for k, v := range patch {
@@ -1578,22 +1608,60 @@ func dbUpdate(db *sql.DB, pid string, id int64, patch map[string]any, source str
 		sets = append(sets, k+" = ?")
 		args = append(args, v)
 	}
-	if len(sets) == 0 {
-		return dbGetByID(db, pid, id)
+	if len(sets) > 0 {
+		sets = append(sets, "updated_at = ?")
+		args = append(args, time.Now().UTC().Format(time.RFC3339))
+		if source != "" {
+			sets = append(sets, "source = ?")
+			args = append(args, source)
+		}
+		args = append(args, id, pid)
+		if _, err := db.Exec(
+			`UPDATE contacts SET `+strings.Join(sets, ", ")+` WHERE id = ? AND project_id = ?`,
+			args...); err != nil {
+			return nil, err
+		}
 	}
-	sets = append(sets, "updated_at = ?")
-	args = append(args, time.Now().UTC().Format(time.RFC3339))
-	if source != "" {
-		sets = append(sets, "source = ?")
-		args = append(args, source)
-	}
-	args = append(args, id, pid)
-	if _, err := db.Exec(
-		`UPDATE contacts SET `+strings.Join(sets, ", ")+` WHERE id = ? AND project_id = ?`,
-		args...); err != nil {
-		return nil, err
+
+	// Attributes: iterate the patch array, call dbSetAttribute per
+	// item. Same shape as contacts_set_attribute MCP tool — each item
+	// is {key, value, source?}. Per-key source overrides the patch-
+	// level source when present.
+	if rawAttrs, ok := patch["attributes"]; ok {
+		if err := applyAttributesPatch(db, pid, id, rawAttrs, source); err != nil {
+			return nil, err
+		}
 	}
 	return dbGetByID(db, pid, id)
+}
+
+// applyAttributesPatch iterates an array of {key, value, source?}
+// items and writes each via dbSetAttribute. Errors short-circuit: the
+// caller learns which attribute failed and why (typically: the def
+// doesn't exist yet — call contacts_define_attribute first).
+func applyAttributesPatch(db *sql.DB, pid string, contactID int64, raw any, patchSource string) error {
+	arr, ok := raw.([]any)
+	if !ok {
+		return fmt.Errorf("attributes: expected array of {key, value, source?}, got %T", raw)
+	}
+	for i, item := range arr {
+		m, ok := item.(map[string]any)
+		if !ok {
+			return fmt.Errorf("attributes[%d]: expected object, got %T", i, item)
+		}
+		key, _ := m["key"].(string)
+		if key == "" {
+			return fmt.Errorf("attributes[%d]: 'key' required", i)
+		}
+		src, _ := m["source"].(string)
+		if src == "" {
+			src = patchSource
+		}
+		if err := dbSetAttribute(db, pid, contactID, key, m["value"], src); err != nil {
+			return fmt.Errorf("attributes[%d] %q: %w", i, key, err)
+		}
+	}
+	return nil
 }
 
 func dbUpsertByChannel(db *sql.DB, pid, kind, value string, defaults map[string]any, source string) (*Contact, bool, error) {
