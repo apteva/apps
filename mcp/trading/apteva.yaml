@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.4.5
+version: 0.4.6
 description: |
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in

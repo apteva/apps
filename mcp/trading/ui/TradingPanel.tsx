@@ -274,10 +274,12 @@ function PriceChart({ symbol, assetClass, api }: {
 
   if (!symbol) return null;
 
-  // SVG viewBox: 1000 wide, 300 tall. Chart pane reserves 56px on the
-  // right for Y-axis labels + 24px at the bottom for X-axis labels.
+  // SVG viewBox. Chart pane reserves 56px on the right for the
+  // Y-axis label gutter; X-axis labels are rendered in their own
+  // DOM row underneath the SVG (not inside it) so they can't be
+  // clipped, scaled, or overlapped by the data line.
   const W = 1000, H = 300;
-  const padL = 6, padR = 60, padT = 8, padB = 28;
+  const padL = 6, padR = 60, padT = 8, padB = 8;
   const plotW = W - padL - padR;
   const plotH = H - padT - padB;
 
@@ -494,14 +496,6 @@ function PriceChart({ symbol, assetClass, api }: {
               </div>
             </div>
 
-            {/* X-axis time labels at the bottom (DOM, so font stays
-                pixel-accurate). */}
-            <div className="absolute left-0 bottom-1 right-14 flex justify-between text-xs text-text-dim tabular-nums px-1">
-              {xTicks.map((i, k) => (
-                <span key={k}>{formatTimeTick(times[i], range)}</span>
-              ))}
-            </div>
-
             {/* Hover tooltip — floating chip above the crosshair */}
             {hoverIdx != null && hoverV != null && hoverT != null && (
               <div
@@ -518,6 +512,23 @@ function PriceChart({ symbol, assetClass, api }: {
                 <div className="text-text-dim">{formatTimeTick(hoverT, range)}</div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* X-axis time labels — rendered as a sibling row of the chart
+            pane, NOT inside the SVG container. Lives in its own band so
+            the labels can't be clipped, hidden behind the gradient
+            fill, or scaled by the viewBox stretching. Right padding
+            matches the Y-axis label gutter (56px) so the ticks line up
+            with the plot area, not the price labels. */}
+        {values.length >= 2 && (
+          <div
+            className="flex justify-between text-xs text-text-dim tabular-nums px-2 py-1 border-t border-border"
+            style={{ paddingRight: 60 }}
+          >
+            {xTicks.map((i, k) => (
+              <span key={k}>{formatTimeTick(times[i], range)}</span>
+            ))}
           </div>
         )}
       </div>
