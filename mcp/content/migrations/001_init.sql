@@ -105,7 +105,7 @@ CREATE TABLE media (
   byte_size     INTEGER NOT NULL DEFAULT 0,
   alt           TEXT    NOT NULL DEFAULT '',
   caption       TEXT    NOT NULL DEFAULT '',
-  source        TEXT    NOT NULL DEFAULT 'upload',        -- 'upload' | 'image-studio' | 'url-import'
+  source        TEXT    NOT NULL DEFAULT 'upload',        -- 'upload' | 'media-studio' | 'url-import'
   uploaded_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

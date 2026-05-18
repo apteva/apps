@@ -1,4 +1,4 @@
-module github.com/apteva/apps/mcp/image-studio
+module github.com/apteva/apps/mcp/media-studio
 
 go 1.25.0
 

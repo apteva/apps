@@ -1,18 +1,16 @@
 package main
 
-// image-studio v0.1 — tests cover:
+// media-studio v0.3 — tests cover:
 //
 //   - normalizeImageResponse for openai-api shape (and unknown-slug)
-//   - extractStorageID for both direct + MCP-wrapped shapes
-//   - toolImageGenerate: success path + unbound provider error path
-//     + provider-error path. Uses a stub PlatformClient so no real
-//     OpenAI calls fly out.
-//   - toolImageHistory: empty + after-insert
+//   - mediaBytes for both B64 and URL paths
+//   - toolMediaGenerate (kind=image): success + unbound-provider + provider-error paths
+//   - toolMediaGenerate dispatch: missing kind, unknown kind, stubbed-kind error
+//   - toolMediaHistory: empty + after-insert + limit cap + kind filter
 //   - dbInsertGeneration writes the row + roundtrips JSON-list fields
 //
-// We don't test the thumbnail generator — the underlying image/jpeg
-// encoder is stdlib, and the function gracefully no-ops on decode
-// errors which is what we'd test anyway.
+// Stubs the platform via tk.BasePlatformClient + a recordingPlatform
+// so no real OpenAI calls fly out.
 
 import (
 	"encoding/base64"
@@ -33,10 +31,6 @@ import (
 
 // --- stub PlatformClient -------------------------------------------
 
-// recordingPlatform implements sdk.PlatformClient and records every
-// call. ExecuteIntegrationTool returns whatever the test pre-loads
-// in nextExecuteResult; CallApp returns nextCallResult. WhoAmI / GetX
-// stubs are minimal and only what the SDK touches in these tests.
 type recordingPlatform struct {
 	tk.BasePlatformClient
 	mu                sync.Mutex
@@ -63,10 +57,13 @@ type callAppCall struct {
 func newRecordingPlatform() *recordingPlatform {
 	return &recordingPlatform{
 		identity: &sdk.InstallIdentity{
-			AppName:   "image-studio",
+			AppName:   "media-studio",
 			InstallID: 99,
 			ProjectID: "test-proj",
-			Bindings:  map[string]any{"provider": float64(42), "storage": float64(17)},
+			Bindings: map[string]any{
+				"image_provider": float64(42),
+				"storage":        float64(17),
+			},
 		},
 	}
 }
@@ -80,9 +77,9 @@ func (p *recordingPlatform) ListConnections(filter sdk.ConnectionFilter) ([]sdk.
 func (p *recordingPlatform) GetInstance(id int64) (*sdk.PlatformInstance, error) {
 	return nil, errors.New("not implemented in stub")
 }
-func (p *recordingPlatform) SendEvent(int64, string) error { return nil }
+func (p *recordingPlatform) SendEvent(int64, string) error              { return nil }
 func (p *recordingPlatform) SendToChannel(string, string, string) error { return nil }
-func (p *recordingPlatform) WhoAmI() (*sdk.InstallIdentity, error) { return p.identity, nil }
+func (p *recordingPlatform) WhoAmI() (*sdk.InstallIdentity, error)      { return p.identity, nil }
 func (p *recordingPlatform) StartOAuth(sdk.OAuthStartRequest) (*sdk.OAuthStartResult, error) {
 	return &sdk.OAuthStartResult{}, nil
 }
@@ -138,7 +135,7 @@ func (p *recordingPlatform) CallAppResult(appName, tool string, input map[string
 
 // --- helpers --------------------------------------------------------
 
-func newImageStudioCtx(t *testing.T, pf sdk.PlatformClient) *sdk.AppCtx {
+func newMediaStudioCtx(t *testing.T, pf sdk.PlatformClient) *sdk.AppCtx {
 	t.Helper()
 	rec := tk.NewEmitRecorder()
 	opts := []tk.Option{
@@ -153,8 +150,6 @@ func newImageStudioCtx(t *testing.T, pf sdk.PlatformClient) *sdk.AppCtx {
 	return ctx
 }
 
-// fakePNG returns valid PNG bytes (a 4x4 transparent image) so the
-// upstream-image fetch in toolImageGenerate succeeds.
 func fakePNG() []byte {
 	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
 	var buf strings.Builder
@@ -171,7 +166,6 @@ func (s *stringWriter) Write(p []byte) (int, error) { return s.b.Write(p) }
 // --- normalizeImageResponse ----------------------------------------
 
 func TestNormalizeImageResponse_OpenAI_DALLE_URL(t *testing.T) {
-	// DALL·E shape — URL response, no model echo.
 	body := `{"data":[{"url":"https://upstream/a.png","revised_prompt":"a tabby cat"}]}`
 	imgs, revised, _, err := normalizeImageResponse("openai-api", json.RawMessage(body))
 	if err != nil {
@@ -189,7 +183,6 @@ func TestNormalizeImageResponse_OpenAI_DALLE_URL(t *testing.T) {
 }
 
 func TestNormalizeImageResponse_OpenAI_GPTImage_B64(t *testing.T) {
-	// gpt-image-* shape — base64 response, model echoed.
 	body := `{"data":[{"b64_json":"AAECAwQ="}],"created":1714000000,"model":"gpt-image-2"}`
 	imgs, _, model, err := normalizeImageResponse("openai-api", json.RawMessage(body))
 	if err != nil {
@@ -227,40 +220,73 @@ func TestNormalizeImageResponse_UnknownSlug(t *testing.T) {
 	}
 }
 
+// --- toolMediaGenerate dispatch ------------------------------------
 
-// --- toolImageGenerate ---------------------------------------------
-
-func TestToolImageGenerate_RequiresPrompt(t *testing.T) {
-	ctx := newImageStudioCtx(t, newRecordingPlatform())
+func TestToolMediaGenerate_RequiresKind(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
 	app := &App{}
-	_, err := app.toolImageGenerate(ctx, map[string]any{})
-	if err == nil || !strings.Contains(err.Error(), "prompt") {
-		t.Fatalf("expected 'prompt required' error, got %v", err)
+	_, err := app.toolMediaGenerate(ctx, map[string]any{"prompt": "x"})
+	if err == nil || !strings.Contains(err.Error(), "kind") {
+		t.Fatalf("expected 'kind required', got %v", err)
 	}
 }
 
-func TestToolImageGenerate_NoProviderBound(t *testing.T) {
-	pf := newRecordingPlatform()
-	pf.identity.Bindings = map[string]any{} // no provider binding
-	ctx := newImageStudioCtx(t, pf)
+func TestToolMediaGenerate_RequiresPrompt(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
 	app := &App{}
-	out, err := app.toolImageGenerate(ctx, map[string]any{"prompt": "hi"})
-	// Tool's contract: signal failure as MCP isError=true content,
-	// not a Go error — agents see a clean message.
+	_, err := app.toolMediaGenerate(ctx, map[string]any{"kind": "image"})
+	if err == nil || !strings.Contains(err.Error(), "prompt") {
+		t.Fatalf("expected 'prompt required', got %v", err)
+	}
+}
+
+func TestToolMediaGenerate_UnknownKind(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	app := &App{}
+	out, err := app.toolMediaGenerate(ctx, map[string]any{"kind": "hologram", "prompt": "x"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	res, ok := out.(map[string]any)
-	if !ok {
-		// Older code path returned a Go error directly. Accept both.
-		t.Skipf("tool returned non-map: %T", out)
+	res := out.(map[string]any)
+	if res["isError"] != true {
+		t.Errorf("expected isError=true for unknown kind, got %+v", res)
 	}
-	_ = res
 }
 
-func TestToolImageGenerate_HappyPath_WithStorage(t *testing.T) {
-	// Mock OpenAI's image endpoint via httptest — fakePNG returned
-	// when image-studio fetches the upstream URL.
+func TestToolMediaGenerate_StubbedKind_VideoReturnsCleanError(t *testing.T) {
+	pf := newRecordingPlatform()
+	// Pretend a video provider is bound so dispatch reaches the build-args stub.
+	pf.identity.Bindings["video_provider"] = float64(99)
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolMediaGenerate(ctx, map[string]any{"kind": "video", "prompt": "a cat"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	res := out.(map[string]any)
+	if res["isError"] != true {
+		t.Errorf("expected isError=true for stubbed kind, got %+v", res)
+	}
+}
+
+func TestToolMediaGenerate_NoProviderBound(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.identity.Bindings = map[string]any{} // no image_provider
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolMediaGenerate(ctx, map[string]any{"kind": "image", "prompt": "hi"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	res := out.(map[string]any)
+	if res["isError"] != true {
+		t.Errorf("expected isError=true when image_provider unbound, got %+v", res)
+	}
+}
+
+// --- toolMediaGenerate (kind=image) — full pipeline ----------------
+
+func TestToolMediaGenerate_Image_HappyPath_WithStorage(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(fakePNG())
@@ -268,7 +294,6 @@ func TestToolImageGenerate_HappyPath_WithStorage(t *testing.T) {
 	defer upstream.Close()
 
 	pf := newRecordingPlatform()
-	// Provider returns OpenAI shape pointing at the test server.
 	pf.nextExecuteResult = &sdk.ExecuteResult{
 		Success: true,
 		Status:  200,
@@ -277,22 +302,21 @@ func TestToolImageGenerate_HappyPath_WithStorage(t *testing.T) {
 			upstream.URL,
 		)),
 	}
-	// Storage returns id 1234 in MCP-wrapped shape.
 	pf.nextCallResult = json.RawMessage(
 		`{"result":{"content":[{"type":"text","text":"{\"id\":1234,\"url\":\"/files/1234\",\"sha256\":\"abc\"}"}]}}`,
 	)
 
-	ctx := newImageStudioCtx(t, pf)
+	ctx := newMediaStudioCtx(t, pf)
 	app := &App{}
-	out, err := app.toolImageGenerate(ctx, map[string]any{
+	out, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":   "image",
 		"prompt": "a cat in a hat",
 		"size":   "1024x1024",
 	})
 	if err != nil {
-		t.Fatalf("toolImageGenerate: %v", err)
+		t.Fatalf("toolMediaGenerate: %v", err)
 	}
 
-	// Provider was called once with the expected tool + prompt.
 	if len(pf.executeCalls) != 1 {
 		t.Fatalf("expected 1 ExecuteIntegrationTool call, got %d", len(pf.executeCalls))
 	}
@@ -306,15 +330,17 @@ func TestToolImageGenerate_HappyPath_WithStorage(t *testing.T) {
 		t.Errorf("prompt mismatch")
 	}
 
-	// Storage was called once with files_from_url.
 	if len(pf.callAppCalls) != 1 {
 		t.Fatalf("expected 1 CallApp, got %d", len(pf.callAppCalls))
 	}
 	if pf.callAppCalls[0].AppName != "storage" || pf.callAppCalls[0].Tool != "files_from_url" {
 		t.Errorf("storage call = %+v", pf.callAppCalls[0])
 	}
+	// Folder must be the dotted convention.
+	if folder, _ := pf.callAppCalls[0].Input["folder"].(string); folder != "/.generated/images/" {
+		t.Errorf("storage folder = %q, want /.generated/images/", folder)
+	}
 
-	// MCP result has content[].
 	res := out.(map[string]any)
 	content, ok := res["content"].([]map[string]any)
 	if !ok {
@@ -323,7 +349,6 @@ func TestToolImageGenerate_HappyPath_WithStorage(t *testing.T) {
 	if len(content) < 2 {
 		t.Errorf("expected at least 2 content blocks, got %d", len(content))
 	}
-	// One block is text with the storage id.
 	var foundText bool
 	for _, c := range content {
 		if c["type"] == "text" {
@@ -336,29 +361,35 @@ func TestToolImageGenerate_HappyPath_WithStorage(t *testing.T) {
 		t.Errorf("expected storage id 1234 in text block; got %+v", content)
 	}
 
-	// _meta carries storage_ids.
 	meta := res["_meta"].(map[string]any)
+	if meta["kind"] != "image" {
+		t.Errorf("_meta.kind = %v, want image", meta["kind"])
+	}
 	ids := meta["storage_ids"].([]int64)
 	if len(ids) != 1 || ids[0] != 1234 {
 		t.Errorf("storage_ids = %+v", ids)
 	}
 
-	// History row exists.
 	var count int
 	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM generations`).Scan(&count)
 	if count != 1 {
 		t.Errorf("expected 1 history row, got %d", count)
 	}
+	var kind string
+	ctx.AppDB().QueryRow(`SELECT kind FROM generations LIMIT 1`).Scan(&kind)
+	if kind != "image" {
+		t.Errorf("inserted kind = %q, want image", kind)
+	}
 }
 
-func TestToolImageGenerate_NoStorageBound(t *testing.T) {
+func TestToolMediaGenerate_Image_NoStorageBound(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(fakePNG())
 	}))
 	defer upstream.Close()
 
 	pf := newRecordingPlatform()
-	pf.identity.Bindings = map[string]any{"provider": float64(42)} // no storage
+	pf.identity.Bindings = map[string]any{"image_provider": float64(42)} // no storage
 	pf.nextExecuteResult = &sdk.ExecuteResult{
 		Success: true,
 		Status:  200,
@@ -367,9 +398,9 @@ func TestToolImageGenerate_NoStorageBound(t *testing.T) {
 		)),
 	}
 
-	ctx := newImageStudioCtx(t, pf)
+	ctx := newMediaStudioCtx(t, pf)
 	app := &App{}
-	out, err := app.toolImageGenerate(ctx, map[string]any{"prompt": "hi"})
+	out, err := app.toolMediaGenerate(ctx, map[string]any{"kind": "image", "prompt": "hi"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +413,6 @@ func TestToolImageGenerate_NoStorageBound(t *testing.T) {
 	if len(ids) != 0 {
 		t.Errorf("storage_ids should be empty when storage unbound, got %+v", ids)
 	}
-	// Still has thumbnail (from the fetched bytes).
 	content := res["content"].([]map[string]any)
 	hasImage := false
 	for _, c := range content {
@@ -395,25 +425,25 @@ func TestToolImageGenerate_NoStorageBound(t *testing.T) {
 	}
 }
 
-func TestToolImageGenerate_ProviderError(t *testing.T) {
+func TestToolMediaGenerate_Image_ProviderError(t *testing.T) {
 	pf := newRecordingPlatform()
 	pf.nextExecuteResult = &sdk.ExecuteResult{Success: false, Status: 429, Data: json.RawMessage(`"rate limited"`)}
 
-	ctx := newImageStudioCtx(t, pf)
+	ctx := newMediaStudioCtx(t, pf)
 	app := &App{}
-	out, _ := app.toolImageGenerate(ctx, map[string]any{"prompt": "hi"})
+	out, _ := app.toolMediaGenerate(ctx, map[string]any{"kind": "image", "prompt": "hi"})
 	res := out.(map[string]any)
 	if res["isError"] != true {
 		t.Errorf("expected isError=true on provider failure, got %+v", res)
 	}
 }
 
-// --- toolImageHistory ----------------------------------------------
+// --- toolMediaHistory ----------------------------------------------
 
-func TestToolImageHistory_EmptyByDefault(t *testing.T) {
-	ctx := newImageStudioCtx(t, newRecordingPlatform())
+func TestToolMediaHistory_EmptyByDefault(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
 	app := &App{}
-	out, err := app.toolImageHistory(ctx, map[string]any{})
+	out, err := app.toolMediaHistory(ctx, map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,13 +453,16 @@ func TestToolImageHistory_EmptyByDefault(t *testing.T) {
 	}
 }
 
-func TestToolImageHistory_AfterInsert(t *testing.T) {
-	ctx := newImageStudioCtx(t, newRecordingPlatform())
+func TestToolMediaHistory_AfterInsert(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
 	app := &App{}
-	app.dbInsertGeneration("test-proj", "p1", "rev1", "openai-api", "dall-e-3", "1024x1024",
-		[]int64{1, 2}, []string{"u1", "u2"},
-		base64.StdEncoding.EncodeToString([]byte("thumb")), 2)
-	out, err := app.toolImageHistory(ctx, map[string]any{})
+	app.dbInsertGeneration(generationRecord{
+		ProjectID: "test-proj", Kind: "image", Prompt: "p1", Revised: "rev1",
+		Provider: "openai-api", Model: "dall-e-3", Size: "1024x1024",
+		StorageIDs: []int64{1, 2}, UpstreamURLs: []string{"u1", "u2"},
+		ThumbnailB64: base64.StdEncoding.EncodeToString([]byte("thumb")), Count: 2,
+	})
+	out, err := app.toolMediaHistory(ctx, map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +471,7 @@ func TestToolImageHistory_AfterInsert(t *testing.T) {
 		t.Fatalf("expected 1 row, got %d", len(gens))
 	}
 	g := gens[0]
-	if g["prompt"] != "p1" || g["provider"] != "openai-api" {
+	if g["prompt"] != "p1" || g["provider"] != "openai-api" || g["kind"] != "image" {
 		t.Errorf("row mismatch: %+v", g)
 	}
 	if ids := g["storage_ids"].([]int64); len(ids) != 2 || ids[0] != 1 {
@@ -446,16 +479,50 @@ func TestToolImageHistory_AfterInsert(t *testing.T) {
 	}
 }
 
-func TestToolImageHistory_LimitCap(t *testing.T) {
-	ctx := newImageStudioCtx(t, newRecordingPlatform())
+func TestToolMediaHistory_LimitCap(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
 	app := &App{}
 	for i := 0; i < 5; i++ {
-		app.dbInsertGeneration("test-proj", fmt.Sprintf("p%d", i), "", "openai-api", "", "", nil, nil, "", 1)
+		app.dbInsertGeneration(generationRecord{
+			ProjectID: "test-proj", Kind: "image",
+			Prompt: fmt.Sprintf("p%d", i), Provider: "openai-api", Count: 1,
+		})
 	}
-	out, _ := app.toolImageHistory(ctx, map[string]any{"limit": 3})
+	out, _ := app.toolMediaHistory(ctx, map[string]any{"limit": 3})
 	gens := out.(map[string]any)["generations"].([]map[string]any)
 	if len(gens) != 3 {
 		t.Errorf("expected limit=3, got %d", len(gens))
+	}
+}
+
+func TestToolMediaHistory_KindFilter(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	app := &App{}
+	app.dbInsertGeneration(generationRecord{ProjectID: "test-proj", Kind: "image", Prompt: "i1", Provider: "openai-api", Count: 1})
+	app.dbInsertGeneration(generationRecord{ProjectID: "test-proj", Kind: "video", Prompt: "v1", Provider: "replicate", Count: 1})
+	app.dbInsertGeneration(generationRecord{ProjectID: "test-proj", Kind: "image", Prompt: "i2", Provider: "openai-api", Count: 1})
+
+	out, _ := app.toolMediaHistory(ctx, map[string]any{"kind": "image"})
+	gens := out.(map[string]any)["generations"].([]map[string]any)
+	if len(gens) != 2 {
+		t.Fatalf("kind=image filter: expected 2 rows, got %d", len(gens))
+	}
+	for _, g := range gens {
+		if g["kind"] != "image" {
+			t.Errorf("row leaked through kind filter: %+v", g)
+		}
+	}
+
+	out, _ = app.toolMediaHistory(ctx, map[string]any{"kind": "video"})
+	gens = out.(map[string]any)["generations"].([]map[string]any)
+	if len(gens) != 1 {
+		t.Errorf("kind=video filter: expected 1 row, got %d", len(gens))
+	}
+
+	out, _ = app.toolMediaHistory(ctx, map[string]any{})
+	gens = out.(map[string]any)["generations"].([]map[string]any)
+	if len(gens) != 3 {
+		t.Errorf("no filter: expected 3 rows, got %d", len(gens))
 	}
 }
 
@@ -485,7 +552,6 @@ func TestBuildProviderArgs_GPTImage_DefaultsOmitOptionals(t *testing.T) {
 }
 
 func TestBuildProviderArgs_DallE3_QualityRemap(t *testing.T) {
-	// "auto" is a gpt-image value; for dall-e-3 we must remap to standard.
 	args := buildProviderArgs("dall-e-3", "p", "1024x1024", "auto", "webp", "", 1)
 	if args["quality"] != "standard" {
 		t.Errorf("dall-e-3 'auto' should remap to standard, got %v", args["quality"])
@@ -508,12 +574,12 @@ func TestBuildProviderArgs_DallE2_StripsAllExtras(t *testing.T) {
 	}
 }
 
-// --- imageBytes ----------------------------------------------------
+// --- mediaBytes ----------------------------------------------------
 
-func TestImageBytes_PrefersB64(t *testing.T) {
+func TestMediaBytes_PrefersB64(t *testing.T) {
 	want := []byte("hello")
 	enc := base64.StdEncoding.EncodeToString(want)
-	got, err := imageBytes(generatedImage{B64: enc, UpstreamURL: "http://should-not-be-fetched.invalid"})
+	got, err := mediaBytes(generatedMedia{B64: enc, UpstreamURL: "http://should-not-be-fetched.invalid"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -522,17 +588,15 @@ func TestImageBytes_PrefersB64(t *testing.T) {
 	}
 }
 
-func TestImageBytes_NoSource(t *testing.T) {
-	if _, err := imageBytes(generatedImage{}); err == nil {
+func TestMediaBytes_NoSource(t *testing.T) {
+	if _, err := mediaBytes(generatedMedia{}); err == nil {
 		t.Fatal("expected error when neither URL nor B64 set")
 	}
 }
 
-// --- toolImageGenerate b64 path ------------------------------------
+// --- gpt-image-* b64 storage upload --------------------------------
 
-func TestToolImageGenerate_GPTImage_B64_StorageUpload(t *testing.T) {
-	// gpt-image-* never returns a URL — only b64. Storage handoff must
-	// switch from files_from_url to files_upload with content_base64.
+func TestToolMediaGenerate_GPTImage_B64_StorageUpload(t *testing.T) {
 	pngB64 := base64.StdEncoding.EncodeToString(fakePNG())
 
 	pf := newRecordingPlatform()
@@ -548,15 +612,18 @@ func TestToolImageGenerate_GPTImage_B64_StorageUpload(t *testing.T) {
 		`{"result":{"content":[{"type":"text","text":"{\"id\":7777,\"url\":\"/files/7777\",\"sha256\":\"abc\"}"}]}}`,
 	)
 
-	ctx := newImageStudioCtx(t, pf)
+	ctx := newMediaStudioCtx(t, pf)
 	app := &App{}
-	out, err := app.toolImageGenerate(ctx, map[string]any{
-		"prompt":        "moonlit owl",
-		"model":         "gpt-image-2",
-		"output_format": "png",
+	out, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":   "image",
+		"prompt": "moonlit owl",
+		"model":  "gpt-image-2",
+		"options": map[string]any{
+			"output_format": "png",
+		},
 	})
 	if err != nil {
-		t.Fatalf("toolImageGenerate: %v", err)
+		t.Fatalf("toolMediaGenerate: %v", err)
 	}
 
 	if len(pf.callAppCalls) != 1 {
@@ -573,7 +640,6 @@ func TestToolImageGenerate_GPTImage_B64_StorageUpload(t *testing.T) {
 		t.Errorf("content_type = %q, want image/png", ct)
 	}
 
-	// Provider call: model + output_format made it through.
 	if pf.executeCalls[0].Input["model"] != "gpt-image-2" {
 		t.Errorf("model not forwarded: %+v", pf.executeCalls[0].Input)
 	}
@@ -581,7 +647,6 @@ func TestToolImageGenerate_GPTImage_B64_StorageUpload(t *testing.T) {
 		t.Errorf("output_format not forwarded: %+v", pf.executeCalls[0].Input)
 	}
 
-	// Result has storage id.
 	res := out.(map[string]any)
 	meta := res["_meta"].(map[string]any)
 	ids := meta["storage_ids"].([]int64)
@@ -590,15 +655,9 @@ func TestToolImageGenerate_GPTImage_B64_StorageUpload(t *testing.T) {
 	}
 }
 
-// --- pickExt -------------------------------------------------------
-
 // --- storage URL surfacing -----------------------------------------
 
-func TestToolImageGenerate_WithStorage_OmitsInlineImage_AddsURLs(t *testing.T) {
-	// New contract: when storage saves the image, the response carries
-	// the storage URL (in text + resource + _meta.storage_urls) and
-	// drops the inline base64 image block. Without storage we keep the
-	// inline thumbnail (only way for the agent to see the result).
+func TestToolMediaGenerate_WithStorage_OmitsInlineImage_AddsURLs(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(fakePNG())
@@ -616,15 +675,14 @@ func TestToolImageGenerate_WithStorage_OmitsInlineImage_AddsURLs(t *testing.T) {
 		`{"result":{"content":[{"type":"text","text":"{\"id\":1234}"}]}}`,
 	)
 
-	ctx := newImageStudioCtx(t, pf)
+	ctx := newMediaStudioCtx(t, pf)
 	app := &App{}
-	out, err := app.toolImageGenerate(ctx, map[string]any{"prompt": "x"})
+	out, err := app.toolMediaGenerate(ctx, map[string]any{"kind": "image", "prompt": "x"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	res := out.(map[string]any)
 
-	// _meta carries storage_urls.
 	meta := res["_meta"].(map[string]any)
 	urls, ok := meta["storage_urls"].([]string)
 	if !ok || len(urls) != 1 {
@@ -637,7 +695,6 @@ func TestToolImageGenerate_WithStorage_OmitsInlineImage_AddsURLs(t *testing.T) {
 		t.Errorf("storage URL missing project_id: %q", urls[0])
 	}
 
-	// No inline image content block when storage URLs are available.
 	content := res["content"].([]map[string]any)
 	for _, c := range content {
 		if c["type"] == "image" {
@@ -645,7 +702,6 @@ func TestToolImageGenerate_WithStorage_OmitsInlineImage_AddsURLs(t *testing.T) {
 		}
 	}
 
-	// Text block mentions the URL.
 	var foundURL bool
 	for _, c := range content {
 		if c["type"] == "text" {
@@ -658,7 +714,6 @@ func TestToolImageGenerate_WithStorage_OmitsInlineImage_AddsURLs(t *testing.T) {
 		t.Errorf("text block doesn't reference the storage URL; got %+v", content)
 	}
 
-	// Resource block exposes the fetchable URI (not apteva://).
 	var foundResource bool
 	for _, c := range content {
 		if c["type"] == "resource" {
@@ -674,24 +729,22 @@ func TestToolImageGenerate_WithStorage_OmitsInlineImage_AddsURLs(t *testing.T) {
 	}
 }
 
-func TestToolImageGenerate_NoStorage_KeepsInlineImage(t *testing.T) {
-	// Without storage, the response must still ship the thumbnail b64
-	// so the agent can see what was generated.
+func TestToolMediaGenerate_NoStorage_KeepsInlineImage(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(fakePNG())
 	}))
 	defer upstream.Close()
 
 	pf := newRecordingPlatform()
-	pf.identity.Bindings = map[string]any{"provider": float64(42)} // no storage
+	pf.identity.Bindings = map[string]any{"image_provider": float64(42)}
 	pf.nextExecuteResult = &sdk.ExecuteResult{
 		Success: true, Status: 200,
 		Data: json.RawMessage(fmt.Sprintf(`{"data":[{"url":"%s/img.png"}]}`, upstream.URL)),
 	}
 
-	ctx := newImageStudioCtx(t, pf)
+	ctx := newMediaStudioCtx(t, pf)
 	app := &App{}
-	out, _ := app.toolImageGenerate(ctx, map[string]any{"prompt": "x"})
+	out, _ := app.toolMediaGenerate(ctx, map[string]any{"kind": "image", "prompt": "x"})
 	res := out.(map[string]any)
 	content := res["content"].([]map[string]any)
 	var hasImage bool
@@ -705,12 +758,15 @@ func TestToolImageGenerate_NoStorage_KeepsInlineImage(t *testing.T) {
 	}
 }
 
-func TestToolImageHistory_IncludesStorageURLs(t *testing.T) {
-	ctx := newImageStudioCtx(t, newRecordingPlatform())
+func TestToolMediaHistory_IncludesStorageURLs(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
 	app := &App{}
-	app.dbInsertGeneration("test-proj", "p1", "", "openai-api", "gpt-image-2", "1024x1024",
-		[]int64{42, 99}, nil, "", 2)
-	out, err := app.toolImageHistory(ctx, map[string]any{})
+	app.dbInsertGeneration(generationRecord{
+		ProjectID: "test-proj", Kind: "image", Prompt: "p1",
+		Provider: "openai-api", Model: "gpt-image-2", Size: "1024x1024",
+		StorageIDs: []int64{42, 99}, Count: 2,
+	})
+	out, err := app.toolMediaHistory(ctx, map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -744,7 +800,7 @@ func TestPickExt(t *testing.T) {
 		"jpeg": "jpg",
 		"jpg":  "jpg",
 		"webp": "webp",
-		"gif":  "png", // unknown defaults to png
+		"gif":  "png",
 	}
 	for in, want := range cases {
 		if got := pickExt(in); got != want {

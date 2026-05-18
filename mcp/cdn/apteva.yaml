@@ -18,7 +18,7 @@ description: |
   Mode B (self-hosted edges via instances) and regional origins are
   deferred to v0.3.
 
-  Consumers (storage today, image-studio / podcast / media tomorrow)
+  Consumers (storage today, media-studio / podcast tomorrow)
   call cdn_url_for to mint URLs on a zone they've been linked to.
 
 author: Apteva
@@ -94,7 +94,7 @@ provides:
       body_file: skills/how-to-use-cdn.md
       description: |
         When + how to add a CDN zone, linking a zone to storage /
-        image-studio / podcast / deploy, and what v0.1 does and
+        media-studio / podcast / deploy, and what v0.1 does and
         doesn't cover. Load when working with custom hostnames.
       metadata:
         category: infrastructure

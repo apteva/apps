@@ -1,0 +1,101 @@
+schema: apteva-app/v1
+
+name: media-studio
+display_name: Media Studio
+version: 0.3.0
+description: |
+  Generate images, video, audio, and music via any compatible provider
+  (OpenAI for image + TTS today; Replicate / ElevenLabs / Suno / Runway
+  / Pika as the integration catalog learns them). Optionally saves
+  outputs to the Storage app for permanent, shareable references.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/media-studio
+tags: [ai, image-generation, video-generation, audio, music, productivity]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.connections.execute
+    - platform.apps.call
+  integrations:
+    - role: image_provider
+      kind: integration
+      compatible_slugs: [openai-api]
+      capabilities: [image.generate]
+      tools:
+        image.generate: generate_image
+      required: false
+      label: "Image provider"
+      hint: "Bind any compatible integration (OpenAI today; Replicate / Stability soon) to enable image generation."
+
+    - role: video_provider
+      kind: integration
+      compatible_slugs: [replicate, runway, pika]
+      capabilities: [video.generate]
+      tools:
+        video.generate: generate_video
+      required: false
+      label: "Video provider"
+      hint: "Bind a video model (Replicate, Runway, Pika) to enable video generation."
+
+    - role: audio_provider
+      kind: integration
+      compatible_slugs: [elevenlabs, openai-api]
+      capabilities: [audio.tts, audio.sfx]
+      tools:
+        audio.tts: text_to_speech
+        audio.sfx: generate_sfx
+      required: false
+      label: "Audio provider"
+      hint: "Bind a TTS / SFX provider (ElevenLabs covers both; OpenAI is TTS only)."
+
+    - role: music_provider
+      kind: integration
+      compatible_slugs: [suno, replicate]
+      capabilities: [music.generate]
+      tools:
+        music.generate: generate_music
+      required: false
+      label: "Music provider"
+      hint: "Bind a music generator (Suno, Replicate-MusicGen) to enable music generation."
+
+    - role: storage
+      kind: app
+      compatible_app_names: [storage]
+      capabilities: [files.write]
+      required: false
+      label: "Storage (optional)"
+      hint: "Save generated media permanently and share across instances. Without this, results are returned inline (when small enough) or as expiring upstream URLs."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: media_generate, description: "Generate media (image / video / audio / music). Args: kind (required: image|video|audio_tts|audio_sfx|music), prompt (required), model?, size?, duration?, voice?, aspect?, n?, options?. Returns thumbnail + storage URL when storage is bound, else inline (small media) or expiring upstream URL." }
+    - { name: media_history,  description: "List recent generations for this project. Args: kind?, limit?, since?." }
+  ui_panels:
+    - slot: project.page
+      label: Studio
+      icon: image
+      entry: /ui/MediaPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/media-studio
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/media-studio.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch

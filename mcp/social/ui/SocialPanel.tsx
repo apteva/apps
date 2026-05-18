@@ -10,7 +10,7 @@
 //
 // Lives in the social app's sidecar at /api/apps/social/ui/SocialPanel.mjs.
 // The host React (19) + react-dom come from the dashboard's importmap;
-// this file uses the same useAppEvents pattern as image-studio.
+// this file uses the same useAppEvents pattern as media-studio.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { uploadResumable } from "./uploadResumable";

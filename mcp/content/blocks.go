@@ -2,7 +2,7 @@
 //
 // The canonical post body is a JSON tree of blocks. Each block has a
 // stable id (so the agent can target it across revisions), a typed
-// `type` ("core/heading", "image-studio/generated"), an `attrs` map
+// `type` ("core/heading", "media-studio/generated"), an `attrs` map
 // validated against a JSON Schema declared by the block type, and an
 // optional `inner` array for container blocks (columns, group, quote).
 //
@@ -101,7 +101,7 @@ func validateDocument(d Document) error {
 }
 
 // looksNamespaced returns true for cross-app block types like
-// "image-studio/generated". v1 doesn't register these yet (the registry
+// "media-studio/generated". v1 doesn't register these yet (the registry
 // hook is reserved for v1.1), but we accept them in storage so a
 // forward-rolling install doesn't lose data.
 func looksNamespaced(t string) bool {

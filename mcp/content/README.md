@@ -32,7 +32,7 @@ as a headless REST API from the same database.
 
 ## Deliberately deferred
 
-- Custom blocks contributed by bound apps (`image-studio/generated`,
+- Custom blocks contributed by bound apps (`media-studio/generated`,
   `crm/subscribe`, `crm/contact-form`, `social/embed`). The block
   registry interface is in place; cross-app wiring lands in v1.1.
 - `posts_generate_hero`, `posts_cross_post`, `posts_send_newsletter`,

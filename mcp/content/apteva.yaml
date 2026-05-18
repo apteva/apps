@@ -32,9 +32,9 @@ requires:
       hint: "Optional. When bound, uploaded media bytes live at /.media/<uuid> in storage; custom themes at /.themes/<slug>/. Without it, content runs against the embedded default theme and rejects media uploads."
     - role: image
       kind: app
-      compatible_app_names: [image-studio]
+      compatible_app_names: [media-studio]
       required: false
-      label: "Image Studio (AI hero images)"
+      label: "Media Studio (AI hero images)"
     - role: social
       kind: app
       compatible_app_names: [social]

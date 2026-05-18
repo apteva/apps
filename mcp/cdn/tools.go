@@ -61,7 +61,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "cdn_url_for",
 			Description: "Mint a public URL on a zone for a given origin path. Pure string assembly — no I/O. " +
-				"Use from consumer apps (storage, image-studio, …) to render zone-fronted URLs when an install is linked to a zone. " +
+				"Use from consumer apps (storage, media-studio, …) to render zone-fronted URLs when an install is linked to a zone. " +
 				"Args: zone_id, origin_path (must start with /). Returns { url }.",
 			InputSchema: schemaObject(map[string]any{
 				"zone_id":     map[string]any{"type": "integer"},

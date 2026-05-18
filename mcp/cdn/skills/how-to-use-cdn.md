@@ -4,7 +4,7 @@ description: |
   CDN's mental model + conventions. Load when working with custom
   hostnames, vanity URLs, or asking how files / pages get exposed
   publicly on a non-platform domain. Covers zones, the local-mode
-  v0.1 model, linking storage / image-studio / podcast / deploy to
+  v0.1 model, linking storage / media-studio / podcast / deploy to
   a zone, and the trade-offs vs. just using the platform's own
   PublicURL. Triggers on: "custom domain", "vanity URL", "files on
   acme.com", "publish on", "expose under", "behind a domain", or
@@ -33,7 +33,7 @@ Host header.
   `<PublicURL>/api/apps/<name>/...` URLs. Linking is per-install,
   per-consumer-app.
 - **URL minting is a separate call.** Consumer apps (storage,
-  image-studio, …) call `cdn_url_for(zone_id, origin_path)` at URL-
+  media-studio, …) call `cdn_url_for(zone_id, origin_path)` at URL-
   build time. The cdn sidecar isn't in the request path — only at
   URL-mint time.
 
@@ -139,7 +139,7 @@ in its own install config. For storage:
    zone.
 
 The consumer-side wiring is per-app. Other consumer apps
-(image-studio, podcast, …) follow the same pattern.
+(media-studio, podcast, …) follow the same pattern.
 
 ## Deleting a zone
 
