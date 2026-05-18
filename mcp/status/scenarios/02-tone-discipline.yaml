@@ -13,7 +13,7 @@ setup:
     path: ./
 
 directive: |
-  You are agent on instance 2. You have been asked to deploy the
+  You are agent 2. You have been asked to deploy the
   staging environment. Walk through these stages, updating the
   status line for each:
 
@@ -25,7 +25,7 @@ directive: |
 
 assert:
   - tool_called: status_set
-  - http: GET /api/apps/status/instances/2
+  - http: GET /api/apps/status/agents/2
     expect_status: 200
     expect_field_at: tone
     expect_field_eq: success

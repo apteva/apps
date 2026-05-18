@@ -2,8 +2,8 @@ schema: apteva-app/v1
 
 name: status
 display_name: Status
-version: 1.0.0
-description: Per-instance status line. Agent writes "what I'm on right now" via MCP; dashboard reads it live. Short-horizon counterpart to the long-lived directive.
+version: 2.0.0
+description: Per-agent status line. Agent writes "what I'm on right now" via MCP; dashboard reads it live. Short-horizon counterpart to the long-lived directive.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/status
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/status/icon.png
@@ -22,11 +22,16 @@ provides:
     - prefix: /
   mcp_tools:
     - name: status_set
-      description: Set the instance's status line — message, optional emoji, tone (info|working|warn|error|success|idle).
+      description: Set the agent's status line — message, optional emoji, tone (info|working|warn|error|success|idle).
     - name: status_get
-      description: Read the instance's current status line.
+      description: Read the agent's current status line.
     - name: status_clear
-      description: Clear the instance's status line.
+      description: Clear the agent's status line.
+  ui_panels:
+    - slot: project.page
+      label: Status
+      icon: activity
+      entry: /ui/StatusPanel.mjs
 
 runtime:
   kind: source

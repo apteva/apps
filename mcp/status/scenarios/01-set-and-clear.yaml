@@ -13,7 +13,7 @@ setup:
     path: ./
 
 directive: |
-  You are agent on instance 1. Before you start, set your status to
+  You are agent 1. Before you start, set your status to
   "Reviewing the new feature spec" with tone "working" and emoji 📖.
   Then read it back with status_get to confirm, and finally clear it
   with status_clear. Stop after that.
@@ -22,7 +22,7 @@ assert:
   - tool_called: status_set
   - tool_called: status_get
   - tool_called: status_clear
-  - http: GET /api/apps/status/instances/1
+  - http: GET /api/apps/status/agents/1
     expect_status: 204     # cleared → no row
   - iterations_at_most: 8
 

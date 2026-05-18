@@ -31,7 +31,7 @@ func TestSidecar_FullStatusFlow(t *testing.T) {
 
 	// 1. Set via MCP.
 	r := sc.MCP("status_set", map[string]any{
-		"instance_id": 42,
+		"agent_id": 42,
 		"message":     "running migrations",
 		"tone":        "working",
 	})
@@ -44,7 +44,7 @@ func TestSidecar_FullStatusFlow(t *testing.T) {
 
 	// 2. Read via REST.
 	var rest map[string]any
-	resp := sc.GET("/instances/"+strconv.Itoa(42), &rest)
+	resp := sc.GET("/agents/"+strconv.Itoa(42), &rest)
 	if resp.Status != 200 {
 		t.Fatalf("REST GET: status=%d body=%s", resp.Status, resp.Body)
 	}
@@ -53,30 +53,30 @@ func TestSidecar_FullStatusFlow(t *testing.T) {
 	}
 
 	// 3. Read via MCP — same data.
-	got := sc.MCP("status_get", map[string]any{"instance_id": 42})
+	got := sc.MCP("status_get", map[string]any{"agent_id": 42})
 	if got["message"] != "running migrations" {
 		t.Errorf("MCP status_get mismatch: %#v", got)
 	}
 
 	// 4. Update — upsert semantics.
 	sc.MCP("status_set", map[string]any{
-		"instance_id": 42,
+		"agent_id": 42,
 		"message":     "deploying",
 		"tone":        "info",
 	})
-	got = sc.MCP("status_get", map[string]any{"instance_id": 42})
+	got = sc.MCP("status_get", map[string]any{"agent_id": 42})
 	if got["message"] != "deploying" || got["tone"] != "info" {
 		t.Errorf("update didn't take: %#v", got)
 	}
 
 	// 5. Clear via MCP.
-	cleared := sc.MCP("status_clear", map[string]any{"instance_id": 42})
+	cleared := sc.MCP("status_clear", map[string]any{"agent_id": 42})
 	if cleared["status"] != "cleared" {
 		t.Errorf("status_clear returned %#v", cleared)
 	}
 
 	// 6. REST returns 204 for an absent status.
-	resp2 := sc.GET("/instances/42", nil)
+	resp2 := sc.GET("/agents/42", nil)
 	if resp2.Status != 204 {
 		t.Errorf("after clear, REST = %d, want 204", resp2.Status)
 	}
@@ -90,7 +90,7 @@ func TestSidecar_RejectsInvalidTone(t *testing.T) {
 	_, err := sc.MCPRaw("tools/call", map[string]any{
 		"name": "status_set",
 		"arguments": map[string]any{
-			"instance_id": 1,
+			"agent_id": 1,
 			"message":     "x",
 			"tone":        "panic",
 		},

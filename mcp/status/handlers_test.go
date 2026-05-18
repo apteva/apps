@@ -6,6 +6,7 @@ package main
 // integration. Tier 3 (live agent + LLM) is scenarios/*.yaml.
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -22,7 +23,7 @@ func TestUnit_ToolSet_DefaultsToInfoTone(t *testing.T) {
 	ctx := newStatusCtx(t)
 	app := &App{}
 	out, err := app.toolSet(ctx, map[string]any{
-		"instance_id": int64(7),
+		"agent_id": int64(7),
 		"message":     "running migrations",
 	})
 	if err != nil {
@@ -41,7 +42,7 @@ func TestUnit_ToolSet_RejectsInvalidTone(t *testing.T) {
 	ctx := newStatusCtx(t)
 	app := &App{}
 	_, err := app.toolSet(ctx, map[string]any{
-		"instance_id": int64(1),
+		"agent_id": int64(1),
 		"message":     "x",
 		"tone":        "panic", // not in the validTones map
 	})
@@ -53,15 +54,15 @@ func TestUnit_ToolSet_RejectsInvalidTone(t *testing.T) {
 func TestUnit_ToolSet_UpsertSemantics(t *testing.T) {
 	ctx := newStatusCtx(t)
 	app := &App{}
-	app.toolSet(ctx, map[string]any{"instance_id": int64(1), "message": "first"})
-	app.toolSet(ctx, map[string]any{"instance_id": int64(1), "message": "second", "tone": "working"})
+	app.toolSet(ctx, map[string]any{"agent_id": int64(1), "message": "first"})
+	app.toolSet(ctx, map[string]any{"agent_id": int64(1), "message": "second", "tone": "working"})
 	// Single row per instance — second call overwrites first.
 	var n int
-	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM status_status WHERE instance_id=1`).Scan(&n)
+	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM status_status WHERE agent_id=1`).Scan(&n)
 	if n != 1 {
 		t.Errorf("expected upsert to keep one row, got %d", n)
 	}
-	out, _ := app.toolGet(ctx, map[string]any{"instance_id": int64(1)})
+	out, _ := app.toolGet(ctx, map[string]any{"agent_id": int64(1)})
 	s := out.(*Status)
 	if s.Message != "second" || s.Tone != "working" {
 		t.Errorf("upsert didn't update fields: %+v", s)
@@ -71,11 +72,11 @@ func TestUnit_ToolSet_UpsertSemantics(t *testing.T) {
 func TestUnit_ToolGet_AbsentReturnsEmpty(t *testing.T) {
 	ctx := newStatusCtx(t)
 	app := &App{}
-	out, err := app.toolGet(ctx, map[string]any{"instance_id": int64(99)})
+	out, err := app.toolGet(ctx, map[string]any{"agent_id": int64(99)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// No row → returns {instance_id, message:""} placeholder, NOT nil.
+	// No row → returns {agent_id, message:""} placeholder, NOT nil.
 	res := out.(map[string]any)
 	if res["message"] != "" {
 		t.Errorf("expected empty message for missing row, got %+v", res)
@@ -85,12 +86,12 @@ func TestUnit_ToolGet_AbsentReturnsEmpty(t *testing.T) {
 func TestUnit_ToolClear_RemovesRow(t *testing.T) {
 	ctx := newStatusCtx(t)
 	app := &App{}
-	app.toolSet(ctx, map[string]any{"instance_id": int64(5), "message": "x"})
-	if _, err := app.toolClear(ctx, map[string]any{"instance_id": int64(5)}); err != nil {
+	app.toolSet(ctx, map[string]any{"agent_id": int64(5), "message": "x"})
+	if _, err := app.toolClear(ctx, map[string]any{"agent_id": int64(5)}); err != nil {
 		t.Fatal(err)
 	}
 	var n int
-	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM status_status WHERE instance_id=5`).Scan(&n)
+	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM status_status WHERE agent_id=5`).Scan(&n)
 	if n != 0 {
 		t.Errorf("clear didn't remove row, %d remaining", n)
 	}
@@ -101,9 +102,9 @@ func TestUnit_ToolSet_ValidatesArgs(t *testing.T) {
 	app := &App{}
 	cases := []map[string]any{
 		{},
-		{"instance_id": int64(1)},        // missing message
-		{"message": "x"},                  // missing instance_id
-		{"instance_id": int64(1), "message": ""},
+		{"agent_id": int64(1)},        // missing message
+		{"message": "x"},              // missing agent_id
+		{"agent_id": int64(1), "message": ""},
 	}
 	for i, args := range cases {
 		if _, err := app.toolSet(ctx, args); err == nil {
@@ -117,7 +118,7 @@ func TestUnit_ToolSet_ValidatesArgs(t *testing.T) {
 func TestHTTP_GetMissingReturns204(t *testing.T) {
 	srv := newHTTPServer(t)
 	defer srv.Close()
-	resp, err := http.Get(srv.URL + "/instances/1234")
+	resp, err := http.Get(srv.URL + "/agents/1234")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,13 +135,13 @@ func TestHTTP_GetAfterMCPSet(t *testing.T) {
 	// share the same store.
 	app := &App{}
 	if _, err := app.toolSet(globalCtx, map[string]any{
-		"instance_id": int64(42),
+		"agent_id": int64(42),
 		"message":     "hello",
 		"tone":        "success",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	resp, err := http.Get(srv.URL + "/instances/42")
+	resp, err := http.Get(srv.URL + "/agents/42")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,12 +158,52 @@ func TestHTTP_GetAfterMCPSet(t *testing.T) {
 	}
 }
 
+func TestHTTP_PostUpserts(t *testing.T) {
+	srv := newHTTPServer(t)
+	defer srv.Close()
+	body := bytes.NewBufferString(`{"message":"deploying","tone":"working","emoji":"🚀"}`)
+	resp, err := http.Post(srv.URL+"/agents/9", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		bb, _ := io.ReadAll(resp.Body)
+		t.Fatalf("POST status=%d body=%s", resp.StatusCode, bb)
+	}
+	var s Status
+	json.NewDecoder(resp.Body).Decode(&s)
+	if s.Message != "deploying" || s.Tone != "working" {
+		t.Errorf("POST round-trip mismatch: %+v", s)
+	}
+	// Second POST upserts.
+	resp2, _ := http.Post(srv.URL+"/agents/9", "application/json",
+		bytes.NewBufferString(`{"message":"deployed","tone":"success"}`))
+	if resp2.StatusCode != 200 {
+		t.Fatalf("second POST status=%d", resp2.StatusCode)
+	}
+	var n int
+	globalCtx.AppDB().QueryRow(`SELECT COUNT(*) FROM status_status WHERE agent_id=9`).Scan(&n)
+	if n != 1 {
+		t.Errorf("expected upsert to keep one row, got %d", n)
+	}
+}
+
+func TestHTTP_PostRejectsInvalidTone(t *testing.T) {
+	srv := newHTTPServer(t)
+	defer srv.Close()
+	resp, _ := http.Post(srv.URL+"/agents/1", "application/json",
+		bytes.NewBufferString(`{"message":"x","tone":"panic"}`))
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid tone, got %d", resp.StatusCode)
+	}
+}
+
 func TestHTTP_DeleteClears(t *testing.T) {
 	srv := newHTTPServer(t)
 	defer srv.Close()
 	app := &App{}
-	app.toolSet(globalCtx, map[string]any{"instance_id": int64(7), "message": "x"})
-	req, _ := http.NewRequest("DELETE", srv.URL+"/instances/7", nil)
+	app.toolSet(globalCtx, map[string]any{"agent_id": int64(7), "message": "x"})
+	req, _ := http.NewRequest("DELETE", srv.URL+"/agents/7", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -172,7 +213,7 @@ func TestHTTP_DeleteClears(t *testing.T) {
 	}
 	// Confirm.
 	var n int
-	globalCtx.AppDB().QueryRow(`SELECT COUNT(*) FROM status_status WHERE instance_id=7`).Scan(&n)
+	globalCtx.AppDB().QueryRow(`SELECT COUNT(*) FROM status_status WHERE agent_id=7`).Scan(&n)
 	if n != 0 {
 		t.Errorf("delete didn't remove row, %d left", n)
 	}
@@ -212,7 +253,7 @@ func TestMCP_ToolsCall_SetGetClear(t *testing.T) {
 	app := &App{}
 	// status_set
 	if r := mcpDispatch(t, app, "status_set", map[string]any{
-		"instance_id": float64(1),
+		"agent_id": float64(1),
 		"message":     "via mcp",
 		"tone":        "working",
 	}, ctx); r == nil {
@@ -220,7 +261,7 @@ func TestMCP_ToolsCall_SetGetClear(t *testing.T) {
 	}
 	// status_get
 	r := mcpDispatch(t, app, "status_get", map[string]any{
-		"instance_id": float64(1),
+		"agent_id": float64(1),
 	}, ctx)
 	s, ok := r.(*Status)
 	if !ok {
@@ -231,13 +272,13 @@ func TestMCP_ToolsCall_SetGetClear(t *testing.T) {
 	}
 	// status_clear
 	if _, err := dispatchByName(app, "status_clear").Handler(ctx, map[string]any{
-		"instance_id": float64(1),
+		"agent_id": float64(1),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	// Confirm cleared.
 	r = mcpDispatch(t, app, "status_get", map[string]any{
-		"instance_id": float64(1),
+		"agent_id": float64(1),
 	}, ctx)
 	res := r.(map[string]any) // get returns a placeholder map when row absent
 	if res["message"] != "" {
@@ -249,7 +290,7 @@ func TestMCP_ToolsCall_RequiredArgsEnforced(t *testing.T) {
 	ctx := newStatusCtx(t)
 	app := &App{}
 	if _, err := dispatchByName(app, "status_set").Handler(ctx, map[string]any{
-		"instance_id": float64(1),
+		"agent_id": float64(1),
 		// missing message
 	}); err == nil {
 		t.Error("expected error for missing message")
