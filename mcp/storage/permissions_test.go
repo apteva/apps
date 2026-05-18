@@ -15,7 +15,7 @@ import (
 // withCaller stamps a Caller onto a ctx for the *Ctx tool variants.
 func withCaller(grants ...sdk.Grant) context.Context {
 	c := &sdk.Caller{
-		InstanceID:    7,
+		AgentID:    7,
 		DefaultEffect: "deny",
 		Grants:        grants,
 		Resources: []sdk.ResourceDecl{
@@ -189,7 +189,7 @@ func TestScope_DefaultAllowEmptyGrants_SeesEverything(t *testing.T) {
 
 	app := &App{}
 	c := &sdk.Caller{
-		InstanceID:    7,
+		AgentID:    7,
 		DefaultEffect: "allow",
 		// no grants
 		Resources: []sdk.ResourceDecl{
