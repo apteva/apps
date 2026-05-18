@@ -1,40 +1,63 @@
-// Computer v0.1 — UI-only sidecar app.
+// Computer v0.3 — first three MCP tools (browser_open / browser_screenshot
+// / browser_close) on top of the existing UI surface.
 //
-// Today this app contributes one operator panel + four chat-attachable
-// UI components. There are no MCP tools and no DB; the agent's
-// browser_session / computer_use calls remain core built-ins. The
-// operator panel and the LiveCard component talk to apteva-server
-// endpoints (/api/browsers, /api/instances/{id}/computer/stream, ...)
-// to fetch live data; this sidecar just serves the static UI bundles
-// the platform mounts under /apps/computer/.
+// Sessions opened via these tools are owned by this sidecar: an
+// in-memory map keyed by sidecar-generated session_id holds the
+// computer.Computer value, and an idle reaper closes anything not
+// touched in 30 minutes. Attaching to a session the agent opened in
+// core is NOT yet supported — Browserbase/Steel resume comes with the
+// next release, and local CDP attach needs core-side plumbing.
 //
-// A later release will lift the browser backends out of core/ and
-// register them as MCP tools here. The manifest will gain entries;
-// nothing about today's UI surface needs to change because the
-// components consume server endpoints, not direct tool returns.
+// The browser backends (local Chrome, Browserbase, Steel, Browser
+// Engine) live in github.com/apteva/computer; we never duplicate any
+// CDP / HTTP plumbing here. Backend choice comes from the per-call
+// `backend` arg, falling back to APTEVA_BROWSER_BACKEND env, falling
+// back to "local". Cloud credentials are read from env at open time
+// (BROWSERBASE_API_KEY / BROWSERBASE_PROJECT_ID / STEEL_API_KEY) —
+// the integration-bindings migration is a later refinement.
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"sync"
+	"time"
+
 	sdk "github.com/apteva/app-sdk"
+	backends "github.com/apteva/computer"
+	pkgcomputer "github.com/apteva/core/pkg/computer"
 )
 
 // ─── Manifest (also lives in apteva.yaml) ──────────────────────────
 // Embedded so a built sidecar binary still self-describes if loaded
 // without its source tree. Keep in sync with apteva.yaml — the
-// platform reads the on-disk yaml at install time.
+// platform reads the on-disk yaml at install time. main_test.go
+// enforces drift on the load-bearing fields.
 
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.2.1
+version: 0.3.0
 description: |
-  Watch and steer the agent's browser. Operator panel + chat
-  components. v0.1 is UI-only; backends and tools land in a
-  later release.
+  Watch and steer the agent's browser. v0.3 adds the first three MCP
+  tools (browser_open / browser_screenshot / browser_close).
 scopes: [project, global]
+requires:
+  permissions:
+    - net.egress
 provides:
   http_routes:
     - prefix: /
+  mcp_tools:
+    - name: browser_open
+      description: "Open a browser session. Args: backend?, url?, viewport?. Returns {session_id, backend, current_url, width, height}."
+    - name: browser_screenshot
+      description: "Capture a PNG of the session's current viewport. Args: session_id. Returns {png_b64, current_url, width, height}."
+    - name: browser_close
+      description: "Close a session opened by this app. Args: session_id. Idempotent."
   ui_panels:
     - slot: project.page
       label: Browsers
@@ -63,7 +86,90 @@ runtime:
   health_check: /health
 `
 
-type App struct{}
+// newBackend is the factory the handlers use to construct a backend.
+// Swapped by tests to inject a fake Computer without booting real
+// Chrome / cloud sessions. Production path is backends.New verbatim.
+var newBackend = backends.New
+
+// idleTTL — sessions untouched for this long get reaped. Matches core's
+// rough "agent abandoned the browser, free the resource" expectation;
+// generous because cloud sessions (Browserbase/Steel) cost real money
+// when leaked but a too-aggressive reaper would close mid-task sessions
+// for callers that pause for human input.
+const idleTTL = 30 * time.Minute
+const reapInterval = 5 * time.Minute
+
+// session is one open browser, owned by this sidecar.
+type session struct {
+	comp     pkgcomputer.Computer
+	backend  string
+	openedAt time.Time
+	lastUsed time.Time
+}
+
+// registry holds open sessions across all callers in this sidecar
+// process. The mutex protects the map only; per-session calls hit the
+// underlying chromedp/CDP layers which serialize themselves.
+type registry struct {
+	mu sync.Mutex
+	m  map[string]*session
+}
+
+func (r *registry) put(id string, s *session) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.m[id] = s
+}
+
+func (r *registry) get(id string) (*session, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.m[id]
+	if ok {
+		s.lastUsed = time.Now()
+	}
+	return s, ok
+}
+
+// remove returns the session (if any) and removes it from the map. The
+// caller is responsible for closing it — keeping close-outside-the-lock
+// avoids holding the registry mutex during slow tear-down.
+func (r *registry) remove(id string) (*session, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.m[id]
+	if ok {
+		delete(r.m, id)
+	}
+	return s, ok
+}
+
+// reapIdle closes and removes any session not touched within ttl.
+// Returns the ids it reaped so the caller can log them.
+func (r *registry) reapIdle(ttl time.Duration) []string {
+	r.mu.Lock()
+	cutoff := time.Now().Add(-ttl)
+	var stale []*session
+	var ids []string
+	for id, s := range r.m {
+		if s.lastUsed.Before(cutoff) {
+			stale = append(stale, s)
+			ids = append(ids, id)
+			delete(r.m, id)
+		}
+	}
+	r.mu.Unlock()
+	for _, s := range stale {
+		_ = s.comp.Close()
+	}
+	return ids
+}
+
+// ─── App ───────────────────────────────────────────────────────────
+
+type App struct {
+	reg *registry
+}
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
@@ -74,24 +180,245 @@ func (a *App) Manifest() sdk.Manifest {
 }
 
 func (a *App) OnMount(ctx *sdk.AppCtx) error {
-	ctx.Logger().Info("computer mounted (UI-only, no MCP tools yet)")
+	a.reg = &registry{m: map[string]*session{}}
+	go a.reaper(ctx)
+	ctx.Logger().Info("computer mounted", "tools", 3, "idle_ttl", idleTTL.String())
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	// Best-effort close on shutdown. We don't lock for the whole sweep
+	// — we're shutting down, racing is fine.
+	if a.reg == nil {
+		return nil
+	}
+	a.reg.mu.Lock()
+	sessions := a.reg.m
+	a.reg.m = map[string]*session{}
+	a.reg.mu.Unlock()
+	for _, s := range sessions {
+		_ = s.comp.Close()
+	}
+	return nil
+}
+
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
-func (a *App) MCPTools() []sdk.Tool              { return nil }
 
 // HTTPRoutes — none. UI bundles under /ui/* are served by the
-// platform's static handler against this app's bundle directory;
-// /health is auto-registered by the SDK (mountFrameworkRoutes). A
-// custom handler for either would conflict (we panicked once on
-// /health when we tried to own it ourselves). Future MCP tools or
-// custom HTTP routes go here when they land.
-func (a *App) HTTPRoutes() []sdk.Route {
-	return nil
+// platform's static handler; /health is auto-registered by the SDK.
+func (a *App) HTTPRoutes() []sdk.Route { return nil }
+
+func (a *App) MCPTools() []sdk.Tool {
+	return []sdk.Tool{
+		{
+			Name: "browser_open",
+			Description: "Open a new browser session. Args: backend? (local|browserbase|steel, default per APTEVA_BROWSER_BACKEND env then \"local\"), " +
+				"url? (navigate after open), viewport? ({width:int, height:int}, default 1600x800). " +
+				"Returns {session_id, backend, current_url, width, height}. " +
+				"Session owned by this sidecar until browser_close or 30-minute idle reaper.",
+			InputSchema: schemaObject(map[string]any{
+				"backend": map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel"}},
+				"url":     map[string]any{"type": "string"},
+				"viewport": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"width":  map[string]any{"type": "integer"},
+						"height": map[string]any{"type": "integer"},
+					},
+				},
+			}, nil),
+			Handler: a.toolBrowserOpen,
+		},
+		{
+			Name: "browser_screenshot",
+			Description: "Capture a PNG of the session's current viewport. Args: session_id. " +
+				"Returns {png_b64, current_url, width, height}. Full-page and SoM are not yet supported.",
+			InputSchema: schemaObject(map[string]any{
+				"session_id": map[string]any{"type": "string"},
+			}, []string{"session_id"}),
+			Handler: a.toolBrowserScreenshot,
+		},
+		{
+			Name: "browser_close",
+			Description: "Close a session opened by this app. Args: session_id. Idempotent — unknown ids return {closed:false}.",
+			InputSchema: schemaObject(map[string]any{
+				"session_id": map[string]any{"type": "string"},
+			}, []string{"session_id"}),
+			Handler: a.toolBrowserClose,
+		},
+	}
+}
+
+// ─── Tool handlers ─────────────────────────────────────────────────
+
+func (a *App) toolBrowserOpen(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	backend := stringArg(args, "backend")
+	if backend == "" {
+		backend = os.Getenv("APTEVA_BROWSER_BACKEND")
+	}
+	if backend == "" {
+		backend = "local"
+	}
+
+	width, height := 0, 0
+	if vp, ok := args["viewport"].(map[string]any); ok {
+		width = intArg(vp, "width")
+		height = intArg(vp, "height")
+	}
+
+	cfg := backendConfig(backend, width, height)
+	comp, err := newBackend(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("backend %q open failed: %w", backend, err)
+	}
+	if comp == nil {
+		return nil, fmt.Errorf("backend %q unknown", backend)
+	}
+
+	opener, ok := comp.(pkgcomputer.SessionOpener)
+	if !ok {
+		_ = comp.Close()
+		return nil, fmt.Errorf("backend %q does not support OpenSession", backend)
+	}
+	openOpts := pkgcomputer.OpenOptions{URL: stringArg(args, "url")}
+	if err := opener.OpenSession(openOpts); err != nil {
+		_ = comp.Close()
+		return nil, fmt.Errorf("OpenSession: %w", err)
+	}
+
+	id := newSessionID()
+	now := time.Now()
+	a.reg.put(id, &session{
+		comp:     comp,
+		backend:  backend,
+		openedAt: now,
+		lastUsed: now,
+	})
+
+	disp := comp.DisplaySize()
+	out := map[string]any{
+		"session_id":  id,
+		"backend":     backend,
+		"current_url": currentURL(comp),
+		"width":       disp.Width,
+		"height":      disp.Height,
+	}
+	ctx.Logger().Info("browser_open", "session_id", id, "backend", backend)
+	return out, nil
+}
+
+func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := stringArg(args, "session_id")
+	if id == "" {
+		return nil, fmt.Errorf("session_id required")
+	}
+	sess, ok := a.reg.get(id)
+	if !ok {
+		return nil, fmt.Errorf("session %s not found (may have been reaped or never opened by this sidecar)", id)
+	}
+	png, err := sess.comp.Screenshot()
+	if err != nil {
+		return nil, fmt.Errorf("screenshot: %w", err)
+	}
+	disp := sess.comp.DisplaySize()
+	return map[string]any{
+		"png_b64":     base64.StdEncoding.EncodeToString(png),
+		"current_url": currentURL(sess.comp),
+		"width":       disp.Width,
+		"height":      disp.Height,
+	}, nil
+}
+
+func (a *App) toolBrowserClose(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := stringArg(args, "session_id")
+	if id == "" {
+		return nil, fmt.Errorf("session_id required")
+	}
+	sess, ok := a.reg.remove(id)
+	if !ok {
+		return map[string]any{"closed": false}, nil
+	}
+	if err := sess.comp.Close(); err != nil {
+		ctx.Logger().Warn("browser_close underlying Close error", "session_id", id, "err", err.Error())
+	}
+	return map[string]any{"closed": true}, nil
+}
+
+// ─── Background reaper ─────────────────────────────────────────────
+
+func (a *App) reaper(ctx *sdk.AppCtx) {
+	t := time.NewTicker(reapInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			ids := a.reg.reapIdle(idleTTL)
+			for _, id := range ids {
+				ctx.Logger().Info("reaped idle session", "session_id", id, "idle_ttl", idleTTL.String())
+			}
+		}
+	}
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────
+
+func newSessionID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return "br_" + hex.EncodeToString(b[:])
+}
+
+func backendConfig(backend string, width, height int) backends.Config {
+	cfg := backends.Config{Type: backend, Width: width, Height: height}
+	switch backend {
+	case "browserbase":
+		cfg.APIKey = os.Getenv("BROWSERBASE_API_KEY")
+		cfg.ProjectID = os.Getenv("BROWSERBASE_PROJECT_ID")
+	case "steel":
+		cfg.APIKey = os.Getenv("STEEL_API_KEY")
+	}
+	return cfg
+}
+
+func currentURL(c pkgcomputer.Computer) string {
+	if si, ok := c.(pkgcomputer.SessionInfo); ok {
+		return si.CurrentURL()
+	}
+	return ""
+}
+
+func stringArg(args map[string]any, k string) string {
+	if v, ok := args[k].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func intArg(args map[string]any, k string) int {
+	switch v := args[k].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	}
+	return 0
+}
+
+func schemaObject(props map[string]any, required []string) map[string]any {
+	out := map[string]any{
+		"type":       "object",
+		"properties": props,
+	}
+	if len(required) > 0 {
+		out["required"] = required
+	}
+	return out
 }
 
 func main() { sdk.Run(&App{}) }

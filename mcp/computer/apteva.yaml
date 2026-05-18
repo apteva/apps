@@ -2,18 +2,21 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.2.1
+version: 0.3.0
 description: |
   Watch and steer the agent's browser. Operator panel for browsing
   live sessions across instances, taking control of one, and reading
   the agent's chat. Inline chat components the agent attaches so
   its work surfaces visually instead of as plain text.
 
-  v0.1 is UI-only — the browser backends (local Chrome, Browserbase,
-  Steel) and the browser_session / computer_use tools remain built
-  into the agent loop. They will be promoted into this app's
-  mcp_tools in a later release; the manifest will gain entries then
-  with no rename or install-path change.
+  v0.3 adds the first three MCP tools (browser_open / browser_screenshot
+  / browser_close) so callers — first the new `screenshots` app, then
+  later the agent loop itself — can drive browser sessions through this
+  app instead of through the core binary. Click/type/scroll and SoM
+  follow in a later release. Sessions opened via these tools are owned
+  by this sidecar; attaching to a session the agent already opened in
+  core is not yet supported (cloud-backed resume comes with the next
+  release; local CDP attach requires core-side plumbing).
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -22,9 +25,36 @@ tags: [browser, observability, ui]
 scopes: [project, global]
 min_apteva_version: "0.10.0"
 
+requires:
+  permissions:
+    - net.egress           # Browserbase / Steel API calls
+
 provides:
   http_routes:
     - prefix: /
+
+  mcp_tools:
+    - name: browser_open
+      description: |
+        Open a new browser session. Args: backend? (local|browserbase|steel,
+        default reads APTEVA_BROWSER_BACKEND env then falls back to "local"),
+        url? (navigate after open), viewport? ({width:int, height:int},
+        default 1600x800). Returns {session_id, backend, current_url,
+        width, height}. The session is owned by this app and persists
+        until browser_close or the 30-minute idle reaper, whichever
+        comes first.
+    - name: browser_screenshot
+      description: |
+        Capture a PNG of the session's current viewport. Args: session_id.
+        Returns {png_b64, current_url, width, height}. Full-page capture
+        and SoM overlay are not yet supported — the computer/ package
+        exposes only a single Screenshot() that returns the current
+        viewport bytes.
+    - name: browser_close
+      description: |
+        Close a session opened by this app. Args: session_id. Idempotent —
+        closing an unknown id returns {closed:false}. Always returns
+        without error so callers can safely close-on-defer.
 
   ui_panels:
     - slot: project.page
