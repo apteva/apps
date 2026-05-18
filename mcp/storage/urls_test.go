@@ -92,6 +92,25 @@ func TestSignedAbsoluteURL(t *testing.T) {
 	}
 }
 
+// Regression: signed URLs must carry project_id so the platform's
+// /api/apps/storage/... proxy routes to the install that owns the
+// file. Without it, the proxy falls back to byName (last-wins) and
+// 404s for any file not in that arbitrarily-chosen install's DB —
+// the symptom that landed DLNA's MeGusta-mkv "device disconnected"
+// failure in v0.1.17/18.
+func TestSignedAbsoluteURL_IncludesProjectID(t *testing.T) {
+	t.Setenv("STORAGE_PUBLIC_URL", "https://agents.example.com")
+	got := signedAbsoluteURL(nil, &File{
+		ID:        42,
+		Name:      "video.mp4",
+		ProjectID: "1776532035349-7aca99abbd8afe9e",
+	}, "abcdef", 1234567890)
+	want := "https://agents.example.com/api/apps/storage/files/42/content/video.mp4?sig=abcdef&exp=1234567890&project_id=1776532035349-7aca99abbd8afe9e"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 func TestDBGetByID_PopulatesURL(t *testing.T) {
 	t.Setenv("STORAGE_PUBLIC_URL", "https://agents.example.com")
 	ctx := newTestCtx(t)

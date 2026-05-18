@@ -145,9 +145,22 @@ func cdnZoneForInstall(ctx *sdk.AppCtx) int64 {
 // so the URL ends in the proper extension for downstream sniffers.
 // `?sig=&exp=` are appended; the platform's authMiddleware carves
 // out signed URLs for app paths.
+//
+// project_id rides as a query param so apteva-server's
+// /api/apps/<name>/... proxy (handleAppProxy) can route to the
+// install of `storage` that owns the file. Without it the proxy
+// falls back to byName.GetByName which is last-wins across all
+// project-scoped installs and 404s for any file not in that
+// arbitrarily-chosen install's DB. The DLNA app's gateway-proxied
+// fetch is the canonical case that surfaces this — the TV's URL
+// has no auth context to disambiguate by, only what the URL
+// itself carries.
 func signedAbsoluteURL(ctx *sdk.AppCtx, f *File, sig string, exp int64) string {
 	rel := buildContentURL(f) // includes filename when present
 	q := fmt.Sprintf("?sig=%s&exp=%d", sig, exp)
+	if f != nil && f.ProjectID != "" {
+		q += "&project_id=" + f.ProjectID
+	}
 	base := publicBase(ctx)
 	if base == "" {
 		return "/api/apps/storage" + rel + q
