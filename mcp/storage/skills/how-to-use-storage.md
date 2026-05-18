@@ -124,6 +124,13 @@ Three flavours. Pick the right one.
   when the recipient is an apteva user and you want them to see
   the file in context.
 
+When the install has a CDN zone configured (`cdn_zone_id` install
+config set to a non-zero zone id from the cdn app), public file URLs
+become `https://<zone-hostname>/files/<id>/content` automatically —
+you don't choose CDN vs origin, the visibility tier does. Signed and
+private URLs always go to the platform host because they need HMAC
+or auth validation the CDN edge doesn't perform.
+
 ## Soft vs hard delete
 
 `files_delete` is **hard delete by default** — row removed AND

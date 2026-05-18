@@ -20,18 +20,22 @@ package main
 //
 // Resolution chain for the absolute base:
 //
-//   1. ctx.PlatformAPI().WhoAmI().PublicURL — live-fresh from the
+//   1. cdn zone (when cdn_zone_id != 0 in install config) — public
+//      URLs only; signed and private always go to publicBase. cdn
+//      mints "https://<zone-hostname>/files/<id>/content".
+//   2. ctx.PlatformAPI().WhoAmI().PublicURL — live-fresh from the
 //      platform's server_settings.public_url (admin-editable from
 //      Settings → Server). Sub-second cache via the SDK so setting
 //      changes propagate without sidecar restart.
-//   2. APTEVA_PUBLIC_URL / STORAGE_PUBLIC_URL env — fallback for
+//   3. APTEVA_PUBLIC_URL / STORAGE_PUBLIC_URL env — fallback for
 //      older platforms / test harnesses. Frozen at spawn.
-//   3. "" — neither available; fall back to relative paths so the
+//   4. "" — neither available; fall back to relative paths so the
 //      same-origin dashboard still works in dev / no-network installs.
 
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	sdk "github.com/apteva/app-sdk"
@@ -66,13 +70,74 @@ func envPublicURL() string {
 // absoluteContentURL returns the file's canonical URL. Same shape
 // for every visibility level — what differs is whether the request
 // for the URL needs auth.
+//
+// When the install is linked to a cdn zone (cdn_zone_id != 0) AND
+// the file's visibility is public, the URL is minted on the zone's
+// hostname via cdn_url_for. Signed and private files always go to
+// publicBase because the cdn edge doesn't carry HMAC or auth state
+// in v0.1.
 func absoluteContentURL(ctx *sdk.AppCtx, f *File) string {
 	rel := buildContentURL(f) // "/files/<id>/content"
+	if f != nil && f.Visibility == "public" {
+		if u := cdnURLFor(ctx, rel); u != "" {
+			return u
+		}
+	}
 	base := publicBase(ctx)
 	if base == "" {
 		return "/api/apps/storage" + rel
 	}
 	return base + "/api/apps/storage" + rel
+}
+
+// cdnURLFor asks the cdn app to mint a URL on the install's linked
+// zone. Returns "" when:
+//   - the install isn't linked to a zone (cdn_zone_id == 0)
+//   - the cdn app isn't installed / unreachable (CallAppResult errors)
+//   - cdn returns an empty URL (shouldn't happen, treat as fallback)
+//
+// All failure modes fall through to publicBase silently — a cdn
+// outage must never produce broken file URLs.
+func cdnURLFor(ctx *sdk.AppCtx, rel string) string {
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return ""
+	}
+	zoneID := cdnZoneForInstall(ctx)
+	if zoneID == 0 {
+		return ""
+	}
+	args := map[string]any{
+		"zone_id":     zoneID,
+		"origin_path": rel,
+	}
+	if pid := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); pid != "" {
+		args["_project_id"] = pid
+	}
+	var out struct {
+		URL string `json:"url"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("cdn", "cdn_url_for", args, &out); err != nil {
+		return ""
+	}
+	return out.URL
+}
+
+// cdnZoneForInstall reads the cdn_zone_id install config; "0" or
+// missing means no link. Parses defensively — the config field is a
+// text input, so a typo lands as 0 rather than crashing.
+func cdnZoneForInstall(ctx *sdk.AppCtx) int64 {
+	if ctx == nil {
+		return 0
+	}
+	v := strings.TrimSpace(ctx.Config().Get("cdn_zone_id"))
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // signedAbsoluteURL returns the absolute form of a signed URL.
