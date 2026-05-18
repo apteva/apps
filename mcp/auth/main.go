@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.2.0
+version: 0.2.1
 description: |
   Identity layer for Apteva-deployed SaaS. Email + password signup/login,
   asymmetric JWT issuance, refresh-token sessions, OAuth client registry,

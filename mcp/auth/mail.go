@@ -60,7 +60,10 @@ func issueResetToken(ctx *sdk.AppCtx, projectID string, userID int64, email stri
 }
 
 func buildLink(ctx *sdk.AppCtx, path string, q url.Values) string {
-	base := cfgStr(ctx, "app_url", "")
+	// Same resolution as publicBaseURL (config override → SDK
+	// PlatformInfo) but without an http.Request to fall back to.
+	// Email links go out asynchronously, so we don't have one.
+	base := publicBaseURL(ctx, nil)
 	if base == "" {
 		base = "http://localhost:8080"
 	}

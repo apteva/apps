@@ -622,14 +622,25 @@ func newFailureCount(u *User) int {
 }
 
 // publicBaseURL is the issuer string we embed in JWTs and the OIDC
-// discovery doc. We prefer the install's `app_url` config when set
-// because that's the user-visible domain (e.g. https://app.example.com)
-// rather than the internal sidecar URL the request came in on.
+// discovery doc. Resolution order:
+//   1. install config `app_url` — explicit override wins (useful when
+//      this auth install fronts a custom domain different from the
+//      platform's public_url).
+//   2. SDK PlatformInfo().PublicURL — hot-refreshed from apteva-server,
+//      so operators changing the platform URL don't need to restart
+//      every sidecar.
+//   3. the request's own host — last-ditch dev fallback.
 func publicBaseURL(ctx *sdk.AppCtx, r *http.Request) string {
 	if ctx != nil {
 		if v := cfgStr(ctx, "app_url", ""); v != "" {
 			return strings.TrimRight(v, "/")
 		}
+		if info, err := ctx.PlatformInfo(); err == nil && info != nil && info.PublicURL != "" {
+			return strings.TrimRight(info.PublicURL, "/")
+		}
+	}
+	if r == nil {
+		return ""
 	}
 	scheme := "https"
 	if r.TLS == nil {

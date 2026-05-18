@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: auth
 display_name: Auth
-version: 0.2.0
+version: 0.2.1
 description: |
   Identity layer for Apteva-deployed SaaS. Email + password signup/login,
   asymmetric (EdDSA) JWT issuance with rotating signing keys + JWKS,
@@ -86,14 +86,12 @@ db:
 config_schema:
   - name: app_url
     type: text
-    required: true
-    label: Public app URL
-    description: Used in email verification, reset, magic-link, and OAuth redirect URLs. e.g. https://app.example.com
+    label: Public app URL (override)
+    description: Optional. Used in JWT issuer, email links, and OAuth redirects. Leave blank to auto-derive from the platform's public URL; set this only when this auth install fronts a custom domain different from apteva-server. e.g. https://app.example.com
   - name: from_email
     type: text
-    required: true
     label: Outbound from-address
-    description: Sender address for transactional emails. Must be verified in the messaging app.
+    description: Optional. Sender address for transactional email (verify, reset, magic-link). Required only if the messaging app is installed; without it, links are written to the audit log instead. Must be a from-address verified in the messaging app.
   - name: jwt_access_ttl_seconds
     type: text
     default: "900"
