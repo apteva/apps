@@ -21,7 +21,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: status
 display_name: Status
-version: 2.0.0
+version: 2.0.1
 description: Per-agent status line. Agent writes via MCP; dashboard reads live.
 author: Apteva
 scopes: [project, global]
@@ -34,11 +34,11 @@ provides:
     - prefix: /
   mcp_tools:
     - name: status_set
-      description: Set the agent's status line.
+      description: Set the agent's status line at a phase transition. See the /status skill.
     - name: status_get
       description: Read the agent's current status line.
     - name: status_clear
-      description: Clear the agent's status line.
+      description: Clear the status line (prefer setting a terminal tone instead).
 runtime:
   kind: source
   source:
@@ -117,7 +117,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "status_set",
-			Description: "Set the agent's status line. Args: agent_id, message, emoji (optional), tone (info|working|warn|error|success|idle, default info), thread_id (optional).",
+			Description: "Set the agent's status line. Call this at phase transitions (new sub-task, new sequence, begin → success/fail), NOT on every tool call — operators scan for changes, not noise. Tone matches the phase: 'working' while active, 'success'/'error' on completion, 'blocked' when waiting on human or external system. Keep messages short (one line, ~5-12 words). See the /status skill for the full cadence + tone protocol. Args: agent_id, message, emoji (optional), tone (info|working|warn|error|success|idle, default info), thread_id (optional).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -133,7 +133,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "status_get",
-			Description: "Read the agent's current status line. Args: agent_id.",
+			Description: "Read the agent's current status line. Mainly for other agents/apps inspecting state; you usually know your own status. Args: agent_id.",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{"agent_id": map[string]any{"type": "integer"}},
@@ -143,7 +143,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "status_clear",
-			Description: "Clear the agent's status line. Args: agent_id.",
+			Description: "Clear the agent's status line. Only use when nothing is running and the slot should be empty — otherwise update with a terminal tone (success/error/idle) so operators see what just happened. Args: agent_id.",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{"agent_id": map[string]any{"type": "integer"}},

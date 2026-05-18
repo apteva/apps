@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: status
 display_name: Status
-version: 2.0.0
+version: 2.0.1
 description: Per-agent status line. Agent writes "what I'm on right now" via MCP; dashboard reads it live. Short-horizon counterpart to the long-lived directive.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/status
@@ -22,11 +22,23 @@ provides:
     - prefix: /
   mcp_tools:
     - name: status_set
-      description: Set the agent's status line — message, optional emoji, tone (info|working|warn|error|success|idle).
+      description: Set the agent's status line at a phase transition — message, optional emoji, tone (info|working|warn|error|success|idle). See the /status skill for the cadence + tone protocol.
     - name: status_get
-      description: Read the agent's current status line.
+      description: Read the agent's current status line. Mainly for other agents/apps inspecting state.
     - name: status_clear
-      description: Clear the agent's status line.
+      description: Clear the status line. Prefer updating to a terminal tone (success/error/idle) so the operator sees what just happened.
+  skills:
+    - name: how-to-write-status
+      command: /status
+      body_file: skills/how-to-write-status.md
+      description: |
+        Teaches the agent the cadence (when to call status_set vs
+        skip), tone semantics (info/working/warn/error/success/
+        idle/blocked), and format (one short line per phase). Loads
+        on any status_* tool call.
+      metadata:
+        category: observability
+        icon: activity
   ui_panels:
     - slot: project.page
       label: Status
