@@ -1,0 +1,175 @@
+schema: apteva-app/v1
+
+name: gigs
+display_name: Gigs
+version: 0.1.0
+description: |
+  Agents delegate atomic work to human workers (CRM contacts) by
+  composing reusable multi-modal instructions. Templates are saved
+  instruction sets; gigs are dispatched snapshots. Async by default —
+  agents resume on gig.submitted.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/gigs
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/gigs/icon.png
+tags: [gigs, workers, delegation, productivity]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.instances.read
+    - platform.apps.call
+  integrations:
+    - role: contacts
+      kind: app
+      compatible_app_names: [crm]
+      capabilities: [contact.read, contact.message]
+      required: true
+      label: "CRM"
+      hint: "Workers are CRM contacts. Notifications use crm.contacts_send_message and gig touches auto-log to each contact's timeline."
+    - role: storage
+      kind: app
+      compatible_app_names: [storage]
+      capabilities: [file.read, file.write]
+      required: true
+      label: "Storage"
+      hint: "Instruction media (audio/video/images/docs) and worker submissions are stored here under /.gigs/."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    # ─── Workers ─────────────────────────────────────────────────────
+    - name: workers_create
+      description: Create a worker by name + email/phone — upserts the CRM contact in one shot, then promotes it to a worker. Returns {worker, contact, was_created}.
+    - name: workers_promote_contact
+      description: Promote an existing CRM contact to a worker. Idempotent.
+    - name: workers_list
+      description: List workers with stats (filterable by status, skill).
+    - name: workers_get
+      description: Fetch a worker with the resolved CRM contact details + skills + open assignment count.
+    - name: workers_search
+      description: Filtered worker search (skill, availability, rating, recent activity).
+    - name: workers_set_availability
+      description: Pause or resume a worker.
+    - name: workers_set_skills
+      description: Replace a worker's skill set.
+    - name: skills_create
+      description: Define a new skill.
+    - name: skills_list
+      description: List all skills in the project.
+    # ─── Instruction library ─────────────────────────────────────────
+    - name: instructions_create
+      description: Create a new instruction (text/audio/video/image/document/link/script/warning/example/checklist_item/confirmation/timer_hint/input_*). Returns the head row + v1.
+    - name: instructions_list
+      description: Filter the library by kind or search.
+    - name: instructions_get
+      description: Instruction + current version + derived result_field schema fragment.
+    - name: instructions_update
+      description: Forks a new version (previous versions remain queryable).
+    - name: instructions_publish
+      description: Move the current draft version to active.
+    - name: instructions_archive
+      description: Soft-delete.
+    - name: instructions_used_in
+      description: Templates referencing this instruction — impact view before an edit.
+    # ─── Templates (compositions) ────────────────────────────────────
+    - name: templates_create
+      description: New template, empty composition (draft).
+    - name: templates_list
+      description: Active templates in the project.
+    - name: templates_get
+      description: Full template incl. composition + derived result_schema + media_manifest + variables.
+    - name: templates_set_instructions
+      description: Replace the composition. Returns the derived result_schema, media_manifest, variables.
+    - name: templates_insert_instruction
+      description: Insert one instruction at sort_order n (granular edit on the draft version).
+    - name: templates_remove_instruction
+      description: Remove one instruction from the draft version.
+    - name: templates_reorder_instructions
+      description: Permute the draft version's composition.
+    - name: templates_publish
+      description: Move the current draft version to active.
+    - name: templates_archive
+      description: Soft-delete.
+    - name: templates_check_updates
+      description: Which pinned instruction versions have newer active versions available?
+    - name: templates_render_preview
+      description: Render title + each instruction with sample variables. No gig created.
+    # ─── Gigs ────────────────────────────────────────────────────────
+    - name: gigs_create_from_template
+      description: Primary dispatch path. Template slug/id + vars + optional worker_id. Returns the gig + assignment.
+    - name: gigs_create_from_instructions
+      description: Ad-hoc dispatch — list of instruction refs + vars, no template required.
+    - name: gigs_create
+      description: Fully inline composition (raw instruction bodies, no library refs). Escape hatch.
+    - name: gigs_assign
+      description: Assign or re-assign an open gig (mode= direct|broadcast|first-come).
+    - name: gigs_status
+      description: Pre-flight read — gig + composition + assignments + submission.
+    - name: gigs_list_open
+      description: Filtered queue read (status, worker, template, deadline).
+    - name: gigs_cancel
+      description: Cancel an open gig; notifies offered workers via CRM.
+    - name: gigs_extend_deadline
+      description: Push the deadline.
+    - name: gigs_accept_result
+      description: Accept a submission. Bumps worker accepted_count and logs to the contact's CRM timeline.
+    - name: gigs_reject_result
+      description: Reject with reason. Re-opens the gig or routes to the next worker.
+  ui_panels:
+    - slot: project.page
+      label: Gigs
+      icon: clipboard
+      entry: /ui/GigsPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/gigs
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/gigs.db
+  migrations: migrations/
+
+config_schema:
+  - name: default_deadline_hours
+    type: number
+    default: 24
+    label: Default deadline (hours)
+    description: When a gig is created without an explicit deadline, this is the offset from now.
+  - name: auto_remind_after_hours
+    type: number
+    default: 4
+    label: Auto-remind workers after (hours)
+    description: Hours after an offer was sent without a response before the worker is reminded. 0 disables reminders.
+  - name: max_open_per_worker
+    type: number
+    default: 5
+    label: Max open assignments per worker
+    description: Reject new offers to a worker whose open queue is already this deep. 0 disables the cap.
+  - name: signed_url_ttl_seconds
+    type: number
+    default: 3600
+    label: Signed URL TTL (seconds)
+    description: Lifetime of storage signed URLs embedded in the worker page.
+  - name: lenient_inbound_parsing
+    type: bool
+    default: true
+    label: Lenient inbound reply parsing
+    description: For yes/no result schemas, accept "y/yes/ok/sure/👍" etc. from reply-based submissions.
+  - name: storage_root_folder
+    type: text
+    default: "/.gigs"
+    label: Storage root folder
+    description: Storage folder prefix for gig media + submissions. Dotted by convention so it stays out of dashboards.
+
+upgrade_policy: auto-patch
