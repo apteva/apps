@@ -185,15 +185,35 @@ func processOne(
 	logger := app.Logger()
 	logCtx := []any{"file_id", fid, "name", f.Name, "content_type", f.ContentType, "size", f.SizeBytes}
 
-	// force_probe (set by media_reindex(force=true)) bypasses the
-	// size cap for one shot. The flag is cleared at every terminal
-	// outcome below — success via probe_status='ok', failure via
-	// markFailed — so a second cycle re-applies the cap.
+	// force_probe (set by media_reindex(force=true)) bypasses both
+	// the dedupe-check below AND the size cap further down. The flag
+	// is cleared at every terminal outcome below — success via
+	// probe_status='ok', failure via markFailed — so a second cycle
+	// re-applies both gates.
 	var forceProbe int
 	_ = app.AppDB().QueryRow(
 		`SELECT force_probe FROM media WHERE project_id=? AND file_id=?`,
 		projectID, fid,
 	).Scan(&forceProbe)
+
+	// Dedupe at the entry point. The same file can land here twice
+	// in quick succession when the storage `file.added` SSE event
+	// races the 30s periodic indexer tick — both grab the row as a
+	// candidate, both spawn the (potentially remote) pipeline, the
+	// second one collides with the first's still-cleaning workdir
+	// or storage rejects the duplicate derivation upload.
+	// indexOneFile already has this check; the periodic path didn't
+	// (it relied on indexerCandidates filtering, which has a tiny
+	// race window). Belt + suspenders here: if the row already
+	// exists at this exact sha with probe_status=ok and the operator
+	// isn't forcing a reprobe, the work's already been done — return
+	// without touching the remote or local pipeline.
+	if forceProbe == 0 {
+		if existing, err := getMedia(app.AppDB(), projectID, fid); err == nil &&
+			existing.SourceSHA256 == f.SHA256 && existing.ProbeStatus == "ok" {
+			return
+		}
+	}
 
 	// Remote indexing — when render_host_id is set, run probe +
 	// derivations on the Hetzner host via HTTP-range-seek against a

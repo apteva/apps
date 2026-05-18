@@ -97,6 +97,14 @@ func runRemoteIndexing(
 
 	out, exit, err := runRemote(ctx, app, params.HostID, script, 120)
 	if err != nil {
+		// runRemote returns err non-nil when the SSH session itself
+		// reports failure (typically a non-zero exit via ssh.ExitError).
+		// The captured stdout still carries the script's actual error
+		// output — include it so the operator sees the real cause
+		// instead of "Process exited with status N" with no context.
+		if out != "" {
+			return nil, 0, 0, fmt.Errorf("remote index ssh: %w (output: %s)", err, truncate(out, 600))
+		}
 		return nil, 0, 0, fmt.Errorf("remote index ssh: %w", err)
 	}
 	if exit != 0 {

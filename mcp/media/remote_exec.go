@@ -191,6 +191,13 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		if ctx.Err() != nil {
 			return 0, ctx.Err()
 		}
+		// SSH-reported non-zero exit lands here with runErr set;
+		// preserve the captured script stdout so the operator sees
+		// the actual cause (ffmpeg error, curl HTTP code, etc.)
+		// rather than just "Process exited with status N".
+		if out != "" {
+			return 0, fmt.Errorf("remote render: %w (output: %s)", runErr, truncate(out, 1000))
+		}
 		return 0, fmt.Errorf("remote render: %w", runErr)
 	}
 	if exit != 0 {
