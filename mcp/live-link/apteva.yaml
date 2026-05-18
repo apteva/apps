@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: live-link
 display_name: Live Link
-version: 0.4.1
+version: 0.4.2
 description: |
   Public HTTPS URL for a locally-installed Apteva instance. Two modes:
 

@@ -275,14 +275,20 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// non-cloudflare options; v0.3 panels stay on mode without
 	// breaking.
 	out["provider"] = a.activeProviderName(ctx)
-	// Always surface cloudflare_bound + the configured hostname (if
-	// any), regardless of mode, so the panel can render its
-	// "promote to named" CTA without a separate roundtrip — and so
-	// the CTA can disable itself with an actionable hint when the
-	// integration isn't bound yet.
+	// Always surface bound-integration booleans + the configured
+	// hostname (if any), regardless of active provider, so the panel
+	// can render the right config CTAs without a separate roundtrip.
+	// Each `*_bound` is true when the corresponding integration role
+	// has a non-nil binding on this install.
 	out["cloudflare_bound"] = ctx.IntegrationFor("cloudflare") != nil
+	out["ngrok_bound"] = ctx.IntegrationFor("ngrok") != nil
 	if nt, _ := dbFirstNamedTunnel(ctx.AppDB()); nt != nil {
 		out["hostname"] = nt.Hostname
+	}
+	// ngrok's reserved-domain config — surfaced for the panel's
+	// "currently configured" hint when the active provider is ngrok.
+	if v := strings.TrimSpace(ctx.Config().Get("ngrok_domain")); v != "" {
+		out["ngrok_domain"] = v
 	}
 	httpJSON(w, out)
 }

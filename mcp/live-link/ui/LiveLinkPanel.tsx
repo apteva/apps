@@ -106,9 +106,19 @@ interface StatusResp {
   run_id?: number;
   last_error?: string;
   started_at?: string;
+  // Legacy v0.3 field — quick | named. Pre-ngrok panels read this.
+  // Newer panels prefer `provider` which carries the actual provider
+  // name (cloudflare-quick / cloudflare-named / ngrok).
   mode?: "quick" | "named";
+  // v0.4+ — provider name reported by activeProvider(). Drives the
+  // "Active provider" badge + which config form the panel shows.
+  provider?: "cloudflare-quick" | "cloudflare-named" | "ngrok" | string;
   hostname?: string;
   cloudflare_bound?: boolean;
+  ngrok_bound?: boolean;
+  // ngrok reserved domain (paid plans), set via the app's ngrok_domain
+  // config. Surfaced for display when active provider is ngrok.
+  ngrok_domain?: string;
 }
 
 interface CFZone {
@@ -307,9 +317,20 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
 
   const isRunning = status.status === "running";
   const isStarting = isRunning && !status.public_url;
-  const isNamed = status.mode === "named";
+  // Active-provider classification. Prefer the v0.4+ provider field
+  // when present; fall back to the legacy mode field so this panel
+  // also works against a v0.3 sidecar.
+  const provider = status.provider || (status.mode === "named" ? "cloudflare-named" : "cloudflare-quick");
+  const isNgrok = provider === "ngrok";
+  const isNamed = provider === "cloudflare-named" || status.mode === "named";
   const cfBound = !!status.cloudflare_bound;
+  const ngrokBound = !!status.ngrok_bound;
   const hasNamedHostname = isNamed && !!status.hostname;
+  // Human-friendly provider label for the header badge.
+  const providerLabel =
+    isNgrok ? "ngrok"
+    : isNamed ? "Cloudflare (named)"
+    : "Cloudflare (quick)";
 
   // Memoize the QR SVG — encoding is fast (~0.5ms) but recomputing on
   // every status poll is wasteful. Force light=#fff so the QR is
@@ -327,14 +348,21 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
         <div>
           <h2 className="text-text text-base font-bold">Live Link</h2>
           <p className="text-text-muted text-xs mt-1">
-            Public HTTPS URL for this Apteva instance via Cloudflare.
-            {status.mode === "named" && status.hostname ? (
+            {isNgrok ? (
+              <>Public HTTPS URL for this Apteva instance via ngrok.</>
+            ) : (
+              <>Public HTTPS URL for this Apteva instance via Cloudflare.</>
+            )}
+            {isNamed && status.hostname ? (
               <> Stable hostname: <code className="font-mono text-text">{status.hostname}</code>.</>
+            ) : null}
+            {isNgrok && status.ngrok_domain ? (
+              <> Reserved domain: <code className="font-mono text-text">{status.ngrok_domain}</code>.</>
             ) : null}
           </p>
         </div>
         <span className="text-text-dim text-xs uppercase tracking-wide">
-          {status.mode === "named" ? "Named" : "Quick"}
+          {providerLabel}
         </span>
       </header>
 
@@ -344,9 +372,44 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
         </div>
       )}
 
+      {/* ─── ngrok section ──────────────────────────────────────────
+          Shows when ngrok is the active provider. ngrok has no panel-
+          driven config (the authtoken lives on the integration; the
+          optional reserved domain lives in app config_schema), so this
+          section is mostly informational: "this is the provider that
+          will start" + a path to set the optional ngrok_domain. */}
+      {isNgrok && ngrokBound && (
+        <section className="border border-border rounded-lg p-4 bg-bg-card space-y-2 text-sm">
+          <div className="text-text font-bold">ngrok is the active provider.</div>
+          {status.ngrok_domain ? (
+            <div className="text-text-muted text-xs">
+              Reserved domain configured: <code className="font-mono text-text">{status.ngrok_domain}</code> —
+              the public URL will be <code className="font-mono text-text">https://{status.ngrok_domain}</code> on every start.
+            </div>
+          ) : (
+            <div className="text-text-muted text-xs">
+              Free plan / no reserved domain set — ngrok assigns a fresh
+              <code className="font-mono text-text"> *.ngrok-free.app </code>
+              URL on each "Go live". Paid plans can pin a hostname via the
+              <code className="font-mono text-text"> ngrok_domain </code>
+              setting (Settings tab).
+            </div>
+          )}
+          {cfBound && hasNamedHostname && (
+            <div className="text-yellow text-xs leading-snug">
+              Note: a Cloudflare-named tunnel is also configured. It takes
+              precedence over ngrok — destroy it (Cloudflare section below)
+              if you want ngrok to be the active provider.
+            </div>
+          )}
+        </section>
+      )}
+
       {/* ─── Custom-domain section ──────────────────────────────────
-          Only renders when cloudflare is bound (binding is an
-          install-time concern, not a panel one). Three states:
+          Renders whenever Cloudflare is bound, even when ngrok is the
+          active provider — the operator might want to migrate. The
+          header badge tells them which one is actually active. Three
+          states for the Cloudflare flow:
             cfBound, no hostname, form closed  → "Configure hostname" CTA
             cfBound, hostname set, form closed → hostname row + Change / Switch
             cfBound, form open                 → zone picker + subdomain input */}
