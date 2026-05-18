@@ -267,6 +267,7 @@ function UsersTab({ projectId, setStatus, onUsersChanged }: {
   const [statusFilter, setStatusFilter] = useState<"" | "active" | "disabled">("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -307,7 +308,13 @@ function UsersTab({ projectId, setStatus, onUsersChanged }: {
             disabled={loading}
             className="px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
           >{loading ? "…" : "Refresh"}</button>
-          <span className="ml-auto text-text-dim text-xs">{users.length} user{users.length === 1 ? "" : "s"}</span>
+          <button
+            onClick={() => setCreateOpen(true)}
+            className="ml-auto inline-flex items-center gap-1.5 px-3 py-1 text-sm bg-accent text-bg rounded font-medium"
+          >
+            <UserPlusIcon /> New user
+          </button>
+          <span className="text-text-dim text-xs">{users.length} user{users.length === 1 ? "" : "s"}</span>
         </div>
 
         {users.length === 0 ? (
@@ -367,7 +374,133 @@ function UsersTab({ projectId, setStatus, onUsersChanged }: {
           setStatus={setStatus}
         />
       )}
+
+      {createOpen && (
+        <CreateUserModal
+          onClose={() => setCreateOpen(false)}
+          onCreated={(userId, opened) => {
+            setCreateOpen(false);
+            load();
+            onUsersChanged();
+            if (opened) setSelectedId(userId);
+          }}
+          setStatus={setStatus}
+        />
+      )}
     </div>
+  );
+}
+
+function CreateUserModal({ onClose, onCreated, setStatus }: {
+  onClose: () => void;
+  onCreated: (userId: number, openDrawer: boolean) => void;
+  setStatus: (s: string) => void;
+}) {
+  const [email, setEmail] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [mode, setMode] = useState<"invite" | "password">("invite");
+  const [password, setPassword] = useState("");
+  const [emailVerified, setEmailVerified] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email.trim()) return;
+    setBusy(true);
+    try {
+      const body: Record<string, unknown> = {
+        email: email.trim(),
+        display_name: displayName.trim() || undefined,
+        email_verified: emailVerified,
+      };
+      if (mode === "password") {
+        body.password = password;
+      }
+      const r = await fetch(`${API}/admin/users`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || `create ${r.status}`);
+      onCreated(data.user.id, true);
+    } catch (err) {
+      setStatus(`create: ${(err as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal onClose={onClose} title="New user">
+      <form onSubmit={submit} className="space-y-3">
+        <Field label="Email">
+          <input
+            type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+            autoFocus required
+            placeholder="alice@example.com"
+            className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
+          />
+        </Field>
+        <Field label="Display name (optional)">
+          <input
+            value={displayName} onChange={(e) => setDisplayName(e.target.value)}
+            placeholder="Alice"
+            className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
+          />
+        </Field>
+        <Field label="Initial credential" hint={
+          mode === "invite"
+            ? "Issues a one-time password-reset link the user follows to set their own password."
+            : "Sets a password directly. Use for service accounts or test fixtures."
+        }>
+          <div className="flex gap-1">
+            <ModeButton active={mode === "invite"} onClick={() => setMode("invite")}>Send reset link</ModeButton>
+            <ModeButton active={mode === "password"} onClick={() => setMode("password")}>Set password</ModeButton>
+          </div>
+        </Field>
+        {mode === "password" && (
+          <Field label="Password" hint="Must satisfy the install's password policy.">
+            <input
+              type="text" value={password} onChange={(e) => setPassword(e.target.value)}
+              required minLength={8}
+              placeholder="at least 12 chars by default"
+              className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text font-mono"
+            />
+          </Field>
+        )}
+        <label className="flex items-center gap-2 text-sm text-text">
+          <input type="checkbox" checked={emailVerified} onChange={(e) => setEmailVerified(e.target.checked)} />
+          Mark email as already verified
+        </label>
+        <div className="flex justify-end gap-2 pt-2">
+          <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted hover:text-text">
+            Cancel
+          </button>
+          <button
+            type="submit" disabled={busy || !email.trim() || (mode === "password" && !password)}
+            className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-medium disabled:opacity-50"
+          >{busy ? "Creating…" : "Create user"}</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function ModeButton({ active, onClick, children }: {
+  active: boolean; onClick: () => void; children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button" onClick={onClick}
+      className={
+        "flex-1 px-2 py-1.5 text-sm rounded border " +
+        (active
+          ? "border-accent bg-accent/15 text-accent"
+          : "border-border bg-bg-input text-text-muted hover:text-text")
+      }
+    >{children}</button>
   );
 }
 
@@ -386,6 +519,8 @@ function UserDrawer({ userId, projectId, onClose, onChanged, setStatus }: {
 }) {
   const [data, setData] = useState<{ user: User; sessions: Session[]; audit_log: AuditEvent[] } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -398,23 +533,34 @@ function UserDrawer({ userId, projectId, onClose, onChanged, setStatus }: {
   }, [userId, setStatus]);
   useEffect(() => { load(); }, [load, projectId]);
 
-  const act = async (path: string, body?: unknown) => {
+  const act = async (path: string, body?: unknown, method: "POST" | "PATCH" = "POST") => {
     setBusy(true);
     try {
-      const r = await fetch(`${API}/admin/users/${userId}/${path}`, {
-        method: "POST",
+      const url = path
+        ? `${API}/admin/users/${userId}/${path}`
+        : `${API}/admin/users/${userId}`;
+      const r = await fetch(url, {
+        method,
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body ?? {}),
       });
-      if (!r.ok) throw new Error(`${path} ${r.status}`);
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({}));
+        throw new Error(errBody.error || `${path || "patch"} ${r.status}`);
+      }
       await load();
       onChanged();
     } catch (e) {
-      setStatus(`${path}: ${(e as Error).message}`);
+      setStatus(`${path || "patch"}: ${(e as Error).message}`);
     } finally {
       setBusy(false);
     }
+  };
+
+  const saveName = async () => {
+    await act("", { display_name: nameDraft }, "PATCH");
+    setEditingName(false);
   };
 
   if (!data) {
@@ -462,10 +608,56 @@ function UserDrawer({ userId, projectId, onClose, onChanged, setStatus }: {
             className="px-3 py-1 text-sm border border-border rounded text-text hover:bg-bg-card disabled:opacity-50"
             title={activeSessions.length === 0 ? "No active sessions" : ""}
           >Revoke {activeSessions.length} session{activeSessions.length === 1 ? "" : "s"}</button>
+          <button
+            onClick={() => act("send_password_reset")}
+            disabled={busy}
+            className="px-3 py-1 text-sm border border-border rounded text-text hover:bg-bg-card disabled:opacity-50"
+            title="Issues a fresh reset token; link is emailed (when messaging is installed) or written to the audit log."
+          >Send password reset</button>
+          {!u.email_verified_at && (
+            <button
+              onClick={() => act("", { email_verified: true }, "PATCH")}
+              disabled={busy}
+              className="px-3 py-1 text-sm border border-border rounded text-text hover:bg-bg-card disabled:opacity-50"
+            >Mark verified</button>
+          )}
         </div>
 
         <DetailGrid>
-          <DetailRow label="Display name" value={u.display_name || "—"} />
+          <div className="flex justify-between gap-3 py-1.5 px-3 border-b border-border text-sm items-center">
+            <span className="text-text-dim">Display name</span>
+            {editingName ? (
+              <span className="flex items-center gap-1">
+                <input
+                  value={nameDraft}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") saveName();
+                    if (e.key === "Escape") setEditingName(false);
+                  }}
+                  autoFocus
+                  className="bg-bg-input border border-border rounded px-2 py-0.5 text-sm text-text"
+                  style={{ width: 180 }}
+                />
+                <button
+                  onClick={saveName} disabled={busy}
+                  className="text-accent text-xs px-1.5 hover:underline disabled:opacity-50"
+                >Save</button>
+                <button
+                  onClick={() => setEditingName(false)}
+                  className="text-text-dim text-xs px-1.5 hover:text-text"
+                >Cancel</button>
+              </span>
+            ) : (
+              <span className="flex items-center gap-2">
+                <span className="text-text text-right">{u.display_name || "—"}</span>
+                <button
+                  onClick={() => { setNameDraft(u.display_name || ""); setEditingName(true); }}
+                  className="text-text-dim hover:text-text text-xs"
+                >Edit</button>
+              </span>
+            )}
+          </div>
           <DetailRow label="Email verified" value={u.email_verified_at ? rfc(u.email_verified_at) : "no"} />
           <DetailRow label="Password set" value={u.has_password ? "yes" : "no"} />
           <DetailRow label="MFA" value={u.mfa_enabled ? "enabled" : "not enabled"} />
@@ -1094,11 +1286,26 @@ function Modal({ title, children, onClose }: {
 
 // ─── Icons (inline SVG; no Tailwind colour classes — use currentColor) ───
 
-function KeyIcon() {
+function KeyIcon({ size = 18 }: { size?: number }) {
+  // Lucide "key-round" — horizontal bow + shaft + tooth. Much more
+  // legible at 16-18px than the FA-style diagonal key I had before.
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M15 2a7 7 0 0 0-6.93 8L2 16v4h4l1-1v-2h2v-2h2l3.07-3.07A7 7 0 1 0 15 2z" />
-      <circle cx="16.5" cy="7.5" r="1.5" fill="currentColor" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M2 18a4 4 0 0 1 4-4h.5" />
+      <path d="M14 14h.5a4 4 0 0 1 0 8H6a4 4 0 0 1 0-8" />
+      <circle cx="16.5" cy="7.5" r="5.5" />
+      <circle cx="16.5" cy="7.5" r="1.5" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+function UserPlusIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+      <circle cx="8.5" cy="7" r="4" />
+      <line x1="20" y1="8" x2="20" y2="14" />
+      <line x1="23" y1="11" x2="17" y2="11" />
     </svg>
   );
 }

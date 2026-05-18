@@ -148,6 +148,37 @@ func dbSetUserStatus(db *sql.DB, projectID string, userID int64, status string) 
 	return err
 }
 
+// dbUpdateUserProfile applies a partial admin-driven edit. Nil pointer
+// = leave the column alone; non-nil = write. Email is intentionally
+// not editable here — changing primary identity is its own flow
+// (deferred), since it invalidates outstanding tokens and needs
+// reverify.
+func dbUpdateUserProfile(db *sql.DB, projectID string, userID int64,
+	displayName *string, markEmailVerified *bool) error {
+	sets := []string{"updated_at = ?"}
+	args := []any{time.Now().UTC().Format(time.RFC3339)}
+	if displayName != nil {
+		sets = append(sets, "display_name = ?")
+		args = append(args, *displayName)
+	}
+	if markEmailVerified != nil {
+		sets = append(sets, "email_verified_at = ?")
+		if *markEmailVerified {
+			args = append(args, time.Now().UTC().Format(time.RFC3339))
+		} else {
+			args = append(args, sql.NullString{})
+		}
+	}
+	if len(sets) == 1 {
+		return nil // nothing to do beyond bumping updated_at; skip the write
+	}
+	args = append(args, projectID, userID)
+	_, err := db.Exec(
+		`UPDATE users SET `+strings.Join(sets, ", ")+` WHERE project_id = ? AND id = ?`,
+		args...)
+	return err
+}
+
 // dbSearchUsers — q is substring on email + display_name; status and
 // createdAfter are optional filters. limit clamped 1..200 by caller.
 func dbSearchUsers(db *sql.DB, projectID, q, status, createdAfter string, limit int) ([]User, error) {

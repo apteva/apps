@@ -64,6 +64,169 @@ func (a *App) handleAdminUsersList(w http.ResponseWriter, r *http.Request) {
 	httpJSON(w, map[string]any{"users": users, "count": len(users)})
 }
 
+// handleAdminUsersCreate — admin-side user provisioning. Bypasses the
+// /signup flow (which is rate-limited public-facing) and lets an
+// operator seed the pool, invite a teammate, or create test accounts.
+//
+// Body: { email (required), password? (auto-generates one when blank
+//         AND email_verified+send_reset are false; otherwise leaves
+//         password unset and emails a reset link), display_name?,
+//         email_verified? (default true — admins know who they're
+//         inviting), send_password_reset? }
+//
+// Response: { user, password_reset_link? }. The link is included only
+// when no password was supplied; in production the link should go via
+// the messaging app instead, but for now the audit log carries it.
+func (a *App) handleAdminUsersCreate(w http.ResponseWriter, r *http.Request) {
+	ctx := getAppCtx(r)
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var body struct {
+		Email             string `json:"email"`
+		Password          string `json:"password"`
+		DisplayName       string `json:"display_name"`
+		EmailVerified     *bool  `json:"email_verified"`
+		SendPasswordReset bool   `json:"send_password_reset"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
+	if body.Email == "" {
+		httpErr(w, http.StatusBadRequest, "email required")
+		return
+	}
+	if existing, err := dbGetUserByEmail(ctx.AppDB(), pid, body.Email); err == nil && existing != nil {
+		httpErr(w, http.StatusConflict, "email already registered")
+		return
+	}
+	verified := true
+	if body.EmailVerified != nil {
+		verified = *body.EmailVerified
+	}
+	var pwHash string
+	if body.Password != "" {
+		if reason := validatePassword(body.Password,
+			cfgInt(ctx, "password_min_length", 12),
+			cfgInt(ctx, "password_classes_required", 2)); reason != "" {
+			httpErr(w, http.StatusBadRequest, reason)
+			return
+		}
+		h, hashErr := hashPassword(body.Password)
+		if hashErr != nil {
+			httpErr(w, http.StatusInternalServerError, hashErr.Error())
+			return
+		}
+		pwHash = h
+	}
+	uid, err := dbCreateUser(ctx.AppDB(), pid, body.Email, pwHash, body.DisplayName, verified)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	user, err := dbGetUserByID(ctx.AppDB(), pid, uid)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	dbAudit(ctx.AppDB(), pid, &uid, "", "user_created_admin", r.RemoteAddr, r.UserAgent(),
+		map[string]any{"email": body.Email, "via": "admin_panel"})
+
+	out := map[string]any{"user": user}
+
+	// Auto-issue a reset link when the admin didn't set a password
+	// (or explicitly asked for one). Same primitive as the public
+	// /password/forgot flow; mail.go logs the link to the audit row
+	// when messaging isn't installed.
+	if pwHash == "" || body.SendPasswordReset {
+		if err := issueResetToken(ctx, pid, uid, body.Email); err != nil {
+			ctx.Logger().Warn("password-reset issue failed", "err", err, "user_id", uid)
+		} else {
+			out["password_reset_sent"] = true
+		}
+	}
+	httpStatus(w, http.StatusCreated, out)
+}
+
+// handleAdminUsersPatch — partial edit. Today only display_name and
+// email_verified (toggle). Email changes deferred — they invalidate
+// outstanding tokens and need a reverify flow.
+func (a *App) handleAdminUsersPatch(w http.ResponseWriter, r *http.Request) {
+	ctx := getAppCtx(r)
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	uid, err := pathInt64(r, "id")
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var body struct {
+		DisplayName   *string `json:"display_name"`
+		EmailVerified *bool   `json:"email_verified"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if body.DisplayName == nil && body.EmailVerified == nil {
+		httpErr(w, http.StatusBadRequest, "nothing to update")
+		return
+	}
+	if err := dbUpdateUserProfile(ctx.AppDB(), pid, uid, body.DisplayName, body.EmailVerified); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	user, err := dbGetUserByID(ctx.AppDB(), pid, uid)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, "user not found")
+		return
+	}
+	changes := map[string]any{}
+	if body.DisplayName != nil {
+		changes["display_name"] = *body.DisplayName
+	}
+	if body.EmailVerified != nil {
+		changes["email_verified"] = *body.EmailVerified
+	}
+	dbAudit(ctx.AppDB(), pid, &uid, "", "user_updated_admin", r.RemoteAddr, r.UserAgent(), changes)
+	httpJSON(w, map[string]any{"user": user})
+}
+
+// handleAdminUsersSendPasswordReset — issue a fresh reset token and
+// (when messaging is bound) email the link. mail.go writes the link
+// to the audit log either way, so dev installs without messaging can
+// still recover by copying the link out of the dashboard's audit feed.
+func (a *App) handleAdminUsersSendPasswordReset(w http.ResponseWriter, r *http.Request) {
+	ctx := getAppCtx(r)
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	uid, err := pathInt64(r, "id")
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	user, err := dbGetUserByID(ctx.AppDB(), pid, uid)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if err := issueResetToken(ctx, pid, uid, user.Email); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"ok": true})
+}
+
 func (a *App) handleAdminUsersGetContext(w http.ResponseWriter, r *http.Request) {
 	ctx := getAppCtx(r)
 	pid, err := resolveProjectFromRequest(r)

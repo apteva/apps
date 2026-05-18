@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.2.1
+version: 0.3.0
 description: |
   Identity layer for Apteva-deployed SaaS. Email + password signup/login,
   asymmetric JWT issuance, refresh-token sessions, OAuth client registry,
@@ -163,10 +163,13 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// the SDK's bearer-token gate (platform proxy attaches it).
 		{Method: "GET", Pattern: "/admin/stats", Handler: a.handleAdminStats},
 		{Method: "GET", Pattern: "/admin/users", Handler: a.handleAdminUsersList},
+		{Method: "POST", Pattern: "/admin/users", Handler: a.handleAdminUsersCreate},
 		{Method: "GET", Pattern: "/admin/users/{id}/context", Handler: a.handleAdminUsersGetContext},
+		{Method: "PATCH", Pattern: "/admin/users/{id}", Handler: a.handleAdminUsersPatch},
 		{Method: "POST", Pattern: "/admin/users/{id}/disable", Handler: a.handleAdminUsersDisable},
 		{Method: "POST", Pattern: "/admin/users/{id}/enable", Handler: a.handleAdminUsersEnable},
 		{Method: "POST", Pattern: "/admin/users/{id}/revoke_sessions", Handler: a.handleAdminUsersRevokeSessions},
+		{Method: "POST", Pattern: "/admin/users/{id}/send_password_reset", Handler: a.handleAdminUsersSendPasswordReset},
 		{Method: "GET", Pattern: "/admin/clients", Handler: a.handleAdminClientsList},
 		{Method: "POST", Pattern: "/admin/clients", Handler: a.handleAdminClientsCreate},
 		{Method: "POST", Pattern: "/admin/clients/{client_id}/rotate", Handler: a.handleAdminClientsRotate},
