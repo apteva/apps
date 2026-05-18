@@ -867,6 +867,8 @@ interface RenderRow {
   progress_pct?: number;
   output_file_id?: number;
   error?: string;
+  started_at?: string;
+  finished_at?: string;
 }
 
 // RenderStatusCard polls the backend every 2s for one render's state
@@ -883,10 +885,20 @@ function RenderStatusCard({
 }) {
   const [row, setRow] = useState<RenderRow | null>(null);
   const [err, setErr] = useState<string>("");
+  // Wall-clock seconds since the card was mounted. Drives the
+  // "running for Ns" line so operators know *something* is
+  // progressing even when the server-side progress_pct hasn't
+  // ticked off 0 yet (remote renders only push 0→50 on the first
+  // `out_time_ms=` sighting from ffmpeg's progress pipe, polled
+  // every 5s — renders that finish under 5s never get a numeric
+  // progress signal at all).
+  const cardMountedAt = useMemo(() => Date.now(), []);
+  const [nowMs, setNowMs] = useState(Date.now());
 
   useEffect(() => {
     let mounted = true;
     let interval: ReturnType<typeof setInterval> | null = null;
+    let clock: ReturnType<typeof setInterval> | null = null;
     const poll = async () => {
       try {
         const r = await fetch(`${apiBase}/renders/${renderId}?${query}`, { credentials: "same-origin" });
@@ -896,6 +908,7 @@ function RenderStatusCard({
         setRow(data);
         if (data.status === "ok" || data.status === "failed" || data.status === "cancelled") {
           if (interval) { clearInterval(interval); interval = null; }
+          if (clock) { clearInterval(clock); clock = null; }
         }
       } catch (e) {
         if (mounted) setErr(e instanceof Error ? e.message : String(e));
@@ -903,9 +916,13 @@ function RenderStatusCard({
     };
     poll();
     interval = setInterval(poll, 2000);
+    // Tick the clock every second so the elapsed-time display
+    // updates even when the 2s poll hasn't fired yet.
+    clock = setInterval(() => mounted && setNowMs(Date.now()), 1000);
     return () => {
       mounted = false;
       if (interval) clearInterval(interval);
+      if (clock) clearInterval(clock);
     };
   }, [renderId, apiBase, query]);
 
@@ -926,8 +943,12 @@ function RenderStatusCard({
     : row.status === "cancelled" ? "bg-text-dim/20 text-text-dim border-border"
     : "bg-yellow/20 text-yellow border-yellow/40"; // pending | running
 
+  const elapsedS = Math.max(0, Math.floor((nowMs - cardMountedAt) / 1000));
+  const running = row.status === "pending" || row.status === "running";
+  const pct = Math.max(0, Math.min(100, row.progress_pct ?? 0));
+
   return (
-    <div className="border border-border rounded p-2 text-xs space-y-1">
+    <div className="border border-border rounded p-2 text-xs space-y-1.5">
       <div className="flex items-center justify-between gap-2">
         <div className="text-text-dim">
           <span className="font-mono">#{row.id}</span>{" "}
@@ -937,26 +958,39 @@ function RenderStatusCard({
           {row.status}
         </span>
       </div>
-      {(row.status === "pending" || row.status === "running") && (
-        <div className="w-full bg-bg-input rounded h-1 overflow-hidden">
-          <div
-            className="h-full bg-yellow transition-all"
-            style={{ width: `${row.progress_pct ?? 0}%` }}
-          />
-        </div>
+      {running && (
+        <>
+          {/* Thicker bar with explicit % text. Pulses gently when
+              progress_pct hasn't ticked off 0 yet so operators can
+              see the panel is alive even before ffmpeg surfaces
+              its first progress event. */}
+          <div className="w-full bg-bg-input rounded h-2 overflow-hidden relative">
+            <div
+              className={`h-full bg-yellow transition-all ${pct === 0 ? "animate-pulse" : ""}`}
+              style={{ width: `${pct === 0 ? 100 : pct}%`, opacity: pct === 0 ? 0.3 : 1 }}
+            />
+          </div>
+          <div className="flex justify-between text-text-dim text-[10px]">
+            <span>{pct > 0 ? `${pct}%` : "Working…"}</span>
+            <span>{elapsedS}s elapsed</span>
+          </div>
+        </>
       )}
       {row.status === "ok" && row.output_file_id ? (
-        <a
-          href={`${previewBase}/${row.output_file_id}/content?${query}`}
-          target="_blank"
-          rel="noopener"
-          className="text-accent hover:underline"
-        >
-          Open output (file_id #{row.output_file_id}) ↗
-        </a>
+        <div className="space-y-1">
+          <a
+            href={`${previewBase}/${row.output_file_id}/content?${query}`}
+            target="_blank"
+            rel="noopener"
+            className="text-accent hover:underline block"
+          >
+            Open output (file_id #{row.output_file_id}) ↗
+          </a>
+          <div className="text-text-dim text-[10px]">Done in {elapsedS}s.</div>
+        </div>
       ) : null}
       {row.status === "failed" && row.error ? (
-        <div className="text-error">{row.error}</div>
+        <div className="text-error break-words">{row.error}</div>
       ) : null}
     </div>
   );
