@@ -322,6 +322,13 @@ INIT_CODE=$(curl -sS -o "$INIT_BODY_FILE" -w "%{http_code}" \
   "$STORAGE_BASE/files/init?project_id=$PROJECT_ID" || echo 000)
 if [ "$INIT_CODE" = "200" ]; then
   UPLOAD_URL=$(sed -n 's/.*"upload_url":[[:space:]]*"\([^"]*\)".*/\1/p' "$INIT_BODY_FILE")
+  # Decode JSON-escaped ampersands. Go's encoding/json escapes & as
+  # & by default ("safe" HTML output); our raw sed extraction
+  # keeps the literal "&" in the URL, which Hetzner / S3 sees
+  # as part of the query-string value, garbling the signature and
+  # 403'ing the PUT. One sed pass fixes it. < / > aren't
+  # used in S3 URLs but cost nothing to handle defensively.
+  UPLOAD_URL=$(printf '%s' "$UPLOAD_URL" | sed -e 's/\\u0026/\&/g' -e 's/\\u003c/</g' -e 's/\\u003e/>/g')
   UPLOAD_ID=$(sed -n 's/.*"upload_id":[[:space:]]*"\([^"]*\)".*/\1/p' "$INIT_BODY_FILE")
   rm -f "$INIT_BODY_FILE"
   if [ -z "$UPLOAD_URL" ] || [ -z "$UPLOAD_ID" ]; then
