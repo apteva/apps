@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: auth
 display_name: Auth
-version: 0.1.0
+version: 0.2.0
 description: |
   Identity layer for Apteva-deployed SaaS. Email + password signup/login,
   asymmetric (EdDSA) JWT issuance with rotating signing keys + JWKS,
@@ -65,17 +65,9 @@ provides:
       description: Disable a client. Existing access tokens remain valid until expiry; refresh tokens stop working.
   ui_panels:
     - slot: project.page
-      label: Users
-      icon: users
-      entry: /ui/UsersPanel.mjs
-    - slot: project.page
-      label: Auth Clients
+      label: Auth
       icon: key
-      entry: /ui/ClientsPanel.mjs
-    - slot: project.page
-      label: Auth Settings
-      icon: settings
-      entry: /ui/SettingsPanel.mjs
+      entry: /ui/AuthPanel.mjs
 
 runtime:
   kind: source

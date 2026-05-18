@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.1.0
+version: 0.2.0
 description: |
   Identity layer for Apteva-deployed SaaS. Email + password signup/login,
   asymmetric JWT issuance, refresh-token sessions, OAuth client registry,
@@ -90,17 +90,9 @@ provides:
       description: Disable a client.
   ui_panels:
     - slot: project.page
-      label: Users
-      icon: users
-      entry: /ui/UsersPanel.mjs
-    - slot: project.page
-      label: Auth Clients
+      label: Auth
       icon: key
-      entry: /ui/ClientsPanel.mjs
-    - slot: project.page
-      label: Auth Settings
-      icon: settings
-      entry: /ui/SettingsPanel.mjs
+      entry: /ui/AuthPanel.mjs
 runtime:
   kind: source
   source:
@@ -166,6 +158,21 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/logout", Handler: a.handleLogout},
 		{Pattern: "/refresh", Handler: a.handleRefresh},
 		{Pattern: "/me", Handler: a.handleMe},
+
+		// Admin surface — consumed by the dashboard AuthPanel. Auth is
+		// the SDK's bearer-token gate (platform proxy attaches it).
+		{Method: "GET", Pattern: "/admin/stats", Handler: a.handleAdminStats},
+		{Method: "GET", Pattern: "/admin/users", Handler: a.handleAdminUsersList},
+		{Method: "GET", Pattern: "/admin/users/{id}/context", Handler: a.handleAdminUsersGetContext},
+		{Method: "POST", Pattern: "/admin/users/{id}/disable", Handler: a.handleAdminUsersDisable},
+		{Method: "POST", Pattern: "/admin/users/{id}/enable", Handler: a.handleAdminUsersEnable},
+		{Method: "POST", Pattern: "/admin/users/{id}/revoke_sessions", Handler: a.handleAdminUsersRevokeSessions},
+		{Method: "GET", Pattern: "/admin/clients", Handler: a.handleAdminClientsList},
+		{Method: "POST", Pattern: "/admin/clients", Handler: a.handleAdminClientsCreate},
+		{Method: "POST", Pattern: "/admin/clients/{client_id}/rotate", Handler: a.handleAdminClientsRotate},
+		{Method: "POST", Pattern: "/admin/clients/{client_id}/disable", Handler: a.handleAdminClientsDisable},
+		{Method: "GET", Pattern: "/admin/audit", Handler: a.handleAdminAudit},
+		{Method: "GET", Pattern: "/admin/oidc", Handler: a.handleAdminOIDC},
 	}
 }
 
