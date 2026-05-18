@@ -192,9 +192,26 @@ func TestLiveProvider_FallsBackToMockOnCryptoError(t *testing.T) {
 	}
 }
 
-func TestLiveProvider_EquityAlwaysFallsBack(t *testing.T) {
+// stubUnreachableYahoo points the Yahoo client at a closed TCP port so
+// the equity dispatch falls through to mock predictably in tests. Tests
+// that exercise the live-Yahoo path itself would use a real httptest
+// server; these tests verify the mock-fallback path.
+func stubUnreachableYahoo(lp *liveProvider) {
+	lp.yahoo = &yahooPublic{
+		base:   "http://127.0.0.1:0",
+		client: &http.Client{Timeout: 50 * time.Millisecond},
+		sem:    make(chan struct{}, 4),
+	}
+}
+
+func TestLiveProvider_EquityFallsBackToMockWhenYahooDown(t *testing.T) {
 	mock := newMockProvider()
 	lp := newLiveProvider(mock)
+	// v0.4.9 onward Yahoo is the equity default — point it at an
+	// unreachable host so the equity path falls through to mock and
+	// this test exercises the fallback contract.
+	stubUnreachableYahoo(lp)
+
 	mark, err := lp.Quote("AAPL")
 	if err != nil {
 		t.Fatal(err)
@@ -202,11 +219,10 @@ func TestLiveProvider_EquityAlwaysFallsBack(t *testing.T) {
 	if mark.AssetClass != "equity" {
 		t.Errorf("asset_class=%q", mark.AssetClass)
 	}
-	// Provider name should be "mock" for equity in the health surface.
 	snap := lp.Health()
 	c, _ := snap["equity"].(map[string]any)
 	if c == nil || c["name"] != "mock" {
-		t.Errorf("equity class should be mock, got %v", c)
+		t.Errorf("equity class should be mock after yahoo failure, got %v", c)
 	}
 }
 
@@ -215,6 +231,7 @@ func TestLiveProvider_HealthSurfaceCoversAllClasses(t *testing.T) {
 	lp := newLiveProvider(mock)
 	lp.crypto = &binancePublic{base: "http://127.0.0.1:0", client: &http.Client{Timeout: 50 * time.Millisecond}}
 	lp.poly = &polymarketPublic{base: "http://127.0.0.1:0", client: &http.Client{Timeout: 50 * time.Millisecond}}
+	stubUnreachableYahoo(lp)
 	_ = lp.Universe()
 
 	snap := lp.Health()
@@ -224,7 +241,7 @@ func TestLiveProvider_HealthSurfaceCoversAllClasses(t *testing.T) {
 		}
 	}
 	if eq, _ := snap["equity"].(map[string]any); eq == nil || eq["name"] != "mock" {
-		t.Errorf("equity not stamped as mock: %v", snap["equity"])
+		t.Errorf("equity not stamped as mock after yahoo failure: %v", snap["equity"])
 	}
 }
 

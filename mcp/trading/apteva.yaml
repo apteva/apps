@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.4.8
+version: 0.4.9
 description: |
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
@@ -71,13 +71,13 @@ requires:
     - role: market_data_equity
       kind: integration
       required: false
-      compatible_slugs: [alpaca-market-data]
+      compatible_slugs: [alpaca-market-data, yahoo-finance]
       capabilities:
         - quotes.equity
       tools:
         quotes.equity: stock_snapshots
       label: "Market Data — Equity (optional — real prices for live equity portfolios)"
-      hint: "Bind alpaca-market-data to switch equity/etf marks from mock walks to real Alpaca snapshots."
+      hint: "Bind alpaca-market-data for paid-tier real-time. yahoo-finance works without auth as a free fallback — the trading sidecar already uses Yahoo automatically when nothing's bound here."
 
 provides:
   http_routes:

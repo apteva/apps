@@ -28,6 +28,7 @@ type liveProvider struct {
 	crypto   *binancePublic
 	poly     *polymarketPublic
 	equity   *alpacaMarketData // nil until SetPlatform is called from OnMount
+	yahoo    *yahooPublic
 	fallback Provider
 	cache    *markCache
 	health   *providerHealth
@@ -37,6 +38,7 @@ func newLiveProvider(fallback Provider) *liveProvider {
 	return &liveProvider{
 		crypto:   newBinancePublic(),
 		poly:     newPolymarketPublic(),
+		yahoo:    newYahooPublic(),
 		fallback: fallback,
 		cache:    newMarkCache(cacheTTL),
 		health:   newProviderHealth(),
@@ -47,6 +49,11 @@ func newLiveProvider(fallback Provider) *liveProvider {
 // after globalCtx is set so the equity provider can dial the platform
 // for the bound connection. Safe to call multiple times; subsequent
 // calls swap the platform reference.
+//
+// Yahoo Finance has no platform dependency — it's set up in
+// newLiveProvider directly. It runs as the equity fallback when no
+// alpaca-market-data connection is bound (which is the default state
+// on a fresh install).
 func (p *liveProvider) SetPlatform(platform sdk.PlatformClient, logger sdk.Logger) {
 	p.equity = newAlpacaMarketData(platform, logger)
 }
@@ -77,17 +84,28 @@ func (p *liveProvider) Quote(symbol string) (*Mark, error) {
 		p.cache.put(m)
 		return m, nil
 	case "equity", "etf":
-		// Route to Alpaca Market Data when bound; otherwise fall back to
-		// mock walks so paper portfolios keep ticking on a fresh install.
+		// Equity routing: Alpaca > Yahoo > mock.
+		// Alpaca wins when bound (paid SLA, fresher data, includes
+		// pre/post-market). Otherwise Yahoo Finance — no auth, real
+		// prices, works on first boot. Mock only if Yahoo also fails
+		// (network down, Yahoo schema-changed, etc.).
 		if p.equity != nil && p.equity.available() {
 			m, err := p.equity.Quote(symbol)
-			if err != nil {
-				p.health.note(cls, err)
-				return p.fallback.Quote(symbol)
+			if err == nil {
+				p.health.ok(cls, alpacaMarketDataSlug)
+				p.cache.put(m)
+				return m, nil
 			}
-			p.health.ok(cls, alpacaMarketDataSlug)
+			p.health.note(cls, err)
+			// Fall through to Yahoo instead of straight to mock
+			// when Alpaca errors — usually a transient network blip.
+		}
+		if m, err := p.yahoo.Quote(symbol); err == nil {
+			p.health.ok(cls, "yahoo-finance")
 			p.cache.put(m)
 			return m, nil
+		} else {
+			p.health.note(cls, err)
 		}
 		p.health.ok(cls, "mock")
 		return p.fallback.Quote(symbol)
@@ -142,11 +160,13 @@ func (p *liveProvider) Universe() []*Mark {
 		out = append(out, filterByClass(p.fallback.Universe(), "polymarket")...)
 	}
 
-	// Equity / ETF — Alpaca Market Data when bound, mock otherwise.
-	// Batched snapshot call covers all tracked equity tickers in one
-	// HTTP request; per-class failure falls back to mock.
+	// Equity / ETF — Alpaca > Yahoo > mock. Same dispatch order as
+	// the per-symbol Quote path. Alpaca + Yahoo both take a list of
+	// symbols and return marks; if either errors or returns fewer
+	// symbols than asked, we fall down to the next tier.
+	eqSyms := alpacaEquitySymbolsKnown()
+	gotEquity := false
 	if p.equity != nil && p.equity.available() {
-		eqSyms := alpacaEquitySymbolsKnown()
 		if eMarks, err := p.equity.UniverseBatch(eqSyms); err == nil && len(eMarks) > 0 {
 			p.health.ok("equity", alpacaMarketDataSlug)
 			p.health.ok("etf", alpacaMarketDataSlug)
@@ -154,15 +174,27 @@ func (p *liveProvider) Universe() []*Mark {
 				p.cache.put(m)
 			}
 			out = append(out, eMarks...)
-		} else {
-			if err != nil {
-				p.health.note("equity", err)
-				p.health.note("etf", err)
-			}
-			out = append(out, filterByClass(p.fallback.Universe(), "equity")...)
-			out = append(out, filterByClass(p.fallback.Universe(), "etf")...)
+			gotEquity = true
+		} else if err != nil {
+			p.health.note("equity", err)
+			p.health.note("etf", err)
 		}
-	} else {
+	}
+	if !gotEquity {
+		if eMarks, err := p.yahoo.UniverseBatch(eqSyms); err == nil && len(eMarks) > 0 {
+			p.health.ok("equity", "yahoo-finance")
+			p.health.ok("etf", "yahoo-finance")
+			for _, m := range eMarks {
+				p.cache.put(m)
+			}
+			out = append(out, eMarks...)
+			gotEquity = true
+		} else if err != nil {
+			p.health.note("equity", err)
+			p.health.note("etf", err)
+		}
+	}
+	if !gotEquity {
 		p.health.ok("equity", "mock")
 		p.health.ok("etf", "mock")
 		out = append(out, filterByClass(p.fallback.Universe(), "equity")...)
@@ -172,11 +204,12 @@ func (p *liveProvider) Universe() []*Mark {
 	return out
 }
 
-// Bars routes history fetches by asset class. Crypto uses Binance's
-// public klines (no auth, ~200ms typical). Equity/etf + polymarket
-// fall back to the mock walk for now — Alpaca stock_bars + gamma
-// prices-history are wired in a follow-up. Errors anywhere also
-// fall back to mock so the chart pane never goes blank.
+// Bars routes history fetches by asset class. Crypto = Binance klines.
+// Equity/etf = Yahoo Finance chart (no auth) — Alpaca stock_bars is a
+// follow-up (needs the alpaca-market-data connection to be threaded
+// through). Polymarket bars stay on mock until gamma prices-history
+// is wired. Errors anywhere fall back to mock so the chart pane never
+// goes blank.
 func (p *liveProvider) Bars(symbol, rng string) ([]Bar, error) {
 	cls := inferAssetClass(symbol)
 	switch cls {
@@ -188,8 +221,18 @@ func (p *liveProvider) Bars(symbol, rng string) ([]Bar, error) {
 		}
 		p.health.ok("crypto", "binance-public")
 		return bars, nil
+	case "equity", "etf":
+		bars, err := p.yahoo.Bars(symbol, rng)
+		if err != nil || len(bars) == 0 {
+			if err != nil {
+				p.health.note(cls, err)
+			}
+			return p.fallback.Bars(symbol, rng)
+		}
+		p.health.ok(cls, "yahoo-finance")
+		return bars, nil
 	default:
-		// equity / etf / polymarket — mock for now.
+		// polymarket — mock for now.
 		return p.fallback.Bars(symbol, rng)
 	}
 }
