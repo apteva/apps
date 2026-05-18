@@ -195,6 +195,26 @@ func processOne(
 		projectID, fid,
 	).Scan(&forceProbe)
 
+	// Remote indexing — when render_host_id is set, run probe +
+	// derivations on the Hetzner host via HTTP-range-seek against a
+	// signed source URL. Saves the giant local download for large
+	// videos: the Apteva machine never touches the source bytes.
+	// Auto-falls-back to local on any error so a flaky Hetzner
+	// network degrades to "slow but works" instead of "stuck".
+	//
+	// The size cap is BYPASSED in this branch because the whole
+	// point is that big files no longer require local disk space —
+	// they stay on storage and only the ffmpeg/ffprobe-needed bytes
+	// stream to the remote.
+	if hostID := remoteIndexerHostID(app); hostID > 0 {
+		ok := tryRemoteIndex(ctx, app, sc, projectID, fid, f, hostID,
+			thumbSeek, thumbWidth, waveW, waveH)
+		if ok {
+			return
+		}
+		logger.Warn("remote indexing failed, falling back to local", "file_id", fid)
+	}
+
 	if forceProbe == 0 && maxBytes > 0 && f.SizeBytes > maxBytes {
 		_ = markFailed(app.AppDB(), projectID, fid, f.SHA256, "skipped_size",
 			fmt.Sprintf("file size %d > max_probe_size_mb (%d MB)", f.SizeBytes, toInt(maxSizeMB)))
@@ -286,6 +306,89 @@ func processOne(
 	} else {
 		notifyDescriber(projectID, fid)
 	}
+}
+
+// remoteIndexerHostID returns the host_id to dispatch indexing to,
+// or 0 to keep everything local. Reads the same render_host_id
+// config the render pool uses — operators don't need to configure
+// indexing separately, they just say "use this host for ffmpeg work"
+// and both renders and derivations honour it.
+func remoteIndexerHostID(app *sdk.AppCtx) int64 {
+	cfg := app.Config()
+	return int64(parseConfigIntFallback(cfg.Get("render_host_id"), 0))
+}
+
+// tryRemoteIndex runs the whole indexer pipeline on the remote host
+// and writes the resulting media + derivation rows. Returns false on
+// any error so the caller can fall back to the local path. We don't
+// touch the DB on failure — letting the local path do a clean
+// attempt with its own error reporting.
+func tryRemoteIndex(
+	ctx context.Context, app *sdk.AppCtx, sc *storageClient,
+	projectID, fid string, f StorageFile, hostID int64,
+	thumbSeek, thumbWidth, waveW, waveH any,
+) bool {
+	logger := app.Logger()
+	// Time-limited signed URL the remote uses for both probe + derivations.
+	// Generous TTL covers slow installs of ffmpeg on first remote use.
+	signedURL, err := sc.GetSignedURL(ctx, projectID, f.ID, 3600)
+	if err != nil {
+		logger.Warn("remote index: sign source url", "file_id", fid, "err", err)
+		return false
+	}
+	probe, thumbID, waveID, err := runRemoteIndexing(ctx, app, projectID, remoteIndexParams{
+		HostID:     hostID,
+		SignedURL:  signedURL,
+		ThumbSeek:  toFloat(thumbSeek),
+		ThumbWidth: toInt(thumbWidth),
+		WaveW:      toInt(waveW),
+		WaveH:      toInt(waveH),
+		FileID:     fid,
+	})
+	if err != nil {
+		logger.Warn("remote index: pipeline", "file_id", fid, "err", err)
+		return false
+	}
+	if !probe.HasVideo && !probe.HasAudio && !probe.IsImage {
+		_ = markFailed(app.AppDB(), projectID, fid, f.SHA256, "unsupported",
+			"no audio, video, or image stream")
+		return true
+	}
+	if err := upsertMedia(app.AppDB(), projectID, fid, probe, f.SHA256, f.Folder); err != nil {
+		logger.Warn("remote index: upsert media", "file_id", fid, "err", err)
+		return false
+	}
+	logger.Info("indexed (remote)",
+		"file_id", fid, "host_id", hostID,
+		"duration_ms", probe.DurationMs,
+		"video", probe.HasVideo, "audio", probe.HasAudio, "image", probe.IsImage,
+		"thumb_id", thumbID, "wave_id", waveID,
+	)
+	app.Emit("media.indexed", map[string]any{
+		"file_id":     fid,
+		"name":        f.Name,
+		"has_video":   probe.HasVideo,
+		"has_audio":   probe.HasAudio,
+		"is_image":    probe.IsImage,
+		"duration_ms": probe.DurationMs,
+		"executor":    "remote-instance",
+	})
+	if thumbID > 0 {
+		if err := upsertDerivation(app.AppDB(), projectID, fid, "thumbnail", thumbID, toInt(thumbWidth), 0); err != nil {
+			logger.Warn("remote index: upsert thumbnail derivation", "err", err)
+		}
+	}
+	if waveID > 0 {
+		if err := upsertDerivation(app.AppDB(), projectID, fid, "waveform", waveID, toInt(waveW), toInt(waveH)); err != nil {
+			logger.Warn("remote index: upsert waveform derivation", "err", err)
+		}
+	}
+	if probe.HasAudio {
+		notifyTranscriber(projectID, fid)
+	} else {
+		notifyDescriber(projectID, fid)
+	}
+	return true
 }
 
 // uploadAndRecord pushes the derivation file to storage and records

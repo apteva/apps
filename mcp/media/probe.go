@@ -78,6 +78,13 @@ func runProbe(ctx context.Context, ffprobePath, file string) (*Probe, error) {
 		}
 		return nil, fmt.Errorf("ffprobe: %s", stderr)
 	}
+	return parseProbeBytes(out)
+}
+
+// parseProbeBytes turns raw ffprobe JSON output into a Probe. Shared
+// between the local runProbe and the remote-indexer path which gets
+// the same JSON shape back over SSH.
+func parseProbeBytes(out []byte) (*Probe, error) {
 	var raw ffprobeOut
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil, fmt.Errorf("ffprobe json parse: %w", err)

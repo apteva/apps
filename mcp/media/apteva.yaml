@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.11.1
+version: 0.11.2
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -336,6 +336,11 @@ config_schema:
       ~/.apteva-render/ on the host (no sudo). Source bytes come from
       a signed storage URL; output uploads back to storage via the
       presigned-PUT fast path (S3 backends) or multipart fallback.
+
+      Indexing also follows this setting (v0.11.2): probe + thumbnail
+      + waveform run on the host via HTTP-range-seek against the
+      signed source URL, so giant videos are never downloaded to the
+      Apteva machine. Falls back to local on any remote error.
 
       If the Instances app isn't installed the field collapses to a
       plain text input where you can type a host id manually.
