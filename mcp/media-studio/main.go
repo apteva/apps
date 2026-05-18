@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.3.1
+version: 0.4.0
 description: |
   Generate images, video, audio, and music via any compatible provider.
   Optionally saves outputs to the Storage app for permanent references.
@@ -49,8 +49,10 @@ requires:
     - role: image_provider
       kind: integration
       compatible_slugs: [openai-api, venice-ai]
-      capabilities: [image.generate]
-      tools: { image.generate: generate_image }
+      capabilities: [image.generate, image.edit]
+      tools:
+        image.generate: generate_image
+        image.edit: edit_image
       required: false
       label: "Image provider"
     - role: video_provider

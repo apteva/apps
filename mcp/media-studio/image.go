@@ -11,18 +11,27 @@ import (
 // we gate each parameter on the model's accepted set rather than always
 // sending everything.
 //
-// buildImageArgs dispatches by provider slug. Each provider's request
-// shape is distinct enough (OpenAI: model/prompt/size/quality, Venice:
-// model/prompt/width/height/format/cfg_scale/…) that a unified body
+// buildImageArgs dispatches by (provider slug, capability). Each
+// provider's request shape is distinct enough that a unified body
 // would require gating every field on every model — clearer to fork.
-func buildImageArgs(args map[string]any, providerSlug string) (map[string]any, error) {
-	switch providerSlug {
-	case "openai-api":
-		return buildOpenAIImageArgs(args), nil
-	case "venice-ai":
-		return buildVeniceImageArgs(args), nil
+func buildImageArgs(args map[string]any, providerSlug, capability string) (map[string]any, error) {
+	switch capability {
+	case "image.generate":
+		switch providerSlug {
+		case "openai-api":
+			return buildOpenAIImageArgs(args), nil
+		case "venice-ai":
+			return buildVeniceImageArgs(args), nil
+		}
+	case "image.edit":
+		switch providerSlug {
+		case "venice-ai":
+			return buildVeniceImageEditArgs(args), nil
+		case "openai-api":
+			return nil, fmt.Errorf("openai-api image edit not wired (multipart body — pending executor support)")
+		}
 	}
-	return nil, fmt.Errorf("unsupported image provider slug: %q", providerSlug)
+	return nil, fmt.Errorf("unsupported (slug=%q, capability=%q)", providerSlug, capability)
 }
 
 // buildOpenAIImageArgs unpacks the options bag and delegates to
@@ -151,7 +160,10 @@ func buildProviderArgs(model, prompt, size, quality, outputFormat, background st
 // in the family — only the per-item shape differs (url vs b64_json), and
 // gpt-image-* never includes a URL. We surface both fields so the caller
 // can pick the path that matches what was returned.
-func normalizeImageResponse(slug string, raw json.RawMessage) ([]generatedMedia, string, string, error) {
+func normalizeImageResponse(slug, capability string, raw json.RawMessage) ([]generatedMedia, string, string, error) {
+	if capability == "image.edit" {
+		return normalizeImageEditResponse(slug, raw)
+	}
 	switch slug {
 	case "openai-api":
 		var body struct {
@@ -204,4 +216,83 @@ func normalizeImageResponse(slug string, raw json.RawMessage) ([]generatedMedia,
 		return media, "", "", nil
 	}
 	return nil, "", "", fmt.Errorf("unsupported provider slug: %q", slug)
+}
+
+// buildVeniceImageEditArgs assembles Venice's POST /image/edit body.
+// The dispatcher has already resolved args["source_image"] into either
+// a URL or a base64 string (storage:N handles get fetched upstream).
+func buildVeniceImageEditArgs(args map[string]any) map[string]any {
+	model := strArg(args, "model", "firered-image-edit")
+	prompt := strArg(args, "prompt", "")
+	source := strArg(args, "source_image", "")
+
+	out := map[string]any{
+		"model":  model,
+		"prompt": prompt,
+		"image":  source,
+	}
+	if opts, ok := args["options"].(map[string]any); ok {
+		passThrough := []string{
+			"aspect_ratio", "resolution", "output_format", "safe_mode",
+		}
+		for _, k := range passThrough {
+			if v, exists := opts[k]; exists {
+				out[k] = v
+			}
+		}
+	}
+	return out
+}
+
+// normalizeImageEditResponse parses the binary-envelope shape the
+// integrations http-executor produces for non-JSON responses:
+//
+//	{ "_binary": true, "base64": "<b64>", "mimeType": "image/png", "size": N }
+//
+// Venice's /image/edit always returns one binary image. The mimeType
+// + ext fall through to whichever output_format was requested.
+func normalizeImageEditResponse(slug string, raw json.RawMessage) ([]generatedMedia, string, string, error) {
+	switch slug {
+	case "venice-ai":
+		var env struct {
+			Binary   bool   `json:"_binary"`
+			Base64   string `json:"base64"`
+			MimeType string `json:"mimeType"`
+		}
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return nil, "", "", err
+		}
+		if !env.Binary || env.Base64 == "" {
+			return nil, "", "", fmt.Errorf("edit response missing binary payload (got: %s)", truncate(string(raw), 200))
+		}
+		mt := env.MimeType
+		if mt == "" {
+			mt = "image/png"
+		}
+		return []generatedMedia{{
+			B64:      env.Base64,
+			MimeType: mt,
+			Ext:      extFromMime(mt),
+		}}, "", "", nil
+	}
+	return nil, "", "", fmt.Errorf("unsupported edit provider slug: %q", slug)
+}
+
+func extFromMime(mt string) string {
+	switch mt {
+	case "image/png":
+		return "png"
+	case "image/jpeg", "image/jpg":
+		return "jpg"
+	case "image/webp":
+		return "webp"
+	}
+	return "bin"
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }

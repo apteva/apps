@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.3.1
+version: 0.4.0
 description: |
   Generate images, video, audio, and music via any compatible provider
   (OpenAI for image + TTS today; Replicate / ElevenLabs / Suno / Runway
@@ -26,12 +26,13 @@ requires:
     - role: image_provider
       kind: integration
       compatible_slugs: [openai-api, venice-ai]
-      capabilities: [image.generate]
+      capabilities: [image.generate, image.edit]
       tools:
         image.generate: generate_image
+        image.edit: edit_image
       required: false
       label: "Image provider"
-      hint: "Bind any compatible integration (OpenAI, Venice AI; Replicate / Stability soon) to enable image generation."
+      hint: "Bind any compatible integration (OpenAI, Venice AI; Replicate / Stability soon) to enable image generation. image.edit (reference-image edits) currently requires Venice AI."
 
     - role: video_provider
       kind: integration

@@ -41,6 +41,13 @@ type recordingPlatform struct {
 	nextCallResult    json.RawMessage
 	nextCallErr       error
 	identity          *sdk.InstallIdentity
+	// appSlug is what GetConnection echoes back. Default openai-api so
+	// existing tests keep passing; venice tests override to "venice-ai".
+	appSlug string
+	// perAppCallResults: when set, CallApp returns the response keyed by
+	// (appName, tool); falls back to nextCallResult otherwise. Lets edit
+	// tests pre-load both files_get_content + files_upload responses.
+	perAppCallResults map[string]json.RawMessage
 }
 
 type executeCall struct {
@@ -56,6 +63,7 @@ type callAppCall struct {
 
 func newRecordingPlatform() *recordingPlatform {
 	return &recordingPlatform{
+		appSlug: "openai-api",
 		identity: &sdk.InstallIdentity{
 			AppName:   "media-studio",
 			InstallID: 99,
@@ -69,7 +77,11 @@ func newRecordingPlatform() *recordingPlatform {
 }
 
 func (p *recordingPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
-	return &sdk.PlatformConnection{ID: id, AppSlug: "openai-api", ProjectID: "test-proj"}, nil
+	slug := p.appSlug
+	if slug == "" {
+		slug = "openai-api"
+	}
+	return &sdk.PlatformConnection{ID: id, AppSlug: slug, ProjectID: "test-proj"}, nil
 }
 func (p *recordingPlatform) ListConnections(filter sdk.ConnectionFilter) ([]sdk.PlatformConnection, error) {
 	return nil, nil
@@ -102,9 +114,13 @@ func (p *recordingPlatform) ExecuteIntegrationTool(connID int64, tool string, in
 func (p *recordingPlatform) CallApp(appName, tool string, input map[string]any) (json.RawMessage, error) {
 	p.mu.Lock()
 	p.callAppCalls = append(p.callAppCalls, callAppCall{AppName: appName, Tool: tool, Input: input})
+	keyed, ok := p.perAppCallResults[appName+":"+tool]
 	p.mu.Unlock()
 	if p.nextCallErr != nil {
 		return nil, p.nextCallErr
+	}
+	if ok {
+		return keyed, nil
 	}
 	return p.nextCallResult, nil
 }
@@ -167,7 +183,7 @@ func (s *stringWriter) Write(p []byte) (int, error) { return s.b.Write(p) }
 
 func TestNormalizeImageResponse_OpenAI_DALLE_URL(t *testing.T) {
 	body := `{"data":[{"url":"https://upstream/a.png","revised_prompt":"a tabby cat"}]}`
-	imgs, revised, _, err := normalizeImageResponse("openai-api", json.RawMessage(body))
+	imgs, revised, _, err := normalizeImageResponse("openai-api", "image.generate", json.RawMessage(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +200,7 @@ func TestNormalizeImageResponse_OpenAI_DALLE_URL(t *testing.T) {
 
 func TestNormalizeImageResponse_OpenAI_GPTImage_B64(t *testing.T) {
 	body := `{"data":[{"b64_json":"AAECAwQ="}],"created":1714000000,"model":"gpt-image-2"}`
-	imgs, _, model, err := normalizeImageResponse("openai-api", json.RawMessage(body))
+	imgs, _, model, err := normalizeImageResponse("openai-api", "image.generate", json.RawMessage(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +217,7 @@ func TestNormalizeImageResponse_OpenAI_GPTImage_B64(t *testing.T) {
 
 func TestNormalizeImageResponse_OpenAI_MultipleImages(t *testing.T) {
 	body := `{"data":[{"url":"u1"},{"url":"u2"},{"url":"u3"}]}`
-	imgs, _, _, err := normalizeImageResponse("openai-api", json.RawMessage(body))
+	imgs, _, _, err := normalizeImageResponse("openai-api", "image.generate", json.RawMessage(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +227,7 @@ func TestNormalizeImageResponse_OpenAI_MultipleImages(t *testing.T) {
 }
 
 func TestNormalizeImageResponse_UnknownSlug(t *testing.T) {
-	_, _, _, err := normalizeImageResponse("replicate", json.RawMessage(`{}`))
+	_, _, _, err := normalizeImageResponse("replicate", "image.generate", json.RawMessage(`{}`))
 	if err == nil {
 		t.Fatal("expected error for unknown slug")
 	}
@@ -806,5 +822,279 @@ func TestPickExt(t *testing.T) {
 		if got := pickExt(in); got != want {
 			t.Errorf("pickExt(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// --- image edit path (reference-image / source_image) --------------
+
+func TestResolveImageCapability(t *testing.T) {
+	if got := resolveImageCapability(map[string]any{}); got != "image.generate" {
+		t.Errorf("no source_image → got %q, want image.generate", got)
+	}
+	if got := resolveImageCapability(map[string]any{"source_image": "storage:1"}); got != "image.edit" {
+		t.Errorf("source_image set → got %q, want image.edit", got)
+	}
+	if got := resolveImageCapability(map[string]any{"source_image": "   "}); got != "image.generate" {
+		t.Errorf("whitespace-only source_image → got %q, want image.generate (treated as empty)", got)
+	}
+}
+
+func TestBuildVeniceImageEditArgs(t *testing.T) {
+	args := map[string]any{
+		"prompt":       "remove the tree",
+		"source_image": "AAAA",
+		"model":        "qwen-edit",
+		"options": map[string]any{
+			"aspect_ratio":  "16:9",
+			"resolution":    "2K",
+			"output_format": "png",
+			"safe_mode":     false,
+		},
+	}
+	got, err := buildImageArgs(args, "venice-ai", "image.edit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["model"] != "qwen-edit" || got["prompt"] != "remove the tree" || got["image"] != "AAAA" {
+		t.Errorf("base fields: %+v", got)
+	}
+	if got["aspect_ratio"] != "16:9" || got["resolution"] != "2K" || got["output_format"] != "png" {
+		t.Errorf("options not passed through: %+v", got)
+	}
+	if got["safe_mode"] != false {
+		t.Errorf("safe_mode not passed through: %+v", got["safe_mode"])
+	}
+}
+
+func TestBuildVeniceImageEditArgs_DefaultModel(t *testing.T) {
+	got, err := buildImageArgs(map[string]any{
+		"prompt":       "x",
+		"source_image": "AAAA",
+	}, "venice-ai", "image.edit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["model"] != "firered-image-edit" {
+		t.Errorf("default model = %v, want firered-image-edit", got["model"])
+	}
+}
+
+func TestBuildImageArgs_OpenAIEdit_NotWired(t *testing.T) {
+	_, err := buildImageArgs(map[string]any{"prompt": "x", "source_image": "AAAA"}, "openai-api", "image.edit")
+	if err == nil || !strings.Contains(err.Error(), "not wired") {
+		t.Errorf("expected 'not wired' error for openai edit, got %v", err)
+	}
+}
+
+func TestNormalizeImageEditResponse_VeniceBinary(t *testing.T) {
+	body := `{"_binary":true,"base64":"SGVsbG8=","mimeType":"image/png","size":5}`
+	imgs, _, _, err := normalizeImageResponse("venice-ai", "image.edit", json.RawMessage(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imgs) != 1 {
+		t.Fatalf("expected 1 image, got %d", len(imgs))
+	}
+	if imgs[0].B64 != "SGVsbG8=" || imgs[0].MimeType != "image/png" || imgs[0].Ext != "png" {
+		t.Errorf("decoded mismatch: %+v", imgs[0])
+	}
+}
+
+func TestNormalizeImageEditResponse_MissingBinary(t *testing.T) {
+	body := `{"some":"json"}`
+	_, _, _, err := normalizeImageResponse("venice-ai", "image.edit", json.RawMessage(body))
+	if err == nil || !strings.Contains(err.Error(), "missing binary") {
+		t.Errorf("expected 'missing binary' error, got %v", err)
+	}
+}
+
+// resolveSourceImage unit coverage
+
+func TestResolveSourceImage_URLPassthrough(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	got, err := resolveSourceImage(ctx, "https://example.com/x.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://example.com/x.png" {
+		t.Errorf("URL should pass through unchanged, got %q", got)
+	}
+}
+
+func TestResolveSourceImage_Base64Passthrough(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	got, err := resolveSourceImage(ctx, "AAECAwQ=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "AAECAwQ=" {
+		t.Errorf("base64 should pass through unchanged, got %q", got)
+	}
+}
+
+func TestResolveSourceImage_StorageHandle(t *testing.T) {
+	pf := newRecordingPlatform()
+	// Storage's files_get_content returns content_base64 in the MCP envelope.
+	pf.perAppCallResults = map[string]json.RawMessage{
+		"storage:files_get_content": json.RawMessage(
+			`{"result":{"content":[{"type":"text","text":"{\"content_base64\":\"RkFLRUJZVEVT\"}"}]}}`,
+		),
+	}
+	ctx := newMediaStudioCtx(t, pf)
+	got, err := resolveSourceImage(ctx, "storage:1234")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got != "RkFLRUJZVEVT" {
+		t.Errorf("got %q, want RkFLRUJZVEVT", got)
+	}
+	if len(pf.callAppCalls) != 1 || pf.callAppCalls[0].Tool != "files_get_content" {
+		t.Errorf("expected files_get_content call, got %+v", pf.callAppCalls)
+	}
+	if id, _ := pf.callAppCalls[0].Input["id"].(int64); id != 1234 {
+		t.Errorf("storage id passed through wrong: %+v", pf.callAppCalls[0].Input)
+	}
+}
+
+func TestResolveSourceImage_StorageMalformedHandle(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	_, err := resolveSourceImage(ctx, "storage:abc")
+	if err == nil || !strings.Contains(err.Error(), "malformed storage handle") {
+		t.Errorf("expected malformed-handle error, got %v", err)
+	}
+}
+
+func TestResolveSourceImage_Empty(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	_, err := resolveSourceImage(ctx, "  ")
+	if err == nil {
+		t.Error("expected error on empty source")
+	}
+}
+
+// Full toolMediaGenerate edit-path coverage
+
+func TestToolMediaGenerate_Image_EditPath_VeniceStorageSource(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	// Storage returns the source bytes; Venice returns a binary envelope;
+	// storage save returns id 5555.
+	pf.perAppCallResults = map[string]json.RawMessage{
+		"storage:files_get_content": json.RawMessage(
+			`{"result":{"content":[{"type":"text","text":"{\"content_base64\":\"U09VUkNF\"}"}]}}`,
+		),
+		"storage:files_upload": json.RawMessage(
+			`{"result":{"content":[{"type":"text","text":"{\"id\":5555}"}]}}`,
+		),
+	}
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"_binary":true,"base64":"RURJVA==","mimeType":"image/png","size":4}`),
+	}
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":         "image",
+		"prompt":       "remove the tree",
+		"source_image": "storage:1234",
+	})
+	if err != nil {
+		t.Fatalf("toolMediaGenerate: %v", err)
+	}
+
+	// Provider call must have hit Venice's edit tool with the resolved bytes.
+	if len(pf.executeCalls) != 1 {
+		t.Fatalf("expected 1 ExecuteIntegrationTool call, got %d", len(pf.executeCalls))
+	}
+	if pf.executeCalls[0].Tool != "edit_image" {
+		t.Errorf("tool = %q, want edit_image", pf.executeCalls[0].Tool)
+	}
+	if pf.executeCalls[0].Input["image"] != "U09VUkNF" {
+		t.Errorf("source bytes not passed through: %+v", pf.executeCalls[0].Input)
+	}
+
+	// CallApp sequence: files_get_content (resolve) then files_upload (save).
+	if len(pf.callAppCalls) < 2 {
+		t.Fatalf("expected at least 2 CallApp invocations (resolve+save), got %d", len(pf.callAppCalls))
+	}
+	if pf.callAppCalls[0].Tool != "files_get_content" {
+		t.Errorf("first CallApp = %q, want files_get_content", pf.callAppCalls[0].Tool)
+	}
+	if pf.callAppCalls[1].Tool != "files_upload" {
+		t.Errorf("second CallApp = %q, want files_upload", pf.callAppCalls[1].Tool)
+	}
+
+	// _meta carries kind + storage id.
+	res := out.(map[string]any)
+	meta := res["_meta"].(map[string]any)
+	if meta["kind"] != "image" {
+		t.Errorf("_meta.kind = %v", meta["kind"])
+	}
+	ids := meta["storage_ids"].([]int64)
+	if len(ids) != 1 || ids[0] != 5555 {
+		t.Errorf("storage_ids = %+v", ids)
+	}
+
+	// History row carries the source_image_ref lineage in extra_json.
+	var extraJSON string
+	if err := ctx.AppDB().QueryRow(`SELECT extra_json FROM generations LIMIT 1`).Scan(&extraJSON); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(extraJSON, "source_image_ref") || !strings.Contains(extraJSON, "storage:1234") {
+		t.Errorf("extra_json missing source_image_ref lineage: %s", extraJSON)
+	}
+	if !strings.Contains(extraJSON, `"capability":"image.edit"`) {
+		t.Errorf("extra_json missing capability marker: %s", extraJSON)
+	}
+}
+
+func TestToolMediaGenerate_Image_EditPath_URLSource_NoResolveCall(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"_binary":true,"base64":"RURJVA==","mimeType":"image/png"}`),
+	}
+	// No storage binding — confirms URL source skips files_get_content.
+	pf.identity.Bindings = map[string]any{"image_provider": float64(42)}
+
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	_, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":         "image",
+		"prompt":       "make sunset",
+		"source_image": "https://upstream/ref.png",
+	})
+	if err != nil {
+		t.Fatalf("toolMediaGenerate: %v", err)
+	}
+
+	if len(pf.callAppCalls) != 0 {
+		t.Errorf("URL source must NOT call CallApp (no storage resolve, no storage save when unbound), got %+v", pf.callAppCalls)
+	}
+	if got, _ := pf.executeCalls[0].Input["image"].(string); got != "https://upstream/ref.png" {
+		t.Errorf("URL not passed through to provider: %q", got)
+	}
+}
+
+func TestToolMediaGenerate_Image_EditPath_ProviderDoesNotSupportEdit(t *testing.T) {
+	pf := newRecordingPlatform()
+	// Default appSlug=openai-api. The manifest binds image.edit→edit_image,
+	// but bound.ToolFor("image.edit") returns the binding name regardless;
+	// the openai-api buildArgs path then refuses. Either way the result
+	// is a clean mcpError, not a panic.
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":         "image",
+		"prompt":       "x",
+		"source_image": "https://upstream/ref.png",
+	})
+	if err != nil {
+		t.Fatalf("toolMediaGenerate: %v", err)
+	}
+	res := out.(map[string]any)
+	if res["isError"] != true {
+		t.Errorf("expected isError=true when openai-api routed to edit, got %+v", res)
 	}
 }

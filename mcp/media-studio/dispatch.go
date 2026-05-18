@@ -24,14 +24,17 @@ const (
 // or wire a new provider for an existing kind, edit only the per-kind
 // file (image.go, video.go, audio.go, music.go) — never this map.
 type kindHandler struct {
-	Role       string
-	Capability string
+	Role string
+	// ResolveCapability picks the capability per-call. Lets a single
+	// kind drive multiple sub-flows (e.g. image.generate vs image.edit
+	// based on presence of source_image).
+	ResolveCapability func(args map[string]any) string
 	// BuildArgs assembles the provider request body. providerSlug is
 	// the bound integration's app_slug so per-provider quirks can be
-	// gated inline (e.g. dall-e-2 vs gpt-image-2 vs replicate-X).
-	BuildArgs func(args map[string]any, providerSlug string) (map[string]any, error)
+	// gated inline; capability disambiguates within a multi-cap kind.
+	BuildArgs func(args map[string]any, providerSlug, capability string) (map[string]any, error)
 	// Normalize parses the provider response into a uniform media list.
-	Normalize func(slug string, raw json.RawMessage) ([]generatedMedia, string, string, error)
+	Normalize func(providerSlug, capability string, raw json.RawMessage) ([]generatedMedia, string, string, error)
 	// StorageDir is the sub-folder under /.generated/ where storage
 	// hand-offs land (images/, videos/, audio/, music/).
 	StorageDir string
@@ -40,31 +43,57 @@ type kindHandler struct {
 	MakeThumbnail bool
 }
 
+// constCap returns a ResolveCapability that always picks the same
+// capability — for kinds (video, music, audio_*) that don't fork.
+func constCap(name string) func(map[string]any) string {
+	return func(map[string]any) string { return name }
+}
+
+// resolveImageCapability picks image.edit when the caller supplied a
+// source_image (any of "storage:N", URL, base64); image.generate otherwise.
+func resolveImageCapability(args map[string]any) string {
+	if v, ok := args["source_image"].(string); ok && strings.TrimSpace(v) != "" {
+		return "image.edit"
+	}
+	return "image.generate"
+}
+
 var handlers = map[string]kindHandler{
 	KindImage: {
-		Role: "image_provider", Capability: "image.generate",
-		BuildArgs: buildImageArgs, Normalize: normalizeImageResponse,
-		StorageDir: "images", MakeThumbnail: true,
+		Role:              "image_provider",
+		ResolveCapability: resolveImageCapability,
+		BuildArgs:         buildImageArgs,
+		Normalize:         normalizeImageResponse,
+		StorageDir:        "images",
+		MakeThumbnail:     true,
 	},
 	KindVideo: {
-		Role: "video_provider", Capability: "video.generate",
-		BuildArgs: buildVideoArgs, Normalize: normalizeVideoResponse,
-		StorageDir: "videos",
+		Role:              "video_provider",
+		ResolveCapability: constCap("video.generate"),
+		BuildArgs:         buildVideoArgs,
+		Normalize:         normalizeVideoResponse,
+		StorageDir:        "videos",
 	},
 	KindAudioTTS: {
-		Role: "audio_provider", Capability: "audio.tts",
-		BuildArgs: buildAudioTTSArgs, Normalize: normalizeAudioResponse,
-		StorageDir: "audio",
+		Role:              "audio_provider",
+		ResolveCapability: constCap("audio.tts"),
+		BuildArgs:         buildAudioTTSArgs,
+		Normalize:         normalizeAudioResponse,
+		StorageDir:        "audio",
 	},
 	KindAudioSFX: {
-		Role: "audio_provider", Capability: "audio.sfx",
-		BuildArgs: buildAudioSFXArgs, Normalize: normalizeAudioResponse,
-		StorageDir: "audio",
+		Role:              "audio_provider",
+		ResolveCapability: constCap("audio.sfx"),
+		BuildArgs:         buildAudioSFXArgs,
+		Normalize:         normalizeAudioResponse,
+		StorageDir:        "audio",
 	},
 	KindMusic: {
-		Role: "music_provider", Capability: "music.generate",
-		BuildArgs: buildMusicArgs, Normalize: normalizeMusicResponse,
-		StorageDir: "music",
+		Role:              "music_provider",
+		ResolveCapability: constCap("music.generate"),
+		BuildArgs:         buildMusicArgs,
+		Normalize:         normalizeMusicResponse,
+		StorageDir:        "music",
 	},
 }
 
@@ -90,12 +119,27 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if bound == nil {
 		return mcpError("no " + h.Role + " bound — pick one in app settings"), nil
 	}
-	tool := bound.ToolFor(h.Capability)
+	capability := h.ResolveCapability(args)
+	tool := bound.ToolFor(capability)
 	if tool == "" {
-		return mcpError("bound " + h.Role + " (" + bound.AppSlug + ") doesn't support " + h.Capability), nil
+		return mcpError("bound " + h.Role + " (" + bound.AppSlug + ") doesn't support " + capability), nil
 	}
 
-	providerArgs, err := h.BuildArgs(args, bound.AppSlug)
+	// Source-image (edit flow) — resolve "storage:N" / URL / base64 into
+	// the bytes-or-URL the per-provider builder will pass through.
+	// We preserve the original ref under _source_image_ref so the
+	// history row (and the MCP _meta) can show "edit of #1234".
+	if capability == "image.edit" {
+		orig := strArg(args, "source_image", "")
+		resolved, err := resolveSourceImage(ctx, orig)
+		if err != nil {
+			return mcpError("source_image: " + err.Error()), nil
+		}
+		args["_source_image_ref"] = orig
+		args["source_image"] = resolved
+	}
+
+	providerArgs, err := h.BuildArgs(args, bound.AppSlug, capability)
 	if err != nil {
 		return mcpError("build args: " + err.Error()), nil
 	}
@@ -112,7 +156,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return mcpError("provider returned non-2xx: " + body), nil
 	}
 
-	media, revisedPrompt, normalizedModel, err := h.Normalize(bound.AppSlug, res.Data)
+	media, revisedPrompt, normalizedModel, err := h.Normalize(bound.AppSlug, capability, res.Data)
 	if err != nil {
 		return mcpError("provider response parse: " + err.Error()), nil
 	}
@@ -197,8 +241,8 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 // encodeExtras stashes per-kind args that aren't first-class columns
-// (voice, aspect, options.*) into the row's extra_json blob. Best-effort;
-// failure to encode just drops the metadata.
+// (voice, aspect, options.*, edit lineage) into the row's extra_json
+// blob. Best-effort; failure to encode just drops the metadata.
 func encodeExtras(kind string, args map[string]any) string {
 	extras := map[string]any{}
 	for _, k := range []string{"voice", "aspect", "duration", "n"} {
@@ -209,6 +253,13 @@ func encodeExtras(kind string, args map[string]any) string {
 	if opts, ok := args["options"].(map[string]any); ok && len(opts) > 0 {
 		extras["options"] = opts
 	}
+	// Edit-flow lineage: the original source_image reference (e.g.
+	// "storage:1234") + the capability so history can render
+	// "edit of #1234" without re-deriving from the resolved bytes.
+	if ref, ok := args["_source_image_ref"].(string); ok && ref != "" {
+		extras["source_image_ref"] = ref
+		extras["capability"] = "image.edit"
+	}
 	if len(extras) == 0 {
 		return "{}"
 	}
@@ -217,6 +268,51 @@ func encodeExtras(kind string, args map[string]any) string {
 		return "{}"
 	}
 	return string(b)
+}
+
+// resolveSourceImage takes the raw source_image arg (one of: "storage:N",
+// a URL, or a base64 string) and returns the value the per-provider
+// builder will pass through. "storage:N" fetches via files_get_content;
+// URLs + bare base64 are passed through unchanged.
+func resolveSourceImage(ctx *sdk.AppCtx, raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", errors.New("required (got empty)")
+	}
+	if strings.HasPrefix(raw, "storage:") {
+		idStr := strings.TrimPrefix(raw, "storage:")
+		id, err := parseInt64(idStr)
+		if err != nil {
+			return "", errors.New("malformed storage handle: " + raw)
+		}
+		var got struct {
+			ContentBase64 string `json:"content_base64"`
+		}
+		if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_content",
+			map[string]any{"id": id}, &got); err != nil {
+			return "", errors.New("storage fetch failed: " + err.Error())
+		}
+		if got.ContentBase64 == "" {
+			return "", errors.New("storage returned empty content for id " + idStr)
+		}
+		return got.ContentBase64, nil
+	}
+	// URL or already-base64 — pass through unchanged.
+	return raw, nil
+}
+
+func parseInt64(s string) (int64, error) {
+	var n int64
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, errors.New("not a positive integer")
+		}
+		n = n*10 + int64(c-'0')
+	}
+	if n == 0 && s != "0" {
+		return 0, errors.New("empty")
+	}
+	return n, nil
 }
 
 // ─── HTTP /generate — panel hand-off ───────────────────────────────
@@ -275,7 +371,15 @@ func (a *App) handleBindings(w http.ResponseWriter, r *http.Request) {
 		if b := globalCtx.IntegrationFor(h.Role); b != nil {
 			entry["bound"] = true
 			entry["slug"] = b.AppSlug
-			entry["capability_supported"] = b.ToolFor(h.Capability) != ""
+			// Default-capability support — what an empty-args call would
+			// route to (image.generate for the image kind, etc).
+			defaultCap := h.ResolveCapability(map[string]any{})
+			entry["default_capability"] = defaultCap
+			entry["capability_supported"] = b.ToolFor(defaultCap) != ""
+			// For the image kind, also surface whether edit is bound.
+			if kind == KindImage {
+				entry["edit_supported"] = b.ToolFor("image.edit") != ""
+			}
 		}
 		out[kind] = entry
 	}

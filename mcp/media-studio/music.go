@@ -7,10 +7,10 @@ import "encoding/json"
 // handlers[KindMusic]; once buildMusicArgs + normalizeMusicResponse
 // know a provider slug, the kind goes live end-to-end.
 
-func buildMusicArgs(args map[string]any, providerSlug string) (map[string]any, error) {
+func buildMusicArgs(args map[string]any, providerSlug, capability string) (map[string]any, error) {
 	return nil, errKindStub
 }
 
-func normalizeMusicResponse(slug string, raw json.RawMessage) ([]generatedMedia, string, string, error) {
+func normalizeMusicResponse(slug, capability string, raw json.RawMessage) ([]generatedMedia, string, string, error) {
 	return nil, "", "", errKindStub
 }

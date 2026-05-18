@@ -2,7 +2,7 @@
 // Loaded by the dashboard via dynamic import; uses host React via
 // importmap; talks to the media-studio sidecar at /api/apps/media-studio/*.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
 // because panels are bundled standalone and apps install independently.
@@ -156,6 +156,18 @@ function isGptImage(m: ImageModel) {
   return m.startsWith("gpt-image");
 }
 
+// Edit-capable models (Venice). Used when the user supplies a reference
+// image — the manifest's image.edit capability routes to /image/edit
+// which only accepts these. Default firered-image-edit per Venice docs.
+const EDIT_MODELS = [
+  "firered-image-edit",
+  "qwen-edit",
+  "grok-imagine-edit",
+  "flux-2-max-edit",
+  "gpt-image-2-edit",
+] as const;
+type EditModel = typeof EDIT_MODELS[number];
+
 // Small inline SVG icons — no emoji, no Tailwind color classes inside
 // the SVG (dashboard's JIT doesn't scan apps/mcp/*/ui/, so color
 // utilities inside SVG silently no-op). Use currentColor + className
@@ -224,6 +236,12 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [duration, setDuration] = useState(5); // video/audio/music
   const [aspect, setAspect] = useState("16:9");
   const [voice, setVoice] = useState("");
+  // Reference-image (edit mode) state. When sourceImage is non-empty,
+  // media_generate routes through image.edit instead of image.generate.
+  const [sourceImage, setSourceImage] = useState("");
+  const [sourceImageLabel, setSourceImageLabel] = useState("");
+  const [editModel, setEditModel] = useState<EditModel>("firered-image-edit");
+  const isEditMode = activeKind === "image" && sourceImage.trim() !== "";
 
   useEffect(() => {
     const allowed = IMAGE_SIZES[imageModel] || ["1024x1024"];
@@ -293,12 +311,18 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         prompt,
       };
       if (activeKind === "image") {
-        body.model = imageModel;
-        body.size = imageSize;
-        const options: Record<string, unknown> = {};
-        if (imageModel !== "dall-e-2") options.quality = imageQuality;
-        if (isGptImage(imageModel)) options.output_format = imageFormat;
-        body.options = options;
+        if (isEditMode) {
+          body.model = editModel;
+          body.source_image = sourceImage;
+          body.options = { output_format: imageFormat };
+        } else {
+          body.model = imageModel;
+          body.size = imageSize;
+          const options: Record<string, unknown> = {};
+          if (imageModel !== "dall-e-2") options.quality = imageQuality;
+          if (isGptImage(imageModel)) options.output_format = imageFormat;
+          body.options = options;
+        }
       } else if (activeKind === "video") {
         body.duration = duration;
         body.aspect = aspect;
@@ -395,6 +419,21 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       {/* Main area */}
       <div className="flex-1 flex min-h-0">
         <div className="flex-1 flex flex-col p-6 gap-4 min-w-0">
+          {activeKind === "image" && (
+            <ReferenceImageInput
+              sourceImage={sourceImage}
+              sourceImageLabel={sourceImageLabel}
+              onSet={(value, label) => {
+                setSourceImage(value);
+                setSourceImageLabel(label);
+              }}
+              onClear={() => {
+                setSourceImage("");
+                setSourceImageLabel("");
+              }}
+            />
+          )}
+
           <Composer
             kind={activeKind}
             prompt={prompt}
@@ -402,6 +441,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             generate={generate}
             generating={generating}
             disabled={!isBound}
+            isEditMode={isEditMode}
             imageModel={imageModel}
             setImageModel={setImageModel}
             imageSize={imageSize}
@@ -410,6 +450,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             setImageQuality={setImageQuality}
             imageFormat={imageFormat}
             setImageFormat={setImageFormat}
+            editModel={editModel}
+            setEditModel={setEditModel}
             duration={duration}
             setDuration={setDuration}
             aspect={aspect}
@@ -431,7 +473,21 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         </div>
 
         {selected && (
-          <DetailAside selected={selected} onClose={() => setSelected(null)} />
+          <DetailAside
+            selected={selected}
+            onClose={() => setSelected(null)}
+            onUseAsReference={
+              selected.kind === "image" && selected.storage_ids.length > 0
+                ? () => {
+                    const id = selected.storage_ids[0];
+                    setSourceImage(`storage:${id}`);
+                    setSourceImageLabel(`Storage #${id}`);
+                    setSelected(null);
+                    setTab("image");
+                  }
+                : undefined
+            }
+          />
         )}
       </div>
     </div>
@@ -495,6 +551,7 @@ interface ComposerProps {
   generate: () => void;
   generating: boolean;
   disabled: boolean;
+  isEditMode: boolean;
   imageModel: ImageModel;
   setImageModel: (v: ImageModel) => void;
   imageSize: string;
@@ -503,6 +560,8 @@ interface ComposerProps {
   setImageQuality: (v: string) => void;
   imageFormat: string;
   setImageFormat: (v: string) => void;
+  editModel: EditModel;
+  setEditModel: (v: EditModel) => void;
   duration: number;
   setDuration: (v: number) => void;
   aspect: string;
@@ -512,8 +571,9 @@ interface ComposerProps {
 }
 
 function Composer(p: ComposerProps) {
-  const promptPlaceholder =
-    p.kind === "audio_tts"
+  const promptPlaceholder = p.isEditMode
+    ? "Edit instruction — 'remove the tree', 'change sky to sunset'"
+    : p.kind === "audio_tts"
       ? "Text to speak"
       : p.kind === "music"
         ? "A jazzy lo-fi loop with piano"
@@ -537,7 +597,15 @@ function Composer(p: ComposerProps) {
           className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
         />
       </div>
-      {p.kind === "image" && (
+      {p.kind === "image" && p.isEditMode && (
+        <EditOptions
+          model={p.editModel}
+          setModel={p.setEditModel}
+          format={p.imageFormat}
+          setFormat={p.setImageFormat}
+        />
+      )}
+      {p.kind === "image" && !p.isEditMode && (
         <ImageOptions
           model={p.imageModel}
           setModel={p.setImageModel}
@@ -566,8 +634,145 @@ function Composer(p: ComposerProps) {
         disabled={!p.prompt.trim() || p.generating || p.disabled}
         className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
       >
-        {p.generating ? "…" : "Generate"}
+        {p.generating ? "…" : p.isEditMode ? "Edit" : "Generate"}
       </button>
+    </div>
+  );
+}
+
+function EditOptions({
+  model,
+  setModel,
+  format,
+  setFormat,
+}: {
+  model: EditModel;
+  setModel: (v: EditModel) => void;
+  format: string;
+  setFormat: (v: string) => void;
+}) {
+  return (
+    <>
+      <div>
+        <label className="text-text-muted text-xs block">Edit model</label>
+        <select
+          value={model}
+          onChange={(e) => setModel(e.target.value as EditModel)}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+        >
+          {EDIT_MODELS.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <label className="text-text-muted text-xs block">Format</label>
+        <select
+          value={format}
+          onChange={(e) => setFormat(e.target.value)}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+        >
+          <option value="png">PNG</option>
+          <option value="jpeg">JPEG</option>
+          <option value="webp">WebP</option>
+        </select>
+      </div>
+    </>
+  );
+}
+
+// ReferenceImageInput — accepts upload (file → base64), URL paste, or
+// a "storage:N" handle (set from DetailAside's "Use as reference"). When
+// non-empty, the composer flips to edit mode (image.edit capability).
+function ReferenceImageInput({
+  sourceImage,
+  sourceImageLabel,
+  onSet,
+  onClear,
+}: {
+  sourceImage: string;
+  sourceImageLabel: string;
+  onSet: (value: string, label: string) => void;
+  onClear: () => void;
+}) {
+  const [urlInput, setUrlInput] = useState("");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleFile = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      // FileReader.readAsDataURL gives us "data:image/png;base64,..."; strip the prefix.
+      const b64 = result.includes(",") ? result.split(",", 2)[1] : result;
+      onSet(b64, `Upload (${file.name})`);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleDrop = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files?.[0];
+    if (file && file.type.startsWith("image/")) handleFile(file);
+  };
+
+  if (sourceImage) {
+    return (
+      <div className="flex items-center gap-3 p-2.5 rounded border border-accent bg-bg-card">
+        <span className="text-xs text-text-muted">Reference:</span>
+        <span className="text-sm text-text font-medium flex-1 truncate">{sourceImageLabel || "(set)"}</span>
+        <button
+          onClick={onClear}
+          className="text-text-muted hover:text-text text-sm px-2 py-0.5 border border-border rounded"
+        >
+          Clear
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      onDrop={handleDrop}
+      onDragOver={(e) => e.preventDefault()}
+      className="flex items-center gap-3 p-2 rounded border border-dashed border-border bg-bg-card"
+    >
+      <span className="text-text-muted text-xs">Reference image (optional):</span>
+      <button
+        onClick={() => fileInputRef.current?.click()}
+        className="text-xs px-2 py-1 border border-border rounded text-text hover:border-accent"
+      >
+        Upload
+      </button>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) handleFile(file);
+          e.target.value = "";
+        }}
+        style={{ display: "none" }}
+      />
+      <span className="text-text-dim text-xs">or paste URL:</span>
+      <input
+        type="text"
+        value={urlInput}
+        onChange={(e) => setUrlInput(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && urlInput.trim()) {
+            const trimmed = urlInput.trim();
+            onSet(trimmed, trimmed.length > 40 ? trimmed.slice(0, 37) + "…" : trimmed);
+            setUrlInput("");
+          }
+        }}
+        placeholder="https://…"
+        className="flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm"
+        style={{ minWidth: 180 }}
+      />
+      <span className="text-text-dim text-xs">— or pick from history (click a generation → "Use as reference")</span>
     </div>
   );
 }
@@ -784,9 +989,11 @@ function CardMeta({ g }: { g: Generation }) {
 function DetailAside({
   selected,
   onClose,
+  onUseAsReference,
 }: {
   selected: Generation;
   onClose: () => void;
+  onUseAsReference?: () => void;
 }) {
   const url = selected.storage_urls?.[0] || selected.upstream_urls?.[0] || "";
   return (
@@ -796,6 +1003,15 @@ function DetailAside({
     >
       <header className="flex items-center gap-2 px-4 py-3 border-b border-border">
         <span className="text-text font-medium truncate flex-1">{selected.prompt}</span>
+        {onUseAsReference && (
+          <button
+            onClick={onUseAsReference}
+            className="text-xs px-2 py-1 border border-border rounded text-accent hover:border-accent"
+            title="Use this image as the reference for an edit"
+          >
+            Use as reference
+          </button>
+        )}
         <button
           onClick={onClose}
           className="text-text-muted hover:text-text leading-none px-1"
