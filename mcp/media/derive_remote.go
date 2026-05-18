@@ -174,11 +174,33 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	b.WriteString(`THUMB_FILE_ID=""` + "\n")
 	b.WriteString(`WAVE_FILE_ID=""` + "\n")
 
-	// Thumbnail for video OR image (single-frame video looks like
-	// image to ffmpeg — same -ss seek + scale extract works for both).
+	// Image vs video distinction. ffmpeg's container-level seek (`-ss`)
+	// only makes sense for sources with a timeline; on a single-frame
+	// image (JPEG/PNG/GIF/single-frame video) `-ss 1.0` seeks past EOF
+	// and ffmpeg exits 0 with no output file — which then breaks curl's
+	// upload (exit 26 "read error") and the whole script aborts.
+	//
+	// We mirror the local extractImageThumbnail / extractVideoThumbnail
+	// split: an image-codec stream (mjpeg/png/gif/webp/bmp/tiff) or a
+	// container with no format.duration is treated as an image and gets
+	// no seek; everything else gets the seek.
+	b.WriteString(`IS_IMAGE=0` + "\n")
+	b.WriteString(`if grep -qE '"codec_name": *"(mjpeg|png|gif|webp|bmp|tiff)"' probe.json; then IS_IMAGE=1; fi` + "\n")
+	b.WriteString(`if ! grep -q '"duration":' probe.json; then IS_IMAGE=1; fi` + "\n")
+
 	fmt.Fprintf(&b, `if [ "$HAS_VIDEO" -gt 0 ]; then`+"\n")
-	fmt.Fprintf(&b, `  "$FFMPEG" -y -loglevel error -ss %s -i "$SIGNED_URL" -frames:v 1 -vf scale=%d:-2 -q:v 2 thumb.jpg`+"\n",
+	fmt.Fprintf(&b, `  if [ "$IS_IMAGE" = "1" ]; then`+"\n")
+	fmt.Fprintf(&b, `    "$FFMPEG" -y -loglevel error -i "$SIGNED_URL" -frames:v 1 -vf scale=%d:-2 -q:v 2 thumb.jpg`+"\n",
+		in.ThumbWidth)
+	fmt.Fprintf(&b, `  else`+"\n")
+	fmt.Fprintf(&b, `    "$FFMPEG" -y -loglevel error -ss %s -i "$SIGNED_URL" -frames:v 1 -vf scale=%d:-2 -q:v 2 thumb.jpg`+"\n",
 		strconv.FormatFloat(in.ThumbSeek, 'f', 3, 64), in.ThumbWidth)
+	fmt.Fprintf(&b, `  fi`+"\n")
+	// Belt + suspenders: if ffmpeg silently produced nothing (some
+	// codec edge cases exit 0 without writing the output), don't
+	// hand curl an empty path — fail loudly here so the surfaced
+	// error names the actual problem.
+	b.WriteString(`  if [ ! -s thumb.jpg ]; then echo "ffmpeg produced no thumbnail output" >&2; exit 1; fi` + "\n")
 	b.WriteString(`  RESP=$(curl -sS --fail -X POST \
     -H "Authorization: Bearer $STORAGE_TOKEN" \
     -F "folder=/.media/thumbnail/" \
@@ -195,6 +217,9 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	fmt.Fprintf(&b, `if [ "$HAS_AUDIO" -gt 0 ] && [ "$HAS_VIDEO" -eq 0 ]; then`+"\n")
 	fmt.Fprintf(&b, `  "$FFMPEG" -y -loglevel error -i "$SIGNED_URL" -filter_complex "showwavespic=s=%dx%d:colors=#7f7f7f" -frames:v 1 waveform.png`+"\n",
 		in.WaveW, in.WaveH)
+	// Same guard as the thumbnail branch — empty output would crash
+	// curl's -F upload with the unhelpful exit 26 "read error".
+	b.WriteString(`  if [ ! -s waveform.png ]; then echo "ffmpeg produced no waveform output" >&2; exit 1; fi` + "\n")
 	b.WriteString(`  RESP=$(curl -sS --fail -X POST \
     -H "Authorization: Bearer $STORAGE_TOKEN" \
     -F "folder=/.media/waveform/" \
