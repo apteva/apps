@@ -35,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: dlna
 display_name: DLNA Server
-version: 0.1.17
+version: 0.1.18
 description: Local-LAN UPnP/DLNA MediaServer for Apteva.
 author: Apteva
 scopes: [project, global]
@@ -882,7 +882,7 @@ func (a *App) storageListFolders(ctx context.Context, parent string) ([]storageS
 	var env struct {
 		Folders []string `json:"folders"`
 	}
-	if err := a.ctx.PlatformAPI().CallAppResult("storage", "files_list_folders", map[string]any{
+	if err := a.callApp("storage", "files_list_folders", map[string]any{
 		"parent": parent,
 	}, &env); err != nil {
 		return nil, err
@@ -902,7 +902,7 @@ func (a *App) storageListFiles(ctx context.Context, folder string, recursive boo
 	var env struct {
 		Files []storageFile `json:"files"`
 	}
-	if err := a.ctx.PlatformAPI().CallAppResult("storage", "files_list", map[string]any{
+	if err := a.callApp("storage", "files_list", map[string]any{
 		"folder":    folder,
 		"recursive": recursive,
 		"limit":     1000,
@@ -914,7 +914,7 @@ func (a *App) storageListFiles(ctx context.Context, folder string, recursive boo
 
 func (a *App) storageGetFile(ctx context.Context, id int64) (*storageFile, error) {
 	var f storageFile
-	if err := a.ctx.PlatformAPI().CallAppResult("storage", "files_get", map[string]any{"id": id}, &f); err != nil {
+	if err := a.callApp("storage", "files_get", map[string]any{"id": id}, &f); err != nil {
 		return nil, err
 	}
 	return &f, nil
@@ -923,11 +923,47 @@ func (a *App) storageGetFile(ctx context.Context, id int64) (*storageFile, error
 // storageGetURL mints a short-lived signed URL the TV can fetch
 // directly. Storage handles ranges & ETag, which is what we need for
 // seeking.
+// callApp wraps PlatformAPI.CallAppResult and injects _project_id so
+// the target app's MCP gateway routes to the install that actually
+// holds this project's data.
+//
+// Why this is needed for dlna in particular: dlna is bound to a LAN
+// port and serves requests that arrive without any MCP agent context
+// (TVs discovering it via SSDP, then dialing the advertised URLs).
+// The SDK's project-scoped client wrapper only injects _project_id
+// when a project is active in the calling ctx; for dlna's HTTP
+// handlers there is no such ctx, so every CallAppResult arrived at
+// storage/media without project info and got routed to whichever
+// install the gateway picked by default — often the wrong one.
+//
+// Pre-v0.1.18 each call site was raw CallAppResult, every Browse +
+// stream attempt routed to the wrong storage install and returned
+// "file not found" → 502 from dlna → TVs reported "device
+// disconnected". Same anti-pattern flagged in the workspace's
+// [[feedback_project_id_global_calls]] memory for the bit-3 apps.
+//
+// Pulls APTEVA_PROJECT_ID from env (set by apteva-server at spawn
+// time per project-scoped install). On global installs (apteva-server
+// doesn't pin a project) the env is empty and we fall back to the
+// gateway's default routing — those installs have a single sibling
+// of each dep anyway, so the routing is unambiguous.
+func (a *App) callApp(target, tool string, args map[string]any, out any) error {
+	if args == nil {
+		args = map[string]any{}
+	}
+	if pid := os.Getenv("APTEVA_PROJECT_ID"); pid != "" {
+		if _, set := args["_project_id"]; !set {
+			args["_project_id"] = pid
+		}
+	}
+	return a.ctx.PlatformAPI().CallAppResult(target, tool, args, out)
+}
+
 func (a *App) storageGetURL(ctx context.Context, id int64, ttlSec int) (string, error) {
 	var out struct {
 		URL string `json:"url"`
 	}
-	if err := a.ctx.PlatformAPI().CallAppResult("storage", "files_get_url", map[string]any{
+	if err := a.callApp("storage", "files_get_url", map[string]any{
 		"id":          id,
 		"ttl_seconds": ttlSec,
 	}, &out); err != nil {
@@ -960,7 +996,7 @@ func (a *App) searchStorage(ctx context.Context, contentTypePrefix, query string
 	var env struct {
 		Files []storageFile `json:"files"`
 	}
-	if err := a.ctx.PlatformAPI().CallAppResult("storage", "files_search", args, &env); err != nil {
+	if err := a.callApp("storage", "files_search", args, &env); err != nil {
 		return nil, err
 	}
 	out := make([]didlItem, 0, len(env.Files))
@@ -993,7 +1029,7 @@ func (a *App) recentItems(ctx context.Context, start, count int) ([]didlItem, er
 	var env struct {
 		Files []storageFile `json:"files"`
 	}
-	if err := a.ctx.PlatformAPI().CallAppResult("storage", "files_search", args, &env); err != nil {
+	if err := a.callApp("storage", "files_search", args, &env); err != nil {
 		return nil, err
 	}
 	out := make([]didlItem, 0, len(env.Files))
@@ -1077,7 +1113,7 @@ type mediaMeta struct {
 // and leave the DIDL fields blank — clients tolerate that.
 func (a *App) mediaProbe(ctx context.Context, fileID int64) *mediaMeta {
 	var m mediaMeta
-	if err := a.ctx.PlatformAPI().CallAppResult("media", "probe_file", map[string]any{
+	if err := a.callApp("media", "probe_file", map[string]any{
 		"file_id": fileID,
 	}, &m); err != nil {
 		return nil
