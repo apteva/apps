@@ -249,6 +249,40 @@ func dbCreateBuild(db *sql.DB, deploymentID int64, framework, buildCmd string) (
 	return dbGetBuild(db, id)
 }
 
+// dbUpdateDeployment mutates an allowlist of deployment-level fields
+// without touching identity (id, project_id, name, source_kind,
+// source_ref, created_at). Mirrors dbUpdateBuild's dynamic SET +
+// allowlist pattern. Used by the PATCH endpoint and deploy_set_env
+// to change config (env_json, build_cmd, start_cmd, port_hint,
+// description, framework) without delete+recreate. Note: domain
+// stays managed by dbSetDeploymentDomain because the attach flow
+// owns the (domain, record_id, attached_at) triple atomically.
+func dbUpdateDeployment(db *sql.DB, projectID string, id int64, fields map[string]any) error {
+	if len(fields) == 0 {
+		return nil
+	}
+	cols := []string{}
+	args := []any{}
+	for _, k := range []string{
+		"description", "framework", "build_cmd", "start_cmd",
+		"port_hint", "env_json", "source_extra_json",
+	} {
+		if v, ok := fields[k]; ok {
+			cols = append(cols, k+" = ?")
+			args = append(args, v)
+		}
+	}
+	if len(cols) == 0 {
+		return nil
+	}
+	cols = append(cols, "updated_at = CURRENT_TIMESTAMP")
+	args = append(args, id, projectID)
+	_, err := db.Exec(
+		`UPDATE deployments SET `+strings.Join(cols, ", ")+` WHERE id = ? AND project_id = ?`,
+		args...)
+	return err
+}
+
 func dbUpdateBuild(db *sql.DB, id int64, fields map[string]any) error {
 	if len(fields) == 0 {
 		return nil

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -59,6 +60,8 @@ func (a *App) handleDeploymentItem(w http.ResponseWriter, r *http.Request) {
 		a.httpDeploymentRelease(w, r, d)
 	case tail == "stop":
 		a.httpDeploymentStop(w, r, d)
+	case tail == "restart":
+		a.httpDeploymentRestart(w, r, d)
 	case tail == "logs":
 		a.httpDeploymentLogs(w, r, d)
 	case tail == "attach-domain":
@@ -231,9 +234,133 @@ func (a *App) httpDeploymentDetail(w http.ResponseWriter, r *http.Request, d *De
 		_ = dbDeleteDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
 		emit("deploy.destroyed", map[string]any{"deployment_id": d.ID, "name": d.Name})
 		httpJSON(w, map[string]any{"destroyed": true, "id": d.ID})
+	case http.MethodPatch:
+		a.httpDeploymentPatch(w, r, d)
 	default:
-		httpErr(w, http.StatusMethodNotAllowed, "GET or DELETE")
+		httpErr(w, http.StatusMethodNotAllowed, "GET, PATCH or DELETE")
 	}
+}
+
+// httpDeploymentPatch mutates an allowlist of deployment fields
+// without delete+recreate. The fields are exactly the ones in
+// dbUpdateDeployment; unknown keys are ignored (silently — clearer
+// API than rejecting). New values take effect on the NEXT release
+// build/restart; the live process keeps its env until restarted.
+// Use POST /restart (or deploy_restart) to apply config without a
+// fresh build.
+func (a *App) httpDeploymentPatch(w http.ResponseWriter, r *http.Request, d *Deployment) {
+	body, err := patchBodyFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(body) == 0 {
+		httpErr(w, http.StatusBadRequest, "no mutable fields in body")
+		return
+	}
+	if err := dbUpdateDeployment(globalCtx.AppDB(), d.ProjectID, d.ID, body); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	emit("deploy.updated", map[string]any{
+		"deployment_id": d.ID, "name": d.Name,
+		"fields": keysOf(body),
+	})
+	fresh, _ := dbGetDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
+	httpJSON(w, map[string]any{
+		"deployment": fresh,
+		"applied":    keysOf(body),
+		"note":       "new values take effect on the next build/release. Call POST /restart to apply now without rebuilding.",
+	})
+}
+
+// httpDeploymentRestart re-spawns the current release with whatever
+// config the deployment row now holds. Stops the live release
+// authoritatively (port-free guarantee), then runs runRelease with
+// the same build_id, so a config-only change (env_json, port_hint,
+// start_cmd) takes effect without a rebuild. Falls back to error if
+// there's nothing to restart.
+func (a *App) httpDeploymentRestart(w http.ResponseWriter, r *http.Request, d *Deployment) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	if d.CurrentReleaseID == nil {
+		httpErr(w, http.StatusBadRequest, "no current release to restart — run /build or /release first")
+		return
+	}
+	rel, err := dbGetRelease(globalCtx.AppDB(), *d.CurrentReleaseID)
+	if err != nil || rel == nil {
+		httpErr(w, http.StatusInternalServerError, "current release missing")
+		return
+	}
+	build, err := dbGetBuild(globalCtx.AppDB(), rel.BuildID)
+	if err != nil || build == nil {
+		httpErr(w, http.StatusInternalServerError, "build for current release missing")
+		return
+	}
+	// Authoritative stop so the port is genuinely free before the
+	// respawn binds — same guarantee operator-driven stop has.
+	if err := a.stopReleaseAuthoritative(rel, 5*time.Second); err != nil {
+		httpErr(w, http.StatusInternalServerError, "stop: "+err.Error())
+		return
+	}
+	a.markStopped(rel.ID)
+	// Re-fetch the deployment so runRelease sees the latest env_json /
+	// port_hint / start_cmd / etc. — that's the whole point of restart.
+	fresh, _ := dbGetDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
+	if fresh == nil {
+		fresh = d
+	}
+	newRel, err := a.runRelease(fresh, build)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, "release: "+err.Error())
+		return
+	}
+	emit("deploy.restarted", map[string]any{
+		"deployment_id": d.ID, "release_id": newRel.ID, "build_id": build.ID,
+	})
+	httpJSON(w, map[string]any{
+		"release": newRel,
+		"url":     a.deploymentURL(fresh, newRel),
+	})
+}
+
+func patchBodyFromRequest(r *http.Request) (map[string]any, error) {
+	var raw map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		return nil, fmt.Errorf("invalid JSON: %w", err)
+	}
+	// Filter to the allowlist. PortHint comes in as float64 from JSON;
+	// the SQL driver doesn't mind, but coerce to int for clarity.
+	allow := map[string]bool{
+		"description": true, "framework": true,
+		"build_cmd": true, "start_cmd": true,
+		"port_hint": true, "env_json": true,
+		"source_extra_json": true,
+	}
+	out := map[string]any{}
+	for k, v := range raw {
+		if !allow[k] {
+			continue
+		}
+		if k == "port_hint" {
+			if f, ok := v.(float64); ok {
+				out[k] = int(f)
+				continue
+			}
+		}
+		out[k] = v
+	}
+	return out, nil
+}
+
+func keysOf(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 func (a *App) httpDeploymentBuild(w http.ResponseWriter, r *http.Request, d *Deployment) {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -166,6 +167,48 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{},
+			},
+		},
+		{
+			Name: "deploy_update", Handler: a.toolUpdate,
+			Description: "Mutate deployment config (env_json, build_cmd, start_cmd, port_hint, description, framework, source_extra_json) without delete+recreate. New values take effect on the next build/release; call deploy_restart to apply immediately without rebuilding. Unknown fields are silently ignored — pass only what you want to change. Args: name OR id, plus any subset of the mutable fields.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":              map[string]any{"type": "string"},
+					"id":                map[string]any{"type": "integer"},
+					"description":       map[string]any{"type": "string"},
+					"framework":         map[string]any{"type": "string"},
+					"build_cmd":         map[string]any{"type": "string"},
+					"start_cmd":         map[string]any{"type": "string"},
+					"port_hint":         map[string]any{"type": "integer"},
+					"env_json":          map[string]any{"type": "string"},
+					"source_extra_json": map[string]any{"type": "string"},
+				},
+			},
+		},
+		{
+			Name: "deploy_restart", Handler: a.toolRestart,
+			Description: "Re-spawn the current release with whatever config the deployment row now holds. Authoritative stop (port guaranteed free), then runRelease against the same build_id — so a config-only change (env_json, port_hint, start_cmd) takes effect without rebuilding. Errors if there is no current release to restart. Args: name OR id.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name": map[string]any{"type": "string"},
+					"id":   map[string]any{"type": "integer"},
+				},
+			},
+		},
+		{
+			Name: "deploy_set_env", Handler: a.toolSetEnv,
+			Description: "Merge-update the deployment's env_json without round-tripping the full blob. Existing keys are preserved; supplied keys overwrite. Pass `restart: true` to apply immediately via deploy_restart. Args: name OR id, env (object of string→string), restart? (default false).",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":    map[string]any{"type": "string"},
+					"id":      map[string]any{"type": "integer"},
+					"env":     map[string]any{"type": "object"},
+					"restart": map[string]any{"type": "boolean"},
+				},
 			},
 		},
 	}
@@ -556,6 +599,156 @@ func (a *App) toolHealth(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"count":      len(out),
 		"checked_at": now,
 	}, nil
+}
+
+// toolUpdate is the MCP twin of PATCH /api/deployments/:name. Reads
+// the mutable-field allowlist from args and writes them. No-restart
+// — operator calls deploy_restart explicitly to apply.
+func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	d, err := a.lookupDeployment(args)
+	if err != nil {
+		return nil, err
+	}
+	fields := map[string]any{}
+	for _, k := range []string{
+		"description", "framework", "build_cmd", "start_cmd",
+		"env_json", "source_extra_json",
+	} {
+		if v, ok := args[k].(string); ok {
+			fields[k] = v
+		}
+	}
+	if v, ok := args["port_hint"]; ok {
+		switch n := v.(type) {
+		case float64:
+			fields["port_hint"] = int(n)
+		case int:
+			fields["port_hint"] = n
+		}
+	}
+	if len(fields) == 0 {
+		return nil, errors.New("no mutable fields supplied (allowed: description, framework, build_cmd, start_cmd, port_hint, env_json, source_extra_json)")
+	}
+	if err := dbUpdateDeployment(ctx.AppDB(), d.ProjectID, d.ID, fields); err != nil {
+		return nil, err
+	}
+	emit("deploy.updated", map[string]any{
+		"deployment_id": d.ID, "name": d.Name,
+		"fields": keysOf(fields),
+	})
+	fresh, _ := dbGetDeployment(ctx.AppDB(), d.ProjectID, d.ID)
+	return map[string]any{
+		"deployment": fresh,
+		"applied":    keysOf(fields),
+		"note":       "new values apply on the next build/release; call deploy_restart to apply now without rebuilding",
+	}, nil
+}
+
+// toolRestart is the MCP twin of POST /api/deployments/:name/restart.
+// Re-spawns the current release with whatever config the deployment
+// row holds RIGHT NOW (post-update). No new build.
+func (a *App) toolRestart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	d, err := a.lookupDeployment(args)
+	if err != nil {
+		return nil, err
+	}
+	if d.CurrentReleaseID == nil {
+		return nil, errors.New("no current release to restart — call deploy_release (or deploy_build with release=true) first")
+	}
+	rel, err := dbGetRelease(ctx.AppDB(), *d.CurrentReleaseID)
+	if err != nil || rel == nil {
+		return nil, errors.New("current release missing")
+	}
+	build, err := dbGetBuild(ctx.AppDB(), rel.BuildID)
+	if err != nil || build == nil {
+		return nil, errors.New("build for current release missing")
+	}
+	if err := a.stopReleaseAuthoritative(rel, 5*time.Second); err != nil {
+		return nil, fmt.Errorf("stop: %w", err)
+	}
+	a.markStopped(rel.ID)
+	fresh, _ := dbGetDeployment(ctx.AppDB(), d.ProjectID, d.ID)
+	if fresh == nil {
+		fresh = d
+	}
+	newRel, err := a.runRelease(fresh, build)
+	if err != nil {
+		return nil, fmt.Errorf("release: %w", err)
+	}
+	emit("deploy.restarted", map[string]any{
+		"deployment_id": d.ID, "release_id": newRel.ID, "build_id": build.ID,
+	})
+	return map[string]any{
+		"release": newRel,
+		"url":     a.deploymentURL(fresh, newRel),
+	}, nil
+}
+
+// toolSetEnv merges the `env` arg into the deployment's existing
+// env_json. Existing keys not in `env` are preserved; supplied keys
+// overwrite. To CLEAR a key, pass it with an empty-string value
+// (or update the full env_json via deploy_update). Optional restart
+// flag triggers a re-release with the merged env.
+func (a *App) toolSetEnv(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	d, err := a.lookupDeployment(args)
+	if err != nil {
+		return nil, err
+	}
+	envArg, _ := args["env"].(map[string]any)
+	if len(envArg) == 0 {
+		return nil, errors.New("env required (object of string→string)")
+	}
+	// Merge: start from existing env_json, overlay supplied keys.
+	cur := map[string]string{}
+	if d.EnvJSON != "" {
+		// Best-effort decode; if env_json was hand-written invalid, treat
+		// as empty and let the merge overwrite with the new shape.
+		_ = json.Unmarshal([]byte(d.EnvJSON), &cur)
+	}
+	for k, v := range envArg {
+		if s, ok := v.(string); ok {
+			cur[k] = s
+		}
+	}
+	merged, err := json.Marshal(cur)
+	if err != nil {
+		return nil, err
+	}
+	if err := dbUpdateDeployment(ctx.AppDB(), d.ProjectID, d.ID, map[string]any{
+		"env_json": string(merged),
+	}); err != nil {
+		return nil, err
+	}
+	emit("deploy.env_updated", map[string]any{
+		"deployment_id": d.ID, "name": d.Name, "keys": keysOfMap(envArg),
+	})
+	envKeys := make([]string, 0, len(cur))
+	for k := range cur {
+		envKeys = append(envKeys, k)
+	}
+	res := map[string]any{
+		"deployment_id": d.ID,
+		"env_keys":      envKeys,
+	}
+	if restart, _ := args["restart"].(bool); restart && d.CurrentReleaseID != nil {
+		restartRes, rerr := a.toolRestart(ctx, args)
+		if rerr != nil {
+			res["restart_error"] = rerr.Error()
+		} else {
+			res["restart"] = restartRes
+		}
+	} else {
+		res["note"] = "env updated; current release still running with the old env. Pass restart=true to apply now, or call deploy_restart later."
+	}
+	return res, nil
+}
+
+func keysOfMap(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 // ─── helpers ──────────────────────────────────────────────────────
