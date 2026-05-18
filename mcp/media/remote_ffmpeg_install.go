@@ -43,32 +43,56 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-// ─── manifest mirror ───────────────────────────────────────────────
+// ─── upstream ──────────────────────────────────────────────────────
+//
+// We use BtbN/FFmpeg-Builds (the modern, widely-used static binary
+// distribution that yt-dlp / OBS / many other projects rely on)
+// instead of the johnvansickle builds we shipped pre-v0.11.4.
+//
+// Why: johnvansickle's static builds list `https` in `-protocols` but
+// actually SIGSEGV when ffmpeg/ffprobe is given an HTTPS URL — broken
+// TLS implementation. Every signed storage URL is HTTPS, so the
+// remote indexer's "read source via signed URL" path crashed every
+// time. BtbN ships with OpenSSL statically linked correctly and
+// HTTPS works for real.
+//
+// We track the rolling `latest` channel of the n7.1 LTS branch
+// (ffmpeg 7.1 + ongoing security backports — same UX, current
+// codecs, modern CVE posture). Pinning a specific autobuild tag
+// would require manual bumps; the rolling URL is safer in practice
+// because BtbN doesn't break ABI within an LTS series and we
+// download fresh on every new install dir anyway.
+//
+// No sha256 verification: BtbN's "latest" channel is a rolling
+// target, so any pinned hash would go stale daily. We rely on
+// github.com's TLS and HTTPS for download integrity — same trust
+// model as `curl ... | sh` patterns widely used across the
+// ecosystem. The downloaded binaries also self-verify by being
+// run with -version before we trust them.
 
-const ffmpegVersion = "7.0.2"
+const ffmpegVersion = "btbn-n7.1"
 
-// remoteInstallDir is the per-version directory under $HOME on the
+// remoteInstallDir is the per-channel directory under $HOME on the
 // remote. Bumping ffmpegVersion changes this string, so on-remote
-// installs of the new version land in a fresh path and the old one
-// stays usable until garbage-collected (deliberately not GC'd today —
-// 80 MB per version is cheap; left for a later cleanup pass).
+// installs of a new channel land in a fresh path. Old installs
+// linger until GC; ~250 MB per channel is cheap on a render VPS.
 var remoteInstallDir = "$HOME/.apteva-render/ffmpeg-" + ffmpegVersion
 
-// ffmpegSource is the per-arch download spec. Keep in sync with the
-// binaries: block in apteva.yaml.
+// ffmpegSource is the per-arch download spec.
 type ffmpegSource struct {
-	URL    string
-	SHA256 string
+	URL string
 }
 
+// BtbN publishes the same archive under predictable URLs on the
+// "latest" release tag, one asset per arch. The tarball extracts
+// to <one-top-level-dir>/bin/ffmpeg + ffprobe; --strip-components=1
+// flattens that to <install_dir>/bin/{ffmpeg,ffprobe}.
 var ffmpegSources = map[string]ffmpegSource{
 	"amd64": {
-		URL:    "https://johnvansickle.com/ffmpeg/releases/ffmpeg-7.0.2-amd64-static.tar.xz",
-		SHA256: "abda8d77ce8309141f83ab8edf0596834087c52467f6badf376a6a2a4c87cf67",
+		URL: "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linux64-gpl-7.1.tar.xz",
 	},
 	"arm64": {
-		URL:    "https://johnvansickle.com/ffmpeg/releases/ffmpeg-7.0.2-arm64-static.tar.xz",
-		SHA256: "f4149bb2b0784e30e99bdda85471c9b5930d3402014e934a5098b41d0f7201b1",
+		URL: "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linuxarm64-gpl-7.1.tar.xz",
 	},
 }
 
@@ -145,168 +169,46 @@ func (i *remoteFFmpegInstaller) Ensure(ctx context.Context, app *sdk.AppCtx, hos
 
 // install runs the full provision flow. Caller holds st.mu.
 //
-// Preference order:
-//
-//  1. System ffmpeg already on PATH (apt-installed or pre-baked image).
-//     Uses /usr/bin/ffmpeg + /usr/bin/ffprobe. Dynamically linked
-//     against the distro's OpenSSL → HTTPS works.
-//  2. apt-installed if `apt-get` is available — we're root on default
-//     Hetzner Ubuntu/Debian, so this is the common-case install path.
-//     Reliable HTTPS support is the whole reason we don't ship our own
-//     static binary anymore (v0.11.3): the johnvansickle build SIGSEGV's
-//     on HTTPS URLs even though `-protocols` lists it, which breaks
-//     the indexer's signed-URL flow on R2/S3/any TLS-served storage.
-//  3. Vendored static binary as a last-resort fallback for non-Debian
-//     hosts (Alpine, RHEL-based, etc.). Documented to lack HTTPS — works
-//     when sources are reachable over plain HTTP. The static path is
-//     preserved so the remote render path keeps working on those hosts
-//     (it downloads via curl first, so ffmpeg never speaks TLS).
+// Download + extract the BtbN static binary into the per-channel dir
+// under $HOME. We don't probe for system ffmpeg (apt-installed v4.4
+// would shadow our preferred 7.x) and we don't fall back to apt
+// either: BtbN is reliable enough and gives us the same modern build
+// on every host regardless of distro. Cached on subsequent calls via
+// the existence probe at the binary path.
 func (i *remoteFFmpegInstaller) install(ctx context.Context, app *sdk.AppCtx, hostID int64) (installedPaths, error) {
 	log := app.Logger()
 
-	// Step 1: check for system ffmpeg first. Cheapest win.
-	if paths, ok, err := probeSystemFFmpeg(ctx, app, hostID); err != nil {
-		return installedPaths{}, fmt.Errorf("probe system ffmpeg: %w", err)
-	} else if ok {
-		log.Info("remote ffmpeg: using system install",
-			"host_id", hostID, "path", paths.FFmpeg)
-		return paths, nil
-	}
-
-	// Step 2: apt-get install if available.
-	if hasApt, err := probeApt(ctx, app, hostID); err != nil {
-		return installedPaths{}, fmt.Errorf("probe apt: %w", err)
-	} else if hasApt {
-		log.Info("remote ffmpeg: installing via apt", "host_id", hostID)
-		if err := runAptInstall(ctx, app, hostID); err != nil {
-			return installedPaths{}, fmt.Errorf("apt install ffmpeg on host_id=%d: %w", hostID, err)
-		}
-		// Re-probe — apt landed it at /usr/bin/, but be defensive
-		// against distro layout quirks by re-resolving.
-		paths, ok, err := probeSystemFFmpeg(ctx, app, hostID)
-		if err != nil || !ok {
-			return installedPaths{}, fmt.Errorf("apt install reported success but ffmpeg still not on PATH (err=%v, found=%v)", err, ok)
-		}
-		log.Info("remote ffmpeg: apt install complete", "host_id", hostID, "path", paths.FFmpeg)
-		return paths, nil
-	}
-
-	// Step 3: static binary fallback (non-Debian distros). HTTPS won't
-	// work — indexer's signed-URL probe will fail. Renders work because
-	// they curl-download sources first.
 	arch, err := detectRemoteArch(ctx, app, hostID)
 	if err != nil {
 		return installedPaths{}, fmt.Errorf("detect arch: %w", err)
 	}
 	src, ok := ffmpegSources[arch]
 	if !ok {
-		return installedPaths{}, fmt.Errorf("no system ffmpeg, no apt, and unsupported arch %q for static fallback", arch)
+		return installedPaths{}, fmt.Errorf("unsupported remote arch %q (supported: amd64, arm64)", arch)
 	}
 
-	ffmpegPath := remoteInstallDir + "/ffmpeg"
-	ffprobePath := remoteInstallDir + "/ffprobe"
+	ffmpegPath := remoteInstallDir + "/bin/ffmpeg"
+	ffprobePath := remoteInstallDir + "/bin/ffprobe"
 
+	// Existence probe — one-RTT skip when the binary's already there.
 	already, version, err := probeInstalled(ctx, app, hostID, ffmpegPath)
 	if err != nil {
 		return installedPaths{}, fmt.Errorf("probe install: %w", err)
 	}
 	if already {
-		log.Info("remote ffmpeg: using vendored static fallback (HTTPS-limited)",
+		log.Info("remote ffmpeg already installed",
 			"host_id", hostID, "arch", arch, "path", ffmpegPath, "version", version)
 		return installedPaths{FFmpeg: ffmpegPath, FFprobe: ffprobePath}, nil
 	}
 
-	log.Warn("remote ffmpeg: no system install + no apt; downloading static fallback (HTTPS will not work)",
-		"host_id", hostID, "arch", arch, "version", ffmpegVersion, "url", src.URL)
+	log.Info("remote ffmpeg install starting",
+		"host_id", hostID, "arch", arch, "channel", ffmpegVersion, "url", src.URL)
 	if err := runInstall(ctx, app, hostID, src); err != nil {
 		return installedPaths{}, fmt.Errorf("install ffmpeg %s on host_id=%d: %w", ffmpegVersion, hostID, err)
 	}
-	log.Info("remote ffmpeg static install complete",
+	log.Info("remote ffmpeg install complete",
 		"host_id", hostID, "arch", arch, "path", ffmpegPath)
 	return installedPaths{FFmpeg: ffmpegPath, FFprobe: ffprobePath}, nil
-}
-
-// probeSystemFFmpeg checks whether ffmpeg + ffprobe are already on
-// the host's PATH (apt-installed, pre-baked image, etc.). Returns
-// (paths, found, err). A missing binary is the common case and
-// returns (zero, false, nil) — not an error.
-//
-// We require BOTH ffmpeg and ffprobe; an install where only one is
-// present is treated as not-installed so the apt path can complete
-// it. Resolves the actual absolute path via `command -v` rather than
-// hardcoding /usr/bin/ — some distros use /usr/local/bin or have
-// alternatives via update-alternatives.
-func probeSystemFFmpeg(ctx context.Context, app *sdk.AppCtx, hostID int64) (installedPaths, bool, error) {
-	cmd := `FFMPEG=$(command -v ffmpeg 2>/dev/null || true); ` +
-		`FFPROBE=$(command -v ffprobe 2>/dev/null || true); ` +
-		`if [ -n "$FFMPEG" ] && [ -n "$FFPROBE" ]; then ` +
-		`  printf 'FFMPEG=%s\nFFPROBE=%s\n' "$FFMPEG" "$FFPROBE"; ` +
-		`else echo MISSING; fi`
-	out, exit, err := runRemote(ctx, app, hostID, cmd, 10)
-	if err != nil {
-		return installedPaths{}, false, err
-	}
-	if exit != 0 {
-		return installedPaths{}, false, fmt.Errorf("system probe exit=%d: %s", exit, truncate(out, 200))
-	}
-	if strings.Contains(out, "MISSING") {
-		return installedPaths{}, false, nil
-	}
-	var paths installedPaths
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		switch {
-		case strings.HasPrefix(line, "FFMPEG="):
-			paths.FFmpeg = strings.TrimPrefix(line, "FFMPEG=")
-		case strings.HasPrefix(line, "FFPROBE="):
-			paths.FFprobe = strings.TrimPrefix(line, "FFPROBE=")
-		}
-	}
-	if paths.FFmpeg == "" || paths.FFprobe == "" {
-		return installedPaths{}, false, nil
-	}
-	return paths, true, nil
-}
-
-// probeApt returns true when apt-get is available on the remote.
-// Used to decide whether the apt-install branch is viable.
-func probeApt(ctx context.Context, app *sdk.AppCtx, hostID int64) (bool, error) {
-	out, exit, err := runRemote(ctx, app, hostID,
-		`if command -v apt-get >/dev/null 2>&1; then echo HAS_APT; else echo NO_APT; fi`, 10)
-	if err != nil {
-		return false, err
-	}
-	if exit != 0 {
-		return false, fmt.Errorf("apt probe exit=%d: %s", exit, truncate(out, 200))
-	}
-	return strings.Contains(out, "HAS_APT"), nil
-}
-
-// runAptInstall installs ffmpeg via apt-get on the remote. Runs
-// non-interactively (DEBIAN_FRONTEND=noninteractive) so it never
-// prompts for confirmation or service restarts. The `apt-get update`
-// is necessary on cloud-init-fresh boxes whose package lists may be
-// stale; on a recently-updated host it's a cheap no-op.
-//
-// 4-minute timeout: covers a slow mirror + first-time apt-get update
-// + downloading ffmpeg's deps (Ubuntu 22.04 pulls ~80 packages,
-// ~150 MB; Ubuntu 24.04 has a slimmer set). Real-world: usually
-// under 90 seconds.
-func runAptInstall(ctx context.Context, app *sdk.AppCtx, hostID int64) error {
-	script := `set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq --no-install-recommends ffmpeg
-ffmpeg -version | head -1
-ffprobe -version | head -1
-`
-	out, exit, err := runRemote(ctx, app, hostID, script, 240)
-	if err != nil {
-		return err
-	}
-	if exit != 0 {
-		return fmt.Errorf("apt install script exit=%d: %s", exit, truncate(out, 800))
-	}
-	return nil
 }
 
 // ─── remote operations ─────────────────────────────────────────────
@@ -357,37 +259,49 @@ func probeInstalled(ctx context.Context, app *sdk.AppCtx, hostID int64, ffmpegPa
 	return true, first, nil
 }
 
-// runInstall is the actual download → verify → extract script. Runs
-// under a longer timeout because the download (~25 MB compressed) +
-// extract (~80 MB on disk) takes real wall-clock on a small VPS.
+// runInstall is the download → extract script. ~50 MB download
+// (xz-compressed BtbN tarball) → ~250 MB extracted, takes real
+// wall-clock on a small VPS so the timeout is generous.
 //
-// `set -euo pipefail` so any step's failure aborts the script with a
-// non-zero exit — the caller surfaces that with the captured output.
-// Working dir is the install parent so curl + extract land where we
-// want without needing absolute paths.
+// `set -euo pipefail` aborts on any step's failure; the caller
+// surfaces the captured output with the exit code.
 //
-// We extract with `--strip-components=1` because the upstream tarball
-// has a top-level directory (`ffmpeg-7.0.2-amd64-static/`) that we
-// don't want in our path.
+// `--strip-components=1` flattens the upstream's top-level directory
+// (BtbN names it like `ffmpeg-n7.1-NN-ghash-linux64-gpl-7.1/`) so
+// the binaries land at <install_dir>/bin/{ffmpeg,ffprobe}.
+//
+// No sha256 verification: BtbN's "latest" channel is rolling and
+// any pinned hash would go stale daily. We trust github.com's TLS
+// for download integrity (same trust model as curl-pipe-sh installers
+// across the ecosystem) and self-verify by running the extracted
+// binary's -version + a quick HTTPS probe before declaring success.
 func runInstall(ctx context.Context, app *sdk.AppCtx, hostID int64, src ffmpegSource) error {
 	script := fmt.Sprintf(`set -euo pipefail
 mkdir -p %[1]s
 cd %[1]s
-# Free-space guard: ~250 MB headroom covers compressed + extracted
-# + a margin. df reports 1K blocks, so 250000 = ~250 MB.
+# Free-space guard: ~400 MB headroom covers compressed + extracted
+# + a margin. df reports 1K blocks, so 400000 = ~400 MB.
 FREE=$(df -P . | tail -1 | awk '{print $4}')
-if [ "$FREE" -lt 250000 ]; then
-  echo "insufficient disk: $FREE KB free, need ~250000 KB"
+if [ "$FREE" -lt 400000 ]; then
+  echo "insufficient disk: $FREE KB free, need ~400000 KB"
   exit 1
 fi
 curl -sS -L --fail -o ffmpeg.tar.xz %[2]q
-echo "%[3]s  ffmpeg.tar.xz" | sha256sum -c -
 tar -xJf ffmpeg.tar.xz --strip-components=1
 rm -f ffmpeg.tar.xz
-test -x ./ffmpeg
-test -x ./ffprobe
-./ffmpeg -version | head -1
-`, remoteInstallDir, src.URL, src.SHA256)
+test -x ./bin/ffmpeg
+test -x ./bin/ffprobe
+./bin/ffmpeg -version | head -1
+# Sanity: make sure HTTPS actually works in this build. Fetches
+# only response headers from a tiny well-known endpoint via
+# ffprobe's HTTP demuxer. A SIGSEGV here means we re-shipped the
+# johnvansickle-class bug; bail loudly so the operator hears about
+# it instead of the indexer silently falling back forever.
+./bin/ffprobe -v error -i https://github.com/favicon.ico -show_format 2>&1 | head -3 || {
+  echo "ffprobe HTTPS probe failed — this BtbN build does not have working TLS"
+  exit 1
+}
+`, remoteInstallDir, src.URL)
 
 	// 5 min cap. Real-world: ~10s download + ~5s extract on a
 	// reasonable VPS. The cap mostly defends against curl hangs.
