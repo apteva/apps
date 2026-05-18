@@ -160,6 +160,14 @@ func (a *App) MCPTools() []sdk.Tool {
 				"properties": map[string]any{},
 			},
 		},
+		{
+			Name: "deploy_health", Handler: a.toolHealth,
+			Description: "Health snapshot for this project's deployments. Returns deployments whose current release is crashed/failed, or stuck in starting, or auto-restart paused. Includes how long each has been unhealthy and the auto-restart attempt count. Designed for a jobs cron / alert worker to poll on a tight interval: an empty `unhealthy` list means everything is fine. Args: (none, project_id from context).",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+		},
 	}
 }
 
@@ -463,6 +471,91 @@ func (a *App) toolListRoutes(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		})
 	}
 	return map[string]any{"routes": out, "count": len(out)}, nil
+}
+
+// toolHealth returns a snapshot of unhealthy deployments for polling
+// alert sinks (jobs cron, watchman). A deployment is unhealthy if
+// any of: current_release is crashed/failed, current release is
+// stuck in starting > 2min, or auto-restart is paused.
+//
+// Returns an empty `unhealthy` list when everything is fine — the
+// caller's alert rule is "len(unhealthy) > 0 → page". Designed to be
+// cheap to poll: a single dbListDeployments + one dbGetRelease per
+// deployment.
+func (a *App) toolHealth(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	deps, err := dbListDeployments(ctx.AppDB(), pid, false /* include archived */)
+	if err != nil {
+		return nil, err
+	}
+	type unhealthyEntry struct {
+		DeploymentID   int64  `json:"deployment_id"`
+		Name           string `json:"name"`
+		Domain         string `json:"domain,omitempty"`
+		Status         string `json:"status"`          // crashed | failed | starting_stuck | auto_restart_paused
+		ReleaseID      int64  `json:"release_id,omitempty"`
+		Reason         string `json:"reason,omitempty"`
+		UnhealthyForS  int    `json:"unhealthy_for_s"` // seconds since the bad state began
+		AutoRestart    autoRestartInfo `json:"auto_restart"`
+	}
+	out := []unhealthyEntry{}
+	now := time.Now().UTC()
+	for _, d := range deps {
+		a.autoRestartMu.Lock()
+		ar := a.autoRestartState[d.ID]
+		a.autoRestartMu.Unlock()
+		if ar.Paused {
+			out = append(out, unhealthyEntry{
+				DeploymentID: d.ID, Name: d.Name, Domain: d.Domain,
+				Status: "auto_restart_paused", Reason: "max attempts reached",
+				AutoRestart: ar,
+			})
+			continue
+		}
+		if d.CurrentReleaseID == nil {
+			continue // no release ever → not unhealthy, just unbooted
+		}
+		rel, _ := dbGetRelease(ctx.AppDB(), *d.CurrentReleaseID)
+		if rel == nil {
+			continue
+		}
+		var entry *unhealthyEntry
+		switch rel.Status {
+		case "crashed", "failed":
+			since := 0
+			if t, err := time.Parse(time.RFC3339, rel.StoppedAt); err == nil {
+				since = int(now.Sub(t).Seconds())
+			}
+			entry = &unhealthyEntry{
+				DeploymentID: d.ID, Name: d.Name, Domain: d.Domain,
+				Status: rel.Status, ReleaseID: rel.ID,
+				Reason: rel.Error, UnhealthyForS: since,
+				AutoRestart: ar,
+			}
+		case "starting":
+			startedAt, _ := time.Parse(time.RFC3339, rel.StartedAt)
+			if !startedAt.IsZero() && now.Sub(startedAt) > 2*time.Minute {
+				entry = &unhealthyEntry{
+					DeploymentID: d.ID, Name: d.Name, Domain: d.Domain,
+					Status: "starting_stuck", ReleaseID: rel.ID,
+					Reason:        "release in starting state > 2min — pid never owned port",
+					UnhealthyForS: int(now.Sub(startedAt).Seconds()),
+					AutoRestart:   ar,
+				}
+			}
+		}
+		if entry != nil {
+			out = append(out, *entry)
+		}
+	}
+	return map[string]any{
+		"unhealthy":  out,
+		"count":      len(out),
+		"checked_at": now,
+	}, nil
 }
 
 // ─── helpers ──────────────────────────────────────────────────────

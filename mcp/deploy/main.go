@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.11.2
+version: 0.12.0
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
@@ -121,6 +121,20 @@ type App struct {
 
 	buildSem     chan struct{} // throttle concurrent builds
 	watchdogStop chan struct{} // closed on unmount; pid-owns-port poller
+
+	// Auto-restart bookkeeping. In-memory: a sidecar restart resets
+	// the counter, which is fine — reconcileReleases will re-adopt
+	// any process that survived. Per deployment: how many consecutive
+	// restart attempts have fired, and when the last one fired (for
+	// exponential backoff). Cleared on a successful promoteToLive.
+	autoRestartMu    sync.Mutex
+	autoRestartState map[int64]autoRestartInfo
+}
+
+type autoRestartInfo struct {
+	Attempts int
+	LastAt   time.Time
+	Paused   bool // hit the cap; operator must intervene
 }
 
 var globalCtx *sdk.AppCtx
@@ -176,6 +190,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	a.buildSem = make(chan struct{}, a.maxBuilds)
 	a.registry = NewSupervisorRegistry()
+	a.autoRestartState = map[int64]autoRestartInfo{}
 	a.runtime = NewLocalRuntime(a.dataDir, a)
 
 	ctx.Logger().Info("deploy mounted",
@@ -662,13 +677,17 @@ func (a *App) markCrashed(releaseID int64, cause error) {
 	if rel != nil {
 		_ = dbReleasePortLease(globalCtx.AppDB(), rel.Port)
 		_ = dbAppendReleaseEvent(globalCtx.AppDB(), releaseID, "crash", fmt.Sprintf(`{"error":%q}`, cause.Error()))
-		emit("deploy.release.crashed", map[string]any{
-			"deployment_id": rel.DeploymentID, "release_id": releaseID, "error": cause.Error(),
-		})
+		payload := a.crashEventPayload(rel, "process_exit")
+		payload["error"] = cause.Error()
+		emit("deploy.release.crashed", payload)
 		// Cascade: a crashed release's route would otherwise stay live
 		// in the routes-app DB pointing at a now-freed port — the next
 		// allocator pick lands on it and the wrong site is served.
 		a.cascadeUnregisterRoute(rel.DeploymentID)
+		// Try to bring the deployment back up; autoRestart respects
+		// its own backoff + cap so a crash-loop can't stampede the
+		// supervisor.
+		go a.autoRestart(rel.DeploymentID, "process_exit")
 	}
 	a.registry.Delete(releaseID)
 }
@@ -914,6 +933,9 @@ func (a *App) promoteToLive(releaseID int64, pid, port int) {
 	emit("deploy.release.live", map[string]any{
 		"deployment_id": rel.DeploymentID, "release_id": releaseID, "port": port, "pid": pid,
 	})
+	// Release is healthy — clear any auto-restart backoff so the next
+	// crash starts from a fresh attempts budget.
+	a.resetAutoRestart(rel.DeploymentID)
 	d, _ := dbGetDeploymentByID(globalCtx.AppDB(), rel.DeploymentID)
 	if d != nil && d.Domain != "" {
 		registerRouteForDeployment(globalCtx, a, d)
@@ -989,12 +1011,158 @@ func (a *App) markPortOwnerChanged(rel *Release) {
 	})
 	_ = dbReleasePortLease(globalCtx.AppDB(), rel.Port)
 	_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "crash", `{"reason":"port_owner_changed"}`)
-	emit("deploy.release.crashed", map[string]any{
-		"deployment_id": rel.DeploymentID, "release_id": rel.ID,
-		"reason": "port_owner_changed",
-	})
+	emit("deploy.release.crashed", a.crashEventPayload(rel, "port_owner_changed"))
 	a.registry.Delete(rel.ID)
 	a.cascadeUnregisterRoute(rel.DeploymentID)
+	// Try to bring the deployment back up. Async so the caller (the
+	// watchdog tick) returns immediately; auto-restart respects its
+	// own backoff/cap so a tight loop on the watchdog can't pile up
+	// concurrent restart attempts for the same deployment.
+	go a.autoRestart(rel.DeploymentID, "port_owner_changed")
+}
+
+// ─── Auto-restart ─────────────────────────────────────────────────
+//
+// When a release flips to crashed (supervisor cmd.Wait error OR
+// watchdog port-owner-changed), try to bring the deployment back up
+// by spawning a new release from the last succeeded build.
+//
+// Capped at autoRestartMaxAttempts within autoRestartWindow to keep
+// a broken release from looping forever. Backoff is exponential:
+// 5s, 30s, 5min between attempts. After the cap the deployment is
+// "paused" — only an operator-driven action (deploy_release /
+// tenant_start) clears the state.
+//
+// Each successful promoteToLive clears the counter so a deployment
+// that genuinely recovers gets a fresh budget on its next crash.
+
+const (
+	autoRestartMaxAttempts = 3
+	autoRestartWindow      = 10 * time.Minute
+)
+
+var autoRestartBackoff = []time.Duration{5 * time.Second, 30 * time.Second, 5 * time.Minute}
+
+// autoRestart attempts to bring a deployment back up after a crash.
+// Returns silently when:
+//   - the cap is hit (state stays Paused; cleared by operator action)
+//   - backoff window hasn't elapsed since the last attempt
+//   - the deployment isn't restartable (no succeeded build, deleted,
+//     or the operator explicitly stopped it)
+//
+// Fires runRelease against the last succeeded build. Promotion to
+// "live" by the normal probe path then resets the counter.
+func (a *App) autoRestart(deploymentID int64, reason string) {
+	if globalCtx == nil || globalCtx.AppDB() == nil {
+		return
+	}
+	a.autoRestartMu.Lock()
+	st := a.autoRestartState[deploymentID]
+	if st.Paused {
+		a.autoRestartMu.Unlock()
+		return
+	}
+	if st.Attempts >= autoRestartMaxAttempts {
+		st.Paused = true
+		a.autoRestartState[deploymentID] = st
+		a.autoRestartMu.Unlock()
+		_ = dbAppendReleaseEvent(globalCtx.AppDB(), 0, "auto_restart_paused", fmt.Sprintf(`{"deployment_id":%d,"attempts":%d}`, deploymentID, st.Attempts))
+		emit("deploy.auto_restart_paused", map[string]any{
+			"deployment_id": deploymentID, "attempts": st.Attempts,
+			"reason": "max_attempts_reached",
+		})
+		return
+	}
+	// Backoff: pick the delay for THIS attempt by attempt count.
+	delay := autoRestartBackoff[st.Attempts]
+	if !st.LastAt.IsZero() && time.Since(st.LastAt) < delay {
+		// Re-fire the trigger after the remaining backoff. Without
+		// this re-schedule, a single crash burst would only get one
+		// restart try.
+		remaining := delay - time.Since(st.LastAt)
+		a.autoRestartMu.Unlock()
+		go func() {
+			time.Sleep(remaining)
+			a.autoRestart(deploymentID, reason+"+backoff")
+		}()
+		return
+	}
+	st.Attempts++
+	st.LastAt = time.Now().UTC()
+	a.autoRestartState[deploymentID] = st
+	a.autoRestartMu.Unlock()
+
+	// Find the deployment + last succeeded build. project_id from
+	// the deployment row; auto-restart doesn't have a project
+	// context of its own.
+	d, err := dbGetDeploymentByID(globalCtx.AppDB(), deploymentID)
+	if err != nil || d == nil {
+		return
+	}
+	if d.Domain == "" && d.CurrentReleaseID == nil {
+		// Operator-cleared deployment; nothing to restart toward.
+		return
+	}
+	builds, err := dbListBuilds(globalCtx.AppDB(), deploymentID, 5)
+	if err != nil {
+		return
+	}
+	var lastBuild *Build
+	for i := range builds {
+		if builds[i].Status == "succeeded" {
+			lastBuild = &builds[i]
+			break
+		}
+	}
+	if lastBuild == nil {
+		return
+	}
+	emit("deploy.auto_restart_attempted", map[string]any{
+		"deployment_id": deploymentID, "build_id": lastBuild.ID,
+		"attempt": st.Attempts, "reason": reason,
+	})
+	_, err = a.runRelease(d, lastBuild)
+	if err != nil {
+		_ = dbAppendReleaseEvent(globalCtx.AppDB(), 0, "auto_restart_failed",
+			fmt.Sprintf(`{"deployment_id":%d,"error":%q,"attempt":%d}`, deploymentID, err.Error(), st.Attempts))
+		emit("deploy.auto_restart_failed", map[string]any{
+			"deployment_id": deploymentID, "attempt": st.Attempts, "error": err.Error(),
+		})
+	}
+	// Success/failure of runRelease doesn't reset Attempts here —
+	// only promoteToLive does, since "spawn succeeded but release
+	// crashes 10s later" is still failure from auto-restart's POV.
+}
+
+// resetAutoRestart clears the counter for a deployment. Called from
+// promoteToLive when a release reaches live, signalling the
+// deployment is healthy again.
+func (a *App) resetAutoRestart(deploymentID int64) {
+	a.autoRestartMu.Lock()
+	defer a.autoRestartMu.Unlock()
+	delete(a.autoRestartState, deploymentID)
+}
+
+// crashEventPayload builds a richer event for downstream subscribers
+// (jobs cron, watchman). Includes the deployment name + domain +
+// auto-restart state so an alert sink can render a useful message
+// without having to fetch more state.
+func (a *App) crashEventPayload(rel *Release, reason string) map[string]any {
+	out := map[string]any{
+		"deployment_id": rel.DeploymentID,
+		"release_id":    rel.ID,
+		"reason":        reason,
+	}
+	if d, err := dbGetDeploymentByID(globalCtx.AppDB(), rel.DeploymentID); err == nil && d != nil {
+		out["deployment_name"] = d.Name
+		out["domain"] = d.Domain
+	}
+	a.autoRestartMu.Lock()
+	st := a.autoRestartState[rel.DeploymentID]
+	a.autoRestartMu.Unlock()
+	out["auto_restart_attempts"] = st.Attempts
+	out["auto_restart_paused"] = st.Paused
+	return out
 }
 
 // ─── Port allocator ───────────────────────────────────────────────
