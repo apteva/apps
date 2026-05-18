@@ -144,42 +144,169 @@ func (i *remoteFFmpegInstaller) Ensure(ctx context.Context, app *sdk.AppCtx, hos
 }
 
 // install runs the full provision flow. Caller holds st.mu.
+//
+// Preference order:
+//
+//  1. System ffmpeg already on PATH (apt-installed or pre-baked image).
+//     Uses /usr/bin/ffmpeg + /usr/bin/ffprobe. Dynamically linked
+//     against the distro's OpenSSL → HTTPS works.
+//  2. apt-installed if `apt-get` is available — we're root on default
+//     Hetzner Ubuntu/Debian, so this is the common-case install path.
+//     Reliable HTTPS support is the whole reason we don't ship our own
+//     static binary anymore (v0.11.3): the johnvansickle build SIGSEGV's
+//     on HTTPS URLs even though `-protocols` lists it, which breaks
+//     the indexer's signed-URL flow on R2/S3/any TLS-served storage.
+//  3. Vendored static binary as a last-resort fallback for non-Debian
+//     hosts (Alpine, RHEL-based, etc.). Documented to lack HTTPS — works
+//     when sources are reachable over plain HTTP. The static path is
+//     preserved so the remote render path keeps working on those hosts
+//     (it downloads via curl first, so ffmpeg never speaks TLS).
 func (i *remoteFFmpegInstaller) install(ctx context.Context, app *sdk.AppCtx, hostID int64) (installedPaths, error) {
 	log := app.Logger()
 
+	// Step 1: check for system ffmpeg first. Cheapest win.
+	if paths, ok, err := probeSystemFFmpeg(ctx, app, hostID); err != nil {
+		return installedPaths{}, fmt.Errorf("probe system ffmpeg: %w", err)
+	} else if ok {
+		log.Info("remote ffmpeg: using system install",
+			"host_id", hostID, "path", paths.FFmpeg)
+		return paths, nil
+	}
+
+	// Step 2: apt-get install if available.
+	if hasApt, err := probeApt(ctx, app, hostID); err != nil {
+		return installedPaths{}, fmt.Errorf("probe apt: %w", err)
+	} else if hasApt {
+		log.Info("remote ffmpeg: installing via apt", "host_id", hostID)
+		if err := runAptInstall(ctx, app, hostID); err != nil {
+			return installedPaths{}, fmt.Errorf("apt install ffmpeg on host_id=%d: %w", hostID, err)
+		}
+		// Re-probe — apt landed it at /usr/bin/, but be defensive
+		// against distro layout quirks by re-resolving.
+		paths, ok, err := probeSystemFFmpeg(ctx, app, hostID)
+		if err != nil || !ok {
+			return installedPaths{}, fmt.Errorf("apt install reported success but ffmpeg still not on PATH (err=%v, found=%v)", err, ok)
+		}
+		log.Info("remote ffmpeg: apt install complete", "host_id", hostID, "path", paths.FFmpeg)
+		return paths, nil
+	}
+
+	// Step 3: static binary fallback (non-Debian distros). HTTPS won't
+	// work — indexer's signed-URL probe will fail. Renders work because
+	// they curl-download sources first.
 	arch, err := detectRemoteArch(ctx, app, hostID)
 	if err != nil {
 		return installedPaths{}, fmt.Errorf("detect arch: %w", err)
 	}
 	src, ok := ffmpegSources[arch]
 	if !ok {
-		return installedPaths{}, fmt.Errorf("unsupported remote arch %q (supported: amd64, arm64)", arch)
+		return installedPaths{}, fmt.Errorf("no system ffmpeg, no apt, and unsupported arch %q for static fallback", arch)
 	}
 
 	ffmpegPath := remoteInstallDir + "/ffmpeg"
 	ffprobePath := remoteInstallDir + "/ffprobe"
 
-	// Existence probe — cheap one-RTT skip when the binary's already
-	// where we expect it.
 	already, version, err := probeInstalled(ctx, app, hostID, ffmpegPath)
 	if err != nil {
 		return installedPaths{}, fmt.Errorf("probe install: %w", err)
 	}
 	if already {
-		log.Info("remote ffmpeg already installed",
+		log.Info("remote ffmpeg: using vendored static fallback (HTTPS-limited)",
 			"host_id", hostID, "arch", arch, "path", ffmpegPath, "version", version)
 		return installedPaths{FFmpeg: ffmpegPath, FFprobe: ffprobePath}, nil
 	}
 
-	log.Info("remote ffmpeg install starting",
+	log.Warn("remote ffmpeg: no system install + no apt; downloading static fallback (HTTPS will not work)",
 		"host_id", hostID, "arch", arch, "version", ffmpegVersion, "url", src.URL)
 	if err := runInstall(ctx, app, hostID, src); err != nil {
 		return installedPaths{}, fmt.Errorf("install ffmpeg %s on host_id=%d: %w", ffmpegVersion, hostID, err)
 	}
-	log.Info("remote ffmpeg install complete",
+	log.Info("remote ffmpeg static install complete",
 		"host_id", hostID, "arch", arch, "path", ffmpegPath)
-
 	return installedPaths{FFmpeg: ffmpegPath, FFprobe: ffprobePath}, nil
+}
+
+// probeSystemFFmpeg checks whether ffmpeg + ffprobe are already on
+// the host's PATH (apt-installed, pre-baked image, etc.). Returns
+// (paths, found, err). A missing binary is the common case and
+// returns (zero, false, nil) — not an error.
+//
+// We require BOTH ffmpeg and ffprobe; an install where only one is
+// present is treated as not-installed so the apt path can complete
+// it. Resolves the actual absolute path via `command -v` rather than
+// hardcoding /usr/bin/ — some distros use /usr/local/bin or have
+// alternatives via update-alternatives.
+func probeSystemFFmpeg(ctx context.Context, app *sdk.AppCtx, hostID int64) (installedPaths, bool, error) {
+	cmd := `FFMPEG=$(command -v ffmpeg 2>/dev/null || true); ` +
+		`FFPROBE=$(command -v ffprobe 2>/dev/null || true); ` +
+		`if [ -n "$FFMPEG" ] && [ -n "$FFPROBE" ]; then ` +
+		`  printf 'FFMPEG=%s\nFFPROBE=%s\n' "$FFMPEG" "$FFPROBE"; ` +
+		`else echo MISSING; fi`
+	out, exit, err := runRemote(ctx, app, hostID, cmd, 10)
+	if err != nil {
+		return installedPaths{}, false, err
+	}
+	if exit != 0 {
+		return installedPaths{}, false, fmt.Errorf("system probe exit=%d: %s", exit, truncate(out, 200))
+	}
+	if strings.Contains(out, "MISSING") {
+		return installedPaths{}, false, nil
+	}
+	var paths installedPaths
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		switch {
+		case strings.HasPrefix(line, "FFMPEG="):
+			paths.FFmpeg = strings.TrimPrefix(line, "FFMPEG=")
+		case strings.HasPrefix(line, "FFPROBE="):
+			paths.FFprobe = strings.TrimPrefix(line, "FFPROBE=")
+		}
+	}
+	if paths.FFmpeg == "" || paths.FFprobe == "" {
+		return installedPaths{}, false, nil
+	}
+	return paths, true, nil
+}
+
+// probeApt returns true when apt-get is available on the remote.
+// Used to decide whether the apt-install branch is viable.
+func probeApt(ctx context.Context, app *sdk.AppCtx, hostID int64) (bool, error) {
+	out, exit, err := runRemote(ctx, app, hostID,
+		`if command -v apt-get >/dev/null 2>&1; then echo HAS_APT; else echo NO_APT; fi`, 10)
+	if err != nil {
+		return false, err
+	}
+	if exit != 0 {
+		return false, fmt.Errorf("apt probe exit=%d: %s", exit, truncate(out, 200))
+	}
+	return strings.Contains(out, "HAS_APT"), nil
+}
+
+// runAptInstall installs ffmpeg via apt-get on the remote. Runs
+// non-interactively (DEBIAN_FRONTEND=noninteractive) so it never
+// prompts for confirmation or service restarts. The `apt-get update`
+// is necessary on cloud-init-fresh boxes whose package lists may be
+// stale; on a recently-updated host it's a cheap no-op.
+//
+// 4-minute timeout: covers a slow mirror + first-time apt-get update
+// + downloading ffmpeg's deps (Ubuntu 22.04 pulls ~80 packages,
+// ~150 MB; Ubuntu 24.04 has a slimmer set). Real-world: usually
+// under 90 seconds.
+func runAptInstall(ctx context.Context, app *sdk.AppCtx, hostID int64) error {
+	script := `set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends ffmpeg
+ffmpeg -version | head -1
+ffprobe -version | head -1
+`
+	out, exit, err := runRemote(ctx, app, hostID, script, 240)
+	if err != nil {
+		return err
+	}
+	if exit != 0 {
+		return fmt.Errorf("apt install script exit=%d: %s", exit, truncate(out, 800))
+	}
+	return nil
 }
 
 // ─── remote operations ─────────────────────────────────────────────
