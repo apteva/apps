@@ -67,6 +67,19 @@ func (binanceAdapter) ParseHoldings(raw json.RawMessage) (map[string]brokerBalan
 	return map[string]brokerBalance{}, nil
 }
 
+// History backfill — Binance's all_orders / open_orders both require
+// a per-symbol query. The portfolio-create backfill path doesn't know
+// which symbols to iterate (we'd need to enumerate every pair the
+// account ever touched), so we skip backfill for Binance in v1.
+// Adopting this later means walking holdings + watchlist for symbols
+// and issuing one all_orders call per pair — doable but rate-limit
+// sensitive.
+func (binanceAdapter) OrdersHistoryTool() (string, map[string]any) { return "", nil }
+func (binanceAdapter) OpenOrdersTool() (string, map[string]any)    { return "", nil }
+func (binanceAdapter) ParseOrders(raw json.RawMessage) ([]brokerHistoricOrder, error) {
+	return nil, nil
+}
+
 func (binanceAdapter) CancelArgs(o *Order, brokerOrderID string) map[string]any {
 	// origClientOrderId is stable across orderId reuse — prefer it.
 	return map[string]any{
@@ -298,8 +311,10 @@ type brokerAccount struct {
 }
 
 type brokerBalance struct {
-	Asset string  // "BTC", "ETH", …
-	Free  float64
+	Asset   string  // canonical local form: "BTC-USD", "AAPL", …
+	Free    float64 // qty available
+	AvgCost float64 // broker-reported cost basis (Alpaca's avg_entry_price);
+	                // 0 when the broker doesn't publish one (Binance get_account, polymarket).
 }
 
 // parseBinanceAccount decodes the get_account response into a quote

@@ -72,6 +72,27 @@ type brokerAdapter interface {
 	// canonical local form (AAPL, BTC-USD).
 	ParseHoldings(raw json.RawMessage) (map[string]brokerBalance, error)
 
+	// OrdersHistoryTool / OpenOrdersTool — upstream tool name + arg
+	// template for pulling order history (status=closed) and open
+	// orders respectively. Returns ("", nil) to opt out of either
+	// backfill on this broker. Args are merged into the
+	// ExecuteIntegrationTool call so adapters that need per-call
+	// filters (Binance's all_orders wants a symbol) can express that;
+	// adapters that don't (Alpaca takes status + limit at the
+	// endpoint level) just hand back {"limit": "50", "status": "closed"}.
+	//
+	// "" return = "this broker doesn't support history backfill for
+	// the current scope" — caller silently skips and continues with
+	// the rest of portfolio_create.
+	OrdersHistoryTool() (tool string, args map[string]any)
+	OpenOrdersTool() (tool string, args map[string]any)
+
+	// ParseOrders — parses the response of OrdersHistoryTool /
+	// OpenOrdersTool into a list of brokerHistoricOrder rows. Same
+	// parser handles both: the response shape is the same; only the
+	// query filter differs.
+	ParseOrders(raw json.RawMessage) ([]brokerHistoricOrder, error)
+
 	// CancelArgs — args for cancel_order. Receives the local order so
 	// the adapter can use whichever cancel handle works best (client id
 	// preferred where supported; broker id as fallback).
@@ -93,6 +114,28 @@ type brokerAdapter interface {
 	// {"code": 40010001, "message": "..."}. Returning ("", "") signals
 	// a successful call (callers should not invoke ErrText then).
 	ErrText(res *sdk.ExecuteResult, err error) (code, detail string)
+}
+
+// brokerHistoricOrder — flattened order shape used by the backfill
+// path. Every adapter normalises into this so the backfill code in
+// tools.go is broker-agnostic.
+type brokerHistoricOrder struct {
+	BrokerOrderID string  // exchange-side id (Alpaca uuid, Binance integer-as-string, ...)
+	ClientOrderID string  // operator-supplied id if any (matches our local Order.ID format when an apteva agent placed it)
+	Symbol        string  // canonical local form (AAPL, BTC-USD)
+	AssetClass    string  // inferred class for the symbol
+	Side          string  // "buy" | "sell" | "yes" | "no"
+	Type          string  // "market" | "limit" | "stop"
+	Qty           float64 // total quantity requested
+	FilledQty     float64 // quantity actually filled (==Qty for closed-filled, 0 for closed-canceled, partial for partial-fills)
+	AvgFillPrice  float64 // VWAP across fills, 0 if unfilled
+	LimitPrice    float64 // 0 if not a limit order
+	StopPrice     float64 // 0 if not a stop order
+	TIF           string  // "day" | "gtc" | "ioc" | "fok" | ...
+	Status        string  // local: "filled" | "cancelled" | "rejected" | "working"
+	BrokerStatus  string  // raw upstream status for the journal record
+	PlacedAt      string  // RFC3339; empty if broker didn't ship one
+	ResolvedAt    string  // RFC3339 for closed orders; empty for still-working
 }
 
 type brokerCapabilities struct {

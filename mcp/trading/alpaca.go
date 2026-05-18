@@ -282,9 +282,10 @@ func alpacaParsePositions(raw json.RawMessage) (map[string]brokerBalance, error)
 		return map[string]brokerBalance{}, nil
 	}
 	var positions []struct {
-		Symbol string `json:"symbol"`
-		Qty    string `json:"qty"`
-		Side   string `json:"side"` // "long" | "short"
+		Symbol         string `json:"symbol"`
+		Qty            string `json:"qty"`
+		Side           string `json:"side"` // "long" | "short"
+		AvgEntryPrice  string `json:"avg_entry_price"`
 	}
 	if err := json.Unmarshal(raw, &positions); err != nil {
 		return nil, fmt.Errorf("decode positions response: %w", err)
@@ -298,10 +299,123 @@ func alpacaParsePositions(raw json.RawMessage) (map[string]brokerBalance, error)
 			continue
 		}
 		canonical := fromAlpacaSymbol(p.Symbol)
+		// avg_entry_price is the real cost basis Alpaca tracks across
+		// every fill that built the current position. Seeding portfolios
+		// with this instead of current_mark means unrealized P&L is
+		// correct from the first refresh after connect — operators see
+		// "you've got +$840 on AAPL", not "+$0".
 		out[canonical] = brokerBalance{
-			Asset: canonical,
-			Free:  qty,
+			Asset:   canonical,
+			Free:    qty,
+			AvgCost: parseFloat(p.AvgEntryPrice),
 		}
+	}
+	return out, nil
+}
+
+// Order history — Alpaca's /v2/orders accepts {status, limit, direction}.
+// "closed" returns filled + canceled + expired + rejected. "open" gives
+// the currently-working set. We cap at 50 to keep portfolio_create
+// snappy even for old accounts with thousands of historical orders.
+func (alpacaAdapter) OrdersHistoryTool() (string, map[string]any) {
+	return "list_orders", map[string]any{
+		"status":    "closed",
+		"limit":     50,
+		"direction": "desc", // newest first
+	}
+}
+func (alpacaAdapter) OpenOrdersTool() (string, map[string]any) {
+	return "list_orders", map[string]any{
+		"status":    "open",
+		"limit":     50,
+		"direction": "desc",
+	}
+}
+
+// Alpaca's list_orders response shape (from their REST docs):
+//
+//	{
+//	  "id": "...",
+//	  "client_order_id": "...",
+//	  "created_at": "2024-…",
+//	  "submitted_at": "...",
+//	  "filled_at": "...",
+//	  "symbol": "AAPL",
+//	  "asset_class": "us_equity",
+//	  "qty": "10",
+//	  "filled_qty": "10",
+//	  "type": "market",
+//	  "side": "buy",
+//	  "time_in_force": "day",
+//	  "limit_price": "228.50" | null,
+//	  "stop_price": null,
+//	  "filled_avg_price": "227.69",
+//	  "status": "filled"
+//	}
+//
+// We normalise statuses via mapAlpacaStatus (same map used by
+// ParseOrder for create_order responses).
+func (alpacaAdapter) ParseOrders(raw json.RawMessage) ([]brokerHistoricOrder, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var rows []struct {
+		ID             string `json:"id"`
+		ClientOrderID  string `json:"client_order_id"`
+		CreatedAt      string `json:"created_at"`
+		SubmittedAt    string `json:"submitted_at"`
+		FilledAt       string `json:"filled_at"`
+		CanceledAt     string `json:"canceled_at"`
+		ExpiredAt      string `json:"expired_at"`
+		Symbol         string `json:"symbol"`
+		AssetClass     string `json:"asset_class"`
+		Qty            string `json:"qty"`
+		FilledQty      string `json:"filled_qty"`
+		Type           string `json:"type"`
+		Side           string `json:"side"`
+		TIF            string `json:"time_in_force"`
+		LimitPrice     string `json:"limit_price"`
+		StopPrice      string `json:"stop_price"`
+		FilledAvgPrice string `json:"filled_avg_price"`
+		Status         string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("decode list_orders response: %w", err)
+	}
+	out := make([]brokerHistoricOrder, 0, len(rows))
+	for _, r := range rows {
+		canonical := fromAlpacaSymbol(r.Symbol)
+		// Pick a resolved-at timestamp from whichever terminal event
+		// fired; falls back to "" for still-working orders.
+		resolved := r.FilledAt
+		if resolved == "" {
+			resolved = r.CanceledAt
+		}
+		if resolved == "" {
+			resolved = r.ExpiredAt
+		}
+		placed := r.SubmittedAt
+		if placed == "" {
+			placed = r.CreatedAt
+		}
+		out = append(out, brokerHistoricOrder{
+			BrokerOrderID: r.ID,
+			ClientOrderID: r.ClientOrderID,
+			Symbol:        canonical,
+			AssetClass:    inferAssetClass(canonical),
+			Side:          strings.ToLower(r.Side),
+			Type:          strings.ToLower(r.Type),
+			Qty:           parseFloat(r.Qty),
+			FilledQty:     parseFloat(r.FilledQty),
+			AvgFillPrice:  parseFloat(r.FilledAvgPrice),
+			LimitPrice:    parseFloat(r.LimitPrice),
+			StopPrice:     parseFloat(r.StopPrice),
+			TIF:           strings.ToLower(r.TIF),
+			Status:        mapAlpacaStatus(r.Status),
+			BrokerStatus:  r.Status,
+			PlacedAt:      placed,
+			ResolvedAt:    resolved,
+		})
 	}
 	return out, nil
 }

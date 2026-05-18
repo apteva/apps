@@ -514,6 +514,91 @@ func dbRejectOrder(db *sql.DB, id, code, detail string) error {
 	return err
 }
 
+// dbOrderIDByBrokerID — reverse of dbBrokerOrderIDFor. Given an
+// exchange-side order id, finds the local Order.ID it maps to (if
+// any) by looking up the rationale journal entry whose metadata
+// carries that broker_order_id. Used by the backfill path to skip
+// re-importing orders we already have.
+func dbOrderIDByBrokerID(db *sql.DB, brokerOrderID string) (string, error) {
+	if brokerOrderID == "" {
+		return "", nil
+	}
+	row := db.QueryRow(`
+		SELECT json_extract(metadata, '$.order_id')
+		FROM journal
+		WHERE kind = 'rationale' AND json_extract(metadata, '$.broker_order_id') = ?
+		ORDER BY created_at DESC LIMIT 1`, brokerOrderID)
+	var s sql.NullString
+	if err := row.Scan(&s); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", err
+	}
+	return s.String, nil
+}
+
+// dbInsertBackfilledOrder — order writer that takes EXPLICIT placed_at
+// and resolved_at timestamps, so historical orders pulled from the
+// broker land with their real chronology instead of the
+// CURRENT_TIMESTAMP default dbInsertOrder uses. Empty timestamps fall
+// through to the column defaults (e.g. unfilled open orders that
+// haven't resolved).
+func dbInsertBackfilledOrder(
+	db *sql.DB, projectID string, portfolioID int64, id,
+	symbol, assetClass, side, otype string,
+	qty, filledQty, avgFillPrice, limitPrice, stopPrice float64,
+	tif, status, rationale, source, placedAt, resolvedAt string,
+) error {
+	var lp, sp any
+	if limitPrice > 0 {
+		lp = limitPrice
+	}
+	if stopPrice > 0 {
+		sp = stopPrice
+	}
+	var placed, resolved any
+	if placedAt != "" {
+		placed = placedAt
+	}
+	if resolvedAt != "" {
+		resolved = resolvedAt
+	}
+	_, err := db.Exec(`
+		INSERT INTO orders (
+			id, project_id, portfolio_id, symbol, asset_class, side, type,
+			qty, filled_qty, avg_fill_price, limit_price, stop_price,
+			tif, status, rationale, source, placed_at, resolved_at
+		) VALUES (
+			?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?,
+			?, ?, ?, ?,
+			COALESCE(?, CURRENT_TIMESTAMP), ?
+		)`,
+		id, projectID, portfolioID, symbol, assetClass, side, otype,
+		qty, filledQty, avgFillPrice, lp, sp,
+		tif, status, rationale, source, placed, resolved)
+	return err
+}
+
+// dbInsertBackfilledFill — fill writer that takes an explicit
+// filled_at timestamp. Companion to dbInsertBackfilledOrder; the
+// regular dbInsertFill takes a *sql.Tx and uses CURRENT_TIMESTAMP.
+func dbInsertBackfilledFill(
+	db *sql.DB, projectID, orderID string, portfolioID int64,
+	qty, price, fee float64, filledAt string,
+) error {
+	var at any
+	if filledAt != "" {
+		at = filledAt
+	}
+	_, err := db.Exec(`
+		INSERT INTO fills (project_id, order_id, portfolio_id, qty, price, fee, filled_at)
+		VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))`,
+		projectID, orderID, portfolioID, qty, price, fee, at)
+	return err
+}
+
 // dbBrokerOrderIDFor — pulls the broker's order id out of the rationale
 // journal row that order_place writes when in live mode. The journal
 // metadata is the authoritative store; no broker_order_id column on

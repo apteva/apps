@@ -71,6 +71,17 @@ func (polymarketAdapter) ParseHoldings(_ json.RawMessage) (map[string]brokerBala
 	return map[string]brokerBalance{}, nil
 }
 
+// Polymarket order history — the CLOB exposes get_trades + get_open_orders
+// but their response shape (matched orders, partial book entries) differs
+// substantially from Alpaca's order shape. v1 ships without backfill on
+// polymarket so we don't ship half-correct parsers; a follow-up
+// implements ParseOrders against gamma's data endpoints.
+func (polymarketAdapter) OrdersHistoryTool() (string, map[string]any) { return "", nil }
+func (polymarketAdapter) OpenOrdersTool() (string, map[string]any)    { return "", nil }
+func (polymarketAdapter) ParseOrders(_ json.RawMessage) ([]brokerHistoricOrder, error) {
+	return nil, nil
+}
+
 // ─── Symbol mapping ────────────────────────────────────────────────
 //
 // Local canonical:   POLY:trump-wins-2028   (our app-level form)

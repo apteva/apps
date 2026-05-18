@@ -262,29 +262,67 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 
 		// Seed positions from broker holdings. Symbols arrive in the
 		// adapter's canonical form (BTC-USD for binance, AAPL / BTC-USD
-		// for alpaca via fromAlpacaSymbol). avg_cost is unknown at seed
-		// time; subsequent fills weight in via dbApplyFill.
+		// for alpaca via fromAlpacaSymbol). For Alpaca, bal.AvgCost
+		// carries the broker's real cost basis (avg_entry_price); for
+		// Binance, bal.AvgCost is 0 (not published by get_account) and
+		// we fall back to the current mark so unrealized P&L is 0 at
+		// seed time instead of bogus.
 		seeded := 0
+		seededWithCost := 0
 		for canonical, bal := range acct.Holdings {
 			cls := inferAssetClass(canonical)
-			price := 0.0
-			if mark, _ := dbGetMark(ctx.AppDB(), canonical); mark != nil {
-				price = mark.Price
+			cost := bal.AvgCost
+			if cost <= 0 {
+				if mark, _ := dbGetMark(ctx.AppDB(), canonical); mark != nil {
+					cost = mark.Price
+				}
+			} else {
+				seededWithCost++
 			}
-			_ = dbInsertPositionRaw(ctx.AppDB(), pid, id, canonical, cls, "", bal.Free, price)
+			_ = dbInsertPositionRaw(ctx.AppDB(), pid, id, canonical, cls, "", bal.Free, cost)
 			seeded++
 		}
 		if seeded > 0 {
-			body := fmt.Sprintf("Seeded %d position(s) from %s holdings on portfolio create. avg_cost is unknown — reconciler tracks future trades from here.", seeded, brokerSlug)
+			body := ""
+			if seededWithCost == seeded {
+				body = fmt.Sprintf("Seeded %d position(s) from %s holdings on portfolio create with broker-reported avg_entry_price.", seeded, brokerSlug)
+			} else if seededWithCost > 0 {
+				body = fmt.Sprintf("Seeded %d position(s) from %s holdings on portfolio create. %d had broker-reported cost basis; the rest defaulted to current mark.", seeded, brokerSlug, seededWithCost)
+			} else {
+				body = fmt.Sprintf("Seeded %d position(s) from %s holdings on portfolio create. %s doesn't publish cost basis — seeded to current mark; sell-side P&L will be off by the actual cost basis until you reset it.", seeded, brokerSlug, brokerSlug)
+			}
 			if entryID, jerr := dbInsertJournal(ctx.AppDB(), pid, id, "note", body, map[string]any{
 				"source": "broker_reconcile", "kind": "create_seed",
 				"broker_slug": brokerSlug, "broker_connection_id": bb.ConnectionID,
+				"seeded": seeded, "seeded_with_cost": seededWithCost,
 			}); jerr == nil {
 				emit("journal.appended", map[string]any{
 					"id": entryID, "portfolio_id": id, "kind": "note", "body": body,
 				})
 			}
 		}
+		// Backfill order + fill history from the broker. Best-effort
+		// — failures here don't block portfolio creation; the next
+		// reconcile cycle will eventually fill the gap. Adapters that
+		// don't support history backfill (Binance, Polymarket today)
+		// return ("", nil) and we silently skip.
+		backfilled, openSynced := backfillBrokerHistory(ctx, pid, id, bb)
+		if backfilled+openSynced > 0 {
+			body := fmt.Sprintf("Backfilled %d historical order(s) and %d open order(s) from %s.", backfilled, openSynced, brokerSlug)
+			if entryID, jerr := dbInsertJournal(ctx.AppDB(), pid, id, "note", body, map[string]any{
+				"source":              "broker_backfill",
+				"kind":                "history_backfill",
+				"broker_slug":         brokerSlug,
+				"broker_connection_id": bb.ConnectionID,
+				"historical_orders":   backfilled,
+				"open_orders_synced":  openSynced,
+			}); jerr == nil {
+				emit("journal.appended", map[string]any{
+					"id": entryID, "portfolio_id": id, "kind": "note", "body": body,
+				})
+			}
+		}
+
 		emit("portfolio.created", map[string]any{
 			"id": id, "name": name, "mandate": mandate,
 			"allowed_classes": classes, "starting_cash": cash,
@@ -360,6 +398,147 @@ func defaultBrokerSlug(ctx *sdk.AppCtx) (string, error) {
 		bound = append(bound, slug)
 	}
 	return "", fmt.Errorf("multiple brokers bound (%v) — pass broker_slug to disambiguate", bound)
+}
+
+// backfillBrokerHistory — best-effort sync of historical closed orders
+// + currently-open orders from the broker into the local DB. Called
+// once at portfolio_create. Returns (historicalCount, openCount) for
+// the audit journal line.
+//
+// Failures are swallowed — backfill is a quality-of-life surface, not
+// a correctness one. The next reconcile tick still picks up open
+// orders via their broker_order_id; missing history just means the
+// orders/fills tables start sparse.
+func backfillBrokerHistory(ctx *sdk.AppCtx, projectID string, portfolioID int64, bb *boundBroker) (int, int) {
+	historical := 0
+	open := 0
+
+	// ─── Historical (closed) orders ─────────────────────────────
+	if tool, args := bb.Adapter.OrdersHistoryTool(); tool != "" {
+		historical = importBrokerOrders(ctx, projectID, portfolioID, bb, tool, args, "backfill")
+	}
+
+	// ─── Currently-open broker orders ───────────────────────────
+	if tool, args := bb.Adapter.OpenOrdersTool(); tool != "" {
+		open = importBrokerOrders(ctx, projectID, portfolioID, bb, tool, args, "open_sync")
+	}
+
+	return historical, open
+}
+
+// importBrokerOrders — shared body for both backfill paths. Fetches +
+// parses + inserts; returns how many rows it actually wrote (skipping
+// dupes when the broker's order_id is already in our journal).
+//
+// `kind` flavors the local Order.ID prefix and the journal source so
+// audit queries can tell history-fill from open-order-sync apart:
+//
+//	kind=backfill  → o-bf-<broker_id_short>, source=broker_backfill
+//	kind=open_sync → o-os-<broker_id_short>, source=broker_open_sync
+func importBrokerOrders(ctx *sdk.AppCtx, projectID string, portfolioID int64, bb *boundBroker, tool string, args map[string]any, kind string) int {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bb.ConnectionID, tool, args)
+	if err != nil || res == nil || !res.Success {
+		return 0
+	}
+	rows, err := bb.Adapter.ParseOrders(res.Data)
+	if err != nil || len(rows) == 0 {
+		return 0
+	}
+
+	prefix := "o-bf-"
+	source := "broker_backfill:live"
+	if kind == "open_sync" {
+		prefix = "o-os-"
+		source = "broker_open_sync:live"
+	}
+
+	wrote := 0
+	for _, r := range rows {
+		// Idempotency: skip if we already imported this broker_order_id
+		// (re-runs of portfolio_create against the same connection
+		// shouldn't double-insert).
+		if existing, _ := dbOrderIDByBrokerID(ctx.AppDB(), r.BrokerOrderID); existing != "" {
+			continue
+		}
+		// Skip ClientOrderIDs that match our local format (orders
+		// originally placed via this app). If they're already in
+		// `orders` we'd hit primary-key conflicts; if they're not
+		// (orphaned), they likely belong to a different install — not
+		// our story to tell.
+		if r.ClientOrderID != "" && strings.HasPrefix(r.ClientOrderID, "o-") {
+			if existing, _ := dbGetOrder(ctx.AppDB(), projectID, r.ClientOrderID); existing != nil {
+				continue
+			}
+		}
+
+		localID := prefix + safeBrokerIDShort(r.BrokerOrderID)
+		rationale := "Imported from broker on portfolio_create — no operator rationale captured. Trust the broker's record of intent."
+
+		if err := dbInsertBackfilledOrder(
+			ctx.AppDB(), projectID, portfolioID, localID,
+			r.Symbol, r.AssetClass, r.Side, r.Type,
+			r.Qty, r.FilledQty, r.AvgFillPrice,
+			r.LimitPrice, r.StopPrice, r.TIF,
+			r.Status, rationale, source,
+			r.PlacedAt, r.ResolvedAt,
+		); err != nil {
+			ctx.Logger().Warn("backfill: insert order failed",
+				"broker_order_id", r.BrokerOrderID, "err", err)
+			continue
+		}
+
+		// Fill row for filled qty. Use the broker's resolved_at as the
+		// fill timestamp when available so equity curves line up.
+		if r.FilledQty > 0 && r.AvgFillPrice > 0 {
+			fillAt := r.ResolvedAt
+			if fillAt == "" {
+				fillAt = r.PlacedAt
+			}
+			_ = dbInsertBackfilledFill(ctx.AppDB(), projectID, localID, portfolioID,
+				r.FilledQty, r.AvgFillPrice, 0 /* fee unknown */, fillAt)
+		}
+
+		// Rationale journal row carrying the broker_order_id so the
+		// existing cancel + status-poll paths can resolve it. Without
+		// this row, dbBrokerOrderIDFor would return "" and live
+		// cancel against an open-sync'd order would fall to local-only.
+		_, _ = dbInsertJournal(ctx.AppDB(), projectID, portfolioID, "rationale", rationale, map[string]any{
+			"order_id":              localID,
+			"symbol":                r.Symbol,
+			"side":                  r.Side,
+			"qty":                   r.Qty,
+			"type":                  r.Type,
+			"broker_slug":           bb.Adapter.Slug(),
+			"broker_connection_id":  bb.ConnectionID,
+			"broker_order_id":       r.BrokerOrderID,
+			"client_order_id":       r.ClientOrderID,
+			"source":                source,
+			"backfill_status":       r.BrokerStatus,
+		})
+
+		wrote++
+	}
+	return wrote
+}
+
+// safeBrokerIDShort — crops a long broker id (Alpaca UUIDs are 36 chars)
+// to something the orders.id column can carry alongside our prefix.
+// Strip non-alphanumeric so the resulting id is URL-safe for the
+// /orders/{id}/cancel route.
+func safeBrokerIDShort(s string) string {
+	var b strings.Builder
+	for _, c := range s {
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			b.WriteRune(c)
+			if b.Len() >= 16 {
+				break
+			}
+		}
+	}
+	if b.Len() == 0 {
+		return "unknown"
+	}
+	return b.String()
 }
 
 func registeredSlugs() []string {
