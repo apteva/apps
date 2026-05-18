@@ -689,6 +689,12 @@ function DetailDrawer({
             Open source file ↗
           </a>
           <DescriptionEditor row={row} onSave={onSaveDescription} />
+          <OperationsSection
+            row={row}
+            apiBase={apiBase}
+            previewBase={previewBase}
+            query={query}
+          />
           {row.has_audio ? (
             <TranscriptSection
               row={row}
@@ -745,6 +751,432 @@ function DetailDrawer({
       </aside>
     </div>
   );
+}
+
+// ─── Operations (renders: trim / resize / transcode / …) ─────────
+//
+// Per-file render operations exposed as a button row at the top of
+// the drawer. Each operation opens a modal with the minimum fields it
+// needs; submit POSTs to /renders and gets back a render_id. The
+// submitted renders are tracked locally + polled every 2s until
+// terminal; when they finish ok the output file_id is rendered as a
+// "Open output" link to the storage content endpoint.
+//
+// Defaults are pulled from the row's metadata when sensible (trim
+// end_ms defaults to the source duration; extract_frame defaults to
+// the middle; resize keeps aspect when only width is provided).
+// Operation availability is gated on the file's media kind — a
+// silent video doesn't get "extract audio", an image doesn't get
+// "trim", etc.
+//
+// Output naming is left to the backend (it builds a sane
+// "<original>-<op>.<ext>" when output_name is empty), so the modal
+// stays compact. Operators wanting a specific name can rename after
+// the fact via storage.
+
+type OpName = "trim" | "resize" | "transcode" | "crop" | "extract_frame" | "audio_extract" | "extract_reel";
+
+interface OpDef {
+  name: OpName;
+  label: string;
+  needs: (row: MediaRow) => boolean;
+}
+
+const ALL_OPS: OpDef[] = [
+  { name: "trim",          label: "Trim",           needs: (r) => (r.has_video || r.has_audio) && !r.is_image },
+  { name: "resize",        label: "Resize",         needs: (r) => r.has_video || r.is_image },
+  { name: "transcode",     label: "Transcode",      needs: (r) => (r.has_video || r.has_audio) && !r.is_image },
+  { name: "crop",          label: "Crop",           needs: (r) => r.has_video || r.is_image },
+  { name: "extract_frame", label: "Extract frame",  needs: (r) => r.has_video && !r.is_image },
+  { name: "audio_extract", label: "Audio only",     needs: (r) => r.has_video && r.has_audio },
+  { name: "extract_reel",  label: "9:16 reel",      needs: (r) => r.has_video && !r.is_image },
+];
+
+function OperationsSection({
+  row, apiBase, previewBase, query,
+}: {
+  row: MediaRow;
+  apiBase: string;
+  previewBase: string;
+  query: string;
+}) {
+  const [openOp, setOpenOp] = useState<OpName | null>(null);
+  const [activeRenders, setActiveRenders] = useState<number[]>([]);
+  const [submitError, setSubmitError] = useState<string>("");
+
+  const ops = ALL_OPS.filter((o) => o.needs(row));
+  if (ops.length === 0) return null;
+
+  return (
+    <Section title="Operations">
+      <div className="flex flex-wrap gap-1.5">
+        {ops.map((op) => (
+          <button
+            key={op.name}
+            type="button"
+            onClick={() => { setOpenOp(op.name); setSubmitError(""); }}
+            className="px-2 py-1 text-xs border border-border rounded text-text hover:bg-bg-input hover:border-accent"
+          >
+            {op.label}
+          </button>
+        ))}
+      </div>
+      {submitError && (
+        <div className="text-error text-xs mt-2">{submitError}</div>
+      )}
+      {openOp && (
+        <OperationModal
+          op={openOp}
+          row={row}
+          apiBase={apiBase}
+          onClose={() => setOpenOp(null)}
+          onSubmitted={(id) => {
+            setOpenOp(null);
+            setActiveRenders((cur) => [id, ...cur]);
+          }}
+          onError={(msg) => setSubmitError(msg)}
+        />
+      )}
+      {activeRenders.length > 0 && (
+        <div className="space-y-2 mt-3">
+          {activeRenders.map((id) => (
+            <RenderStatusCard
+              key={id}
+              renderId={id}
+              apiBase={apiBase}
+              previewBase={previewBase}
+              query={query}
+            />
+          ))}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+interface RenderRow {
+  id: number;
+  operation: string;
+  status: "pending" | "running" | "ok" | "failed" | "cancelled";
+  progress_pct?: number;
+  output_file_id?: number;
+  error?: string;
+}
+
+// RenderStatusCard polls the backend every 2s for one render's state
+// and renders a compact status pill + (when terminal) an action.
+// Stops polling on terminal states. No cleanup needed beyond the
+// interval clear in the effect's return value.
+function RenderStatusCard({
+  renderId, apiBase, previewBase, query,
+}: {
+  renderId: number;
+  apiBase: string;
+  previewBase: string;
+  query: string;
+}) {
+  const [row, setRow] = useState<RenderRow | null>(null);
+  const [err, setErr] = useState<string>("");
+
+  useEffect(() => {
+    let mounted = true;
+    let interval: ReturnType<typeof setInterval> | null = null;
+    const poll = async () => {
+      try {
+        const r = await fetch(`${apiBase}/renders/${renderId}?${query}`, { credentials: "same-origin" });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = (await r.json()) as RenderRow;
+        if (!mounted) return;
+        setRow(data);
+        if (data.status === "ok" || data.status === "failed" || data.status === "cancelled") {
+          if (interval) { clearInterval(interval); interval = null; }
+        }
+      } catch (e) {
+        if (mounted) setErr(e instanceof Error ? e.message : String(e));
+      }
+    };
+    poll();
+    interval = setInterval(poll, 2000);
+    return () => {
+      mounted = false;
+      if (interval) clearInterval(interval);
+    };
+  }, [renderId, apiBase, query]);
+
+  if (err && !row) {
+    return (
+      <div className="text-xs text-error border border-error/40 rounded p-2">
+        render #{renderId}: {err}
+      </div>
+    );
+  }
+  if (!row) {
+    return <div className="text-xs text-text-dim">render #{renderId}: loading…</div>;
+  }
+
+  const badgeClass =
+    row.status === "ok"        ? "bg-green/20 text-green border-green/40"
+    : row.status === "failed"  ? "bg-red/20 text-red border-red/40"
+    : row.status === "cancelled" ? "bg-text-dim/20 text-text-dim border-border"
+    : "bg-yellow/20 text-yellow border-yellow/40"; // pending | running
+
+  return (
+    <div className="border border-border rounded p-2 text-xs space-y-1">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-text-dim">
+          <span className="font-mono">#{row.id}</span>{" "}
+          <span className="text-text">{row.operation}</span>
+        </div>
+        <span className={`px-1.5 py-0.5 rounded border text-[10px] uppercase ${badgeClass}`}>
+          {row.status}
+        </span>
+      </div>
+      {(row.status === "pending" || row.status === "running") && (
+        <div className="w-full bg-bg-input rounded h-1 overflow-hidden">
+          <div
+            className="h-full bg-yellow transition-all"
+            style={{ width: `${row.progress_pct ?? 0}%` }}
+          />
+        </div>
+      )}
+      {row.status === "ok" && row.output_file_id ? (
+        <a
+          href={`${previewBase}/${row.output_file_id}/content?${query}`}
+          target="_blank"
+          rel="noopener"
+          className="text-accent hover:underline"
+        >
+          Open output (file_id #{row.output_file_id}) ↗
+        </a>
+      ) : null}
+      {row.status === "failed" && row.error ? (
+        <div className="text-error">{row.error}</div>
+      ) : null}
+    </div>
+  );
+}
+
+// OperationModal — per-op form. Each op has a focused set of fields;
+// missing optional fields fall back to backend defaults (output_name
+// builds "<src>-<op>.<ext>" automatically; trim end_ms defaults to
+// source duration). Submit POSTs to /renders and bubbles the
+// render_id up so the section can start polling.
+function OperationModal({
+  op, row, apiBase, onClose, onSubmitted, onError,
+}: {
+  op: OpName;
+  row: MediaRow;
+  apiBase: string;
+  onClose: () => void;
+  onSubmitted: (id: number) => void;
+  onError: (msg: string) => void;
+}) {
+  // One state object keyed by field name — cheaper than threading a
+  // separate useState per per-op field.
+  const [fields, setFields] = useState<Record<string, string>>(() => defaultFields(op, row));
+  const [busy, setBusy] = useState(false);
+
+  const set = (k: string, v: string) => setFields((f) => ({ ...f, [k]: v }));
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const params = buildParams(op, fields);
+      const r = await fetch(`${apiBase}/renders?project_id=${encodeURIComponent(row.project_id)}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          operation: op,
+          file_id: row.file_id,
+          params,
+        }),
+      });
+      if (!r.ok) throw new Error(await r.text().catch(() => `HTTP ${r.status}`));
+      const data = (await r.json()) as { render_id: number };
+      onSubmitted(data.render_id);
+    } catch (e) {
+      onError("Render submit failed: " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const title = ALL_OPS.find((o) => o.name === op)?.label ?? op;
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <form
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={submit}
+        className="bg-bg border border-border rounded p-5 space-y-3"
+        style={{ width: 360 }}
+      >
+        <h3 className="text-text font-semibold text-sm">{title}</h3>
+        {opFieldDefs(op).map((fd) => (
+          <label key={fd.key} className="block">
+            <span className="text-xs text-text-muted">{fd.label}</span>
+            {fd.type === "select" ? (
+              <select
+                value={fields[fd.key] || ""}
+                onChange={(e) => set(fd.key, e.target.value)}
+                className="w-full mt-1 bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+              >
+                {fd.options!.map((opt) => (
+                  <option key={opt} value={opt}>{opt}</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                type={fd.type === "number" ? "number" : "text"}
+                value={fields[fd.key] || ""}
+                onChange={(e) => set(fd.key, e.target.value)}
+                placeholder={fd.placeholder}
+                className="w-full mt-1 bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+              />
+            )}
+            {fd.hint && (
+              <span className="text-[10px] text-text-dim block mt-0.5">{fd.hint}</span>
+            )}
+          </label>
+        ))}
+        <div className="flex justify-end gap-2 pt-1">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="px-3 py-1 text-sm border border-border rounded text-text-muted hover:text-text"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={busy}
+            className="px-3 py-1 text-sm bg-accent text-bg rounded hover:bg-accent-hover disabled:opacity-50"
+          >
+            {busy ? "Submitting…" : "Submit"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// ─── per-op field definitions ────────────────────────────────────
+
+interface FieldDef {
+  key: string;
+  label: string;
+  type: "number" | "text" | "select";
+  placeholder?: string;
+  hint?: string;
+  options?: string[];
+}
+
+function opFieldDefs(op: OpName): FieldDef[] {
+  switch (op) {
+    case "trim":
+      return [
+        { key: "start_ms", label: "Start (ms)",  type: "number", placeholder: "0" },
+        { key: "end_ms",   label: "End (ms)",    type: "number", placeholder: "30000" },
+      ];
+    case "resize":
+      return [
+        { key: "width",        label: "Width (px)",  type: "number", placeholder: "1280" },
+        { key: "height",       label: "Height (px)", type: "number", placeholder: "720", hint: "Leave empty if keep_aspect=true" },
+        { key: "keep_aspect",  label: "Keep aspect", type: "select", options: ["true", "false"] },
+      ];
+    case "transcode":
+      return [
+        { key: "format",       label: "Format",      type: "select", options: ["mp4", "webm", "mkv", "mp3", "wav", "m4a", "opus"] },
+        { key: "video_codec",  label: "Video codec", type: "text",   placeholder: "libx264 (optional)" },
+        { key: "audio_codec",  label: "Audio codec", type: "text",   placeholder: "aac (optional)" },
+        { key: "bitrate",      label: "Bitrate",     type: "text",   placeholder: "1M (optional)" },
+      ];
+    case "crop":
+      return [
+        { key: "x",      label: "X (px)",      type: "number", placeholder: "0" },
+        { key: "y",      label: "Y (px)",      type: "number", placeholder: "0" },
+        { key: "width",  label: "Width (px)",  type: "number", placeholder: "640" },
+        { key: "height", label: "Height (px)", type: "number", placeholder: "360" },
+      ];
+    case "extract_frame":
+      return [
+        { key: "at_ms", label: "At (ms)",    type: "number", placeholder: "1000" },
+        { key: "width", label: "Width (px)", type: "number", placeholder: "1280 (optional)" },
+      ];
+    case "audio_extract":
+      return [
+        { key: "format", label: "Format", type: "select", options: ["mp3", "wav", "m4a", "opus"] },
+      ];
+    case "extract_reel":
+      return [
+        { key: "start_ms",     label: "Start (ms)",       type: "number", placeholder: "0" },
+        { key: "end_ms",       label: "End (ms)",         type: "number", placeholder: "10000" },
+        { key: "target_ratio", label: "Aspect ratio",     type: "select", options: ["9:16", "1:1", "4:5", "16:9"] },
+        { key: "output_width", label: "Output width (px)",type: "number", placeholder: "1080" },
+      ];
+  }
+}
+
+function defaultFields(op: OpName, row: MediaRow): Record<string, string> {
+  const out: Record<string, string> = {};
+  switch (op) {
+    case "trim":
+      out.start_ms = "0";
+      if (row.duration_ms) out.end_ms = String(row.duration_ms);
+      break;
+    case "resize":
+      out.keep_aspect = "true";
+      if (row.width) out.width = String(row.width);
+      break;
+    case "transcode":
+      out.format = "mp4";
+      break;
+    case "extract_frame":
+      out.at_ms = row.duration_ms ? String(Math.floor(row.duration_ms / 2)) : "1000";
+      break;
+    case "audio_extract":
+      out.format = "mp3";
+      break;
+    case "extract_reel":
+      out.start_ms = "0";
+      if (row.duration_ms) out.end_ms = String(Math.min(row.duration_ms, 10000));
+      out.target_ratio = "9:16";
+      out.output_width = "1080";
+      break;
+    case "crop":
+      out.x = "0";
+      out.y = "0";
+      if (row.width) out.width = String(Math.floor(row.width / 2));
+      if (row.height) out.height = String(Math.floor(row.height / 2));
+      break;
+  }
+  return out;
+}
+
+// buildParams converts the form's stringy fields into the typed
+// params object the backend expects. Numbers parse to Number,
+// "true"/"false" to bool, empty strings drop the field so the
+// backend default applies. Output name is intentionally not
+// configurable here — the backend builds "<src>-<op>.<ext>".
+function buildParams(op: OpName, fields: Record<string, string>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const fd of opFieldDefs(op)) {
+    const v = (fields[fd.key] ?? "").trim();
+    if (!v) continue;
+    if (fd.type === "number") {
+      const n = Number(v);
+      if (!Number.isFinite(n)) continue;
+      out[fd.key] = n;
+    } else if (v === "true" || v === "false") {
+      out[fd.key] = v === "true";
+    } else {
+      out[fd.key] = v;
+    }
+  }
+  return out;
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
