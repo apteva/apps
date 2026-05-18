@@ -1652,6 +1652,7 @@ function BrokersTab({ api, setError }: {
   setError: (e: string | null) => void;
 }) {
   const [brokers, setBrokers] = useState<BrokerInfo[]>([]);
+  const [connectSlug, setConnectSlug] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -1662,22 +1663,26 @@ function BrokersTab({ api, setError }: {
 
   useEffect(() => { load(); }, [load]);
 
+  // Disconnect a specific connection by id, then refresh the brokers
+  // list. Hits the platform endpoint directly — same auth cookie as
+  // the dashboard, no panel/server proxy needed.
+  const disconnect = async (connID: number, slug: string) => {
+    if (!window.confirm(`Disconnect ${slug} connection #${connID}? Any live portfolio bound to it will reject orders until rebound.`)) return;
+    try {
+      const res = await fetch(`/api/connections/${connID}`, {
+        method: "DELETE", credentials: "same-origin",
+      });
+      if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+      load();
+    } catch (e) { setError((e as Error).message); }
+  };
+
   return (
-    <Section
-      title="Brokers"
-      action={
-        <a
-          href="/dashboard/integrations"
-          target="_blank"
-          rel="noopener"
-          className="px-3 py-1 text-xs rounded bg-accent text-bg font-medium inline-flex items-center gap-1 hover:opacity-90 no-underline"
-        >Bind broker <Icon.ExternalLink /></a>
-      }
-    >
+    <Section title="Brokers">
       <div className="mb-3 p-3 text-xs bg-bg-input border border-border rounded text-text-muted">
-        Each portfolio binds to one broker at creation. Bind a connection
-        via the dashboard's integrations page, then come back and create a
-        live portfolio under the Portfolios tab.
+        Connect a broker to enable live trading. Each portfolio binds to
+        one broker at creation (Portfolios tab → New → Live). Credentials
+        are encrypted at rest and stay on this server.
       </div>
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))" }}>
         {brokers.map((b) => (
@@ -1708,16 +1713,223 @@ function BrokersTab({ api, setError }: {
               <div className="mt-2 text-xs">
                 <FieldLabel>Connections</FieldLabel>
                 {b.connections.map((c) => (
-                  <div key={c.id} className="px-2 py-1 mt-1 text-xs bg-bg-input border border-border rounded">
-                    #{c.id} · {c.name || "(unnamed)"} · {c.status}
+                  <div key={c.id} className="flex items-center justify-between px-2 py-1 mt-1 text-xs bg-bg-input border border-border rounded">
+                    <span className="truncate">#{c.id} · {c.name || "(unnamed)"} · {c.status}</span>
+                    <button
+                      onClick={() => disconnect(c.id, b.slug)}
+                      className="p-0.5 rounded text-text-dim hover:text-red"
+                      title={`Disconnect ${c.name || "#" + c.id}`}
+                    ><Icon.Trash /></button>
                   </div>
                 ))}
               </div>
             )}
+            <div className="mt-3 flex gap-2">
+              <button
+                onClick={() => setConnectSlug(b.slug)}
+                className="flex-1 px-2 py-1 text-xs rounded bg-accent text-bg font-medium inline-flex items-center justify-center gap-1 hover:opacity-90"
+              ><Icon.Plus /> {b.bound ? "Add another" : "Connect"}</button>
+            </div>
           </div>
         ))}
       </div>
+
+      {connectSlug && (
+        <BrokerConnectModal
+          slug={connectSlug}
+          onClose={() => setConnectSlug(null)}
+          onConnected={() => { setConnectSlug(null); load(); }}
+          setError={setError}
+        />
+      )}
     </Section>
+  );
+}
+
+// CatalogApp — minimal subset of the platform's catalog response we
+// actually need to render the form. apteva-server's
+// /api/integrations/catalog/<slug> returns much more (tool defs,
+// webhooks, etc.); we ignore the rest.
+interface CatalogApp {
+  slug: string;
+  name: string;
+  description?: string;
+  auth: {
+    types: string[];
+    credential_fields?: Array<{
+      name: string;
+      label?: string;
+      description?: string;
+      required?: boolean;
+      type?: string; // "password" | "text" | etc
+      default?: string;
+    }>;
+  };
+}
+
+// BrokerConnectModal — inline credential form for any broker integration
+// in our compatible_slugs set. Mirrors the dashboard's "Connect" flow:
+// fetch the catalog entry to know what fields to render, then POST
+// /api/connections with {source: "local", app_slug, auth_type,
+// credentials, ...}. Reuses the user's session cookie (same origin),
+// so no API token needed.
+//
+// We don't handle OAuth here — none of the current brokers
+// (binance-trading, alpaca-trading, polymarket-clob) use OAuth. If a
+// future broker does, the social app's popup flow is the reference.
+function BrokerConnectModal({ slug, onClose, onConnected, setError }: {
+  slug: string;
+  onClose: () => void;
+  onConnected: () => void;
+  setError: (e: string | null) => void;
+}) {
+  const [app, setApp] = useState<CatalogApp | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [name, setName] = useState("");
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [submitting, setSubmitting] = useState(false);
+  const [localErr, setLocalErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetch(`/api/integrations/catalog/${encodeURIComponent(slug)}`, { credentials: "same-origin" })
+      .then((r) => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then((data: CatalogApp) => {
+        if (cancelled) return;
+        setApp(data);
+        // Seed the connection name with the slug so the operator
+        // doesn't have to type anything for the common case.
+        setName(data.name || slug);
+        // Pre-fill any fields that declare a default in the catalog
+        // (e.g. alpaca-trading's `host` defaults to paper-api).
+        const seed: Record<string, string> = {};
+        for (const f of data.auth?.credential_fields || []) {
+          if (f.default) seed[f.name] = f.default;
+        }
+        setValues(seed);
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setLocalErr((e as Error).message);
+        setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [slug]);
+
+  const submit = async () => {
+    if (!app) return;
+    setSubmitting(true);
+    setLocalErr(null);
+    try {
+      const authType = (app.auth.types || ["api_key"])[0];
+      const res = await fetch("/api/connections", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source: "local",
+          app_slug: slug,
+          name: name.trim() || slug,
+          auth_type: authType,
+          credentials: values,
+          // The trading panel binds via portfolio.broker_slug — we don't
+          // want apteva-server auto-creating an mcp_servers row here.
+          auto_mcp: false,
+          created_via: "app_install",
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(`${res.status}: ${body}`);
+      }
+      onConnected();
+    } catch (e) {
+      setLocalErr((e as Error).message);
+      setError((e as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const fields = app?.auth?.credential_fields || [];
+  const requiredMissing = fields.some((f) => f.required !== false && !((values[f.name] || "").trim()));
+
+  // Heuristic: any field whose name or label suggests a secret gets
+  // type=password so it's masked in the input. Avoids surprising the
+  // operator if the catalog forgets to declare `type: password`.
+  const isSensitive = (name: string, declared?: string) => {
+    if (declared === "password") return true;
+    const n = name.toLowerCase();
+    return n.includes("secret") || n.includes("private_key") || n.includes("passphrase") || n.includes("password");
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/60 grid place-items-center z-50"
+      onClick={onClose}
+    >
+      <div
+        className="bg-bg-card border border-border rounded p-4 w-full max-w-md max-h-[90vh] overflow-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-text font-medium">Connect {app?.name || slug}</div>
+          <button onClick={onClose} className="text-text-muted hover:text-text"><Icon.X /></button>
+        </div>
+
+        {loading ? (
+          <div className="py-6 text-center text-text-dim text-sm">Loading credential schema…</div>
+        ) : !app ? (
+          <div className="py-6 text-center text-red text-sm">{localErr || "Couldn't load catalog"}</div>
+        ) : (
+          <>
+            {app.description && (
+              <div className="text-xs text-text-muted mb-3">{app.description}</div>
+            )}
+            <div className="mb-3">
+              <FieldLabel>Connection name</FieldLabel>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className={inputClass}
+                placeholder={slug}
+              />
+            </div>
+            {fields.map((f) => (
+              <div key={f.name} className="mb-3">
+                <FieldLabel>{f.label || f.name}{f.required !== false ? "" : " (optional)"}</FieldLabel>
+                <input
+                  value={values[f.name] || ""}
+                  onChange={(e) => setValues((v) => ({ ...v, [f.name]: e.target.value }))}
+                  type={isSensitive(f.name, f.type) ? "password" : "text"}
+                  className={inputClass}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                {f.description && (
+                  <div className="text-xs text-text-dim mt-1">{f.description}</div>
+                )}
+              </div>
+            ))}
+            {localErr && (
+              <div className="mb-3 p-2 text-xs bg-error/10 border border-error/30 rounded text-error">
+                {localErr}
+              </div>
+            )}
+            <div className="flex gap-2 justify-end">
+              <button onClick={onClose} className="px-3 py-1 text-sm rounded border border-border text-text hover:bg-bg-hover">Cancel</button>
+              <button
+                onClick={submit}
+                disabled={submitting || requiredMissing}
+                className="px-3 py-1 text-sm rounded bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50"
+              >{submitting ? "Connecting…" : "Connect"}</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 
