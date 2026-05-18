@@ -21,7 +21,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.10.2
+version: 0.11.0
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -47,6 +47,10 @@ requires:
       version: ">=0.1.0"
       optional: true
       reason: optional — schedule recurring or delayed renders against media's HTTP routes
+    - name: instances
+      version: ">=0.2.0"
+      optional: true
+      reason: optional — when render_host_id > 0, renders run on that instances host via SSH
   integrations:
     - role: transcripts
       kind: integration

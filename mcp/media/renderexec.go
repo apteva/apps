@@ -50,11 +50,25 @@ type renderExecutor interface {
 //  3. The Cloudinary backend declines ops it can't handle (currently
 //     concat + audio_extract); the orchestrator retries on local.
 //
+// Precedence when multiple backends are configured:
+//
+//	remote-instance (render_host_id > 0) → cloudinary → local
+//
+// The remote backend wins because operators who explicitly point
+// renders at a host are doing so to offload CPU; falling through to
+// cloudinary would silently change the cost model. Within remote,
+// any op is supported (it's just ffmpeg on another machine).
+//
 // We deliberately don't auto-fall-back on Cloudinary *runtime errors*
 // — masking config issues (bad creds, quota exhaustion) by silently
-// re-running on local would make those bugs invisible. An operator
-// who wants to disable the cloud backend just clears the binding.
-func selectExecutor(app *sdk.AppCtx, fallback *localExecutor, row *RenderRow) renderExecutor {
+// re-running on local would make those bugs invisible. Same applies
+// to remote: configured-but-broken hosts surface as render failures
+// rather than silent local fallback. An operator who wants to
+// disable a backend just clears its config / binding.
+func selectExecutor(app *sdk.AppCtx, fallback *localExecutor, remote *remoteExecutor, row *RenderRow) renderExecutor {
+	if remote != nil {
+		return remote
+	}
 	bound := app.IntegrationFor("render_executor")
 	if bound == nil {
 		return fallback

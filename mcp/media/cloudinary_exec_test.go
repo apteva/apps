@@ -205,7 +205,7 @@ func TestSelectExecutor_NoBinding_ReturnsLocal(t *testing.T) {
 	ctx := newTestCtxWithPlatform(t, noBindings())
 	local := &localExecutor{ffmpegPath: "ffmpeg", scratchRoot: "/tmp", outputFolder: "/r/"}
 	row := &RenderRow{Operation: "trim"}
-	got := selectExecutor(ctx, local, row)
+	got := selectExecutor(ctx, local, nil, row)
 	if got.Name() != "local" {
 		t.Errorf("expected local executor, got %q", got.Name())
 	}
@@ -216,7 +216,7 @@ func TestSelectExecutor_CloudinaryBound_SupportedOp_ReturnsCloudinary(t *testing
 	local := &localExecutor{ffmpegPath: "ffmpeg", scratchRoot: "/tmp", outputFolder: "/r/"}
 	for _, op := range []string{"trim", "resize", "transcode", "crop", "extract_frame"} {
 		row := &RenderRow{Operation: op}
-		got := selectExecutor(ctx, local, row)
+		got := selectExecutor(ctx, local, nil, row)
 		if got.Name() != "cloudinary" {
 			t.Errorf("op=%s expected cloudinary, got %q", op, got.Name())
 		}
@@ -230,7 +230,7 @@ func TestSelectExecutor_CloudinaryBound_UnsupportedOp_FallsBackLocal(t *testing.
 	local := &localExecutor{ffmpegPath: "ffmpeg", scratchRoot: "/tmp", outputFolder: "/r/"}
 	for _, op := range []string{"concat", "audio_extract"} {
 		row := &RenderRow{Operation: op}
-		got := selectExecutor(ctx, local, row)
+		got := selectExecutor(ctx, local, nil, row)
 		if got.Name() != "local" {
 			t.Errorf("op=%s expected local fallback, got %q", op, got.Name())
 		}
@@ -244,7 +244,7 @@ func TestSelectExecutor_UnknownSlug_FallsBackLocal(t *testing.T) {
 	ctx := newTestCtxWithPlatform(t, boundUnknownSlug())
 	local := &localExecutor{ffmpegPath: "ffmpeg", scratchRoot: "/tmp", outputFolder: "/r/"}
 	row := &RenderRow{Operation: "trim"}
-	got := selectExecutor(ctx, local, row)
+	got := selectExecutor(ctx, local, nil, row)
 	if got.Name() != "local" {
 		t.Errorf("expected local fallback for unknown slug, got %q", got.Name())
 	}

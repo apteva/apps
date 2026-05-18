@@ -107,6 +107,23 @@ func renderWorker(app *sdk.AppCtx, id int) {
 		outputFolder: outputFolder,
 	}
 
+	// Remote backend is opt-in via render_host_id. >0 means "send
+	// renders to that instances host_id". 0 (default) keeps everything
+	// local. Construction-time failures (missing PUBLIC_URL, missing
+	// outbound token) are logged once and the feature disables itself
+	// for this worker — local + cloudinary stay available.
+	hostID := int64(parseConfigIntFallback(cfg.Get("render_host_id"), 0))
+	var remote *remoteExecutor
+	if hostID > 0 {
+		var err error
+		remote, err = newRemoteExecutor(hostID, sharedRemoteInstaller(), local)
+		if err != nil {
+			log.Warn("render worker: remote backend disabled", "host_id", hostID, "err", err)
+		} else {
+			log.Info("render worker: remote backend enabled", "host_id", hostID)
+		}
+	}
+
 	for {
 		select {
 		case <-app.Done():
@@ -130,14 +147,14 @@ func renderWorker(app *sdk.AppCtx, id int) {
 			continue
 		}
 
-		runOneRender(app, row, local, timeoutSec)
+		runOneRender(app, row, local, remote, timeoutSec)
 	}
 }
 
 // runOneRender is the per-render orchestrator. It owns the DB
 // lifecycle (mark ok/failed/cancelled) and the cancel registration;
 // the actual produce-output work is delegated to the chosen executor.
-func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, timeoutSec int) {
+func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote *remoteExecutor, timeoutSec int) {
 	log := app.Logger()
 	db := app.AppDB()
 
@@ -148,7 +165,7 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, timeout
 	registerCancel(row.ID, cancel)
 	defer deregisterCancel(row.ID)
 
-	executor := selectExecutor(app, local, row)
+	executor := selectExecutor(app, local, remote, row)
 	log.Info("render claimed", "id", row.ID, "op", row.Operation, "executor", executor.Name())
 
 	outputFileID, err := executor.Execute(ctx, app, row)

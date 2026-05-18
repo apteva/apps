@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.10.5
+version: 0.11.0
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -47,6 +47,10 @@ requires:
       version: ">=0.1.0"
       optional: true
       reason: optional — recurring or delayed renders schedule via jobs against media's HTTP routes
+    - name: instances
+      version: ">=0.2.0"
+      optional: true
+      reason: optional — when render_host_id config > 0, renders are offloaded to that instances host via SSH (ffmpeg auto-installed there on first use)
   integrations:
     - role: transcripts
       kind: integration
@@ -311,6 +315,17 @@ config_schema:
     default: "/renders/"
     label: Render output folder
     description: Storage folder where finished renders are uploaded.
+  - name: render_host_id
+    type: text
+    default: "0"
+    label: Remote render host_id
+    description: |
+      When > 0, renders are dispatched to the named host from the
+      Instances app (instance_run_command + signed-URL source pulls +
+      multipart upload back to storage). ffmpeg auto-installs into
+      ~/.apteva-render/ on first use; no sudo. 0 (default) = all
+      renders run on local ffmpeg. Requires the Instances app
+      installed and the host already provisioned + ready.
 
   # Transcripts (new in v0.4)
   - name: transcribe_auto
