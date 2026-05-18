@@ -333,6 +333,18 @@ func hetznerDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 // installs, no service setup. Consumer apps (Live Link, Deploy)
 // install their own software via instance_run_command after the
 // box is up.
+//
+// Hetzner's Ubuntu images ship with the root password marked expired
+// (chage -d 0 root), which is fine for password auth but PAM also
+// enforces it on key-based non-interactive SSH: every command exits 1
+// before running with "WARNING: Your password has expired. Password
+// change required but no TTY available." So we explicitly tell cloud-
+// init NOT to expire passwords, plus a defensive `chage` runcmd in
+// case the image already did so before cloud-init reads chpasswd.
+// Both belt + suspenders because `chpasswd: expire: false` only takes
+// effect if cloud-init runs before whatever image-bake step set the
+// expiry — observed inconsistent across Hetzner's ubuntu-22.04 vs
+// ubuntu-24.04 builds.
 func buildCloudInit(pubKey string) string {
 	return strings.Join([]string{
 		"#cloud-config",
@@ -342,6 +354,10 @@ func buildCloudInit(pubKey string) string {
 		"      - " + pubKey,
 		"ssh_pwauth: false",
 		"disable_root: false",
+		"chpasswd:",
+		"  expire: false",
+		"runcmd:",
+		"  - chage -M 99999 -E -1 root",
 	}, "\n") + "\n"
 }
 
