@@ -106,7 +106,6 @@ func TestBuildScript_TrimShape(t *testing.T) {
 	e := &remoteExecutor{
 		hostID:       3,
 		outputFolder: "/renders/",
-		publicURL:    "https://apt.example.com",
 		storageToken: "tok-xyz",
 	}
 	row := &RenderRow{
@@ -125,7 +124,7 @@ func TestBuildScript_TrimShape(t *testing.T) {
 	sourceNames := []string{"source.mp4"}
 
 	script, err := e.buildScript(row, plan, "/root/.apteva-render/ffmpeg-7.0.2/ffmpeg",
-		signedURLs, sourceNames, "/renders/")
+		signedURLs, sourceNames, "/renders/", "https://apt.example.com")
 	if err != nil {
 		t.Fatalf("buildScript: %v", err)
 	}
@@ -185,7 +184,7 @@ func TestMaterialiseRemoteArgs_ProgressRewrite(t *testing.T) {
 func TestBuildScript_ConcatWritesListFile(t *testing.T) {
 	e := &remoteExecutor{
 		hostID: 3, outputFolder: "/r/",
-		publicURL: "https://x.example.com", storageToken: "t",
+		storageToken: "t",
 	}
 	row := &RenderRow{
 		ID: 7, ProjectID: "p", Operation: "concat",
@@ -199,7 +198,7 @@ func TestBuildScript_ConcatWritesListFile(t *testing.T) {
 	urls := []string{"https://u/1?s=a", "https://u/2?s=b"}
 	names := []string{"a.mp4", "b.mp4"}
 
-	script, err := e.buildScript(row, plan, "ffmpeg", urls, names, "/r/")
+	script, err := e.buildScript(row, plan, "ffmpeg", urls, names, "/r/", "https://x.example.com")
 	if err != nil {
 		t.Fatalf("buildScript: %v", err)
 	}

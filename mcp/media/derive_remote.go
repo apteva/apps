@@ -62,9 +62,9 @@ func runRemoteIndexing(
 	ctx context.Context, app *sdk.AppCtx, projectID string,
 	params remoteIndexParams,
 ) (*Probe, int64, int64, error) {
-	publicURL := strings.TrimRight(os.Getenv("APTEVA_PUBLIC_URL"), "/")
-	if publicURL == "" {
-		return nil, 0, 0, errors.New("APTEVA_PUBLIC_URL not set; remote indexing requires a publicly reachable storage URL")
+	publicURL, err := resolvePublicURL(app)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("remote indexing requires a publicly reachable storage URL: %w", err)
 	}
 	storageToken := os.Getenv("APTEVA_OUTBOUND_TOKEN")
 	if storageToken == "" {

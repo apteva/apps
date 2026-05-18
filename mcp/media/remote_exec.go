@@ -62,10 +62,11 @@ type remoteExecutor struct {
 	installer    *remoteFFmpegInstaller
 	outputFolder string
 
-	// Outbound storage credentials — the remote uses these to POST
-	// the rendered output back. Captured at construction so we don't
-	// re-read env on every render.
-	publicURL    string
+	// Outbound storage credentials. storageToken is per-install +
+	// process-stable (set by the SDK at boot), so caching it on the
+	// struct is fine. publicURL is operator-mutable via settings, so
+	// it's resolved per-Execute via app.PlatformInfo() — SDK-side 60s
+	// cache keeps this cheap.
 	storageToken string
 
 	// fallback gives us defaults (output folder) and lets the executor
@@ -80,13 +81,17 @@ func (e *remoteExecutor) Name() string { return "remote-instance" }
 // newRemoteExecutor constructs the executor from worker-level config.
 // Returns nil + nil when the feature isn't configured (host_id <= 0)
 // so callers can use a clean nil check.
+//
+// Pre-v0.11.7 this captured APTEVA_PUBLIC_URL into a struct field at
+// worker startup; operators who later changed public_url in settings
+// had to restart media for it to take effect. v0.11.7 drops the
+// cached field — Execute resolves the URL fresh per render via
+// app.PlatformInfo() (SDK-side 60s cache so we don't hammer the
+// server), so public_url changes propagate within a minute without
+// a sidecar restart.
 func newRemoteExecutor(hostID int64, installer *remoteFFmpegInstaller, local *localExecutor) (*remoteExecutor, error) {
 	if hostID <= 0 {
 		return nil, nil
-	}
-	publicURL := strings.TrimRight(os.Getenv("APTEVA_PUBLIC_URL"), "/")
-	if publicURL == "" {
-		return nil, errors.New("render_host_id is set but APTEVA_PUBLIC_URL is not — remote hosts need a reachable storage URL")
 	}
 	tok := os.Getenv("APTEVA_OUTBOUND_TOKEN")
 	if tok == "" {
@@ -99,7 +104,6 @@ func newRemoteExecutor(hostID int64, installer *remoteFFmpegInstaller, local *lo
 		hostID:       hostID,
 		installer:    installer,
 		outputFolder: local.outputFolder,
-		publicURL:    publicURL,
 		storageToken: tok,
 		fallback:     local,
 	}, nil
@@ -107,6 +111,11 @@ func newRemoteExecutor(hostID int64, installer *remoteFFmpegInstaller, local *lo
 
 func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *RenderRow) (int64, error) {
 	log := app.Logger()
+
+	publicURL, err := resolvePublicURL(app)
+	if err != nil {
+		return 0, fmt.Errorf("remote render needs a publicly reachable storage URL: %w", err)
+	}
 
 	paths, err := e.installer.Ensure(ctx, app, e.hostID)
 	if err != nil {
@@ -146,7 +155,7 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		folder = e.outputFolder
 	}
 
-	script, err := e.buildScript(row, plan, paths.FFmpeg, signedURLs, sourceNames, folder)
+	script, err := e.buildScript(row, plan, paths.FFmpeg, signedURLs, sourceNames, folder, publicURL)
 	if err != nil {
 		return 0, fmt.Errorf("build remote script: %w", err)
 	}
@@ -208,7 +217,7 @@ func (e *remoteExecutor) buildScript(
 	row *RenderRow, plan *opPlan,
 	ffmpegPath string,
 	signedURLs []string, sourceNames []string,
-	folder string,
+	folder string, publicURL string,
 ) (string, error) {
 	workDir := fmt.Sprintf("/tmp/apteva-render-%d", row.ID)
 
@@ -276,7 +285,7 @@ func (e *remoteExecutor) buildScript(
 	// Env vars carry the inputs so they don't appear in `ps` output
 	// and so the inline JSON / curl args stay readable.
 	fmt.Fprintf(&b, "export STORAGE_TOKEN=%s\n", shellQuote(e.storageToken))
-	fmt.Fprintf(&b, "export STORAGE_BASE=%s\n", shellQuote(e.publicURL+"/api/apps/storage"))
+	fmt.Fprintf(&b, "export STORAGE_BASE=%s\n", shellQuote(publicURL+"/api/apps/storage"))
 	fmt.Fprintf(&b, "export PROJECT_ID=%s\n", shellQuote(row.ProjectID))
 	fmt.Fprintf(&b, "export FOLDER=%s\n", shellQuote(folder))
 	fmt.Fprintf(&b, "export NAME=%s\n", shellQuote(plan.Filename))
@@ -489,4 +498,27 @@ func sanitizeFilename(s string) string {
 		return "file"
 	}
 	return s
+}
+
+// resolvePublicURL returns the platform's externally-reachable base
+// URL. Used by every code path that hands a storage URL to a remote
+// Hetzner box for direct curl access (signed-URL sources for renders
+// + indexer; multipart upload destination; presigned-PUT init+finalize).
+//
+// Prefers the SDK's hot-cached PlatformInfo() (60s freshness — picks
+// up operator settings changes without a sidecar restart). Falls back
+// to the legacy APTEVA_PUBLIC_URL env so this works against older
+// apteva-server versions that don't yet expose /platform-info. Returns
+// "trimmed; trailing slash removed" so callers can `publicURL + "/api/..."`
+// safely.
+func resolvePublicURL(app *sdk.AppCtx) (string, error) {
+	if app != nil {
+		if info, err := app.PlatformInfo(); err == nil && info != nil && info.PublicURL != "" {
+			return strings.TrimRight(info.PublicURL, "/"), nil
+		}
+	}
+	if v := strings.TrimRight(os.Getenv("APTEVA_PUBLIC_URL"), "/"); v != "" {
+		return v, nil
+	}
+	return "", errors.New("APTEVA_PUBLIC_URL not set in platform settings or env")
 }
