@@ -1,0 +1,109 @@
+schema: apteva-app/v1
+
+name: checkout
+display_name: Checkout
+version: 0.1.0
+description: |
+  Cart + checkout flow. Customers add catalog prices to a cart, fill
+  contact info, and convert into a billing invoice. v0.1.0 is the
+  manual-payment path (creates a draft → open invoice in billing for
+  wire / card-by-portal recording). Stripe Checkout Session and the
+  webhook-driven auto-paid flow land in v0.2.0 alongside billing's
+  Stripe integration.
+
+  Storefront blocks (add-to-cart, cart-summary, checkout-page) are
+  added to the content app separately — checkout exposes the REST +
+  MCP surface; content renders the buyer-facing HTML.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/checkout
+tags: [checkout, cart, commerce, ecommerce, storefront]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call         # calls catalog + billing
+  apps:
+    - name: catalog
+      optional: false            # cart items reference catalog prices
+    - name: billing
+      optional: false            # checkout creates invoices for conversion
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: cart_get
+      description: Fetch a cart by id or session_token. Returns items + materialised totals.
+    - name: cart_add_item
+      description: Add a catalog price to a cart. Snapshots description/amount from the price.
+    - name: cart_set_quantity
+      description: Change an item's quantity. Setting 0 removes it.
+    - name: cart_clear
+      description: Remove all items from a cart.
+    - name: checkout_start
+      description: Lock a cart and create a checkout_session. Cart becomes immutable until session terminates.
+    - name: checkout_update
+      description: Capture or update email / name / addresses on a started session.
+    - name: checkout_pay
+      description: |
+        Submit the session for payment. v0.1.0 creates a draft → finalized invoice in
+        billing and returns it for manual payment recording. v0.2.0 will additionally
+        return a Stripe Checkout Session redirect URL when provider='stripe'.
+    - name: checkout_get
+      description: Fetch a checkout_session by id, including the linked invoice_id when paid.
+    - name: checkout_cancel
+      description: Cancel a started or awaiting-payment session. Releases the cart back to open.
+  ui_panels:
+    - slot: project.page
+      label: Checkout
+      icon: shopping-cart
+      entry: /ui/CheckoutPanel.mjs
+  skills:
+    - name: how-to-use-checkout
+      command: /checkout
+      body_file: skills/how-to-use-checkout.md
+      description: |
+        Checkout's mental model — when to create a cart vs an invoice
+        directly, what state transitions exist, how the catalog
+        snapshot works. Triggers on: "cart", "checkout", "order",
+        "buy", "convert".
+      metadata:
+        category: commerce
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/checkout
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/checkout.db
+  migrations: migrations/
+
+config_schema:
+  - name: cart_ttl_days
+    type: text
+    default: "30"
+    label: Cart TTL (days)
+    description: |
+      Open guest carts older than this without activity get marked
+      abandoned by the nightly worker. Logged-in carts (customer_id
+      set) never expire.
+  - name: session_ttl_minutes
+    type: text
+    default: "30"
+    label: Checkout session TTL (minutes)
+    description: |
+      An awaiting-payment session that doesn't complete within this
+      window is marked expired; the cart returns to 'open' so the
+      buyer can try again.
+
+upgrade_policy: auto-patch
