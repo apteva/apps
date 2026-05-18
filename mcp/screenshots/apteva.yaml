@@ -1,0 +1,110 @@
+schema: apteva-app/v1
+
+name: screenshots
+display_name: Screenshots
+version: 0.1.0
+description: |
+  Capture browser screenshots from a URL, save them to storage, and
+  browse them in a gallery. Built entirely on the `computer` app for
+  the browser session and `storage` for the bytes — no browser
+  plumbing here.
+
+  v0.1 supports URL-driven capture (sidecar opens and closes its own
+  session). Attaching to a session the agent already opened is not
+  yet supported — that lands when `computer` exposes session resume
+  for Browserbase/Steel + the core lift for local CDP.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/screenshots
+tags: [browser, observability, productivity]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app          # screenshots registry
+    - platform.apps.call    # CallAppResult into computer + storage
+  apps:
+    - name: computer
+      version: ">=0.3.0"
+      reason: "Browser session lifecycle: browser_open / browser_screenshot / browser_close."
+    - name: storage
+      reason: "Persists the PNG bytes; screenshots are useless without it."
+
+provides:
+  http_routes:
+    - prefix: /
+
+  mcp_tools:
+    - name: screenshot_capture
+      description: |
+        Capture a screenshot of a URL. Args: url (required), backend?
+        (local|browserbase|steel; default uses computer's APTEVA_BROWSER_BACKEND
+        env), viewport? ({width,height}), label? (free-form for the
+        gallery), idempotency_key? (when set, a repeat call within
+        10 min with the same key returns the existing record instead
+        of opening a new browser). Returns {screenshot_id, storage_id,
+        url, captured_at, label}.
+    - name: screenshot_list
+      description: |
+        List captures, newest first. Args: limit? (default 50, max 200),
+        since? (ISO timestamp), url_contains?, label_contains?.
+        Returns {screenshots:[{id, url, label, width, height, captured_at,
+        storage_id}]}.
+    - name: screenshot_get
+      description: |
+        Fetch one capture. Args: screenshot_id. Returns the registry
+        record plus a fresh signed url from storage.
+    - name: screenshot_delete
+      description: |
+        Args: screenshot_id. Soft-deletes the row and removes the
+        underlying storage blob (calls storage.files_delete).
+        Idempotent — unknown or already-deleted ids return {deleted:false}.
+
+  ui_panels:
+    - slot: project.page
+      label: Screenshots
+      icon: camera
+      entry: /ui/GalleryPanel.mjs
+
+  ui_components:
+    - name: screenshot-card
+      entry: /ui/ScreenshotCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [screenshot_id]
+        properties:
+          screenshot_id: { type: integer }
+          caption:       { type: string }
+      preview_props:
+        preview: true
+        screenshot_id: 1
+        caption: "example.com"
+
+  skills:
+    - name: how-to-use-screenshots
+      command: /screenshots
+      body_file: skills/how-to-use-screenshots.md
+      description: |
+        Teaches the agent when to call screenshot_capture and attach
+        the screenshot-card to its reply.
+      metadata:
+        category: browsing
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/screenshots
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/screenshots.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
