@@ -60,6 +60,15 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		ctx.Logger().Warn("theme load failed; using embedded default", "err", err.Error())
 	}
 
+	// Seed bundled templates for project-scoped installs. Global
+	// installs seed lazily on first templates_list call per project
+	// (handled inside the tool).
+	if pid := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); pid != "" {
+		if err := seedBundledTemplates(ctx, pid); err != nil {
+			ctx.Logger().Warn("template seed failed", "err", err.Error())
+		}
+	}
+
 	ctx.Logger().Info("content mounted",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"active_theme", currentThemeName())
@@ -118,6 +127,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/admin/settings", Handler: a.handleHTTPSettings},
 		{Pattern: "/admin/themes", Handler: a.handleHTTPThemes},
 		{Pattern: "/admin/block-types", Handler: a.handleHTTPBlockTypes},
+		{Pattern: "/admin/templates", Handler: a.handleHTTPTemplates},
+		{Pattern: "/admin/templates/", Handler: a.handleHTTPTemplateItem},
 
 		// ── public render surface ───────────────────────────────
 		{Pattern: "/_theme/", Handler: a.handleThemeAsset, NoAuth: true},

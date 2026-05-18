@@ -122,9 +122,21 @@ function defaultAttrs(type: string): Record<string, any> {
 }
 
 // ── top-level panel ──────────────────────────────────────────────
+//
+// Three views:
+//   - "list"      → the post/page index (default)
+//   - "templates" → site-kit catalog (Finance Blog, SaaS Marketing, …)
+//   - "editor"    → block editor for a specific post
+//
+// Switching between list and templates is via the top tab bar;
+// opening the editor replaces the view entirely (own back button).
+
+type View = "list" | "templates";
+
 export default function ContentPanel({ projectId }: NativePanelProps) {
   const api = useMemo(() => makeAPI(projectId), [projectId]);
   const [editing, setEditing] = useState<number | null>(null);
+  const [view, setView] = useState<View>("list");
 
   if (editing != null) {
     return (
@@ -136,7 +148,35 @@ export default function ContentPanel({ projectId }: NativePanelProps) {
       />
     );
   }
-  return <ListView api={api} projectId={projectId} onOpen={setEditing} />;
+  return (
+    <div>
+      <Tabs view={view} onChange={setView} />
+      {view === "list" && <ListView api={api} projectId={projectId} onOpen={setEditing} />}
+      {view === "templates" && (
+        <TemplatesView api={api} projectId={projectId} onApplied={() => setView("list")} />
+      )}
+    </div>
+  );
+}
+
+function Tabs({ view, onChange }: { view: View; onChange: (v: View) => void }) {
+  const tab = (id: View, label: string) => (
+    <button
+      key={id}
+      onClick={() => onChange(id)}
+      className={`px-4 py-2 text-sm border-b-2 ${
+        view === id ? "border-fg font-semibold" : "border-transparent text-fg-muted"
+      }`}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div className="flex gap-1 border-b border-border px-4 pt-2 bg-bg">
+      {tab("list", "Content")}
+      {tab("templates", "Templates")}
+    </div>
+  );
 }
 
 // ── list view ───────────────────────────────────────────────────
@@ -894,4 +934,243 @@ function BlockEditor({
         />
       );
   }
+}
+
+// ── templates view (site-kit catalog) ─────────────────────────────
+
+interface TemplateListItem {
+  name: string;
+  display_name: string;
+  version: string;
+  description: string;
+  tags: string[] | null;
+  source: string;
+}
+
+interface ApplySummary {
+  template: string;
+  version: string;
+  mode: string;
+  created: Record<string, number>;
+  skipped: Record<string, number>;
+  homepage_pinned: boolean;
+  warnings?: string[];
+  dry_run?: boolean;
+}
+
+function TemplatesView({
+  api,
+  projectId: _projectId,
+  onApplied,
+}: {
+  api: ReturnType<typeof makeAPI>;
+  projectId: string;
+  onApplied: () => void;
+}) {
+  const [templates, setTemplates] = useState<TemplateListItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [picked, setPicked] = useState<TemplateListItem | null>(null);
+
+  useEffect(() => {
+    setLoading(true);
+    api<{ templates: TemplateListItem[] | null }>("/admin/templates")
+      .then((r) => setTemplates(r.templates ?? []))
+      .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false));
+  }, [api]);
+
+  if (picked) {
+    return (
+      <ApplyTemplateDialog
+        api={api}
+        template={picked}
+        onClose={() => setPicked(null)}
+        onApplied={() => {
+          setPicked(null);
+          onApplied();
+        }}
+      />
+    );
+  }
+
+  return (
+    <div className="p-4 text-sm">
+      <header className="flex items-baseline justify-between mb-3">
+        <h2 className="text-base font-semibold">Templates</h2>
+        <p className="text-xs text-fg-muted">
+          Apply a starter to populate your site with pages, posts, terms, and menus.
+        </p>
+      </header>
+
+      {error && (
+        <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2">{error}</div>
+      )}
+      {loading && <div className="text-fg-muted py-4">Loading…</div>}
+
+      <ul className="grid grid-cols-1 md:grid-cols-2 gap-3 list-none p-0">
+        {templates.map((t) => (
+          <li key={t.name} className="border border-border rounded p-3 flex flex-col">
+            <div className="flex items-baseline justify-between gap-2">
+              <h3 className="font-semibold">{t.display_name}</h3>
+              <span className="text-xs text-fg-muted">v{t.version}</span>
+            </div>
+            <p className="text-fg-muted text-sm flex-1 mt-1">{t.description}</p>
+            <div className="flex flex-wrap gap-1 mt-2">
+              {(t.tags ?? []).map((tag) => (
+                <span key={tag} className="text-xs px-2 py-0.5 rounded bg-bg-input border border-border">
+                  {tag}
+                </span>
+              ))}
+              <span className="text-xs px-2 py-0.5 rounded bg-bg-input border border-border ml-auto">
+                {t.source}
+              </span>
+            </div>
+            <div className="flex gap-2 mt-3">
+              <button
+                onClick={() => setPicked(t)}
+                className="flex-1 px-3 py-1 rounded border border-border font-medium"
+              >
+                Apply
+              </button>
+            </div>
+          </li>
+        ))}
+        {!loading && templates.length === 0 && (
+          <li className="text-fg-muted text-center py-8 col-span-full">No templates available.</li>
+        )}
+      </ul>
+    </div>
+  );
+}
+
+function ApplyTemplateDialog({
+  api,
+  template,
+  onClose,
+  onApplied,
+}: {
+  api: ReturnType<typeof makeAPI>;
+  template: TemplateListItem;
+  onClose: () => void;
+  onApplied: () => void;
+}) {
+  const [mode, setMode] = useState<"empty_only" | "append" | "overwrite">("empty_only");
+  const [preview, setPreview] = useState<ApplySummary | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [applying, setApplying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<ApplySummary | null>(null);
+
+  useEffect(() => {
+    setLoading(true);
+    setError(null);
+    api<{ summary: ApplySummary }>(`/admin/templates/${template.name}/preview?mode=${mode}`)
+      .then((r) => setPreview(r.summary))
+      .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false));
+  }, [api, template.name, mode]);
+
+  const apply = async () => {
+    setApplying(true);
+    setError(null);
+    try {
+      const r = await api<{ summary: ApplySummary }>(`/admin/templates/${template.name}/apply`, {
+        method: "POST",
+        body: JSON.stringify({ mode }),
+      });
+      setResult(r.summary);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  if (result) {
+    return (
+      <div className="p-4 text-sm">
+        <h2 className="text-base font-semibold mb-3">Applied — {template.display_name}</h2>
+        <SummaryTable s={result} />
+        <button onClick={onApplied} className="mt-4 px-3 py-1 rounded border border-border">
+          Back to content
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-4 text-sm">
+      <header className="flex items-baseline justify-between mb-3">
+        <h2 className="text-base font-semibold">Apply — {template.display_name}</h2>
+        <button onClick={onClose} className="text-fg-muted text-xs">close</button>
+      </header>
+
+      <p className="text-fg-muted mb-3">{template.description}</p>
+
+      <label className="block mb-3">
+        <span className="text-xs text-fg-muted">Mode</span>
+        <select
+          value={mode}
+          onChange={(e) => setMode(e.target.value as typeof mode)}
+          className="block mt-1 border border-border rounded px-2 py-1 bg-bg-input"
+        >
+          <option value="empty_only">Empty only — refuse if site has content</option>
+          <option value="append">Append — add only missing slugs</option>
+          <option value="overwrite">Overwrite — replace by slug</option>
+        </select>
+      </label>
+
+      <div className="border border-border rounded p-3 my-3">
+        <p className="text-xs text-fg-muted mb-2">Will create:</p>
+        {loading && <p className="text-fg-muted">Loading preview…</p>}
+        {preview && <SummaryTable s={preview} />}
+      </div>
+
+      {error && <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2">{error}</div>}
+
+      <div className="flex gap-2 mt-3">
+        <button onClick={onClose} className="px-3 py-1 rounded border border-border">
+          Cancel
+        </button>
+        <button
+          onClick={apply}
+          disabled={loading || applying}
+          className="px-3 py-1 rounded border border-border font-semibold disabled:opacity-50"
+        >
+          {applying ? "Applying…" : "Apply"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SummaryTable({ s }: { s: ApplySummary }) {
+  const entries = Object.entries(s.created || {}).filter(([_, n]) => n > 0);
+  return (
+    <ul className="list-none p-0 m-0">
+      {entries.map(([kind, n]) => (
+        <li key={kind} className="flex justify-between py-0.5">
+          <span>{kind}</span>
+          <strong>{n}</strong>
+        </li>
+      ))}
+      {s.homepage_pinned && (
+        <li className="flex justify-between py-0.5">
+          <span>homepage pinned</span>
+          <strong>yes</strong>
+        </li>
+      )}
+      {(s.warnings ?? []).length > 0 && (
+        <li className="mt-2">
+          <p className="text-xs text-fg-muted">Warnings:</p>
+          <ul className="pl-4 text-xs text-fg-muted list-disc">
+            {s.warnings!.map((w, i) => (
+              <li key={i}>{w}</li>
+            ))}
+          </ul>
+        </li>
+      )}
+    </ul>
+  );
 }

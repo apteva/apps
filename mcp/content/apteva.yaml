@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: content
 display_name: Content
-version: 1.1.2
+version: 1.2.0
 description: |
   Block-based CMS for Apteva. Posts, pages, media, taxonomies, menus,
   revisions, redirects. Renders themed HTML and exposes a headless REST
@@ -66,6 +66,19 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    # Templates (site kits)
+    - name: templates_list
+      description: List available site templates (bundled + user-imported).
+    - name: templates_get
+      description: Fetch one template's full body.
+    - name: templates_preview
+      description: Dry-run apply — returns counts of what would be created.
+    - name: templates_apply
+      description: Apply a template; creates pages/posts/terms/menus/settings in one transaction.
+    - name: templates_register
+      description: Register a user-supplied template (raw YAML body).
+    - name: templates_unregister
+      description: Remove a user-registered template (bundled templates cannot be removed).
     # Posts + pages (kind-agnostic)
     - name: posts_search
       description: Filtered post/page search. Args filters by status, kind, term, parent.

@@ -375,5 +375,59 @@ func (a *App) mcpTools() []sdk.Tool {
 			}, []string{"slug"}),
 			Handler: a.toolThemesSetActive,
 		},
+
+		// ── Templates (site kits) ───────────────────────────
+		{
+			Name:        "templates_list",
+			Description: "List available site templates (bundled + user-imported). Args: source (optional 'bundled'|'imported'|'agent'), tag (optional tag filter).",
+			InputSchema: schemaObject(map[string]any{
+				"source": map[string]any{"type": "string"},
+				"tag":    map[string]any{"type": "string"},
+			}, nil),
+			Handler: a.toolTemplatesList,
+		},
+		{
+			Name:        "templates_get",
+			Description: "Fetch one template's full body (YAML). Args: name.",
+			InputSchema: schemaObject(map[string]any{
+				"name": map[string]any{"type": "string"},
+			}, []string{"name"}),
+			Handler: a.toolTemplatesGet,
+		},
+		{
+			Name:        "templates_preview",
+			Description: "Dry-run apply — returns counts of what would be created without writing. Args: name, mode (optional 'empty_only'|'append'|'overwrite').",
+			InputSchema: schemaObject(map[string]any{
+				"name": map[string]any{"type": "string"},
+				"mode": map[string]any{"type": "string"},
+			}, []string{"name"}),
+			Handler: a.toolTemplatesPreview,
+		},
+		{
+			Name:        "templates_apply",
+			Description: "Apply a template to this project — creates pages, posts, terms, menus, settings in one transaction. Args: name, mode ('empty_only' default — refuses if site has any content; 'append' — adds missing slugs only; 'overwrite' — replaces matching slugs).",
+			InputSchema: schemaObject(map[string]any{
+				"name": map[string]any{"type": "string"},
+				"mode": map[string]any{"type": "string"},
+			}, []string{"name"}),
+			Handler: a.toolTemplatesApply,
+		},
+		{
+			Name:        "templates_register",
+			Description: "Register a user-supplied template (raw YAML body). Args: body (string), source (optional, defaults to 'imported').",
+			InputSchema: schemaObject(map[string]any{
+				"body":   map[string]any{"type": "string"},
+				"source": map[string]any{"type": "string"},
+			}, []string{"body"}),
+			Handler: a.toolTemplatesRegister,
+		},
+		{
+			Name:        "templates_unregister",
+			Description: "Remove a user-registered template. Bundled templates cannot be removed. Args: name.",
+			InputSchema: schemaObject(map[string]any{
+				"name": map[string]any{"type": "string"},
+			}, []string{"name"}),
+			Handler: a.toolTemplatesUnregister,
+		},
 	}
 }

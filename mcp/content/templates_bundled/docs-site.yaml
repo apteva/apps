@@ -1,0 +1,227 @@
+schema: apteva-content-template/v1
+name: docs-site
+display_name: Docs Site
+version: 1.0.0
+description: |
+  Documentation site for an open-source library or product. Homepage,
+  getting-started, guides index, reference, FAQ, and changelog — all as
+  pages (no blog), with code blocks and nested page hierarchy demonstrated.
+  Designed to be navigable from a single primary menu.
+tags: [docs, documentation, open-source]
+
+requires_apps: []
+optional_apps: []
+
+settings:
+  site_title: Project Docs
+  site_tagline: Everything you need to ship with our library
+  posts_per_page: "10"
+
+terms: []
+
+pages:
+  - slug: home
+    title: Home
+    blocks:
+      - type: core/heading
+        attrs:
+          level: 1
+          text: Project Docs
+      - type: core/paragraph
+        attrs:
+          text_md: A short one-liner about what this library or product does, who it's for, and why someone should keep reading.
+      - type: core/code
+        attrs:
+          language: sh
+          source: npm install @project/sdk
+      - type: core/heading
+        attrs:
+          level: 2
+          text: Start here
+      - type: core/list
+        attrs:
+          style: bullet
+          items:
+            - "[Getting started](getting-started) — install, configure, ship your first thing in 5 minutes."
+            - "[Guides](guides) — task-focused recipes for the things people actually do."
+            - "[Reference](reference) — every function, every option, every type."
+            - "[FAQ](faq) — the questions people ask in chat."
+            - "[Changelog](changelog) — what changed and when."
+
+  - slug: getting-started
+    title: Getting started
+    blocks:
+      - type: core/heading
+        attrs:
+          level: 1
+          text: Getting started
+      - type: core/paragraph
+        attrs:
+          text_md: Install the package, drop in three lines, and you're shipping.
+      - type: core/heading
+        attrs:
+          level: 2
+          text: 1. Install
+      - type: core/code
+        attrs:
+          language: sh
+          source: |
+            npm install @project/sdk
+            # or
+            yarn add @project/sdk
+      - type: core/heading
+        attrs:
+          level: 2
+          text: 2. Initialize
+      - type: core/code
+        attrs:
+          language: ts
+          source: |
+            import { Client } from "@project/sdk";
+
+            const client = new Client({
+              apiKey: process.env.PROJECT_API_KEY,
+            });
+      - type: core/heading
+        attrs:
+          level: 2
+          text: 3. Make your first call
+      - type: core/code
+        attrs:
+          language: ts
+          source: |
+            const result = await client.things.create({
+              name: "My first thing",
+            });
+            console.log(result);
+      - type: core/heading
+        attrs:
+          level: 2
+          text: Next
+      - type: core/paragraph
+        attrs:
+          text_md: Read the [Guides](guides) for task-focused recipes, or jump straight to the [Reference](reference).
+
+  - slug: guides
+    title: Guides
+    blocks:
+      - type: core/heading
+        attrs:
+          level: 1
+          text: Guides
+      - type: core/paragraph
+        attrs:
+          text_md: Task-focused walkthroughs. Pick the one that matches what you're trying to do.
+      - type: core/list
+        attrs:
+          style: bullet
+          items:
+            - Authentication — API keys, OAuth, session tokens.
+            - Webhooks — verify signatures, retry semantics, idempotency.
+            - Pagination — cursor-based vs page-based, our defaults.
+            - Rate limits — per-key quotas and how to back off.
+            - Errors — error classes and what to do about each one.
+      - type: core/paragraph
+        attrs:
+          text_md: _Each of these would become its own nested page under /guides in a fully-fleshed-out docs site._
+
+  - slug: reference
+    title: API reference
+    blocks:
+      - type: core/heading
+        attrs:
+          level: 1
+          text: API reference
+      - type: core/paragraph
+        attrs:
+          text_md: Every public function and type. Auto-generated reference goes here in production; for the template, here's a sample shape.
+      - type: core/heading
+        attrs:
+          level: 2
+          text: client.things.create(input)
+      - type: core/paragraph
+        attrs:
+          text_md: Creates a new thing. Returns a Thing object.
+      - type: core/code
+        attrs:
+          language: ts
+          source: |
+            interface CreateThingInput {
+              name: string;
+              metadata?: Record<string, string>;
+            }
+
+  - slug: faq
+    title: FAQ
+    blocks:
+      - type: core/heading
+        attrs:
+          level: 1
+          text: Frequently asked questions
+      - type: core/heading
+        attrs:
+          level: 2
+          text: Does this work with TypeScript?
+      - type: core/paragraph
+        attrs:
+          text_md: Yes — the SDK ships with type definitions and a strict TypeScript-first API.
+      - type: core/heading
+        attrs:
+          level: 2
+          text: Is there a free tier?
+      - type: core/paragraph
+        attrs:
+          text_md: Yes, up to 1,000 requests per month. See [Pricing](pricing) for higher tiers.
+      - type: core/heading
+        attrs:
+          level: 2
+          text: How do I report a bug?
+      - type: core/paragraph
+        attrs:
+          text_md: Open an issue on GitHub or email support@example.com.
+
+  - slug: changelog
+    title: Changelog
+    blocks:
+      - type: core/heading
+        attrs:
+          level: 1
+          text: Changelog
+      - type: core/heading
+        attrs:
+          level: 2
+          text: v1.0.0
+      - type: core/paragraph
+        attrs:
+          text_md: Initial public release. API stable; semver applies from here on.
+      - type: core/heading
+        attrs:
+          level: 2
+          text: v0.5.0
+      - type: core/paragraph
+        attrs:
+          text_md: Beta release. Feedback welcome.
+
+posts: []
+
+menus:
+  - slug: primary
+    name: Primary
+    items:
+      - label: Get started
+        target_kind: page
+        target_slug: getting-started
+      - label: Guides
+        target_kind: page
+        target_slug: guides
+      - label: Reference
+        target_kind: page
+        target_slug: reference
+      - label: FAQ
+        target_kind: page
+        target_slug: faq
+      - label: Changelog
+        target_kind: page
+        target_slug: changelog
+
+homepage_slug: home

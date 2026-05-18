@@ -1,0 +1,244 @@
+schema: apteva-content-template/v1
+name: saas-marketing
+display_name: SaaS Marketing
+version: 1.0.0
+description: |
+  Marketing-site starter for a B2B SaaS product. Homepage with hero +
+  features + social-proof + pricing CTA; dedicated pages for features,
+  pricing, about, and contact. No blog posts — this is a five-page
+  marketing site, not a content publication. Pairs with the default
+  theme or any landing-style theme.
+tags: [marketing, saas, b2b, landing]
+
+requires_apps: []
+optional_apps: []
+
+settings:
+  site_title: Acme
+  site_tagline: The fastest way to ship a SaaS
+  posts_per_page: "10"
+  blog_root_path: /blog
+
+terms: []
+
+pages:
+  - slug: home
+    title: Home
+    blocks:
+      - type: core/heading
+        attrs:
+          level: 1
+          text: Ship faster. Less code. Real results.
+      - type: core/paragraph
+        attrs:
+          align: center
+          text_md: Acme is the all-in-one platform for teams that want to launch a SaaS product without spending six months on plumbing.
+      - type: core/button
+        attrs:
+          label: Start free trial
+          url: /signup
+          style: primary
+      - type: core/separator
+        attrs:
+          style: plain
+      - type: core/heading
+        attrs:
+          level: 2
+          text: Why teams pick Acme
+      - type: core/columns
+        inner:
+          - type: core/group
+            inner:
+              - type: core/heading
+                attrs:
+                  level: 3
+                  text: Ship in days
+              - type: core/paragraph
+                attrs:
+                  text_md: Auth, billing, email, and analytics out of the box. Focus on what makes your product different.
+          - type: core/group
+            inner:
+              - type: core/heading
+                attrs:
+                  level: 3
+                  text: Scale with you
+              - type: core/paragraph
+                attrs:
+                  text_md: From the first paying customer to your Series B. No re-platforming.
+      - type: core/separator
+        attrs:
+          style: plain
+      - type: core/heading
+        attrs:
+          level: 2
+          text: Trusted by
+      - type: core/paragraph
+        attrs:
+          align: center
+          text_md: _Replace with logos of customers, or testimonials if you don't have logos yet._
+      - type: core/separator
+        attrs:
+          style: plain
+      - type: core/cta
+        attrs:
+          heading: Try it free for 14 days
+          body: No credit card required.
+          button_label: Start free trial
+          button_url: /signup
+
+  - slug: features
+    title: Features
+    blocks:
+      - type: core/heading
+        attrs:
+          level: 1
+          text: What's in the box
+      - type: core/paragraph
+        attrs:
+          text_md: Acme bundles the boring-but-essential parts of a SaaS so you can spend your time on the differentiator.
+      - type: core/heading
+        attrs:
+          level: 2
+          text: Authentication
+      - type: core/paragraph
+        attrs:
+          text_md: Magic-link, social login (Google / GitHub / Apple), and SAML SSO for enterprise plans. Sessions are managed for you.
+      - type: core/heading
+        attrs:
+          level: 2
+          text: Billing
+      - type: core/paragraph
+        attrs:
+          text_md: Stripe-powered subscriptions, usage-based metering, trial logic, dunning, and proration — all without leaving Acme.
+      - type: core/heading
+        attrs:
+          level: 2
+          text: Transactional email
+      - type: core/paragraph
+        attrs:
+          text_md: Send welcome, password-reset, and trial-expiry emails through the bundled email API. Templates are versioned and previewable.
+      - type: core/heading
+        attrs:
+          level: 2
+          text: Analytics
+      - type: core/paragraph
+        attrs:
+          text_md: Event tracking with retention cohorts, funnels, and revenue dashboards. No JS snippet to install.
+
+  - slug: pricing
+    title: Pricing
+    blocks:
+      - type: core/heading
+        attrs:
+          level: 1
+          text: Simple, transparent pricing
+      - type: core/paragraph
+        attrs:
+          text_md: Pick a plan that matches where you are. Upgrade whenever; downgrade anytime.
+      - type: core/columns
+        inner:
+          - type: core/group
+            inner:
+              - type: core/heading
+                attrs:
+                  level: 3
+                  text: Starter — $29/mo
+              - type: core/list
+                attrs:
+                  style: bullet
+                  items:
+                    - Up to 1,000 monthly active users
+                    - All core features
+                    - Email support
+              - type: core/button
+                attrs:
+                  label: Start
+                  url: /signup?plan=starter
+                  style: secondary
+          - type: core/group
+            inner:
+              - type: core/heading
+                attrs:
+                  level: 3
+                  text: Growth — $99/mo
+              - type: core/list
+                attrs:
+                  style: bullet
+                  items:
+                    - Up to 10,000 MAU
+                    - Priority support
+                    - Custom domain
+                    - Webhooks
+              - type: core/button
+                attrs:
+                  label: Start
+                  url: /signup?plan=growth
+                  style: primary
+          - type: core/group
+            inner:
+              - type: core/heading
+                attrs:
+                  level: 3
+                  text: Enterprise — custom
+              - type: core/list
+                attrs:
+                  style: bullet
+                  items:
+                    - Unlimited MAU
+                    - SAML SSO + SCIM
+                    - SLA + dedicated support
+                    - Custom contract
+              - type: core/button
+                attrs:
+                  label: Talk to sales
+                  url: /contact
+                  style: ghost
+
+  - slug: about
+    title: About
+    blocks:
+      - type: core/heading
+        attrs:
+          level: 1
+          text: About Acme
+      - type: core/paragraph
+        attrs:
+          text_md: Replace this with your founder story. Who started the company, why, what makes the team uniquely qualified to build this product.
+
+  - slug: contact
+    title: Contact
+    blocks:
+      - type: core/heading
+        attrs:
+          level: 1
+          text: Get in touch
+      - type: core/paragraph
+        attrs:
+          text_md: "**Sales:** sales@example.com"
+      - type: core/paragraph
+        attrs:
+          text_md: "**Support:** support@example.com"
+      - type: core/paragraph
+        attrs:
+          text_md: "**Press:** press@example.com"
+
+posts: []
+
+menus:
+  - slug: primary
+    name: Primary
+    items:
+      - label: Features
+        target_kind: page
+        target_slug: features
+      - label: Pricing
+        target_kind: page
+        target_slug: pricing
+      - label: About
+        target_kind: page
+        target_slug: about
+      - label: Contact
+        target_kind: page
+        target_slug: contact
+
+homepage_slug: home
