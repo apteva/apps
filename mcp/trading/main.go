@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.4.9
+version: 0.4.10
 description: Trading desk for Apteva agents (paper + live via per-portfolio broker integration).
 author: Apteva
 scopes: [project, global]
@@ -187,9 +187,18 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		_ = dbUpsertMark(ctx.AppDB(), m)
 	}
 
+	// Log which provider impl actually got wired so operators can
+	// confirm the default applied. The config value can be empty —
+	// it means "use the default", which since v0.4.10 is live.
+	configured := ctx.Config().Get("pricing_provider")
+	resolved := "mock"
+	if _, ok := provider.(*liveProvider); ok {
+		resolved = "live"
+	}
 	ctx.Logger().Info("trading mounted",
 		"project_id", os.Getenv("APTEVA_PROJECT_ID"),
-		"pricing_provider", ctx.Config().Get("pricing_provider"))
+		"pricing_provider_config", configured,
+		"pricing_provider_resolved", resolved)
 
 	// Auto-fill on first install. Idempotent — guards on "zero
 	// portfolios in this project". Never fatal.
@@ -218,15 +227,23 @@ func (a *App) Workers() []sdk.Worker {
 	}
 }
 
-// newProvider picks the pricing path. v0.2 adds "live" which composes
-// public Binance + Polymarket gamma-api with a mock fallback for
-// equity/etf and on errors. "mock" stays for tests + offline demos.
+// newProvider picks the pricing path. "live" composes public Binance
+// (crypto) + Polymarket gamma-api (polymarket) + Yahoo Finance
+// (equity/etf), each falling back to mock on failure. "mock" stays
+// for tests and air-gapped demos.
+//
+// Unset / empty string defaults to LIVE — the install's
+// pricing_provider field can be empty either because the operator
+// hasn't touched it (manifest default doesn't auto-populate the
+// install's config blob) or because they explicitly cleared it; in
+// either case the right behavior is real prices, not synthesised
+// walks pegged to year-old anchors.
 func newProvider(name string) Provider {
 	mock := newMockProvider()
 	switch name {
-	case "live":
+	case "live", "":
 		return newLiveProvider(mock)
-	case "", "mock":
+	case "mock":
 		return mock
 	}
 	if globalCtx != nil {
