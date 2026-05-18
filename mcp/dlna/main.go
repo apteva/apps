@@ -35,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: dlna
 display_name: DLNA Server
-version: 0.1.18
+version: 0.1.19
 description: Local-LAN UPnP/DLNA MediaServer for Apteva.
 author: Apteva
 scopes: [project, global]
@@ -292,6 +292,22 @@ func (a *App) handleConnectionManagerSCPD(w http.ResponseWriter, r *http.Request
 // query params (sig=, exp=) ride along untouched — the gateway's
 // auth middleware carves out signed paths.
 func (a *App) handleMediaRedirect(w http.ResponseWriter, r *http.Request) {
+	// v0.1.19 diagnostic: log every entry so we can prove whether
+	// the handler is being reached for the failing /media?id=N case.
+	// Previous releases were shipped on hypothesis without this signal
+	// — turning out to be: handler runs for /media (no query) returning
+	// 400, but /media?id=21 was returning a 404 JSON body we couldn't
+	// trace to any source. Two possibilities: (a) the handler IS running
+	// and silently falling through to a 404 path we missed, or (b) the
+	// request never reaches the handler (something upstream intercepts).
+	// This log line distinguishes the two.
+	a.ctx.Logger().Info("media handler entered",
+		"path", r.URL.Path,
+		"raw_query", r.URL.RawQuery,
+		"method", r.Method,
+		"remote", r.RemoteAddr,
+		"ua", r.Header.Get("User-Agent"))
+
 	// id can arrive two ways:
 	//   1. v0.1.17+: as ?id=N in the query string (canonical, since
 	//      the advertised URL is /media?id=N&n=name.ext — no path
