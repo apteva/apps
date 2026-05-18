@@ -187,6 +187,10 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := dbDeleteInstance(ctx.AppDB(), id); err != nil {
 		return nil, err
 	}
+	// Release any pooled SSH connection to the now-dead host so we
+	// don't leak the TCP socket. Safe to call when no entry exists
+	// (e.g. instance was destroyed before any command ran).
+	globalSSHPool.evict(id)
 	return map[string]any{"destroyed": true, "id": id}, nil
 }
 
