@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.11.0
+version: 0.11.1
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -316,16 +316,29 @@ config_schema:
     label: Render output folder
     description: Storage folder where finished renders are uploaded.
   - name: render_host_id
-    type: text
+    type: select_from_app
+    app: instances
+    discovery:
+      route: /api/instances
+      response_path: instances
+      value_field: id
+      label_field: name
+    fallback: text
     default: "0"
-    label: Remote render host_id
+    label: Remote render host
     description: |
-      When > 0, renders are dispatched to the named host from the
-      Instances app (instance_run_command + signed-URL source pulls +
-      multipart upload back to storage). ffmpeg auto-installs into
-      ~/.apteva-render/ on first use; no sudo. 0 (default) = all
-      renders run on local ffmpeg. Requires the Instances app
-      installed and the host already provisioned + ready.
+      Pick a host from the Instances app's inventory to offload renders
+      to. The dropdown populates from /api/apps/instances/api/instances
+      at config-render time. Picking the local host (id 0) means
+      "no remote — render here", which is the default.
+
+      On first remote render: ffmpeg auto-installs into
+      ~/.apteva-render/ on the host (no sudo). Source bytes come from
+      a signed storage URL; output uploads back to storage via the
+      presigned-PUT fast path (S3 backends) or multipart fallback.
+
+      If the Instances app isn't installed the field collapses to a
+      plain text input where you can type a host id manually.
 
   # Transcripts (new in v0.4)
   - name: transcribe_auto
