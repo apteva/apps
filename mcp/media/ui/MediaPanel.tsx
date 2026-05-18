@@ -807,15 +807,21 @@ function OperationsSection({
   const ops = ALL_OPS.filter((o) => o.needs(row));
   if (ops.length === 0) return null;
 
+  // Don't use the shared <Section> wrapper here — it forces a 2-col
+  // grid (100px | 1fr) designed for label/value rows, which would
+  // squeeze the button strip into the first 100px column. Render
+  // the section directly with a flex layout so buttons flow
+  // horizontally and wrap naturally.
   return (
-    <Section title="Operations">
+    <section>
+      <h3 className="text-xs uppercase tracking-wide text-text-dim mb-1">Operations</h3>
       <div className="flex flex-wrap gap-1.5">
         {ops.map((op) => (
           <button
             key={op.name}
             type="button"
             onClick={() => { setOpenOp(op.name); setSubmitError(""); }}
-            className="px-2 py-1 text-xs border border-border rounded text-text hover:bg-bg-input hover:border-accent"
+            className="px-2 py-1 text-xs border border-border rounded text-text hover:bg-bg-input hover:border-accent whitespace-nowrap"
           >
             {op.label}
           </button>
@@ -850,7 +856,7 @@ function OperationsSection({
           ))}
         </div>
       )}
-    </Section>
+    </section>
   );
 }
 
