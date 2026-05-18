@@ -1,0 +1,138 @@
+schema: apteva-app/v1
+
+name: cdn
+display_name: CDN
+version: 0.1.0
+description: |
+  Public-facing edge for apps that emit URLs. Composes domains (DNS),
+  certs (TLS), and routes (host-based reverse-proxy) into one
+  capability: given an origin URL and a hostname, expose that origin
+  publicly on the hostname.
+
+  v0.1 is local-mode only — the apteva-server itself is the origin,
+  no third-party CDN provider, no edge caching, no edge nodes. The
+  hostname is registered with the routes app, the cert is issued via
+  certs, the DNS record is written via domains; apteva-server's
+  built-in HostRouter does the rest.
+
+  Mode B (self-hosted edges via instances) and regional origins are
+  deferred to v0.3.
+
+  Consumers (storage today, image-studio / podcast / media tomorrow)
+  call cdn_url_for to mint URLs on a zone they've been linked to.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/cdn
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/cdn/icon.png
+tags: [cdn, edge, hostname, routing, infrastructure]
+
+scopes: [global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    # routes is required — without it, apteva-server's HostRouter
+    # has nothing to dispatch on and zones can't actually serve
+    # traffic. cdn refuses to install without routes.
+    - { name: routes }
+    # domains is optional — cdn skips the DNS write leg when it's
+    # unbound (set skip_dns:true on cdn_zone_create, or wire up
+    # /etc/hosts manually for local dev).
+    - { name: domains, optional: true }
+    # certs is optional — cdn skips the cert issuance leg when
+    # unbound (set allow_http:true on cdn_zone_create to serve the
+    # zone over plain HTTP without the HTTPS redirect).
+    - { name: certs,   optional: true }
+
+provides:
+  http_routes:
+    - prefix: /
+  resources:
+    - { name: zone, label: "CDN zone", list_endpoint: /zones, matcher: exact, picker: list }
+  permissions:
+    - { name: zones.read,   resource: zone, description: "View zone config." }
+    - { name: zones.write,  resource: zone, description: "Create / modify zones." }
+    - { name: zones.delete, resource: zone, description: "Destroy a zone." }
+  mcp_tools:
+    - name: cdn_zone_create
+      description: |
+        Stand up a public hostname for an origin URL. Writes DNS via
+        domains (A record to server_public_host), issues TLS via
+        certs, registers the host→target route via routes. Args:
+        hostname (FQDN), origin_url (http(s):// URL the edge should
+        reverse-proxy to), record_type? (A | CNAME, default A).
+      requires: zones.write
+    - name: cdn_zone_get
+      description: "Fetch one zone by id or hostname. Args: id OR hostname."
+      requires: zones.read
+      resource_from: "zone/{arg.id}"
+    - name: cdn_zone_list
+      description: "List zones for this project."
+      requires: zones.read
+    - name: cdn_zone_delete
+      description: |
+        Tear down a zone — unregister the route, revoke the cert,
+        delete the DNS record, drop the local row. Idempotent. Args:
+        id OR hostname.
+      requires: zones.delete
+      resource_from: "zone/{arg.id}"
+    - name: cdn_url_for
+      description: |
+        Mint a public URL on a zone for an origin path. Pure string
+        assembly — no I/O. Args: zone_id, origin_path (must start
+        with /). Returns { url }.
+      requires: zones.read
+      resource_from: "zone/{arg.zone_id}"
+  ui_panels:
+    - { slot: project.page, label: CDN, icon: cloud, entry: /ui/CdnPanel.mjs }
+  skills:
+    - name: how-to-use-cdn
+      command: /cdn
+      body_file: skills/how-to-use-cdn.md
+      description: |
+        When + how to add a CDN zone, linking a zone to storage /
+        image-studio / podcast / deploy, and what v0.1 does and
+        doesn't cover. Load when working with custom hostnames.
+      metadata:
+        category: infrastructure
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/cdn
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/cdn.db
+  migrations: migrations/
+
+config_schema:
+  - name: server_public_host
+    type: text
+    default: ""
+    label: Apteva-server public host
+    description: |
+      IPv4 address or hostname clients should resolve zone hostnames
+      to. Used as the value for the DNS record written when a zone
+      is created. Required — leaving empty makes cdn_zone_create
+      fail. v0.2 will auto-detect from APTEVA_PUBLIC_URL.
+  - name: record_type_default
+    type: select
+    options: [A, CNAME]
+    default: A
+    label: Default DNS record type
+    description: |
+      A pins zone hostnames to server_public_host as an IP. CNAME
+      points them at server_public_host as a hostname (useful when
+      the apteva-server itself sits behind a stable CNAME like a
+      managed-DNS load balancer). cdn_zone_create accepts a per-call
+      override.
+
+upgrade_policy: auto-patch
