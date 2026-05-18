@@ -175,6 +175,12 @@ func (i *remoteFFmpegInstaller) Ensure(ctx context.Context, app *sdk.AppCtx, hos
 // either: BtbN is reliable enough and gives us the same modern build
 // on every host regardless of distro. Cached on subsequent calls via
 // the existence probe at the binary path.
+//
+// Both probe + install resolve $HOME to its absolute value on the
+// remote and return the fully-expanded path in installedPaths.
+// Pre-v0.11.4 stored "$HOME/..." literals; downstream scripts that
+// single-quoted the path (no expansion) tried to exec a literal
+// "$HOME/..." → 127 "command not found".
 func (i *remoteFFmpegInstaller) install(ctx context.Context, app *sdk.AppCtx, hostID int64) (installedPaths, error) {
 	log := app.Logger()
 
@@ -187,28 +193,35 @@ func (i *remoteFFmpegInstaller) install(ctx context.Context, app *sdk.AppCtx, ho
 		return installedPaths{}, fmt.Errorf("unsupported remote arch %q (supported: amd64, arm64)", arch)
 	}
 
-	ffmpegPath := remoteInstallDir + "/bin/ffmpeg"
-	ffprobePath := remoteInstallDir + "/bin/ffprobe"
-
-	// Existence probe — one-RTT skip when the binary's already there.
-	already, version, err := probeInstalled(ctx, app, hostID, ffmpegPath)
+	// Existence probe — returns the absolute install dir when present,
+	// "" when missing. One-RTT skip on subsequent calls.
+	absDir, version, err := probeInstalled(ctx, app, hostID)
 	if err != nil {
 		return installedPaths{}, fmt.Errorf("probe install: %w", err)
 	}
-	if already {
+	if absDir != "" {
+		paths := installedPaths{
+			FFmpeg:  absDir + "/bin/ffmpeg",
+			FFprobe: absDir + "/bin/ffprobe",
+		}
 		log.Info("remote ffmpeg already installed",
-			"host_id", hostID, "arch", arch, "path", ffmpegPath, "version", version)
-		return installedPaths{FFmpeg: ffmpegPath, FFprobe: ffprobePath}, nil
+			"host_id", hostID, "arch", arch, "path", paths.FFmpeg, "version", version)
+		return paths, nil
 	}
 
 	log.Info("remote ffmpeg install starting",
 		"host_id", hostID, "arch", arch, "channel", ffmpegVersion, "url", src.URL)
-	if err := runInstall(ctx, app, hostID, src); err != nil {
+	absDir, err = runInstall(ctx, app, hostID, src)
+	if err != nil {
 		return installedPaths{}, fmt.Errorf("install ffmpeg %s on host_id=%d: %w", ffmpegVersion, hostID, err)
 	}
+	paths := installedPaths{
+		FFmpeg:  absDir + "/bin/ffmpeg",
+		FFprobe: absDir + "/bin/ffprobe",
+	}
 	log.Info("remote ffmpeg install complete",
-		"host_id", hostID, "arch", arch, "path", ffmpegPath)
-	return installedPaths{FFmpeg: ffmpegPath, FFprobe: ffprobePath}, nil
+		"host_id", hostID, "arch", arch, "path", paths.FFmpeg)
+	return paths, nil
 }
 
 // ─── remote operations ─────────────────────────────────────────────
@@ -235,28 +248,49 @@ func detectRemoteArch(ctx context.Context, app *sdk.AppCtx, hostID int64) (strin
 	return m, nil // caller resolves against ffmpegSources and errors with the raw name
 }
 
-// probeInstalled returns (true, versionLine, nil) when the binary
-// exists and `-version` succeeds. A missing binary is the common
-// case and returns (false, "", nil) — not an error.
-func probeInstalled(ctx context.Context, app *sdk.AppCtx, hostID int64, ffmpegPath string) (bool, string, error) {
-	// `-x` test + version probe in one round-trip. Output is the
-	// version line OR "MISSING" (no binary); exit_code stays 0 in
-	// both branches so we don't need to distinguish ENOENT from a
-	// real run-failure here.
-	cmd := fmt.Sprintf(`if [ -x %q ]; then %q -version 2>/dev/null | head -1; else echo MISSING; fi`,
-		ffmpegPath, ffmpegPath)
+// probeInstalled returns (absInstallDir, versionLine, nil) when the
+// binary exists and `-version` succeeds. A missing binary returns
+// ("", "", nil) — the common case, not an error.
+//
+// The probe script uses double-quoted "$HOME/..." so bash expands
+// the variable, and echoes both the resolved absolute path
+// (DIR=/root/... line) and the version line. Caller stores the
+// absolute path so downstream single-quoted shell uses don't
+// re-encounter the unexpanded-$HOME bug that bit pre-v0.11.4.
+func probeInstalled(ctx context.Context, app *sdk.AppCtx, hostID int64) (string, string, error) {
+	// `-x` test + version probe in one round-trip. Output is:
+	//   - "DIR=<abs>\n<version line>" when present
+	//   - "MISSING" when not
+	// exit_code stays 0 in both branches so we don't need to
+	// distinguish ENOENT from a real run-failure here.
+	cmd := fmt.Sprintf(`DIR=%s; FFMPEG="$DIR/bin/ffmpeg"; `+
+		`if [ -x "$FFMPEG" ]; then `+
+		`  printf 'DIR=%%s\n' "$DIR"; "$FFMPEG" -version 2>/dev/null | head -1; `+
+		`else echo MISSING; fi`,
+		remoteInstallDir)
 	out, exit, err := runRemote(ctx, app, hostID, cmd, 15)
 	if err != nil {
-		return false, "", err
+		return "", "", err
 	}
 	if exit != 0 {
-		return false, "", fmt.Errorf("existence probe exit=%d: %s", exit, truncate(out, 200))
+		return "", "", fmt.Errorf("existence probe exit=%d: %s", exit, truncate(out, 200))
 	}
-	first := strings.SplitN(strings.TrimSpace(out), "\n", 2)[0]
-	if first == "MISSING" || first == "" {
-		return false, "", nil
+	out = strings.TrimSpace(out)
+	if out == "MISSING" || out == "" {
+		return "", "", nil
 	}
-	return true, first, nil
+	lines := strings.SplitN(out, "\n", 2)
+	if !strings.HasPrefix(lines[0], "DIR=") {
+		// Missing or malformed marker — treat as not-installed so
+		// the install path runs and produces a clean install.
+		return "", "", nil
+	}
+	absDir := strings.TrimPrefix(lines[0], "DIR=")
+	version := ""
+	if len(lines) > 1 {
+		version = lines[1]
+	}
+	return absDir, version, nil
 }
 
 // runInstall is the download → extract script. ~50 MB download
@@ -275,10 +309,15 @@ func probeInstalled(ctx context.Context, app *sdk.AppCtx, hostID int64, ffmpegPa
 // for download integrity (same trust model as curl-pipe-sh installers
 // across the ecosystem) and self-verify by running the extracted
 // binary's -version + a quick HTTPS probe before declaring success.
-func runInstall(ctx context.Context, app *sdk.AppCtx, hostID int64, src ffmpegSource) error {
+func runInstall(ctx context.Context, app *sdk.AppCtx, hostID int64, src ffmpegSource) (string, error) {
+	// Returns the absolute install directory so the caller can
+	// construct fully-resolved paths to ffmpeg/ffprobe (no $HOME).
+	// The marker `INSTALL_DIR=...` is printed as the last line on
+	// success; we parse it on the Go side.
 	script := fmt.Sprintf(`set -euo pipefail
 mkdir -p %[1]s
 cd %[1]s
+ABS_DIR=$(pwd)
 # Free-space guard: ~400 MB headroom covers compressed + extracted
 # + a margin. df reports 1K blocks, so 400000 = ~400 MB.
 FREE=$(df -P . | tail -1 | awk '{print $4}')
@@ -292,27 +331,39 @@ rm -f ffmpeg.tar.xz
 test -x ./bin/ffmpeg
 test -x ./bin/ffprobe
 ./bin/ffmpeg -version | head -1
-# Sanity: make sure HTTPS actually works in this build. Fetches
-# only response headers from a tiny well-known endpoint via
-# ffprobe's HTTP demuxer. A SIGSEGV here means we re-shipped the
-# johnvansickle-class bug; bail loudly so the operator hears about
-# it instead of the indexer silently falling back forever.
-./bin/ffprobe -v error -i https://github.com/favicon.ico -show_format 2>&1 | head -3 || {
-  echo "ffprobe HTTPS probe failed — this BtbN build does not have working TLS"
+# Sanity: make sure HTTPS actually works in this build. A SIGSEGV
+# here means we re-shipped the johnvansickle-class bug; bail loudly
+# so the operator hears about it instead of the indexer silently
+# falling back forever.
+./bin/ffprobe -v error -i https://github.com/favicon.ico -show_format >/dev/null 2>&1 || {
+  echo "ffprobe HTTPS probe failed — this build does not have working TLS"
   exit 1
 }
+printf 'INSTALL_DIR=%%s\n' "$ABS_DIR"
 `, remoteInstallDir, src.URL)
 
 	// 5 min cap. Real-world: ~10s download + ~5s extract on a
 	// reasonable VPS. The cap mostly defends against curl hangs.
 	out, exit, err := runRemote(ctx, app, hostID, script, 300)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if exit != 0 {
-		return fmt.Errorf("install script exit=%d: %s", exit, truncate(out, 1000))
+		return "", fmt.Errorf("install script exit=%d: %s", exit, truncate(out, 1000))
 	}
-	return nil
+	// Parse INSTALL_DIR marker from the (potentially multi-line)
+	// stdout. Last matching line wins (defensive against future
+	// additions before the marker).
+	var absDir string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.HasPrefix(line, "INSTALL_DIR=") {
+			absDir = strings.TrimPrefix(line, "INSTALL_DIR=")
+		}
+	}
+	if absDir == "" {
+		return "", fmt.Errorf("install completed but INSTALL_DIR marker missing in output: %s", truncate(out, 400))
+	}
+	return absDir, nil
 }
 
 // ─── helpers ───────────────────────────────────────────────────────
