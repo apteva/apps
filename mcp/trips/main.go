@@ -18,8 +18,10 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -113,6 +115,11 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/budget", Handler: a.handleBudget},
 		{Pattern: "/budget/summary", Handler: a.handleBudgetSummary},
 		{Pattern: "/dashboard", Handler: a.handleDashboard},
+		{Pattern: "/settings", Handler: a.handleSettings},
+		{Pattern: "/connections", Handler: a.handleAvailableConnections},
+		{Pattern: "/search/places", Handler: a.handleSearchPlaces},
+		{Pattern: "/search/place", Handler: a.handlePlaceDetails},
+		{Pattern: "/search/flights", Handler: a.handleSearchFlights},
 	}
 }
 
@@ -282,6 +289,50 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "dashboard", Description: "Trip + all children + budget summary in a single payload (drives the panel detail view).",
 			InputSchema: schemaObject(map[string]any{"trip_id": map[string]any{"type": "integer"}}, []string{"trip_id"}),
 			Handler:     a.toolDashboard},
+
+		// Settings + search surface (v0.4)
+		{Name: "settings_get", Description: "Read trips project settings (home_airport, default_passengers, connection ids, daily search budget).",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler:     a.toolSettingsGet},
+		{Name: "settings_set", Description: "Update trips project settings. Args: home_airport?, default_passengers?, duffel_connection_id?, places_connection_id?, daily_search_budget_cents?.",
+			InputSchema: schemaObject(map[string]any{
+				"home_airport":              map[string]any{"type": "string"},
+				"default_passengers":        map[string]any{"type": "integer"},
+				"duffel_connection_id":      map[string]any{"type": "integer"},
+				"places_connection_id":      map[string]any{"type": "integer"},
+				"daily_search_budget_cents": map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolSettingsSet},
+		{Name: "available_connections", Description: "List connections this project has access to. Args: provider? (filter by app_slug, e.g. 'duffel' or 'google-places').",
+			InputSchema: schemaObject(map[string]any{
+				"provider": map[string]any{"type": "string"},
+			}, nil),
+			Handler: a.toolAvailableConnections},
+
+		{Name: "search_places", Description: "Search Google Places. Three modes dispatched by which args are supplied: (1) kind=destination + query → autocomplete suggestions for the destination input; (2) query + optional kind/lat/lng → text search; (3) kind + (lat/lng or destination_id) without query → nearby search. kind values: lodging, restaurant, cafe, bar, attraction, museum, shopping, other, destination. Returns ranked places with place_id, name, address, coords, rating, price_level.",
+			InputSchema: schemaObject(map[string]any{
+				"query":          map[string]any{"type": "string"},
+				"kind":           map[string]any{"type": "string"},
+				"lat":            map[string]any{"type": "number"},
+				"lng":            map[string]any{"type": "number"},
+				"destination_id": map[string]any{"type": "integer"},
+				"radius":         map[string]any{"type": "integer"},
+				"limit":          map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolSearchPlaces},
+		{Name: "place_details", Description: "Fetch full details (phone, website, hours, photos, rating) for a single place by id. Cached 7 days.",
+			InputSchema: schemaObject(map[string]any{"place_id": map[string]any{"type": "string"}}, []string{"place_id"}),
+			Handler:     a.toolPlaceDetails},
+		{Name: "search_flights", Description: "Search flights via Duffel. Args: from (IATA, default settings.home_airport), to (IATA), depart_date (YYYY-MM-DD), return_date?, passengers? (default settings.default_passengers), cabin? (economy|premium_economy|business|first). Returns ranked offers (cheapest first).",
+			InputSchema: schemaObject(map[string]any{
+				"from":        map[string]any{"type": "string"},
+				"to":          map[string]any{"type": "string"},
+				"depart_date": map[string]any{"type": "string"},
+				"return_date": map[string]any{"type": "string"},
+				"passengers":  map[string]any{"type": "integer"},
+				"cabin":       map[string]any{"type": "string"},
+			}, []string{"to", "depart_date"}),
+			Handler: a.toolSearchFlights},
 	}
 }
 
@@ -2451,6 +2502,783 @@ func (a *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := a.toolDashboard(globalCtx, map[string]any{"trip_id": float64(n)})
 	writeOrErr(w, out, err)
+}
+
+// ─── Settings ────────────────────────────────────────────────────
+
+type Settings struct {
+	ProjectID              string `json:"project_id"`
+	HomeAirport            string `json:"home_airport"`
+	DefaultPassengers      int    `json:"default_passengers"`
+	DuffelConnectionID     int64  `json:"duffel_connection_id,omitempty"`
+	PlacesConnectionID     int64  `json:"places_connection_id,omitempty"`
+	DailySearchBudgetCents int    `json:"daily_search_budget_cents"`
+}
+
+func loadSettings(ctx *sdk.AppCtx) (Settings, error) {
+	pid := projectID()
+	var s Settings
+	var duffel, places sql.NullInt64
+	err := ctx.AppDB().QueryRow(
+		`SELECT project_id, home_airport, default_passengers, duffel_connection_id,
+		        places_connection_id, daily_search_budget_cents
+		 FROM settings WHERE project_id=?`, pid,
+	).Scan(&s.ProjectID, &s.HomeAirport, &s.DefaultPassengers, &duffel, &places, &s.DailySearchBudgetCents)
+	if errors.Is(err, sql.ErrNoRows) {
+		s = Settings{ProjectID: pid, DefaultPassengers: 1, DailySearchBudgetCents: 500}
+		_, _ = ctx.AppDB().Exec(`INSERT OR IGNORE INTO settings (project_id) VALUES (?)`, pid)
+		return s, nil
+	}
+	if duffel.Valid {
+		s.DuffelConnectionID = duffel.Int64
+	}
+	if places.Valid {
+		s.PlacesConnectionID = places.Int64
+	}
+	return s, err
+}
+
+func (a *App) toolSettingsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return loadSettings(ctx)
+}
+
+func (a *App) toolSettingsSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid := projectID()
+	cols, vals := []string{}, []any{}
+	if v, ok := args["home_airport"].(string); ok {
+		cols = append(cols, "home_airport=?")
+		vals = append(vals, strings.ToUpper(v))
+	}
+	if v, ok := args["default_passengers"]; ok {
+		n := intArgFromAny(v, 1)
+		if n < 1 {
+			n = 1
+		}
+		cols = append(cols, "default_passengers=?")
+		vals = append(vals, n)
+	}
+	if v, ok := args["duffel_connection_id"]; ok {
+		if n := int64(intArgFromAny(v, 0)); n > 0 {
+			cols = append(cols, "duffel_connection_id=?")
+			vals = append(vals, n)
+		} else {
+			cols = append(cols, "duffel_connection_id=NULL")
+		}
+	}
+	if v, ok := args["places_connection_id"]; ok {
+		if n := int64(intArgFromAny(v, 0)); n > 0 {
+			cols = append(cols, "places_connection_id=?")
+			vals = append(vals, n)
+		} else {
+			cols = append(cols, "places_connection_id=NULL")
+		}
+	}
+	if v, ok := args["daily_search_budget_cents"]; ok {
+		cols = append(cols, "daily_search_budget_cents=?")
+		vals = append(vals, intArgFromAny(v, 500))
+	}
+	if len(cols) == 0 {
+		return nil, errors.New("no updatable fields supplied — pass at least one of: home_airport, default_passengers, duffel_connection_id, places_connection_id, daily_search_budget_cents")
+	}
+	cols = append(cols, "updated_at=CURRENT_TIMESTAMP")
+	vals = append(vals, pid)
+	_, _ = ctx.AppDB().Exec(`INSERT OR IGNORE INTO settings (project_id) VALUES (?)`, pid)
+	// Build statement; NULL-set entries are already inlined above so
+	// we filter them out of the vals matching.
+	cleanCols := []string{}
+	cleanVals := []any{}
+	valIdx := 0
+	for _, c := range cols {
+		if strings.HasSuffix(c, "=NULL") {
+			cleanCols = append(cleanCols, c)
+		} else if strings.HasSuffix(c, "=?") {
+			cleanCols = append(cleanCols, c)
+			cleanVals = append(cleanVals, vals[valIdx])
+			valIdx++
+		}
+	}
+	cleanVals = append(cleanVals, pid)
+	if _, err := ctx.AppDB().Exec(
+		`UPDATE settings SET `+strings.Join(cleanCols, ", ")+` WHERE project_id=?`, cleanVals...,
+	); err != nil {
+		return nil, err
+	}
+	return loadSettings(ctx)
+}
+
+// ─── Connections (read-only proxy of the platform list) ─────────
+
+func (a *App) toolAvailableConnections(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	provider := strArg(args, "provider", "")
+	pid := projectID()
+	filter := sdk.ConnectionFilter{ProjectID: pid}
+	if provider != "" {
+		filter.AppSlug = provider
+	}
+	conns, err := ctx.PlatformAPI().ListConnections(filter)
+	if err != nil {
+		return nil, err
+	}
+	type out struct {
+		ID      int64  `json:"id"`
+		AppSlug string `json:"provider"`
+		Name    string `json:"name"`
+		Status  string `json:"status"`
+	}
+	res := make([]out, 0, len(conns))
+	for _, c := range conns {
+		res = append(res, out{ID: c.ID, AppSlug: c.AppSlug, Name: c.Name, Status: c.Status})
+	}
+	return map[string]any{"connections": res}, nil
+}
+
+// ─── Search cache ────────────────────────────────────────────────
+
+// cacheKey hashes (provider, tool, normalized input) into a stable
+// string so the same query hits the same row.
+func cacheKey(provider, tool string, input map[string]any) string {
+	b, _ := json.Marshal(input)
+	sum := sha256.Sum256([]byte(provider + "|" + tool + "|" + string(b)))
+	return hex.EncodeToString(sum[:])
+}
+
+// cacheGet returns the cached response body + true if a non-expired
+// entry exists for `key`. Misses (no row, or expired) return false.
+func cacheGet(ctx *sdk.AppCtx, key string) (json.RawMessage, bool) {
+	var body string
+	var expires string
+	err := ctx.AppDB().QueryRow(
+		`SELECT response, expires_at FROM search_cache WHERE key=?`, key,
+	).Scan(&body, &expires)
+	if err != nil {
+		return nil, false
+	}
+	if t, err := time.Parse(time.RFC3339, expires); err == nil && time.Now().UTC().After(t) {
+		return nil, false
+	}
+	return json.RawMessage(body), true
+}
+
+func cacheSet(ctx *sdk.AppCtx, key string, body any, ttl time.Duration) {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return
+	}
+	exp := time.Now().UTC().Add(ttl).Format(time.RFC3339)
+	_, _ = ctx.AppDB().Exec(
+		`INSERT OR REPLACE INTO search_cache (key, response, cached_at, expires_at) VALUES (?, ?, CURRENT_TIMESTAMP, ?)`,
+		key, string(b), exp,
+	)
+}
+
+// ─── Search: places ──────────────────────────────────────────────
+
+// PlaceResult is the normalized shape across the three Places search
+// modes. Optional fields stay nil when the underlying API didn't
+// return them.
+type PlaceResult struct {
+	PlaceID          string   `json:"place_id"`
+	Name             string   `json:"name"`
+	FormattedAddress string   `json:"formatted_address,omitempty"`
+	Country          string   `json:"country,omitempty"`
+	Lat              *float64 `json:"lat,omitempty"`
+	Lng              *float64 `json:"lng,omitempty"`
+	Rating           *float64 `json:"rating,omitempty"`
+	UserRatingCount  *int     `json:"user_rating_count,omitempty"`
+	PriceLevel       string   `json:"price_level,omitempty"`
+	PrimaryType      string   `json:"primary_type,omitempty"`
+	GoogleMapsURI    string   `json:"google_maps_uri,omitempty"`
+}
+
+type PlaceDetailsResult struct {
+	PlaceResult
+	Phone   string   `json:"phone,omitempty"`
+	Website string   `json:"website,omitempty"`
+	Hours   []string `json:"hours,omitempty"`
+	Photos  []string `json:"photos,omitempty"`
+}
+
+// kindToPlacesType maps trips' kind enum onto Google Places' primary
+// type strings. Empty string disables type filtering.
+func kindToPlacesType(kind string) string {
+	switch kind {
+	case "lodging", "hotel":
+		return "lodging"
+	case "restaurant", "food":
+		return "restaurant"
+	case "cafe":
+		return "cafe"
+	case "bar":
+		return "bar"
+	case "attraction", "tourist_attraction":
+		return "tourist_attraction"
+	case "museum":
+		return "museum"
+	case "shopping":
+		return "shopping_mall"
+	}
+	return ""
+}
+
+func (a *App) toolSearchPlaces(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	settings, _ := loadSettings(ctx)
+	if settings.PlacesConnectionID == 0 {
+		return nil, errors.New("no Google Places connection — set places_connection_id in trips settings (settings_set) or pick one in the panel's Settings dialog")
+	}
+	kind := strArg(args, "kind", "")
+	query := strArg(args, "query", "")
+	lat, lng := resolveLatLng(ctx, args)
+
+	var tool string
+	var input map[string]any
+	switch {
+	case kind == "destination":
+		if query == "" {
+			return nil, errors.New("query required for destination autocomplete")
+		}
+		tool = "autocomplete"
+		input = map[string]any{"input": query}
+		if lat != nil && lng != nil {
+			input["locationBias"] = map[string]any{
+				"circle": map[string]any{
+					"center": map[string]any{"latitude": *lat, "longitude": *lng},
+					"radius": 50000.0,
+				},
+			}
+		}
+	case query != "":
+		tool = "search_text"
+		input = map[string]any{"textQuery": query, "pageSize": maxInt(intArg(args, "limit", 10), 1)}
+		if t := kindToPlacesType(kind); t != "" {
+			input["includedType"] = t
+		}
+		if lat != nil && lng != nil {
+			input["locationBias"] = map[string]any{
+				"circle": map[string]any{
+					"center": map[string]any{"latitude": *lat, "longitude": *lng},
+					"radius": 50000.0,
+				},
+			}
+		}
+	case lat != nil && lng != nil:
+		if kind == "" {
+			return nil, errors.New("kind required when searching nearby without a query")
+		}
+		tool = "search_nearby"
+		input = map[string]any{
+			"locationRestriction": map[string]any{
+				"circle": map[string]any{
+					"center": map[string]any{"latitude": *lat, "longitude": *lng},
+					"radius": float64(intArg(args, "radius", 5000)),
+				},
+			},
+			"maxResultCount": maxInt(intArg(args, "limit", 10), 1),
+		}
+		if t := kindToPlacesType(kind); t != "" {
+			input["includedTypes"] = []string{t}
+		}
+	default:
+		return nil, errors.New("either query, lat/lng, or destination_id required")
+	}
+
+	key := cacheKey("google_places", tool, input)
+	if raw, ok := cacheGet(ctx, key); ok {
+		var cached map[string]any
+		if err := json.Unmarshal(raw, &cached); err == nil {
+			cached["cached"] = true
+			return cached, nil
+		}
+	}
+
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(settings.PlacesConnectionID, tool, input)
+	if err != nil {
+		return nil, fmt.Errorf("places search failed: %w", err)
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return nil, fmt.Errorf("places search failed: %s", body)
+	}
+
+	out := normalizePlacesResponse(tool, res.Data)
+	cacheSet(ctx, key, out, 24*time.Hour)
+	return out, nil
+}
+
+func (a *App) toolPlaceDetails(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	settings, _ := loadSettings(ctx)
+	if settings.PlacesConnectionID == 0 {
+		return nil, errors.New("no Google Places connection configured")
+	}
+	placeID := strArg(args, "place_id", "")
+	if placeID == "" {
+		return nil, errors.New("place_id required")
+	}
+	input := map[string]any{"placeId": placeID}
+	key := cacheKey("google_places", "get_place", input)
+	if raw, ok := cacheGet(ctx, key); ok {
+		var cached map[string]any
+		if err := json.Unmarshal(raw, &cached); err == nil {
+			cached["cached"] = true
+			return cached, nil
+		}
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(settings.PlacesConnectionID, "get_place", input)
+	if err != nil {
+		return nil, fmt.Errorf("place details failed: %w", err)
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return nil, fmt.Errorf("place details failed: %s", body)
+	}
+	out := normalizePlaceDetails(res.Data)
+	cacheSet(ctx, key, out, 7*24*time.Hour)
+	return out, nil
+}
+
+// ─── Search: flights ─────────────────────────────────────────────
+
+type FlightOffer struct {
+	OfferID          string `json:"offer_id"`
+	Carrier          string `json:"carrier"`
+	CarrierCode      string `json:"carrier_code"`
+	Number           string `json:"number"`
+	DepartAt         string `json:"depart_at"`
+	ArriveAt         string `json:"arrive_at"`
+	Duration         string `json:"duration,omitempty"`
+	DepartLocation   string `json:"depart_location"`
+	ArriveLocation   string `json:"arrive_location"`
+	Stops            int    `json:"stops"`
+	Cabin            string `json:"cabin,omitempty"`
+	TotalAmountCents int64  `json:"total_amount_cents"`
+	Currency         string `json:"currency"`
+}
+
+func (a *App) toolSearchFlights(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	settings, _ := loadSettings(ctx)
+	if settings.DuffelConnectionID == 0 {
+		return nil, errors.New("no Duffel connection — set duffel_connection_id in trips settings")
+	}
+	from := strings.ToUpper(strArg(args, "from", settings.HomeAirport))
+	to := strings.ToUpper(strArg(args, "to", ""))
+	depart := strArg(args, "depart_date", "")
+	returnDate := strArg(args, "return_date", "")
+	if from == "" || to == "" || depart == "" {
+		return nil, errors.New("from, to, depart_date required (depart_date as YYYY-MM-DD)")
+	}
+	passengers := intArg(args, "passengers", settings.DefaultPassengers)
+	if passengers < 1 {
+		passengers = 1
+	}
+	cabin := strArg(args, "cabin", "economy")
+
+	slices := []map[string]any{
+		{"origin": from, "destination": to, "departure_date": depart},
+	}
+	if returnDate != "" {
+		slices = append(slices, map[string]any{
+			"origin": to, "destination": from, "departure_date": returnDate,
+		})
+	}
+	paxList := make([]map[string]any, passengers)
+	for i := range paxList {
+		paxList[i] = map[string]any{"type": "adult"}
+	}
+	input := map[string]any{
+		"slices":       slices,
+		"passengers":   paxList,
+		"cabin_class":  cabin,
+	}
+	key := cacheKey("duffel", "search_flights", input)
+	if raw, ok := cacheGet(ctx, key); ok {
+		var cached map[string]any
+		if err := json.Unmarshal(raw, &cached); err == nil {
+			cached["cached"] = true
+			return cached, nil
+		}
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(settings.DuffelConnectionID, "search_flights", input)
+	if err != nil {
+		return nil, fmt.Errorf("flight search failed: %w", err)
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return nil, fmt.Errorf("flight search failed: %s", body)
+	}
+	out := normalizeFlightsResponse(res.Data)
+	// Duffel offers expire fast — 10-minute cache is plenty.
+	cacheSet(ctx, key, out, 10*time.Minute)
+	return out, nil
+}
+
+// ─── Normalizers ─────────────────────────────────────────────────
+
+// resolveLatLng pulls coords either from explicit args or from a
+// referenced destination_id (which has its own lat/lng columns).
+func resolveLatLng(ctx *sdk.AppCtx, args map[string]any) (*float64, *float64) {
+	if v, ok := args["lat"].(float64); ok {
+		if w, ok := args["lng"].(float64); ok {
+			return &v, &w
+		}
+	}
+	if did := int64(intArg(args, "destination_id", 0)); did != 0 {
+		d, err := readDestination(ctx, did)
+		if err == nil && d.Lat != nil && d.Lng != nil {
+			return d.Lat, d.Lng
+		}
+	}
+	return nil, nil
+}
+
+// normalizePlacesResponse flattens the three Google Places (New v1)
+// response shapes into a single {places: [...]} list our UI can render.
+func normalizePlacesResponse(tool string, data json.RawMessage) map[string]any {
+	out := map[string]any{"places": []PlaceResult{}, "cached": false}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return out
+	}
+	results := []PlaceResult{}
+	if tool == "autocomplete" {
+		// suggestions: [{placePrediction: {placeId, text:{text}, structuredFormat:{mainText, secondaryText}}}]
+		if sugs, ok := raw["suggestions"].([]any); ok {
+			for _, s := range sugs {
+				m, _ := s.(map[string]any)
+				pp, _ := m["placePrediction"].(map[string]any)
+				if pp == nil {
+					continue
+				}
+				name := jsonString(jsonGet(pp, "structuredFormat", "mainText", "text"))
+				if name == "" {
+					name = jsonString(jsonGet(pp, "text", "text"))
+				}
+				country := jsonString(jsonGet(pp, "structuredFormat", "secondaryText", "text"))
+				results = append(results, PlaceResult{
+					PlaceID: jsonString(pp["placeId"]),
+					Name:    name,
+					Country: country,
+				})
+			}
+		}
+	} else {
+		// search_text / search_nearby: {places: [{id, displayName:{text}, formattedAddress, location:{latitude,longitude}, rating, userRatingCount, priceLevel, primaryType, googleMapsUri}]}
+		if ps, ok := raw["places"].([]any); ok {
+			for _, p := range ps {
+				m, _ := p.(map[string]any)
+				if m == nil {
+					continue
+				}
+				r := PlaceResult{
+					PlaceID:          jsonString(m["id"]),
+					Name:             jsonString(jsonGet(m, "displayName", "text")),
+					FormattedAddress: jsonString(m["formattedAddress"]),
+					PriceLevel:       jsonString(m["priceLevel"]),
+					PrimaryType:      jsonString(m["primaryType"]),
+					GoogleMapsURI:    jsonString(m["googleMapsUri"]),
+				}
+				if lat := jsonFloat(jsonGet(m, "location", "latitude")); lat != nil {
+					r.Lat = lat
+				}
+				if lng := jsonFloat(jsonGet(m, "location", "longitude")); lng != nil {
+					r.Lng = lng
+				}
+				if rt := jsonFloat(m["rating"]); rt != nil {
+					r.Rating = rt
+				}
+				if urc, ok := m["userRatingCount"].(float64); ok {
+					v := int(urc)
+					r.UserRatingCount = &v
+				}
+				results = append(results, r)
+			}
+		}
+	}
+	out["places"] = results
+	return out
+}
+
+func normalizePlaceDetails(data json.RawMessage) map[string]any {
+	var raw map[string]any
+	_ = json.Unmarshal(data, &raw)
+	if raw == nil {
+		return map[string]any{}
+	}
+	d := PlaceDetailsResult{
+		PlaceResult: PlaceResult{
+			PlaceID:          jsonString(raw["id"]),
+			Name:             jsonString(jsonGet(raw, "displayName", "text")),
+			FormattedAddress: jsonString(raw["formattedAddress"]),
+			PriceLevel:       jsonString(raw["priceLevel"]),
+			PrimaryType:      jsonString(raw["primaryType"]),
+			GoogleMapsURI:    jsonString(raw["googleMapsUri"]),
+		},
+		Phone:   jsonString(raw["internationalPhoneNumber"]),
+		Website: jsonString(raw["websiteUri"]),
+	}
+	if lat := jsonFloat(jsonGet(raw, "location", "latitude")); lat != nil {
+		d.Lat = lat
+	}
+	if lng := jsonFloat(jsonGet(raw, "location", "longitude")); lng != nil {
+		d.Lng = lng
+	}
+	if rt := jsonFloat(raw["rating"]); rt != nil {
+		d.Rating = rt
+	}
+	if urc, ok := raw["userRatingCount"].(float64); ok {
+		v := int(urc)
+		d.UserRatingCount = &v
+	}
+	// regularOpeningHours.weekdayDescriptions = ["Mon: 9:00 AM – 5:00 PM", ...]
+	if hours, ok := jsonGet(raw, "regularOpeningHours", "weekdayDescriptions").([]any); ok {
+		for _, h := range hours {
+			if s, ok := h.(string); ok {
+				d.Hours = append(d.Hours, s)
+			}
+		}
+	}
+	// photos[].name (resource name; UI builds the photo URL)
+	if photos, ok := raw["photos"].([]any); ok {
+		for _, p := range photos {
+			m, _ := p.(map[string]any)
+			if n := jsonString(m["name"]); n != "" {
+				d.Photos = append(d.Photos, n)
+			}
+		}
+	}
+	b, _ := json.Marshal(d)
+	out := map[string]any{}
+	_ = json.Unmarshal(b, &out)
+	return out
+}
+
+// normalizeFlightsResponse flattens Duffel's offers array into our
+// FlightOffer shape — one row per offer's first slice's first segment
+// (good enough for direct + ranked-by-price display; multi-leg detail
+// stays in the raw offer for v0.5).
+func normalizeFlightsResponse(data json.RawMessage) map[string]any {
+	var raw map[string]any
+	_ = json.Unmarshal(data, &raw)
+	offers := []FlightOffer{}
+	root, _ := raw["data"].(map[string]any)
+	if root == nil {
+		root = raw // Duffel sometimes returns root-level data
+	}
+	rawOffers, _ := root["offers"].([]any)
+	if rawOffers == nil {
+		rawOffers, _ = raw["offers"].([]any)
+	}
+	for _, o := range rawOffers {
+		m, _ := o.(map[string]any)
+		if m == nil {
+			continue
+		}
+		slicesRaw, _ := m["slices"].([]any)
+		if len(slicesRaw) == 0 {
+			continue
+		}
+		firstSlice, _ := slicesRaw[0].(map[string]any)
+		segs, _ := firstSlice["segments"].([]any)
+		if len(segs) == 0 {
+			continue
+		}
+		firstSeg, _ := segs[0].(map[string]any)
+		lastSeg, _ := segs[len(segs)-1].(map[string]any)
+		f := FlightOffer{
+			OfferID:        jsonString(m["id"]),
+			Currency:       jsonString(m["total_currency"]),
+			Stops:          len(segs) - 1,
+			Carrier:        jsonString(jsonGet(firstSeg, "marketing_carrier", "name")),
+			CarrierCode:    jsonString(jsonGet(firstSeg, "marketing_carrier", "iata_code")),
+			Number:         jsonString(firstSeg["marketing_carrier_flight_number"]),
+			DepartAt:       jsonString(firstSeg["departing_at"]),
+			ArriveAt:       jsonString(lastSeg["arriving_at"]),
+			Duration:       jsonString(firstSlice["duration"]),
+			DepartLocation: jsonString(jsonGet(firstSeg, "origin", "iata_code")),
+			ArriveLocation: jsonString(jsonGet(lastSeg, "destination", "iata_code")),
+			Cabin:          jsonString(firstSeg["cabin_class"]),
+		}
+		if amt := jsonString(m["total_amount"]); amt != "" {
+			if cents, err := parseMoneyDecimal(amt); err == nil {
+				f.TotalAmountCents = cents
+			}
+		}
+		offers = append(offers, f)
+	}
+	sort.Slice(offers, func(i, j int) bool { return offers[i].TotalAmountCents < offers[j].TotalAmountCents })
+	return map[string]any{"offers": offers, "cached": false}
+}
+
+// parseMoneyDecimal turns a decimal money string ("234.50") into
+// integer minor units (23450). No currency conversion.
+func parseMoneyDecimal(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, errors.New("empty")
+	}
+	neg := false
+	if strings.HasPrefix(s, "-") {
+		neg = true
+		s = s[1:]
+	}
+	dot := strings.Index(s, ".")
+	if dot < 0 {
+		v, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		v *= 100
+		if neg {
+			v = -v
+		}
+		return v, nil
+	}
+	integer := s[:dot]
+	fraction := s[dot+1:]
+	if len(fraction) > 2 {
+		fraction = fraction[:2]
+	}
+	for len(fraction) < 2 {
+		fraction += "0"
+	}
+	ip, err := strconv.ParseInt(integer, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	fp, err := strconv.ParseInt(fraction, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	v := ip*100 + fp
+	if neg {
+		v = -v
+	}
+	return v, nil
+}
+
+func jsonString(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+func jsonFloat(v any) *float64 {
+	if f, ok := v.(float64); ok {
+		return &f
+	}
+	return nil
+}
+func jsonGet(m map[string]any, path ...string) any {
+	var cur any = m
+	for _, k := range path {
+		obj, ok := cur.(map[string]any)
+		if !ok {
+			return nil
+		}
+		cur = obj[k]
+	}
+	return cur
+}
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// ─── HTTP handlers for search surface ────────────────────────────
+
+func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		out, err := a.toolSettingsGet(globalCtx, nil)
+		writeOrErr(w, out, err)
+	case http.MethodPatch, http.MethodPut, http.MethodPost:
+		body := map[string]any{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		out, err := a.toolSettingsSet(globalCtx, body)
+		writeOrErr(w, out, err)
+	default:
+		http.Error(w, "GET or PATCH", http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *App) handleAvailableConnections(w http.ResponseWriter, r *http.Request) {
+	args := queryToArgs(r.URL.Query(), []string{"provider"})
+	out, err := a.toolAvailableConnections(globalCtx, args)
+	writeOrErr(w, out, err)
+}
+
+func (a *App) handleSearchPlaces(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		args := map[string]any{}
+		for _, k := range []string{"query", "kind"} {
+			if v := r.URL.Query().Get(k); v != "" {
+				args[k] = v
+			}
+		}
+		for _, k := range []string{"destination_id", "limit", "radius"} {
+			if v := r.URL.Query().Get(k); v != "" {
+				if n, _ := strconv.ParseInt(v, 10, 64); n != 0 {
+					args[k] = float64(n)
+				}
+			}
+		}
+		for _, k := range []string{"lat", "lng"} {
+			if v := r.URL.Query().Get(k); v != "" {
+				if f, err := strconv.ParseFloat(v, 64); err == nil {
+					args[k] = f
+				}
+			}
+		}
+		out, err := a.toolSearchPlaces(globalCtx, args)
+		writeOrErr(w, out, err)
+		return
+	}
+	postBody(w, r, a.toolSearchPlaces)
+}
+
+func (a *App) handlePlaceDetails(w http.ResponseWriter, r *http.Request) {
+	args := queryToArgs(r.URL.Query(), []string{"place_id"})
+	out, err := a.toolPlaceDetails(globalCtx, args)
+	writeOrErr(w, out, err)
+}
+
+func (a *App) handleSearchFlights(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		args := map[string]any{}
+		for _, k := range []string{"from", "to", "depart_date", "return_date", "cabin"} {
+			if v := r.URL.Query().Get(k); v != "" {
+				args[k] = v
+			}
+		}
+		if v := r.URL.Query().Get("passengers"); v != "" {
+			if n, _ := strconv.Atoi(v); n > 0 {
+				args["passengers"] = float64(n)
+			}
+		}
+		out, err := a.toolSearchFlights(globalCtx, args)
+		writeOrErr(w, out, err)
+		return
+	}
+	postBody(w, r, a.toolSearchFlights)
+}
+
+func queryToArgs(q map[string][]string, keys []string) map[string]any {
+	out := map[string]any{}
+	for _, k := range keys {
+		if v := q[k]; len(v) > 0 && v[0] != "" {
+			out[k] = v[0]
+		}
+	}
+	return out
 }
 
 // ─── helpers ─────────────────────────────────────────────────────

@@ -108,6 +108,52 @@ interface Todo {
   done: boolean;
 }
 
+interface Settings {
+  project_id: string;
+  home_airport: string;
+  default_passengers: number;
+  duffel_connection_id?: number;
+  places_connection_id?: number;
+  daily_search_budget_cents: number;
+}
+
+interface AvailableConnection {
+  id: number;
+  provider: string;
+  name: string;
+  status: string;
+}
+
+interface PlaceResult {
+  place_id: string;
+  name: string;
+  formatted_address?: string;
+  country?: string;
+  lat?: number;
+  lng?: number;
+  rating?: number;
+  user_rating_count?: number;
+  price_level?: string;
+  primary_type?: string;
+  google_maps_uri?: string;
+}
+
+interface FlightOffer {
+  offer_id: string;
+  carrier: string;
+  carrier_code: string;
+  number: string;
+  depart_at: string;
+  arrive_at: string;
+  duration?: string;
+  depart_location: string;
+  arrive_location: string;
+  stops: number;
+  cabin?: string;
+  total_amount_cents: number;
+  currency: string;
+}
+
 interface BudgetCategoryRow {
   category: string;
   cap: number;
@@ -381,6 +427,14 @@ function Icon({ name, size = 16 }: { name: string; size?: number }) {
       return <svg {...common}><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>;
     case "clock":
       return <svg {...common}><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>;
+    case "settings":
+      return <svg {...common}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>;
+    case "search":
+      return <svg {...common}><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>;
+    case "star":
+      return <svg {...common}><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>;
+    case "external":
+      return <svg {...common}><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>;
     default:
       return null;
   }
@@ -411,6 +465,7 @@ function TripsPanelInner({ projectId }: NativePanelProps) {
   const [trips, setTrips] = useState<Trip[]>([]);
   const [selectedID, setSelectedID] = useState<number | null>(null);
   const [showNew, setShowNew] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [error, setError] = useState("");
 
   const refresh = useCallback(async () => {
@@ -443,12 +498,21 @@ function TripsPanelInner({ projectId }: NativePanelProps) {
           <Icon name="map" size={20} />
           <h1 className="text-lg font-semibold">Trips</h1>
         </div>
-        <button
-          onClick={() => setShowNew(true)}
-          className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm text-bg hover:bg-accent-hover"
-        >
-          <Icon name="plus" size={14} /> New trip
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowSettings(true)}
+            title="Search providers + defaults"
+            className="p-1.5 text-text-muted hover:text-text"
+          >
+            <Icon name="settings" size={16} />
+          </button>
+          <button
+            onClick={() => setShowNew(true)}
+            className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm text-bg hover:bg-accent-hover"
+          >
+            <Icon name="plus" size={14} /> New trip
+          </button>
+        </div>
       </header>
 
       {error && (
@@ -475,6 +539,9 @@ function TripsPanelInner({ projectId }: NativePanelProps) {
           onClose={() => setShowNew(false)}
           onCreated={async (id) => { setShowNew(false); await refresh(); setSelectedID(id); }}
         />
+      )}
+      {showSettings && (
+        <SettingsDialog onClose={() => setShowSettings(false)} />
       )}
     </div>
   );
@@ -809,6 +876,7 @@ function ItineraryTab({ data, onChanged }: { data: TripDashboard; onChanged: () 
         <ItemDialog
           kind={showAdd}
           trip={data.trip}
+          destinations={data.destinations}
           onClose={() => setShowAdd(null)}
           onSaved={() => { setShowAdd(null); onChanged(); }}
         />
@@ -817,6 +885,7 @@ function ItineraryTab({ data, onChanged }: { data: TripDashboard; onChanged: () 
         <ItemDialog
           kind={editItem.kind}
           trip={data.trip}
+          destinations={data.destinations}
           existing={editItem.data}
           onClose={() => setEditItem(null)}
           onSaved={() => { setEditItem(null); onChanged(); }}
@@ -1235,9 +1304,10 @@ function NewTripDialog({ onClose, onCreated }: { onClose: () => void; onCreated:
   );
 }
 
-function ItemDialog({ kind, trip, existing, onClose, onSaved }: {
+function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
   kind: "transport" | "accommodation" | "activity";
   trip: Trip;
+  destinations?: Destination[];
   existing?: ItemData;
   onClose: () => void;
   onSaved: () => void;
@@ -1245,6 +1315,8 @@ function ItemDialog({ kind, trip, existing, onClose, onSaved }: {
   const isEdit = existing != null;
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [showFlightSearch, setShowFlightSearch] = useState(false);
+  const [showPlaceSearch, setShowPlaceSearch] = useState(false);
 
   // Prefill the right initial value per field based on what (if anything)
   // we're editing. Each branch coerces the existing row to its concrete
@@ -1332,8 +1404,64 @@ function ItemDialog({ kind, trip, existing, onClose, onSaved }: {
   const titlePrefix = isEdit ? "Edit" : "Add";
   const title = kind === "transport" ? `${titlePrefix} transport` : kind === "accommodation" ? `${titlePrefix} accommodation` : `${titlePrefix} activity`;
 
+  // First destination (if any) is the natural anchor for nearby
+  // searches — its lat/lng come from autocomplete picks.
+  const firstDest = destinations && destinations.length > 0 ? destinations[0] : undefined;
+
+  const onFlightPicked = (offer: FlightOffer) => {
+    setTKind("flight");
+    setProvider(offer.carrier);
+    setReference(`${offer.carrier_code}${offer.number}`);
+    setDepartAt(offer.depart_at.slice(0, 16));
+    setArriveAt(offer.arrive_at.slice(0, 16));
+    setDepartLoc(offer.depart_location);
+    setArriveLoc(offer.arrive_location);
+    if (offer.total_amount_cents > 0) {
+      setCost((offer.total_amount_cents / 100).toFixed(2));
+    }
+    if (offer.currency) setCurrency(offer.currency);
+    setShowFlightSearch(false);
+  };
+
+  const onPlacePicked = (p: PlaceResult) => {
+    if (kind === "accommodation") {
+      setName(p.name);
+      if (p.formatted_address) setAddress(p.formatted_address);
+      // Hotel-style discovery: open the place in Google Maps in a new
+      // tab so the user can book externally and paste the confirmation back.
+      if (p.google_maps_uri) window.open(p.google_maps_uri, "_blank", "noopener");
+    } else if (kind === "activity") {
+      setName(p.name);
+      if (p.formatted_address) setActLocation(p.formatted_address);
+      // Map Places primary_type → trip activity category.
+      if (p.primary_type === "restaurant" || p.primary_type === "cafe" || p.primary_type === "bar") {
+        setActCategory("food");
+      } else {
+        setActCategory("activity");
+      }
+    }
+    setShowPlaceSearch(false);
+  };
+
+  // Show search button only when adding (edit mode = user is fixing
+  // an existing thing, not researching afresh).
+  const canSearchFlights = !isEdit && kind === "transport" && tKind === "flight";
+  const canSearchPlaces  = !isEdit && (kind === "accommodation" || kind === "activity");
+
   return (
     <Dialog title={title} onClose={onClose}>
+      {canSearchFlights && (
+        <button
+          onClick={() => setShowFlightSearch(true)}
+          className="mb-1 flex w-full items-center justify-center gap-2 rounded-md border border-border bg-bg-hover px-3 py-2 text-sm text-text hover:border-accent"
+        ><Icon name="search" size={14} /> Search flights with Duffel</button>
+      )}
+      {canSearchPlaces && (
+        <button
+          onClick={() => setShowPlaceSearch(true)}
+          className="mb-1 flex w-full items-center justify-center gap-2 rounded-md border border-border bg-bg-hover px-3 py-2 text-sm text-text hover:border-accent"
+        ><Icon name="search" size={14} /> {kind === "accommodation" ? "Search hotels nearby" : "Find places nearby"}</button>
+      )}
       {kind === "transport" && (
         <>
           <Field label="Kind">
@@ -1398,6 +1526,24 @@ function ItemDialog({ kind, trip, existing, onClose, onSaved }: {
         <button onClick={onClose} className="btn-dialog-secondary">Cancel</button>
         <button onClick={submit} disabled={busy} className="btn-dialog-primary">{busy ? "Saving…" : isEdit ? "Update" : "Save"}</button>
       </DialogActions>
+      {showFlightSearch && (
+        <SearchFlightsModal
+          trip={trip}
+          defaultTo={firstDest?.country || ""}
+          defaultDepartAt={departAt}
+          onPick={onFlightPicked}
+          onClose={() => setShowFlightSearch(false)}
+        />
+      )}
+      {showPlaceSearch && (
+        <SearchPlacesModal
+          trip={trip}
+          destinations={destinations ?? []}
+          defaultKind={kind === "accommodation" ? "lodging" : "attraction"}
+          onPick={onPlacePicked}
+          onClose={() => setShowPlaceSearch(false)}
+        />
+      )}
     </Dialog>
   );
 }
@@ -1444,7 +1590,21 @@ function DestinationDialog({ trip, existing, onClose, onSaved }: {
 
   return (
     <Dialog title={isEdit ? "Edit destination" : "Add destination"} onClose={onClose}>
-      <Field label="Place"><input value={placeName} onChange={e => setPlaceName(e.target.value)} className="input" autoFocus placeholder="Paris" /></Field>
+      <Field label="Place">
+        <PlaceAutocomplete
+          value={placeName}
+          onChange={setPlaceName}
+          onPick={(p) => {
+            setPlaceName(p.name);
+            // Try to extract a 2-letter country code from the
+            // secondary text Google returns ("France" etc.). If it
+            // isn't a clean 2-letter code we leave it for the user.
+            if (p.country && p.country.length === 2) {
+              setCountry(p.country.toUpperCase());
+            }
+          }}
+        />
+      </Field>
       <Field label="Country (ISO-2)"><input value={country} onChange={e => setCountry(e.target.value.toUpperCase())} className="input uppercase" maxLength={2} placeholder="FR" /></Field>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Arrive"><input type="date" value={arriveAt} onChange={e => setArriveAt(e.target.value)} className="input" /></Field>
@@ -1526,6 +1686,431 @@ function TripEditDialog({ trip, onClose, onSaved }: { trip: Trip; onClose: () =>
         <button onClick={onClose} className="btn-dialog-secondary">Cancel</button>
         <button onClick={submit} disabled={busy || !name} className="btn-dialog-primary">{busy ? "Saving…" : "Update"}</button>
       </DialogActions>
+    </Dialog>
+  );
+}
+
+// ─── Search-powered dialogs (v0.4) ───────────────────────────────
+
+// PlaceAutocomplete swaps a free-text input for one wired to the
+// Places autocomplete tool. The textbox stays editable (manual entry
+// is preserved when no suggestion fits); a dropdown of suggestions
+// renders below while focused with results, and Enter / click picks.
+function PlaceAutocomplete({ value, onChange, onPick }: {
+  value: string;
+  onChange: (v: string) => void;
+  onPick: (p: PlaceResult) => void;
+}) {
+  const ui = useUI();
+  const [suggestions, setSuggestions] = useState<PlaceResult[]>([]);
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const debounceRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (debounceRef.current) window.clearTimeout(debounceRef.current);
+    if (!value || value.length < 2) {
+      setSuggestions([]);
+      return;
+    }
+    debounceRef.current = window.setTimeout(async () => {
+      setLoading(true);
+      try {
+        const url = `/search/places?kind=destination&query=${encodeURIComponent(value)}`;
+        const r = await api<{ places: PlaceResult[] }>(url);
+        setSuggestions(r.places ?? []);
+      } catch (e: unknown) {
+        // Silent on autocomplete fail — fall back to manual text entry.
+        // We do surface the error via the toast only on explicit picks.
+        ui.notify(e instanceof Error ? e.message : String(e));
+      } finally {
+        setLoading(false);
+      }
+    }, 250);
+    return () => {
+      if (debounceRef.current) window.clearTimeout(debounceRef.current);
+    };
+  }, [value, ui]);
+
+  return (
+    <div className="relative">
+      <input
+        value={value}
+        onChange={e => { onChange(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => window.setTimeout(() => setOpen(false), 150)}
+        className="input"
+        autoFocus
+        placeholder="Paris"
+      />
+      {open && suggestions.length > 0 && (
+        <ul className="absolute left-0 right-0 top-full z-10 mt-1 max-h-60 overflow-auto rounded-md border border-border bg-bg-card shadow-lg">
+          {suggestions.map(s => (
+            <li key={s.place_id}>
+              <button
+                type="button"
+                onClick={() => { onPick(s); setOpen(false); }}
+                className="flex w-full flex-col items-start px-3 py-2 text-left text-sm hover:bg-bg-hover"
+              >
+                <span className="text-text">{s.name}</span>
+                {s.country && <span className="text-xs text-text-muted">{s.country}</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {loading && <span className="absolute right-2 top-2 text-xs text-text-dim">…</span>}
+    </div>
+  );
+}
+
+function SearchFlightsModal({ trip, defaultTo, defaultDepartAt, onPick, onClose }: {
+  trip: Trip;
+  defaultTo: string;
+  defaultDepartAt: string;
+  onPick: (offer: FlightOffer) => void;
+  onClose: () => void;
+}) {
+  const ui = useUI();
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState(defaultTo);
+  const [departDate, setDepartDate] = useState(() => (defaultDepartAt || trip.start_at).slice(0, 10));
+  const [returnDate, setReturnDate] = useState("");
+  const [passengers, setPassengers] = useState(1);
+  const [cabin, setCabin] = useState("economy");
+  const [offers, setOffers] = useState<FlightOffer[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  // Pull settings to default home_airport + passengers.
+  useEffect(() => {
+    (async () => {
+      try {
+        const s = await api<Settings>("/settings");
+        if (!from && s.home_airport) setFrom(s.home_airport);
+        if (s.default_passengers) setPassengers(s.default_passengers);
+      } catch { /* keep defaults */ }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const search = async () => {
+    if (!from || !to || !departDate) {
+      ui.notify("from / to / depart date all required");
+      return;
+    }
+    setBusy(true);
+    try {
+      const params = new URLSearchParams({
+        from, to, depart_date: departDate,
+        passengers: String(passengers),
+        cabin,
+      });
+      if (returnDate) params.set("return_date", returnDate);
+      const r = await api<{ offers: FlightOffer[] }>(`/search/flights?${params}`);
+      setOffers(r.offers ?? []);
+    } catch (e: unknown) {
+      ui.notify(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog title="Search flights" onClose={onClose}>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="From"><input value={from} onChange={e => setFrom(e.target.value.toUpperCase())} className="input uppercase" maxLength={3} placeholder="CDG" /></Field>
+        <Field label="To"><input value={to} onChange={e => setTo(e.target.value.toUpperCase())} className="input uppercase" maxLength={3} placeholder="LIN" /></Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Depart"><input type="date" value={departDate} onChange={e => setDepartDate(e.target.value)} className="input" /></Field>
+        <Field label="Return (optional)"><input type="date" value={returnDate} onChange={e => setReturnDate(e.target.value)} className="input" /></Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Passengers"><input type="number" min={1} value={passengers} onChange={e => setPassengers(Math.max(1, parseInt(e.target.value || "1", 10)))} className="input" /></Field>
+        <Field label="Cabin">
+          <select value={cabin} onChange={e => setCabin(e.target.value)} className="input">
+            <option value="economy">Economy</option>
+            <option value="premium_economy">Premium economy</option>
+            <option value="business">Business</option>
+            <option value="first">First</option>
+          </select>
+        </Field>
+      </div>
+      <button onClick={search} disabled={busy} className="btn-dialog-primary w-full">
+        {busy ? "Searching…" : "Search"}
+      </button>
+      {offers.length > 0 && (
+        <ul className="-mx-1 max-h-72 overflow-auto">
+          {offers.map(o => (
+            <li key={o.offer_id}>
+              <button
+                type="button"
+                onClick={() => onPick(o)}
+                className="flex w-full items-center justify-between gap-3 rounded-md border border-border-subtle bg-bg-card p-3 text-left text-sm hover:border-accent"
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium">{o.carrier} {o.carrier_code}{o.number}</div>
+                  <div className="text-xs text-text-muted">
+                    {o.depart_location} → {o.arrive_location}
+                    {o.stops > 0 && <> · {o.stops} stop{o.stops > 1 ? "s" : ""}</>}
+                    {o.duration && <> · {humanizeISO8601Duration(o.duration)}</>}
+                  </div>
+                  <div className="text-xs text-text-dim">
+                    {fmtDateShort(o.depart_at)} {fmtTime(o.depart_at)} – {fmtTime(o.arrive_at)}
+                  </div>
+                </div>
+                <div className="text-right tabular-nums text-sm font-medium">
+                  {fmtMoney(o.total_amount_cents, o.currency || "EUR")}
+                </div>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <DialogActions>
+        <button onClick={onClose} className="btn-dialog-secondary">Close</button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+function SearchPlacesModal({ trip, destinations, defaultKind, onPick, onClose }: {
+  trip: Trip;
+  destinations: Destination[];
+  defaultKind: string;
+  onPick: (place: PlaceResult) => void;
+  onClose: () => void;
+}) {
+  const ui = useUI();
+  const [destID, setDestID] = useState<number | "">(destinations[0]?.id ?? "");
+  const [kind, setKind] = useState(defaultKind);
+  const [query, setQuery] = useState("");
+  const [places, setPlaces] = useState<PlaceResult[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  const search = async () => {
+    setBusy(true);
+    try {
+      const params = new URLSearchParams({ kind });
+      if (query.trim()) params.set("query", query.trim());
+      if (destID) params.set("destination_id", String(destID));
+      params.set("limit", "12");
+      const r = await api<{ places: PlaceResult[] }>(`/search/places?${params}`);
+      setPlaces(r.places ?? []);
+    } catch (e: unknown) {
+      ui.notify(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Trigger an initial search if we have an anchor.
+  useEffect(() => {
+    if (destinations.length > 0) search();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <Dialog title={`Search ${kindLabel(kind)} near ${trip.name}`} onClose={onClose}>
+      <Field label="Near">
+        <select value={destID} onChange={e => setDestID(e.target.value ? Number(e.target.value) : "")} className="input">
+          <option value="">— No anchor (free text only) —</option>
+          {destinations.map(d => <option key={d.id} value={d.id}>{d.place_name}</option>)}
+        </select>
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Kind">
+          <select value={kind} onChange={e => setKind(e.target.value)} className="input">
+            <option value="lodging">Hotels</option>
+            <option value="restaurant">Restaurants</option>
+            <option value="cafe">Cafés</option>
+            <option value="bar">Bars</option>
+            <option value="attraction">Attractions</option>
+            <option value="museum">Museums</option>
+            <option value="shopping">Shopping</option>
+          </select>
+        </Field>
+        <Field label="Free text (optional)"><input value={query} onChange={e => setQuery(e.target.value)} className="input" placeholder="ramen, near louvre, …" /></Field>
+      </div>
+      <button onClick={search} disabled={busy} className="btn-dialog-primary w-full">
+        {busy ? "Searching…" : "Search"}
+      </button>
+      {places.length > 0 && (
+        <ul className="-mx-1 max-h-72 overflow-auto">
+          {places.map(p => (
+            <li key={p.place_id}>
+              <button
+                type="button"
+                onClick={() => onPick(p)}
+                className="flex w-full flex-col items-start gap-1 rounded-md border border-border-subtle bg-bg-card p-3 text-left text-sm hover:border-accent"
+              >
+                <div className="flex w-full items-center justify-between gap-2">
+                  <span className="truncate font-medium">{p.name}</span>
+                  {p.rating != null && (
+                    <span className="flex items-center gap-1 text-xs text-warn">
+                      <Icon name="star" size={10} /> {p.rating.toFixed(1)}
+                      {p.user_rating_count != null && <span className="text-text-dim">({p.user_rating_count})</span>}
+                    </span>
+                  )}
+                </div>
+                {p.formatted_address && <div className="truncate text-xs text-text-muted">{p.formatted_address}</div>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <DialogActions>
+        <button onClick={onClose} className="btn-dialog-secondary">Close</button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+function kindLabel(kind: string): string {
+  switch (kind) {
+    case "lodging": return "hotels";
+    case "restaurant": return "restaurants";
+    case "cafe": return "cafés";
+    case "bar": return "bars";
+    case "attraction": return "attractions";
+    case "museum": return "museums";
+    case "shopping": return "shopping";
+  }
+  return "places";
+}
+
+// humanizeISO8601Duration turns "PT1H30M" into "1h 30m". Bare-bones —
+// only handles hours + minutes, which covers every flight Duffel returns.
+function humanizeISO8601Duration(s: string): string {
+  const m = /^PT(?:(\d+)H)?(?:(\d+)M)?$/.exec(s);
+  if (!m) return s;
+  const parts: string[] = [];
+  if (m[1]) parts.push(`${m[1]}h`);
+  if (m[2]) parts.push(`${m[2]}m`);
+  return parts.join(" ") || s;
+}
+
+function SettingsDialog({ onClose }: { onClose: () => void }) {
+  const ui = useUI();
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [duffelConns, setDuffelConns] = useState<AvailableConnection[]>([]);
+  const [placesConns, setPlacesConns] = useState<AvailableConnection[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const s = await api<Settings>("/settings");
+        setSettings(s);
+        const [d, p] = await Promise.all([
+          api<{ connections: AvailableConnection[] }>("/connections?provider=duffel"),
+          api<{ connections: AvailableConnection[] }>("/connections?provider=google-places"),
+        ]);
+        setDuffelConns(d.connections ?? []);
+        setPlacesConns(p.connections ?? []);
+      } catch (e: unknown) {
+        ui.notify(e instanceof Error ? e.message : String(e));
+      }
+    })();
+  }, [ui]);
+
+  const update = (patch: Partial<Settings>) => {
+    if (!settings) return;
+    setSettings({ ...settings, ...patch });
+  };
+
+  const save = async () => {
+    if (!settings) return;
+    setBusy(true);
+    try {
+      await api<Settings>("/settings", {
+        method: "PATCH",
+        body: JSON.stringify({
+          home_airport: settings.home_airport,
+          default_passengers: settings.default_passengers,
+          duffel_connection_id: settings.duffel_connection_id ?? 0,
+          places_connection_id: settings.places_connection_id ?? 0,
+          daily_search_budget_cents: settings.daily_search_budget_cents,
+        }),
+      });
+      onClose();
+    } catch (e: unknown) {
+      ui.notify(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog title="Search providers + defaults" onClose={onClose}>
+      {!settings ? (
+        <p className="text-sm text-text-muted">Loading…</p>
+      ) : (
+        <>
+          <Field label="Duffel (flights)">
+            <select
+              value={settings.duffel_connection_id ?? ""}
+              onChange={e => update({ duffel_connection_id: e.target.value ? Number(e.target.value) : undefined })}
+              className="input"
+            >
+              <option value="">— Not connected —</option>
+              {duffelConns.map(c => (
+                <option key={c.id} value={c.id}>{c.name} ({c.status})</option>
+              ))}
+            </select>
+            {duffelConns.length === 0 && (
+              <p className="mt-1 text-xs text-text-dim">No Duffel connections yet. Add one in the platform Integrations panel, then come back here.</p>
+            )}
+          </Field>
+          <Field label="Google Places (destinations, hotels, restaurants)">
+            <select
+              value={settings.places_connection_id ?? ""}
+              onChange={e => update({ places_connection_id: e.target.value ? Number(e.target.value) : undefined })}
+              className="input"
+            >
+              <option value="">— Not connected —</option>
+              {placesConns.map(c => (
+                <option key={c.id} value={c.id}>{c.name} ({c.status})</option>
+              ))}
+            </select>
+            {placesConns.length === 0 && (
+              <p className="mt-1 text-xs text-text-dim">No Google Places connections yet. Add one in the platform Integrations panel.</p>
+            )}
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Home airport (IATA)">
+              <input
+                value={settings.home_airport}
+                onChange={e => update({ home_airport: e.target.value.toUpperCase() })}
+                className="input uppercase"
+                maxLength={3}
+                placeholder="CDG"
+              />
+            </Field>
+            <Field label="Default passengers">
+              <input
+                type="number"
+                min={1}
+                value={settings.default_passengers}
+                onChange={e => update({ default_passengers: Math.max(1, parseInt(e.target.value || "1", 10)) })}
+                className="input"
+              />
+            </Field>
+          </div>
+          <Field label="Daily Places budget (cents; 0 = unlimited)">
+            <input
+              type="number"
+              min={0}
+              value={settings.daily_search_budget_cents}
+              onChange={e => update({ daily_search_budget_cents: Math.max(0, parseInt(e.target.value || "0", 10)) })}
+              className="input"
+            />
+          </Field>
+          <DialogActions>
+            <button onClick={onClose} className="btn-dialog-secondary">Cancel</button>
+            <button onClick={save} disabled={busy} className="btn-dialog-primary">{busy ? "Saving…" : "Save"}</button>
+          </DialogActions>
+        </>
+      )}
     </Dialog>
   );
 }

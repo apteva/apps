@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trips
 display_name: Trips
-version: 0.3.1
+version: 0.4.0
 description: |
   Plan trips end-to-end: destinations, transport, accommodation,
   activities, packing, budget. Calendar-synced — each trip owns a
@@ -21,11 +21,22 @@ min_apteva_version: "0.10.0"
 requires:
   permissions:
     - db.write.app
-    - platform.apps.call          # talks to calendar
+    - platform.apps.call               # talks to calendar
+    - platform.connections.execute     # search via duffel + google-places
+    - platform.connections.manage      # list available connections in settings UI
   apps:
     - name: calendar
       optional: false
       reason: "Mirror itinerary into a dedicated per-trip calendar"
+  integrations:
+    - role: duffel
+      kind: integration
+      required: false
+      compatible_slugs: [duffel]
+    - role: google-places
+      kind: integration
+      required: false
+      compatible_slugs: [google-places]
 
 provides:
   http_routes:
@@ -66,6 +77,13 @@ provides:
     - { name: budget_summary,             description: "Per-category planned (sum of estimates) + actual (sum of cost_actual) + cap + delta, plus a totals row. Args: trip_id." }
 
     - { name: dashboard,                  description: "One mega-payload for the trip detail page: trip row + destinations + transport_legs + accommodations + activities + todos + budget summary. Args: trip_id." }
+
+    - { name: settings_get,               description: "Read trips project settings (home_airport, default_passengers, duffel + places connection ids, daily search budget)." }
+    - { name: settings_set,               description: "Update trips project settings. Pass any subset of: home_airport, default_passengers, duffel_connection_id, places_connection_id, daily_search_budget_cents." }
+    - { name: available_connections,      description: "List integration connections this project has access to. Args: provider? (e.g. 'duffel' or 'google-places'). Used by the settings dialog to pick which key to wire in." }
+    - { name: search_places,              description: "Search Google Places. One generic tool with three modes: kind=destination + query → autocomplete; query + optional kind/coords → text search; kind + (lat/lng or destination_id) without query → nearby search. Cached 24h." }
+    - { name: place_details,              description: "Full details for one place (phone, website, hours, photos, rating). Args: place_id. Cached 7d." }
+    - { name: search_flights,             description: "Search flights via Duffel. Args: from (IATA, default home_airport), to, depart_date, return_date?, passengers?, cabin?. Returns offers ranked cheapest first." }
 
   ui_panels:
     - slot: project.page

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -30,12 +31,17 @@ type fakeCalendar struct {
 	calls               []callRecord
 	calendars           map[int64]map[string]any
 	events              map[int64]map[string]any
+	// integration plumbing for the search tools (v0.4+)
+	integCalls     []integCall
+	integResponses map[string]any                   // tool name → canned response (unwrapped JSON)
+	connList       []sdk.PlatformConnection
 }
 
 func newFakeCalendar() *fakeCalendar {
 	return &fakeCalendar{
-		calendars: map[int64]map[string]any{},
-		events:    map[int64]map[string]any{},
+		calendars:      map[int64]map[string]any{},
+		events:         map[int64]map[string]any{},
+		integResponses: map[string]any{},
 	}
 }
 
@@ -91,6 +97,41 @@ func (f *fakeCalendar) countCalls(tool string) int {
 		}
 	}
 	return n
+}
+
+// integExec is set by tests that exercise ExecuteIntegrationTool;
+// the default returns ErrNotImplemented (matches BasePlatformClient).
+func (f *fakeCalendar) ExecuteIntegrationTool(connID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	f.mu.Lock()
+	f.integCalls = append(f.integCalls, integCall{ConnID: connID, Tool: tool, Input: input})
+	resp := f.integResponses[tool]
+	f.mu.Unlock()
+	if resp == nil {
+		return nil, tk.ErrNotImplemented
+	}
+	b, _ := json.Marshal(resp)
+	return &sdk.ExecuteResult{Success: true, Status: 200, Data: b}, nil
+}
+
+// ListConnections returns the canned set so the available_connections
+// tool round-trip works in tests.
+func (f *fakeCalendar) ListConnections(filter sdk.ConnectionFilter) ([]sdk.PlatformConnection, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []sdk.PlatformConnection{}
+	for _, c := range f.connList {
+		if filter.AppSlug != "" && c.AppSlug != filter.AppSlug {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+type integCall struct {
+	ConnID int64
+	Tool   string
+	Input  map[string]any
 }
 
 func clone(m map[string]any) map[string]any {
@@ -524,6 +565,228 @@ func TestHTTP_TripCreateDashboardDelete(t *testing.T) {
 	r3, err := http.DefaultClient.Do(req)
 	if err != nil || r3.StatusCode != 204 {
 		t.Fatalf("delete failed: %v %v", err, r3)
+	}
+}
+
+// ─── Settings + search (v0.4) ────────────────────────────────────
+
+func TestUnit_Settings_UpsertAndRead(t *testing.T) {
+	ctx, _ := newCtx(t)
+	app := &App{}
+	// First read returns defaults.
+	r1, err := app.toolSettingsGet(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r1.(Settings).DefaultPassengers != 1 || r1.(Settings).DailySearchBudgetCents != 500 {
+		t.Errorf("defaults wrong: %+v", r1)
+	}
+	// Set a few values, read back.
+	if _, err := app.toolSettingsSet(ctx, map[string]any{
+		"home_airport":         "CDG",
+		"default_passengers":   float64(2),
+		"duffel_connection_id": float64(42),
+		"places_connection_id": float64(99),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r2, _ := app.toolSettingsGet(ctx, nil)
+	s := r2.(Settings)
+	if s.HomeAirport != "CDG" || s.DefaultPassengers != 2 || s.DuffelConnectionID != 42 || s.PlacesConnectionID != 99 {
+		t.Errorf("after set: %+v", s)
+	}
+}
+
+func TestUnit_SearchPlaces_RequiresConnection(t *testing.T) {
+	ctx, _ := newCtx(t)
+	app := &App{}
+	if _, err := app.toolSearchPlaces(ctx, map[string]any{"query": "paris", "kind": "destination"}); err == nil {
+		t.Error("expected error when no places connection configured")
+	}
+}
+
+func TestUnit_SearchPlaces_AutocompleteDispatch(t *testing.T) {
+	ctx, fake := newCtx(t)
+	app := &App{}
+	// Configure connection.
+	_, _ = app.toolSettingsSet(ctx, map[string]any{"places_connection_id": float64(99)})
+	// Stub the upstream response (Google Places autocomplete shape).
+	fake.integResponses["autocomplete"] = map[string]any{
+		"suggestions": []any{
+			map[string]any{"placePrediction": map[string]any{
+				"placeId": "ChIJ_paris",
+				"structuredFormat": map[string]any{
+					"mainText":      map[string]any{"text": "Paris"},
+					"secondaryText": map[string]any{"text": "France"},
+				},
+			}},
+		},
+	}
+	r, err := app.toolSearchPlaces(ctx, map[string]any{"kind": "destination", "query": "par"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := r.(map[string]any)
+	places := out["places"].([]PlaceResult)
+	if len(places) != 1 || places[0].PlaceID != "ChIJ_paris" || places[0].Name != "Paris" {
+		t.Errorf("autocomplete normalize: %+v", places)
+	}
+	// Verify it used the autocomplete tool, not search_text/nearby.
+	tool := fake.integCalls[0].Tool
+	if tool != "autocomplete" {
+		t.Errorf("expected autocomplete, got %q", tool)
+	}
+}
+
+func TestUnit_SearchPlaces_NearbyDispatch(t *testing.T) {
+	ctx, fake := newCtx(t)
+	app := &App{}
+	_, _ = app.toolSettingsSet(ctx, map[string]any{"places_connection_id": float64(99)})
+	fake.integResponses["search_nearby"] = map[string]any{
+		"places": []any{
+			map[string]any{
+				"id":               "ChIJ_hotel",
+				"displayName":      map[string]any{"text": "Hotel Foo"},
+				"formattedAddress": "1 rue Foo, Paris",
+				"location":         map[string]any{"latitude": 48.8, "longitude": 2.3},
+				"rating":           4.5,
+				"userRatingCount":  float64(123),
+				"primaryType":      "lodging",
+			},
+		},
+	}
+	r, err := app.toolSearchPlaces(ctx, map[string]any{
+		"kind": "lodging", "lat": 48.8, "lng": 2.3, "limit": float64(5),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	places := r.(map[string]any)["places"].([]PlaceResult)
+	if len(places) != 1 || places[0].Name != "Hotel Foo" || places[0].PriceLevel != "" {
+		t.Errorf("nearby normalize: %+v", places)
+	}
+	if fake.integCalls[0].Tool != "search_nearby" {
+		t.Errorf("expected search_nearby dispatch, got %q", fake.integCalls[0].Tool)
+	}
+}
+
+func TestUnit_SearchPlaces_CacheHit(t *testing.T) {
+	ctx, fake := newCtx(t)
+	app := &App{}
+	_, _ = app.toolSettingsSet(ctx, map[string]any{"places_connection_id": float64(99)})
+	fake.integResponses["search_text"] = map[string]any{
+		"places": []any{
+			map[string]any{"id": "p1", "displayName": map[string]any{"text": "Place 1"}},
+		},
+	}
+	// First call hits upstream.
+	if _, err := app.toolSearchPlaces(ctx, map[string]any{"query": "sushi paris"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.integCalls) != 1 {
+		t.Fatalf("first call should hit upstream, got %d", len(fake.integCalls))
+	}
+	// Second call with identical args is a cache hit (no new upstream).
+	r, err := app.toolSearchPlaces(ctx, map[string]any{"query": "sushi paris"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.integCalls) != 1 {
+		t.Errorf("second call should be cached, got %d upstream calls", len(fake.integCalls))
+	}
+	if cached := r.(map[string]any)["cached"]; cached != true {
+		t.Errorf("expected cached=true on second call, got %v", cached)
+	}
+}
+
+func TestUnit_SearchFlights_HappyPath(t *testing.T) {
+	ctx, fake := newCtx(t)
+	app := &App{}
+	_, _ = app.toolSettingsSet(ctx, map[string]any{
+		"duffel_connection_id": float64(11),
+		"home_airport":         "CDG",
+	})
+	// Duffel response shape (paraphrased).
+	fake.integResponses["search_flights"] = map[string]any{
+		"data": map[string]any{
+			"offers": []any{
+				map[string]any{
+					"id":             "off_1",
+					"total_amount":   "120.50",
+					"total_currency": "EUR",
+					"slices": []any{
+						map[string]any{
+							"duration": "PT1H30M",
+							"segments": []any{
+								map[string]any{
+									"marketing_carrier":                map[string]any{"iata_code": "AF", "name": "Air France"},
+									"marketing_carrier_flight_number": "1234",
+									"departing_at":                     "2026-06-05T08:00:00",
+									"arriving_at":                      "2026-06-05T09:30:00",
+									"origin":                           map[string]any{"iata_code": "CDG"},
+									"destination":                      map[string]any{"iata_code": "LIN"},
+									"cabin_class":                      "economy",
+								},
+							},
+						},
+					},
+				},
+				map[string]any{
+					"id": "off_2", "total_amount": "85.00", "total_currency": "EUR",
+					"slices": []any{map[string]any{"segments": []any{
+						map[string]any{
+							"marketing_carrier":                map[string]any{"iata_code": "U2", "name": "easyJet"},
+							"marketing_carrier_flight_number": "4321",
+							"departing_at":                     "2026-06-05T10:00:00",
+							"arriving_at":                      "2026-06-05T11:30:00",
+							"origin":                           map[string]any{"iata_code": "CDG"},
+							"destination":                      map[string]any{"iata_code": "LIN"},
+						},
+					}}},
+				},
+			},
+		},
+	}
+	r, err := app.toolSearchFlights(ctx, map[string]any{
+		"to":          "LIN",
+		"depart_date": "2026-06-05",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	offers := r.(map[string]any)["offers"].([]FlightOffer)
+	if len(offers) != 2 {
+		t.Fatalf("want 2 offers, got %d", len(offers))
+	}
+	// Sorted cheapest-first: easyJet 85.00 should be index 0.
+	if offers[0].CarrierCode != "U2" || offers[0].TotalAmountCents != 8500 {
+		t.Errorf("sort/parse wrong: %+v", offers[0])
+	}
+	// Verify from defaulted to settings.home_airport.
+	in := fake.integCalls[0].Input
+	slices := in["slices"].([]map[string]any)
+	if slices[0]["origin"] != "CDG" {
+		t.Errorf("default home_airport not applied: %+v", slices)
+	}
+}
+
+func TestUnit_AvailableConnections_FiltersByProvider(t *testing.T) {
+	ctx, fake := newCtx(t)
+	app := &App{}
+	fake.connList = []sdk.PlatformConnection{
+		{ID: 1, AppSlug: "duffel", Name: "duffel-prod", Status: "active", ProjectID: "test-proj"},
+		{ID: 2, AppSlug: "google-places", Name: "places-key", Status: "active", ProjectID: "test-proj"},
+		{ID: 3, AppSlug: "duffel", Name: "duffel-sandbox", Status: "active", ProjectID: "test-proj"},
+	}
+	out, err := app.toolAvailableConnections(ctx, map[string]any{"provider": "duffel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conns := out.(map[string]any)["connections"]
+	// Should only include duffel (2 of 3).
+	b, _ := json.Marshal(conns)
+	if !strings.Contains(string(b), "duffel-prod") || strings.Contains(string(b), "places-key") {
+		t.Errorf("filter wrong: %s", b)
 	}
 }
 
