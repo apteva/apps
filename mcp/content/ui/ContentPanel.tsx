@@ -956,6 +956,9 @@ interface ApplySummary {
   homepage_pinned: boolean;
   warnings?: string[];
   dry_run?: boolean;
+  would_refuse?: boolean;
+  refuse_reason?: string;
+  existing_count?: number;
 }
 
 function TemplatesView({
@@ -1127,6 +1130,18 @@ function ApplyTemplateDialog({
         {preview && <SummaryTable s={preview} />}
       </div>
 
+      {preview?.would_refuse && (
+        <div className="bg-amber-100 text-amber-900 rounded px-3 py-2 my-2 flex items-center justify-between gap-2">
+          <span>{preview.refuse_reason}</span>
+          <button
+            onClick={() => setMode("append")}
+            className="text-xs px-2 py-1 rounded border border-amber-300 bg-white whitespace-nowrap"
+          >
+            Switch to append
+          </button>
+        </div>
+      )}
+
       {error && <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2">{error}</div>}
 
       <div className="flex gap-2 mt-3">
@@ -1135,8 +1150,9 @@ function ApplyTemplateDialog({
         </button>
         <button
           onClick={apply}
-          disabled={loading || applying}
+          disabled={loading || applying || Boolean(preview?.would_refuse)}
           className="px-3 py-1 rounded border border-border font-semibold disabled:opacity-50"
+          title={preview?.would_refuse ? "Change mode to enable Apply" : undefined}
         >
           {applying ? "Applying…" : "Apply"}
         </button>

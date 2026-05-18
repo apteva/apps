@@ -278,15 +278,23 @@ const (
 )
 
 // ApplySummary is the return shape of templates_apply + templates_preview.
+//
+// WouldRefuse / RefuseReason / ExistingCount are populated by the
+// dry-run path so the panel can warn the user *before* they click
+// Apply — preview itself never errors on the empty_only guard; only
+// a real apply does.
 type ApplySummary struct {
-	Template      string         `json:"template"`
-	Version       string         `json:"version"`
-	Mode          string         `json:"mode"`
-	Created       map[string]int `json:"created"`
-	Skipped       map[string]int `json:"skipped"`
-	HomepagePinned bool          `json:"homepage_pinned"`
-	Warnings      []string       `json:"warnings,omitempty"`
-	DryRun        bool           `json:"dry_run,omitempty"`
+	Template       string         `json:"template"`
+	Version        string         `json:"version"`
+	Mode           string         `json:"mode"`
+	Created        map[string]int `json:"created"`
+	Skipped        map[string]int `json:"skipped"`
+	HomepagePinned bool           `json:"homepage_pinned"`
+	Warnings       []string       `json:"warnings,omitempty"`
+	DryRun         bool           `json:"dry_run,omitempty"`
+	WouldRefuse    bool           `json:"would_refuse,omitempty"`
+	RefuseReason   string         `json:"refuse_reason,omitempty"`
+	ExistingCount  int            `json:"existing_count,omitempty"`
 }
 
 // applyTemplate is the workhorse — opens a tx, walks the body, returns
@@ -331,16 +339,14 @@ func applyTemplate(ctx *sdk.AppCtx, projectID, name string, mode ApplyMode, dryR
 		}
 	}
 
-	// empty_only guard — refuse if any existing posts/menus/terms.
-	if mode == ApplyEmptyOnly {
-		if existing, _ := countExisting(ctx.AppDB(), projectID); existing > 0 {
-			return nil, fmt.Errorf("install is not empty (%d posts/pages/menus/terms exist); switch mode to append or overwrite to proceed", existing)
-		}
-	}
+	// Compute existing-content count once so we can either error on
+	// apply OR annotate the dry-run with a "would refuse" hint.
+	existing, _ := countExisting(ctx.AppDB(), projectID)
 
 	if dryRun {
 		// Walk the body and report what would be created without
-		// touching the DB.
+		// touching the DB. Annotate would_refuse so the panel can
+		// show a warning before the user clicks Apply.
 		summary.Created["pages"] = len(body.Pages)
 		summary.Created["posts"] = len(body.Posts)
 		summary.Created["terms"] = len(body.Terms)
@@ -350,7 +356,17 @@ func applyTemplate(ctx *sdk.AppCtx, projectID, name string, mode ApplyMode, dryR
 		if body.HomepageSlug != "" {
 			summary.HomepagePinned = true
 		}
+		summary.ExistingCount = existing
+		if mode == ApplyEmptyOnly && existing > 0 {
+			summary.WouldRefuse = true
+			summary.RefuseReason = fmt.Sprintf("Mode 'empty_only' refuses on populated sites — %d existing posts/pages/menus/terms. Switch to append or overwrite.", existing)
+		}
 		return summary, nil
+	}
+
+	// Real apply — the empty_only guard blocks writes here.
+	if mode == ApplyEmptyOnly && existing > 0 {
+		return nil, fmt.Errorf("install is not empty (%d posts/pages/menus/terms exist); switch mode to append or overwrite to proceed", existing)
 	}
 
 	tx, err := ctx.AppDB().Begin()
