@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -348,10 +349,10 @@ func (a *App) toolStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return map[string]any{"stopped": false, "reason": "no live release"}, nil
 	}
 	rid := *d.CurrentReleaseID
-	if rr := a.registry.Get(rid); rr != nil {
-		if err := a.runtime.Stop(rr); err != nil {
-			return nil, err
-		}
+	rel, _ := dbGetRelease(ctx.AppDB(), rid)
+	// Authoritative stop — see stopReleaseAuthoritative comment.
+	if err := a.stopReleaseAuthoritative(rel, 5*time.Second); err != nil {
+		return nil, err
 	}
 	a.markStopped(rid)
 	_ = dbSetCurrentRelease(ctx.AppDB(), d.ID, nil)
@@ -372,11 +373,11 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if d.DomainRecordID != "" {
 		_ = a.detachDomain(ctx, d)
 	}
-	// Stop any live release first.
+	// Stop any live release first — authoritative, so the port is
+	// guaranteed free before we delete the row.
 	if d.CurrentReleaseID != nil {
-		if rr := a.registry.Get(*d.CurrentReleaseID); rr != nil {
-			_ = a.runtime.Stop(rr)
-		}
+		rel, _ := dbGetRelease(ctx.AppDB(), *d.CurrentReleaseID)
+		_ = a.stopReleaseAuthoritative(rel, 5*time.Second)
 		a.markStopped(*d.CurrentReleaseID)
 	}
 	// Delete the row (CASCADE wipes builds + releases + events + leases).

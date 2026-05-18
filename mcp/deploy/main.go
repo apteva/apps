@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -39,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.11.0
+version: 0.11.1
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
@@ -561,8 +562,27 @@ func (a *App) runRelease(d *Deployment, b *Build) (*Release, error) {
 		return nil, err
 	}
 
-	// Allocate port.
-	port, err := a.allocatePort(d.PortHint, rel.ID)
+	// Allocate port. Explicit PortHint is sticky-by-design; with no
+	// hint, prefer the previous release's port for this deployment so
+	// re-releases don't drift through the range (operator may have
+	// written Caddy rules / firewall holes / docs against the old
+	// port). Falls through to the range scan if that port can't be
+	// claimed any more (operator changed something, port now held by
+	// another tenant, etc.) — allocator's fail-loud only fires for
+	// EXPLICIT hints.
+	effectiveHint := d.PortHint
+	if effectiveHint == 0 {
+		if prev := a.previousReleasePort(d.ID); prev > 0 {
+			effectiveHint = prev
+		}
+	}
+	port, err := a.allocatePort(effectiveHint, rel.ID)
+	if err != nil && effectiveHint != 0 && d.PortHint == 0 {
+		// Implicit hint (previous release's port) lost — quietly
+		// fall back to a range scan. Explicit hint failure bubbles
+		// up; this branch only catches the convenience path.
+		port, err = a.allocatePort(0, rel.ID)
+	}
 	if err != nil {
 		_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
 			"status": "failed", "error": err.Error(),
@@ -651,6 +671,76 @@ func (a *App) markCrashed(releaseID int64, cause error) {
 		a.cascadeUnregisterRoute(rel.DeploymentID)
 	}
 	a.registry.Delete(releaseID)
+}
+
+// stopReleaseAuthoritative is the operator-facing stop. Unlike a
+// bare runtime.Stop, this guarantees the port is actually free when
+// it returns — by killing the process group of whatever owns the
+// port, regardless of whether fleet's in-memory registry knows
+// about it.
+//
+// Fixes the orphan class operators reported: registry.Get(rid) was
+// nil (sidecar restart cleared the in-memory map; markStopped from
+// a prior call already deleted the entry; etc.), runtime.Stop was a
+// no-op, the actual process kept serving while the DB said stopped.
+// Re-release then allocated a different port → two processes
+// listening, both releases drifting from reality.
+//
+// Sequence:
+//   1. runtime.Stop on the in-memory handle if present (graceful
+//      cmd.Wait path with cancel + SIGTERM/SIGKILL escalation).
+//   2. Probe the port. If still held, find the pid that owns it
+//      (pid-tree-aware now), SIGTERM the whole pgrp, poll until
+//      free, escalate to SIGKILL.
+//   3. Return only when the port is genuinely free, or after the
+//      hard fallback (with an error so the operator sees it).
+//
+// Stop is now synchronous from the operator's POV.
+func (a *App) stopReleaseAuthoritative(rel *Release, grace time.Duration) error {
+	if rel == nil {
+		return nil
+	}
+	if rr := a.registry.Get(rel.ID); rr != nil {
+		_ = a.runtime.Stop(rr)
+	}
+	if rel.Port <= 0 {
+		return nil
+	}
+	if portFreeForServer(rel.Port) {
+		return nil // happy path — registry stop did its job
+	}
+	// Port still held → find the pid + kill its process group. The
+	// pid we know about (rel.PID) is often a wrapper; pid-by-port
+	// gets us the actual owner. Then walk up to its pgrp leader so
+	// the whole tree dies (bun wrapper → bun script, npm wrapper →
+	// node, etc.).
+	pid := findPidListeningOn(rel.Port)
+	if pid <= 0 {
+		// portFreeForServer says held but nothing in proc — corner
+		// case (kernel TIME_WAIT? socket in another namespace?).
+		// Treat as success; the next allocator pick will bind-probe.
+		return nil
+	}
+	pgid, _ := syscall.Getpgid(pid)
+	if pgid <= 0 {
+		pgid = pid
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		if portFreeForServer(rel.Port) {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	for i := 0; i < 25; i++ { // 5s after SIGKILL
+		if portFreeForServer(rel.Port) {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("port %d still bound after SIGKILL (pid %d, pgrp %d)", rel.Port, pid, pgid)
 }
 
 func (a *App) markStopped(releaseID int64) {
@@ -909,54 +999,80 @@ func (a *App) markPortOwnerChanged(rel *Release) {
 
 // ─── Port allocator ───────────────────────────────────────────────
 
+// previousReleasePort returns the port of the most recent release for
+// deployment d, or 0 if none. Used as an implicit port_hint on
+// re-release so a deployment with no explicit PortHint still keeps
+// the same port across releases (sticky port without operator
+// having to think about it).
+func (a *App) previousReleasePort(deploymentID int64) int {
+	if globalCtx == nil || globalCtx.AppDB() == nil {
+		return 0
+	}
+	rels, err := dbListReleases(globalCtx.AppDB(), deploymentID, 1)
+	if err != nil || len(rels) == 0 {
+		return 0
+	}
+	return rels[0].Port
+}
+
 var portMu sync.Mutex // serialise probes; the lease table is the durable claim
 
 func (a *App) allocatePort(hint int, releaseID int64) (int, error) {
 	portMu.Lock()
 	defer portMu.Unlock()
 
-	tried := map[int]bool{}
-	candidates := []int{}
-	if hint > 0 {
-		candidates = append(candidates, hint)
-	}
-	for p := a.portRangeStart; p <= a.portRangeEnd; p++ {
-		if !tried[p] {
-			candidates = append(candidates, p)
-			tried[p] = true
-		}
-	}
-
 	held, err := dbHeldPorts(globalCtx.AppDB())
 	if err != nil {
 		return 0, err
 	}
-	// Cross-instance check: a co-located apteva-server's process may
-	// hold a port we'd otherwise consider free. portFreeForServer's
-	// bind-probe catches it too, but only with a TOCTOU window —
-	// querying the kernel's listen table first shrinks that window to
-	// the time between this read and the supervised process bind.
-	// On non-Linux this returns an empty map; we fall back to
-	// bind-probe alone, which is fine for single-tenant dev hosts.
 	listening := systemListeningPorts()
-	// Cross-app check: a port may be OS-free *but* the routes app
-	// could still be pointing a hostname at it (stale route, partial
-	// failure, manual reverse_proxy edit). Allocating it would silently
-	// hijack whichever domain currently maps to it — the apteva.ai
-	// cross-bleed class. routes app missing → empty map, allocator
-	// behaves as before.
 	targeted := routesTargetedPorts(globalCtx, a)
-	for _, p := range candidates {
+
+	// hintConflict spells out exactly why a port can't be taken —
+	// silent fallback was the bug we're fixing here. Operators set
+	// port_hint deliberately (sticky port across re-releases, Caddy
+	// blocks they hand-wrote, allocator skipping the hinted port
+	// shouldn't be invisible).
+	hintConflict := func(p int) string {
 		if held[p] {
-			continue
+			return "another release in this app holds the port lease"
 		}
 		if listening[p] {
-			continue
+			return "another process on the host is listening on this port (cross-instance bind)"
 		}
 		if targeted[p] {
-			continue
+			return "the routes app already maps a hostname to this port; allocating would hijack it"
 		}
 		if !portFreeForServer(p) {
+			return "OS bind-probe failed (port in use or restricted)"
+		}
+		return ""
+	}
+
+	// Honor an explicit hint, OR fail loud. Auto-falling-back to a
+	// random port in the range was the bug — re-releases would drift
+	// off the operator's chosen port whenever an orphan held it,
+	// then route configs hand-written for the old port broke.
+	if hint > 0 {
+		if reason := hintConflict(hint); reason != "" {
+			return 0, fmt.Errorf("port_hint %d not available: %s — free it then retry, "+
+				"or clear port_hint on the deployment to allow any free port in %d-%d",
+				hint, reason, a.portRangeStart, a.portRangeEnd)
+		}
+		ok, err := dbAcquirePortLease(globalCtx.AppDB(), hint, releaseID)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			return hint, nil
+		}
+		// Race: lease was claimed between our checks and the INSERT.
+		return 0, fmt.Errorf("port_hint %d lost a race to another concurrent release", hint)
+	}
+
+	// No hint → scan the configured range as before.
+	for p := a.portRangeStart; p <= a.portRangeEnd; p++ {
+		if hintConflict(p) != "" {
 			continue
 		}
 		ok, err := dbAcquirePortLease(globalCtx.AppDB(), p, releaseID)

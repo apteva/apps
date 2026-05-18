@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // REST surface — mirror of the MCP tools.
@@ -301,8 +302,13 @@ func (a *App) httpDeploymentStop(w http.ResponseWriter, r *http.Request, d *Depl
 		return
 	}
 	rid := *d.CurrentReleaseID
-	if rr := a.registry.Get(rid); rr != nil {
-		_ = a.runtime.Stop(rr)
+	rel, _ := dbGetRelease(globalCtx.AppDB(), rid)
+	// Authoritative stop: don't return until the port is actually free
+	// (or report the failure). Fixes the orphan class where runtime.Stop
+	// was a no-op (registry handle missing) and the process kept serving.
+	if err := a.stopReleaseAuthoritative(rel, 5*time.Second); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	a.markStopped(rid)
 	_ = dbSetCurrentRelease(globalCtx.AppDB(), d.ID, nil)
