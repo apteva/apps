@@ -35,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: dlna
 display_name: DLNA Server
-version: 0.1.15
+version: 0.1.17
 description: Local-LAN UPnP/DLNA MediaServer for Apteva.
 author: Apteva
 scopes: [project, global]
@@ -191,6 +191,18 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/ConnectionManager/control", Handler: a.handleControlConnectionManager, NoAuth: true},
 		{Pattern: "/ContentDirectory/event", Handler: stubEvent, NoAuth: true},
 		{Pattern: "/ConnectionManager/event", Handler: stubEvent, NoAuth: true},
+		// TVs need both forms. Exact /media (no trailing slash) is the
+		// canonical URL we advertise in DIDL; /media/ subtree stays for
+		// any legacy listings TVs may have cached. Pre-v0.1.17 the
+		// app advertised /media/<id> and relied on http.ServeMux's
+		// subtree-match — but the actual routing chain (SDK
+		// withTokenAuth + the SDK's mux registration on older
+		// app-sdk pins) was strict-suffix and returned 404 for
+		// /media/21 with no trailing slash, which TVs interpret as
+		// "server gone" and report as device-disconnected. Two
+		// registrations + a query-string id make this robust against
+		// every variant we've observed.
+		{Pattern: "/media", Handler: a.handleMediaRedirect, NoAuth: true},
 		{Pattern: "/media/", Handler: a.handleMediaRedirect, NoAuth: true},
 
 		// Panel reads — proxied through the dashboard with the
@@ -280,8 +292,20 @@ func (a *App) handleConnectionManagerSCPD(w http.ResponseWriter, r *http.Request
 // query params (sig=, exp=) ride along untouched — the gateway's
 // auth middleware carves out signed paths.
 func (a *App) handleMediaRedirect(w http.ResponseWriter, r *http.Request) {
-	idStr := strings.TrimPrefix(r.URL.Path, "/media/")
-	idStr = strings.TrimSuffix(idStr, "."+strings.ToLower(extOf(idStr)))
+	// id can arrive two ways:
+	//   1. v0.1.17+: as ?id=N in the query string (canonical, since
+	//      the advertised URL is /media?id=N&n=name.ext — no path
+	//      segments means no trailing-slash routing ambiguity).
+	//   2. legacy: as the last path segment in /media/N or /media/N.ext
+	//      (TVs may have cached an old listing).
+	var idStr string
+	if v := strings.TrimSpace(r.URL.Query().Get("id")); v != "" {
+		idStr = v
+	} else {
+		idStr = strings.TrimPrefix(r.URL.Path, "/media/")
+		idStr = strings.TrimSuffix(idStr, "/")
+		idStr = strings.TrimSuffix(idStr, "."+strings.ToLower(extOf(idStr)))
+	}
 	fileID, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		http.Error(w, "bad file id", 400)
@@ -996,7 +1020,14 @@ func (a *App) publishedFolderPaths() []string {
 // a media-app outage.
 func (a *App) fileToDIDL(ctx context.Context, f storageFile, parent string) didlItem {
 	class := classFor(f.ContentType)
-	mediaURL := fmt.Sprintf("http://%s:%d/media/%d", a.lanIP, a.httpPort, f.ID)
+	// Use ?id=N rather than /media/N to dodge the SDK's strict-suffix
+	// route matching that returned 404 for /media/N (no trailing slash)
+	// pre-v0.1.17. The &n=<filename> tail is purely cosmetic — some TVs
+	// inspect the URL to pick a display name when the DIDL <dc:title>
+	// is hidden by the UI; including the original name keeps that
+	// working without changing the route.
+	mediaURL := fmt.Sprintf("http://%s:%d/media?id=%d&n=%s",
+		a.lanIP, a.httpPort, f.ID, url.QueryEscape(f.Name))
 	it := didlItem{
 		ID:          fmt.Sprintf("i:%d", f.ID),
 		ParentID:    parent,

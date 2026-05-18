@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/dlna
 go 1.25.0
 
 require (
-	github.com/apteva/app-sdk v0.4.0
+	github.com/apteva/app-sdk v0.25.0
 	github.com/google/uuid v1.6.0
 	modernc.org/sqlite v1.50.0
 )
