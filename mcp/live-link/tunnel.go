@@ -25,6 +25,7 @@ import (
 	"io"
 	"os/exec"
 	"regexp"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -98,10 +99,27 @@ type Manager struct {
 	status    Status
 	lastError string
 
+	// recentOutput is a ring-buffer of the last recentOutputCap lines
+	// the URL scanner saw. Pre-v0.4.3 we silently discarded everything
+	// that wasn't a URL match; that meant when the agent failed (bad
+	// authtoken, hit a session limit, network blip) the operator just
+	// saw "exit 1" with no clue what actually went wrong. Now we keep
+	// the tail of the output so waitForExit can surface it as part
+	// of the exit reason when the process dies without publishing a
+	// URL — turning "exit 1" into "exit 1: ERR_NGROK_105 authentication
+	// failed: ..." that the panel + DB row both expose.
+	recentOutput []string
+
 	// Hooks the caller (main.go) installs to persist state.
 	onURLAssigned func(runID int64, url string)
 	onExit        func(runID int64, exitReason string, status Status)
 }
+
+// recentOutputCap bounds how many output lines we retain. 20 lines is
+// plenty for ngrok's typical error footprint (3-4 logfmt lines) and
+// cloudflared's (5-8 plain-text lines) while keeping memory bounded
+// for chatty agents.
+const recentOutputCap = 20
 
 // NewManager — single instance per process. There is at most one
 // tunnel running at a time per install (in v0.1), so we don't need a
@@ -219,6 +237,9 @@ func (m *Manager) Start(p StartParams) error {
 	m.status = StatusRunning
 	m.lastError = ""
 	m.publicURL = ""
+	// Fresh buffer per run — previous run's tail (success or failure)
+	// has no bearing on this one.
+	m.recentOutput = m.recentOutput[:0]
 
 	// Wait for exit in the background; clean up when it ends.
 	go m.waitForExit(p.RunID)
@@ -262,6 +283,20 @@ func (m *Manager) scanForURL(r io.ReadCloser, runID int64, re *regexp.Regexp) {
 	captured := false
 	for scanner.Scan() {
 		line := scanner.Text()
+		// Stash every line into the recent-output ring buffer regardless
+		// of whether it matches. waitForExit reads the tail when the
+		// process dies without a URL — that's the only debug signal an
+		// operator has when the agent fails fast (bad token, hit a
+		// session limit, etc.).
+		m.mu.Lock()
+		if m.runID == runID {
+			m.recentOutput = append(m.recentOutput, line)
+			if len(m.recentOutput) > recentOutputCap {
+				m.recentOutput = m.recentOutput[len(m.recentOutput)-recentOutputCap:]
+			}
+		}
+		m.mu.Unlock()
+
 		if !captured {
 			groups := re.FindStringSubmatch(line)
 			if len(groups) > 0 {
@@ -283,8 +318,6 @@ func (m *Manager) scanForURL(r io.ReadCloser, runID int64, re *regexp.Regexp) {
 				captured = true
 			}
 		}
-		// We deliberately don't log every agent line — too noisy for
-		// normal operation. If we ever need to debug, add a flag.
 	}
 }
 
@@ -337,6 +370,28 @@ func (m *Manager) waitForExit(runID int64) {
 			reason = waitErr.Error()
 			finalStatus = StatusFailed
 		}
+	}
+
+	// If the agent died without publishing a URL, attach the tail of
+	// its output to the exit reason. Without this the panel just shows
+	// "exit 1" and operators have no path forward; with it they see
+	// the actual ngrok / cloudflared error message ("ERR_NGROK_105
+	// authentication failed", "tunnel limit reached", etc.). Only
+	// triggered for failures (clean stop has nothing to diagnose) and
+	// only when we never got a URL (a URL-bearing run that died later
+	// is a transient connection issue, not a startup misconfig).
+	if finalStatus == StatusFailed && m.publicURL == "" && len(m.recentOutput) > 0 {
+		// Show last 5 lines — enough to surface the error, short enough
+		// to fit in a panel toast or row.
+		start := 0
+		if len(m.recentOutput) > 5 {
+			start = len(m.recentOutput) - 5
+		}
+		tail := strings.Join(m.recentOutput[start:], " | ")
+		if len(tail) > 600 {
+			tail = tail[:600] + "…"
+		}
+		reason = fmt.Sprintf("%s: %s", reason, tail)
 	}
 
 	m.cmd = nil
