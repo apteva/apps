@@ -48,7 +48,7 @@ requires:
   integrations:
     - role: image_provider
       kind: integration
-      compatible_slugs: [openai-api]
+      compatible_slugs: [openai-api, venice-ai]
       capabilities: [image.generate]
       tools: { image.generate: generate_image }
       required: false
@@ -62,7 +62,7 @@ requires:
       label: "Video provider"
     - role: audio_provider
       kind: integration
-      compatible_slugs: [elevenlabs, openai-api]
+      compatible_slugs: [elevenlabs, openai-api, venice-ai]
       capabilities: [audio.tts, audio.sfx]
       tools:
         audio.tts: text_to_speech

@@ -11,17 +11,28 @@ import (
 // we gate each parameter on the model's accepted set rather than always
 // sending everything.
 //
-// Thin shim over buildProviderArgs that also unpacks the options bag —
-// the unified media_generate surface stashes provider-specific extras
-// (quality, output_format, background) under args["options"].
+// buildImageArgs dispatches by provider slug. Each provider's request
+// shape is distinct enough (OpenAI: model/prompt/size/quality, Venice:
+// model/prompt/width/height/format/cfg_scale/…) that a unified body
+// would require gating every field on every model — clearer to fork.
 func buildImageArgs(args map[string]any, providerSlug string) (map[string]any, error) {
+	switch providerSlug {
+	case "openai-api":
+		return buildOpenAIImageArgs(args), nil
+	case "venice-ai":
+		return buildVeniceImageArgs(args), nil
+	}
+	return nil, fmt.Errorf("unsupported image provider slug: %q", providerSlug)
+}
+
+// buildOpenAIImageArgs unpacks the options bag and delegates to
+// buildProviderArgs (the original openai-shape builder).
+func buildOpenAIImageArgs(args map[string]any) map[string]any {
 	model := strArg(args, "model", "gpt-image-2")
 	prompt := strArg(args, "prompt", "")
 	size := strArg(args, "size", "1024x1024")
 	n := intArg(args, "n", 1)
 
-	// options.* takes precedence — agent-supplied quality/output_format/background
-	// usually arrives via the options bag in the unified surface.
 	quality := strArg(args, "quality", "")
 	outputFormat := strArg(args, "output_format", "")
 	background := strArg(args, "background", "")
@@ -36,8 +47,64 @@ func buildImageArgs(args map[string]any, providerSlug string) (map[string]any, e
 			background = v
 		}
 	}
+	return buildProviderArgs(model, prompt, size, quality, outputFormat, background, n)
+}
 
-	return buildProviderArgs(model, prompt, size, quality, outputFormat, background, n), nil
+// buildVeniceImageArgs assembles Venice's POST /images/generations body.
+// Venice requires both model + prompt; format defaults to webp; size
+// translates to width/height when given as WxH (otherwise width/height
+// fall back to 1024x1024). Per-Venice extras come through args["options"]:
+// style_preset, negative_prompt, cfg_scale, steps, seed, safe_mode,
+// hide_watermark, lora_strength, aspect_ratio, resolution.
+func buildVeniceImageArgs(args map[string]any) map[string]any {
+	model := strArg(args, "model", "grok-imagine-image")
+	prompt := strArg(args, "prompt", "")
+	n := intArg(args, "n", 1)
+
+	out := map[string]any{
+		"model":         model,
+		"prompt":        prompt,
+		"variants":      n,
+		"return_binary": false, // we want JSON+base64 — saveToStorage handles bytes
+	}
+
+	// size "WxH" → width + height. Pixel-sized Venice models honour these;
+	// aspect-ratio models (nano-banana, qwen-image-2) ignore them and use
+	// aspect_ratio / resolution from options instead.
+	w, h, ok := parseWxH(strArg(args, "size", ""))
+	if ok {
+		out["width"] = w
+		out["height"] = h
+	}
+
+	// options.* — pass through everything the catalog supports.
+	if opts, ok := args["options"].(map[string]any); ok {
+		passThrough := []string{
+			"negative_prompt", "format", "cfg_scale", "steps", "seed",
+			"style_preset", "safe_mode", "hide_watermark", "lora_strength",
+			"aspect_ratio", "resolution", "embed_exif_metadata",
+		}
+		for _, k := range passThrough {
+			if v, exists := opts[k]; exists {
+				out[k] = v
+			}
+		}
+	}
+	return out
+}
+
+func parseWxH(s string) (int, int, bool) {
+	if s == "" {
+		return 0, 0, false
+	}
+	var w, h int
+	if _, err := fmt.Sscanf(s, "%dx%d", &w, &h); err != nil {
+		return 0, 0, false
+	}
+	if w <= 0 || h <= 0 {
+		return 0, 0, false
+	}
+	return w, h, true
 }
 
 // buildProviderArgs is the original openai-shape builder. Kept as a
@@ -113,6 +180,28 @@ func normalizeImageResponse(slug string, raw json.RawMessage) ([]generatedMedia,
 			}
 		}
 		return media, revised, body.Model, nil
+	case "venice-ai":
+		// Venice native shape: { id, images:[<b64>,...], request, timing }.
+		// Default format is webp; if the request asked for png/jpeg the
+		// bytes differ but our metadata still tags webp — storage's
+		// content-type sniffer sorts the rest out for downstream consumers.
+		var body struct {
+			ID     string   `json:"id"`
+			Images []string `json:"images"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return nil, "", "", err
+		}
+		media := make([]generatedMedia, 0, len(body.Images))
+		for _, b64 := range body.Images {
+			media = append(media, generatedMedia{
+				B64:      b64,
+				MimeType: "image/webp",
+				Ext:      "webp",
+			})
+		}
+		// Venice doesn't return a revised prompt or echo the model.
+		return media, "", "", nil
 	}
 	return nil, "", "", fmt.Errorf("unsupported provider slug: %q", slug)
 }
