@@ -298,8 +298,10 @@ type ApplySummary struct {
 }
 
 // applyTemplate is the workhorse — opens a tx, walks the body, returns
-// a summary. When dryRun is true it inspects but never writes.
-func applyTemplate(ctx *sdk.AppCtx, projectID, name string, mode ApplyMode, dryRun bool) (*ApplySummary, error) {
+// a summary. When dryRun is true it inspects but never writes. The
+// template applies to the supplied siteID (multi-site v2.0); the
+// templates catalog itself is per-project (not site-scoped).
+func applyTemplate(ctx *sdk.AppCtx, projectID string, siteID int64, name string, mode ApplyMode, dryRun bool) (*ApplySummary, error) {
 	if mode == "" {
 		mode = ApplyEmptyOnly
 	}
@@ -331,17 +333,13 @@ func applyTemplate(ctx *sdk.AppCtx, projectID, name string, mode ApplyMode, dryR
 		DryRun:   dryRun,
 	}
 
-	// Required-apps check — returns a structured error so the panel
-	// can list which bindings are missing.
 	for _, role := range body.RequiresApps {
 		if ctx.IntegrationFor(role) == nil {
 			return nil, fmt.Errorf("template requires the %q role to be bound; install/bind that app first", role)
 		}
 	}
 
-	// Compute existing-content count once so we can either error on
-	// apply OR annotate the dry-run with a "would refuse" hint.
-	existing, _ := countExisting(ctx.AppDB(), projectID)
+	existing, _ := countExisting(ctx.AppDB(), projectID, siteID)
 
 	if dryRun {
 		// Walk the body and report what would be created without
@@ -375,11 +373,11 @@ func applyTemplate(ctx *sdk.AppCtx, projectID, name string, mode ApplyMode, dryR
 	}
 	defer tx.Rollback()
 
-	// 1. Settings — direct UPSERT.
+	// 1. Settings — site-scoped UPSERT.
 	for k, v := range body.Settings {
-		if _, err := tx.Exec(`INSERT INTO settings (project_id, key, value) VALUES (?, ?, ?)
-			ON CONFLICT(project_id, key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP`,
-			projectID, k, v); err != nil {
+		if _, err := tx.Exec(`INSERT INTO settings (project_id, site_id, key, value) VALUES (?, ?, ?, ?)
+			ON CONFLICT(project_id, site_id, key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP`,
+			projectID, siteID, k, v); err != nil {
 			return nil, fmt.Errorf("settings %q: %w", k, err)
 		}
 		summary.Created["settings"]++
@@ -393,8 +391,8 @@ func applyTemplate(ctx *sdk.AppCtx, projectID, name string, mode ApplyMode, dryR
 			slug = slugify(term.Name)
 		}
 		var existing int64
-		lerr := tx.QueryRow(`SELECT id FROM terms WHERE project_id=? AND kind=? AND slug=?`,
-			projectID, term.Kind, slug).Scan(&existing)
+		lerr := tx.QueryRow(`SELECT id FROM terms WHERE project_id=? AND site_id=? AND kind=? AND slug=?`,
+			projectID, siteID, term.Kind, slug).Scan(&existing)
 		switch {
 		case lerr == nil && mode == ApplyOverwrite:
 			if _, err := tx.Exec(`UPDATE terms SET name=?, description=? WHERE id=?`,
@@ -407,8 +405,8 @@ func applyTemplate(ctx *sdk.AppCtx, projectID, name string, mode ApplyMode, dryR
 			termIDs[term.Kind+"/"+slug] = existing
 			summary.Skipped["terms"]++
 		case lerr == sql.ErrNoRows:
-			res, err := tx.Exec(`INSERT INTO terms (project_id, kind, name, slug, description) VALUES (?, ?, ?, ?, ?)`,
-				projectID, term.Kind, term.Name, slug, term.Description)
+			res, err := tx.Exec(`INSERT INTO terms (project_id, site_id, kind, name, slug, description) VALUES (?, ?, ?, ?, ?, ?)`,
+				projectID, siteID, term.Kind, term.Name, slug, term.Description)
 			if err != nil {
 				return nil, fmt.Errorf("insert term %q: %w", slug, err)
 			}
@@ -434,7 +432,7 @@ func applyTemplate(ctx *sdk.AppCtx, projectID, name string, mode ApplyMode, dryR
 					fmt.Sprintf("page %q references parent %q which appears later in the template; placed at root", page.Slug, page.ParentSlug))
 			}
 		}
-		created, skipped, id, err := upsertPostInTx(tx, projectID, "page", page, parentID, mode)
+		created, skipped, id, err := upsertPostInTx(tx, projectID, siteID, "page", page, parentID, mode)
 		if err != nil {
 			return nil, err
 		}
@@ -452,7 +450,7 @@ func applyTemplate(ctx *sdk.AppCtx, projectID, name string, mode ApplyMode, dryR
 	// 4. Posts — same upsert, plus term assignment.
 	postIDs := map[string]int64{}
 	for _, post := range body.Posts {
-		created, skipped, id, err := upsertPostInTx(tx, projectID, "post", post, nil, mode)
+		created, skipped, id, err := upsertPostInTx(tx, projectID, siteID, "post", post, nil, mode)
 		if err != nil {
 			return nil, err
 		}
@@ -485,7 +483,7 @@ func applyTemplate(ctx *sdk.AppCtx, projectID, name string, mode ApplyMode, dryR
 
 	// 5. Menus — replace items atomically per menu.
 	for _, menu := range body.Menus {
-		menuID, err := upsertMenuInTx(tx, projectID, menu.Slug, menu.Name)
+		menuID, err := upsertMenuInTx(tx, projectID, siteID, menu.Slug, menu.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -506,10 +504,10 @@ func applyTemplate(ctx *sdk.AppCtx, projectID, name string, mode ApplyMode, dryR
 		if code != 301 && code != 302 {
 			code = 301
 		}
-		if _, err := tx.Exec(`INSERT INTO redirects (project_id, from_path, to_path, code)
-			VALUES (?, ?, ?, ?)
-			ON CONFLICT(project_id, from_path) DO UPDATE SET to_path=excluded.to_path, code=excluded.code`,
-			projectID, red.From, red.To, code); err != nil {
+		if _, err := tx.Exec(`INSERT INTO redirects (project_id, site_id, from_path, to_path, code)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(project_id, site_id, from_path) DO UPDATE SET to_path=excluded.to_path, code=excluded.code`,
+			projectID, siteID, red.From, red.To, code); err != nil {
 			return nil, fmt.Errorf("redirect %q: %w", red.From, err)
 		}
 		summary.Created["redirects"]++
@@ -518,9 +516,9 @@ func applyTemplate(ctx *sdk.AppCtx, projectID, name string, mode ApplyMode, dryR
 	// 7. Homepage pin.
 	if body.HomepageSlug != "" {
 		if id, ok := pageIDs[body.HomepageSlug]; ok {
-			if _, err := tx.Exec(`INSERT INTO settings (project_id, key, value) VALUES (?, 'homepage_page_id', ?)
-				ON CONFLICT(project_id, key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP`,
-				projectID, fmt.Sprintf("%d", id)); err != nil {
+			if _, err := tx.Exec(`INSERT INTO settings (project_id, site_id, key, value) VALUES (?, ?, 'homepage_page_id', ?)
+				ON CONFLICT(project_id, site_id, key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP`,
+				projectID, siteID, fmt.Sprintf("%d", id)); err != nil {
 				return nil, fmt.Errorf("set homepage: %w", err)
 			}
 			summary.HomepagePinned = true
@@ -538,10 +536,9 @@ func applyTemplate(ctx *sdk.AppCtx, projectID, name string, mode ApplyMode, dryR
 }
 
 // upsertPostInTx handles a single page or post within an open
-// transaction. Honors mode: existing rows are skipped (append) or
-// overwritten (overwrite); empty_only is enforced before tx start so
-// we never reach here in that mode with existing content.
-func upsertPostInTx(tx *sql.Tx, projectID, kind string, p TemplatePost, parentID *int64, mode ApplyMode) (created bool, skipped bool, id int64, err error) {
+// transaction. Site-scoped: existing-row lookup includes site_id so
+// the same slug can coexist across sites in the same project.
+func upsertPostInTx(tx *sql.Tx, projectID string, siteID int64, kind string, p TemplatePost, parentID *int64, mode ApplyMode) (created bool, skipped bool, id int64, err error) {
 	bodyJSON := emptyDocumentJSON()
 	if len(p.Blocks) > 0 {
 		doc := Document{Version: documentVersion, Blocks: p.Blocks}
@@ -553,28 +550,23 @@ func upsertPostInTx(tx *sql.Tx, projectID, kind string, p TemplatePost, parentID
 	if slug == "" {
 		slug = slugify(p.Title)
 	}
-	// Look for existing.
 	var existingID int64
-	err = tx.QueryRow(`SELECT id FROM posts WHERE project_id=? AND kind=? AND locale='en' AND slug=? AND deleted_at IS NULL`,
-		projectID, kind, slug).Scan(&existingID)
+	err = tx.QueryRow(`SELECT id FROM posts WHERE project_id=? AND site_id=? AND kind=? AND locale='en' AND slug=? AND deleted_at IS NULL`,
+		projectID, siteID, kind, slug).Scan(&existingID)
 	if err == sql.ErrNoRows {
-		// Handling the no-rows case — reset err so the named-return
-		// doesn't leak ErrNoRows back to the caller after a clean insert.
 		err = nil
 		var parentVal any
 		if parentID != nil {
 			parentVal = *parentID
 		}
-		res, ierr := tx.Exec(`INSERT INTO posts (project_id, kind, slug, locale, status, title, excerpt, body_blocks, parent_id, template)
-			VALUES (?, ?, ?, 'en', 'published', ?, ?, ?, ?, ?)`,
-			projectID, kind, slug, p.Title, p.Excerpt, bodyJSON, parentVal, p.Template)
+		res, ierr := tx.Exec(`INSERT INTO posts (project_id, site_id, kind, slug, locale, status, title, excerpt, body_blocks, parent_id, template)
+			VALUES (?, ?, ?, ?, 'en', 'published', ?, ?, ?, ?, ?)`,
+			projectID, siteID, kind, slug, p.Title, p.Excerpt, bodyJSON, parentVal, p.Template)
 		if ierr != nil {
 			err = fmt.Errorf("insert %s %q: %w", kind, slug, ierr)
 			return
 		}
 		id, _ = res.LastInsertId()
-		// Pages published immediately so they're navigable; posts also
-		// published so the homepage's "Latest" section has something.
 		now := nowStamp()
 		_, _ = tx.Exec(`UPDATE posts SET published_at=? WHERE id=?`, now, id)
 		created = true
@@ -603,11 +595,11 @@ func upsertPostInTx(tx *sql.Tx, projectID, kind string, p TemplatePost, parentID
 	return
 }
 
-func upsertMenuInTx(tx *sql.Tx, projectID, slug, name string) (int64, error) {
+func upsertMenuInTx(tx *sql.Tx, projectID string, siteID int64, slug, name string) (int64, error) {
 	var id int64
-	err := tx.QueryRow(`SELECT id FROM menus WHERE project_id=? AND slug=?`, projectID, slug).Scan(&id)
+	err := tx.QueryRow(`SELECT id FROM menus WHERE project_id=? AND site_id=? AND slug=?`, projectID, siteID, slug).Scan(&id)
 	if err == sql.ErrNoRows {
-		res, err := tx.Exec(`INSERT INTO menus (project_id, slug, name) VALUES (?, ?, ?)`, projectID, slug, name)
+		res, err := tx.Exec(`INSERT INTO menus (project_id, site_id, slug, name) VALUES (?, ?, ?, ?)`, projectID, siteID, slug, name)
 		if err != nil {
 			return 0, err
 		}
@@ -682,16 +674,16 @@ func insertMenuItemsInTx(tx *sql.Tx, menuID int64, items []TemplateMenuItem, par
 	return nil
 }
 
-func countExisting(db *sql.DB, projectID string) (int, error) {
+func countExisting(db *sql.DB, projectID string, siteID int64) (int, error) {
 	var total int
 	queries := []string{
-		`SELECT COUNT(*) FROM posts WHERE project_id=? AND deleted_at IS NULL`,
-		`SELECT COUNT(*) FROM terms WHERE project_id=?`,
-		`SELECT COUNT(*) FROM menus WHERE project_id=?`,
+		`SELECT COUNT(*) FROM posts WHERE project_id=? AND site_id=? AND deleted_at IS NULL`,
+		`SELECT COUNT(*) FROM terms WHERE project_id=? AND site_id=?`,
+		`SELECT COUNT(*) FROM menus WHERE project_id=? AND site_id=?`,
 	}
 	for _, q := range queries {
 		var n int
-		if err := db.QueryRow(q, projectID).Scan(&n); err != nil {
+		if err := db.QueryRow(q, projectID, siteID).Scan(&n); err != nil {
 			return 0, err
 		}
 		total += n

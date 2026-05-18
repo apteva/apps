@@ -1,8 +1,6 @@
-// Navigation menus + items. Menus are named buckets (slug + name); a
-// menu's items are a flat list with parent_id for hierarchy + a
-// position int for sibling order. The set_items tool replaces the
-// whole tree atomically so the editor can persist a drag-reorder
-// without diffing.
+// Navigation menus + items. Multi-site (v2.0): menus are site-scoped;
+// menu items continue to inherit siting via their parent menu (no
+// site_id on menu_items).
 
 package main
 
@@ -21,6 +19,7 @@ import (
 type Menu struct {
 	ID        int64      `json:"id"`
 	ProjectID string     `json:"project_id,omitempty"`
+	SiteID    int64      `json:"site_id"`
 	Slug      string     `json:"slug"`
 	Name      string     `json:"name"`
 	CreatedAt string     `json:"created_at,omitempty"`
@@ -28,36 +27,36 @@ type Menu struct {
 }
 
 type MenuItem struct {
-	ID         int64  `json:"id"`
-	MenuID     int64  `json:"menu_id"`
-	ParentID   *int64 `json:"parent_id,omitempty"`
-	Label      string `json:"label"`
-	TargetKind string `json:"target_kind"` // post | page | term | url
-	TargetID   *int64 `json:"target_id,omitempty"`
-	TargetURL  string `json:"target_url,omitempty"`
-	Position   int    `json:"position"`
+	ID         int64      `json:"id"`
+	MenuID     int64      `json:"menu_id"`
+	ParentID   *int64     `json:"parent_id,omitempty"`
+	Label      string     `json:"label"`
+	TargetKind string     `json:"target_kind"`
+	TargetID   *int64     `json:"target_id,omitempty"`
+	TargetURL  string     `json:"target_url,omitempty"`
+	Position   int        `json:"position"`
 	Children   []MenuItem `json:"children,omitempty"`
 }
 
-func dbCreateMenu(db *sql.DB, projectID, slug, name string) (*Menu, error) {
+func dbCreateMenu(db *sql.DB, projectID string, siteID int64, slug, name string) (*Menu, error) {
 	if slug == "" {
 		return nil, errors.New("slug required")
 	}
-	res, err := db.Exec(`INSERT INTO menus (project_id, slug, name) VALUES (?, ?, ?)`,
-		projectID, slugify(slug), name)
+	res, err := db.Exec(`INSERT INTO menus (project_id, site_id, slug, name) VALUES (?, ?, ?, ?)`,
+		projectID, siteID, slugify(slug), name)
 	if err != nil {
 		return nil, fmt.Errorf("insert menu: %w", err)
 	}
 	id, _ := res.LastInsertId()
-	return dbGetMenu(db, projectID, id)
+	return dbGetMenu(db, projectID, siteID, id)
 }
 
-func dbGetMenu(db *sql.DB, projectID string, id int64) (*Menu, error) {
-	row := db.QueryRow(`SELECT id, project_id, slug, name, created_at FROM menus WHERE project_id=? AND id=?`,
-		projectID, id)
+func dbGetMenu(db *sql.DB, projectID string, siteID int64, id int64) (*Menu, error) {
+	row := db.QueryRow(`SELECT id, project_id, COALESCE(site_id, 0), slug, name, created_at
+		FROM menus WHERE project_id=? AND site_id=? AND id=?`, projectID, siteID, id)
 	m := &Menu{}
 	var created sql.NullString
-	if err := row.Scan(&m.ID, &m.ProjectID, &m.Slug, &m.Name, &created); err != nil {
+	if err := row.Scan(&m.ID, &m.ProjectID, &m.SiteID, &m.Slug, &m.Name, &created); err != nil {
 		return nil, err
 	}
 	if created.Valid {
@@ -71,17 +70,18 @@ func dbGetMenu(db *sql.DB, projectID string, id int64) (*Menu, error) {
 	return m, nil
 }
 
-func dbGetMenuBySlug(db *sql.DB, projectID, slug string) (*Menu, error) {
+func dbGetMenuBySlug(db *sql.DB, projectID string, siteID int64, slug string) (*Menu, error) {
 	var id int64
-	if err := db.QueryRow(`SELECT id FROM menus WHERE project_id=? AND slug=?`, projectID, slug).Scan(&id); err != nil {
+	if err := db.QueryRow(`SELECT id FROM menus WHERE project_id=? AND site_id=? AND slug=?`,
+		projectID, siteID, slug).Scan(&id); err != nil {
 		return nil, err
 	}
-	return dbGetMenu(db, projectID, id)
+	return dbGetMenu(db, projectID, siteID, id)
 }
 
-func dbListMenus(db *sql.DB, projectID string) ([]Menu, error) {
-	rows, err := db.Query(`SELECT id, project_id, slug, name, created_at FROM menus WHERE project_id=? ORDER BY name`,
-		projectID)
+func dbListMenus(db *sql.DB, projectID string, siteID int64) ([]Menu, error) {
+	rows, err := db.Query(`SELECT id, project_id, COALESCE(site_id, 0), slug, name, created_at
+		FROM menus WHERE project_id=? AND site_id=? ORDER BY name`, projectID, siteID)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +90,7 @@ func dbListMenus(db *sql.DB, projectID string) ([]Menu, error) {
 	for rows.Next() {
 		var m Menu
 		var created sql.NullString
-		if err := rows.Scan(&m.ID, &m.ProjectID, &m.Slug, &m.Name, &created); err != nil {
+		if err := rows.Scan(&m.ID, &m.ProjectID, &m.SiteID, &m.Slug, &m.Name, &created); err != nil {
 			return nil, err
 		}
 		if created.Valid {
@@ -128,7 +128,6 @@ func dbListMenuItems(db *sql.DB, menuID int64) ([]MenuItem, error) {
 	return out, nil
 }
 
-// nestItems turns a flat parent-id list into a tree.
 func nestItems(items []MenuItem) []MenuItem {
 	byID := map[int64]*MenuItem{}
 	for i := range items {
@@ -147,7 +146,6 @@ func nestItems(items []MenuItem) []MenuItem {
 	return roots
 }
 
-// dbSetMenuItems replaces a menu's entire item tree in one transaction.
 func dbSetMenuItems(db *sql.DB, menuID int64, items []MenuItem) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -157,10 +155,6 @@ func dbSetMenuItems(db *sql.DB, menuID int64, items []MenuItem) error {
 	if _, err := tx.Exec(`DELETE FROM menu_items WHERE menu_id=?`, menuID); err != nil {
 		return err
 	}
-	// Two-pass: first insert all items with their parent's *external*
-	// id (the position in input), then map to actual IDs once they're
-	// minted. Simpler: clients submit a flat list with `temp_parent`
-	// references — but we accept the nested shape and resolve here.
 	pos := 0
 	var insert func(items []MenuItem, parentID *int64) error
 	insert = func(items []MenuItem, parentID *int64) error {
@@ -205,7 +199,11 @@ func (a *App) toolMenusCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	m, err := dbCreateMenu(ctx.AppDB(), pid, asString(args["slug"]), asString(args["name"]))
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	m, err := dbCreateMenu(ctx.AppDB(), pid, siteID, asString(args["slug"]), asString(args["name"]))
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +215,11 @@ func (a *App) toolMenusList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	menus, err := dbListMenus(ctx.AppDB(), pid)
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	menus, err := dbListMenus(ctx.AppDB(), pid, siteID)
 	if err != nil {
 		return nil, err
 	}
@@ -229,8 +231,12 @@ func (a *App) toolMenusGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
 	if id, ok := asInt64(args["id"]); ok && id > 0 {
-		m, err := dbGetMenu(ctx.AppDB(), pid, id)
+		m, err := dbGetMenu(ctx.AppDB(), pid, siteID, id)
 		if err != nil {
 			return nil, err
 		}
@@ -240,7 +246,7 @@ func (a *App) toolMenusGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if slug == "" {
 		return nil, errors.New("id or slug required")
 	}
-	m, err := dbGetMenuBySlug(ctx.AppDB(), pid, slug)
+	m, err := dbGetMenuBySlug(ctx.AppDB(), pid, siteID, slug)
 	if err != nil {
 		return nil, err
 	}
@@ -249,6 +255,10 @@ func (a *App) toolMenusGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 func (a *App) toolMenusSetItems(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +279,7 @@ func (a *App) toolMenusSetItems(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return nil, err
 	}
 	invalidatePageCache()
-	m, err := dbGetMenu(ctx.AppDB(), pid, menuID)
+	m, err := dbGetMenu(ctx.AppDB(), pid, siteID, menuID)
 	if err != nil {
 		return nil, err
 	}
@@ -285,9 +295,14 @@ func (a *App) handleHTTPMenus(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	siteID, err := resolveSiteIDFromRequest(ctx.AppDB(), pid, r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		menus, err := dbListMenus(ctx.AppDB(), pid)
+		menus, err := dbListMenus(ctx.AppDB(), pid, siteID)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -300,6 +315,7 @@ func (a *App) handleHTTPMenus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body["_project_id"] = pid
+		body["_site_id"] = siteID
 		out, err := a.toolMenusCreate(ctx, body)
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
@@ -311,6 +327,5 @@ func (a *App) handleHTTPMenus(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// silence unused imports when only some helpers are used
 var _ = strconv.Atoi
 var _ = strings.TrimSpace

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: content
 display_name: Content
-version: 1.2.1
+version: 2.0.0
 description: |
   Block-based CMS for Apteva. Posts, pages, media, taxonomies, menus,
   revisions, redirects. Renders themed HTML and exposes a headless REST
@@ -66,6 +66,19 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    # Sites (multi-site v2.0)
+    - name: sites_list
+      description: List sites in the current project.
+    - name: sites_get
+      description: Fetch one site by id or slug.
+    - name: sites_create
+      description: Create a new site; first site is auto-promoted to default.
+    - name: sites_update
+      description: Update a site's display name or hostname.
+    - name: sites_archive
+      description: Soft-delete a site (refuses if default).
+    - name: sites_set_default
+      description: Promote a site to default — picks the ambiguous-call target.
     # Templates (site kits)
     - name: templates_list
       description: List available site templates (bundled + user-imported).

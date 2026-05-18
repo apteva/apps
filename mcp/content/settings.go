@@ -1,7 +1,7 @@
-// Site settings — KV table. Bootstraps from the install's config
-// (apteva.yaml::config_schema) on first read so the defaults
-// (site_title, posts_per_page, render_mode, …) are usable even before
-// any settings_set call.
+// Site settings — KV table, multi-site scoped (project + site + key).
+// Bootstraps from the install's config (apteva.yaml::config_schema)
+// on first read so the defaults (site_title, posts_per_page,
+// render_mode, …) are usable even before any settings_set call.
 
 package main
 
@@ -14,24 +14,26 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-func dbGetSetting(db *sql.DB, projectID, key string) (string, error) {
+func dbGetSetting(db *sql.DB, projectID string, siteID int64, key string) (string, error) {
 	var v string
-	err := db.QueryRow(`SELECT value FROM settings WHERE project_id=? AND key=?`, projectID, key).Scan(&v)
+	err := db.QueryRow(`SELECT value FROM settings WHERE project_id=? AND site_id=? AND key=?`,
+		projectID, siteID, key).Scan(&v)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
 	return v, err
 }
 
-func dbSetSetting(db *sql.DB, projectID, key, value string) error {
-	_, err := db.Exec(`INSERT INTO settings (project_id, key, value) VALUES (?, ?, ?)
-		ON CONFLICT(project_id, key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP`,
-		projectID, key, value)
+func dbSetSetting(db *sql.DB, projectID string, siteID int64, key, value string) error {
+	_, err := db.Exec(`INSERT INTO settings (project_id, site_id, key, value) VALUES (?, ?, ?, ?)
+		ON CONFLICT(project_id, site_id, key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP`,
+		projectID, siteID, key, value)
 	return err
 }
 
-func dbListSettings(db *sql.DB, projectID string) (map[string]string, error) {
-	rows, err := db.Query(`SELECT key, value FROM settings WHERE project_id=?`, projectID)
+func dbListSettings(db *sql.DB, projectID string, siteID int64) (map[string]string, error) {
+	rows, err := db.Query(`SELECT key, value FROM settings WHERE project_id=? AND site_id=?`,
+		projectID, siteID)
 	if err != nil {
 		return nil, err
 	}
@@ -48,15 +50,15 @@ func dbListSettings(db *sql.DB, projectID string) (map[string]string, error) {
 }
 
 // effectiveSettings merges install-time config (from apteva.yaml) with
-// per-project DB overrides. DB wins.
-func effectiveSettings(ctx *sdk.AppCtx, projectID string) (map[string]string, error) {
+// per-site DB overrides. DB wins.
+func effectiveSettings(ctx *sdk.AppCtx, projectID string, siteID int64) (map[string]string, error) {
 	out := map[string]string{}
 	if cfg := ctx.Config(); cfg != nil {
 		for k, v := range cfg {
 			out[k] = v
 		}
 	}
-	dbVals, err := dbListSettings(ctx.AppDB(), projectID)
+	dbVals, err := dbListSettings(ctx.AppDB(), projectID, siteID)
 	if err != nil {
 		return out, err
 	}
@@ -71,7 +73,11 @@ func (a *App) toolSettingsGet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	all, err := effectiveSettings(ctx, pid)
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	all, err := effectiveSettings(ctx, pid, siteID)
 	if err != nil {
 		return nil, err
 	}
@@ -92,6 +98,10 @@ func (a *App) toolSettingsSet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
 	key := asString(args["key"])
 	if key == "" {
 		return nil, errors.New("key required")
@@ -106,7 +116,7 @@ func (a *App) toolSettingsSet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		b, _ := json.Marshal(v)
 		val = string(b)
 	}
-	if err := dbSetSetting(ctx.AppDB(), pid, key, val); err != nil {
+	if err := dbSetSetting(ctx.AppDB(), pid, siteID, key, val); err != nil {
 		return nil, err
 	}
 	invalidatePageCache()
@@ -120,9 +130,14 @@ func (a *App) handleHTTPSettings(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	siteID, err := resolveSiteIDFromRequest(ctx.AppDB(), pid, r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		all, err := effectiveSettings(ctx, pid)
+		all, err := effectiveSettings(ctx, pid, siteID)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -135,6 +150,7 @@ func (a *App) handleHTTPSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body["_project_id"] = pid
+		body["_site_id"] = siteID
 		out, err := a.toolSettingsSet(ctx, body)
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())

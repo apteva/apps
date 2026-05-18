@@ -1,7 +1,9 @@
 // Public HTTP surface: rendered pages, term archives, feed, sitemap,
-// media streaming, draft previews. The headless REST handlers live in
-// the per-domain files (posts.go, terms.go, etc.) — this file is the
-// catch-all renderer + the asset/preview/feed surfaces.
+// media streaming, draft previews. Multi-site (v2.0): every public
+// route resolves the target site via resolveSiteIDFromRequest, which
+// considers hostname → sites.hostname lookup first for domain-linked
+// public traffic, then query/header overrides, then falls back to
+// the project's default site.
 
 package main
 
@@ -21,9 +23,6 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-// handlePublic is the catch-all rendered-HTML handler. It resolves the
-// requested path against redirects → posts → pages → term archives →
-// paginated blog index. Misses return 404.
 func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 	ctx := getAppCtx(r)
 	if ctx == nil {
@@ -35,22 +34,26 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	siteID, err := resolveSiteIDFromRequest(ctx.AppDB(), pid, r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	if r.URL.Path == "/health" || r.URL.Path == "/healthz" {
 		w.Write([]byte("ok"))
 		return
 	}
 
-	// Redirects come first — content migrations rely on this.
-	if red, _ := dbLookupRedirect(ctx.AppDB(), pid, r.URL.Path); red != nil {
+	if red, _ := dbLookupRedirect(ctx.AppDB(), pid, siteID, r.URL.Path); red != nil {
 		http.Redirect(w, r, red.To, red.Code)
 		return
 	}
 
-	// Try the page cache. Prefix segments the key so the dashboard
-	// proxy and a domain-link can't return each other's cached pages.
+	// Page cache. Site segments the key alongside prefix/host/path so
+	// no two sites can return each other's cached body.
 	prefix := computeURLPrefix(r)
-	key := cacheKey(r.Host, r.URL.Path, "", prefix)
+	key := cacheKeyMulti(r.Host, r.URL.Path, "", prefix, siteID)
 	if e, ok := cacheGet(key); ok {
 		w.Header().Set("Content-Type", e.contentType)
 		w.Header().Set("ETag", e.etag)
@@ -62,19 +65,18 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Dispatch by path shape.
 	switch {
 	case r.URL.Path == "/":
-		a.renderHomepage(w, r, ctx, pid)
+		a.renderHomepage(w, r, ctx, pid, siteID)
 	case strings.HasPrefix(r.URL.Path, "/posts/"):
 		slug := strings.TrimPrefix(r.URL.Path, "/posts/")
-		a.renderPost(w, r, ctx, pid, slug)
+		a.renderPost(w, r, ctx, pid, siteID, slug)
 	case strings.HasPrefix(r.URL.Path, "/category/"):
 		slug := strings.TrimPrefix(r.URL.Path, "/category/")
-		a.renderTermArchive(w, r, ctx, pid, "category", slug)
+		a.renderTermArchive(w, r, ctx, pid, siteID, "category", slug)
 	case strings.HasPrefix(r.URL.Path, "/tag/"):
 		slug := strings.TrimPrefix(r.URL.Path, "/tag/")
-		a.renderTermArchive(w, r, ctx, pid, "tag", slug)
+		a.renderTermArchive(w, r, ctx, pid, siteID, "tag", slug)
 	case strings.HasPrefix(r.URL.Path, "/page/"):
 		nStr := strings.TrimPrefix(r.URL.Path, "/page/")
 		n, _ := strconv.Atoi(nStr)
@@ -82,18 +84,13 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		a.renderBlogIndex(w, r, ctx, pid, n)
+		a.renderBlogIndex(w, r, ctx, pid, siteID, n)
 	default:
-		// Page slug (possibly nested). Strip leading slash.
 		slug := strings.TrimPrefix(r.URL.Path, "/")
-		a.renderPage(w, r, ctx, pid, slug)
+		a.renderPage(w, r, ctx, pid, siteID, slug)
 	}
 }
 
-// publicProject resolves a project id for public requests. For
-// project-scoped installs APTEVA_PROJECT_ID is set; for global installs
-// the platform's domain_link table routes the host to a specific
-// project that gets forwarded via the X-Apteva-Project-ID header.
 func publicProject(r *http.Request) (string, error) {
 	if env := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); env != "" {
 		return env, nil
@@ -107,29 +104,28 @@ func publicProject(r *http.Request) (string, error) {
 	return "", fmt.Errorf("project_id required (host not bound to a project)")
 }
 
-func (a *App) renderHomepage(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid string) {
-	settings, _ := effectiveSettings(ctx, pid)
-	// If homepage_page_id is set, render that page.
+func (a *App) renderHomepage(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid string, siteID int64) {
+	settings, _ := effectiveSettings(ctx, pid, siteID)
 	if id := settings["homepage_page_id"]; id != "" {
 		if n, err := strconv.ParseInt(id, 10, 64); err == nil {
-			if post, err := dbGetPost(ctx.AppDB(), pid, n); err == nil && post.Status == "published" {
-				a.servePost(w, r, ctx, pid, post, settings)
+			if post, err := dbGetPost(ctx.AppDB(), pid, siteID, n); err == nil && post.Status == "published" {
+				a.servePost(w, r, ctx, pid, siteID, post, settings)
 				return
 			}
 		}
 	}
-	a.renderBlogIndex(w, r, ctx, pid, 1)
+	a.renderBlogIndex(w, r, ctx, pid, siteID, 1)
 }
 
-func (a *App) renderBlogIndex(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid string, page int) {
-	settings, _ := effectiveSettings(ctx, pid)
+func (a *App) renderBlogIndex(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid string, siteID int64, page int) {
+	settings, _ := effectiveSettings(ctx, pid, siteID)
 	per := 10
 	if v := settings["posts_per_page"]; v != "" {
 		if n, _ := strconv.Atoi(v); n > 0 {
 			per = n
 		}
 	}
-	posts, total, err := dbSearchPosts(ctx.AppDB(), pid, PostSearch{
+	posts, total, err := dbSearchPosts(ctx.AppDB(), pid, siteID, PostSearch{
 		Status: "published",
 		Kind:   "post",
 		Limit:  per,
@@ -139,7 +135,7 @@ func (a *App) renderBlogIndex(w http.ResponseWriter, r *http.Request, ctx *sdk.A
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	data := basePageData(ctx, pid, settings, r)
+	data := basePageData(ctx, pid, siteID, settings, r)
 	data.Posts = posts
 	data.ListTitle = ""
 	if total > per {
@@ -163,32 +159,31 @@ func (a *App) renderBlogIndex(w http.ResponseWriter, r *http.Request, ctx *sdk.A
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	cacheAndWrite(w, r, body, "text/html; charset=utf-8")
+	cacheAndWrite(w, r, body, "text/html; charset=utf-8", siteID)
 }
 
-func (a *App) renderPost(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid, slug string) {
-	post, err := dbGetPostBySlug(ctx.AppDB(), pid, "post", "en", slug)
+func (a *App) renderPost(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid string, siteID int64, slug string) {
+	post, err := dbGetPostBySlug(ctx.AppDB(), pid, siteID, "post", "en", slug)
 	if err != nil || post.Status != "published" {
 		http.NotFound(w, r)
 		return
 	}
-	settings, _ := effectiveSettings(ctx, pid)
-	a.servePost(w, r, ctx, pid, post, settings)
+	settings, _ := effectiveSettings(ctx, pid, siteID)
+	a.servePost(w, r, ctx, pid, siteID, post, settings)
 }
 
-func (a *App) renderPage(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid, slug string) {
+func (a *App) renderPage(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid string, siteID int64, slug string) {
 	if slug == "" {
 		http.NotFound(w, r)
 		return
 	}
 	parts := strings.Split(slug, "/")
 	leaf := parts[len(parts)-1]
-	post, err := dbGetPostBySlug(ctx.AppDB(), pid, "page", "en", leaf)
+	post, err := dbGetPostBySlug(ctx.AppDB(), pid, siteID, "page", "en", leaf)
 	if err != nil || post.Status != "published" {
 		http.NotFound(w, r)
 		return
 	}
-	// Validate ancestry — if the slug is nested, walk parent_id chain.
 	if len(parts) > 1 {
 		curr := post
 		for i := len(parts) - 2; i >= 0; i-- {
@@ -196,7 +191,7 @@ func (a *App) renderPage(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx
 				http.NotFound(w, r)
 				return
 			}
-			parent, err := dbGetPost(ctx.AppDB(), pid, *curr.ParentID)
+			parent, err := dbGetPost(ctx.AppDB(), pid, siteID, *curr.ParentID)
 			if err != nil || parent.Slug != parts[i] {
 				http.NotFound(w, r)
 				return
@@ -204,13 +199,13 @@ func (a *App) renderPage(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx
 			curr = parent
 		}
 	}
-	settings, _ := effectiveSettings(ctx, pid)
-	a.servePost(w, r, ctx, pid, post, settings)
+	settings, _ := effectiveSettings(ctx, pid, siteID)
+	a.servePost(w, r, ctx, pid, siteID, post, settings)
 }
 
-func (a *App) servePost(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid string, post *Post, settings map[string]string) {
+func (a *App) servePost(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid string, siteID int64, post *Post, settings map[string]string) {
 	terms, _ := dbListPostTerms(ctx.AppDB(), post.ID)
-	data := basePageData(ctx, pid, settings, r)
+	data := basePageData(ctx, pid, siteID, settings, r)
 	data.Post = post
 	data.Terms = terms
 	data.PageTitle = post.Title
@@ -223,33 +218,32 @@ func (a *App) servePost(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx,
 		data.Canonical = post.SEOCanonical
 	}
 	if post.FeaturedMediaID != nil {
-		if m, err := dbGetMedia(ctx.AppDB(), pid, *post.FeaturedMediaID); err == nil {
+		if m, err := dbGetMedia(ctx.AppDB(), pid, siteID, *post.FeaturedMediaID); err == nil {
 			data.FeaturedMediaURL = "/_media" + strings.TrimPrefix(m.StoragePath, "/.media")
 			data.FeaturedMediaAlt = m.Alt
 		}
 	}
-	og := &OpenGraph{
+	data.OpenGraph = &OpenGraph{
 		Title:       firstNonEmpty(post.SEOTitle, post.Title),
 		Description: data.MetaDescription,
 		Type:        "article",
 		Image:       data.FeaturedMediaURL,
 	}
-	data.OpenGraph = og
 	body, err := renderSingle(data)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	cacheAndWrite(w, r, body, "text/html; charset=utf-8")
+	cacheAndWrite(w, r, body, "text/html; charset=utf-8", siteID)
 }
 
-func (a *App) renderTermArchive(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid, kind, slug string) {
-	term, err := dbGetTermBySlug(ctx.AppDB(), pid, kind, slug)
+func (a *App) renderTermArchive(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid string, siteID int64, kind, slug string) {
+	term, err := dbGetTermBySlug(ctx.AppDB(), pid, siteID, kind, slug)
 	if err != nil || term == nil {
 		http.NotFound(w, r)
 		return
 	}
-	posts, _, err := dbSearchPosts(ctx.AppDB(), pid, PostSearch{
+	posts, _, err := dbSearchPosts(ctx.AppDB(), pid, siteID, PostSearch{
 		Status:   "published",
 		Kind:     "post",
 		TermSlug: slug,
@@ -259,8 +253,8 @@ func (a *App) renderTermArchive(w http.ResponseWriter, r *http.Request, ctx *sdk
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	settings, _ := effectiveSettings(ctx, pid)
-	data := basePageData(ctx, pid, settings, r)
+	settings, _ := effectiveSettings(ctx, pid, siteID)
+	data := basePageData(ctx, pid, siteID, settings, r)
 	data.Posts = posts
 	data.ListTitle = term.Name
 	data.PageTitle = term.Name
@@ -269,7 +263,7 @@ func (a *App) renderTermArchive(w http.ResponseWriter, r *http.Request, ctx *sdk
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	cacheAndWrite(w, r, body, "text/html; charset=utf-8")
+	cacheAndWrite(w, r, body, "text/html; charset=utf-8", siteID)
 }
 
 func (a *App) handleFeed(w http.ResponseWriter, r *http.Request) {
@@ -279,20 +273,25 @@ func (a *App) handleFeed(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	posts, _, err := dbSearchPosts(ctx.AppDB(), pid, PostSearch{Status: "published", Kind: "post", Limit: 20})
+	siteID, err := resolveSiteIDFromRequest(ctx.AppDB(), pid, r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	posts, _, err := dbSearchPosts(ctx.AppDB(), pid, siteID, PostSearch{Status: "published", Kind: "post", Limit: 20})
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	settings, _ := effectiveSettings(ctx, pid)
-	data := basePageData(ctx, pid, settings, r)
+	settings, _ := effectiveSettings(ctx, pid, siteID)
+	data := basePageData(ctx, pid, siteID, settings, r)
 	data.Posts = posts
 	body, err := renderFeed(data)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	cacheAndWrite(w, r, body, "application/rss+xml; charset=utf-8")
+	cacheAndWrite(w, r, body, "application/rss+xml; charset=utf-8", siteID)
 }
 
 func (a *App) handleSitemap(w http.ResponseWriter, r *http.Request) {
@@ -302,12 +301,17 @@ func (a *App) handleSitemap(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	posts, _, err := dbSearchPosts(ctx.AppDB(), pid, PostSearch{Status: "published", Limit: 500})
+	siteID, err := resolveSiteIDFromRequest(ctx.AppDB(), pid, r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	posts, _, err := dbSearchPosts(ctx.AppDB(), pid, siteID, PostSearch{Status: "published", Limit: 500})
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	settings, _ := effectiveSettings(ctx, pid)
+	settings, _ := effectiveSettings(ctx, pid, siteID)
 	base := settings["public_base_url"]
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
@@ -331,13 +335,9 @@ func (a *App) handleSitemap(w http.ResponseWriter, r *http.Request) {
 		b.WriteString("</url>\n")
 	}
 	b.WriteString("</urlset>")
-	cacheAndWrite(w, r, b.String(), "application/xml; charset=utf-8")
+	cacheAndWrite(w, r, b.String(), "application/xml; charset=utf-8", siteID)
 }
 
-// handleMediaAsset streams a byte body from the bound storage app.
-// Path shape: /_media/<rest> — translated to /.media/<rest> for the
-// storage lookup. NoAuth (declared in main.go) since this is the
-// public-facing media URL.
 func (a *App) handleMediaAsset(w http.ResponseWriter, r *http.Request) {
 	ctx := getAppCtx(r)
 	rest := strings.TrimPrefix(r.URL.Path, "/_media/")
@@ -355,25 +355,28 @@ func (a *App) handleMediaAsset(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
-// handlePreview serves a draft via a signed short-lived token.
-//   /preview/<base64(post_id|exp|hmac)>
 func (a *App) handlePreview(w http.ResponseWriter, r *http.Request) {
 	ctx := getAppCtx(r)
 	pid, _ := publicProject(r)
+	siteID, err := resolveSiteIDFromRequest(ctx.AppDB(), pid, r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	rest := strings.TrimPrefix(r.URL.Path, "/preview/")
 	postID, err := verifyPreviewToken(rest)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
-	post, err := dbGetPost(ctx.AppDB(), pid, postID)
+	post, err := dbGetPost(ctx.AppDB(), pid, siteID, postID)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	settings, _ := effectiveSettings(ctx, pid)
+	settings, _ := effectiveSettings(ctx, pid, siteID)
 	terms, _ := dbListPostTerms(ctx.AppDB(), post.ID)
-	data := basePageData(ctx, pid, settings, r)
+	data := basePageData(ctx, pid, siteID, settings, r)
 	data.Post = post
 	data.Terms = terms
 	data.PageTitle = post.Title + " (preview)"
@@ -389,9 +392,6 @@ func (a *App) handlePreview(w http.ResponseWriter, r *http.Request) {
 
 // ── preview token signing ────────────────────────────────────────
 
-// previewSecret derives the HMAC key from the install's app token; it
-// rotates whenever the platform reissues the token, which is fine —
-// previews are short-lived (15 min).
 func previewSecret() []byte {
 	tok := os.Getenv("APTEVA_APP_TOKEN")
 	if tok == "" {
@@ -401,9 +401,6 @@ func previewSecret() []byte {
 	return sum[:]
 }
 
-// SignPreview returns a token that grants read access to one post for
-// 15 minutes. Exposed so the dashboard can mint a preview URL via the
-// REST surface (POST /api/posts/:id/preview-token) — not wired in v1.
 func SignPreview(postID int64) string {
 	exp := time.Now().Add(15 * time.Minute).Unix()
 	payload := fmt.Sprintf("%d.%d", postID, exp)
@@ -439,9 +436,9 @@ func verifyPreviewToken(token string) (int64, error) {
 
 // ── shared helpers ──────────────────────────────────────────────
 
-func basePageData(ctx *sdk.AppCtx, pid string, settings map[string]string, r *http.Request) PageData {
+func basePageData(ctx *sdk.AppCtx, pid string, siteID int64, settings map[string]string, r *http.Request) PageData {
 	prefix := computeURLPrefix(r)
-	mainMenu, _ := dbGetMenuBySlug(ctx.AppDB(), pid, "primary")
+	mainMenu, _ := dbGetMenuBySlug(ctx.AppDB(), pid, siteID, "primary")
 	var rendered []RenderedMenuItem
 	if mainMenu != nil {
 		rendered = renderMenuItems(mainMenu.Items, prefix)
@@ -452,29 +449,12 @@ func basePageData(ctx *sdk.AppCtx, pid string, settings map[string]string, r *ht
 		Locale:        firstNonEmpty(settings["default_locale"], "en"),
 		PublicBaseURL: settings["public_base_url"],
 		URLPrefix:     prefix,
+		SiteID:        siteID,
 		PrimaryMenu:   rendered,
 		Now:           time.Now().UTC().Format(time.RFC3339),
 	}
 }
 
-// computeURLPrefix figures out the mount path the current request
-// came in through, so the renderer can emit a <base href> that makes
-// every relative URL on the page resolve back to the right path.
-//
-// Detection order:
-//
-//   1. X-Forwarded-Prefix — preferred (apteva-server can set this
-//      explicitly in the proxy Director once we patch it). Honored
-//      verbatim, with a trailing slash appended.
-//   2. X-Apteva-App-Install-ID — set only by the dashboard proxy in
-//      apteva-server's handleAppProxy. If present and X-Forwarded-Host
-//      is NOT (which would indicate domain-link mode), we're behind
-//      the dashboard proxy, so the prefix is /api/apps/<our-name>/.
-//   3. Otherwise — domain-link / direct access — the app is mounted
-//      at /, so the prefix is just "/".
-//
-// The name comes from globalCtx.Manifest().Name so this remains
-// correct if the app is ever renamed at install time.
 func computeURLPrefix(r *http.Request) string {
 	if v := strings.TrimSpace(r.Header.Get("X-Forwarded-Prefix")); v != "" {
 		if !strings.HasSuffix(v, "/") {
@@ -506,10 +486,6 @@ func renderMenuItems(items []MenuItem, prefix string) []RenderedMenuItem {
 	return out
 }
 
-// resolveMenuURL builds an absolute URL for a menu item. Internal
-// links (post/page/term) are prefixed with the request's mount path
-// so they work from both dashboard-proxy and domain-link contexts;
-// external URLs pass through verbatim.
 func resolveMenuURL(it MenuItem, prefix string) string {
 	if it.TargetURL != "" {
 		return it.TargetURL
@@ -539,10 +515,17 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-func cacheAndWrite(w http.ResponseWriter, r *http.Request, body, contentType string) {
+// cacheKeyMulti is the v2.0 cache key — same as cacheKey but with
+// siteID segmented in so two sites in the same project (and even
+// sharing a hostname accidentally) can't return each other's pages.
+func cacheKeyMulti(host, path, locale, prefix string, siteID int64) string {
+	return cacheKey(host, path, locale, prefix) + "|s:" + strconv.FormatInt(siteID, 10)
+}
+
+func cacheAndWrite(w http.ResponseWriter, r *http.Request, body, contentType string, siteID int64) {
 	sum := sha256.Sum256([]byte(body))
 	etag := `"` + hex.EncodeToString(sum[:8]) + `"`
-	key := cacheKey(r.Host, r.URL.Path, "", computeURLPrefix(r))
+	key := cacheKeyMulti(r.Host, r.URL.Path, "", computeURLPrefix(r), siteID)
 	cacheSet(key, body, contentType, etag)
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("ETag", etag)

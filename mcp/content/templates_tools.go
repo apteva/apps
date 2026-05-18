@@ -70,8 +70,12 @@ func (a *App) toolTemplatesPreview(ctx *sdk.AppCtx, args map[string]any) (any, e
 		return nil, errors.New("name required")
 	}
 	_ = seedBundledTemplates(ctx, pid)
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
 	mode := ApplyMode(asStringDefault(args["mode"], string(ApplyEmptyOnly)))
-	summary, err := applyTemplate(ctx, pid, name, mode, true /* dryRun */)
+	summary, err := applyTemplate(ctx, pid, siteID, name, mode, true /* dryRun */)
 	if err != nil {
 		return nil, err
 	}
@@ -88,12 +92,16 @@ func (a *App) toolTemplatesApply(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, errors.New("name required")
 	}
 	_ = seedBundledTemplates(ctx, pid)
-	mode := ApplyMode(asStringDefault(args["mode"], string(ApplyEmptyOnly)))
-	summary, err := applyTemplate(ctx, pid, name, mode, false)
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("template.applied", map[string]any{"name": name, "mode": string(mode)})
+	mode := ApplyMode(asStringDefault(args["mode"], string(ApplyEmptyOnly)))
+	summary, err := applyTemplate(ctx, pid, siteID, name, mode, false)
+	if err != nil {
+		return nil, err
+	}
+	ctx.Emit("template.applied", map[string]any{"name": name, "site_id": siteID, "mode": string(mode)})
 	return map[string]any{"summary": summary}, nil
 }
 
@@ -211,12 +219,18 @@ func (a *App) handleHTTPTemplateItem(w http.ResponseWriter, r *http.Request) {
 				httpErr(w, http.StatusMethodNotAllowed, "POST only")
 				return
 			}
+			siteID, err := resolveSiteIDFromRequest(ctx.AppDB(), pid, r)
+			if err != nil {
+				httpErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			if body == nil {
 				body = map[string]any{}
 			}
 			body["_project_id"] = pid
+			body["_site_id"] = siteID
 			body["name"] = name
 			out, err := a.toolTemplatesApply(ctx, body)
 			if err != nil {
@@ -226,8 +240,14 @@ func (a *App) handleHTTPTemplateItem(w http.ResponseWriter, r *http.Request) {
 			httpJSON(w, out)
 			return
 		case "preview":
+			siteID, err := resolveSiteIDFromRequest(ctx.AppDB(), pid, r)
+			if err != nil {
+				httpErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
 			out, err := a.toolTemplatesPreview(ctx, map[string]any{
 				"_project_id": pid,
+				"_site_id":    siteID,
 				"name":        name,
 				"mode":        r.URL.Query().Get("mode"),
 			})

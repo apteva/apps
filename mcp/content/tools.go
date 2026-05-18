@@ -429,5 +429,60 @@ func (a *App) mcpTools() []sdk.Tool {
 			}, []string{"name"}),
 			Handler: a.toolTemplatesUnregister,
 		},
+
+		// ── Sites (multi-site v2.0) ────────────────────────
+		{
+			Name:        "sites_list",
+			Description: "List sites in the current project. Each site is a self-contained content surface with its own posts/pages/menus/settings/theme.",
+			InputSchema: schemaObject(map[string]any{
+				"include_archived": map[string]any{"type": "boolean"},
+			}, nil),
+			Handler: a.toolSitesList,
+		},
+		{
+			Name:        "sites_get",
+			Description: "Fetch one site by id or slug.",
+			InputSchema: schemaObject(map[string]any{
+				"id":   map[string]any{"type": "integer"},
+				"slug": map[string]any{"type": "string"},
+			}, nil),
+			Handler: a.toolSitesGet,
+		},
+		{
+			Name:        "sites_create",
+			Description: "Create a new site in the current project. Args: slug, name, hostname (optional). The first site for a project is auto-promoted to default.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":     map[string]any{"type": "string"},
+				"name":     map[string]any{"type": "string"},
+				"hostname": map[string]any{"type": "string"},
+			}, []string{"slug", "name"}),
+			Handler: a.toolSitesCreate,
+		},
+		{
+			Name:        "sites_update",
+			Description: "Update a site's display name or hostname. Args: id, name?, hostname?.",
+			InputSchema: schemaObject(map[string]any{
+				"id":       map[string]any{"type": "integer"},
+				"name":     map[string]any{"type": "string"},
+				"hostname": map[string]any{"type": "string"},
+			}, []string{"id"}),
+			Handler: a.toolSitesUpdate,
+		},
+		{
+			Name:        "sites_archive",
+			Description: "Soft-delete a site. Refuses if the site is the default — promote another site to default first via sites_set_default. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolSitesArchive,
+		},
+		{
+			Name:        "sites_set_default",
+			Description: "Promote a site to default — picks which site receives ambiguous (no site arg) tool calls and admin REST requests. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolSitesSetDefault,
+		},
 	}
 }

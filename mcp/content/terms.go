@@ -1,6 +1,9 @@
 // Taxonomy — categories + tags share one table, distinguished by
-// `kind`. Hierarchical (parent_id) so categories can nest; tags do not
-// nest in practice but the column is available for both.
+// `kind`. Hierarchical (parent_id) so categories can nest; tags do
+// not nest in practice but the column is available for both.
+//
+// Multi-site (v2.0): site_id partition column; terms with the same
+// slug can coexist across sites within a project.
 
 package main
 
@@ -19,6 +22,7 @@ import (
 type Term struct {
 	ID          int64  `json:"id"`
 	ProjectID   string `json:"project_id,omitempty"`
+	SiteID      int64  `json:"site_id"`
 	Kind        string `json:"kind"`
 	Name        string `json:"name"`
 	Slug        string `json:"slug"`
@@ -27,7 +31,7 @@ type Term struct {
 	CreatedAt   string `json:"created_at,omitempty"`
 }
 
-func dbCreateTerm(db *sql.DB, projectID, kind, name, slug, description string, parentID *int64) (*Term, error) {
+func dbCreateTerm(db *sql.DB, projectID string, siteID int64, kind, name, slug, description string, parentID *int64) (*Term, error) {
 	if kind != "category" && kind != "tag" {
 		return nil, fmt.Errorf("kind must be category or tag (got %q)", kind)
 	}
@@ -39,25 +43,25 @@ func dbCreateTerm(db *sql.DB, projectID, kind, name, slug, description string, p
 	} else {
 		slug = slugify(slug)
 	}
-	res, err := db.Exec(`INSERT INTO terms (project_id, kind, name, slug, parent_id, description)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		projectID, kind, name, slug, nullableInt(parentID), description)
+	res, err := db.Exec(`INSERT INTO terms (project_id, site_id, kind, name, slug, parent_id, description)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		projectID, siteID, kind, name, slug, nullableInt(parentID), description)
 	if err != nil {
 		return nil, fmt.Errorf("insert term: %w", err)
 	}
 	id, _ := res.LastInsertId()
-	return dbGetTerm(db, projectID, id)
+	return dbGetTerm(db, projectID, siteID, id)
 }
 
-func dbGetTerm(db *sql.DB, projectID string, id int64) (*Term, error) {
-	row := db.QueryRow(`SELECT id, project_id, kind, name, slug, parent_id, description, created_at
-		FROM terms WHERE project_id=? AND id=?`, projectID, id)
+func dbGetTerm(db *sql.DB, projectID string, siteID int64, id int64) (*Term, error) {
+	row := db.QueryRow(`SELECT id, project_id, COALESCE(site_id, 0), kind, name, slug, parent_id, description, created_at
+		FROM terms WHERE project_id=? AND site_id=? AND id=?`, projectID, siteID, id)
 	return scanTerm(row)
 }
 
-func dbGetTermBySlug(db *sql.DB, projectID, kind, slug string) (*Term, error) {
-	row := db.QueryRow(`SELECT id, project_id, kind, name, slug, parent_id, description, created_at
-		FROM terms WHERE project_id=? AND kind=? AND slug=?`, projectID, kind, slug)
+func dbGetTermBySlug(db *sql.DB, projectID string, siteID int64, kind, slug string) (*Term, error) {
+	row := db.QueryRow(`SELECT id, project_id, COALESCE(site_id, 0), kind, name, slug, parent_id, description, created_at
+		FROM terms WHERE project_id=? AND site_id=? AND kind=? AND slug=?`, projectID, siteID, kind, slug)
 	return scanTerm(row)
 }
 
@@ -65,7 +69,7 @@ func scanTerm(row rowScanner) (*Term, error) {
 	var t Term
 	var parent sql.NullInt64
 	var created sql.NullString
-	if err := row.Scan(&t.ID, &t.ProjectID, &t.Kind, &t.Name, &t.Slug, &parent, &t.Description, &created); err != nil {
+	if err := row.Scan(&t.ID, &t.ProjectID, &t.SiteID, &t.Kind, &t.Name, &t.Slug, &parent, &t.Description, &created); err != nil {
 		return nil, err
 	}
 	if parent.Valid {
@@ -78,9 +82,9 @@ func scanTerm(row rowScanner) (*Term, error) {
 	return &t, nil
 }
 
-func dbListTerms(db *sql.DB, projectID, kind, q string) ([]Term, error) {
-	where := []string{"project_id = ?"}
-	args := []any{projectID}
+func dbListTerms(db *sql.DB, projectID string, siteID int64, kind, q string) ([]Term, error) {
+	where := []string{"project_id = ?", "site_id = ?"}
+	args := []any{projectID, siteID}
 	if kind != "" {
 		where = append(where, "kind = ?")
 		args = append(args, kind)
@@ -90,7 +94,7 @@ func dbListTerms(db *sql.DB, projectID, kind, q string) ([]Term, error) {
 		like := "%" + q + "%"
 		args = append(args, like, like)
 	}
-	rows, err := db.Query(`SELECT id, project_id, kind, name, slug, parent_id, description, created_at
+	rows, err := db.Query(`SELECT id, project_id, COALESCE(site_id, 0), kind, name, slug, parent_id, description, created_at
 		FROM terms WHERE `+strings.Join(where, " AND ")+` ORDER BY kind, name`, args...)
 	if err != nil {
 		return nil, err
@@ -107,6 +111,10 @@ func dbListTerms(db *sql.DB, projectID, kind, q string) ([]Term, error) {
 	return out, nil
 }
 
+// dbAssignTerms / dbUnassignTerms don't need site_id directly — the
+// post_terms junction inherits siting from the parent post + term
+// rows, both of which are site-scoped. The caller is responsible for
+// passing post_ids and term_ids that belong to the same site.
 func dbAssignTerms(db *sql.DB, postID int64, termIDs []int64) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -140,10 +148,9 @@ func dbUnassignTerms(db *sql.DB, postID int64, termIDs []int64) error {
 	return err
 }
 
-// dbListPostTerms returns the terms attached to a post, joined for
-// display.
+// dbListPostTerms returns the terms attached to a post.
 func dbListPostTerms(db *sql.DB, postID int64) ([]Term, error) {
-	rows, err := db.Query(`SELECT t.id, t.project_id, t.kind, t.name, t.slug, t.parent_id, t.description, t.created_at
+	rows, err := db.Query(`SELECT t.id, t.project_id, COALESCE(t.site_id, 0), t.kind, t.name, t.slug, t.parent_id, t.description, t.created_at
 		FROM terms t JOIN post_terms pt ON pt.term_id = t.id
 		WHERE pt.post_id = ? ORDER BY t.kind, t.name`, postID)
 	if err != nil {
@@ -168,11 +175,15 @@ func (a *App) toolTermsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
 	var parent *int64
 	if v, ok := asInt64(args["parent_id"]); ok && v > 0 {
 		parent = &v
 	}
-	term, err := dbCreateTerm(ctx.AppDB(), pid,
+	term, err := dbCreateTerm(ctx.AppDB(), pid, siteID,
 		asString(args["kind"]),
 		asString(args["name"]),
 		asString(args["slug"]),
@@ -189,7 +200,11 @@ func (a *App) toolTermsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	terms, err := dbListTerms(ctx.AppDB(), pid, asString(args["kind"]), asString(args["q"]))
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	terms, err := dbListTerms(ctx.AppDB(), pid, siteID, asString(args["kind"]), asString(args["q"]))
 	if err != nil {
 		return nil, err
 	}
@@ -264,11 +279,16 @@ func (a *App) handleHTTPTermsCollection(w http.ResponseWriter, r *http.Request) 
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	siteID, err := resolveSiteIDFromRequest(ctx.AppDB(), pid, r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		kind := r.URL.Query().Get("kind")
 		q := r.URL.Query().Get("q")
-		terms, err := dbListTerms(ctx.AppDB(), pid, kind, q)
+		terms, err := dbListTerms(ctx.AppDB(), pid, siteID, kind, q)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -281,6 +301,7 @@ func (a *App) handleHTTPTermsCollection(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		body["_project_id"] = pid
+		body["_site_id"] = siteID
 		out, err := a.toolTermsCreate(ctx, body)
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
@@ -292,5 +313,4 @@ func (a *App) handleHTTPTermsCollection(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-// silence import linters when only used in REST helpers.
 var _ = strconv.Atoi

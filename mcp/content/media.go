@@ -1,7 +1,7 @@
 // Media — metadata rows in this app's DB; bytes proxied to the bound
-// `storage` app at /.media/<uuid>.<ext>. Without a storage binding,
-// media_upload returns a structured "binding required" error rather
-// than failing silently.
+// `storage` app at /.media/<uuid>.<ext>. Multi-site (v2.0): metadata
+// rows are site-scoped so each site has its own media library view.
+// Bytes themselves remain in one shared storage namespace.
 
 package main
 
@@ -25,6 +25,7 @@ import (
 type Media struct {
 	ID          int64  `json:"id"`
 	ProjectID   string `json:"project_id,omitempty"`
+	SiteID      int64  `json:"site_id"`
 	Kind        string `json:"kind"`
 	StoragePath string `json:"storage_path"`
 	Filename    string `json:"filename,omitempty"`
@@ -39,19 +40,19 @@ type Media struct {
 }
 
 func dbCreateMedia(db *sql.DB, m Media) (*Media, error) {
-	res, err := db.Exec(`INSERT INTO media (project_id, kind, storage_path, filename, mime, byte_size, alt, caption, source)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		m.ProjectID, m.Kind, m.StoragePath, m.Filename, m.Mime, m.ByteSize, m.Alt, m.Caption, m.Source)
+	res, err := db.Exec(`INSERT INTO media (project_id, site_id, kind, storage_path, filename, mime, byte_size, alt, caption, source)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.ProjectID, m.SiteID, m.Kind, m.StoragePath, m.Filename, m.Mime, m.ByteSize, m.Alt, m.Caption, m.Source)
 	if err != nil {
 		return nil, fmt.Errorf("insert media: %w", err)
 	}
 	id, _ := res.LastInsertId()
-	return dbGetMedia(db, m.ProjectID, id)
+	return dbGetMedia(db, m.ProjectID, m.SiteID, id)
 }
 
-func dbGetMedia(db *sql.DB, projectID string, id int64) (*Media, error) {
-	row := db.QueryRow(`SELECT id, project_id, kind, storage_path, filename, mime, width, height, byte_size, alt, caption, source, uploaded_at
-		FROM media WHERE project_id=? AND id=?`, projectID, id)
+func dbGetMedia(db *sql.DB, projectID string, siteID int64, id int64) (*Media, error) {
+	row := db.QueryRow(`SELECT id, project_id, COALESCE(site_id, 0), kind, storage_path, filename, mime, width, height, byte_size, alt, caption, source, uploaded_at
+		FROM media WHERE project_id=? AND site_id=? AND id=?`, projectID, siteID, id)
 	return scanMedia(row)
 }
 
@@ -59,7 +60,7 @@ func scanMedia(row rowScanner) (*Media, error) {
 	var m Media
 	var width, height sql.NullInt64
 	var uploaded sql.NullString
-	if err := row.Scan(&m.ID, &m.ProjectID, &m.Kind, &m.StoragePath, &m.Filename, &m.Mime, &width, &height, &m.ByteSize, &m.Alt, &m.Caption, &m.Source, &uploaded); err != nil {
+	if err := row.Scan(&m.ID, &m.ProjectID, &m.SiteID, &m.Kind, &m.StoragePath, &m.Filename, &m.Mime, &width, &height, &m.ByteSize, &m.Alt, &m.Caption, &m.Source, &uploaded); err != nil {
 		return nil, err
 	}
 	if width.Valid {
@@ -76,12 +77,12 @@ func scanMedia(row rowScanner) (*Media, error) {
 	return &m, nil
 }
 
-func dbListMedia(db *sql.DB, projectID, kind, q string, limit, offset int) ([]Media, error) {
+func dbListMedia(db *sql.DB, projectID string, siteID int64, kind, q string, limit, offset int) ([]Media, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	where := []string{"project_id = ?"}
-	args := []any{projectID}
+	where := []string{"project_id = ?", "site_id = ?"}
+	args := []any{projectID, siteID}
 	if kind != "" {
 		where = append(where, "kind = ?")
 		args = append(args, kind)
@@ -92,7 +93,7 @@ func dbListMedia(db *sql.DB, projectID, kind, q string, limit, offset int) ([]Me
 		args = append(args, like, like, like)
 	}
 	args = append(args, limit, offset)
-	rows, err := db.Query(`SELECT id, project_id, kind, storage_path, filename, mime, width, height, byte_size, alt, caption, source, uploaded_at
+	rows, err := db.Query(`SELECT id, project_id, COALESCE(site_id, 0), kind, storage_path, filename, mime, width, height, byte_size, alt, caption, source, uploaded_at
 		FROM media WHERE `+strings.Join(where, " AND ")+` ORDER BY uploaded_at DESC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, err
@@ -109,7 +110,7 @@ func dbListMedia(db *sql.DB, projectID, kind, q string, limit, offset int) ([]Me
 	return out, nil
 }
 
-func dbUpdateMediaMeta(db *sql.DB, projectID string, id int64, alt, caption *string) error {
+func dbUpdateMediaMeta(db *sql.DB, projectID string, siteID int64, id int64, alt, caption *string) error {
 	sets := []string{}
 	args := []any{}
 	if alt != nil {
@@ -123,14 +124,13 @@ func dbUpdateMediaMeta(db *sql.DB, projectID string, id int64, alt, caption *str
 	if len(sets) == 0 {
 		return nil
 	}
-	args = append(args, projectID, id)
-	_, err := db.Exec(`UPDATE media SET `+strings.Join(sets, ", ")+` WHERE project_id=? AND id=?`, args...)
+	args = append(args, projectID, siteID, id)
+	_, err := db.Exec(`UPDATE media SET `+strings.Join(sets, ", ")+` WHERE project_id=? AND site_id=? AND id=?`, args...)
 	return err
 }
 
 // ── storage app interaction ────────────────────────────────────────
 
-// storagePath generates a unique filename under /.media/.
 func storagePath(filename string) string {
 	ext := strings.ToLower(filepath.Ext(filename))
 	if ext == "" {
@@ -141,9 +141,6 @@ func storagePath(filename string) string {
 	return "/.media/" + hex.EncodeToString(raw[:]) + ext
 }
 
-// storageWrite delegates to the bound storage app's files_upload tool.
-// Returns a structured error when no storage binding exists so the
-// caller can surface a clear "bind a storage app" message.
 func storageWrite(ctx *sdk.AppCtx, path string, bytes []byte, mime string) error {
 	bound := ctx.IntegrationFor("storage")
 	if bound == nil {
@@ -161,7 +158,6 @@ func storageWrite(ctx *sdk.AppCtx, path string, bytes []byte, mime string) error
 	return ctx.PlatformAPI().CallAppResult("storage", "files_upload", in, &out)
 }
 
-// storageRead fetches bytes via the storage app's files_read tool.
 func storageRead(ctx *sdk.AppCtx, path string) ([]byte, string, error) {
 	bound := ctx.IntegrationFor("storage")
 	if bound == nil {
@@ -182,6 +178,10 @@ func storageRead(ctx *sdk.AppCtx, path string) ([]byte, string, error) {
 
 func (a *App) toolMediaUpload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
 	}
@@ -225,6 +225,7 @@ func (a *App) toolMediaUpload(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	kind := mediaKindFromMime(mimeType)
 	m, err := dbCreateMedia(ctx.AppDB(), Media{
 		ProjectID:   pid,
+		SiteID:      siteID,
 		Kind:        kind,
 		StoragePath: path,
 		Filename:    filename,
@@ -245,6 +246,10 @@ func (a *App) toolMediaList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
 	limit, offset := 50, 0
 	if v, ok := asInt64(args["limit"]); ok {
 		limit = int(v)
@@ -252,7 +257,7 @@ func (a *App) toolMediaList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if v, ok := asInt64(args["offset"]); ok {
 		offset = int(v)
 	}
-	items, err := dbListMedia(ctx.AppDB(), pid, asString(args["kind"]), asString(args["q"]), limit, offset)
+	items, err := dbListMedia(ctx.AppDB(), pid, siteID, asString(args["kind"]), asString(args["q"]), limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -261,6 +266,10 @@ func (a *App) toolMediaList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 func (a *App) toolMediaSetMeta(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
 	}
@@ -275,10 +284,10 @@ func (a *App) toolMediaSetMeta(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if v, ok := args["caption"].(string); ok {
 		caption = &v
 	}
-	if err := dbUpdateMediaMeta(ctx.AppDB(), pid, id, alt, caption); err != nil {
+	if err := dbUpdateMediaMeta(ctx.AppDB(), pid, siteID, id, alt, caption); err != nil {
 		return nil, err
 	}
-	m, err := dbGetMedia(ctx.AppDB(), pid, id)
+	m, err := dbGetMedia(ctx.AppDB(), pid, siteID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -307,9 +316,14 @@ func (a *App) handleHTTPMedia(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	siteID, err := resolveSiteIDFromRequest(ctx.AppDB(), pid, r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		items, err := dbListMedia(ctx.AppDB(), pid,
+		items, err := dbListMedia(ctx.AppDB(), pid, siteID,
 			r.URL.Query().Get("kind"), r.URL.Query().Get("q"), 50, 0)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
@@ -323,6 +337,7 @@ func (a *App) handleHTTPMedia(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body["_project_id"] = pid
+		body["_site_id"] = siteID
 		out, err := a.toolMediaUpload(ctx, body)
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())

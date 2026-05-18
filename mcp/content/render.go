@@ -109,6 +109,14 @@ func buildThemeFuncMap(_ *sdk.AppCtx) template.FuncMap {
 			return "_theme/" + v + "/" + strings.TrimPrefix(path, "/")
 		},
 		"media": func(mediaID any) string {
+			// Media URLs are built without a site lookup — bytes live in
+			// the storage app at /.media/<uuid>.<ext>, identified by
+			// storage_path. We accept storage_path strings directly OR an
+			// int media_id (which we'd resolve via DB lookup, but per-
+			// template-call DB lookups have no site context here; the
+			// renderer should ideally pre-resolve and pass the URL).
+			// For v2.0 we keep the legacy id→path fallback but it now
+			// queries without site filtering (returns first match).
 			id, _ := asInt64(mediaID)
 			if id == 0 {
 				return ""
@@ -117,16 +125,17 @@ func buildThemeFuncMap(_ *sdk.AppCtx) template.FuncMap {
 			if ctx == nil {
 				return ""
 			}
-			pid := strings.TrimSpace(getEnvFunc("APTEVA_PROJECT_ID"))
-			if pid == "" {
+			// Best-effort lookup: find any media row with this id. Bytes
+			// are not site-scoped, so cross-site exposure here is
+			// limited to the URL, not the data. Multi-site sites that
+			// need strict separation should serve assets via a different
+			// origin or use signed URLs (future work).
+			row := ctx.AppDB().QueryRow(`SELECT storage_path FROM media WHERE id=? LIMIT 1`, id)
+			var path string
+			if err := row.Scan(&path); err != nil {
 				return ""
 			}
-			m, err := dbGetMedia(ctx.AppDB(), pid, id)
-			if err != nil || m == nil {
-				return ""
-			}
-			// `_media/<uuid>.<ext>` (relative to base).
-			return "_media" + strings.TrimPrefix(m.StoragePath, "/.media")
+			return "_media" + strings.TrimPrefix(path, "/.media")
 		},
 		"markdown": renderInlineMarkdown,
 		"safeHTML": sanitizeHTML,
@@ -189,6 +198,7 @@ func renderBlock(b Block) template.HTML {
 // concrete fields rather than a map so templates can access them
 // without index calls.
 type PageData struct {
+	SiteID           int64
 	SiteTitle        string
 	SiteTagline      string
 	Locale           string

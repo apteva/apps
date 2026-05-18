@@ -82,10 +82,16 @@ function Icon({ name }: { name: string }) {
 }
 
 // ── shared api helper (scoped via closure to the panel's project) ─
-function makeAPI(projectId: string) {
+// makeAPI returns a fetcher pre-bound to a project and (optionally) a
+// site slug. The site slug is appended as ?site=<slug> on every URL so
+// every admin REST call lands on the right site.
+function makeAPI(projectId: string, siteSlug?: string | null) {
   return async function api<T = any>(path: string, opts: RequestInit = {}): Promise<T> {
     const sep = path.includes("?") ? "&" : "?";
-    const url = `/api/apps/content${path}${sep}project_id=${encodeURIComponent(projectId)}`;
+    let url = `/api/apps/content${path}${sep}project_id=${encodeURIComponent(projectId)}`;
+    if (siteSlug) {
+      url += `&site=${encodeURIComponent(siteSlug)}`;
+    }
     const r = await fetch(url, {
       headers: { "Content-Type": "application/json" },
       ...opts,
@@ -133,8 +139,43 @@ function defaultAttrs(type: string): Record<string, any> {
 
 type View = "list" | "templates";
 
+interface SiteSummary {
+  id: number;
+  slug: string;
+  name: string;
+  hostname?: string;
+  is_default: boolean;
+}
+
 export default function ContentPanel({ projectId }: NativePanelProps) {
-  const api = useMemo(() => makeAPI(projectId), [projectId]);
+  const [sites, setSites] = useState<SiteSummary[]>([]);
+  const [activeSite, setActiveSite] = useState<string | null>(null);
+  const [sitesError, setSitesError] = useState<string | null>(null);
+
+  // Sites list — fetch once per project. The active site defaults to
+  // the default; user can switch via the dropdown. Refreshes whenever
+  // a new site is created.
+  const refreshSites = useCallback(() => {
+    const url = `/api/apps/content/admin/sites?project_id=${encodeURIComponent(projectId)}`;
+    fetch(url)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${r.status}`))))
+      .then((r: { sites: SiteSummary[] | null }) => {
+        const list = r.sites ?? [];
+        setSites(list);
+        // Pick the default site initially; sticky on user choice
+        // through component lifetime.
+        setActiveSite((curr) => {
+          if (curr && list.find((s) => s.slug === curr)) return curr;
+          const def = list.find((s) => s.is_default) ?? list[0];
+          return def ? def.slug : null;
+        });
+        setSitesError(null);
+      })
+      .catch((e) => setSitesError(String(e)));
+  }, [projectId]);
+  useEffect(refreshSites, [refreshSites]);
+
+  const api = useMemo(() => makeAPI(projectId, activeSite), [projectId, activeSite]);
   const [editing, setEditing] = useState<number | null>(null);
   const [view, setView] = useState<View>("list");
 
@@ -150,7 +191,18 @@ export default function ContentPanel({ projectId }: NativePanelProps) {
   }
   return (
     <div>
-      <Tabs view={view} onChange={setView} />
+      <Tabs
+        view={view}
+        onChange={setView}
+        sites={sites}
+        activeSite={activeSite}
+        onSiteChange={setActiveSite}
+        onCreatedSite={refreshSites}
+        projectId={projectId}
+      />
+      {sitesError && (
+        <div className="bg-red-100 text-red-800 rounded px-3 py-2 mx-4 mt-2">{sitesError}</div>
+      )}
       {view === "list" && <ListView api={api} projectId={projectId} onOpen={setEditing} />}
       {view === "templates" && (
         <TemplatesView api={api} projectId={projectId} onApplied={() => setView("list")} />
@@ -159,7 +211,24 @@ export default function ContentPanel({ projectId }: NativePanelProps) {
   );
 }
 
-function Tabs({ view, onChange }: { view: View; onChange: (v: View) => void }) {
+function Tabs({
+  view,
+  onChange,
+  sites,
+  activeSite,
+  onSiteChange,
+  onCreatedSite,
+  projectId,
+}: {
+  view: View;
+  onChange: (v: View) => void;
+  sites: SiteSummary[];
+  activeSite: string | null;
+  onSiteChange: (slug: string) => void;
+  onCreatedSite: () => void;
+  projectId: string;
+}) {
+  const [creating, setCreating] = useState(false);
   const tab = (id: View, label: string) => (
     <button
       key={id}
@@ -172,9 +241,164 @@ function Tabs({ view, onChange }: { view: View; onChange: (v: View) => void }) {
     </button>
   );
   return (
-    <div className="flex gap-1 border-b border-border px-4 pt-2 bg-bg">
-      {tab("list", "Content")}
-      {tab("templates", "Templates")}
+    <div className="flex items-center justify-between border-b border-border px-4 pt-2 bg-bg">
+      <div className="flex gap-1">
+        {tab("list", "Content")}
+        {tab("templates", "Templates")}
+      </div>
+      {/* Site switcher — hidden when only one site exists (single-site UX). */}
+      {sites.length >= 2 ? (
+        <div className="flex items-center gap-2 pb-2">
+          <span className="text-xs text-fg-muted">Site</span>
+          <select
+            value={activeSite ?? ""}
+            onChange={(e) => onSiteChange(e.target.value)}
+            className="border border-border rounded px-2 py-1 bg-bg-input text-sm"
+          >
+            {sites.map((s) => (
+              <option key={s.slug} value={s.slug}>
+                {s.name}{s.is_default ? " (default)" : ""}
+                {s.hostname ? ` · ${s.hostname}` : ""}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={() => setCreating(true)}
+            className="px-2 py-1 text-xs rounded border border-border"
+          >
+            + New site
+          </button>
+        </div>
+      ) : (
+        // Single-site mode: show a discreet "+ Add second site" button
+        // so users can discover multi-site without it being noisy.
+        <div className="pb-2">
+          <button
+            onClick={() => setCreating(true)}
+            className="text-xs text-fg-muted hover:text-fg"
+          >
+            + Add second site
+          </button>
+        </div>
+      )}
+      {creating && (
+        <NewSiteDialog
+          projectId={projectId}
+          onClose={() => setCreating(false)}
+          onCreated={(slug) => {
+            setCreating(false);
+            onCreatedSite();
+            onSiteChange(slug);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function NewSiteDialog({
+  projectId,
+  onClose,
+  onCreated,
+}: {
+  projectId: string;
+  onClose: () => void;
+  onCreated: (slug: string) => void;
+}) {
+  const [slug, setSlug] = useState("");
+  const [name, setName] = useState("");
+  const [hostname, setHostname] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    if (!slug.trim()) {
+      setError("slug required");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const url = `/api/apps/content/admin/sites?project_id=${encodeURIComponent(projectId)}`;
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug, name: name || slug, hostname }),
+      });
+      if (!r.ok) {
+        const body = await r.text();
+        throw new Error(`${r.status}: ${body.slice(0, 200)}`);
+      }
+      const out: { site: SiteSummary } = await r.json();
+      onCreated(out.site.slug);
+    } catch (e) {
+      setError(String(e));
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+      onClick={onClose}
+    >
+      <div
+        className="bg-bg border border-border rounded p-4 w-96"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="font-semibold mb-3">New site</h3>
+        <p className="text-xs text-fg-muted mb-3">
+          Sites in the same project share templates but have their own posts,
+          pages, menus, settings, and theme. Bind a hostname to make this site
+          publicly addressable (requires the deploy app).
+        </p>
+        <label className="block mb-2">
+          <span className="text-xs text-fg-muted">Slug (URL-safe id)</span>
+          <input
+            type="text"
+            value={slug}
+            onChange={(e) => setSlug(e.target.value)}
+            placeholder="e.g. blog"
+            className="block w-full mt-1 border border-border rounded px-2 py-1 bg-bg-input"
+            autoFocus
+          />
+        </label>
+        <label className="block mb-2">
+          <span className="text-xs text-fg-muted">Display name</span>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Blog"
+            className="block w-full mt-1 border border-border rounded px-2 py-1 bg-bg-input"
+          />
+        </label>
+        <label className="block mb-3">
+          <span className="text-xs text-fg-muted">Hostname (optional)</span>
+          <input
+            type="text"
+            value={hostname}
+            onChange={(e) => setHostname(e.target.value)}
+            placeholder="e.g. blog.example.com"
+            className="block w-full mt-1 border border-border rounded px-2 py-1 bg-bg-input"
+          />
+        </label>
+        {error && (
+          <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2">{error}</div>
+        )}
+        <div className="flex justify-end gap-2 mt-3">
+          <button onClick={onClose} className="px-3 py-1 rounded border border-border">
+            Cancel
+          </button>
+          <button
+            onClick={submit}
+            disabled={submitting}
+            className="px-3 py-1 rounded border border-border font-semibold disabled:opacity-50"
+          >
+            {submitting ? "Creating…" : "Create site"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

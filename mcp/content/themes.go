@@ -241,7 +241,11 @@ func (a *App) toolThemesSetActive(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if slug != "default" {
 		return nil, errors.New("custom themes from storage not yet supported in v1.0 — only 'default'")
 	}
-	if err := dbSetSetting(ctx.AppDB(), pid, "active_theme", slug); err != nil {
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	if err := dbSetSetting(ctx.AppDB(), pid, siteID, "active_theme", slug); err != nil {
 		return nil, err
 	}
 	if err := loadActiveTheme(ctx); err != nil {

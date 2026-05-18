@@ -1,7 +1,7 @@
 // MCP tool handlers for block_* operations. Each tool loads the post,
 // applies one structured mutation to its block tree, persists the
 // updated body (creating a revision via dbUpdatePost), and returns the
-// new tree.
+// new tree. Multi-site (v2.0): every handler resolves the site upfront.
 
 package main
 
@@ -19,11 +19,15 @@ func (a *App) toolBlocksGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
 	id, ok := asInt64(args["post_id"])
 	if !ok || id == 0 {
 		return nil, errors.New("post_id required")
 	}
-	post, err := dbGetPost(ctx.AppDB(), pid, id)
+	post, err := dbGetPost(ctx.AppDB(), pid, siteID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -35,11 +39,15 @@ func (a *App) toolBlocksInsert(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
 	id, ok := asInt64(args["post_id"])
 	if !ok || id == 0 {
 		return nil, errors.New("post_id required")
 	}
-	post, err := dbGetPost(ctx.AppDB(), pid, id)
+	post, err := dbGetPost(ctx.AppDB(), pid, siteID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +64,7 @@ func (a *App) toolBlocksInsert(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	doc := Document{Version: documentVersion, Blocks: updated}
-	if _, err := dbUpdatePost(ctx.AppDB(), pid, id, PostPatch{Blocks: &doc}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("inserted block %s", newID)); err != nil {
+	if _, err := dbUpdatePost(ctx.AppDB(), pid, siteID, id, PostPatch{Blocks: &doc}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("inserted block %s", newID)); err != nil {
 		return nil, err
 	}
 	return map[string]any{"block_id": newID, "blocks": doc}, nil
@@ -64,6 +72,10 @@ func (a *App) toolBlocksInsert(ctx *sdk.AppCtx, args map[string]any) (any, error
 
 func (a *App) toolBlocksUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +87,7 @@ func (a *App) toolBlocksUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if blockID == "" {
 		return nil, errors.New("block_id required")
 	}
-	post, err := dbGetPost(ctx.AppDB(), pid, id)
+	post, err := dbGetPost(ctx.AppDB(), pid, siteID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +114,7 @@ func (a *App) toolBlocksUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	doc := Document{Version: documentVersion, Blocks: post.BodyBlocks.Blocks}
-	if _, err := dbUpdatePost(ctx.AppDB(), pid, id, PostPatch{Blocks: &doc}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("updated block %s", blockID)); err != nil {
+	if _, err := dbUpdatePost(ctx.AppDB(), pid, siteID, id, PostPatch{Blocks: &doc}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("updated block %s", blockID)); err != nil {
 		return nil, err
 	}
 	return map[string]any{"block_id": blockID, "blocks": doc}, nil
@@ -110,6 +122,10 @@ func (a *App) toolBlocksUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error
 
 func (a *App) toolBlocksMove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +141,7 @@ func (a *App) toolBlocksMove(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	post, err := dbGetPost(ctx.AppDB(), pid, id)
+	post, err := dbGetPost(ctx.AppDB(), pid, siteID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +150,7 @@ func (a *App) toolBlocksMove(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	doc := Document{Version: documentVersion, Blocks: updated}
-	if _, err := dbUpdatePost(ctx.AppDB(), pid, id, PostPatch{Blocks: &doc}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("moved block %s", blockID)); err != nil {
+	if _, err := dbUpdatePost(ctx.AppDB(), pid, siteID, id, PostPatch{Blocks: &doc}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("moved block %s", blockID)); err != nil {
 		return nil, err
 	}
 	return map[string]any{"block_id": blockID, "blocks": doc}, nil
@@ -142,6 +158,10 @@ func (a *App) toolBlocksMove(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 
 func (a *App) toolBlocksDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +173,7 @@ func (a *App) toolBlocksDelete(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if blockID == "" {
 		return nil, errors.New("block_id required")
 	}
-	post, err := dbGetPost(ctx.AppDB(), pid, id)
+	post, err := dbGetPost(ctx.AppDB(), pid, siteID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +182,7 @@ func (a *App) toolBlocksDelete(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	doc := Document{Version: documentVersion, Blocks: updated}
-	if _, err := dbUpdatePost(ctx.AppDB(), pid, id, PostPatch{Blocks: &doc}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("deleted block %s", blockID)); err != nil {
+	if _, err := dbUpdatePost(ctx.AppDB(), pid, siteID, id, PostPatch{Blocks: &doc}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("deleted block %s", blockID)); err != nil {
 		return nil, err
 	}
 	return map[string]any{"ok": true, "blocks": doc}, nil
@@ -170,6 +190,10 @@ func (a *App) toolBlocksDelete(ctx *sdk.AppCtx, args map[string]any) (any, error
 
 func (a *App) toolBlocksReplaceAll(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +209,7 @@ func (a *App) toolBlocksReplaceAll(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if err != nil {
 		return nil, err
 	}
-	if _, err := dbUpdatePost(ctx.AppDB(), pid, id, PostPatch{Blocks: &doc}, "", asStringDefault(args["source"], "agent"), "replaced all blocks"); err != nil {
+	if _, err := dbUpdatePost(ctx.AppDB(), pid, siteID, id, PostPatch{Blocks: &doc}, "", asStringDefault(args["source"], "agent"), "replaced all blocks"); err != nil {
 		return nil, err
 	}
 	return map[string]any{"blocks": doc}, nil
@@ -193,6 +217,10 @@ func (a *App) toolBlocksReplaceAll(ctx *sdk.AppCtx, args map[string]any) (any, e
 
 func (a *App) toolBlocksDuplicate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +232,7 @@ func (a *App) toolBlocksDuplicate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if blockID == "" {
 		return nil, errors.New("block_id required")
 	}
-	post, err := dbGetPost(ctx.AppDB(), pid, id)
+	post, err := dbGetPost(ctx.AppDB(), pid, siteID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +241,7 @@ func (a *App) toolBlocksDuplicate(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	doc := Document{Version: documentVersion, Blocks: updated}
-	if _, err := dbUpdatePost(ctx.AppDB(), pid, id, PostPatch{Blocks: &doc}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("duplicated block %s → %s", blockID, newID)); err != nil {
+	if _, err := dbUpdatePost(ctx.AppDB(), pid, siteID, id, PostPatch{Blocks: &doc}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("duplicated block %s → %s", blockID, newID)); err != nil {
 		return nil, err
 	}
 	return map[string]any{"block_id": newID, "blocks": doc}, nil

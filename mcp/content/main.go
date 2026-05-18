@@ -60,10 +60,13 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		ctx.Logger().Warn("theme load failed; using embedded default", "err", err.Error())
 	}
 
-	// Seed bundled templates for project-scoped installs. Global
-	// installs seed lazily on first templates_list call per project
-	// (handled inside the tool).
+	// Project-scoped installs: ensure a default site exists, then
+	// seed templates. Global installs handle both lazily per project
+	// at first tool call (handled inside the tool).
 	if pid := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); pid != "" {
+		if _, err := ensureDefaultSite(ctx.AppDB(), pid); err != nil {
+			ctx.Logger().Warn("ensure default site failed", "err", err.Error())
+		}
 		if err := seedBundledTemplates(ctx, pid); err != nil {
 			ctx.Logger().Warn("template seed failed", "err", err.Error())
 		}
@@ -129,6 +132,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/admin/block-types", Handler: a.handleHTTPBlockTypes},
 		{Pattern: "/admin/templates", Handler: a.handleHTTPTemplates},
 		{Pattern: "/admin/templates/", Handler: a.handleHTTPTemplateItem},
+		{Pattern: "/admin/sites", Handler: a.handleHTTPSites},
+		{Pattern: "/admin/sites/", Handler: a.handleHTTPSiteItem},
 
 		// ── public render surface ───────────────────────────────
 		{Pattern: "/_theme/", Handler: a.handleThemeAsset, NoAuth: true},
