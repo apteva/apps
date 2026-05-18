@@ -109,8 +109,18 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// asks each non-quick provider whether it's Configured() and
 	// returns the first match; quick is the fallback default. Adding
 	// future providers means inserting them ahead of quick.
+	//
+	// Precedence today (first Configured wins):
+	//   1. cloudflare-named — operator pinned a Cloudflare zone + hostname
+	//   2. ngrok            — operator bound the ngrok integration
+	//   3. cloudflare-quick — default fallback, anonymous trycloudflare URL
+	//
+	// Operators with both Cloudflare-named AND ngrok bound get
+	// cloudflare-named (more "intentional"). They can flip by destroying
+	// the named tunnel.
 	a.providers = []Provider{
 		&cloudflareNamedProvider{app: a},
+		&ngrokProvider{app: a},
 		&cloudflareQuickProvider{app: a},
 	}
 

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: live-link
 display_name: Live Link
-version: 0.3.3
+version: 0.4.0
 description: |
   Public HTTPS URL for a locally-installed Apteva instance. Two modes:
 
@@ -58,6 +58,20 @@ requires:
       required: false
       label: "Cloudflare (named mode)"
       hint: "Required for named mode (stable URL on your own domain). Quick mode works without this."
+    # ngrok integration — alternative tunnel provider. Bind it and
+    # live-link uses the ngrok agent instead of cloudflared. The
+    # catalog's tools[] is empty (we drive the local ngrok binary
+    # directly with the authtoken — no REST calls needed for v1) but
+    # the binding gives us access to the authtoken via
+    # PlatformAPI().GetConnectionCredentials.
+    - role: ngrok
+      kind: integration
+      compatible_slugs: [ngrok]
+      capabilities: []
+      tools: {}
+      required: false
+      label: "ngrok (alternative provider)"
+      hint: "Bind your ngrok authtoken to use ngrok instead of Cloudflare. Either one works; pick whichever you prefer per install. If both Cloudflare-named and ngrok are bound, Cloudflare-named wins."
 
 provides:
   http_routes:
@@ -118,6 +132,25 @@ config_schema:
       previously auto-installed copy in the install's data dir, and as a
       last resort download the latest release from github.com/cloudflare/cloudflared
       (~30MB, one-time, on the first "Go live" click).
+  - name: ngrok_path
+    type: text
+    default: ""
+    label: ngrok binary (override)
+    description: |
+      Optional path to an ngrok agent you already manage. Same fallback
+      shape as cloudflared_path: $PATH → previously auto-installed copy
+      → download the latest v3 stable from equinox.io (~20MB). Only
+      relevant when the ngrok integration is bound.
+  - name: ngrok_domain
+    type: text
+    default: ""
+    label: ngrok reserved domain (paid plans)
+    description: |
+      Optional. Paid ngrok plans can reserve a hostname (e.g.
+      yourname.ngrok.app) that survives agent restarts. Set this to
+      pin the public URL across "Go live" cycles; leave empty to let
+      ngrok assign a fresh random *.ngrok-free.app per start (free
+      tier default).
   - name: auto_restart_on_boot
     type: toggle
     default: "true"

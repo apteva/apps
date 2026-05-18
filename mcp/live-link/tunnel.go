@@ -30,6 +30,13 @@ import (
 	"time"
 )
 
+// ngrokURL matches the URL the ngrok agent prints to stdout under
+// `--log stdout --log-format logfmt`. Format:
+//   t=... lvl=info msg="started tunnel" name=command_line addr=http://localhost:5280 url=https://abc.ngrok-free.app
+// Matches both free (*.ngrok-free.app) and paid (*.ngrok.app /
+// *.ngrok.io and operator-reserved domains) forms.
+var ngrokURL = regexp.MustCompile(`url=(https://[a-z0-9.-]+\.(?:ngrok-free\.app|ngrok\.app|ngrok\.io))`)
+
 // trycloudflareURL matches the URL cloudflared prints to stderr when a
 // Quick Tunnel has been assigned. Format is stable across cloudflared
 // versions; the surrounding box-drawing characters and JSON envelope
@@ -53,18 +60,27 @@ type Mode string
 const (
 	ModeQuick Mode = "quick"
 	ModeNamed Mode = "named"
+	// ModeNgrok spawns the ngrok agent instead of cloudflared. The
+	// agent assigns a *.ngrok-free.app URL on the free tier and a
+	// reserved domain on paid plans; we discover the URL by scraping
+	// ngrok's logfmt-mode stdout for `url=https://...`.
+	ModeNgrok Mode = "ngrok"
 )
 
-// StartParams bundles everything the Manager needs to spawn cloudflared.
-// Quick mode populates Binary/Target/RunID; Named mode also sets Token
-// + Hostname so the manager can skip stderr URL scraping.
+// StartParams bundles everything the Manager needs to spawn a tunnel
+// agent. The set of populated fields depends on Mode:
+//
+//	Quick (cloudflared): Binary, Target, RunID
+//	Named (cloudflared): Binary, RunID, Token, Hostname (Target optional, label only)
+//	Ngrok:               Binary, Target, RunID, Authtoken (Hostname optional — pre-reserved domain)
 type StartParams struct {
-	Binary   string
-	Target   string // local URL to forward to (used as label in named mode)
-	RunID    int64
-	Mode     Mode
-	Token    string // named mode: connector token from `cfd_tunnel` create
-	Hostname string // named mode: e.g. "tunnel.example.com"; pre-known public host
+	Binary    string
+	Target    string // local URL to forward to (used as label in named mode)
+	RunID     int64
+	Mode      Mode
+	Token     string // named-cloudflare: connector token from cfd_tunnel create
+	Hostname  string // named-cloudflare: e.g. "tunnel.example.com"; pre-known public host. ngrok: optional reserved domain (paid plans).
+	Authtoken string // ngrok: agent authtoken from operator's ngrok integration
 }
 
 // Manager owns the cloudflared subprocess for one app install.
@@ -129,19 +145,42 @@ func (m *Manager) Start(p StartParams) error {
 		if p.Hostname == "" {
 			return errors.New("named mode: hostname is empty")
 		}
+	case ModeNgrok:
+		if p.Target == "" {
+			return errors.New("ngrok mode: target URL is empty")
+		}
+		if p.Authtoken == "" {
+			return errors.New("ngrok mode: authtoken is empty (bind the ngrok integration first)")
+		}
 	default:
 		return fmt.Errorf("unknown mode %q", p.Mode)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	args := []string{"tunnel", "--no-autoupdate"}
+	var args []string
 	switch p.Mode {
 	case ModeQuick:
-		args = append(args, "--url", p.Target)
+		args = []string{"tunnel", "--no-autoupdate", "--url", p.Target}
 	case ModeNamed:
 		// Ingress was configured server-side via the API; the connector
 		// just needs the token to dial home.
-		args = append(args, "run", "--token", p.Token)
+		args = []string{"tunnel", "--no-autoupdate", "run", "--token", p.Token}
+	case ModeNgrok:
+		// `ngrok http <target>` proxies <target> to a fresh public
+		// hostname (or a reserved domain if --domain is given). We force
+		// logfmt to stdout so ngrokURL can scrape the assigned URL.
+		// --log-level info keeps the line we need without filling the
+		// pipe with debug noise.
+		args = []string{
+			"http", p.Target,
+			"--authtoken", p.Authtoken,
+			"--log", "stdout",
+			"--log-format", "logfmt",
+			"--log-level", "info",
+		}
+		if p.Hostname != "" {
+			args = append(args, "--domain", p.Hostname)
+		}
 	}
 	cmd := exec.CommandContext(ctx, binary, args...)
 	// Combined stderr is where cloudflared writes the assigned URL.
@@ -161,11 +200,15 @@ func (m *Manager) Start(p StartParams) error {
 	if err := cmd.Start(); err != nil {
 		cancel()
 		// Most common failure: binary missing from PATH. Surface a
-		// clear message rather than the raw exec.Error.
+		// clear message naming the binary the operator needs to fix.
 		if errors.Is(err, exec.ErrNotFound) {
-			return fmt.Errorf("cloudflared binary not found at %q — install from github.com/cloudflare/cloudflared or set the cloudflared_path config", binary)
+			hint := "install from github.com/cloudflare/cloudflared or set the cloudflared_path config"
+			if p.Mode == ModeNgrok {
+				hint = "install ngrok (brew install ngrok) or set the ngrok_path config"
+			}
+			return fmt.Errorf("agent binary not found at %q — %s", binary, hint)
 		}
-		return fmt.Errorf("spawn cloudflared: %w", err)
+		return fmt.Errorf("spawn agent: %w", err)
 	}
 
 	m.cmd = cmd
@@ -177,20 +220,23 @@ func (m *Manager) Start(p StartParams) error {
 	m.lastError = ""
 	m.publicURL = ""
 
-	// Drain stdout to avoid back-pressure. Discard contents.
-	go io.Copy(io.Discard, stdout)
-
 	// Wait for exit in the background; clean up when it ends.
 	go m.waitForExit(p.RunID)
 
+	// Per-mode wiring of stdout vs stderr to URL-scanner vs Discard.
+	// cloudflared writes its URL to STDERR; ngrok writes ours to STDOUT
+	// (because we passed --log stdout). Named mode knows the URL up
+	// front and just drains both streams.
 	switch p.Mode {
 	case ModeQuick:
-		// Tail stderr, scan for the URL, persist when we see it.
-		go m.scanStderr(stderr, p.RunID)
+		go io.Copy(io.Discard, stdout)
+		go m.scanForURL(stderr, p.RunID, trycloudflareURL)
+	case ModeNgrok:
+		go io.Copy(io.Discard, stderr)
+		go m.scanForURL(stdout, p.RunID, ngrokURL)
 	case ModeNamed:
-		// URL is known up-front; just discard stderr so the pipe
-		// doesn't block, and fire onURLAssigned async (mirrors quick
-		// mode's "callback runs outside the lock" contract).
+		// URL is known up-front; just drain both streams.
+		go io.Copy(io.Discard, stdout)
 		go io.Copy(io.Discard, stderr)
 		m.publicURL = "https://" + p.Hostname
 		url, runID, cb := m.publicURL, p.RunID, m.onURLAssigned
@@ -202,18 +248,27 @@ func (m *Manager) Start(p StartParams) error {
 	return nil
 }
 
-// scanStderr reads cloudflared's stderr until either the URL is
-// assigned (we record it once) or the pipe closes (process exited).
-func (m *Manager) scanStderr(r io.ReadCloser, runID int64) {
+// scanForURL reads agent output line-by-line until either pattern
+// matches (we record the URL once) or the pipe closes (process
+// exited). Mode-neutral — caller passes the regex (trycloudflareURL
+// for cloudflared stderr, ngrokURL for ngrok stdout). The regex's
+// first capture group, if present, is preferred over the full match
+// — lets ngrok's `url=https://...` line strip the prefix without a
+// post-match substring.
+func (m *Manager) scanForURL(r io.ReadCloser, runID int64, re *regexp.Regexp) {
 	defer r.Close()
 	scanner := bufio.NewScanner(r)
-	// cloudflared lines fit easily in 64KB but the default Scanner
-	// buffer is 64KB anyway, which is fine.
+	// Agent lines fit easily in the default 64KB Scanner buffer.
 	captured := false
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !captured {
-			if match := trycloudflareURL.FindString(line); match != "" {
+			groups := re.FindStringSubmatch(line)
+			if len(groups) > 0 {
+				match := groups[0]
+				if len(groups) > 1 && groups[1] != "" {
+					match = groups[1]
+				}
 				m.mu.Lock()
 				// Only record if this is still the active run — Stop
 				// could have raced ahead of us.
@@ -228,8 +283,8 @@ func (m *Manager) scanStderr(r io.ReadCloser, runID int64) {
 				captured = true
 			}
 		}
-		// We deliberately don't log every cloudflared line — too noisy
-		// for normal operation. If we ever need to debug, add a flag.
+		// We deliberately don't log every agent line — too noisy for
+		// normal operation. If we ever need to debug, add a flag.
 	}
 }
 
