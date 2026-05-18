@@ -277,83 +277,88 @@ type attachDomainResult struct {
 }
 
 func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec) (*attachDomainResult, error) {
-	if !a.domainsAvailable(ctx) {
-		return nil, errors.New("domains app not installed — install it or clear the domain field")
-	}
 	fqdn := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(spec.FQDN, ".")))
 	if fqdn == "" {
 		return nil, errors.New("fqdn required")
 	}
-	// Resolve the record value first (explicit target → public_host →
-	// auto-derived box IP), then the type — inferred from the value's
-	// shape unless the caller pinned it.
-	target := resolveTarget(spec)
-	if target == "" {
-		return nil, errors.New("target required — pass target, set public_host on the deploy app, or ensure APTEVA_PUBLIC_URL is set so the box IP can be auto-derived")
-	}
-	rtype := strings.ToUpper(strings.TrimSpace(spec.Type))
-	if rtype == "" {
-		rtype = inferRecordType(target)
-	}
-	if rtype != "CNAME" && rtype != "A" {
-		return nil, fmt.Errorf("unsupported record type %q (CNAME or A)", rtype)
-	}
-	if rtype == "CNAME" {
-		// CNAME values are domain names; ensure no trailing dot.
-		target = strings.TrimSuffix(target, ".")
-	}
-	ttl := spec.TTL
-	if ttl <= 0 {
-		ttl = 600
-	}
 
-	apex, sub, err := resolveApex(ctx, d.ProjectID, fqdn)
-	if err != nil {
-		return nil, err
-	}
-	subArg := sub
-	if subArg == "" {
-		subArg = "@"
-	}
-	// CNAME at the apex isn't valid per RFC. Block it explicitly with
-	// a friendlier message than whatever the registrar will say.
-	if rtype == "CNAME" && sub == "" {
-		return nil, errors.New("apex CNAME isn't allowed; use type=A with an IP, or attach a subdomain")
-	}
+	res := &attachDomainResult{FQDN: fqdn}
+	var apex, recordID string
 
-	res := &attachDomainResult{FQDN: fqdn, Apex: apex, Type: rtype, Target: target}
+	// DNS step runs only if the Domains app is bound. In the multi-
+	// tenant model the tenant has only routes installed (DNS + cert
+	// are written by the parent's fleet.tenant_attach_domain), so
+	// !domainsAvailable is the EXPECTED state here, not an error.
+	// Skip cleanly, persist the link, register the route — operator
+	// still sees the domain on the deployment.
+	if a.domainsAvailable(ctx) {
+		target := resolveTarget(spec)
+		if target == "" {
+			return nil, errors.New("target required — pass target, set public_host on the deploy app, or ensure APTEVA_PUBLIC_URL is set so the box IP can be auto-derived")
+		}
+		rtype := strings.ToUpper(strings.TrimSpace(spec.Type))
+		if rtype == "" {
+			rtype = inferRecordType(target)
+		}
+		if rtype != "CNAME" && rtype != "A" {
+			return nil, fmt.Errorf("unsupported record type %q (CNAME or A)", rtype)
+		}
+		if rtype == "CNAME" {
+			target = strings.TrimSuffix(target, ".")
+		}
+		ttl := spec.TTL
+		if ttl <= 0 {
+			ttl = 600
+		}
 
-	// DNS write — failure no longer fails the whole attach.
-	dnsErr := callDomainsTool(ctx, d.ProjectID, "domain_records_set", map[string]any{
-		"domain": apex,
-		"name":   subArg,
-		"type":   rtype,
-		"value":  target,
-		"ttl":    ttl,
-	}, nil)
-	if dnsErr != nil {
-		res.DNSStatus = "error"
-		res.DNSError = dnsErr.Error()
-		emit("deploy.domain.dns_failed", map[string]any{
-			"deployment_id": d.ID, "fqdn": fqdn, "error": dnsErr.Error(),
-		})
+		var sub string
+		var err error
+		apex, sub, err = resolveApex(ctx, d.ProjectID, fqdn)
+		if err != nil {
+			return nil, err
+		}
+		subArg := sub
+		if subArg == "" {
+			subArg = "@"
+		}
+		if rtype == "CNAME" && sub == "" {
+			return nil, errors.New("apex CNAME isn't allowed; use type=A with an IP, or attach a subdomain")
+		}
+
+		res.Apex = apex
+		res.Type = rtype
+		res.Target = target
+
+		dnsErr := callDomainsTool(ctx, d.ProjectID, "domain_records_set", map[string]any{
+			"domain": apex,
+			"name":   subArg,
+			"type":   rtype,
+			"value":  target,
+			"ttl":    ttl,
+		}, nil)
+		if dnsErr != nil {
+			res.DNSStatus = "error"
+			res.DNSError = dnsErr.Error()
+			emit("deploy.domain.dns_failed", map[string]any{
+				"deployment_id": d.ID, "fqdn": fqdn, "error": dnsErr.Error(),
+			})
+		} else {
+			res.DNSStatus = "ok"
+			recordID = apex + "|" + rtype
+		}
 	} else {
-		res.DNSStatus = "ok"
+		res.DNSStatus = "skipped"
+		res.DNSError = "domains app not bound — multi-tenant model expects parent to own DNS"
 	}
 
-	// Persist the link either way. record_id is left empty when DNS
-	// didn't write — detach checks for that and skips the registrar
-	// delete; calling deploy_attach_domain again re-attempts the DNS
-	// write (the whole tool is idempotent).
-	recordID := ""
-	if dnsErr == nil {
-		recordID = apex + "|" + rtype
-	}
+	// Persist the link. recordID stays empty when DNS was skipped or
+	// failed — detach checks for that and skips the registrar delete;
+	// re-attaching re-attempts the DNS write idempotently.
 	if err := dbSetDeploymentDomain(globalCtx.AppDB(), d.ID, fqdn, recordID, nowUTC()); err != nil {
 		return res, err
 	}
 	emit("deploy.domain.attached", map[string]any{
-		"deployment_id": d.ID, "fqdn": fqdn, "apex": apex, "type": rtype,
+		"deployment_id": d.ID, "fqdn": fqdn, "apex": apex,
 		"dns_status": res.DNSStatus,
 	})
 
