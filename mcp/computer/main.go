@@ -42,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.3.1
+version: 0.3.2
 description: |
   Watch and steer the agent's browser. v0.3 adds the first MCP tools
   (browser_open / browser_list / browser_screenshot / browser_close).
@@ -215,7 +215,7 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 // handler; /health is auto-registered by the SDK.
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
-		{Method: http.MethodGet, Pattern: "/api/sessions", Handler: a.handleListSessions},
+		{Method: http.MethodGet, Pattern: "/sessions", Handler: a.handleListSessions},
 	}
 }
 

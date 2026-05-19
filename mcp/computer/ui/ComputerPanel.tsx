@@ -30,7 +30,10 @@ interface ListResponse {
   error?: string;
 }
 
-const SESSIONS_URL = "/api/sessions";
+// /api/apps/<name>/<route> is the platform's proxy prefix; the
+// sidecar registers Pattern:"/sessions" and the dashboard fetches
+// /api/apps/computer/sessions to reach it.
+const SESSIONS_URL = "/api/apps/computer/sessions";
 const POLL_MS = 4000;
 
 const BACKEND_LABEL: Record<string, string> = {

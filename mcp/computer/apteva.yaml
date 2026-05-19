@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.3.1
+version: 0.3.2
 description: |
   Watch and steer the agent's browser. Operator panel for browsing
   the sessions this sidecar owns; inline chat components the agent
@@ -16,9 +16,11 @@ description: |
   session the agent already opened in core is not yet supported
   (cloud-backed resume + local CDP attach land in later releases).
 
-  v0.3.1 exposes browser_list + a /api/sessions HTTP route so the
-  operator panel and other UIs can render the live session set
-  without round-tripping through apteva-server.
+  v0.3.1 exposes browser_list + a /sessions HTTP route (proxied as
+  /api/apps/computer/sessions) so the operator panel and other UIs
+  can render the live session set without round-tripping through
+  apteva-server. v0.3.2 corrects the route prefix (the v0.3.1 panel
+  fetched the wrong URL and 404'd).
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -50,8 +52,8 @@ provides:
         List sessions currently owned by this sidecar. Returns
         {sessions:[{session_id, backend, current_url, debug_url,
         opened_at, last_used_at}]}. Empty when the sidecar holds none.
-        Operators reach the same data via GET /api/sessions on the
-        sidecar.
+        Operators reach the same data via GET /sessions on the
+        sidecar (the dashboard hits /api/apps/computer/sessions).
     - name: browser_screenshot
       description: |
         Capture a PNG of the session's current viewport. Args: session_id.
