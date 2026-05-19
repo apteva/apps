@@ -256,7 +256,13 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 	if model == "" {
 		model = "kimi-k2.6"
 	}
-	maxTokens := parseConfigIntFallback(cfg.Get("describe_max_tokens"), 4000)
+	// 8000 default since v0.13.0+ — the JSON-output prompt + up to 4
+	// keyframe images + (potentially) a long transcript eats the
+	// reasoning budget on Kimi K2.6 / DeepSeek V4. 4000 was the right
+	// default for the pre-JSON plain-text path; v0.13.0 prompts hit
+	// finish_reason=length far more often, especially with audio-
+	// bearing files where the transcript can easily run 5000+ chars.
+	maxTokens := parseConfigIntFallback(cfg.Get("describe_max_tokens"), 8000)
 	timeout := time.Duration(parseConfigIntFallback(cfg.Get("describe_timeout_seconds"), 120)) * time.Second
 	_ = timeout // timeout is enforced by the platform's HTTP client; reserved for future per-call override.
 
@@ -383,6 +389,23 @@ Be precise — don't escalate one tier above what the content actually shows. Ou
 func buildDescribePrompt(app *sdk.AppCtx, projectID string, media *MediaRow) ([]map[string]any, error) {
 	transcript, _ := getTranscript(app.AppDB(), projectID, media.FileID)
 	hasTranscript := transcript != nil && transcript.Status == "ok" && strings.TrimSpace(transcript.Text) != ""
+	// Cap the transcript bytes we feed to the LLM. A 10-min talk
+	// can produce 8000+ chars of transcript — combined with 4
+	// keyframe images, that consistently blew past Kimi K2.6's
+	// reasoning budget and the response came back truncated with
+	// finish_reason=length. 2000 chars is enough context for the
+	// describer to summarise + audience-rate; anything longer is
+	// repetition or sub-topics that don't change the verdict. The
+	// "[…truncated]" suffix signals to the LLM that the transcript
+	// is partial so it doesn't try to recap the missing tail.
+	const transcriptCharCap = 2000
+	transcriptText := ""
+	if hasTranscript {
+		transcriptText = transcript.Text
+		if len(transcriptText) > transcriptCharCap {
+			transcriptText = transcriptText[:transcriptCharCap] + " […transcript truncated]"
+		}
+	}
 
 	// Project context — operator-set name + description from the
 	// platform's projects table, surfaced through WhoAmI. When set,
@@ -415,9 +438,9 @@ func buildDescribePrompt(app *sdk.AppCtx, projectID string, media *MediaRow) ([]
 
 	switch {
 	case hasImages && hasTranscript:
-		// Multimodal: keyframe set + transcript. Best signal.
+		// Multimodal: keyframe set + (capped) transcript. Best signal.
 		content := []map[string]any{
-			{"type": "text", "text": "Representative frames and the transcript follow. Return the JSON object.\n\nTranscript:\n" + transcript.Text},
+			{"type": "text", "text": "Representative frames and the transcript follow. Return the JSON object.\n\nTranscript:\n" + transcriptText},
 		}
 		content = append(content, imageContentBlocks...)
 		return append(systemMessages, map[string]any{"role": "user", "content": content}), nil
@@ -432,10 +455,10 @@ func buildDescribePrompt(app *sdk.AppCtx, projectID string, media *MediaRow) ([]
 		return append(systemMessages, map[string]any{"role": "user", "content": content}), nil
 
 	case hasTranscript:
-		// Audio-only: transcript is all we have.
+		// Audio-only: capped transcript is all we have.
 		return append(systemMessages, map[string]any{
 			"role":    "user",
-			"content": "The transcript follows. Return the JSON object.\n\nTranscript:\n" + transcript.Text,
+			"content": "The transcript follows. Return the JSON object.\n\nTranscript:\n" + transcriptText,
 		}), nil
 	}
 

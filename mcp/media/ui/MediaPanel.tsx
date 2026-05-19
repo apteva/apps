@@ -218,6 +218,18 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
   );
 
   const load = useCallback(async () => {
+    // Guard against empty projectId on first paint. The dashboard
+    // host re-renders the panel a few times before its project
+    // context is hydrated; without this guard the fetch goes out
+    // with `project_id=` (empty), apteva-server falls through to
+    // byName.GetByName, and we get whichever media install
+    // registered last — which serves THAT project's rows.
+    // Net effect for the operator: a brief flash of another
+    // project's media on every page load.
+    if (!projectId) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError("");
     try {
