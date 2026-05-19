@@ -100,6 +100,26 @@ interface Generation {
   created_at: string;
 }
 
+// LiveModel mirrors the sidecar's modelEntry JSON. Constraints arrays
+// are empty when the model doesn't pre-enumerate options (e.g.
+// pixel-sized image models that accept arbitrary WxH).
+interface LiveModel {
+  id: string;
+  label: string;
+  model_type?: string;
+  aspect_ratios?: string[];
+  default_aspect_ratio?: string;
+  resolutions?: string[];
+  default_resolution?: string;
+  durations?: string[];
+  supports_image_to_video?: boolean;
+  audio_configurable?: boolean;
+  steps_default?: number;
+  steps_max?: number;
+  prompt_char_limit?: number;
+  price_usd?: number;
+}
+
 // formatCost renders the per-generation USD figure. Trims trailing
 // zeros so $0.0400 reads as "$0.04" but $0.0009 still keeps precision.
 function formatCost(n: number): string {
@@ -269,7 +289,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   // switch and binding change. Falls back to the hardcoded
   // OpenAI-flavour list (IMAGE_MODELS) when the fetch fails so the
   // dropdown is never empty.
-  const [liveModels, setLiveModels] = useState<{ id: string; label: string }[] | null>(null);
+  const [liveModels, setLiveModels] = useState<LiveModel[] | null>(null);
   const [liveProvider, setLiveProvider] = useState<string>("");
   // In-flight video jobs (queued / polling). Shown as a small badge
   // above the video gallery so the user knows something is cooking
@@ -325,10 +345,14 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
 
   // Poll in-flight video jobs every 5s while the Videos tab is active.
   // 5s is finer than the sidecar's 15s worker tick so the user sees the
-  // failed→cleared transition promptly when the worker gives up.
+  // failed→cleared transition promptly when the worker gives up. When
+  // a job transitions queued|polling → complete we also force a
+  // gallery refresh — belt-and-suspenders for the rare case where the
+  // media.generated event was dropped or missed by the EventSource.
   useEffect(() => {
     if (activeKind !== "video") return;
     let cancelled = false;
+    let prevInFlight = new Set<number>();
     const load = () => {
       fetch(`${API}/video-jobs?project_id=${encodeURIComponent(projectId)}`, {
         credentials: "same-origin",
@@ -336,7 +360,19 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
           if (cancelled || !data) return;
-          setVideoJobs(Array.isArray(data.jobs) ? data.jobs : []);
+          const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+          setVideoJobs(jobs);
+          const nowInFlight = new Set<number>(
+            jobs
+              .filter((j: { status: string }) => j.status === "queued" || j.status === "polling")
+              .map((j: { id: number }) => j.id),
+          );
+          // Any job that was in-flight last tick and isn't now → either
+          // completed or failed. Refresh the gallery to surface the new row.
+          let transitioned = false;
+          for (const id of prevInFlight) if (!nowInFlight.has(id)) transitioned = true;
+          if (transitioned) loadGenerations();
+          prevInFlight = nowInFlight;
         })
         .catch(() => {});
     };
@@ -346,7 +382,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       cancelled = true;
       window.clearInterval(t);
     };
-  }, [activeKind, projectId]);
+  }, [activeKind, projectId, loadGenerations]);
 
   // Live-load the model list whenever the active kind or the bound
   // provider for that kind changes. The sidecar caches per-(provider,
@@ -405,6 +441,44 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const currentBinding = bindings ? bindings[activeKind] : null;
   const isBound = !!currentBinding?.bound;
 
+  // Find the currently-selected model's full entry so the composer
+  // can render constrained dropdowns (aspect / duration / resolution)
+  // and decide whether to show the reference-image input for
+  // image-to-video models.
+  const currentModelId =
+    activeKind === "image"
+      ? (isEditMode ? editModel : imageModel)
+      : activeKind === "video"
+        ? videoModel
+        : "";
+  const currentModel: LiveModel | undefined =
+    liveModels?.find((m) => m.id === currentModelId);
+  // Video reference-image is allowed for both standard (text-to-video)
+  // and image-to-video models — required for the latter, optional
+  // hint for the former (Venice's queue accepts image_url on most).
+  const showVideoRefInput =
+    activeKind === "video" && !!currentModel?.supports_image_to_video;
+
+  // Auto-snap aspect / duration / resolution when the user picks a
+  // different model whose constraint set doesn't include the current
+  // value. Defaults to the model's default* field when set, else the
+  // first listed option.
+  useEffect(() => {
+    if (!currentModel) return;
+    if (currentModel.aspect_ratios && currentModel.aspect_ratios.length > 0
+        && !currentModel.aspect_ratios.includes(aspect)) {
+      setAspect(currentModel.default_aspect_ratio || currentModel.aspect_ratios[0]);
+    }
+    if (currentModel.durations && currentModel.durations.length > 0) {
+      const want = `${duration}s`;
+      if (!currentModel.durations.includes(want)) {
+        const first = currentModel.durations[0];
+        const n = parseInt(first.replace(/[^\d]/g, ""), 10);
+        if (!isNaN(n)) setDuration(n);
+      }
+    }
+  }, [currentModelId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const generate = async () => {
     if (!prompt.trim() || generating) return;
     setGenerating(true);
@@ -431,6 +505,11 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         if (videoModel) body.model = videoModel;
         body.duration = duration;
         body.aspect = aspect;
+        // Image-to-video: pass the reference image through the same
+        // source_image arg the dispatcher uses for image.edit.
+        if (showVideoRefInput && sourceImage) {
+          body.source_image = sourceImage;
+        }
       } else if (activeKind === "audio_tts") {
         if (voice) body.voice = voice;
       } else if (activeKind === "audio_sfx" || activeKind === "music") {
@@ -535,7 +614,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       {/* Main area */}
       <div className="flex-1 flex min-h-0">
         <div className="flex-1 flex flex-col p-6 gap-4 min-w-0">
-          {activeKind === "image" && (
+          {(activeKind === "image" || showVideoRefInput) && (
             <ReferenceImageInput
               sourceImage={sourceImage}
               sourceImageLabel={sourceImageLabel}
@@ -547,6 +626,11 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                 setSourceImage("");
                 setSourceImageLabel("");
               }}
+              hint={
+                showVideoRefInput
+                  ? "Source image for the image-to-video model (required)"
+                  : undefined
+              }
             />
           )}
 
@@ -572,6 +656,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             setEditModel={setEditModel}
             videoModel={videoModel}
             setVideoModel={setVideoModel}
+            currentModel={currentModel}
             safeMode={safeMode}
             setSafeMode={setSafeMode}
             duration={duration}
@@ -718,6 +803,7 @@ interface ComposerProps {
   setEditModel: (v: EditModel) => void;
   videoModel: string;
   setVideoModel: (v: string) => void;
+  currentModel?: LiveModel;
   safeMode: boolean;
   setSafeMode: (v: boolean) => void;
   duration: number;
@@ -785,8 +871,21 @@ function Composer(p: ComposerProps) {
             liveModels={p.liveModels}
             liveProvider={p.liveProvider}
           />
-          <NumberField label="Duration (s)" value={p.duration} onChange={p.setDuration} min={1} max={60} />
-          <TextField label="Aspect" value={p.aspect} onChange={p.setAspect} />
+          <ConstrainedDuration
+            durations={p.currentModel?.durations}
+            value={p.duration}
+            onChange={p.setDuration}
+          />
+          <ConstrainedAspect
+            aspects={p.currentModel?.aspect_ratios}
+            value={p.aspect}
+            onChange={p.setAspect}
+            disabledHint={
+              p.currentModel?.model_type === "image-to-video"
+                ? "Inherited from source image"
+                : undefined
+            }
+          />
         </>
       )}
       {p.kind === "audio_tts" && (
@@ -883,11 +982,13 @@ function ReferenceImageInput({
   sourceImageLabel,
   onSet,
   onClear,
+  hint,
 }: {
   sourceImage: string;
   sourceImageLabel: string;
   onSet: (value: string, label: string) => void;
   onClear: () => void;
+  hint?: string;
 }) {
   const [urlInput, setUrlInput] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -962,7 +1063,9 @@ function ReferenceImageInput({
       onDragOver={(e) => e.preventDefault()}
       className="flex items-center gap-3 p-2 rounded border border-dashed border-border bg-bg-card"
     >
-      <span className="text-text-muted text-xs">Reference image (optional):</span>
+      <span className="text-text-muted text-xs">
+        {hint || "Reference image (optional):"}
+      </span>
       <button
         onClick={() => fileInputRef.current?.click()}
         className="text-xs px-2 py-1 border border-border rounded text-text hover:border-accent"
@@ -1112,7 +1215,7 @@ function VideoModelPicker({
 }: {
   model: string;
   setModel: (v: string) => void;
-  liveModels: { id: string; label: string }[] | null;
+  liveModels: LiveModel[] | null;
   liveProvider: string;
 }) {
   const models = liveModels || [];
@@ -1140,9 +1243,96 @@ function VideoModelPicker({
         className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
         style={{ maxWidth: 280 }}
       >
-        {models.map((m) => (
-          <option key={m.id} value={m.id}>
-            {m.label}
+        {models.map((m) => {
+          const tag = m.model_type === "image-to-video" ? " · img→vid" : "";
+          const price = formatCost(m.price_usd || 0);
+          const suffix = [tag, price ? ` ${price}` : ""].filter(Boolean).join("");
+          return (
+            <option key={m.id} value={m.id}>
+              {m.id}
+              {suffix}
+            </option>
+          );
+        })}
+      </select>
+    </div>
+  );
+}
+
+function ConstrainedDuration({
+  durations,
+  value,
+  onChange,
+}: {
+  durations: string[] | undefined;
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  if (!durations || durations.length === 0) {
+    return (
+      <NumberField label="Duration (s)" value={value} onChange={onChange} min={1} max={60} />
+    );
+  }
+  return (
+    <div>
+      <label className="text-text-muted text-xs block">Duration</label>
+      <select
+        value={`${value}s`}
+        onChange={(e) => {
+          const n = parseInt(e.target.value.replace(/[^\d]/g, ""), 10);
+          if (!isNaN(n)) onChange(n);
+        }}
+        className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+      >
+        {durations.map((d) => (
+          <option key={d} value={d}>
+            {d}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function ConstrainedAspect({
+  aspects,
+  value,
+  onChange,
+  disabledHint,
+}: {
+  aspects: string[] | undefined;
+  value: string;
+  onChange: (v: string) => void;
+  disabledHint?: string;
+}) {
+  if (disabledHint) {
+    return (
+      <div>
+        <label className="text-text-muted text-xs block">Aspect</label>
+        <div
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text-dim"
+          style={{ minWidth: 160 }}
+          title={disabledHint}
+        >
+          {disabledHint}
+        </div>
+      </div>
+    );
+  }
+  if (!aspects || aspects.length === 0) {
+    return <TextField label="Aspect" value={value} onChange={onChange} />;
+  }
+  return (
+    <div>
+      <label className="text-text-muted text-xs block">Aspect</label>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+      >
+        {aspects.map((a) => (
+          <option key={a} value={a}>
+            {a}
           </option>
         ))}
       </select>

@@ -23,6 +23,26 @@ const modelCacheTTL = 10 * time.Minute
 type modelEntry struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
+	// Constraints parsed from Venice's model_spec.constraints —
+	// surfaced so the panel can render real dropdowns instead of
+	// free-form inputs. All optional; empty arrays mean "no
+	// preset values, use a text input".
+	ModelType            string   `json:"model_type,omitempty"`
+	AspectRatios         []string `json:"aspect_ratios,omitempty"`
+	DefaultAspectRatio   string   `json:"default_aspect_ratio,omitempty"`
+	Resolutions          []string `json:"resolutions,omitempty"`
+	DefaultResolution    string   `json:"default_resolution,omitempty"`
+	Durations            []string `json:"durations,omitempty"`
+	SupportsImageToVideo bool     `json:"supports_image_to_video,omitempty"`
+	AudioConfigurable    bool     `json:"audio_configurable,omitempty"`
+	StepsDefault         int      `json:"steps_default,omitempty"`
+	StepsMax             int      `json:"steps_max,omitempty"`
+	PromptCharLimit      int      `json:"prompt_char_limit,omitempty"`
+	// PriceUSD is a representative cost — flat for pixel-models,
+	// the cheapest tier for resolution-tier models, the inpaint
+	// price for edit models. The panel uses this for the dropdown
+	// label so the user sees what each model costs upfront.
+	PriceUSD float64 `json:"price_usd,omitempty"`
 }
 
 type modelCacheKey struct {
@@ -141,7 +161,7 @@ func parseModelList(providerSlug, kind string, raw json.RawMessage, connID int64
 			// — pricing lookup reads from here.
 			specCache[specCacheKey{ConnectionID: connID, VeniceType: veniceType, ModelID: head.ID}] = mRaw
 			specCacheAt[specCacheKey{ConnectionID: connID, VeniceType: veniceType, ModelID: head.ID}] = now
-			out = append(out, modelEntry{ID: head.ID, Label: head.ID})
+			out = append(out, buildModelEntryFromVeniceSpec(head.ID, mRaw))
 		}
 		modelCacheMu.Unlock()
 		return out
@@ -167,6 +187,95 @@ func parseModelList(providerSlug, kind string, raw json.RawMessage, connID int64
 		return out
 	}
 	return nil
+}
+
+// buildModelEntryFromVeniceSpec parses a Venice model object into the
+// uniform modelEntry the panel renders. Venice mixes naming
+// conventions (image models use camelCase like aspectRatios /
+// defaultAspectRatio; video + inpaint use snake_case like
+// aspect_ratios / model_type / durations), so we accept both via
+// json struct tags and pick whichever has values.
+func buildModelEntryFromVeniceSpec(id string, raw json.RawMessage) modelEntry {
+	var spec struct {
+		ModelSpec struct {
+			Constraints struct {
+				// snake_case (video / inpaint)
+				ModelType         string   `json:"model_type"`
+				AspectRatiosSnake []string `json:"aspect_ratios"`
+				Resolutions       []string `json:"resolutions"`
+				Durations         []string `json:"durations"`
+				AudioConfigurable bool     `json:"audio_configurable"`
+				// camelCase (image)
+				AspectRatiosCamel []string `json:"aspectRatios"`
+				DefaultAspect     string   `json:"defaultAspectRatio"`
+				DefaultResolution string   `json:"defaultResolution"`
+				PromptCharLimit   int      `json:"promptCharacterLimit"`
+				Steps             struct {
+					Default int `json:"default"`
+					Max     int `json:"max"`
+				} `json:"steps"`
+			} `json:"constraints"`
+			Pricing struct {
+				Generation  *struct{ USD float64 `json:"usd"` } `json:"generation,omitempty"`
+				Inpaint     *struct{ USD float64 `json:"usd"` } `json:"inpaint,omitempty"`
+				Resolutions map[string]struct {
+					USD float64 `json:"usd"`
+				} `json:"resolutions,omitempty"`
+			} `json:"pricing"`
+		} `json:"model_spec"`
+	}
+	_ = json.Unmarshal(raw, &spec)
+
+	c := spec.ModelSpec.Constraints
+	aspects := c.AspectRatiosCamel
+	if len(aspects) == 0 {
+		aspects = c.AspectRatiosSnake
+	}
+
+	// PriceUSD: flat generation rate, else cheapest resolution tier,
+	// else the inpaint flat rate. Zero when none are published.
+	var price float64
+	switch {
+	case spec.ModelSpec.Pricing.Generation != nil:
+		price = spec.ModelSpec.Pricing.Generation.USD
+	case spec.ModelSpec.Pricing.Inpaint != nil:
+		price = spec.ModelSpec.Pricing.Inpaint.USD
+	case len(spec.ModelSpec.Pricing.Resolutions) > 0:
+		// Prefer the default tier if known, else the cheapest entry.
+		if def := c.DefaultResolution; def != "" {
+			if r, ok := spec.ModelSpec.Pricing.Resolutions[def]; ok {
+				price = r.USD
+			}
+		}
+		if price == 0 {
+			min := 0.0
+			for _, r := range spec.ModelSpec.Pricing.Resolutions {
+				if min == 0 || r.USD < min {
+					min = r.USD
+				}
+			}
+			price = min
+		}
+	}
+
+	supportsImg2Vid := c.ModelType == "image-to-video"
+
+	return modelEntry{
+		ID:                   id,
+		Label:                id, // panel re-styles labels with price/model type
+		ModelType:            c.ModelType,
+		AspectRatios:         aspects,
+		DefaultAspectRatio:   c.DefaultAspect,
+		Resolutions:          c.Resolutions,
+		DefaultResolution:    c.DefaultResolution,
+		Durations:            c.Durations,
+		SupportsImageToVideo: supportsImg2Vid,
+		AudioConfigurable:    c.AudioConfigurable,
+		StepsDefault:         c.Steps.Default,
+		StepsMax:             c.Steps.Max,
+		PromptCharLimit:      c.PromptCharLimit,
+		PriceUSD:             price,
+	}
 }
 
 // ensureVeniceSpecLoaded triggers a sync fetch+parse of Venice's

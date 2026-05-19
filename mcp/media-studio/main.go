@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.5.4
+version: 0.5.5
 description: |
   Generate images, video, audio, and music via any compatible provider.
   Optionally saves outputs to the Storage app for permanent references.

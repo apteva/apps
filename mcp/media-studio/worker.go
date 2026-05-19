@@ -93,7 +93,10 @@ func (a *App) pollOneVideoJob(
 	if attempts > maxVideoPollAttempts {
 		errMsg := fmt.Sprintf("gave up after %d polls (%s)", maxVideoPollAttempts, time.Duration(maxVideoPollAttempts*15)*time.Second)
 		videoJobUpdateStatus(app, jobID, "failed", errMsg)
-		app.Emit("media.failed", map[string]any{
+		// EmitWithProject — worker context has no CurrentProject set,
+		// so plain Emit lands on the wildcard lane and the panel's
+		// project-scoped EventSource never sees it.
+		app.EmitWithProject("media.failed", projectID, map[string]any{
 			"kind": KindVideo, "job_id": jobID, "queue_id": queueID, "error": errMsg,
 		})
 		return
@@ -127,7 +130,7 @@ func (a *App) pollOneVideoJob(
 			errMsg = "provider returned status " + fmt.Sprint(res.Status) + ": " + truncate(string(res.Data), 300)
 		}
 		videoJobUpdateStatus(app, jobID, "failed", errMsg)
-		app.Emit("media.failed", map[string]any{
+		app.EmitWithProject("media.failed", projectID, map[string]any{
 			"kind": KindVideo, "job_id": jobID, "queue_id": queueID, "error": errMsg,
 		})
 		return
@@ -235,7 +238,12 @@ func (a *App) finalizeVideoJob(
 	}
 	videoJobMarkComplete(app, jobID, storageID, generationID)
 
-	app.Emit("media.generated", map[string]any{
+	// EmitWithProject — worker context has no CurrentProject set, so
+	// plain Emit lands on the wildcard event lane and the panel's
+	// project-scoped EventSource never delivers it. This was why
+	// completed video jobs appeared stuck in the in-flight banner:
+	// backend was done, panel never got the refresh signal.
+	app.EmitWithProject("media.generated", projectID, map[string]any{
 		"kind":     KindVideo,
 		"job_id":   jobID,
 		"queue_id": queueID,
