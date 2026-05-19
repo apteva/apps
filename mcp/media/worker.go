@@ -292,12 +292,19 @@ func processOne(
 	})
 
 	// Derivations: thumbnail for video/image, waveform for audio.
+	// Track success per derivation so the media.derived event below
+	// tells subscribers exactly what's available — partial failures
+	// (e.g. waveform produced but thumbnail upload 5xx'd) still emit
+	// the event with the truthful subset.
+	var hasThumb, hasWave bool
 	if probe.HasVideo || probe.IsImage {
 		thumbPath := filepath.Join(tmpDir, "thumb.jpg")
 		if err := makeThumbnail(ctx, ffmpegPath, srcPath, thumbPath, toFloat(thumbSeek), toInt(thumbWidth), probe.IsImage, probe.DurationMs); err != nil {
 			logger.Warn("thumbnail failed", "err", err)
 		} else if err := uploadAndRecord(ctx, app, sc, projectID, fid, "thumbnail", thumbPath, "image/jpeg", toInt(thumbWidth), 0); err != nil {
 			logger.Warn("thumbnail upload failed", "err", err)
+		} else {
+			hasThumb = true
 		}
 	}
 	if probe.HasAudio && !probe.HasVideo {
@@ -306,8 +313,27 @@ func processOne(
 			logger.Warn("waveform failed", "err", err)
 		} else if err := uploadAndRecord(ctx, app, sc, projectID, fid, "waveform", wavePath, "image/png", toInt(waveW), toInt(waveH)); err != nil {
 			logger.Warn("waveform upload failed", "err", err)
+		} else {
+			hasWave = true
 		}
 	}
+
+	// media.derived — the canonical "indexer is done with this file"
+	// event. Fires REGARDLESS of whether Deepgram/LLM integrations are
+	// bound, so subscribers that want "file is ready for consumption"
+	// don't get silently starved on installs that only do indexing.
+	// Distinguishable from media.indexed (which on the local path fires
+	// BEFORE derivations) by the has_thumbnail / has_waveform fields.
+	app.Emit("media.derived", map[string]any{
+		"file_id":       fid,
+		"name":          f.Name,
+		"has_video":     probe.HasVideo,
+		"has_audio":     probe.HasAudio,
+		"is_image":      probe.IsImage,
+		"duration_ms":   probe.DurationMs,
+		"has_thumbnail": hasThumb,
+		"has_waveform":  hasWave,
+	})
 
 	// Wake the right downstream worker the moment probe finishes:
 	//
@@ -403,6 +429,26 @@ func tryRemoteIndex(
 			logger.Warn("remote index: upsert waveform derivation", "err", err)
 		}
 	}
+
+	// media.derived — same contract as the local path: fires after
+	// the indexer has finished derive work for this file, regardless
+	// of whether the transcriber/describer integrations are bound.
+	// The executor field distinguishes this from the local emit; the
+	// has_thumbnail / has_waveform truthfully reflect what the remote
+	// shell uploaded back (thumbID > 0 means the upload completed
+	// successfully).
+	app.Emit("media.derived", map[string]any{
+		"file_id":       fid,
+		"name":          f.Name,
+		"has_video":     probe.HasVideo,
+		"has_audio":     probe.HasAudio,
+		"is_image":      probe.IsImage,
+		"duration_ms":   probe.DurationMs,
+		"has_thumbnail": thumbID > 0,
+		"has_waveform":  waveID > 0,
+		"executor":      "remote-instance",
+	})
+
 	if probe.HasAudio {
 		notifyTranscriber(projectID, fid)
 	} else {

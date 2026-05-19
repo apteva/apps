@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.12.9
+version: 0.12.10
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -236,13 +236,26 @@ provides:
   # form's event picker so operators know what they'll receive.
   publishes:
     - name: media.indexed
-      description: A storage file was probed and added (or refreshed) in media's catalog.
+      description: A storage file was probed and added (or refreshed) in media's catalog. NOTE — on the local indexer this fires BEFORE thumbnail/waveform derivation; on the remote indexer it fires AFTER (the remote shell does probe + derive in one pass). Use media.derived for the unambiguous "fully indexed" signal.
       payload:
         file_id: string
         status: string                  # ok | failed | unsupported | skipped_size
         kind: string                    # video | audio | image
         duration_ms: integer
         codec: string
+
+    - name: media.derived
+      description: The indexer has finished all derive work for this file (probe + thumbnail/waveform upload). Fires regardless of whether the transcripts or descriptions integrations are bound, so subscribers can treat this as "file is ready for consumption" without waiting on optional LLM steps. Cross-path consistent — same payload shape from local and remote indexers.
+      payload:
+        file_id: string
+        name: string
+        has_video: boolean
+        has_audio: boolean
+        is_image: boolean
+        duration_ms: integer
+        has_thumbnail: boolean
+        has_waveform: boolean
+        executor: string                # "" for local, "remote-instance" for remote
 
     - name: media.described
       description: An LLM-generated description was attached to a media row (via media's auto-describe pipeline).
