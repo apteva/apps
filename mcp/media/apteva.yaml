@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.12.7
+version: 0.12.8
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -228,6 +228,95 @@ provides:
             type: integer
       preview_props:
         preview: true
+
+  # Events emitted on the AppBus via ctx.Emit. Subscribers (other apps,
+  # platform subscriptions) match on the topic name. Each entry's
+  # payload is documentation-only — the platform doesn't validate
+  # emit shapes, but the dashboard surfaces it in the subscription
+  # form's event picker so operators know what they'll receive.
+  publishes:
+    - name: media.indexed
+      description: A storage file was probed and added (or refreshed) in media's catalog.
+      payload:
+        file_id: string
+        status: string                  # ok | failed | unsupported | skipped_size
+        kind: string                    # video | audio | image
+        duration_ms: integer
+        codec: string
+
+    - name: media.described
+      description: An LLM-generated description was attached to a media row (via media's auto-describe pipeline).
+      payload:
+        file_id: string
+        description: string
+        model: string
+
+    - name: media.transcribed
+      description: A Deepgram-powered transcription finished for an audio or video file.
+      payload:
+        file_id: string
+        language: string
+        duration_ms: integer
+        text_chars: integer
+
+    - name: media.updated
+      description: A media row's metadata was updated (move, rename, re-index, manual description edit, etc.).
+      payload:
+        file_id: string
+        change: string                  # moved | renamed | reindexed | described | transcript_set
+
+    - name: media.deleted
+      description: A media row was removed because the underlying storage file is gone.
+      payload:
+        file_id: string
+
+    - name: render.queued
+      description: A new render was submitted via a media_* tool (or POST /renders) and is awaiting a worker.
+      payload:
+        render_id: integer
+        operation: string               # trim | resize | transcode | crop | concat | extract_frame | extract_reel | audio_extract
+        source_file_ids: array
+        requested_by: string            # "agent:<id>" | "human:<id>" | integration name
+        status: string                  # always "pending"
+
+    - name: render.started
+      description: A worker claimed a pending render and is now executing it.
+      payload:
+        render_id: integer
+        operation: string
+        source_file_ids: array
+        executor: string                # local | remote-instance | cloudinary
+        status: string                  # always "running"
+
+    - name: render.progress
+      description: A running render's progress_pct moved. Today executors bump to 50 when ffmpeg actually starts producing output; finer-grained progress is a future enhancement.
+      payload:
+        render_id: integer
+        progress_pct: integer
+        status: string                  # always "running"
+
+    - name: render.completed
+      description: A render finished successfully and produced an output_file_id in storage.
+      payload:
+        render_id: integer
+        operation: string
+        output_file_id: string
+        status: string                  # always "ok"
+
+    - name: render.failed
+      description: A render terminated with an error — backend failure, ffmpeg exit non-zero, storage upload error, or timeout.
+      payload:
+        render_id: integer
+        operation: string
+        error: string                   # verbatim error message (panel surfaces the head of this)
+        status: string                  # always "failed"
+
+    - name: render.cancelled
+      description: A render was aborted via media_cancel_render (operator/agent) or a wall-clock timeout that the worker translated into a cancel.
+      payload:
+        render_id: integer
+        operation: string
+        status: string                  # always "cancelled"
 
 runtime:
   kind: source

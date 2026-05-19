@@ -21,7 +21,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.12.7
+version: 0.12.8
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -269,6 +269,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// jobs-app-style scheduled triggers; GET lists. /renders/{id}
 		// supports GET (status) + DELETE (cancel).
 		{Pattern: "/renders", Handler: a.handleRendersCollection},
+		// /renders/summary must come BEFORE /renders/ in registration
+		// order so the more-specific pattern wins — sdk's HTTP route
+		// mounting respects insertion order for subtree disambiguation.
+		{Pattern: "/renders/summary", Handler: a.handleRendersSummary},
 		{Pattern: "/renders/", Handler: a.handleRenderItem},
 	}
 }
@@ -1419,6 +1423,7 @@ func (a *App) toolSubmitRender(operation string, paramKeys, sourceKeys []string)
 		if err != nil {
 			return nil, err
 		}
+		emitRenderQueued(ctx, id, pid, operation, sources, requestedBy)
 		return map[string]any{
 			"render_id": id,
 			"status":    "pending",
@@ -1512,11 +1517,14 @@ func (a *App) toolCancelRender(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	// Order matters: kill the ffmpeg child first (worker will mark
 	// the row cancelled when it sees ctx.Err == Canceled). For
-	// pending rows there's no child — flip the row directly.
+	// pending rows there's no child — flip the row directly. The
+	// emit fires from runOneRender for running rows; the pending
+	// branch emits here since no worker ever picked it up.
 	if !triggerCancel(id) {
 		if err := renderMarkCancelled(ctx.AppDB(), id); err != nil {
 			return nil, err
 		}
+		emitRenderCancelled(ctx, id, r.ProjectID, r.Operation)
 	}
 	return map[string]any{"found": true, "status": "cancelled"}, nil
 }
@@ -1681,11 +1689,35 @@ func (a *App) handleRendersCollection(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		emitRenderQueued(globalCtx, id, pid, body.Operation, sources, body.RequestedBy)
 		w.WriteHeader(http.StatusAccepted)
 		writeJSON(w, map[string]any{"render_id": id, "status": "pending"})
 	default:
 		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleRendersSummary powers the MediaPanel's queue widget. Single
+// call returns the counts pill row + the running / pending / recent
+// lists the panel renders. Panel uses it for initial load + as a
+// re-sync when reconnecting an SSE stream (network blip, tab
+// background-resume, etc.).
+func (a *App) handleRendersSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	summary, err := queueSummary(globalCtx.AppDB(), pid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, summary)
 }
 
 func (a *App) handleRenderItem(w http.ResponseWriter, r *http.Request) {
@@ -1734,6 +1766,7 @@ func (a *App) handleRenderItem(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			emitRenderCancelled(globalCtx, id, row.ProjectID, row.Operation)
 		}
 		writeJSON(w, map[string]any{"status": "cancelled"})
 	default:

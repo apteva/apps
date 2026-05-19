@@ -167,6 +167,7 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 
 	executor := selectExecutor(app, local, remote, row)
 	log.Info("render claimed", "id", row.ID, "op", row.Operation, "executor", executor.Name())
+	emitRenderStarted(app, row, executor.Name())
 
 	outputFileID, err := executor.Execute(ctx, app, row)
 	if err != nil {
@@ -177,21 +178,27 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 		// context wrap still gets classified correctly.
 		if ctx.Err() == context.Canceled {
 			_ = renderMarkCancelled(db, row.ID)
+			emitRenderCancelled(app, row.ID, row.ProjectID, row.Operation)
 			log.Info("render cancelled", "id", row.ID, "executor", executor.Name())
 			return
 		}
 		if ctx.Err() == context.DeadlineExceeded {
-			_ = renderMarkFailed(db, row.ID, fmt.Sprintf("timeout after %ds", timeoutSec))
+			msg := fmt.Sprintf("timeout after %ds", timeoutSec)
+			_ = renderMarkFailed(db, row.ID, msg)
+			emitRenderFailed(app, row.ID, row.ProjectID, row.Operation, msg)
 			return
 		}
 		_ = renderMarkFailed(db, row.ID, err.Error())
+		emitRenderFailed(app, row.ID, row.ProjectID, row.Operation, err.Error())
 		return
 	}
 
-	if err := renderMarkOk(db, row.ID, strconv.FormatInt(outputFileID, 10)); err != nil {
+	outputFileIDStr := strconv.FormatInt(outputFileID, 10)
+	if err := renderMarkOk(db, row.ID, outputFileIDStr); err != nil {
 		log.Error("render mark ok", "id", row.ID, "err", err)
 		return
 	}
+	emitRenderCompleted(app, row.ID, row.ProjectID, row.Operation, outputFileIDStr)
 	log.Info("render done",
 		"id", row.ID, "op", row.Operation,
 		"executor", executor.Name(), "output_file_id", outputFileID)

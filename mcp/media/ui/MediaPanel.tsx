@@ -479,6 +479,13 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
         </label>
       </nav>
 
+      {/* Render queue widget — shows pending / running / recent jobs.
+          Live-updates via render.* SSE events; the initial snapshot
+          comes from GET /renders/summary. Collapsed by default
+          (header-only) so it doesn't crowd the catalog view when
+          there's nothing interesting to look at. */}
+      <RenderQueue projectId={projectId} installId={installId} />
+
       <div className="flex items-center gap-2 flex-wrap">
         {(["all", "video", "audio", "image"] as Kind[]).map((k) => (
           <button
@@ -1775,4 +1782,356 @@ function MicSlashIcon({ className }: { className?: string }) {
       <line x1="2" y1="2" x2="22" y2="22" />
     </svg>
   );
+}
+
+// ─── Render queue widget ────────────────────────────────────────────
+//
+// Live-updating view of the render pipeline:
+//   - Counts pill row (pending / running / ok / failed / cancelled in 24h)
+//   - Currently-running jobs with progress bar
+//   - Oldest pending jobs (FIFO order — what the worker picks next)
+//   - Recent terminal jobs (collapsed by default)
+//
+// Initial load via GET /renders/summary; live updates via render.*
+// SSE events. We deliberately keep the panel idempotent: an event
+// for a render we haven't seen yet adds it; an event for one we
+// know about updates it; a terminal event moves it from
+// running→recent.
+
+interface QueueRow {
+  id: number;
+  operation: string;
+  source_file_ids: string[];
+  status: string;
+  progress_pct: number;
+  output_file_id?: string;
+  error?: string;
+  requested_by?: string;
+  created_at: string;
+  started_at?: string;
+  completed_at?: string;
+}
+
+interface QueueCounts {
+  pending: number;
+  running: number;
+  ok_24h: number;
+  failed_24h: number;
+  cancelled_24h: number;
+}
+
+interface QueueSummary {
+  counts: QueueCounts;
+  running: QueueRow[];
+  pending: QueueRow[];
+  recent: QueueRow[];
+}
+
+interface RenderEventPayload {
+  render_id: number;
+  project_id?: string;
+  operation?: string;
+  source_file_ids?: string[];
+  requested_by?: string;
+  status?: string;
+  progress_pct?: number;
+  output_file_id?: string;
+  error?: string;
+  executor?: string;
+}
+
+function RenderQueue({
+  projectId,
+  installId,
+}: {
+  projectId?: string;
+  installId?: number;
+}) {
+  const [summary, setSummary] = useState<QueueSummary | null>(null);
+  // Open by default when anything is in-flight; otherwise collapsed
+  // so the catalog grid stays the focus.
+  const [open, setOpen] = useState<boolean>(true);
+
+  const refresh = useCallback(async () => {
+    if (!projectId) return;
+    const qs = new URLSearchParams();
+    qs.set("project_id", projectId);
+    if (installId != null) qs.set("install_id", String(installId));
+    try {
+      const res = await fetch(`${API}/renders/summary?${qs.toString()}`, {
+        credentials: "same-origin",
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as QueueSummary;
+      setSummary(data);
+    } catch {
+      /* network blip — next event or refresh recovers */
+    }
+  }, [projectId, installId]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  // Apply a single render event to the local snapshot. Mutates by
+  // moving the row across lists according to the new status so the
+  // counts + lists stay consistent without a refetch.
+  const applyEvent = useCallback((topic: string, ev: RenderEventPayload) => {
+    setSummary((cur) => {
+      if (!cur) return cur;
+      const rid = ev.render_id;
+      // Helper: filter a row out of every list (we re-insert into
+      // the right one below based on the new status).
+      const without = (rows: QueueRow[]) => rows.filter((r) => r.id !== rid);
+      const findExisting = (): QueueRow | undefined =>
+        cur.running.find((r) => r.id === rid) ??
+        cur.pending.find((r) => r.id === rid) ??
+        cur.recent.find((r) => r.id === rid);
+      const existing = findExisting();
+
+      const next: QueueSummary = {
+        counts: { ...cur.counts },
+        running: without(cur.running),
+        pending: without(cur.pending),
+        recent: without(cur.recent),
+      };
+
+      // Compose a candidate updated row from the event payload,
+      // merging onto whatever we had locally. New rows (queued
+      // before we hydrated) come in with sparse data — we keep what
+      // we can and let the next summary refresh fill the rest.
+      const row: QueueRow = {
+        id: rid,
+        operation: ev.operation ?? existing?.operation ?? "",
+        source_file_ids: ev.source_file_ids ?? existing?.source_file_ids ?? [],
+        status: ev.status ?? existing?.status ?? "pending",
+        progress_pct: ev.progress_pct ?? existing?.progress_pct ?? 0,
+        output_file_id: ev.output_file_id ?? existing?.output_file_id,
+        error: ev.error ?? existing?.error,
+        requested_by: ev.requested_by ?? existing?.requested_by,
+        created_at: existing?.created_at ?? new Date().toISOString(),
+        started_at: existing?.started_at,
+        completed_at: existing?.completed_at,
+      };
+
+      switch (topic) {
+        case "render.queued":
+          row.status = "pending";
+          next.pending = [...next.pending, row].sort((a, b) =>
+            a.created_at.localeCompare(b.created_at),
+          );
+          // Don't bump count by 1 if the row already existed in
+          // pending (idempotent on event replay).
+          if (!existing) next.counts.pending += 1;
+          break;
+        case "render.started":
+          row.status = "running";
+          row.started_at = row.started_at ?? new Date().toISOString();
+          next.running = [...next.running, row].sort((a, b) =>
+            (a.started_at ?? "").localeCompare(b.started_at ?? ""),
+          );
+          // Decrement pending if it was a pending→running transition.
+          if (existing?.status === "pending") {
+            next.counts.pending = Math.max(0, next.counts.pending - 1);
+            next.counts.running += 1;
+          } else if (!existing) {
+            next.counts.running += 1;
+          }
+          break;
+        case "render.progress":
+          row.status = "running";
+          next.running = [...next.running, row].sort((a, b) =>
+            (a.started_at ?? "").localeCompare(b.started_at ?? ""),
+          );
+          // No count change — running→running.
+          break;
+        case "render.completed":
+        case "render.failed":
+        case "render.cancelled": {
+          const terminalStatus =
+            topic === "render.completed"
+              ? "ok"
+              : topic === "render.failed"
+                ? "failed"
+                : "cancelled";
+          row.status = terminalStatus;
+          row.completed_at = row.completed_at ?? new Date().toISOString();
+          next.recent = [row, ...next.recent].slice(0, 10);
+          if (existing?.status === "running") {
+            next.counts.running = Math.max(0, next.counts.running - 1);
+          } else if (existing?.status === "pending") {
+            next.counts.pending = Math.max(0, next.counts.pending - 1);
+          }
+          if (terminalStatus === "ok") next.counts.ok_24h += 1;
+          else if (terminalStatus === "failed") next.counts.failed_24h += 1;
+          else next.counts.cancelled_24h += 1;
+          break;
+        }
+      }
+      return next;
+    });
+  }, []);
+
+  useAppEvents<RenderEventPayload>("media", projectId, (ev) => {
+    if (!ev.topic || !ev.topic.startsWith("render.")) return;
+    applyEvent(ev.topic, ev.data);
+  });
+
+  if (!projectId) return null;
+  if (!summary) {
+    return (
+      <div className="text-xs text-text-dim border border-border rounded p-2">
+        Loading render queue…
+      </div>
+    );
+  }
+
+  const c = summary.counts;
+  const anyInFlight = c.pending > 0 || c.running > 0;
+
+  return (
+    <section
+      className="border border-border rounded bg-bg-input/30"
+      aria-label="Render queue"
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((x) => !x)}
+        className="w-full flex items-center gap-3 px-3 py-2 text-xs hover:bg-bg-input/60 transition-colors"
+      >
+        <span className="text-text font-medium">Render queue</span>
+        <div className="flex items-center gap-2 flex-wrap text-text-muted">
+          <CountPill label="running" value={c.running} tone={c.running > 0 ? "accent" : "muted"} />
+          <CountPill label="pending" value={c.pending} tone={c.pending > 0 ? "warn" : "muted"} />
+          <CountPill label="ok / 24h" value={c.ok_24h} tone="muted" />
+          {c.failed_24h > 0 && <CountPill label="failed / 24h" value={c.failed_24h} tone="error" />}
+          {c.cancelled_24h > 0 && <CountPill label="cancelled / 24h" value={c.cancelled_24h} tone="muted" />}
+        </div>
+        <div className="flex-1" />
+        <span className="text-text-dim">{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+        <div className="border-t border-border px-3 py-2 space-y-3">
+          {summary.running.length > 0 && (
+            <div>
+              <div className="text-[11px] text-text-dim mb-1">Running</div>
+              <div className="space-y-1">
+                {summary.running.map((r) => (
+                  <QueueRowView key={r.id} row={r} />
+                ))}
+              </div>
+            </div>
+          )}
+          {summary.pending.length > 0 && (
+            <div>
+              <div className="text-[11px] text-text-dim mb-1">
+                Pending {c.pending > summary.pending.length ? `(showing oldest ${summary.pending.length} of ${c.pending})` : ""}
+              </div>
+              <div className="space-y-1">
+                {summary.pending.map((r) => (
+                  <QueueRowView key={r.id} row={r} />
+                ))}
+              </div>
+            </div>
+          )}
+          {summary.recent.length > 0 && (
+            <div>
+              <div className="text-[11px] text-text-dim mb-1">Recent</div>
+              <div className="space-y-1">
+                {summary.recent.map((r) => (
+                  <QueueRowView key={r.id} row={r} />
+                ))}
+              </div>
+            </div>
+          )}
+          {!anyInFlight && summary.recent.length === 0 && (
+            <div className="text-xs text-text-dim">
+              No renders in flight or recent. Submitted jobs will appear here.
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function CountPill({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: "accent" | "warn" | "error" | "muted";
+}) {
+  const colorClass =
+    tone === "accent"
+      ? "bg-accent/20 text-accent border-accent/30"
+      : tone === "warn"
+        ? "bg-yellow-500/15 text-yellow-400 border-yellow-500/30"
+        : tone === "error"
+          ? "bg-red-500/15 text-red-400 border-red-500/30"
+          : "bg-bg-input border-border text-text-muted";
+  return (
+    <span className={`px-1.5 py-0.5 rounded border text-[10px] ${colorClass}`}>
+      <span className="font-mono mr-1">{value}</span>
+      <span className="opacity-70">{label}</span>
+    </span>
+  );
+}
+
+function QueueRowView({ row }: { row: QueueRow }) {
+  const sources = (row.source_file_ids ?? []).join(", ");
+  const isRunning = row.status === "running";
+  const isFailed = row.status === "failed";
+  const isCancelled = row.status === "cancelled";
+  const isOk = row.status === "ok";
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <StatusDot status={row.status} />
+      <span className="font-mono text-text-dim">#{row.id}</span>
+      <span className="text-text">{row.operation || "?"}</span>
+      {sources && <span className="text-text-dim">· file {sources}</span>}
+      {isRunning && (
+        <div className="flex-1 flex items-center gap-2 min-w-0">
+          <div className="flex-1 h-1 bg-bg-input rounded overflow-hidden max-w-[200px]">
+            <div
+              className="h-full bg-accent transition-all"
+              style={{ width: `${Math.max(5, row.progress_pct)}%` }}
+            />
+          </div>
+          <span className="text-text-dim text-[10px] tabular-nums">
+            {row.progress_pct}%
+          </span>
+        </div>
+      )}
+      {isOk && row.output_file_id && (
+        <span className="text-text-dim">→ file {row.output_file_id}</span>
+      )}
+      {isFailed && row.error && (
+        <span className="text-red-400 truncate max-w-[280px]" title={row.error}>
+          {row.error}
+        </span>
+      )}
+      {isCancelled && <span className="text-text-dim italic">cancelled</span>}
+      <div className="flex-1" />
+      <span className="text-text-dim text-[10px]">
+        {row.requested_by ?? ""}
+      </span>
+    </div>
+  );
+}
+
+function StatusDot({ status }: { status: string }) {
+  const color =
+    status === "running"
+      ? "bg-accent animate-pulse"
+      : status === "pending"
+        ? "bg-yellow-400"
+        : status === "ok"
+          ? "bg-green-500"
+          : status === "failed"
+            ? "bg-red-500"
+            : "bg-text-dim";
+  return <span className={`inline-block w-2 h-2 rounded-full ${color}`} aria-hidden />;
 }

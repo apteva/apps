@@ -173,6 +173,134 @@ type RenderFilters struct {
 	Limit     int
 }
 
+// RenderQueueSummary is what the panel asks for on initial load (and
+// occasionally as a re-sync against the event stream). One round-trip,
+// everything the queue header + lists need.
+type RenderQueueSummary struct {
+	Counts  RenderCounts `json:"counts"`
+	Running []RenderRow  `json:"running"`           // current running rows, oldest first (FIFO order)
+	Pending []RenderRow  `json:"pending"`           // oldest pending rows (FIFO), up to 20
+	Recent  []RenderRow  `json:"recent"`            // most recent terminal rows (ok/failed/cancelled), up to 10
+}
+
+// RenderCounts is a snapshot of pipeline state. ok_24h + failed_24h
+// give the panel a "how's the queue been recently" feel without
+// dumping the whole history; pending + running are point-in-time.
+type RenderCounts struct {
+	Pending    int `json:"pending"`
+	Running    int `json:"running"`
+	Ok24h      int `json:"ok_24h"`
+	Failed24h  int `json:"failed_24h"`
+	Cancelled24h int `json:"cancelled_24h"`
+}
+
+// queueSummary computes the panel's render-queue snapshot. Four
+// queries — small for typical project sizes; the LIMIT N on the
+// list queries caps memory regardless of queue depth.
+func queueSummary(db *sql.DB, projectID string) (*RenderQueueSummary, error) {
+	if projectID == "" {
+		return nil, errors.New("project_id required")
+	}
+	out := &RenderQueueSummary{}
+
+	// Counts. One scan per status — sqlite COUNT(*) on an indexed
+	// (project_id, status) is fast even at queue depths in the
+	// thousands. 24h windows use SQLite's datetime("-24 hours") which
+	// is consistent across all platforms (no TZ surprises).
+	// COALESCE wraps each SUM because SQLite returns NULL (not 0)
+	// when no rows match the WHERE — Scan into int then fails. The
+	// 0-default makes "empty project" indistinguishable from
+	// "project with explicit 0 counts," which is correct.
+	countQ := `
+		SELECT
+			COALESCE(SUM(CASE WHEN status='pending'   THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status='running'   THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status='ok'        AND completed_at >= datetime('now','-24 hours') THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status='failed'    AND completed_at >= datetime('now','-24 hours') THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status='cancelled' AND completed_at >= datetime('now','-24 hours') THEN 1 ELSE 0 END), 0)
+		  FROM renders
+		 WHERE project_id = ?`
+	if err := db.QueryRow(countQ, projectID).Scan(
+		&out.Counts.Pending, &out.Counts.Running,
+		&out.Counts.Ok24h, &out.Counts.Failed24h, &out.Counts.Cancelled24h,
+	); err != nil {
+		return nil, fmt.Errorf("counts: %w", err)
+	}
+
+	// Running rows — usually small (== pool size, default 2). FIFO
+	// by started_at so the panel can show "this one's been running
+	// for 3 min" intuitively.
+	runningRows, err := db.Query(`
+		SELECT id, project_id, operation, source_file_ids, params,
+		       status, progress_pct, COALESCE(output_file_id,''),
+		       COALESCE(output_name,''), COALESCE(output_folder,''), error, COALESCE(requested_by,''),
+		       created_at, COALESCE(started_at,''), COALESCE(completed_at,'')
+		  FROM renders
+		 WHERE project_id = ? AND status = 'running'
+		 ORDER BY started_at ASC, id ASC
+		 LIMIT 32`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("running: %w", err)
+	}
+	defer runningRows.Close()
+	for runningRows.Next() {
+		r, err := scanRenderFromRows(runningRows)
+		if err != nil {
+			return nil, err
+		}
+		out.Running = append(out.Running, *r)
+	}
+
+	// Pending rows — oldest first (the order the worker will pick
+	// them up). Cap at 20 so a 10k-deep queue doesn't bloat the
+	// response; the counts.pending tells the panel there's more.
+	pendingRows, err := db.Query(`
+		SELECT id, project_id, operation, source_file_ids, params,
+		       status, progress_pct, COALESCE(output_file_id,''),
+		       COALESCE(output_name,''), COALESCE(output_folder,''), error, COALESCE(requested_by,''),
+		       created_at, COALESCE(started_at,''), COALESCE(completed_at,'')
+		  FROM renders
+		 WHERE project_id = ? AND status = 'pending'
+		 ORDER BY created_at ASC, id ASC
+		 LIMIT 20`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("pending: %w", err)
+	}
+	defer pendingRows.Close()
+	for pendingRows.Next() {
+		r, err := scanRenderFromRows(pendingRows)
+		if err != nil {
+			return nil, err
+		}
+		out.Pending = append(out.Pending, *r)
+	}
+
+	// Recent terminal rows — newest first. Capped at 10 since these
+	// fall off the panel quickly anyway (drift past 24h or get pruned
+	// by the recent-counts window).
+	recentRows, err := db.Query(`
+		SELECT id, project_id, operation, source_file_ids, params,
+		       status, progress_pct, COALESCE(output_file_id,''),
+		       COALESCE(output_name,''), COALESCE(output_folder,''), error, COALESCE(requested_by,''),
+		       created_at, COALESCE(started_at,''), COALESCE(completed_at,'')
+		  FROM renders
+		 WHERE project_id = ? AND status IN ('ok','failed','cancelled')
+		 ORDER BY completed_at DESC, id DESC
+		 LIMIT 10`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("recent: %w", err)
+	}
+	defer recentRows.Close()
+	for recentRows.Next() {
+		r, err := scanRenderFromRows(recentRows)
+		if err != nil {
+			return nil, err
+		}
+		out.Recent = append(out.Recent, *r)
+	}
+	return out, nil
+}
+
 func listRenders(db *sql.DB, projectID string, f RenderFilters) ([]RenderRow, error) {
 	q := strings.Builder{}
 	q.WriteString(`SELECT id, project_id, operation, source_file_ids, params,

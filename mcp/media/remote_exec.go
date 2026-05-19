@@ -182,7 +182,7 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 	// the -progress pipe:1 stream. Stops when Execute returns.
 	progressDone := make(chan struct{})
 	defer close(progressDone)
-	go pollRemoteProgress(ctx, progressDone, app, e.hostID, row.ID)
+	go pollRemoteProgress(ctx, progressDone, app, e.hostID, row.ID, row.ProjectID)
 
 	// timeout_s on the run-command call gets the row's wall-clock cap
 	// minus a small safety margin (the install-time pre-flight already
@@ -446,7 +446,7 @@ func parseAptevaResult(stdout string) (*remoteRenderResult, error) {
 //
 // Poll interval is intentionally coarse (5s). Faster would burn
 // SSH connections on every render with no user-visible benefit.
-func pollRemoteProgress(ctx context.Context, done <-chan struct{}, app *sdk.AppCtx, hostID, renderID int64) {
+func pollRemoteProgress(ctx context.Context, done <-chan struct{}, app *sdk.AppCtx, hostID, renderID int64, projectID string) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	bumped := false
@@ -476,6 +476,7 @@ func pollRemoteProgress(ctx context.Context, done <-chan struct{}, app *sdk.AppC
 			if updErr := renderUpdateProgress(app.AppDB(), renderID, 50); updErr != nil {
 				app.Logger().Warn("remote progress bump failed", "id", renderID, "err", updErr)
 			}
+			emitRenderProgress(app, renderID, projectID, 50)
 			bumped = true
 		}
 	}

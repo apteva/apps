@@ -167,7 +167,7 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("ffmpeg start: %w", err)
 	}
-	go forwardProgress(stdout, db, row.ID)
+	go forwardProgress(stdout, db, row.ID, app, row.ProjectID)
 	if err := cmd.Wait(); err != nil {
 		// Cancellation/timeout get the raw context error — the
 		// orchestrator distinguishes them via ctx.Err().
@@ -205,13 +205,14 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 // have total duration without an extra ffprobe call here, so v0.2's
 // behaviour is preserved: bump to 50 on first activity, jump to 100
 // on done (via renderMarkOk).
-func forwardProgress(r io.ReadCloser, db *sql.DB, id int64) {
+func forwardProgress(r io.ReadCloser, db *sql.DB, id int64, app *sdk.AppCtx, projectID string) {
 	defer r.Close()
 	scanner := bufio.NewScanner(r)
 	bumped := false
 	for scanner.Scan() {
 		if !bumped && strings.HasPrefix(scanner.Text(), "out_time_ms=") {
 			_ = renderUpdateProgress(db, id, 50)
+			emitRenderProgress(app, id, projectID, 50)
 			bumped = true
 		}
 	}
