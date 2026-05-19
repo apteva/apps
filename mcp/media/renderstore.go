@@ -201,7 +201,14 @@ func queueSummary(db *sql.DB, projectID string) (*RenderQueueSummary, error) {
 	if projectID == "" {
 		return nil, errors.New("project_id required")
 	}
-	out := &RenderQueueSummary{}
+	// Initialise slices so they marshal as [] rather than null —
+	// the UI panel dereferences .length on each list immediately,
+	// and Go's nil-slice → JSON null breaks that without a null check.
+	out := &RenderQueueSummary{
+		Running: []RenderRow{},
+		Pending: []RenderRow{},
+		Recent:  []RenderRow{},
+	}
 
 	// Counts. One scan per status — sqlite COUNT(*) on an indexed
 	// (project_id, status) is fast even at queue depths in the

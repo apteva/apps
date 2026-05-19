@@ -1862,8 +1862,18 @@ function RenderQueue({
         credentials: "same-origin",
       });
       if (!res.ok) return;
-      const data = (await res.json()) as QueueSummary;
-      setSummary(data);
+      const data = (await res.json()) as Partial<QueueSummary> | null;
+      // Defensive: tolerate older server versions or any non-default
+      // JSON encoder that sends null for empty slices. The UI
+      // dereferences .length on each list immediately.
+      setSummary({
+        counts:
+          data?.counts ??
+          { pending: 0, running: 0, ok_24h: 0, failed_24h: 0, cancelled_24h: 0 },
+        running: data?.running ?? [],
+        pending: data?.pending ?? [],
+        recent: data?.recent ?? [],
+      });
     } catch {
       /* network blip — next event or refresh recovers */
     }
