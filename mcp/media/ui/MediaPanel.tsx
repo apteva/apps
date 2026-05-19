@@ -2184,10 +2184,16 @@ function KeyframesStrip({
     .sort((a, b) => (a.position_ms ?? 0) - (b.position_ms ?? 0));
   if (keyframes.length === 0) return null;
 
+  // Section's 100px-label grid would squash the strip into a tiny
+  // column. Use a plain header + full-width body so the horizontal
+  // scroll fills the drawer.
   return (
-    <Section title={`Storyboard (${keyframes.length} frames)`}>
+    <section>
+      <h3 className="text-xs uppercase tracking-wide text-text-dim mb-2">
+        Storyboard <span className="opacity-60">· {keyframes.length} frames</span>
+      </h3>
       <div
-        className="flex gap-1 overflow-x-auto pb-1"
+        className="flex gap-1 overflow-x-auto pb-2"
         style={{ scrollbarWidth: "thin" }}
       >
         {keyframes.map((k) => {
@@ -2201,7 +2207,7 @@ function KeyframesStrip({
               rel="noopener"
               title={`@ ${label}`}
               className="flex-shrink-0 relative block border border-border rounded overflow-hidden hover:border-accent/60 transition-colors"
-              style={{ width: 120, height: 68 }}
+              style={{ width: 96, height: 54 }}
             >
               <img
                 src={src}
@@ -2216,7 +2222,8 @@ function KeyframesStrip({
                 }}
               />
               <span
-                className="absolute bottom-0 right-0 px-1 text-[10px] font-mono text-white bg-black/70 rounded-tl"
+                className="absolute bottom-0 right-0 px-1 font-mono text-white bg-black/70 rounded-tl"
+                style={{ fontSize: 9 }}
                 aria-hidden
               >
                 {label}
@@ -2225,7 +2232,7 @@ function KeyframesStrip({
           );
         })}
       </div>
-    </Section>
+    </section>
   );
 }
 
@@ -2286,34 +2293,42 @@ function AudienceRatingSection({
     mature: "bg-yellow-500/15 text-yellow-400 border-yellow-500/30",
     adult: "bg-red-500/15 text-red-400 border-red-500/30",
   };
+  // Drop Section wrapper — its 100px-label grid layout cramped the
+  // buttons into a too-narrow column and the current-state pill was
+  // appearing twice (once as state, once as button). Use a header +
+  // inline state pill, then a button row that EXCLUDES whichever
+  // option is the current state to avoid the double-rendering.
+  const allRatings = ["general", "mature", "adult", "unrated"] as const;
   return (
-    <Section title="Audience rating">
-      <div className="flex items-center gap-2 flex-wrap">
+    <section>
+      <div className="flex items-center gap-2 mb-2 flex-wrap">
+        <h3 className="text-xs uppercase tracking-wide text-text-dim">
+          Audience rating
+        </h3>
         <span className={`px-2 py-0.5 rounded border text-[11px] ${tones[rating] ?? tones.unrated}`}>
           {rating}
         </span>
         {reasoning && (
-          <span className="text-text-dim text-[11px] truncate" title={reasoning}>
-            · {reasoning}
+          <span className="text-text-dim text-[11px] truncate flex-1 min-w-0" title={reasoning}>
+            {reasoning}
           </span>
         )}
       </div>
-      <div className="flex items-center gap-1 flex-wrap mt-2">
-        {(["general", "mature", "adult", "unrated"] as const).map((r) => (
+      <div className="flex items-center gap-1 flex-wrap">
+        <span className="text-text-dim text-[10px] uppercase mr-1">
+          set to:
+        </span>
+        {allRatings.filter((r) => r !== rating).map((r) => (
           <button
             key={r}
             type="button"
-            disabled={pending !== null || rating === r}
+            disabled={pending !== null}
             onClick={() => setRating(r)}
-            className={`px-2 py-0.5 rounded border text-[11px] transition-colors ${
-              rating === r
-                ? "opacity-60 cursor-default border-border text-text-muted"
-                : "border-border text-text-muted hover:text-text hover:border-accent/40"
-            }`}
+            className="px-2 py-0.5 rounded border text-[11px] border-border text-text-muted hover:text-text hover:border-accent/40 transition-colors disabled:opacity-50"
             title={
               r === "unrated"
                 ? "Reset — re-queues the file for the describer's next pass"
-                : `Set rating to ${r}`
+                : `Override rating to ${r}`
             }
           >
             {pending === r ? "…" : r}
@@ -2321,6 +2336,6 @@ function AudienceRatingSection({
         ))}
       </div>
       {err && <div className="text-red-400 text-[11px] mt-1">{err}</div>}
-    </Section>
+    </section>
   );
 }
