@@ -373,20 +373,36 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
         onClick={() => setSelected(r)}
         className="text-left bg-bg-input/40 border border-border rounded overflow-hidden hover:border-accent/50 transition-colors flex flex-col"
       >
+        {/* Square thumbnail wrapper. We use `position: relative` +
+            absolutely-positioned children rather than a flex parent
+            because `height: 100%` on a flex item whose parent's height
+            comes from `aspect-ratio` doesn't resolve in every browser —
+            the percentage falls back to `auto` (natural image height)
+            and the tile grows to the source's full aspect ratio.
+            That's why portrait videos were rendering as 1080×1918
+            tiles instead of 200×200 cropped squares. Absolute children
+            sized via inset:0 are unaffected by the parent's flex
+            algorithm. */}
         <div
-          style={{ aspectRatio: "1 / 1" }}
-          className="bg-bg-input flex items-center justify-center relative"
+          style={{ aspectRatio: "1 / 1", position: "relative" }}
+          className="bg-bg-input relative overflow-hidden"
         >
           {previewURL ? (
             <img
               src={previewURL}
               alt=""
-              style={{ width: "100%", height: "100%", objectFit: "cover" }}
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+              }}
             />
           ) : (
-            <span className="text-text-dim">
+            <div className="absolute inset-0 flex items-center justify-center text-text-dim">
               <KindIcon row={r} className="w-8 h-8" />
-            </span>
+            </div>
           )}
           {r.transcript_status ? (
             <span

@@ -172,6 +172,12 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	fmt.Fprintf(&b, "export SIGNED_URL=%s\n", shellQuote(in.SignedURL))
 	fmt.Fprintf(&b, "export FFMPEG=%s\n", shellQuote(in.FFmpeg))
 	fmt.Fprintf(&b, "export FFPROBE=%s\n", shellQuote(in.FFprobe))
+	// THUMB_SEEK is the user-configured fallback seek (same value the
+	// local extractVideoThumbnail uses as its first candidate). The
+	// multi-attempt block below tries it FIRST, then progressively
+	// later positions if the frame at THUMB_SEEK is too dark.
+	fmt.Fprintf(&b, "export THUMB_SEEK=%s\n", shellQuote(strconv.FormatFloat(in.ThumbSeek, 'f', 3, 64)))
+	fmt.Fprintf(&b, "export THUMB_WIDTH=%d\n", in.ThumbWidth)
 
 	// Probe — same flags as the local runProbe, against the signed URL.
 	b.WriteString(`"$FFPROBE" -v quiet -print_format json -show_format -show_streams "$SIGNED_URL" > probe.json` + "\n")
@@ -196,13 +202,67 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	b.WriteString(`if grep -qE '"codec_name": *"(mjpeg|png|gif|webp|bmp|tiff)"' probe.json; then IS_IMAGE=1; fi` + "\n")
 	b.WriteString(`if ! grep -q '"duration":' probe.json; then IS_IMAGE=1; fi` + "\n")
 
+	// Smart video thumbnailing — ports the local extractVideoThumbnail
+	// strategy (mcp/media/derive.go) to the remote shell:
+	//
+	//   1. Try the configured THUMB_SEEK first (back-compat + lets users
+	//      pin a known-good moment via thumbnail_seek_seconds).
+	//   2. Then sample 5/15/30/50/75% of duration, skipping positions
+	//      too close to start/end and deduping to 0.1s granularity.
+	//   3. For each seek: extract via ffmpeg's `thumbnail=30` filter,
+	//      which picks the most representative frame from a 30-frame
+	//      window via RGB-histogram scoring (skips uniform / fade-y
+	//      frames automatically).
+	//   4. Decode the produced JPEG and compute mean luminance via
+	//      ffmpeg's signalstats; reject anything below 25/255 (the
+	//      same threshold as the local path) and try the next seek.
+	//   5. Final attempt's output is kept regardless — better an
+	//      under-exposed thumbnail than no thumbnail at all.
+	//
+	// Pre-this-block the script did one fixed seek with no smart
+	// filter and no luma check, so the thumbnail was whatever raw
+	// frame happened to land at THUMB_SEEK — typically a studio logo,
+	// title card, or black opening. This restores parity with what
+	// the local sidecar produces.
 	fmt.Fprintf(&b, `if [ "$HAS_VIDEO" -gt 0 ]; then`+"\n")
 	fmt.Fprintf(&b, `  if [ "$IS_IMAGE" = "1" ]; then`+"\n")
-	fmt.Fprintf(&b, `    "$FFMPEG" -y -loglevel error -i "$SIGNED_URL" -frames:v 1 -vf scale=%d:-2 -q:v 2 thumb.jpg`+"\n",
-		in.ThumbWidth)
+	fmt.Fprintf(&b, `    "$FFMPEG" -y -loglevel error -i "$SIGNED_URL" -frames:v 1 -vf "scale=$THUMB_WIDTH:-2" -q:v 2 thumb.jpg`+"\n")
 	fmt.Fprintf(&b, `  else`+"\n")
-	fmt.Fprintf(&b, `    "$FFMPEG" -y -loglevel error -ss %s -i "$SIGNED_URL" -frames:v 1 -vf scale=%d:-2 -q:v 2 thumb.jpg`+"\n",
-		strconv.FormatFloat(in.ThumbSeek, 'f', 3, 64), in.ThumbWidth)
+	// Parse duration from probe.json — first numeric "duration":"…" we
+	// find (the format-level one). Empty → DUR_SEC=0 → only the
+	// configured fallback seek is tried.
+	b.WriteString(`    DUR_SEC=$(sed -n 's/.*"duration"[[:space:]]*:[[:space:]]*"\([0-9.]*\)".*/\1/p' probe.json | head -1)` + "\n")
+	b.WriteString(`    : "${DUR_SEC:=0}"` + "\n")
+	// luma_of: mean-Y of a JPEG, via ffmpeg's signalstats. Empty
+	// output (parse fail / corrupt JPEG) becomes 0, which is treated
+	// as "too dark" and triggers the next attempt.
+	b.WriteString(`    luma_of() {` + "\n")
+	b.WriteString(`      "$FFMPEG" -hide_banner -nostats -i "$1" -vf "signalstats,metadata=print:file=-" -f null /dev/null 2>&1 \` + "\n")
+	b.WriteString(`        | sed -n 's/.*signalstats\.YAVG=\([0-9.]*\).*/\1/p' | head -1` + "\n")
+	b.WriteString(`    }` + "\n")
+	// Build seek list: configured THUMB_SEEK first, then 5/15/30/50/
+	// 75% of duration if duration is known. awk handles float math
+	// since busybox sh doesn't.
+	b.WriteString(`    SEEKS="$THUMB_SEEK"` + "\n")
+	b.WriteString(`    if awk -v d="$DUR_SEC" 'BEGIN{exit !(d > 0)}'; then` + "\n")
+	b.WriteString(`      for PCT in 0.05 0.15 0.30 0.50 0.75; do` + "\n")
+	b.WriteString(`        CAND=$(awk -v d="$DUR_SEC" -v p="$PCT" 'BEGIN{printf "%.3f", d*p}')` + "\n")
+	b.WriteString(`        if awk -v c="$CAND" -v d="$DUR_SEC" 'BEGIN{exit !(c >= 0.5 && c < d - 0.1)}'; then` + "\n")
+	b.WriteString(`          SEEKS="$SEEKS $CAND"` + "\n")
+	b.WriteString(`        fi` + "\n")
+	b.WriteString(`      done` + "\n")
+	b.WriteString(`    fi` + "\n")
+	// Try each seek; first acceptable luma wins, last attempt's
+	// output is kept as fallback. set -e is in effect, so wrap the
+	// ffmpeg call with "|| continue" — codec/seek failure on one
+	// attempt mustn't abort the whole script.
+	b.WriteString(`    for S in $SEEKS; do` + "\n")
+	b.WriteString(`      "$FFMPEG" -y -loglevel error -ss "$S" -i "$SIGNED_URL" -vf "thumbnail=30,scale=$THUMB_WIDTH:-2" -frames:v 1 -q:v 3 thumb.jpg 2>/dev/null || continue` + "\n")
+	b.WriteString(`      [ ! -s thumb.jpg ] && continue` + "\n")
+	b.WriteString(`      L=$(luma_of thumb.jpg)` + "\n")
+	b.WriteString(`      [ -z "$L" ] && continue` + "\n")
+	b.WriteString(`      if awk -v l="$L" 'BEGIN{exit !(l >= 25)}'; then break; fi` + "\n")
+	b.WriteString(`    done` + "\n")
 	fmt.Fprintf(&b, `  fi`+"\n")
 	// Belt + suspenders: if ffmpeg silently produced nothing (some
 	// codec edge cases exit 0 without writing the output), don't
