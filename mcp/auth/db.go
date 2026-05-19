@@ -435,6 +435,10 @@ func dbListUserSessions(db *sql.DB, projectID string, orgID, userID int64) ([]Se
 
 // ─── Clients ─────────────────────────────────────────────────────────
 
+// dbCreateClient — orgID = 0 creates a **multi-organization** client.
+// Multi-org clients are usable across every org in the project; the
+// SaaS frontend must send organization_slug (or _id) on every public
+// call. orgID > 0 creates a single-org client (v0.4.0 default).
 func dbCreateClient(db *sql.DB, projectID string, orgID int64, c Client, secretHash string) (int64, error) {
 	redirects, _ := json.Marshal(c.RedirectURIs)
 	origins, _ := json.Marshal(c.AllowedOrigins)
@@ -451,13 +455,18 @@ func dbCreateClient(db *sql.DB, projectID string, orgID int64, c Client, secretH
 	if !c.RefreshRotation {
 		rotation = 0
 	}
+	// orgID = 0 → NULL column; otherwise the FK.
+	var orgArg any
+	if orgID > 0 {
+		orgArg = orgID
+	}
 	res, err := db.Exec(`
 		INSERT INTO clients(project_id, organization_id, client_id, client_secret_hash, name, type,
 			redirect_uris, allowed_origins, allowed_grant_types, token_endpoint_auth_method,
 			require_pkce, require_mfa, jwt_audience,
 			access_token_ttl_seconds, refresh_token_ttl_seconds, refresh_rotation)
 		VALUES(?,?,?,?,?,?, ?,?,?,?, ?,?,?, ?,?,?)`,
-		projectID, orgID, c.ClientID, nullStr(secretHash), c.Name, c.Type,
+		projectID, orgArg, c.ClientID, nullStr(secretHash), c.Name, c.Type,
 		string(redirects), string(origins), string(grants), c.TokenEndpointAuthMethod,
 		requirePKCE, requireMFA, nullStr(c.JWTAudience),
 		nullInt(c.AccessTokenTTLSeconds), nullInt(c.RefreshTokenTTLSeconds), rotation)
@@ -522,7 +531,11 @@ func dbListClients(db *sql.DB, projectID string, orgID int64, includeDisabled bo
 	conds := []string{"project_id = ?"}
 	args := []any{projectID}
 	if orgID > 0 {
-		conds = append(conds, "organization_id = ?")
+		// Org-scoped read includes multi-org clients (organization_id
+		// IS NULL) too — they're usable from any org so they should
+		// surface in every org's client list. The flat project-wide
+		// view (orgID = 0) lists everything regardless.
+		conds = append(conds, "(organization_id = ? OR organization_id IS NULL)")
 		args = append(args, orgID)
 	}
 	if !includeDisabled {

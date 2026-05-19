@@ -492,8 +492,17 @@ func (a *App) handleAdminClientsList(w http.ResponseWriter, r *http.Request) {
 	httpJSON(w, map[string]any{"clients": clients, "count": len(clients)})
 }
 
+// handleAdminClientsCreate — accepts an optional organization_id /
+// organization_slug. When omitted, the client is created as
+// **multi-organization**: usable by every org in the project, with the
+// SaaS sending organization_slug on every public call. Use this when
+// one SaaS frontend deployment serves many customer orgs (Auth0
+// "Organizations" / Stytch B2B pattern). When set, the client is bound
+// to that single org (v0.4.0 default behaviour).
 func (a *App) handleAdminClientsCreate(w http.ResponseWriter, r *http.Request) {
-	org, pid, ok := adminOrgInner(w, r, true)
+	// adminOrgInner with require=false: missing org param is fine — we
+	// interpret it as "create a multi-org client".
+	org, pid, ok := adminOrgInner(w, r, false)
 	if !ok {
 		return
 	}
@@ -544,13 +553,16 @@ func (a *App) handleAdminClientsCreate(w http.ResponseWriter, r *http.Request) {
 		secretHash = hashToken(secret)
 		c.TokenEndpointAuthMethod = "client_secret_post"
 	}
-	if _, err := dbCreateClient(ctx.AppDB(), pid, org.ID, c, secretHash); err != nil {
+	if _, err := dbCreateClient(ctx.AppDB(), pid, orgID(org), c, secretHash); err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, nil, c.ClientID, "client_created", r.RemoteAddr, r.UserAgent(),
-		map[string]any{"name": body.Name, "type": body.Type})
-	out := map[string]any{"client": c, "client_id": c.ClientID}
+	auditMeta := map[string]any{"name": body.Name, "type": body.Type}
+	if org == nil {
+		auditMeta["scope"] = "multi_organization"
+	}
+	dbAudit(ctx.AppDB(), pid, orgID(org), nil, c.ClientID, "client_created", r.RemoteAddr, r.UserAgent(), auditMeta)
+	out := map[string]any{"client": c, "client_id": c.ClientID, "multi_organization": org == nil}
 	if secret != "" {
 		out["client_secret"] = secret
 		out["note"] = "store this secret — it will not be shown again"

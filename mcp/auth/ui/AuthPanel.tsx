@@ -1281,9 +1281,8 @@ function ClientsTab({ activeOrgSlug, orgs, projectId, setStatus }: {
       <div className="flex items-center gap-3">
         <button
           onClick={() => setCreateOpen(true)}
-          disabled={!activeOrgSlug}
-          title={activeOrgSlug ? "Register a new OAuth client" : "Pick an organization first to register a client"}
-          className="px-3 py-1 text-sm bg-accent text-bg rounded font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+          title="Register a new OAuth client"
+          className="px-3 py-1 text-sm bg-accent text-bg rounded font-medium"
         >+ New client</button>
         <label className="flex items-center gap-2 text-text-muted text-sm">
           <input
@@ -1300,9 +1299,7 @@ function ClientsTab({ activeOrgSlug, orgs, projectId, setStatus }: {
         <EmptyState
           icon={<KeyIcon />}
           title="No OAuth clients yet"
-          hint={activeOrgSlug
-            ? "Create one for each frontend or service that consumes auth — SPA, web app, mobile, or machine-to-machine."
-            : "No clients in any organization. Pick an organization above to add one."}
+          hint="Create one for each frontend or service that consumes auth — SPA, web, mobile, or M2M. Bind to one organization, or leave multi-organization to serve many."
         />
       ) : (
         <ul className="space-y-2">
@@ -1310,7 +1307,8 @@ function ClientsTab({ activeOrgSlug, orgs, projectId, setStatus }: {
             <ClientCard
               key={c.id}
               client={c}
-              org={!activeOrgSlug ? orgByID.get(c.organization_id) : null}
+              org={c.organization_id ? orgByID.get(c.organization_id) : null}
+              showOrg={!activeOrgSlug || !c.organization_id}
               onRotate={() => rotate(c)}
               onDisable={() => disable(c)}
             />
@@ -1318,9 +1316,10 @@ function ClientsTab({ activeOrgSlug, orgs, projectId, setStatus }: {
         </ul>
       )}
 
-      {createOpen && activeOrgSlug && (
+      {createOpen && (
         <CreateClientModal
-          orgSlug={activeOrgSlug}
+          defaultOrgSlug={activeOrgSlug}
+          orgs={orgs}
           onClose={() => setCreateOpen(false)}
           onCreated={(client_id, secret) => {
             setCreateOpen(false);
@@ -1341,13 +1340,15 @@ function ClientsTab({ activeOrgSlug, orgs, projectId, setStatus }: {
   );
 }
 
-function ClientCard({ client, org, onRotate, onDisable }: {
+function ClientCard({ client, org, showOrg, onRotate, onDisable }: {
   client: Client;
   org: Organization | null | undefined;
+  showOrg: boolean;
   onRotate: () => void;
   onDisable: () => void;
 }) {
   const isPublic = client.type === "spa" || client.type === "native";
+  const isMultiOrg = !client.organization_id;
   return (
     <li className={
       "border border-border rounded bg-bg-card p-3 " +
@@ -1355,14 +1356,18 @@ function ClientCard({ client, org, onRotate, onDisable }: {
     }>
       <div className="flex items-start gap-3">
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="text-text font-medium">{client.name}</span>
             <ClientTypePill type={client.type} />
-            {org && (
-              <span className="inline-flex items-center gap-1.5 text-xs text-text-muted">
-                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: org.color || "#94a3b8" }} />
-                {org.name}
-              </span>
+            {isMultiOrg ? (
+              <Pill tone="ok">multi-organization</Pill>
+            ) : (
+              showOrg && org && (
+                <span className="inline-flex items-center gap-1.5 text-xs text-text-muted">
+                  <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: org.color || "#94a3b8" }} />
+                  {org.name}
+                </span>
+              )
             )}
             {client.disabled_at && <Pill tone="muted">disabled</Pill>}
             {client.require_mfa && <Pill tone="ok">MFA required</Pill>}
@@ -1419,14 +1424,20 @@ function ClientTypePill({ type }: { type: Client["type"] }) {
   return <Pill tone="muted">{label}</Pill>;
 }
 
-function CreateClientModal({ orgSlug, onClose, onCreated, setStatus }: {
-  orgSlug: string;
+function CreateClientModal({ defaultOrgSlug, orgs, onClose, onCreated, setStatus }: {
+  defaultOrgSlug: string | null;
+  orgs: Organization[];
   onClose: () => void;
   onCreated: (clientId: string, secret?: string) => void;
   setStatus: (s: string) => void;
 }) {
   const [name, setName] = useState("");
   const [type, setType] = useState<Client["type"]>("web");
+  // scope: "single" → bound to one org (the v0.4.0 default).
+  //        "multi"  → no org binding; SaaS sends organization_slug on
+  //                   every public call (Auth0 Organizations pattern).
+  const [scope, setScope] = useState<"single" | "multi">(defaultOrgSlug ? "single" : "multi");
+  const [orgSlug, setOrgSlug] = useState<string>(defaultOrgSlug || (orgs[0]?.slug ?? ""));
   const [redirects, setRedirects] = useState("");
   const [audience, setAudience] = useState("");
   const [requireMFA, setRequireMFA] = useState(false);
@@ -1435,6 +1446,7 @@ function CreateClientModal({ orgSlug, onClose, onCreated, setStatus }: {
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
+    if (scope === "single" && !orgSlug) return;
     setBusy(true);
     try {
       const body = {
@@ -1444,7 +1456,10 @@ function CreateClientModal({ orgSlug, onClose, onCreated, setStatus }: {
         require_mfa: requireMFA,
         jwt_audience: audience.trim() || undefined,
       };
-      const r = await fetch(`${API}/admin/clients${orgQS(orgSlug)}`, {
+      // scope=single → ?organization_slug=… binds the client to that org.
+      // scope=multi  → no org query → server creates a multi-org client.
+      const qs = scope === "single" ? orgQS(orgSlug) : "";
+      const r = await fetch(`${API}/admin/clients${qs}`, {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -1474,6 +1489,29 @@ function CreateClientModal({ orgSlug, onClose, onCreated, setStatus }: {
             className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
           />
         </Field>
+        <Field label="Scope" hint={
+          scope === "single"
+            ? "Bind this client to one organization. The SaaS frontend sends only client_id; the server derives the org. Default."
+            : "One client serves all organizations. The SaaS frontend MUST send organization_slug on every /signup, /login, /refresh call. Use when one deployment hosts many customer orgs."
+        }>
+          <div className="flex gap-1">
+            <ModeButton active={scope === "single"} onClick={() => setScope("single")}>One organization</ModeButton>
+            <ModeButton active={scope === "multi"} onClick={() => setScope("multi")}>Multi-organization</ModeButton>
+          </div>
+        </Field>
+        {scope === "single" && (
+          <Field label="Organization">
+            <select
+              value={orgSlug} onChange={(e) => setOrgSlug(e.target.value)}
+              required
+              className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
+            >
+              {orgs.filter((o) => o.status === "active").map((o) => (
+                <option key={o.id} value={o.slug}>{o.name} ({o.slug})</option>
+              ))}
+            </select>
+          </Field>
+        )}
         <Field label="Type" hint={typeHint(type)}>
           <select
             value={type} onChange={(e) => setType(e.target.value as Client["type"])}

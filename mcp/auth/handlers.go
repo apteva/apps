@@ -128,10 +128,11 @@ func (a *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Email       string `json:"email"`
-		Password    string `json:"password"`
-		DisplayName string `json:"display_name"`
-		ClientID    string `json:"client_id"`
+		Email            string `json:"email"`
+		Password         string `json:"password"`
+		DisplayName      string `json:"display_name"`
+		ClientID         string `json:"client_id"`
+		OrganizationSlug string `json:"organization_slug"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
@@ -142,9 +143,14 @@ func (a *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "email and password required")
 		return
 	}
-	client, org, clientErr := requireClient(ctx, pid, body.ClientID)
+	client, clientErr := requireClient(ctx, pid, body.ClientID)
 	if clientErr != nil {
 		httpErr(w, http.StatusBadRequest, clientErr.Error())
+		return
+	}
+	org, orgErr := resolveOrgForRequest(ctx, pid, client, body.OrganizationSlug)
+	if orgErr != nil {
+		httpErr(w, http.StatusBadRequest, orgErr.Error())
 		return
 	}
 	if reason := validatePassword(body.Password,
@@ -218,17 +224,23 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-		ClientID string `json:"client_id"`
+		Email            string `json:"email"`
+		Password         string `json:"password"`
+		ClientID         string `json:"client_id"`
+		OrganizationSlug string `json:"organization_slug"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	client, org, clientErr := requireClient(ctx, pid, body.ClientID)
+	client, clientErr := requireClient(ctx, pid, body.ClientID)
 	if clientErr != nil {
 		httpErr(w, http.StatusBadRequest, clientErr.Error())
+		return
+	}
+	org, orgErr := resolveOrgForRequest(ctx, pid, client, body.OrganizationSlug)
+	if orgErr != nil {
+		httpErr(w, http.StatusBadRequest, orgErr.Error())
 		return
 	}
 
@@ -327,8 +339,9 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		RefreshToken string `json:"refresh_token"`
-		ClientID     string `json:"client_id"`
+		RefreshToken     string `json:"refresh_token"`
+		ClientID         string `json:"client_id"`
+		OrganizationSlug string `json:"organization_slug"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
@@ -338,7 +351,7 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "refresh_token required")
 		return
 	}
-	client, org, clientErr := requireClient(ctx, pid, body.ClientID)
+	client, clientErr := requireClient(ctx, pid, body.ClientID)
 	if clientErr != nil {
 		httpErr(w, http.StatusBadRequest, clientErr.Error())
 		return
@@ -358,10 +371,28 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
 		return
 	}
-	// Defense-in-depth: the session's org_id should match the client's.
-	// They're the same partition, but mismatching them would be a strong
-	// signal of a stolen-and-replayed refresh from another org.
-	if sess.OrganizationID != org.ID {
+	// The session carries the org it was minted under. For single-org
+	// clients we cross-check that the session's org matches the
+	// client's org (defense-in-depth — they're the same partition,
+	// mismatching would be a strong signal of cross-org replay). For
+	// multi-org clients we accept whichever org the session was issued
+	// for, but if the caller passed organization_slug we also verify
+	// it matches the session — a stale-but-correct hint shouldn't
+	// override the session, but a *wrong* one is a red flag.
+	if client.OrganizationID > 0 && sess.OrganizationID != client.OrganizationID {
+		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
+		return
+	}
+	org, err := dbGetOrgByID(ctx.AppDB(), pid, sess.OrganizationID)
+	if err != nil {
+		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
+		return
+	}
+	if org.Status != "active" {
+		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
+		return
+	}
+	if hint := strings.TrimSpace(strings.ToLower(body.OrganizationSlug)); hint != "" && hint != org.Slug {
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
 		return
 	}
@@ -560,44 +591,79 @@ func mintSession(ctx *sdk.AppCtx, projectID string, org *Organization, user *Use
 	return tokenPair{access: access, refresh: refresh, expiresIn: int(accessTTL.Seconds())}, nil
 }
 
-// requireClient looks up the client by id and resolves its Organization.
-// When client_id is omitted and exactly one active client exists across
-// the project, that's used — preserves the v0.1.x convenience for new
-// installs without registered clients.
-func requireClient(ctx *sdk.AppCtx, projectID, clientID string) (*Client, *Organization, error) {
+// requireClient looks up the client by id. Does NOT resolve the org —
+// see resolveOrgForRequest for that, since the org might come from the
+// client row (single-org client) OR from a body/query parameter
+// (multi-org client). When client_id is omitted and exactly one active
+// client exists across the project, that's used — preserves the v0.1.x
+// convenience for new installs without registered clients.
+func requireClient(ctx *sdk.AppCtx, projectID, clientID string) (*Client, error) {
 	if clientID == "" {
 		clients, err := dbListClients(ctx.AppDB(), projectID, 0, false)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if len(clients) == 1 {
 			c := clients[0]
-			org, err := dbGetOrgByID(ctx.AppDB(), projectID, c.OrganizationID)
-			if err != nil {
-				return nil, nil, fmt.Errorf("client org missing: %w", err)
-			}
-			return &c, org, nil
+			return &c, nil
 		}
-		return nil, nil, errors.New("client_id required (multiple clients registered)")
+		return nil, errors.New("client_id required (multiple clients registered)")
 	}
 	c, err := dbGetClientByClientID(ctx.AppDB(), projectID, clientID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil, errors.New("unknown client_id")
+			return nil, errors.New("unknown client_id")
 		}
-		return nil, nil, err
+		return nil, err
 	}
 	if c.DisabledAt != "" {
-		return nil, nil, errors.New("client disabled")
+		return nil, errors.New("client disabled")
 	}
-	org, err := dbGetOrgByID(ctx.AppDB(), projectID, c.OrganizationID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("client org missing: %w", err)
+	return c, nil
+}
+
+// resolveOrgForRequest picks the Organization for a public-endpoint
+// request. Two paths:
+//
+//  1. Single-org client (client.OrganizationID > 0) — org comes from
+//     the client row. The SaaS doesn't need to send anything extra;
+//     bodyOrgSlug is ignored even if present (the client's org wins
+//     so a typo can't accidentally land users in the wrong pool).
+//  2. Multi-org client (client.OrganizationID == 0) — org must be
+//     supplied by the caller via the request body's organization_slug
+//     field. Missing or unknown → error.
+//
+// Either way the caller gets the resolved Organization with status
+// checked. Archived orgs error.
+func resolveOrgForRequest(ctx *sdk.AppCtx, projectID string, client *Client, bodyOrgSlug string) (*Organization, error) {
+	if client == nil {
+		return nil, errors.New("client required")
+	}
+	var org *Organization
+	if client.OrganizationID > 0 {
+		o, err := dbGetOrgByID(ctx.AppDB(), projectID, client.OrganizationID)
+		if err != nil {
+			return nil, fmt.Errorf("client org missing: %w", err)
+		}
+		org = o
+	} else {
+		slug := strings.TrimSpace(strings.ToLower(bodyOrgSlug))
+		if slug == "" {
+			return nil, errors.New("organization_slug required (this client is multi-organization)")
+		}
+		o, err := dbGetOrgBySlug(ctx.AppDB(), projectID, slug)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, errors.New("unknown organization_slug")
+			}
+			return nil, err
+		}
+		org = o
 	}
 	if org.Status != "active" {
-		return nil, nil, errors.New("organization archived")
+		return nil, errors.New("organization archived")
 	}
-	return c, org, nil
+	return org, nil
 }
 
 // orgFromRequest resolves the org for routes whose URL carries the slug

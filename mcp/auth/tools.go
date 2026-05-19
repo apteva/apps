@@ -302,10 +302,10 @@ func (a *App) toolClientsCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
-	org, err := orgFromArgs(ctx, pid, args)
-	if err != nil {
-		return nil, err
-	}
+	// Optional: organization_id/_slug = single-org client (default);
+	// omitted = multi-organization client (one SaaS deployment serves
+	// many orgs, with org_slug supplied on every public call).
+	org, _ := orgFromArgsOptional(ctx, pid, args)
 	name, _ := args["name"].(string)
 	typ, _ := args["type"].(string)
 	if name == "" || typ == "" {
@@ -336,14 +336,22 @@ func (a *App) toolClientsCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		secretHash = hashToken(secret)
 		c.TokenEndpointAuthMethod = "client_secret_post"
 	}
-	if _, err := dbCreateClient(ctx.AppDB(), pid, org.ID, c, secretHash); err != nil {
+	var oid int64
+	if org != nil {
+		oid = org.ID
+	}
+	if _, err := dbCreateClient(ctx.AppDB(), pid, oid, c, secretHash); err != nil {
 		return nil, err
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, nil, c.ClientID, "client_created", "", "agent",
-		map[string]any{"name": name, "type": typ})
+	auditMeta := map[string]any{"name": name, "type": typ}
+	if org == nil {
+		auditMeta["scope"] = "multi_organization"
+	}
+	dbAudit(ctx.AppDB(), pid, oid, nil, c.ClientID, "client_created", "", "agent", auditMeta)
 	out := map[string]any{
-		"client":    c,
-		"client_id": c.ClientID,
+		"client":             c,
+		"client_id":          c.ClientID,
+		"multi_organization": org == nil,
 	}
 	if secret != "" {
 		out["client_secret"] = secret
@@ -409,6 +417,28 @@ func lookupUserByArgs(ctx *sdk.AppCtx, projectID string, orgID int64, args map[s
 		return dbGetUserByEmail(ctx.AppDB(), projectID, orgID, email)
 	}
 	return nil, errors.New("id or email required")
+}
+
+// orgFromArgsOptional — same lookup as orgFromArgs but returns
+// (nil, nil) when neither id nor slug is supplied. Used by client
+// creation where the absence of an org means "this is a multi-org
+// client". An *invalid* org id/slug still errors.
+func orgFromArgsOptional(ctx *sdk.AppCtx, projectID string, args map[string]any) (*Organization, error) {
+	if slug, _ := args["organization_slug"].(string); slug != "" {
+		o, err := dbGetOrgBySlug(ctx.AppDB(), projectID, slug)
+		if err != nil {
+			return nil, errors.New("unknown organization_slug")
+		}
+		return o, nil
+	}
+	if id, ok := intReq(args, "organization_id"); ok {
+		o, err := dbGetOrgByID(ctx.AppDB(), projectID, id)
+		if err != nil {
+			return nil, errors.New("unknown organization_id")
+		}
+		return o, nil
+	}
+	return nil, nil
 }
 
 // orgFromArgs — required-org resolver. Accepts organization_id or
