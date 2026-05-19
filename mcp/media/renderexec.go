@@ -119,6 +119,11 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 	}
 	defer os.RemoveAll(jobDir)
 
+	// Resolve subject-aware crop window before planning, when the
+	// operation supports it. Mutates row.Params in place so buildPlan
+	// can see explicit crop_w/h/x/y. No-op for ops that don't crop.
+	row.Params = preprocessSmartCrop(ctx, app, sc, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
+
 	plan, err := buildPlan(row.Operation, row.SourceFileIDs, row.Params, row.OutputName)
 	if err != nil {
 		return 0, fmt.Errorf("build plan: %w", err)

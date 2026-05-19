@@ -122,15 +122,23 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		return 0, fmt.Errorf("remote ffmpeg unavailable on host_id=%d: %w", e.hostID, err)
 	}
 
-	plan, err := buildPlan(row.Operation, row.SourceFileIDs, row.Params, row.OutputName)
-	if err != nil {
-		return 0, fmt.Errorf("build plan: %w", err)
-	}
-
 	// Mint signed source URLs. Use a generous TTL because download +
 	// render + upload can take a while for big inputs, and a re-mint
 	// halfway through would require keeping more state on media's side.
 	sc := newStorageClient()
+
+	// Subject-aware crop pre-pass. We hoist this above buildPlan so
+	// the planner sees concrete crop_w/h/x/y instead of the symbolic
+	// iw/ih expression. preprocessSmartCrop reaches into storage to
+	// download the cached thumbnail and into the media DB for source
+	// dimensions, so it can only run after sc exists. No-op for ops
+	// that don't crop (trim, concat, audio_extract, …).
+	row.Params = preprocessSmartCrop(ctx, app, sc, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
+
+	plan, err := buildPlan(row.Operation, row.SourceFileIDs, row.Params, row.OutputName)
+	if err != nil {
+		return 0, fmt.Errorf("build plan: %w", err)
+	}
 	signedURLs := make([]string, 0, len(row.SourceFileIDs))
 	sourceNames := make([]string, 0, len(row.SourceFileIDs))
 	for _, fidStr := range row.SourceFileIDs {

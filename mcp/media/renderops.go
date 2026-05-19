@@ -269,8 +269,20 @@ func planCrop(sources []string, raw json.RawMessage, outputName string) (*opPlan
 // frame at a specific time, possibly multiple per source.
 
 type extractFrameParams struct {
-	AtMs  int64 `json:"at_ms"`
-	Width int   `json:"width,omitempty"`
+	AtMs        int64  `json:"at_ms"`
+	Width       int    `json:"width,omitempty"`
+	TargetRatio string `json:"target_ratio,omitempty"` // "1:1", "9:16", "4:5", … — if set, output is cropped + scaled to that ratio
+	OutputWidth int    `json:"output_width,omitempty"` // width when target_ratio is set; defaults to Width or 1080
+	CropMode    string `json:"crop_mode,omitempty"`    // informational — actual crop_w/h/x/y is supplied by preprocessSmartCrop
+
+	// crop_w/h/x/y are injected by preprocessSmartCrop at execute
+	// time. When set, the filter chain uses explicit coords and
+	// skips the symbolic iw/ih path. Agents and the UI shouldn't
+	// pass these directly — set crop_mode instead.
+	CropW int `json:"crop_w,omitempty"`
+	CropH int `json:"crop_h,omitempty"`
+	CropX int `json:"crop_x,omitempty"`
+	CropY int `json:"crop_y,omitempty"`
 }
 
 func planExtractFrame(sources []string, raw json.RawMessage, outputName string) (*opPlan, error) {
@@ -291,7 +303,38 @@ func planExtractFrame(sources []string, raw json.RawMessage, outputName string) 
 		"-i", "{input}",
 		"-frames:v", "1",
 	}
-	if p.Width > 0 {
+	// Filter chain: build crop + scale, depending on which combo of
+	// params was supplied. Three modes:
+	//   1. No target_ratio + no width    → unchanged frame
+	//   2. No target_ratio + width       → scale only (back-compat)
+	//   3. target_ratio (any crop_mode)  → crop then scale to OutputWidth
+	//      The crop coords come from preprocessSmartCrop (smart/center
+	//      mode resolved upstream into crop_w/h/x/y) when present;
+	//      otherwise we fall back to a symbolic iw/ih center expression
+	//      so the render still proceeds even if smartcrop bailed.
+	if strings.TrimSpace(p.TargetRatio) != "" {
+		rw, rh, err := parseAspectRatio(p.TargetRatio)
+		if err != nil {
+			return nil, fmt.Errorf("extract_frame: %w", err)
+		}
+		outW := p.OutputWidth
+		if outW <= 0 {
+			outW = p.Width
+		}
+		if outW <= 0 {
+			outW = 1080
+		}
+		var cropExpr string
+		if p.CropW > 0 && p.CropH > 0 {
+			cropExpr = fmt.Sprintf("crop=%d:%d:%d:%d", p.CropW, p.CropH, p.CropX, p.CropY)
+		} else {
+			cropExpr = fmt.Sprintf(
+				"crop=w='if(gt(iw/ih,%d/%d),ih*%d/%d,iw)':h='if(gt(iw/ih,%d/%d),ih,iw*%d/%d)':x='(iw-out_w)/2':y='(ih-out_h)/2'",
+				rw, rh, rw, rh, rw, rh, rh, rw,
+			)
+		}
+		args = append(args, "-vf", cropExpr+","+fmt.Sprintf("scale=%d:-2", outW))
+	} else if p.Width > 0 {
 		args = append(args, "-vf", fmt.Sprintf("scale=%d:-2", p.Width))
 	}
 	if outputName == "" {
@@ -328,10 +371,20 @@ func planExtractFrame(sources []string, raw json.RawMessage, outputName string) 
 // before re-encoding the video, so we save audio bandwidth too.
 
 type extractReelParams struct {
-	StartMs     int64   `json:"start_ms"`
-	EndMs       int64   `json:"end_ms"`
-	TargetRatio string  `json:"target_ratio"` // "9:16" (default), "1:1", "4:5", "16:9", …
-	OutputWidth int     `json:"output_width"` // optional; default 1080
+	StartMs     int64  `json:"start_ms"`
+	EndMs       int64  `json:"end_ms"`
+	TargetRatio string `json:"target_ratio"` // "9:16" (default), "1:1", "4:5", "16:9", …
+	OutputWidth int    `json:"output_width"` // optional; default 1080
+	CropMode    string `json:"crop_mode,omitempty"` // "smart" (default) | "center" — passed through for logging; the actual crop_w/h/x/y is injected by preprocessSmartCrop
+
+	// crop_w/h/x/y are injected by preprocessSmartCrop at execute
+	// time. When set, the filter chain uses explicit coords and
+	// skips the symbolic iw/ih path. Agents and the UI shouldn't
+	// pass these directly.
+	CropW int `json:"crop_w,omitempty"`
+	CropH int `json:"crop_h,omitempty"`
+	CropX int `json:"crop_x,omitempty"`
+	CropY int `json:"crop_y,omitempty"`
 }
 
 func planExtractReel(sources []string, raw json.RawMessage, outputName string) (*opPlan, error) {
@@ -358,16 +411,21 @@ func planExtractReel(sources []string, raw json.RawMessage, outputName string) (
 	if err != nil {
 		return nil, fmt.Errorf("extract_reel: %w", err)
 	}
-	// Filter chain:
-	//   crop=W:H:X:Y where:
-	//     W = if source-wider-than-target then ih*rw/rh else iw
-	//     H = if source-wider-than-target then ih       else iw*rh/rw
-	//   X,Y = center using out_w / out_h (auto-references)
-	// Then scale=output_width:-2 (height auto-derived, even).
-	cropExpr := fmt.Sprintf(
-		"crop=w='if(gt(iw/ih,%d/%d),ih*%d/%d,iw)':h='if(gt(iw/ih,%d/%d),ih,iw*%d/%d)':x='(iw-out_w)/2':y='(ih-out_h)/2'",
-		rw, rh, rw, rh, rw, rh, rh, rw,
-	)
+	// Filter chain: explicit crop (when preprocessSmartCrop has
+	// already resolved smart/center coords into crop_w/h/x/y on the
+	// params) takes priority; otherwise fall back to the original
+	// symbolic iw/ih center expression so renders still proceed when
+	// the pre-pass bails (no probed dimensions, missing thumbnail,
+	// older media row, smartcrop analyzer error, …).
+	var cropExpr string
+	if p.CropW > 0 && p.CropH > 0 {
+		cropExpr = fmt.Sprintf("crop=%d:%d:%d:%d", p.CropW, p.CropH, p.CropX, p.CropY)
+	} else {
+		cropExpr = fmt.Sprintf(
+			"crop=w='if(gt(iw/ih,%d/%d),ih*%d/%d,iw)':h='if(gt(iw/ih,%d/%d),ih,iw*%d/%d)':x='(iw-out_w)/2':y='(ih-out_h)/2'",
+			rw, rh, rw, rh, rw, rh, rh, rw,
+		)
+	}
 	scaleExpr := fmt.Sprintf("scale=%d:-2", p.OutputWidth)
 	args := []string{
 		"-y",
