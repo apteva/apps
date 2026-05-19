@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.4.0
+version: 0.5.0
 description: |
   Generate images, video, audio, and music via any compatible provider.
   Optionally saves outputs to the Storage app for permanent references.
@@ -57,9 +57,9 @@ requires:
       label: "Image provider"
     - role: video_provider
       kind: integration
-      compatible_slugs: [replicate, runway, pika]
+      compatible_slugs: [venice-ai, replicate, runway, pika]
       capabilities: [video.generate]
-      tools: { video.generate: generate_video }
+      tools: { video.generate: queue_video }
       required: false
       label: "Video provider"
     - role: audio_provider
@@ -131,9 +131,17 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{
+		{
+			Name:     "video-poll",
+			Schedule: "@every 15s",
+			Run:      a.videoPollWorker,
+		},
+	}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 // ─── HTTP routes (panel data) ──────────────────────────────────────
@@ -143,6 +151,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/generations", Handler: a.handleListGenerations},
 		{Pattern: "/generate", Handler: a.handleGenerate},
 		{Pattern: "/bindings", Handler: a.handleBindings},
+		{Pattern: "/models", Handler: a.handleListModels},
+		{Pattern: "/video-jobs", Handler: a.handleListVideoJobs},
 	}
 }
 

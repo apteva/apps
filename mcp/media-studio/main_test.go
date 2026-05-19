@@ -13,6 +13,7 @@ package main
 // so no real OpenAI calls fly out.
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -1096,5 +1097,144 @@ func TestToolMediaGenerate_Image_EditPath_ProviderDoesNotSupportEdit(t *testing.
 	res := out.(map[string]any)
 	if res["isError"] != true {
 		t.Errorf("expected isError=true when openai-api routed to edit, got %+v", res)
+	}
+}
+
+// --- video (async / queue) path -----------------------------------
+
+func TestToolMediaGenerate_Video_VeniceQueue(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	pf.identity.Bindings["video_provider"] = float64(77)
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"model":"kling-2","queue_id":"q-abc-123"}`),
+	}
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":     "video",
+		"prompt":   "a cat walking through a sunlit garden",
+		"model":    "kling-2",
+		"duration": "5s",
+	})
+	if err != nil {
+		t.Fatalf("toolMediaGenerate: %v", err)
+	}
+	res := out.(map[string]any)
+	meta := res["_meta"].(map[string]any)
+	if meta["status"] != "queued" || meta["queue_id"] != "q-abc-123" {
+		t.Errorf("expected queued meta, got %+v", meta)
+	}
+	if pf.executeCalls[0].Tool != "queue_video" {
+		t.Errorf("provider tool = %q, want queue_video", pf.executeCalls[0].Tool)
+	}
+	if pf.executeCalls[0].Input["duration"] != "5s" {
+		t.Errorf("duration not forwarded: %+v", pf.executeCalls[0].Input)
+	}
+
+	// video_jobs row landed in 'queued' state.
+	var count int
+	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM video_jobs WHERE status='queued'`).Scan(&count)
+	if count != 1 {
+		t.Errorf("expected 1 queued video_jobs row, got %d", count)
+	}
+}
+
+func TestVideoPollWorker_StillProcessing_BumpsAttempts(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	pf.identity.Bindings["video_provider"] = float64(77)
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"status":"PROCESSING","average_execution_time":120000,"execution_duration":40000}`),
+	}
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	// Seed a queued job.
+	_, err := ctx.AppDB().Exec(
+		`INSERT INTO video_jobs (project_id, queue_id, provider, model, prompt, status)
+		 VALUES ('test-proj', 'q-1', 'venice-ai', 'kling-2', 'p', 'queued')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.videoPollWorker(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var status string
+	var attempts int
+	ctx.AppDB().QueryRow(`SELECT status, attempts FROM video_jobs WHERE queue_id='q-1'`).Scan(&status, &attempts)
+	if status != "polling" {
+		t.Errorf("status = %q, want polling", status)
+	}
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want 1", attempts)
+	}
+}
+
+func TestVideoPollWorker_Completes_SavesToStorageAndInsertsGenerations(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	pf.identity.Bindings["video_provider"] = float64(77)
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"_binary":true,"base64":"VklERU8=","mimeType":"video/mp4","size":5}`),
+	}
+	pf.nextCallResult = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":9999}"}]}}`,
+	)
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	_, err := ctx.AppDB().Exec(
+		`INSERT INTO video_jobs (project_id, queue_id, provider, model, prompt, status)
+		 VALUES ('test-proj', 'q-2', 'venice-ai', 'kling-2', 'sunset clip', 'queued')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.videoPollWorker(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var status string
+	var storageID, generationID int64
+	ctx.AppDB().QueryRow(
+		`SELECT status, result_storage_id, generation_id FROM video_jobs WHERE queue_id='q-2'`,
+	).Scan(&status, &storageID, &generationID)
+	if status != "complete" {
+		t.Errorf("status = %q, want complete", status)
+	}
+	if storageID != 9999 {
+		t.Errorf("result_storage_id = %d, want 9999", storageID)
+	}
+	if generationID == 0 {
+		t.Error("generation_id should be populated after complete")
+	}
+
+	// Storage save call must have used the videos folder.
+	if len(pf.callAppCalls) == 0 || pf.callAppCalls[0].Tool != "files_upload" {
+		t.Fatalf("expected files_upload, got %+v", pf.callAppCalls)
+	}
+	if folder, _ := pf.callAppCalls[0].Input["folder"].(string); folder != "/.generated/videos/" {
+		t.Errorf("storage folder = %q, want /.generated/videos/", folder)
+	}
+
+	// Generations row exists with kind=video.
+	var kind string
+	ctx.AppDB().QueryRow(`SELECT kind FROM generations WHERE id=?`, generationID).Scan(&kind)
+	if kind != "video" {
+		t.Errorf("generations.kind = %q, want video", kind)
+	}
+}
+
+func TestVideoPollWorker_NoJobsNoOp(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	app := &App{}
+	if err := app.videoPollWorker(context.Background(), ctx); err != nil {
+		t.Fatalf("unexpected error on empty queue: %v", err)
 	}
 }

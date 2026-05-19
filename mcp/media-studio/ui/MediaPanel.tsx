@@ -242,6 +242,18 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [sourceImageLabel, setSourceImageLabel] = useState("");
   const [editModel, setEditModel] = useState<EditModel>("firered-image-edit");
   const isEditMode = activeKind === "image" && sourceImage.trim() !== "";
+  // Live-loaded model list for the bound provider, refreshed on tab
+  // switch and binding change. Falls back to the hardcoded
+  // OpenAI-flavour list (IMAGE_MODELS) when the fetch fails so the
+  // dropdown is never empty.
+  const [liveModels, setLiveModels] = useState<{ id: string; label: string }[] | null>(null);
+  const [liveProvider, setLiveProvider] = useState<string>("");
+  // In-flight video jobs (queued / polling). Shown as a small badge
+  // above the video gallery so the user knows something is cooking
+  // between submit and the eventual media.generated event.
+  const [videoJobs, setVideoJobs] = useState<
+    { id: number; queue_id: string; model: string; prompt: string; status: string; error: string }[]
+  >([]);
 
   useEffect(() => {
     const allowed = IMAGE_SIZES[imageModel] || ["1024x1024"];
@@ -287,6 +299,71 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   useEffect(() => {
     loadGenerations();
   }, [loadGenerations]);
+
+  // Poll in-flight video jobs every 5s while the Videos tab is active.
+  // 5s is finer than the sidecar's 15s worker tick so the user sees the
+  // failed→cleared transition promptly when the worker gives up.
+  useEffect(() => {
+    if (activeKind !== "video") return;
+    let cancelled = false;
+    const load = () => {
+      fetch(`${API}/video-jobs?project_id=${encodeURIComponent(projectId)}`, {
+        credentials: "same-origin",
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (cancelled || !data) return;
+          setVideoJobs(Array.isArray(data.jobs) ? data.jobs : []);
+        })
+        .catch(() => {});
+    };
+    load();
+    const t = window.setInterval(load, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(t);
+    };
+  }, [activeKind, projectId]);
+
+  // Live-load the model list whenever the active kind or the bound
+  // provider for that kind changes. The sidecar caches per-(provider,
+  // kind) for 10 min so this is cheap on tab switches.
+  useEffect(() => {
+    const currentBoundSlug = bindings?.[activeKind]?.slug || "";
+    if (!currentBoundSlug) {
+      setLiveModels(null);
+      setLiveProvider("");
+      return;
+    }
+    let cancelled = false;
+    fetch(`${API}/models?kind=${activeKind}`, { credentials: "same-origin" })
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (cancelled || !data) return;
+        if (Array.isArray(data.models)) {
+          setLiveModels(data.models);
+          setLiveProvider(String(data.provider || ""));
+          // Snap the active image model to the first live option when
+          // the current selection isn't in the live list (e.g. user
+          // switched provider from OpenAI to Venice — gpt-image-2 isn't
+          // a Venice model).
+          if (activeKind === "image" && data.models.length > 0) {
+            const haveSelection = data.models.some(
+              (m: { id: string }) => m.id === imageModel,
+            );
+            if (!haveSelection) {
+              setImageModel(data.models[0].id as ImageModel);
+            }
+          }
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLiveModels(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeKind, bindings]);
 
   // Live refresh — dispatcher fires media.generated on every success.
   // Refresh when the event's kind matches the current tab; otherwise
@@ -349,6 +426,14 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       if (result.isError) {
         const msg = result.content?.find((c) => c.type === "text")?.text || "generation failed";
         setStatus(`Error: ${msg}`);
+        return;
+      }
+      // Async kinds (video today) return _meta.status === "queued".
+      // Tell the user the bytes will arrive later via the event/poll loop.
+      const meta = (result as unknown as { _meta?: { status?: string; job_id?: number } })._meta;
+      if (meta?.status === "queued") {
+        setPrompt("");
+        setStatus(`Queued — job #${meta.job_id}, polling for completion…`);
         return;
       }
       setPrompt("");
@@ -442,6 +527,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             generating={generating}
             disabled={!isBound}
             isEditMode={isEditMode}
+            liveModels={liveModels}
+            liveProvider={liveProvider}
             imageModel={imageModel}
             setImageModel={setImageModel}
             imageSize={imageSize}
@@ -459,6 +546,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             voice={voice}
             setVoice={setVoice}
           />
+
+          {activeKind === "video" && videoJobs.length > 0 && (
+            <VideoJobsBanner jobs={videoJobs} />
+          )}
 
           <div className="flex-1 overflow-auto border border-border rounded">
             {items.length === 0 ? (
@@ -552,6 +643,8 @@ interface ComposerProps {
   generating: boolean;
   disabled: boolean;
   isEditMode: boolean;
+  liveModels: { id: string; label: string }[] | null;
+  liveProvider: string;
   imageModel: ImageModel;
   setImageModel: (v: ImageModel) => void;
   imageSize: string;
@@ -615,6 +708,8 @@ function Composer(p: ComposerProps) {
           setQuality={p.setImageQuality}
           format={p.imageFormat}
           setFormat={p.setImageFormat}
+          liveModels={p.liveModels}
+          liveProvider={p.liveProvider}
         />
       )}
       {p.kind === "video" && (
@@ -786,6 +881,8 @@ function ImageOptions({
   setQuality,
   format,
   setFormat,
+  liveModels,
+  liveProvider,
 }: {
   model: ImageModel;
   setModel: (v: ImageModel) => void;
@@ -795,21 +892,39 @@ function ImageOptions({
   setQuality: (v: string) => void;
   format: string;
   setFormat: (v: string) => void;
+  liveModels: { id: string; label: string }[] | null;
+  liveProvider: string;
 }) {
+  // Live list wins when present. Otherwise fall back to the
+  // OpenAI-flavour hardcoded matrix (so dropdown is never empty).
+  const usingLive = liveModels && liveModels.length > 0;
   return (
     <>
       <div>
-        <label className="text-text-muted text-xs block">Model</label>
+        <label className="text-text-muted text-xs block">
+          Model
+          {usingLive && (
+            <span className="text-text-dim ml-1" style={{ fontSize: 10 }}>
+              · {liveProvider} ({liveModels!.length})
+            </span>
+          )}
+        </label>
         <select
           value={model}
           onChange={(e) => setModel(e.target.value as ImageModel)}
           className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
         >
-          {IMAGE_MODELS.map((m) => (
-            <option key={m} value={m}>
-              {IMAGE_MODEL_LABELS[m]}
-            </option>
-          ))}
+          {usingLive
+            ? liveModels!.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))
+            : IMAGE_MODELS.map((m) => (
+                <option key={m} value={m}>
+                  {IMAGE_MODEL_LABELS[m]}
+                </option>
+              ))}
         </select>
       </div>
       <div>
@@ -1061,6 +1176,44 @@ function DetailAside({
         )}
       </div>
     </aside>
+  );
+}
+
+function VideoJobsBanner({
+  jobs,
+}: {
+  jobs: { id: number; queue_id: string; model: string; prompt: string; status: string; error: string }[];
+}) {
+  const inFlight = jobs.filter((j) => j.status === "queued" || j.status === "polling");
+  const failed = jobs.filter((j) => j.status === "failed");
+  if (inFlight.length === 0 && failed.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-1 p-2 rounded border border-border bg-bg-card">
+      {inFlight.length > 0 && (
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-text">
+            <strong>{inFlight.length}</strong> video{inFlight.length === 1 ? "" : "s"} processing
+          </span>
+          <span className="text-text-dim">
+            {inFlight
+              .slice(0, 3)
+              .map((j) => `#${j.id} (${j.model})`)
+              .join(", ")}
+            {inFlight.length > 3 && `, +${inFlight.length - 3} more`}
+          </span>
+        </div>
+      )}
+      {failed.map((j) => (
+        <div key={j.id} className="flex items-start gap-2 text-xs">
+          <span className="text-text" style={{ color: "var(--apteva-danger, #ef4444)" }}>
+            Failed #{j.id} ({j.model})
+          </span>
+          <span className="text-text-dim flex-1 truncate" title={j.error}>
+            {j.error || "(no detail)"}
+          </span>
+        </div>
+      ))}
+    </div>
   );
 }
 

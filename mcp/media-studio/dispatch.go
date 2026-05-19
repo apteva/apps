@@ -125,12 +125,13 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return mcpError("bound " + h.Role + " (" + bound.AppSlug + ") doesn't support " + capability), nil
 	}
 
-	// Source-image (edit flow) — resolve "storage:N" / URL / base64 into
-	// the bytes-or-URL the per-provider builder will pass through.
-	// We preserve the original ref under _source_image_ref so the
-	// history row (and the MCP _meta) can show "edit of #1234".
-	if capability == "image.edit" {
-		orig := strArg(args, "source_image", "")
+	// Source-image — resolve "storage:N" / URL / base64 into the
+	// bytes-or-URL the per-provider builder will pass through.
+	// Used by both image.edit (Venice's /image/edit `image`) and
+	// video.generate image-to-video (Venice's `image_url`).
+	// Original ref preserved under _source_image_ref so the history
+	// row (and MCP _meta) can show "edit of #1234".
+	if orig := strArg(args, "source_image", ""); orig != "" {
 		resolved, err := resolveSourceImage(ctx, orig)
 		if err != nil {
 			return mcpError("source_image: " + err.Error()), nil
@@ -162,6 +163,18 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	if len(media) == 0 {
 		return mcpError("provider returned zero items"), nil
+	}
+
+	// Async kinds (video, eventually music for some providers) return
+	// a job handle, not bytes. Short-circuit the sync save pipeline —
+	// the worker (worker.go) takes over the polling + storage save.
+	if kind == KindVideo {
+		queueID := media[0].UpstreamURL
+		modelEcho := normalizedModel
+		if modelEcho == "" {
+			modelEcho = strArg(args, "model", "")
+		}
+		return a.handleVideoQueueResponse(ctx, bound.AppSlug, args, queueID, modelEcho), nil
 	}
 
 	model := strArg(args, "model", "")

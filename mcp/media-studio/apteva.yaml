@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.4.0
+version: 0.5.0
 description: |
   Generate images, video, audio, and music via any compatible provider
   (OpenAI for image + TTS today; Replicate / ElevenLabs / Suno / Runway
@@ -36,13 +36,13 @@ requires:
 
     - role: video_provider
       kind: integration
-      compatible_slugs: [replicate, runway, pika]
+      compatible_slugs: [venice-ai, replicate, runway, pika]
       capabilities: [video.generate]
       tools:
-        video.generate: generate_video
+        video.generate: queue_video
       required: false
       label: "Video provider"
-      hint: "Bind a video model (Replicate, Runway, Pika) to enable video generation."
+      hint: "Bind a video model (Venice AI today; Replicate, Runway, Pika as integrations land) to enable video generation. Video generation is asynchronous — media_generate returns a queued job and the worker delivers the result via the media.generated event when it lands."
 
     - role: audio_provider
       kind: integration
