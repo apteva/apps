@@ -1,0 +1,84 @@
+schema: apteva-app/v1
+
+name: composer
+display_name: Composer
+version: 0.1.0
+description: |
+  Multi-clip video composition. Stitch generated or uploaded assets
+  into a single video — clips on a track, optional soundtrack, text
+  overlays. Render runs locally via the sidecar's bundled ffmpeg by
+  default, on a render host via instances when render_host_id is
+  set, or against a SaaS render backend (Shotstack et al) when one
+  is bound to the render_executor role.
+
+  v0.1 ships local + remote ffmpeg. SaaS executors land in 0.2.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/composer
+tags: [video, composition, render, ffmpeg, timeline]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.connections.execute
+    - platform.apps.call
+  apps:
+    - name: storage
+      version: ">=0.9.0"
+      reason: source bytes via signed URLs, rendered output written back as a new file
+    - name: instances
+      version: ">=0.2.0"
+      optional: true
+      reason: when render_host_id config > 0, renders SSH-execute on that instance (auto-installs ffmpeg on first use)
+    - name: media-studio
+      version: ">=0.5.0"
+      optional: true
+      reason: panel asset picker can browse media-studio generations as clip sources
+  integrations:
+    - role: render_executor
+      kind: integration
+      compatible_slugs: [shotstack, creatomate, json2video]
+      capabilities: [video.compose]
+      tools:
+        video.compose: queue_render
+      required: false
+      label: "Render backend (optional)"
+      hint: "When unbound, renders run locally via the sidecar's bundled ffmpeg (or remote via instances if render_host_id is set). v0.1 ignores this role — SaaS executors land in v0.2."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: composition_create, description: "Create a composition. Args: name?, tracks (array of {clips:[…]}), soundtrack? ({src, volume?}), output ({format, resolution, aspect, fps})." }
+    - { name: composition_update, description: "Patch a composition. Args: id, patch (subset of {name, tracks, soundtrack, output})." }
+    - { name: composition_get,    description: "Fetch one composition with its latest render row. Args: id." }
+    - { name: composition_list,   description: "List compositions for this project. Args: limit? (default 50)." }
+    - { name: composition_delete, description: "Delete a composition (cascades renders). Args: id." }
+    - { name: composition_render, description: "Submit a composition for rendering. Args: id, executor? ('local'|'remote' — overrides the auto ladder). Returns {render_id, status, …}." }
+    - { name: render_status,      description: "Poll one render row. Args: render_id." }
+    - { name: asset_inspect,      description: "Probe an asset via ffprobe. Args: src (storage:N | https://… | mediastudio:N). Returns {kind, duration, dimensions, codec, fps}." }
+  ui_panels:
+    - slot: project.page
+      label: Composer
+      icon: film
+      entry: /ui/ComposerPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/composer
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/composer.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch

@@ -13,6 +13,7 @@ mcp/cdn/cdn
 mcp/certs/certs
 mcp/checkout/checkout
 mcp/code/code
+mcp/composer/composer
 mcp/computer/computer
 mcp/content/content
 mcp/crm/crm
