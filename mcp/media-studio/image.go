@@ -75,6 +75,12 @@ func buildVeniceImageArgs(args map[string]any) map[string]any {
 		"prompt":        prompt,
 		"variants":      n,
 		"return_binary": false, // we want JSON+base64 — saveToStorage handles bytes
+		// Default to PNG so the stdlib image decoder (used by
+		// makeThumbnail) can read the bytes. Venice's own default
+		// is webp which Go's image package doesn't understand —
+		// thumbnails would silently fall back to no-preview.
+		// User can override via options.format.
+		"format": "png",
 	}
 
 	// size "WxH" → width + height. Pixel-sized Venice models honour these;
@@ -193,27 +199,37 @@ func normalizeImageResponse(slug, capability string, raw json.RawMessage) ([]gen
 		}
 		return media, revised, body.Model, nil
 	case "venice-ai":
-		// Venice native shape: { id, images:[<b64>,...], request, timing }.
-		// Default format is webp; if the request asked for png/jpeg the
-		// bytes differ but our metadata still tags webp — storage's
-		// content-type sniffer sorts the rest out for downstream consumers.
+		// Venice native shape: { id, images:[<b64>,...], request:{success,data:{...}}, timing }.
+		// request.data echoes back the canonical format + model so we
+		// don't have to guess.
 		var body struct {
-			ID     string   `json:"id"`
-			Images []string `json:"images"`
+			ID      string   `json:"id"`
+			Images  []string `json:"images"`
+			Request struct {
+				Data struct {
+					Format string `json:"format"`
+					Model  string `json:"model"`
+				} `json:"data"`
+			} `json:"request"`
 		}
 		if err := json.Unmarshal(raw, &body); err != nil {
 			return nil, "", "", err
 		}
+		format := body.Request.Data.Format
+		if format == "" {
+			format = "png" // matches buildVeniceImageArgs default
+		}
+		mime, ext := imageFormatToMime(format)
 		media := make([]generatedMedia, 0, len(body.Images))
 		for _, b64 := range body.Images {
 			media = append(media, generatedMedia{
 				B64:      b64,
-				MimeType: "image/webp",
-				Ext:      "webp",
+				MimeType: mime,
+				Ext:      ext,
 			})
 		}
-		// Venice doesn't return a revised prompt or echo the model.
-		return media, "", "", nil
+		// Venice doesn't return a revised prompt; model echoed under request.data.
+		return media, "", body.Request.Data.Model, nil
 	}
 	return nil, "", "", fmt.Errorf("unsupported provider slug: %q", slug)
 }
@@ -276,6 +292,19 @@ func normalizeImageEditResponse(slug string, raw json.RawMessage) ([]generatedMe
 		}}, "", "", nil
 	}
 	return nil, "", "", fmt.Errorf("unsupported edit provider slug: %q", slug)
+}
+
+// imageFormatToMime maps Venice's `format` string ("png" / "jpeg" / "webp")
+// to (mimeType, extension). Used by the normalizer to tag stored bytes
+// correctly so the storage app serves them with the right Content-Type.
+func imageFormatToMime(format string) (string, string) {
+	switch format {
+	case "jpeg", "jpg":
+		return "image/jpeg", "jpg"
+	case "webp":
+		return "image/webp", "webp"
+	}
+	return "image/png", "png"
 }
 
 func extFromMime(mt string) string {
