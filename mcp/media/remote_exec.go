@@ -139,6 +139,14 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 	if err != nil {
 		return 0, fmt.Errorf("build plan: %w", err)
 	}
+
+	// Same rotation pre-pass as the local executor — see renderexec.go's
+	// applyRotation call site for the rationale. Both executors emit
+	// identical argv shape, so the helper works against either.
+	if shouldRotate(row.Operation, plan.Args) {
+		rotation := canonicalRotation(lookupSourceRotation(app.AppDB(), row.ProjectID, row.SourceFileIDs))
+		plan.Args = applyRotation(plan.Args, rotation)
+	}
 	signedURLs := make([]string, 0, len(row.SourceFileIDs))
 	sourceNames := make([]string, 0, len(row.SourceFileIDs))
 	for _, fidStr := range row.SourceFileIDs {

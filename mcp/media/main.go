@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -21,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.12.12
+version: 0.13.0
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -124,6 +125,8 @@ provides:
     - { name: media_list_renders,    description: "List renders filtered by status / operation." }
     - { name: media_cancel_render,   description: "Cancel a pending or running render. Idempotent." }
     - { name: media_set_description, description: "Set title / description / alt_text on a media row. Partial update; omitted fields preserved." }
+    - { name: media_set_audience_rating, description: "Override audience rating (general | mature | adult | unrated). 'unrated' clears and re-queues for the describer." }
+    - { name: media_get_keyframes,   description: "Storyboard frames for a video as [{position_ms, storage_file_id, url}, …]." }
     - { name: media_transcribe,      description: "Queue a transcription for one media file. Returns transcript_id; poll media_get_transcript." }
     - { name: media_get_transcript,  description: "Status + text + segments of one file's transcript." }
     - { name: media_set_transcript,  description: "Upsert an externally-produced transcript (imported / manual). Skips the auto pipeline." }
@@ -537,6 +540,24 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolSetDescription,
 		},
 		{
+			Name:        "media_set_audience_rating",
+			Description: "Override the audience rating on a media row. The describer auto-rates new files (general/mature/adult); this tool lets an operator/agent set it manually. Use rating='unrated' to clear and re-queue for the describer. Args: file_id, rating (general|mature|adult|unrated), reasoning? (short explanation).",
+			InputSchema: schemaObject(map[string]any{
+				"file_id":   map[string]any{"type": "string"},
+				"rating":    map[string]any{"type": "string", "enum": []string{"general", "mature", "adult", "unrated"}},
+				"reasoning": map[string]any{"type": "string"},
+			}, []string{"file_id", "rating"}),
+			Handler: a.toolSetAudienceRating,
+		},
+		{
+			Name:        "media_get_keyframes",
+			Description: "Get the storyboard keyframes for a video — list of {position_ms, storage_file_id, url} ordered by position. Empty for non-video files or videos before the indexer's keyframe step has run. The set is what the describer samples for multi-image prompts; agents can use it for timeline scrubbing, scene detection, or as input to further analysis tools.",
+			InputSchema: schemaObject(map[string]any{
+				"file_id": map[string]any{"type": "string"},
+			}, []string{"file_id"}),
+			Handler: a.toolGetKeyframes,
+		},
+		{
 			Name:        "media_transcribe",
 			Description: "Queue a transcription for one media file. Inserts a pending row that the transcriber picks up on its next tick. force=true also re-queues already-ok rows (useful when you want a re-run after model upgrades or to retry a failed attempt). Args: file_id, force?.",
 			InputSchema: schemaObject(map[string]any{
@@ -665,6 +686,87 @@ func (a *App) toolSetDescription(ctx *sdk.AppCtx, args map[string]any) (any, err
 		resp["created"] = true
 	}
 	return resp, nil
+}
+
+// toolSetAudienceRating writes the operator/agent's audience verdict
+// to a media row. Bypasses the describer pipeline — the rating
+// sticks even on subsequent re-indexes (unless the operator explicitly
+// resets it to "unrated", which clears the column and re-queues the
+// row for the describer).
+func (a *App) toolSetAudienceRating(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	fid, _ := args["file_id"].(string)
+	if fid == "" {
+		return nil, errors.New("file_id required")
+	}
+	rating, _ := args["rating"].(string)
+	rating = strings.ToLower(strings.TrimSpace(rating))
+	switch rating {
+	case "general", "mature", "adult", "unrated":
+		// valid
+	default:
+		return nil, errors.New("rating must be one of: general, mature, adult, unrated")
+	}
+	reasoning, _ := args["reasoning"].(string)
+	if rating == "unrated" {
+		// Reset path — clear reasoning + timestamp so the describer
+		// re-queues on its next sweep.
+		_, err := ctx.AppDB().Exec(
+			`UPDATE media SET audience_rating='unrated', audience_reasoning='', audience_updated_at=NULL
+			  WHERE project_id=? AND file_id=?`, pid, fid)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		if err := setAudienceRating(ctx.AppDB(), pid, fid, rating, reasoning); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"file_id": fid, "rating": rating, "reasoning": reasoning}, nil
+}
+
+// toolGetKeyframes returns the storyboard keyframes for a video as
+// [{position_ms, storage_file_id, url}, …]. Empty for non-video files
+// or videos that haven't reached the indexer's keyframe step yet
+// (e.g. just-uploaded). URLs are 60-minute signed reads.
+func (a *App) toolGetKeyframes(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	fid, _ := args["file_id"].(string)
+	if fid == "" {
+		return nil, errors.New("file_id required")
+	}
+	derivs, err := listDerivations(ctx.AppDB(), pid, fid)
+	if err != nil {
+		return nil, err
+	}
+	sc := newStorageClient()
+	cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	type keyframeOut struct {
+		PositionMs    int64  `json:"position_ms"`
+		StorageFileID string `json:"storage_file_id"`
+		URL           string `json:"url"`
+	}
+	out := make([]keyframeOut, 0)
+	for _, d := range derivs {
+		if d.Kind != "keyframe" || d.Status != "ok" {
+			continue
+		}
+		entry := keyframeOut{PositionMs: d.PositionMs, StorageFileID: d.StorageFileID}
+		if id, err := strconv.ParseInt(d.StorageFileID, 10, 64); err == nil {
+			if u, err := sc.GetSignedURL(cctx, pid, id, 3600); err == nil {
+				entry.URL = u
+			}
+		}
+		out = append(out, entry)
+	}
+	return map[string]any{"file_id": fid, "keyframes": out}, nil
 }
 
 // toolDescribe queues a media row for auto-description on the next
@@ -845,6 +947,24 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	f.Limit = int(int64Arg(args["limit"]))
 	f.OrderBy, _ = args["order_by"].(string)
+	// audience_rating accepts a single string ("general") or an
+	// array of strings (["general","mature"]). Both shapes coerce to
+	// the f.AudienceRatingIn slice — the SQL builder turns it into
+	// an IN clause.
+	switch v := args["audience_rating"].(type) {
+	case string:
+		if v != "" {
+			f.AudienceRatingIn = []string{v}
+		}
+	case []any:
+		for _, x := range v {
+			if s, ok := x.(string); ok && s != "" {
+				f.AudienceRatingIn = append(f.AudienceRatingIn, s)
+			}
+		}
+	case []string:
+		f.AudienceRatingIn = v
+	}
 	rows, err := searchMedia(ctx.AppDB(), pid, f)
 	if err != nil {
 		return nil, err

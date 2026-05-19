@@ -297,11 +297,12 @@ func processOne(
 	// (e.g. waveform produced but thumbnail upload 5xx'd) still emit
 	// the event with the truthful subset.
 	var hasThumb, hasWave bool
+	var keyframeCount int
 	if probe.HasVideo || probe.IsImage {
 		thumbPath := filepath.Join(tmpDir, "thumb.jpg")
 		if err := makeThumbnail(ctx, ffmpegPath, srcPath, thumbPath, toFloat(thumbSeek), toInt(thumbWidth), probe.IsImage, probe.DurationMs); err != nil {
 			logger.Warn("thumbnail failed", "err", err)
-		} else if err := uploadAndRecord(ctx, app, sc, projectID, fid, "thumbnail", thumbPath, "image/jpeg", toInt(thumbWidth), 0); err != nil {
+		} else if err := uploadAndRecord(ctx, app, sc, projectID, fid, "thumbnail", thumbPath, "image/jpeg", toInt(thumbWidth), 0, 0); err != nil {
 			logger.Warn("thumbnail upload failed", "err", err)
 		} else {
 			hasThumb = true
@@ -311,10 +312,29 @@ func processOne(
 		wavePath := filepath.Join(tmpDir, "waveform.png")
 		if err := makeWaveform(ctx, ffmpegPath, srcPath, wavePath, toInt(waveW), toInt(waveH)); err != nil {
 			logger.Warn("waveform failed", "err", err)
-		} else if err := uploadAndRecord(ctx, app, sc, projectID, fid, "waveform", wavePath, "image/png", toInt(waveW), toInt(waveH)); err != nil {
+		} else if err := uploadAndRecord(ctx, app, sc, projectID, fid, "waveform", wavePath, "image/png", toInt(waveW), toInt(waveH), 0); err != nil {
 			logger.Warn("waveform upload failed", "err", err)
 		} else {
 			hasWave = true
+		}
+	}
+	// Keyframes for video sources only (images are single-frame; audio-
+	// only has no frames). Soft-fail per keyframe — a single extract or
+	// upload error doesn't abort the rest. Counts what actually
+	// persisted so media.derived's has_keyframes is truthful.
+	if probe.HasVideo && !probe.IsImage && keyframesEnabled(app) {
+		positions := keyframePositions(probe.DurationMs, app)
+		for _, posMs := range positions {
+			framePath := filepath.Join(tmpDir, fmt.Sprintf("kf-%d.jpg", posMs))
+			if err := extractKeyframe(ctx, ffmpegPath, srcPath, framePath, float64(posMs)/1000.0, toInt(thumbWidth)); err != nil {
+				logger.Warn("keyframe failed", "position_ms", posMs, "err", err)
+				continue
+			}
+			if err := uploadAndRecord(ctx, app, sc, projectID, fid, "keyframe", framePath, "image/jpeg", toInt(thumbWidth), 0, posMs); err != nil {
+				logger.Warn("keyframe upload failed", "position_ms", posMs, "err", err)
+				continue
+			}
+			keyframeCount++
 		}
 	}
 
@@ -325,14 +345,15 @@ func processOne(
 	// Distinguishable from media.indexed (which on the local path fires
 	// BEFORE derivations) by the has_thumbnail / has_waveform fields.
 	app.Emit("media.derived", map[string]any{
-		"file_id":       fid,
-		"name":          f.Name,
-		"has_video":     probe.HasVideo,
-		"has_audio":     probe.HasAudio,
-		"is_image":      probe.IsImage,
-		"duration_ms":   probe.DurationMs,
-		"has_thumbnail": hasThumb,
-		"has_waveform":  hasWave,
+		"file_id":         fid,
+		"name":            f.Name,
+		"has_video":       probe.HasVideo,
+		"has_audio":       probe.HasAudio,
+		"is_image":        probe.IsImage,
+		"duration_ms":     probe.DurationMs,
+		"has_thumbnail":   hasThumb,
+		"has_waveform":    hasWave,
+		"keyframe_count":  keyframeCount,
 	})
 
 	// Wake the right downstream worker the moment probe finishes:
@@ -388,14 +409,17 @@ func tryRemoteIndex(
 		logger.Warn("remote index: sign source url", "file_id", fid, "err", err)
 		return false
 	}
-	probe, thumbID, waveID, err := runRemoteIndexing(ctx, app, projectID, remoteIndexParams{
-		HostID:     hostID,
-		SignedURL:  signedURL,
-		ThumbSeek:  toFloat(thumbSeek),
-		ThumbWidth: toInt(thumbWidth),
-		WaveW:      toInt(waveW),
-		WaveH:      toInt(waveH),
-		FileID:     fid,
+	probe, thumbID, waveID, keyframes, err := runRemoteIndexing(ctx, app, projectID, remoteIndexParams{
+		HostID:               hostID,
+		SignedURL:            signedURL,
+		ThumbSeek:            toFloat(thumbSeek),
+		ThumbWidth:           toInt(thumbWidth),
+		WaveW:                toInt(waveW),
+		WaveH:                toInt(waveH),
+		FileID:               fid,
+		KeyframeIntervalSecs: parseConfigIntFallback(app.Config().Get("keyframe_interval_seconds"), defaultKeyframeIntervalSeconds),
+		KeyframeMaxCount:     parseConfigIntFallback(app.Config().Get("keyframe_max_count"), defaultKeyframeMaxCount),
+		KeyframesEnabled:     keyframesEnabled(app),
 	})
 	if err != nil {
 		logger.Warn("remote index: pipeline", "file_id", fid, "err", err)
@@ -426,13 +450,21 @@ func tryRemoteIndex(
 		"executor":    "remote-instance",
 	})
 	if thumbID > 0 {
-		if err := upsertDerivation(app.AppDB(), projectID, fid, "thumbnail", thumbID, toInt(thumbWidth), 0); err != nil {
+		if err := upsertDerivation(app.AppDB(), projectID, fid, "thumbnail", thumbID, toInt(thumbWidth), 0, 0); err != nil {
 			logger.Warn("remote index: upsert thumbnail derivation", "err", err)
 		}
 	}
 	if waveID > 0 {
-		if err := upsertDerivation(app.AppDB(), projectID, fid, "waveform", waveID, toInt(waveW), toInt(waveH)); err != nil {
+		if err := upsertDerivation(app.AppDB(), projectID, fid, "waveform", waveID, toInt(waveW), toInt(waveH), 0); err != nil {
 			logger.Warn("remote index: upsert waveform derivation", "err", err)
+		}
+	}
+	// Keyframes (remote): upsert any keyframe rows the remote shell
+	// produced. The shell returns them as a JSON array
+	// [{position_ms, storage_file_id}, …] in the APTEVA_INDEX marker.
+	for _, k := range keyframes {
+		if err := upsertDerivation(app.AppDB(), projectID, fid, "keyframe", k.StorageFileID, toInt(thumbWidth), 0, k.PositionMs); err != nil {
+			logger.Warn("remote index: upsert keyframe derivation", "err", err, "position_ms", k.PositionMs)
 		}
 	}
 
@@ -469,9 +501,13 @@ func tryRemoteIndex(
 // the resulting storage_file_id in the derivations table. The file
 // lands under /.media/<kind>/<src_id>.<ext> so the dashboard's Files
 // panel can hide it under a single hidden folder.
+//
+// positionMs is 0 for thumbnail/waveform; the source timestamp for
+// keyframes (so multiple keyframe rows per file coexist via the
+// (file, kind, position_ms) UNIQUE constraint).
 func uploadAndRecord(
 	ctx context.Context, app *sdk.AppCtx, sc *storageClient,
-	projectID, fileID, kind, path, contentType string, w, h int,
+	projectID, fileID, kind, path, contentType string, w, h int, positionMs int64,
 ) error {
 	bytesData, err := os.ReadFile(path)
 	if err != nil {
@@ -480,11 +516,19 @@ func uploadAndRecord(
 	folder := "/.media/" + kind + "/"
 	ext := filepath.Ext(path)
 	name := fileID + ext
+	// Keyframes need a unique filename per position; without this the
+	// folder would have N files all named "<src>.jpg" with the last
+	// upload winning and the prior keyframes orphaning their
+	// derivation rows. Position-tag the filename so each keyframe is
+	// its own storage row.
+	if kind == "keyframe" && positionMs > 0 {
+		name = fmt.Sprintf("%s-%d%s", fileID, positionMs, ext)
+	}
 	storageID, err := sc.UploadDerivation(ctx, projectID, name, folder, contentType, bytesData)
 	if err != nil {
 		return err
 	}
-	return upsertDerivation(app.AppDB(), projectID, fileID, kind, storageID, w, h)
+	return upsertDerivation(app.AppDB(), projectID, fileID, kind, storageID, w, h, positionMs)
 }
 
 // filterMediaFiles keeps the subset whose content_type starts with a

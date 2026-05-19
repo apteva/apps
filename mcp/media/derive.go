@@ -222,6 +222,42 @@ func meanLumaJPEG(path string) (float64, error) {
 	return float64(sum) / float64(count), nil
 }
 
+// extractKeyframe pulls a single representative frame at the given
+// timestamp. Uses the same `thumbnail=30` smart-frame filter as
+// extractVideoFrame — picks the most representative frame from a
+// 30-frame window starting at seekSeconds via histogram-distance
+// scoring, so we don't accidentally land on a transition / black
+// frame even when the user asked for an exact timestamp.
+//
+// Distinct from extractVideoFrame because:
+//   - keyframes are part of a SERIES (the indexer iterates positions),
+//     so there's no luma-rejection retry loop — a single dark frame
+//     in a series is fine, and retrying would push us past the next
+//     keyframe's window.
+//   - the luminance check would also break for legitimately dark
+//     content (night-scene videos, dimly-lit interiors).
+func extractKeyframe(ctx context.Context, ffmpegPath, inFile, outFile string, seekSeconds float64, width int) error {
+	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	args := []string{
+		"-y",
+		"-loglevel", "error",
+		"-ss", fmt.Sprintf("%.2f", seekSeconds),
+		"-i", inFile,
+		"-vf", fmt.Sprintf("thumbnail=30,scale=%d:-2", width),
+		"-frames:v", "1",
+		"-q:v", "3",
+		outFile,
+	}
+	cmd := exec.CommandContext(cctx, ffmpegPath, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffmpeg keyframe @%.2fs: %w: %s",
+			seekSeconds, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // makeWaveform renders a static PNG waveform image of the audio
 // content. showwavespic collapses the whole track into one image —
 // no animation, no playback — exactly what a list view wants.

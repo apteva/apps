@@ -175,7 +175,7 @@ func TestSearchMedia_OmitsNonOk(t *testing.T) {
 func TestUpsertDerivation(t *testing.T) {
 	ctx := newTestCtx(t)
 	upsertMedia(ctx.AppDB(), testProj, "vid1", sampleVideoProbe(), "a", "", "")
-	if err := upsertDerivation(ctx.AppDB(), testProj, "vid1", "thumbnail", 999, 320, 180); err != nil {
+	if err := upsertDerivation(ctx.AppDB(), testProj, "vid1", "thumbnail", 999, 320, 180, 0); err != nil {
 		t.Fatal(err)
 	}
 	got, err := getMedia(ctx.AppDB(), testProj, "vid1")
@@ -186,7 +186,7 @@ func TestUpsertDerivation(t *testing.T) {
 		t.Errorf("derivations wrong: %+v", got.Derivations)
 	}
 	// Re-upsert overwrites — uniqueness is (file_id, kind).
-	if err := upsertDerivation(ctx.AppDB(), testProj, "vid1", "thumbnail", 1234, 400, 225); err != nil {
+	if err := upsertDerivation(ctx.AppDB(), testProj, "vid1", "thumbnail", 1234, 400, 225, 0); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = getMedia(ctx.AppDB(), testProj, "vid1")

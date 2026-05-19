@@ -285,16 +285,37 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 		return
 	}
 
-	desc, err := extractChatContent(res.Data)
+	rawContent, err := extractChatContent(res.Data)
 	if err != nil {
 		_ = markDescribeAttempt(db, projectID, fileID, "parse describe: "+err.Error())
 		return
 	}
-	if strings.TrimSpace(desc) == "" {
+	if strings.TrimSpace(rawContent) == "" {
 		// The reasoning model can come back empty when max_tokens was
 		// too tight to fit reasoning + answer. Treat as a soft failure
 		// — cooldown applies, we'll retry next sweep.
 		_ = markDescribeAttempt(db, projectID, fileID, "describe returned empty content (reasoning may have consumed token budget)")
+		return
+	}
+
+	// v0.13.0: prompt requests JSON object {description,
+	// audience_rating, audience_reasoning}. Parse defensively — LLMs
+	// occasionally wrap in ```json fences, emit prose preamble, or
+	// refuse outright. Two retry-friendly fallbacks inside
+	// parseDescribeJSON; if all fail we treat the raw text as a
+	// description (back-compat) and leave audience_rating at
+	// 'unrated' so the next sweep re-tries.
+	parsed := parseDescribeJSON(rawContent)
+	desc := parsed.Description
+	if strings.TrimSpace(desc) == "" {
+		// Refusal pattern — LLM declined to process. Empty description
+		// IS itself a signal; we mark audience as 'adult' (most
+		// conservative bucket) so downstream filters don't accidentally
+		// treat refused content as general-audience-safe.
+		if looksLikeRefusal(rawContent) {
+			_ = setAudienceRating(db, projectID, fileID, "adult", "model declined to process — defaulting to most restrictive rating")
+		}
+		_ = markDescribeAttempt(db, projectID, fileID, "describe returned empty description (refusal or token budget)")
 		return
 	}
 
@@ -305,11 +326,23 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 		log.Error("describe setDescription failed", "file_id", fileID, "err", err)
 		return
 	}
-	log.Info("auto-described", "file_id", fileID, "model", model, "chars", len(desc))
+	// Persist audience rating alongside description. The LLM may have
+	// omitted it (older prompt response, parse fallback) — in that
+	// case we leave the column at 'unrated' and the next describer
+	// pass re-evaluates.
+	if parsed.AudienceRating != "" {
+		_ = setAudienceRating(db, projectID, fileID, parsed.AudienceRating, parsed.AudienceReasoning)
+	}
+	log.Info("auto-described",
+		"file_id", fileID, "model", model,
+		"chars", len(desc),
+		"audience_rating", parsed.AudienceRating,
+	)
 	app.Emit("media.described", map[string]any{
-		"file_id": fileID,
-		"chars":   len(desc),
-		"source":  "ai-generated",
+		"file_id":         fileID,
+		"chars":           len(desc),
+		"source":          "ai-generated",
+		"audience_rating": parsed.AudienceRating,
 	})
 
 	// media.completed coordinator. Description was the last
@@ -321,7 +354,27 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 
 // ─── prompt building ───────────────────────────────────────────────
 
-const describeSystemPrompt = "You write very brief media descriptions. Output 1-2 short sentences, ~200 characters maximum. Plain prose, no preamble, no headings, no quotes. Focus on subjects, setting, and action — concrete what's-there observations only. No speculation about emotion or intent. Don't mention the medium ('this video', 'this image', 'this audio') — describe the content directly.\n\nIMPORTANT: respond with ONLY the final 1-2 sentences. No reasoning, no drafts, no character counts, no thinking out loud. Just the description."
+// describeSystemPrompt asks the model for a structured JSON object
+// combining the description with an AUDIENCE rating (not a moderation
+// review queue — we're answering "who can this be shown to" rather
+// than "is this safe"). Single LLM call, two pieces of information
+// out. Failure modes (model refuses, output isn't valid JSON,
+// missing fields) are handled by parseDescribeJSON below.
+const describeSystemPrompt = `You are analysing a media file. Return a SINGLE valid JSON object — no preamble, no markdown fences, no commentary outside the JSON.
+
+Schema (all fields required):
+{
+  "description": "1-2 short sentences (~200 chars max) describing the content. Concrete what's-there observations only. No emotion or intent speculation. Don't mention the medium ('this video', etc) — describe the content directly.",
+  "audience_rating": "general" | "mature" | "adult",
+  "audience_reasoning": "short explanation (~100 chars). Empty string when audience_rating is 'general'."
+}
+
+audience_rating rubric — pick the LEAST restrictive level the content fits:
+  - "general":  appropriate for all audiences. Nothing suggestive, no profanity, no drug/alcohol references, no violence beyond cartoon-level.
+  - "mature":   13+. Suggestive themes or attire, mild language, alcohol/tobacco/drug references, mild or stylised violence, distressing imagery.
+  - "adult":    18+. Explicit sexual content or nudity, graphic violence/gore, hate symbols, hard drugs in use.
+
+Be precise — don't escalate one tier above what the content actually shows. Output ONLY the JSON object. No reasoning, no drafts, no markdown fences.`
 
 // buildDescribePrompt assembles the messages array for the chat call
 // based on what's available for the file. Returns nil (no error) when
@@ -345,70 +398,156 @@ func buildDescribePrompt(app *sdk.AppCtx, projectID string, media *MediaRow) ([]
 		}
 	}
 
-	var thumbURL string
-	if media.HasVideo || media.IsImage {
-		// Use thumbnail for video, the file itself for image. Fall
-		// back to nothing when not available — vision models can't
-		// describe what they can't see.
-		var ref *DerivationRow
-		for i := range media.Derivations {
-			if media.Derivations[i].Kind == "thumbnail" && media.Derivations[i].Status == "ok" {
-				ref = &media.Derivations[i]
-				break
-			}
-		}
-		if ref != nil {
-			sc := newStorageClient()
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			ref64, _ := strconv.ParseInt(ref.StorageFileID, 10, 64)
-			if u, err := sc.GetSignedURL(ctx, projectID, ref64, 30*60); err == nil {
-				thumbURL = u
-			}
-		} else if media.IsImage {
-			// Images: the file itself is the input.
-			sc := newStorageClient()
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			fid, _ := strconv.ParseInt(media.FileID, 10, 64)
-			if u, err := sc.GetSignedURL(ctx, projectID, fid, 30*60); err == nil {
-				thumbURL = u
-			}
-		}
+	// v0.13.0: build an image set, not just a single thumbnail. For
+	// videos with keyframes we sample a handful evenly across the
+	// timeline so the LLM sees scene variety, not just t=1s. The
+	// canonical thumbnail (always at position 0 in our derivations
+	// table) goes first as the "best representative" frame.
+	imageURLs := buildPromptImageURLs(app, projectID, media)
+	hasImages := len(imageURLs) > 0
+
+	imageContentBlocks := make([]map[string]any, 0, len(imageURLs))
+	for _, u := range imageURLs {
+		imageContentBlocks = append(imageContentBlocks, map[string]any{
+			"type": "image_url", "image_url": map[string]any{"url": u},
+		})
 	}
 
 	switch {
-	case thumbURL != "" && hasTranscript:
-		// Multimodal: video frame + transcript. Best signal.
-		return append(systemMessages, map[string]any{
-			"role": "user",
-			"content": []map[string]any{
-				{"type": "text", "text": "A representative frame and the transcript follow. Describe the content in 1-2 short sentences (under ~200 chars).\n\nTranscript:\n" + transcript.Text},
-				{"type": "image_url", "image_url": map[string]any{"url": thumbURL}},
-			},
-		}), nil
+	case hasImages && hasTranscript:
+		// Multimodal: keyframe set + transcript. Best signal.
+		content := []map[string]any{
+			{"type": "text", "text": "Representative frames and the transcript follow. Return the JSON object.\n\nTranscript:\n" + transcript.Text},
+		}
+		content = append(content, imageContentBlocks...)
+		return append(systemMessages, map[string]any{"role": "user", "content": content}), nil
 
-	case thumbURL != "":
-		// Vision-only: image or silent video.
-		return append(systemMessages, map[string]any{
-			"role": "user",
-			"content": []map[string]any{
-				{"type": "text", "text": "Describe the content of this image in 1-2 short sentences (under ~200 chars)."},
-				{"type": "image_url", "image_url": map[string]any{"url": thumbURL}},
-			},
-		}), nil
+	case hasImages:
+		// Vision-only: image or silent video. Up to N keyframes when
+		// available, otherwise just the canonical thumbnail.
+		content := []map[string]any{
+			{"type": "text", "text": "Representative frames follow. Return the JSON object."},
+		}
+		content = append(content, imageContentBlocks...)
+		return append(systemMessages, map[string]any{"role": "user", "content": content}), nil
 
 	case hasTranscript:
 		// Audio-only: transcript is all we have.
 		return append(systemMessages, map[string]any{
 			"role":    "user",
-			"content": "Summarise what's said in 1-2 short sentences (under ~200 chars).\n\nTranscript:\n" + transcript.Text,
+			"content": "The transcript follows. Return the JSON object.\n\nTranscript:\n" + transcript.Text,
 		}), nil
 	}
 
 	// Nothing usable yet — silent video without a thumbnail derivation,
 	// or an image where the file isn't readable. Skip without marking.
 	return nil, nil
+}
+
+// buildPromptImageURLs collects the image URLs the describer feeds
+// into the multimodal LLM call.
+//
+//   Images:  the file itself (no thumbnail derivation step).
+//   Video:   canonical thumbnail + up to N evenly-sampled keyframes
+//            (when present). The thumbnail is the "best
+//            representative" frame, picked by the indexer via the
+//            multi-seek + luma-check pipeline; keyframes are
+//            timeline samples that add scene variety.
+//   Audio-only: empty (no frames).
+//
+// Sample count comes from describe_keyframe_sample_count config
+// (default 4). When fewer keyframes exist than the sample count, we
+// include all of them. Order matters: the LLM weights the first
+// image highest, so we put the canonical thumbnail first.
+func buildPromptImageURLs(app *sdk.AppCtx, projectID string, media *MediaRow) []string {
+	if !media.HasVideo && !media.IsImage {
+		return nil
+	}
+	cfg := app.Config()
+	sampleCount := parseConfigIntFallback(cfg.Get("describe_keyframe_sample_count"), 4)
+	if sampleCount < 1 {
+		sampleCount = 1
+	}
+
+	sc := newStorageClient()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	signURL := func(storageFileIDStr string) (string, bool) {
+		id, err := strconv.ParseInt(storageFileIDStr, 10, 64)
+		if err != nil {
+			return "", false
+		}
+		u, err := sc.GetSignedURL(ctx, projectID, id, 30*60)
+		if err != nil {
+			return "", false
+		}
+		return u, true
+	}
+
+	urls := make([]string, 0, sampleCount+1)
+
+	// Canonical thumbnail first (or the image file itself for images).
+	var thumbStorageID string
+	for _, d := range media.Derivations {
+		if d.Kind == "thumbnail" && d.Status == "ok" && d.PositionMs == 0 {
+			thumbStorageID = d.StorageFileID
+			break
+		}
+	}
+	if thumbStorageID != "" {
+		if u, ok := signURL(thumbStorageID); ok {
+			urls = append(urls, u)
+		}
+	} else if media.IsImage {
+		// Single-frame image: the source file is the input.
+		if u, ok := signURL(media.FileID); ok {
+			urls = append(urls, u)
+		}
+	}
+
+	// Keyframes — sample evenly across whatever's available.
+	if media.HasVideo && !media.IsImage {
+		keyframes := make([]DerivationRow, 0)
+		for _, d := range media.Derivations {
+			if d.Kind == "keyframe" && d.Status == "ok" {
+				keyframes = append(keyframes, d)
+			}
+		}
+		// Already sorted by position via listDerivations, but defensive.
+		if len(keyframes) > 0 {
+			// Pick `sampleCount` evenly across the keyframe list.
+			picked := sampleEvenly(keyframes, sampleCount)
+			for _, k := range picked {
+				if u, ok := signURL(k.StorageFileID); ok {
+					urls = append(urls, u)
+				}
+			}
+		}
+	}
+	return urls
+}
+
+// sampleEvenly returns at most `n` items from `rows`, spaced as
+// evenly as possible. Identity when len(rows) <= n.
+func sampleEvenly(rows []DerivationRow, n int) []DerivationRow {
+	if n <= 0 || len(rows) == 0 {
+		return nil
+	}
+	if len(rows) <= n {
+		return rows
+	}
+	out := make([]DerivationRow, 0, n)
+	// Use float steps so the last index lands near len-1 instead of
+	// halfway through.
+	step := float64(len(rows)-1) / float64(n-1)
+	for i := 0; i < n; i++ {
+		idx := int(float64(i)*step + 0.5)
+		if idx >= len(rows) {
+			idx = len(rows) - 1
+		}
+		out = append(out, rows[idx])
+	}
+	return out
 }
 
 // projectContextLine builds a short system-prompt addendum with the

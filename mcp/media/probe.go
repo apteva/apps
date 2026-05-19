@@ -15,20 +15,36 @@ import (
 )
 
 type Probe struct {
-	FormatName  string
-	DurationMs  int64
-	Bitrate     int64
-	HasVideo    bool
-	HasAudio    bool
-	IsImage     bool
-	Width       int
-	Height      int
-	FPS         float64
-	VideoCodec  string
-	Channels    int
-	SampleRate  int
-	AudioCodec  string
-	Raw         string // raw JSON, persisted as-is
+	FormatName string
+	DurationMs int64
+	Bitrate    int64
+	HasVideo   bool
+	HasAudio   bool
+	IsImage    bool
+	// Width/Height are reported in DISPLAY-space — what users
+	// actually see in a player. For sources with a rotation tag
+	// (e.g. iPhone landscape recordings tagged rotation=90 to
+	// display portrait), the codec frame's pixel dims and the
+	// displayed dims differ: parseProbeBytes swaps Width↔Height
+	// when Rotation is 90 or 270. Downstream consumers (panels,
+	// agents, the crop math in renders) all treat Width/Height as
+	// "what the user sees" — keeping the abstraction consistent
+	// regardless of rotation metadata.
+	Width  int
+	Height int
+	// Rotation in {0, 90, 180, 270}. ffprobe reports this as a
+	// signed float in the displaymatrix side_data; we normalise
+	// to one of the four 90°-aligned values. Renderers use this to
+	// prepend a transpose filter + pass -noautorotate to ffmpeg so
+	// the filter chain sees a frame matching the displayed
+	// orientation, not the raw codec orientation.
+	Rotation   int
+	FPS        float64
+	VideoCodec string
+	Channels   int
+	SampleRate int
+	AudioCodec string
+	Raw        string // raw JSON, persisted as-is
 }
 
 type ffprobeOut struct {
@@ -50,6 +66,18 @@ type ffprobeStream struct {
 	SampleRate   string `json:"sample_rate,omitempty"`
 	NbFrames     string `json:"nb_frames,omitempty"`
 	Duration     string `json:"duration,omitempty"`
+	// SideDataList holds the display-matrix metadata that carries
+	// rotation. Only the "Display Matrix" side_data_type entry
+	// matters for our purposes; everything else is ignored.
+	SideDataList []ffprobeSideData `json:"side_data_list,omitempty"`
+}
+
+// ffprobeSideData lifts only the rotation field we care about. The
+// real side_data structure is much richer (HDR metadata, mastering
+// info, etc.); we don't touch the rest.
+type ffprobeSideData struct {
+	SideDataType string  `json:"side_data_type"`
+	Rotation     float64 `json:"rotation,omitempty"`
 }
 
 // runProbe shells out to ffprobe on a local file path. Returns parsed
@@ -102,6 +130,18 @@ func parseProbeBytes(out []byte) (*Probe, error) {
 				p.HasVideo = true
 				p.Width = s.Width
 				p.Height = s.Height
+				p.Rotation = normaliseRotation(extractRotation(s.SideDataList))
+				// Display-space: when the source is tagged with a
+				// 90° or 270° rotation, the displayed orientation
+				// is the codec frame rotated quarter-turn. Swap
+				// W↔H so every downstream consumer (UI, agents,
+				// crop math) sees the orientation the user
+				// actually sees. The Rotation column tells the
+				// renderer how to bake this in at render time
+				// via a transpose filter.
+				if p.Rotation == 90 || p.Rotation == 270 {
+					p.Width, p.Height = p.Height, p.Width
+				}
 				p.FPS = parseRational(s.RFrameRate)
 				p.VideoCodec = s.CodecName
 				// Detect "image" — single-frame video stream,
@@ -169,6 +209,51 @@ func parseRational(s string) float64 {
 	}
 	v, _ := strconv.ParseFloat(s, 64)
 	return v
+}
+
+// extractRotation pulls the rotation value out of an ffprobe stream's
+// side_data_list. ffprobe emits multiple side_data entries per
+// stream; only the "Display Matrix" entry has the rotation field
+// we care about. Returns 0 when absent.
+func extractRotation(entries []ffprobeSideData) float64 {
+	for _, e := range entries {
+		if e.SideDataType == "Display Matrix" {
+			return e.Rotation
+		}
+	}
+	return 0
+}
+
+// normaliseRotation quantises ffprobe's signed float rotation into
+// one of {0, 90, 180, 270}. ffprobe reports rotation as a signed
+// degrees value: -90 (90° clockwise from display) is equivalent to
+// 270, -180 == 180, etc. We canonicalise to the positive equivalent
+// so the renderer's transpose-direction lookup table only has to
+// handle four cases.
+//
+// Off-axis rotations (e.g. 45°) get rounded to the nearest 90°;
+// real-world camera footage never produces those, and even if it did
+// ffmpeg's transpose filter only does 90° increments — better an
+// imperfect rotation than a silent no-op.
+func normaliseRotation(deg float64) int {
+	// Bring into [0, 360). Go's math.Mod can return negatives.
+	r := deg
+	for r < 0 {
+		r += 360
+	}
+	for r >= 360 {
+		r -= 360
+	}
+	switch {
+	case r < 45 || r >= 315:
+		return 0
+	case r < 135:
+		return 90
+	case r < 225:
+		return 180
+	default:
+		return 270
+	}
 }
 
 func isImageCodec(c string) bool {

@@ -129,6 +129,16 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 		return 0, fmt.Errorf("build plan: %w", err)
 	}
 
+	// Bake source rotation into the output frame. The indexer stored
+	// display-space Width/Height + a rotation column; the renderer
+	// passes -noautorotate and prepends transpose=… so ffmpeg's
+	// filter chain matches the orientation the user sees, not the
+	// raw codec orientation. No-op when the source has rotation=0.
+	if shouldRotate(row.Operation, plan.Args) {
+		rotation := canonicalRotation(lookupSourceRotation(db, row.ProjectID, row.SourceFileIDs))
+		plan.Args = applyRotation(plan.Args, rotation)
+	}
+
 	// Download source(s) to scratch.
 	srcPaths := make([]string, 0, len(row.SourceFileIDs))
 	for _, fidStr := range row.SourceFileIDs {

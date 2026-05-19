@@ -190,7 +190,7 @@ func TestRunOneDescription_ImageWithThumbnail_Multimodal(t *testing.T) {
 
 	probe := &Probe{FormatName: "png_pipe", IsImage: true, HasVideo: true, Width: 1024, Height: 768, VideoCodec: "png", Raw: "{}"}
 	upsertMedia(ctx.AppDB(), testProj, "1", probe, "sha", "", "test.mp4")
-	if err := upsertDerivation(ctx.AppDB(), testProj, "1", "thumbnail", 99, 320, 240); err != nil {
+	if err := upsertDerivation(ctx.AppDB(), testProj, "1", "thumbnail", 99, 320, 240, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -235,7 +235,7 @@ func TestRunOneDescription_VideoWithBoth_FullMultimodal(t *testing.T) {
 
 	probe := sampleAVProbe(8000) // has_video + has_audio
 	upsertMedia(ctx.AppDB(), testProj, "1", probe, "sha", "", "test.mp4")
-	upsertDerivation(ctx.AppDB(), testProj, "1", "thumbnail", 99, 320, 240)
+	upsertDerivation(ctx.AppDB(), testProj, "1", "thumbnail", 99, 320, 240, 0)
 	upsertTranscript(ctx.AppDB(), &TranscriptRow{
 		FileID: "1", ProjectID: testProj, Status: "ok",
 		Text: "Quarterly numbers came in above forecast.",

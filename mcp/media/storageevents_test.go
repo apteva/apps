@@ -13,8 +13,8 @@ import (
 func TestCascadeDeleteOne_DeletesAll(t *testing.T) {
 	ctx := newTestCtx(t)
 	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha", "", "")
-	upsertDerivation(ctx.AppDB(), testProj, "1", "thumbnail", 100, 320, 240)
-	upsertDerivation(ctx.AppDB(), testProj, "1", "waveform", 101, 800, 100)
+	upsertDerivation(ctx.AppDB(), testProj, "1", "thumbnail", 100, 320, 240, 0)
+	upsertDerivation(ctx.AppDB(), testProj, "1", "waveform", 101, 800, 100, 0)
 	upsertTranscript(ctx.AppDB(), &TranscriptRow{
 		FileID: "1", ProjectID: testProj, Status: "ok", Text: "x",
 	})

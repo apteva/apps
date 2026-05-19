@@ -228,5 +228,9 @@ func maybeEmitMediaCompleted(app *sdk.AppCtx, projectID, fileID string) {
 		"has_waveform":    hasWave,
 		"has_transcript":  hasTranscript,
 		"has_description": hasDescription,
+		// Audience rating populated by the describer when descriptions
+		// integration is bound; "unrated" otherwise. Subscribers can
+		// filter on this directly without a follow-up media_get.
+		"audience_rating": row.AudienceRating,
 	})
 }

@@ -37,8 +37,8 @@ func TestPurgeOrphans_DeletesMissingFiles(t *testing.T) {
 func TestPurgeOrphans_CascadesDerivations(t *testing.T) {
 	ctx := newTestCtx(t)
 	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha", "", "")
-	upsertDerivation(ctx.AppDB(), testProj, "1", "thumbnail", 100, 320, 240)
-	upsertDerivation(ctx.AppDB(), testProj, "1", "waveform", 101, 800, 100)
+	upsertDerivation(ctx.AppDB(), testProj, "1", "thumbnail", 100, 320, 240, 0)
+	upsertDerivation(ctx.AppDB(), testProj, "1", "waveform", 101, 800, 100, 0)
 
 	// Storage no longer has file 1 → orphan.
 	if _, err := purgeOrphans(ctx.AppDB(), testProj, []string{}); err != nil {

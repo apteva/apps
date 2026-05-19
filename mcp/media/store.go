@@ -43,8 +43,16 @@ type MediaRow struct {
 	HasAudio bool `json:"has_audio"`
 	IsImage  bool `json:"is_image"`
 
-	Width      int     `json:"width,omitempty"`
-	Height     int     `json:"height,omitempty"`
+	// Width/Height in DISPLAY-space — what users see in a player.
+	// The indexer pre-swaps these when the source has a 90°/270°
+	// rotation tag, so downstream consumers don't need to know about
+	// rotation at all. See probe.go::parseProbeBytes for the swap.
+	Width  int     `json:"width,omitempty"`
+	Height int     `json:"height,omitempty"`
+	// Rotation in degrees (0/90/180/270). Renderers read this and
+	// emit `transpose=…` + `-noautorotate` so ffmpeg's filter chain
+	// sees a frame oriented to match Width/Height above.
+	Rotation   int     `json:"rotation,omitempty"`
 	FPS        float64 `json:"fps,omitempty"`
 	VideoCodec string  `json:"video_codec,omitempty"`
 
@@ -78,6 +86,13 @@ type MediaRow struct {
 	// without a second roundtrip. Empty when no transcript exists.
 	TranscriptStatus string `json:"transcript_status,omitempty"`
 
+	// Audience rating populated by the describer (v0.13.0+). One of
+	// {unrated, general, mature, adult}. Reasoning is the LLM's short
+	// explanation for non-general ratings; empty otherwise.
+	AudienceRating    string `json:"audience_rating,omitempty"`
+	AudienceReasoning string `json:"audience_reasoning,omitempty"`
+	AudienceUpdatedAt string `json:"audience_updated_at,omitempty"`
+
 	CreatedAt string `json:"created_at,omitempty"`
 	UpdatedAt string `json:"updated_at,omitempty"`
 
@@ -91,6 +106,11 @@ type DerivationRow struct {
 	StorageFileID string `json:"storage_file_id"`
 	Width         int    `json:"width,omitempty"`
 	Height        int    `json:"height,omitempty"`
+	// PositionMs is the source timestamp in ms for keyframes; 0 for
+	// thumbnail/waveform/cover (single-frame derivations). Migration
+	// 012_keyframes.sql added the column and shifted the UNIQUE
+	// constraint to (file_id, kind, position_ms).
+	PositionMs    int64  `json:"position_ms,omitempty"`
 	Status        string `json:"status"`
 	Error         string `json:"error,omitempty"`
 	GeneratedAt   string `json:"generated_at,omitempty"`
@@ -107,11 +127,11 @@ func upsertMedia(db *sql.DB, projectID string, fileID string, p *Probe, sha, fol
 			file_id, project_id, source_sha256, folder, name,
 			format_name, duration_ms, bitrate,
 			has_video, has_audio, is_image,
-			width, height, fps, video_codec,
+			width, height, rotation, fps, video_codec,
 			channels, sample_rate, audio_codec,
 			probe_status, probe_error, probe_at,
 			raw_probe, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', '', ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', '', ?, ?, ?)
 		ON CONFLICT(file_id) DO UPDATE SET
 			project_id=excluded.project_id,
 			source_sha256=excluded.source_sha256,
@@ -125,6 +145,7 @@ func upsertMedia(db *sql.DB, projectID string, fileID string, p *Probe, sha, fol
 			is_image=excluded.is_image,
 			width=excluded.width,
 			height=excluded.height,
+			rotation=excluded.rotation,
 			fps=excluded.fps,
 			video_codec=excluded.video_codec,
 			channels=excluded.channels,
@@ -139,7 +160,7 @@ func upsertMedia(db *sql.DB, projectID string, fileID string, p *Probe, sha, fol
 		fileID, projectID, sha, folder, name,
 		p.FormatName, p.DurationMs, p.Bitrate,
 		boolInt(p.HasVideo), boolInt(p.HasAudio), boolInt(p.IsImage),
-		nullableInt(p.Width), nullableInt(p.Height), nullableFloat(p.FPS), nullableStr(p.VideoCodec),
+		nullableInt(p.Width), nullableInt(p.Height), p.Rotation, nullableFloat(p.FPS), nullableStr(p.VideoCodec),
 		nullableInt(p.Channels), nullableInt(p.SampleRate), nullableStr(p.AudioCodec),
 		now, p.Raw, now,
 	)
@@ -231,11 +252,16 @@ func markFailed(db *sql.DB, projectID, fileID, sha, kind, msg string) error {
 	return err
 }
 
-func upsertDerivation(db *sql.DB, projectID, fileID, kind string, storageFileID int64, w, h int) error {
+// upsertDerivation writes a derivation row. positionMs is 0 for
+// thumbnail/waveform/cover (single-frame derivations) and the
+// source timestamp in ms for keyframes. The UNIQUE constraint moved
+// to (file_id, kind, position_ms) in 012_keyframes.sql so multiple
+// keyframe rows can coexist for one file.
+func upsertDerivation(db *sql.DB, projectID, fileID, kind string, storageFileID int64, w, h int, positionMs int64) error {
 	_, err := db.Exec(`
-		INSERT INTO derivations (file_id, project_id, kind, storage_file_id, width, height, status, error)
-		VALUES (?, ?, ?, ?, ?, ?, 'ok', '')
-		ON CONFLICT(file_id, kind) DO UPDATE SET
+		INSERT INTO derivations (file_id, project_id, kind, storage_file_id, width, height, position_ms, status, error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'ok', '')
+		ON CONFLICT(file_id, kind, position_ms) DO UPDATE SET
 			project_id=excluded.project_id,
 			storage_file_id=excluded.storage_file_id,
 			width=excluded.width,
@@ -243,7 +269,7 @@ func upsertDerivation(db *sql.DB, projectID, fileID, kind string, storageFileID 
 			status='ok',
 			error='',
 			generated_at=CURRENT_TIMESTAMP`,
-		fileID, projectID, kind, fmt.Sprintf("%d", storageFileID), nullableInt(w), nullableInt(h),
+		fileID, projectID, kind, fmt.Sprintf("%d", storageFileID), nullableInt(w), nullableInt(h), positionMs,
 	)
 	return err
 }
@@ -508,13 +534,14 @@ func getMedia(db *sql.DB, projectID, fileID string) (*MediaRow, error) {
 		SELECT m.file_id, m.project_id, m.source_sha256, m.folder, m.name,
 			m.format_name, m.duration_ms, m.bitrate,
 			m.has_video, m.has_audio, m.is_image,
-			m.width, m.height, m.fps, m.video_codec,
+			m.width, m.height, m.rotation, m.fps, m.video_codec,
 			m.channels, m.sample_rate, m.audio_codec,
 			m.probe_status, m.probe_error, m.probe_at, m.raw_probe,
 			m.title, m.description, m.alt_text,
 			m.description_source, COALESCE(m.description_updated_at, ''),
 			COALESCE(m.description_attempted_at, ''), m.description_error,
 			COALESCE(t.status, ''),
+			m.audience_rating, m.audience_reasoning, COALESCE(m.audience_updated_at, ''),
 			m.created_at, m.updated_at
 		FROM media m
 		LEFT JOIN transcripts t
@@ -548,12 +575,13 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 		&m.FileID, &m.ProjectID, &m.SourceSHA256, &m.Folder, &m.Name,
 		&formatName, &duration, &bitrate,
 		&hasVideo, &hasAudio, &isImage,
-		&width, &height, &fps, &vcodec,
+		&width, &height, &m.Rotation, &fps, &vcodec,
 		&channels, &srate, &acodec,
 		&m.ProbeStatus, &probeError, &probeAt, &rawProbe,
 		&title, &description, &altText,
 		&descSource, &descUpdatedAt, &descAttemptedAt, &descError,
 		&transcriptStatus,
+		&m.AudienceRating, &m.AudienceReasoning, &m.AudienceUpdatedAt,
 		&createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -608,6 +636,12 @@ type SearchFilters struct {
 	Recursive bool
 	Limit     int
 	OrderBy   string // duration_ms | created_at | updated_at
+	// AudienceRating filters by the column populated by the
+	// describer (v0.13.0+). Nil/empty = no filter (everything,
+	// including unrated). Multiple values OR'd: ["general","mature"]
+	// returns rows at either rating. Use this rather than a single
+	// status string when callers want "exclude adult" semantics.
+	AudienceRatingIn []string
 }
 
 // searchMedia returns rows matching f. Joins derivations once at the
@@ -665,6 +699,16 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 			args = append(args, f.Folder)
 		}
 	}
+	// Audience-rating filter — IN clause when supplied. Empty slice
+	// is "no filter" (returns everything, including unrated).
+	if len(f.AudienceRatingIn) > 0 {
+		placeholders := strings.Repeat("?,", len(f.AudienceRatingIn))
+		placeholders = strings.TrimSuffix(placeholders, ",")
+		clauses = append(clauses, "audience_rating IN ("+placeholders+")")
+		for _, r := range f.AudienceRatingIn {
+			args = append(args, r)
+		}
+	}
 
 	order := "created_at DESC"
 	switch f.OrderBy {
@@ -688,13 +732,14 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 	query := `SELECT m.file_id, m.project_id, m.source_sha256, m.folder, m.name,
 		m.format_name, m.duration_ms, m.bitrate,
 		m.has_video, m.has_audio, m.is_image,
-		m.width, m.height, m.fps, m.video_codec,
+		m.width, m.height, m.rotation, m.fps, m.video_codec,
 		m.channels, m.sample_rate, m.audio_codec,
 		m.probe_status, m.probe_error, m.probe_at, m.raw_probe,
 		m.title, m.description, m.alt_text,
 		m.description_source, COALESCE(m.description_updated_at, ''),
 		COALESCE(m.description_attempted_at, ''), m.description_error,
 		COALESCE(t.status, ''),
+		m.audience_rating, m.audience_reasoning, COALESCE(m.audience_updated_at, ''),
 		m.created_at, m.updated_at
 	FROM media m
 	LEFT JOIN transcripts t
@@ -730,9 +775,14 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 }
 
 func listDerivations(db *sql.DB, projectID, fileID string) ([]DerivationRow, error) {
+	// Order by kind then position_ms so the canonical thumbnail/
+	// waveform comes first and keyframes are returned in source-
+	// timeline order — the UI timeline scrub + describer sampling
+	// rely on that order without re-sorting client-side.
 	rows, err := db.Query(
-		`SELECT id, file_id, kind, storage_file_id, width, height, status, error, generated_at
-		FROM derivations WHERE project_id=? AND file_id=?`, projectID, fileID,
+		`SELECT id, file_id, kind, storage_file_id, width, height, position_ms, status, error, generated_at
+		FROM derivations WHERE project_id=? AND file_id=?
+		ORDER BY kind, position_ms`, projectID, fileID,
 	)
 	if err != nil {
 		return nil, err
@@ -743,7 +793,7 @@ func listDerivations(db *sql.DB, projectID, fileID string) ([]DerivationRow, err
 		var d DerivationRow
 		var w, h sql.NullInt64
 		var gen sql.NullString
-		if err := rows.Scan(&d.ID, &d.FileID, &d.Kind, &d.StorageFileID, &w, &h, &d.Status, &d.Error, &gen); err != nil {
+		if err := rows.Scan(&d.ID, &d.FileID, &d.Kind, &d.StorageFileID, &w, &h, &d.PositionMs, &d.Status, &d.Error, &gen); err != nil {
 			return nil, err
 		}
 		d.Width = int(w.Int64)
@@ -765,8 +815,9 @@ func listDerivationsByFiles(db *sql.DB, projectID string, fileIDs []string) (map
 		args = append(args, id)
 	}
 	rows, err := db.Query(
-		`SELECT id, file_id, kind, storage_file_id, width, height, status, error, generated_at
-		FROM derivations WHERE project_id=? AND file_id IN (`+placeholders+`)`, args...,
+		`SELECT id, file_id, kind, storage_file_id, width, height, position_ms, status, error, generated_at
+		FROM derivations WHERE project_id=? AND file_id IN (`+placeholders+`)
+		ORDER BY file_id, kind, position_ms`, args...,
 	)
 	if err != nil {
 		return nil, err
@@ -777,7 +828,7 @@ func listDerivationsByFiles(db *sql.DB, projectID string, fileIDs []string) (map
 		var d DerivationRow
 		var w, h sql.NullInt64
 		var gen sql.NullString
-		if err := rows.Scan(&d.ID, &d.FileID, &d.Kind, &d.StorageFileID, &w, &h, &d.Status, &d.Error, &gen); err != nil {
+		if err := rows.Scan(&d.ID, &d.FileID, &d.Kind, &d.StorageFileID, &w, &h, &d.PositionMs, &d.Status, &d.Error, &gen); err != nil {
 			return nil, err
 		}
 		d.Width = int(w.Int64)

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.12.12
+version: 0.13.0
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -155,6 +155,12 @@ provides:
     - name: media_set_description
       description: Set title / description / alt_text on a media row. Partial update (omitted fields preserved). Empty string clears.
 
+    # Audience rating + keyframes (v0.13.0+)
+    - name: media_set_audience_rating
+      description: Override the audience rating (general | mature | adult | unrated). Rating='unrated' clears + re-queues for the describer.
+    - name: media_get_keyframes
+      description: Storyboard frames for a video as [{position_ms, storage_file_id, url}, …] ordered by position. Empty for non-video files or before the keyframe step has run.
+
     # Transcripts — speech-to-text for audio + video (Deepgram-powered).
     - name: media_transcribe
       description: Queue a transcription. force=true re-queues already-ok rows. Returns immediately; transcriber drains the queue async.
@@ -245,7 +251,7 @@ provides:
         codec: string
 
     - name: media.derived
-      description: The indexer has finished all derive work for this file (probe + thumbnail/waveform upload). Fires regardless of whether the transcripts or descriptions integrations are bound, so subscribers can treat this as "file is ready for consumption" without waiting on optional LLM steps. Cross-path consistent — same payload shape from local and remote indexers.
+      description: The indexer has finished all derive work for this file (probe + thumbnail/waveform/keyframes upload). Fires regardless of whether the transcripts or descriptions integrations are bound, so subscribers can treat this as "file is ready for consumption" without waiting on optional LLM steps. Cross-path consistent — same payload shape from local and remote indexers.
       payload:
         file_id: string
         name: string
@@ -255,14 +261,16 @@ provides:
         duration_ms: integer
         has_thumbnail: boolean
         has_waveform: boolean
+        keyframe_count: integer         # 0 for non-video; up to keyframe_max_count for long videos (v0.13.0+)
         executor: string                # "" for local, "remote-instance" for remote
 
     - name: media.described
-      description: An LLM-generated description was attached to a media row (via media's auto-describe pipeline).
+      description: An LLM-generated description was attached to a media row (via media's auto-describe pipeline). v0.13.0+ the same describer call also writes audience_rating.
       payload:
         file_id: string
-        description: string
-        model: string
+        chars: integer
+        source: string                  # always "ai-generated"
+        audience_rating: string         # general | mature | adult (empty when LLM omitted the field)
 
     - name: media.transcribed
       description: A Deepgram-powered transcription finished for an audio or video file.
@@ -312,6 +320,7 @@ provides:
         has_waveform: boolean
         has_transcript: boolean         # transcripts integration bound AND transcript stored at status=ok
         has_description: boolean        # descriptions integration bound AND description column non-empty
+        audience_rating: string         # general | mature | adult | unrated (v0.13.0+; populated by describer)
 
     - name: render.queued
       description: A new render was submitted via a media_* tool (or POST /renders) and is awaiting a worker.

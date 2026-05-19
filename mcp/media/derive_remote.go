@@ -42,6 +42,13 @@ type remoteIndexParams struct {
 	WaveW      int
 	WaveH      int
 	FileID     string // source file_id (string), used to name derivations
+	// Keyframe config for the remote shell. Empty/zero values mean
+	// "use the script's defaults" — interval 30s, cap 60, enabled.
+	// The local indexer pre-resolves these from app.Config() before
+	// dispatch.
+	KeyframeIntervalSecs int
+	KeyframeMaxCount     int
+	KeyframesEnabled     bool
 }
 
 // remoteIndexResult is the parsed APTEVA_INDEX marker the script
@@ -49,9 +56,22 @@ type remoteIndexParams struct {
 // the corresponding derivation was actually produced (the script
 // branches on probe).
 type remoteIndexResult struct {
-	ProbeBase64     string `json:"probe_b64"`
-	ThumbnailFileID int64  `json:"thumbnail_file_id"`
-	WaveformFileID  int64  `json:"waveform_file_id"`
+	ProbeBase64     string             `json:"probe_b64"`
+	ThumbnailFileID int64              `json:"thumbnail_file_id"`
+	WaveformFileID  int64              `json:"waveform_file_id"`
+	// Keyframes is the storyboard set produced by the remote shell.
+	// One entry per (position_ms, storage_file_id) pair that uploaded
+	// successfully. Failures inside the loop are skipped per-frame
+	// (the loop continues), so this can be shorter than the requested
+	// position count.
+	Keyframes []remoteKeyframe `json:"keyframes,omitempty"`
+}
+
+// remoteKeyframe is one entry in the storyboard returned by the
+// remote indexer.
+type remoteKeyframe struct {
+	PositionMs    int64 `json:"position_ms"`
+	StorageFileID int64 `json:"storage_file_id"`
 }
 
 // runRemoteIndexing executes the whole indexer pipeline on the
@@ -61,41 +81,44 @@ type remoteIndexResult struct {
 func runRemoteIndexing(
 	ctx context.Context, app *sdk.AppCtx, projectID string,
 	params remoteIndexParams,
-) (*Probe, int64, int64, error) {
+) (*Probe, int64, int64, []remoteKeyframe, error) {
 	publicURL, err := resolvePublicURL(app)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("remote indexing requires a publicly reachable storage URL: %w", err)
+		return nil, 0, 0, nil, fmt.Errorf("remote indexing requires a publicly reachable storage URL: %w", err)
 	}
 	storageToken := os.Getenv("APTEVA_OUTBOUND_TOKEN")
 	if storageToken == "" {
 		storageToken = os.Getenv("APTEVA_APP_TOKEN")
 	}
 	if storageToken == "" {
-		return nil, 0, 0, errors.New("no outbound storage token (APTEVA_OUTBOUND_TOKEN/APP_TOKEN); remote indexing requires it")
+		return nil, 0, 0, nil, errors.New("no outbound storage token (APTEVA_OUTBOUND_TOKEN/APP_TOKEN); remote indexing requires it")
 	}
 
 	// Pre-flight: ffmpeg + ffprobe present on the remote. Cached after
 	// first success — same machinery the render executor uses.
 	paths, err := sharedRemoteInstaller().Ensure(ctx, app, params.HostID)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("ffmpeg unavailable on host_id=%d: %w", params.HostID, err)
+		return nil, 0, 0, nil, fmt.Errorf("ffmpeg unavailable on host_id=%d: %w", params.HostID, err)
 	}
 
 	script := buildRemoteIndexScript(remoteIndexScriptInputs{
-		FFmpeg:       paths.FFmpeg,
-		FFprobe:      paths.FFprobe,
-		SignedURL:    params.SignedURL,
-		FileID:       params.FileID,
-		ThumbSeek:    params.ThumbSeek,
-		ThumbWidth:   params.ThumbWidth,
-		WaveW:        params.WaveW,
-		WaveH:        params.WaveH,
-		PublicURL:    publicURL,
-		StorageToken: storageToken,
-		ProjectID:    projectID,
+		FFmpeg:                 paths.FFmpeg,
+		FFprobe:                paths.FFprobe,
+		SignedURL:              params.SignedURL,
+		FileID:                 params.FileID,
+		ThumbSeek:              params.ThumbSeek,
+		ThumbWidth:             params.ThumbWidth,
+		WaveW:                  params.WaveW,
+		WaveH:                  params.WaveH,
+		KeyframeIntervalSecs:   params.KeyframeIntervalSecs,
+		KeyframeMaxCount:       params.KeyframeMaxCount,
+		KeyframesEnabled:       params.KeyframesEnabled,
+		PublicURL:              publicURL,
+		StorageToken:           storageToken,
+		ProjectID:              projectID,
 	})
 
-	out, exit, err := runRemote(ctx, app, params.HostID, script, 120)
+	out, exit, err := runRemote(ctx, app, params.HostID, script, 600)
 	if err != nil {
 		// runRemote returns err non-nil when the SSH session itself
 		// reports failure (typically a non-zero exit via ssh.ExitError).
@@ -103,28 +126,28 @@ func runRemoteIndexing(
 		// output — include it so the operator sees the real cause
 		// instead of "Process exited with status N" with no context.
 		if out != "" {
-			return nil, 0, 0, fmt.Errorf("remote index ssh: %w (output: %s)", err, truncate(out, 600))
+			return nil, 0, 0, nil, fmt.Errorf("remote index ssh: %w (output: %s)", err, truncate(out, 600))
 		}
-		return nil, 0, 0, fmt.Errorf("remote index ssh: %w", err)
+		return nil, 0, 0, nil, fmt.Errorf("remote index ssh: %w", err)
 	}
 	if exit != 0 {
-		return nil, 0, 0, fmt.Errorf("remote index script exit=%d: %s", exit, truncate(out, 800))
+		return nil, 0, 0, nil, fmt.Errorf("remote index script exit=%d: %s", exit, truncate(out, 800))
 	}
 
 	res, err := parseAptevaIndex(out)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("parse remote index result: %w (output=%s)", err, truncate(out, 400))
+		return nil, 0, 0, nil, fmt.Errorf("parse remote index result: %w (output=%s)", err, truncate(out, 400))
 	}
 
 	probeBytes, err := base64.StdEncoding.DecodeString(res.ProbeBase64)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("decode probe base64: %w", err)
+		return nil, 0, 0, nil, fmt.Errorf("decode probe base64: %w", err)
 	}
 	probe, err := parseProbeBytes(probeBytes)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("parse probe json: %w", err)
+		return nil, 0, 0, nil, fmt.Errorf("parse probe json: %w", err)
 	}
-	return probe, res.ThumbnailFileID, res.WaveformFileID, nil
+	return probe, res.ThumbnailFileID, res.WaveformFileID, res.Keyframes, nil
 }
 
 // ─── script construction ──────────────────────────────────────────
@@ -136,9 +159,15 @@ type remoteIndexScriptInputs struct {
 	ThumbSeek       float64
 	ThumbWidth      int
 	WaveW, WaveH    int
-	PublicURL       string
-	StorageToken    string
-	ProjectID       string
+	// Keyframe params: zero/empty means "skip the keyframes block".
+	// IntervalSecs default 30; MaxCount default 60. KeyframesEnabled
+	// must be set true to emit the block at all.
+	KeyframeIntervalSecs int
+	KeyframeMaxCount     int
+	KeyframesEnabled     bool
+	PublicURL            string
+	StorageToken         string
+	ProjectID            string
 }
 
 // buildRemoteIndexScript returns the bash program executed on the
@@ -299,6 +328,84 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	b.WriteString(`  WAVE_FILE_ID=$(echo "$RESP" | sed -n 's/.*"id":[[:space:]]*\([0-9]*\).*/\1/p' | head -1)` + "\n")
 	b.WriteString(`fi` + "\n")
 
+	// Keyframes — storyboard frames at regular intervals. Only for
+	// video sources (audio-only has no frames; images are single-
+	// frame). Each iteration: extract one frame via the same
+	// `thumbnail=30` smart-frame filter as the canonical thumbnail,
+	// upload, append the resulting file_id to a JSON array under
+	// KEYFRAMES_JSON. The array is emitted as part of the
+	// APTEVA_INDEX marker below.
+	//
+	// awk + a small shell loop handles the interval/cap math without
+	// requiring python on the remote. First keyframe sits at 1s in
+	// (skips splash / black opens, same convention as the canonical
+	// thumbnail's default seek).
+	if in.KeyframesEnabled {
+		interval := in.KeyframeIntervalSecs
+		if interval <= 0 {
+			interval = defaultKeyframeIntervalSeconds
+		}
+		maxCount := in.KeyframeMaxCount
+		if maxCount <= 0 {
+			maxCount = defaultKeyframeMaxCount
+		}
+		fmt.Fprintf(&b, "export KEYFRAME_INTERVAL_SECS=%d\n", interval)
+		fmt.Fprintf(&b, "export KEYFRAME_MAX_COUNT=%d\n", maxCount)
+		b.WriteString(`KEYFRAMES_JSON=""` + "\n")
+		fmt.Fprintf(&b, `if [ "$HAS_VIDEO" -gt 0 ] && [ "$IS_IMAGE" = "0" ] && awk -v d="$DUR_SEC" 'BEGIN{exit !(d > 0)}'; then`+"\n")
+		// Compute effective interval: natural = (dur - 1)/interval.
+		// If natural+1 > max, stretch interval = (dur-1)/(max-1).
+		b.WriteString(`  EFFECTIVE_INTERVAL=$(awk -v d="$DUR_SEC" -v iv="$KEYFRAME_INTERVAL_SECS" -v mx="$KEYFRAME_MAX_COUNT" 'BEGIN{
+    natural=int((d-1)/iv);
+    if (natural+1 > mx) {
+      printf "%.3f", (d-1)/(mx-1);
+    } else {
+      printf "%d", iv;
+    }
+  }')` + "\n")
+		b.WriteString(`  KF_INDEX=0` + "\n")
+		b.WriteString(`  POS_SEC=1` + "\n")
+		// Loop until pos >= dur OR we hit the cap.
+		b.WriteString(`  while awk -v p="$POS_SEC" -v d="$DUR_SEC" -v c="$KF_INDEX" -v mx="$KEYFRAME_MAX_COUNT" 'BEGIN{exit !(p < d && c < mx)}'; do` + "\n")
+		// Position in milliseconds (integer, for filename + JSON).
+		b.WriteString(`    POS_MS=$(awk -v p="$POS_SEC" 'BEGIN{printf "%d", p*1000}')` + "\n")
+		b.WriteString(`    KF_FILE="kf-${POS_MS}.jpg"` + "\n")
+		// Extract with the smart-frame filter — same as thumbnail. If
+		// ffmpeg fails for this position, skip and continue to the
+		// next; one failed frame mustn't kill the whole loop.
+		b.WriteString(`    "$FFMPEG" -y -loglevel error -ss "$POS_SEC" -i "$SIGNED_URL" -vf "thumbnail=30,scale=$THUMB_WIDTH:-2" -frames:v 1 -q:v 3 "$KF_FILE" 2>/dev/null || { POS_SEC=$(awk -v p="$POS_SEC" -v iv="$EFFECTIVE_INTERVAL" 'BEGIN{printf "%.3f", p+iv}'); continue; }` + "\n")
+		b.WriteString(`    [ ! -s "$KF_FILE" ] && { POS_SEC=$(awk -v p="$POS_SEC" -v iv="$EFFECTIVE_INTERVAL" 'BEGIN{printf "%.3f", p+iv}'); continue; }` + "\n")
+		// Upload the keyframe to storage under /.media/keyframe/.
+		// Position-tagged filename so storage's per-folder uniqueness
+		// doesn't clobber prior frames.
+		b.WriteString(`    KF_RESP=$(curl -sS --fail -X POST \
+      -H "Authorization: Bearer $STORAGE_TOKEN" \
+      -F "folder=/.media/keyframe/" \
+      -F "visibility=private" \
+      -F "source=media-derivation" \
+      -F "tags=derivation,keyframe" \
+      -F "file=@${KF_FILE};type=image/jpeg;filename=${SRC_ID}-${POS_MS}.jpg" \
+      "$STORAGE_BASE/files?project_id=$PROJECT_ID" || true)` + "\n")
+		b.WriteString(`    KF_ID=$(echo "$KF_RESP" | sed -n 's/.*"id":[[:space:]]*\([0-9]*\).*/\1/p' | head -1)` + "\n")
+		// Append {position_ms, storage_file_id} to JSON array.
+		b.WriteString(`    if [ -n "$KF_ID" ]; then` + "\n")
+		b.WriteString(`      if [ -z "$KEYFRAMES_JSON" ]; then` + "\n")
+		b.WriteString(`        KEYFRAMES_JSON="{\"position_ms\":$POS_MS,\"storage_file_id\":$KF_ID}"` + "\n")
+		b.WriteString(`      else` + "\n")
+		b.WriteString(`        KEYFRAMES_JSON="$KEYFRAMES_JSON,{\"position_ms\":$POS_MS,\"storage_file_id\":$KF_ID}"` + "\n")
+		b.WriteString(`      fi` + "\n")
+		b.WriteString(`      KF_INDEX=$((KF_INDEX+1))` + "\n")
+		b.WriteString(`    fi` + "\n")
+		// rm the local file before next iteration so /tmp doesn't fill
+		// for a long video with 60 keyframes.
+		b.WriteString(`    rm -f "$KF_FILE"` + "\n")
+		b.WriteString(`    POS_SEC=$(awk -v p="$POS_SEC" -v iv="$EFFECTIVE_INTERVAL" 'BEGIN{printf "%.3f", p+iv}')` + "\n")
+		b.WriteString(`  done` + "\n")
+		fmt.Fprintf(&b, `fi`+"\n")
+	} else {
+		b.WriteString(`KEYFRAMES_JSON=""` + "\n")
+	}
+
 	// Encode probe.json so the marker line stays single-line + safe
 	// to embed inside JSON. `base64 -w0` is GNU; the busybox fallback
 	// (`base64 | tr -d '\n'`) covers Alpine.
@@ -309,13 +416,21 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	b.WriteString(`: "${THUMB_FILE_ID:=0}"` + "\n")
 	b.WriteString(`: "${WAVE_FILE_ID:=0}"` + "\n")
 
-	b.WriteString(`printf 'APTEVA_INDEX:{"probe_b64":"%s","thumbnail_file_id":%s,"waveform_file_id":%s}\n' "$PROBE_B64" "$THUMB_FILE_ID" "$WAVE_FILE_ID"` + "\n")
+	// APTEVA_INDEX marker: probe_b64 + ids + keyframes array. The
+	// keyframes field is an empty array when KEYFRAMES_JSON is unset.
+	b.WriteString(`printf 'APTEVA_INDEX:{"probe_b64":"%s","thumbnail_file_id":%s,"waveform_file_id":%s,"keyframes":[%s]}\n' "$PROBE_B64" "$THUMB_FILE_ID" "$WAVE_FILE_ID" "$KEYFRAMES_JSON"` + "\n")
 	return b.String()
 }
 
 // ─── parsers ──────────────────────────────────────────────────────
 
-var aptevaIndexRE = regexp.MustCompile(`(?m)^APTEVA_INDEX:(\{[^}]+\})\s*$`)
+// aptevaIndexRE matches the JSON envelope. Pre-v0.13.0 used a
+// non-greedy `[^}]+` body — that broke when the marker started
+// carrying nested arrays/objects like "keyframes":[{...},{...}]
+// because the `[^}]` stops at the first inner `}`. The new regex
+// finds the line, grabs everything from `{` to end-of-line, and
+// relies on json.Unmarshal to validate the structure.
+var aptevaIndexRE = regexp.MustCompile(`(?m)^APTEVA_INDEX:(\{.*)$`)
 
 func parseAptevaIndex(stdout string) (*remoteIndexResult, error) {
 	m := aptevaIndexRE.FindStringSubmatch(stdout)
@@ -324,7 +439,7 @@ func parseAptevaIndex(stdout string) (*remoteIndexResult, error) {
 	}
 	var r remoteIndexResult
 	if err := json.Unmarshal([]byte(m[1]), &r); err != nil {
-		return nil, fmt.Errorf("decode marker: %w", err)
+		return nil, fmt.Errorf("decode marker: %w (raw=%s)", err, truncate(m[1], 300))
 	}
 	if r.ProbeBase64 == "" {
 		return nil, errors.New("marker missing probe_b64")
