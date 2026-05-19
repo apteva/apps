@@ -219,7 +219,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	size := strArg(args, "size", "")
 	extraJSON := encodeExtras(kind, args)
 	costUSD := computeGenerationCost(ctx, bound, kind, capability, model, args)
-	a.dbInsertGeneration(generationRecord{
+	genID := a.dbInsertGeneration(generationRecord{
 		ProjectID:    pid,
 		Kind:         kind,
 		Prompt:       prompt,
@@ -235,6 +235,17 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		Count:        len(media),
 		CostUSD:      costUSD,
 	})
+
+	// When storage is unbound, persist the full first-item bytes to
+	// the sidecar's local cache so the panel can render them at native
+	// resolution (instead of falling back to the lossy thumbnail).
+	// Only the first item — multi-variant cases will need a richer
+	// cache key if/when we render more than one image per row.
+	if storage == nil && genID > 0 && len(media) > 0 && media[0].B64 != "" {
+		if err := writeLocalCache(genID, media[0].B64, media[0].Ext); err != nil {
+			ctx.Logger().Warn("writeLocalCache failed", "gen_id", genID, "err", err)
+		}
+	}
 
 	ctx.Emit("media.generated", map[string]any{
 		"kind": kind, "prompt": prompt, "model": model, "count": len(media),

@@ -221,6 +221,13 @@ func (a *App) finalizeVideoJob(
 		Count:        1,
 		CostUSD:      costUSD,
 	})
+	// Mirror dispatcher: when storage is unbound, cache the full bytes
+	// locally so the video plays back at native quality in the panel.
+	if storage == nil && generationID > 0 {
+		if err := writeLocalCache(generationID, base64Bytes, ext); err != nil {
+			app.Logger().Warn("video writeLocalCache failed", "gen_id", generationID, "err", err)
+		}
+	}
 
 	var storageID int64
 	if len(storageIDs) > 0 {

@@ -111,23 +111,31 @@ func queryHistory(ctx *sdk.AppCtx, pid, kindFilter string, limit int) (map[strin
 		for _, sid := range storageIDs {
 			storageURLs = append(storageURLs, storageContentURL(sid, pid))
 		}
+		// When storage isn't bound, the sidecar may have cached the full
+		// bytes locally (cache.go writeLocalCache). Surface that URL so
+		// the panel can render the original instead of the thumbnail.
+		localURL := ""
+		if len(storageIDs) == 0 {
+			localURL = localCacheURL(id)
+		}
 		out = append(out, map[string]any{
-			"id":             id,
-			"kind":           kind,
-			"prompt":         prompt,
-			"revised_prompt": revised,
-			"provider":       provider,
-			"model":          model,
-			"size":           size,
-			"duration_ms":    durationMs,
-			"storage_ids":    storageIDs,
-			"storage_urls":   storageURLs,
-			"upstream_urls":  upstreamURLs,
-			"thumbnail_b64":  thumbB64,
-			"extra_json":     extraJSON,
-			"count":          count,
-			"cost_usd":       costUSD,
-			"created_at":     createdAt,
+			"id":               id,
+			"kind":             kind,
+			"prompt":           prompt,
+			"revised_prompt":   revised,
+			"provider":         provider,
+			"model":            model,
+			"size":             size,
+			"duration_ms":      durationMs,
+			"storage_ids":      storageIDs,
+			"storage_urls":     storageURLs,
+			"upstream_urls":    upstreamURLs,
+			"thumbnail_b64":    thumbB64,
+			"local_cache_url":  localURL,
+			"extra_json":       extraJSON,
+			"count":            count,
+			"cost_usd":         costUSD,
+			"created_at":       createdAt,
 		})
 	}
 	return map[string]any{"generations": out}, nil

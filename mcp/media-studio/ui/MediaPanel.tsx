@@ -94,6 +94,7 @@ interface Generation {
   storage_urls: string[];
   upstream_urls: string[];
   thumbnail_b64: string;
+  local_cache_url?: string;
   count: number;
   cost_usd: number;
   created_at: string;
@@ -219,7 +220,11 @@ function IconMusic() {
 }
 
 function imageSrc(g: Generation): string {
+  // Prefer storage (persistent, sharable) > local sidecar cache
+  // (full-resolution original kept when storage is unbound) >
+  // thumbnail (lossy 256px JPEG, last-resort).
   if (g.storage_urls && g.storage_urls.length > 0) return g.storage_urls[0];
+  if (g.local_cache_url) return g.local_cache_url;
   if (g.thumbnail_b64) return `data:image/jpeg;base64,${g.thumbnail_b64}`;
   return "";
 }
@@ -1179,7 +1184,7 @@ function Gallery({
         <GeneratingCard prompt={generatingPrompt} model={generatingModel} />
       )}
       {items.map((g) => {
-        const url = g.storage_urls?.[0] || g.upstream_urls?.[0] || "";
+        const url = g.storage_urls?.[0] || g.local_cache_url || g.upstream_urls?.[0] || "";
         return (
           <div
             key={g.id}
@@ -1410,7 +1415,7 @@ function Lightbox({
   onClose: () => void;
   onUseAsReference?: () => void;
 }) {
-  const url = item.storage_urls?.[0] || item.upstream_urls?.[0] || imageSrc(item);
+  const url = item.storage_urls?.[0] || item.local_cache_url || item.upstream_urls?.[0] || imageSrc(item);
   // Close on Esc.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
