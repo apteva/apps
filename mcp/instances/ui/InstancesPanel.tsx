@@ -100,6 +100,10 @@ function formatPriceEUR(cents: number): string {
 // ProgressBar — labeled percentage with a colored fill. Width via
 // inline style; Tailwind arbitrary widths don't compile in the
 // dashboard's CSS bundle.
+//
+// Default height is 10px (up from the original 6px which read as a
+// thin colored line against the dark backgrounds). Disk bars use the
+// smaller 6px form for compact stacks.
 function ProgressBar({
   pct, label, sublabel, height,
 }: {
@@ -109,22 +113,22 @@ function ProgressBar({
   height?: number;
 }) {
   const clamped = Math.max(0, Math.min(100, pct));
-  const h = height ?? 6;
+  const h = height ?? 10;
   return (
-    <div className="space-y-0.5">
+    <div className="space-y-1">
       {(label || sublabel) && (
-        <div className="flex justify-between items-baseline text-[10px]">
-          {label && <span className="text-text-dim uppercase tracking-wider">{label}</span>}
+        <div className="flex justify-between items-baseline text-[11px]">
+          {label && <span className="text-text-dim uppercase tracking-wider font-medium">{label}</span>}
           {sublabel && <span className="text-text font-mono">{sublabel}</span>}
         </div>
       )}
       <div
-        className="w-full rounded-full overflow-hidden bg-bg-input"
+        className="w-full rounded-full overflow-hidden bg-bg/60 border border-border/40"
         style={{ height: `${h}px` }}
         title={`${clamped.toFixed(1)}%`}
       >
         <div
-          className="h-full rounded-full transition-all"
+          className="h-full rounded-full transition-all duration-500"
           style={{ width: `${clamped}%`, backgroundColor: pctColor(clamped) }}
         />
       </div>
@@ -169,65 +173,80 @@ function Sparkline({
 // history window. Y axis pinned 0-100 so both series are comparable.
 // Includes gridlines at 25/50/75/100 and a tiny legend.
 function MultiLineChart({
-  cpu, mem, width, height,
+  cpu, mem, height,
 }: {
   cpu: number[];
   mem: number[];
-  width?: number;
   height?: number;
 }) {
-  const w = width ?? 460;
-  const h = height ?? 80;
-  const padding = 24;
-  const plotW = w - padding - 8;
-  const plotH = h - 24;
+  // Fills its container width — operator scales via parent layout.
+  // Height defaults to 140 so the gridlines have breathing room and
+  // y-axis labels don't pile up on top of each other (the original
+  // h=80 had "0/50/100" overlapping at low resolutions).
+  const VIEW_W = 800;
+  const h = height ?? 140;
+  const padLeft = 32;
+  const padRight = 12;
+  const padTop = 10;
+  const padBottom = 26;
+  const plotW = VIEW_W - padLeft - padRight;
+  const plotH = h - padTop - padBottom;
   const n = Math.max(cpu.length, mem.length);
   if (n < 2) {
     return (
       <div
-        className="text-[10px] text-text-dim flex items-center justify-center bg-bg-input/30 rounded"
-        style={{ width: w, height: h }}
+        className="text-[11px] text-text-dim flex items-center justify-center bg-bg/40 border border-border/40 rounded"
+        style={{ height: h }}
       >
-        accumulating samples…
+        Accumulating samples — chart fills in as the metrics poll ticks
       </div>
     );
   }
   const xAt = (i: number, len: number) =>
-    padding + (len > 1 ? (i / (len - 1)) * plotW : 0);
-  const yAt = (v: number) => 8 + (1 - Math.max(0, Math.min(100, v)) / 100) * plotH;
+    padLeft + (len > 1 ? (i / (len - 1)) * plotW : 0);
+  const yAt = (v: number) =>
+    padTop + (1 - Math.max(0, Math.min(100, v)) / 100) * plotH;
   const lineFor = (vs: number[]) =>
     vs
       .map((v, i) => `${i === 0 ? "M" : "L"} ${xAt(i, vs.length).toFixed(1)} ${yAt(v).toFixed(1)}`)
       .join(" ");
-  const cpuPath = lineFor(cpu);
-  const memPath = lineFor(mem);
   return (
-    <svg width={w} height={h} className="block" aria-label="cpu/memory history">
+    <svg
+      viewBox={`0 0 ${VIEW_W} ${h}`}
+      preserveAspectRatio="none"
+      className="block w-full"
+      style={{ height: h }}
+      aria-label="cpu/memory history"
+    >
       {/* gridlines */}
-      {[25, 50, 75].map((g) => (
+      {[0, 25, 50, 75, 100].map((g) => (
         <line
           key={g}
-          x1={padding} y1={yAt(g)} x2={w - 8} y2={yAt(g)}
-          stroke="currentColor" strokeOpacity="0.08" strokeWidth="1"
+          x1={padLeft} y1={yAt(g)} x2={VIEW_W - padRight} y2={yAt(g)}
+          stroke="currentColor"
+          strokeOpacity={g === 0 || g === 100 ? "0.15" : "0.06"}
+          strokeWidth="1"
         />
       ))}
       {/* y labels */}
       {[0, 50, 100].map((g) => (
         <text
           key={g}
-          x={padding - 4} y={yAt(g) + 3}
-          textAnchor="end" fontSize="9" fill="currentColor" fillOpacity="0.4"
-        >{g}</text>
+          x={padLeft - 6} y={yAt(g) + 3}
+          textAnchor="end" fontSize="10" fill="currentColor" fillOpacity="0.45"
+        >{g}%</text>
       ))}
-      <path d={cpuPath} fill="none" stroke="#3b82f6" strokeWidth="1.5" />
-      <path d={memPath} fill="none" stroke="#8b5cf6" strokeWidth="1.5" />
+      <path d={lineFor(cpu)} fill="none" stroke="#3b82f6" strokeWidth="2" />
+      <path d={lineFor(mem)} fill="none" stroke="#a78bfa" strokeWidth="2" />
       {/* legend */}
-      <g transform={`translate(${padding}, ${h - 6})`} fontSize="9" fill="currentColor" fillOpacity="0.7">
-        <rect x="0" y="-7" width="8" height="2" fill="#3b82f6" />
-        <text x="12" y="0">CPU</text>
-        <rect x="44" y="-7" width="8" height="2" fill="#8b5cf6" />
-        <text x="56" y="0">MEM</text>
-        <text x="92" y="0" fillOpacity="0.5">{n} samples</text>
+      <g transform={`translate(${padLeft}, ${h - 8})`} fontSize="10" fill="currentColor" fillOpacity="0.7">
+        <rect x="0" y="-7" width="10" height="2" fill="#3b82f6" />
+        <text x="16" y="0">CPU</text>
+        <rect x="56" y="-7" width="10" height="2" fill="#a78bfa" />
+        <text x="72" y="0">Memory</text>
+        <text x={plotW - 60} y="0" textAnchor="end" fillOpacity="0.45">
+          {n} samples · ~{Math.round((n * 10) / 60)} min
+        </text>
       </g>
     </svg>
   );
@@ -304,12 +323,17 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
         </span>
         {remoteCount > 0 && (
           <span
-            className="text-xs text-text-muted"
-            title="Sum of monthly cost across non-local instances"
+            className="text-xs text-text-muted px-2 py-0.5 rounded bg-bg-input/40 border border-border/40"
+            title="Sum of monthly cost across non-local instances (0 when the catalog hasn't priced them yet)"
           >
-            <span className="font-mono text-text">{formatPriceEUR(monthlyEUR)}</span>
-            <span className="text-text-dim">/mo</span>
-            <span className="text-text-dim"> · {remoteCount} remote</span>
+            {monthlyEUR > 0 ? (
+              <>
+                <span className="font-mono text-text">{formatPriceEUR(monthlyEUR)}</span>
+                <span className="text-text-dim">/mo</span>
+                <span className="text-text-dim mx-1">·</span>
+              </>
+            ) : null}
+            <span className="text-text-dim">{remoteCount} remote</span>
           </span>
         )}
         <button
@@ -425,19 +449,32 @@ function InstanceCard({
   const staleAgeS = lastPollAt > 0 ? Math.floor((Date.now() - lastPollAt) / 1000) : 0;
   const stale = lastPollAt > 0 && (Date.now() - lastPollAt) > STALE_THRESHOLD_MS;
 
+  // Pick the most space-pressed mounts first when there are many
+  // (local dev box has /dev, /System/Volumes/VM, etc.). Top 3 by
+  // used_pct keeps the interesting ones; full list is one click
+  // away in the existing /metrics REST shape if needed later.
+  const sortedDisks = metrics?.disk
+    ? [...metrics.disk].sort((a, b) => b.used_pct - a.used_pct).slice(0, 3)
+    : [];
+
   return (
-    <div className="border border-border rounded p-3 space-y-2 bg-bg-input/20">
-      <div className="flex items-baseline gap-2 flex-wrap">
-        <span className={statusColor(inst.status) + " text-xs"}>●</span>
-        <span className="text-text font-medium">{inst.name}</span>
-        <span className="text-text-dim text-xs">
+    <div className="rounded-lg border border-border bg-bg-card overflow-hidden">
+      {/* Header strip — distinct background so the card has a visible
+          "spine" and the body content reads as bounded sections. */}
+      <div className="flex items-center gap-2 px-4 py-2.5 bg-bg-input/40 border-b border-border flex-wrap">
+        <span className={statusColor(inst.status) + " text-base leading-none"}>●</span>
+        <span className="text-text font-semibold">{inst.name}</span>
+        <span className="text-text-dim text-xs ml-1">
           {inst.provider}
           {inst.size ? ` · ${inst.size}` : ""}
           {inst.region ? ` · ${inst.region}` : ""}
         </span>
         <span className="text-text-dim text-xs font-mono ml-2">{ip}</span>
         {!isLocal && inst.monthly_cost_cents > 0 && (
-          <span className="text-text-dim text-[11px]">
+          <span
+            className="text-[11px] text-text-muted font-mono ml-2"
+            title="Monthly cost from the provider catalog"
+          >
             {formatPriceEUR(inst.monthly_cost_cents)}/mo
           </span>
         )}
@@ -448,7 +485,9 @@ function InstanceCard({
             title={`No successful metrics poll for ${staleAgeS}s — values shown may be outdated`}
           >stale {staleAgeS}s</span>
         )}
-        <span className={statusColor(inst.status) + " text-xs"}>{inst.status}</span>
+        <span className={statusColor(inst.status) + " text-[11px] uppercase tracking-wider font-medium"}>
+          {inst.status}
+        </span>
         {!isLocal && (
           <button
             type="button"
@@ -460,102 +499,141 @@ function InstanceCard({
       </div>
 
       {inst.error && (
-        <div className="text-red text-xs">{inst.error}</div>
+        <div className="px-4 py-2 text-red text-xs bg-red/5 border-b border-red/20">
+          {inst.error}
+        </div>
       )}
 
+      {/* Body — split into three sub-cards (vitals / disk / history)
+          on a slightly darker shared background so the inner pieces
+          read as distinct surfaces against the outer card. */}
       {metrics ? (
         <div
+          className="p-3 space-y-3 bg-bg-input/15"
           style={stale ? { opacity: 0.55 } : undefined}
-          className="space-y-2"
         >
-          {/* Progress bars: CPU + Memory share the same 0-100 scale. */}
-          <div className="grid grid-cols-2 gap-3">
-            <div className="flex items-center gap-2">
-              <div className="flex-1">
-                <ProgressBar
-                  label="CPU"
-                  sublabel={`${metrics.cpu.total_pct.toFixed(1)}%`}
-                  pct={metrics.cpu.total_pct}
+          {/* Vitals: CPU + Memory bars with inline sparklines on the
+              right, then a stat row underneath. Background lighter
+              than the body to lift it visually. */}
+          <div className="rounded-md border border-border/60 bg-bg-card/80 p-3 space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="flex items-end gap-3">
+                <div className="flex-1 min-w-0">
+                  <ProgressBar
+                    label="CPU"
+                    sublabel={`${metrics.cpu.total_pct.toFixed(1)}%`}
+                    pct={metrics.cpu.total_pct}
+                  />
+                </div>
+                <Sparkline
+                  values={history.map((s) => s.cpuPct)}
+                  color="#3b82f6"
+                  width={64}
+                  height={22}
                 />
               </div>
-              <Sparkline
-                values={history.map((s) => s.cpuPct)}
-                color="#3b82f6"
-              />
+              <div className="flex items-end gap-3">
+                <div className="flex-1 min-w-0">
+                  <ProgressBar
+                    label="Memory"
+                    sublabel={`${formatBytes(metrics.mem.used_bytes)} / ${formatBytes(metrics.mem.total_bytes)} · ${memPct.toFixed(0)}%`}
+                    pct={memPct}
+                  />
+                </div>
+                <Sparkline
+                  values={history.map((s) => s.memPct)}
+                  color="#a78bfa"
+                  width={64}
+                  height={22}
+                />
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <div className="flex-1">
-                <ProgressBar
-                  label="MEM"
-                  sublabel={`${formatBytes(metrics.mem.used_bytes)} / ${formatBytes(metrics.mem.total_bytes)} · ${memPct.toFixed(0)}%`}
-                  pct={memPct}
-                />
-              </div>
-              <Sparkline
-                values={history.map((s) => s.memPct)}
-                color="#8b5cf6"
-              />
+
+            <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs pt-1 border-t border-border/40">
+              <StatChip label="Load (1m)">
+                <span
+                  className="font-mono"
+                  style={{ color: loadColor(metrics.load.l1) }}
+                  title={`1/5/15 min: ${metrics.load.l1.toFixed(2)} / ${metrics.load.l5.toFixed(2)} / ${metrics.load.l15.toFixed(2)}`}
+                >
+                  {metrics.load.l1.toFixed(2)}
+                </span>
+                <span className="text-text-dim font-mono ml-1">
+                  / {metrics.load.l5.toFixed(2)} / {metrics.load.l15.toFixed(2)}
+                </span>
+              </StatChip>
+              <StatChip label="Uptime">
+                <span className="text-text font-mono">{formatUptime(metrics.uptime_s)}</span>
+              </StatChip>
+              {metrics.process_count > 0 && (
+                <StatChip label="Processes">
+                  <span className="text-text font-mono">{metrics.process_count}</span>
+                </StatChip>
+              )}
             </div>
           </div>
 
-          {/* Stat row: load + uptime + procs. Load is colored against
-              a conservative threshold (cores unknown). */}
-          <div className="flex flex-wrap gap-4 text-xs text-text-muted">
-            <div>
-              <span className="text-text-dim uppercase text-[10px] mr-1">LOAD</span>
-              <span
-                className="font-mono"
-                style={{ color: loadColor(metrics.load.l1) }}
-                title={`1/5/15 min load average: ${metrics.load.l1.toFixed(2)} / ${metrics.load.l5.toFixed(2)} / ${metrics.load.l15.toFixed(2)}`}
-              >
-                {metrics.load.l1.toFixed(2)}
-              </span>
-              <span className="text-text-dim font-mono ml-1">
-                / {metrics.load.l5.toFixed(2)} / {metrics.load.l15.toFixed(2)}
-              </span>
-            </div>
-            <div>
-              <span className="text-text-dim uppercase text-[10px] mr-1">UP</span>
-              <span className="text-text font-mono">{formatUptime(metrics.uptime_s)}</span>
-            </div>
-            {metrics.process_count > 0 && (
-              <div>
-                <span className="text-text-dim uppercase text-[10px] mr-1">PROCS</span>
-                <span className="text-text font-mono">{metrics.process_count}</span>
+          {/* Disks — its own sub-card so the per-mount progress stack
+              has visual separation from the vitals. Title strip keeps
+              the section labeled without needing operator inference. */}
+          {sortedDisks.length > 0 && (
+            <div className="rounded-md border border-border/60 bg-bg-card/80 overflow-hidden">
+              <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-text-dim font-medium border-b border-border/40 bg-bg-input/20">
+                Disk
               </div>
-            )}
-          </div>
-
-          {/* Per-mount disk bars. Slice to top 3 — most boxes only
-              have one mount of interest; more than 3 makes the card
-              too tall. */}
-          {metrics.disk?.length > 0 && (
-            <div className="space-y-1.5 pt-1">
-              {metrics.disk.slice(0, 3).map((d) => (
-                <ProgressBar
-                  key={d.mount}
-                  label={d.mount}
-                  sublabel={`${formatBytes(d.used_bytes)} / ${formatBytes(d.total_bytes)} · ${d.used_pct.toFixed(0)}%`}
-                  pct={d.used_pct}
-                  height={4}
-                />
-              ))}
+              <div className="p-3 space-y-2.5">
+                {sortedDisks.map((d) => (
+                  <ProgressBar
+                    key={d.mount}
+                    label={d.mount}
+                    sublabel={`${formatBytes(d.used_bytes)} / ${formatBytes(d.total_bytes)} · ${d.used_pct.toFixed(0)}%`}
+                    pct={d.used_pct}
+                    height={8}
+                  />
+                ))}
+                {metrics.disk.length > sortedDisks.length && (
+                  <div className="text-[10px] text-text-dim italic">
+                    + {metrics.disk.length - sortedDisks.length} more mount(s) — top {sortedDisks.length} by utilization shown
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
-          {/* Time-range chart: live, in-memory. Renders an "accumulating"
-              placeholder until we have 2+ samples. Caps the window at
-              ~1h via HISTORY_MAX. */}
-          <div className="pt-1">
-            <MultiLineChart
-              cpu={history.map((s) => s.cpuPct)}
-              mem={history.map((s) => s.memPct)}
-            />
+          {/* History — live in-memory time-range chart. Same sub-card
+              chrome as Disk. Title summarizes window size. */}
+          <div className="rounded-md border border-border/60 bg-bg-card/80 overflow-hidden">
+            <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-text-dim font-medium border-b border-border/40 bg-bg-input/20 flex items-center justify-between">
+              <span>History (live)</span>
+              <span className="text-text-dim normal-case tracking-normal">
+                {history.length >= 2
+                  ? `Last ~${Math.round((history.length * 10) / 60)} min — session-scoped`
+                  : "warming up"}
+              </span>
+            </div>
+            <div className="p-3">
+              <MultiLineChart
+                cpu={history.map((s) => s.cpuPct)}
+                mem={history.map((s) => s.memPct)}
+              />
+            </div>
           </div>
         </div>
       ) : inst.status === "ready" ? (
-        <div className="text-text-dim text-[11px]">Loading vitals…</div>
+        <div className="px-4 py-3 text-text-dim text-[11px]">Loading vitals…</div>
       ) : null}
+    </div>
+  );
+}
+
+// StatChip — uniform label + value pair for the stat row under the
+// vitals bars. Kept as a tiny helper because every "label inline
+// value" pair used to duplicate the same markup.
+function StatChip({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <span className="text-text-dim uppercase text-[10px] tracking-wider mr-1.5 font-medium">{label}</span>
+      {children}
     </div>
   );
 }
