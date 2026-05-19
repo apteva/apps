@@ -82,18 +82,18 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// passing AppCtx — can reach it. (Same pattern as crm.)
 	globalCtx = ctx
 
-	// Surface the v0.1.0 ⇄ stripe gap loud-and-clear at boot. v0.1.0
-	// can't honour stripe_enabled=true; we log a warning rather than
-	// fail boot so an install pre-configured for v0.1.1 doesn't get
-	// stuck.
-	if cfg := ctx.Config(); cfg != nil {
-		if strings.EqualFold(strings.TrimSpace(cfg.Get("stripe_enabled")), "true") {
-			ctx.Logger().Warn("billing v0.1.0: stripe_enabled=true ignored — Stripe provider lands in v0.1.1; running local-only")
-		}
+	// v0.8.0: Stripe is now an integration (role: payment_processor),
+	// no longer a config-driven toggle. Surface the binding status at
+	// boot so install issues are visible in the logs without
+	// failing the mount.
+	if ctx.IntegrationFor("payment_processor") != nil {
+		ctx.Logger().Info("billing: payment_processor integration bound — Stripe payment links enabled")
+	} else {
+		ctx.Logger().Info("billing: no payment_processor bound — manual-payment mode only")
 	}
 
 	ctx.Logger().Info("billing mounted",
-		"version", "0.1.1",
+		"version", "0.8.0",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -117,6 +117,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/invoices/", Handler: a.handleHTTPInvoiceItem},
 		{Pattern: "/payments", Handler: a.handleHTTPPaymentsCollection},
 		{Pattern: "/issuer", Handler: a.handleHTTPIssuer},
+		// Stripe webhook receiver (v0.8.0+). Public POST endpoint
+		// Stripe Dashboard is configured to call. Signature verified
+		// via the integration's process_webhook tool.
+		{Pattern: "/webhooks/stripe", Handler: a.handleStripeWebhook},
 	}
 }
 
@@ -384,6 +388,16 @@ func (a *App) MCPTools() []sdk.Tool {
 				"folder":           map[string]any{"type": "string"},
 			}, []string{"invoice_id"}),
 			Handler: a.toolInvoicesRenderPDF,
+		},
+		{
+			Name:        "invoices_send_payment_link",
+			Description: "Generate a Stripe-hosted payment URL for an open invoice. Returns {url, stripe_session_id, expires_at}. Requires the payment_processor integration (Stripe) to be bound. URL is a Stripe Checkout Session, valid for 24h. On payment success, the /webhooks/stripe handler records the payment and transitions the invoice to 'paid' automatically (idempotent on the payment_intent id). Args: invoice_id (required), success_url, cancel_url.",
+			InputSchema: schemaObject(map[string]any{
+				"invoice_id":  map[string]any{"type": "integer"},
+				"success_url": map[string]any{"type": "string"},
+				"cancel_url":  map[string]any{"type": "string"},
+			}, []string{"invoice_id"}),
+			Handler: a.toolInvoicesSendPaymentLink,
 		},
 		// ── Issuer ───────────────────────────────────────────────────
 		{
@@ -944,11 +958,14 @@ func (a *App) toolPaymentsRecord(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if amount == 0 {
 		return nil, errors.New("amount_cents must be non-zero")
 	}
-	if method == "stripe" {
-		return nil, errors.New("method='stripe' is reserved for the v0.1.1 reconciler — use 'wire', 'cash', 'check', or 'other'")
-	}
 	switch method {
 	case "wire", "cash", "check", "other":
+	case "stripe":
+		// v0.8.0+: Stripe payments accepted. Webhook handler is the
+		// primary writer (idempotent via (method, external_id) unique
+		// index); explicit MCP calls are allowed for manual recording
+		// of off-platform Stripe activity. external_id is recommended
+		// for any stripe payment so re-deliveries dedupe cleanly.
 	default:
 		return nil, fmt.Errorf("unknown method %q", method)
 	}
@@ -956,7 +973,8 @@ func (a *App) toolPaymentsRecord(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if received == "" {
 		received = time.Now().UTC().Format(time.RFC3339)
 	}
-	pay, inv, err := dbPaymentRecord(ctx.AppDB(), pid, id, amount, method, received,
+	pay, inv, err := dbPaymentRecord(ctx.AppDB(), pid, id, amount, method,
+		strArg(args, "external_id"), received,
 		strArg(args, "notes"), callerActor(args))
 	if err != nil {
 		return nil, err
@@ -1670,12 +1688,8 @@ func (a *App) handleHTTPPaymentRecord(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "invoice_id, amount_cents, method required")
 		return
 	}
-	if method == "stripe" {
-		httpErr(w, http.StatusBadRequest, "method='stripe' is reserved for the v0.1.1 reconciler")
-		return
-	}
 	switch method {
-	case "wire", "cash", "check", "other":
+	case "wire", "cash", "check", "other", "stripe":
 	default:
 		httpErr(w, http.StatusBadRequest, "unknown method")
 		return
@@ -1684,7 +1698,8 @@ func (a *App) handleHTTPPaymentRecord(w http.ResponseWriter, r *http.Request) {
 	if received == "" {
 		received = time.Now().UTC().Format(time.RFC3339)
 	}
-	pay, inv, err := dbPaymentRecord(ctx.AppDB(), pid, id, amount, method, received,
+	pay, inv, err := dbPaymentRecord(ctx.AppDB(), pid, id, amount, method,
+		strArg(body, "external_id"), received,
 		strArg(body, "notes"), actorFromRequest(r))
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -2639,7 +2654,31 @@ func dbPaymentList(db *sql.DB, pid string, f paymentFilters) ([]*Payment, error)
 // invoice's amount_paid_cents + status. Single Tx so the invoice
 // state can never disagree with its payments.
 func dbPaymentRecord(db *sql.DB, pid string, invID int64, amount int64,
-	method, receivedAt, notes, actor string) (*Payment, *Invoice, error) {
+	method, externalID, receivedAt, notes, actor string) (*Payment, *Invoice, error) {
+	// Idempotency for processor-driven writes (Stripe webhook, future
+	// reconciler): when method='stripe' (or any non-empty external_id),
+	// check the unique (method, external_id) index BEFORE the
+	// transaction. If a payment already exists with the same key,
+	// return it as a no-op rather than failing on constraint.
+	if externalID != "" {
+		var existingPayID int64
+		if err := db.QueryRow(
+			`SELECT id FROM payments WHERE method = ? AND external_id = ?`,
+			method, externalID).Scan(&existingPayID); err == nil {
+			// Re-deliver — return current state.
+			pays, _ := dbPaymentList(db, pid, paymentFilters{invoiceID: invID, limit: 1})
+			inv, _ := dbInvoiceGetByID(db, pid, invID)
+			if inv != nil {
+				_ = loadInvoiceChildren(db, pid, inv)
+			}
+			if len(pays) > 0 {
+				return pays[0], inv, nil
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, nil, err
+		}
+	}
+
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, nil, err
@@ -2666,9 +2705,10 @@ func dbPaymentRecord(db *sql.DB, pid string, invID int64, amount int64,
 	}
 	res, err := tx.Exec(
 		`INSERT INTO payments (project_id, invoice_id, customer_id, amount_cents,
-		                      currency, method, received_at, notes)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, invID, cid, amount, currency, method, receivedAt, nullStr(notes))
+		                      currency, method, external_id, received_at, notes)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pid, invID, cid, amount, currency, method,
+		nullStr(externalID), receivedAt, nullStr(notes))
 	if err != nil {
 		return nil, nil, err
 	}

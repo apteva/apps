@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.7.0
+version: 0.8.0
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Per-invoice provider — local for internal/wire/cash records, stripe
@@ -23,10 +23,25 @@ min_apteva_version: "0.10.0"
 requires:
   permissions:
     - db.write.app
-    - platform.apps.call               # billing calls catalog when line items reference price_id
+    - platform.apps.call                       # billing calls catalog when line items reference price_id
+    - platform.connections.read_credentials    # for the Stripe webhook signature verification path
   apps:
     - name: catalog
-      optional: true                   # free-form line items keep working without catalog
+      optional: true                           # free-form line items keep working without catalog
+  integrations:
+    - role: payment_processor                  # Stripe (or any future processor) for card-payable invoices
+      kind: integration
+      compatible_slugs: [stripe]
+      capabilities: [customers.create, checkout_sessions.create, refunds.create, webhooks.receive]
+      tools:
+        customers.create:         create_customer
+        customers.search:         search_customers
+        checkout_sessions.create: create_checkout_session
+        refunds.create:           create_refund
+        webhooks.process:         process_webhook
+      required: false                          # billing still works without it — manual payments only
+      label: "Payment processor (Stripe)"
+      hint: "Bind to enable card payment links on invoices. Without it, payments_record handles wire / cash / check / other only."
 
 provides:
   http_routes:
@@ -63,6 +78,14 @@ provides:
         Render the invoice as a PDF. Default returns the bytes as base64; set
         save_to_storage=true to write the PDF into the storage app and get back
         a file_id + URL the agent can attach to chat or email.
+    - name: invoices_send_payment_link
+      description: |
+        Generate a Stripe-hosted payment URL for an open invoice. Returns
+        {url, expires_at}. Requires the payment_processor integration
+        (Stripe) to be bound; otherwise errors with a clear "bind the
+        integration" message. URL is a Stripe Checkout Session, valid for
+        24h. On payment success, the webhook records the payment + transitions
+        the invoice to 'paid' automatically.
     - name: payments_record
       description: Record a non-Stripe payment (wire / cash / check / other). Updates invoice status when fully covered.
     - name: payments_list
@@ -137,23 +160,21 @@ db:
   migrations: migrations/
 
 config_schema:
-  - name: stripe_enabled
-    type: select
-    options: ["true", "false"]
-    default: "false"
-    label: Stripe enabled
-    description: |
-      Master switch. v0.1.0 must leave this false — the Stripe provider lands in v0.1.1.
-      When set true on a v0.1.1+ install, the Stripe integration must be installed for
-      this project; boot fails loud if it isn't.
+  # Stripe is no longer a config-driven toggle — it's the
+  # payment_processor integration declared above. If bound, the
+  # send-payment-link flow lights up; if not, billing degrades
+  # gracefully to manual-only payment recording. No boot-time
+  # gating; runtime checks the binding per request.
   - name: default_provider
     type: select
-    options: [local, stripe]
+    options: [local]
     default: local
-    label: Default provider
+    label: Default invoice provider
     description: |
-      Provider applied when invoices_create doesn't specify one. v0.1.0 only honours
-      "local"; "stripe" is rejected at create time.
+      Invoice issuance provider. v0.8.0 only emits 'local' invoices —
+      Stripe is consumed as a payment method via the
+      payment_processor integration, not as an invoice issuer.
+      Future versions may add Stripe-hosted invoice mirroring.
   - name: default_currency
     type: text
     default: "USD"

@@ -586,7 +586,11 @@ func TestPayments_CoveringTotalTransitionsToPaid(t *testing.T) {
 	}
 }
 
-func TestPayments_RejectsStripeMethod(t *testing.T) {
+// As of v0.8.0, method='stripe' is accepted (webhook handler uses it;
+// manual recording is allowed for off-platform Stripe activity). The
+// (method, external_id) unique index handles idempotency for
+// webhook re-deliveries.
+func TestPayments_AcceptsStripeMethod(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}
 	c := mustCustomer(t, ctx, "alice@acme.com", "Alice")
@@ -597,12 +601,52 @@ func TestPayments_RejectsStripeMethod(t *testing.T) {
 		"invoice_id":   inv.ID,
 		"amount_cents": int64(1000),
 		"method":       "stripe",
+		"external_id":  "pi_test_abc",
 	})
-	if err == nil {
-		t.Fatal("expected method=stripe to be rejected")
+	if err != nil {
+		t.Fatalf("method=stripe should be accepted in v0.8.0+: %v", err)
 	}
-	if !strings.Contains(err.Error(), "stripe") || !strings.Contains(err.Error(), "reconciler") {
-		t.Errorf("error %q should mention stripe + reconciler", err.Error())
+}
+
+// Idempotency: re-submitting the same (method, external_id) pair
+// returns the existing payment instead of double-charging.
+func TestPayments_StripeIdempotent(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	c := mustCustomer(t, ctx, "bob@acme.com", "Bob")
+	inv := mustDraft(t, ctx, c.ID, []any{line("X", 1, 2000, 0)})
+	mustFinalize(t, ctx, inv.ID)
+
+	args := map[string]any{
+		"invoice_id":   inv.ID,
+		"amount_cents": int64(2000),
+		"method":       "stripe",
+		"external_id":  "pi_test_xyz",
+	}
+	if _, err := app.toolPaymentsRecord(ctx, args); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	// Re-deliver — must not double-record.
+	if _, err := app.toolPaymentsRecord(ctx, args); err != nil {
+		t.Fatalf("re-deliver: %v", err)
+	}
+	// Invoice should be paid exactly once (amount_paid_cents = 2000, not 4000).
+	got, err := app.toolInvoicesGet(ctx, map[string]any{"id": inv.ID})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	out, _ := got.(map[string]any)
+	invMap, _ := out["invoice"].(*Invoice)
+	if invMap == nil || invMap.AmountPaidCents != 2000 {
+		t.Errorf("expected amount_paid_cents=2000 after idempotent re-deliver, got %d", func() int64 {
+			if invMap == nil {
+				return -1
+			}
+			return invMap.AmountPaidCents
+		}())
+	}
+	if invMap != nil && invMap.Status != "paid" {
+		t.Errorf("expected status=paid, got %q", invMap.Status)
 	}
 }
 
