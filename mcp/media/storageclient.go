@@ -276,6 +276,49 @@ func (c *storageClient) signedURLViaMCP(ctx context.Context, projectID string, i
 	return urlStr, nil
 }
 
+// DeleteFile hard-deletes a storage file by id. Used by the media
+// cascade when a source file is removed — we follow up by deleting
+// every derivation (thumbnail, waveform, keyframes) the indexer
+// uploaded under /.media/. Without this, those bytes accumulate
+// forever; the media DB rows get cleaned but the storage objects
+// orphan.
+//
+// "Hard" matches our intent: the derivations are byproducts, not
+// audit history; nothing else references them once the source is
+// gone. Failures (storage temporarily down, row already deleted,
+// etc.) are returned to the caller, which decides whether to log
+// and continue or abort the cascade.
+func (c *storageClient) DeleteFile(ctx context.Context, projectID string, id int64) error {
+	rpc := map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{
+			"name": "files_delete",
+			"arguments": map[string]any{
+				"_project_id": projectID,
+				"id":          id,
+			},
+		},
+	}
+	if c.base == "" {
+		return errors.New("APTEVA_GATEWAY_URL not set")
+	}
+	raw, _ := json.Marshal(rpc)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.base+"/api/apps/storage/mcp", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("files_delete: %d: %s", resp.StatusCode, body)
+	}
+	return nil
+}
+
 // DownloadContent streams the raw bytes of a file to dst. Used by the
 // indexer to feed ffprobe / ffmpeg a local copy.
 func (c *storageClient) DownloadContent(ctx context.Context, projectID string, id int64, dst io.Writer) error {

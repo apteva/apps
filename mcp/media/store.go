@@ -5,12 +5,16 @@ package main
 // install, but a future global-scope deploy will rely on this.
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 // MediaRow is the canonical shape returned by reads. JSON tags drive
@@ -378,9 +382,47 @@ func setDescription(db *sql.DB, projectID, fileID string, f DescriptionFields) (
 // targeted at a single file_id, no diff against current storage
 // list needed.
 //
-// Rows that don't exist are no-ops. Cascade order matches
-// purgeOrphans: derivations → transcripts → media.
-func cascadeDeleteOne(db *sql.DB, projectID, fileID string) error {
+// Cleanup order:
+//   1. Find all derivation storage_file_ids (thumbnail, waveform,
+//      keyframes) for this row.
+//   2. Delete each from storage via files_delete (hard delete —
+//      derivations are byproducts, not audit history).
+//   3. Delete the local DB rows (derivations → transcripts → media).
+//
+// Storage-side delete failures are logged but DON'T block the DB
+// cleanup. The media DB needs to be consistent with what's actually
+// present; an orphaned storage row will be reaped by storage's own
+// sweeper or a later media run, but a stale derivation row in
+// media's DB pointing at a missing storage file is a worse
+// foot-gun (callers fetch the URL and 404).
+//
+// Rows that don't exist are no-ops. app + sc are nullable for tests
+// that exercise the DB-only path; production paths always pass both.
+func cascadeDeleteOne(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID, fileID string) error {
+	// Step 1+2: storage-side cleanup. Best-effort.
+	if sc != nil {
+		derivs, _ := listDerivations(db, projectID, fileID)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		for _, d := range derivs {
+			storageID, err := strconv.ParseInt(d.StorageFileID, 10, 64)
+			if err != nil || storageID <= 0 {
+				continue
+			}
+			if err := sc.DeleteFile(ctx, projectID, storageID); err != nil {
+				if app != nil {
+					app.Logger().Warn("cascadeDeleteOne: storage delete failed",
+						"file_id", fileID,
+						"derivation_storage_id", storageID,
+						"kind", d.Kind,
+						"err", err)
+				}
+				// Continue — DB cleanup must still happen.
+			}
+		}
+	}
+
+	// Step 3: local DB cleanup.
 	if _, err := db.Exec(
 		`DELETE FROM derivations WHERE project_id = ? AND file_id = ?`,
 		projectID, fileID,
@@ -422,7 +464,7 @@ func cascadeDeleteOne(db *sql.DB, projectID, fileID string) error {
 // media.file_id storage. A nil slice is treated as "no files exist"
 // and will purge every media row in the project — a deliberate way
 // to wipe a project's catalog without dropping the DB.
-func purgeOrphans(db *sql.DB, projectID string, currentFileIDs []string) (int64, error) {
+func purgeOrphans(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID string, currentFileIDs []string) (int64, error) {
 	seen := make(map[string]bool, len(currentFileIDs))
 	for _, fid := range currentFileIDs {
 		seen[fid] = true
@@ -433,6 +475,7 @@ func purgeOrphans(db *sql.DB, projectID string, currentFileIDs []string) (int64,
 		return 0, err
 	}
 	var orphans []any
+	orphanIDs := make([]string, 0)
 	placeholders := make([]string, 0)
 	for rows.Next() {
 		var fid string
@@ -442,12 +485,41 @@ func purgeOrphans(db *sql.DB, projectID string, currentFileIDs []string) (int64,
 		}
 		if !seen[fid] {
 			orphans = append(orphans, fid)
+			orphanIDs = append(orphanIDs, fid)
 			placeholders = append(placeholders, "?")
 		}
 	}
 	rows.Close()
 	if len(orphans) == 0 {
 		return 0, nil
+	}
+
+	// Storage-side cleanup: bulk-fetch derivations for all orphans
+	// up front, then delete each from storage. Best-effort — DB
+	// cleanup must still happen even if storage is unreachable.
+	// Without this, the derivation bytes (thumbnail, waveform,
+	// every keyframe) accumulate under /.media/* forever.
+	if sc != nil {
+		derivByFile, _ := listDerivationsByFiles(db, projectID, orphanIDs)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		for _, fid := range orphanIDs {
+			for _, d := range derivByFile[fid] {
+				storageID, perr := strconv.ParseInt(d.StorageFileID, 10, 64)
+				if perr != nil || storageID <= 0 {
+					continue
+				}
+				if delErr := sc.DeleteFile(ctx, projectID, storageID); delErr != nil {
+					if app != nil {
+						app.Logger().Warn("purgeOrphans: storage delete failed",
+							"file_id", fid,
+							"derivation_storage_id", storageID,
+							"kind", d.Kind,
+							"err", delErr)
+					}
+				}
+			}
+		}
+		cancel()
 	}
 
 	in := strings.Join(placeholders, ",")

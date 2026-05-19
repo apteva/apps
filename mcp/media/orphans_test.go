@@ -17,7 +17,7 @@ func TestPurgeOrphans_DeletesMissingFiles(t *testing.T) {
 	upsertMedia(ctx.AppDB(), testProj, "3", sampleAudioProbe(), "sha-3", "", "")
 
 	// Storage lists file 1 only — files 2 + 3 were deleted.
-	n, err := purgeOrphans(ctx.AppDB(), testProj, []string{"1"})
+	n, err := purgeOrphans(nil, nil, ctx.AppDB(), testProj, []string{"1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestPurgeOrphans_CascadesDerivations(t *testing.T) {
 	upsertDerivation(ctx.AppDB(), testProj, "1", "waveform", 101, 800, 100, 0)
 
 	// Storage no longer has file 1 → orphan.
-	if _, err := purgeOrphans(ctx.AppDB(), testProj, []string{}); err != nil {
+	if _, err := purgeOrphans(nil, nil, ctx.AppDB(), testProj, []string{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -59,7 +59,7 @@ func TestPurgeOrphans_CascadesTranscripts(t *testing.T) {
 		FileID: "1", ProjectID: testProj, Status: "ok", Text: "to be cleaned",
 	})
 
-	if _, err := purgeOrphans(ctx.AppDB(), testProj, []string{}); err != nil {
+	if _, err := purgeOrphans(nil, nil, ctx.AppDB(), testProj, []string{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := getTranscript(ctx.AppDB(), testProj, "1"); !notFound(err) {
@@ -72,7 +72,7 @@ func TestPurgeOrphans_NoOpWhenAllPresent(t *testing.T) {
 	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha-1", "", "")
 	upsertMedia(ctx.AppDB(), testProj, "2", sampleAudioProbe(), "sha-2", "", "")
 
-	n, err := purgeOrphans(ctx.AppDB(), testProj, []string{"1", "2"})
+	n, err := purgeOrphans(nil, nil, ctx.AppDB(), testProj, []string{"1", "2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestPurgeOrphans_OtherProjectUntouched(t *testing.T) {
 	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha-a", "", "")
 	upsertMedia(ctx.AppDB(), "other-proj", "1", sampleAudioProbe(), "sha-b", "", "")
 
-	if _, err := purgeOrphans(ctx.AppDB(), testProj, []string{}); err != nil {
+	if _, err := purgeOrphans(nil, nil, ctx.AppDB(), testProj, []string{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := getMedia(ctx.AppDB(), "other-proj", "1"); err != nil {
@@ -110,7 +110,7 @@ func TestPurgeOrphans_NilFileListWipesProject(t *testing.T) {
 	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha", "", "")
 	upsertMedia(ctx.AppDB(), testProj, "2", sampleAudioProbe(), "sha", "", "")
 
-	n, err := purgeOrphans(ctx.AppDB(), testProj, nil)
+	n, err := purgeOrphans(nil, nil, ctx.AppDB(), testProj, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestPurgeOrphans_LargeBatch(t *testing.T) {
 		fid := strDigit(i)
 		upsertMedia(ctx.AppDB(), testProj, fid, sampleAudioProbe(), "sha"+fid, "", "test.wav")
 	}
-	n, err := purgeOrphans(ctx.AppDB(), testProj, nil)
+	n, err := purgeOrphans(nil, nil, ctx.AppDB(), testProj, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

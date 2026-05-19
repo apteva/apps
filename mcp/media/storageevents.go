@@ -411,7 +411,7 @@ func cascadeDeleteFromEvent(app *sdk.AppCtx, data map[string]any, projectID stri
 	// and deletes media rows NOT in it; we synthesise the inverse —
 	// pass everything BUT this one file_id. Cleaner approach: a
 	// targeted helper.
-	if err := cascadeDeleteOne(app.AppDB(), projectID, fileID); err != nil {
+	if err := cascadeDeleteOne(app, newStorageClient(), app.AppDB(), projectID, fileID); err != nil {
 		log.Warn("cascade delete failed", "file_id", fileID, "err", err)
 		return
 	}

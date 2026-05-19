@@ -111,7 +111,7 @@ func runIndexer(ctx context.Context, app *sdk.AppCtx) error {
 		for _, f := range files {
 			fileIDs = append(fileIDs, strconv.FormatInt(f.ID, 10))
 		}
-		if n, err := purgeOrphans(app.AppDB(), projectID, fileIDs); err != nil {
+		if n, err := purgeOrphans(app, sc, app.AppDB(), projectID, fileIDs); err != nil {
 			app.Logger().Warn("purge orphan media failed", "err", err)
 		} else if n > 0 {
 			app.Logger().Info("purged orphan media", "count", n)

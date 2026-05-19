@@ -19,7 +19,7 @@ func TestCascadeDeleteOne_DeletesAll(t *testing.T) {
 		FileID: "1", ProjectID: testProj, Status: "ok", Text: "x",
 	})
 
-	if err := cascadeDeleteOne(ctx.AppDB(), testProj, "1"); err != nil {
+	if err := cascadeDeleteOne(nil, nil, ctx.AppDB(), testProj, "1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -40,7 +40,7 @@ func TestCascadeDeleteOne_NoOpOnMissing(t *testing.T) {
 	// catalogued (e.g. non-media file). Cascade should be a clean
 	// no-op rather than erroring.
 	ctx := newTestCtx(t)
-	if err := cascadeDeleteOne(ctx.AppDB(), testProj, "9999"); err != nil {
+	if err := cascadeDeleteOne(nil, nil, ctx.AppDB(), testProj, "9999"); err != nil {
 		t.Errorf("cascade on missing file_id should not error: %v", err)
 	}
 }
@@ -97,7 +97,7 @@ func TestCascadeDeleteOne_OtherProjectUntouched(t *testing.T) {
 	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha-a", "", "")
 	upsertMedia(ctx.AppDB(), "other-proj", "1", sampleAudioProbe(), "sha-b", "", "")
 
-	if err := cascadeDeleteOne(ctx.AppDB(), testProj, "1"); err != nil {
+	if err := cascadeDeleteOne(nil, nil, ctx.AppDB(), testProj, "1"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := getMedia(ctx.AppDB(), "other-proj", "1"); err != nil {
