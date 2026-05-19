@@ -43,7 +43,7 @@ interface Occurrence {
   occurrence_start_at: string;
 }
 
-type ViewMode = "week" | "day" | "agenda";
+type ViewMode = "week" | "day" | "month" | "year" | "agenda";
 
 // --- Inlined SDK app-event subscription -------------------------------
 interface AppEventEnvelope<T = unknown> {
@@ -137,12 +137,40 @@ function addDays(d: Date, n: number): Date {
   return out;
 }
 
+function addMonths(d: Date, n: number): Date {
+  // Pin to day 1 first so end-of-month dates don't roll over (e.g. Jan 31 + 1mo).
+  const out = new Date(d.getFullYear(), d.getMonth() + n, 1);
+  out.setHours(0, 0, 0, 0);
+  return out;
+}
+
+function startOfMonth(d: Date): Date {
+  const out = new Date(d.getFullYear(), d.getMonth(), 1);
+  out.setHours(0, 0, 0, 0);
+  return out;
+}
+
+// Mo-first 6×7 grid origin for any date.
+function startOfMonthGrid(d: Date): Date {
+  return startOfWeek(startOfMonth(d));
+}
+
+function startOfYear(d: Date): Date {
+  const out = new Date(d.getFullYear(), 0, 1);
+  out.setHours(0, 0, 0, 0);
+  return out;
+}
+
 function rfc3339(d: Date): string {
   return d.toISOString();
 }
 
 function fmtDay(d: Date): string {
   return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+
+function fmtMonthYear(d: Date): string {
+  return d.toLocaleDateString(undefined, { month: "long", year: "numeric" });
 }
 
 function fmtTime(d: Date): string {
@@ -248,12 +276,9 @@ function CalendarPanelInner({ projectId }: NativePanelProps) {
 
   const windowStart = useMemo(() => {
     if (view === "week") return startOfWeek(anchor);
-    if (view === "day") {
-      const d = new Date(anchor);
-      d.setHours(0, 0, 0, 0);
-      return d;
-    }
-    // agenda
+    if (view === "month") return startOfMonthGrid(anchor);
+    if (view === "year") return startOfYear(anchor);
+    // day + agenda: midnight of anchor day
     const d = new Date(anchor);
     d.setHours(0, 0, 0, 0);
     return d;
@@ -262,6 +287,8 @@ function CalendarPanelInner({ projectId }: NativePanelProps) {
   const windowEnd = useMemo(() => {
     if (view === "week") return addDays(windowStart, 7);
     if (view === "day") return addDays(windowStart, 1);
+    if (view === "month") return addDays(windowStart, 42); // 6 weeks
+    if (view === "year") return addDays(windowStart, 366); // covers leap years
     return addDays(windowStart, 30); // agenda: 30 days
   }, [view, windowStart]);
 
@@ -311,9 +338,21 @@ function CalendarPanelInner({ projectId }: NativePanelProps) {
     return m;
   }, [calendars]);
 
-  const goPrev = () => setAnchor(addDays(anchor, view === "week" ? -7 : view === "day" ? -1 : -30));
-  const goNext = () => setAnchor(addDays(anchor, view === "week" ? 7 : view === "day" ? 1 : 30));
+  const goPrev = () => {
+    if (view === "month") setAnchor(addMonths(anchor, -1));
+    else if (view === "year") setAnchor(new Date(anchor.getFullYear() - 1, 0, 1));
+    else setAnchor(addDays(anchor, view === "week" ? -7 : view === "day" ? -1 : -30));
+  };
+  const goNext = () => {
+    if (view === "month") setAnchor(addMonths(anchor, 1));
+    else if (view === "year") setAnchor(new Date(anchor.getFullYear() + 1, 0, 1));
+    else setAnchor(addDays(anchor, view === "week" ? 7 : view === "day" ? 1 : 30));
+  };
   const goToday = () => setAnchor(new Date());
+
+  // Used by the new month/year views to dive into a clicked day.
+  const jumpToDay = (d: Date) => { setAnchor(d); setView("day"); };
+  const jumpToMonth = (d: Date) => { setAnchor(d); setView("month"); };
 
   // commitEventTimes is the drag/resize commit path. Updates local
   // state optimistically, PATCHes /items/{event_id} with the new
@@ -408,10 +447,14 @@ function CalendarPanelInner({ projectId }: NativePanelProps) {
               ? `${fmtDay(windowStart)} – ${fmtDay(addDays(windowEnd, -1))}`
               : view === "day"
                 ? fmtDay(windowStart)
-                : `${fmtDay(windowStart)} → 30 days`}
+                : view === "month"
+                  ? fmtMonthYear(anchor)
+                  : view === "year"
+                    ? String(anchor.getFullYear())
+                    : `${fmtDay(windowStart)} → 30 days`}
           </span>
           <div className="ml-auto flex items-center gap-1">
-            {(["week", "day", "agenda"] as ViewMode[]).map((v) => (
+            {(["day", "week", "month", "year", "agenda"] as ViewMode[]).map((v) => (
               <button
                 key={v}
                 onClick={() => setView(v)}
@@ -447,6 +490,33 @@ function CalendarPanelInner({ projectId }: NativePanelProps) {
               }}
               onEventClick={setEditingEvent}
               onEventCommit={commitEventTimes}
+            />
+          ) : view === "month" ? (
+            <MonthView
+              monthAnchor={anchor}
+              gridStart={windowStart}
+              events={visibleEvents}
+              calendarById={calendarById}
+              onEmptyClick={(d) => {
+                if (calendars.length === 0) { setStatus("Create a calendar first."); return; }
+                const firstEnabled = calendars.find((c) => c.enabled);
+                if (!firstEnabled) { setStatus("Enable at least one calendar."); return; }
+                // Default new events created from month cells to noon
+                // so they're not stuck at 00:00 if the user just wants
+                // a slot to type into.
+                const slot = new Date(d); slot.setHours(12, 0, 0, 0);
+                setCreatingEvent({ start: slot, calendarId: firstEnabled.id });
+              }}
+              onDayClick={jumpToDay}
+              onEventClick={setEditingEvent}
+            />
+          ) : view === "year" ? (
+            <YearView
+              year={anchor.getFullYear()}
+              events={visibleEvents}
+              calendarById={calendarById}
+              onDayClick={jumpToDay}
+              onMonthClick={jumpToMonth}
             />
           ) : (
             <Agenda
@@ -812,6 +882,236 @@ function DragGhost({ start, end, color, title }: { start: Date; end: Date; color
 
 function sameDay(a: Date, b: Date): boolean {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+function ymdKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// --- Month view -----------------------------------------------------
+
+const MONTH_MAX_CHIPS = 3;
+
+function MonthView({
+  monthAnchor, gridStart, events, calendarById,
+  onEmptyClick, onDayClick, onEventClick,
+}: {
+  monthAnchor: Date;
+  gridStart: Date;
+  events: Occurrence[];
+  calendarById: Map<number, Calendar>;
+  onEmptyClick: (d: Date) => void;
+  onDayClick: (d: Date) => void;
+  onEventClick: (e: Occurrence) => void;
+}) {
+  const today = new Date();
+  const month = monthAnchor.getMonth();
+
+  // Bucket events by yyyy-mm-dd of their local start time, sorted by
+  // start. Recurring occurrences come pre-expanded from the server, so
+  // each one already has its own row.
+  const eventsByDay = useMemo(() => {
+    const map = new Map<string, Occurrence[]>();
+    for (const e of events) {
+      const d = new Date(e.start_at);
+      const key = ymdKey(d);
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(e);
+    }
+    for (const arr of map.values()) {
+      arr.sort((a, b) => a.start_at.localeCompare(b.start_at));
+    }
+    return map;
+  }, [events]);
+
+  const cells = Array.from({ length: 42 }, (_, i) => addDays(gridStart, i));
+  const weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+  return (
+    <div className="h-full flex flex-col">
+      <div className="grid grid-cols-7 border-b border-border">
+        {weekdays.map((w) => (
+          <div key={w} className="px-2 py-1 text-text-dim text-xs uppercase">{w}</div>
+        ))}
+      </div>
+      <div className="grid grid-cols-7 grid-rows-6 flex-1 min-h-0">
+        {cells.map((d) => {
+          const inMonth = d.getMonth() === month;
+          const isToday = sameDay(d, today);
+          const dayEvents = eventsByDay.get(ymdKey(d)) || [];
+          const visible = dayEvents.slice(0, MONTH_MAX_CHIPS);
+          const extra = dayEvents.length - visible.length;
+          return (
+            <div
+              key={d.toISOString()}
+              onClick={() => onEmptyClick(d)}
+              className={
+                "border-r border-b border-border p-1 flex flex-col gap-1 overflow-hidden min-h-0 cursor-pointer " +
+                (inMonth ? "bg-bg hover:bg-bg-card" : "bg-bg-card hover:bg-bg-input")
+              }
+            >
+              <div className="flex items-center justify-between">
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); onDayClick(d); }}
+                  className={
+                    "text-xs leading-none rounded-full w-6 h-6 inline-flex items-center justify-center transition-colors " +
+                    (isToday
+                      ? "bg-accent text-bg font-medium"
+                      : inMonth
+                        ? "text-text hover:bg-bg-input"
+                        : "text-text-dim hover:bg-bg-input")
+                  }
+                  title={d.toLocaleDateString()}
+                >
+                  {d.getDate()}
+                </button>
+              </div>
+              <div className="flex flex-col gap-0.5 min-h-0 overflow-hidden">
+                {visible.map((ev) => {
+                  const cal = calendarById.get(ev.calendar_id);
+                  return (
+                    <button
+                      key={ev.id + "-" + ev.occurrence_start_at}
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); onEventClick(ev); }}
+                      className="flex items-center gap-1 px-1 py-0.5 rounded text-xs text-left hover:bg-bg-input min-w-0"
+                      title={ev.title}
+                    >
+                      <span
+                        className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                        style={{ backgroundColor: cal?.color || "#3b82f6" }}
+                      />
+                      {!ev.all_day && (
+                        <span className="text-text-dim flex-shrink-0">
+                          {fmtTime(new Date(ev.start_at))}
+                        </span>
+                      )}
+                      <span className="text-text truncate">{ev.title}</span>
+                    </button>
+                  );
+                })}
+                {extra > 0 && (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); onDayClick(d); }}
+                    className="text-xs text-text-muted hover:text-text text-left px-1"
+                  >
+                    +{extra} more
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// --- Year view ------------------------------------------------------
+
+function YearView({
+  year, events, calendarById, onDayClick, onMonthClick,
+}: {
+  year: number;
+  events: Occurrence[];
+  calendarById: Map<number, Calendar>;
+  onDayClick: (d: Date) => void;
+  onMonthClick: (d: Date) => void;
+}) {
+  const today = new Date();
+  // Per-day color of the first event that day — drives the tiny dot
+  // under the date number. Multi-event days still get just one dot to
+  // keep mini cells readable.
+  const dayColor = useMemo(() => {
+    const map = new Map<string, string>();
+    const sorted = [...events].sort((a, b) => a.start_at.localeCompare(b.start_at));
+    for (const e of sorted) {
+      const key = ymdKey(new Date(e.start_at));
+      if (map.has(key)) continue;
+      const cal = calendarById.get(e.calendar_id);
+      map.set(key, cal?.color || "#3b82f6");
+    }
+    return map;
+  }, [events, calendarById]);
+
+  const months = Array.from({ length: 12 }, (_, i) => new Date(year, i, 1));
+  return (
+    <div className="p-4 grid gap-4 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
+      {months.map((m) => (
+        <MiniMonth
+          key={m.getMonth()}
+          month={m}
+          today={today}
+          dayColor={dayColor}
+          onDayClick={onDayClick}
+          onMonthClick={onMonthClick}
+        />
+      ))}
+    </div>
+  );
+}
+
+function MiniMonth({
+  month, today, dayColor, onDayClick, onMonthClick,
+}: {
+  month: Date;
+  today: Date;
+  dayColor: Map<string, string>;
+  onDayClick: (d: Date) => void;
+  onMonthClick: (d: Date) => void;
+}) {
+  const start = startOfMonthGrid(month);
+  const m = month.getMonth();
+  const cells = Array.from({ length: 42 }, (_, i) => addDays(start, i));
+  // Single-letter weekday header; second T/S share with their pair.
+  const weekdays = ["M", "T", "W", "T", "F", "S", "S"];
+  return (
+    <div className="border border-border rounded p-3 flex flex-col gap-2">
+      <button
+        type="button"
+        onClick={() => onMonthClick(month)}
+        className="text-left text-text font-medium text-sm hover:text-accent"
+      >
+        {month.toLocaleDateString(undefined, { month: "long" })}
+      </button>
+      <div className="grid grid-cols-7">
+        {weekdays.map((w, i) => (
+          <div key={i} className="text-center text-text-dim text-xs py-0.5">{w}</div>
+        ))}
+        {cells.map((d) => {
+          const inMonth = d.getMonth() === m;
+          const isToday = sameDay(d, today);
+          const color = inMonth ? dayColor.get(ymdKey(d)) : undefined;
+          return (
+            <button
+              key={d.toISOString()}
+              type="button"
+              onClick={() => onDayClick(d)}
+              className={
+                "aspect-square rounded-full text-xs flex items-center justify-center relative transition-colors " +
+                (isToday
+                  ? "bg-accent text-bg font-medium"
+                  : inMonth
+                    ? "text-text hover:bg-bg-input"
+                    : "text-text-dim hover:bg-bg-input")
+              }
+              title={d.toLocaleDateString()}
+            >
+              {d.getDate()}
+              {color && !isToday && (
+                <span
+                  className="absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full"
+                  style={{ backgroundColor: color }}
+                />
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 // --- Agenda view ----------------------------------------------------

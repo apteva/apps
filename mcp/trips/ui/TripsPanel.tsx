@@ -1290,10 +1290,11 @@ function NewTripDialog({ onClose, onCreated }: { onClose: () => void; onCreated:
   return (
     <Dialog title="New trip" onClose={onClose}>
       <Field label="Name"><input value={name} onChange={e => setName(e.target.value)} className="input" autoFocus placeholder="Paris weekend" /></Field>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="From"><input type="date" value={startAt} onChange={e => setStartAt(e.target.value)} className="input" /></Field>
-        <Field label="To"><input type="date" value={endAt} onChange={e => setEndAt(e.target.value)} className="input" /></Field>
-      </div>
+      <DateRangeField
+        start={startAt}
+        end={endAt}
+        onChange={(s, e) => { setStartAt(s); setEndAt(e); }}
+      />
       <Field label="Home currency"><input value={currency} onChange={e => setCurrency(e.target.value.toUpperCase())} className="input uppercase" maxLength={3} /></Field>
       {err && <p className="text-sm text-error">{err}</p>}
       <DialogActions>
@@ -1496,10 +1497,13 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
             </select>
           </Field>
           <Field label="Address"><input value={address} onChange={e => setAddress(e.target.value)} className="input" /></Field>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Check-in"><input type="date" value={checkIn} onChange={e => setCheckIn(e.target.value)} className="input" /></Field>
-            <Field label="Check-out"><input type="date" value={checkOut} onChange={e => setCheckOut(e.target.value)} className="input" /></Field>
-          </div>
+          <DateRangeField
+            startLabel="Check-in"
+            endLabel="Check-out"
+            start={checkIn}
+            end={checkOut}
+            onChange={(s, e) => { setCheckIn(s); setCheckOut(e); }}
+          />
         </>
       )}
       {kind === "activity" && (
@@ -1606,10 +1610,13 @@ function DestinationDialog({ trip, existing, onClose, onSaved }: {
         />
       </Field>
       <Field label="Country (ISO-2)"><input value={country} onChange={e => setCountry(e.target.value.toUpperCase())} className="input uppercase" maxLength={2} placeholder="FR" /></Field>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Arrive"><input type="date" value={arriveAt} onChange={e => setArriveAt(e.target.value)} className="input" /></Field>
-        <Field label="Depart"><input type="date" value={departAt} onChange={e => setDepartAt(e.target.value)} className="input" /></Field>
-      </div>
+      <DateRangeField
+        startLabel="Arrive"
+        endLabel="Depart"
+        start={arriveAt}
+        end={departAt}
+        onChange={(s, e) => { setArriveAt(s); setDepartAt(e); }}
+      />
       <Field label="Notes"><input value={notes} onChange={e => setNotes(e.target.value)} className="input" /></Field>
       {err && <p className="text-sm text-error">{err}</p>}
       <DialogActions>
@@ -1656,10 +1663,11 @@ function TripEditDialog({ trip, onClose, onSaved }: { trip: Trip; onClose: () =>
   return (
     <Dialog title="Edit trip" onClose={onClose}>
       <Field label="Name"><input value={name} onChange={e => setName(e.target.value)} className="input" autoFocus /></Field>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="From"><input type="date" value={startAt} onChange={e => setStartAt(e.target.value)} className="input" /></Field>
-        <Field label="To"><input type="date" value={endAt} onChange={e => setEndAt(e.target.value)} className="input" /></Field>
-      </div>
+      <DateRangeField
+        start={startAt}
+        end={endAt}
+        onChange={(s, e) => { setStartAt(s); setEndAt(e); }}
+      />
       <div className="grid grid-cols-2 gap-3">
         <Field label="Status">
           <select value={status} onChange={e => setStatus(e.target.value as Trip["status"])} className="input">
@@ -1821,10 +1829,14 @@ function SearchFlightsModal({ trip, defaultTo, defaultDepartAt, onPick, onClose 
         <Field label="From"><input value={from} onChange={e => setFrom(e.target.value.toUpperCase())} className="input uppercase" maxLength={3} placeholder="CDG" /></Field>
         <Field label="To"><input value={to} onChange={e => setTo(e.target.value.toUpperCase())} className="input uppercase" maxLength={3} placeholder="LIN" /></Field>
       </div>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Depart"><input type="date" value={departDate} onChange={e => setDepartDate(e.target.value)} className="input" /></Field>
-        <Field label="Return (optional)"><input type="date" value={returnDate} onChange={e => setReturnDate(e.target.value)} className="input" /></Field>
-      </div>
+      <DateRangeField
+        startLabel="Depart"
+        endLabel="Return (optional)"
+        start={departDate}
+        end={returnDate}
+        onChange={(s, e) => { setDepartDate(s); setReturnDate(e); }}
+        optionalEnd
+      />
       <div className="grid grid-cols-2 gap-3">
         <Field label="Passengers"><input type="number" min={1} value={passengers} onChange={e => setPassengers(Math.max(1, parseInt(e.target.value || "1", 10)))} className="input" /></Field>
         <Field label="Cabin">
@@ -2166,6 +2178,380 @@ function EmptyState({ message }: { message: string }) {
     </div>
   );
 }
+
+// ─── DateRangeField ──────────────────────────────────────────────
+// Airbnb/Skyscanner-style range picker: two paired date fields that
+// open a single two-month popover. Range highlights between start and
+// end, with hover preview while picking the end. Tokens come from the
+// dashboard CSS variables so it inherits the active theme.
+
+function parseYMD(s: string): Date {
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, (m || 1) - 1, d || 1);
+}
+
+function toYMD(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function monthYearLabel(y: number, m: number): string {
+  return new Date(y, m, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+
+function DateRangeField({
+  startLabel = "From",
+  endLabel = "To",
+  start,
+  end,
+  onChange,
+  optionalEnd = false,
+  minDate,
+}: {
+  startLabel?: string;
+  endLabel?: string;
+  start: string;
+  end: string;
+  onChange: (start: string, end: string) => void;
+  optionalEnd?: boolean;
+  minDate?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [picking, setPicking] = useState<"start" | "end">("start");
+  const [hovered, setHovered] = useState("");
+  const [viewYM, setViewYM] = useState(() => {
+    const seed = start ? parseYMD(start) : new Date();
+    return { y: seed.getFullYear(), m: seed.getMonth() };
+  });
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const openFor = (which: "start" | "end") => {
+    setPicking(which);
+    setOpen(true);
+    setHovered("");
+    const anchorYMD = which === "end" && end ? end : (start || toYMD(new Date()));
+    const anchor = parseYMD(anchorYMD);
+    setViewYM({ y: anchor.getFullYear(), m: anchor.getMonth() });
+  };
+
+  const pick = (ymd: string) => {
+    if (minDate && ymd < minDate) return;
+    if (picking === "start") {
+      const keptEnd = end && end >= ymd ? end : "";
+      onChange(ymd, keptEnd);
+      if (keptEnd) setOpen(false);
+      else setPicking("end");
+    } else {
+      if (start && ymd >= start) {
+        onChange(start, ymd);
+        setOpen(false);
+      } else {
+        onChange(ymd, "");
+        setPicking("end");
+      }
+    }
+  };
+
+  const shiftMonths = (n: number) => setViewYM(v => {
+    const d = new Date(v.y, v.m + n, 1);
+    return { y: d.getFullYear(), m: d.getMonth() };
+  });
+
+  const month1 = viewYM;
+  const month2 = (() => {
+    const d = new Date(viewYM.y, viewYM.m + 1, 1);
+    return { y: d.getFullYear(), m: d.getMonth() };
+  })();
+
+  // While picking the end, hovering shows a preview range.
+  const previewEnd = picking === "end" && start && hovered && hovered >= start && !end ? hovered : end;
+
+  return (
+    <div ref={rootRef} className="relative">
+      <div className="grid grid-cols-2 gap-3">
+        <Field label={startLabel}>
+          <button
+            type="button"
+            onClick={() => openFor("start")}
+            className={`drf-trigger ${open && picking === "start" ? "drf-trigger-active" : ""}`}
+          >
+            {start ? fmtDate(start) : <span className="drf-placeholder">Pick a date</span>}
+          </button>
+        </Field>
+        <Field label={endLabel}>
+          <button
+            type="button"
+            onClick={() => openFor("end")}
+            className={`drf-trigger ${open && picking === "end" ? "drf-trigger-active" : ""}`}
+          >
+            {end ? fmtDate(end) : <span className="drf-placeholder">{optionalEnd ? "Optional" : "Pick a date"}</span>}
+          </button>
+        </Field>
+      </div>
+      {open && (
+        <div className="drf-popover" onMouseLeave={() => setHovered("")}>
+          <div className="drf-popover-head">
+            <button type="button" onClick={() => shiftMonths(-1)} className="drf-nav" aria-label="Previous month">
+              <Icon name="chevron-left" size={14} />
+            </button>
+            <div className="drf-months-title">
+              <span>{monthYearLabel(month1.y, month1.m)}</span>
+              <span>{monthYearLabel(month2.y, month2.m)}</span>
+            </div>
+            <button type="button" onClick={() => shiftMonths(1)} className="drf-nav" aria-label="Next month">
+              <Icon name="chevron-right" size={14} />
+            </button>
+          </div>
+          <div className="drf-months">
+            <MonthGrid ym={month1} start={start} end={previewEnd} onPick={pick} onHover={setHovered} minDate={minDate} />
+            <MonthGrid ym={month2} start={start} end={previewEnd} onPick={pick} onHover={setHovered} minDate={minDate} />
+          </div>
+          {optionalEnd && (
+            <div className="drf-foot">
+              <button
+                type="button"
+                className="drf-foot-btn"
+                onClick={() => { onChange(start, ""); setOpen(false); }}
+              >
+                No return
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      <style>{drfStyles}</style>
+    </div>
+  );
+}
+
+function MonthGrid({ ym, start, end, onPick, onHover, minDate }: {
+  ym: { y: number; m: number };
+  start: string;
+  end: string;
+  onPick: (ymd: string) => void;
+  onHover: (ymd: string) => void;
+  minDate?: string;
+}) {
+  const first = new Date(ym.y, ym.m, 1);
+  const dayCount = new Date(ym.y, ym.m + 1, 0).getDate();
+  // Monday-first weekday index: 0 = Mon, 6 = Sun.
+  const leading = (first.getDay() + 6) % 7;
+  const cells: (string | null)[] = [];
+  for (let i = 0; i < leading; i++) cells.push(null);
+  for (let d = 1; d <= dayCount; d++) cells.push(toYMD(new Date(ym.y, ym.m, d)));
+  while (cells.length % 7 !== 0) cells.push(null);
+  const todayStr = toYMD(new Date());
+  return (
+    <div className="drf-month">
+      <div className="drf-weekdays">
+        {["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].map(w => (
+          <div key={w} className="drf-weekday">{w}</div>
+        ))}
+      </div>
+      <div className="drf-grid">
+        {cells.map((c, i) => {
+          if (!c) return <div key={`e${i}`} className="drf-empty" />;
+          const isStart = c === start;
+          const isEnd = !!end && c === end;
+          const inRange = !!start && !!end && c > start && c < end;
+          const disabled = !!minDate && c < minDate;
+          const cls = [
+            "drf-day",
+            inRange ? "drf-day-in-range" : "",
+            isStart && isEnd ? "drf-day-single" : "",
+            isStart && !isEnd && !end ? "drf-day-single" : "",
+            isStart && !!end && !isEnd ? "drf-day-start" : "",
+            isEnd && !isStart ? "drf-day-end" : "",
+            isStart || isEnd ? "drf-day-active" : "",
+            c === todayStr ? "drf-day-today" : "",
+            disabled ? "drf-day-disabled" : "",
+          ].filter(Boolean).join(" ");
+          return (
+            <button
+              key={c}
+              type="button"
+              disabled={disabled}
+              className={cls}
+              onMouseEnter={() => onHover(c)}
+              onClick={() => onPick(c)}
+            >
+              <span className="drf-day-num">{Number(c.slice(8))}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+const drfStyles = `
+.drf-trigger {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.375rem;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.drf-trigger:hover { border-color: var(--border-strong); }
+.drf-trigger-active { outline: 2px solid var(--accent); outline-offset: -1px; }
+.drf-placeholder { color: var(--text-dim); }
+
+.drf-popover {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 0.5rem;
+  z-index: 60;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.32);
+  user-select: none;
+}
+.drf-popover-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.25rem 0.5rem;
+}
+.drf-nav {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 0.375rem;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.drf-nav:hover { background: var(--bg-hover); color: var(--text); }
+.drf-months-title {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text);
+  text-align: center;
+}
+.drf-months {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+.drf-month { width: 220px; }
+.drf-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  margin-bottom: 0.25rem;
+}
+.drf-weekday {
+  text-align: center;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 0.25rem 0;
+}
+.drf-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+}
+.drf-empty { aspect-ratio: 1 / 1; }
+.drf-day {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 0.8125rem;
+  padding: 0;
+}
+.drf-day:hover { background: var(--bg-hover); }
+.drf-day-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border-radius: 999px;
+}
+.drf-day-today .drf-day-num { box-shadow: inset 0 0 0 1px var(--border-strong); }
+.drf-day-in-range {
+  background: var(--bg-hover);
+  border-radius: 0;
+}
+.drf-day-active {
+  background: var(--accent);
+  color: var(--bg);
+}
+.drf-day-active:hover { background: var(--accent-hover); }
+.drf-day-active .drf-day-num { background: var(--accent); }
+.drf-day-start { border-radius: 999px 0 0 999px; }
+.drf-day-end   { border-radius: 0 999px 999px 0; }
+.drf-day-single { border-radius: 999px; }
+.drf-day-disabled,
+.drf-day-disabled:hover {
+  color: var(--text-dim);
+  opacity: 0.35;
+  cursor: not-allowed;
+  background: transparent;
+}
+
+.drf-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border-subtle, var(--border));
+}
+.drf-foot-btn {
+  font-size: 0.8125rem;
+  padding: 0.25rem 0.5rem;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  border-radius: 0.25rem;
+}
+.drf-foot-btn:hover { background: var(--bg-hover); color: var(--text); }
+
+@media (max-width: 560px) {
+  .drf-months { grid-template-columns: 1fr; }
+  .drf-months-title { grid-template-columns: 1fr; }
+  .drf-months-title > :nth-child(2) { display: none; }
+}
+`;
 
 // ─── helpers ─────────────────────────────────────────────────────
 
