@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.3.3
+version: 0.3.4
 description: |
   Watch and steer the agent's browser. v0.3 adds the first MCP tools
   (browser_open / browser_list / browser_screenshot / browser_close).
@@ -228,6 +228,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: http.MethodGet, Pattern: "/sessions", Handler: a.handleListSessions},
 		{Method: http.MethodPost, Pattern: "/sessions", Handler: a.handleOpenSession},
 		{Method: http.MethodDelete, Pattern: "/sessions/{id}", Handler: a.handleCloseSession},
+		// /sessions/{id}/screenshot returns the raw PNG inline (not the
+		// base64-wrapped MCP-tool shape) so the panel's <img src> can
+		// poll it directly for a cheap "live" view.
+		{Method: http.MethodGet, Pattern: "/sessions/{id}/screenshot", Handler: a.handleSessionScreenshot},
 	}
 }
 
@@ -547,6 +551,37 @@ func (a *App) handleCloseSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, out)
+}
+
+// handleSessionScreenshot streams the session's current PNG inline.
+// Path is /sessions/{id}/screenshot — strip the prefix + suffix to
+// get id. Returns 404 if the session is unknown; the panel will then
+// stop polling that id on its own when the session disappears from
+// the list.
+func (a *App) handleSessionScreenshot(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/sessions/")
+	rest = strings.TrimSuffix(rest, "/screenshot")
+	rest = strings.Trim(rest, "/")
+	if rest == "" {
+		httpErr(w, http.StatusBadRequest, "session id required")
+		return
+	}
+	sess, ok := a.reg.get(rest)
+	if !ok {
+		httpErr(w, http.StatusNotFound, "session not found")
+		return
+	}
+	png, err := sess.comp.Screenshot()
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, "screenshot: "+err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	// No-cache so the panel's cache-busting query-string isn't even
+	// needed — but we set it anyway for proxies that don't pass it
+	// through.
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(png)
 }
 
 func writeJSON(w http.ResponseWriter, payload any) {

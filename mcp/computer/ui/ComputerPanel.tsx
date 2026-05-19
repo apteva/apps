@@ -23,6 +23,11 @@ interface SessionRow {
   debug_url?: string;
   opened_at: string;
   last_used_at: string;
+  // width/height aren't reported by browser_list today (they're a
+  // backend-side display property), but kept optional for forward
+  // compat; LivePreview uses 16:10 as a fallback.
+  width?: number;
+  height?: number;
 }
 
 interface ListResponse {
@@ -362,6 +367,7 @@ function SessionDetail({
         right={<StatusPill variant="neutral" label={BACKEND_LABEL[session.backend] ?? session.backend} />}
       />
       <div style={{ padding: "0 16px 16px" }}>
+        <LivePreview session={session} />
         <DataList
           items={[
             { label: "Session ID", value: session.session_id },
@@ -616,6 +622,71 @@ function XIcon() {
       <path d="M18 6 6 18" />
       <path d="m6 6 12 12" />
     </svg>
+  );
+}
+
+// LivePreview — cheap "live" view of the session's current page by
+// polling /sessions/{id}/screenshot every ~800ms with a cache-busting
+// query string. Not as smooth as CDP screencast but works for every
+// backend (local Chrome, Browserbase, Steel) without WebSocket
+// plumbing, and degrades gracefully if Screenshot errors (placeholder
+// kept, next tick retries).
+function LivePreview({ session }: { session: SessionRow }) {
+  const [tick, setTick] = useState(0);
+  const [stale, setStale] = useState(false);
+  const url = `${SESSIONS_URL}/${encodeURIComponent(session.session_id)}/screenshot?t=${tick}`;
+  const aspectW = session.width && session.height ? session.width : 16;
+  const aspectH = session.width && session.height ? session.height : 10;
+
+  useEffect(() => {
+    setStale(false);
+    setTick((n) => n + 1);
+    const t = setInterval(() => setTick((n) => n + 1), 800);
+    return () => clearInterval(t);
+  }, [session.session_id]);
+
+  return (
+    <div
+      className="border border-border bg-bg-subtle"
+      style={{
+        position: "relative",
+        width: "100%",
+        aspectRatio: `${aspectW} / ${aspectH}`,
+        borderRadius: "6px",
+        overflow: "hidden",
+        marginBottom: "12px",
+      }}
+    >
+      <img
+        key={session.session_id}
+        src={url}
+        alt="live"
+        onLoad={() => setStale(false)}
+        onError={() => setStale(true)}
+        style={{
+          width: "100%",
+          height: "100%",
+          objectFit: "contain",
+          display: "block",
+        }}
+      />
+      {stale && (
+        <div
+          className="text-text-muted"
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: "12px",
+            background: "rgba(0,0,0,0.05)",
+          }}
+        >
+          waiting for next frame…
+        </div>
+      )}
+    </div>
   );
 }
 
