@@ -216,10 +216,14 @@ func maybeEmitMediaCompleted(app *sdk.AppCtx, projectID, fileID string) {
 
 	app.Emit("media.completed", map[string]any{
 		"file_id":         fileID,
+		"name":            row.Name,
+		"folder":          row.Folder,
 		"has_video":       row.HasVideo,
 		"has_audio":       row.HasAudio,
 		"is_image":        row.IsImage,
 		"duration_ms":     row.DurationMs,
+		"width":           row.Width,
+		"height":          row.Height,
 		"has_thumbnail":   hasThumb,
 		"has_waveform":    hasWave,
 		"has_transcript":  hasTranscript,

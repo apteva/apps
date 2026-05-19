@@ -274,7 +274,7 @@ func processOne(
 		_ = markFailed(app.AppDB(), projectID, fid, f.SHA256, "unsupported", "no audio, video, or image stream")
 		return
 	}
-	if err := upsertMedia(app.AppDB(), projectID, fid, probe, f.SHA256, f.Folder); err != nil {
+	if err := upsertMedia(app.AppDB(), projectID, fid, probe, f.SHA256, f.Folder, f.Name); err != nil {
 		logger.Warn("upsert failed", "err", err)
 		return
 	}
@@ -406,7 +406,7 @@ func tryRemoteIndex(
 			"no audio, video, or image stream")
 		return true
 	}
-	if err := upsertMedia(app.AppDB(), projectID, fid, probe, f.SHA256, f.Folder); err != nil {
+	if err := upsertMedia(app.AppDB(), projectID, fid, probe, f.SHA256, f.Folder, f.Name); err != nil {
 		logger.Warn("remote index: upsert media", "file_id", fid, "err", err)
 		return false
 	}

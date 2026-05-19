@@ -50,8 +50,8 @@ func jsonStr(s string) string {
 
 func TestDescribeCandidates_FiltersHumanSet(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "")
-	upsertMedia(ctx.AppDB(), testProj, "2", sampleAVProbe(3000), "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "test.mp4")
+	upsertMedia(ctx.AppDB(), testProj, "2", sampleAVProbe(3000), "sha", "", "test.mp4")
 
 	// File 2 has a human description — must be filtered out.
 	d := "human prose"
@@ -70,7 +70,7 @@ func TestDescribeCandidates_FiltersHumanSet(t *testing.T) {
 
 func TestDescribeCandidates_RespectsCooldown(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "test.mp4")
 	if err := markDescribeAttempt(ctx.AppDB(), testProj, "1", "boom"); err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestDescribeCandidates_RequiresProbeOk(t *testing.T) {
 	// shape yet — describing it would be guessing.
 	ctx := newTestCtx(t)
 	probe := sampleAVProbe(3000)
-	upsertMedia(ctx.AppDB(), testProj, "1", probe, "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", probe, "sha", "", "test.mp4")
 	// Manually flip probe_status to simulate a probe in flight.
 	ctx.AppDB().Exec(`UPDATE media SET probe_status='pending' WHERE file_id='1'`)
 	cands, _ := describeCandidates(ctx.AppDB(), testProj, 100, 0)
@@ -108,7 +108,7 @@ func TestDescriberSweep_NoIntegrationBound_NoOp(t *testing.T) {
 	// integration may be installed later; we don't want to wedge
 	// rows in a "skipped" state.
 	ctx := newTestCtxWithPlatform(t, noBindings())
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "test.mp4")
 
 	describerSweep(ctx)
 
@@ -133,7 +133,7 @@ func TestRunOneDescription_TextOnly_FromTranscript(t *testing.T) {
 
 	// Audio-only file with a transcript — should send text-only call.
 	probe := &Probe{FormatName: "wav", DurationMs: 3000, HasAudio: true, AudioCodec: "pcm_s16le", Raw: "{}"}
-	upsertMedia(ctx.AppDB(), testProj, "1", probe, "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", probe, "sha", "", "test.mp4")
 	upsertTranscript(ctx.AppDB(), &TranscriptRow{
 		FileID: "1", ProjectID: testProj, Status: "ok",
 		Text: "Q3 results were strong, exceeded expectations.",
@@ -189,7 +189,7 @@ func TestRunOneDescription_ImageWithThumbnail_Multimodal(t *testing.T) {
 	ctx := newTestCtxWithPlatform(t, stub)
 
 	probe := &Probe{FormatName: "png_pipe", IsImage: true, HasVideo: true, Width: 1024, Height: 768, VideoCodec: "png", Raw: "{}"}
-	upsertMedia(ctx.AppDB(), testProj, "1", probe, "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", probe, "sha", "", "test.mp4")
 	if err := upsertDerivation(ctx.AppDB(), testProj, "1", "thumbnail", 99, 320, 240); err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestRunOneDescription_VideoWithBoth_FullMultimodal(t *testing.T) {
 	ctx := newTestCtxWithPlatform(t, stub)
 
 	probe := sampleAVProbe(8000) // has_video + has_audio
-	upsertMedia(ctx.AppDB(), testProj, "1", probe, "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", probe, "sha", "", "test.mp4")
 	upsertDerivation(ctx.AppDB(), testProj, "1", "thumbnail", 99, 320, 240)
 	upsertTranscript(ctx.AppDB(), &TranscriptRow{
 		FileID: "1", ProjectID: testProj, Status: "ok",
@@ -286,7 +286,7 @@ func TestRunOneDescription_TruncatedMarksAttempt(t *testing.T) {
 	}
 	ctx := newTestCtxWithPlatform(t, stub)
 
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "test.mp4")
 	upsertTranscript(ctx.AppDB(), &TranscriptRow{
 		FileID: "1", ProjectID: testProj, Status: "ok", Text: "x",
 	})
@@ -314,7 +314,7 @@ func TestRunOneDescription_LLMNon2xx_MarksAttempt(t *testing.T) {
 		Data: json.RawMessage(`{"error":"bad key"}`),
 	}
 	ctx := newTestCtxWithPlatform(t, stub)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "test.mp4")
 	upsertTranscript(ctx.AppDB(), &TranscriptRow{
 		FileID: "1", ProjectID: testProj, Status: "ok", Text: "x",
 	})
@@ -337,7 +337,7 @@ func TestRunOneDescription_NetworkError_MarksAttempt(t *testing.T) {
 	stub := boundOpencodeGo()
 	stub.executeErr = errors.New("connection reset by peer")
 	ctx := newTestCtxWithPlatform(t, stub)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "test.mp4")
 	upsertTranscript(ctx.AppDB(), &TranscriptRow{
 		FileID: "1", ProjectID: testProj, Status: "ok", Text: "x",
 	})
@@ -360,7 +360,7 @@ func TestRunOneDescription_NoUsableInput_SkipsWithoutMarking(t *testing.T) {
 	// produces a thumbnail the next sweep gets another chance.
 	stub := boundOpencodeGo()
 	ctx := newTestCtxWithPlatform(t, stub)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoOnlyProbe(), "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoOnlyProbe(), "sha", "", "")
 	// No derivations, no transcripts.
 
 	describerSweep(ctx)
@@ -387,7 +387,7 @@ func TestNotifyDescriber_RunsImmediately(t *testing.T) {
 		Data: canonOK("a hot description"),
 	}
 	ctx := newTestCtxWithPlatform(t, stub)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "test.mp4")
 	upsertTranscript(ctx.AppDB(), &TranscriptRow{
 		FileID: "1", ProjectID: testProj, Status: "ok",
 		Text: "hello there",
@@ -457,7 +457,7 @@ func TestRunOneDescription_NonEmptyDescriptionIsRespected(t *testing.T) {
 		Data: canonOK("ai overwrite"),
 	}
 	ctx := newTestCtxWithPlatform(t, stub)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "test.mp4")
 	d := "previously generated by ai"
 	// Source explicitly 'ai-generated' — without the new guard, the
 	// describer would happily overwrite this on a re-run race.
@@ -491,7 +491,7 @@ func TestRunOneDescription_HumanSetIsRespected(t *testing.T) {
 		Data: canonOK("ai prose"),
 	}
 	ctx := newTestCtxWithPlatform(t, stub)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "test.mp4")
 	d := "human-written"
 	setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{Description: &d}) // source=human
 
@@ -562,7 +562,7 @@ func TestExtractChatContent_NoChoices_Errors(t *testing.T) {
 func TestToolDescribe_QueuesCandidate(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "test.mp4")
 
 	out, err := app.toolDescribe(ctx, map[string]any{
 		"_project_id": testProj,
@@ -580,7 +580,7 @@ func TestToolDescribe_QueuesCandidate(t *testing.T) {
 func TestToolDescribe_HumanSetReturnsReason(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "test.mp4")
 	d := "human-only"
 	setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{Description: &d})
 
@@ -602,7 +602,7 @@ func TestToolDescribe_ForceClearsCooldown(t *testing.T) {
 	// reattempts even if we just failed.
 	ctx := newTestCtx(t)
 	app := &App{}
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "test.mp4")
 	markDescribeAttempt(ctx.AppDB(), testProj, "1", "boom")
 
 	app.toolDescribe(ctx, map[string]any{

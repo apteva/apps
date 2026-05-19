@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.12.11
+version: 0.12.12
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -300,10 +300,14 @@ provides:
         + media.described and reconciling them yourself.
       payload:
         file_id: string
+        name: string                    # storage filename, e.g. "ballerina.MOV" — populated by upsertMedia at probe time
+        folder: string                  # storage folder, e.g. "/clips/" — same shape storage uses
         has_video: boolean
         has_audio: boolean
         is_image: boolean
         duration_ms: integer
+        width: integer                  # 0 for audio-only sources
+        height: integer                 # 0 for audio-only sources
         has_thumbnail: boolean
         has_waveform: boolean
         has_transcript: boolean         # transcripts integration bound AND transcript stored at status=ok

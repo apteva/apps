@@ -60,7 +60,7 @@ func sampleImageProbe() *Probe {
 
 func TestUpsertAndGet(t *testing.T) {
 	ctx := newTestCtx(t)
-	if err := upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoProbe(), "abc123", ""); err != nil {
+	if err := upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoProbe(), "abc123", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	got, err := getMedia(ctx.AppDB(), testProj, "1")
@@ -86,13 +86,13 @@ func TestUpsertAndGet(t *testing.T) {
 
 func TestUpsertIdempotent_Update(t *testing.T) {
 	ctx := newTestCtx(t)
-	if err := upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "v1", ""); err != nil {
+	if err := upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "v1", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Re-upsert with new probe (e.g. file replaced in storage).
 	v2 := sampleAudioProbe()
 	v2.DurationMs = 7777
-	if err := upsertMedia(ctx.AppDB(), testProj, "1", v2, "v2", ""); err != nil {
+	if err := upsertMedia(ctx.AppDB(), testProj, "1", v2, "v2", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := getMedia(ctx.AppDB(), testProj, "1")
@@ -132,9 +132,9 @@ func TestMarkFailed_TruncatesLong(t *testing.T) {
 
 func TestSearchMedia_Filters(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "vid1", sampleVideoProbe(), "a", "")
-	upsertMedia(ctx.AppDB(), testProj, "aud1", sampleAudioProbe(), "b", "")
-	upsertMedia(ctx.AppDB(), testProj, "img1", sampleImageProbe(), "c", "")
+	upsertMedia(ctx.AppDB(), testProj, "vid1", sampleVideoProbe(), "a", "", "")
+	upsertMedia(ctx.AppDB(), testProj, "aud1", sampleAudioProbe(), "b", "", "")
+	upsertMedia(ctx.AppDB(), testProj, "img1", sampleImageProbe(), "c", "", "")
 
 	hasVideo := true
 	rows, err := searchMedia(ctx.AppDB(), testProj, SearchFilters{HasVideo: &hasVideo})
@@ -163,7 +163,7 @@ func TestSearchMedia_Filters(t *testing.T) {
 
 func TestSearchMedia_OmitsNonOk(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "good", sampleAudioProbe(), "a", "")
+	upsertMedia(ctx.AppDB(), testProj, "good", sampleAudioProbe(), "a", "", "")
 	markFailed(ctx.AppDB(), testProj, "bad", "b", "failed", "boom")
 
 	rows, _ := searchMedia(ctx.AppDB(), testProj, SearchFilters{})
@@ -174,7 +174,7 @@ func TestSearchMedia_OmitsNonOk(t *testing.T) {
 
 func TestUpsertDerivation(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "vid1", sampleVideoProbe(), "a", "")
+	upsertMedia(ctx.AppDB(), testProj, "vid1", sampleVideoProbe(), "a", "", "")
 	if err := upsertDerivation(ctx.AppDB(), testProj, "vid1", "thumbnail", 999, 320, 180); err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestUpsertDerivation(t *testing.T) {
 func TestIndexerCandidates(t *testing.T) {
 	ctx := newTestCtx(t)
 	// Pre-populate one row in 'ok' state matching shaA.
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "shaA", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "shaA", "", "")
 
 	files := []StorageFile{
 		{ID: 1, Name: "old.wav", ContentType: "audio/wav", SHA256: "shaA"}, // unchanged → skip

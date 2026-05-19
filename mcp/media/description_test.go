@@ -38,7 +38,7 @@ func seedRow(t *testing.T, ctx interface{ AppDB() any }, fileID string) {
 
 func TestSetDescription_RoundTrip(t *testing.T) {
 	ctx := newTestCtx(t)
-	if err := upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "abc", ""); err != nil {
+	if err := upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "abc", "", "test.mp4"); err != nil {
 		t.Fatal(err)
 	}
 	title := "Q3 board meeting"
@@ -68,7 +68,7 @@ func TestSetDescription_PartialUpdatePreservesOthers(t *testing.T) {
 	// Set all three, then update just description; title + alt_text
 	// must stay put.
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "abc", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "abc", "", "test.mp4")
 	t1, d1, a1 := "T1", "D1", "A1"
 	setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{
 		Title: &t1, Description: &d1, AltText: &a1,
@@ -97,7 +97,7 @@ func TestSetDescription_EmptyStringClears(t *testing.T) {
 	// explicitly clears the column. Pointer-distinguishing makes this
 	// possible.
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "abc", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "abc", "", "test.mp4")
 	d := "to be cleared"
 	setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{Description: &d})
 
@@ -115,7 +115,7 @@ func TestSetDescription_NoOpWithEmptyFields(t *testing.T) {
 	// Calling setDescription with all nils must not error and must
 	// leave the row untouched.
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "abc", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "abc", "", "test.mp4")
 	d := "untouched"
 	setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{Description: &d})
 
@@ -133,7 +133,7 @@ func TestSetDescription_ReprobeDoesNotWipeDescription(t *testing.T) {
 	// it must survive a reprobe. upsertMedia (the indexer) writes
 	// only probe columns; description columns must stay untouched.
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "abc", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "abc", "", "test.mp4")
 	desc := "Persistent description"
 	title := "Persistent title"
 	setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{
@@ -144,7 +144,7 @@ func TestSetDescription_ReprobeDoesNotWipeDescription(t *testing.T) {
 	// upsertMedia. Description columns must be untouched.
 	freshProbe := sampleProbeForDesc()
 	freshProbe.DurationMs = 7500 // pretend something changed
-	if err := upsertMedia(ctx.AppDB(), testProj, "1", freshProbe, "different-sha", ""); err != nil {
+	if err := upsertMedia(ctx.AppDB(), testProj, "1", freshProbe, "different-sha", "", "test.mp4"); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := getMedia(ctx.AppDB(), testProj, "1")
@@ -203,7 +203,7 @@ func TestSetDescription_StubSurvivesIndexerProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Indexer probes — same call upsertMedia makes after ffprobe.
-	if err := upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "sha-real", ""); err != nil {
+	if err := upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "sha-real", "", "test.mp4"); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := getMedia(ctx.AppDB(), testProj, "1")
@@ -240,7 +240,7 @@ func TestSetDescription_SecondCallDoesntRecreate(t *testing.T) {
 
 func TestSearchMedia_ReturnsDescriptionFields(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "abc", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "abc", "", "test.mp4")
 	d := "in search results"
 	setDescription(ctx.AppDB(), testProj, "1", DescriptionFields{Description: &d})
 
@@ -261,7 +261,7 @@ func TestSearchMedia_ReturnsDescriptionFields(t *testing.T) {
 func TestToolSetDescription_Roundtrip(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "abc", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "abc", "", "test.mp4")
 
 	out, err := app.toolSetDescription(ctx, map[string]any{
 		"_project_id": testProj,
@@ -308,7 +308,7 @@ func TestToolSetDescription_RequiresAtLeastOneField(t *testing.T) {
 	// the tool returns an error rather than a silent no-op.
 	ctx := newTestCtx(t)
 	app := &App{}
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "abc", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleProbeForDesc(), "abc", "", "test.mp4")
 	_, err := app.toolSetDescription(ctx, map[string]any{
 		"_project_id": testProj,
 		"file_id":     "1",

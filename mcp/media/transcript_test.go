@@ -200,9 +200,9 @@ func TestTranscribeCandidates_OnlyAudio(t *testing.T) {
 	// Files without audio must not be candidates. Files with audio
 	// AND no transcript yet should be picked.
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "audio-1", sampleAVProbe(5000), "sha-a", "")
-	upsertMedia(ctx.AppDB(), testProj, "video-only", sampleVideoOnlyProbe(), "sha-b", "")
-	upsertMedia(ctx.AppDB(), testProj, "audio-2", sampleAVProbe(5000), "sha-c", "")
+	upsertMedia(ctx.AppDB(), testProj, "audio-1", sampleAVProbe(5000), "sha-a", "", "")
+	upsertMedia(ctx.AppDB(), testProj, "video-only", sampleVideoOnlyProbe(), "sha-b", "", "")
+	upsertMedia(ctx.AppDB(), testProj, "audio-2", sampleAVProbe(5000), "sha-c", "", "")
 
 	cands, err := transcribeCandidates(ctx.AppDB(), testProj, 100)
 	if err != nil {
@@ -224,8 +224,8 @@ func TestTranscribeCandidates_SkipsAlreadyTranscribed(t *testing.T) {
 	// A file that already has an ok transcript with matching sha
 	// shouldn't reappear. A drifted sha should re-queue it.
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(5000), "sha-A", "")
-	upsertMedia(ctx.AppDB(), testProj, "2", sampleAVProbe(5000), "sha-B", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(5000), "sha-A", "", "")
+	upsertMedia(ctx.AppDB(), testProj, "2", sampleAVProbe(5000), "sha-B", "", "")
 
 	// 1 gets a transcript with matching sha.
 	upsertTranscript(ctx.AppDB(), &TranscriptRow{
@@ -254,7 +254,7 @@ func TestTranscribeCandidates_SkipsAlreadyTranscribed(t *testing.T) {
 
 func TestUpsertTranscript_RoundTrip(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(5000), "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(5000), "sha", "", "")
 
 	err := upsertTranscript(ctx.AppDB(), &TranscriptRow{
 		FileID:    "1",
@@ -336,7 +336,7 @@ func TestToolGetTranscript_NotFound(t *testing.T) {
 func TestToolSetTranscript_RoundTrip(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(5000), "sha", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(5000), "sha", "", "")
 
 	out, err := app.toolSetTranscript(ctx, map[string]any{
 		"_project_id": testProj,

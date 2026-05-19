@@ -20,9 +20,9 @@ func upsertWithFolder(t *testing.T, ctx interface{ AppDB() *anyDB }, fileID, fol
 
 func TestSearch_FolderExactMatch(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoProbe(), "a", "/clips/")
-	upsertMedia(ctx.AppDB(), testProj, "2", sampleVideoProbe(), "b", "/clips/q3/")
-	upsertMedia(ctx.AppDB(), testProj, "3", sampleVideoProbe(), "c", "/raw/")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoProbe(), "a", "/clips/", "")
+	upsertMedia(ctx.AppDB(), testProj, "2", sampleVideoProbe(), "b", "/clips/q3/", "")
+	upsertMedia(ctx.AppDB(), testProj, "3", sampleVideoProbe(), "c", "/raw/", "")
 
 	rows, err := searchMedia(ctx.AppDB(), testProj, SearchFilters{Folder: "/clips/"})
 	if err != nil {
@@ -35,10 +35,10 @@ func TestSearch_FolderExactMatch(t *testing.T) {
 
 func TestSearch_FolderRecursive(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoProbe(), "a", "/clips/")
-	upsertMedia(ctx.AppDB(), testProj, "2", sampleVideoProbe(), "b", "/clips/q3/")
-	upsertMedia(ctx.AppDB(), testProj, "3", sampleVideoProbe(), "c", "/clips/q3/sub/")
-	upsertMedia(ctx.AppDB(), testProj, "4", sampleVideoProbe(), "d", "/raw/")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoProbe(), "a", "/clips/", "")
+	upsertMedia(ctx.AppDB(), testProj, "2", sampleVideoProbe(), "b", "/clips/q3/", "")
+	upsertMedia(ctx.AppDB(), testProj, "3", sampleVideoProbe(), "c", "/clips/q3/sub/", "")
+	upsertMedia(ctx.AppDB(), testProj, "4", sampleVideoProbe(), "d", "/raw/", "")
 
 	rows, err := searchMedia(ctx.AppDB(), testProj, SearchFilters{Folder: "/clips/", Recursive: true})
 	if err != nil {
@@ -51,9 +51,9 @@ func TestSearch_FolderRecursive(t *testing.T) {
 
 func TestSearch_FolderComposesWithOtherFilters(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoProbe(), "a", "/clips/")
-	upsertMedia(ctx.AppDB(), testProj, "2", sampleAudioProbe(), "b", "/clips/")
-	upsertMedia(ctx.AppDB(), testProj, "3", sampleVideoProbe(), "c", "/raw/")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoProbe(), "a", "/clips/", "")
+	upsertMedia(ctx.AppDB(), testProj, "2", sampleAudioProbe(), "b", "/clips/", "")
+	upsertMedia(ctx.AppDB(), testProj, "3", sampleVideoProbe(), "c", "/raw/", "")
 
 	hasVideo := true
 	rows, err := searchMedia(ctx.AppDB(), testProj, SearchFilters{
@@ -70,10 +70,10 @@ func TestSearch_FolderComposesWithOtherFilters(t *testing.T) {
 
 func TestListChildFolders_OneLevel(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoProbe(), "a", "/clips/q3/")
-	upsertMedia(ctx.AppDB(), testProj, "2", sampleVideoProbe(), "b", "/clips/q4/")
-	upsertMedia(ctx.AppDB(), testProj, "3", sampleVideoProbe(), "c", "/clips/q4/sub/")
-	upsertMedia(ctx.AppDB(), testProj, "4", sampleVideoProbe(), "d", "/raw/2026/")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoProbe(), "a", "/clips/q3/", "")
+	upsertMedia(ctx.AppDB(), testProj, "2", sampleVideoProbe(), "b", "/clips/q4/", "")
+	upsertMedia(ctx.AppDB(), testProj, "3", sampleVideoProbe(), "c", "/clips/q4/sub/", "")
+	upsertMedia(ctx.AppDB(), testProj, "4", sampleVideoProbe(), "d", "/raw/2026/", "")
 
 	// Root: top-level folders that contain media.
 	got, err := listChildFolders(ctx.AppDB(), testProj, "/")
@@ -100,7 +100,7 @@ func TestListChildFolders_OneLevel(t *testing.T) {
 func TestListChildFolders_OmitsMediaLessFolders(t *testing.T) {
 	ctx := newTestCtx(t)
 	// One media folder + one folder with only failed-probe rows.
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoProbe(), "a", "/clips/")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoProbe(), "a", "/clips/", "")
 	// Mark a failed-probe row in another folder — listChildFolders
 	// filters to probe_status='ok' so this shouldn't show up.
 	if err := markFailed(ctx.AppDB(), testProj, "2", "b", "unsupported", "no media stream"); err != nil {
@@ -121,7 +121,7 @@ func TestListChildFolders_OmitsMediaLessFolders(t *testing.T) {
 // row's folder reflects the new location without a reprobe.
 func TestUpdateFolder_OnMove(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoProbe(), "sha", "/raw/")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoProbe(), "sha", "/raw/", "")
 
 	if err := updateFolder(ctx.AppDB(), testProj, "1", "/edited/"); err != nil {
 		t.Fatal(err)
@@ -149,7 +149,7 @@ func TestUpdateFolder_OnMove(t *testing.T) {
 // trailing slashes.
 func TestToolListFolders_NormalizesParent(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoProbe(), "a", "/clips/q3/")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleVideoProbe(), "a", "/clips/q3/", "")
 
 	app := &App{}
 	for _, parent := range []string{"clips", "/clips", "/clips/"} {

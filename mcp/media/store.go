@@ -27,6 +27,14 @@ type MediaRow struct {
 	// files_move changes a folder.
 	Folder string `json:"folder,omitempty"`
 
+	// Name mirrors storage.files.name so events + the media.completed
+	// payload + UI rows can show a filename without round-tripping to
+	// storage. Populated by upsertMedia at probe time; refreshed on
+	// every re-index. Migration 010_media_name.sql added the column —
+	// rows from before that migration carry "" until their next
+	// reindex.
+	Name string `json:"name,omitempty"`
+
 	FormatName string `json:"format_name,omitempty"`
 	DurationMs int64  `json:"duration_ms,omitempty"`
 	Bitrate    int64  `json:"bitrate,omitempty"`
@@ -92,22 +100,23 @@ type DerivationRow struct {
 // (durations, codecs, folder) are written every time; status fields
 // too. folder mirrors storage.files.folder so media can filter +
 // paginate by folder without an enrichment roundtrip per query.
-func upsertMedia(db *sql.DB, projectID string, fileID string, p *Probe, sha string, folder string) error {
+func upsertMedia(db *sql.DB, projectID string, fileID string, p *Probe, sha, folder, name string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := db.Exec(`
 		INSERT INTO media (
-			file_id, project_id, source_sha256, folder,
+			file_id, project_id, source_sha256, folder, name,
 			format_name, duration_ms, bitrate,
 			has_video, has_audio, is_image,
 			width, height, fps, video_codec,
 			channels, sample_rate, audio_codec,
 			probe_status, probe_error, probe_at,
 			raw_probe, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', '', ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', '', ?, ?, ?)
 		ON CONFLICT(file_id) DO UPDATE SET
 			project_id=excluded.project_id,
 			source_sha256=excluded.source_sha256,
 			folder=excluded.folder,
+			name=excluded.name,
 			format_name=excluded.format_name,
 			duration_ms=excluded.duration_ms,
 			bitrate=excluded.bitrate,
@@ -127,7 +136,7 @@ func upsertMedia(db *sql.DB, projectID string, fileID string, p *Probe, sha stri
 			raw_probe=excluded.raw_probe,
 			updated_at=excluded.updated_at,
 			force_probe=0`,
-		fileID, projectID, sha, folder,
+		fileID, projectID, sha, folder, name,
 		p.FormatName, p.DurationMs, p.Bitrate,
 		boolInt(p.HasVideo), boolInt(p.HasAudio), boolInt(p.IsImage),
 		nullableInt(p.Width), nullableInt(p.Height), nullableFloat(p.FPS), nullableStr(p.VideoCodec),
@@ -496,7 +505,7 @@ func markDescribeAttempt(db *sql.DB, projectID, fileID, errMsg string) error {
 
 func getMedia(db *sql.DB, projectID, fileID string) (*MediaRow, error) {
 	row := db.QueryRow(`
-		SELECT m.file_id, m.project_id, m.source_sha256, m.folder,
+		SELECT m.file_id, m.project_id, m.source_sha256, m.folder, m.name,
 			m.format_name, m.duration_ms, m.bitrate,
 			m.has_video, m.has_audio, m.is_image,
 			m.width, m.height, m.fps, m.video_codec,
@@ -536,7 +545,7 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 		transcriptStatus               string
 	)
 	err := row.Scan(
-		&m.FileID, &m.ProjectID, &m.SourceSHA256, &m.Folder,
+		&m.FileID, &m.ProjectID, &m.SourceSHA256, &m.Folder, &m.Name,
 		&formatName, &duration, &bitrate,
 		&hasVideo, &hasAudio, &isImage,
 		&width, &height, &fps, &vcodec,
@@ -676,7 +685,7 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 	for i, c := range clauses {
 		clauses[i] = strings.ReplaceAll(c, "project_id =", "m.project_id =")
 	}
-	query := `SELECT m.file_id, m.project_id, m.source_sha256, m.folder,
+	query := `SELECT m.file_id, m.project_id, m.source_sha256, m.folder, m.name,
 		m.format_name, m.duration_ms, m.bitrate,
 		m.has_video, m.has_audio, m.is_image,
 		m.width, m.height, m.fps, m.video_codec,
