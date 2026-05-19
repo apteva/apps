@@ -191,11 +191,13 @@ function MultiLineChart({
   mem: number[];
   height?: number;
 }) {
-  // Sane aspect ratio. preserveAspectRatio="none" + className="w-full"
-  // stretched the lines horizontally on wide panels — 14 samples
-  // smeared across 1900px read as a flat horizon. Caller wraps this
-  // in a max-width container so the chart stays roughly 5:1.
-  const VIEW_W = 800;
+  // ViewBox sized to roughly match a typical panel width so
+  // preserveAspectRatio="none" stretching is minimal (1.0x–1.3x
+  // horizontal). The earlier 800-wide viewBox stretched to 1900px
+  // panels showed a 2.4x horizontal squash — every CPU/MEM change
+  // got visually compressed and the chart read as a flat line.
+  // 1400 lands much closer to common panel widths.
+  const VIEW_W = 1400;
   const h = height ?? 160;
   const padLeft = 32;
   const padRight = 12;
@@ -232,16 +234,19 @@ function MultiLineChart({
   return (
     <svg
       viewBox={`0 0 ${VIEW_W} ${h}`}
-      // xMidYMid meet → preserve aspect, center the chart. Combined
-      // with the caller's max-width wrapper this stops 14 samples
-      // from being stretched across 1900px and reading as a flat
-      // horizon (real screenshot bug).
-      preserveAspectRatio="xMidYMid meet"
+      // "none" → fills the container width completely (operator
+      // wanted edge-to-edge). The widened viewBox above keeps the
+      // visual aspect close to natural; lines stay readable without
+      // the flat-horizon stretch that the original 800-wide viewBox
+      // showed at 1900px.
+      preserveAspectRatio="none"
       className="block w-full"
-      style={{ maxHeight: h }}
+      style={{ height: h }}
       aria-label="cpu/memory history"
     >
-      {/* gridlines */}
+      {/* gridlines — non-scaling stroke so they stay 1px sharp on
+          any panel width (preserveAspectRatio="none" stretches the
+          chart horizontally, which would otherwise thicken strokes). */}
       {[0, 25, 50, 75, 100].map((g) => (
         <line
           key={g}
@@ -249,6 +254,7 @@ function MultiLineChart({
           stroke="currentColor"
           strokeOpacity={g === 0 || g === 100 ? "0.15" : "0.06"}
           strokeWidth="1"
+          vectorEffect="non-scaling-stroke"
         />
       ))}
       {/* y labels */}
@@ -259,8 +265,8 @@ function MultiLineChart({
           textAnchor="end" fontSize="10" fill="currentColor" fillOpacity="0.45"
         >{g}%</text>
       ))}
-      <path d={lineFor(cpu)} fill="none" stroke="#3b82f6" strokeWidth="2" />
-      <path d={lineFor(mem)} fill="none" stroke="#a78bfa" strokeWidth="2" />
+      <path d={lineFor(cpu)} fill="none" stroke="#3b82f6" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+      <path d={lineFor(mem)} fill="none" stroke="#a78bfa" strokeWidth="2" vectorEffect="non-scaling-stroke" />
       {/* Color-key only legend — the "N samples · ~M min" hint moved
           up to the section header so we don't repeat it inside the
           plot area. */}
@@ -657,12 +663,10 @@ function InstanceCard({
               }
             />
             <div className="p-4">
-              <div style={{ maxWidth: 880, margin: "0 auto" }}>
-                <MultiLineChart
-                  cpu={history.map((s) => s.cpuPct)}
-                  mem={history.map((s) => s.memPct)}
-                />
-              </div>
+              <MultiLineChart
+                cpu={history.map((s) => s.cpuPct)}
+                mem={history.map((s) => s.memPct)}
+              />
             </div>
           </div>
         </div>
