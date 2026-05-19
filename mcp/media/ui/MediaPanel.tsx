@@ -103,16 +103,21 @@ interface NativePanelProps {
 interface Derivation {
   id: number;
   file_id: string;
-  kind: "thumbnail" | "waveform" | "cover";
+  kind: "thumbnail" | "waveform" | "cover" | "keyframe";
   storage_file_id: string;
   width?: number;
   height?: number;
+  // position_ms is the source timestamp for keyframes (storyboard
+  // frames every keyframe_interval_seconds — v0.13.0+). 0 for
+  // single-frame derivations (thumbnail/waveform/cover).
+  position_ms?: number;
   status: "ok" | "failed" | "stale";
 }
 
 interface MediaRow {
   file_id: string;
   project_id: string;
+  name?: string;
   format_name?: string;
   duration_ms?: number;
   bitrate?: number;
@@ -121,6 +126,7 @@ interface MediaRow {
   is_image: boolean;
   width?: number;
   height?: number;
+  rotation?: number;
   fps?: number;
   video_codec?: string;
   channels?: number;
@@ -136,6 +142,12 @@ interface MediaRow {
   // v0.4 — transcript status, surfaced via LEFT JOIN so the tile can
   // show an icon without a second roundtrip. "" when no transcript.
   transcript_status?: "" | "pending" | "running" | "ok" | "failed" | "skipped";
+  // v0.13.0 — audience rating populated by the describer's LLM call.
+  // Empty until the describer runs (or stays empty when no descriptions
+  // integration is bound). The panel renders a tile badge + filter
+  // chip from this.
+  audience_rating?: "unrated" | "general" | "mature" | "adult" | "";
+  audience_reasoning?: string;
   derivations?: Derivation[];
 }
 
@@ -712,6 +724,8 @@ function DetailDrawer({
             Open source file ↗
           </a>
           <DescriptionEditor row={row} onSave={onSaveDescription} />
+          <AudienceRatingSection row={row} apiBase={apiBase} query={query} />
+          <KeyframesStrip row={row} previewBase={previewBase} query={query} />
           <OperationsSection
             row={row}
             apiBase={apiBase}
@@ -1848,9 +1862,9 @@ function RenderQueue({
   installId?: number;
 }) {
   const [summary, setSummary] = useState<QueueSummary | null>(null);
-  // Open by default when anything is in-flight; otherwise collapsed
-  // so the catalog grid stays the focus.
-  const [open, setOpen] = useState<boolean>(true);
+  // Collapsed by default so the catalog grid stays the focus. User
+  // expands manually when they want to inspect the queue.
+  const [open, setOpen] = useState<boolean>(false);
 
   const refresh = useCallback(async () => {
     if (!projectId) return;
@@ -2144,4 +2158,169 @@ function StatusDot({ status }: { status: string }) {
             ? "bg-red-500"
             : "bg-text-dim";
   return <span className={`inline-block w-2 h-2 rounded-full ${color}`} aria-hidden />;
+}
+
+// ─── KeyframesStrip ──────────────────────────────────────────────────
+//
+// Horizontal storyboard of the indexer-extracted keyframes (v0.13.0+).
+// One row per video; populated when the keyframer ran (every
+// keyframe_interval_seconds). Click a frame to open it full-size in a
+// new tab; hover shows the timestamp.
+
+function KeyframesStrip({
+  row,
+  previewBase,
+  query,
+}: {
+  row: MediaRow;
+  previewBase: string;
+  query: string;
+}) {
+  // Only video rows have keyframes; images get a single canonical
+  // thumbnail; audio gets a waveform.
+  if (!row.has_video || row.is_image) return null;
+  const keyframes = (row.derivations ?? [])
+    .filter((d) => d.kind === "keyframe" && d.status === "ok")
+    .sort((a, b) => (a.position_ms ?? 0) - (b.position_ms ?? 0));
+  if (keyframes.length === 0) return null;
+
+  return (
+    <Section title={`Storyboard (${keyframes.length} frames)`}>
+      <div
+        className="flex gap-1 overflow-x-auto pb-1"
+        style={{ scrollbarWidth: "thin" }}
+      >
+        {keyframes.map((k) => {
+          const src = `${previewBase}/${k.storage_file_id}/content?${query}`;
+          const label = formatDuration(k.position_ms ?? 0);
+          return (
+            <a
+              key={k.id}
+              href={src}
+              target="_blank"
+              rel="noopener"
+              title={`@ ${label}`}
+              className="flex-shrink-0 relative block border border-border rounded overflow-hidden hover:border-accent/60 transition-colors"
+              style={{ width: 120, height: 68 }}
+            >
+              <img
+                src={src}
+                alt=""
+                loading="lazy"
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "cover",
+                }}
+              />
+              <span
+                className="absolute bottom-0 right-0 px-1 text-[10px] font-mono text-white bg-black/70 rounded-tl"
+                aria-hidden
+              >
+                {label}
+              </span>
+            </a>
+          );
+        })}
+      </div>
+    </Section>
+  );
+}
+
+// ─── AudienceRatingSection ───────────────────────────────────────────
+//
+// Shows the LLM-decided audience rating (general | mature | adult |
+// unrated) and offers operator override buttons. Override → POST
+// /api/apps/media/mcp media_set_audience_rating. Setting to "unrated"
+// re-queues for the describer's next pass.
+
+function AudienceRatingSection({
+  row,
+  apiBase,
+  query,
+}: {
+  row: MediaRow;
+  apiBase: string;
+  query: string;
+}) {
+  const rating = row.audience_rating || "unrated";
+  const reasoning = (row.audience_reasoning ?? "").trim();
+  const [pending, setPending] = useState<string | null>(null);
+  const [err, setErr] = useState<string>("");
+
+  const setRating = async (next: string) => {
+    setPending(next);
+    setErr("");
+    try {
+      const res = await fetch(`${apiBase}/mcp?${query}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "media_set_audience_rating",
+            arguments: {
+              file_id: row.file_id,
+              rating: next,
+              reasoning: "operator override",
+            },
+          },
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setPending(null);
+    }
+  };
+
+  const tones: Record<string, string> = {
+    unrated: "bg-bg-input border-border text-text-muted",
+    general: "bg-green-500/15 text-green-400 border-green-500/30",
+    mature: "bg-yellow-500/15 text-yellow-400 border-yellow-500/30",
+    adult: "bg-red-500/15 text-red-400 border-red-500/30",
+  };
+  return (
+    <Section title="Audience rating">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className={`px-2 py-0.5 rounded border text-[11px] ${tones[rating] ?? tones.unrated}`}>
+          {rating}
+        </span>
+        {reasoning && (
+          <span className="text-text-dim text-[11px] truncate" title={reasoning}>
+            · {reasoning}
+          </span>
+        )}
+      </div>
+      <div className="flex items-center gap-1 flex-wrap mt-2">
+        {(["general", "mature", "adult", "unrated"] as const).map((r) => (
+          <button
+            key={r}
+            type="button"
+            disabled={pending !== null || rating === r}
+            onClick={() => setRating(r)}
+            className={`px-2 py-0.5 rounded border text-[11px] transition-colors ${
+              rating === r
+                ? "opacity-60 cursor-default border-border text-text-muted"
+                : "border-border text-text-muted hover:text-text hover:border-accent/40"
+            }`}
+            title={
+              r === "unrated"
+                ? "Reset — re-queues the file for the describer's next pass"
+                : `Set rating to ${r}`
+            }
+          >
+            {pending === r ? "…" : r}
+          </button>
+        ))}
+      </div>
+      {err && <div className="text-red-400 text-[11px] mt-1">{err}</div>}
+    </Section>
+  );
 }

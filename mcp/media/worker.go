@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -175,12 +176,58 @@ func indexOneFile(ctx context.Context, app *sdk.AppCtx, projectID string, f Stor
 		c.maxSizeMB, c.thumbSeek, c.thumbWidth, c.waveW, c.waveH)
 }
 
+// inFlightIndex is a process-wide set of (projectID, fileID) keys
+// currently being indexed. The DB-row dedupe check inside processOne
+// only catches the race when the first run has already written
+// probe_status='ok'; between "first run started" and "first run wrote
+// ok" the second run still flies past dedupe and ends up colliding
+// on the workdir (the first's EXIT-trap rm -rf "$WORK" deletes
+// probe.json out from under the second mid-execution).
+//
+// In-memory mutex closes that window: any second attempt for the
+// same (project, file) skips immediately. Process-local is enough
+// because the indexer is a singleton per sidecar; if multi-process
+// indexing ever becomes a thing we'd need a SELECT FOR UPDATE on a
+// dedicated locks table.
+var inFlightIndex sync.Map // key: "projectID|fileID" → struct{}
+
+// claimInFlight tries to register (projectID, fileID) as in-flight.
+// Returns false when another goroutine is already processing — the
+// caller skips silently. The releaseInFlight call MUST happen in a
+// defer on success.
+func claimInFlight(projectID, fileID string) bool {
+	key := projectID + "|" + fileID
+	_, loaded := inFlightIndex.LoadOrStore(key, struct{}{})
+	return !loaded
+}
+
+func releaseInFlight(projectID, fileID string) {
+	inFlightIndex.Delete(projectID + "|" + fileID)
+}
+
 func processOne(
 	ctx context.Context, app *sdk.AppCtx, sc *storageClient, projectID string,
 	f StorageFile, ffmpegPath, ffprobePath string,
 	maxSizeMB, thumbSeek, thumbWidth, waveW, waveH any,
 ) {
 	fid := strconv.FormatInt(f.ID, 10)
+	// Race guard. Concurrent attempts for the same file (periodic
+	// indexer tick + storage `file.added` event replay both firing,
+	// or two ticks during a slow remote indexing run) would otherwise
+	// step on each other's scratch workdirs + duplicate-upload to
+	// storage. The DB-row dedupe further down only catches the case
+	// after the first run has written probe_status='ok'; this
+	// in-memory claim covers the gap.
+	if !claimInFlight(projectID, fid) {
+		// Concurrent attempt for the same file — skip silently.
+		// Single Info log so operators can see the dedupe firing
+		// without spamming Warn for normal-shape races.
+		app.Logger().Info("indexer: file already in flight; skipping concurrent attempt",
+			"file_id", fid, "name", f.Name)
+		return
+	}
+	defer releaseInFlight(projectID, fid)
+
 	maxBytes := int64(toInt(maxSizeMB)) * 1024 * 1024
 	logger := app.Logger()
 	logCtx := []any{"file_id", fid, "name", f.Name, "content_type", f.ContentType, "size", f.SizeBytes}
