@@ -107,8 +107,18 @@ func runIndexer(ctx context.Context, app *sdk.AppCtx) error {
 	// is "did we hit the page limit". Storage soft-deletes by default
 	// so re-creation later just re-indexes the file fresh.
 	if len(files) < storageListLimit {
+		// Only files we'd legitimately catalog count as "still here".
+		// Excluded-folder files (renders, .screenshots, .media)
+		// SHOULDN'T have a media row to begin with; if one snuck in
+		// before isExcludedFromCatalog covered that folder, treat it
+		// as orphan now so purgeOrphans cascades it out. Without this
+		// filter, render outputs (storage genuinely keeps them) would
+		// continue to drive catalog rows that confuse the panel.
 		fileIDs := make([]string, 0, len(files))
 		for _, f := range files {
+			if isExcludedFromCatalog(f.Folder) {
+				continue
+			}
 			fileIDs = append(fileIDs, strconv.FormatInt(f.ID, 10))
 		}
 		if n, err := purgeOrphans(app, sc, app.AppDB(), projectID, fileIDs); err != nil {
@@ -148,7 +158,8 @@ func runIndexer(ctx context.Context, app *sdk.AppCtx) error {
 // instead of waiting up to 30s for the indexer's tick.
 //
 // Skips with no error when:
-//   - the file lives under /.media/ (our own derivation)
+//   - the file lives in an excluded folder (see isExcludedFromCatalog
+//     — covers /.<hidden>/ and /renders/)
 //   - the file isn't a media type (text, archives, …)
 //   - the media row already exists with a matching sha (idempotent
 //     re-event from a flapping connection / event replay)
@@ -156,7 +167,7 @@ func runIndexer(ctx context.Context, app *sdk.AppCtx) error {
 // Wraps processOne with the same config setup runIndexer uses so
 // the two entry points produce identical results.
 func indexOneFile(ctx context.Context, app *sdk.AppCtx, projectID string, f StorageFile) {
-	if isOwnDerivation(f.Folder) {
+	if isExcludedFromCatalog(f.Folder) {
 		return
 	}
 	if !isMediaContentType(f.ContentType) && !isMediaByExt(f.Name) {
@@ -582,14 +593,12 @@ func uploadAndRecord(
 // media prefix. Storage may not always have a content_type set — for
 // those, fall back to the file extension.
 //
-// Hard skip: anything under /.media/ — that's where this app writes
-// its own thumbnails + waveforms. Indexing them would create a tight
-// loop (probe a thumbnail, generate a thumbnail of the thumbnail,
-// repeat every sweep) and pollute both the catalog and storage.
+// Hard skip: anything under a folder isExcludedFromCatalog returns
+// true for — see that helper for the rules.
 func filterMediaFiles(files []StorageFile) []StorageFile {
 	out := make([]StorageFile, 0, len(files))
 	for _, f := range files {
-		if isOwnDerivation(f.Folder) {
+		if isExcludedFromCatalog(f.Folder) {
 			continue
 		}
 		if isMediaContentType(f.ContentType) || isMediaByExt(f.Name) {
@@ -599,10 +608,38 @@ func filterMediaFiles(files []StorageFile) []StorageFile {
 	return out
 }
 
-// isOwnDerivation reports whether a storage folder path holds files
-// the media indexer wrote (thumbnails, waveforms). They live under
-// /.media/<kind>/ and must never be re-indexed. The leading dot
-// matches the storage app's "hidden folder" convention.
+// isExcludedFromCatalog reports whether a storage folder should NEVER
+// produce media catalog rows. Three categories:
+//
+//   1. Hidden folders (anything starting with "/.") — storage's
+//      convention for "internal app bookkeeping, don't show users".
+//      Covers /.media/ (this app's own derivations — would loop on
+//      itself), /.screenshots/ (the screenshots app's captures), and
+//      any future hidden-folder convention an app adopts.
+//
+//   2. Media's own render output folder (/renders/ by default).
+//      Renders are OUTPUTS of media's pipeline, not new source
+//      uploads. Indexing them would cluter the catalog with frames
+//      that are already addressable via the renders table.
+//
+// Older versions only skipped /.media/. That let render outputs +
+// screenshots + every other app's hidden folder pollute the catalog
+// — operators reported "I see files I think I deleted" because the
+// rows for /renders/frame-Nms.png stuck around (those storage files
+// genuinely exist, just shouldn't be cataloged).
+func isExcludedFromCatalog(folder string) bool {
+	if strings.HasPrefix(folder, "/.") {
+		return true
+	}
+	if folder == "/renders/" || strings.HasPrefix(folder, "/renders/") {
+		return true
+	}
+	return false
+}
+
+// isOwnDerivation is kept as a backward-compat alias for callers
+// that specifically want "is this MY derivation". Use
+// isExcludedFromCatalog for the catalog-skip decision.
 func isOwnDerivation(folder string) bool {
 	return strings.HasPrefix(folder, "/.media/")
 }
