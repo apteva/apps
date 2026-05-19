@@ -20,6 +20,7 @@ interface NativePanelProps {
 
 interface User {
   id: number;
+  organization_id: number;
   email: string;
   email_verified_at?: string;
   display_name?: string;
@@ -35,6 +36,7 @@ interface User {
 
 interface Client {
   id: number;
+  organization_id: number;
   client_id: string;
   name: string;
   type: "spa" | "web" | "native" | "m2m";
@@ -109,7 +111,31 @@ interface OIDCInfo {
   lockout_initial_minutes: number;
 }
 
-type Tab = "overview" | "users" | "clients" | "endpoints";
+type Tab = "overview" | "organizations" | "users" | "clients" | "endpoints";
+
+interface Organization {
+  id: number;
+  slug: string;
+  name: string;
+  color?: string;
+  status: string;
+  policy_overrides?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+// orgQS — builds `?organization_slug=<slug>` (or appends to an existing
+// query). When orgSlug is null we're in the "All organizations" rollup
+// view and the server returns project-wide data.
+function orgQS(slug: string | null, extra?: string): string {
+  const params = new URLSearchParams();
+  if (slug) params.set("organization_slug", slug);
+  if (extra) {
+    for (const [k, v] of new URLSearchParams(extra)) params.set(k, v);
+  }
+  const s = params.toString();
+  return s ? `?${s}` : "";
+}
 
 // ─── Panel root ──────────────────────────────────────────────────────
 
@@ -117,29 +143,69 @@ export default function AuthPanel({ projectId }: NativePanelProps) {
   const [tab, setTab] = useState<Tab>("overview");
   const [stats, setStats] = useState<Stats | null>(null);
   const [status, setStatus] = useState("");
+  const [orgs, setOrgs] = useState<Organization[]>([]);
+  const [activeOrgSlug, setActiveOrgSlug] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(`auth.activeOrg.${projectId || ""}`);
+    } catch {
+      return null;
+    }
+  });
+
+  // Persist active-org selection per project.
+  useEffect(() => {
+    try {
+      if (activeOrgSlug == null) {
+        localStorage.removeItem(`auth.activeOrg.${projectId || ""}`);
+      } else {
+        localStorage.setItem(`auth.activeOrg.${projectId || ""}`, activeOrgSlug);
+      }
+    } catch {}
+  }, [activeOrgSlug, projectId]);
+
+  const loadOrgs = useCallback(async () => {
+    try {
+      const r = await fetch(`${API}/admin/organizations`, { credentials: "same-origin" });
+      if (!r.ok) throw new Error(`orgs ${r.status}`);
+      const data = await r.json();
+      setOrgs(data.organizations || []);
+    } catch (e) {
+      setStatus(`orgs: ${(e as Error).message}`);
+    }
+  }, []);
 
   const loadStats = useCallback(async () => {
     try {
-      const r = await fetch(`${API}/admin/stats`, { credentials: "same-origin" });
+      const r = await fetch(`${API}/admin/stats${orgQS(activeOrgSlug)}`, { credentials: "same-origin" });
       if (!r.ok) throw new Error(`stats ${r.status}`);
       setStats(await r.json());
     } catch (e) {
       setStatus(`stats: ${(e as Error).message}`);
     }
-  }, []);
+  }, [activeOrgSlug]);
 
-  useEffect(() => {
-    loadStats();
-  }, [loadStats]);
+  useEffect(() => { loadOrgs(); }, [loadOrgs, projectId]);
+  useEffect(() => { loadStats(); }, [loadStats]);
+
+  // Users tab needs a specific org for create/edit. When user picks
+  // "All" we still show a read-only flat list, but disable mutations.
 
   return (
     <div className="h-full flex flex-col">
       <header className="flex items-center gap-1 border-b border-border px-4 py-2">
-        <div className="flex items-center gap-2 mr-3">
+        <div className="flex items-center gap-2 mr-2">
           <KeyIcon />
           <span className="font-semibold text-text">Auth</span>
         </div>
+        <OrgSwitcher
+          orgs={orgs}
+          activeSlug={activeOrgSlug}
+          onSelect={setActiveOrgSlug}
+          onManage={() => setTab("organizations")}
+        />
+        <span className="w-px h-5 bg-border mx-2" />
         <NavTab label="Overview" value="overview" current={tab} onClick={setTab} />
+        <NavTab label="Organizations" value="organizations" current={tab} onClick={setTab} count={orgs.length} />
         <NavTab label="Users" value="users" current={tab} onClick={setTab} count={stats ? stats.active + stats.disabled : undefined} />
         <NavTab label="Clients" value="clients" current={tab} onClick={setTab} />
         <NavTab label="Endpoints" value="endpoints" current={tab} onClick={setTab} />
@@ -147,11 +213,130 @@ export default function AuthPanel({ projectId }: NativePanelProps) {
       </header>
 
       <div className="flex-1 overflow-auto">
-        {tab === "overview" && <OverviewTab stats={stats} projectId={projectId} setStatus={setStatus} />}
-        {tab === "users" && <UsersTab projectId={projectId} setStatus={setStatus} onUsersChanged={loadStats} />}
-        {tab === "clients" && <ClientsTab projectId={projectId} setStatus={setStatus} />}
-        {tab === "endpoints" && <EndpointsTab projectId={projectId} setStatus={setStatus} />}
+        {tab === "overview" && (
+          <OverviewTab
+            stats={stats}
+            orgs={orgs}
+            activeOrgSlug={activeOrgSlug}
+            projectId={projectId}
+            setStatus={setStatus}
+          />
+        )}
+        {tab === "organizations" && (
+          <OrganizationsTab
+            orgs={orgs}
+            activeOrgSlug={activeOrgSlug}
+            onSelect={setActiveOrgSlug}
+            onChanged={() => { loadOrgs(); loadStats(); }}
+            setStatus={setStatus}
+          />
+        )}
+        {tab === "users" && (
+          <UsersTab
+            activeOrgSlug={activeOrgSlug}
+            orgs={orgs}
+            projectId={projectId}
+            setStatus={setStatus}
+            onUsersChanged={loadStats}
+          />
+        )}
+        {tab === "clients" && (
+          <ClientsTab
+            activeOrgSlug={activeOrgSlug}
+            orgs={orgs}
+            projectId={projectId}
+            setStatus={setStatus}
+          />
+        )}
+        {tab === "endpoints" && (
+          <EndpointsTab
+            activeOrgSlug={activeOrgSlug}
+            onSelectOrg={setActiveOrgSlug}
+            orgs={orgs}
+            projectId={projectId}
+            setStatus={setStatus}
+          />
+        )}
       </div>
+    </div>
+  );
+}
+
+// ─── OrgSwitcher (header dropdown) ───────────────────────────────────
+
+function OrgSwitcher({ orgs, activeSlug, onSelect, onManage }: {
+  orgs: Organization[];
+  activeSlug: string | null;
+  onSelect: (s: string | null) => void;
+  onManage: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener("mousedown", onDoc);
+    return () => window.removeEventListener("mousedown", onDoc);
+  }, [open]);
+  const active = orgs.find((o) => o.slug === activeSlug) || null;
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-2 px-2 py-1 text-sm rounded hover:bg-bg-card transition-colors"
+        title={active ? `Organization: ${active.name}` : "All organizations"}
+      >
+        <span
+          className="w-2 h-2 rounded-full"
+          style={{ backgroundColor: active?.color || "#94a3b8" }}
+        />
+        <span className="text-text font-medium">{active ? active.name : "All organizations"}</span>
+        <span className="text-text-dim text-xs">▾</span>
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full mt-1 w-64 z-40 bg-bg-card border border-border rounded shadow-lg py-1">
+          <button
+            onClick={() => { onSelect(null); setOpen(false); }}
+            className={
+              "w-full text-left flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-bg-input/50 " +
+              (activeSlug == null ? "text-accent" : "text-text")
+            }
+          >
+            <span className="w-2 h-2 rounded-full bg-text-dim" />
+            <span className="flex-1">All organizations</span>
+            <span className="text-text-dim text-xs">project rollup</span>
+          </button>
+          {orgs.length > 0 && <div className="border-t border-border my-1" />}
+          {orgs.map((o) => (
+            <button
+              key={o.id}
+              onClick={() => { onSelect(o.slug); setOpen(false); }}
+              className={
+                "w-full text-left flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-bg-input/50 " +
+                (o.slug === activeSlug ? "text-accent" : "text-text")
+              }
+              title={o.slug}
+            >
+              <span
+                className="w-2 h-2 rounded-full flex-shrink-0"
+                style={{ backgroundColor: o.color || "#94a3b8" }}
+              />
+              <span className="flex-1 truncate">{o.name}</span>
+              {o.status === "archived" && <span className="text-text-dim text-xs">archived</span>}
+              {o.slug === "default" && <span className="text-text-dim text-xs">default</span>}
+            </button>
+          ))}
+          <div className="border-t border-border my-1" />
+          <button
+            onClick={() => { onManage(); setOpen(false); }}
+            className="w-full text-left px-3 py-1.5 text-sm text-text-muted hover:bg-bg-input/50 hover:text-text"
+          >
+            Manage organizations…
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -179,24 +364,34 @@ function NavTab({ label, value, current, onClick, count }: {
 
 // ─── Overview tab ────────────────────────────────────────────────────
 
-function OverviewTab({ stats, projectId, setStatus }: {
-  stats: Stats | null; projectId: string; setStatus: (s: string) => void;
+function OverviewTab({ stats, orgs, activeOrgSlug, projectId, setStatus }: {
+  stats: Stats | null;
+  orgs: Organization[];
+  activeOrgSlug: string | null;
+  projectId: string;
+  setStatus: (s: string) => void;
 }) {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const loadAudit = useCallback(async () => {
     try {
-      const r = await fetch(`${API}/admin/audit?limit=25`, { credentials: "same-origin" });
+      const r = await fetch(`${API}/admin/audit${orgQS(activeOrgSlug, "limit=25")}`, { credentials: "same-origin" });
       if (!r.ok) throw new Error(`audit ${r.status}`);
       const data = await r.json();
       setEvents(data.events || []);
     } catch (e) {
       setStatus(`audit: ${(e as Error).message}`);
     }
-  }, [setStatus]);
+  }, [activeOrgSlug, setStatus]);
   useEffect(() => { loadAudit(); }, [loadAudit, projectId]);
+  const active = orgs.find((o) => o.slug === activeOrgSlug) || null;
 
   return (
     <div className="p-4 space-y-4">
+      <div className="text-text-dim text-xs">
+        {active
+          ? <>Scope: <span className="text-text">{active.name}</span></>
+          : <>Scope: <span className="text-text">All organizations</span> (project-wide rollup)</>}
+      </div>
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <StatCard label="Active users" value={stats?.active} accent />
         <StatCard label="Disabled" value={stats?.disabled} />
@@ -257,10 +452,288 @@ function StatCard({ label, value, accent, warn }: {
   );
 }
 
+// ─── Organizations tab ───────────────────────────────────────────────
+
+function OrganizationsTab({ orgs, activeOrgSlug, onSelect, onChanged, setStatus }: {
+  orgs: Organization[];
+  activeOrgSlug: string | null;
+  onSelect: (s: string | null) => void;
+  onChanged: () => void;
+  setStatus: (s: string) => void;
+}) {
+  const [createOpen, setCreateOpen] = useState(false);
+  const [editing, setEditing] = useState<Organization | null>(null);
+
+  const archive = async (o: Organization) => {
+    if (o.slug === "default") return;
+    if (!window.confirm(`Archive organization "${o.name}"? Users and clients remain but new signups via that org's client_ids fail.`)) return;
+    try {
+      const r = await fetch(`${API}/admin/organizations/${o.id}/archive`, {
+        method: "POST", credentials: "same-origin",
+      });
+      if (!r.ok) throw new Error(`archive ${r.status}`);
+      onChanged();
+      if (activeOrgSlug === o.slug) onSelect(null);
+    } catch (e) {
+      setStatus(`archive: ${(e as Error).message}`);
+    }
+  };
+
+  return (
+    <div className="p-4 space-y-3">
+      <div className="flex items-center gap-3">
+        <button
+          onClick={() => setCreateOpen(true)}
+          className="px-3 py-1 text-sm bg-accent text-bg rounded font-medium"
+        >+ New organization</button>
+        <span className="text-text-dim text-sm">
+          Each organization is its own user pool — separate users, OAuth clients, signing keys, and JWKS.
+        </span>
+      </div>
+
+      {orgs.length === 0 ? (
+        <EmptyState
+          icon={<BuildingIcon />}
+          title="No organizations yet"
+          hint="Create one to start partitioning users by SaaS product."
+        />
+      ) : (
+        <ul className="space-y-2">
+          {orgs.map((o) => (
+            <li
+              key={o.id}
+              className={
+                "border rounded bg-bg-card px-3 py-2 flex items-center gap-3 " +
+                (o.slug === activeOrgSlug ? "border-accent" : "border-border")
+              }
+            >
+              <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: o.color || "#94a3b8" }} />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-text font-medium">{o.name}</span>
+                  <span className="text-text-dim text-xs font-mono">{o.slug}</span>
+                  {o.slug === "default" && <Pill tone="muted">default</Pill>}
+                  {o.status === "archived" && <Pill tone="warn">archived</Pill>}
+                  {o.slug === activeOrgSlug && <Pill tone="ok">selected</Pill>}
+                </div>
+                <div className="text-text-dim text-xs">
+                  created {o.created_at ? relTime(o.created_at) : "—"}
+                </div>
+              </div>
+              <div className="flex items-center gap-1 flex-shrink-0">
+                {o.slug !== activeOrgSlug && (
+                  <button
+                    onClick={() => onSelect(o.slug)}
+                    className="px-2 py-1 text-xs border border-border rounded text-text-muted hover:text-text hover:bg-bg"
+                  >Select</button>
+                )}
+                <button
+                  onClick={() => setEditing(o)}
+                  className="px-2 py-1 text-xs border border-border rounded text-text-muted hover:text-text hover:bg-bg"
+                >Edit</button>
+                {o.status === "active" && o.slug !== "default" && (
+                  <button
+                    onClick={() => archive(o)}
+                    className="px-2 py-1 text-xs border border-border rounded text-text-muted hover:text-text hover:bg-bg"
+                  >Archive</button>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {createOpen && (
+        <CreateOrgModal
+          existingSlugs={orgs.map((o) => o.slug)}
+          onClose={() => setCreateOpen(false)}
+          onCreated={(slug) => {
+            setCreateOpen(false);
+            onChanged();
+            onSelect(slug);
+          }}
+          setStatus={setStatus}
+        />
+      )}
+      {editing && (
+        <EditOrgModal
+          org={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
+            onChanged();
+          }}
+          setStatus={setStatus}
+        />
+      )}
+    </div>
+  );
+}
+
+function CreateOrgModal({ existingSlugs, onClose, onCreated, setStatus }: {
+  existingSlugs: string[];
+  onClose: () => void;
+  onCreated: (slug: string) => void;
+  setStatus: (s: string) => void;
+}) {
+  const [slug, setSlug] = useState("");
+  const [name, setName] = useState("");
+  const [color, setColor] = useState("#3b82f6");
+  const [busy, setBusy] = useState(false);
+
+  // Auto-derive slug from name as the user types — common UX.
+  const onNameChange = (v: string) => {
+    setName(v);
+    if (!slug || slug === slugify(name)) setSlug(slugify(v));
+  };
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const s = slug.trim().toLowerCase();
+    if (!s || !name.trim()) return;
+    if (existingSlugs.includes(s)) {
+      setStatus(`slug "${s}" already in use`);
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await fetch(`${API}/admin/organizations`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug: s, name: name.trim(), color }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || `create ${r.status}`);
+      onCreated(data.organization.slug);
+    } catch (err) {
+      setStatus(`create org: ${(err as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal onClose={onClose} title="New organization">
+      <form onSubmit={submit} className="space-y-3">
+        <Field label="Name">
+          <input
+            value={name} onChange={(e) => onNameChange(e.target.value)}
+            autoFocus required
+            placeholder="e.g. Acme Corp"
+            className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
+          />
+        </Field>
+        <Field label="Slug" hint="Used in URLs, JWT iss, and tools. Lowercase letters/digits/hyphens, 3–32 chars.">
+          <input
+            value={slug} onChange={(e) => setSlug(e.target.value)}
+            required minLength={3} maxLength={32}
+            pattern="^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"
+            placeholder="acme"
+            className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text font-mono"
+          />
+        </Field>
+        <Field label="Color">
+          <input
+            type="color" value={color} onChange={(e) => setColor(e.target.value)}
+            style={{ width: 48, height: 32 }}
+            className="bg-bg-input border border-border rounded cursor-pointer"
+          />
+        </Field>
+        <div className="flex justify-end gap-2 pt-2">
+          <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted hover:text-text">Cancel</button>
+          <button
+            type="submit" disabled={busy || !slug.trim() || !name.trim()}
+            className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-medium disabled:opacity-50"
+          >{busy ? "Creating…" : "Create organization"}</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function EditOrgModal({ org, onClose, onSaved, setStatus }: {
+  org: Organization;
+  onClose: () => void;
+  onSaved: () => void;
+  setStatus: (s: string) => void;
+}) {
+  const [name, setName] = useState(org.name);
+  const [color, setColor] = useState(org.color || "#94a3b8");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const r = await fetch(`${API}/admin/organizations/${org.id}`, {
+        method: "PATCH",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name.trim(), color }),
+      });
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        throw new Error(data.error || `update ${r.status}`);
+      }
+      onSaved();
+    } catch (err) {
+      setStatus(`update org: ${(err as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal onClose={onClose} title={`Edit ${org.slug}`}>
+      <form onSubmit={submit} className="space-y-3">
+        <Field label="Name">
+          <input
+            value={name} onChange={(e) => setName(e.target.value)} required
+            className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
+          />
+        </Field>
+        <Field label="Slug">
+          <input
+            value={org.slug} disabled
+            className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text-dim font-mono opacity-60"
+          />
+          <div className="text-text-dim text-xs mt-1">Slug is immutable — it's baked into issued JWTs.</div>
+        </Field>
+        <Field label="Color">
+          <input
+            type="color" value={color} onChange={(e) => setColor(e.target.value)}
+            style={{ width: 48, height: 32 }}
+            className="bg-bg-input border border-border rounded cursor-pointer"
+          />
+        </Field>
+        <div className="flex justify-end gap-2 pt-2">
+          <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted hover:text-text">Cancel</button>
+          <button
+            type="submit" disabled={busy || !name.trim()}
+            className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-medium disabled:opacity-50"
+          >{busy ? "Saving…" : "Save"}</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function slugify(s: string): string {
+  return s.toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32);
+}
+
 // ─── Users tab ───────────────────────────────────────────────────────
 
-function UsersTab({ projectId, setStatus, onUsersChanged }: {
-  projectId: string; setStatus: (s: string) => void; onUsersChanged: () => void;
+function UsersTab({ activeOrgSlug, orgs, projectId, setStatus, onUsersChanged }: {
+  activeOrgSlug: string | null;
+  orgs: Organization[];
+  projectId: string;
+  setStatus: (s: string) => void;
+  onUsersChanged: () => void;
 }) {
   const [users, setUsers] = useState<User[]>([]);
   const [q, setQ] = useState("");
@@ -273,6 +746,7 @@ function UsersTab({ projectId, setStatus, onUsersChanged }: {
     setLoading(true);
     try {
       const params = new URLSearchParams();
+      if (activeOrgSlug) params.set("organization_slug", activeOrgSlug);
       if (q) params.set("q", q);
       if (statusFilter) params.set("status", statusFilter);
       params.set("limit", "200");
@@ -285,9 +759,18 @@ function UsersTab({ projectId, setStatus, onUsersChanged }: {
     } finally {
       setLoading(false);
     }
-  }, [q, statusFilter, setStatus]);
+  }, [activeOrgSlug, q, statusFilter, setStatus]);
 
   useEffect(() => { load(); }, [load, projectId]);
+
+  // When user clicks an "All" row, the drawer needs the user's own org —
+  // it lives on the user row. The drawer takes orgSlug as a prop and
+  // uses it for all its own queries.
+  const orgByID = new Map(orgs.map((o) => [o.id, o]));
+  const selectedUser = users.find((u) => u.id === selectedId) || null;
+  const selectedOrg = selectedUser
+    ? orgByID.get(selectedUser.organization_id) || orgs.find((o) => o.slug === activeOrgSlug) || null
+    : null;
 
   return (
     <div className="flex h-full">
@@ -310,7 +793,9 @@ function UsersTab({ projectId, setStatus, onUsersChanged }: {
           >{loading ? "…" : "Refresh"}</button>
           <button
             onClick={() => setCreateOpen(true)}
-            className="ml-auto inline-flex items-center gap-1.5 px-3 py-1 text-sm bg-accent text-bg rounded font-medium"
+            disabled={!activeOrgSlug}
+            title={activeOrgSlug ? "Create user" : "Pick an organization first to create a user"}
+            className="ml-auto inline-flex items-center gap-1.5 px-3 py-1 text-sm bg-accent text-bg rounded font-medium disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <UserPlusIcon /> New user
           </button>
@@ -323,13 +808,16 @@ function UsersTab({ projectId, setStatus, onUsersChanged }: {
             title={q || statusFilter ? "No matching users" : "No users yet"}
             hint={q || statusFilter
               ? "Try clearing the filters."
-              : "Users appear once your SaaS frontend has signups against /signup."}
+              : activeOrgSlug
+                ? "Users appear once your SaaS frontend has signups against /signup, or once you click \"+ New user\"."
+                : "No users in any organization yet. Pick an organization above to add one."}
           />
         ) : (
           <table className="w-full text-sm">
             <thead className="text-text-dim text-xs uppercase tracking-wide">
               <tr className="border-b border-border">
                 <th className="text-left px-3 py-2 font-normal">Email</th>
+                {!activeOrgSlug && <th className="text-left px-3 py-2 font-normal">Org</th>}
                 <th className="text-left px-3 py-2 font-normal">Status</th>
                 <th className="text-left px-3 py-2 font-normal">MFA</th>
                 <th className="text-left px-3 py-2 font-normal">Last login</th>
@@ -350,6 +838,20 @@ function UsersTab({ projectId, setStatus, onUsersChanged }: {
                     <div className="text-text">{u.email}</div>
                     {u.display_name && <div className="text-text-dim text-xs">{u.display_name}</div>}
                   </td>
+                  {!activeOrgSlug && (
+                    <td className="px-3 py-2">
+                      {(() => {
+                        const o = orgByID.get(u.organization_id);
+                        if (!o) return <span className="text-text-dim text-xs">—</span>;
+                        return (
+                          <span className="inline-flex items-center gap-1.5 text-xs text-text-muted">
+                            <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: o.color || "#94a3b8" }} />
+                            {o.name}
+                          </span>
+                        );
+                      })()}
+                    </td>
+                  )}
                   <td className="px-3 py-2"><UserStatusPill user={u} /></td>
                   <td className="px-3 py-2">
                     {u.mfa_enabled
@@ -365,9 +867,10 @@ function UsersTab({ projectId, setStatus, onUsersChanged }: {
         )}
       </div>
 
-      {selectedId != null && (
+      {selectedId != null && selectedOrg != null && (
         <UserDrawer
           userId={selectedId}
+          orgSlug={selectedOrg.slug}
           projectId={projectId}
           onClose={() => setSelectedId(null)}
           onChanged={() => { load(); onUsersChanged(); }}
@@ -375,8 +878,9 @@ function UsersTab({ projectId, setStatus, onUsersChanged }: {
         />
       )}
 
-      {createOpen && (
+      {createOpen && activeOrgSlug && (
         <CreateUserModal
+          orgSlug={activeOrgSlug}
           onClose={() => setCreateOpen(false)}
           onCreated={(userId, opened) => {
             setCreateOpen(false);
@@ -391,7 +895,8 @@ function UsersTab({ projectId, setStatus, onUsersChanged }: {
   );
 }
 
-function CreateUserModal({ onClose, onCreated, setStatus }: {
+function CreateUserModal({ orgSlug, onClose, onCreated, setStatus }: {
+  orgSlug: string;
   onClose: () => void;
   onCreated: (userId: number, openDrawer: boolean) => void;
   setStatus: (s: string) => void;
@@ -416,7 +921,7 @@ function CreateUserModal({ onClose, onCreated, setStatus }: {
       if (mode === "password") {
         body.password = password;
       }
-      const r = await fetch(`${API}/admin/users`, {
+      const r = await fetch(`${API}/admin/users${orgQS(orgSlug)}`, {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -513,9 +1018,13 @@ function UserStatusPill({ user }: { user: User }) {
   return <Pill tone="muted">{user.status}</Pill>;
 }
 
-function UserDrawer({ userId, projectId, onClose, onChanged, setStatus }: {
-  userId: number; projectId: string; onClose: () => void;
-  onChanged: () => void; setStatus: (s: string) => void;
+function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus }: {
+  userId: number;
+  orgSlug: string;
+  projectId: string;
+  onClose: () => void;
+  onChanged: () => void;
+  setStatus: (s: string) => void;
 }) {
   const [data, setData] = useState<{ user: User; sessions: Session[]; audit_log: AuditEvent[] } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -524,21 +1033,21 @@ function UserDrawer({ userId, projectId, onClose, onChanged, setStatus }: {
 
   const load = useCallback(async () => {
     try {
-      const r = await fetch(`${API}/admin/users/${userId}/context`, { credentials: "same-origin" });
+      const r = await fetch(`${API}/admin/users/${userId}/context${orgQS(orgSlug)}`, { credentials: "same-origin" });
       if (!r.ok) throw new Error(`user ${r.status}`);
       setData(await r.json());
     } catch (e) {
       setStatus(`user: ${(e as Error).message}`);
     }
-  }, [userId, setStatus]);
+  }, [userId, orgSlug, setStatus]);
   useEffect(() => { load(); }, [load, projectId]);
 
   const act = async (path: string, body?: unknown, method: "POST" | "PATCH" = "POST") => {
     setBusy(true);
     try {
       const url = path
-        ? `${API}/admin/users/${userId}/${path}`
-        : `${API}/admin/users/${userId}`;
+        ? `${API}/admin/users/${userId}/${path}${orgQS(orgSlug)}`
+        : `${API}/admin/users/${userId}${orgQS(orgSlug)}`;
       const r = await fetch(url, {
         method,
         credentials: "same-origin",
@@ -715,8 +1224,11 @@ function UserDrawer({ userId, projectId, onClose, onChanged, setStatus }: {
 
 // ─── Clients tab ─────────────────────────────────────────────────────
 
-function ClientsTab({ projectId, setStatus }: {
-  projectId: string; setStatus: (s: string) => void;
+function ClientsTab({ activeOrgSlug, orgs, projectId, setStatus }: {
+  activeOrgSlug: string | null;
+  orgs: Organization[];
+  projectId: string;
+  setStatus: (s: string) => void;
 }) {
   const [clients, setClients] = useState<Client[]>([]);
   const [includeDisabled, setIncludeDisabled] = useState(false);
@@ -725,18 +1237,17 @@ function ClientsTab({ projectId, setStatus }: {
 
   const load = useCallback(async () => {
     try {
-      const r = await fetch(
-        `${API}/admin/clients${includeDisabled ? "?include_disabled=true" : ""}`,
-        { credentials: "same-origin" },
-      );
+      const extra = includeDisabled ? "include_disabled=true" : "";
+      const r = await fetch(`${API}/admin/clients${orgQS(activeOrgSlug, extra)}`, { credentials: "same-origin" });
       if (!r.ok) throw new Error(`clients ${r.status}`);
       const data = await r.json();
       setClients(data.clients || []);
     } catch (e) {
       setStatus(`clients: ${(e as Error).message}`);
     }
-  }, [includeDisabled, setStatus]);
+  }, [activeOrgSlug, includeDisabled, setStatus]);
   useEffect(() => { load(); }, [load, projectId]);
+  const orgByID = new Map(orgs.map((o) => [o.id, o]));
 
   const rotate = async (c: Client) => {
     if (!window.confirm(`Rotate secret for "${c.name}"? Existing services will need the new value.`)) return;
@@ -770,7 +1281,9 @@ function ClientsTab({ projectId, setStatus }: {
       <div className="flex items-center gap-3">
         <button
           onClick={() => setCreateOpen(true)}
-          className="px-3 py-1 text-sm bg-accent text-bg rounded font-medium"
+          disabled={!activeOrgSlug}
+          title={activeOrgSlug ? "Register a new OAuth client" : "Pick an organization first to register a client"}
+          className="px-3 py-1 text-sm bg-accent text-bg rounded font-medium disabled:opacity-40 disabled:cursor-not-allowed"
         >+ New client</button>
         <label className="flex items-center gap-2 text-text-muted text-sm">
           <input
@@ -787,18 +1300,27 @@ function ClientsTab({ projectId, setStatus }: {
         <EmptyState
           icon={<KeyIcon />}
           title="No OAuth clients yet"
-          hint="Create one for each frontend or service that consumes auth — SPA, web app, mobile, or machine-to-machine."
+          hint={activeOrgSlug
+            ? "Create one for each frontend or service that consumes auth — SPA, web app, mobile, or machine-to-machine."
+            : "No clients in any organization. Pick an organization above to add one."}
         />
       ) : (
         <ul className="space-y-2">
           {clients.map((c) => (
-            <ClientCard key={c.id} client={c} onRotate={() => rotate(c)} onDisable={() => disable(c)} />
+            <ClientCard
+              key={c.id}
+              client={c}
+              org={!activeOrgSlug ? orgByID.get(c.organization_id) : null}
+              onRotate={() => rotate(c)}
+              onDisable={() => disable(c)}
+            />
           ))}
         </ul>
       )}
 
-      {createOpen && (
+      {createOpen && activeOrgSlug && (
         <CreateClientModal
+          orgSlug={activeOrgSlug}
           onClose={() => setCreateOpen(false)}
           onCreated={(client_id, secret) => {
             setCreateOpen(false);
@@ -819,8 +1341,11 @@ function ClientsTab({ projectId, setStatus }: {
   );
 }
 
-function ClientCard({ client, onRotate, onDisable }: {
-  client: Client; onRotate: () => void; onDisable: () => void;
+function ClientCard({ client, org, onRotate, onDisable }: {
+  client: Client;
+  org: Organization | null | undefined;
+  onRotate: () => void;
+  onDisable: () => void;
 }) {
   const isPublic = client.type === "spa" || client.type === "native";
   return (
@@ -833,6 +1358,12 @@ function ClientCard({ client, onRotate, onDisable }: {
           <div className="flex items-center gap-2">
             <span className="text-text font-medium">{client.name}</span>
             <ClientTypePill type={client.type} />
+            {org && (
+              <span className="inline-flex items-center gap-1.5 text-xs text-text-muted">
+                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: org.color || "#94a3b8" }} />
+                {org.name}
+              </span>
+            )}
             {client.disabled_at && <Pill tone="muted">disabled</Pill>}
             {client.require_mfa && <Pill tone="ok">MFA required</Pill>}
             {client.require_pkce && <Pill tone="muted">PKCE</Pill>}
@@ -888,7 +1419,8 @@ function ClientTypePill({ type }: { type: Client["type"] }) {
   return <Pill tone="muted">{label}</Pill>;
 }
 
-function CreateClientModal({ onClose, onCreated, setStatus }: {
+function CreateClientModal({ orgSlug, onClose, onCreated, setStatus }: {
+  orgSlug: string;
   onClose: () => void;
   onCreated: (clientId: string, secret?: string) => void;
   setStatus: (s: string) => void;
@@ -912,7 +1444,7 @@ function CreateClientModal({ onClose, onCreated, setStatus }: {
         require_mfa: requireMFA,
         jwt_audience: audience.trim() || undefined,
       };
-      const r = await fetch(`${API}/admin/clients`, {
+      const r = await fetch(`${API}/admin/clients${orgQS(orgSlug)}`, {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -1026,20 +1558,51 @@ function SecretRevealModal({ clientId, secret, onClose }: {
 
 // ─── Endpoints tab ───────────────────────────────────────────────────
 
-function EndpointsTab({ projectId, setStatus }: {
-  projectId: string; setStatus: (s: string) => void;
+function EndpointsTab({ activeOrgSlug, onSelectOrg, orgs, projectId, setStatus }: {
+  activeOrgSlug: string | null;
+  onSelectOrg: (s: string | null) => void;
+  orgs: Organization[];
+  projectId: string;
+  setStatus: (s: string) => void;
 }) {
   const [info, setInfo] = useState<OIDCInfo | null>(null);
   const load = useCallback(async () => {
+    if (!activeOrgSlug) return;
     try {
-      const r = await fetch(`${API}/admin/oidc`, { credentials: "same-origin" });
+      const r = await fetch(`${API}/admin/oidc${orgQS(activeOrgSlug)}`, { credentials: "same-origin" });
       if (!r.ok) throw new Error(`oidc ${r.status}`);
       setInfo(await r.json());
     } catch (e) {
       setStatus(`oidc: ${(e as Error).message}`);
     }
-  }, [setStatus]);
+  }, [activeOrgSlug, setStatus]);
   useEffect(() => { load(); }, [load, projectId]);
+
+  if (!activeOrgSlug) {
+    return (
+      <div className="p-4">
+        <div className="border border-border rounded bg-bg-card px-4 py-6">
+          <div className="text-text font-medium mb-2">Pick an organization to see its endpoints</div>
+          <div className="text-text-dim text-sm mb-4">
+            Discovery URLs and signing keys are per-organization in v0.4.0.
+            Select one below or via the switcher in the header.
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {orgs.map((o) => (
+              <button
+                key={o.id}
+                onClick={() => onSelectOrg(o.slug)}
+                className="inline-flex items-center gap-2 px-3 py-1.5 text-sm border border-border rounded text-text hover:bg-bg"
+              >
+                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: o.color || "#94a3b8" }} />
+                {o.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (!info) return <div className="p-4 text-text-dim text-sm">Loading…</div>;
   const activeKeys = info.signing_keys.filter((k) => !k.retired_at);
@@ -1317,6 +1880,21 @@ function UsersIcon() {
       <circle cx="9" cy="7" r="4" />
       <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
       <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+    </svg>
+  );
+}
+
+function BuildingIcon() {
+  return (
+    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="4" y="2" width="16" height="20" rx="2" />
+      <line x1="9" y1="6" x2="9.01" y2="6" />
+      <line x1="15" y1="6" x2="15.01" y2="6" />
+      <line x1="9" y1="10" x2="9.01" y2="10" />
+      <line x1="15" y1="10" x2="15.01" y2="10" />
+      <line x1="9" y1="14" x2="9.01" y2="14" />
+      <line x1="15" y1="14" x2="15.01" y2="14" />
+      <path d="M10 22V18a2 2 0 0 1 4 0v4" />
     </svg>
   );
 }

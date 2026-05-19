@@ -43,11 +43,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.3.0
+version: 0.4.0
 description: |
-  Identity layer for Apteva-deployed SaaS. Email + password signup/login,
-  asymmetric JWT issuance, refresh-token sessions, OAuth client registry,
-  email verification, password reset, magic links, TOTP MFA.
+  Identity layer for Apteva-deployed SaaS, partitioned by Organization
+  (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One install
+  owns N orgs; each org has its own users, clients, signing keys, JWKS,
+  and audit log. EdDSA JWTs, refresh-token rotation, email verification,
+  password reset, magic links, TOTP MFA.
 author: Apteva
 scopes: [project]
 requires:
@@ -64,30 +66,38 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - name: auth_orgs_list
+      description: List organizations in the project.
+    - name: auth_orgs_create
+      description: Create a new organization.
+    - name: auth_orgs_update
+      description: Rename / recolor / set policy overrides.
+    - name: auth_orgs_archive
+      description: Archive (soft-disable) an organization.
     - name: auth_users_search
-      description: Filtered user search.
+      description: Filtered user search; org-scoped or project-wide.
     - name: auth_users_get
-      description: Snapshot of one user.
+      description: Snapshot of one user (requires org).
     - name: auth_users_get_context
-      description: Snapshot + sessions + MFA + audit events.
+      description: Snapshot + sessions + MFA + audit events (requires org).
     - name: auth_users_disable
-      description: Disable + revoke sessions.
+      description: Disable + revoke sessions (requires org).
     - name: auth_users_enable
-      description: Re-enable a disabled user.
+      description: Re-enable a disabled user (requires org).
     - name: auth_users_revoke_sessions
-      description: Force-logout one user.
+      description: Force-logout one user (requires org).
     - name: auth_audit_search
-      description: Filter the audit log.
+      description: Filter the audit log; org-scoped or project-wide.
     - name: auth_stats
-      description: Active / signup / login counts.
+      description: User counts; org-scoped or project-wide.
     - name: auth_clients_list
-      description: List OAuth clients.
+      description: List OAuth clients; org-scoped or project-wide.
     - name: auth_clients_create
-      description: Register a new OAuth client.
+      description: Register a new OAuth client (requires org).
     - name: auth_clients_rotate_secret
-      description: Rotate a client secret.
+      description: Rotate a client secret (org derived from client).
     - name: auth_clients_disable
-      description: Disable a client.
+      description: Disable a client (org derived from client).
   ui_panels:
     - slot: project.page
       label: Auth
@@ -125,15 +135,27 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("auth requires a db block")
 	}
 	globalCtx = ctx
-	// Seed the first signing key on first boot. JWTs can't be issued
-	// without an active key; doing this lazily on first /login would
-	// race with concurrent boots. Eager seed on mount is simple and
-	// idempotent.
-	if err := ensureSigningKey(ctx.AppDB(), envProject()); err != nil {
-		return fmt.Errorf("seed signing key: %w", err)
+	pid := envProject()
+	// Migrations have already run by the time OnMount fires (see
+	// app-sdk run.go). Backfill in 002_organizations.sql guarantees
+	// a Default org exists for every project_id seen at upgrade time;
+	// for a fresh install there's no project_id in the DB yet, so we
+	// create one here once we know our pid.
+	if pid != "" {
+		orgID := dbDefaultOrgID(ctx.AppDB(), pid)
+		if orgID == 0 {
+			id, err := dbCreateOrg(ctx.AppDB(), pid, "default", "Default", "#94a3b8")
+			if err != nil {
+				return fmt.Errorf("seed default org: %w", err)
+			}
+			orgID = id
+		}
+		if err := ensureSigningKey(ctx.AppDB(), pid, orgID); err != nil {
+			return fmt.Errorf("seed signing key: %w", err)
+		}
 	}
 	ctx.Logger().Info("auth mounted",
-		"scope_project_id", envProject())
+		"scope_project_id", pid)
 	return nil
 }
 
@@ -149,10 +171,17 @@ func (a *App) EventHandlers() []sdk.EventHandler    { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
-		// /health is registered by the SDK framework — don't double-register.
+		// Per-org discovery (v0.4.0).
+		{Pattern: "/orgs/{slug}/.well-known/jwks.json", Handler: a.handleJWKS},
+		{Pattern: "/orgs/{slug}/.well-known/openid-configuration", Handler: a.handleOIDCConfig},
+
+		// Legacy discovery — resolves to the default org. Scheduled for
+		// removal in v0.5.0; old SaaS code keeps working for one release
+		// window so callers can update their JWT verifier configuration.
 		{Pattern: "/.well-known/jwks.json", Handler: a.handleJWKS},
 		{Pattern: "/.well-known/openid-configuration", Handler: a.handleOIDCConfig},
 
+		// Public auth endpoints — tenant resolved from client_id at runtime.
 		{Pattern: "/signup", Handler: a.handleSignup},
 		{Pattern: "/login", Handler: a.handleLogin},
 		{Pattern: "/logout", Handler: a.handleLogout},
@@ -161,6 +190,11 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 		// Admin surface — consumed by the dashboard AuthPanel. Auth is
 		// the SDK's bearer-token gate (platform proxy attaches it).
+		{Method: "GET", Pattern: "/admin/organizations", Handler: a.handleAdminOrgsList},
+		{Method: "POST", Pattern: "/admin/organizations", Handler: a.handleAdminOrgsCreate},
+		{Method: "PATCH", Pattern: "/admin/organizations/{id}", Handler: a.handleAdminOrgsPatch},
+		{Method: "POST", Pattern: "/admin/organizations/{id}/archive", Handler: a.handleAdminOrgsArchive},
+
 		{Method: "GET", Pattern: "/admin/stats", Handler: a.handleAdminStats},
 		{Method: "GET", Pattern: "/admin/users", Handler: a.handleAdminUsersList},
 		{Method: "POST", Pattern: "/admin/users", Handler: a.handleAdminUsersCreate},
@@ -182,92 +216,150 @@ func (a *App) HTTPRoutes() []sdk.Route {
 // ─── MCP tools ────────────────────────────────────────────────────────
 
 func (a *App) MCPTools() []sdk.Tool {
+	// orgSelector — every tool that operates on user/client data
+	// accepts either organization_id or organization_slug. Reads roll
+	// up project-wide when omitted; mutations error.
+	orgSelector := map[string]any{
+		"organization_id":   map[string]any{"type": "integer"},
+		"organization_slug": map[string]any{"type": "string"},
+	}
+	merge := func(base map[string]any) map[string]any {
+		out := map[string]any{}
+		for k, v := range orgSelector {
+			out[k] = v
+		}
+		for k, v := range base {
+			out[k] = v
+		}
+		return out
+	}
 	return []sdk.Tool{
+		// ─── Organizations ─────────────────────────────────────────
+		{
+			Name:        "auth_orgs_list",
+			Description: "List organizations in this project. Args: include_archived (bool).",
+			InputSchema: schemaObject(map[string]any{
+				"include_archived": map[string]any{"type": "boolean"},
+			}, nil),
+			Handler: a.toolOrgsList,
+		},
+		{
+			Name:        "auth_orgs_create",
+			Description: "Create an organization. Args: slug (lowercase a-z 0-9 -), name, color (hex, optional). Auto-seeds an EdDSA keypair for the new org's JWKS.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":  map[string]any{"type": "string"},
+				"name":  map[string]any{"type": "string"},
+				"color": map[string]any{"type": "string"},
+			}, []string{"slug", "name"}),
+			Handler: a.toolOrgsCreate,
+		},
+		{
+			Name:        "auth_orgs_update",
+			Description: "Update an organization. Args: organization_id OR organization_slug, name, color, policy_overrides (JSON string).",
+			InputSchema: schemaObject(merge(map[string]any{
+				"name":             map[string]any{"type": "string"},
+				"color":            map[string]any{"type": "string"},
+				"policy_overrides": map[string]any{"type": "string"},
+			}), nil),
+			Handler: a.toolOrgsUpdate,
+		},
+		{
+			Name:        "auth_orgs_archive",
+			Description: "Archive an organization (soft-disable; cannot archive 'default'). Args: organization_id OR organization_slug.",
+			InputSchema: schemaObject(orgSelector, nil),
+			Handler:     a.toolOrgsArchive,
+		},
+
+		// ─── Users ─────────────────────────────────────────────────
 		{
 			Name:        "auth_users_search",
-			Description: "Filtered user search. Args: q (substring on email/display_name), status (active|disabled|deleted), mfa (bool), created_after (RFC3339), limit (default 50, max 200).",
-			InputSchema: schemaObject(map[string]any{
+			Description: "Filtered user search. Org-scoped when organization_id/slug is given; project-wide otherwise. Args: q (substring on email/display_name), status (active|disabled|deleted), mfa (bool), created_after (RFC3339), limit (default 50, max 200).",
+			InputSchema: schemaObject(merge(map[string]any{
 				"q":             map[string]any{"type": "string"},
 				"status":        map[string]any{"type": "string"},
 				"mfa":           map[string]any{"type": "boolean"},
 				"created_after": map[string]any{"type": "string"},
 				"limit":         map[string]any{"type": "integer"},
-			}, nil),
+			}), nil),
 			Handler: a.toolUsersSearch,
 		},
 		{
 			Name:        "auth_users_get",
-			Description: "Fetch one user. Args: id OR email.",
-			InputSchema: schemaObject(map[string]any{
+			Description: "Fetch one user. Requires organization_id/slug. Args: id OR email.",
+			InputSchema: schemaObject(merge(map[string]any{
 				"id":    map[string]any{"type": "integer"},
 				"email": map[string]any{"type": "string"},
-			}, nil),
+			}), nil),
 			Handler: a.toolUsersGet,
 		},
 		{
 			Name:        "auth_users_get_context",
-			Description: "Snapshot + active sessions + MFA factors + last 20 audit events.",
-			InputSchema: schemaObject(map[string]any{
+			Description: "Snapshot + active sessions + MFA factors + last 20 audit events. Requires organization_id/slug.",
+			InputSchema: schemaObject(merge(map[string]any{
 				"id":    map[string]any{"type": "integer"},
 				"email": map[string]any{"type": "string"},
-			}, nil),
+			}), nil),
 			Handler: a.toolUsersGetContext,
 		},
 		{
 			Name:        "auth_users_revoke_sessions",
-			Description: "Force-logout one user across all sessions. Args: user_id.",
-			InputSchema: schemaObject(map[string]any{
+			Description: "Force-logout one user across all sessions. Requires organization_id/slug.",
+			InputSchema: schemaObject(merge(map[string]any{
 				"user_id": map[string]any{"type": "integer"},
-			}, []string{"user_id"}),
+			}), []string{"user_id"}),
 			Handler: a.toolUsersRevokeSessions,
 		},
 		{
 			Name:        "auth_users_disable",
-			Description: "Disable a user and revoke all sessions. Args: user_id, reason.",
-			InputSchema: schemaObject(map[string]any{
+			Description: "Disable a user and revoke all sessions. Requires organization_id/slug.",
+			InputSchema: schemaObject(merge(map[string]any{
 				"user_id": map[string]any{"type": "integer"},
 				"reason":  map[string]any{"type": "string"},
-			}, []string{"user_id"}),
+			}), []string{"user_id"}),
 			Handler: a.toolUsersDisable,
 		},
 		{
 			Name:        "auth_users_enable",
-			Description: "Re-enable a disabled user. Args: user_id.",
-			InputSchema: schemaObject(map[string]any{
+			Description: "Re-enable a disabled user. Requires organization_id/slug.",
+			InputSchema: schemaObject(merge(map[string]any{
 				"user_id": map[string]any{"type": "integer"},
-			}, []string{"user_id"}),
+			}), []string{"user_id"}),
 			Handler: a.toolUsersEnable,
 		},
+
+		// ─── Audit + stats ─────────────────────────────────────────
 		{
 			Name:        "auth_audit_search",
-			Description: "Filter the audit log. Args: user_id, event, since (RFC3339), until (RFC3339), limit (default 100, max 500).",
-			InputSchema: schemaObject(map[string]any{
+			Description: "Filter the audit log. Org-scoped when organization_id/slug given; project-wide otherwise.",
+			InputSchema: schemaObject(merge(map[string]any{
 				"user_id": map[string]any{"type": "integer"},
 				"event":   map[string]any{"type": "string"},
 				"since":   map[string]any{"type": "string"},
 				"until":   map[string]any{"type": "string"},
 				"limit":   map[string]any{"type": "integer"},
-			}, nil),
+			}), nil),
 			Handler: a.toolAuditSearch,
 		},
 		{
 			Name:        "auth_stats",
-			Description: "Active / disabled / locked user counts; signups_7d, logins_24h.",
-			InputSchema: schemaObject(map[string]any{}, nil),
+			Description: "User counts (active / disabled / locked) + signups_7d + logins_24h. Org-scoped when given; project-wide rollup otherwise.",
+			InputSchema: schemaObject(orgSelector, nil),
 			Handler:     a.toolStats,
 		},
+
+		// ─── OAuth clients ─────────────────────────────────────────
 		{
 			Name:        "auth_clients_list",
-			Description: "List OAuth clients (frontends/services that consume auth).",
-			InputSchema: schemaObject(map[string]any{
+			Description: "List OAuth clients. Org-scoped when given; project-wide otherwise.",
+			InputSchema: schemaObject(merge(map[string]any{
 				"include_disabled": map[string]any{"type": "boolean"},
-			}, nil),
+			}), nil),
 			Handler: a.toolClientsList,
 		},
 		{
 			Name:        "auth_clients_create",
-			Description: "Register a new OAuth client. Returns client_id + (for confidential clients) one-time client_secret. Args: name, type (spa|web|native|m2m), redirect_uris [string], allowed_grant_types [string], require_mfa (bool).",
-			InputSchema: schemaObject(map[string]any{
+			Description: "Register a new OAuth client. Requires organization_id/slug. Returns client_id + (for confidential clients) one-time client_secret.",
+			InputSchema: schemaObject(merge(map[string]any{
 				"name":                map[string]any{"type": "string"},
 				"type":                map[string]any{"type": "string"},
 				"redirect_uris":       map[string]any{"type": "array"},
@@ -275,12 +367,12 @@ func (a *App) MCPTools() []sdk.Tool {
 				"allowed_grant_types": map[string]any{"type": "array"},
 				"require_mfa":         map[string]any{"type": "boolean"},
 				"jwt_audience":        map[string]any{"type": "string"},
-			}, []string{"name", "type"}),
+			}), []string{"name", "type"}),
 			Handler: a.toolClientsCreate,
 		},
 		{
 			Name:        "auth_clients_rotate_secret",
-			Description: "Rotate a client's secret. Returns the new value once. Args: client_id.",
+			Description: "Rotate a client's secret. Returns the new value once. Org is derived from the client row.",
 			InputSchema: schemaObject(map[string]any{
 				"client_id": map[string]any{"type": "string"},
 			}, []string{"client_id"}),
@@ -288,7 +380,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "auth_clients_disable",
-			Description: "Disable a client. Args: client_id.",
+			Description: "Disable a client. Org is derived from the client row.",
 			InputSchema: schemaObject(map[string]any{
 				"client_id": map[string]any{"type": "string"},
 			}, []string{"client_id"}),
@@ -369,20 +461,18 @@ func cfgStr(ctx *sdk.AppCtx, name, dflt string) string {
 
 // ─── Signing-key bootstrap ───────────────────────────────────────────
 //
-// Generate the first EdDSA keypair on mount when none exists. Subsequent
-// rotations are explicit (admin endpoint, deferred to v0.2).
+// Generate the first EdDSA keypair for an org when none exists. Each
+// organization owns its own keys (per-org JWKS). Called from OnMount
+// for the default org and from /admin/organizations POST for new ones.
 
-func ensureSigningKey(db *sql.DB, projectID string) error {
-	if projectID == "" {
-		// Global scope — keys are project-scoped, so seeding here would
-		// be premature. The first /login for each project will lazily
-		// create a key (handled in jwtSign).
+func ensureSigningKey(db *sql.DB, projectID string, orgID int64) error {
+	if projectID == "" || orgID <= 0 {
 		return nil
 	}
 	var n int
 	if err := db.QueryRow(
-		`SELECT COUNT(*) FROM signing_keys WHERE project_id = ? AND retired_at IS NULL`,
-		projectID,
+		`SELECT COUNT(*) FROM signing_keys WHERE project_id = ? AND organization_id = ? AND retired_at IS NULL`,
+		projectID, orgID,
 	).Scan(&n); err != nil {
 		return err
 	}
@@ -400,8 +490,8 @@ func ensureSigningKey(db *sql.DB, projectID string) error {
 		return err
 	}
 	_, err = db.Exec(
-		`INSERT INTO signing_keys(project_id, kid, alg, private_pem, public_pem) VALUES(?,?,?,?,?)`,
-		projectID, kid, "EdDSA", string(privPEM), string(pubPEM),
+		`INSERT INTO signing_keys(project_id, organization_id, kid, alg, private_pem, public_pem) VALUES(?,?,?,?,?,?)`,
+		projectID, orgID, kid, "EdDSA", string(privPEM), string(pubPEM),
 	)
 	return err
 }

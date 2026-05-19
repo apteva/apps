@@ -38,7 +38,15 @@ func newAuthCtx(t *testing.T) (*sdk.AppCtx, string) {
 			"email_verification_required": "false",
 			"app_url":                     "http://localhost:8080",
 		}))
-	if err := ensureSigningKey(ctx.AppDB(), "test-proj"); err != nil {
+	// Migrations have already run via the testkit. v0.4.0 expects a
+	// `default` org; the backfill in 002_organizations.sql is a no-op
+	// on a brand-new DB because there's no project_id to backfill from,
+	// so we create it explicitly here.
+	orgID, err := dbCreateOrg(ctx.AppDB(), "test-proj", "default", "Default", "#94a3b8")
+	if err != nil {
+		t.Fatalf("seed default org: %v", err)
+	}
+	if err := ensureSigningKey(ctx.AppDB(), "test-proj", orgID); err != nil {
 		t.Fatalf("seed signing key: %v", err)
 	}
 	globalCtx = ctx
@@ -46,9 +54,10 @@ func newAuthCtx(t *testing.T) (*sdk.AppCtx, string) {
 
 	app := &App{}
 	out, err := app.toolClientsCreate(ctx, map[string]any{
-		"name":          "test-client",
-		"type":          "spa",
-		"redirect_uris": []any{"http://localhost:3000/callback"},
+		"organization_slug": "default",
+		"name":              "test-client",
+		"type":              "spa",
+		"redirect_uris":     []any{"http://localhost:3000/callback"},
 	})
 	if err != nil {
 		t.Fatalf("create client: %v", err)

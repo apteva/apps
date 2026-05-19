@@ -4,9 +4,26 @@ package main
 // row in the schema gets one struct, with omitempty everywhere that
 // nullability is meaningful so JSON output doesn't leak null padding.
 
+// Organization — the row-level partition above users. One project owns
+// many organizations; each org has its own users, clients, sessions,
+// signing keys, audit log, MFA factors. Slug is the URL/CLI-facing
+// identifier; ID is internal.
+type Organization struct {
+	ID               int64  `json:"id"`
+	ProjectID        string `json:"project_id,omitempty"`
+	Slug             string `json:"slug"`
+	Name             string `json:"name"`
+	Color            string `json:"color,omitempty"`
+	Status           string `json:"status"`                       // active | archived
+	PolicyOverrides  string `json:"policy_overrides,omitempty"`   // raw JSON; nil = inherit install defaults
+	CreatedAt        string `json:"created_at,omitempty"`
+	UpdatedAt        string `json:"updated_at,omitempty"`
+}
+
 type User struct {
 	ID              int64  `json:"id"`
 	ProjectID       string `json:"project_id,omitempty"`
+	OrganizationID  int64  `json:"organization_id"`
 	Email           string `json:"email"`
 	EmailVerifiedAt string `json:"email_verified_at,omitempty"`
 	DisplayName     string `json:"display_name,omitempty"`
@@ -22,6 +39,7 @@ type User struct {
 
 type Client struct {
 	ID                       int64    `json:"id"`
+	OrganizationID           int64    `json:"organization_id"`
 	ClientID                 string   `json:"client_id"`
 	Name                     string   `json:"name"`
 	Type                     string   `json:"type"`
@@ -40,26 +58,28 @@ type Client struct {
 }
 
 type Session struct {
-	ID           int64  `json:"id"`
-	UserID       int64  `json:"user_id"`
-	ClientID     string `json:"client_id"`
-	UserAgent    string `json:"user_agent,omitempty"`
-	IP           string `json:"ip,omitempty"`
-	CreatedAt    string `json:"created_at,omitempty"`
-	LastSeenAt   string `json:"last_seen_at,omitempty"`
-	ExpiresAt    string `json:"expires_at,omitempty"`
-	RevokedAt    string `json:"revoked_at,omitempty"`
+	ID             int64  `json:"id"`
+	OrganizationID int64  `json:"organization_id"`
+	UserID         int64  `json:"user_id"`
+	ClientID       string `json:"client_id"`
+	UserAgent      string `json:"user_agent,omitempty"`
+	IP             string `json:"ip,omitempty"`
+	CreatedAt      string `json:"created_at,omitempty"`
+	LastSeenAt     string `json:"last_seen_at,omitempty"`
+	ExpiresAt      string `json:"expires_at,omitempty"`
+	RevokedAt      string `json:"revoked_at,omitempty"`
 }
 
 type AuditEvent struct {
-	ID         int64  `json:"id"`
-	UserID     *int64 `json:"user_id,omitempty"`
-	ClientID   string `json:"client_id,omitempty"`
-	Event      string `json:"event"`
-	IP         string `json:"ip,omitempty"`
-	UserAgent  string `json:"user_agent,omitempty"`
-	Metadata   string `json:"metadata,omitempty"` // raw JSON, returned as-is to the dashboard
-	OccurredAt string `json:"occurred_at"`
+	ID             int64  `json:"id"`
+	OrganizationID *int64 `json:"organization_id,omitempty"` // nullable: project-wide events
+	UserID         *int64 `json:"user_id,omitempty"`
+	ClientID       string `json:"client_id,omitempty"`
+	Event          string `json:"event"`
+	IP             string `json:"ip,omitempty"`
+	UserAgent      string `json:"user_agent,omitempty"`
+	Metadata       string `json:"metadata,omitempty"` // raw JSON, returned as-is to the dashboard
+	OccurredAt     string `json:"occurred_at"`
 }
 
 // MFAFactor — public shape (secret never leaves the DB).

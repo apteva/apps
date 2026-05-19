@@ -2,15 +2,18 @@ schema: apteva-app/v1
 
 name: auth
 display_name: Auth
-version: 0.3.0
+version: 0.4.0
 description: |
-  Identity layer for Apteva-deployed SaaS. Email + password signup/login,
-  asymmetric (EdDSA) JWT issuance with rotating signing keys + JWKS,
-  refresh-token sessions with rotation, OAuth client registry (one user
-  pool, many clients), email verification, password reset, magic links,
-  and TOTP MFA. Agents administer the user pool via MCP tools; the
-  deployed SaaS frontend hits the HTTP routes; the dashboard renders
-  Users / Clients / Settings panels.
+  Identity layer for Apteva-deployed SaaS, partitioned by Organization
+  (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One auth install
+  owns N organizations; each org has its own users, OAuth clients,
+  signing keys + JWKS, sessions, MFA factors, and audit log. Email +
+  password signup/login, asymmetric (EdDSA) JWTs with per-org rotating
+  keys, refresh-token rotation, email verification, password reset,
+  magic links, TOTP MFA. Agents administer via MCP tools; the deployed
+  SaaS frontend hits the HTTP routes (org derived from client_id, no
+  URL changes from v0.3); the dashboard renders a consolidated AuthPanel
+  with OrgSwitcher.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/auth
@@ -35,34 +38,42 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    # v0.1 surface — minimum useful set for an admin to operate the user pool.
-    # Deferred to v0.1.1 (when password-reset / invite / soft-delete flows
-    # land): auth_users_create, _invite, _delete, _set_email,
-    # _send_password_reset.
+    # v0.4 surface — Organization-partitioned. Reads (search/list/stats/audit)
+    # accept optional organization_id or organization_slug and roll up
+    # project-wide when omitted. Mutations require an org. Tools that
+    # operate by client_id derive the org from the client row.
+    - name: auth_orgs_list
+      description: List organizations in this project.
+    - name: auth_orgs_create
+      description: Create a new organization (auto-seeds an EdDSA keypair for its JWKS).
+    - name: auth_orgs_update
+      description: Rename / recolor / set policy_overrides on an organization.
+    - name: auth_orgs_archive
+      description: Archive an organization (soft-disable; cannot archive 'default').
     - name: auth_users_search
-      description: Filtered user search (email, status, created window, MFA on/off).
+      description: Filtered user search. Org-scoped or project-wide rollup.
     - name: auth_users_get
-      description: Snapshot of one user.
+      description: Snapshot of one user (requires org).
     - name: auth_users_get_context
-      description: Snapshot + active sessions + MFA factors + last 20 audit events — agent's pre-flight read.
+      description: Snapshot + active sessions + MFA factors + last 20 audit events (requires org).
     - name: auth_users_disable
-      description: Disable a user and revoke all their sessions.
+      description: Disable a user and revoke all sessions (requires org).
     - name: auth_users_enable
-      description: Re-enable a disabled user.
+      description: Re-enable a disabled user (requires org).
     - name: auth_users_revoke_sessions
-      description: Force-logout one user across all sessions.
+      description: Force-logout one user across all sessions (requires org).
     - name: auth_audit_search
-      description: Time-window + event-type filter over the audit log.
+      description: Time-window + event-type filter over the audit log. Org-scoped or project-wide.
     - name: auth_stats
-      description: Counts (active users, signups_7d, logins_24h, locked) for status reports.
+      description: User counts + signups_7d + logins_24h. Org-scoped or project-wide rollup.
     - name: auth_clients_list
-      description: List registered OAuth clients (frontends/services that consume auth).
+      description: List registered OAuth clients. Org-scoped or project-wide.
     - name: auth_clients_create
-      description: Register a new OAuth client. Returns client_id + (for confidential clients) one-time client_secret.
+      description: Register a new OAuth client (requires org). Returns client_id + (for confidential clients) one-time client_secret.
     - name: auth_clients_rotate_secret
-      description: Rotate a client's secret. Returns the new value once.
+      description: Rotate a client's secret. Returns the new value once. Org is derived from the client row.
     - name: auth_clients_disable
-      description: Disable a client. Existing access tokens remain valid until expiry; refresh tokens stop working.
+      description: Disable a client. Existing access tokens remain valid until expiry; refresh tokens stop working. Org is derived from the client row.
   ui_panels:
     - slot: project.page
       label: Auth
