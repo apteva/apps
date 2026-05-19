@@ -46,6 +46,7 @@ export default function ComputerPanel() {
   const [rows, setRows] = useState<SessionRow[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [showOpen, setShowOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -74,6 +75,22 @@ export default function ComputerPanel() {
     }
   }, [rows, selected]);
 
+  const onClose = useCallback(
+    async (id: string) => {
+      if (!confirm("Close this browser session?")) return;
+      const r = await fetch(`${SESSIONS_URL}/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!r.ok) {
+        setErr(`close failed: HTTP ${r.status}`);
+        return;
+      }
+      void refresh();
+    },
+    [refresh],
+  );
+
   const sel = rows.find((r) => r.session_id === selected) ?? null;
 
   return (
@@ -92,8 +109,20 @@ export default function ComputerPanel() {
         err={err}
         selected={selected}
         onSelect={setSelected}
+        onClose={onClose}
+        onOpen={() => setShowOpen(true)}
       />
-      <SessionDetail session={sel} />
+      <SessionDetail session={sel} onClose={onClose} />
+      {showOpen && (
+        <OpenSessionModal
+          onClose={() => setShowOpen(false)}
+          onOpened={(newID) => {
+            setShowOpen(false);
+            setSelected(newID);
+            void refresh();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -105,17 +134,42 @@ function BrowsersList({
   err,
   selected,
   onSelect,
+  onClose,
+  onOpen,
 }: {
   rows: SessionRow[];
   err: string | null;
   selected: string | null;
   onSelect: (id: string) => void;
+  onClose: (id: string) => void;
+  onOpen: () => void;
 }) {
   return (
     <Card className="overflow-hidden flex flex-col">
       <CardHeader
         title="Browsers"
-        right={<StatusDot variant={err ? "error" : "success"} />}
+        right={
+          <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+            <StatusDot variant={err ? "error" : "success"} />
+            <button
+              onClick={onOpen}
+              className="border border-border bg-bg-subtle text-text hover:bg-bg-hover"
+              title="Open a new browser session"
+              style={{
+                padding: "3px 8px",
+                borderRadius: "5px",
+                fontSize: "12px",
+                fontWeight: 500,
+                cursor: "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "4px",
+              }}
+            >
+              <PlusIcon /> New
+            </button>
+          </div>
+        }
       />
       <div className="flex-1 overflow-y-auto" style={{ padding: "0 12px 12px" }}>
         {err && (
@@ -124,9 +178,28 @@ function BrowsersList({
           </p>
         )}
         {!err && rows.length === 0 && (
-          <p className="text-text-muted" style={{ fontSize: "12px", padding: "8px 4px" }}>
-            No active sessions. Call <code>browser_open</code> to start one.
-          </p>
+          <div
+            className="text-text-muted"
+            style={{ fontSize: "12px", padding: "12px 4px", textAlign: "center" }}
+          >
+            <p style={{ marginBottom: "8px" }}>No active sessions.</p>
+            <button
+              onClick={onOpen}
+              className="border border-border bg-bg-subtle text-text hover:bg-bg-hover"
+              style={{
+                padding: "5px 12px",
+                borderRadius: "6px",
+                fontSize: "12px",
+                fontWeight: 500,
+                cursor: "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "4px",
+              }}
+            >
+              <PlusIcon /> Open browser session
+            </button>
+          </div>
         )}
         <ul style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
           {rows.map((r) => (
@@ -135,6 +208,7 @@ function BrowsersList({
               row={r}
               selected={r.session_id === selected}
               onSelect={() => onSelect(r.session_id)}
+              onClose={() => onClose(r.session_id)}
             />
           ))}
         </ul>
@@ -147,10 +221,12 @@ function BrowserListItem({
   row,
   selected,
   onSelect,
+  onClose,
 }: {
   row: SessionRow;
   selected: boolean;
   onSelect: () => void;
+  onClose: () => void;
 }) {
   let host = "";
   try {
@@ -196,7 +272,27 @@ function BrowserListItem({
           >
             {host}
           </span>
-          <StatusPill variant="success" label="active" />
+          <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+            <StatusPill variant="success" label="active" />
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onClose();
+              }}
+              title="Close session"
+              className="text-text-muted hover:text-text"
+              style={{
+                background: "transparent",
+                border: 0,
+                padding: "2px 4px",
+                borderRadius: "4px",
+                cursor: "pointer",
+                display: "inline-flex",
+              }}
+            >
+              <XIcon />
+            </button>
+          </div>
         </div>
         <div
           className="text-text-muted"
@@ -227,7 +323,13 @@ function BrowserListItem({
 
 // ─── Session detail pane ───────────────────────────────────────────
 
-function SessionDetail({ session }: { session: SessionRow | null }) {
+function SessionDetail({
+  session,
+  onClose,
+}: {
+  session: SessionRow | null;
+  onClose: (id: string) => void;
+}) {
   if (!session) {
     return (
       <Card>
@@ -268,12 +370,37 @@ function SessionDetail({ session }: { session: SessionRow | null }) {
             { label: "Last used", value: formatTime(session.last_used_at) },
           ]}
         />
-        {session.debug_url ? (
-          <a
-            href={session.debug_url}
-            target="_blank"
-            rel="noreferrer"
-            className="border border-border bg-bg-subtle text-text hover:bg-bg-hover"
+        <div
+          style={{
+            marginTop: "12px",
+            display: "flex",
+            gap: "8px",
+            flexWrap: "wrap",
+          }}
+        >
+          {session.debug_url && (
+            <a
+              href={session.debug_url}
+              target="_blank"
+              rel="noreferrer"
+              className="border border-border bg-bg-subtle text-text hover:bg-bg-hover"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "6px 12px",
+                borderRadius: "6px",
+                fontSize: "13px",
+                fontWeight: 500,
+              }}
+            >
+              <ExternalIcon />
+              Open in DevTools
+            </a>
+          )}
+          <button
+            onClick={() => onClose(session.session_id)}
+            className="border border-border bg-bg text-text-muted hover:bg-bg-subtle"
             style={{
               display: "inline-flex",
               alignItems: "center",
@@ -282,16 +409,16 @@ function SessionDetail({ session }: { session: SessionRow | null }) {
               borderRadius: "6px",
               fontSize: "13px",
               fontWeight: 500,
-              marginTop: "12px",
+              cursor: "pointer",
             }}
           >
-            <ExternalIcon />
-            Open in DevTools
-          </a>
-        ) : (
+            <XIcon /> Close session
+          </button>
+        </div>
+        {!session.debug_url && (
           <div
             className="text-text-muted"
-            style={{ fontSize: "12px", marginTop: "12px" }}
+            style={{ fontSize: "12px", marginTop: "10px" }}
           >
             This backend doesn't expose a debug URL. Use{" "}
             <code>browser_screenshot</code> to inspect the page.
@@ -299,6 +426,196 @@ function SessionDetail({ session }: { session: SessionRow | null }) {
         )}
       </div>
     </Card>
+  );
+}
+
+function OpenSessionModal({
+  onClose,
+  onOpened,
+}: {
+  onClose: () => void;
+  onOpened: (sessionID: string) => void;
+}) {
+  const [url, setUrl] = useState("https://");
+  const [backend, setBackend] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const submit = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const body: Record<string, any> = {};
+      if (url && url !== "https://") body.url = url;
+      if (backend) body.backend = backend;
+      const res = await fetch(SESSIONS_URL, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const j = await res.json();
+      if (!res.ok || j.error) {
+        setErr(j.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      onOpened(String(j.session_id ?? ""));
+    } catch (e: any) {
+      setErr(String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.4)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 50,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="bg-bg border border-border text-text"
+        style={{
+          width: "420px",
+          maxWidth: "90vw",
+          padding: "20px",
+          borderRadius: "8px",
+        }}
+      >
+        <h2 style={{ fontSize: "16px", fontWeight: 600, marginBottom: "12px" }}>
+          New browser session
+        </h2>
+        <div style={{ display: "grid", gap: "10px" }}>
+          <label style={{ fontSize: "12px" }} className="text-text-muted">
+            URL (optional — open blank if omitted)
+            <input
+              type="url"
+              autoFocus
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              className="border border-border bg-bg text-text"
+              style={{
+                width: "100%",
+                marginTop: "4px",
+                padding: "6px 10px",
+                borderRadius: "6px",
+                fontSize: "13px",
+              }}
+            />
+          </label>
+          <label style={{ fontSize: "12px" }} className="text-text-muted">
+            Backend
+            <select
+              value={backend}
+              onChange={(e) => setBackend(e.target.value)}
+              className="border border-border bg-bg text-text"
+              style={{
+                width: "100%",
+                marginTop: "4px",
+                padding: "6px 10px",
+                borderRadius: "6px",
+                fontSize: "13px",
+              }}
+            >
+              <option value="">Default (server env)</option>
+              <option value="local">Local Chrome</option>
+              <option value="browserbase">Browserbase</option>
+              <option value="steel">Steel</option>
+            </select>
+          </label>
+        </div>
+        {err && (
+          <div
+            style={{ marginTop: "10px", fontSize: "12px", color: "#dc2626" }}
+          >
+            {err}
+          </div>
+        )}
+        <div
+          style={{
+            marginTop: "16px",
+            display: "flex",
+            justifyContent: "flex-end",
+            gap: "8px",
+          }}
+        >
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="border border-border bg-bg text-text-muted hover:bg-bg-subtle"
+            style={{
+              padding: "6px 12px",
+              borderRadius: "6px",
+              fontSize: "13px",
+              cursor: "pointer",
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={submit}
+            disabled={busy}
+            className="border border-border bg-bg-subtle text-text hover:bg-bg-hover"
+            style={{
+              padding: "6px 12px",
+              borderRadius: "6px",
+              fontSize: "13px",
+              fontWeight: 500,
+              cursor: busy ? "wait" : "pointer",
+              opacity: busy ? 0.6 : 1,
+            }}
+          >
+            {busy ? "Opening…" : "Open"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
+    </svg>
+  );
+}
+
+function XIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M18 6 6 18" />
+      <path d="m6 6 12 12" />
+    </svg>
   );
 }
 

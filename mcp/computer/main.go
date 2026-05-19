@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.3.2
+version: 0.3.3
 description: |
   Watch and steer the agent's browser. v0.3 adds the first MCP tools
   (browser_open / browser_list / browser_screenshot / browser_close).
@@ -175,6 +176,12 @@ type App struct {
 	reg *registry
 }
 
+// globalCtx is the AppCtx captured at OnMount. HTTP handlers need an
+// AppCtx (logger, the same one the tool handlers use) and the SDK's
+// Route.Handler is a plain http.HandlerFunc that doesn't carry one.
+// Same pattern storage / screenshots / other sidecars use.
+var globalCtx *sdk.AppCtx
+
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
 	if err != nil {
@@ -185,6 +192,7 @@ func (a *App) Manifest() sdk.Manifest {
 
 func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.reg = &registry{m: map[string]*session{}}
+	globalCtx = ctx
 	go a.reaper(ctx)
 	ctx.Logger().Info("computer mounted", "tools", 4, "idle_ttl", idleTTL.String())
 	return nil
@@ -210,12 +218,16 @@ func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
-// HTTPRoutes — one read-only listing endpoint the dashboard panel
-// uses. UI bundles under /ui/* are served by the platform's static
-// handler; /health is auto-registered by the SDK.
+// HTTPRoutes — three endpoints the dashboard panel uses to list +
+// open + close sessions. UI bundles under /ui/* are served by the
+// platform's static handler; /health is auto-registered by the SDK.
+// All routes are reachable through the platform proxy at
+// /api/apps/computer/<pattern>.
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Method: http.MethodGet, Pattern: "/sessions", Handler: a.handleListSessions},
+		{Method: http.MethodPost, Pattern: "/sessions", Handler: a.handleOpenSession},
+		{Method: http.MethodDelete, Pattern: "/sessions/{id}", Handler: a.handleCloseSession},
 	}
 }
 
@@ -503,6 +515,49 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 func (a *App) handleListSessions(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"sessions": a.listSessions()})
+}
+
+func (a *App) handleOpenSession(w http.ResponseWriter, r *http.Request) {
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
+		httpErr(w, http.StatusBadRequest, "bad JSON body: "+err.Error())
+		return
+	}
+	if body == nil {
+		body = map[string]any{}
+	}
+	out, err := a.toolBrowserOpen(globalCtx, body)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (a *App) handleCloseSession(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/sessions/")
+	id = strings.TrimSuffix(id, "/")
+	if id == "" {
+		httpErr(w, http.StatusBadRequest, "session id required")
+		return
+	}
+	out, err := a.toolBrowserClose(globalCtx, map[string]any{"session_id": id})
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, out)
+}
+
+func writeJSON(w http.ResponseWriter, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func httpErr(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 func main() { sdk.Run(&App{}) }
