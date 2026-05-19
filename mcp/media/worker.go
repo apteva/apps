@@ -106,29 +106,20 @@ func runIndexer(ctx context.Context, app *sdk.AppCtx) error {
 	// when the storage listing might be incomplete — the safety guard
 	// is "did we hit the page limit". Storage soft-deletes by default
 	// so re-creation later just re-indexes the file fresh.
-	if len(files) < storageListLimit {
-		// Only files we'd legitimately catalog count as "still here".
-		// Excluded-folder files (renders, .screenshots, .media)
-		// SHOULDN'T have a media row to begin with; if one snuck in
-		// before isExcludedFromCatalog covered that folder, treat it
-		// as orphan now so purgeOrphans cascades it out. Without this
-		// filter, render outputs (storage genuinely keeps them) would
-		// continue to drive catalog rows that confuse the panel.
-		fileIDs := make([]string, 0, len(files))
-		for _, f := range files {
-			if isExcludedFromCatalog(f.Folder) {
-				continue
-			}
-			fileIDs = append(fileIDs, strconv.FormatInt(f.ID, 10))
-		}
-		if n, err := purgeOrphans(app, sc, app.AppDB(), projectID, fileIDs); err != nil {
-			app.Logger().Warn("purge orphan media failed", "err", err)
-		} else if n > 0 {
-			app.Logger().Info("purged orphan media", "count", n)
-		}
-	} else {
-		app.Logger().Warn("storage listing hit page limit; orphan cleanup skipped this tick",
-			"limit", storageListLimit)
+	// Orphan cleanup. purgeOrphans now verifies each media row
+	// individually against storage (via the explicit-id ResolveFiles
+	// batch) rather than diffing against a paginated listing. So we
+	// no longer have to guard on "did the listing return everything"
+	// — the storage call is bounded by media's row count, not
+	// storage's file count, and is correct under any listing cap.
+	//
+	// `files` is still computed up-front because filterMediaFiles +
+	// indexerCandidates use it for the indexing side; purgeOrphans
+	// itself doesn't consume it anymore.
+	if n, err := purgeOrphans(app, sc, app.AppDB(), projectID, nil); err != nil {
+		app.Logger().Warn("purge orphan media failed", "err", err)
+	} else if n > 0 {
+		app.Logger().Info("purged orphan media", "count", n)
 	}
 
 	media := filterMediaFiles(files)
@@ -609,32 +600,28 @@ func filterMediaFiles(files []StorageFile) []StorageFile {
 }
 
 // isExcludedFromCatalog reports whether a storage folder should NEVER
-// produce media catalog rows. Three categories:
+// produce media catalog rows. Skips any "hidden" folder (anything
+// starting with "/.") — that's storage's convention for "internal
+// app bookkeeping, don't show users". Covers /.media/ (this app's
+// own derivations — would loop on itself), /.screenshots/ (the
+// screenshots app's captures), and any future hidden-folder
+// convention an app adopts.
 //
-//   1. Hidden folders (anything starting with "/.") — storage's
-//      convention for "internal app bookkeeping, don't show users".
-//      Covers /.media/ (this app's own derivations — would loop on
-//      itself), /.screenshots/ (the screenshots app's captures), and
-//      any future hidden-folder convention an app adopts.
+// /renders/ (media's OWN output folder) is intentionally NOT
+// excluded — operators want render outputs in the catalog so the
+// panel is a one-stop view ("find my reel"). Render rows can be
+// distinguished from uploads by their `source` column (set to
+// 'media-render' by the render script vs 'human' / 'agent' for
+// uploads + manual writes), letting panels + agents filter when
+// they want only originals.
 //
-//   2. Media's own render output folder (/renders/ by default).
-//      Renders are OUTPUTS of media's pipeline, not new source
-//      uploads. Indexing them would cluter the catalog with frames
-//      that are already addressable via the renders table.
-//
-// Older versions only skipped /.media/. That let render outputs +
-// screenshots + every other app's hidden folder pollute the catalog
-// — operators reported "I see files I think I deleted" because the
-// rows for /renders/frame-Nms.png stuck around (those storage files
-// genuinely exist, just shouldn't be cataloged).
+// Older versions only skipped /.media/. That let /.screenshots/
+// captures + other apps' hidden folders pollute the catalog —
+// operators reported "I see files I never uploaded" because the
+// rows for /.screenshots/2026-05/N.png stuck around (storage
+// genuinely keeps them, they just shouldn't appear in media).
 func isExcludedFromCatalog(folder string) bool {
-	if strings.HasPrefix(folder, "/.") {
-		return true
-	}
-	if folder == "/renders/" || strings.HasPrefix(folder, "/renders/") {
-		return true
-	}
-	return false
+	return strings.HasPrefix(folder, "/.")
 }
 
 // isOwnDerivation is kept as a backward-compat alias for callers

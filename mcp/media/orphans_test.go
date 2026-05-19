@@ -5,6 +5,10 @@ package main
 // gone (soft-deleted by the user via the storage app).
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -149,4 +153,133 @@ func strDigit(i int) string {
 		i /= 16
 	}
 	return string(out)
+}
+
+// TestPurgeOrphans_VerifyByID — exercises the v0.13.5+ resolve-by-id
+// path. The old "list all + diff" approach silently failed when
+// storage's listing endpoint capped the response below the project's
+// actual file count (operators saw "media disappears when I upload",
+// because each new upload triggered a tick where purgeOrphans saw
+// only the 50 newest files and treated everything older as orphan).
+//
+// This test stands up a fake storage that responds to /files?ids=A,B,C
+// the same way storage's real handler does — returning entries for
+// requested IDs that "still exist" and dropping the rest from the
+// response. We seed media with 5 rows. The fake reports 3 still
+// present. purgeOrphans should delete exactly the 2 unreported rows.
+//
+// Critically: we make NO bulk-listing call available on the fake.
+// If the production code ever falls back to "list everything",
+// the fake's catch-all 404 ensures the test fails loudly instead
+// of silently passing on stale-listing reads.
+func TestPurgeOrphans_VerifyByID_DeletesUnreported(t *testing.T) {
+	ctx := newTestCtx(t)
+	// Seed 5 media rows.
+	for _, fid := range []string{"100", "101", "102", "103", "104"} {
+		if err := upsertMedia(ctx.AppDB(), testProj, fid, sampleAudioProbe(), "sha-"+fid, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Fake storage that ONLY responds to /files?ids=… requests.
+	// Reports 100, 102, 104 as present; 101 + 103 missing → orphans.
+	stillPresent := map[int64]bool{100: true, 102: true, 104: true}
+	var resolveCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/apps/storage/files") {
+			http.Error(w, "unexpected path "+r.URL.Path, 404)
+			return
+		}
+		// We expect ids= queries only. A bulk listing (no ids) means
+		// the code regressed to the listing-cap path → fail loud.
+		idsRaw := r.URL.Query().Get("ids")
+		if idsRaw == "" {
+			// files_delete also POSTs to /files/.../mcp but uses a
+			// different path. A GET /files with no ids is the
+			// bulk-listing call we want to forbid.
+			if r.Method == http.MethodGet {
+				http.Error(w, "test rejects bulk listing — must use ids= filter", 500)
+				return
+			}
+		}
+		resolveCalls++
+		out := []StorageFile{}
+		for _, idStr := range strings.Split(idsRaw, ",") {
+			id, ok := parseInt64Local(strings.TrimSpace(idStr))
+			if !ok {
+				continue
+			}
+			if stillPresent[id] {
+				out = append(out, StorageFile{ID: id, Name: "f.bin", Folder: "/"})
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"files": out})
+	}))
+	defer srv.Close()
+	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
+	t.Setenv("APTEVA_OUTBOUND_TOKEN", "dev-test")
+
+	sc := newStorageClient()
+	n, err := purgeOrphans(nil, sc, ctx.AppDB(), testProj, nil)
+	if err != nil {
+		t.Fatalf("purgeOrphans: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("expected 2 orphans purged (101, 103), got %d", n)
+	}
+	if resolveCalls == 0 {
+		t.Error("storage was never asked about any IDs — purgeOrphans isn't using the resolve path")
+	}
+
+	// Survivors stay.
+	for _, fid := range []string{"100", "102", "104"} {
+		m, _ := getMedia(ctx.AppDB(), testProj, fid)
+		if m == nil {
+			t.Errorf("file_id=%s was wrongly purged — storage reported it present", fid)
+		}
+	}
+	// Orphans are gone.
+	for _, fid := range []string{"101", "103"} {
+		m, _ := getMedia(ctx.AppDB(), testProj, fid)
+		if m != nil {
+			t.Errorf("file_id=%s should have been purged — storage didn't report it", fid)
+		}
+	}
+}
+
+// TestPurgeOrphans_VerifyByID_StorageErrorSkipsSweep — when the
+// resolve call errors mid-sweep, we MUST NOT cascade-delete based
+// on partial data. Conservative fallback: log + skip this tick.
+// Next tick retries; the orphans (if any) stick around for one
+// more sweep cycle rather than being silently wiped because storage
+// hiccupped.
+func TestPurgeOrphans_VerifyByID_StorageErrorSkipsSweep(t *testing.T) {
+	ctx := newTestCtx(t)
+	for _, fid := range []string{"200", "201"} {
+		if err := upsertMedia(ctx.AppDB(), testProj, fid, sampleAudioProbe(), "sha-"+fid, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "storage is down", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
+	t.Setenv("APTEVA_OUTBOUND_TOKEN", "dev-test")
+
+	sc := newStorageClient()
+	n, err := purgeOrphans(nil, sc, ctx.AppDB(), testProj, nil)
+	if err != nil {
+		t.Fatalf("purgeOrphans should swallow storage errors, not return them: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("storage error should produce 0 purges, got %d", n)
+	}
+	// Both rows still here.
+	for _, fid := range []string{"200", "201"} {
+		m, _ := getMedia(ctx.AppDB(), testProj, fid)
+		if m == nil {
+			t.Errorf("file_id=%s was purged despite storage error — sweep should have skipped", fid)
+		}
+	}
 }

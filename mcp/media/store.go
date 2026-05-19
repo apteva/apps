@@ -445,60 +445,113 @@ func cascadeDeleteOne(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID,
 }
 
 // purgeOrphans removes media rows (and their derivations + transcripts)
-// whose storage file is no longer present in the current storage
-// listing — typically because the user soft-deleted the file via the
-// storage app.
+// whose storage file is no longer present — typically because the
+// user soft-deleted the file via the storage app and either the
+// file.deleted SSE event was missed or the install was down when it
+// fired.
 //
-// Cascade order: derivations → transcripts → media. Renders are NOT
-// touched (the renders table is the audit log of operations attempted;
-// a render row with a now-dangling output_file_id surfaces as a 404
-// when the agent tries to fetch it, which is the right signal —
-// dropping renders silently would lose history).
+// Reconciliation strategy:
+//   1. Read every media row's file_id for this project.
+//   2. Ask storage about EXACTLY those ids via ResolveFiles (batched
+//      at storage's per-call cap, internally chunked).
+//   3. Any media row whose file_id is missing from the resolved
+//      response is an orphan.
 //
-// SAFETY: callers MUST pass a complete file list. A partial list (e.g.
-// pagination cap hit) would false-positive orphan files that legit-
-// imately exist. The indexer guards by only calling when its storage
-// query returned strictly fewer than the safety limit.
+// Why this beats the old "list all + diff" approach: storage's
+// listing endpoint caps the page size, and a project with more
+// files than the cap would silently roll through orphan-deleting
+// every row beyond the page boundary. The verify-by-id path
+// doesn't care about storage's listing limits — it asks storage
+// about specific ids it could otherwise miss and trusts a missing
+// id as a definitive "deleted". Storage's dbGetByID already
+// returns nil for soft-deleted rows, so this is correct under the
+// existing delete semantics.
 //
-// currentFileIDs are storage.files.id values stringified to match
-// media.file_id storage. A nil slice is treated as "no files exist"
-// and will purge every media row in the project — a deliberate way
-// to wipe a project's catalog without dropping the DB.
-func purgeOrphans(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID string, currentFileIDs []string) (int64, error) {
-	seen := make(map[string]bool, len(currentFileIDs))
-	for _, fid := range currentFileIDs {
-		seen[fid] = true
-	}
-
+// Cascade order: storage bytes (derivations) → derivations rows →
+// transcripts rows → media row. Renders are NOT touched (the
+// renders table is the audit log of operations attempted; dropping
+// renders silently would lose history).
+//
+// `sc` is mandatory in production. Tests can pass nil — the
+// storage-side derivation cleanup is then skipped and we fall back
+// to the "what's in `precomputedPresent` (the deprecated parameter
+// path)" mode for back-compat. Passing nil + nil for both `sc` and
+// `precomputedPresent` purges every media row in the project,
+// useful for "wipe this catalog" admin paths.
+func purgeOrphans(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID string, precomputedPresent []string) (int64, error) {
+	// 1. Collect all media row file_ids for this project.
 	rows, err := db.Query(`SELECT file_id FROM media WHERE project_id = ?`, projectID)
 	if err != nil {
 		return 0, err
 	}
-	var orphans []any
-	orphanIDs := make([]string, 0)
-	placeholders := make([]string, 0)
+	allMediaIDs := make([]string, 0)
 	for rows.Next() {
 		var fid string
 		if err := rows.Scan(&fid); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		if !seen[fid] {
-			orphans = append(orphans, fid)
-			orphanIDs = append(orphanIDs, fid)
-			placeholders = append(placeholders, "?")
-		}
+		allMediaIDs = append(allMediaIDs, fid)
 	}
 	rows.Close()
+	if len(allMediaIDs) == 0 {
+		return 0, nil
+	}
+
+	// 2. Determine which of those still exist in storage. Two paths
+	//    depending on what the caller supplied:
+	//
+	//    a. sc != nil → verify-by-id via storage.ResolveFiles. The
+	//       authoritative path; doesn't depend on listing caps.
+	//    b. sc == nil → use precomputedPresent as the "still here"
+	//       set. Back-compat for tests + the rare admin path that
+	//       wants to drive purging manually. nil slice means "purge
+	//       everything".
+	present := make(map[string]struct{}, len(allMediaIDs))
+	if sc != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		resolved, rerr := sc.ResolveFiles(ctx, projectID, allMediaIDs)
+		cancel()
+		if rerr != nil {
+			// Storage unreachable / errored mid-resolve. Conservative
+			// choice: SKIP this sweep entirely rather than purge
+			// rows we couldn't verify. The next tick retries.
+			if app != nil {
+				app.Logger().Warn("purgeOrphans: storage resolve failed; skipping sweep",
+					"err", rerr, "row_count", len(allMediaIDs))
+			}
+			return 0, nil
+		}
+		for fid := range resolved {
+			present[fid] = struct{}{}
+		}
+	} else {
+		for _, fid := range precomputedPresent {
+			present[fid] = struct{}{}
+		}
+	}
+
+	// 3. Compute the orphan set.
+	orphans := make([]any, 0)
+	orphanIDs := make([]string, 0)
+	placeholders := make([]string, 0)
+	for _, fid := range allMediaIDs {
+		if _, ok := present[fid]; ok {
+			continue
+		}
+		orphans = append(orphans, fid)
+		orphanIDs = append(orphanIDs, fid)
+		placeholders = append(placeholders, "?")
+	}
 	if len(orphans) == 0 {
 		return 0, nil
 	}
 
-	// Storage-side cleanup: bulk-fetch derivations for all orphans
-	// up front, then delete each from storage. Best-effort — DB
-	// cleanup must still happen even if storage is unreachable.
-	// Without this, the derivation bytes (thumbnail, waveform,
-	// every keyframe) accumulate under /.media/* forever.
+	// 4. Storage-side cleanup: delete the orphans' derivation bytes
+	//    (thumbnail, waveform, keyframes) before dropping the
+	//    media rows. Best-effort — DB cleanup must still happen
+	//    even if storage is unreachable. Without this, the
+	//    derivation bytes accumulate under /.media/* forever.
 	if sc != nil {
 		derivByFile, _ := listDerivationsByFiles(db, projectID, orphanIDs)
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

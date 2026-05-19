@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: storage
 display_name: Storage
-version: 0.10.7
+version: 0.10.8
 description: |
   File storage for Apteva agents and human teams. Upload bytes,
   organise into folders, share via signed URLs. Pluggable backend:

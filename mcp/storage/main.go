@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: storage
 display_name: Storage
-version: 0.10.7
+version: 0.10.8
 description: |
   File storage with virtual folders, signed URLs, dedup. Pluggable
   backend: local disk by default, S3-compatible (AWS / R2 / B2 /
@@ -1257,7 +1257,14 @@ func (a *App) httpListOrSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	if limit <= 0 || limit > 200 {
+	// 200 was the historical cap; anything above silently reset to 50
+	// (the default page size for UIs). That dropped the result set
+	// below media's orphan-sweep safety threshold, so the indexer
+	// thought every file older than the 50 newest was an orphan and
+	// purged it. Bumping to 10000 keeps small-list defaults intact
+	// (caller passes nothing / 0 → 50) while letting media + any
+	// future sweeper request a complete project view.
+	if limit <= 0 || limit > 10000 {
 		limit = 50
 	}
 	out, err := dbSearch(ctx.AppDB(), pid, searchOpts{
