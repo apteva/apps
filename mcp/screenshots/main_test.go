@@ -136,8 +136,8 @@ func TestCaptureIdempotency(t *testing.T) {
 			t.Errorf("idempotency replay opened a new browser; calls=%v", plat.callLog())
 		}
 	}
-	if !containsCall(plat.callLog(), "storage.files_get_url") {
-		t.Errorf("replay should refresh signed url; calls=%v", plat.callLog())
+	if !containsCall(plat.callLog(), "storage.files_get") {
+		t.Errorf("replay should resolve URL via files_get; calls=%v", plat.callLog())
 	}
 }
 
@@ -290,7 +290,13 @@ func (p *fakePlatform) respond(app, tool string) map[string]any {
 		return map[string]any{"closed": true}
 	case "storage.files_upload":
 		return map[string]any{"id": p.storageID, "url": p.storageURL}
+	case "storage.files_get":
+		return map[string]any{
+			"file":  map[string]any{"id": p.storageID, "url": p.storageURL},
+			"found": true,
+		}
 	case "storage.files_get_url":
+		// kept for older test paths that still poke this directly
 		return map[string]any{"url": p.storageURL}
 	case "storage.files_delete":
 		return map[string]any{}

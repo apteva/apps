@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: screenshots
 display_name: Screenshots
-version: 0.1.1
+version: 0.1.2
 description: |
   Capture browser screenshots from a URL, save them to storage, and
   browse them in a gallery. v0.1: URL-driven capture only.
@@ -407,20 +407,36 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 // captureResult mints the response shape both toolCapture (cache hit)
-// and toolGet return: the registry fields plus a fresh signed URL
-// from storage.
+// and toolGet return: the registry fields plus the storage-routed
+// URL.
+//
+// We deliberately call storage.files_get (NOT files_get_url) because
+// files_get_url returns a presigned S3 URL on S3-backed storage
+// installs, which leaks the bucket origin to anyone who sees the
+// URL. files_get returns the abstracted /api/apps/storage/files/{id}/content
+// route via absoluteContentURL — backend-agnostic and auth-gated
+// through the platform. The matching files_upload response shape
+// already returns this same abstracted URL, so the freshly-captured
+// path (toolCapture happy path) and the replay/get paths are
+// consistent.
 func captureResult(ctx *sdk.AppCtx, row *screenshot) (any, error) {
-	var urlRes struct {
-		URL string `json:"url"`
+	var getRes struct {
+		File *struct {
+			URL string `json:"url"`
+		} `json:"file"`
+		Found bool `json:"found"`
 	}
-	urlArgs := withProjectID(ctx, map[string]any{"id": row.StorageID})
-	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_url", urlArgs, &urlRes); err != nil {
-		return nil, fmt.Errorf("storage.files_get_url: %w", err)
+	getArgs := withProjectID(ctx, map[string]any{"id": row.StorageID})
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", getArgs, &getRes); err != nil {
+		return nil, fmt.Errorf("storage.files_get: %w", err)
+	}
+	if getRes.File == nil {
+		return nil, fmt.Errorf("storage file %d not found", row.StorageID)
 	}
 	return map[string]any{
 		"screenshot_id": row.ID,
 		"storage_id":    row.StorageID,
-		"url":           urlRes.URL,
+		"url":           getRes.File.URL,
 		"captured_at":   row.CapturedAt.Format(time.RFC3339),
 		"label":         row.Label,
 		"final_url":     row.FinalURL,
