@@ -88,6 +88,11 @@ func buildVeniceImageArgs(args map[string]any) map[string]any {
 		// override via options.steps / options.cfg_scale.
 		"steps":     30,
 		"cfg_scale": 7.5,
+		// safe_mode=false by default — Venice's own default is true,
+		// which blurs adult-classified content. We want the API to
+		// return whatever the model produces; operator can override
+		// per-call via options.safe_mode.
+		"safe_mode": false,
 	}
 
 	// size "WxH" → width + height. Pixel-sized Venice models honour these;
@@ -253,6 +258,10 @@ func buildVeniceImageEditArgs(args map[string]any) map[string]any {
 		"model":  model,
 		"prompt": prompt,
 		"image":  source,
+		// safe_mode=false by default (Venice defaults true → blurs
+		// adult-classified output). Operator can flip on via
+		// options.safe_mode if they want filtered output.
+		"safe_mode": false,
 	}
 	if opts, ok := args["options"].(map[string]any); ok {
 		passThrough := []string{

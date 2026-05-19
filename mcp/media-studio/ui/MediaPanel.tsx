@@ -252,6 +252,13 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [duration, setDuration] = useState(5); // video/audio/music
   const [aspect, setAspect] = useState("16:9");
   const [voice, setVoice] = useState("");
+  // Video model picker — live-loaded from /models?kind=video.
+  // Auto-snaps to the first listed model when the dropdown lands.
+  const [videoModel, setVideoModel] = useState<string>("");
+  // safe_mode (image gen + edit) — Venice's own default is true (blurs
+  // adult-classified output); sidecar defaults to false so the API
+  // returns whatever the model produced. Panel flag mirrors that.
+  const [safeMode, setSafeMode] = useState(false);
   // Reference-image (edit mode) state. When sourceImage is non-empty,
   // media_generate routes through image.edit instead of image.generate.
   const [sourceImage, setSourceImage] = useState("");
@@ -359,16 +366,20 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         if (Array.isArray(data.models)) {
           setLiveModels(data.models);
           setLiveProvider(String(data.provider || ""));
-          // Snap the active image model to the first live option when
-          // the current selection isn't in the live list (e.g. user
-          // switched provider from OpenAI to Venice — gpt-image-2 isn't
-          // a Venice model).
-          if (activeKind === "image" && data.models.length > 0) {
-            const haveSelection = data.models.some(
-              (m: { id: string }) => m.id === imageModel,
-            );
-            if (!haveSelection) {
-              setImageModel(data.models[0].id as ImageModel);
+          // Snap the active model to the first live option when the
+          // current selection isn't in the new list (e.g. user switched
+          // provider, or first load of a kind whose model state is "").
+          if (data.models.length > 0) {
+            if (activeKind === "image") {
+              const have = data.models.some(
+                (m: { id: string }) => m.id === imageModel,
+              );
+              if (!have) setImageModel(data.models[0].id as ImageModel);
+            } else if (activeKind === "video") {
+              const have = data.models.some(
+                (m: { id: string }) => m.id === videoModel,
+              );
+              if (!have) setVideoModel(data.models[0].id);
             }
           }
         }
@@ -407,16 +418,17 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         if (isEditMode) {
           body.model = editModel;
           body.source_image = sourceImage;
-          body.options = { output_format: imageFormat };
+          body.options = { output_format: imageFormat, safe_mode: safeMode };
         } else {
           body.model = imageModel;
           body.size = imageSize;
-          const options: Record<string, unknown> = {};
+          const options: Record<string, unknown> = { safe_mode: safeMode };
           if (imageModel !== "dall-e-2") options.quality = imageQuality;
           if (isGptImage(imageModel)) options.output_format = imageFormat;
           body.options = options;
         }
       } else if (activeKind === "video") {
+        if (videoModel) body.model = videoModel;
         body.duration = duration;
         body.aspect = aspect;
       } else if (activeKind === "audio_tts") {
@@ -558,6 +570,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             setImageFormat={setImageFormat}
             editModel={editModel}
             setEditModel={setEditModel}
+            videoModel={videoModel}
+            setVideoModel={setVideoModel}
+            safeMode={safeMode}
+            setSafeMode={setSafeMode}
             duration={duration}
             setDuration={setDuration}
             aspect={aspect}
@@ -700,6 +716,10 @@ interface ComposerProps {
   setImageFormat: (v: string) => void;
   editModel: EditModel;
   setEditModel: (v: EditModel) => void;
+  videoModel: string;
+  setVideoModel: (v: string) => void;
+  safeMode: boolean;
+  setSafeMode: (v: boolean) => void;
   duration: number;
   setDuration: (v: number) => void;
   aspect: string;
@@ -759,6 +779,12 @@ function Composer(p: ComposerProps) {
       )}
       {p.kind === "video" && (
         <>
+          <VideoModelPicker
+            model={p.videoModel}
+            setModel={p.setVideoModel}
+            liveModels={p.liveModels}
+            liveProvider={p.liveProvider}
+          />
           <NumberField label="Duration (s)" value={p.duration} onChange={p.setDuration} min={1} max={60} />
           <TextField label="Aspect" value={p.aspect} onChange={p.setAspect} />
         </>
@@ -769,6 +795,9 @@ function Composer(p: ComposerProps) {
       {(p.kind === "audio_sfx" || p.kind === "music") && (
         <NumberField label="Duration (s)" value={p.duration} onChange={p.setDuration} min={1} max={300} />
       )}
+      {p.kind === "image" && (
+        <SafeModeToggle value={p.safeMode} onChange={p.setSafeMode} />
+      )}
       <button
         onClick={p.generate}
         disabled={!p.prompt.trim() || p.generating || p.disabled}
@@ -777,6 +806,29 @@ function Composer(p: ComposerProps) {
         {p.generating ? "…" : p.isEditMode ? "Edit" : "Generate"}
       </button>
     </div>
+  );
+}
+
+function SafeModeToggle({
+  value,
+  onChange,
+}: {
+  value: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <label
+      className="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer select-none"
+      title="When on, Venice blurs adult-classified output. Off = pass-through (default)."
+    >
+      <input
+        type="checkbox"
+        checked={value}
+        onChange={(e) => onChange(e.target.checked)}
+        style={{ accentColor: "var(--apteva-accent, #4ade80)" }}
+      />
+      Safe mode
+    </label>
   );
 }
 
@@ -1049,6 +1101,52 @@ function ImageOptions({
         </div>
       )}
     </>
+  );
+}
+
+function VideoModelPicker({
+  model,
+  setModel,
+  liveModels,
+  liveProvider,
+}: {
+  model: string;
+  setModel: (v: string) => void;
+  liveModels: { id: string; label: string }[] | null;
+  liveProvider: string;
+}) {
+  const models = liveModels || [];
+  if (models.length === 0) {
+    return (
+      <div>
+        <label className="text-text-muted text-xs block">Model</label>
+        <div className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text-dim" style={{ minWidth: 200 }}>
+          {liveProvider ? `loading ${liveProvider}…` : "no provider bound"}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <label className="text-text-muted text-xs block">
+        Model
+        <span className="text-text-dim ml-1" style={{ fontSize: 10 }}>
+          · {liveProvider} ({models.length})
+        </span>
+      </label>
+      <select
+        value={model}
+        onChange={(e) => setModel(e.target.value)}
+        className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+        style={{ maxWidth: 280 }}
+      >
+        {models.map((m) => (
+          <option key={m.id} value={m.id}>
+            {m.label}
+          </option>
+        ))}
+      </select>
+    </div>
   );
 }
 
