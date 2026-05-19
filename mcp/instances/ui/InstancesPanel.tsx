@@ -646,29 +646,11 @@ function InstanceCard({
             </div>
           )}
 
-          {/* History — live in-memory time-range chart. Outer max-width
-              keeps the chart sensibly proportioned on wide panels; the
-              SVG itself uses preserveAspectRatio="xMidYMid meet" so the
-              lines don't get stretched horizontally. */}
-          <div
-            className="rounded-md overflow-hidden"
-            style={{ backgroundColor: SUB_CARD_BG, border: `1px solid ${SUBTLE_BORDER}` }}
-          >
-            <SectionHeader
-              title="History (live)"
-              right={
-                history.length >= 2
-                  ? `${history.length} samples · ~${Math.round((history.length * 10) / 60)} min · session-scoped`
-                  : "warming up"
-              }
-            />
-            <div className="p-4">
-              <MultiLineChart
-                cpu={history.map((s) => s.cpuPct)}
-                mem={history.map((s) => s.memPct)}
-              />
-            </div>
-          </div>
+          {/* History sub-card disabled in v0.4.4 — operator preferred
+              the at-a-glance sparklines next to CPU/MEM bars over a
+              full-width time-range chart that mostly read as flat
+              lines anyway in dark mode. MultiLineChart kept defined
+              above so re-enabling is one block of JSX away. */}
         </div>
       ) : inst.status === "ready" ? (
         <div className="px-4 py-3 text-text-dim text-[11px]">Loading vitals…</div>
