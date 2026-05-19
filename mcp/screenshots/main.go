@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: screenshots
 display_name: Screenshots
-version: 0.1.0
+version: 0.1.1
 description: |
   Capture browser screenshots from a URL, save them to storage, and
   browse them in a gallery. v0.1: URL-driven capture only.
@@ -140,10 +140,10 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 // All routes inherit the SDK's token-auth gate (we don't set NoAuth).
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
-		{Method: http.MethodGet, Pattern: "/api/screenshots", Handler: a.handleList},
-		{Method: http.MethodPost, Pattern: "/api/screenshots", Handler: a.handleCapture},
-		{Method: http.MethodGet, Pattern: "/api/screenshots/{id}", Handler: a.handleGet},
-		{Method: http.MethodDelete, Pattern: "/api/screenshots/{id}", Handler: a.handleDelete},
+		{Method: http.MethodGet, Pattern: "/screenshots", Handler: a.handleList},
+		{Method: http.MethodPost, Pattern: "/screenshots", Handler: a.handleCapture},
+		{Method: http.MethodGet, Pattern: "/screenshots/{id}", Handler: a.handleGet},
+		{Method: http.MethodDelete, Pattern: "/screenshots/{id}", Handler: a.handleDelete},
 	}
 }
 
@@ -675,7 +675,7 @@ func (a *App) handleCapture(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleGet(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(r, "/api/screenshots/")
+	id, ok := pathID(r, "/screenshots/")
 	if !ok {
 		httpErr(w, http.StatusBadRequest, "bad id")
 		return
@@ -685,7 +685,7 @@ func (a *App) handleGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleDelete(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(r, "/api/screenshots/")
+	id, ok := pathID(r, "/screenshots/")
 	if !ok {
 		httpErr(w, http.StatusBadRequest, "bad id")
 		return

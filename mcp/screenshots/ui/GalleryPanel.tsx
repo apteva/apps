@@ -2,8 +2,9 @@
 // screenshots app. Lists captures, lets the operator trigger a fresh
 // capture, opens any capture full-size in a new tab, and deletes.
 //
-// All data goes through this app's own JSON API (/api/screenshots…)
-// which delegates to the same MCP tool functions the agent calls.
+// All data goes through this app's own JSON API
+// (/api/apps/screenshots/screenshots…) which delegates to the same
+// MCP tool functions the agent calls.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card, CardHeader, StatusPill } from "@apteva/ui-kit";
@@ -30,7 +31,10 @@ interface GetResponse {
   error?: string;
 }
 
-const API_LIST = "/api/screenshots";
+// /api/apps/<name>/<route> is the platform's proxy prefix; the
+// sidecar registers Pattern:"/screenshots" and the dashboard fetches
+// /api/apps/screenshots/screenshots to reach it.
+const API_LIST = "/api/apps/screenshots/screenshots";
 
 export default function GalleryPanel() {
   const [rows, setRows] = useState<Row[]>([]);
