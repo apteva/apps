@@ -69,6 +69,16 @@ function formatUptime(s: number): string {
   return `${Math.floor(s / 86400)}d`;
 }
 
+// Subtle border + divider colors used throughout the card. The
+// dashboard's `--border` token reads as too bright in dark mode, so
+// we lean on rgba inline-style borders that sit at ~5% opacity over
+// the background. Same reason we colorize bars with explicit hex
+// rather than `bg-…/N` opacity classes.
+const SUBTLE_BORDER = "rgba(255,255,255,0.05)";
+const FAINT_DIVIDER = "rgba(255,255,255,0.04)";
+const SUB_CARD_BG = "rgba(255,255,255,0.015)";
+const HEADER_STRIP_BG = "rgba(255,255,255,0.025)";
+
 // Color ramps for utilization. Returns a CSS color literal so callers
 // can stick it into inline style (Tailwind arbitrary classes like
 // bg-[#…] don't ship to the panel CSS bundle — feedback_no_arbitrary_tailwind_in_panels).
@@ -123,8 +133,10 @@ function ProgressBar({
         </div>
       )}
       <div
-        className="w-full rounded-full overflow-hidden bg-bg/60 border border-border/40"
-        style={{ height: `${h}px` }}
+        className="w-full rounded-full overflow-hidden"
+        // Track sits at ~5% white on a dark bg — readable as a track
+        // without the bright outlined-rectangle effect we had before.
+        style={{ height: `${h}px`, backgroundColor: "rgba(255,255,255,0.06)" }}
         title={`${clamped.toFixed(1)}%`}
       >
         <div
@@ -179,12 +191,12 @@ function MultiLineChart({
   mem: number[];
   height?: number;
 }) {
-  // Fills its container width — operator scales via parent layout.
-  // Height defaults to 140 so the gridlines have breathing room and
-  // y-axis labels don't pile up on top of each other (the original
-  // h=80 had "0/50/100" overlapping at low resolutions).
+  // Sane aspect ratio. preserveAspectRatio="none" + className="w-full"
+  // stretched the lines horizontally on wide panels — 14 samples
+  // smeared across 1900px read as a flat horizon. Caller wraps this
+  // in a max-width container so the chart stays roughly 5:1.
   const VIEW_W = 800;
-  const h = height ?? 140;
+  const h = height ?? 160;
   const padLeft = 32;
   const padRight = 12;
   const padTop = 10;
@@ -193,12 +205,19 @@ function MultiLineChart({
   const plotH = h - padTop - padBottom;
   const n = Math.max(cpu.length, mem.length);
   if (n < 2) {
+    // Slim placeholder — full-height empty box dominated the card
+    // when there were 0-1 samples; this reads as "waiting" without
+    // wasting vertical space.
     return (
       <div
-        className="text-[11px] text-text-dim flex items-center justify-center bg-bg/40 border border-border/40 rounded"
-        style={{ height: h }}
+        className="text-[11px] text-text-dim flex items-center justify-center rounded"
+        style={{
+          height: 32,
+          backgroundColor: "rgba(255,255,255,0.02)",
+          color: "rgba(255,255,255,0.35)",
+        }}
       >
-        Accumulating samples — chart fills in as the metrics poll ticks
+        Accumulating samples · chart will fill in over the next ticks
       </div>
     );
   }
@@ -213,9 +232,13 @@ function MultiLineChart({
   return (
     <svg
       viewBox={`0 0 ${VIEW_W} ${h}`}
-      preserveAspectRatio="none"
+      // xMidYMid meet → preserve aspect, center the chart. Combined
+      // with the caller's max-width wrapper this stops 14 samples
+      // from being stretched across 1900px and reading as a flat
+      // horizon (real screenshot bug).
+      preserveAspectRatio="xMidYMid meet"
       className="block w-full"
-      style={{ height: h }}
+      style={{ maxHeight: h }}
       aria-label="cpu/memory history"
     >
       {/* gridlines */}
@@ -238,15 +261,14 @@ function MultiLineChart({
       ))}
       <path d={lineFor(cpu)} fill="none" stroke="#3b82f6" strokeWidth="2" />
       <path d={lineFor(mem)} fill="none" stroke="#a78bfa" strokeWidth="2" />
-      {/* legend */}
+      {/* Color-key only legend — the "N samples · ~M min" hint moved
+          up to the section header so we don't repeat it inside the
+          plot area. */}
       <g transform={`translate(${padLeft}, ${h - 8})`} fontSize="10" fill="currentColor" fillOpacity="0.7">
         <rect x="0" y="-7" width="10" height="2" fill="#3b82f6" />
         <text x="16" y="0">CPU</text>
         <rect x="56" y="-7" width="10" height="2" fill="#a78bfa" />
         <text x="72" y="0">Memory</text>
-        <text x={plotW - 60} y="0" textAnchor="end" fillOpacity="0.45">
-          {n} samples · ~{Math.round((n * 10) / 60)} min
-        </text>
       </g>
     </svg>
   );
@@ -351,7 +373,7 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
 
       {error && <div className="px-4 py-2 text-red text-xs border-b border-border">{error}</div>}
 
-      <main className="flex-1 overflow-auto p-3 space-y-3">
+      <main className="flex-1 overflow-auto p-4 space-y-5">
         {instances === null ? (
           <div className="p-6 text-text-muted text-sm">Loading…</div>
         ) : instances.length === 0 ? (
@@ -458,10 +480,20 @@ function InstanceCard({
     : [];
 
   return (
-    <div className="rounded-lg border border-border bg-bg-card overflow-hidden">
-      {/* Header strip — distinct background so the card has a visible
-          "spine" and the body content reads as bounded sections. */}
-      <div className="flex items-center gap-2 px-4 py-2.5 bg-bg-input/40 border-b border-border flex-wrap">
+    <div
+      className="rounded-lg overflow-hidden"
+      // Outer card: very subtle border + bg-card tint. The dashboard's
+      // `--border` token looked stark in dark mode; inline rgba sits
+      // closer to the panel bg, giving a quiet edge.
+      style={{ backgroundColor: "var(--bg-card, transparent)", border: `1px solid ${SUBTLE_BORDER}` }}
+    >
+      {/* Header strip — distinct, slightly lighter background so the
+          card has a visible "spine" and the body content reads as
+          bounded sections without needing strong borders. */}
+      <div
+        className="flex items-center gap-2 px-4 py-3 flex-wrap"
+        style={{ backgroundColor: HEADER_STRIP_BG, borderBottom: `1px solid ${SUBTLE_BORDER}` }}
+      >
         <span className={statusColor(inst.status) + " text-base leading-none"}>●</span>
         <span className="text-text font-semibold">{inst.name}</span>
         <span className="text-text-dim text-xs ml-1">
@@ -504,18 +536,20 @@ function InstanceCard({
         </div>
       )}
 
-      {/* Body — split into three sub-cards (vitals / disk / history)
-          on a slightly darker shared background so the inner pieces
-          read as distinct surfaces against the outer card. */}
+      {/* Body — split into three sub-cards (vitals / disk / history).
+          Background depth comes from rgba tints rather than tokens
+          because the dashboard's bg-input/N classes can be loud in
+          dark mode. */}
       {metrics ? (
         <div
-          className="p-3 space-y-3 bg-bg-input/15"
+          className="p-4 space-y-4"
           style={stale ? { opacity: 0.55 } : undefined}
         >
-          {/* Vitals: CPU + Memory bars with inline sparklines on the
-              right, then a stat row underneath. Background lighter
-              than the body to lift it visually. */}
-          <div className="rounded-md border border-border/60 bg-bg-card/80 p-3 space-y-3">
+          {/* Vitals — bars + stat row. */}
+          <div
+            className="rounded-md p-4 space-y-4"
+            style={{ backgroundColor: SUB_CARD_BG, border: `1px solid ${SUBTLE_BORDER}` }}
+          >
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="flex items-end gap-3">
                 <div className="flex-1 min-w-0">
@@ -549,7 +583,14 @@ function InstanceCard({
               </div>
             </div>
 
-            <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs pt-1 border-t border-border/40">
+            <div
+              className="flex flex-wrap text-xs pt-3"
+              // Inline gap + border because Tailwind JIT can't be
+              // relied on for gap-x-N / border-border/N at panel-
+              // bundle time. Real screenshot showed labels touching
+              // values + chips merging without padding.
+              style={{ gap: "20px", borderTop: `1px solid ${FAINT_DIVIDER}` }}
+            >
               <StatChip label="Load (1m)">
                 <span
                   className="font-mono"
@@ -573,15 +614,14 @@ function InstanceCard({
             </div>
           </div>
 
-          {/* Disks — its own sub-card so the per-mount progress stack
-              has visual separation from the vitals. Title strip keeps
-              the section labeled without needing operator inference. */}
+          {/* Disks — sub-card with titled header strip. */}
           {sortedDisks.length > 0 && (
-            <div className="rounded-md border border-border/60 bg-bg-card/80 overflow-hidden">
-              <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-text-dim font-medium border-b border-border/40 bg-bg-input/20">
-                Disk
-              </div>
-              <div className="p-3 space-y-2.5">
+            <div
+              className="rounded-md overflow-hidden"
+              style={{ backgroundColor: SUB_CARD_BG, border: `1px solid ${SUBTLE_BORDER}` }}
+            >
+              <SectionHeader title="Disk" />
+              <div className="p-4 space-y-3">
                 {sortedDisks.map((d) => (
                   <ProgressBar
                     key={d.mount}
@@ -600,22 +640,29 @@ function InstanceCard({
             </div>
           )}
 
-          {/* History — live in-memory time-range chart. Same sub-card
-              chrome as Disk. Title summarizes window size. */}
-          <div className="rounded-md border border-border/60 bg-bg-card/80 overflow-hidden">
-            <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-text-dim font-medium border-b border-border/40 bg-bg-input/20 flex items-center justify-between">
-              <span>History (live)</span>
-              <span className="text-text-dim normal-case tracking-normal">
-                {history.length >= 2
-                  ? `Last ~${Math.round((history.length * 10) / 60)} min — session-scoped`
-                  : "warming up"}
-              </span>
-            </div>
-            <div className="p-3">
-              <MultiLineChart
-                cpu={history.map((s) => s.cpuPct)}
-                mem={history.map((s) => s.memPct)}
-              />
+          {/* History — live in-memory time-range chart. Outer max-width
+              keeps the chart sensibly proportioned on wide panels; the
+              SVG itself uses preserveAspectRatio="xMidYMid meet" so the
+              lines don't get stretched horizontally. */}
+          <div
+            className="rounded-md overflow-hidden"
+            style={{ backgroundColor: SUB_CARD_BG, border: `1px solid ${SUBTLE_BORDER}` }}
+          >
+            <SectionHeader
+              title="History (live)"
+              right={
+                history.length >= 2
+                  ? `${history.length} samples · ~${Math.round((history.length * 10) / 60)} min · session-scoped`
+                  : "warming up"
+              }
+            />
+            <div className="p-4">
+              <div style={{ maxWidth: 880, margin: "0 auto" }}>
+                <MultiLineChart
+                  cpu={history.map((s) => s.cpuPct)}
+                  mem={history.map((s) => s.memPct)}
+                />
+              </div>
             </div>
           </div>
         </div>
@@ -627,13 +674,39 @@ function InstanceCard({
 }
 
 // StatChip — uniform label + value pair for the stat row under the
-// vitals bars. Kept as a tiny helper because every "label inline
-// value" pair used to duplicate the same markup.
+// vitals bars. Inline-padded label because Tailwind utility margins
+// (mr-1.5 etc.) sometimes don't compile in the panel CSS bundle, and
+// the live screenshot showed labels touching values.
 function StatChip({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div>
-      <span className="text-text-dim uppercase text-[10px] tracking-wider mr-1.5 font-medium">{label}</span>
-      {children}
+    <div className="inline-flex items-baseline">
+      <span
+        className="text-text-dim uppercase text-[10px] tracking-wider font-medium"
+        style={{ marginRight: "8px" }}
+      >{label}</span>
+      <span>{children}</span>
+    </div>
+  );
+}
+
+// SectionHeader — uniform titled strip on each sub-card. Used for
+// Disk and History (live). Right side optional, useful for showing
+// the session-scope hint on the history chart.
+function SectionHeader({ title, right }: { title: string; right?: string }) {
+  return (
+    <div
+      className="px-4 py-2 flex items-center justify-between"
+      style={{
+        backgroundColor: "rgba(255,255,255,0.02)",
+        borderBottom: `1px solid ${FAINT_DIVIDER}`,
+      }}
+    >
+      <span className="text-[10px] uppercase tracking-wider text-text-dim font-semibold">
+        {title}
+      </span>
+      {right && (
+        <span className="text-[10px] text-text-dim normal-case">{right}</span>
+      )}
     </div>
   );
 }
