@@ -929,12 +929,22 @@ function MonthView({
 
   return (
     <div className="h-full flex flex-col">
-      <div className="grid grid-cols-7 border-b border-border">
+      <div
+        className="border-b border-border"
+        style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))" }}
+      >
         {weekdays.map((w) => (
           <div key={w} className="px-2 py-1 text-text-dim text-xs uppercase">{w}</div>
         ))}
       </div>
-      <div className="grid grid-cols-7 grid-rows-6 flex-1 min-h-0">
+      <div
+        className="flex-1 min-h-0"
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
+          gridTemplateRows: "repeat(6, minmax(0, 1fr))",
+        }}
+      >
         {cells.map((d) => {
           const inMonth = d.getMonth() === month;
           const isToday = sameDay(d, today);
@@ -967,7 +977,10 @@ function MonthView({
                   {d.getDate()}
                 </button>
               </div>
-              <div className="flex flex-col gap-0.5 min-h-0 overflow-hidden">
+              <div
+                className="flex flex-col min-h-0 overflow-hidden"
+                style={{ gap: "2px" }}
+              >
                 {visible.map((ev) => {
                   const cal = calendarById.get(ev.calendar_id);
                   return (
@@ -975,12 +988,13 @@ function MonthView({
                       key={ev.id + "-" + ev.occurrence_start_at}
                       type="button"
                       onClick={(e) => { e.stopPropagation(); onEventClick(ev); }}
-                      className="flex items-center gap-1 px-1 py-0.5 rounded text-xs text-left hover:bg-bg-input min-w-0"
+                      className="flex items-center gap-1 px-1 rounded text-xs text-left hover:bg-bg-input min-w-0"
+                      style={{ paddingTop: "2px", paddingBottom: "2px" }}
                       title={ev.title}
                     >
                       <span
-                        className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-                        style={{ backgroundColor: cal?.color || "#3b82f6" }}
+                        className="rounded-full flex-shrink-0"
+                        style={{ width: "6px", height: "6px", backgroundColor: cal?.color || "#3b82f6" }}
                       />
                       {!ev.all_day && (
                         <span className="text-text-dim flex-shrink-0">
@@ -1038,7 +1052,14 @@ function YearView({
 
   const months = Array.from({ length: 12 }, (_, i) => new Date(year, i, 1));
   return (
-    <div className="p-4 grid gap-4 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
+    <div
+      className="p-4"
+      style={{
+        display: "grid",
+        gap: "1rem",
+        gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+      }}
+    >
       {months.map((m) => (
         <MiniMonth
           key={m.getMonth()}
@@ -1076,9 +1097,9 @@ function MiniMonth({
       >
         {month.toLocaleDateString(undefined, { month: "long" })}
       </button>
-      <div className="grid grid-cols-7">
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))" }}>
         {weekdays.map((w, i) => (
-          <div key={i} className="text-center text-text-dim text-xs py-0.5">{w}</div>
+          <div key={i} className="text-center text-text-dim text-xs" style={{ paddingTop: "2px", paddingBottom: "2px" }}>{w}</div>
         ))}
         {cells.map((d) => {
           const inMonth = d.getMonth() === m;
@@ -1102,8 +1123,15 @@ function MiniMonth({
               {d.getDate()}
               {color && !isToday && (
                 <span
-                  className="absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full"
-                  style={{ backgroundColor: color }}
+                  className="absolute rounded-full"
+                  style={{
+                    bottom: "2px",
+                    left: "50%",
+                    transform: "translateX(-50%)",
+                    width: "4px",
+                    height: "4px",
+                    backgroundColor: color,
+                  }}
                 />
               )}
             </button>
