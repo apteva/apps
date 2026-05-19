@@ -69,6 +69,170 @@ function formatUptime(s: number): string {
   return `${Math.floor(s / 86400)}d`;
 }
 
+// Color ramps for utilization. Returns a CSS color literal so callers
+// can stick it into inline style (Tailwind arbitrary classes like
+// bg-[#…] don't ship to the panel CSS bundle — feedback_no_arbitrary_tailwind_in_panels).
+function pctColor(pct: number): string {
+  if (pct >= 90) return "#dc2626"; // red-600
+  if (pct >= 75) return "#f59e0b"; // amber-500
+  if (pct >= 50) return "#eab308"; // yellow-500
+  return "#16a34a";                 // green-600
+}
+
+// Load average threshold heuristic. We don't have a reliable
+// per-instance "cores" field (the size is just a name like cx22),
+// so the bands are deliberately conservative: l1>2 amber, l1>4 red.
+// Wrong on a 16-core box; correct enough on the Hetzner shared
+// types most operators provision.
+function loadColor(l1: number): string {
+  if (l1 >= 4) return "#dc2626";
+  if (l1 >= 2) return "#f59e0b";
+  return "#16a34a";
+}
+
+function formatPriceEUR(cents: number): string {
+  if (!cents) return "";
+  return `€${(cents / 100).toFixed(2)}`;
+}
+
+// ─── Visuals ──────────────────────────────────────────────────────
+
+// ProgressBar — labeled percentage with a colored fill. Width via
+// inline style; Tailwind arbitrary widths don't compile in the
+// dashboard's CSS bundle.
+function ProgressBar({
+  pct, label, sublabel, height,
+}: {
+  pct: number;
+  label?: string;
+  sublabel?: string;
+  height?: number;
+}) {
+  const clamped = Math.max(0, Math.min(100, pct));
+  const h = height ?? 6;
+  return (
+    <div className="space-y-0.5">
+      {(label || sublabel) && (
+        <div className="flex justify-between items-baseline text-[10px]">
+          {label && <span className="text-text-dim uppercase tracking-wider">{label}</span>}
+          {sublabel && <span className="text-text font-mono">{sublabel}</span>}
+        </div>
+      )}
+      <div
+        className="w-full rounded-full overflow-hidden bg-bg-input"
+        style={{ height: `${h}px` }}
+        title={`${clamped.toFixed(1)}%`}
+      >
+        <div
+          className="h-full rounded-full transition-all"
+          style={{ width: `${clamped}%`, backgroundColor: pctColor(clamped) }}
+        />
+      </div>
+    </div>
+  );
+}
+
+// Sparkline — single-series tiny line chart. Plots in equal-width
+// steps, auto-scales y to data range. Pure SVG, no library.
+function Sparkline({
+  values, width, height, color,
+}: {
+  values: number[];
+  width?: number;
+  height?: number;
+  color?: string;
+}) {
+  const w = width ?? 80;
+  const h = height ?? 20;
+  if (values.length < 2) {
+    return <svg width={w} height={h} />;
+  }
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const stepX = w / (values.length - 1);
+  const path = values
+    .map((v, i) => {
+      const x = i * stepX;
+      const y = h - ((v - min) / range) * h;
+      return `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
+    })
+    .join(" ");
+  return (
+    <svg width={w} height={h} className="block" aria-hidden>
+      <path d={path} fill="none" stroke={color ?? "#3b82f6"} strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+// MultiLineChart — dual-line (CPU% + memory%) over the in-memory
+// history window. Y axis pinned 0-100 so both series are comparable.
+// Includes gridlines at 25/50/75/100 and a tiny legend.
+function MultiLineChart({
+  cpu, mem, width, height,
+}: {
+  cpu: number[];
+  mem: number[];
+  width?: number;
+  height?: number;
+}) {
+  const w = width ?? 460;
+  const h = height ?? 80;
+  const padding = 24;
+  const plotW = w - padding - 8;
+  const plotH = h - 24;
+  const n = Math.max(cpu.length, mem.length);
+  if (n < 2) {
+    return (
+      <div
+        className="text-[10px] text-text-dim flex items-center justify-center bg-bg-input/30 rounded"
+        style={{ width: w, height: h }}
+      >
+        accumulating samples…
+      </div>
+    );
+  }
+  const xAt = (i: number, len: number) =>
+    padding + (len > 1 ? (i / (len - 1)) * plotW : 0);
+  const yAt = (v: number) => 8 + (1 - Math.max(0, Math.min(100, v)) / 100) * plotH;
+  const lineFor = (vs: number[]) =>
+    vs
+      .map((v, i) => `${i === 0 ? "M" : "L"} ${xAt(i, vs.length).toFixed(1)} ${yAt(v).toFixed(1)}`)
+      .join(" ");
+  const cpuPath = lineFor(cpu);
+  const memPath = lineFor(mem);
+  return (
+    <svg width={w} height={h} className="block" aria-label="cpu/memory history">
+      {/* gridlines */}
+      {[25, 50, 75].map((g) => (
+        <line
+          key={g}
+          x1={padding} y1={yAt(g)} x2={w - 8} y2={yAt(g)}
+          stroke="currentColor" strokeOpacity="0.08" strokeWidth="1"
+        />
+      ))}
+      {/* y labels */}
+      {[0, 50, 100].map((g) => (
+        <text
+          key={g}
+          x={padding - 4} y={yAt(g) + 3}
+          textAnchor="end" fontSize="9" fill="currentColor" fillOpacity="0.4"
+        >{g}</text>
+      ))}
+      <path d={cpuPath} fill="none" stroke="#3b82f6" strokeWidth="1.5" />
+      <path d={memPath} fill="none" stroke="#8b5cf6" strokeWidth="1.5" />
+      {/* legend */}
+      <g transform={`translate(${padding}, ${h - 6})`} fontSize="9" fill="currentColor" fillOpacity="0.7">
+        <rect x="0" y="-7" width="8" height="2" fill="#3b82f6" />
+        <text x="12" y="0">CPU</text>
+        <rect x="44" y="-7" width="8" height="2" fill="#8b5cf6" />
+        <text x="56" y="0">MEM</text>
+        <text x="92" y="0" fillOpacity="0.5">{n} samples</text>
+      </g>
+    </svg>
+  );
+}
+
 export default function InstancesPanel({ projectId, installId }: NativePanelProps) {
   const [instances, setInstances] = useState<Instance[] | null>(null);
   const [error, setError] = useState("");
@@ -123,6 +287,14 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
     }
   };
 
+  // Cost rollup: sum of monthly cost across remote (non-local)
+  // instances. Local is free by construction; including it would just
+  // confuse the number.
+  const remoteCount = (instances || []).filter((i) => i.provider !== "local").length;
+  const monthlyEUR = (instances || [])
+    .filter((i) => i.provider !== "local")
+    .reduce((s, i) => s + (i.monthly_cost_cents || 0), 0);
+
   return (
     <div className="h-full flex flex-col">
       <header className="px-4 py-3 border-b border-border flex items-baseline gap-3">
@@ -130,6 +302,16 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
         <span className="text-xs text-text-muted flex-1">
           Host inventory — local + remote (Hetzner v0.1).
         </span>
+        {remoteCount > 0 && (
+          <span
+            className="text-xs text-text-muted"
+            title="Sum of monthly cost across non-local instances"
+          >
+            <span className="font-mono text-text">{formatPriceEUR(monthlyEUR)}</span>
+            <span className="text-text-dim">/mo</span>
+            <span className="text-text-dim"> · {remoteCount} remote</span>
+          </span>
+        )}
         <button
           type="button"
           onClick={() => setShowCreate(true)}
@@ -175,6 +357,19 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
   );
 }
 
+// MetricsSample is a single tick captured for the in-memory history.
+// We don't persist anything; the panel session is the entire window.
+// Caps at HISTORY_MAX entries so memory stays bounded if someone
+// leaves the panel open for hours.
+interface MetricsSample {
+  ts: number; // ms since epoch when the metrics fetch resolved
+  cpuPct: number;
+  memPct: number;
+  l1: number;
+}
+const HISTORY_MAX = 360;          // 10s polling × 360 = 1 hour
+const STALE_THRESHOLD_MS = 30000; // 30s without a successful poll → "stale"
+
 function InstanceCard({
   inst, withParams, busy, onDestroy,
 }: {
@@ -184,6 +379,9 @@ function InstanceCard({
   onDestroy: () => void;
 }) {
   const [metrics, setMetrics] = useState<MetricsWire | null>(null);
+  const [history, setHistory] = useState<MetricsSample[]>([]);
+  const [lastPollAt, setLastPollAt] = useState<number>(0);
+  const [, setNowTick] = useState(0); // forces stale-badge re-render
 
   useEffect(() => {
     let cancelled = false;
@@ -191,20 +389,45 @@ function InstanceCard({
       if (inst.status !== "ready") return;
       fetch(`${API}/instances/${inst.id}/metrics?${withParams()}`, { credentials: "same-origin" })
         .then((r) => r.ok ? r.json() : null)
-        .then((j) => { if (!cancelled && j?.metrics) setMetrics(j.metrics); })
+        .then((j) => {
+          if (cancelled || !j?.metrics) return;
+          const m = j.metrics as MetricsWire;
+          setMetrics(m);
+          setLastPollAt(Date.now());
+          // Append to history. Memory % derived from used/total so
+          // the chart can put cpu + mem on the same 0-100 scale.
+          const memPct = m.mem.total_bytes > 0
+            ? (m.mem.used_bytes / m.mem.total_bytes) * 100
+            : 0;
+          setHistory((prev) => {
+            const next = [
+              ...prev,
+              { ts: Date.now(), cpuPct: m.cpu.total_pct, memPct, l1: m.load.l1 },
+            ];
+            return next.length > HISTORY_MAX ? next.slice(-HISTORY_MAX) : next;
+          });
+        })
         .catch(() => {});
     };
     fetchMetrics();
     const t = setInterval(fetchMetrics, 10000);
-    return () => { cancelled = true; clearInterval(t); };
+    // Tick the clock every 5s so the "stale Ns ago" badge updates
+    // without waiting on the next metrics fetch.
+    const tick = setInterval(() => setNowTick((n) => n + 1), 5000);
+    return () => { cancelled = true; clearInterval(t); clearInterval(tick); };
   }, [inst.id, inst.status, withParams]);
 
   const ip = inst.public_ipv4 || inst.public_ipv6 || "—";
   const isLocal = inst.provider === "local";
+  const memPct = metrics && metrics.mem.total_bytes > 0
+    ? (metrics.mem.used_bytes / metrics.mem.total_bytes) * 100
+    : 0;
+  const staleAgeS = lastPollAt > 0 ? Math.floor((Date.now() - lastPollAt) / 1000) : 0;
+  const stale = lastPollAt > 0 && (Date.now() - lastPollAt) > STALE_THRESHOLD_MS;
 
   return (
     <div className="border border-border rounded p-3 space-y-2 bg-bg-input/20">
-      <div className="flex items-baseline gap-2">
+      <div className="flex items-baseline gap-2 flex-wrap">
         <span className={statusColor(inst.status) + " text-xs"}>●</span>
         <span className="text-text font-medium">{inst.name}</span>
         <span className="text-text-dim text-xs">
@@ -213,7 +436,18 @@ function InstanceCard({
           {inst.region ? ` · ${inst.region}` : ""}
         </span>
         <span className="text-text-dim text-xs font-mono ml-2">{ip}</span>
+        {!isLocal && inst.monthly_cost_cents > 0 && (
+          <span className="text-text-dim text-[11px]">
+            {formatPriceEUR(inst.monthly_cost_cents)}/mo
+          </span>
+        )}
         <span className="flex-1" />
+        {stale && metrics && (
+          <span
+            className="text-[10px] px-1.5 py-0.5 rounded bg-amber/15 text-amber"
+            title={`No successful metrics poll for ${staleAgeS}s — values shown may be outdated`}
+          >stale {staleAgeS}s</span>
+        )}
         <span className={statusColor(inst.status) + " text-xs"}>{inst.status}</span>
         {!isLocal && (
           <button
@@ -230,34 +464,98 @@ function InstanceCard({
       )}
 
       {metrics ? (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs text-text-muted">
-          <Stat label="CPU" value={`${metrics.cpu.total_pct.toFixed(1)}%`} />
-          <Stat label="MEM" value={`${formatBytes(metrics.mem.used_bytes)} / ${formatBytes(metrics.mem.total_bytes)}`} />
-          <Stat label="LOAD" value={`${metrics.load.l1.toFixed(2)} / ${metrics.load.l5.toFixed(2)} / ${metrics.load.l15.toFixed(2)}`} />
-          <Stat label="UP" value={formatUptime(metrics.uptime_s)} />
+        <div
+          style={stale ? { opacity: 0.55 } : undefined}
+          className="space-y-2"
+        >
+          {/* Progress bars: CPU + Memory share the same 0-100 scale. */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="flex items-center gap-2">
+              <div className="flex-1">
+                <ProgressBar
+                  label="CPU"
+                  sublabel={`${metrics.cpu.total_pct.toFixed(1)}%`}
+                  pct={metrics.cpu.total_pct}
+                />
+              </div>
+              <Sparkline
+                values={history.map((s) => s.cpuPct)}
+                color="#3b82f6"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="flex-1">
+                <ProgressBar
+                  label="MEM"
+                  sublabel={`${formatBytes(metrics.mem.used_bytes)} / ${formatBytes(metrics.mem.total_bytes)} · ${memPct.toFixed(0)}%`}
+                  pct={memPct}
+                />
+              </div>
+              <Sparkline
+                values={history.map((s) => s.memPct)}
+                color="#8b5cf6"
+              />
+            </div>
+          </div>
+
+          {/* Stat row: load + uptime + procs. Load is colored against
+              a conservative threshold (cores unknown). */}
+          <div className="flex flex-wrap gap-4 text-xs text-text-muted">
+            <div>
+              <span className="text-text-dim uppercase text-[10px] mr-1">LOAD</span>
+              <span
+                className="font-mono"
+                style={{ color: loadColor(metrics.load.l1) }}
+                title={`1/5/15 min load average: ${metrics.load.l1.toFixed(2)} / ${metrics.load.l5.toFixed(2)} / ${metrics.load.l15.toFixed(2)}`}
+              >
+                {metrics.load.l1.toFixed(2)}
+              </span>
+              <span className="text-text-dim font-mono ml-1">
+                / {metrics.load.l5.toFixed(2)} / {metrics.load.l15.toFixed(2)}
+              </span>
+            </div>
+            <div>
+              <span className="text-text-dim uppercase text-[10px] mr-1">UP</span>
+              <span className="text-text font-mono">{formatUptime(metrics.uptime_s)}</span>
+            </div>
+            {metrics.process_count > 0 && (
+              <div>
+                <span className="text-text-dim uppercase text-[10px] mr-1">PROCS</span>
+                <span className="text-text font-mono">{metrics.process_count}</span>
+              </div>
+            )}
+          </div>
+
+          {/* Per-mount disk bars. Slice to top 3 — most boxes only
+              have one mount of interest; more than 3 makes the card
+              too tall. */}
+          {metrics.disk?.length > 0 && (
+            <div className="space-y-1.5 pt-1">
+              {metrics.disk.slice(0, 3).map((d) => (
+                <ProgressBar
+                  key={d.mount}
+                  label={d.mount}
+                  sublabel={`${formatBytes(d.used_bytes)} / ${formatBytes(d.total_bytes)} · ${d.used_pct.toFixed(0)}%`}
+                  pct={d.used_pct}
+                  height={4}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* Time-range chart: live, in-memory. Renders an "accumulating"
+              placeholder until we have 2+ samples. Caps the window at
+              ~1h via HISTORY_MAX. */}
+          <div className="pt-1">
+            <MultiLineChart
+              cpu={history.map((s) => s.cpuPct)}
+              mem={history.map((s) => s.memPct)}
+            />
+          </div>
         </div>
       ) : inst.status === "ready" ? (
         <div className="text-text-dim text-[11px]">Loading vitals…</div>
       ) : null}
-
-      {metrics && metrics.disk?.length > 0 && (
-        <div className="text-[11px] text-text-dim font-mono space-y-0.5">
-          {metrics.disk.slice(0, 3).map((d) => (
-            <div key={d.mount}>
-              {d.mount.padEnd(20)} {formatBytes(d.used_bytes)} / {formatBytes(d.total_bytes)} ({d.used_pct.toFixed(0)}%)
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <div className="text-text-dim uppercase text-[10px]">{label}</div>
-      <div className="text-text font-mono text-xs">{value}</div>
     </div>
   );
 }
