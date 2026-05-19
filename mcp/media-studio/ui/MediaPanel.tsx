@@ -95,7 +95,17 @@ interface Generation {
   upstream_urls: string[];
   thumbnail_b64: string;
   count: number;
+  cost_usd: number;
   created_at: string;
+}
+
+// formatCost renders the per-generation USD figure. Trims trailing
+// zeros so $0.0400 reads as "$0.04" but $0.0009 still keeps precision.
+function formatCost(n: number): string {
+  if (!n || n <= 0) return "";
+  if (n >= 0.01) return "$" + n.toFixed(2);
+  if (n >= 0.001) return "$" + n.toFixed(4);
+  return "$" + n.toFixed(6);
 }
 
 interface BindingsStatus {
@@ -226,6 +236,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [status, setStatus] = useState("");
   const [generating, setGenerating] = useState(false);
   const [selected, setSelected] = useState<Generation | null>(null);
+  const [lightbox, setLightbox] = useState<Generation | null>(null);
 
   // Per-kind composer state.
   const [prompt, setPrompt] = useState("");
@@ -430,10 +441,13 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       }
       // Async kinds (video today) return _meta.status === "queued".
       // Tell the user the bytes will arrive later via the event/poll loop.
-      const meta = (result as unknown as { _meta?: { status?: string; job_id?: number } })._meta;
+      const meta = (result as unknown as {
+        _meta?: { status?: string; job_id?: number; cost_usd?: number };
+      })._meta;
       if (meta?.status === "queued") {
         setPrompt("");
-        setStatus(`Queued — job #${meta.job_id}, polling for completion…`);
+        const costStr = meta.cost_usd ? ` · est. ${formatCost(meta.cost_usd)}` : "";
+        setStatus(`Queued — job #${meta.job_id}${costStr}, polling for completion…`);
         return;
       }
       setPrompt("");
@@ -552,12 +566,20 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           )}
 
           <div className="flex-1 overflow-auto border border-border rounded">
-            {items.length === 0 ? (
+            {items.length === 0 && !generating ? (
               <div className="py-12 px-6 text-center text-text-muted text-sm">
                 {status || "No generations yet for this kind."}
               </div>
             ) : (
-              <Gallery kind={activeKind} items={items} onSelect={setSelected} />
+              <Gallery
+                kind={activeKind}
+                items={items}
+                onSelect={setSelected}
+                onOpenLightbox={setLightbox}
+                generating={generating}
+                generatingPrompt={prompt}
+                generatingModel={isEditMode ? editModel : imageModel}
+              />
             )}
           </div>
           <div className="text-xs text-text-dim">{status}</div>
@@ -581,6 +603,24 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           />
         )}
       </div>
+
+      {lightbox && (
+        <Lightbox
+          item={lightbox}
+          onClose={() => setLightbox(null)}
+          onUseAsReference={
+            lightbox.kind === "image" && lightbox.storage_ids.length > 0
+              ? () => {
+                  const id = lightbox.storage_ids[0];
+                  setSourceImage(`storage:${id}`);
+                  setSourceImageLabel(`Storage #${id}`);
+                  setLightbox(null);
+                  setTab("image");
+                }
+              : undefined
+          }
+        />
+      )}
     </div>
   );
 }
@@ -813,10 +853,42 @@ function ReferenceImageInput({
   };
 
   if (sourceImage) {
+    // Compute a preview src from whatever shape sourceImage takes.
+    const previewSrc = sourceImagePreviewSrc(sourceImage);
     return (
-      <div className="flex items-center gap-3 p-2.5 rounded border border-accent bg-bg-card">
-        <span className="text-xs text-text-muted">Reference:</span>
-        <span className="text-sm text-text font-medium flex-1 truncate">{sourceImageLabel || "(set)"}</span>
+      <div className="flex items-center gap-3 p-2 rounded border border-accent bg-bg-card">
+        {previewSrc ? (
+          <img
+            src={previewSrc}
+            alt=""
+            style={{
+              width: 56,
+              height: 56,
+              objectFit: "cover",
+              borderRadius: 4,
+              flexShrink: 0,
+            }}
+          />
+        ) : (
+          <div
+            style={{
+              width: 56,
+              height: 56,
+              borderRadius: 4,
+              background: "var(--apteva-bg-input, #222)",
+              flexShrink: 0,
+            }}
+            className="flex items-center justify-center text-text-dim text-xs"
+          >
+            ref
+          </div>
+        )}
+        <div className="flex-1 min-w-0">
+          <div className="text-xs text-text-muted">Reference image</div>
+          <div className="text-sm text-text font-medium truncate" title={sourceImageLabel}>
+            {sourceImageLabel || "(set)"}
+          </div>
+        </div>
         <button
           onClick={onClear}
           className="text-text-muted hover:text-text text-sm px-2 py-0.5 border border-border rounded"
@@ -1034,37 +1106,78 @@ function Gallery({
   kind,
   items,
   onSelect,
+  onOpenLightbox,
+  generating,
+  generatingPrompt,
+  generatingModel,
 }: {
   kind: Kind;
   items: Generation[];
   onSelect: (g: Generation) => void;
+  onOpenLightbox: (g: Generation) => void;
+  generating: boolean;
+  generatingPrompt: string;
+  generatingModel: string;
 }) {
   if (kind === "image") {
     return (
-      <div className="grid grid-cols-2 gap-2 p-2">
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+          gap: 8,
+          padding: 8,
+        }}
+      >
+        {generating && (
+          <GeneratingCard prompt={generatingPrompt} model={generatingModel} />
+        )}
         {items.map((g) => {
           const src = imageSrc(g);
           return (
-            <button
+            <div
               key={g.id}
-              onClick={() => onSelect(g)}
-              className="text-left border border-border rounded overflow-hidden hover:border-accent transition-colors"
+              className="border border-border rounded overflow-hidden hover:border-accent transition-colors"
             >
               {src ? (
-                <img src={src} alt="" className="w-full" loading="lazy" />
+                <button
+                  onClick={() => onOpenLightbox(g)}
+                  className="block w-full"
+                  title="Click to open"
+                >
+                  <img src={src} alt="" className="w-full" loading="lazy" style={{ display: "block" }} />
+                </button>
               ) : (
                 <div className="bg-bg-input py-12 text-center text-text-muted text-xs">no preview</div>
               )}
-              <CardMeta g={g} />
-            </button>
+              <button
+                onClick={() => onSelect(g)}
+                className="block w-full text-left"
+                title="Show details"
+              >
+                <CardMeta g={g} />
+              </button>
+            </div>
           );
         })}
       </div>
     );
   }
-  // Video, audio, music: single-column list with native players.
+  // Video, audio, music: responsive grid of media-card players.
   return (
-    <div className="flex flex-col gap-2 p-2">
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: kind === "video"
+          ? "repeat(auto-fill, minmax(360px, 1fr))"
+          : "repeat(auto-fill, minmax(280px, 1fr))",
+        gap: 8,
+        padding: 8,
+      }}
+    >
+      {generating && kind === "video" && (
+        <GeneratingCard prompt={generatingPrompt} model={generatingModel} />
+      )}
       {items.map((g) => {
         const url = g.storage_urls?.[0] || g.upstream_urls?.[0] || "";
         return (
@@ -1090,12 +1203,61 @@ function Gallery({
   );
 }
 
+function GeneratingCard({ prompt, model }: { prompt: string; model: string }) {
+  return (
+    <div
+      className="border border-accent rounded overflow-hidden bg-bg-card flex flex-col items-center justify-center"
+      style={{ minHeight: 220 }}
+    >
+      <Spinner />
+      <div className="mt-3 text-sm text-text">Generating…</div>
+      {prompt && (
+        <div className="mt-1 px-3 text-xs text-text-muted text-center" style={{ maxWidth: 260 }} title={prompt}>
+          {prompt.length > 80 ? prompt.slice(0, 77) + "…" : prompt}
+        </div>
+      )}
+      {model && <div className="mt-1 text-text-dim" style={{ fontSize: 10 }}>{model}</div>}
+    </div>
+  );
+}
+
+function Spinner() {
+  return (
+    <svg width="28" height="28" viewBox="0 0 24 24">
+      <circle
+        cx="12"
+        cy="12"
+        r="9"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeDasharray="44"
+        strokeDashoffset="22"
+        style={{ animation: "ms-spin 0.9s linear infinite" }}
+      />
+      <style>{`@keyframes ms-spin { to { transform: rotate(360deg); transform-origin: 12px 12px; } }`}</style>
+    </svg>
+  );
+}
+
 function CardMeta({ g }: { g: Generation }) {
+  const cost = formatCost(g.cost_usd);
   return (
     <div className="p-2">
       <div className="text-text text-xs truncate">{g.prompt}</div>
-      <div className="text-text-dim mt-0.5" style={{ fontSize: 10 }}>
-        {g.provider} · {g.model || g.size || "—"} · {new Date(g.created_at).toLocaleString()}
+      <div className="text-text-dim mt-0.5 flex items-center gap-1.5" style={{ fontSize: 10 }}>
+        <span>{g.provider}</span>
+        <span>·</span>
+        <span>{g.model || g.size || "—"}</span>
+        <span>·</span>
+        <span>{new Date(g.created_at).toLocaleString()}</span>
+        {cost && (
+          <>
+            <span>·</span>
+            <span className="text-accent">{cost}</span>
+          </>
+        )}
       </div>
     </div>
   );
@@ -1150,6 +1312,9 @@ function DetailAside({
             <Row label="Duration" value={`${(selected.duration_ms / 1000).toFixed(1)}s`} />
           )}
           <Row label="Count" value={String(selected.count)} />
+          {formatCost(selected.cost_usd) && (
+            <Row label="Cost" value={formatCost(selected.cost_usd)} />
+          )}
           <Row label="Created" value={new Date(selected.created_at).toLocaleString()} />
           {selected.revised_prompt && <Row label="Revised" value={selected.revised_prompt} />}
           {selected.storage_ids.length > 0 && (
@@ -1213,6 +1378,126 @@ function VideoJobsBanner({
           </span>
         </div>
       ))}
+    </div>
+  );
+}
+
+// sourceImagePreviewSrc renders a tiny <img> for the reference state.
+// Handles three shapes: storage handle ("storage:N" → platform-proxy
+// URL), http(s) URL (pass-through), or base64 (assume PNG, wrap in
+// data: URL). Returns "" when none match (caller renders placeholder).
+function sourceImagePreviewSrc(value: string): string {
+  const v = value.trim();
+  if (!v) return "";
+  if (v.startsWith("storage:")) {
+    const id = v.slice("storage:".length);
+    // Same routing the gallery uses for storage_urls.
+    return `/api/apps/storage/files/${id}/content`;
+  }
+  if (v.startsWith("http://") || v.startsWith("https://") || v.startsWith("data:")) {
+    return v;
+  }
+  // Bare base64 — try as PNG; browser will figure out if it's something else.
+  return `data:image/png;base64,${v}`;
+}
+
+function Lightbox({
+  item,
+  onClose,
+  onUseAsReference,
+}: {
+  item: Generation;
+  onClose: () => void;
+  onUseAsReference?: () => void;
+}) {
+  const url = item.storage_urls?.[0] || item.upstream_urls?.[0] || imageSrc(item);
+  // Close on Esc.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.85)",
+        zIndex: 9999,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 24,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          maxWidth: "100%",
+          maxHeight: "100%",
+          gap: 12,
+        }}
+      >
+        {url && item.kind === "image" && (
+          <img
+            src={url}
+            alt=""
+            style={{ maxWidth: "92vw", maxHeight: "82vh", objectFit: "contain", borderRadius: 4 }}
+          />
+        )}
+        {url && item.kind === "video" && (
+          <video controls src={url} style={{ maxWidth: "92vw", maxHeight: "82vh" }} />
+        )}
+        {url && (item.kind === "audio_tts" || item.kind === "audio_sfx" || item.kind === "music") && (
+          <audio controls src={url} style={{ width: 480 }} />
+        )}
+        <div className="text-text text-sm text-center" style={{ maxWidth: 700 }}>
+          {item.prompt}
+        </div>
+        <div className="text-text-dim" style={{ fontSize: 11 }}>
+          {item.provider} · {item.model || item.size || "—"} ·{" "}
+          {new Date(item.created_at).toLocaleString()}
+          {formatCost(item.cost_usd) && (
+            <>
+              {" · "}
+              <span className="text-accent">{formatCost(item.cost_usd)}</span>
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {onUseAsReference && (
+            <button
+              onClick={onUseAsReference}
+              className="text-xs px-3 py-1.5 border border-border rounded text-accent hover:border-accent"
+            >
+              Use as reference
+            </button>
+          )}
+          {url && (
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener"
+              className="text-xs px-3 py-1.5 border border-border rounded text-text"
+            >
+              Open original
+            </a>
+          )}
+          <button
+            onClick={onClose}
+            className="text-xs px-3 py-1.5 border border-border rounded text-text-muted"
+          >
+            Close (Esc)
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

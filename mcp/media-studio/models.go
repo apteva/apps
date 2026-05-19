@@ -35,9 +35,20 @@ type modelCacheValue struct {
 	FetchedAt time.Time
 }
 
+// specCacheKey holds the raw Venice model_spec keyed by venice-type
+// (image / inpaint / video / …) so cost lookups can find a model
+// regardless of which kind-tab the user originally fetched.
+type specCacheKey struct {
+	ConnectionID int64
+	VeniceType   string // "image" | "inpaint" | "video" | "tts" | "music"
+	ModelID      string
+}
+
 var (
 	modelCacheMu sync.RWMutex
 	modelCache   = map[modelCacheKey]modelCacheValue{}
+	specCache    = map[specCacheKey]json.RawMessage{}
+	specCacheAt  = map[specCacheKey]time.Time{}
 )
 
 // kindToVeniceType maps a media-studio kind to Venice's list_models
@@ -89,7 +100,11 @@ func loadModelsFor(ctx *sdk.AppCtx, kind string) ([]modelEntry, error) {
 	if res == nil || !res.Success {
 		return nil, nil
 	}
-	models := parseModelList(bound.AppSlug, kind, res.Data)
+	veniceType := ""
+	if bound.AppSlug == "venice-ai" {
+		veniceType = kindToVeniceType(kind)
+	}
+	models := parseModelList(bound.AppSlug, kind, res.Data, bound.ConnectionID, veniceType)
 
 	modelCacheMu.Lock()
 	modelCache[key] = modelCacheValue{Models: models, FetchedAt: time.Now()}
@@ -99,28 +114,40 @@ func loadModelsFor(ctx *sdk.AppCtx, kind string) ([]modelEntry, error) {
 
 // parseModelList normalizes per-provider response shapes into a
 // uniform {id, label} list. Filters to the kind when the provider
-// returns mixed types in one payload (OpenAI).
-func parseModelList(providerSlug, kind string, raw json.RawMessage) []modelEntry {
+// returns mixed types in one payload (OpenAI). For Venice it also
+// populates the spec cache so cost lookups can find each model's
+// model_spec.pricing later without an extra round-trip.
+func parseModelList(providerSlug, kind string, raw json.RawMessage, connID int64, veniceType string) []modelEntry {
 	switch providerSlug {
 	case "venice-ai":
 		var body struct {
-			Data []struct {
-				ID   string `json:"id"`
-				Type string `json:"type"`
-			} `json:"data"`
+			Data []json.RawMessage `json:"data"`
 		}
 		if err := json.Unmarshal(raw, &body); err != nil {
 			return nil
 		}
 		out := make([]modelEntry, 0, len(body.Data))
-		for _, m := range body.Data {
-			if m.ID == "" {
+		now := time.Now()
+		modelCacheMu.Lock()
+		for _, mRaw := range body.Data {
+			var head struct {
+				ID   string `json:"id"`
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(mRaw, &head); err != nil || head.ID == "" {
 				continue
 			}
-			out = append(out, modelEntry{ID: m.ID, Label: m.ID})
+			// Stash the full raw blob keyed by (conn, venice-type, model)
+			// — pricing lookup reads from here.
+			specCache[specCacheKey{ConnectionID: connID, VeniceType: veniceType, ModelID: head.ID}] = mRaw
+			specCacheAt[specCacheKey{ConnectionID: connID, VeniceType: veniceType, ModelID: head.ID}] = now
+			out = append(out, modelEntry{ID: head.ID, Label: head.ID})
 		}
+		modelCacheMu.Unlock()
 		return out
 	case "openai-api":
+		_ = connID // openai has no published model_spec to cache; cost stays 0
+		_ = veniceType
 		var body struct {
 			Data []struct {
 				ID      string `json:"id"`
@@ -140,6 +167,112 @@ func parseModelList(providerSlug, kind string, raw json.RawMessage) []modelEntry
 		return out
 	}
 	return nil
+}
+
+// ensureVeniceSpecLoaded triggers a sync fetch+parse of Venice's
+// type=<veniceType> models for the given connection if the spec cache
+// doesn't have it yet (or if the entry is older than modelCacheTTL).
+// No-op when the platform call fails — we just log and return,
+// cost lookup falls back to 0.
+func ensureVeniceSpecLoaded(ctx *sdk.AppCtx, connID int64, veniceType string) {
+	// Cheap probe — if any entry exists for this (connID, veniceType)
+	// and is fresh, we already have specs.
+	modelCacheMu.RLock()
+	for k, ts := range specCacheAt {
+		if k.ConnectionID == connID && k.VeniceType == veniceType && time.Since(ts) < modelCacheTTL {
+			modelCacheMu.RUnlock()
+			return
+		}
+	}
+	modelCacheMu.RUnlock()
+
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_models", map[string]any{
+		"type": veniceType,
+	})
+	if err != nil || res == nil || !res.Success {
+		return
+	}
+	parseModelList("venice-ai", "", res.Data, connID, veniceType)
+}
+
+// getVeniceModelSpec returns the cached raw model_spec for a given
+// (connection, venice-type, model). Returns (nil, false) when missing.
+func getVeniceModelSpec(connID int64, veniceType, modelID string) (json.RawMessage, bool) {
+	modelCacheMu.RLock()
+	defer modelCacheMu.RUnlock()
+	raw, ok := specCache[specCacheKey{ConnectionID: connID, VeniceType: veniceType, ModelID: modelID}]
+	return raw, ok
+}
+
+// computeVeniceImageCost reads model_spec.pricing from a cached
+// Venice model and returns the cost in USD for one variant of the
+// given capability + args. Cost = perVariant × variants.
+//
+// Pricing shapes seen in the wild:
+//   generate (pixel models):       {"pricing":{"generation":{"usd":0.01}}}
+//   generate (resolution tier):    {"pricing":{"resolutions":{"1K":{"usd":0.08}, "2K":{"usd":0.10}}}}
+//   edit (Venice's "inpaint"):     {"pricing":{"inpaint":{"usd":0.04}}}
+//
+// Returns (0, false) when the spec lacks a price for the capability.
+func computeVeniceImageCost(specRaw json.RawMessage, capability string, args map[string]any) (float64, bool) {
+	var spec struct {
+		ModelSpec struct {
+			Pricing struct {
+				Generation  *struct{ USD float64 `json:"usd"` } `json:"generation,omitempty"`
+				Inpaint     *struct{ USD float64 `json:"usd"` } `json:"inpaint,omitempty"`
+				Resolutions map[string]struct {
+					USD float64 `json:"usd"`
+				} `json:"resolutions,omitempty"`
+			} `json:"pricing"`
+			Constraints struct {
+				DefaultResolution string `json:"defaultResolution"`
+			} `json:"constraints"`
+		} `json:"model_spec"`
+	}
+	if err := json.Unmarshal(specRaw, &spec); err != nil {
+		return 0, false
+	}
+	p := spec.ModelSpec.Pricing
+	variants := intArg(args, "n", 1)
+	if v := intArg(args, "variants", 0); v > 0 {
+		variants = v
+	}
+	if variants < 1 {
+		variants = 1
+	}
+
+	var perVariant float64
+	var ok bool
+	switch capability {
+	case "image.edit":
+		if p.Inpaint != nil {
+			perVariant, ok = p.Inpaint.USD, true
+		}
+	case "image.generate":
+		if p.Generation != nil {
+			perVariant, ok = p.Generation.USD, true
+			break
+		}
+		if len(p.Resolutions) > 0 {
+			tier := ""
+			if opts, _ := args["options"].(map[string]any); opts != nil {
+				tier = strArg(opts, "resolution", "")
+			}
+			if tier == "" {
+				tier = spec.ModelSpec.Constraints.DefaultResolution
+			}
+			if tier == "" {
+				tier = "1K"
+			}
+			if r, found := p.Resolutions[tier]; found {
+				perVariant, ok = r.USD, true
+			}
+		}
+	}
+	if !ok {
+		return 0, false
+	}
+	return perVariant * float64(variants), true
 }
 
 // openaiModelMatches filters OpenAI's flat /models list to the ones

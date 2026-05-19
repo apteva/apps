@@ -133,12 +133,17 @@ func (a *App) handleVideoQueueResponse(ctx *sdk.AppCtx, providerSlug string, arg
 	sourceRef := strArg(args, "_source_image_ref", "")
 	requestJSON, _ := json.Marshal(args)
 
+	// Best-effort cost lookup via /video/quote. If the quote call fails
+	// we still want the queue/poll path to work, so cost stays 0 and
+	// the panel just renders the row without a price tag.
+	costUSD := veniceVideoQuote(ctx, providerSlug, args)
+
 	result, err := globalCtx.AppDB().Exec(
 		`INSERT INTO video_jobs
 			(project_id, queue_id, provider, model, prompt,
-			 source_image_ref, request_json, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, 'queued')`,
-		pid, queueID, providerSlug, model, prompt, sourceRef, string(requestJSON),
+			 source_image_ref, request_json, status, cost_usd)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)`,
+		pid, queueID, providerSlug, model, prompt, sourceRef, string(requestJSON), costUSD,
 	)
 	if err != nil {
 		ctx.Logger().Warn("video_jobs insert failed", "err", err)
@@ -153,11 +158,15 @@ func (a *App) handleVideoQueueResponse(ctx *sdk.AppCtx, providerSlug string, arg
 		"prompt":   prompt,
 	})
 
+	costLine := ""
+	if costUSD > 0 {
+		costLine = fmt.Sprintf("\nEstimated cost: $%.4f", costUSD)
+	}
 	summary := fmt.Sprintf(
-		"Video queued via %s (model=%s). Job #%d, queue_id=%s.\nPrompt: %q\n\n"+
+		"Video queued via %s (model=%s). Job #%d, queue_id=%s.\nPrompt: %q%s\n\n"+
 			"The worker will poll for completion every 15s. media.generated will fire when the video lands; "+
 			"media_history will surface the finished row.",
-		providerSlug, model, jobID, queueID, prompt,
+		providerSlug, model, jobID, queueID, prompt, costLine,
 	)
 	return map[string]any{
 		"content": []map[string]any{
@@ -170,8 +179,49 @@ func (a *App) handleVideoQueueResponse(ctx *sdk.AppCtx, providerSlug string, arg
 			"queue_id": queueID,
 			"model":    model,
 			"provider": providerSlug,
+			"cost_usd": costUSD,
 		},
 	}
+}
+
+// veniceVideoQuote calls POST /video/quote with the same shape we'd
+// pass to /video/queue. Returns the USD quote or 0 on any failure.
+// Best-effort — we never block the queue path on quote success.
+func veniceVideoQuote(ctx *sdk.AppCtx, providerSlug string, args map[string]any) float64 {
+	if providerSlug != "venice-ai" {
+		return 0
+	}
+	bound := ctx.IntegrationFor("video_provider")
+	if bound == nil {
+		return 0
+	}
+	// Quote accepts a subset of queue's args — model + duration required;
+	// aspect_ratio, resolution, upscale_factor, audio optional.
+	quoteArgs := map[string]any{
+		"model":    strArg(args, "model", ""),
+		"duration": strArg(args, "duration", "5s"),
+	}
+	if v := strArg(args, "aspect", ""); v != "" {
+		quoteArgs["aspect_ratio"] = v
+	}
+	if opts, ok := args["options"].(map[string]any); ok {
+		for _, k := range []string{"resolution", "upscale_factor", "audio"} {
+			if v, exists := opts[k]; exists {
+				quoteArgs[k] = v
+			}
+		}
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "quote_video", quoteArgs)
+	if err != nil || res == nil || !res.Success {
+		return 0
+	}
+	var body struct {
+		Quote float64 `json:"quote"`
+	}
+	if err := json.Unmarshal(res.Data, &body); err != nil {
+		return 0
+	}
+	return body.Quote
 }
 
 // videoJobUpdateStatus updates a job row's status/error fields.
@@ -206,7 +256,7 @@ func (a *App) handleListVideoJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	statusFilter := r.URL.Query().Get("status")
 	q := `SELECT id, queue_id, provider, model, prompt, status, error,
-	             result_storage_id, generation_id, attempts, created_at, updated_at
+	             result_storage_id, generation_id, attempts, cost_usd, created_at, updated_at
 	      FROM video_jobs
 	      WHERE project_id = ?`
 	args := []any{pid}
@@ -229,13 +279,14 @@ func (a *App) handleListVideoJobs(w http.ResponseWriter, r *http.Request) {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id, storageID, generationID, attempts                int64
-			queueID, provider, model, prompt, status, errMsg     string
-			createdAt, updatedAt                                 string
+			id, storageID, generationID, attempts            int64
+			queueID, provider, model, prompt, status, errMsg string
+			createdAt, updatedAt                             string
+			costUSD                                          float64
 		)
 		if err := rows.Scan(&id, &queueID, &provider, &model, &prompt,
 			&status, &errMsg, &storageID, &generationID, &attempts,
-			&createdAt, &updatedAt); err != nil {
+			&costUSD, &createdAt, &updatedAt); err != nil {
 			continue
 		}
 		out = append(out, map[string]any{
@@ -249,6 +300,7 @@ func (a *App) handleListVideoJobs(w http.ResponseWriter, r *http.Request) {
 			"result_storage_id": storageID,
 			"generation_id":     generationID,
 			"attempts":          attempts,
+			"cost_usd":          costUSD,
 			"created_at":        createdAt,
 			"updated_at":        updatedAt,
 		})

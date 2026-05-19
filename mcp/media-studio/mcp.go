@@ -14,6 +14,7 @@ type buildResultArgs struct {
 	FirstThumbB64 string
 	Count         int
 	MimeType      string
+	CostUSD       float64
 }
 
 // buildMCPResult shapes the MCP content blocks per kind. Image kind
@@ -45,6 +46,9 @@ func buildMCPResult(a buildResultArgs) map[string]any {
 		a.Count, a.Kind, a.Provider, a.Model, a.Prompt)
 	if a.Revised != "" && a.Revised != a.Prompt {
 		summary += "\nRevised: " + a.Revised
+	}
+	if a.CostUSD > 0 {
+		summary += fmt.Sprintf("\nCost: $%.4f", a.CostUSD)
 	}
 	if hasStorage {
 		summary += "\nSaved to storage:"
@@ -89,6 +93,7 @@ func buildMCPResult(a buildResultArgs) map[string]any {
 		"storage_ids":    a.StorageIDs,
 		"storage_urls":   storageURLs,
 		"upstream_urls":  a.UpstreamURLs,
+		"cost_usd":       a.CostUSD,
 	}
 	return map[string]any{
 		"content": content,

@@ -27,30 +27,34 @@ type generationRecord struct {
 	ThumbnailB64 string
 	ExtraJSON    string
 	Count        int
+	CostUSD      float64
 }
 
-func (a *App) dbInsertGeneration(r generationRecord) {
+func (a *App) dbInsertGeneration(r generationRecord) int64 {
 	if globalCtx == nil {
-		return
+		return 0
 	}
 	sj, _ := json.Marshal(r.StorageIDs)
 	uj, _ := json.Marshal(r.UpstreamURLs)
 	if r.ExtraJSON == "" {
 		r.ExtraJSON = "{}"
 	}
-	_, err := globalCtx.AppDB().Exec(
+	res, err := globalCtx.AppDB().Exec(
 		`INSERT INTO generations
 			(project_id, kind, prompt, revised_prompt, provider, model,
 			 size, duration_ms, storage_ids, upstream_urls, thumbnail_b64,
-			 extra_json, count)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 extra_json, count, cost_usd)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ProjectID, r.Kind, r.Prompt, r.Revised, r.Provider, r.Model,
 		r.Size, r.DurationMs, string(sj), string(uj), r.ThumbnailB64,
-		r.ExtraJSON, r.Count,
+		r.ExtraJSON, r.Count, r.CostUSD,
 	)
 	if err != nil {
 		globalCtx.Logger().Warn("dbInsertGeneration failed", "err", err)
+		return 0
 	}
+	id, _ := res.LastInsertId()
+	return id
 }
 
 // toolMediaHistory is the MCP read tool — kind-aware, paginated.
@@ -74,7 +78,7 @@ func queryHistory(ctx *sdk.AppCtx, pid, kindFilter string, limit int) (map[strin
 	rows, err := ctx.AppDB().Query(
 		`SELECT id, kind, prompt, revised_prompt, provider, model, size,
 		        duration_ms, storage_ids, upstream_urls, thumbnail_b64,
-		        extra_json, count, created_at
+		        extra_json, count, cost_usd, created_at
 		 FROM generations
 		 WHERE project_id = ? AND (? = '' OR kind = ?)
 		 ORDER BY id DESC LIMIT ?`,
@@ -92,10 +96,11 @@ func queryHistory(ctx *sdk.AppCtx, pid, kindFilter string, limit int) (map[strin
 			kind, prompt, revised, provider, model, size          string
 			storageIDsJSON, upstreamURLsJSON, thumbB64, extraJSON string
 			createdAt                                             string
+			costUSD                                               float64
 		)
 		if err := rows.Scan(&id, &kind, &prompt, &revised, &provider, &model, &size,
 			&durationMs, &storageIDsJSON, &upstreamURLsJSON, &thumbB64,
-			&extraJSON, &count, &createdAt); err != nil {
+			&extraJSON, &count, &costUSD, &createdAt); err != nil {
 			continue
 		}
 		var storageIDs []int64
@@ -121,6 +126,7 @@ func queryHistory(ctx *sdk.AppCtx, pid, kindFilter string, limit int) (map[strin
 			"thumbnail_b64":  thumbB64,
 			"extra_json":     extraJSON,
 			"count":          count,
+			"cost_usd":       costUSD,
 			"created_at":     createdAt,
 		})
 	}

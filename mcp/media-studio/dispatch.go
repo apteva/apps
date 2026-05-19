@@ -218,6 +218,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 
 	size := strArg(args, "size", "")
 	extraJSON := encodeExtras(kind, args)
+	costUSD := computeGenerationCost(ctx, bound, kind, capability, model, args)
 	a.dbInsertGeneration(generationRecord{
 		ProjectID:    pid,
 		Kind:         kind,
@@ -232,6 +233,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		ThumbnailB64: firstThumbB64,
 		ExtraJSON:    extraJSON,
 		Count:        len(media),
+		CostUSD:      costUSD,
 	})
 
 	ctx.Emit("media.generated", map[string]any{
@@ -250,6 +252,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		FirstThumbB64: firstThumbB64,
 		Count:         len(media),
 		MimeType:      media[0].MimeType,
+		CostUSD:       costUSD,
 	}), nil
 }
 
@@ -281,6 +284,39 @@ func encodeExtras(kind string, args map[string]any) string {
 		return "{}"
 	}
 	return string(b)
+}
+
+// computeGenerationCost looks up Venice's per-model rate (cached or
+// freshly fetched) and returns the USD cost for this generation.
+// Returns 0 for providers without published rates (openai-api today)
+// or when the model isn't in the cache after a refresh attempt.
+func computeGenerationCost(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, kind, capability, model string, args map[string]any) float64 {
+	if bound == nil || bound.AppSlug != "venice-ai" || model == "" {
+		return 0
+	}
+	// Map media-studio capability → Venice's model type bucket. Edit
+	// models live under type=inpaint; generate under type=image. Video
+	// has its own path (cost stored on video_jobs at queue time).
+	veniceType := ""
+	switch capability {
+	case "image.generate":
+		veniceType = "image"
+	case "image.edit":
+		veniceType = "inpaint"
+	default:
+		return 0
+	}
+	// Try cache first; fetch on miss.
+	specRaw, ok := getVeniceModelSpec(bound.ConnectionID, veniceType, model)
+	if !ok {
+		ensureVeniceSpecLoaded(ctx, bound.ConnectionID, veniceType)
+		specRaw, ok = getVeniceModelSpec(bound.ConnectionID, veniceType, model)
+	}
+	if !ok {
+		return 0
+	}
+	cost, _ := computeVeniceImageCost(specRaw, capability, args)
+	return cost
 }
 
 // resolveSourceImage takes the raw source_image arg (one of: "storage:N",

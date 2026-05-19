@@ -204,23 +204,23 @@ func (a *App) finalizeVideoJob(
 	}
 	extraJSON, _ := json.Marshal(extras)
 
-	sj, _ := json.Marshal(storageIDs)
-	uj, _ := json.Marshal([]string{}) // no upstream URL for Venice's binary path
-	res, err := app.AppDB().Exec(
-		`INSERT INTO generations
-			(project_id, kind, prompt, revised_prompt, provider, model,
-			 size, duration_ms, storage_ids, upstream_urls, thumbnail_b64,
-			 extra_json, count)
-		 VALUES (?, ?, ?, '', ?, ?, '', 0, ?, ?, '', ?, 1)`,
-		projectID, KindVideo, prompt, provider, model,
-		string(sj), string(uj), string(extraJSON),
-	)
-	var generationID int64
-	if err != nil {
-		app.Logger().Warn("video generations insert failed", "job_id", jobID, "err", err)
-	} else {
-		generationID, _ = res.LastInsertId()
-	}
+	// Carry forward the cost from video_jobs (set at queue time by
+	// veniceVideoQuote). Best-effort; missing → 0.
+	var costUSD float64
+	app.AppDB().QueryRow(`SELECT cost_usd FROM video_jobs WHERE id=?`, jobID).Scan(&costUSD)
+
+	generationID := a.dbInsertGeneration(generationRecord{
+		ProjectID:    projectID,
+		Kind:         KindVideo,
+		Prompt:       prompt,
+		Provider:     provider,
+		Model:        model,
+		StorageIDs:   storageIDs,
+		UpstreamURLs: []string{},
+		ExtraJSON:    string(extraJSON),
+		Count:        1,
+		CostUSD:      costUSD,
+	})
 
 	var storageID int64
 	if len(storageIDs) > 0 {

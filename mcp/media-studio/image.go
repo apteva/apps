@@ -81,6 +81,13 @@ func buildVeniceImageArgs(args map[string]any) map[string]any {
 		// thumbnails would silently fall back to no-preview.
 		// User can override via options.format.
 		"format": "png",
+		// Quality defaults — SD / Flux / Qwen models honour these,
+		// resolution-tier models (gpt-image-2, nano-banana) silently
+		// ignore. Without these Venice falls back to ~8 steps which
+		// produces visibly soft output for the SD family. Users can
+		// override via options.steps / options.cfg_scale.
+		"steps":     30,
+		"cfg_scale": 7.5,
 	}
 
 	// size "WxH" → width + height. Pixel-sized Venice models honour these;
