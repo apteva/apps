@@ -21,7 +21,9 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -40,10 +42,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.3.0
+version: 0.3.1
 description: |
-  Watch and steer the agent's browser. v0.3 adds the first three MCP
-  tools (browser_open / browser_screenshot / browser_close).
+  Watch and steer the agent's browser. v0.3 adds the first MCP tools
+  (browser_open / browser_list / browser_screenshot / browser_close).
 scopes: [project, global]
 requires:
   permissions:
@@ -54,6 +56,8 @@ provides:
   mcp_tools:
     - name: browser_open
       description: "Open a browser session. Args: backend?, url?, viewport?. Returns {session_id, backend, current_url, width, height}."
+    - name: browser_list
+      description: "List sessions currently owned by this sidecar. Returns {sessions:[{session_id, backend, current_url, debug_url, opened_at, last_used_at}]}."
     - name: browser_screenshot
       description: "Capture a PNG of the session's current viewport. Args: session_id. Returns {png_b64, current_url, width, height}."
     - name: browser_close
@@ -182,7 +186,7 @@ func (a *App) Manifest() sdk.Manifest {
 func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.reg = &registry{m: map[string]*session{}}
 	go a.reaper(ctx)
-	ctx.Logger().Info("computer mounted", "tools", 3, "idle_ttl", idleTTL.String())
+	ctx.Logger().Info("computer mounted", "tools", 4, "idle_ttl", idleTTL.String())
 	return nil
 }
 
@@ -206,9 +210,14 @@ func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
-// HTTPRoutes — none. UI bundles under /ui/* are served by the
-// platform's static handler; /health is auto-registered by the SDK.
-func (a *App) HTTPRoutes() []sdk.Route { return nil }
+// HTTPRoutes — one read-only listing endpoint the dashboard panel
+// uses. UI bundles under /ui/* are served by the platform's static
+// handler; /health is auto-registered by the SDK.
+func (a *App) HTTPRoutes() []sdk.Route {
+	return []sdk.Route{
+		{Method: http.MethodGet, Pattern: "/api/sessions", Handler: a.handleListSessions},
+	}
+}
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
@@ -230,6 +239,12 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 			}, nil),
 			Handler: a.toolBrowserOpen,
+		},
+		{
+			Name:        "browser_list",
+			Description: "List sessions currently owned by this sidecar. Returns {sessions:[{session_id, backend, current_url, debug_url, opened_at, last_used_at}]}.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler:     a.toolBrowserList,
 		},
 		{
 			Name: "browser_screenshot",
@@ -307,6 +322,56 @@ func (a *App) toolBrowserOpen(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	ctx.Logger().Info("browser_open", "session_id", id, "backend", backend)
 	return out, nil
+}
+
+// sessionInfo is the shape each row in browser_list / /api/sessions
+// reports. Kept tight: session_id + provenance + the URLs the
+// operator needs to identify or open the session.
+type sessionInfo struct {
+	SessionID  string `json:"session_id"`
+	Backend    string `json:"backend"`
+	CurrentURL string `json:"current_url"`
+	DebugURL   string `json:"debug_url,omitempty"`
+	OpenedAt   string `json:"opened_at"`
+	LastUsedAt string `json:"last_used_at"`
+}
+
+func (a *App) toolBrowserList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	return map[string]any{"sessions": a.listSessions()}, nil
+}
+
+// listSessions snapshots the registry under the lock and projects
+// each row into the public shape. Network/IO methods (DebugURL on
+// browserbase reads cached state, local Chrome's reads chromedp
+// state) are called outside the lock to avoid blocking other tools
+// on a slow getter.
+func (a *App) listSessions() []sessionInfo {
+	type frozen struct {
+		id      string
+		comp    pkgcomputer.Computer
+		backend string
+		opened  time.Time
+		used    time.Time
+	}
+	a.reg.mu.Lock()
+	rows := make([]frozen, 0, len(a.reg.m))
+	for id, s := range a.reg.m {
+		rows = append(rows, frozen{id: id, comp: s.comp, backend: s.backend, opened: s.openedAt, used: s.lastUsed})
+	}
+	a.reg.mu.Unlock()
+
+	out := make([]sessionInfo, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, sessionInfo{
+			SessionID:  r.id,
+			Backend:    r.backend,
+			CurrentURL: currentURL(r.comp),
+			DebugURL:   debugURL(r.comp),
+			OpenedAt:   r.opened.UTC().Format(time.RFC3339),
+			LastUsedAt: r.used.UTC().Format(time.RFC3339),
+		})
+	}
+	return out
 }
 
 func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -391,6 +456,18 @@ func currentURL(c pkgcomputer.Computer) string {
 	return ""
 }
 
+// debugURL pulls the backend's debug URL via the anonymous interface
+// each concrete backend (local Chrome, browserbase, steel,
+// browserengine) implements. Returns "" if the backend doesn't
+// expose one. Operators use this to attach DevTools / open the
+// vendor's live viewer.
+func debugURL(c pkgcomputer.Computer) string {
+	if dbg, ok := c.(interface{ DebugURL() string }); ok {
+		return dbg.DebugURL()
+	}
+	return ""
+}
+
 func stringArg(args map[string]any, k string) string {
 	if v, ok := args[k].(string); ok {
 		return v
@@ -419,6 +496,13 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 		out["required"] = required
 	}
 	return out
+}
+
+// ─── HTTP handlers ─────────────────────────────────────────────────
+
+func (a *App) handleListSessions(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"sessions": a.listSessions()})
 }
 
 func main() { sdk.Run(&App{}) }

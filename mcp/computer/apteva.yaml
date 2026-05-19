@@ -2,21 +2,23 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.3.0
+version: 0.3.1
 description: |
   Watch and steer the agent's browser. Operator panel for browsing
-  live sessions across instances, taking control of one, and reading
-  the agent's chat. Inline chat components the agent attaches so
-  its work surfaces visually instead of as plain text.
+  the sessions this sidecar owns; inline chat components the agent
+  attaches so its work surfaces visually instead of as plain text.
 
-  v0.3 adds the first three MCP tools (browser_open / browser_screenshot
-  / browser_close) so callers — first the new `screenshots` app, then
-  later the agent loop itself — can drive browser sessions through this
-  app instead of through the core binary. Click/type/scroll and SoM
-  follow in a later release. Sessions opened via these tools are owned
-  by this sidecar; attaching to a session the agent already opened in
-  core is not yet supported (cloud-backed resume comes with the next
-  release; local CDP attach requires core-side plumbing).
+  v0.3 adds the first MCP tools — browser_open / browser_list /
+  browser_screenshot / browser_close — so callers (first the
+  `screenshots` app, then later the agent loop itself) can drive
+  browser sessions through this app instead of through the core
+  binary. Sessions are owned by this sidecar; attaching to a
+  session the agent already opened in core is not yet supported
+  (cloud-backed resume + local CDP attach land in later releases).
+
+  v0.3.1 exposes browser_list + a /api/sessions HTTP route so the
+  operator panel and other UIs can render the live session set
+  without round-tripping through apteva-server.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -43,6 +45,13 @@ provides:
         width, height}. The session is owned by this app and persists
         until browser_close or the 30-minute idle reaper, whichever
         comes first.
+    - name: browser_list
+      description: |
+        List sessions currently owned by this sidecar. Returns
+        {sessions:[{session_id, backend, current_url, debug_url,
+        opened_at, last_used_at}]}. Empty when the sidecar holds none.
+        Operators reach the same data via GET /api/sessions on the
+        sidecar.
     - name: browser_screenshot
       description: |
         Capture a PNG of the session's current viewport. Args: session_id.
