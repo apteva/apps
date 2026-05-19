@@ -165,17 +165,35 @@ func (c *storageClient) GetFile(ctx context.Context, projectID string, id int64)
 }
 
 // GetSignedURL asks storage to mint a time-limited signed URL for a
-// file. Returned absolute URL is reachable from outside the cluster
-// (it embeds APTEVA_PUBLIC_URL); callers hand it to third-party
-// services like Deepgram that need to fetch the bytes themselves.
+// file. Returned absolute URL is reachable from outside the cluster;
+// callers hand it to third-party services like Deepgram that need to
+// fetch the bytes themselves.
 //
-// Storage's files_get_url HTTP endpoint returns a path-only URL
-// (e.g. "/files/42/content?sig=..."). We prepend the platform's
-// public host so it's a real https:// URL.
+// Two URL shapes come back from storage's HTTP endpoint:
+//
+//   1. S3-backed storage: a full presigned S3 URL on the bucket's
+//      provider domain (Hetzner Object Storage / R2 / AWS / B2). No
+//      prefix needed.
+//
+//   2. Disk-backed storage: a path-only URL (e.g.
+//      "/files/42/content?sig=...&exp=..."). We prepend the
+//      platform's public host so it's a real https:// URL the remote
+//      side can curl.
+//
+// Pre-v0.12.6 this read `os.Getenv("APTEVA_PUBLIC_URL")` directly,
+// which captures the tunnel URL at sidecar SPAWN time. When ngrok
+// flapped (new subdomain) operators had to restart the sidecar to
+// get fresh URLs — and forgotten restarts manifested as remote
+// renders failing with `curl: (22) The requested URL returned error:
+// 404` because the script's STORAGE_BASE pointed at a dead subdomain.
+// Now we route through resolvePublicURL, which prefers the SDK's
+// hot-cached PlatformInfo() (60s freshness; picks up server-setting
+// edits without restart) and falls back to the env for older
+// platforms / unusual setups.
 func (c *storageClient) GetSignedURL(ctx context.Context, projectID string, id int64, ttlSeconds int) (string, error) {
-	publicURL := strings.TrimRight(os.Getenv("APTEVA_PUBLIC_URL"), "/")
-	if publicURL == "" {
-		return "", errors.New("APTEVA_PUBLIC_URL not set — cannot mint a signed URL reachable from outside the cluster")
+	publicURL, err := resolvePublicURL(globalCtx)
+	if err != nil {
+		return "", fmt.Errorf("cannot mint a signed URL reachable from outside the cluster: %w", err)
 	}
 	body, err := c.do(ctx, http.MethodPost, "/files/"+strconv.FormatInt(id, 10)+"/url",
 		map[string]any{"project_id": projectID, "ttl_seconds": ttlSeconds}, "application/json")
