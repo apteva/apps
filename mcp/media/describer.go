@@ -311,6 +311,12 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 		"chars":   len(desc),
 		"source":  "ai-generated",
 	})
+
+	// media.completed coordinator. Description was the last
+	// applicable stage on installs that have descriptions bound;
+	// emit the completion here. Idempotent — earlier stages already
+	// tried and bailed because description was empty.
+	maybeEmitMediaCompleted(app, projectID, fileID)
 }
 
 // ─── prompt building ───────────────────────────────────────────────

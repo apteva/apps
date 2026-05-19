@@ -352,6 +352,12 @@ func processOne(
 	} else {
 		notifyDescriber(projectID, fid)
 	}
+	// media.completed coordinator. Runs after every stage; whichever
+	// is "last applicable" given the install config wins the
+	// idempotent UPDATE inside the helper and emits the event. For
+	// installs with no transcripts/descriptions integrations bound,
+	// this tail-call is the one that emits.
+	maybeEmitMediaCompleted(app, projectID, fid)
 }
 
 // remoteIndexerHostID returns the host_id to dispatch indexing to,
@@ -454,6 +460,8 @@ func tryRemoteIndex(
 	} else {
 		notifyDescriber(projectID, fid)
 	}
+	// Same tail-call as the local path — see comment there.
+	maybeEmitMediaCompleted(app, projectID, fid)
 	return true
 }
 

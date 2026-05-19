@@ -350,6 +350,12 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 	// LLM call gets the multimodal {thumbnail + transcript} input.
 	// No-op when describer isn't running or queue is full.
 	notifyDescriber(row.ProjectID, row.FileID)
+
+	// media.completed coordinator. If descriptions integration isn't
+	// bound, this is the terminal-applicable stage and the event
+	// fires here. If it IS bound, the describer's tail-call will
+	// win instead.
+	maybeEmitMediaCompleted(app, row.ProjectID, row.FileID)
 }
 
 // ─── Deepgram response parsing ─────────────────────────────────────
