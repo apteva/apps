@@ -124,11 +124,22 @@ interface Organization {
   updated_at?: string;
 }
 
-// orgQS — builds `?organization_slug=<slug>` (or appends to an existing
-// query). When orgSlug is null we're in the "All organizations" rollup
-// view and the server returns project-wide data.
+// panelProjectId — set once at mount from the panel's projectId prop.
+// Every admin request includes it as a project_id query param. The
+// sidecar prefers its APTEVA_PROJECT_ID env when set (project-scoped
+// installs), so this is a harmless redundancy there — but it's the
+// difference between working and a 400 when the env isn't set (global
+// scope, or a mid-upgrade blue-green window where the new sidecar
+// booted before the platform injected the env). Other panels (media)
+// always send project_id; auth was the outlier.
+let panelProjectId = "";
+
+// orgQS — builds the query string for an admin call: always project_id,
+// plus organization_slug when scoped (null = "All organizations"
+// project-wide rollup), plus any extra params.
 function orgQS(slug: string | null, extra?: string): string {
   const params = new URLSearchParams();
+  if (panelProjectId) params.set("project_id", panelProjectId);
   if (slug) params.set("organization_slug", slug);
   if (extra) {
     for (const [k, v] of new URLSearchParams(extra)) params.set(k, v);
@@ -137,9 +148,17 @@ function orgQS(slug: string | null, extra?: string): string {
   return s ? `?${s}` : "";
 }
 
+// projectQS — project_id-only query string for admin endpoints that
+// don't take an org (organizations CRUD) or build their own params.
+function projectQS(): string {
+  return panelProjectId ? `?project_id=${encodeURIComponent(panelProjectId)}` : "";
+}
+
 // ─── Panel root ──────────────────────────────────────────────────────
 
 export default function AuthPanel({ projectId }: NativePanelProps) {
+  // Set the module-level project id before any child effect fires.
+  panelProjectId = projectId || "";
   const [tab, setTab] = useState<Tab>("overview");
   const [stats, setStats] = useState<Stats | null>(null);
   const [status, setStatus] = useState("");
@@ -165,7 +184,7 @@ export default function AuthPanel({ projectId }: NativePanelProps) {
 
   const loadOrgs = useCallback(async () => {
     try {
-      const r = await fetch(`${API}/admin/organizations`, { credentials: "same-origin" });
+      const r = await fetch(`${API}/admin/organizations${projectQS()}`, { credentials: "same-origin" });
       if (!r.ok) throw new Error(`orgs ${r.status}`);
       const data = await r.json();
       setOrgs(data.organizations || []);
@@ -468,7 +487,7 @@ function OrganizationsTab({ orgs, activeOrgSlug, onSelect, onChanged, setStatus 
     if (o.slug === "default") return;
     if (!window.confirm(`Archive organization "${o.name}"? Users and clients remain but new signups via that org's client_ids fail.`)) return;
     try {
-      const r = await fetch(`${API}/admin/organizations/${o.id}/archive`, {
+      const r = await fetch(`${API}/admin/organizations/${o.id}/archive${projectQS()}`, {
         method: "POST", credentials: "same-origin",
       });
       if (!r.ok) throw new Error(`archive ${r.status}`);
@@ -597,7 +616,7 @@ function CreateOrgModal({ existingSlugs, onClose, onCreated, setStatus }: {
     }
     setBusy(true);
     try {
-      const r = await fetch(`${API}/admin/organizations`, {
+      const r = await fetch(`${API}/admin/organizations${projectQS()}`, {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -666,7 +685,7 @@ function EditOrgModal({ org, onClose, onSaved, setStatus }: {
     e.preventDefault();
     setBusy(true);
     try {
-      const r = await fetch(`${API}/admin/organizations/${org.id}`, {
+      const r = await fetch(`${API}/admin/organizations/${org.id}${projectQS()}`, {
         method: "PATCH",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -746,6 +765,7 @@ function UsersTab({ activeOrgSlug, orgs, projectId, setStatus, onUsersChanged }:
     setLoading(true);
     try {
       const params = new URLSearchParams();
+      if (panelProjectId) params.set("project_id", panelProjectId);
       if (activeOrgSlug) params.set("organization_slug", activeOrgSlug);
       if (q) params.set("q", q);
       if (statusFilter) params.set("status", statusFilter);
@@ -1252,7 +1272,7 @@ function ClientsTab({ activeOrgSlug, orgs, projectId, setStatus }: {
   const rotate = async (c: Client) => {
     if (!window.confirm(`Rotate secret for "${c.name}"? Existing services will need the new value.`)) return;
     try {
-      const r = await fetch(`${API}/admin/clients/${encodeURIComponent(c.client_id)}/rotate`, {
+      const r = await fetch(`${API}/admin/clients/${encodeURIComponent(c.client_id)}/rotate${projectQS()}`, {
         method: "POST", credentials: "same-origin",
       });
       if (!r.ok) throw new Error(`rotate ${r.status}`);
@@ -1266,7 +1286,7 @@ function ClientsTab({ activeOrgSlug, orgs, projectId, setStatus }: {
   const disable = async (c: Client) => {
     if (!window.confirm(`Disable client "${c.name}"? Refresh tokens stop working immediately.`)) return;
     try {
-      const r = await fetch(`${API}/admin/clients/${encodeURIComponent(c.client_id)}/disable`, {
+      const r = await fetch(`${API}/admin/clients/${encodeURIComponent(c.client_id)}/disable${projectQS()}`, {
         method: "POST", credentials: "same-origin",
       });
       if (!r.ok) throw new Error(`disable ${r.status}`);
@@ -1458,7 +1478,8 @@ function CreateClientModal({ defaultOrgSlug, orgs, onClose, onCreated, setStatus
       };
       // scope=single → ?organization_slug=… binds the client to that org.
       // scope=multi  → no org query → server creates a multi-org client.
-      const qs = scope === "single" ? orgQS(orgSlug) : "";
+      // Both paths still carry project_id (orgQS / projectQS include it).
+      const qs = scope === "single" ? orgQS(orgSlug) : projectQS();
       const r = await fetch(`${API}/admin/clients${qs}`, {
         method: "POST",
         credentials: "same-origin",
