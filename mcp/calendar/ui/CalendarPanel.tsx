@@ -610,29 +610,140 @@ function Grid({
   const dayDates = Array.from({ length: days }, (_, i) => addDays(start, i));
   const hours = Array.from({ length: 24 }, (_, i) => i);
 
+  // Multi-day / all-day events go to the all-day strip; everything else
+  // is a timed block in its day column. This is what stops a 23-day
+  // trip from rendering as a giant "02:00 – 01:59" block.
+  const allDayEvents = useMemo(
+    () => events.filter(isMultiDay).sort((a, b) => a.start_at.localeCompare(b.start_at) || a.id - b.id),
+    [events],
+  );
+
   return (
-    <div className="flex">
-      {/* Hour gutter */}
-      <div className="w-12 flex-shrink-0">
-        <div className="h-8" />
-        {hours.map((h) => (
-          <div key={h} style={{ height: HOUR_HEIGHT }} className="text-text-dim text-[10px] text-right pr-2 -mt-2">
-            {h.toString().padStart(2, "0")}:00
-          </div>
+    <div className="flex flex-col">
+      {/* All-day strip — only when there's something to show. */}
+      {allDayEvents.length > 0 && (
+        <AllDayStrip
+          start={start}
+          days={days}
+          events={allDayEvents}
+          calendarById={calendarById}
+          onEventClick={onEventClick}
+        />
+      )}
+      <div className="flex">
+        {/* Hour gutter */}
+        <div className="w-12 flex-shrink-0">
+          <div className="h-8" />
+          {hours.map((h) => (
+            <div key={h} style={{ height: HOUR_HEIGHT }} className="text-text-dim text-[10px] text-right pr-2 -mt-2">
+              {h.toString().padStart(2, "0")}:00
+            </div>
+          ))}
+        </div>
+        {/* Day columns — timed events only (multi-day go to the strip). */}
+        {dayDates.map((d) => (
+          <DayColumn
+            key={d.toISOString()}
+            date={d}
+            events={events.filter((e) => !isMultiDay(e) && sameDay(new Date(e.start_at), d))}
+            calendarById={calendarById}
+            onEmptyClick={onEmptyClick}
+            onEventClick={onEventClick}
+            onEventCommit={onEventCommit}
+          />
         ))}
       </div>
-      {/* Day columns */}
-      {dayDates.map((d) => (
-        <DayColumn
-          key={d.toISOString()}
-          date={d}
-          events={events.filter((e) => sameDay(new Date(e.start_at), d))}
-          calendarById={calendarById}
-          onEmptyClick={onEmptyClick}
-          onEventClick={onEventClick}
-          onEventCommit={onEventCommit}
-        />
-      ))}
+    </div>
+  );
+}
+
+// AllDayStrip — the band above the timed grid that holds multi-day and
+// all-day events as horizontal bars spanning their day columns. Mirrors
+// the gutter + N-column layout of the grid below so bars line up with
+// the right days. Each event gets its own row to avoid overlap; bars
+// are clamped to the visible window with arrow affordances when the
+// span continues off-screen.
+function AllDayStrip({
+  start, days, events, calendarById, onEventClick,
+}: {
+  start: Date;
+  days: number;
+  events: Occurrence[];
+  calendarById: Map<number, Calendar>;
+  onEventClick: (e: Occurrence) => void;
+}) {
+  // Keep only events that intersect the visible window at all.
+  const rows = events.filter((e) => {
+    for (let i = 0; i < days; i++) {
+      if (occCoversDay(e, addDays(start, i))) return true;
+    }
+    return false;
+  });
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="flex border-b border-border">
+      {/* Gutter spacer matching the hour gutter width + header row */}
+      <div className="w-12 flex-shrink-0 flex items-start justify-end pr-2 pt-1">
+        <span className="text-text-dim text-[10px] uppercase">all-day</span>
+      </div>
+      {/* Span grid: header row height (h-8) reserved by the day columns
+          below; here we lay bars over a days-wide grid. */}
+      <div
+        className="flex-1 min-w-0 py-1"
+        style={{
+          display: "grid",
+          gridTemplateColumns: `repeat(${days}, minmax(0, 1fr))`,
+          gridAutoRows: "minmax(20px, auto)",
+          rowGap: "2px",
+        }}
+      >
+        {rows.map((ev) => {
+          const cal = calendarById.get(ev.calendar_id);
+          const color = cal?.color || "#3b82f6";
+          // First/last covered column within the window.
+          let firstCol = -1;
+          let lastCol = -1;
+          for (let i = 0; i < days; i++) {
+            if (occCoversDay(ev, addDays(start, i))) {
+              if (firstCol === -1) firstCol = i;
+              lastCol = i;
+            }
+          }
+          if (firstCol === -1) return null;
+          const continuesLeft = !sameDay(new Date(ev.start_at), addDays(start, firstCol));
+          const endsHere = !occCoversDay(ev, addDays(start, lastCol + 1));
+          const continuesRight = !endsHere && lastCol === days - 1;
+          return (
+            <button
+              key={ev.id + "-" + ev.occurrence_start_at}
+              type="button"
+              onClick={() => onEventClick(ev)}
+              className="text-xs text-left text-bg truncate hover:opacity-90 transition-opacity"
+              title={ev.title}
+              style={{
+                gridColumnStart: firstCol + 1,
+                gridColumnEnd: lastCol + 2,
+                backgroundColor: color,
+                paddingTop: "2px",
+                paddingBottom: "2px",
+                paddingLeft: "6px",
+                paddingRight: "6px",
+                marginLeft: "1px",
+                marginRight: "1px",
+                borderTopLeftRadius: continuesLeft ? "0" : "4px",
+                borderBottomLeftRadius: continuesLeft ? "0" : "4px",
+                borderTopRightRadius: continuesRight ? "0" : "4px",
+                borderBottomRightRadius: continuesRight ? "0" : "4px",
+              }}
+            >
+              {continuesLeft ? "‹ " : ""}
+              {ev.title}
+              {continuesRight ? " ›" : ""}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -888,6 +999,47 @@ function ymdKey(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+// Local midnight for a date (strips time-of-day).
+function startOfDay(d: Date): Date {
+  const out = new Date(d);
+  out.setHours(0, 0, 0, 0);
+  return out;
+}
+
+// isMultiDay — does this occurrence span more than one calendar day, or
+// is it flagged all-day? These get the spanning-bar / all-day-strip
+// treatment instead of being drawn as a timed block. We subtract 1ms
+// from end_at so an event that ends exactly at midnight (a clean
+// single-day block) doesn't count the following day. A genuine
+// multi-day trip (Paris: 20 May → 12 Jun) and any all-day event match.
+function isMultiDay(ev: Occurrence): boolean {
+  if (ev.all_day) return true;
+  const s = new Date(ev.start_at);
+  const e = new Date(ev.end_at);
+  if (e.getTime() <= s.getTime()) return false;
+  return !sameDay(s, new Date(e.getTime() - 1));
+}
+
+// occCoversDay — true if the occurrence overlaps the calendar day `d`
+// (inclusive of the start day, exclusive of a midnight-exact end).
+function occCoversDay(ev: Occurrence, d: Date): boolean {
+  const dayStart = startOfDay(d).getTime();
+  const dayEnd = dayStart + 24 * 60 * 60 * 1000;
+  const s = new Date(ev.start_at).getTime();
+  const eRaw = new Date(ev.end_at).getTime();
+  const e = Math.max(eRaw - 1, s); // half-open end; never before start
+  return s < dayEnd && e >= dayStart;
+}
+
+// dayIndexInWindow — 0-based column index of date `d` within a window
+// that starts at `windowStart`, or -1 if outside [0, days).
+function dayIndexInWindow(windowStart: Date, days: number, d: Date): number {
+  const a = startOfDay(windowStart).getTime();
+  const b = startOfDay(d).getTime();
+  const idx = Math.round((b - a) / (24 * 60 * 60 * 1000));
+  return idx >= 0 && idx < days ? idx : -1;
+}
+
 // --- Month view -----------------------------------------------------
 
 const MONTH_MAX_CHIPS = 3;
@@ -907,22 +1059,39 @@ function MonthView({
   const today = new Date();
   const month = monthAnchor.getMonth();
 
-  // Bucket events by yyyy-mm-dd of their local start time, sorted by
-  // start. Recurring occurrences come pre-expanded from the server, so
-  // each one already has its own row.
-  const eventsByDay = useMemo(() => {
-    const map = new Map<string, Occurrence[]>();
+  // Split into single-day (per-cell chips) and multi-day (spanning
+  // bars). Single-day events bucket by their start day as before.
+  // Multi-day events are bucketed onto EVERY day they cover so the bar
+  // reads as a continuous band across the grid.
+  const { singleByDay, spanningByDay } = useMemo(() => {
+    const single = new Map<string, Occurrence[]>();
+    const spanning = new Map<string, Occurrence[]>();
     for (const e of events) {
-      const d = new Date(e.start_at);
-      const key = ymdKey(d);
-      if (!map.has(key)) map.set(key, []);
-      map.get(key)!.push(e);
+      if (isMultiDay(e)) {
+        // Stamp the event on each covered cell within the visible grid.
+        for (let i = 0; i < 42; i++) {
+          const d = addDays(gridStart, i);
+          if (!occCoversDay(e, d)) continue;
+          const key = ymdKey(d);
+          if (!spanning.has(key)) spanning.set(key, []);
+          spanning.get(key)!.push(e);
+        }
+      } else {
+        const key = ymdKey(new Date(e.start_at));
+        if (!single.has(key)) single.set(key, []);
+        single.get(key)!.push(e);
+      }
     }
-    for (const arr of map.values()) {
+    // Stable order: longer/earlier spans first so bars line up across
+    // adjacent cells.
+    for (const arr of spanning.values()) {
+      arr.sort((a, b) => a.start_at.localeCompare(b.start_at) || a.id - b.id);
+    }
+    for (const arr of single.values()) {
       arr.sort((a, b) => a.start_at.localeCompare(b.start_at));
     }
-    return map;
-  }, [events]);
+    return { singleByDay: single, spanningByDay: spanning };
+  }, [events, gridStart]);
 
   const cells = Array.from({ length: 42 }, (_, i) => addDays(gridStart, i));
   const weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -948,9 +1117,13 @@ function MonthView({
         {cells.map((d) => {
           const inMonth = d.getMonth() === month;
           const isToday = sameDay(d, today);
-          const dayEvents = eventsByDay.get(ymdKey(d)) || [];
-          const visible = dayEvents.slice(0, MONTH_MAX_CHIPS);
-          const extra = dayEvents.length - visible.length;
+          const spanning = spanningByDay.get(ymdKey(d)) || [];
+          const single = singleByDay.get(ymdKey(d)) || [];
+          // Spanning bars are shown on every covered cell; single-day
+          // chips fill the remaining room up to the chip budget.
+          const visibleSingle = single.slice(0, Math.max(0, MONTH_MAX_CHIPS - spanning.length));
+          const extra = (spanning.length + single.length) - (spanning.length + visibleSingle.length);
+          const isWeekStart = d.getDay() === 1; // Monday — bars re-label on wrap
           return (
             <div
               key={d.toISOString()}
@@ -981,7 +1154,46 @@ function MonthView({
                 className="flex flex-col min-h-0 overflow-hidden"
                 style={{ gap: "2px" }}
               >
-                {visible.map((ev) => {
+                {spanning.map((ev) => {
+                  const cal = calendarById.get(ev.calendar_id);
+                  const color = cal?.color || "#3b82f6";
+                  const startsHere = sameDay(new Date(ev.start_at), d);
+                  // Half-open end: the last covered day is the day before
+                  // a midnight-exact end; occCoversDay already accounts
+                  // for that, so "ends here" = covers d but not d+1.
+                  const endsHere = !occCoversDay(ev, addDays(d, 1));
+                  // Label on the first day OR when a bar wraps to a new
+                  // week row, so a long span stays identifiable.
+                  const showLabel = startsHere || isWeekStart;
+                  return (
+                    <button
+                      key={ev.id + "-" + ev.occurrence_start_at}
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); onEventClick(ev); }}
+                      className="text-xs text-left text-bg truncate hover:opacity-90 transition-opacity"
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        backgroundColor: color,
+                        paddingTop: "2px",
+                        paddingBottom: "2px",
+                        paddingLeft: "6px",
+                        paddingRight: "6px",
+                        // Round only the true ends of the span; mid-span
+                        // days keep square edges so consecutive full-width
+                        // bars read as one continuous band.
+                        borderTopLeftRadius: startsHere ? "4px" : "0",
+                        borderBottomLeftRadius: startsHere ? "4px" : "0",
+                        borderTopRightRadius: endsHere ? "4px" : "0",
+                        borderBottomRightRadius: endsHere ? "4px" : "0",
+                      }}
+                      title={ev.title}
+                    >
+                      {showLabel ? ev.title : " "}
+                    </button>
+                  );
+                })}
+                {visibleSingle.map((ev) => {
                   const cal = calendarById.get(ev.calendar_id);
                   return (
                     <button
@@ -1042,10 +1254,23 @@ function YearView({
     const map = new Map<string, string>();
     const sorted = [...events].sort((a, b) => a.start_at.localeCompare(b.start_at));
     for (const e of sorted) {
-      const key = ymdKey(new Date(e.start_at));
-      if (map.has(key)) continue;
       const cal = calendarById.get(e.calendar_id);
-      map.set(key, cal?.color || "#3b82f6");
+      const color = cal?.color || "#3b82f6";
+      // Multi-day events dot every day they cover so the span is
+      // visible at a glance, not just the start day. Cap the walk so a
+      // pathological end date can't spin forever.
+      if (isMultiDay(e)) {
+        const s = startOfDay(new Date(e.start_at));
+        for (let i = 0; i < 366; i++) {
+          const d = addDays(s, i);
+          if (!occCoversDay(e, d)) break;
+          const key = ymdKey(d);
+          if (!map.has(key)) map.set(key, color);
+        }
+      } else {
+        const key = ymdKey(new Date(e.start_at));
+        if (!map.has(key)) map.set(key, color);
+      }
     }
     return map;
   }, [events, calendarById]);
