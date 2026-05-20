@@ -162,37 +162,60 @@ export default function RedirectsPanel({ projectId, installId }: NativePanelProp
   useEffect(() => { load(); }, [load]);
   useEffect(() => { loadMeta(); }, [loadMeta]);
 
-  // Real-time rule lifecycle via the platform's app-events bus. The
-  // backend emits rule.created / rule.updated / rule.removed on every
-  // mutating action (REST + MCP), so the panel stays current when an
-  // agent calls redirect_add from chat, or when another operator's
-  // browser session changes a rule. The "redirects" string MUST match
-  // the manifest name — that's the bus's primary key.
-  useAppEvents<{ redirect: Redirect }>("redirects", projectId, (ev) => {
-    const incoming = ev.data?.redirect;
-    if (!incoming) return;
-    setRules((prev) => {
-      const list = prev ?? [];
-      switch (ev.topic) {
-        case "rule.created": {
-          if (list.some((r) => r.id === incoming.id)) return list;
-          // Re-sort by hostname then path so a new rule slots into the
-          // table in the same order the backend's LIST would return.
-          return [...list, incoming].sort((a, b) =>
-            a.hostname === b.hostname
-              ? a.path.localeCompare(b.path)
-              : a.hostname.localeCompare(b.hostname),
-          );
+  // Real-time rule lifecycle + hit counter via the platform's app-bus.
+  // The backend emits rule.created / rule.updated / rule.removed on
+  // every mutating action (REST + MCP), and rule.hit on each public
+  // traffic match (throttled server-side to ≤1/sec per rule). The
+  // "redirects" string MUST match the manifest name — that's the
+  // bus's primary key.
+  useAppEvents<{ redirect?: Redirect; id?: number; at?: string }>(
+    "redirects",
+    projectId,
+    (ev) => {
+      setRules((prev) => {
+        const list = prev ?? [];
+        switch (ev.topic) {
+          case "rule.created": {
+            const incoming = ev.data?.redirect;
+            if (!incoming || list.some((r) => r.id === incoming.id)) return list;
+            // Re-sort by hostname then path so a new rule slots into
+            // the table the same way the backend's LIST would return.
+            return [...list, incoming].sort((a, b) =>
+              a.hostname === b.hostname
+                ? a.path.localeCompare(b.path)
+                : a.hostname.localeCompare(b.hostname),
+            );
+          }
+          case "rule.updated": {
+            const incoming = ev.data?.redirect;
+            if (!incoming) return list;
+            return list.map((r) => (r.id === incoming.id ? incoming : r));
+          }
+          case "rule.removed": {
+            const incoming = ev.data?.redirect;
+            if (!incoming) return list;
+            return list.filter((r) => r.id !== incoming.id);
+          }
+          case "rule.hit": {
+            // Server-side throttle is 1/sec per rule, so each event
+            // represents AT LEAST one hit since the last emit. We bump
+            // by 1 here for the live feel; the absolute count
+            // reconciles next time the rule is loaded from the API.
+            const id = ev.data?.id;
+            const at = ev.data?.at;
+            if (!id) return list;
+            return list.map((r) =>
+              r.id === id
+                ? { ...r, hits: r.hits + 1, last_hit_at: at || r.last_hit_at }
+                : r,
+            );
+          }
+          default:
+            return list;
         }
-        case "rule.updated":
-          return list.map((r) => (r.id === incoming.id ? incoming : r));
-        case "rule.removed":
-          return list.filter((r) => r.id !== incoming.id);
-        default:
-          return list;
-      }
-    });
-  });
+      });
+    },
+  );
 
   const remove = async (id: number) => {
     setBusy(true);

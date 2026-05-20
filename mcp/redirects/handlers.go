@@ -190,13 +190,18 @@ func (a *App) handlePublicRedirect(w http.ResponseWriter, r *http.Request) {
 	}
 	target := applyRule(rule, r.URL.Path, r.URL.RawQuery)
 
-	// Async hit counter — never let a counter failure block the
-	// redirect itself.
-	go func(id int64) {
-		if err := dbRecordHit(globalCtx.AppDB(), id); err != nil {
-			globalCtx.Logger().Info("record hit", "id", id, "err", err.Error())
+	// Async hit counter + bus emit — never let a counter failure block
+	// the redirect itself. The emit is throttled to at most one per
+	// rule per second so a hammered link can't fill the platform's
+	// 256-event ring buffer and starve other apps' subscribers.
+	go func(rule *Redirect) {
+		if err := dbRecordHit(globalCtx.AppDB(), rule.ID); err != nil {
+			globalCtx.Logger().Info("record hit", "id", rule.ID, "err", err.Error())
 		}
-	}(rule.ID)
+		if shouldEmitHit(rule.ID) {
+			emitHit(globalCtx, rule)
+		}
+	}(rule)
 
 	w.Header().Set("Location", target)
 	w.Header().Set("Cache-Control", "no-store")
