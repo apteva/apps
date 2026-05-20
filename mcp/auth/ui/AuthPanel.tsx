@@ -599,6 +599,7 @@ function CreateOrgModal({ existingSlugs, onClose, onCreated, setStatus }: {
   const [name, setName] = useState("");
   const [color, setColor] = useState("#3b82f6");
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
 
   // Auto-derive slug from name as the user types — common UX.
   const onNameChange = (v: string) => {
@@ -611,10 +612,11 @@ function CreateOrgModal({ existingSlugs, onClose, onCreated, setStatus }: {
     const s = slug.trim().toLowerCase();
     if (!s || !name.trim()) return;
     if (existingSlugs.includes(s)) {
-      setStatus(`slug "${s}" already in use`);
+      setErr(`slug "${s}" already in use`);
       return;
     }
     setBusy(true);
+    setErr("");
     try {
       const r = await fetch(`${API}/admin/organizations${projectQS()}`, {
         method: "POST",
@@ -622,11 +624,12 @@ function CreateOrgModal({ existingSlugs, onClose, onCreated, setStatus }: {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ slug: s, name: name.trim(), color }),
       });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || `create ${r.status}`);
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `create failed (${r.status})`);
       onCreated(data.organization.slug);
-    } catch (err) {
-      setStatus(`create org: ${(err as Error).message}`);
+    } catch (e2) {
+      setErr((e2 as Error).message);
+      setStatus(`create org: ${(e2 as Error).message}`);
     } finally {
       setBusy(false);
     }
@@ -659,6 +662,7 @@ function CreateOrgModal({ existingSlugs, onClose, onCreated, setStatus }: {
             className="bg-bg-input border border-border rounded cursor-pointer"
           />
         </Field>
+        <FormError message={err} />
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted hover:text-text">Cancel</button>
           <button
@@ -680,10 +684,12 @@ function EditOrgModal({ org, onClose, onSaved, setStatus }: {
   const [name, setName] = useState(org.name);
   const [color, setColor] = useState(org.color || "#94a3b8");
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
+    setErr("");
     try {
       const r = await fetch(`${API}/admin/organizations/${org.id}${projectQS()}`, {
         method: "PATCH",
@@ -693,11 +699,12 @@ function EditOrgModal({ org, onClose, onSaved, setStatus }: {
       });
       if (!r.ok) {
         const data = await r.json().catch(() => ({}));
-        throw new Error(data.error || `update ${r.status}`);
+        throw new Error(data.error || `update failed (${r.status})`);
       }
       onSaved();
-    } catch (err) {
-      setStatus(`update org: ${(err as Error).message}`);
+    } catch (e2) {
+      setErr((e2 as Error).message);
+      setStatus(`update org: ${(e2 as Error).message}`);
     } finally {
       setBusy(false);
     }
@@ -726,6 +733,7 @@ function EditOrgModal({ org, onClose, onSaved, setStatus }: {
             className="bg-bg-input border border-border rounded cursor-pointer"
           />
         </Field>
+        <FormError message={err} />
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted hover:text-text">Cancel</button>
           <button
@@ -927,11 +935,13 @@ function CreateUserModal({ orgSlug, onClose, onCreated, setStatus }: {
   const [password, setPassword] = useState("");
   const [emailVerified, setEmailVerified] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email.trim()) return;
     setBusy(true);
+    setErr("");
     try {
       const body: Record<string, unknown> = {
         email: email.trim(),
@@ -947,11 +957,15 @@ function CreateUserModal({ orgSlug, onClose, onCreated, setStatus }: {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || `create ${r.status}`);
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `create failed (${r.status})`);
       onCreated(data.user.id, true);
-    } catch (err) {
-      setStatus(`create: ${(err as Error).message}`);
+    } catch (e2) {
+      // Surface inline (the header status line is hidden behind the
+      // modal). The server's message is descriptive — e.g. "password
+      // must be at least 12 characters".
+      setErr((e2 as Error).message);
+      setStatus(`create: ${(e2 as Error).message}`);
     } finally {
       setBusy(false);
     }
@@ -986,11 +1000,11 @@ function CreateUserModal({ orgSlug, onClose, onCreated, setStatus }: {
           </div>
         </Field>
         {mode === "password" && (
-          <Field label="Password" hint="Must satisfy the install's password policy.">
+          <Field label="Password" hint="Default policy: at least 12 characters and 2 of {lower, upper, digit, symbol}.">
             <input
               type="text" value={password} onChange={(e) => setPassword(e.target.value)}
               required minLength={8}
-              placeholder="at least 12 chars by default"
+              placeholder="at least 12 chars, mixed character classes"
               className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text font-mono"
             />
           </Field>
@@ -999,6 +1013,7 @@ function CreateUserModal({ orgSlug, onClose, onCreated, setStatus }: {
           <input type="checkbox" checked={emailVerified} onChange={(e) => setEmailVerified(e.target.checked)} />
           Mark email as already verified
         </label>
+        <FormError message={err} />
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted hover:text-text">
             Cancel
@@ -1010,6 +1025,18 @@ function CreateUserModal({ orgSlug, onClose, onCreated, setStatus }: {
         </div>
       </form>
     </Modal>
+  );
+}
+
+// FormError — inline error banner for modals. Modals overlay the
+// header status line, so failures must be shown in-place or the user
+// just sees a console 400 with no explanation.
+function FormError({ message }: { message: string }) {
+  if (!message) return null;
+  return (
+    <div className="border border-warning rounded bg-warning/10 px-3 py-2 text-sm text-warning">
+      {message}
+    </div>
   );
 }
 
@@ -1462,12 +1489,14 @@ function CreateClientModal({ defaultOrgSlug, orgs, onClose, onCreated, setStatus
   const [audience, setAudience] = useState("");
   const [requireMFA, setRequireMFA] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
     if (scope === "single" && !orgSlug) return;
     setBusy(true);
+    setErr("");
     try {
       const body = {
         name: name.trim(),
@@ -1486,14 +1515,12 @@ function CreateClientModal({ defaultOrgSlug, orgs, onClose, onCreated, setStatus
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!r.ok) {
-        const data = await r.json().catch(() => ({}));
-        throw new Error(data.error || `create ${r.status}`);
-      }
-      const data = await r.json();
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `create failed (${r.status})`);
       onCreated(data.client_id, data.client_secret);
-    } catch (err) {
-      setStatus(`create: ${(err as Error).message}`);
+    } catch (e2) {
+      setErr((e2 as Error).message);
+      setStatus(`create: ${(e2 as Error).message}`);
     } finally {
       setBusy(false);
     }
@@ -1565,6 +1592,7 @@ function CreateClientModal({ defaultOrgSlug, orgs, onClose, onCreated, setStatus
           <input type="checkbox" checked={requireMFA} onChange={(e) => setRequireMFA(e.target.checked)} />
           Require MFA for this client
         </label>
+        <FormError message={err} />
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted hover:text-text">
             Cancel
