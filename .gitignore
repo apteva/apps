@@ -31,6 +31,7 @@ mcp/media-studio/media-studio
 mcp/instances/instances
 mcp/jobs/jobs
 mcp/live-link/live-link
+mcp/market-intel/market-intel
 mcp/media/media
 mcp/messaging/messaging
 mcp/mqtt/mqtt

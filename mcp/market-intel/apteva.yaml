@@ -1,0 +1,142 @@
+schema: apteva-app/v1
+
+name: market-intel
+display_name: Market Intelligence
+version: 0.1.0
+description: |
+  Cross-source market intelligence for trading agents. Two faces:
+
+    Gateway   — a unified, normalized query layer over every bound data
+                source. The agent asks in domain language ("Alcaraz clay
+                H2H", "current Fed-cut probability", "enrich this
+                Polymarket market") and market-intel fans out to the
+                right underlying integrations, normalizes, and returns
+                one consistent shape. The agent never has to know which
+                of 20 integration slugs answers what.
+
+    Signal    — (v0.2) background scanners that match equivalent markets
+                across prediction-market venues + ground-truth sources,
+                compute net-of-cost edge, and push signal.arbitrage
+                events the trading agent can act on.
+
+  Read-only. market-intel never places orders — that authority lives in
+  the trading app. It reads prices, depth, stats, and history; the agent
+  decides; the trading app executes.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/market-intel
+tags: [trading, intelligence, prediction-markets, polymarket, sports, macro, signals]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.instances.read
+    - net.egress                   # some sources hit directly (public, no-auth)
+    - platform.connections.execute # data integration calls
+    - platform.connections.read    # discover bound data sources by slug
+  integrations:
+    # Every data source is OPTIONAL. The gateway degrades gracefully:
+    # an unbound source is simply absent from the enrichment blob, and
+    # query types that depend only on it return empty. Bind what you
+    # want the agents to see.
+    - role: prediction_market_polymarket
+      kind: integration
+      required: false
+      compatible_slugs: [polymarket, polymarket-data, polymarket-clob]
+      label: "Polymarket (gamma + data + CLOB read)"
+      hint: "Anchor venue. gamma = prices/metadata, data-api = holders/OI, clob = order book depth."
+    - role: prediction_market_other
+      kind: integration
+      required: false
+      compatible_slugs: [kalshi, manifold-markets]
+      label: "Other prediction markets (cross-venue comparison)"
+    - role: sports_data
+      kind: integration
+      required: false
+      compatible_slugs: [the-odds-api, the-sports-db, api-sports, tennis-abstract]
+      label: "Sports odds + stats + history"
+    - role: macro_data
+      kind: integration
+      required: false
+      compatible_slugs: [fred, bls, eia, finnhub]
+      label: "Macro indicators + economic calendar"
+    - role: news_data
+      kind: integration
+      required: false
+      compatible_slugs: [tavily, perplexity, exa, newsapi, gnews, gdelt, wikipedia]
+      label: "News + events + sentiment"
+    - role: crypto_data
+      kind: integration
+      required: false
+      compatible_slugs: [coingecko, etherscan, polygonscan, whale-alert, defillama]
+      label: "Crypto prices + on-chain"
+    - role: llm
+      kind: integration
+      required: false
+      compatible_slugs: [anthropic-api, openai-api]
+      label: "LLM for entity resolution + market matching"
+  apps:
+    # Optional dep — Phase 3 position-aware signals read the trading
+    # portfolios so market-intel can say "you hold this, it resolved".
+    # Absent = signals are venue-only, no portfolio context.
+    - name: trading
+      required: false
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: enrich
+      description: "Everything relevant to a prediction market in one normalized blob — cross-venue prices, ground-truth probability, entities, their stats + H2H, news, computed edge."
+    - name: stats
+      description: "Normalized profile for an entity (player, team, ticker, crypto) fanned across the right sources."
+    - name: history
+      description: "Historical record — head-to-head between two entities, or one entity's time series."
+    - name: context
+      description: "Deduped news + sentiment + event-volume for a topic or entity."
+    - name: probability
+      description: "Best ground-truth probability for an event from whichever method fits (odds de-vig, macro-implied, cross-venue median)."
+    - name: resolve_entity
+      description: "Resolve a name to a canonical entity id across sources (disambiguation)."
+    - name: sources_status
+      description: "Which data sources are bound + healthy right now, by domain."
+  ui_panels:
+    - slot: project.page
+      label: Market Intel
+      icon: activity
+      entry: /ui/MarketIntelPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/market-intel
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/market-intel.db
+  migrations: migrations/
+
+config_schema:
+  - name: llm_matching
+    type: text
+    default: "true"
+    label: Use LLM for entity resolution + market matching
+    description: |
+      true — discovery uses a bound LLM integration to semantically match
+             markets + resolve entity ids. Falls back to heuristic keyword
+             matching when no LLM is bound.
+      false — heuristic matching only.
+  - name: cache_ttl_seconds
+    type: text
+    default: "60"
+    label: Source cache TTL (seconds)
+    description: How long to cache a source response before re-fetching. Protects tight free tiers.
+
+upgrade_policy: auto-patch
