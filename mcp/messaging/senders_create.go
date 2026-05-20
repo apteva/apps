@@ -374,7 +374,17 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 	}
 	ruleName := req.RuleName
 	if ruleName == "" {
+		// Per-install rule name. Before v0.12.5 this was the constant
+		// "messaging-inbound" — first install to bootstrap "claimed"
+		// the rule, every other install hit AlreadyExists and silently
+		// no-op'd while still persisting inbound_bootstrapped=1
+		// locally. Suffixing with install_id lets every install own
+		// its own rule inside the shared rule set; the merge logic in
+		// bootstrapCreateReceiptRule handles same-install re-runs.
 		ruleName = "messaging-inbound"
+		if iid, err := ctx.PlatformAPI().WhoAmI(); err == nil && iid != nil && iid.InstallID > 0 {
+			ruleName = fmt.Sprintf("messaging-inbound-%d", iid.InstallID)
+		}
 	}
 	if doInbound {
 		resp.Inbound.BucketName = bucketName
@@ -1094,16 +1104,21 @@ func bootstrapCreateRuleSet(ctx *sdk.AppCtx, connID int64, name string) error {
 	return errors.New("create_receipt_rule_set: nil result")
 }
 
+// bootstrapCreateReceiptRule creates the receipt rule for `domain` —
+// or merges the new recipient into an existing rule of the same name
+// when AlreadyExists fires. Pre-v0.12.5 the AlreadyExists branch
+// returned nil silently, leaving whatever recipient + S3 target the
+// FIRST caller set in place; second-and-later domains (or installs)
+// looked successfully bootstrapped locally but SES had no idea about
+// them, so their inbound mail bounced.
+//
+// SES doesn't expose UpdateReceiptRule on the query API we have
+// available; the merge path is describe-active → delete → recreate
+// with the union of (existing_recipients, new_domain). Brief 50ms
+// window where the rule doesn't exist; for inbound mail that just
+// means SES retries the SMTP delivery.
 func bootstrapCreateReceiptRule(ctx *sdk.AppCtx, connID int64, ruleSetName, ruleName, domain, bucket, topicArn string) error {
-	args := map[string]any{
-		"RuleSetName":                               ruleSetName,
-		"Rule.Name":                                 ruleName,
-		"Rule.Enabled":                              "true",
-		"Rule.ScanEnabled":                          "true",
-		"Rule.Recipients.member.1":                  domain,
-		"Rule.Actions.member.1.S3Action.BucketName": bucket,
-		"Rule.Actions.member.1.S3Action.TopicArn":   topicArn,
-	}
+	args := buildReceiptRuleArgs(ruleSetName, ruleName, []string{domain}, bucket, topicArn)
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "create_receipt_rule", args)
 	if err != nil {
 		return fmt.Errorf("create_receipt_rule: %w", err)
@@ -1111,14 +1126,195 @@ func bootstrapCreateReceiptRule(ctx *sdk.AppCtx, connID int64, ruleSetName, rule
 	if res != nil && res.Success {
 		return nil
 	}
-	if res != nil {
-		raw := string(res.Data)
-		if strings.Contains(raw, "AlreadyExists") {
-			return nil
-		}
+	if res == nil {
+		return errors.New("create_receipt_rule: nil result")
+	}
+	raw := string(res.Data)
+	if !strings.Contains(raw, "AlreadyExists") {
 		return fmt.Errorf("create_receipt_rule non-2xx: %s", truncate(raw, 400))
 	}
-	return errors.New("create_receipt_rule: nil result")
+	return mergeReceiptRuleRecipient(ctx, connID, ruleSetName, ruleName, domain, bucket, topicArn)
+}
+
+func buildReceiptRuleArgs(ruleSetName, ruleName string, recipients []string, bucket, topicArn string) map[string]any {
+	args := map[string]any{
+		"RuleSetName":                               ruleSetName,
+		"Rule.Name":                                 ruleName,
+		"Rule.Enabled":                              "true",
+		"Rule.ScanEnabled":                          "true",
+		"Rule.Actions.member.1.S3Action.BucketName": bucket,
+		"Rule.Actions.member.1.S3Action.TopicArn":   topicArn,
+	}
+	// SES query API takes Recipients as numbered members starting at 1.
+	for i, r := range recipients {
+		args[fmt.Sprintf("Rule.Recipients.member.%d", i+1)] = r
+	}
+	return args
+}
+
+// mergeReceiptRuleRecipient reads the existing rule via the active
+// rule set describe call, unions in `domain`, deletes the rule, and
+// recreates it with the merged recipient list + the caller's S3
+// target. The S3 target gets overwritten by the latest caller — same
+// install always has the same bucket/topic, so this is a no-op
+// rewrite in the common case.
+func mergeReceiptRuleRecipient(ctx *sdk.AppCtx, connID int64, ruleSetName, ruleName, domain, bucket, topicArn string) error {
+	existing, err := describeReceiptRuleRecipients(ctx, connID, ruleSetName, ruleName)
+	if err != nil {
+		return fmt.Errorf("merge: describe failed: %w", err)
+	}
+	merged := append([]string{}, existing...)
+	seen := false
+	for _, r := range merged {
+		if strings.EqualFold(strings.TrimSpace(r), strings.TrimSpace(domain)) {
+			seen = true
+			break
+		}
+	}
+	if !seen {
+		merged = append(merged, domain)
+	}
+	// Delete the existing rule first; create_receipt_rule won't let
+	// us overwrite. Idempotent — delete on a missing rule errors but
+	// we just attempted describe, so it definitely exists.
+	if _, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "delete_receipt_rule", map[string]any{
+		"RuleSetName": ruleSetName,
+		"RuleName":    ruleName,
+	}); err != nil {
+		return fmt.Errorf("merge: delete failed: %w", err)
+	}
+	args := buildReceiptRuleArgs(ruleSetName, ruleName, merged, bucket, topicArn)
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "create_receipt_rule", args)
+	if err != nil {
+		return fmt.Errorf("merge: recreate failed: %w", err)
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return fmt.Errorf("merge: recreate non-2xx: %s", truncate(body, 400))
+	}
+	return nil
+}
+
+// describeReceiptRuleRecipients reads the active rule set, finds the
+// rule by name, returns its current recipient list. Returns nil + no
+// error when the rule isn't in the set (treated as empty recipients;
+// the caller will create-from-scratch).
+//
+// SES Query API converts XML to JSON wrappers the integration runner
+// passes through. The shape is deeply nested and slightly variable:
+// single-element lists may not be wrapped in a JSON array. Best-
+// effort parsing — if we can't pull recipients out, return empty and
+// let the recreate overwrite with just the new domain (worse than a
+// merge but better than silent failure).
+func describeReceiptRuleRecipients(ctx *sdk.AppCtx, connID int64, ruleSetName, ruleName string) ([]string, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "describe_active_receipt_rule_set", map[string]any{})
+	if err != nil {
+		return nil, fmt.Errorf("describe_active_receipt_rule_set: %w", err)
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return nil, fmt.Errorf("describe_active_receipt_rule_set non-2xx: %s", truncate(body, 400))
+	}
+	// Two response wrappers depending on output style; try both.
+	var env struct {
+		DescribeActiveReceiptRuleSetResponse struct {
+			DescribeActiveReceiptRuleSetResult struct {
+				Metadata struct {
+					Name string `json:"Name"`
+				} `json:"Metadata"`
+				Rules json.RawMessage `json:"Rules"`
+			} `json:"DescribeActiveReceiptRuleSetResult"`
+		} `json:"DescribeActiveReceiptRuleSetResponse"`
+		// Flatter variant some runners emit.
+		Metadata struct {
+			Name string `json:"Name"`
+		} `json:"Metadata"`
+		Rules json.RawMessage `json:"Rules"`
+	}
+	_ = json.Unmarshal(res.Data, &env)
+	if ruleSetName != "" && env.DescribeActiveReceiptRuleSetResponse.DescribeActiveReceiptRuleSetResult.Metadata.Name != "" {
+		if !strings.EqualFold(env.DescribeActiveReceiptRuleSetResponse.DescribeActiveReceiptRuleSetResult.Metadata.Name, ruleSetName) {
+			return nil, fmt.Errorf("active rule set is %q, not %q", env.DescribeActiveReceiptRuleSetResponse.DescribeActiveReceiptRuleSetResult.Metadata.Name, ruleSetName)
+		}
+	}
+	rules := env.DescribeActiveReceiptRuleSetResponse.DescribeActiveReceiptRuleSetResult.Rules
+	if len(rules) == 0 {
+		rules = env.Rules
+	}
+	return extractRecipientsForRule(rules, ruleName), nil
+}
+
+// extractRecipientsForRule walks the Rules payload (which can be
+// shaped {"member":[...]}, [...], or a single object) and returns the
+// Recipients list for the rule whose Name matches. Tolerant of the
+// variability so a slightly different SES → JSON shape doesn't make
+// us silently rebuild the rule with empty recipients.
+func extractRecipientsForRule(raw json.RawMessage, ruleName string) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	// Try { "member": [...] }.
+	var wrapped struct {
+		Member []map[string]any `json:"member"`
+	}
+	if err := json.Unmarshal(raw, &wrapped); err == nil && len(wrapped.Member) > 0 {
+		return recipientsFromRuleList(wrapped.Member, ruleName)
+	}
+	// Try [...]
+	var arr []map[string]any
+	if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
+		return recipientsFromRuleList(arr, ruleName)
+	}
+	// Try single object.
+	var single map[string]any
+	if err := json.Unmarshal(raw, &single); err == nil && len(single) > 0 {
+		return recipientsFromRuleList([]map[string]any{single}, ruleName)
+	}
+	return nil
+}
+
+func recipientsFromRuleList(rules []map[string]any, ruleName string) []string {
+	for _, rule := range rules {
+		name, _ := rule["Name"].(string)
+		if !strings.EqualFold(name, ruleName) {
+			continue
+		}
+		raw, _ := json.Marshal(rule["Recipients"])
+		return extractRecipientsField(raw)
+	}
+	return nil
+}
+
+func extractRecipientsField(raw json.RawMessage) []string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	// { "member": ["a", "b"] }
+	var wrapped struct {
+		Member []string `json:"member"`
+	}
+	if err := json.Unmarshal(raw, &wrapped); err == nil && len(wrapped.Member) > 0 {
+		return wrapped.Member
+	}
+	// { "member": "single" }
+	var wrappedSingle struct {
+		Member string `json:"member"`
+	}
+	if err := json.Unmarshal(raw, &wrappedSingle); err == nil && wrappedSingle.Member != "" {
+		return []string{wrappedSingle.Member}
+	}
+	// Bare ["a", "b"]
+	var bare []string
+	if err := json.Unmarshal(raw, &bare); err == nil {
+		return bare
+	}
+	return nil
 }
 
 func bootstrapActivateRuleSet(ctx *sdk.AppCtx, connID int64, name string) error {

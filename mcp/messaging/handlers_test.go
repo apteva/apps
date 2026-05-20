@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -32,7 +33,16 @@ type stubPlatform struct {
 	executeErr       error
 	callAppReply     json.RawMessage
 	callAppErr       error
-	bindingsOverride map[string]any // when non-nil, replaces the default email_provider binding
+	bindingsOverride map[string]any            // when non-nil, replaces the default email_provider binding
+	whoAmIOverride   *sdk.InstallIdentity      // when non-nil, replaces the default identity
+	// executeOverride: when non-nil, called per ExecuteIntegrationTool
+	// invocation BEFORE replyByTool / defaults. The int is the
+	// 0-indexed count of prior calls for that tool — lets a test
+	// switch behaviour between calls (e.g., first AlreadyExists,
+	// second success). Return nil to fall through to the normal stub
+	// behaviour.
+	executeOverride func(tool string, priorCalls int) *sdk.ExecuteResult
+	toolCallCounts  map[string]int
 }
 
 type executeCall struct {
@@ -50,9 +60,23 @@ type callAppCall struct {
 func (s *stubPlatform) ExecuteIntegrationTool(connID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
 	s.mu.Lock()
 	s.executeCalls = append(s.executeCalls, executeCall{ConnID: connID, Tool: tool, Input: input})
+	priorCalls := 0
+	if s.toolCallCounts == nil {
+		s.toolCallCounts = map[string]int{}
+	}
+	priorCalls = s.toolCallCounts[tool]
+	s.toolCallCounts[tool] = priorCalls + 1
 	s.mu.Unlock()
 	if s.executeErr != nil {
 		return nil, s.executeErr
+	}
+	// Per-call override wins (lets a test switch behaviour between
+	// successive calls for the same tool, e.g. first AlreadyExists,
+	// second success).
+	if s.executeOverride != nil {
+		if r := s.executeOverride(tool, priorCalls); r != nil {
+			return r, nil
+		}
 	}
 	// Per-tool reply override wins; otherwise fall back to a sane default.
 	if s.replyByTool != nil {
@@ -111,6 +135,16 @@ func (s *stubPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
 	bindings := map[string]any{"email_provider": float64(1)}
 	if s.bindingsOverride != nil {
 		bindings = s.bindingsOverride
+	}
+	if s.whoAmIOverride != nil {
+		// Caller-provided identity wins, but merge bindings if the
+		// override didn't set them (most tests only override
+		// InstallID + AppName).
+		id := *s.whoAmIOverride
+		if id.Bindings == nil {
+			id.Bindings = bindings
+		}
+		return &id, nil
 	}
 	return &sdk.InstallIdentity{
 		AppName:   "messaging",
@@ -1223,6 +1257,183 @@ func TestSendersDelete_PropagatesRealUpstreamError(t *testing.T) {
 	row, _ := dbFindSender(ctx.AppDB(), "test-proj", "email", "ok@x.com")
 	if row == nil || row.DeletedAt != nil {
 		t.Errorf("row should NOT be soft-deleted when SES error is real, got %+v", row)
+	}
+}
+
+// ─── v0.12.5 receipt-rule per-install + merge-on-AlreadyExists ────
+
+// Reported bug: ruleName was the constant "messaging-inbound" across
+// every install. First install to bootstrap claimed it; everyone else
+// AlreadyExists'd and silently no-op'd while persisting
+// inbound_bootstrapped=1 — SES had no rule for their domains, mail
+// bounced.
+func TestSendersCreate_Domain_InboundRuleNameIsInstallScoped(t *testing.T) {
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{
+			"email_provider":         float64(1),
+			"inbound_storage":        float64(2),
+			"inbound_notifications":  float64(3),
+		},
+		whoAmIOverride: &sdk.InstallIdentity{
+			AppName: "messaging", ProjectID: "test-proj", InstallID: 47,
+		},
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"create_sns_topic":            {Success: true, Status: 200, Data: json.RawMessage(`{"CreateTopicResponse":{"CreateTopicResult":{"TopicArn":"arn:aws:sns:eu-west-1:111:apteva-ses-inbound-47"}}}`)},
+			"set_topic_attributes":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"create_s3_bucket":            {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"put_s3_bucket_policy":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"verify_domain":               {Success: true, Status: 200, Data: json.RawMessage(`{"DkimAttributes":{"Tokens":["a","b","c"],"Status":"SUCCESS"}}`)},
+			"create_receipt_rule_set":     {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"create_receipt_rule":         {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"set_active_receipt_rule_set": {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"subscribe":                   {Success: true, Status: 200, Data: json.RawMessage(`{"SubscribeResponse":{"SubscribeResult":{"SubscriptionArn":"arn:sub"}}}`)},
+		},
+	}
+	// PublicURL is needed for inbound auto to engage; the bootstrap
+	// also reads it for the webhook subscription. Skip subscribe step
+	// failures aren't relevant to the rule-naming assertion below.
+	t.Setenv("APTEVA_PUBLIC_URL", "https://test.public.example")
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	if _, err := app.toolSendersCreate(ctx, map[string]any{
+		"address": "schwartzindustries.com",
+		"inbound": "true",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var createRule *executeCall
+	for i := range plat.executeCalls {
+		if plat.executeCalls[i].Tool == "create_receipt_rule" {
+			createRule = &plat.executeCalls[i]
+			break
+		}
+	}
+	if createRule == nil {
+		t.Fatal("create_receipt_rule not called")
+	}
+	if createRule.Input["Rule.Name"] != "messaging-inbound-47" {
+		t.Errorf("rule name not install-scoped: got %q, want messaging-inbound-47", createRule.Input["Rule.Name"])
+	}
+	if createRule.Input["Rule.Recipients.member.1"] != "schwartzindustries.com" {
+		t.Errorf("recipient not set: %+v", createRule.Input)
+	}
+}
+
+// Same install adding a second domain: AlreadyExists must trigger
+// describe → merge → delete → recreate-with-both, not the pre-v0.12.5
+// silent no-op.
+func TestSendersCreate_Domain_AlreadyExists_MergesRecipients(t *testing.T) {
+	const describeReply = `{
+		"DescribeActiveReceiptRuleSetResponse": {
+			"DescribeActiveReceiptRuleSetResult": {
+				"Metadata": {"Name":"apteva-default"},
+				"Rules": {"member":[
+					{"Name":"messaging-inbound-47","Recipients":{"member":["schwartzindustries.com"]}}
+				]}
+			}
+		}
+	}`
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{
+			"email_provider":         float64(1),
+			"inbound_storage":        float64(2),
+			"inbound_notifications":  float64(3),
+		},
+		whoAmIOverride: &sdk.InstallIdentity{
+			AppName: "messaging", ProjectID: "test-proj", InstallID: 47,
+		},
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"create_sns_topic":            {Success: true, Status: 200, Data: json.RawMessage(`{"CreateTopicResponse":{"CreateTopicResult":{"TopicArn":"arn:aws:sns:eu-west-1:111:apteva-ses-inbound-47"}}}`)},
+			"set_topic_attributes":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"create_s3_bucket":            {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"put_s3_bucket_policy":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"verify_domain":               {Success: true, Status: 200, Data: json.RawMessage(`{"DkimAttributes":{"Tokens":["a","b","c"],"Status":"SUCCESS"}}`)},
+			"create_receipt_rule_set":     {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			// First create_receipt_rule call (for the new domain) fails
+			// AlreadyExists; merge path then describes, deletes, recreates.
+			"set_active_receipt_rule_set": {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"subscribe":                   {Success: true, Status: 200, Data: json.RawMessage(`{"SubscribeResponse":{"SubscribeResult":{"SubscriptionArn":"arn:sub"}}}`)},
+			"delete_receipt_rule":         {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"describe_active_receipt_rule_set": {Success: true, Status: 200, Data: json.RawMessage(describeReply)},
+		},
+		// create_receipt_rule needs a per-call switch: first AlreadyExists,
+		// second (recreate) success. Use a tiny dispatcher.
+		executeOverride: func(tool string, calls int) *sdk.ExecuteResult {
+			if tool == "create_receipt_rule" {
+				if calls == 0 {
+					return &sdk.ExecuteResult{Success: false, Status: 400, Data: json.RawMessage(`{"Error":{"Code":"AlreadyExists","Message":"Rule already exists"}}`)}
+				}
+				return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{}`)}
+			}
+			return nil
+		},
+	}
+	t.Setenv("APTEVA_PUBLIC_URL", "https://test.public.example")
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	if _, err := app.toolSendersCreate(ctx, map[string]any{
+		"address": "hypnofans.com",
+		"inbound": "true",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Confirm the dispatch order: create → describe → delete → create.
+	var seq []string
+	for _, c := range plat.executeCalls {
+		switch c.Tool {
+		case "create_receipt_rule", "describe_active_receipt_rule_set", "delete_receipt_rule":
+			seq = append(seq, c.Tool)
+		}
+	}
+	if len(seq) != 4 ||
+		seq[0] != "create_receipt_rule" ||
+		seq[1] != "describe_active_receipt_rule_set" ||
+		seq[2] != "delete_receipt_rule" ||
+		seq[3] != "create_receipt_rule" {
+		t.Fatalf("expected create→describe→delete→create dispatch, got %v", seq)
+	}
+
+	// The recreate (2nd create_receipt_rule call) must carry BOTH the
+	// existing (schwartzindustries.com) and the new (hypnofans.com)
+	// recipient. Pre-v0.12.5 the bug was the silent no-op; this
+	// assertion is the actual fix.
+	var recreate *executeCall
+	createSeen := 0
+	for i := range plat.executeCalls {
+		if plat.executeCalls[i].Tool == "create_receipt_rule" {
+			createSeen++
+			if createSeen == 2 {
+				recreate = &plat.executeCalls[i]
+				break
+			}
+		}
+	}
+	if recreate == nil {
+		t.Fatal("no 2nd create_receipt_rule call (the recreate after delete)")
+	}
+	for _, key := range []string{"Rule.Recipients.member.1", "Rule.Recipients.member.2"} {
+		if recreate.Input[key] == nil {
+			t.Errorf("recreate missing %s: %+v", key, recreate.Input)
+		}
+	}
+	got := []string{
+		fmt.Sprint(recreate.Input["Rule.Recipients.member.1"]),
+		fmt.Sprint(recreate.Input["Rule.Recipients.member.2"]),
+	}
+	want := map[string]bool{"schwartzindustries.com": false, "hypnofans.com": false}
+	for _, r := range got {
+		if _, ok := want[r]; ok {
+			want[r] = true
+		}
+	}
+	for r, seen := range want {
+		if !seen {
+			t.Errorf("merged recipients missing %q (got %v)", r, got)
+		}
 	}
 }
 
