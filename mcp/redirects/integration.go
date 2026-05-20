@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 
@@ -239,19 +241,42 @@ func apexOf(hostname string) string {
 	return parts[len(parts)-2] + "." + parts[len(parts)-1]
 }
 
-// platformPublicHost — the DNS target the CNAME should point at. Set
-// by the platform when this sidecar starts; falls back to the local
-// hostname only as a last-resort, which won't work for public DNS but
-// at least tells the panel something concrete in dev.
+// platformPublicHost — the hostname the CNAME should target. The
+// platform injects APTEVA_PUBLIC_URL into every sidecar (sourced from
+// the dashboard's "Public URL" setting); we parse it for the host
+// part. If the public URL points at an IP rather than a hostname we
+// return "" — CNAMEs can't target IPs, that case needs an A record
+// and isn't implemented yet.
+//
+// APTEVA_PUBLIC_HOST stays supported as a manual override for the
+// rare case where the operator wants the CNAME to target a different
+// hostname than the dashboard URL (e.g. an apex behind a CDN vs the
+// origin host).
 func platformPublicHost() string {
 	if v := strings.TrimSpace(os.Getenv("APTEVA_PUBLIC_HOST")); v != "" {
 		return v
 	}
-	if v := strings.TrimSpace(os.Getenv("PUBLIC_URL")); v != "" {
-		// PUBLIC_URL is sometimes a full URL like https://x.example.com.
+	if v := strings.TrimSpace(os.Getenv("APTEVA_PUBLIC_URL")); v != "" {
+		u, err := url.Parse(v)
+		if err == nil && u.Hostname() != "" {
+			host := u.Hostname()
+			if ip := net.ParseIP(host); ip == nil {
+				return host
+			}
+			// Public URL is an IP — can't CNAME to it.
+			return ""
+		}
+		// Not a parseable URL — assume it's already bare host:port or
+		// just a hostname. Strip scheme/port defensively.
 		v = strings.TrimPrefix(v, "https://")
 		v = strings.TrimPrefix(v, "http://")
 		v = strings.TrimSuffix(v, "/")
+		if i := strings.IndexAny(v, ":/"); i >= 0 {
+			v = v[:i]
+		}
+		if ip := net.ParseIP(v); ip != nil {
+			return ""
+		}
 		return v
 	}
 	return ""
