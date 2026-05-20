@@ -107,6 +107,22 @@ var registry = map[string]map[queryType][]sourceSpec{
 			}},
 		},
 	},
+	// Prediction-market venue prices. All public (direct HTTP, no key).
+	// Polymarket gamma is the anchor; kalshi + manifold give cross-venue
+	// comparison.
+	"prediction_market": {
+		qMarketPrice: {
+			{slug: "polymarket", tool: "market_price", argFn: func(p map[string]any) map[string]any {
+				return map[string]any{"market": p["market"]}
+			}},
+			{slug: "kalshi", tool: "list_markets", argFn: func(p map[string]any) map[string]any {
+				return map[string]any{"ticker": p["ticker"]}
+			}},
+			{slug: "manifold-markets", tool: "search_markets", argFn: func(p map[string]any) map[string]any {
+				return map[string]any{"term": p["topic"]}
+			}},
+		},
+	},
 	"*": {
 		qNews: {
 			{slug: "tavily", tool: "search", argFn: func(p map[string]any) map[string]any {
@@ -204,6 +220,17 @@ func (p *platformSourceClient) connFor(slug string) (int64, bool) {
 }
 
 func (p *platformSourceClient) call(slug, tool string, args map[string]any) (json.RawMessage, bool) {
+	// Public sources first — direct HTTP, no binding, no key.
+	if isPublicSource(slug) {
+		if data, ok := directPublicCall(slug, tool, args); ok {
+			return data, true
+		}
+		// A public source that failed (network blip, bad args) shouldn't
+		// fall through to ExecuteIntegrationTool — there's no bound
+		// connection for it anyway. Report miss.
+		return nil, false
+	}
+	// Keyed sources — need a bound connection.
 	id, ok := p.connFor(slug)
 	if !ok {
 		return nil, false
@@ -215,9 +242,15 @@ func (p *platformSourceClient) call(slug, tool string, args map[string]any) (jso
 	return res.Data, true
 }
 
+// boundSlugs reports availability. Public sources are always available
+// (no binding needed); keyed sources depend on a live connection.
 func (p *platformSourceClient) boundSlugs(candidates []string) map[string]bool {
 	out := map[string]bool{}
 	for _, s := range candidates {
+		if isPublicSource(s) {
+			out[s] = true
+			continue
+		}
 		_, ok := p.connFor(s)
 		out[s] = ok
 	}

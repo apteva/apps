@@ -93,12 +93,43 @@ func (a *App) toolEnrich(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 	}
 
+	// Prediction-market price (public, no binding). The anchor.
+	var pmYes *float64
+	if mp := gwMarketPrice(sc, market); mp != nil {
+		blob["market_price"] = mp
+		pmYes = mp.YesPrice
+		addSrc([]string{mp.Source})
+	}
+
 	// Ground-truth probability (sports). entity_a is the principal
 	// outcome we price.
+	var fair *float64
 	if entityA != "" {
 		prob := gwProbability(sc, map[string]any{"entity": entityA, "domain": domain, "sport": sport})
 		blob["ground_truth"] = prob
 		addSrc(prob.Sources)
+		if prob.Method != "unavailable" {
+			f := prob.FairProb
+			fair = &f
+		}
+	}
+
+	// Edge: PM YES vs ground-truth fair. Positive = PM overprices YES
+	// (a SELL_YES signal). Note: ground truth may be surface-blind etc;
+	// the agent enriches with stats below before trusting it.
+	if pmYes != nil && fair != nil {
+		bps := edgeBps(*pmYes, *fair)
+		dir := "BUY_YES"
+		if bps > 0 {
+			dir = "SELL_YES"
+		}
+		blob["edge"] = map[string]any{
+			"pm_yes":    *pmYes,
+			"fair":      *fair,
+			"edge_bps":  bps,
+			"direction": dir,
+			"note":      "ground truth may be naive (e.g. surface-blind odds); validate with the stats/h2h fields before trading",
+		}
 	}
 
 	// Stats for both principals.

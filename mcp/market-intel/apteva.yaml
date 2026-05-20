@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: market-intel
 display_name: Market Intelligence
-version: 0.1.0
+version: 0.1.1
 description: |
   Cross-source market intelligence for trading agents. Two faces:
 
@@ -47,7 +47,7 @@ requires:
       required: false
       compatible_slugs: [polymarket, polymarket-data, polymarket-clob]
       label: "Polymarket (gamma + data + CLOB read)"
-      hint: "Anchor venue. gamma = prices/metadata, data-api = holders/OI, clob = order book depth."
+      hint: "Anchor venue. gamma (prices/metadata) + data-api (holders/OI) are PUBLIC — market-intel reads them directly, no key or binding needed. Bind only if you want order-book depth via the signed CLOB."
     - role: prediction_market_other
       kind: integration
       required: false

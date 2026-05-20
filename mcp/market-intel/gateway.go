@@ -116,6 +116,93 @@ func fairProbFromOddsAPI(raw json.RawMessage, target string) (float64, int) {
 	return consensusFairProb(bookOutcomes, targetIdxAcross)
 }
 
+// ─── market price (prediction-market venues) ──────────────────────
+
+type MarketPrice struct {
+	Venue    string   `json:"venue"`
+	Question string   `json:"question,omitempty"`
+	YesPrice *float64 `json:"yes_price,omitempty"`
+	NoPrice  *float64 `json:"no_price,omitempty"`
+	Closed   bool     `json:"closed"`
+	Source   string   `json:"source"`
+}
+
+// gwMarketPrice fetches the current price of a prediction market from
+// its venue. v0.1 fully parses Polymarket gamma (public, no key);
+// kalshi/manifold return raw for the agent until their parsers land.
+func gwMarketPrice(sc sourceClient, market string) *MarketPrice {
+	for _, spec := range specsFor("prediction_market", qMarketPrice) {
+		raw, ok := sc.call(spec.slug, spec.tool, spec.argFn(map[string]any{"market": market, "topic": market}))
+		if !ok {
+			continue
+		}
+		if spec.slug == "polymarket" {
+			if mp := parsePolymarketGamma(raw); mp != nil {
+				mp.Source = spec.slug
+				return mp
+			}
+		}
+		// Other venues: return the raw under a venue tag (parsers v0.2).
+		// Skip if empty.
+	}
+	return nil
+}
+
+// parsePolymarketGamma reads gamma's /markets response. outcomePrices +
+// outcomes arrive as JSON-encoded STRINGS (gamma is opinionated that
+// way), e.g. outcomePrices: "[\"0.78\", \"0.22\"]". For a binary
+// market, index 0 is YES.
+func parsePolymarketGamma(raw json.RawMessage) *MarketPrice {
+	var arr []struct {
+		Question      string `json:"question"`
+		OutcomePrices string `json:"outcomePrices"`
+		Closed        bool   `json:"closed"`
+	}
+	if err := json.Unmarshal(raw, &arr); err != nil || len(arr) == 0 {
+		return nil
+	}
+	m := arr[0]
+	var prices []string
+	_ = json.Unmarshal([]byte(m.OutcomePrices), &prices)
+	mp := &MarketPrice{Venue: "polymarket", Question: m.Question, Closed: m.Closed}
+	if len(prices) >= 1 {
+		if y := parseFloatStr(prices[0]); y > 0 {
+			mp.YesPrice = &y
+		}
+	}
+	if len(prices) >= 2 {
+		if n := parseFloatStr(prices[1]); n > 0 {
+			mp.NoPrice = &n
+		}
+	}
+	return mp
+}
+
+func parseFloatStr(s string) float64 {
+	var f float64
+	// json.Unmarshal of a quoted number string fails; parse manually.
+	if _, err := jsonNumber(s, &f); err != nil {
+		return 0
+	}
+	return f
+}
+
+// jsonNumber parses a decimal string into a float without importing
+// strconv at the call site (keeps the parse local + tolerant).
+func jsonNumber(s string, out *float64) (bool, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false, errEmpty
+	}
+	return true, json.Unmarshal([]byte(s), out)
+}
+
+var errEmpty = jsonErr("empty")
+
+type jsonErr string
+
+func (e jsonErr) Error() string { return string(e) }
+
 // ─── stats ─────────────────────────────────────────────────────────
 
 type StatsResult struct {
@@ -290,7 +377,13 @@ func gwSourcesStatus(sc sourceClient) map[string]any {
 	bound := sc.boundSlugs(slugs)
 	rows := make([]map[string]any, 0, len(slugs))
 	for _, s := range slugs {
-		rows = append(rows, map[string]any{"slug": s, "bound": bound[s]})
+		pub := isPublicSource(s)
+		rows = append(rows, map[string]any{
+			"slug":      s,
+			"bound":     bound[s],
+			"public":    pub,
+			"available": pub || bound[s], // public works without binding
+		})
 	}
 	return map[string]any{"sources": rows}
 }

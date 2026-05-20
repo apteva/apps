@@ -103,6 +103,38 @@ func TestGwStats_FansAndRecordsProvenance(t *testing.T) {
 	}
 }
 
+func TestParsePolymarketGamma(t *testing.T) {
+	// gamma encodes outcomePrices as a JSON-STRING, not a JSON array.
+	resp := `[{"question":"Will Alcaraz win the French Open 2026?",
+	            "outcomePrices":"[\"0.55\", \"0.45\"]","closed":false}]`
+	mp := parsePolymarketGamma(json.RawMessage(resp))
+	if mp == nil {
+		t.Fatal("expected a parsed market price")
+	}
+	if mp.YesPrice == nil || *mp.YesPrice != 0.55 {
+		t.Errorf("yes price = %v, want 0.55", mp.YesPrice)
+	}
+	if mp.NoPrice == nil || *mp.NoPrice != 0.45 {
+		t.Errorf("no price = %v, want 0.45", mp.NoPrice)
+	}
+	if mp.Question == "" {
+		t.Error("expected question populated")
+	}
+}
+
+func TestPublicSourcesNeedNoBinding(t *testing.T) {
+	for _, s := range []string{"polymarket", "polymarket-data", "gdelt", "wikipedia", "kalshi", "manifold-markets"} {
+		if !isPublicSource(s) {
+			t.Errorf("%s should be a public (no-binding) source", s)
+		}
+	}
+	for _, s := range []string{"the-odds-api", "fred", "finnhub", "newsapi", "anthropic-api"} {
+		if isPublicSource(s) {
+			t.Errorf("%s needs a key — should NOT be public", s)
+		}
+	}
+}
+
 func TestGwSourcesStatus(t *testing.T) {
 	sc := &mockSource{bound: map[string]bool{"the-odds-api": true, "fred": true}}
 	out := gwSourcesStatus(sc)

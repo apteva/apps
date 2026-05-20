@@ -24,7 +24,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: market-intel
 display_name: Market Intelligence
-version: 0.1.0
+version: 0.1.1
 description: Cross-source market-intelligence gateway for trading agents (unified data queries; signals in v0.2).
 author: Apteva
 scopes: [project, global]

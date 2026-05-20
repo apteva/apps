@@ -97,56 +97,69 @@ export default function MarketIntelPanel({ projectId, installId }: NativePanelPr
 
 // ─── Sources tab ───────────────────────────────────────────────────
 
+interface SourceRow { slug: string; bound: boolean; public: boolean; available: boolean }
+
 function SourcesTab({ api, setError }: {
   api: <T>(p: string, q?: Record<string, string>) => Promise<T>;
   setError: (e: string | null) => void;
 }) {
-  const [rows, setRows] = useState<{ slug: string; bound: boolean }[]>([]);
+  const [rows, setRows] = useState<SourceRow[]>([]);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     setBusy(true);
     try {
-      const r = await api<{ sources: { slug: string; bound: boolean }[] }>("/sources");
+      const r = await api<{ sources: SourceRow[] }>("/sources");
       setRows(r.sources || []);
     } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }, [api, setError]);
 
   useEffect(() => { load(); }, [load]);
 
-  // Group by domain.
-  const groups: Record<string, { slug: string; bound: boolean }[]> = {};
+  const groups: Record<string, SourceRow[]> = {};
   for (const r of rows) {
     const d = SOURCE_DOMAINS[r.slug] || "Other";
     (groups[d] ||= []).push(r);
   }
-  const boundCount = rows.filter((r) => r.bound).length;
+  const availCount = rows.filter((r) => r.available).length;
+
+  // Label: public sources work with no setup; keyed need binding.
+  const label = (r: SourceRow): { text: string; cls: string } => {
+    if (r.public) return { text: "public", cls: "text-green" };
+    if (r.bound) return { text: "bound", cls: "text-green" };
+    return { text: "needs key", cls: "text-text-dim" };
+  };
 
   return (
     <>
       <div className="flex items-center justify-between mb-3">
         <div className="text-xs text-text-muted">
-          {boundCount} of {rows.length} sources bound. The gateway answers a query domain only when at least one of its sources is connected.
+          {availCount} of {rows.length} sources available. Public sources work with zero setup; keyed sources need a connection bound on the Integrations page.
         </div>
         <button onClick={load} disabled={busy} className="p-1.5 rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50"><Icon.Refresh /></button>
       </div>
       {Object.keys(groups).sort().map((domain) => (
         <div key={domain} className="mb-4">
           <h2 className="text-xs font-semibold uppercase tracking-wider text-text-dim mb-2">{domain}</h2>
-          <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))" }}>
-            {groups[domain].map((r) => (
-              <div key={r.slug} className={`flex items-center gap-2 px-3 py-2 rounded border ${r.bound ? "border-border bg-bg-card" : "border-border bg-bg-input"}`}>
-                <Icon.Dot on={r.bound} />
-                <span className="text-xs font-medium flex-1">{r.slug}</span>
-                <span className={`text-xs ${r.bound ? "text-green" : "text-text-dim"}`}>{r.bound ? "bound" : "unbound"}</span>
-              </div>
-            ))}
+          <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
+            {groups[domain].map((r) => {
+              const l = label(r);
+              return (
+                <div key={r.slug} className={`flex items-center gap-2 px-3 py-2 rounded border border-border ${r.available ? "bg-bg-card" : "bg-bg-input"}`}>
+                  <Icon.Dot on={r.available} />
+                  <span className="text-xs font-medium flex-1">{r.slug}</span>
+                  <span className={`text-xs ${l.cls}`}>{l.text}</span>
+                </div>
+              );
+            })}
           </div>
         </div>
       ))}
       <div className="mt-2 p-3 text-xs bg-bg-input border border-border rounded text-text-muted">
-        Bind data sources via the dashboard's Integrations page. Each is optional —
-        the gateway degrades gracefully, simply omitting an unbound source from results.
+        <strong className="text-text">Public</strong> sources (Polymarket gamma + data, GDELT, Wikipedia, Kalshi, Manifold) work
+        immediately — no key, no binding. <strong className="text-text">Keyed</strong> sources
+        (the-odds-api, FRED, Finnhub, NewsAPI, …) need a connection bound on the dashboard's
+        Integrations page. Every source is optional; the gateway omits whatever's unavailable.
       </div>
     </>
   );
