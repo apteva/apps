@@ -133,11 +133,17 @@ func unregisterRoute(ctx *sdk.AppCtx, hostname string) error {
 }
 
 // sidecarTarget builds the http://127.0.0.1:<port> URL the routes app
-// should reverse-proxy this hostname to. The platform exposes the
-// sidecar's listening port via APTEVA_PORT.
+// should reverse-proxy this hostname to. The platform injects
+// APTEVA_APP_PORT into each sidecar — it's the free port the platform
+// picked for this install, distinct from the manifest's static port.
+// Falling back to the manifest port (8080) is wrong on multi-app
+// hosts; we'd register a bogus target and Caddy / apteva-server
+// returns 502 for the configured hostname.
 func sidecarTarget() string {
-	port := os.Getenv("APTEVA_PORT")
+	port := os.Getenv("APTEVA_APP_PORT")
 	if port == "" {
+		// Last-resort fallback for dev where the manifest's runtime.port
+		// matches the actual bind. Production always sets APTEVA_APP_PORT.
 		port = "8080"
 	}
 	return "http://127.0.0.1:" + port
