@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.6.0
+version: 0.7.0
 description: |
   Generate images, video, audio, and music via any compatible provider.
   Optionally saves outputs to the Storage app for permanent references.
@@ -160,6 +160,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/bindings", Handler: a.handleBindings},
 		{Pattern: "/models", Handler: a.handleListModels},
 		{Pattern: "/avatars", Handler: a.handleListAvatars},
+		{Pattern: "/voices", Handler: a.handleListVoices},
 		{Pattern: "/video-jobs", Handler: a.handleListVideoJobs},
 		{Pattern: "/cache/", Handler: a.handleCacheGet},
 	}

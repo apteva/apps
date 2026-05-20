@@ -146,6 +146,14 @@ interface AvatarEntry {
   status?: string;
 }
 
+interface VoiceEntry {
+  id: string;
+  name: string;
+  language?: string;
+  gender?: string;
+  preview?: string;
+}
+
 const API = "/api/apps/media-studio";
 
 const TAB_LABELS: Record<Exclude<Kind, "audio_sfx">, string> = {
@@ -291,6 +299,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   // Avatar (talking-head) state — replica/avatar picker + selection.
   const [avatars, setAvatars] = useState<AvatarEntry[]>([]);
   const [selectedAvatar, setSelectedAvatar] = useState("");
+  // Voices — HeyGen needs an explicit voice_id (Tavus bakes voice into
+  // the replica, so this stays empty there). Reuses the `voice` state.
+  const [voices, setVoices] = useState<VoiceEntry[]>([]);
   // Reference-image (edit mode) state. When sourceImage is non-empty,
   // media_generate routes through image.edit instead of image.generate.
   const [sourceImage, setSourceImage] = useState("");
@@ -396,7 +407,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     };
   }, [activeKind, projectId, loadGenerations]);
 
-  // Load the avatar/replica list when the Avatar tab is active.
+  // Load the avatar/replica list (and HeyGen voices) when the Avatar
+  // tab is active.
   useEffect(() => {
     if (activeKind !== "avatar") return;
     let cancelled = false;
@@ -406,9 +418,21 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         if (cancelled || !data) return;
         const list: AvatarEntry[] = Array.isArray(data.avatars) ? data.avatars : [];
         setAvatars(list);
-        // Snap selection to the first ready replica if none chosen.
         if (list.length > 0 && !list.some((x) => x.id === selectedAvatar)) {
           setSelectedAvatar(list[0].id);
+        }
+      })
+      .catch(() => {});
+    fetch(`${API}/voices`, { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (cancelled || !data) return;
+        const list: VoiceEntry[] = Array.isArray(data.voices) ? data.voices : [];
+        setVoices(list);
+        // Default the voice to the first one when the provider needs it
+        // (HeyGen) and none is chosen yet.
+        if (list.length > 0 && !list.some((x) => x.id === voice)) {
+          setVoice(list[0].id);
         }
       })
       .catch(() => {});
@@ -705,6 +729,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             avatars={avatars}
             selectedAvatar={selectedAvatar}
             setSelectedAvatar={setSelectedAvatar}
+            voices={voices}
           />
 
           {(activeKind === "video" || activeKind === "avatar") && videoJobs.length > 0 && (
@@ -865,6 +890,7 @@ interface ComposerProps {
   avatars: AvatarEntry[];
   selectedAvatar: string;
   setSelectedAvatar: (v: string) => void;
+  voices: VoiceEntry[];
 }
 
 function Composer(p: ComposerProps) {
@@ -955,6 +981,25 @@ function Composer(p: ComposerProps) {
           selected={p.selectedAvatar}
           setSelected={p.setSelectedAvatar}
         />
+      )}
+      {p.kind === "avatar" && p.voices.length > 0 && (
+        <div>
+          <label className="text-text-muted text-xs block">Voice</label>
+          <select
+            value={p.voice}
+            onChange={(e) => p.setVoice(e.target.value)}
+            className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+            style={{ maxWidth: 220 }}
+          >
+            {p.voices.map((v) => (
+              <option key={v.id} value={v.id}>
+                {v.name || v.id}
+                {v.language ? ` · ${v.language}` : ""}
+                {v.gender ? ` · ${v.gender}` : ""}
+              </option>
+            ))}
+          </select>
+        </div>
       )}
       {p.kind === "image" && (
         <SafeModeToggle value={p.safeMode} onChange={p.setSafeMode} />

@@ -1265,10 +1265,114 @@ func TestBuildTavusAvatarArgs_RequiresReplica(t *testing.T) {
 	}
 }
 
-func TestBuildAvatarArgs_HeyGenNotWired(t *testing.T) {
-	_, err := buildAvatarArgs(map[string]any{"avatar": "a", "prompt": "p"}, "heygen", "avatar.generate")
-	if err == nil || !strings.Contains(err.Error(), "heygen") {
-		t.Errorf("want heygen-not-wired error, got %v", err)
+func TestBuildHeyGenAvatarArgs_NestedPayload(t *testing.T) {
+	args := map[string]any{
+		"avatar": "av-1", "prompt": "hello world", "voice": "vo-9",
+		"options": map[string]any{"resolution": "720p", "aspect": "9:16", "title": "Promo"},
+	}
+	got, err := buildAvatarArgs(args, "heygen", "avatar.generate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vis, ok := got["video_inputs"].([]any)
+	if !ok || len(vis) != 1 {
+		t.Fatalf("video_inputs missing/wrong: %+v", got["video_inputs"])
+	}
+	vi := vis[0].(map[string]any)
+	char := vi["character"].(map[string]any)
+	if char["avatar_id"] != "av-1" || char["type"] != "avatar" {
+		t.Errorf("character wrong: %+v", char)
+	}
+	voice := vi["voice"].(map[string]any)
+	if voice["voice_id"] != "vo-9" || voice["input_text"] != "hello world" {
+		t.Errorf("voice wrong: %+v", voice)
+	}
+	dim := got["dimension"].(map[string]any)
+	if dim["width"] != 720 || dim["height"] != 1280 {
+		t.Errorf("dimension = %+v, want 720x1280", dim)
+	}
+	if got["title"] != "Promo" {
+		t.Errorf("title not set: %+v", got["title"])
+	}
+}
+
+func TestBuildHeyGenAvatarArgs_RequiresVoice(t *testing.T) {
+	_, err := buildAvatarArgs(map[string]any{"avatar": "av-1", "prompt": "hi"}, "heygen", "avatar.generate")
+	if err == nil || !strings.Contains(err.Error(), "voice") {
+		t.Errorf("want voice-required error, got %v", err)
+	}
+}
+
+func TestAvatarToolForSlug(t *testing.T) {
+	if avatarToolForSlug("tavus", "avatar.generate") != "create_video" {
+		t.Error("tavus should map to create_video")
+	}
+	if avatarToolForSlug("heygen", "avatar.generate") != "generate_video" {
+		t.Error("heygen should map to generate_video")
+	}
+}
+
+func TestNormalizeAvatarResponse_HeyGen(t *testing.T) {
+	body := `{"error":null,"data":{"video_id":"hg-77"}}`
+	media, _, _, err := normalizeAvatarResponse("heygen", "avatar.generate", json.RawMessage(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(media) != 1 || media[0].UpstreamURL != "hg-77" {
+		t.Errorf("expected data.video_id as handle, got %+v", media)
+	}
+}
+
+func TestHeyGenDimension(t *testing.T) {
+	if w, h := heygenDimension("1080p", "16:9"); w != 1920 || h != 1080 {
+		t.Errorf("1080p 16:9 = %dx%d, want 1920x1080", w, h)
+	}
+	if w, h := heygenDimension("720p", "16:9"); w != 1280 || h != 720 {
+		t.Errorf("720p 16:9 = %dx%d, want 1280x720", w, h)
+	}
+	if w, h := heygenDimension("1080p", "9:16"); w != 1080 || h != 1920 {
+		t.Errorf("1080p 9:16 = %dx%d, want 1080x1920", w, h)
+	}
+}
+
+func TestPollWorker_AvatarHeyGen_Completes(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		_, _ = w.Write([]byte("HEYGEN-MP4"))
+	}))
+	defer upstream.Close()
+
+	pf := newRecordingPlatform()
+	pf.appSlug = "heygen"
+	pf.identity.Bindings["avatar_provider"] = float64(56)
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(fmt.Sprintf(`{"code":100,"data":{"status":"completed","video_url":"%s/v.mp4"}}`, upstream.URL)),
+	}
+	pf.nextCallResult = json.RawMessage(`{"result":{"content":[{"type":"text","text":"{\"id\":4321}"}]}}`)
+
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	ctx.AppDB().Exec(
+		`INSERT INTO video_jobs (project_id, kind, role, queue_id, provider, model, prompt, status)
+		 VALUES ('test-proj', 'avatar', 'avatar_provider', 'hg-1', 'heygen', 'heygen-avatar', 'hi', 'queued')`,
+	)
+	if err := app.videoPollWorker(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	var genID int64
+	ctx.AppDB().QueryRow(`SELECT status, generation_id FROM video_jobs WHERE queue_id='hg-1'`).Scan(&status, &genID)
+	if status != "complete" {
+		t.Errorf("status = %q, want complete", status)
+	}
+	if pf.executeCalls[0].Tool != "get_video_status" {
+		t.Errorf("retrieve tool = %q, want get_video_status", pf.executeCalls[0].Tool)
+	}
+	var kind string
+	ctx.AppDB().QueryRow(`SELECT kind FROM generations WHERE id=?`, genID).Scan(&kind)
+	if kind != "avatar" {
+		t.Errorf("generations.kind = %q, want avatar", kind)
 	}
 }
 

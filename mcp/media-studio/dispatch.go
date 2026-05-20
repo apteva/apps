@@ -39,6 +39,11 @@ type kindHandler struct {
 	// kind drive multiple sub-flows (e.g. image.generate vs image.edit
 	// based on presence of source_image).
 	ResolveCapability func(args map[string]any) string
+	// ResolveTool optionally overrides the manifest's tool name per
+	// provider slug. Needed when compatible providers name the same
+	// capability's tool differently (avatar: tavus=create_video,
+	// heygen=generate_video). nil → use bound.ToolFor(capability).
+	ResolveTool func(slug, capability string) string
 	// BuildArgs assembles the provider request body. providerSlug is
 	// the bound integration's app_slug so per-provider quirks can be
 	// gated inline; capability disambiguates within a multi-cap kind.
@@ -108,6 +113,7 @@ var handlers = map[string]kindHandler{
 	KindAvatar: {
 		Role:              "avatar_provider",
 		ResolveCapability: constCap("avatar.generate"),
+		ResolveTool:       avatarToolForSlug,
 		BuildArgs:         buildAvatarArgs,
 		Normalize:         normalizeAvatarResponse,
 		StorageDir:        "avatars",
@@ -138,6 +144,13 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	capability := h.ResolveCapability(args)
 	tool := bound.ToolFor(capability)
+	// Per-slug tool override — for kinds where compatible providers name
+	// the same capability's tool differently (avatar).
+	if h.ResolveTool != nil {
+		if t := h.ResolveTool(bound.AppSlug, capability); t != "" {
+			tool = t
+		}
+	}
 	if tool == "" {
 		return mcpError("bound " + h.Role + " (" + bound.AppSlug + ") doesn't support " + capability), nil
 	}

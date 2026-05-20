@@ -149,8 +149,62 @@ func (a *App) pollAvatarJob(app *sdk.AppCtx, bound *sdk.BoundIntegration, p pend
 	switch bound.AppSlug {
 	case "tavus":
 		a.pollTavusAvatarJob(app, bound, p, attempts)
+	case "heygen":
+		a.pollHeyGenAvatarJob(app, bound, p, attempts)
 	default:
-		failJob(app, p, "avatar provider "+bound.AppSlug+" not wired in v0.6 (Tavus only)")
+		failJob(app, p, "avatar provider "+bound.AppSlug+" not wired")
+	}
+}
+
+// pollHeyGenAvatarJob polls /v1/video_status.get. HeyGen wraps the
+// result in {code, data:{status, video_url}}. status flows
+// pending → processing → completed (or failed). On completed we fetch
+// data.video_url's bytes ourselves.
+func (a *App) pollHeyGenAvatarJob(app *sdk.AppCtx, bound *sdk.BoundIntegration, p pendingJob, attempts int) {
+	res, err := app.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "get_video_status",
+		map[string]any{"video_id": p.QueueID})
+	if err != nil {
+		bumpPolling(app, p.ID, attempts)
+		app.Logger().Warn("heygen get_video_status transient error", "id", p.ID, "err", err)
+		return
+	}
+	if res == nil || !res.Success {
+		errMsg := "heygen non-2xx"
+		if res != nil {
+			errMsg = "heygen status " + fmt.Sprint(res.Status) + ": " + truncate(string(res.Data), 300)
+		}
+		failJob(app, p, errMsg)
+		return
+	}
+	var body struct {
+		Data struct {
+			Status   string `json:"status"`    // pending | processing | completed | failed
+			VideoURL string `json:"video_url"` // direct mp4 when completed
+			Error    any    `json:"error"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(res.Data, &body); err != nil {
+		bumpPolling(app, p.ID, attempts)
+		app.Logger().Warn("heygen status parse failed", "id", p.ID, "err", err)
+		return
+	}
+	switch body.Data.Status {
+	case "completed":
+		if body.Data.VideoURL == "" {
+			failJob(app, p, "heygen completed but no video_url")
+			return
+		}
+		bytes, err := fetchBytes(body.Data.VideoURL)
+		if err != nil {
+			bumpPolling(app, p.ID, attempts)
+			app.Logger().Warn("heygen download fetch failed", "id", p.ID, "err", err)
+			return
+		}
+		a.finalizeJob(app, p, base64.StdEncoding.EncodeToString(bytes), "video/mp4")
+	case "failed":
+		failJob(app, p, "heygen status=failed")
+	default: // pending | processing
+		bumpPolling(app, p.ID, attempts)
 	}
 }
 

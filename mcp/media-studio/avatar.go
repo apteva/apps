@@ -18,17 +18,115 @@ import (
 // fetches the finished bytes from a download URL. That handle rides the
 // same video_jobs table + worker as the video kind (kind='avatar').
 
+// avatarToolForSlug maps the avatar.generate capability to the
+// provider's actual create tool — they diverge: Tavus names it
+// create_video, HeyGen generate_video. The dispatcher applies this
+// over the manifest's (single) tool mapping.
+func avatarToolForSlug(slug, capability string) string {
+	switch slug {
+	case "tavus":
+		return "create_video"
+	case "heygen":
+		return "generate_video"
+	}
+	return ""
+}
+
 // buildAvatarArgs assembles the provider's create-video request from
 // the unified args. prompt carries the spoken script; `avatar` carries
-// the replica/avatar id; `voice` is an optional override.
+// the replica/avatar id; `voice` is an optional override (required for
+// HeyGen, baked into the replica for Tavus).
 func buildAvatarArgs(args map[string]any, providerSlug, capability string) (map[string]any, error) {
 	switch providerSlug {
 	case "tavus":
 		return buildTavusAvatarArgs(args)
 	case "heygen":
-		return nil, fmt.Errorf("heygen avatar not wired in v0.6 (different create-video payload) — use Tavus")
+		return buildHeyGenAvatarArgs(args)
 	}
 	return nil, fmt.Errorf("unsupported avatar provider slug: %q", providerSlug)
+}
+
+// buildHeyGenAvatarArgs → POST /v2/videos. HeyGen wants a nested
+// video_inputs array (character + voice) plus a dimension object —
+// quite different from Tavus's flat replica_id+script. voice_id is
+// required (the script needs a voice; HeyGen doesn't bake voice into
+// the avatar the way Tavus bakes it into the replica).
+func buildHeyGenAvatarArgs(args map[string]any) (map[string]any, error) {
+	avatarID := strArg(args, "avatar", "")
+	if avatarID == "" {
+		return nil, errors.New("avatar (HeyGen avatar_id) required — pick one from /avatars")
+	}
+	script := strArg(args, "prompt", "")
+	if script == "" {
+		return nil, errors.New("prompt (the spoken script) required")
+	}
+	voiceID := strArg(args, "voice", "")
+	if voiceID == "" {
+		return nil, errors.New("voice (HeyGen voice_id) required — pick one from /voices")
+	}
+
+	res := "1080p"
+	aspect := "16:9"
+	var background any
+	var title string
+	if opts, ok := args["options"].(map[string]any); ok {
+		if v := strArg(opts, "resolution", ""); v != "" {
+			res = v
+		}
+		if v := strArg(opts, "aspect", ""); v != "" {
+			aspect = v
+		}
+		if v, exists := opts["background"]; exists {
+			background = v
+		}
+		title = strArg(opts, "title", "")
+	}
+	w, h := heygenDimension(res, aspect)
+
+	character := map[string]any{
+		"type":         "avatar",
+		"avatar_id":    avatarID,
+		"avatar_style": "normal",
+	}
+	voice := map[string]any{
+		"type":       "text",
+		"input_text": script,
+		"voice_id":   voiceID,
+	}
+	if opts, ok := args["options"].(map[string]any); ok {
+		if vs, exists := opts["voice_settings"]; exists {
+			// Merge tuning (speed/pitch/locale) onto the voice object.
+			if m, ok := vs.(map[string]any); ok {
+				for k, v := range m {
+					voice[k] = v
+				}
+			}
+		}
+	}
+	videoInput := map[string]any{"character": character, "voice": voice}
+	if background != nil {
+		videoInput["background"] = background
+	}
+	out := map[string]any{
+		"video_inputs": []any{videoInput},
+		"dimension":    map[string]any{"width": w, "height": h},
+	}
+	if title != "" {
+		out["title"] = title
+	}
+	return out, nil
+}
+
+// heygenDimension maps resolution + aspect to pixel width/height.
+func heygenDimension(resolution, aspect string) (int, int) {
+	long, short := 1280, 720 // 720p
+	if resolution == "1080p" {
+		long, short = 1920, 1080
+	}
+	if aspect == "9:16" {
+		return short, long // portrait
+	}
+	return long, short // 16:9 landscape
 }
 
 // buildTavusAvatarArgs → POST /v2/videos. replica_id + script required;
@@ -84,6 +182,25 @@ func normalizeAvatarResponse(slug, capability string, raw json.RawMessage) ([]ge
 			MimeType:    "video/mp4",
 			Ext:         "mp4",
 		}}, "", "tavus-replica", nil
+	case "heygen":
+		// HeyGen wraps the result: {error, data:{video_id}}.
+		var body struct {
+			Data struct {
+				VideoID string `json:"video_id"`
+			} `json:"data"`
+			Error any `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return nil, "", "", err
+		}
+		if body.Data.VideoID == "" {
+			return nil, "", "", fmt.Errorf("heygen create response missing data.video_id: %s", truncate(string(raw), 200))
+		}
+		return []generatedMedia{{
+			UpstreamURL: body.Data.VideoID,
+			MimeType:    "video/mp4",
+			Ext:         "mp4",
+		}}, "", "heygen-avatar", nil
 	}
 	return nil, "", "", fmt.Errorf("unsupported avatar provider slug: %q", slug)
 }
@@ -161,7 +278,116 @@ func listAvatarsFor(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) ([]avatarEntry
 		}
 		return out, nil
 	case "heygen":
-		return nil, errors.New("heygen avatar listing not wired in v0.6")
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_avatars", map[string]any{})
+		if err != nil {
+			return nil, err
+		}
+		if res == nil || !res.Success {
+			return nil, errors.New("heygen list_avatars non-2xx")
+		}
+		var body struct {
+			Data struct {
+				Avatars []struct {
+					AvatarID        string `json:"avatar_id"`
+					AvatarName      string `json:"avatar_name"`
+					PreviewImageURL string `json:"preview_image_url"`
+					PreviewVideoURL string `json:"preview_video_url"`
+				} `json:"avatars"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(res.Data, &body); err != nil {
+			return nil, err
+		}
+		out := make([]avatarEntry, 0, len(body.Data.Avatars))
+		for _, av := range body.Data.Avatars {
+			if av.AvatarID == "" {
+				continue
+			}
+			thumb := av.PreviewVideoURL
+			if thumb == "" {
+				thumb = av.PreviewImageURL
+			}
+			out = append(out, avatarEntry{ID: av.AvatarID, Name: av.AvatarName, Thumbnail: thumb})
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("unsupported avatar provider: %s", bound.AppSlug)
+}
+
+// --- voices (HeyGen only — Tavus bakes voice into the replica) ----
+
+type voiceEntry struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Language string `json:"language,omitempty"`
+	Gender   string `json:"gender,omitempty"`
+	Preview  string `json:"preview,omitempty"`
+}
+
+// handleListVoices → GET /voices. Returns the bound avatar provider's
+// voice catalog. Empty for Tavus (voice is part of the replica).
+func (a *App) handleListVoices(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	if globalCtx == nil {
+		http.Error(w, "app not mounted", http.StatusServiceUnavailable)
+		return
+	}
+	resp := map[string]any{"voices": []voiceEntry{}}
+	bound := globalCtx.IntegrationFor("avatar_provider")
+	if bound != nil {
+		resp["provider"] = bound.AppSlug
+		voices, err := listVoicesFor(globalCtx, bound)
+		if err != nil {
+			resp["error"] = err.Error()
+		} else {
+			resp["voices"] = voices
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func listVoicesFor(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) ([]voiceEntry, error) {
+	switch bound.AppSlug {
+	case "heygen":
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_voices", map[string]any{})
+		if err != nil {
+			return nil, err
+		}
+		if res == nil || !res.Success {
+			return nil, errors.New("heygen list_voices non-2xx")
+		}
+		var body struct {
+			Data struct {
+				Voices []struct {
+					VoiceID      string `json:"voice_id"`
+					Name         string `json:"name"`
+					Language     string `json:"language"`
+					Gender       string `json:"gender"`
+					PreviewAudio string `json:"preview_audio"`
+				} `json:"voices"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(res.Data, &body); err != nil {
+			return nil, err
+		}
+		out := make([]voiceEntry, 0, len(body.Data.Voices))
+		for _, v := range body.Data.Voices {
+			if v.VoiceID == "" {
+				continue
+			}
+			out = append(out, voiceEntry{
+				ID: v.VoiceID, Name: v.Name, Language: v.Language,
+				Gender: v.Gender, Preview: v.PreviewAudio,
+			})
+		}
+		return out, nil
+	case "tavus":
+		// Voice is part of the Tavus replica — no separate voice list.
+		return []voiceEntry{}, nil
 	}
 	return nil, fmt.Errorf("unsupported avatar provider: %s", bound.AppSlug)
 }
