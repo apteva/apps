@@ -98,6 +98,13 @@ func (a *App) handleSendersCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
+	// Global-scope installs have no APTEVA_PROJECT_ID env; resolve
+	// project_id from the query string so the panel and curl callers
+	// both work. sendersCreateImpl's env-fallback handles the
+	// project-scope case where this returns "".
+	if pid, _ := resolveProjectFromRequest(r); pid != "" {
+		body.ProjectID = pid
+	}
 	out, err := a.sendersCreateImpl(globalCtx, body)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -116,12 +123,27 @@ func (a *App) toolSendersCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		TopicName:   strArg(args, "topic_name"),
 		RuleSetName: strArg(args, "rule_set_name"),
 		RuleName:    strArg(args, "rule_name"),
+		DisplayName: strArg(args, "display_name"),
 	}
 	if v, ok := args["publish_dns"].(bool); ok {
 		body.PublishDNS = &v
 	}
 	if v, ok := args["spf"].(bool); ok {
 		body.SPF = &v
+	}
+	if v, ok := args["set_default"].(bool); ok {
+		body.SetDefault = v
+	}
+	// Global-scope installs have no APTEVA_PROJECT_ID env, so
+	// sibling-app callers (CRM, agents) inject _project_id per the
+	// platform convention. Every other senders_* tool routes through
+	// resolveProjectFromArgs; the create path was the lone omission,
+	// which made it the only senders tool that 500'd on global
+	// installs ("project_id required"). The error returned here is
+	// silently absorbed when neither env nor arg yields a project —
+	// sendersCreateImpl will surface its own clearer error.
+	if pid, err := resolveProjectFromArgs(args); err == nil {
+		body.ProjectID = pid
 	}
 	return a.sendersCreateImpl(ctx, body)
 }
@@ -179,7 +201,7 @@ func (a *App) sendersCreateImpl(ctx *sdk.AppCtx, req sendersCreateReq) (*senders
 		if isAppDepBound(ctx, "domains") {
 			return a.sendersCreateEmailViaParentDomain(ctx, pid, sesBound.ConnectionID, raw, req, resp)
 		}
-		return a.sendersCreateEmail(ctx, pid, sesBound.ConnectionID, raw, resp)
+		return a.sendersCreateEmail(ctx, pid, sesBound.ConnectionID, raw, req, resp)
 	}
 	return a.sendersCreateDomain(ctx, pid, sesBound.ConnectionID, raw, req, resp)
 }
@@ -285,7 +307,7 @@ func allDigits(s string) bool {
 	return s != ""
 }
 
-func (a *App) sendersCreateEmail(ctx *sdk.AppCtx, pid string, connID int64, addr string, resp *sendersCreateResp) (*sendersCreateResp, error) {
+func (a *App) sendersCreateEmail(ctx *sdk.AppCtx, pid string, connID int64, addr string, req sendersCreateReq, resp *sendersCreateResp) (*sendersCreateResp, error) {
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "verify_email", map[string]any{
 		"EmailIdentity": addr,
 	})
@@ -304,6 +326,7 @@ func (a *App) sendersCreateEmail(ctx *sdk.AppCtx, pid string, connID int64, addr
 		Channel:            "email",
 		Address:            addr,
 		Kind:               "email_mailbox",
+		DisplayName:        req.DisplayName,
 		Provider:           "aws-ses",
 		ProviderIdentityID: addr,
 		Verified:           false,

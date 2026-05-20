@@ -1226,6 +1226,54 @@ func TestSendersDelete_PropagatesRealUpstreamError(t *testing.T) {
 	}
 }
 
+// ─── v0.12.3 toolSendersCreate global-scope + arg-drop fixes ──────
+
+// Reported bug: toolSendersCreate's MCP wrapper never copied
+// _project_id out of args, so global-scope installs always 500'd with
+// "project_id required" even when the caller dutifully passed it per
+// the platform convention.
+func TestSendersCreate_GlobalScope_ResolvesProjectIDFromArgs(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "")
+	ctx := newTestCtx(t, &stubPlatform{})
+	app := &App{}
+
+	out, err := app.toolSendersCreate(ctx, map[string]any{
+		"_project_id": "test-proj",
+		"address":     "ops@example.com",
+	})
+	if err != nil {
+		t.Fatalf("global-scope create should succeed when _project_id is in args, got %v", err)
+	}
+	resp := out.(*sendersCreateResp)
+	if resp.Address != "ops@example.com" {
+		t.Errorf("address=%q", resp.Address)
+	}
+	// And the row landed in the right project's table.
+	row, _ := dbFindSender(ctx.AppDB(), "test-proj", "email", "ops@example.com")
+	if row == nil {
+		t.Error("sender row not persisted under test-proj")
+	}
+}
+
+// Same-class bug found while fixing: display_name + set_default args
+// declared in the schema but never extracted by the MCP wrapper, so
+// the panel's Add form silently dropped both even when the operator
+// filled them in.
+func TestSendersCreate_ExtractsDisplayNameFromArgs(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+	app := &App{}
+	if _, err := app.toolSendersCreate(ctx, map[string]any{
+		"address":      "marco@example.com",
+		"display_name": "Marco at Apteva",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	row, _ := dbFindSender(ctx.AppDB(), "test-proj", "email", "marco@example.com")
+	if row == nil || row.DisplayName != "Marco at Apteva" {
+		t.Errorf("display_name not persisted from args: %+v", row)
+	}
+}
+
 // ─── senders_update (local-only patch) ─────────────────────────────
 
 func TestSendersUpdate_SetsDisplayName(t *testing.T) {
