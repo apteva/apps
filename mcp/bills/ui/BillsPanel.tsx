@@ -1023,39 +1023,74 @@ function convertCents(amountCents: number, from: string, to: string): number {
   return Math.round((amountCents * f) / t);
 }
 
-// SpendChart — purely client-side summary built from the already-
-// loaded bills list. Buckets by month and currency, splits each
-// monthly bar into paid (bottom) and not-yet-paid (top, dimmer).
-// Hover tooltips via native <title>. No new endpoints, no fetches;
-// reflects whatever filter / search the user has applied to the
-// list. Mounts in the no-bill-selected area of the right pane.
+// One (month, currency) spend bucket from /bills/summary.
+type SummaryRow = {
+  ym: string;
+  currency: string;
+  paid_cents: number;
+  unpaid_cents: number;
+};
+
+// SpendChart — "Spend over time" for the no-bill-selected pane.
+// Buckets by month and currency, splitting each bar into paid (bottom)
+// and not-yet-paid (top, dimmer). Hover tooltips via native <title>.
+//
+// The buckets come from a dedicated server aggregation
+// (/bills/summary) over EVERY non-void bill in the trailing 6 months —
+// deliberately NOT the paginated/filtered table list, which would only
+// reflect the 50 rows on screen and badly understate spend. This is
+// the complete picture regardless of the table's page or filter.
 //
 // When the bills span multiple currencies, an estimated combined
 // chart sits on top (converted to the dominant currency using rough
 // hardcoded FX rates) so the user gets a single "total spend"
 // picture. The per-currency charts stay underneath as the source of
 // truth.
-function SpendChart({ bills }: { bills: Bill[] }) {
+function SpendChart({
+  apiCall,
+  projectId,
+}: {
+  apiCall: ApiCall;
+  projectId: string;
+}) {
   type MonthBucket = { paid: number; unpaid: number };
+  const [rows, setRows] = useState<SummaryRow[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const res = await apiCall<{ months: SummaryRow[] }>(
+        "GET",
+        "/bills/summary",
+      );
+      setRows(res.months || []);
+      setError("");
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoaded(true);
+    }
+  }, [apiCall]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // Refresh when bills change (created, paid, voided, …) so the chart
+  // tracks the dataset, not a stale snapshot.
+  useAppEvents("bills", projectId, () => {
+    load();
+  });
+
   const { byCurrency, base, combined, totals } = useMemo(() => {
     const byCur: Record<string, Record<string, MonthBucket>> = {};
     const curTotals: Record<string, number> = {};
-    for (const b of bills) {
-      if (b.status === "void") continue;
-      // Prefer the invoice date (when the expense was actually
-      // incurred); fall back to created_at so bills without an
-      // OCR'd date still show up.
-      const src = b.vendor_invoice_date || b.created_at;
-      if (!src) continue;
-      const d = new Date(src);
-      if (Number.isNaN(d.getTime())) continue;
-      const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-      const cur = (b.currency || "USD").toUpperCase();
+    for (const r of rows) {
+      const cur = (r.currency || "USD").toUpperCase();
       if (!byCur[cur]) byCur[cur] = {};
-      if (!byCur[cur][ym]) byCur[cur][ym] = { paid: 0, unpaid: 0 };
-      if (b.status === "paid") byCur[cur][ym].paid += b.total_cents;
-      else byCur[cur][ym].unpaid += b.total_cents;
-      curTotals[cur] = (curTotals[cur] || 0) + b.total_cents;
+      byCur[cur][r.ym] = { paid: r.paid_cents, unpaid: r.unpaid_cents };
+      curTotals[cur] = (curTotals[cur] || 0) + r.paid_cents + r.unpaid_cents;
     }
     // Pick base = the currency with the highest total spend. Tie-break
     // is alphabetical (stable). If everything is one currency, base is
@@ -1082,15 +1117,25 @@ function SpendChart({ bills }: { bills: Bill[] }) {
       combined: combinedBuckets,
       totals: curTotals,
     };
-  }, [bills]);
+  }, [rows]);
 
   const currencies = Object.keys(byCurrency).sort(
     (a, b) => (totals[b] || 0) - (totals[a] || 0) || a.localeCompare(b),
   );
+  if (error) {
+    return (
+      <div className="text-text-muted text-sm">
+        Couldn’t load spend summary: {error}
+      </div>
+    );
+  }
+  if (!loaded) {
+    return <div className="text-text-muted text-sm">Loading spend…</div>;
+  }
   if (currencies.length === 0) {
     return (
       <div className="text-text-muted text-sm">
-        No spend data in the current view yet — upload a bill or clear the filters.
+        No spend in the last 6 months yet — upload a bill to get started.
       </div>
     );
   }
@@ -1100,7 +1145,7 @@ function SpendChart({ bills }: { bills: Bill[] }) {
       <div>
         <h2 className="text-sm font-medium text-text">Spend over time</h2>
         <p className="text-xs text-text-muted mt-1">
-          Last 6 months · grouped by invoice date · matches the bills shown on the left.
+          Last 6 months · grouped by invoice date · all bills, not just this page.
         </p>
       </div>
       {showCombined && (
@@ -1327,11 +1372,18 @@ function BillsTab({
 }) {
   const dialogs = useDialogs();
   const [list, setList] = useState<Bill[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(0);
   const [statusFilter, setStatusFilter] = useState("");
+  // searchInput is bound to the field; `search` is the debounced value
+  // actually sent to the server (search is server-side now so paging
+  // stays correct across the whole result set, not just one page).
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<Bill | null>(null);
   const [status, setStatus] = useState("");
+  const PAGE_SIZE = 50;
 
   // Drop-to-create-bill flow: stash the dropped file, prompt for
   // vendor, then submit multipart to /bills/from-file.
@@ -1350,39 +1402,56 @@ function BillsTab({
   const loadList = useCallback(async () => {
     setStatus("Loading…");
     try {
-      const query: Record<string, string> = {};
+      const query: Record<string, string> = {
+        limit: String(PAGE_SIZE),
+        offset: String(page * PAGE_SIZE),
+      };
       if (statusFilter) query.status = statusFilter;
-      const res = await apiCall<{ bills: Bill[] }>(
+      if (search) query.q = search;
+      const res = await apiCall<{ bills: Bill[]; total: number }>(
         "GET",
         "/bills",
         undefined,
         query,
       );
-      const visible = (res.bills || []).filter((b) => {
-        if (!search) return true;
-        const f = search.toLowerCase();
-        return (
-          (b.vendor_invoice_number || "").toLowerCase().includes(f) ||
-          String(b.id).includes(f) ||
-          (b.notes || "").toLowerCase().includes(f) ||
-          (b.category || "").toLowerCase().includes(f)
-        );
-      });
-      setList(visible);
-      setStatus(`${visible.length} bill${visible.length === 1 ? "" : "s"}`);
+      setList(res.bills || []);
+      setTotal(res.total ?? (res.bills || []).length);
     } catch (err) {
       setStatus(`Error: ${(err as Error).message}`);
     }
-  }, [apiCall, statusFilter, search]);
+  }, [apiCall, statusFilter, search, page]);
+
+  // Debounce the search field into `search`, and reset to the first
+  // page whenever the query text changes.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setSearch(searchInput.trim());
+      setPage(0);
+    }, 250);
+    return () => clearTimeout(t);
+  }, [searchInput]);
 
   useEffect(() => {
     loadList();
   }, [loadList]);
 
+  // Keep the status line in sync with the current page window.
+  useEffect(() => {
+    if (total === 0) {
+      setStatus("No bills");
+      return;
+    }
+    const from = page * PAGE_SIZE + 1;
+    const to = Math.min(total, page * PAGE_SIZE + list.length);
+    setStatus(`${from}–${to} of ${total}`);
+  }, [total, page, list.length]);
+
   useAppEvents("bills", projectId, () => {
     loadList();
     if (selectedId) loadDetail(selectedId);
   });
+
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   const loadDetail = useCallback(
     async (id: number) => {
@@ -1850,8 +1919,8 @@ function BillsTab({
           <div className="flex items-center gap-2">
             <input
               type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
               placeholder="Search bills…"
               className="flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm"
             />
@@ -1897,7 +1966,10 @@ function BillsTab({
           </label>
           <select
             value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
+            onChange={(e) => {
+              setStatusFilter(e.target.value);
+              setPage(0);
+            }}
             className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
           >
             <option value="">All statuses</option>
@@ -1910,7 +1982,11 @@ function BillsTab({
           </select>
         </div>
         <div className="flex-1 overflow-auto">
-          {list.length === 0 ? (
+          {list.length === 0 && (search || statusFilter) ? (
+            <div className="p-6 text-center text-sm text-text-muted">
+              No bills match your search or filter.
+            </div>
+          ) : list.length === 0 ? (
             <div className="p-4">
               <div
                 onClick={() => bareFileInputRef.current?.click()}
@@ -1995,13 +2071,38 @@ function BillsTab({
             </ul>
           )}
         </div>
-        <div className="p-2 text-xs border-t border-border">
+        <div className="p-2 text-xs border-t border-border flex items-center justify-between gap-2">
           {batchProgress ? (
             <span className="text-accent">
               Uploading {batchProgress.current} of {batchProgress.total}…
             </span>
           ) : (
-            <span className="text-text-dim">{status}</span>
+            <span className="text-text-dim truncate">{status}</span>
+          )}
+          {total > PAGE_SIZE && (
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.max(0, p - 1))}
+                disabled={page === 0}
+                className="px-2 py-0.5 rounded border border-border hover:bg-bg-input/50 disabled:opacity-40 disabled:cursor-default"
+                title="Previous page"
+              >
+                Prev
+              </button>
+              <span className="text-text-dim tabular-nums">
+                {page + 1}/{pageCount}
+              </span>
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+                disabled={page >= pageCount - 1}
+                className="px-2 py-0.5 rounded border border-border hover:bg-bg-input/50 disabled:opacity-40 disabled:cursor-default"
+                title="Next page"
+              >
+                Next
+              </button>
+            </div>
           )}
         </div>
       </aside>
@@ -2011,7 +2112,7 @@ function BillsTab({
           selectedId ? (
             <div className="text-text-muted text-sm text-center mt-12">Loading…</div>
           ) : (
-            <SpendChart bills={list} />
+            <SpendChart apiCall={apiCall} projectId={projectId} />
           )
         ) : (
           <BillDetail

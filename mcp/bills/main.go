@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bills
 display_name: Bills
-version: 0.1.19
+version: 0.1.20
 description: |
   Vendors, bills, and outbound payments. The AP mirror of billing.
 author: Apteva
@@ -113,7 +113,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("bills mounted",
-		"version", "0.1.19",
+		"version", "0.1.20",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"ocr_provider", configString(ctx, "ocr_provider", "(disabled)"))
 	return nil
@@ -184,6 +184,16 @@ func (a *App) handleHTTPBillItem(w http.ResponseWriter, r *http.Request) {
 	if rest == "from-file" {
 		if r.Method == http.MethodPost {
 			a.handleHTTPBillsCreateFromFile(w, r)
+			return
+		}
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	// /bills/summary — monthly spend aggregation for the panel chart.
+	// Sibling of /bills/{id}, so intercept before id parsing.
+	if rest == "summary" {
+		if r.Method == http.MethodGet {
+			a.handleHTTPBillsSummary(w, r)
 			return
 		}
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -419,7 +429,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "bills_search",
-			Description: "Filter bills. Args: vendor_id, status (received|approved|scheduled|paid|disputed|void), provider, currency, category, since (RFC3339), until (RFC3339), due_before, min_total_cents, max_total_cents, limit (default 50, max 200).",
+			Description: "Filter bills. Args: vendor_id, status (received|approved|scheduled|paid|disputed|void), provider, currency, category, since (RFC3339), until (RFC3339), due_before, min_total_cents, max_total_cents, limit (default 50; values >200 are clamped to 200, NOT dropped to default), offset (for paging). Returns {bills, count, total, has_more, next_offset}. total is the unpaged match count; when has_more is true, re-call with offset=next_offset to page. bills is [] (never null) when nothing matches.",
 			InputSchema: schemaObject(map[string]any{
 				"vendor_id":       map[string]any{"type": "integer"},
 				"status":          map[string]any{"type": "string"},
@@ -432,6 +442,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"min_total_cents": map[string]any{"type": "integer"},
 				"max_total_cents": map[string]any{"type": "integer"},
 				"limit":           map[string]any{"type": "integer"},
+				"offset":          map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolBillsSearch,
 		},
@@ -1015,10 +1026,19 @@ func (a *App) toolBillsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	limit := intArg(args, "limit", 50)
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 {
 		limit = 50
 	}
-	out, err := dbBillSearch(ctx.AppDB(), pid, billFilters{
+	// Clamp over-max to the ceiling rather than silently dropping back
+	// to the default — asking for 400 and getting 50 reads like a bug.
+	if limit > 200 {
+		limit = 200
+	}
+	offset := intArg(args, "offset", 0)
+	if offset < 0 {
+		offset = 0
+	}
+	filters := billFilters{
 		vendorID:      int64Arg(args, "vendor_id"),
 		status:        strArg(args, "status"),
 		provider:      strArg(args, "provider"),
@@ -1030,11 +1050,26 @@ func (a *App) toolBillsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		minTotalCents: int64Arg(args, "min_total_cents"),
 		maxTotalCents: int64Arg(args, "max_total_cents"),
 		limit:         limit,
-	})
+		offset:        offset,
+	}
+	out, err := dbBillSearch(ctx.AppDB(), pid, filters)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"bills": out, "count": len(out)}, nil
+	total, err := dbBillCount(ctx.AppDB(), pid, filters)
+	if err != nil {
+		return nil, err
+	}
+	resp := map[string]any{
+		"bills":    out,
+		"count":    len(out),
+		"total":    total,
+		"has_more": offset+len(out) < total,
+	}
+	if offset+len(out) < total {
+		resp["next_offset"] = offset + len(out)
+	}
+	return resp, nil
 }
 
 // ─── Payment tool handlers ──────────────────────────────────────────
@@ -1596,11 +1631,20 @@ func (a *App) handleHTTPBillsList(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 {
 		limit = 50
 	}
+	// Clamp over-max to the ceiling rather than silently dropping back
+	// to the default — asking for 400 and getting 50 reads like a bug.
+	if limit > 200 {
+		limit = 200
+	}
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	if offset < 0 {
+		offset = 0
+	}
 	vid, _ := strconv.ParseInt(q.Get("vendor_id"), 10, 64)
-	out, err := dbBillSearch(ctx.AppDB(), pid, billFilters{
+	filters := billFilters{
 		vendorID:  vid,
 		status:    q.Get("status"),
 		provider:  q.Get("provider"),
@@ -1609,13 +1653,50 @@ func (a *App) handleHTTPBillsList(w http.ResponseWriter, r *http.Request) {
 		since:     q.Get("since"),
 		until:     q.Get("until"),
 		dueBefore: q.Get("due_before"),
+		q:         strings.TrimSpace(q.Get("q")),
 		limit:     limit,
-	})
+		offset:    offset,
+	}
+	out, err := dbBillSearch(ctx.AppDB(), pid, filters)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"bills": out, "count": len(out)})
+	total, err := dbBillCount(ctx.AppDB(), pid, filters)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	resp := map[string]any{
+		"bills":    out,
+		"count":    len(out),
+		"total":    total,
+		"limit":    limit,
+		"offset":   offset,
+		"has_more": offset+len(out) < total,
+	}
+	if offset+len(out) < total {
+		resp["next_offset"] = offset + len(out)
+	}
+	httpJSON(w, resp)
+}
+
+func (a *App) handleHTTPBillsSummary(w http.ResponseWriter, r *http.Request) {
+	ctx := getAppCtx(r)
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Trailing 6 months: current month + the 5 prior. The chart
+	// (CurrencyChart) renders exactly these six buckets.
+	sinceYM := time.Now().AddDate(0, -5, 0).Format("2006-01")
+	months, err := dbBillMonthlySummary(ctx.AppDB(), pid, sinceYM)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"months": months, "since": sinceYM})
 }
 
 func (a *App) handleHTTPBillCreate(w http.ResponseWriter, r *http.Request) {
@@ -2639,18 +2720,26 @@ type billFilters struct {
 	provider, currency, category string
 	since, until, dueBefore      string
 	minTotalCents, maxTotalCents int64
+	q                            string
 	limit                        int
+	offset                       int
 }
 
-func dbBillSearch(db *sql.DB, pid string, f billFilters) ([]*Bill, error) {
-	where := []string{"project_id = ?", "deleted_at IS NULL"}
+// billWhere builds the shared WHERE clauses + bind args for bill
+// queries. `prefix` qualifies every column ("bills." when the query
+// joins vendors, "" for an unqualified COUNT). LIMIT/OFFSET are added
+// by the caller so dbBillSearch and dbBillCount stay in lockstep on
+// filtering.
+func billWhere(pid string, f billFilters, prefix string) ([]string, []any) {
+	p := prefix
+	where := []string{p + "project_id = ?", p + "deleted_at IS NULL"}
 	args := []any{pid}
 	if f.vendorID != 0 {
-		where = append(where, "vendor_id = ?")
+		where = append(where, p+"vendor_id = ?")
 		args = append(args, f.vendorID)
 	}
 	if f.status != "" {
-		where = append(where, "status = ?")
+		where = append(where, p+"status = ?")
 		args = append(args, f.status)
 	}
 	if len(f.statusIn) > 0 {
@@ -2659,58 +2748,62 @@ func dbBillSearch(db *sql.DB, pid string, f billFilters) ([]*Bill, error) {
 			placeholders[i] = "?"
 			args = append(args, s)
 		}
-		where = append(where, "status IN ("+strings.Join(placeholders, ",")+")")
+		where = append(where, p+"status IN ("+strings.Join(placeholders, ",")+")")
 	}
 	if f.provider != "" {
-		where = append(where, "provider = ?")
+		where = append(where, p+"provider = ?")
 		args = append(args, f.provider)
 	}
 	if f.currency != "" {
-		where = append(where, "currency = ?")
+		where = append(where, p+"currency = ?")
 		args = append(args, strings.ToUpper(f.currency))
 	}
 	if f.category != "" {
-		where = append(where, "category = ?")
+		where = append(where, p+"category = ?")
 		args = append(args, f.category)
 	}
 	if f.since != "" {
-		where = append(where, "created_at >= ?")
+		where = append(where, p+"created_at >= ?")
 		args = append(args, f.since)
 	}
 	if f.until != "" {
-		where = append(where, "created_at < ?")
+		where = append(where, p+"created_at < ?")
 		args = append(args, f.until)
 	}
 	if f.dueBefore != "" {
-		where = append(where, "due_date < ?")
+		where = append(where, p+"due_date < ?")
 		args = append(args, f.dueBefore)
 	}
 	if f.minTotalCents != 0 {
-		where = append(where, "total_cents >= ?")
+		where = append(where, p+"total_cents >= ?")
 		args = append(args, f.minTotalCents)
 	}
 	if f.maxTotalCents != 0 {
-		where = append(where, "total_cents <= ?")
+		where = append(where, p+"total_cents <= ?")
 		args = append(args, f.maxTotalCents)
 	}
+	if f.q != "" {
+		// Free-text search across the same fields the panel used to
+		// filter client-side, now server-side so pagination is correct.
+		like := "%" + f.q + "%"
+		where = append(where, "("+p+"vendor_invoice_number LIKE ? OR "+p+"notes LIKE ? OR "+
+			p+"category LIKE ? OR CAST("+p+"id AS TEXT) LIKE ?)")
+		args = append(args, like, like, like, like)
+	}
+	return where, args
+}
+
+func dbBillSearch(db *sql.DB, pid string, f billFilters) ([]*Bill, error) {
+	where, args := billWhere(pid, f, "bills.")
 	limit := f.limit
 	if limit <= 0 {
 		limit = 50
 	}
-	args = append(args, limit)
-	// Scope `where` clauses to the bills table to disambiguate from
-	// the vendors join.
-	scopedWhere := make([]string, len(where))
-	for i, w := range where {
-		// All current `where` entries reference unqualified columns
-		// that exist on bills only — prefix with `bills.` so the JOIN
-		// doesn't make them ambiguous.
-		if strings.Contains(w, ".") {
-			scopedWhere[i] = w
-		} else {
-			scopedWhere[i] = "bills." + w
-		}
+	offset := f.offset
+	if offset < 0 {
+		offset = 0
 	}
+	args = append(args, limit, offset)
 	rows, err := db.Query(
 		`SELECT bills.id, bills.project_id, bills.vendor_id, bills.provider,
 		        bills.vendor_invoice_number, bills.vendor_invoice_date,
@@ -2725,14 +2818,16 @@ func dbBillSearch(db *sql.DB, pid string, f billFilters) ([]*Bill, error) {
 		        vendors.name
 		 FROM bills
 		 LEFT JOIN vendors ON vendors.id = bills.vendor_id
-		 WHERE `+strings.Join(scopedWhere, " AND ")+`
+		 WHERE `+strings.Join(where, " AND ")+`
 		 ORDER BY bills.updated_at DESC
-		 LIMIT ?`, args...)
+		 LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []*Bill
+	// Non-nil so a zero-match result serializes as [] rather than null
+	// (a null "bills" field reads like a broken filter, not "no rows").
+	out := []*Bill{}
 	for rows.Next() {
 		b, vname, err := scanBillWithVendor(rows)
 		if err != nil {
@@ -2740,6 +2835,59 @@ func dbBillSearch(db *sql.DB, pid string, f billFilters) ([]*Bill, error) {
 		}
 		b.VendorName = vname
 		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// dbBillCount returns the total number of bills matching the same
+// filters as dbBillSearch, ignoring limit/offset. Drives the panel's
+// pagination ("X–Y of N"). No vendors join needed — every filter
+// column (including the q search) lives on the bills table.
+func dbBillCount(db *sql.DB, pid string, f billFilters) (int, error) {
+	where, args := billWhere(pid, f, "")
+	var n int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM bills WHERE `+strings.Join(where, " AND "), args...,
+	).Scan(&n)
+	return n, err
+}
+
+// billMonthSummary is one (month, currency) spend bucket.
+type billMonthSummary struct {
+	YM          string `json:"ym"`
+	Currency    string `json:"currency"`
+	PaidCents   int64  `json:"paid_cents"`
+	UnpaidCents int64  `json:"unpaid_cents"`
+}
+
+// dbBillMonthlySummary aggregates non-void spend by month + currency
+// for the panel's "Spend over time" chart. It buckets by invoice date
+// (falling back to created_at), so the chart reflects every bill in
+// the window — not just the page the table happens to show. `sinceYM`
+// is an inclusive "YYYY-MM" lower bound; YYYY-MM strings sort
+// chronologically, so the lexical >= is correct.
+func dbBillMonthlySummary(db *sql.DB, pid, sinceYM string) ([]billMonthSummary, error) {
+	const ymExpr = `substr(COALESCE(NULLIF(vendor_invoice_date, ''), created_at), 1, 7)`
+	rows, err := db.Query(
+		`SELECT `+ymExpr+` AS ym, currency,
+		        SUM(CASE WHEN status = 'paid' THEN total_cents ELSE 0 END) AS paid_cents,
+		        SUM(CASE WHEN status != 'paid' THEN total_cents ELSE 0 END) AS unpaid_cents
+		 FROM bills
+		 WHERE project_id = ? AND deleted_at IS NULL AND status != 'void'
+		   AND `+ymExpr+` >= ?
+		 GROUP BY ym, currency
+		 ORDER BY ym ASC`, pid, sinceYM)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []billMonthSummary{}
+	for rows.Next() {
+		var s billMonthSummary
+		if err := rows.Scan(&s.YM, &s.Currency, &s.PaidCents, &s.UnpaidCents); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
 	}
 	return out, rows.Err()
 }
