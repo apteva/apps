@@ -439,7 +439,7 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 		if isAppDepBound(ctx, "domains") {
 			for i, tok := range dkimTokens {
 				resp.Steps = append(resp.Steps, bootstrapPublishDNSRecord(
-					ctx,
+					ctx, pid,
 					fmt.Sprintf("dns_dkim_%d", i+1),
 					domain,
 					tok+"._domainkey",
@@ -449,13 +449,13 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 			}
 			if doInbound {
 				resp.Steps = append(resp.Steps, bootstrapPublishDNSRecord(
-					ctx, "dns_mx", domain, "@", "MX",
+					ctx, pid, "dns_mx", domain, "@", "MX",
 					"10 inbound-smtp."+region+".amazonaws.com",
 				))
 			}
 			if publishSPF {
 				resp.Steps = append(resp.Steps, bootstrapPublishDNSRecord(
-					ctx, "dns_spf", domain, "@", "TXT",
+					ctx, pid, "dns_spf", domain, "@", "TXT",
 					"v=spf1 include:amazonses.com ~all",
 				))
 			}
@@ -1046,13 +1046,20 @@ func getDomainDKIM(ctx *sdk.AppCtx, connID int64, domain string) ([]string, stri
 	return inner.DkimAttributes.Tokens, inner.DkimAttributes.Status, nil
 }
 
-func bootstrapPublishDNSRecord(ctx *sdk.AppCtx, step, domain, name, recType, value string) bootstrapStep {
+func bootstrapPublishDNSRecord(ctx *sdk.AppCtx, pid, step, domain, name, recType, value string) bootstrapStep {
+	// Global-scope domains installs reject calls without _project_id —
+	// the inject is the same convention every cross-app helper in this
+	// codebase already follows (see domains_link.go, certs/domain_link.go,
+	// deploy/sources.go). v0.12.2 and earlier omitted it here, so
+	// publish_dns succeeded only on project-scoped domains installs
+	// (matched dev's; broke prod's, where domains is global).
 	args := map[string]any{
-		"domain": domain,
-		"name":   name,
-		"type":   recType,
-		"value":  value,
-		"ttl":    1800,
+		"_project_id": pid,
+		"domain":      domain,
+		"name":        name,
+		"type":        recType,
+		"value":       value,
+		"ttl":         1800,
 	}
 	var probe struct {
 		Action string `json:"action"`

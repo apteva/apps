@@ -1274,6 +1274,52 @@ func TestSendersCreate_ExtractsDisplayNameFromArgs(t *testing.T) {
 	}
 }
 
+// v0.12.4 regression: bootstrapPublishDNSRecord didn't inject
+// _project_id into the cross-app call to domains.domain_records_set.
+// On global-scope domains installs (prod), every publish_dns step
+// failed with "project_id missing"; the domains app fell back to its
+// install role binding and rejected (wrong DNS provider for the
+// domain). Project-scoped installs (dev) papered over the bug via the
+// APTEVA_PROJECT_ID env in the domains sidecar.
+func TestSendersCreate_Domain_PublishDNS_InjectsProjectIDIntoCrossAppCall(t *testing.T) {
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{
+			"email_provider": float64(1),
+			"domains":        float64(42),
+		},
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"verify_domain": {Success: true, Status: 200, Data: json.RawMessage(
+				`{"DkimAttributes":{"Tokens":["a","b","c"],"Status":"SUCCESS"}}`)},
+		},
+		callAppReply: json.RawMessage(`{"action":"created"}`),
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	if _, err := app.toolSendersCreate(ctx, map[string]any{
+		"address": "newdomain.example",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Every CallApp("domains", ...) the bootstrap fired must carry
+	// _project_id. Three DKIM CNAME publishes + one SPF TXT = 4 calls
+	// (inbound MX is gated on aws-s3/aws-sns being bound; not in this
+	// test, so doInbound=false → no MX call).
+	if len(plat.callAppCalls) < 4 {
+		t.Fatalf("expected >=4 CallApp invocations (DKIM x3 + SPF), got %d: %+v", len(plat.callAppCalls), plat.callAppCalls)
+	}
+	for _, c := range plat.callAppCalls {
+		if c.App != "domains" || c.Tool != "domain_records_set" {
+			continue // domain_list etc. — only the publishes matter here
+		}
+		pid, _ := c.Input["_project_id"].(string)
+		if pid != "test-proj" {
+			t.Errorf("publish_dns CallApp missing/wrong _project_id (got %q): %+v", pid, c.Input)
+		}
+	}
+}
+
 // ─── senders_update (local-only patch) ─────────────────────────────
 
 func TestSendersUpdate_SetsDisplayName(t *testing.T) {

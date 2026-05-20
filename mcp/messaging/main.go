@@ -48,7 +48,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.12.3
+version: 0.12.4
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
