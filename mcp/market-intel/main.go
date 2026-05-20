@@ -15,6 +15,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	sdk "github.com/apteva/app-sdk"
@@ -24,7 +25,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: market-intel
 display_name: Market Intelligence
-version: 0.1.1
+version: 0.1.2
 description: Cross-source market-intelligence gateway for trading agents (unified data queries; signals in v0.2).
 author: Apteva
 scopes: [project, global]
@@ -71,6 +72,8 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - name: markets
+      description: "Live volume-ranked markets across public prediction venues (Polymarket, Kalshi, Manifold)."
     - name: enrich
       description: "Everything relevant to a prediction market in one normalized blob."
     - name: stats
@@ -144,9 +147,25 @@ func (a *App) Workers() []sdk.Worker { return nil }
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/sources", Handler: a.handleHTTPSources},
+		{Pattern: "/markets", Handler: a.handleHTTPMarkets},
 		{Pattern: "/enrich/", Handler: a.handleHTTPEnrich},
 		{Pattern: "/query/", Handler: a.handleHTTPQuery},
 	}
+}
+
+func (a *App) handleHTTPMarkets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, 405, "GET only")
+		return
+	}
+	limit := 30
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	rows := gwListMarkets(a.client(), limit)
+	httpJSON(w, 200, map[string]any{"markets": rows, "count": len(rows)})
 }
 
 // handleHTTPQuery — query-param front door for the panel's test

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: market-intel
 display_name: Market Intelligence
-version: 0.1.1
+version: 0.1.2
 description: |
   Cross-source market intelligence for trading agents. Two faces:
 
@@ -89,6 +89,8 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - name: markets
+      description: "Live volume-ranked markets across the public prediction venues (Polymarket, Kalshi, Manifold). No setup — all public."
     - name: enrich
       description: "Everything relevant to a prediction market in one normalized blob — cross-venue prices, ground-truth probability, entities, their stats + H2H, news, computed edge."
     - name: stats

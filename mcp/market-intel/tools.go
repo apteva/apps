@@ -58,10 +58,25 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"name"}),
 			Handler: a.toolResolveEntity},
 
+		{Name: "markets", Description: "Live active markets across the public prediction-market venues (Polymarket, Kalshi, Manifold), volume-ranked. No setup needed — all public. Args: limit (default 30).",
+			InputSchema: schemaObject(map[string]any{
+				"limit": map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolMarkets},
+
 		{Name: "sources_status", Description: "Which data sources are bound right now (by slug). Use to see what the gateway can answer.",
 			InputSchema: schemaObject(nil, nil),
 			Handler: a.toolSourcesStatus},
 	}
+}
+
+func (a *App) toolMarkets(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	limit := 30
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+	rows := gwListMarkets(a.client(), limit)
+	return map[string]any{"markets": rows, "count": len(rows)}, nil
 }
 
 func (a *App) client() sourceClient { return newPlatformSourceClient(globalCtx) }

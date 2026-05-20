@@ -45,10 +45,10 @@ const Icon = {
   Dot: ({ on }: { on: boolean }) => <svg width="8" height="8" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3" className={on ? "text-green" : "text-text-dim"} fill="currentColor" /></svg>,
 };
 
-type TabId = "sources" | "query";
+type TabId = "markets" | "sources" | "query";
 
 export default function MarketIntelPanel({ projectId, installId }: NativePanelProps) {
-  const [tab, setTab] = useState<TabId>("sources");
+  const [tab, setTab] = useState<TabId>("markets");
   const [error, setError] = useState<string | null>(null);
 
   const withParams = useCallback((extra: Record<string, string> = {}) =>
@@ -72,7 +72,7 @@ export default function MarketIntelPanel({ projectId, installId }: NativePanelPr
       </header>
 
       <nav className="flex border-b border-border px-3 text-xs">
-        {(["sources", "query"] as TabId[]).map((id) => (
+        {(["markets", "sources", "query"] as TabId[]).map((id) => (
           <button key={id} onClick={() => setTab(id)}
             className={`px-3 py-2 capitalize ${tab === id ? "text-text font-semibold border-b-2 border-accent -mb-px" : "text-text-muted hover:text-text border-b-2 border-transparent -mb-px"}`}>
             {id}
@@ -88,10 +88,99 @@ export default function MarketIntelPanel({ projectId, installId }: NativePanelPr
       )}
 
       <div className="flex-1 overflow-auto p-4">
+        {tab === "markets" && <MarketsTab api={api} setError={setError} />}
         {tab === "sources" && <SourcesTab api={api} setError={setError} />}
         {tab === "query" && <QueryTab api={api} setError={setError} />}
       </div>
     </div>
+  );
+}
+
+// ─── Markets tab (auto-loads on mount) ─────────────────────────────
+
+interface MarketRow {
+  venue: string; id: string; question: string;
+  yes_price?: number; volume?: number; close_time?: string; url?: string;
+}
+
+function venueClass(v: string): string {
+  switch (v) {
+    case "polymarket": return "bg-accent/15 text-accent";
+    case "kalshi": return "bg-blue-500/20 text-blue-400";
+    case "manifold": return "bg-amber/10 text-amber";
+    default: return "bg-bg-input text-text-muted";
+  }
+}
+function fmtVol(n?: number): string {
+  if (n == null) return "—";
+  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `$${(n / 1_000).toFixed(0)}k`;
+  return `$${n.toFixed(0)}`;
+}
+
+function MarketsTab({ api, setError }: {
+  api: <T>(p: string, q?: Record<string, string>) => Promise<T>;
+  setError: (e: string | null) => void;
+}) {
+  const [rows, setRows] = useState<MarketRow[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  const load = useCallback(async () => {
+    setBusy(true);
+    try {
+      const r = await api<{ markets: MarketRow[] }>("/markets", { limit: "40" });
+      setRows(r.markets || []);
+      setLoaded(true);
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  }, [api, setError]);
+
+  // Auto-load on mount — the whole point: live data with zero clicks.
+  useEffect(() => { load(); }, [load]);
+
+  return (
+    <>
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-xs text-text-muted">
+          Live markets across the public venues (Polymarket · Kalshi · Manifold), volume-ranked. No setup — all public.
+        </div>
+        <button onClick={load} disabled={busy} className="p-1.5 rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50"><Icon.Refresh /></button>
+      </div>
+
+      {busy && rows.length === 0 ? (
+        <div className="p-8 text-center text-text-dim text-sm">Loading live markets…</div>
+      ) : loaded && rows.length === 0 ? (
+        <div className="p-8 text-center text-text-muted text-sm">
+          <div className="font-medium text-text mb-1">No markets returned</div>
+          <div className="opacity-80 text-xs">The public venues may be unreachable from this host. Check the Sources tab.</div>
+        </div>
+      ) : (
+        <div className="border border-border rounded overflow-hidden bg-bg-card">
+          <table className="w-full text-xs border-collapse">
+            <thead className="bg-bg-input text-text-dim">
+              <tr>
+                {["Venue", "Market", "YES", "Volume", ""].map((h) => (
+                  <th key={h} className="px-3 py-2 text-left font-semibold uppercase tracking-wide">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((m) => (
+                <tr key={m.venue + ":" + m.id} className="border-t border-border">
+                  <td className="px-3 py-2"><span className={`text-xs px-2 py-0.5 rounded-full font-semibold ${venueClass(m.venue)}`}>{m.venue}</span></td>
+                  <td className="px-3 py-2 max-w-md"><span className="truncate block">{m.question}</span></td>
+                  <td className="px-3 py-2 tabular-nums font-semibold">{m.yes_price != null ? `${(m.yes_price * 100).toFixed(0)}¢` : "—"}</td>
+                  <td className="px-3 py-2 tabular-nums text-text-muted">{fmtVol(m.volume)}</td>
+                  <td className="px-3 py-2 text-right">
+                    {m.url && <a href={m.url} target="_blank" rel="noopener" className="text-accent hover:underline">open</a>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
   );
 }
 
