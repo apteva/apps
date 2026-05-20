@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: auth
 display_name: Auth
-version: 0.4.3
+version: 0.4.4
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One auth install
@@ -115,14 +115,14 @@ config_schema:
     description: Default 30. Per-client overrides supported.
   - name: password_min_length
     type: text
-    default: "12"
+    default: "8"
     label: Password minimum length
-    description: Minimum character count for new passwords.
+    description: Minimum character count for new passwords. Default 8.
   - name: password_classes_required
     type: text
-    default: "2"
+    default: "0"
     label: Password classes required
-    description: Of [lower, upper, digit, symbol], how many must appear. 0–4.
+    description: Of [lower, upper, digit, symbol], how many must appear. 0–4. Default 0 (no character-class requirement).
   - name: lockout_threshold
     type: text
     default: "5"

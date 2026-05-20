@@ -276,8 +276,8 @@ func (a *App) handleAdminUsersCreate(w http.ResponseWriter, r *http.Request) {
 	var pwHash string
 	if body.Password != "" {
 		if reason := validatePassword(body.Password,
-			cfgInt(ctx, "password_min_length", 12),
-			cfgInt(ctx, "password_classes_required", 2)); reason != "" {
+			cfgInt(ctx, "password_min_length", 8),
+			cfgInt(ctx, "password_classes_required", 0)); reason != "" {
 			httpErr(w, http.StatusBadRequest, reason)
 			return
 		}
@@ -694,8 +694,8 @@ func (a *App) handleAdminOIDC(w http.ResponseWriter, r *http.Request) {
 		"magic_link_enabled":      cfgBool(ctx, "magic_link_enabled", true),
 		"access_ttl_seconds":      cfgInt(ctx, "jwt_access_ttl_seconds", 900),
 		"refresh_ttl_days":        cfgInt(ctx, "jwt_refresh_ttl_days", 30),
-		"password_min_length":     cfgInt(ctx, "password_min_length", 12),
-		"password_classes":        cfgInt(ctx, "password_classes_required", 2),
+		"password_min_length":     cfgInt(ctx, "password_min_length", 8),
+		"password_classes":        cfgInt(ctx, "password_classes_required", 0),
 		"lockout_threshold":       cfgInt(ctx, "lockout_threshold", 5),
 		"lockout_initial_minutes": cfgInt(ctx, "lockout_initial_minutes", 15),
 	})

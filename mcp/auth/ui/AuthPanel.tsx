@@ -1000,11 +1000,11 @@ function CreateUserModal({ orgSlug, onClose, onCreated, setStatus }: {
           </div>
         </Field>
         {mode === "password" && (
-          <Field label="Password" hint="Default policy: at least 12 characters and 2 of {lower, upper, digit, symbol}.">
+          <Field label="Password" hint="Default policy: at least 8 characters. Tighten via install settings (password_min_length / password_classes_required).">
             <input
               type="text" value={password} onChange={(e) => setPassword(e.target.value)}
               required minLength={8}
-              placeholder="at least 12 chars, mixed character classes"
+              placeholder="at least 8 characters"
               className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text font-mono"
             />
           </Field>
@@ -1125,7 +1125,13 @@ function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus 
     );
   }
   const u = data.user;
-  const activeSessions = data.sessions.filter((s) => !s.revoked_at);
+  // Go marshals an empty slice as null, so a brand-new user (no
+  // sessions, no audit yet) arrives with sessions/audit_log == null.
+  // Coerce before iterating or the drawer crashes the moment it opens
+  // on a just-created user.
+  const sessions = data.sessions ?? [];
+  const auditLog = data.audit_log ?? [];
+  const activeSessions = sessions.filter((s) => !s.revoked_at);
   return (
     <aside style={{ width: 420 }} className="flex-shrink-0 overflow-auto">
       <header className="sticky top-0 bg-bg border-b border-border px-4 py-3 flex items-start gap-2">
@@ -1248,13 +1254,13 @@ function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus 
 
         <section>
           <h4 className="text-text-dim text-xs uppercase tracking-wide mb-2">
-            Recent activity ({data.audit_log.length})
+            Recent activity ({auditLog.length})
           </h4>
-          {data.audit_log.length === 0 ? (
+          {auditLog.length === 0 ? (
             <div className="text-text-dim text-sm">None.</div>
           ) : (
             <ul className="space-y-1">
-              {data.audit_log.map((ev) => (
+              {auditLog.map((ev) => (
                 <li key={ev.id} className="flex items-center gap-2 text-xs">
                   <EventBadge event={ev.event} />
                   <span className="text-text">{prettyEvent(ev.event)}</span>

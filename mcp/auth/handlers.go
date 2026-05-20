@@ -154,8 +154,8 @@ func (a *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if reason := validatePassword(body.Password,
-		cfgInt(ctx, "password_min_length", 12),
-		cfgInt(ctx, "password_classes_required", 2)); reason != "" {
+		cfgInt(ctx, "password_min_length", 8),
+		cfgInt(ctx, "password_classes_required", 0)); reason != "" {
 		httpErr(w, http.StatusBadRequest, reason)
 		return
 	}
