@@ -79,7 +79,7 @@ interface NativePanelProps {
   instanceId?: number;
 }
 
-type Kind = "image" | "video" | "audio_tts" | "audio_sfx" | "music";
+type Kind = "image" | "video" | "audio_tts" | "audio_sfx" | "music" | "avatar";
 
 interface Generation {
   id: number;
@@ -135,7 +135,15 @@ interface BindingsStatus {
   audio_tts: { bound: boolean; slug?: string };
   audio_sfx: { bound: boolean; slug?: string };
   music: { bound: boolean; slug?: string };
+  avatar: { bound: boolean; slug?: string };
   storage: { bound: boolean; app?: string };
+}
+
+interface AvatarEntry {
+  id: string;
+  name: string;
+  thumbnail?: string;
+  status?: string;
 }
 
 const API = "/api/apps/media-studio";
@@ -145,6 +153,7 @@ const TAB_LABELS: Record<Exclude<Kind, "audio_sfx">, string> = {
   video: "Videos",
   audio_tts: "Audio",
   music: "Music",
+  avatar: "Avatar",
 };
 
 // Image-specific option matrices, lifted from the old StudioPanel.
@@ -251,7 +260,7 @@ function imageSrc(g: Generation): string {
 
 export default function MediaPanel({ projectId }: NativePanelProps) {
   // Two state axes: the visible tab and (for audio) the sub-kind.
-  const [tab, setTab] = useState<"image" | "video" | "audio" | "music">("image");
+  const [tab, setTab] = useState<"image" | "video" | "audio" | "music" | "avatar">("image");
   const [audioSubKind, setAudioSubKind] = useState<"audio_tts" | "audio_sfx">("audio_tts");
   const activeKind: Kind =
     tab === "audio" ? audioSubKind : (tab as Kind);
@@ -279,6 +288,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   // adult-classified output); sidecar defaults to false so the API
   // returns whatever the model produced. Panel flag mirrors that.
   const [safeMode, setSafeMode] = useState(false);
+  // Avatar (talking-head) state — replica/avatar picker + selection.
+  const [avatars, setAvatars] = useState<AvatarEntry[]>([]);
+  const [selectedAvatar, setSelectedAvatar] = useState("");
   // Reference-image (edit mode) state. When sourceImage is non-empty,
   // media_generate routes through image.edit instead of image.generate.
   const [sourceImage, setSourceImage] = useState("");
@@ -350,7 +362,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   // gallery refresh — belt-and-suspenders for the rare case where the
   // media.generated event was dropped or missed by the EventSource.
   useEffect(() => {
-    if (activeKind !== "video") return;
+    if (activeKind !== "video" && activeKind !== "avatar") return;
     let cancelled = false;
     let prevInFlight = new Set<number>();
     const load = () => {
@@ -383,6 +395,27 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       window.clearInterval(t);
     };
   }, [activeKind, projectId, loadGenerations]);
+
+  // Load the avatar/replica list when the Avatar tab is active.
+  useEffect(() => {
+    if (activeKind !== "avatar") return;
+    let cancelled = false;
+    fetch(`${API}/avatars`, { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (cancelled || !data) return;
+        const list: AvatarEntry[] = Array.isArray(data.avatars) ? data.avatars : [];
+        setAvatars(list);
+        // Snap selection to the first ready replica if none chosen.
+        if (list.length > 0 && !list.some((x) => x.id === selectedAvatar)) {
+          setSelectedAvatar(list[0].id);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [activeKind, bindings]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Live-load the model list whenever the active kind or the bound
   // provider for that kind changes. The sidecar caches per-(provider,
@@ -514,6 +547,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         if (voice) body.voice = voice;
       } else if (activeKind === "audio_sfx" || activeKind === "music") {
         body.duration = duration;
+      } else if (activeKind === "avatar") {
+        // prompt carries the spoken script; avatar = replica/avatar id.
+        body.avatar = selectedAvatar;
+        if (voice) body.voice = voice;
       }
       const res = await fetch(`${API}/generate`, {
         method: "POST",
@@ -560,9 +597,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     <div className="h-full flex flex-col">
       {/* Kind tabs */}
       <nav className="flex items-center border-b border-border px-4">
-        {(Object.keys(TAB_LABELS) as Array<"image" | "video" | "audio_tts" | "music">).map((k) => {
-          const t: "image" | "video" | "audio" | "music" =
-            k === "audio_tts" ? "audio" : (k as "image" | "video" | "music");
+        {(Object.keys(TAB_LABELS) as Array<"image" | "video" | "audio_tts" | "music" | "avatar">).map((k) => {
+          const t: "image" | "video" | "audio" | "music" | "avatar" =
+            k === "audio_tts" ? "audio" : (k as "image" | "video" | "music" | "avatar");
           const active = tab === t;
           const bindingKey: Kind = k;
           const bound = bindings ? bindings[bindingKey]?.bound : false;
@@ -665,9 +702,12 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             setAspect={setAspect}
             voice={voice}
             setVoice={setVoice}
+            avatars={avatars}
+            selectedAvatar={selectedAvatar}
+            setSelectedAvatar={setSelectedAvatar}
           />
 
-          {activeKind === "video" && videoJobs.length > 0 && (
+          {(activeKind === "video" || activeKind === "avatar") && videoJobs.length > 0 && (
             <VideoJobsBanner jobs={videoJobs} />
           )}
 
@@ -737,7 +777,17 @@ function KindIcon({ kind }: { kind: Kind }) {
   if (kind === "image") return <IconImage />;
   if (kind === "video") return <IconVideo />;
   if (kind === "music") return <IconMusic />;
+  if (kind === "avatar") return <IconAvatar />;
   return <IconAudio />;
+}
+
+function IconAvatar() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <circle cx="8" cy="5.5" r="2.5" />
+      <path d="M3 13.5c0-2.8 2.2-4.5 5-4.5s5 1.7 5 4.5" />
+    </svg>
+  );
 }
 
 function BoundDot({ bound }: { bound: boolean }) {
@@ -812,12 +862,17 @@ interface ComposerProps {
   setAspect: (v: string) => void;
   voice: string;
   setVoice: (v: string) => void;
+  avatars: AvatarEntry[];
+  selectedAvatar: string;
+  setSelectedAvatar: (v: string) => void;
 }
 
 function Composer(p: ComposerProps) {
   const promptPlaceholder = p.isEditMode
     ? "Edit instruction — 'remove the tree', 'change sky to sunset'"
-    : p.kind === "audio_tts"
+    : p.kind === "avatar"
+      ? "Script the avatar will speak…"
+      : p.kind === "audio_tts"
       ? "Text to speak"
       : p.kind === "music"
         ? "A jazzy lo-fi loop with piano"
@@ -894,6 +949,13 @@ function Composer(p: ComposerProps) {
       {(p.kind === "audio_sfx" || p.kind === "music") && (
         <NumberField label="Duration (s)" value={p.duration} onChange={p.setDuration} min={1} max={300} />
       )}
+      {p.kind === "avatar" && (
+        <AvatarPicker
+          avatars={p.avatars}
+          selected={p.selectedAvatar}
+          setSelected={p.setSelectedAvatar}
+        />
+      )}
       {p.kind === "image" && (
         <SafeModeToggle value={p.safeMode} onChange={p.setSafeMode} />
       )}
@@ -902,8 +964,75 @@ function Composer(p: ComposerProps) {
         disabled={!p.prompt.trim() || p.generating || p.disabled}
         className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
       >
-        {p.generating ? "…" : p.isEditMode ? "Edit" : "Generate"}
+        {p.generating ? "…" : p.isEditMode ? "Edit" : p.kind === "avatar" ? "Generate avatar" : "Generate"}
       </button>
+    </div>
+  );
+}
+
+// AvatarPicker — replica/avatar grid for the Avatar tab. Renders a
+// thumbnail (video preview poster) per replica + a label; click to
+// select. Falls back to a plain select when there are no thumbnails.
+function AvatarPicker({
+  avatars,
+  selected,
+  setSelected,
+}: {
+  avatars: AvatarEntry[];
+  selected: string;
+  setSelected: (v: string) => void;
+}) {
+  if (avatars.length === 0) {
+    return (
+      <div>
+        <label className="text-text-muted text-xs block">Avatar</label>
+        <div className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text-dim" style={{ minWidth: 200 }}>
+          no replicas — train one in your provider
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div style={{ flexBasis: "100%" }}>
+      <label className="text-text-muted text-xs block mb-1">Avatar / replica</label>
+      <div className="flex gap-2 flex-wrap">
+        {avatars.map((av) => {
+          const isSel = av.id === selected;
+          return (
+            <button
+              key={av.id}
+              onClick={() => setSelected(av.id)}
+              title={`${av.name || av.id}${av.status ? ` (${av.status})` : ""}`}
+              className={
+                "border rounded overflow-hidden text-left " +
+                (isSel ? "border-accent" : "border-border hover:border-accent")
+              }
+              style={{ width: 96 }}
+            >
+              {av.thumbnail ? (
+                <video
+                  src={av.thumbnail}
+                  muted
+                  loop
+                  onMouseEnter={(e) => (e.currentTarget as HTMLVideoElement).play()}
+                  onMouseLeave={(e) => (e.currentTarget as HTMLVideoElement).pause()}
+                  style={{ width: 96, height: 96, objectFit: "cover", display: "block" }}
+                />
+              ) : (
+                <div
+                  className="flex items-center justify-center text-text-dim"
+                  style={{ width: 96, height: 96, background: "var(--apteva-bg-input, #222)", fontSize: 10 }}
+                >
+                  {av.name || av.id}
+                </div>
+              )}
+              <div className="text-text truncate px-1 py-0.5" style={{ fontSize: 10 }}>
+                {av.name || av.id}
+              </div>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -1461,14 +1590,14 @@ function Gallery({
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: kind === "video"
+        gridTemplateColumns: kind === "video" || kind === "avatar"
           ? "repeat(auto-fill, minmax(360px, 1fr))"
           : "repeat(auto-fill, minmax(280px, 1fr))",
         gap: 8,
         padding: 8,
       }}
     >
-      {generating && kind === "video" && (
+      {generating && (kind === "video" || kind === "avatar") && (
         <GeneratingCard prompt={generatingPrompt} model={generatingModel} />
       )}
       {items.map((g) => {
@@ -1480,7 +1609,7 @@ function Gallery({
             onClick={() => onSelect(g)}
           >
             {url ? (
-              kind === "video" ? (
+              kind === "video" || kind === "avatar" ? (
                 <video controls src={url} className="w-full" />
               ) : (
                 <audio controls src={url} className="w-full" />
@@ -1592,7 +1721,7 @@ function DetailAside({
       </header>
       <div className="flex-1 overflow-auto">
         {url && selected.kind === "image" && <img src={url} alt="" className="w-full" />}
-        {url && selected.kind === "video" && <video controls src={url} className="w-full" />}
+        {url && (selected.kind === "video" || selected.kind === "avatar") && <video controls src={url} className="w-full" />}
         {url && (selected.kind === "audio_tts" || selected.kind === "audio_sfx" || selected.kind === "music") && (
           <audio controls src={url} className="w-full p-3" />
         )}
@@ -1745,7 +1874,7 @@ function Lightbox({
             style={{ maxWidth: "92vw", maxHeight: "82vh", objectFit: "contain", borderRadius: 4 }}
           />
         )}
-        {url && item.kind === "video" && (
+        {url && (item.kind === "video" || item.kind === "avatar") && (
           <video controls src={url} style={{ maxWidth: "92vw", maxHeight: "82vh" }} />
         )}
         {url && (item.kind === "audio_tts" || item.kind === "audio_sfx" || item.kind === "music") && (

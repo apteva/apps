@@ -1238,3 +1238,168 @@ func TestVideoPollWorker_NoJobsNoOp(t *testing.T) {
 		t.Fatalf("unexpected error on empty queue: %v", err)
 	}
 }
+
+// --- avatar (talking-head) path ----------------------------------
+
+func TestBuildTavusAvatarArgs(t *testing.T) {
+	args := map[string]any{
+		"avatar": "r-1", "prompt": "hi there",
+		"options": map[string]any{"background_url": "https://bg", "fast": true},
+	}
+	got, err := buildAvatarArgs(args, "tavus", "avatar.generate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["replica_id"] != "r-1" || got["script"] != "hi there" {
+		t.Errorf("base fields wrong: %+v", got)
+	}
+	if got["background_url"] != "https://bg" || got["fast"] != true {
+		t.Errorf("options not passed through: %+v", got)
+	}
+}
+
+func TestBuildTavusAvatarArgs_RequiresReplica(t *testing.T) {
+	_, err := buildAvatarArgs(map[string]any{"prompt": "hi"}, "tavus", "avatar.generate")
+	if err == nil || !strings.Contains(err.Error(), "avatar") {
+		t.Errorf("want avatar-required error, got %v", err)
+	}
+}
+
+func TestBuildAvatarArgs_HeyGenNotWired(t *testing.T) {
+	_, err := buildAvatarArgs(map[string]any{"avatar": "a", "prompt": "p"}, "heygen", "avatar.generate")
+	if err == nil || !strings.Contains(err.Error(), "heygen") {
+		t.Errorf("want heygen-not-wired error, got %v", err)
+	}
+}
+
+func TestNormalizeAvatarResponse_Tavus(t *testing.T) {
+	body := `{"video_id":"v-abc","video_name":"n","status":"queued"}`
+	media, _, _, err := normalizeAvatarResponse("tavus", "avatar.generate", json.RawMessage(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(media) != 1 || media[0].UpstreamURL != "v-abc" {
+		t.Errorf("expected video_id as handle, got %+v", media)
+	}
+}
+
+func TestToolMediaGenerate_Avatar_TavusQueue(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "tavus"
+	pf.identity.Bindings["avatar_provider"] = float64(55)
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"video_id":"v-abc","status":"queued","hosted_url":"https://tavus.video/v-abc"}`),
+	}
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":   "avatar",
+		"prompt": "Hello there",
+		"avatar": "r-123",
+	})
+	if err != nil {
+		t.Fatalf("toolMediaGenerate: %v", err)
+	}
+	res := out.(map[string]any)
+	meta := res["_meta"].(map[string]any)
+	if meta["status"] != "queued" || meta["queue_id"] != "v-abc" {
+		t.Errorf("expected queued meta, got %+v", meta)
+	}
+	if pf.executeCalls[0].Tool != "create_video" {
+		t.Errorf("tool = %q, want create_video", pf.executeCalls[0].Tool)
+	}
+	if pf.executeCalls[0].Input["replica_id"] != "r-123" {
+		t.Errorf("replica_id not forwarded: %+v", pf.executeCalls[0].Input)
+	}
+	if pf.executeCalls[0].Input["script"] != "Hello there" {
+		t.Errorf("script not forwarded: %+v", pf.executeCalls[0].Input)
+	}
+	var count int
+	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM video_jobs WHERE kind='avatar' AND status='queued'`).Scan(&count)
+	if count != 1 {
+		t.Errorf("expected 1 queued avatar job, got %d", count)
+	}
+}
+
+func TestPollWorker_AvatarTavus_Completes(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		_, _ = w.Write([]byte("FAKE-MP4-BYTES"))
+	}))
+	defer upstream.Close()
+
+	pf := newRecordingPlatform()
+	pf.appSlug = "tavus"
+	pf.identity.Bindings["avatar_provider"] = float64(55)
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(fmt.Sprintf(`{"status":"ready","download_url":"%s/v.mp4"}`, upstream.URL)),
+	}
+	pf.nextCallResult = json.RawMessage(`{"result":{"content":[{"type":"text","text":"{\"id\":8888}"}]}}`)
+
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO video_jobs (project_id, kind, role, queue_id, provider, model, prompt, status)
+		 VALUES ('test-proj', 'avatar', 'avatar_provider', 'v-xyz', 'tavus', 'tavus-replica', 'hi', 'queued')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.videoPollWorker(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var status string
+	var genID int64
+	ctx.AppDB().QueryRow(`SELECT status, generation_id FROM video_jobs WHERE queue_id='v-xyz'`).Scan(&status, &genID)
+	if status != "complete" {
+		t.Errorf("status = %q, want complete", status)
+	}
+	if genID == 0 {
+		t.Error("generation_id should be set after complete")
+	}
+	if pf.executeCalls[0].Tool != "get_video" {
+		t.Errorf("retrieve tool = %q, want get_video", pf.executeCalls[0].Tool)
+	}
+	var kind string
+	ctx.AppDB().QueryRow(`SELECT kind FROM generations WHERE id=?`, genID).Scan(&kind)
+	if kind != "avatar" {
+		t.Errorf("generations.kind = %q, want avatar", kind)
+	}
+	if len(pf.callAppCalls) == 0 || pf.callAppCalls[0].Tool != "files_upload" {
+		t.Fatalf("expected files_upload, got %+v", pf.callAppCalls)
+	}
+	if folder, _ := pf.callAppCalls[0].Input["folder"].(string); folder != "/.generated/avatars/" {
+		t.Errorf("storage folder = %q, want /.generated/avatars/", folder)
+	}
+}
+
+func TestPollWorker_AvatarTavus_StillGenerating(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "tavus"
+	pf.identity.Bindings["avatar_provider"] = float64(55)
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"status":"generating"}`),
+	}
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	ctx.AppDB().Exec(
+		`INSERT INTO video_jobs (project_id, kind, role, queue_id, provider, model, prompt, status)
+		 VALUES ('test-proj', 'avatar', 'avatar_provider', 'v-q', 'tavus', 'tavus-replica', 'hi', 'queued')`,
+	)
+	if err := app.videoPollWorker(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	var attempts int
+	ctx.AppDB().QueryRow(`SELECT status, attempts FROM video_jobs WHERE queue_id='v-q'`).Scan(&status, &attempts)
+	if status != "polling" {
+		t.Errorf("status = %q, want polling", status)
+	}
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want 1", attempts)
+	}
+}

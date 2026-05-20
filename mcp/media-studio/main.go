@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.5.5
+version: 0.6.0
 description: |
   Generate images, video, audio, and music via any compatible provider.
   Optionally saves outputs to the Storage app for permanent references.
@@ -78,6 +78,13 @@ requires:
       tools: { music.generate: generate_music }
       required: false
       label: "Music provider"
+    - role: avatar_provider
+      kind: integration
+      compatible_slugs: [tavus, heygen]
+      capabilities: [avatar.generate]
+      tools: { avatar.generate: create_video }
+      required: false
+      label: "Avatar / talking-head provider"
     - role: storage
       kind: app
       compatible_app_names: [storage]
@@ -152,6 +159,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/generate", Handler: a.handleGenerate},
 		{Pattern: "/bindings", Handler: a.handleBindings},
 		{Pattern: "/models", Handler: a.handleListModels},
+		{Pattern: "/avatars", Handler: a.handleListAvatars},
 		{Pattern: "/video-jobs", Handler: a.handleListVideoJobs},
 		{Pattern: "/cache/", Handler: a.handleCacheGet},
 	}
@@ -163,32 +171,33 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "media_generate",
-			Description: "Generate media (image / video / audio / music). " +
-				"Args: kind (required: image|video|audio_tts|audio_sfx|music), prompt (required), " +
-				"model?, size? (image), duration? (video/audio/music, seconds), voice? (audio_tts), " +
-				"aspect? (video), n?, options? (provider-specific extras: background, output_format, " +
-				"lyrics, style, seed, image_storage_id, …). Returns MCP content blocks: image " +
-				"(thumbnail base64 for image kind only when no storage), text (summary with storage URLs " +
-				"when bound), resource (fetchable URL per storage_id).",
+			Description: "Generate media (image / video / audio / music / avatar). " +
+				"Args: kind (required: image|video|audio_tts|audio_sfx|music|avatar), prompt (required — " +
+				"for avatar this is the spoken script), model?, size? (image), duration? (video/audio/music, seconds), " +
+				"voice? (audio_tts / avatar voice override), aspect? (video), avatar? (replica/avatar id, avatar kind), " +
+				"n?, options? (provider-specific extras). Video + avatar are async (queued; delivered via the " +
+				"media.generated event). Returns MCP content blocks: image (thumbnail base64 for image kind only " +
+				"when no storage), text (summary), resource (fetchable URL per storage_id).",
 			InputSchema: schemaObject(map[string]any{
 				"kind": map[string]any{
 					"type":        "string",
 					"description": "Discriminates which provider to invoke.",
-					"enum":        []string{"image", "video", "audio_tts", "audio_sfx", "music"},
+					"enum":        []string{"image", "video", "audio_tts", "audio_sfx", "music", "avatar"},
 				},
 				"prompt": map[string]any{
 					"type":        "string",
-					"description": "Text prompt (or text-to-speak when kind=audio_tts).",
+					"description": "Text prompt (or text-to-speak when kind=audio_tts; the spoken script when kind=avatar).",
 				},
 				"model":    map[string]any{"type": "string", "description": "Provider model id; per-kind defaults apply if omitted."},
 				"size":     map[string]any{"type": "string", "description": "Image size (image only). e.g. 1024x1024."},
 				"duration": map[string]any{"type": "integer", "description": "Length in seconds (video/audio/music)."},
-				"voice":    map[string]any{"type": "string", "description": "Voice id (audio_tts only)."},
+				"voice":    map[string]any{"type": "string", "description": "Voice id (audio_tts; avatar voice override on HeyGen)."},
 				"aspect":   map[string]any{"type": "string", "description": "Aspect ratio (video only). e.g. 16:9."},
+				"avatar":   map[string]any{"type": "string", "description": "Replica/avatar id (avatar kind). From the /avatars list or the provider."},
 				"n":        map[string]any{"type": "integer", "default": 1, "minimum": 1, "maximum": 10},
 				"options": map[string]any{
 					"type":        "object",
-					"description": "Per-provider extras passed through (background, output_format, lyrics, style, seed, image_storage_id, …).",
+					"description": "Per-provider extras passed through (background, output_format, lyrics, style, seed, image_storage_id, background_url, fast, …).",
 				},
 			}, []string{"kind", "prompt"}),
 			Handler: a.toolMediaGenerate,

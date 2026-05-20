@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.5.5
+version: 0.6.0
 description: |
   Generate images, video, audio, and music via any compatible provider
   (OpenAI for image + TTS today; Replicate / ElevenLabs / Suno / Runway
@@ -65,6 +65,16 @@ requires:
       label: "Music provider"
       hint: "Bind a music generator (Suno, Replicate-MusicGen) to enable music generation."
 
+    - role: avatar_provider
+      kind: integration
+      compatible_slugs: [tavus, heygen]
+      capabilities: [avatar.generate]
+      tools:
+        avatar.generate: create_video
+      required: false
+      label: "Avatar / talking-head provider"
+      hint: "Bind Tavus (or HeyGen) to generate talking-head videos from a replica/avatar + script. Async — the job queues and the result lands via the media.generated event when ready."
+
     - role: storage
       kind: app
       compatible_app_names: [storage]
@@ -77,7 +87,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: media_generate, description: "Generate media (image / video / audio / music). Args: kind (required: image|video|audio_tts|audio_sfx|music), prompt (required), model?, size?, duration?, voice?, aspect?, n?, options?. Returns thumbnail + storage URL when storage is bound, else inline (small media) or expiring upstream URL." }
+    - { name: media_generate, description: "Generate media (image / video / audio / music / avatar). Args: kind (required: image|video|audio_tts|audio_sfx|music|avatar), prompt (required — for avatar this is the spoken script), model?, size?, duration?, voice?, aspect?, avatar? (replica/avatar id, avatar kind), n?, options?. Video + avatar are async (queued; delivered via media.generated). Returns thumbnail + storage URL when storage is bound, else inline (small media) or expiring upstream URL." }
     - { name: media_history,  description: "List recent generations for this project. Args: kind?, limit?, since?." }
   ui_panels:
     - slot: project.page

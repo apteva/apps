@@ -17,7 +17,17 @@ const (
 	KindAudioTTS = "audio_tts"
 	KindAudioSFX = "audio_sfx"
 	KindMusic    = "music"
+	KindAvatar   = "avatar"
 )
+
+// asyncKinds render off-thread at the provider — the tool returns a
+// queued job and a worker polls for completion. Both share the
+// video_jobs table + poll worker (rows discriminated by the kind
+// column added in migration 004).
+var asyncKinds = map[string]bool{
+	KindVideo:  true,
+	KindAvatar: true,
+}
 
 // kindHandler binds a kind to its role + capability + per-provider
 // arg builder + per-provider response normalizer. To add a new kind
@@ -95,6 +105,13 @@ var handlers = map[string]kindHandler{
 		Normalize:         normalizeMusicResponse,
 		StorageDir:        "music",
 	},
+	KindAvatar: {
+		Role:              "avatar_provider",
+		ResolveCapability: constCap("avatar.generate"),
+		BuildArgs:         buildAvatarArgs,
+		Normalize:         normalizeAvatarResponse,
+		StorageDir:        "avatars",
+	},
 }
 
 // toolMediaGenerate is the unified MCP entry point. Discriminates on
@@ -165,16 +182,16 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return mcpError("provider returned zero items"), nil
 	}
 
-	// Async kinds (video, eventually music for some providers) return
-	// a job handle, not bytes. Short-circuit the sync save pipeline —
-	// the worker (worker.go) takes over the polling + storage save.
-	if kind == KindVideo {
+	// Async kinds (video, avatar) return a job handle, not bytes.
+	// Short-circuit the sync save pipeline — the worker (worker.go)
+	// takes over the polling + storage save.
+	if asyncKinds[kind] {
 		queueID := media[0].UpstreamURL
 		modelEcho := normalizedModel
 		if modelEcho == "" {
 			modelEcho = strArg(args, "model", "")
 		}
-		return a.handleVideoQueueResponse(ctx, bound.AppSlug, args, queueID, modelEcho), nil
+		return a.handleAsyncQueueResponse(ctx, kind, h.Role, bound.AppSlug, args, queueID, modelEcho), nil
 	}
 
 	model := strArg(args, "model", "")

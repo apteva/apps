@@ -117,11 +117,12 @@ func normalizeVideoResponse(slug, capability string, raw json.RawMessage) ([]gen
 	return nil, "", "", fmt.Errorf("unsupported video provider slug: %q", slug)
 }
 
-// handleVideoQueueResponse is invoked by the dispatcher AFTER the
-// provider's queue call succeeds. It inserts a video_jobs row,
-// emits a queued event, and shapes the MCP response. The worker
-// (worker.go) takes it from here.
-func (a *App) handleVideoQueueResponse(ctx *sdk.AppCtx, providerSlug string, args map[string]any, queueID, model string) any {
+// handleAsyncQueueResponse is invoked by the dispatcher AFTER an
+// async provider's queue/create call succeeds (video or avatar). It
+// inserts a video_jobs row tagged with the kind + role, emits a
+// queued event, and shapes the MCP response. The worker (worker.go)
+// takes it from here, routing the poll by kind.
+func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug string, args map[string]any, queueID, model string) any {
 	if globalCtx == nil {
 		return mcpError("app not mounted")
 	}
@@ -133,25 +134,27 @@ func (a *App) handleVideoQueueResponse(ctx *sdk.AppCtx, providerSlug string, arg
 	sourceRef := strArg(args, "_source_image_ref", "")
 	requestJSON, _ := json.Marshal(args)
 
-	// Best-effort cost lookup via /video/quote. If the quote call fails
-	// we still want the queue/poll path to work, so cost stays 0 and
-	// the panel just renders the row without a price tag.
-	costUSD := veniceVideoQuote(ctx, providerSlug, args)
+	// Cost: video has a quote endpoint (Venice); avatar providers bill
+	// per-minute with no per-render quote, so cost stays 0 there.
+	costUSD := 0.0
+	if kind == KindVideo {
+		costUSD = veniceVideoQuote(ctx, providerSlug, args)
+	}
 
 	result, err := globalCtx.AppDB().Exec(
 		`INSERT INTO video_jobs
-			(project_id, queue_id, provider, model, prompt,
+			(project_id, kind, role, queue_id, provider, model, prompt,
 			 source_image_ref, request_json, status, cost_usd)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)`,
-		pid, queueID, providerSlug, model, prompt, sourceRef, string(requestJSON), costUSD,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`,
+		pid, kind, role, queueID, providerSlug, model, prompt, sourceRef, string(requestJSON), costUSD,
 	)
 	if err != nil {
 		ctx.Logger().Warn("video_jobs insert failed", "err", err)
-		return mcpError("video queued at provider but local tracking row failed: " + err.Error())
+		return mcpError(kind + " queued at provider but local tracking row failed: " + err.Error())
 	}
 	jobID, _ := result.LastInsertId()
 
-	ctx.Emit("video.queued", map[string]any{
+	ctx.Emit(kind+".queued", map[string]any{
 		"job_id":   jobID,
 		"queue_id": queueID,
 		"model":    model,
@@ -162,18 +165,22 @@ func (a *App) handleVideoQueueResponse(ctx *sdk.AppCtx, providerSlug string, arg
 	if costUSD > 0 {
 		costLine = fmt.Sprintf("\nEstimated cost: $%.4f", costUSD)
 	}
+	noun := "Video"
+	if kind == KindAvatar {
+		noun = "Avatar video"
+	}
 	summary := fmt.Sprintf(
-		"Video queued via %s (model=%s). Job #%d, queue_id=%s.\nPrompt: %q%s\n\n"+
-			"The worker will poll for completion every 15s. media.generated will fire when the video lands; "+
-			"media_history will surface the finished row.",
-		providerSlug, model, jobID, queueID, prompt, costLine,
+		"%s queued via %s (model=%s). Job #%d, handle=%s.\nPrompt: %q%s\n\n"+
+			"The worker polls for completion every 15s. media.generated fires when it lands; "+
+			"media_history surfaces the finished row.",
+		noun, providerSlug, model, jobID, queueID, prompt, costLine,
 	)
 	return map[string]any{
 		"content": []map[string]any{
 			{"type": "text", "text": summary},
 		},
 		"_meta": map[string]any{
-			"kind":     KindVideo,
+			"kind":     kind,
 			"status":   "queued",
 			"job_id":   jobID,
 			"queue_id": queueID,

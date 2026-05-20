@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -9,27 +10,41 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-// Async-video polling worker.
+// Async-job polling worker — shared by the video + avatar kinds.
 //
-// Venice's /video/queue returns a queue_id and we have to poll
-// /video/retrieve until it returns binary mp4 (vs JSON
-// {status:"PROCESSING"}). Runs every 15s — typical Venice video
-// generation is 30s–3min so 15s strikes a balance between latency
-// and wasted retrieve calls.
+// Both queue at the provider and return a handle; we poll a
+// provider-specific status tool until the result is ready, then save
+// bytes to storage (or local cache) and emit media.generated.
 //
-// On success: bytes go to storage, a generations row lands,
-// media.generated event fires, the video_jobs row flips to complete.
-// On failure (provider error, exhausted attempts, malformed response):
-// row flips to failed, media.failed event fires.
+// Per-kind retrieve mechanics:
+//   - video (venice-ai): retrieve_video → returns binary mp4 when done
+//     (executor wraps as {_binary, base64}) or {status:"PROCESSING"}.
+//   - avatar (tavus): get_video → {status, download_url}. On
+//     status="ready" we fetch download_url's bytes ourselves.
+//
+// Runs every 15s. Gives up after maxVideoPollAttempts (~20 min).
 
 const (
-	videoPollInterval   = 15 * time.Second
-	maxVideoPollAttempts = 80 // 80 × 15s = 20 minutes — beyond that we give up
+	videoPollInterval    = 15 * time.Second
+	maxVideoPollAttempts = 80 // 80 × 15s = 20 minutes
 )
+
+type pendingJob struct {
+	ID             int64
+	Kind           string
+	Role           string
+	ProjectID      string
+	QueueID        string
+	Provider       string
+	Model          string
+	Prompt         string
+	SourceImageRef string
+	Attempts       int
+}
 
 func (a *App) videoPollWorker(ctx context.Context, app *sdk.AppCtx) error {
 	rows, err := app.AppDB().Query(
-		`SELECT id, project_id, queue_id, provider, model, prompt,
+		`SELECT id, kind, role, project_id, queue_id, provider, model, prompt,
 		        source_image_ref, attempts
 		 FROM video_jobs
 		 WHERE status IN ('queued', 'polling')
@@ -38,21 +53,11 @@ func (a *App) videoPollWorker(ctx context.Context, app *sdk.AppCtx) error {
 	if err != nil {
 		return err
 	}
-	type pending struct {
-		ID             int64
-		ProjectID      string
-		QueueID        string
-		Provider       string
-		Model          string
-		Prompt         string
-		SourceImageRef string
-		Attempts       int
-	}
-	var jobs []pending
+	var jobs []pendingJob
 	for rows.Next() {
-		var p pending
-		if err := rows.Scan(&p.ID, &p.ProjectID, &p.QueueID, &p.Provider,
-			&p.Model, &p.Prompt, &p.SourceImageRef, &p.Attempts); err != nil {
+		var p pendingJob
+		if err := rows.Scan(&p.ID, &p.Kind, &p.Role, &p.ProjectID, &p.QueueID,
+			&p.Provider, &p.Model, &p.Prompt, &p.SourceImageRef, &p.Attempts); err != nil {
 			continue
 		}
 		jobs = append(jobs, p)
@@ -62,83 +67,60 @@ func (a *App) videoPollWorker(ctx context.Context, app *sdk.AppCtx) error {
 		return nil
 	}
 
-	bound := app.IntegrationFor("video_provider")
-	if bound == nil {
-		// Operator unbound the provider mid-flight; nothing we can do.
-		// Leave the jobs in their current state — re-binding restores
-		// progress without losing the queue_ids.
-		app.Logger().Warn("video poll: no video_provider bound; skipping", "in_flight", len(jobs))
-		return nil
-	}
-
 	for _, p := range jobs {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		a.pollOneVideoJob(app, bound, p.ID, p.ProjectID, p.QueueID, p.Provider, p.Model, p.Prompt, p.SourceImageRef, p.Attempts)
+		// Resolve the provider per the job's own role — a video job
+		// polls the video_provider, an avatar job the avatar_provider.
+		bound := app.IntegrationFor(p.Role)
+		if bound == nil {
+			app.Logger().Warn("poll: no provider bound for role; skipping", "role", p.Role, "job_id", p.ID)
+			continue
+		}
+		a.pollOneJob(app, bound, p)
 	}
 	return nil
 }
 
-func (a *App) pollOneVideoJob(
-	app *sdk.AppCtx,
-	bound *sdk.BoundIntegration,
-	jobID int64,
-	projectID, queueID, provider, model, prompt, sourceRef string,
-	attempts int,
-) {
-	attempts++
+func (a *App) pollOneJob(app *sdk.AppCtx, bound *sdk.BoundIntegration, p pendingJob) {
+	attempts := p.Attempts + 1
 
-	// Bail out on chronic failures so the worker stops spinning forever.
 	if attempts > maxVideoPollAttempts {
-		errMsg := fmt.Sprintf("gave up after %d polls (%s)", maxVideoPollAttempts, time.Duration(maxVideoPollAttempts*15)*time.Second)
-		videoJobUpdateStatus(app, jobID, "failed", errMsg)
-		// EmitWithProject — worker context has no CurrentProject set,
-		// so plain Emit lands on the wildcard lane and the panel's
-		// project-scoped EventSource never sees it.
-		app.EmitWithProject("media.failed", projectID, map[string]any{
-			"kind": KindVideo, "job_id": jobID, "queue_id": queueID, "error": errMsg,
+		errMsg := fmt.Sprintf("gave up after %d polls (~%s)", maxVideoPollAttempts, time.Duration(maxVideoPollAttempts)*videoPollInterval)
+		videoJobUpdateStatus(app, p.ID, "failed", errMsg)
+		app.EmitWithProject("media.failed", p.ProjectID, map[string]any{
+			"kind": p.Kind, "job_id": p.ID, "queue_id": p.QueueID, "error": errMsg,
 		})
 		return
 	}
 
-	// Provider-specific tool name (Venice's retrieve is "retrieve_video";
-	// future providers may name theirs differently).
-	retrieveTool := "retrieve_video"
+	switch p.Kind {
+	case KindAvatar:
+		a.pollAvatarJob(app, bound, p, attempts)
+	default: // KindVideo
+		a.pollVideoJob(app, bound, p, attempts)
+	}
+}
 
-	res, err := app.PlatformAPI().ExecuteIntegrationTool(
-		bound.ConnectionID,
-		retrieveTool,
-		map[string]any{
-			"queue_id": queueID,
-			"model":    model,
-		},
-	)
+// --- video (binary-envelope) polling ------------------------------
+
+func (a *App) pollVideoJob(app *sdk.AppCtx, bound *sdk.BoundIntegration, p pendingJob, attempts int) {
+	res, err := app.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "retrieve_video",
+		map[string]any{"queue_id": p.QueueID, "model": p.Model})
 	if err != nil {
-		// Transient — bump attempts, leave status alone so we retry.
-		app.AppDB().Exec(
-			`UPDATE video_jobs SET attempts=?, last_poll_at=?, updated_at=?, status='polling' WHERE id=?`,
-			attempts, time.Now(), time.Now(), jobID,
-		)
-		app.Logger().Warn("video retrieve transient error", "id", jobID, "err", err)
+		bumpPolling(app, p.ID, attempts)
+		app.Logger().Warn("video retrieve transient error", "id", p.ID, "err", err)
 		return
 	}
 	if res == nil || !res.Success {
-		// Provider returned a non-2xx — treat as terminal for now.
 		errMsg := "provider non-2xx"
 		if res != nil {
-			errMsg = "provider returned status " + fmt.Sprint(res.Status) + ": " + truncate(string(res.Data), 300)
+			errMsg = "provider status " + fmt.Sprint(res.Status) + ": " + truncate(string(res.Data), 300)
 		}
-		videoJobUpdateStatus(app, jobID, "failed", errMsg)
-		app.EmitWithProject("media.failed", projectID, map[string]any{
-			"kind": KindVideo, "job_id": jobID, "queue_id": queueID, "error": errMsg,
-		})
+		failJob(app, p, errMsg)
 		return
 	}
-
-	// Two response shapes possible:
-	//   - {_binary:true, base64, mimeType}     → COMPLETED
-	//   - {status:"PROCESSING", …}             → still cooking
 	var envelope struct {
 		Binary   bool   `json:"_binary"`
 		Base64   string `json:"base64"`
@@ -146,89 +128,147 @@ func (a *App) pollOneVideoJob(
 		Status   string `json:"status"`
 	}
 	if err := json.Unmarshal(res.Data, &envelope); err != nil {
-		// Couldn't even parse — log and retry.
-		app.AppDB().Exec(
-			`UPDATE video_jobs SET attempts=?, last_poll_at=?, updated_at=?, status='polling' WHERE id=?`,
-			attempts, time.Now(), time.Now(), jobID,
-		)
-		app.Logger().Warn("video retrieve parse failed", "id", jobID, "err", err)
+		bumpPolling(app, p.ID, attempts)
+		app.Logger().Warn("video retrieve parse failed", "id", p.ID, "err", err)
 		return
 	}
-
 	if !envelope.Binary {
-		// Still processing — bump attempts, set polling status, move on.
-		app.AppDB().Exec(
-			`UPDATE video_jobs SET attempts=?, last_poll_at=?, updated_at=?, status='polling' WHERE id=?`,
-			attempts, time.Now(), time.Now(), jobID,
-		)
+		bumpPolling(app, p.ID, attempts)
 		return
 	}
-
-	// Completed — bytes are in envelope.Base64.
 	mime := envelope.MimeType
 	if mime == "" {
 		mime = "video/mp4"
 	}
-	a.finalizeVideoJob(app, jobID, projectID, queueID, provider, model, prompt, sourceRef, envelope.Base64, mime)
+	a.finalizeJob(app, p, envelope.Base64, mime)
 }
 
-// finalizeVideoJob saves the bytes to storage (when bound), writes the
-// generations row, marks the video_jobs row complete, and emits the
-// media.generated event so the panel refreshes.
-func (a *App) finalizeVideoJob(
-	app *sdk.AppCtx,
-	jobID int64,
-	projectID, queueID, provider, model, prompt, sourceRef, base64Bytes, mime string,
-) {
+// --- avatar (status + download_url) polling ------------------------
+
+func (a *App) pollAvatarJob(app *sdk.AppCtx, bound *sdk.BoundIntegration, p pendingJob, attempts int) {
+	switch bound.AppSlug {
+	case "tavus":
+		a.pollTavusAvatarJob(app, bound, p, attempts)
+	default:
+		failJob(app, p, "avatar provider "+bound.AppSlug+" not wired in v0.6 (Tavus only)")
+	}
+}
+
+func (a *App) pollTavusAvatarJob(app *sdk.AppCtx, bound *sdk.BoundIntegration, p pendingJob, attempts int) {
+	res, err := app.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "get_video",
+		map[string]any{"video_id": p.QueueID})
+	if err != nil {
+		bumpPolling(app, p.ID, attempts)
+		app.Logger().Warn("tavus get_video transient error", "id", p.ID, "err", err)
+		return
+	}
+	if res == nil || !res.Success {
+		errMsg := "tavus non-2xx"
+		if res != nil {
+			errMsg = "tavus status " + fmt.Sprint(res.Status) + ": " + truncate(string(res.Data), 300)
+		}
+		failJob(app, p, errMsg)
+		return
+	}
+	var body struct {
+		Status      string `json:"status"`       // queued | generating | ready | deleted | error
+		DownloadURL string `json:"download_url"` // direct mp4 (mux) when ready
+		HostedURL   string `json:"hosted_url"`
+	}
+	if err := json.Unmarshal(res.Data, &body); err != nil {
+		bumpPolling(app, p.ID, attempts)
+		app.Logger().Warn("tavus get_video parse failed", "id", p.ID, "err", err)
+		return
+	}
+	switch body.Status {
+	case "ready":
+		if body.DownloadURL == "" {
+			failJob(app, p, "tavus ready but no download_url")
+			return
+		}
+		bytes, err := fetchBytes(body.DownloadURL)
+		if err != nil {
+			// Transient network error fetching the finished file — retry.
+			bumpPolling(app, p.ID, attempts)
+			app.Logger().Warn("tavus download fetch failed", "id", p.ID, "err", err)
+			return
+		}
+		a.finalizeJob(app, p, base64.StdEncoding.EncodeToString(bytes), "video/mp4")
+	case "error", "deleted":
+		failJob(app, p, "tavus status="+body.Status)
+	default: // queued | generating
+		bumpPolling(app, p.ID, attempts)
+	}
+}
+
+// --- shared helpers ----------------------------------------------
+
+func bumpPolling(app *sdk.AppCtx, jobID int64, attempts int) {
+	app.AppDB().Exec(
+		`UPDATE video_jobs SET attempts=?, last_poll_at=?, updated_at=?, status='polling' WHERE id=?`,
+		attempts, time.Now(), time.Now(), jobID,
+	)
+}
+
+func failJob(app *sdk.AppCtx, p pendingJob, errMsg string) {
+	videoJobUpdateStatus(app, p.ID, "failed", errMsg)
+	app.EmitWithProject("media.failed", p.ProjectID, map[string]any{
+		"kind": p.Kind, "job_id": p.ID, "queue_id": p.QueueID, "error": errMsg,
+	})
+}
+
+// finalizeJob saves the bytes to storage (or local cache), writes the
+// generations row tagged with the job's kind, marks the video_jobs row
+// complete, and emits media.generated.
+func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime string) {
 	ext := extFromMime(mime)
 	if ext == "bin" {
 		ext = "mp4"
 	}
-	media := generatedMedia{
-		B64:      base64Bytes,
-		MimeType: mime,
-		Ext:      ext,
+	media := generatedMedia{B64: base64Bytes, MimeType: mime, Ext: ext}
+
+	storageDir := "videos"
+	capability := "video.generate"
+	if p.Kind == KindAvatar {
+		storageDir = "avatars"
+		capability = "avatar.generate"
 	}
 
 	storage := app.IntegrationFor("storage")
 	var storageIDs []int64
 	if storage != nil {
-		id, err := saveToStorage(app, media, "videos", provider, 0)
+		id, err := saveToStorage(app, media, storageDir, p.Provider, 0)
 		if err != nil {
-			app.Logger().Warn("video save-to-storage failed", "job_id", jobID, "err", err)
+			app.Logger().Warn("save-to-storage failed", "job_id", p.ID, "err", err)
 		} else if id != 0 {
 			storageIDs = append(storageIDs, id)
 		}
 	}
 
-	extras := map[string]any{"queue_id": queueID, "capability": "video.generate"}
-	if sourceRef != "" {
-		extras["source_image_ref"] = sourceRef
+	extras := map[string]any{"queue_id": p.QueueID, "capability": capability}
+	if p.SourceImageRef != "" {
+		extras["source_image_ref"] = p.SourceImageRef
 	}
 	extraJSON, _ := json.Marshal(extras)
 
-	// Carry forward the cost from video_jobs (set at queue time by
-	// veniceVideoQuote). Best-effort; missing → 0.
 	var costUSD float64
-	app.AppDB().QueryRow(`SELECT cost_usd FROM video_jobs WHERE id=?`, jobID).Scan(&costUSD)
+	app.AppDB().QueryRow(`SELECT cost_usd FROM video_jobs WHERE id=?`, p.ID).Scan(&costUSD)
 
 	generationID := a.dbInsertGeneration(generationRecord{
-		ProjectID:    projectID,
-		Kind:         KindVideo,
-		Prompt:       prompt,
-		Provider:     provider,
-		Model:        model,
+		ProjectID:    p.ProjectID,
+		Kind:         p.Kind,
+		Prompt:       p.Prompt,
+		Provider:     p.Provider,
+		Model:        p.Model,
 		StorageIDs:   storageIDs,
 		UpstreamURLs: []string{},
 		ExtraJSON:    string(extraJSON),
 		Count:        1,
 		CostUSD:      costUSD,
 	})
-	// Mirror dispatcher: when storage is unbound, cache the full bytes
-	// locally so the video plays back at native quality in the panel.
 	if storage == nil && generationID > 0 {
 		if err := writeLocalCache(generationID, base64Bytes, ext); err != nil {
-			app.Logger().Warn("video writeLocalCache failed", "gen_id", generationID, "err", err)
+			app.Logger().Warn("writeLocalCache failed", "gen_id", generationID, "err", err)
 		}
 	}
 
@@ -236,18 +276,13 @@ func (a *App) finalizeVideoJob(
 	if len(storageIDs) > 0 {
 		storageID = storageIDs[0]
 	}
-	videoJobMarkComplete(app, jobID, storageID, generationID)
+	videoJobMarkComplete(app, p.ID, storageID, generationID)
 
-	// EmitWithProject — worker context has no CurrentProject set, so
-	// plain Emit lands on the wildcard event lane and the panel's
-	// project-scoped EventSource never delivers it. This was why
-	// completed video jobs appeared stuck in the in-flight banner:
-	// backend was done, panel never got the refresh signal.
-	app.EmitWithProject("media.generated", projectID, map[string]any{
-		"kind":     KindVideo,
-		"job_id":   jobID,
-		"queue_id": queueID,
-		"model":    model,
-		"prompt":   prompt,
+	app.EmitWithProject("media.generated", p.ProjectID, map[string]any{
+		"kind":     p.Kind,
+		"job_id":   p.ID,
+		"queue_id": p.QueueID,
+		"model":    p.Model,
+		"prompt":   p.Prompt,
 	})
 }
