@@ -2370,14 +2370,13 @@ function MonthGrid({ ym, start, end, onPick, onHover, minDate }: {
           const isStart = c === start;
           const isEnd = !!end && c === end;
           const inRange = !!start && !!end && c > start && c < end;
+          const hasRange = !!start && !!end && start !== end;
           const disabled = !!minDate && c < minDate;
           const cls = [
             "drf-day",
             inRange ? "drf-day-in-range" : "",
-            isStart && isEnd ? "drf-day-single" : "",
-            isStart && !isEnd && !end ? "drf-day-single" : "",
-            isStart && !!end && !isEnd ? "drf-day-start" : "",
-            isEnd && !isStart ? "drf-day-end" : "",
+            hasRange && isStart ? "drf-day-range-start" : "",
+            hasRange && isEnd ? "drf-day-range-end" : "",
             isStart || isEnd ? "drf-day-active" : "",
             c === todayStr ? "drf-day-today" : "",
             disabled ? "drf-day-disabled" : "",
@@ -2451,7 +2450,8 @@ const drfStyles = `
 .drf-months-title {
   flex: 1;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, 238px);
+  gap: 1.25rem;
   font-size: 0.875rem;
   font-weight: 600;
   color: var(--text);
@@ -2459,32 +2459,30 @@ const drfStyles = `
 }
 .drf-months {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 1rem;
+  grid-template-columns: repeat(2, 238px);
+  gap: 1.25rem;
 }
-.drf-month { width: 220px; }
-.drf-weekdays {
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
-  margin-bottom: 0.25rem;
-}
-.drf-weekday {
-  text-align: center;
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-  padding: 0.25rem 0;
-}
+.drf-weekdays,
 .drf-grid {
   display: grid;
-  grid-template-columns: repeat(7, 1fr);
+  grid-template-columns: repeat(7, 34px);
 }
-.drf-empty { aspect-ratio: 1 / 1; }
+.drf-weekday {
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.drf-empty { width: 34px; height: 34px; }
 .drf-day {
   position: relative;
-  aspect-ratio: 1 / 1;
+  width: 34px;
+  height: 34px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2492,34 +2490,36 @@ const drfStyles = `
   border: none;
   color: var(--text);
   cursor: pointer;
-  border-radius: 999px;
   font: inherit;
   font-size: 0.8125rem;
   padding: 0;
 }
-.drf-day:hover { background: var(--bg-hover); }
+/* The number lives in a circle that sits above any range bar. */
 .drf-day-num {
-  display: inline-flex;
+  position: relative;
+  z-index: 1;
+  display: flex;
   align-items: center;
   justify-content: center;
-  width: 100%;
-  height: 100%;
+  width: 30px;
+  height: 30px;
   border-radius: 999px;
 }
-.drf-day-today .drf-day-num { box-shadow: inset 0 0 0 1px var(--border-strong); }
-.drf-day-in-range {
+.drf-day:hover:not(.drf-day-disabled):not(.drf-day-active) .drf-day-num {
   background: var(--bg-hover);
-  border-radius: 0;
 }
-.drf-day-active {
+.drf-day-today .drf-day-num { box-shadow: inset 0 0 0 1px var(--border-strong); }
+/* Range fill sits on the full-width cell so cells join edge-to-edge.
+   Endpoints get a half-fill so the bar tucks under their circle. */
+.drf-day-in-range { background: var(--bg-hover); }
+.drf-day-range-start { background: linear-gradient(to right, transparent 50%, var(--bg-hover) 50%); }
+.drf-day-range-end   { background: linear-gradient(to left,  transparent 50%, var(--bg-hover) 50%); }
+.drf-day-active .drf-day-num {
   background: var(--accent);
   color: var(--bg);
 }
-.drf-day-active:hover { background: var(--accent-hover); }
-.drf-day-active .drf-day-num { background: var(--accent); }
-.drf-day-start { border-radius: 999px 0 0 999px; }
-.drf-day-end   { border-radius: 0 999px 999px 0; }
-.drf-day-single { border-radius: 999px; }
+.drf-day-active.drf-day-today .drf-day-num { box-shadow: none; }
+.drf-day-active:hover .drf-day-num { background: var(--accent-hover); }
 .drf-day-disabled,
 .drf-day-disabled:hover {
   color: var(--text-dim);
@@ -2547,8 +2547,9 @@ const drfStyles = `
 .drf-foot-btn:hover { background: var(--bg-hover); color: var(--text); }
 
 @media (max-width: 560px) {
-  .drf-months { grid-template-columns: 1fr; }
-  .drf-months-title { grid-template-columns: 1fr; }
+  .drf-months { grid-template-columns: 238px; }
+  .drf-months > :nth-child(2) { display: none; }
+  .drf-months-title { grid-template-columns: 238px; }
   .drf-months-title > :nth-child(2) { display: none; }
 }
 `;
