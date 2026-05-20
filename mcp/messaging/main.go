@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/quotedprintable"
 	"net/http"
 	"net/mail"
 	"os"
@@ -48,7 +49,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.12.6
+version: 0.12.7
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -3177,7 +3178,7 @@ func parseRawEml(rawBytes []byte, fallbackMessageID string) (*parsedInbound, err
 		hdrs[k] = msg.Header.Get(k)
 	}
 	body, _ := io.ReadAll(msg.Body)
-	bodyText, bodyHTML := extractBodies(msg.Header.Get("Content-Type"), body)
+	bodyText, bodyHTML := extractBodies(msg.Header.Get("Content-Type"), msg.Header.Get("Content-Transfer-Encoding"), body)
 
 	parsed := &parsedInbound{
 		From:       hdrs["From"],
@@ -3270,25 +3271,36 @@ func resolveInboundStorageTool(ctx *sdk.AppCtx) (int64, string, error) {
 }
 
 // extractBodies handles single-part text/* directly and multipart by
-// pulling the first text/plain and text/html parts. v0.1 is
-// best-effort: nested multiparts beyond one level fall through.
-func extractBodies(contentType string, body []byte) (text string, html string) {
+// pulling the first text/plain and text/html parts. Decodes
+// Content-Transfer-Encoding (base64, quoted-printable) on each part —
+// pre-v0.12.7 it stored the raw transfer-encoded bytes, which made
+// Proton mail (always base64-encodes) render as opaque blobs in the
+// inbox.
+//
+// Single-part path takes the top-level Content-Transfer-Encoding;
+// multipart path reads each part's own header (top-level is
+// "multipart/mixed" with no real encoding, parts carry their own).
+//
+// Best-effort: nested multiparts beyond one level fall through;
+// charset decoding (Content-Type: text/plain; charset=ISO-8859-1)
+// isn't done here — a separate quality issue.
+func extractBodies(contentType, topEncoding string, body []byte) (text string, html string) {
 	ct := strings.ToLower(contentType)
 	switch {
 	case strings.HasPrefix(ct, "text/plain"):
-		return string(body), ""
+		return decodeTransferEncoding(topEncoding, string(body)), ""
 	case strings.HasPrefix(ct, "text/html"):
-		return "", string(body)
+		return "", decodeTransferEncoding(topEncoding, string(body))
 	}
 	// Naive multipart split — finds boundary= and walks parts. For
 	// production we'd swap to mime/multipart but keeping the import
 	// surface tiny here.
 	if !strings.HasPrefix(ct, "multipart/") {
-		return string(body), ""
+		return decodeTransferEncoding(topEncoding, string(body)), ""
 	}
 	boundary := boundaryFromContentType(contentType)
 	if boundary == "" {
-		return string(body), ""
+		return decodeTransferEncoding(topEncoding, string(body)), ""
 	}
 	parts := strings.Split(string(body), "--"+boundary)
 	for _, p := range parts {
@@ -3310,14 +3322,63 @@ func extractBodies(contentType string, body []byte) (text string, html string) {
 		if strings.HasPrefix(p[hdrEnd:], "\r\n\r\n") {
 			bodyPart = p[hdrEnd+4:]
 		}
+		partEncoding := headerValueFromBlock(head, "content-transfer-encoding")
 		switch {
 		case strings.Contains(head, "content-type: text/plain") && text == "":
-			text = bodyPart
+			text = decodeTransferEncoding(partEncoding, bodyPart)
 		case strings.Contains(head, "content-type: text/html") && html == "":
-			html = bodyPart
+			html = decodeTransferEncoding(partEncoding, bodyPart)
 		}
 	}
 	return text, html
+}
+
+// decodeTransferEncoding turns transfer-encoded body bytes into the
+// readable string. 7bit / 8bit / binary / empty / unknown values pass
+// through unchanged; base64 and quoted-printable are the two encodings
+// that make text unreadable when stored raw, and both are stdlib.
+//
+// Decode failure falls back to the raw input — preserves the data so
+// the operator can still inspect it, rather than dropping the body.
+func decodeTransferEncoding(encoding, raw string) string {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "base64":
+		// Mail clients fold base64 with CRLFs; the std decoder
+		// tolerates whitespace inside the input but explicit strip is
+		// cheap insurance against rarer variants (tabs, NBSP).
+		cleaned := strings.NewReplacer("\r", "", "\n", "", " ", "", "\t", "").Replace(raw)
+		if cleaned == "" {
+			return raw
+		}
+		decoded, err := base64.StdEncoding.DecodeString(cleaned)
+		if err != nil {
+			return raw
+		}
+		return string(decoded)
+	case "quoted-printable":
+		decoded, err := io.ReadAll(quotedprintable.NewReader(strings.NewReader(raw)))
+		if err != nil {
+			return raw
+		}
+		return string(decoded)
+	}
+	return raw
+}
+
+// headerValueFromBlock pulls a header value out of a lowercase header
+// block already split off from a MIME part body. Used in extractBodies
+// alongside the existing Contains-based content-type sniffing — cheap
+// and avoids reaching for net/textproto for a one-off read.
+func headerValueFromBlock(headBlock, lowercaseName string) string {
+	prefix := lowercaseName + ":"
+	for _, line := range strings.Split(headBlock, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		return strings.TrimSpace(line[len(prefix):])
+	}
+	return ""
 }
 
 func boundaryFromContentType(ct string) string {

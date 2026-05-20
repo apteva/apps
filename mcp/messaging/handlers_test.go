@@ -1260,6 +1260,80 @@ func TestSendersDelete_PropagatesRealUpstreamError(t *testing.T) {
 	}
 }
 
+// ─── v0.12.7 inbound body transfer-encoding decode ────────────────
+
+// Reported bug: extractBodies stored the raw transfer-encoded bytes
+// (base64 / quoted-printable) instead of decoding. Proton mail
+// triggered it every time — both text/plain and text/html parts are
+// base64-encoded by default.
+func TestExtractBodies_DecodesBase64SinglePart(t *testing.T) {
+	// "Hello\n" → base64 → "SGVsbG8K"
+	body := []byte("SGVsbG8K")
+	text, html := extractBodies("text/plain; charset=utf-8", "base64", body)
+	if text != "Hello\n" {
+		t.Errorf("base64 single-part text/plain not decoded: %q", text)
+	}
+	if html != "" {
+		t.Errorf("html should be empty for text/plain input: %q", html)
+	}
+}
+
+func TestExtractBodies_DecodesQuotedPrintableSinglePart(t *testing.T) {
+	// "café=200€" → quoted-printable → "caf=C3=A9=3D200=E2=82=AC"
+	body := []byte("caf=C3=A9=3D200=E2=82=AC")
+	text, _ := extractBodies("text/plain", "quoted-printable", body)
+	if text != "café=200€" {
+		t.Errorf("quoted-printable not decoded: %q", text)
+	}
+}
+
+func TestExtractBodies_DecodesPerPartEncodingInMultipart(t *testing.T) {
+	// Proton-shaped multipart: text/plain base64 + text/html base64,
+	// both with the per-part Content-Transfer-Encoding header. The
+	// outer Content-Transfer-Encoding doesn't apply to multipart;
+	// each part declares its own.
+	body := []byte("--BNDRY\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\n" +
+		"SGVsbG8K\r\n" +
+		"--BNDRY\r\n" +
+		"Content-Type: text/html; charset=utf-8\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\n" +
+		"PHA+SGVsbG88L3A+\r\n" +
+		"--BNDRY--")
+	text, html := extractBodies("multipart/alternative; boundary=\"BNDRY\"", "", body)
+	if text != "Hello\n" {
+		t.Errorf("multipart text/plain not decoded: %q", text)
+	}
+	if html != "<p>Hello</p>" {
+		t.Errorf("multipart text/html not decoded: %q", html)
+	}
+}
+
+func TestExtractBodies_NoEncodingPassesThrough(t *testing.T) {
+	// 7bit / unset → raw bytes preserved as-is. Regression guard for
+	// Gmail-style plain mail that pre-v0.12.7 worked fine.
+	body := []byte("This is plain text.\n")
+	text, _ := extractBodies("text/plain", "7bit", body)
+	if text != "This is plain text.\n" {
+		t.Errorf("plain text mangled: %q", text)
+	}
+	text2, _ := extractBodies("text/plain", "", body)
+	if text2 != "This is plain text.\n" {
+		t.Errorf("empty encoding mangled: %q", text2)
+	}
+}
+
+func TestDecodeTransferEncoding_FallsBackOnDecodeFailure(t *testing.T) {
+	// Malformed base64 must not lose the data — return it verbatim so
+	// the operator can still inspect.
+	garbage := "this is not base64!@#$"
+	got := decodeTransferEncoding("base64", garbage)
+	if got != garbage {
+		t.Errorf("decode failure should fall through to raw; got %q", got)
+	}
+}
+
 // ─── v0.12.6 inbound webhook project resolution ───────────────────
 
 // Reported bug: SNS subscription URL lacked project_id, so global-
