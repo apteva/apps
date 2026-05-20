@@ -1043,6 +1043,19 @@ function dayIndexInWindow(windowStart: Date, days: number, d: Date): number {
 // --- Month view -----------------------------------------------------
 
 const MONTH_MAX_CHIPS = 3;
+// Vertical layout of a month cell: date-number row, then N lanes of
+// multi-day spanning bars, then single-day chips below them.
+const MONTH_DATE_ROW_H = 24; // px reserved at the top of each cell
+const MONTH_LANE_H = 20;     // px per multi-day bar lane (incl. gap)
+
+interface WeekSeg {
+  ev: Occurrence;
+  startCol: number;        // 0-6 within the week
+  endCol: number;          // 0-6 within the week
+  lane: number;
+  continuesLeft: boolean;  // span began before this week
+  continuesRight: boolean; // span continues past this week
+}
 
 function MonthView({
   monthAnchor, gridStart, events, calendarById,
@@ -1059,41 +1072,71 @@ function MonthView({
   const today = new Date();
   const month = monthAnchor.getMonth();
 
-  // Split into single-day (per-cell chips) and multi-day (spanning
-  // bars). Single-day events bucket by their start day as before.
-  // Multi-day events are bucketed onto EVERY day they cover so the bar
-  // reads as a continuous band across the grid.
-  const { singleByDay, spanningByDay } = useMemo(() => {
+  // Single-day events bucket by their start day -> per-cell chips.
+  const singleByDay = useMemo(() => {
     const single = new Map<string, Occurrence[]>();
-    const spanning = new Map<string, Occurrence[]>();
     for (const e of events) {
-      if (isMultiDay(e)) {
-        // Stamp the event on each covered cell within the visible grid.
-        for (let i = 0; i < 42; i++) {
-          const d = addDays(gridStart, i);
-          if (!occCoversDay(e, d)) continue;
-          const key = ymdKey(d);
-          if (!spanning.has(key)) spanning.set(key, []);
-          spanning.get(key)!.push(e);
-        }
-      } else {
-        const key = ymdKey(new Date(e.start_at));
-        if (!single.has(key)) single.set(key, []);
-        single.get(key)!.push(e);
+      if (isMultiDay(e)) continue;
+      const key = ymdKey(new Date(e.start_at));
+      if (!single.has(key)) single.set(key, []);
+      single.get(key)!.push(e);
+    }
+    for (const arr of single.values()) arr.sort((a, b) => a.start_at.localeCompare(b.start_at));
+    return single;
+  }, [events]);
+
+  // Multi-day events become spanning segments, computed per week so a
+  // single <button> spans a whole column range — that's what makes the
+  // bar truly continuous (no per-cell gaps). Each segment gets a lane
+  // so overlapping trips stack instead of colliding.
+  const weeks = useMemo(() => {
+    const multi = events.filter(isMultiDay);
+    const out: { days: Date[]; segs: WeekSeg[]; laneCount: number }[] = [];
+    for (let w = 0; w < 6; w++) {
+      const weekStart = addDays(gridStart, w * 7);
+      const days = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
+      const raw = multi
+        .map((ev): WeekSeg | null => {
+          let startCol = -1;
+          let endCol = -1;
+          for (let c = 0; c < 7; c++) {
+            if (occCoversDay(ev, days[c])) {
+              if (startCol === -1) startCol = c;
+              endCol = c;
+            }
+          }
+          if (startCol === -1) return null;
+          return {
+            ev,
+            startCol,
+            endCol,
+            lane: 0,
+            continuesLeft: occCoversDay(ev, addDays(weekStart, -1)),
+            continuesRight: occCoversDay(ev, addDays(weekStart, 7)),
+          };
+        })
+        .filter((s): s is WeekSeg => s !== null)
+        // Longest spans first, then earliest, then id — keeps lane
+        // assignment stable so a bar doesn't jump lanes across weeks.
+        .sort((a, b) =>
+          (b.endCol - b.startCol) - (a.endCol - a.startCol) ||
+          a.startCol - b.startCol ||
+          a.ev.id - b.ev.id,
+        );
+      // Greedy lane packing: first lane whose last-used column is left
+      // of this segment's start.
+      const laneLastCol: number[] = [];
+      for (const seg of raw) {
+        let lane = 0;
+        while (lane < laneLastCol.length && laneLastCol[lane] >= seg.startCol) lane++;
+        laneLastCol[lane] = seg.endCol;
+        seg.lane = lane;
       }
+      out.push({ days, segs: raw, laneCount: laneLastCol.length });
     }
-    // Stable order: longer/earlier spans first so bars line up across
-    // adjacent cells.
-    for (const arr of spanning.values()) {
-      arr.sort((a, b) => a.start_at.localeCompare(b.start_at) || a.id - b.id);
-    }
-    for (const arr of single.values()) {
-      arr.sort((a, b) => a.start_at.localeCompare(b.start_at));
-    }
-    return { singleByDay: single, spanningByDay: spanning };
+    return out;
   }, [events, gridStart]);
 
-  const cells = Array.from({ length: 42 }, (_, i) => addDays(gridStart, i));
   const weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
   return (
@@ -1106,34 +1149,30 @@ function MonthView({
           <div key={w} className="px-2 py-1 text-text-dim text-xs uppercase">{w}</div>
         ))}
       </div>
-      <div
-        className="flex-1 min-h-0"
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
-          gridTemplateRows: "repeat(6, minmax(0, 1fr))",
-        }}
-      >
-        {cells.map((d) => {
+      <div className="flex-1 min-h-0 flex flex-col">
+        {weeks.map((week, wi) => (
+          <div
+            key={wi}
+            className="relative flex-1 min-h-0"
+            style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))" }}
+          >
+            {week.days.map((d) => {
           const inMonth = d.getMonth() === month;
           const isToday = sameDay(d, today);
-          const spanning = spanningByDay.get(ymdKey(d)) || [];
           const single = singleByDay.get(ymdKey(d)) || [];
-          // Spanning bars are shown on every covered cell; single-day
-          // chips fill the remaining room up to the chip budget.
-          const visibleSingle = single.slice(0, Math.max(0, MONTH_MAX_CHIPS - spanning.length));
-          const extra = (spanning.length + single.length) - (spanning.length + visibleSingle.length);
-          const isWeekStart = d.getDay() === 1; // Monday — bars re-label on wrap
+          const visibleSingle = single.slice(0, MONTH_MAX_CHIPS);
+          const extra = single.length - visibleSingle.length;
           return (
             <div
               key={d.toISOString()}
               onClick={() => onEmptyClick(d)}
               className={
-                "border-r border-b border-border p-1 flex flex-col gap-1 overflow-hidden min-h-0 cursor-pointer " +
+                "border-r border-b border-border overflow-hidden min-h-0 cursor-pointer " +
                 (inMonth ? "bg-bg hover:bg-bg-card" : "bg-bg-card hover:bg-bg-input")
               }
+              style={{ paddingLeft: "4px", paddingRight: "4px" }}
             >
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between" style={{ height: MONTH_DATE_ROW_H }}>
                 <button
                   type="button"
                   onClick={(e) => { e.stopPropagation(); onDayClick(d); }}
@@ -1150,49 +1189,9 @@ function MonthView({
                   {d.getDate()}
                 </button>
               </div>
-              <div
-                className="flex flex-col min-h-0 overflow-hidden"
-                style={{ gap: "2px" }}
-              >
-                {spanning.map((ev) => {
-                  const cal = calendarById.get(ev.calendar_id);
-                  const color = cal?.color || "#3b82f6";
-                  const startsHere = sameDay(new Date(ev.start_at), d);
-                  // Half-open end: the last covered day is the day before
-                  // a midnight-exact end; occCoversDay already accounts
-                  // for that, so "ends here" = covers d but not d+1.
-                  const endsHere = !occCoversDay(ev, addDays(d, 1));
-                  // Label on the first day OR when a bar wraps to a new
-                  // week row, so a long span stays identifiable.
-                  const showLabel = startsHere || isWeekStart;
-                  return (
-                    <button
-                      key={ev.id + "-" + ev.occurrence_start_at}
-                      type="button"
-                      onClick={(e) => { e.stopPropagation(); onEventClick(ev); }}
-                      className="text-xs text-left text-bg truncate hover:opacity-90 transition-opacity"
-                      style={{
-                        display: "block",
-                        width: "100%",
-                        backgroundColor: color,
-                        paddingTop: "2px",
-                        paddingBottom: "2px",
-                        paddingLeft: "6px",
-                        paddingRight: "6px",
-                        // Round only the true ends of the span; mid-span
-                        // days keep square edges so consecutive full-width
-                        // bars read as one continuous band.
-                        borderTopLeftRadius: startsHere ? "4px" : "0",
-                        borderBottomLeftRadius: startsHere ? "4px" : "0",
-                        borderTopRightRadius: endsHere ? "4px" : "0",
-                        borderBottomRightRadius: endsHere ? "4px" : "0",
-                      }}
-                      title={ev.title}
-                    >
-                      {showLabel ? ev.title : " "}
-                    </button>
-                  );
-                })}
+              {/* Reserve room for the multi-day lanes above the chips. */}
+              <div style={{ height: week.laneCount * MONTH_LANE_H }} />
+              <div className="flex flex-col overflow-hidden" style={{ gap: "2px" }}>
                 {visibleSingle.map((ev) => {
                   const cal = calendarById.get(ev.calendar_id);
                   return (
@@ -1229,7 +1228,48 @@ function MonthView({
               </div>
             </div>
           );
-        })}
+            })}
+            {/* Spanning bars: absolute overlay so each event is one
+                element across its column range (truly continuous). */}
+            <div className="absolute inset-0 pointer-events-none">
+              {week.segs.map((seg) => {
+                const cal = calendarById.get(seg.ev.calendar_id);
+                const color = cal?.color || "#3b82f6";
+                const span = seg.endCol - seg.startCol + 1;
+                return (
+                  <button
+                    key={seg.ev.id + "-" + seg.ev.occurrence_start_at}
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); onEventClick(seg.ev); }}
+                    className="absolute text-xs text-left text-bg truncate hover:opacity-90 transition-opacity"
+                    title={seg.ev.title}
+                    style={{
+                      top: MONTH_DATE_ROW_H + seg.lane * MONTH_LANE_H,
+                      left: `calc(100% * ${seg.startCol} / 7)`,
+                      width: `calc(100% * ${span} / 7)`,
+                      height: MONTH_LANE_H - 2,
+                      backgroundColor: color,
+                      pointerEvents: "auto",
+                      paddingLeft: "6px",
+                      paddingRight: "6px",
+                      marginLeft: seg.continuesLeft ? "0" : "2px",
+                      marginRight: seg.continuesRight ? "0" : "2px",
+                      boxSizing: "border-box",
+                      display: "flex",
+                      alignItems: "center",
+                      borderTopLeftRadius: seg.continuesLeft ? "0" : "4px",
+                      borderBottomLeftRadius: seg.continuesLeft ? "0" : "4px",
+                      borderTopRightRadius: seg.continuesRight ? "0" : "4px",
+                      borderBottomRightRadius: seg.continuesRight ? "0" : "4px",
+                    }}
+                  >
+                    {seg.continuesLeft ? "< " : ""}{seg.ev.title}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -1247,29 +1287,30 @@ function YearView({
   onMonthClick: (d: Date) => void;
 }) {
   const today = new Date();
-  // Per-day color of the first event that day — drives the tiny dot
-  // under the date number. Multi-event days still get just one dot to
-  // keep mini cells readable.
-  const dayColor = useMemo(() => {
-    const map = new Map<string, string>();
+  // Per-day marker for the mini calendars. Single-day events get a
+  // centered dot; multi-day events get a span flag so MiniMonth can
+  // draw a connected bottom bar across the days they cover (otherwise
+  // a long trip is invisible at mini scale).
+  const dayMark = useMemo(() => {
+    const map = new Map<string, { color: string; span: boolean }>();
     const sorted = [...events].sort((a, b) => a.start_at.localeCompare(b.start_at));
     for (const e of sorted) {
       const cal = calendarById.get(e.calendar_id);
       const color = cal?.color || "#3b82f6";
-      // Multi-day events dot every day they cover so the span is
-      // visible at a glance, not just the start day. Cap the walk so a
-      // pathological end date can't spin forever.
       if (isMultiDay(e)) {
         const s = startOfDay(new Date(e.start_at));
+        // Cap the walk so a pathological end date can't spin forever.
         for (let i = 0; i < 366; i++) {
           const d = addDays(s, i);
           if (!occCoversDay(e, d)) break;
           const key = ymdKey(d);
-          if (!map.has(key)) map.set(key, color);
+          const existing = map.get(key);
+          // A span marker wins over a plain dot on the same day.
+          if (!existing || !existing.span) map.set(key, { color, span: true });
         }
       } else {
         const key = ymdKey(new Date(e.start_at));
-        if (!map.has(key)) map.set(key, color);
+        if (!map.has(key)) map.set(key, { color, span: false });
       }
     }
     return map;
@@ -1281,8 +1322,10 @@ function YearView({
       className="p-4"
       style={{
         display: "grid",
-        gap: "1rem",
-        gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+        gap: "1.25rem",
+        // Larger min so we land at ~3-4 mini calendars per row instead
+        // of cramming 5-6 tiny ones in.
+        gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
       }}
     >
       {months.map((m) => (
@@ -1290,7 +1333,7 @@ function YearView({
           key={m.getMonth()}
           month={m}
           today={today}
-          dayColor={dayColor}
+          dayMark={dayMark}
           onDayClick={onDayClick}
           onMonthClick={onMonthClick}
         />
@@ -1300,11 +1343,11 @@ function YearView({
 }
 
 function MiniMonth({
-  month, today, dayColor, onDayClick, onMonthClick,
+  month, today, dayMark, onDayClick, onMonthClick,
 }: {
   month: Date;
   today: Date;
-  dayColor: Map<string, string>;
+  dayMark: Map<string, { color: string; span: boolean }>;
   onDayClick: (d: Date) => void;
   onMonthClick: (d: Date) => void;
 }) {
@@ -1314,11 +1357,11 @@ function MiniMonth({
   // Single-letter weekday header; second T/S share with their pair.
   const weekdays = ["M", "T", "W", "T", "F", "S", "S"];
   return (
-    <div className="border border-border rounded p-3 flex flex-col gap-2">
+    <div className="border border-border rounded p-4 flex flex-col gap-3">
       <button
         type="button"
         onClick={() => onMonthClick(month)}
-        className="text-left text-text font-medium text-sm hover:text-accent"
+        className="text-left text-text font-medium text-base hover:text-accent"
       >
         {month.toLocaleDateString(undefined, { month: "long" })}
       </button>
@@ -1329,35 +1372,50 @@ function MiniMonth({
         {cells.map((d) => {
           const inMonth = d.getMonth() === m;
           const isToday = sameDay(d, today);
-          const color = inMonth ? dayColor.get(ymdKey(d)) : undefined;
+          const mark = inMonth ? dayMark.get(ymdKey(d)) : undefined;
           return (
             <button
               key={d.toISOString()}
               type="button"
               onClick={() => onDayClick(d)}
               className={
-                "aspect-square rounded-full text-xs flex items-center justify-center relative transition-colors " +
+                "aspect-square text-sm flex items-center justify-center relative transition-colors " +
                 (isToday
-                  ? "bg-accent text-bg font-medium"
+                  ? "bg-accent text-bg font-medium rounded-full"
                   : inMonth
-                    ? "text-text hover:bg-bg-input"
-                    : "text-text-dim hover:bg-bg-input")
+                    ? "text-text hover:bg-bg-input rounded-full"
+                    : "text-text-dim hover:bg-bg-input rounded-full")
               }
               title={d.toLocaleDateString()}
             >
               {d.getDate()}
-              {color && !isToday && (
-                <span
-                  className="absolute rounded-full"
-                  style={{
-                    bottom: "2px",
-                    left: "50%",
-                    transform: "translateX(-50%)",
-                    width: "4px",
-                    height: "4px",
-                    backgroundColor: color,
-                  }}
-                />
+              {mark && !isToday && (
+                mark.span ? (
+                  // Connected bottom bar: adjacent covered days touch
+                  // edge-to-edge so a multi-day span reads as a band.
+                  <span
+                    className="absolute"
+                    style={{
+                      bottom: "1px",
+                      left: 0,
+                      right: 0,
+                      height: "3px",
+                      backgroundColor: mark.color,
+                    }}
+                  />
+                ) : (
+                  <span
+                    className="absolute rounded-full"
+                    style={{
+                      bottom: "2px",
+                      left: "50%",
+                      transform: "translateX(-50%)",
+                      width: "4px",
+                      height: "4px",
+                      backgroundColor: mark.color,
+                    }}
+                  />
+                )
               )}
             </button>
           );
