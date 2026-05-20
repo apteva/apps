@@ -404,13 +404,19 @@ type DevRun struct {
 	StartedAt  string `json:"started_at,omitempty"`
 	StoppedAt  string `json:"stopped_at,omitempty"`
 	Error      string `json:"error,omitempty"`
+
+	// Remote-runner fields (mobile repos delegated to the Simulator
+	// app). Empty for local dev runs. See migration 004.
+	Runner    string `json:"runner,omitempty"`     // "" local | "simulator"
+	SimID     string `json:"sim_id,omitempty"`     // Simulator's sim handle
+	StreamURL string `json:"stream_url,omitempty"` // live-stream WebSocket URL
 }
 
 const devRunCols = `id, project_id, repo_id, status, port, pid, framework,
 		run_cmd, env_json, log_path,
 		COALESCE(started_at, '') AS started_at,
 		COALESCE(stopped_at, '') AS stopped_at,
-		error`
+		error, runner, sim_id, stream_url`
 
 func scanDevRunRow(s rowScanner) (*DevRun, error) {
 	var dr DevRun
@@ -418,6 +424,7 @@ func scanDevRunRow(s rowScanner) (*DevRun, error) {
 		&dr.ID, &dr.ProjectID, &dr.RepoID, &dr.Status, &dr.Port, &dr.PID,
 		&dr.Framework, &dr.RunCmd, &dr.EnvJSON, &dr.LogPath,
 		&dr.StartedAt, &dr.StoppedAt, &dr.Error,
+		&dr.Runner, &dr.SimID, &dr.StreamURL,
 	); err != nil {
 		return nil, err
 	}
@@ -451,9 +458,9 @@ func dbUpsertDevRun(db *sql.DB, in DevRun) (*DevRun, error) {
 	res, err := db.Exec(`
 		INSERT INTO dev_runs (
 			project_id, repo_id, status, port, pid, framework, run_cmd, env_json, log_path,
-			started_at, error
+			started_at, error, runner, sim_id, stream_url
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(project_id, repo_id) DO UPDATE SET
 			status     = excluded.status,
 			port       = excluded.port,
@@ -464,9 +471,13 @@ func dbUpsertDevRun(db *sql.DB, in DevRun) (*DevRun, error) {
 			log_path   = excluded.log_path,
 			started_at = excluded.started_at,
 			stopped_at = NULL,
-			error      = excluded.error
+			error      = excluded.error,
+			runner     = excluded.runner,
+			sim_id     = excluded.sim_id,
+			stream_url = excluded.stream_url
 	`, in.ProjectID, in.RepoID, in.Status, in.Port, in.PID, in.Framework,
 		in.RunCmd, in.EnvJSON, in.LogPath, nullableTS(in.StartedAt), in.Error,
+		in.Runner, in.SimID, in.StreamURL,
 	)
 	if err != nil {
 		return nil, err
@@ -486,7 +497,8 @@ func dbUpdateDevRun(db *sql.DB, id int64, fields map[string]any) error {
 	cols := []string{}
 	args := []any{}
 	for _, k := range []string{"status", "port", "pid", "framework", "run_cmd",
-		"env_json", "log_path", "started_at", "stopped_at", "error"} {
+		"env_json", "log_path", "started_at", "stopped_at", "error",
+		"runner", "sim_id", "stream_url"} {
 		if v, ok := fields[k]; ok {
 			cols = append(cols, k+" = ?")
 			args = append(args, v)

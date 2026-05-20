@@ -5,6 +5,7 @@
 // /api/apps/code/api/* with same-origin cookies.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DeviceFrame } from "./components/DeviceFrame";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
 // because panels are bundled standalone and apps install independently.
@@ -337,6 +338,9 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [showNewFile, setShowNewFile] = useState(false);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [showDevLogs, setShowDevLogs] = useState(false);
+  // Lifted from DevBar so the main content area can render the live
+  // device view for remote (Simulator-app) dev runs.
+  const [devRun, setDevRun] = useState<DevRunWire | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameTo, setRenameTo] = useState("");
   const [forkSlug, setForkSlug] = useState<string | null>(null);
@@ -886,10 +890,13 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
             showLogs={showDevLogs}
             onToggleLogs={() => setShowDevLogs((v) => !v)}
             onError={(msg) => setError(msg)}
+            onRunChange={setDevRun}
           />
         )}
         {selectedSlug && showDevLogs ? (
           <DevLogsView slug={selectedSlug} withParams={withParams} />
+        ) : selectedSlug && devRun?.runner === "simulator" && devRun.status === "live" ? (
+          <RemoteDeviceView run={devRun} />
         ) : !openFile ? (
           <div className="p-8 text-text-muted text-sm text-center mt-12">
             {selectedSlug
@@ -1788,6 +1795,11 @@ interface DevRunWire {
   started_at?: string;
   stopped_at?: string;
   error?: string;
+  // Remote-runner fields — populated for mobile repos delegated to the
+  // Simulator app. runner="" for local web dev runs.
+  runner?: string;
+  sim_id?: string;
+  stream_url?: string;
 }
 
 function devStatusColor(s?: string): string {
@@ -1813,6 +1825,7 @@ function DevBar({
   showLogs,
   onToggleLogs,
   onError,
+  onRunChange,
 }: {
   slug: string;
   api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
@@ -1820,6 +1833,7 @@ function DevBar({
   showLogs: boolean;
   onToggleLogs: () => void;
   onError: (msg: string) => void;
+  onRunChange?: (run: DevRunWire | null) => void;
 }) {
   const [run, setRun] = useState<DevRunWire | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1828,11 +1842,12 @@ function DevBar({
     try {
       const r = await api<{ dev_run: DevRunWire | null }>("GET", `/repos/${slug}/dev/status`);
       setRun(r.dev_run);
+      onRunChange?.(r.dev_run);
     } catch (e) {
       // Swallow — this polls in the background; the panel-wide error
       // banner is for explicit user actions.
     }
-  }, [api, slug]);
+  }, [api, slug, onRunChange]);
 
   useEffect(() => {
     refresh();
@@ -1867,12 +1882,18 @@ function DevBar({
   const status = run?.status ?? "stopped";
   const isLive = status === "live";
   const isBusy = status === "starting" || busy;
+  const isRemote = run?.runner === "simulator";
 
   return (
     <div className="px-3 py-2 border-b border-border flex items-center gap-2 bg-bg-input/40">
       <span className={`text-xs ${devStatusColor(status)}`}>●</span>
       <span className="text-xs text-text-muted">
-        {status === "live" ? (
+        {status === "live" && isRemote ? (
+          <>
+            Running on {run?.framework === "ios" ? "iOS Simulator" : "Android emulator"}
+            {" "}· {uptimeStr(run?.started_at)}
+          </>
+        ) : status === "live" ? (
           <>
             Running on{" "}
             <a
@@ -1914,6 +1935,24 @@ function DevBar({
           className="px-2 py-0.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
         >{isBusy ? "Starting…" : "Run"}</button>
       )}
+    </div>
+  );
+}
+
+// RemoteDeviceView renders the live mobile device for a Simulator-app
+// dev run. Mounted by the panel body below the DevBar when the active
+// dev run has runner=simulator and a stream URL.
+function RemoteDeviceView({ run }: { run: DevRunWire }) {
+  if (!run.stream_url) {
+    return (
+      <div className="p-4 text-xs text-text-muted">
+        Device starting — waiting for the stream URL…
+      </div>
+    );
+  }
+  return (
+    <div className="p-4 flex justify-center">
+      <DeviceFrame streamUrl={run.stream_url} platform={run.framework} />
     </div>
   );
 }

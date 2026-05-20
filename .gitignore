@@ -39,6 +39,7 @@ mcp/redirects/redirects
 mcp/robot/robot
 mcp/routes/routes
 mcp/screenshots/screenshots
+mcp/simulator/simulator
 mcp/social/social
 mcp/status/status
 mcp/storage/storage

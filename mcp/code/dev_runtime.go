@@ -50,6 +50,11 @@ type devFramework struct {
 	// FileServer instead of spawning a child. The supervisor branches
 	// on this flag in startDevRun.
 	SelfHostsServer bool
+	// RemoteRunner names a sibling app the dev run is delegated to
+	// instead of spawning a local child. "" = local. "simulator" for
+	// mobile frameworks — startDevRun routes to startRemoteRun, which
+	// calls the Simulator app's sims_run over the cross-app RPC.
+	RemoteRunner string
 }
 
 var devFrameworks = []devFramework{
@@ -57,6 +62,14 @@ var devFrameworks = []devFramework{
 	{Name: "node", Detect: detectDevNode, Command: cmdDevNode},
 	{Name: "go", Detect: detectDevGo, Command: cmdDevGo},
 	{Name: "static", Detect: detectDevStatic, SelfHostsServer: true},
+	// Mobile frameworks — no local command; delegated to the Simulator
+	// app. Listed before "static"-style fallbacks would matter but
+	// after the web frameworks so a repo that's somehow both (a
+	// Next.js web companion next to an Android module) prefers the web
+	// dev loop. detectDevAndroid/IOS are specific enough that this
+	// ordering rarely bites.
+	{Name: "ios", Detect: detectDevIOS, RemoteRunner: "simulator"},
+	{Name: "android", Detect: detectDevAndroid, RemoteRunner: "simulator"},
 	// "blank" has no detector — caller must specify framework=blank
 	// AND pass run_cmd. Listed last because Detect == nil never fires.
 }
@@ -109,6 +122,66 @@ func detectDevGo(store FileStore, slug string) bool {
 func detectDevStatic(store FileStore, slug string) bool {
 	_, err := store.Read(slug, "index.html")
 	return err == nil
+}
+
+// detectDevIOS matches an Xcode project (*.xcodeproj / *.xcworkspace
+// at the repo root) or a SwiftPM package declaring an iOS platform.
+// We only scan the top level — nested example projects shouldn't make
+// the whole repo "an iOS app".
+func detectDevIOS(store FileStore, slug string) bool {
+	entries, err := store.List(slug, "", false)
+	if err == nil {
+		for _, e := range entries {
+			if strings.HasSuffix(e.Path, ".xcodeproj") || strings.HasSuffix(e.Path, ".xcworkspace") {
+				return true
+			}
+		}
+	}
+	if body, err := store.Read(slug, "Package.swift"); err == nil {
+		return strings.Contains(string(body), ".iOS(")
+	}
+	return false
+}
+
+// detectDevAndroid matches a Gradle project with an Android
+// application module: a root settings.gradle[.kts] plus a module
+// applying the com.android.application plugin. Checking the plugin
+// (not just the presence of gradle) avoids classifying a plain JVM /
+// Kotlin-Multiplatform-without-Android repo as Android.
+func detectDevAndroid(store FileStore, slug string) bool {
+	hasSettings := false
+	for _, name := range []string{"settings.gradle", "settings.gradle.kts"} {
+		if _, err := store.Read(slug, name); err == nil {
+			hasSettings = true
+			break
+		}
+	}
+	if !hasSettings {
+		return false
+	}
+	// Scan module build files for the android application plugin.
+	files, err := store.List(slug, "", true)
+	if err != nil {
+		return false
+	}
+	for _, f := range files {
+		base := f.Path
+		if i := strings.LastIndex(base, "/"); i >= 0 {
+			base = base[i+1:]
+		}
+		if base != "build.gradle" && base != "build.gradle.kts" {
+			continue
+		}
+		body, err := store.Read(slug, f.Path)
+		if err != nil {
+			continue
+		}
+		s := string(body)
+		if strings.Contains(s, "com.android.application") {
+			return true
+		}
+	}
+	return false
 }
 
 // ─── Per-framework dev commands ───────────────────────────────────
@@ -322,6 +395,14 @@ func (s *devSupervisor) startDevRun(ctx *sdk.AppCtx, in startDevInput) (*DevRun,
 	}
 	if fw == "" {
 		return nil, errors.New(`could not detect framework — pass framework="blank" with a run_cmd, or add a marker file (package.json, go.mod, index.html)`)
+	}
+
+	// Mobile frameworks are delegated to the Simulator app rather than
+	// spawned locally. startRemoteRun tars the source, calls sims_run,
+	// and persists a dev_runs row with runner=simulator + the stream
+	// URL the panel embeds. See dev_remote.go.
+	if def := devFrameworkByName(fw); def != nil && def.RemoteRunner != "" {
+		return s.startRemoteRun(ctx, in, srcDir, fw, def.RemoteRunner)
 	}
 
 	port, err := s.allocateDevPort()
@@ -579,9 +660,20 @@ func mergeDevEnv(envJSON string, port int) []string {
 
 // stopDevRun terminates the supervised process / static server, marks
 // the row stopped, frees the in-memory handle. Idempotent.
+//
+// Remote runs (runner=simulator) have no local process — instead we
+// ask the Simulator app to shut the sim down. See stopRemoteRun.
 func (s *devSupervisor) stopDevRun(ctx *sdk.AppCtx, projectID string, repoID int64) error {
 	dr, err := dbGetDevRun(ctx.AppDB(), projectID, repoID)
 	if err != nil || dr == nil {
+		return nil
+	}
+	if dr.Runner == "simulator" {
+		s.stopRemoteRun(ctx, dr)
+		_ = dbUpdateDevRun(ctx.AppDB(), dr.ID, map[string]any{
+			"status":     "stopped",
+			"stopped_at": time.Now().UTC().Format(time.RFC3339),
+		})
 		return nil
 	}
 	p := s.get(dr.ID)

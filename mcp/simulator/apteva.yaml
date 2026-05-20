@@ -1,0 +1,133 @@
+schema: apteva-app/v1
+
+name: simulator
+display_name: Apteva Simulator
+version: 0.1.0
+description: |
+  iOS and Android simulators on demand. Boot a device, build a repo's
+  source into a .apk or .app, install + launch on a headless emulator
+  or Simulator, stream the screen back to the browser, relay touch +
+  key input. The Code app calls into this sidecar when it detects an
+  iOS or Android repo on repos_dev_start; usable standalone for any
+  flow that produces a mobile artifact (CI, manual sideload).
+
+  Per-platform capability gating — Android works on Linux/macOS hosts
+  with the Android SDK; iOS requires macOS with Xcode and
+  idb_companion. sims_capabilities reports availability with hints
+  when something's missing.
+
+author: Apteva
+tags: [mobile, simulator, emulator, ios, android, dev]
+
+scopes: [project]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: sims_capabilities
+      description: Report host-level support for android + ios (tools on PATH, hints when missing).
+    - name: sims_list
+      description: List sims known to this project (booted + shutdown).
+    - name: sims_boot
+      description: Boot an emulator (android) or Simulator (ios). Auto-creates the device if none matches.
+    - name: sims_shutdown
+      description: Shut down a sim. Idempotent.
+    - name: sims_build
+      description: Build a repo source archive into an APK (android) or .app (ios).
+    - name: sims_install
+      description: Install a previously-built artifact onto a booted sim.
+    - name: sims_launch
+      description: Launch an installed bundle on a booted sim.
+    - name: sims_run
+      description: Composite — boot-if-needed, build, install, launch, mint stream URL. The entry point Code calls.
+    - name: sims_input
+      description: Forward a tap/swipe/key/text event to a booted sim.
+    - name: sims_logs
+      description: Tail device console (logcat / idb log).
+    - name: sims_screenshot
+      description: One-off PNG capture from a booted sim.
+    - name: sims_stream_url
+      description: Mint a short-lived WebSocket URL for live screen streaming + input.
+  ui_panels:
+    - slot: project.page
+      label: Simulator
+      icon: smartphone
+      entry: /ui/SimulatorPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/simulator
+  port: 8090
+  health_check: /health
+  storage:
+    - name: artifacts
+      mount_path: /data
+
+db:
+  driver: sqlite
+  path: /data/simulator.db
+  migrations: migrations/
+
+config_schema:
+  - name: android_image
+    type: text
+    label: Android system image
+    description: SDK Manager-style identifier for the system image used by auto-created AVDs.
+    default: "system-images;android-34;google_apis;x86_64"
+  - name: android_device_type
+    type: text
+    label: Android device profile
+    description: "`avdmanager` device profile name (e.g. pixel_6, Nexus 5X)."
+    default: "pixel_6"
+  - name: emulator_extra_args
+    type: text
+    label: Extra emulator args
+    description: Appended verbatim to every emulator boot. Default keeps emulators headless.
+    default: "-no-window -no-audio -no-snapshot-save"
+  - name: gradle_extra_args
+    type: text
+    label: Extra gradle args
+    description: Appended to every gradle build invocation.
+    default: ""
+  - name: ios_runtime
+    type: text
+    label: Default iOS runtime
+    description: simctl runtime id, e.g. "iOS-17-5". Empty = pick the newest installed runtime.
+    default: ""
+  - name: ios_device_type
+    type: text
+    label: Default iOS device type
+    description: simctl device-type id (e.g. "iPhone-15-Pro").
+    default: "iPhone-15-Pro"
+  - name: xcodebuild_extra_args
+    type: text
+    label: Extra xcodebuild args
+    description: Appended to every xcodebuild invocation.
+    default: ""
+  - name: idb_companion_path
+    type: text
+    label: idb_companion binary path
+    description: Override the autoresolved PATH lookup. Empty = use PATH.
+    default: ""
+  - name: max_concurrent_sims
+    type: text
+    label: Max simultaneous booted sims
+    description: Global cap across android + ios. Sims and Simulator processes are RAM-hungry.
+    default: "2"
+  - name: stream_codec
+    type: text
+    label: Stream codec
+    description: h264 is the only supported value in v0.1; placeholder for future codec switching.
+    default: "h264"
+
+upgrade_policy: auto-patch
