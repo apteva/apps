@@ -83,7 +83,7 @@ requires:
     # portfolios so market-intel can say "you hold this, it resolved".
     # Absent = signals are venue-only, no portfolio context.
     - name: trading
-      required: false
+      optional: true
 
 provides:
   http_routes:

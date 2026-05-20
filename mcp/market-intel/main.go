@@ -66,7 +66,7 @@ requires:
       compatible_slugs: [anthropic-api, openai-api]
   apps:
     - name: trading
-      required: false
+      optional: true
 provides:
   http_routes:
     - prefix: /
