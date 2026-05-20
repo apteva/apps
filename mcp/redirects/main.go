@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: redirects
 display_name: Redirects
-version: 0.1.3
+version: 0.2.0
 description: |
   Branded short links and domain redirects. Each rule maps a
   (hostname, path) pair to an external URL and returns a 30x.
@@ -47,6 +47,7 @@ requires:
   apps:
     - { name: routes,  reason: "Hostname routing" }
     - { name: domains, optional: true, reason: "DNS auto-config (optional)" }
+    - { name: certs,   optional: true, reason: "TLS cert auto-issuance (optional)" }
 provides:
   http_routes:
     - prefix: /

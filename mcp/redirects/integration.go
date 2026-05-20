@@ -24,11 +24,12 @@ import (
 //         If domains isn't installed (or doesn't manage this hostname)
 //         we skip silently — the operator manages DNS themselves.
 
-// wireHostname claims hostname for this sidecar with routes, and
-// upserts a CNAME via domains when the hostname is known there.
-// Returns a human-readable warning string when something failed (or
-// "" on full success); errors are not propagated because creating
-// the redirect rule should not roll back on wiring failure.
+// wireHostname claims hostname for this sidecar with routes, upserts a
+// CNAME via domains when the hostname is known there, and kicks off a
+// cert issuance via the certs app when it's installed. Returns a
+// human-readable warning string when something failed (or "" on full
+// success); errors are not propagated because creating the redirect
+// rule should not roll back on wiring failure.
 func wireHostname(ctx *sdk.AppCtx, projectID, hostname string) string {
 	if hostname == "" {
 		return ""
@@ -45,6 +46,15 @@ func wireHostname(ctx *sdk.AppCtx, projectID, hostname string) string {
 	// in the domains app's panel when the user manages DNS elsewhere.
 	if err := maybeUpsertCNAME(ctx, projectID, hostname); err != nil {
 		warnings = append(warnings, "domains: "+err.Error())
+	}
+
+	// Certs — best effort. Async on the certs side; cert_issue returns
+	// immediately and ACME runs in the background. The route's
+	// cert_fqdn is already set to this hostname (registerRoute above),
+	// so apteva-server's TLS GetCertificate hook will pick up the cert
+	// the moment certs finishes issuing it.
+	if err := maybeIssueCert(ctx, projectID, hostname); err != nil {
+		warnings = append(warnings, "certs: "+err.Error())
 	}
 
 	if len(warnings) == 0 {
@@ -222,6 +232,37 @@ func maybeUpsertCNAME(ctx *sdk.AppCtx, projectID, hostname string) error {
 		"value":  target,
 	}, &setResp); err != nil {
 		return fmt.Errorf("domain_records_set: %w", err)
+	}
+	return nil
+}
+
+// ─── certs ────────────────────────────────────────────────────────
+
+// maybeIssueCert kicks off TLS cert issuance for the hostname via the
+// certs app. Fire-and-forget — certs handles ACME asynchronously, and
+// apteva-server's TLS GetCertificate hook picks up the result via the
+// route's cert_fqdn. If certs isn't installed the call surfaces as a
+// warning on the redirect response; the operator can choose to install
+// certs and re-fire by updating the rule.
+//
+// We use the requires.apps declaration (not requires.integrations +
+// IntegrationFor) so cross-app reachability matches the domains call
+// path — both go through CallAppResult with _project_id threaded.
+// Discriminating "certs not installed" from "certs errored" is left
+// to the warning string the caller sees; we don't try to be smart
+// about hiding one but not the other.
+func maybeIssueCert(ctx *sdk.AppCtx, projectID, hostname string) error {
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return nil
+	}
+	args := map[string]any{"fqdn": hostname}
+	if projectID != "" {
+		args["_project_id"] = projectID
+	}
+	// CallAppResult requires non-nil out; ack is a sentinel we don't read.
+	var ack map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("certs", "cert_issue", args, &ack); err != nil {
+		return fmt.Errorf("cert_issue: %w", err)
 	}
 	return nil
 }
