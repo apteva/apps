@@ -227,8 +227,9 @@ func TestUnit_TripsDelete_DoesNotTouchSharedCalendar(t *testing.T) {
 	if fake.countCalls("calendars_delete") != 0 {
 		t.Errorf("calendars_delete=%d, want 0 (shared calendar must survive)", fake.countCalls("calendars_delete"))
 	}
-	if fake.countCalls("events_delete") != 1 {
-		t.Errorf("events_delete=%d, want 1 (the leg's event)", fake.countCalls("events_delete"))
+	// Two events get pruned: the leg's event + the trip's own all-day block.
+	if fake.countCalls("events_delete") != 2 {
+		t.Errorf("events_delete=%d, want 2 (the leg's event + the trip block)", fake.countCalls("events_delete"))
 	}
 }
 
@@ -245,6 +246,123 @@ func TestUnit_TwoTrips_ShareCalendar(t *testing.T) {
 	}
 	if fake.countCalls("calendars_create") != 1 {
 		t.Errorf("calendars_create=%d, want 1 (shared cal created once)", fake.countCalls("calendars_create"))
+	}
+}
+
+// A synced trip mirrors itself as an all-day block on create, and each
+// destination mirrors its arrive→depart window — so a freshly planned
+// trip shows up on the calendar before any bookings exist.
+func TestUnit_TripBlock_AndDestination_Mirror(t *testing.T) {
+	ctx, fake := newCtx(t)
+	app := &App{}
+
+	trip := mustCreateTrip(t, app, ctx, "Lisbon", true)
+	if trip.CalendarEventID == nil {
+		t.Fatal("expected trip block calendar_event_id set on create")
+	}
+	if fake.countCalls("events_create") != 1 {
+		t.Errorf("events_create after trip create=%d, want 1 (trip block)", fake.countCalls("events_create"))
+	}
+	// The trip block must be an all-day event spanning the trip dates.
+	fake.mu.Lock()
+	block := fake.events[*trip.CalendarEventID]
+	fake.mu.Unlock()
+	if block == nil {
+		t.Fatal("trip block event not recorded by fake")
+	}
+	if block["all_day"] != true {
+		t.Errorf("trip block all_day=%v, want true", block["all_day"])
+	}
+	if block["start_at"] != trip.StartAt || block["end_at"] != trip.EndAt {
+		t.Errorf("trip block span=%v→%v, want %v→%v", block["start_at"], block["end_at"], trip.StartAt, trip.EndAt)
+	}
+
+	dest := mustAddDest(t, app, ctx, trip.ID, "Sintra")
+	if dest.CalendarEventID == nil {
+		t.Fatal("expected destination calendar_event_id set")
+	}
+	if fake.countCalls("events_create") != 2 {
+		t.Errorf("events_create after destination add=%d, want 2 (trip block + destination)", fake.countCalls("events_create"))
+	}
+
+	// Editing the destination upserts (update, not a second create).
+	if _, err := app.toolDestinationsUpdate(ctx, map[string]any{
+		"id": float64(dest.ID), "depart_at": "2026-06-09T10:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if fake.countCalls("events_create") != 2 {
+		t.Errorf("events_create after destination edit=%d, want still 2", fake.countCalls("events_create"))
+	}
+	if fake.countCalls("events_update") != 1 {
+		t.Errorf("events_update after destination edit=%d, want 1", fake.countCalls("events_update"))
+	}
+
+	// Deleting the destination removes its block (but not the trip block).
+	if _, err := app.toolDestinationsDelete(ctx, map[string]any{"id": float64(dest.ID)}); err != nil {
+		t.Fatal(err)
+	}
+	if fake.countCalls("events_delete") != 1 {
+		t.Errorf("events_delete after destination delete=%d, want 1", fake.countCalls("events_delete"))
+	}
+}
+
+// Adjusting a trip's from/to dates moves the existing all-day block,
+// and (if the trip somehow lost its block) recreates it.
+func TestUnit_TripDateEdit_MovesBlock_AndCreatesIfMissing(t *testing.T) {
+	ctx, fake := newCtx(t)
+	app := &App{}
+	trip := mustCreateTrip(t, app, ctx, "Rome", true)
+	origEvtID := *trip.CalendarEventID
+
+	// Shift the dates — should update, not recreate.
+	newStart, newEnd := "2026-07-01T00:00:00Z", "2026-07-10T23:59:59Z"
+	if _, err := app.toolTripsUpdate(ctx, map[string]any{
+		"id": float64(trip.ID), "start_at": newStart, "end_at": newEnd,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if fake.countCalls("events_create") != 1 {
+		t.Errorf("events_create=%d after date edit, want still 1 (moved, not recreated)", fake.countCalls("events_create"))
+	}
+	if fake.countCalls("events_update") != 1 {
+		t.Errorf("events_update=%d after date edit, want 1", fake.countCalls("events_update"))
+	}
+	fake.mu.Lock()
+	block := fake.events[origEvtID]
+	fake.mu.Unlock()
+	if block == nil || block["start_at"] != newStart || block["end_at"] != newEnd {
+		t.Errorf("block span=%v→%v, want %v→%v", block["start_at"], block["end_at"], newStart, newEnd)
+	}
+
+	// Simulate a trip that lost its block (created before v0.6, or whose
+	// create-time mirror failed): null the event id but keep the calendar.
+	if _, err := ctx.AppDB().Exec(`UPDATE trips SET calendar_event_id=NULL WHERE id=?`, trip.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolTripsUpdate(ctx, map[string]any{
+		"id": float64(trip.ID), "start_at": "2026-08-01T00:00:00Z", "end_at": "2026-08-05T23:59:59Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if fake.countCalls("events_create") != 2 {
+		t.Errorf("events_create=%d, want 2 (block recreated when missing)", fake.countCalls("events_create"))
+	}
+	refreshed, _ := readTrip(ctx, trip.ID)
+	if refreshed.CalendarEventID == nil {
+		t.Error("expected calendar_event_id repopulated after recreate")
+	}
+}
+
+func TestUnit_TripBlock_NoMirrorWhenSyncOff(t *testing.T) {
+	ctx, fake := newCtx(t)
+	app := &App{}
+	trip := mustCreateTrip(t, app, ctx, "Stealth", false)
+	if trip.CalendarEventID != nil {
+		t.Error("expected no trip block when sync off")
+	}
+	if fake.countCalls("events_create") != 0 {
+		t.Errorf("events_create=%d, want 0 when sync off", fake.countCalls("events_create"))
 	}
 }
 
@@ -298,8 +416,9 @@ func TestUnit_TransportLeg_MirrorsToCalendar(t *testing.T) {
 	if leg.CalendarEventID == nil {
 		t.Fatal("expected calendar_event_id set")
 	}
-	if fake.countCalls("events_create") != 1 {
-		t.Errorf("expected 1 events_create, got %d", fake.countCalls("events_create"))
+	// Two events_create: the trip's all-day block (on trip create) + the leg.
+	if fake.countCalls("events_create") != 2 {
+		t.Errorf("expected 2 events_create (trip block + leg), got %d", fake.countCalls("events_create"))
 	}
 	// Update should call events_update, not events_create.
 	if _, err := app.toolTransportLegsUpdate(ctx, map[string]any{
@@ -362,12 +481,13 @@ func TestUnit_SyncToggle_OffToOn_RehydratesEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Expect: one calendars_create (since the trip never had one) +
-	// two events_create (one per item).
+	// three events_create — the trip's own all-day block + one per item
+	// (leg + accommodation).
 	if fake.countCalls("calendars_create") != 1 {
 		t.Errorf("calendars_create=%d, want 1", fake.countCalls("calendars_create"))
 	}
-	if fake.countCalls("events_create") != 2 {
-		t.Errorf("events_create after rehydrate=%d, want 2", fake.countCalls("events_create"))
+	if fake.countCalls("events_create") != 3 {
+		t.Errorf("events_create after rehydrate=%d, want 3 (trip block + leg + accommodation)", fake.countCalls("events_create"))
 	}
 }
 
@@ -379,16 +499,18 @@ func TestUnit_SyncToggle_OnToOff_PrunesEvents(t *testing.T) {
 		"trip_id": float64(trip.ID), "kind": "flight",
 		"depart_at": "2026-06-05T08:00:00Z", "arrive_at": "2026-06-05T09:30:00Z",
 	})
-	if fake.countCalls("events_create") != 1 {
-		t.Fatalf("pre-toggle events_create=%d, want 1", fake.countCalls("events_create"))
+	// Trip block (on create) + leg = 2.
+	if fake.countCalls("events_create") != 2 {
+		t.Fatalf("pre-toggle events_create=%d, want 2 (trip block + leg)", fake.countCalls("events_create"))
 	}
 	if _, err := app.toolTripsUpdate(ctx, map[string]any{
 		"id": float64(trip.ID), "sync_calendar": false,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if fake.countCalls("events_delete") != 1 {
-		t.Errorf("events_delete after prune=%d, want 1", fake.countCalls("events_delete"))
+	// Prune removes both the leg event and the trip block.
+	if fake.countCalls("events_delete") != 2 {
+		t.Errorf("events_delete after prune=%d, want 2 (leg + trip block)", fake.countCalls("events_delete"))
 	}
 }
 

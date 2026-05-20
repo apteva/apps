@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trips
 display_name: Trips
-version: 0.5.0
+version: 0.6.0
 description: |
   Plan trips end-to-end: destinations, transport, accommodation,
   activities, packing, budget. Calendar-synced — each trip owns a
@@ -44,13 +44,13 @@ provides:
   mcp_tools:
     - { name: trips_list,                 description: "List trips with derived planned/actual totals + days-until." }
     - { name: trips_get,                  description: "Read one trip with its child items + budget summary." }
-    - { name: trips_create,               description: "Create a trip. Also creates its dedicated calendar via calendar.calendars_create." }
+    - { name: trips_create,               description: "Create a trip. Attaches the shared Trips calendar and mirrors the trip as an all-day block over its span." }
     - { name: trips_update,               description: "Update a trip's name/dates/status/color/sync_calendar/notes. Renames the linked calendar when name changes." }
     - { name: trips_delete,               description: "Delete a trip and its child rows. Cascade-deletes the linked calendar." }
 
-    - { name: destinations_add,           description: "Add a destination. Args: trip_id, place_name, country?, arrive_at, depart_at, lat?, lng?, notes?." }
-    - { name: destinations_update,        description: "Update a destination." }
-    - { name: destinations_delete,        description: "Delete a destination." }
+    - { name: destinations_add,           description: "Add a destination. Mirrors into the calendar as an all-day arrive→depart block. Args: trip_id, place_name, country?, arrive_at, depart_at, lat?, lng?, notes?." }
+    - { name: destinations_update,        description: "Update a destination; upserts its calendar block." }
+    - { name: destinations_delete,        description: "Delete a destination + its calendar block." }
     - { name: destinations_reorder,       description: "Reorder destinations. Args: trip_id, order (array of destination ids in new order)." }
 
     - { name: transport_legs_add,         description: "Add a transport leg. Mirrors into the trip's calendar when sync is on. Args: trip_id, kind (flight|train|car|bus|ferry|other), depart_at, arrive_at, provider?, reference?, depart_location?, arrive_location?, cost_estimated?, currency?, confirmation_number?, from_destination_id?, to_destination_id?, notes?." }
