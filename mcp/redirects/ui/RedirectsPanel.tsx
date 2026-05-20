@@ -9,7 +9,79 @@
 // here — the wiring warning from the create endpoint surfaces inline.
 // The Domains / Routes panels remain the source of truth for those.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+
+// ─── Inline app-events SSE hook ─────────────────────────────────────
+// Copied from billing/backup panels. Cross-bundle multiplexer pattern:
+// dashboard provides window.__aptevaAppEvents; we fall back to a
+// direct EventSource if the panel is mounted outside the dashboard.
+
+interface AppEventEnvelope<T = unknown> {
+  topic: string;
+  app: string;
+  project_id: string;
+  install_id: number;
+  seq: number;
+  time: string;
+  data: T;
+}
+
+function useAppEvents<T = unknown>(
+  app: string,
+  projectId: string | undefined | null,
+  onEvent: (ev: AppEventEnvelope<T>) => void,
+) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+  useEffect(() => {
+    if (!app || !projectId) return;
+    const handler = (ev: AppEventEnvelope<T>) => handlerRef.current(ev);
+    const bridge = (window as unknown as {
+      __aptevaAppEvents?: {
+        subscribe(
+          app: string,
+          projectId: string,
+          fn: (ev: AppEventEnvelope<T>) => void,
+        ): () => void;
+      };
+    }).__aptevaAppEvents;
+    if (bridge) {
+      return bridge.subscribe(app, projectId, handler);
+    }
+    let lastSeq = 0;
+    let es: EventSource | null = null;
+    let cancelled = false;
+    let reconnectTimer: number | null = null;
+    const connect = () => {
+      if (cancelled) return;
+      const url =
+        `/api/app-events/${encodeURIComponent(app)}` +
+        `?project_id=${encodeURIComponent(projectId)}` +
+        (lastSeq > 0 ? `&since=${lastSeq}` : "");
+      es = new EventSource(url, { withCredentials: true });
+      es.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data) as AppEventEnvelope<T>;
+          if (ev.seq <= lastSeq) return;
+          lastSeq = ev.seq;
+          handlerRef.current(ev);
+        } catch {}
+      };
+      es.onerror = () => {
+        if (es && es.readyState === EventSource.CLOSED) {
+          if (reconnectTimer) window.clearTimeout(reconnectTimer);
+          reconnectTimer = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (es) es.close();
+    };
+  }, [app, projectId]);
+}
 
 interface NativePanelProps {
   appName: string;
@@ -89,6 +161,38 @@ export default function RedirectsPanel({ projectId, installId }: NativePanelProp
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { loadMeta(); }, [loadMeta]);
+
+  // Real-time rule lifecycle via the platform's app-events bus. The
+  // backend emits rule.created / rule.updated / rule.removed on every
+  // mutating action (REST + MCP), so the panel stays current when an
+  // agent calls redirect_add from chat, or when another operator's
+  // browser session changes a rule. The "redirects" string MUST match
+  // the manifest name — that's the bus's primary key.
+  useAppEvents<{ redirect: Redirect }>("redirects", projectId, (ev) => {
+    const incoming = ev.data?.redirect;
+    if (!incoming) return;
+    setRules((prev) => {
+      const list = prev ?? [];
+      switch (ev.topic) {
+        case "rule.created": {
+          if (list.some((r) => r.id === incoming.id)) return list;
+          // Re-sort by hostname then path so a new rule slots into the
+          // table in the same order the backend's LIST would return.
+          return [...list, incoming].sort((a, b) =>
+            a.hostname === b.hostname
+              ? a.path.localeCompare(b.path)
+              : a.hostname.localeCompare(b.hostname),
+          );
+        }
+        case "rule.updated":
+          return list.map((r) => (r.id === incoming.id ? incoming : r));
+        case "rule.removed":
+          return list.filter((r) => r.id !== incoming.id);
+        default:
+          return list;
+      }
+    });
+  });
 
   const remove = async (id: number) => {
     setBusy(true);

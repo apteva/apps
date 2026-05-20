@@ -104,6 +104,7 @@ func (a *App) httpCreateRedirect(w http.ResponseWriter, r *http.Request) {
 	// domains when possible). Wire failures don't roll back the rule;
 	// the panel surfaces a warning so the operator can retry.
 	wireWarning := wireHostname(globalCtx, rule.ProjectID, rule.Hostname)
+	emitRuleChange(globalCtx, "rule.created", rule)
 	httpJSON(w, map[string]any{"redirect": rule, "warning": wireWarning})
 }
 
@@ -140,6 +141,7 @@ func (a *App) httpUpdateRedirect(w http.ResponseWriter, r *http.Request, id int6
 		return
 	}
 	wireWarning := wireHostname(globalCtx, rule.ProjectID, rule.Hostname)
+	emitRuleChange(globalCtx, "rule.updated", rule)
 	httpJSON(w, map[string]any{"redirect": rule, "warning": wireWarning})
 }
 
@@ -160,6 +162,7 @@ func (a *App) httpDeleteRedirect(w http.ResponseWriter, r *http.Request, id int6
 		return
 	}
 	maybeUnwireHostname(globalCtx, existing.Hostname, existing.ProjectID)
+	emitRuleChange(globalCtx, "rule.removed", existing)
 	httpJSON(w, map[string]any{"removed": true})
 }
 

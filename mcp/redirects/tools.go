@@ -103,6 +103,7 @@ func (a *App) toolRedirectAdd(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	warning := wireHostname(ctx, rule.ProjectID, rule.Hostname)
+	emitRuleChange(ctx, "rule.created", rule)
 	return map[string]any{"redirect": rule, "warning": warning}, nil
 }
 
@@ -117,6 +118,7 @@ func (a *App) toolRedirectUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	warning := wireHostname(ctx, rule.ProjectID, rule.Hostname)
+	emitRuleChange(ctx, "rule.updated", rule)
 	return map[string]any{"redirect": rule, "warning": warning}, nil
 }
 
@@ -133,6 +135,7 @@ func (a *App) toolRedirectRemove(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	maybeUnwireHostname(ctx, existing.Hostname, existing.ProjectID)
+	emitRuleChange(ctx, "rule.removed", existing)
 	return map[string]any{"removed": true}, nil
 }
 

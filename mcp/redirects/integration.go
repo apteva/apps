@@ -11,6 +11,19 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+// emitRuleChange publishes a redirect lifecycle event on the app bus.
+// Topic is one of "rule.created" / "rule.updated" / "rule.removed";
+// payload is the full Redirect row so the panel (and any other
+// subscriber) can update local state without an extra fetch. Best-
+// effort — emit failures are swallowed because the rule operation
+// itself has already succeeded by the time we get here.
+func emitRuleChange(ctx *sdk.AppCtx, topic string, rule *Redirect) {
+	if ctx == nil || rule == nil {
+		return
+	}
+	ctx.Emit(topic, map[string]any{"redirect": rule})
+}
+
 // integration.go — glue calling the routes and domains apps.
 //
 // routes  is required: every redirect_add tries to claim the hostname
