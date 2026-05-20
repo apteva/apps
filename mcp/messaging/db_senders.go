@@ -264,6 +264,30 @@ func dbListSenders(db *sql.DB, projectID, channel string, verifiedOnly bool) ([]
 // dbSoftDeleteSender flips deleted_at = now. Idempotent — re-running
 // against a soft-deleted row is a no-op (deleted_at not overwritten
 // for the same reason a closed support ticket isn't re-closed).
+// dbFindSenderByAddress finds the first matching sender row across
+// ALL projects, scoped by channel + address. Companion of
+// dbFindIdentityByAddress for the inbound-webhook fallback: when an
+// inbound SMS / WhatsApp arrives without project_id in the URL, look
+// up which sender row owns the destination phone number to derive
+// the owning project.
+func dbFindSenderByAddress(db *sql.DB, channel, address string) (*senderRow, error) {
+	addr := strings.ToLower(strings.TrimSpace(address))
+	row := db.QueryRow(
+		`SELECT `+senderColumns+` FROM senders
+		 WHERE channel = ? AND address = ? AND deleted_at IS NULL
+		 LIMIT 1`,
+		channel, addr,
+	)
+	s, err := scanSender(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
 // dbUpdateSenderLocal updates only fields the operator owns locally
 // (no provider round-trip). Currently scoped to display_name + notes;
 // add more fields here as inline-edit surfaces them. Empty strings

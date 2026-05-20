@@ -219,6 +219,37 @@ func dbSoftDeleteIdentity(db *sql.DB, projectID, kind, address string) error {
 	return err
 }
 
+// dbFindIdentityByAddress finds the first matching identity row
+// across ALL projects. Used by the inbound webhook to derive the
+// owning project from a recipient domain when the URL didn't carry
+// project_id (the v0.12.6 fallback path for global-scope installs
+// where SNS subscription URLs can't safely stamp project_id).
+//
+// Cross-project lookup is intentional: the SNS topic is per-install
+// and may carry inbound for multiple projects, so we look up by the
+// addressed-to domain to figure out which project owns it. Domains
+// are unique across projects in practice (one DKIM identity per
+// domain at SES); if a future setup somehow shares a domain across
+// projects, this returns the first hit and the operator can refine
+// via the project_id query param.
+func dbFindIdentityByAddress(db *sql.DB, kind, address string) (*identityRow, error) {
+	addr := strings.ToLower(strings.TrimSpace(address))
+	row := db.QueryRow(
+		`SELECT `+identityColumns+` FROM identities
+		 WHERE kind = ? AND address = ? AND deleted_at IS NULL
+		 LIMIT 1`,
+		kind, addr,
+	)
+	i, err := scanIdentity(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return i, nil
+}
+
 // dbCountSendersForIdentity returns how many active senders inherit
 // from a given identity. Used by the soft-delete safety check: don't
 // drop an identity if mailboxes still point at it.

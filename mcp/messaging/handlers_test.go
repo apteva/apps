@@ -1260,6 +1260,86 @@ func TestSendersDelete_PropagatesRealUpstreamError(t *testing.T) {
 	}
 }
 
+// ─── v0.12.6 inbound webhook project resolution ───────────────────
+
+// Reported bug: SNS subscription URL lacked project_id, so global-
+// scope installs (prod) errored with "project_id required in query
+// string when install scope=global" on every inbound delivery — SES
+// thought it had succeeded; nothing landed locally. v0.12.6 derives
+// the project from the recipient domain via the identities table.
+func TestResolveProjectFromInboundEmail_UsesIdentityForRecipientDomain(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+
+	preseedIdentity(t, ctx, identityUpsert{
+		Kind: "email_domain", Address: "schwartzindustries.com",
+		Provider: "aws-ses", Verified: true, VerificationStatus: "verified",
+	})
+
+	sesEnv := &sesInboundEnvelope{}
+	sesEnv.Receipt.Recipients = []string{"contact@schwartzindustries.com"}
+
+	got := resolveProjectFromInboundEmail(ctx, nil, sesEnv)
+	if got != "test-proj" {
+		t.Errorf("expected project derived from identity (test-proj), got %q", got)
+	}
+}
+
+func TestResolveProjectFromInboundEmail_NoMatchReturnsEmpty(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+
+	sesEnv := &sesInboundEnvelope{}
+	sesEnv.Receipt.Recipients = []string{"someone@notmine.example"}
+
+	got := resolveProjectFromInboundEmail(ctx, nil, sesEnv)
+	if got != "" {
+		t.Errorf("unknown domain should not derive a project, got %q", got)
+	}
+}
+
+func TestResolveProjectFromInboundEmail_FallsBackToParsedTo(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+	preseedIdentity(t, ctx, identityUpsert{
+		Kind: "email_domain", Address: "hypnofans.com",
+		Provider: "aws-ses", Verified: true, VerificationStatus: "verified",
+	})
+
+	// SES envelope without Receipt.Recipients (e.g., legacy/odd
+	// shape); parsed.To should still resolve us correctly.
+	parsed := &parsedInbound{To: []string{"info@hypnofans.com"}}
+	got := resolveProjectFromInboundEmail(ctx, parsed, &sesInboundEnvelope{})
+	if got != "test-proj" {
+		t.Errorf("expected fallback to parsed.To, got %q", got)
+	}
+}
+
+func TestResolveProjectFromInboundPhone_LooksUpSender(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "sms", Address: "+15551234567", Kind: "phone",
+		Provider: "twilio", Verified: true, VerificationStatus: "verified",
+		SendingEnabled: true,
+	})
+
+	got := resolveProjectFromInboundPhone(ctx, "sms", "+15551234567")
+	if got != "test-proj" {
+		t.Errorf("expected project from sender row, got %q", got)
+	}
+}
+
+func TestResolveProjectFromInboundPhone_StripsWhatsAppPrefix(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "whatsapp", Address: "+15551234567", Kind: "phone",
+		Provider: "twilio", Verified: true, VerificationStatus: "verified",
+		SendingEnabled: true,
+	})
+
+	got := resolveProjectFromInboundPhone(ctx, "whatsapp", "whatsapp:+15551234567")
+	if got != "test-proj" {
+		t.Errorf("whatsapp: prefix should be stripped before lookup, got %q", got)
+	}
+}
+
 // ─── v0.12.5 receipt-rule per-install + merge-on-AlreadyExists ────
 
 // Reported bug: ruleName was the constant "messaging-inbound" across

@@ -48,7 +48,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.12.5
+version: 0.12.6
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -2369,16 +2369,26 @@ func (a *App) handleInboundWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pid, err := resolveProjectFromRequest(r)
-	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
+	// Parse SES payload BEFORE resolving project — global-scope
+	// installs can't safely stamp project_id into the SNS subscription
+	// URL (one topic per install, but potentially many projects
+	// sharing it), so v0.12.6 falls back to deriving project_id from
+	// the addressed-to domain via the local identities table. The
+	// recipient list lives inside the SES payload, which means we
+	// have to parse first.
 	parsed, sesEnv, err := parseSESInboundContent(env.Message)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, "ses inbound: "+err.Error())
 		return
+	}
+
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		pid = resolveProjectFromInboundEmail(globalCtx, parsed, sesEnv)
+		if pid == "" {
+			httpErr(w, http.StatusBadRequest, "project_id required: not in URL and could not derive from recipients")
+			return
+		}
 	}
 	// S3-action mode: no inline content, but receipt.action.bucketName +
 	// objectKey tell us where to fetch the .eml from.
@@ -2520,12 +2530,6 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	pid, err := resolveProjectFromRequest(r)
-	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
 	rawFrom := form.Get("From")
 	rawTo := form.Get("To")
 	body := form.Get("Body")
@@ -2542,6 +2546,20 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 	// in case (case-insensitive scheme strip, whitespace trim).
 	from = strings.TrimSpace(from)
 	to = strings.TrimSpace(to)
+
+	// v0.12.6: Twilio SmsUrls historically didn't stamp project_id
+	// (global-scope installs can't safely pick one — multiple
+	// projects share the install). Derive project from the
+	// destination phone number via the senders table when the URL
+	// lacks it.
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		pid = resolveProjectFromInboundPhone(globalCtx, channel, to)
+		if pid == "" {
+			httpErr(w, http.StatusBadRequest, "project_id required: not in URL and no sender row found for To="+to)
+			return
+		}
+	}
 
 	toJSON, _ := json.Marshal([]string{to})
 	hdrs := map[string]string{
@@ -3010,17 +3028,97 @@ type sesInboundEnvelope struct {
 		Headers   []struct{ Name, Value string } `json:"headers"`
 	} `json:"mail"`
 	Receipt struct {
-		SpamVerdict   struct{ Status string } `json:"spamVerdict"`
-		VirusVerdict  struct{ Status string } `json:"virusVerdict"`
-		SPFVerdict    struct{ Status string } `json:"spfVerdict"`
-		DKIMVerdict   struct{ Status string } `json:"dkimVerdict"`
-		DMARCVerdict  struct{ Status string } `json:"dmarcVerdict"`
-		Action        struct {
+		// Recipients lists the addressed-to mailboxes the SES receipt
+		// rule matched on. Used by the inbound webhook as the v0.12.6
+		// fallback for resolving project_id when the SNS subscription
+		// URL doesn't carry one (global-scope installs).
+		Recipients   []string                `json:"recipients"`
+		SpamVerdict  struct{ Status string } `json:"spamVerdict"`
+		VirusVerdict struct{ Status string } `json:"virusVerdict"`
+		SPFVerdict   struct{ Status string } `json:"spfVerdict"`
+		DKIMVerdict  struct{ Status string } `json:"dkimVerdict"`
+		DMARCVerdict struct{ Status string } `json:"dmarcVerdict"`
+		Action       struct {
 			Type       string `json:"type"`
 			BucketName string `json:"bucketName"` // populated for S3 action
 			ObjectKey  string `json:"objectKey"`  // populated for S3 action
 		} `json:"action"`
 	} `json:"receipt"`
+}
+
+// resolveProjectFromInboundEmail derives the owning project_id from
+// the recipient list when the SNS subscription URL didn't carry one
+// (global-scope installs where multiple projects can share a single
+// SNS topic). Walks the candidate recipients, strips each to its
+// parent domain, looks the domain up against the identities table —
+// the first match wins. Returns "" when nothing matches; caller
+// surfaces a clean error in that case.
+//
+// Order of trust:
+//   1. sesEnv.Receipt.Recipients (what the SES rule matched on —
+//      always present, even in S3-action mode where the .eml isn't
+//      fetched yet)
+//   2. parsed.To (inline-content path; equivalent in practice but
+//      kept as a fallback in case the receipt.recipients block is
+//      ever empty)
+func resolveProjectFromInboundEmail(ctx *sdk.AppCtx, parsed *parsedInbound, sesEnv *sesInboundEnvelope) string {
+	if ctx == nil {
+		return ""
+	}
+	candidates := []string{}
+	if sesEnv != nil {
+		candidates = append(candidates, sesEnv.Receipt.Recipients...)
+	}
+	if parsed != nil {
+		candidates = append(candidates, parsed.To...)
+	}
+	seen := map[string]bool{}
+	for _, addr := range candidates {
+		clean := normaliseEmailFromHeader(addr)
+		if clean == "" {
+			clean = strings.TrimSpace(strings.ToLower(addr))
+		}
+		domain := parentDomainOf(clean)
+		if domain == "" || seen[domain] {
+			continue
+		}
+		seen[domain] = true
+		if id, _ := dbFindIdentityByAddress(ctx.AppDB(), "email_domain", domain); id != nil {
+			return id.ProjectID
+		}
+	}
+	return ""
+}
+
+// resolveProjectFromInboundPhone is the Twilio analogue of
+// resolveProjectFromInboundEmail. Looks up the destination phone
+// number against the senders table to find its project. WhatsApp
+// numbers carry the "whatsapp:" prefix on the To field; both phone
+// and whatsapp_number sender kinds are stored without it (the
+// channel column captures the distinction), so we strip the prefix
+// before matching.
+func resolveProjectFromInboundPhone(ctx *sdk.AppCtx, channel, to string) string {
+	if ctx == nil || to == "" {
+		return ""
+	}
+	addr := strings.TrimSpace(to)
+	if strings.HasPrefix(strings.ToLower(addr), "whatsapp:") {
+		addr = strings.TrimSpace(addr[len("whatsapp:"):])
+	}
+	if s, _ := dbFindSenderByAddress(ctx.AppDB(), channel, addr); s != nil {
+		return s.ProjectID
+	}
+	// Channel may have been mis-detected (e.g., Twilio routed a WA
+	// number through the SMS handler). Try the other channel as a
+	// last resort.
+	otherChannel := "sms"
+	if channel == "sms" {
+		otherChannel = "whatsapp"
+	}
+	if s, _ := dbFindSenderByAddress(ctx.AppDB(), otherChannel, addr); s != nil {
+		return s.ProjectID
+	}
+	return ""
 }
 
 // extractVerdicts collapses the SES verdict block into a small map
