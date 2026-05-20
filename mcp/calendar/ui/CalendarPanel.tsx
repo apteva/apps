@@ -1378,25 +1378,31 @@ function MiniMonth({
               key={d.toISOString()}
               type="button"
               onClick={() => onDayClick(d)}
-              className={
-                "aspect-square text-sm flex items-center justify-center relative transition-colors " +
-                (isToday
-                  ? "bg-accent text-bg font-medium rounded-full"
-                  : inMonth
-                    ? "text-text hover:bg-bg-input rounded-full"
-                    : "text-text-dim hover:bg-bg-input rounded-full")
-              }
+              className="relative flex flex-col items-center transition-colors"
+              style={{ paddingTop: "3px", paddingBottom: "11px", minHeight: "2.5rem" }}
               title={d.toLocaleDateString()}
             >
-              {d.getDate()}
+              <span
+                className={
+                  "w-7 h-7 rounded-full text-sm flex items-center justify-center " +
+                  (isToday
+                    ? "bg-accent text-bg font-medium"
+                    : inMonth
+                      ? "text-text hover:bg-bg-input"
+                      : "text-text-dim hover:bg-bg-input")
+                }
+              >
+                {d.getDate()}
+              </span>
               {mark && !isToday && (
                 mark.span ? (
-                  // Connected bottom bar: adjacent covered days touch
-                  // edge-to-edge so a multi-day span reads as a band.
+                  // Connected bottom bar: spans the full cell width so
+                  // adjacent covered days touch edge-to-edge and a
+                  // multi-day span reads as one band.
                   <span
                     className="absolute"
                     style={{
-                      bottom: "1px",
+                      bottom: "4px",
                       left: 0,
                       right: 0,
                       height: "3px",
@@ -1407,7 +1413,7 @@ function MiniMonth({
                   <span
                     className="absolute rounded-full"
                     style={{
-                      bottom: "2px",
+                      bottom: "4px",
                       left: "50%",
                       transform: "translateX(-50%)",
                       width: "4px",
