@@ -19,13 +19,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.1.0
+version: 0.2.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
-  top / topics surface aggregates over JSON props. v0.1 is
-  explicit-tracking only — auto-capture from the platform event
-  firehose is deferred to v0.2.
+  top / topics surface aggregates over JSON props. Explicit-tracking
+  only; v0.2 adds a read-only dashboard panel. Auto-capture from the
+  platform event firehose is deferred to a later release.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [global]
@@ -57,6 +57,11 @@ provides:
     - name: analytics_topics
       description: List distinct (app, topic) pairs seen.
       requires: events.read
+  ui_panels:
+    - slot: project.page
+      label: Analytics
+      icon: trending-up
+      entry: /ui/AnalyticsPanel.mjs
 runtime:
   kind: source
   source:
@@ -86,15 +91,25 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("analytics requires a db block")
 	}
+	globalCtx = ctx
 	ctx.Logger().Info("analytics mounted (v0.1 — explicit-tracking only)")
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) HTTPRoutes() []sdk.Route            { return nil }
-func (a *App) Channels() []sdk.ChannelFactory     { return nil }
-func (a *App) Workers() []sdk.Worker              { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler  { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error { return nil }
+
+// HTTPRoutes back the read-only dashboard panel (ui/AnalyticsPanel.mjs).
+// Agents use the MCP tools; these endpoints are panel-only aggregates.
+func (a *App) HTTPRoutes() []sdk.Route {
+	return []sdk.Route{
+		{Pattern: "/summary", Handler: a.handleSummary},
+		{Pattern: "/series", Handler: a.handleSeries},
+		{Pattern: "/top", Handler: a.handleTop},
+	}
+}
+func (a *App) Channels() []sdk.ChannelFactory    { return nil }
+func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
@@ -114,7 +129,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolTrack,
 		},
 		{
-			Name: "analytics_query",
+			Name:        "analytics_query",
 			Description: "Read events. Args: app?, topic?, project_id?, since? (unix ms), until?, where? (map of \"props.X\" → value, equality only), group_by? (array of \"props.X\" / app / topic / project_id / source), limit? (default 100, max 1000). Without group_by returns recent rows; with group_by returns aggregate buckets.",
 			InputSchema: schemaObject(map[string]any{
 				"app":        map[string]any{"type": "string"},

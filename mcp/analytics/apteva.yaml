@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: analytics
 display_name: Analytics
-version: 0.1.0
+version: 0.2.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -10,10 +10,12 @@ description: |
   if analytics is uninstalled, callers' track calls fail silently and
   the rest of their flow continues.
 
-  v0.1 is explicit-tracking only — apps opt in by calling
-  analytics_track. Auto-capture from the platform event firehose is
-  deferred to v0.2 (waiting on a global app-events stream endpoint
-  in apteva-server).
+  Explicit-tracking only — apps opt in by calling analytics_track.
+  v0.2 adds a read-only dashboard panel (overview tiles, an
+  events-per-day chart, top values for a props key, and a topics
+  table) plus the HTTP endpoints behind it. Auto-capture from the
+  platform event firehose (waiting on a global app-events stream
+  endpoint in apteva-server) remains deferred to a later release.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/analytics
@@ -50,6 +52,11 @@ provides:
     - name: analytics_topics
       description: List distinct (app, topic) pairs seen. Args app?. Returns [{app, topic, last_ts, count}].
       requires: events.read
+  ui_panels:
+    - slot: project.page
+      label: Analytics
+      icon: trending-up
+      entry: /ui/AnalyticsPanel.mjs
 
 runtime:
   kind: source

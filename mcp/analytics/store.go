@@ -347,6 +347,88 @@ func listTopics(db *sql.DB, app string) ([]map[string]any, error) {
 	return out, rows.Err()
 }
 
+// overview returns headline counts within the filter window: total
+// events, distinct apps, and distinct (app, topic) pairs. Backs the
+// panel's stat tiles. char(31) is the unit-separator — a delimiter that
+// can't appear in app/topic, so the concat distinct-count is exact.
+func overview(db *sql.DB, f Filter) (map[string]any, error) {
+	where, args := f.buildWhere()
+	q := "SELECT COUNT(*), COUNT(DISTINCT app), COUNT(DISTINCT app || char(31) || topic) FROM events"
+	if where != "" {
+		q += " WHERE " + where
+	}
+	var total, apps, topics int64
+	if err := db.QueryRow(q, args...).Scan(&total, &apps, &topics); err != nil {
+		return nil, err
+	}
+	return map[string]any{"total": total, "apps": apps, "topics": topics}, nil
+}
+
+// dailySeries returns event counts bucketed by UTC day within the
+// window, oldest first: [{day:"2026-05-21", count:N}]. Days with zero
+// events are absent — the panel fills gaps for the chart if it wants.
+func dailySeries(db *sql.DB, f Filter) ([]map[string]any, error) {
+	where, args := f.buildWhere()
+	q := "SELECT strftime('%Y-%m-%d', ts / 1000, 'unixepoch') AS day, COUNT(*) AS count FROM events"
+	if where != "" {
+		q += " WHERE " + where
+	}
+	q += " GROUP BY day ORDER BY day"
+
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []map[string]any
+	for rows.Next() {
+		var day string
+		var count int64
+		if err := rows.Scan(&day, &count); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]any{"day": day, "count": count})
+	}
+	return out, rows.Err()
+}
+
+// topicsWindowed is listTopics constrained to the filter window and
+// ordered by volume — the panel's topics table. listTopics stays the
+// MCP-tool path (all-time, ordered by name).
+func topicsWindowed(db *sql.DB, f Filter, limit int) ([]map[string]any, error) {
+	where, args := f.buildWhere()
+	q := `SELECT app, topic, MAX(ts) AS last_ts, COUNT(*) AS count
+	      FROM events`
+	if where != "" {
+		q += " WHERE " + where
+	}
+	q += " GROUP BY app, topic ORDER BY count DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []map[string]any
+	for rows.Next() {
+		var app, topic string
+		var lastTS, count int64
+		if err := rows.Scan(&app, &topic, &lastTS, &count); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]any{
+			"app":     app,
+			"topic":   topic,
+			"last_ts": lastTS,
+			"count":   count,
+		})
+	}
+	return out, rows.Err()
+}
+
 func nullStr(s string) any {
 	if s == "" {
 		return nil
