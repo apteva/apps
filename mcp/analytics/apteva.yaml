@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: analytics
 display_name: Analytics
-version: 0.5.0
+version: 0.6.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -22,8 +22,14 @@ description: |
   hosted tag.js <script> on any website, and page views + custom
   events flow into GET /collect (anonymous, key-gated, origin-
   allowlisted, rate-limited). The write key is write-only and bound to
-  one project; the platform API key never touches the browser. Auto-
-  capture from the platform event firehose remains deferred.
+  one project; the platform API key never touches the browser.
+
+  v0.6 adds opt-in bus auto-capture: analytics subscribes to the
+  platform's all-apps event firehose (GET /api/app-events/_all) and
+  records what apps already emit via ctx.Emit — so no app needs a
+  dependency on analytics to be measured. Off by default; toggle it,
+  pick a mode (all / denylist / allowlist) + topic patterns + sample
+  rate, in the panel's Capture tab.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/analytics

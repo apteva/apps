@@ -519,8 +519,142 @@ function TrackingTab({ projectId }: { projectId: string }) {
   );
 }
 
+// CaptureTab — toggle + tune the bus auto-capture subscriber. Records
+// what every app already emits on the platform bus, no per-app dependency.
+function CaptureTab({ projectId }: { projectId: string }) {
+  const [enabled, setEnabled] = useState(false);
+  const [mode, setMode] = useState("denylist");
+  const [patterns, setPatterns] = useState("");
+  const [sampleRate, setSampleRate] = useState(1);
+  const [captured, setCaptured] = useState(0);
+  const [status, setStatus] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const r = await fetch(`${API}/capture?project_id=${encodeURIComponent(projectId)}`, {
+        credentials: "same-origin",
+      });
+      if (!r.ok) {
+        setStatus(`load ${r.status}`);
+        return;
+      }
+      const d = await r.json();
+      setEnabled(!!d.enabled);
+      setMode(d.mode || "denylist");
+      setPatterns((d.topic_patterns ?? []).join("\n"));
+      setSampleRate(typeof d.sample_rate === "number" ? d.sample_rate : 1);
+      setCaptured(d.captured ?? 0);
+    } catch (e) {
+      setStatus((e as Error).message);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const save = async () => {
+    setStatus("saving…");
+    const topic_patterns = patterns
+      .split(/[\n,]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    try {
+      const r = await fetch(`${API}/capture`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled, mode, topic_patterns, sample_rate: sampleRate }),
+      });
+      setStatus(r.ok ? "saved" : "save: " + (await r.text()));
+      if (r.ok) load();
+    } catch (e) {
+      setStatus((e as Error).message);
+    }
+  };
+
+  return (
+    <div className="flex-1 overflow-auto p-4 flex flex-col gap-4">
+      <section className="border border-border rounded p-4 flex flex-col gap-3">
+        <div className="flex items-center gap-3">
+          <div className="text-text-dim text-xs uppercase">Bus auto-capture</div>
+          <button
+            onClick={() => setEnabled((v) => !v)}
+            className={
+              "px-2 py-1 text-xs rounded border " +
+              (enabled ? "border-success text-success" : "border-border text-text-muted hover:text-text")
+            }
+          >
+            {enabled ? "Enabled" : "Disabled"}
+          </button>
+          <span className="ml-auto text-text-dim text-xs">{captured.toLocaleString()} captured</span>
+        </div>
+        <div className="text-text-muted text-sm">
+          Records what other apps already emit on the platform bus (e.g.{" "}
+          <code>campaign.sent</code>, <code>file.deleted</code>) — no per-app dependency. Off by
+          default. Recorded events show up with <code>source=bus</code>.
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="text-text-dim text-xs" style={{ width: "72px" }}>Mode</span>
+          <select
+            value={mode}
+            onChange={(e) => setMode(e.target.value)}
+            className="bg-bg-input border border-border rounded px-2 py-1 text-xs"
+          >
+            <option value="all">All topics</option>
+            <option value="denylist">Everything except…</option>
+            <option value="allowlist">Only…</option>
+          </select>
+        </div>
+
+        {mode !== "all" && (
+          <div className="flex flex-col gap-1">
+            <span className="text-text-dim text-xs">
+              Topic patterns ({mode === "denylist" ? "exclude" : "include"}) — one per line; exact
+              (<code>file.deleted</code>), prefix (<code>campaign.*</code>), or <code>*</code>
+            </span>
+            <textarea
+              value={patterns}
+              onChange={(e) => setPatterns(e.target.value)}
+              spellCheck={false}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-xs"
+              style={{ minHeight: "80px", fontFamily: "monospace" }}
+            />
+          </div>
+        )}
+
+        <div className="flex items-center gap-2">
+          <span className="text-text-dim text-xs" style={{ width: "72px" }}>Sample</span>
+          <input
+            type="number"
+            min={0}
+            max={1}
+            step={0.05}
+            value={sampleRate}
+            onChange={(e) => setSampleRate(Math.max(0, Math.min(1, parseFloat(e.target.value) || 0)))}
+            className="bg-bg-input border border-border rounded px-2 py-1 text-xs"
+            style={{ width: "90px" }}
+          />
+          <span className="text-text-dim text-xs">fraction kept (1 = all)</span>
+        </div>
+
+        <div className="flex items-center gap-2 justify-end">
+          <span className="text-text-dim text-xs mr-auto">{status}</span>
+          <button
+            onClick={save}
+            className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold"
+          >
+            Save
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export default function AnalyticsPanel({ projectId }: NativePanelProps) {
-  const [view, setView] = useState<"overview" | "tracking">("overview");
+  const [view, setView] = useState<"overview" | "tracking" | "capture">("overview");
   const [windowKey, setWindowKey] = useState("7d");
   const [byKey, setByKey] = useState("props.platform");
   const [appF, setAppF] = useState("");
@@ -656,7 +790,7 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
           Analytics
         </div>
         <div className="flex items-center gap-1 ml-2">
-          {(["overview", "tracking"] as const).map((v) => (
+          {(["overview", "tracking", "capture"] as const).map((v) => (
             <button
               key={v}
               onClick={() => setView(v)}
@@ -667,7 +801,7 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
                   : "border-border text-text-muted hover:text-text")
               }
             >
-              {v === "overview" ? "Overview" : "Tracking"}
+              {v === "overview" ? "Overview" : v === "tracking" ? "Tracking" : "Capture"}
             </button>
           ))}
         </div>
@@ -709,6 +843,8 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
 
       {view === "tracking" ? (
         <TrackingTab projectId={projectId} />
+      ) : view === "capture" ? (
+        <CaptureTab projectId={projectId} />
       ) : (
       <>
       <div className="flex items-center gap-2 flex-wrap border-b border-border px-4 py-2">

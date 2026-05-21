@@ -19,7 +19,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.5.0
+version: 0.6.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -27,8 +27,10 @@ description: |
   event.recorded bus event; the dashboard panel is real-time (filters
   by event type / app / props, live event feed). v0.4 adds static-site
   tracking: public write keys + a hosted tag.js + GET /collect, so any
-  website can send page views like a classic analytics snippet. Auto-
-  capture from the platform event firehose is deferred to a later release.
+  website can send page views like a classic analytics snippet. v0.6 adds
+  opt-in bus auto-capture: analytics subscribes to the platform's all-apps
+  event firehose and records what apps already emit — so no app needs a
+  dependency on analytics. Toggle it in the panel's Capture tab.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [global]
@@ -95,7 +97,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("analytics requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("analytics mounted (v0.1 — explicit-tracking only)")
+	ctx.Logger().Info("analytics mounted")
+	// Bus auto-capture subscriber (idles until enabled in the Capture tab).
+	startAutoCapture(ctx)
 	return nil
 }
 
@@ -124,6 +128,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "GET", Pattern: "/keys", Handler: a.handleKeysList},
 		{Method: "POST", Pattern: "/keys", Handler: a.handleKeysCreate},
 		{Method: "POST", Pattern: "/keys/revoke", Handler: a.handleKeysRevoke},
+
+		// Bus auto-capture config — operator-only.
+		{Method: "GET", Pattern: "/capture", Handler: a.handleCaptureGet},
+		{Method: "POST", Pattern: "/capture", Handler: a.handleCaptureSet},
 	}
 }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
