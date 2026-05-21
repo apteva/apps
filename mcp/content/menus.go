@@ -33,6 +33,12 @@ type MenuItem struct {
 	Label      string     `json:"label"`
 	TargetKind string     `json:"target_kind"`
 	TargetID   *int64     `json:"target_id,omitempty"`
+	// TargetSlug is the SLUG of the linked post / page / term, resolved
+	// at read time via a LEFT JOIN against posts/terms. Public render
+	// uses slug-based URLs (/posts/welcome, /about, /category/markets),
+	// not id-based, so the slug is what we actually need at render.
+	// Empty when target_kind='url' or the linked row was deleted.
+	TargetSlug string     `json:"target_slug,omitempty"`
 	TargetURL  string     `json:"target_url,omitempty"`
 	Position   int        `json:"position"`
 	Children   []MenuItem `json:"children,omitempty"`
@@ -102,8 +108,27 @@ func dbListMenus(db *sql.DB, projectID string, siteID int64) ([]Menu, error) {
 }
 
 func dbListMenuItems(db *sql.DB, menuID int64) ([]MenuItem, error) {
-	rows, err := db.Query(`SELECT id, menu_id, parent_id, label, target_kind, target_id, target_url, position
-		FROM menu_items WHERE menu_id=? ORDER BY position, id`, menuID)
+	// LEFT JOIN against posts + terms so the slug of the linked row
+	// comes back alongside the menu_item. Both joins use the same
+	// target_id; only one matches per row (target_kind disambiguates).
+	rows, err := db.Query(`
+		SELECT mi.id, mi.menu_id, mi.parent_id, mi.label, mi.target_kind,
+		       mi.target_id, mi.target_url, mi.position,
+		       COALESCE(
+		         CASE WHEN mi.target_kind IN ('post','page') THEN p.slug END,
+		         CASE WHEN mi.target_kind = 'term'           THEN t.slug END,
+		         ''
+		       ) AS target_slug
+		FROM menu_items mi
+		LEFT JOIN posts p
+		  ON p.id = mi.target_id
+		 AND mi.target_kind IN ('post','page')
+		 AND p.deleted_at IS NULL
+		LEFT JOIN terms t
+		  ON t.id = mi.target_id
+		 AND mi.target_kind = 'term'
+		WHERE mi.menu_id = ?
+		ORDER BY mi.position, mi.id`, menuID)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +137,7 @@ func dbListMenuItems(db *sql.DB, menuID int64) ([]MenuItem, error) {
 	for rows.Next() {
 		var it MenuItem
 		var parent, tid sql.NullInt64
-		if err := rows.Scan(&it.ID, &it.MenuID, &parent, &it.Label, &it.TargetKind, &tid, &it.TargetURL, &it.Position); err != nil {
+		if err := rows.Scan(&it.ID, &it.MenuID, &parent, &it.Label, &it.TargetKind, &tid, &it.TargetURL, &it.Position, &it.TargetSlug); err != nil {
 			return nil, err
 		}
 		if parent.Valid {

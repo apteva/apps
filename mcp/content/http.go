@@ -486,21 +486,27 @@ func renderMenuItems(items []MenuItem, prefix string) []RenderedMenuItem {
 	return out
 }
 
+// resolveMenuURL builds an absolute URL for a menu item using the
+// linked row's SLUG (resolved via JOIN in dbListMenuItems), since the
+// public render dispatches by slug (/posts/welcome, /about,
+// /category/markets), not by id. Falls back to # when the linked row
+// was deleted (TargetSlug empty).
 func resolveMenuURL(it MenuItem, prefix string) string {
 	if it.TargetURL != "" {
 		return it.TargetURL
 	}
-	if it.TargetID == nil {
+	if it.TargetSlug == "" {
 		return "#"
 	}
-	id := strconv.FormatInt(*it.TargetID, 10)
 	switch it.TargetKind {
 	case "post":
-		return prefix + "posts/" + id
+		return prefix + "posts/" + it.TargetSlug
 	case "page":
-		return prefix + id
+		return prefix + it.TargetSlug
 	case "term":
-		return prefix + "category/" + id
+		// term slug — both 'category' and 'tag' kinds get the
+		// /category/ route since menu_items doesn't store taxonomy.
+		return prefix + "category/" + it.TargetSlug
 	default:
 		return "#"
 	}
