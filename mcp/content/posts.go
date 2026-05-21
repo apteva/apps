@@ -901,6 +901,7 @@ func (a *App) toolPostsUnpublish(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
+	ctx.Emit("post.unpublished", map[string]any{"id": id, "status": post.Status})
 	return map[string]any{"post": post}, nil
 }
 
@@ -921,6 +922,7 @@ func (a *App) toolPostsArchive(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
+	ctx.Emit("post.archived", map[string]any{"id": id, "kind": post.Kind})
 	return map[string]any{"post": post}, nil
 }
 
@@ -960,6 +962,7 @@ func (a *App) toolPostsSetHomepage(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if err := dbSetSetting(ctx.AppDB(), pid, siteID, "homepage_page_id", strconv.FormatInt(id, 10)); err != nil {
 		return nil, err
 	}
+	ctx.Emit("homepage.changed", map[string]any{"page_id": id})
 	return map[string]any{"ok": true, "homepage_page_id": id}, nil
 }
 
@@ -1003,6 +1006,7 @@ func (a *App) toolPostsRevisionRestore(ctx *sdk.AppCtx, args map[string]any) (an
 	if err != nil {
 		return nil, err
 	}
+	ctx.Emit("post.revision_restored", map[string]any{"id": id, "revision_id": revID})
 	return map[string]any{"post": post}, nil
 }
 

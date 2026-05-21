@@ -118,6 +118,13 @@ func (a *App) renderHomepage(w http.ResponseWriter, r *http.Request, ctx *sdk.Ap
 }
 
 func (a *App) renderBlogIndex(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid string, siteID int64, page int) {
+	trackPageView(ctx, pid, pageViewInfo{
+		Path: r.URL.Path, Kind: "index", Slug: "", Title: "blog-index",
+		SiteID:  siteID,
+		Referer: r.Header.Get("Referer"),
+		UA:      r.Header.Get("User-Agent"),
+		IPHash:  extractIPHash(r),
+	})
 	settings, _ := effectiveSettings(ctx, pid, siteID)
 	per := 10
 	if v := settings["posts_per_page"]; v != "" {
@@ -204,6 +211,13 @@ func (a *App) renderPage(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx
 }
 
 func (a *App) servePost(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid string, siteID int64, post *Post, settings map[string]string) {
+	trackPageView(ctx, pid, pageViewInfo{
+		Path: r.URL.Path, Kind: post.Kind, Slug: post.Slug, Title: post.Title,
+		SiteID:  siteID,
+		Referer: r.Header.Get("Referer"),
+		UA:      r.Header.Get("User-Agent"),
+		IPHash:  extractIPHash(r),
+	})
 	terms, _ := dbListPostTerms(ctx.AppDB(), post.ID)
 	data := basePageData(ctx, pid, siteID, settings, r)
 	data.Post = post
@@ -238,6 +252,13 @@ func (a *App) servePost(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx,
 }
 
 func (a *App) renderTermArchive(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid string, siteID int64, kind, slug string) {
+	trackPageView(ctx, pid, pageViewInfo{
+		Path: r.URL.Path, Kind: "term:" + kind, Slug: slug, Title: kind + ":" + slug,
+		SiteID:  siteID,
+		Referer: r.Header.Get("Referer"),
+		UA:      r.Header.Get("User-Agent"),
+		IPHash:  extractIPHash(r),
+	})
 	term, err := dbGetTermBySlug(ctx.AppDB(), pid, siteID, kind, slug)
 	if err != nil || term == nil {
 		http.NotFound(w, r)
@@ -432,6 +453,82 @@ func verifyPreviewToken(token string) (int64, error) {
 	}
 	id, _ := strconv.ParseInt(parts[0], 10, 64)
 	return id, nil
+}
+
+// trackPageView records that a public page rendered. Always fires
+// the project-scoped 'page.viewed' event on the app bus so panels +
+// other apps can react live. If the analytics app is bound via the
+// optional 'analytics' integration role, ALSO forwards a 'page_view'
+// event into analytics' tools surface — same shape an analytics.js
+// would deliver from a browser, but server-side and reliable
+// (no ad-blockers, no client JS).
+//
+// Runs in a goroutine so the render request isn't blocked on the
+// analytics_track round-trip.
+type pageViewInfo struct {
+	Path     string
+	Kind     string
+	Slug     string
+	Title    string
+	SiteID   int64
+	Referer  string
+	UA       string
+	IPHash   string // we don't store the real IP — use a salted hash for unique-visitor counts
+}
+
+func trackPageView(ctx *sdk.AppCtx, pid string, info pageViewInfo) {
+	props := map[string]any{
+		"path":    info.Path,
+		"kind":    info.Kind,
+		"slug":    info.Slug,
+		"title":   info.Title,
+		"site_id": info.SiteID,
+	}
+	if info.Referer != "" {
+		props["referrer"] = info.Referer
+	}
+	if info.UA != "" {
+		props["user_agent"] = info.UA
+	}
+	// App-bus emit — synchronous, fire-and-forget per SDK semantics.
+	ctx.EmitWithProject("page.viewed", pid, props)
+
+	// Optional analytics_track via the bound analytics app. Runs in
+	// background so we don't add a cross-app RPC to the render path.
+	if ctx.IntegrationFor("analytics") == nil {
+		return
+	}
+	go func() {
+		_ = ctx.PlatformAPI().CallAppResult("analytics", "analytics_track", map[string]any{
+			"event":      "page_view",
+			"app":        "content",
+			"project_id": pid,
+			"props":      props,
+		}, &struct{}{})
+	}()
+}
+
+// extractIPHash returns a stable, salted hash of the client IP. The
+// raw IP is intentionally NOT stored so analytics stays GDPR-clean
+// out of the box.
+func extractIPHash(r *http.Request) string {
+	ip := r.Header.Get("X-Forwarded-For")
+	if i := strings.Index(ip, ","); i > 0 {
+		ip = ip[:i]
+	}
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		ip = r.RemoteAddr
+		if i := strings.LastIndex(ip, ":"); i > 0 {
+			ip = ip[:i]
+		}
+	}
+	if ip == "" {
+		return ""
+	}
+	salt := os.Getenv("APTEVA_APP_TOKEN") // rotates with token; daily-ish stability is fine
+	sum := sha256.Sum256([]byte(salt + ":" + ip))
+	return hex.EncodeToString(sum[:8])
 }
 
 // ── shared helpers ──────────────────────────────────────────────

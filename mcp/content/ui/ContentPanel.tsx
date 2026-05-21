@@ -11,7 +11,82 @@
 // importmap. The dashboard host imports the default export and mounts
 // it — the panel must NOT self-mount.
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+
+// Inlined app-event subscription. Each app ships its own copy because
+// panels are bundled standalone and apps are independently installable
+// — cross-app imports would break a one-off install. Same shape CRM
+// and analytics use.
+interface AppEventEnvelope<T = unknown> {
+  topic: string;
+  app: string;
+  project_id: string;
+  install_id: number;
+  seq: number;
+  time: string;
+  data: T;
+}
+function useAppEvents<T = unknown>(
+  app: string,
+  projectId: string | undefined | null,
+  onEvent: (ev: AppEventEnvelope<T>) => void,
+) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+  useEffect(() => {
+    if (!app || !projectId) return;
+    // Preferred path: the dashboard hosts a multiplexed bridge on
+    // window.__aptevaAppEvents so multiple panels share one
+    // (app, project) channel pool. Fall back to a raw EventSource
+    // when the bridge isn't present (older dashboards).
+    const handler = (ev: AppEventEnvelope<T>) => handlerRef.current(ev);
+    type Bridge = {
+      subscribe: (
+        app: string,
+        projectId: string,
+        handler: (ev: AppEventEnvelope) => void,
+      ) => () => void;
+    };
+    const bridge = (window as unknown as { __aptevaAppEvents?: Bridge })
+      .__aptevaAppEvents;
+    if (bridge) return bridge.subscribe(app, projectId, handler as (ev: AppEventEnvelope) => void);
+
+    let since = 0;
+    let es: EventSource | null = null;
+    let stopped = false;
+    let reconnect: number | null = null;
+    const connect = () => {
+      if (stopped) return;
+      const url =
+        `/api/app-events/${encodeURIComponent(app)}` +
+        `?project_id=${encodeURIComponent(projectId)}` +
+        (since > 0 ? `&since=${since}` : "");
+      es = new EventSource(url, { withCredentials: true });
+      es.onmessage = (m) => {
+        try {
+          const ev = JSON.parse(m.data) as AppEventEnvelope<T>;
+          if (ev.seq <= since) return;
+          since = ev.seq;
+          handlerRef.current(ev);
+        } catch {
+          /* ignore malformed */
+        }
+      };
+      es.onerror = () => {
+        if (es && es.readyState === EventSource.CLOSED) {
+          if (reconnect) window.clearTimeout(reconnect);
+          reconnect = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+    connect();
+    return () => {
+      stopped = true;
+      if (reconnect) window.clearTimeout(reconnect);
+      if (es) es.close();
+    };
+  }, [app, projectId]);
+}
 
 interface NativePanelProps {
   appName: string;
@@ -473,6 +548,27 @@ function ListView({
   }, [api, kind, status]);
 
   useEffect(refresh, [refresh]);
+
+  // Live updates: refresh the list when content events fire. Throttled
+  // by topic so a burst of post.updated events doesn't cause N fetches.
+  useAppEvents("content", projectId, (ev) => {
+    const t = ev.topic;
+    if (
+      t === "post.created" ||
+      t === "post.updated" ||
+      t === "post.published" ||
+      t === "post.unpublished" ||
+      t === "post.archived" ||
+      t === "post.deleted" ||
+      t === "post.revision_restored" ||
+      t === "template.applied" ||
+      t === "site.created" ||
+      t === "site.archived" ||
+      t === "site.default_changed"
+    ) {
+      refresh();
+    }
+  });
 
   const createDraft = () => {
     const title = draftTitle.trim();

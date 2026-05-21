@@ -30,6 +30,7 @@ func (a *App) toolSitesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
+	ctx.Emit("site.created", map[string]any{"id": site.ID, "slug": site.Slug, "hostname": site.Hostname})
 	return map[string]any{"site": site}, nil
 }
 
@@ -90,6 +91,7 @@ func (a *App) toolSitesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	invalidatePageCache()
+	ctx.Emit("site.updated", map[string]any{"id": s.ID, "slug": s.Slug, "hostname": s.Hostname})
 	return map[string]any{"site": s}, nil
 }
 
@@ -106,6 +108,7 @@ func (a *App) toolSitesArchive(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	invalidatePageCache()
+	ctx.Emit("site.archived", map[string]any{"id": id})
 	return map[string]any{"ok": true, "id": id}, nil
 }
 
@@ -121,6 +124,7 @@ func (a *App) toolSitesSetDefault(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err := dbSetDefaultSite(ctx.AppDB(), pid, id); err != nil {
 		return nil, err
 	}
+	ctx.Emit("site.default_changed", map[string]any{"id": id})
 	return map[string]any{"ok": true, "id": id}, nil
 }
 

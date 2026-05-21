@@ -343,6 +343,7 @@ func (a *App) toolThemesSetActive(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	invalidatePageCache()
+	ctx.Emit("theme.changed", map[string]any{"slug": slug, "site_id": siteID})
 	return map[string]any{"ok": true, "active_theme": slug}, nil
 }
 
