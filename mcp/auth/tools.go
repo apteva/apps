@@ -135,6 +135,41 @@ func (a *App) toolUsersSearch(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	return map[string]any{"users": users, "count": len(users)}, nil
 }
 
+// toolUsersCreate — MCP twin of POST /admin/users. Built for bulk
+// email import: an agent can provision N users from a list of emails
+// without firing a reset email at each (send_password_reset defaults
+// false). Set a password for service accounts, or send_password_reset
+// true to invite immediately.
+func (a *App) toolUsersCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	org, err := orgFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	// email_verified defaults true for admin/agent-provisioned users —
+	// we're importing addresses we already trust. Pass false to force
+	// the verify-email flow on first login.
+	emailVerified := boolArg(args, "email_verified", true)
+	user, resetSent, _, cErr := a.createUser(ctx, pid, org, createUserInput{
+		email:             stringArg(args, "email", ""),
+		password:          stringArg(args, "password", ""),
+		displayName:       stringArg(args, "display_name", ""),
+		emailVerified:     emailVerified,
+		sendPasswordReset: boolArg(args, "send_password_reset", false),
+	}, "", "agent", "mcp")
+	if cErr != nil {
+		return nil, cErr
+	}
+	out := map[string]any{"user": user}
+	if resetSent {
+		out["password_reset_sent"] = true
+	}
+	return out, nil
+}
+
 func (a *App) toolUsersGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {

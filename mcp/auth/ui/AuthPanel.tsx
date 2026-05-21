@@ -947,6 +947,9 @@ function CreateUserModal({ orgSlug, onClose, onCreated, setStatus }: {
         email: email.trim(),
         display_name: displayName.trim() || undefined,
         email_verified: emailVerified,
+        // Reset email is now opt-in server-side (no auto-send on empty
+        // password). "Send reset link" mode opts in explicitly.
+        send_password_reset: mode === "invite",
       };
       if (mode === "password") {
         body.password = password;

@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.4.4
+version: 0.5.0
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One install
@@ -76,6 +76,8 @@ provides:
       description: Archive (soft-disable) an organization.
     - name: auth_users_search
       description: Filtered user search; org-scoped or project-wide.
+    - name: auth_users_create
+      description: Provision a user (requires org). send_password_reset defaults false — bulk email imports stay silent.
     - name: auth_users_get
       description: Snapshot of one user (requires org).
     - name: auth_users_get_context
@@ -282,6 +284,18 @@ func (a *App) MCPTools() []sdk.Tool {
 				"limit":         map[string]any{"type": "integer"},
 			}), nil),
 			Handler: a.toolUsersSearch,
+		},
+		{
+			Name:        "auth_users_create",
+			Description: "Provision a user. Requires organization_id/slug + email. Optional: password (omit for passwordless/invite), display_name, email_verified (default true), send_password_reset (default false — no email is sent unless set, so bulk email imports stay silent). Returns the user + password_reset_sent.",
+			InputSchema: schemaObject(merge(map[string]any{
+				"email":               map[string]any{"type": "string"},
+				"password":            map[string]any{"type": "string"},
+				"display_name":        map[string]any{"type": "string"},
+				"email_verified":      map[string]any{"type": "boolean"},
+				"send_password_reset": map[string]any{"type": "boolean"},
+			}), []string{"email"}),
+			Handler: a.toolUsersCreate,
 		},
 		{
 			Name:        "auth_users_get",

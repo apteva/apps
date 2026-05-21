@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 // ─── admin org resolution ────────────────────────────────────────────
@@ -260,56 +262,88 @@ func (a *App) handleAdminUsersCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
-	if body.Email == "" {
-		httpErr(w, http.StatusBadRequest, "email required")
-		return
-	}
-	if existing, err := dbGetUserByEmail(ctx.AppDB(), pid, org.ID, body.Email); err == nil && existing != nil {
-		httpErr(w, http.StatusConflict, "email already registered in this organization")
-		return
-	}
 	verified := true
 	if body.EmailVerified != nil {
 		verified = *body.EmailVerified
 	}
+	user, resetSent, code, err := a.createUser(ctx, pid, org, createUserInput{
+		email:             body.Email,
+		password:          body.Password,
+		displayName:       body.DisplayName,
+		emailVerified:     verified,
+		sendPasswordReset: body.SendPasswordReset,
+	}, r.RemoteAddr, r.UserAgent(), "admin_panel")
+	if err != nil {
+		httpErr(w, code, err.Error())
+		return
+	}
+	out := map[string]any{"user": user}
+	if resetSent {
+		out["password_reset_sent"] = true
+	}
+	httpStatus(w, http.StatusCreated, out)
+}
+
+// createUserInput is the shared argument set for the admin-side user
+// provisioning path (HTTP handler + auth_users_create MCP tool).
+type createUserInput struct {
+	email             string
+	password          string // empty = no password set (invite or import)
+	displayName       string
+	emailVerified     bool
+	sendPasswordReset bool // opt-in. NOT auto-triggered by an empty password.
+}
+
+// createUser is the single create path behind both POST /admin/users
+// and the auth_users_create MCP tool.
+//
+// Important: a reset email is sent ONLY when sendPasswordReset is true.
+// It is NOT auto-sent just because the password is empty — that decoupling
+// is what lets a bulk email import create N users silently and then send
+// invites later in a controlled batch (or not at all, e.g. magic-link
+// installs). Returns (user, resetSent, httpStatusOnError, err); code is
+// 0 on success.
+func (a *App) createUser(ctx *sdk.AppCtx, pid string, org *Organization, in createUserInput, ip, ua, via string) (*User, bool, int, error) {
+	email := strings.ToLower(strings.TrimSpace(in.email))
+	if email == "" {
+		return nil, false, http.StatusBadRequest, errors.New("email required")
+	}
+	if existing, err := dbGetUserByEmail(ctx.AppDB(), pid, org.ID, email); err == nil && existing != nil {
+		return nil, false, http.StatusConflict, errors.New("email already registered in this organization")
+	}
 	var pwHash string
-	if body.Password != "" {
-		if reason := validatePassword(body.Password,
+	if in.password != "" {
+		if reason := validatePassword(in.password,
 			cfgInt(ctx, "password_min_length", 8),
 			cfgInt(ctx, "password_classes_required", 0)); reason != "" {
-			httpErr(w, http.StatusBadRequest, reason)
-			return
+			return nil, false, http.StatusBadRequest, errors.New(reason)
 		}
-		h, hashErr := hashPassword(body.Password)
-		if hashErr != nil {
-			httpErr(w, http.StatusInternalServerError, hashErr.Error())
-			return
+		h, err := hashPassword(in.password)
+		if err != nil {
+			return nil, false, http.StatusInternalServerError, err
 		}
 		pwHash = h
 	}
-	uid, err := dbCreateUser(ctx.AppDB(), pid, org.ID, body.Email, pwHash, body.DisplayName, verified)
+	uid, err := dbCreateUser(ctx.AppDB(), pid, org.ID, email, pwHash, in.displayName, in.emailVerified)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
+		return nil, false, http.StatusInternalServerError, err
 	}
 	user, err := dbGetUserByID(ctx.AppDB(), pid, org.ID, uid)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
+		return nil, false, http.StatusInternalServerError, err
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_created_admin", r.RemoteAddr, r.UserAgent(),
-		map[string]any{"email": body.Email, "via": "admin_panel"})
+	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_created_admin", ip, ua,
+		map[string]any{"email": email, "via": via})
 
-	out := map[string]any{"user": user}
-	if pwHash == "" || body.SendPasswordReset {
-		if err := issueResetToken(ctx, pid, org, uid, body.Email); err != nil {
+	resetSent := false
+	if in.sendPasswordReset {
+		if err := issueResetToken(ctx, pid, org, uid, email); err != nil {
 			ctx.Logger().Warn("password-reset issue failed", "err", err, "user_id", uid)
 		} else {
-			out["password_reset_sent"] = true
+			resetSent = true
 		}
 	}
-	httpStatus(w, http.StatusCreated, out)
+	return user, resetSent, 0, nil
 }
 
 func (a *App) handleAdminUsersPatch(w http.ResponseWriter, r *http.Request) {
