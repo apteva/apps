@@ -1,6 +1,9 @@
-{{- /* attrs: { style 'bullet'|'number', items[] } */ -}}
+{{- /* attrs: { style 'bullet'|'number', items[] }
+       Each item runs through the inline markdown pass so **bold** /
+       *italic* / [link](url) render the same way they do in
+       paragraph blocks. */ -}}
 {{- if eq .Attrs.style "number" -}}
-<ol class="block-list">{{ range .Attrs.items }}<li>{{ . }}</li>{{ end }}</ol>
+<ol class="block-list">{{ range .Attrs.items }}<li>{{ markdown . }}</li>{{ end }}</ol>
 {{- else -}}
-<ul class="block-list">{{ range .Attrs.items }}<li>{{ . }}</li>{{ end }}</ul>
+<ul class="block-list">{{ range .Attrs.items }}<li>{{ markdown . }}</li>{{ end }}</ul>
 {{- end -}}
