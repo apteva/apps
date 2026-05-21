@@ -66,6 +66,8 @@
       k: key,
       e: event || "page_view",
       sid: sid,
+      url: location.href,
+      host: location.host,
       path: location.pathname + location.search,
       ref: document.referrer ? hostOf(document.referrer) : "",
       title: document.title || "",

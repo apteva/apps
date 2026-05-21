@@ -126,6 +126,7 @@ func collectProps(q url.Values) map[string]any {
 		"path": "path", "ref": "referrer", "title": "title",
 		"lang": "lang", "device": "device", "platform": "platform",
 		"country": "country", "screen": "screen",
+		"url": "url", "host": "host",
 	} {
 		if v := q.Get(param); v != "" {
 			props[key] = v
