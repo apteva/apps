@@ -11,7 +11,7 @@
 // importmap. The dashboard host imports the default export and mounts
 // it — the panel must NOT self-mount.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 interface NativePanelProps {
   appName: string;
@@ -461,17 +461,20 @@ function ListView({
       .catch((e) => setError(String(e)));
   };
 
-  // Permanent delete — confirms first. Goes through DELETE
-  // /admin/posts/:id?hard=true which sets deleted_at server-side.
-  const remove = (id: number, title: string) => {
-    const ok = window.confirm(
-      `Permanently delete "${title || "(untitled)"}"?\n\nThis cannot be undone. ` +
-        `If you want to keep the ability to restore it later, use Archive instead.`,
-    );
-    if (!ok) return;
-    api(`/admin/posts/${id}?hard=true`, { method: "DELETE" })
-      .then(refresh)
-      .catch((e) => setError(String(e)));
+  // Permanent delete — opens a custom confirm modal (no native window.confirm
+  // anywhere in this panel; we own the modal styling).
+  const [pendingDelete, setPendingDelete] = useState<Post | null>(null);
+  const remove = (p: Post) => setPendingDelete(p);
+  const confirmDelete = async () => {
+    if (!pendingDelete) return;
+    try {
+      await api(`/admin/posts/${pendingDelete.id}?hard=true`, { method: "DELETE" });
+      setPendingDelete(null);
+      refresh();
+    } catch (e) {
+      setError(String(e));
+      setPendingDelete(null);
+    }
   };
 
   return (
@@ -571,7 +574,7 @@ function ListView({
                 </>
               )}
               <button
-                onClick={() => remove(p.id, p.title)}
+                onClick={() => remove(p)}
                 className="flex items-center px-2 py-1 text-xs rounded border border-border text-red-700 hover:bg-red-50"
                 title="Permanently delete — cannot be undone"
               >
@@ -599,6 +602,94 @@ function ListView({
           </li>
         )}
       </ul>
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title={`Delete "${pendingDelete.title || "(untitled)"}"?`}
+          body={
+            <>
+              <p>
+                This permanently removes the {pendingDelete.kind} — the row is
+                marked deleted and disappears from every list, feed, and
+                rendered page.
+              </p>
+              <p className="text-fg-muted text-xs mt-2">
+                Want a recoverable removal? Cancel and use <strong>Archive</strong>{" "}
+                instead.
+              </p>
+            </>
+          }
+          confirmLabel="Delete permanently"
+          danger
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={confirmDelete}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── reusable confirm dialog — replaces window.confirm everywhere ────
+function ConfirmDialog({
+  title,
+  body,
+  confirmLabel,
+  cancelLabel,
+  danger,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  body?: ReactNode;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  danger?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  // ESC closes; clicking the backdrop closes; Enter confirms.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+      if (e.key === "Enter") onConfirm();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel, onConfirm]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+      onClick={onCancel}
+    >
+      <div
+        className="bg-bg border border-border rounded p-5 w-[28rem] max-w-[calc(100vw-2rem)] shadow-lg"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="font-semibold text-base mb-2">{title}</h3>
+        {body && <div className="text-sm mb-4">{body}</div>}
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            autoFocus
+            className="px-3 py-1 rounded border border-border"
+          >
+            {cancelLabel ?? "Cancel"}
+          </button>
+          <button
+            onClick={onConfirm}
+            className={`px-3 py-1 rounded font-semibold ${
+              danger
+                ? "bg-red-600 text-white hover:bg-red-700 border border-red-600"
+                : "border border-border"
+            }`}
+          >
+            {confirmLabel ?? "Confirm"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
