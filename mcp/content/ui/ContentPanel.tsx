@@ -84,7 +84,7 @@ function Icon({ name }: { name: string }) {
 // ── shared api helper (scoped via closure to the panel's project) ─
 // Scoped <style> — colored status pills ONLY. We don't redefine the
 // dashboard's text/border/bg tokens here; the dashboard's own
-// Tailwind utilities (text-fg, text-fg-muted, border-border,
+// Tailwind utilities (text-fg, text-text-muted, border-border,
 // bg-bg-input) already work and define contrast correctly in both
 // modes. Overriding them via CSS variables broke contrast in dark
 // mode (because our fallback was a light-mode color).
@@ -273,7 +273,7 @@ function Tabs({
       key={id}
       onClick={() => onChange(id)}
       className={`px-4 py-2 text-sm border-b-2 ${
-        view === id ? "border-fg font-semibold" : "border-transparent text-fg-muted"
+        view === id ? "border-border-strong font-semibold" : "border-transparent text-text-muted"
       }`}
     >
       {label}
@@ -290,7 +290,7 @@ function Tabs({
       {/* Site switcher — hidden when only one site exists (single-site UX). */}
       {sites.length >= 2 ? (
         <div className="flex items-center gap-2 pb-2">
-          <span className="text-xs text-fg-muted">Site</span>
+          <span className="text-xs text-text-muted">Site</span>
           <select
             value={activeSite ?? ""}
             onChange={(e) => onSiteChange(e.target.value)}
@@ -316,7 +316,7 @@ function Tabs({
         <div className="pb-2">
           <button
             onClick={() => setCreating(true)}
-            className="text-xs text-fg-muted hover:text-fg"
+            className="text-xs text-text-muted hover:text-text"
           >
             + Add second site
           </button>
@@ -388,13 +388,13 @@ function NewSiteDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <h3 className="font-semibold mb-3">New site</h3>
-        <p className="text-xs text-fg-muted mb-3">
+        <p className="text-xs text-text-muted mb-3">
           Sites in the same project share templates but have their own posts,
           pages, menus, settings, and theme. Bind a hostname to make this site
           publicly addressable (requires the deploy app).
         </p>
         <label className="block mb-2">
-          <span className="text-xs text-fg-muted">Slug (URL-safe id)</span>
+          <span className="text-xs text-text-muted">Slug (URL-safe id)</span>
           <input
             type="text"
             value={slug}
@@ -405,7 +405,7 @@ function NewSiteDialog({
           />
         </label>
         <label className="block mb-2">
-          <span className="text-xs text-fg-muted">Display name</span>
+          <span className="text-xs text-text-muted">Display name</span>
           <input
             type="text"
             value={name}
@@ -415,7 +415,7 @@ function NewSiteDialog({
           />
         </label>
         <label className="block mb-3">
-          <span className="text-xs text-fg-muted">Hostname (optional)</span>
+          <span className="text-xs text-text-muted">Hostname (optional)</span>
           <input
             type="text"
             value={hostname}
@@ -559,7 +559,7 @@ function ListView({
       </section>
 
       {error && <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2">{error}</div>}
-      {loading && <div className="text-fg-muted py-4">Loading…</div>}
+      {loading && <div className="text-text-muted py-4">Loading…</div>}
 
       <ul className="list-none p-0 m-0">
         {posts.map((p) => (
@@ -570,7 +570,7 @@ function ListView({
             <div className="flex items-baseline gap-2">
               <strong>{p.title || <em>(untitled)</em>}</strong>
               <span className={`cp-status-pill cp-status-${p.status}`}>{p.status}</span>
-              <span className="text-xs text-fg-muted">
+              <span className="text-xs text-text-muted">
                 /{p.kind === "post" ? "posts/" : ""}
                 {p.slug}
               </span>
@@ -634,7 +634,7 @@ function ListView({
           </li>
         ))}
         {!loading && posts.length === 0 && (
-          <li className="text-fg-muted py-8 text-center">
+          <li className="text-text-muted py-8 text-center">
             No {kind}s yet — create one above.
           </li>
         )}
@@ -650,7 +650,7 @@ function ListView({
                 marked deleted and disappears from every list, feed, and
                 rendered page.
               </p>
-              <p className="text-fg-muted text-xs mt-2">
+              <p className="text-text-muted text-xs mt-2">
                 Want a recoverable removal? Cancel and use <strong>Archive</strong>{" "}
                 instead.
               </p>
@@ -839,7 +839,7 @@ function Editor({
     }
   };
 
-  if (loading) return <div className="p-4 text-fg-muted">Loading…</div>;
+  if (loading) return <div className="p-4 text-text-muted">Loading…</div>;
   if (!post) return <div className="p-4">Post not found.</div>;
 
   return (
@@ -853,7 +853,7 @@ function Editor({
         </button>
         <div className="flex items-baseline gap-2">
           <span className={`cp-status-pill cp-status-${post.status}`}>{post.status}</span>
-          <span className="text-xs text-fg-muted">/{post.kind === "post" ? "posts/" : ""}{post.slug}</span>
+          <span className="text-xs text-text-muted">/{post.kind === "post" ? "posts/" : ""}{post.slug}</span>
         </div>
         <div className="flex gap-2">
           <button
@@ -886,7 +886,7 @@ function Editor({
         value={post.excerpt ?? ""}
         onChange={(e) => setExcerpt(e.target.value)}
         placeholder="Excerpt (optional)"
-        className="w-full text-fg-muted border-0 bg-transparent py-1 mb-4 focus:outline-none"
+        className="w-full text-text-muted border-0 bg-transparent py-1 mb-4 focus:outline-none"
       />
 
       <Insert types={types} onInsert={(t) => insertBlockAt(0, t)} />
@@ -905,7 +905,7 @@ function Editor({
           </div>
         ))}
         {blocks.length === 0 && (
-          <div className="text-fg-muted text-center py-8">Empty post — add a block above.</div>
+          <div className="text-text-muted text-center py-8">Empty post — add a block above.</div>
         )}
       </div>
     </div>
@@ -933,7 +933,7 @@ function Insert({
     return (
       <button
         onClick={() => setOpen(true)}
-        className="flex items-center gap-1 text-xs text-fg-muted py-1 px-2 my-1 rounded border border-dashed border-border hover:text-fg"
+        className="flex items-center gap-1 text-xs text-text-muted py-1 px-2 my-1 rounded border border-dashed border-border hover:text-text"
       >
         <Icon name="plus" /> Add block
       </button>
@@ -942,12 +942,12 @@ function Insert({
   return (
     <div className="border border-border rounded p-2 my-2 bg-bg-input">
       <div className="flex justify-between items-center mb-2">
-        <span className="text-xs text-fg-muted">Insert block</span>
-        <button onClick={() => setOpen(false)} className="text-xs text-fg-muted">close</button>
+        <span className="text-xs text-text-muted">Insert block</span>
+        <button onClick={() => setOpen(false)} className="text-xs text-text-muted">close</button>
       </div>
       {Object.entries(grouped).map(([cat, ts]) => (
         <div key={cat} className="mb-2">
-          <div className="text-xs uppercase text-fg-muted mb-1">{cat}</div>
+          <div className="text-xs uppercase text-text-muted mb-1">{cat}</div>
           <div className="flex flex-wrap gap-1">
             {ts.map((t) => (
               <button
@@ -990,7 +990,7 @@ function BlockCard({
   return (
     <div className="border border-border rounded p-3">
       <div className="flex justify-between items-center mb-2">
-        <span className="text-xs text-fg-muted">{block.type}</span>
+        <span className="text-xs text-text-muted">{block.type}</span>
         <div className="flex gap-1">
           {onMoveUp && (
             <button onClick={onMoveUp} title="Move up" className="px-1 py-1 rounded border border-border">
@@ -1112,7 +1112,7 @@ function BlockEditor({
             placeholder="Citation (optional)"
             className={input}
           />
-          <div className="text-xs text-fg-muted">
+          <div className="text-xs text-text-muted">
             Quote body comes from nested blocks (add inside via MCP for now).
           </div>
         </div>
@@ -1284,7 +1284,7 @@ function BlockEditor({
             placeholder="Caption (optional)"
             className={input}
           />
-          <div className="text-xs text-fg-muted">
+          <div className="text-xs text-text-muted">
             Upload media via the media library (coming v1.1). For now,
             media_id refers to an already-uploaded row.
           </div>
@@ -1294,7 +1294,7 @@ function BlockEditor({
     case "core/columns":
     case "core/group":
       return (
-        <div className="text-xs text-fg-muted">
+        <div className="text-xs text-text-muted">
           Container block — nested blocks edited via MCP tools in v1.0.
           {block.inner && block.inner.length > 0 && (
             <span> ({block.inner.length} inside)</span>
@@ -1389,7 +1389,7 @@ function TemplatesView({
     <div className="p-4 text-sm">
       <header className="flex items-baseline justify-between mb-3">
         <h2 className="text-base font-semibold">Templates</h2>
-        <p className="text-xs text-fg-muted">
+        <p className="text-xs text-text-muted">
           Apply a starter to populate your site with pages, posts, terms, and menus.
         </p>
       </header>
@@ -1397,16 +1397,16 @@ function TemplatesView({
       {error && (
         <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2">{error}</div>
       )}
-      {loading && <div className="text-fg-muted py-4">Loading…</div>}
+      {loading && <div className="text-text-muted py-4">Loading…</div>}
 
       <ul className="grid grid-cols-1 md:grid-cols-2 gap-3 list-none p-0">
         {templates.map((t) => (
           <li key={t.name} className="border border-border rounded p-3 flex flex-col">
             <div className="flex items-baseline justify-between gap-2">
               <h3 className="font-semibold">{t.display_name}</h3>
-              <span className="text-xs text-fg-muted">v{t.version}</span>
+              <span className="text-xs text-text-muted">v{t.version}</span>
             </div>
-            <p className="text-fg-muted text-sm flex-1 mt-1">{t.description}</p>
+            <p className="text-text-muted text-sm flex-1 mt-1">{t.description}</p>
             <div className="flex flex-wrap gap-1 mt-2">
               {(t.tags ?? []).map((tag) => (
                 <span key={tag} className="text-xs px-2 py-0.5 rounded bg-bg-input border border-border">
@@ -1428,7 +1428,7 @@ function TemplatesView({
           </li>
         ))}
         {!loading && templates.length === 0 && (
-          <li className="text-fg-muted text-center py-8 col-span-full">No templates available.</li>
+          <li className="text-text-muted text-center py-8 col-span-full">No templates available.</li>
         )}
       </ul>
     </div>
@@ -1494,13 +1494,13 @@ function ApplyTemplateDialog({
     <div className="p-4 text-sm">
       <header className="flex items-baseline justify-between mb-3">
         <h2 className="text-base font-semibold">Apply — {template.display_name}</h2>
-        <button onClick={onClose} className="text-fg-muted text-xs">close</button>
+        <button onClick={onClose} className="text-text-muted text-xs">close</button>
       </header>
 
-      <p className="text-fg-muted mb-3">{template.description}</p>
+      <p className="text-text-muted mb-3">{template.description}</p>
 
       <label className="block mb-3">
-        <span className="text-xs text-fg-muted">Mode</span>
+        <span className="text-xs text-text-muted">Mode</span>
         <select
           value={mode}
           onChange={(e) => setMode(e.target.value as typeof mode)}
@@ -1513,8 +1513,8 @@ function ApplyTemplateDialog({
       </label>
 
       <div className="border border-border rounded p-3 my-3">
-        <p className="text-xs text-fg-muted mb-2">Will create:</p>
-        {loading && <p className="text-fg-muted">Loading preview…</p>}
+        <p className="text-xs text-text-muted mb-2">Will create:</p>
+        {loading && <p className="text-text-muted">Loading preview…</p>}
         {preview && <SummaryTable s={preview} />}
       </div>
 
@@ -1567,8 +1567,8 @@ function SummaryTable({ s }: { s: ApplySummary }) {
       )}
       {(s.warnings ?? []).length > 0 && (
         <li className="mt-2">
-          <p className="text-xs text-fg-muted">Warnings:</p>
-          <ul className="pl-4 text-xs text-fg-muted list-disc">
+          <p className="text-xs text-text-muted">Warnings:</p>
+          <ul className="pl-4 text-xs text-text-muted list-disc">
             {s.warnings!.map((w, i) => (
               <li key={i}>{w}</li>
             ))}
@@ -1627,7 +1627,7 @@ function ThemesView({ api }: { api: ReturnType<typeof makeAPI> }) {
     <div className="p-4 text-sm">
       <header className="mb-3">
         <h2 className="text-base font-semibold">Themes</h2>
-        <p className="text-xs text-fg-muted">
+        <p className="text-xs text-text-muted">
           A theme controls how rendered HTML looks. Each site picks its own
           theme; the active theme on the current site is highlighted below.
         </p>
@@ -1636,24 +1636,24 @@ function ThemesView({ api }: { api: ReturnType<typeof makeAPI> }) {
       {error && (
         <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2">{error}</div>
       )}
-      {loading && <div className="text-fg-muted py-4">Loading…</div>}
+      {loading && <div className="text-text-muted py-4">Loading…</div>}
 
       <ul className="grid grid-cols-1 md:grid-cols-2 gap-3 list-none p-0">
         {themes.map((t) => (
           <li
             key={t.slug}
             className={`border rounded p-3 flex flex-col ${
-              t.active ? "border-fg" : "border-border"
+              t.active ? "border-border-strong" : "border-border"
             }`}
           >
             <div className="flex items-baseline justify-between gap-2">
               <h3 className="font-semibold">{t.name}</h3>
-              <span className="text-xs text-fg-muted">v{t.version}</span>
+              <span className="text-xs text-text-muted">v{t.version}</span>
             </div>
-            <p className="text-fg-muted text-xs mt-1">
+            <p className="text-text-muted text-xs mt-1">
               Source: {t.source}
               {t.active && (
-                <span className="ml-2 inline-block px-2 py-0.5 rounded bg-bg-input border border-border text-fg">
+                <span className="ml-2 inline-block px-2 py-0.5 rounded bg-bg-input border border-border text-text">
                   Active
                 </span>
               )}
@@ -1674,13 +1674,13 @@ function ThemesView({ api }: { api: ReturnType<typeof makeAPI> }) {
           </li>
         ))}
         {!loading && themes.length === 0 && (
-          <li className="col-span-full text-fg-muted text-center py-8">
+          <li className="col-span-full text-text-muted text-center py-8">
             No themes installed.
           </li>
         )}
       </ul>
 
-      <footer className="text-fg-muted text-xs pt-4 mt-4 border-t border-border">
+      <footer className="text-text-muted text-xs pt-4 mt-4 border-t border-border">
         Multiple themes are coming in v2.2 — for now, the default ships with the
         binary. Custom themes will be loadable from the bound storage app under{" "}
         <code>/.themes/&lt;slug&gt;/</code> once that path is wired.
@@ -1730,7 +1730,7 @@ function BlocksView({ api }: { api: ReturnType<typeof makeAPI> }) {
     <div className="p-4 text-sm">
       <header className="mb-3">
         <h2 className="text-base font-semibold">Blocks</h2>
-        <p className="text-xs text-fg-muted">
+        <p className="text-xs text-text-muted">
           The catalog of block types available in the post editor. Use these
           as building blocks for pages and posts. Container blocks (✱) accept
           nested children — e.g. <code>columns</code>, <code>group</code>,{" "}
@@ -1739,11 +1739,11 @@ function BlocksView({ api }: { api: ReturnType<typeof makeAPI> }) {
       </header>
 
       {error && <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2">{error}</div>}
-      {loading && <div className="text-fg-muted py-4">Loading…</div>}
+      {loading && <div className="text-text-muted py-4">Loading…</div>}
 
       {cats.map((cat) => (
         <section key={cat} className="mb-6">
-          <h3 className="text-xs uppercase tracking-wider text-fg-muted mb-2">
+          <h3 className="text-xs uppercase tracking-wider text-text-muted mb-2">
             {cat} <span className="opacity-50">({grouped[cat].length})</span>
           </h3>
           <ul className="grid grid-cols-1 md:grid-cols-2 gap-2 list-none p-0">
@@ -1752,20 +1752,20 @@ function BlocksView({ api }: { api: ReturnType<typeof makeAPI> }) {
                 <div className="flex items-baseline justify-between gap-2">
                   <strong>{t.display_name}</strong>
                   {t.container && (
-                    <span title="Container block" className="text-xs text-fg-muted">✱</span>
+                    <span title="Container block" className="text-xs text-text-muted">✱</span>
                   )}
                 </div>
-                <p className="text-xs text-fg-muted mt-1">
+                <p className="text-xs text-text-muted mt-1">
                   <code className="font-mono">{t.name}</code>
                 </p>
-                <p className="text-fg-muted mt-2 leading-snug">{t.description}</p>
+                <p className="text-text-muted mt-2 leading-snug">{t.description}</p>
               </li>
             ))}
           </ul>
         </section>
       ))}
 
-      <footer className="text-fg-muted text-xs pt-4 mt-2 border-t border-border">
+      <footer className="text-text-muted text-xs pt-4 mt-2 border-t border-border">
         Cross-app blocks (e.g. <code>image-studio/generated</code>,{" "}
         <code>crm/subscribe</code>) will appear here once those apps are bound
         and have registered their block types — scheduled for v2.5.
