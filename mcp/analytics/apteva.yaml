@@ -36,10 +36,10 @@ provides:
       description: Query events.
   mcp_tools:
     - name: analytics_track
-      description: Record one event. Args: event (required), props?, app?, project_id?, user_id?, session_id?, ts? (unix ms — defaults to now). Returns the new event id.
+      description: Record one event. Args event (required), props?, app?, project_id?, user_id?, session_id?, ts? (unix ms — defaults to now). Returns the new event id.
       requires: events.write
     - name: analytics_query
-      description: Read events with optional filters. Args: app?, topic?, project_id?, since?, until?, where? (map of "props.X" → value), group_by? (array of "props.X" keys), limit? (default 100, max 1000). Returns rows or aggregate buckets.
+      description: Read events with optional filters. Args app?, topic?, project_id?, since?, until?, where? (map of "props.X" → value), group_by? (array of "props.X" keys), limit? (default 100, max 1000). Returns rows or aggregate buckets.
       requires: events.read
     - name: analytics_count
       description: Count events matching filters. Args same as query minus group_by/limit. Returns {count}.
