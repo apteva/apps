@@ -33,13 +33,39 @@ const (
 // ─── Conversation type + DB helpers ────────────────────────────────
 
 type Conversation struct {
-	ID             int64  `json:"id"`
-	ContactID      int64  `json:"contact_id"`
-	Channel        string `json:"channel"`
-	Subject        string `json:"subject,omitempty"`
-	RootMessageID  string `json:"root_message_id,omitempty"`
-	StartedAt      string `json:"started_at"`
-	LastActivityAt string `json:"last_activity_at"`
+	ID              int64  `json:"id"`
+	ContactID       int64  `json:"contact_id"`
+	Channel         string `json:"channel"`
+	Subject         string `json:"subject,omitempty"`
+	RootMessageID   string `json:"root_message_id,omitempty"`
+	Status          string `json:"status"`             // open | pending | closed
+	Priority        string `json:"priority"`           // low | normal | high | urgent
+	StatusChangedAt string `json:"status_changed_at,omitempty"`
+	StartedAt       string `json:"started_at"`
+	LastActivityAt  string `json:"last_activity_at"`
+}
+
+// Conversation status + priority vocabularies. Kept small and explicit —
+// see migrations/005 for why we don't carry snooze / on-hold / solved.
+var convoStatuses = map[string]bool{"open": true, "pending": true, "closed": true}
+var convoPriorities = map[string]bool{"low": true, "normal": true, "high": true, "urgent": true}
+
+// convoColumns is the canonical SELECT list for a Conversation row.
+// Every reader scans in this exact order via scanConversation.
+const convoColumns = `id, contact_id, channel,
+	COALESCE(subject,''), COALESCE(root_message_id,''),
+	COALESCE(status,'open'), COALESCE(priority,'normal'),
+	COALESCE(status_changed_at,''),
+	started_at, last_activity_at`
+
+func scanConversation(row interface{ Scan(...any) error }) (*Conversation, error) {
+	c := &Conversation{}
+	err := row.Scan(&c.ID, &c.ContactID, &c.Channel, &c.Subject, &c.RootMessageID,
+		&c.Status, &c.Priority, &c.StatusChangedAt, &c.StartedAt, &c.LastActivityAt)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 func dbConversationCreate(tx *sql.Tx, pid string, contactID int64, channel, subject, rootMsgID, when string) (int64, error) {
@@ -64,19 +90,17 @@ func dbConversationForChannel(db *sql.DB, pid string, contactID int64, channel s
 		return nil, nil
 	}
 	row := db.QueryRow(
-		`SELECT id, contact_id, channel,
-				COALESCE(subject,''), COALESCE(root_message_id,''),
-				started_at, last_activity_at
+		`SELECT `+convoColumns+`
 		 FROM contact_conversations
 		 WHERE project_id = ? AND contact_id = ? AND channel = ?
 		 ORDER BY id ASC LIMIT 1`,
 		pid, contactID, channel,
 	)
-	c := &Conversation{}
-	if err := row.Scan(&c.ID, &c.ContactID, &c.Channel, &c.Subject, &c.RootMessageID, &c.StartedAt, &c.LastActivityAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
-		}
+	c, err := scanConversation(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
 		return nil, err
 	}
 	return c, nil
@@ -87,18 +111,16 @@ func dbConversationByRootMsgID(db *sql.DB, pid, rootMsgID string) (*Conversation
 		return nil, nil
 	}
 	row := db.QueryRow(
-		`SELECT id, contact_id, channel,
-				COALESCE(subject,''), COALESCE(root_message_id,''),
-				started_at, last_activity_at
+		`SELECT `+convoColumns+`
 		 FROM contact_conversations
 		 WHERE project_id = ? AND root_message_id = ? LIMIT 1`,
 		pid, rootMsgID,
 	)
-	c := &Conversation{}
-	if err := row.Scan(&c.ID, &c.ContactID, &c.Channel, &c.Subject, &c.RootMessageID, &c.StartedAt, &c.LastActivityAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
-		}
+	c, err := scanConversation(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
 		return nil, err
 	}
 	return c, nil
@@ -128,7 +150,7 @@ func dbConversationByActivityMsgID(db *sql.DB, pid string, contactID int64, msgI
 	return id, nil
 }
 
-func dbConversationsList(db *sql.DB, pid string, contactID int64, channel string, limit int) ([]*Conversation, error) {
+func dbConversationsList(db *sql.DB, pid string, contactID int64, channel, status string, limit int) ([]*Conversation, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -138,11 +160,13 @@ func dbConversationsList(db *sql.DB, pid string, contactID int64, channel string
 		where += " AND channel = ?"
 		args = append(args, channel)
 	}
+	if status != "" {
+		where += " AND COALESCE(status,'open') = ?"
+		args = append(args, status)
+	}
 	args = append(args, limit)
 	rows, err := db.Query(
-		`SELECT id, contact_id, channel,
-				COALESCE(subject,''), COALESCE(root_message_id,''),
-				started_at, last_activity_at
+		`SELECT `+convoColumns+`
 		 FROM contact_conversations
 		 WHERE `+where+`
 		 ORDER BY last_activity_at DESC LIMIT ?`,
@@ -154,8 +178,8 @@ func dbConversationsList(db *sql.DB, pid string, contactID int64, channel string
 	defer rows.Close()
 	out := []*Conversation{}
 	for rows.Next() {
-		c := &Conversation{}
-		if err := rows.Scan(&c.ID, &c.ContactID, &c.Channel, &c.Subject, &c.RootMessageID, &c.StartedAt, &c.LastActivityAt); err == nil {
+		c, err := scanConversation(rows)
+		if err == nil {
 			out = append(out, c)
 		}
 	}
@@ -164,21 +188,69 @@ func dbConversationsList(db *sql.DB, pid string, contactID int64, channel string
 
 func dbConversationGet(db *sql.DB, pid string, id int64) (*Conversation, error) {
 	row := db.QueryRow(
-		`SELECT id, contact_id, channel,
-				COALESCE(subject,''), COALESCE(root_message_id,''),
-				started_at, last_activity_at
+		`SELECT `+convoColumns+`
 		 FROM contact_conversations
 		 WHERE project_id = ? AND id = ?`,
 		pid, id,
 	)
-	c := &Conversation{}
-	if err := row.Scan(&c.ID, &c.ContactID, &c.Channel, &c.Subject, &c.RootMessageID, &c.StartedAt, &c.LastActivityAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
-		}
+	c, err := scanConversation(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+// dbConversationSetStatus patches status and/or priority on a
+// conversation. Empty string for either means "leave unchanged".
+// status_changed_at is stamped only when status actually moves.
+// Returns rows affected (0 = conversation not in this project).
+func dbConversationSetStatus(db *sql.DB, pid string, id int64, status, priority string) (int64, error) {
+	sets := []string{}
+	args := []any{}
+	if status != "" {
+		sets = append(sets, "status = ?", "status_changed_at = ?")
+		args = append(args, status, time.Now().UTC().Format(time.RFC3339))
+	}
+	if priority != "" {
+		sets = append(sets, "priority = ?")
+		args = append(args, priority)
+	}
+	if len(sets) == 0 {
+		return 0, errors.New("nothing to update")
+	}
+	args = append(args, pid, id)
+	res, err := db.Exec(
+		`UPDATE contact_conversations SET `+strings.Join(sets, ", ")+
+			` WHERE project_id = ? AND id = ?`,
+		args...,
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// dbConversationReopenIfClosed flips a non-open conversation back to
+// 'open' — called when a new inbound arrives on an existing thread. The
+// contact replied, so the ball is back in our court. No-op (0 rows) on a
+// conversation that's already open, so it's always safe to call. Returns
+// true when it actually reopened something.
+func dbConversationReopenIfClosed(db *sql.DB, pid string, id int64) (bool, error) {
+	res, err := db.Exec(
+		`UPDATE contact_conversations
+		 SET status = 'open', status_changed_at = ?
+		 WHERE project_id = ? AND id = ? AND COALESCE(status,'open') <> 'open'`,
+		time.Now().UTC().Format(time.RFC3339), pid, id,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // dbConversationActivities returns activities for a conversation in
@@ -803,12 +875,71 @@ func (a *App) toolListConversations(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, errors.New("id required")
 	}
 	channel := strings.ToLower(strArg(args, "channel"))
+	status := strings.ToLower(strings.TrimSpace(strArg(args, "status")))
+	if status != "" && !convoStatuses[status] {
+		return nil, fmt.Errorf("invalid status %q (open|pending|closed)", status)
+	}
 	limit := intArg(args, "limit", 50)
-	out, err := dbConversationsList(ctx.AppDB(), pid, cid, channel, limit)
+	out, err := dbConversationsList(ctx.AppDB(), pid, cid, channel, status, limit)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"conversations": out, "count": len(out)}, nil
+}
+
+// ─── Tool: contacts_set_conversation_status ───────────────────────
+
+func (a *App) toolSetConversationStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	convoID := int64Arg(args, "conversation_id")
+	if convoID == 0 {
+		return nil, errors.New("conversation_id required")
+	}
+	status := strings.ToLower(strings.TrimSpace(strArg(args, "status")))
+	if status != "" && !convoStatuses[status] {
+		return nil, fmt.Errorf("invalid status %q (open|pending|closed)", status)
+	}
+	priority := strings.ToLower(strings.TrimSpace(strArg(args, "priority")))
+	if priority != "" && !convoPriorities[priority] {
+		return nil, fmt.Errorf("invalid priority %q (low|normal|high|urgent)", priority)
+	}
+	if status == "" && priority == "" {
+		return nil, errors.New("status or priority required")
+	}
+
+	convo, err := dbConversationGet(ctx.AppDB(), pid, convoID)
+	if err != nil {
+		return nil, err
+	}
+	if convo == nil {
+		return nil, errors.New("conversation not found")
+	}
+	// Optional contact-id safety check, matching get_conversation.
+	cid := int64Arg(args, "id")
+	if cid == 0 {
+		cid = int64Arg(args, "contact_id")
+	}
+	if cid != 0 && convo.ContactID != cid {
+		return nil, errors.New("conversation does not belong to this contact")
+	}
+
+	if _, err := dbConversationSetStatus(ctx.AppDB(), pid, convoID, status, priority); err != nil {
+		return nil, err
+	}
+	updated, err := dbConversationGet(ctx.AppDB(), pid, convoID)
+	if err != nil {
+		return nil, err
+	}
+	ctx.Emit("conversation.status.changed", map[string]any{
+		"conversation_id": convoID,
+		"contact_id":      updated.ContactID,
+		"status":          updated.Status,
+		"priority":        updated.Priority,
+	})
+	return map[string]any{"conversation": updated}, nil
 }
 
 func (a *App) toolGetConversation(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -926,6 +1057,15 @@ func (a *App) handleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Auto-reopen: a reply on a pending/closed thread puts the ball back
+	// in our court. No-op when the conversation is already open (or was
+	// just created above). Mirrors Front/Intercom; fixes the HubSpot gap.
+	reopened, err := dbConversationReopenIfClosed(db, pid, convoID)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, "reopen: "+err.Error())
+		return
+	}
+
 	occurred := body.ReceivedAt
 	if occurred == "" {
 		occurred = time.Now().UTC().Format(time.RFC3339)
@@ -983,6 +1123,14 @@ func (a *App) handleInbound(w http.ResponseWriter, r *http.Request) {
 	if stubCreated {
 		globalCtx.Emit("contact.added", map[string]any{
 			"id": contact.ID, "display_name": contact.DisplayName,
+		})
+	}
+	if reopened {
+		globalCtx.Emit("conversation.status.changed", map[string]any{
+			"conversation_id": convoID,
+			"contact_id":      contact.ID,
+			"status":          "open",
+			"reason":          "inbound_reply",
 		})
 	}
 	globalCtx.Emit("contact.activity.added", map[string]any{
@@ -1327,6 +1475,33 @@ func (a *App) handleHTTPGetConversation(w http.ResponseWriter, r *http.Request) 
 		args["_project_id"] = pid
 	}
 	out, err := a.toolGetConversation(globalCtx, args)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpJSON(w, out)
+}
+
+// handleHTTPSetConversationStatus handles
+// POST /contacts/<id>/conversations/<cid>/status  body: {status?, priority?}
+func (a *App) handleHTTPSetConversationStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	parts := contactsPathParts(r)
+	// /contacts/<id>/conversations/<cid>/status
+	if len(parts) < 4 || parts[0] == "" || parts[2] == "" {
+		httpErr(w, http.StatusBadRequest, "id and conversation_id required")
+		return
+	}
+	args := mustReadJSONArgs(r)
+	args["id"] = parts[0]
+	args["conversation_id"] = parts[2]
+	if pid, _ := resolveProjectFromRequest(r); pid != "" {
+		args["_project_id"] = pid
+	}
+	out, err := a.toolSetConversationStatus(globalCtx, args)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return

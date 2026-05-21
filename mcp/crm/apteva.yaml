@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.5.4
+version: 0.6.0
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -66,9 +66,11 @@ provides:
     - name: contacts_list_messageable
       description: List contacts reachable on a given channel.
     - name: contacts_list_conversations
-      description: List a contact's recent conversations.
+      description: List a contact's recent conversations (each with status + priority); optional status filter.
     - name: contacts_get_conversation
       description: Fetch one conversation with its full activity chain.
+    - name: contacts_set_conversation_status
+      description: Set a conversation's workflow status (open/pending/closed) and/or priority (low/normal/high/urgent).
     # Lists — explicit configurable buckets of contacts (multi-membership).
     - name: lists_create
       description: Create a new contact list with sender defaults + optional inbound pattern.

@@ -139,9 +139,29 @@ interface Conversation {
   channel: string;
   subject?: string;
   root_message_id?: string;
+  status?: string;   // open | pending | closed
+  priority?: string; // low | normal | high | urgent
   started_at: string;
   last_activity_at: string;
 }
+
+type ConvoStatus = "open" | "pending" | "closed";
+const CONVO_STATUSES: ConvoStatus[] = ["open", "pending", "closed"];
+type ConvoPriority = "low" | "normal" | "high" | "urgent";
+const CONVO_PRIORITIES: ConvoPriority[] = ["low", "normal", "high", "urgent"];
+
+// Tailwind tokens only (no arbitrary values) — see panel-theme memory.
+const STATUS_STYLES: Record<string, string> = {
+  open: "bg-accent/10 text-accent",
+  pending: "bg-yellow/15 text-yellow",
+  closed: "bg-border text-text-muted",
+};
+const PRIORITY_DOT: Record<string, string> = {
+  low: "bg-text-dim",
+  normal: "bg-text-muted",
+  high: "bg-yellow",
+  urgent: "bg-red",
+};
 interface InboundRoute {
   id: number;
   pattern: string;
@@ -705,6 +725,27 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     });
   };
 
+  // Conversation status / priority. POSTs to the dedicated sub-route
+  // and reloads so the lane reflects the new state (and any auto-reopen
+  // that an inbound triggered server-side).
+  const [convoBusy, setConvoBusy] = useState(false);
+  const [showClosed, setShowClosed] = useState(false);
+  const setConversationStatus = useCallback(
+    async (conversationId: string, patch: { status?: string; priority?: string }) => {
+      if (!selectedId) return;
+      setConvoBusy(true);
+      try {
+        await api("POST", `/contacts/${selectedId}/conversations/${conversationId}/status`, patch);
+        await reloadActivities(selectedId);
+      } catch (e) {
+        setErrorToast("Status update failed: " + (e as Error).message);
+      } finally {
+        setConvoBusy(false);
+      }
+    },
+    [api, selectedId, reloadActivities],
+  );
+
   const handleSendFromComposer = async () => {
     if (!composer || !detail) return;
     setComposer({ ...composer, busy: true, error: null });
@@ -747,6 +788,16 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   // down. Loose activities (notes, calls, system, anything without a
   // conversation_id) keep their reverse-chrono order.
   const grouped = useMemo(() => groupActivitiesByConversation(activities, conversations), [activities, conversations]);
+  // Closed conversations are hidden by default (inbox convention). The
+  // toggle reveals them; loose activities are always shown.
+  const closedConvoCount = useMemo(
+    () => grouped.filter((g) => g.kind === "conversation" && g.status === "closed").length,
+    [grouped],
+  );
+  const visibleGroups = useMemo(
+    () => (showClosed ? grouped : grouped.filter((g) => !(g.kind === "conversation" && g.status === "closed"))),
+    [grouped, showClosed],
+  );
   const possibleMatches = useMemo(() => extractPossibleMatchIds(activities), [activities]);
 
   return (
@@ -900,17 +951,32 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
 
 
                   <section>
-                    <h2 className="text-xs uppercase tracking-wide text-text-dim mb-2">
-                      Activity ({activities.length})
-                    </h2>
-                    {grouped.length === 0 ? (
-                      <p className="text-text-muted text-sm">No activity logged.</p>
+                    <div className="flex items-center justify-between mb-2">
+                      <h2 className="text-xs uppercase tracking-wide text-text-dim">
+                        Activity ({activities.length})
+                      </h2>
+                      {closedConvoCount > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setShowClosed((v) => !v)}
+                          className="text-[10px] px-1.5 py-0.5 border border-border rounded hover:bg-bg-input text-text-muted"
+                        >
+                          {showClosed ? "Hide" : "Show"} closed ({closedConvoCount})
+                        </button>
+                      )}
+                    </div>
+                    {visibleGroups.length === 0 ? (
+                      <p className="text-text-muted text-sm">
+                        {grouped.length === 0 ? "No activity logged." : "No open conversations."}
+                      </p>
                     ) : (
                       <ul className="space-y-3">
-                        {grouped.map((group, gi) => (
+                        {visibleGroups.map((group, gi) => (
                           <ActivityGroup
                             key={`g${gi}`}
                             group={group}
+                            busy={convoBusy}
+                            onSetStatus={setConversationStatus}
                             onReply={(act) => openCompose({
                               mode: "reply",
                               channel: channelOfKind(act.kind) || undefined,
@@ -1079,7 +1145,7 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
 // ─── Activity grouping ────────────────────────────────────────────
 
 type Group =
-  | { kind: "conversation"; conversationId: string; channel: string; subject: string; activities: Activity[] }
+  | { kind: "conversation"; conversationId: string; channel: string; subject: string; status: string; priority: string; activities: Activity[] }
   | { kind: "loose"; activities: Activity[] };
 
 // groupActivitiesByConversation walks the reverse-chrono activities
@@ -1114,24 +1180,42 @@ function groupActivitiesByConversation(activities: Activity[], conversations: Co
       conversationId: cid,
       channel: convo?.channel || channelOfKind(a.kind) || "",
       subject: convo?.subject || (a.body.split("\n", 1)[0] || ""),
+      status: convo?.status || "open",
+      priority: convo?.priority || "normal",
       activities: inSameConvo,
     });
   }
   return out;
 }
 
-function ActivityGroup({ group, onReply }: { group: Group; onReply: (a: Activity) => void }) {
+function ActivityGroup({
+  group,
+  onReply,
+  onSetStatus,
+  busy,
+}: {
+  group: Group;
+  onReply: (a: Activity) => void;
+  onSetStatus: (conversationId: string, patch: { status?: string; priority?: string }) => void;
+  busy: boolean;
+}) {
   if (group.kind === "loose") {
     const a = group.activities[0]!;
     if (TEST_SENT_KINDS.has(a.kind)) return null; // hide tests by default
     return <ActivityRow activity={a} onReply={onReply} />;
   }
+  const isClosed = group.status === "closed";
   return (
-    <li className="border border-border rounded">
+    <li className={`border border-border rounded ${isClosed ? "opacity-70" : ""}`}>
       <div className="px-2 py-1 border-b border-border bg-bg-input/30 flex items-center gap-2 text-xs">
+        <span
+          className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${PRIORITY_DOT[group.priority] || PRIORITY_DOT.normal}`}
+          title={`priority: ${group.priority}`}
+        />
         <span className="text-[10px] uppercase text-text-dim">{group.channel}</span>
         <span className="text-text font-medium truncate flex-1">{group.subject || "(no subject)"}</span>
-        <span className="text-text-dim">{group.activities.length} message{group.activities.length === 1 ? "" : "s"}</span>
+        <span className="text-text-dim">{group.activities.length} msg{group.activities.length === 1 ? "" : "s"}</span>
+        <ConversationStatusControl group={group} onSetStatus={onSetStatus} busy={busy} />
       </div>
       <ul className="divide-y divide-border">
         {group.activities.map((a) => (
@@ -1139,6 +1223,48 @@ function ActivityGroup({ group, onReply }: { group: Group; onReply: (a: Activity
         ))}
       </ul>
     </li>
+  );
+}
+
+// ConversationStatusControl renders the status pill and, on the same
+// row, the quick state actions. open → [Pending][Close]; pending →
+// [Reopen][Close]; closed → [Reopen]. Priority is a tiny inline select.
+function ConversationStatusControl({
+  group,
+  onSetStatus,
+  busy,
+}: {
+  group: Extract<Group, { kind: "conversation" }>;
+  onSetStatus: (conversationId: string, patch: { status?: string; priority?: string }) => void;
+  busy: boolean;
+}) {
+  const cid = group.conversationId;
+  const pillCls = `text-[10px] px-1.5 py-0.5 rounded ${STATUS_STYLES[group.status] || STATUS_STYLES.open}`;
+  const btn = "text-[10px] px-1.5 py-0.5 border border-border rounded hover:bg-bg-input disabled:opacity-50";
+  return (
+    <span className="flex items-center gap-1">
+      <span className={pillCls}>{group.status}</span>
+      <select
+        value={group.priority}
+        disabled={busy}
+        onChange={(e) => onSetStatus(cid, { priority: e.target.value })}
+        className="bg-bg-input border border-border rounded text-[10px] px-0.5 py-0.5"
+        title="priority"
+      >
+        {CONVO_PRIORITIES.map((p) => (
+          <option key={p} value={p}>{p}</option>
+        ))}
+      </select>
+      {group.status !== "pending" && group.status !== "closed" && (
+        <button type="button" disabled={busy} className={btn} onClick={() => onSetStatus(cid, { status: "pending" })}>Pending</button>
+      )}
+      {group.status !== "open" && (
+        <button type="button" disabled={busy} className={btn} onClick={() => onSetStatus(cid, { status: "open" })}>Reopen</button>
+      )}
+      {group.status !== "closed" && (
+        <button type="button" disabled={busy} className={btn} onClick={() => onSetStatus(cid, { status: "closed" })}>Close</button>
+      )}
+    </span>
   );
 }
 

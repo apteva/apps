@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.5.4
+version: 0.6.0
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -86,9 +86,11 @@ provides:
     - name: contacts_list_messageable
       description: List contacts reachable on a channel.
     - name: contacts_list_conversations
-      description: List a contact's recent conversations.
+      description: List a contact's recent conversations (with status + priority).
     - name: contacts_get_conversation
       description: Fetch one conversation with its full activity chain.
+    - name: contacts_set_conversation_status
+      description: Set a conversation's status (open/pending/closed) and/or priority.
     - name: lists_create
       description: Create a new contact list.
     - name: lists_list
@@ -236,9 +238,16 @@ func (a *App) handleHTTPContactItem(w http.ResponseWriter, r *http.Request) {
 			a.handleHTTPReply(w, r)
 			return
 		case "conversations":
-			if len(parts) == 3 && parts[2] != "" {
+			// parts here come from SplitN(rest,"/",3), so parts[2] is the
+			// whole tail after "conversations/". Re-split fully to tell
+			// /<cid> apart from /<cid>/status.
+			cp := contactsPathParts(r)
+			switch {
+			case len(cp) >= 4 && cp[3] == "status":
+				a.handleHTTPSetConversationStatus(w, r)
+			case len(cp) >= 3 && cp[2] != "":
 				a.handleHTTPGetConversation(w, r)
-			} else {
+			default:
 				a.handleHTTPListConversations(w, r)
 			}
 			return
@@ -538,10 +547,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_list_conversations",
-			Description: "List a contact's recent conversations, newest first. Args: id, channel?, limit? (default 50).",
+			Description: "List a contact's recent conversations, newest first. Each carries status (open|pending|closed) + priority (low|normal|high|urgent). Args: id, channel?, status? (filter), limit? (default 50).",
 			InputSchema: schemaObject(map[string]any{
 				"id":      map[string]any{"type": "integer"},
 				"channel": map[string]any{"type": "string"},
+				"status":  map[string]any{"type": "string"},
 				"limit":   map[string]any{"type": "integer"},
 			}, []string{"id"}),
 			Handler: a.toolListConversations,
@@ -554,6 +564,17 @@ func (a *App) MCPTools() []sdk.Tool {
 				"conversation_id": map[string]any{"type": "integer"},
 			}, []string{"conversation_id"}),
 			Handler: a.toolGetConversation,
+		},
+		{
+			Name:        "contacts_set_conversation_status",
+			Description: "Set a conversation's workflow status and/or priority. status: open (needs us) | pending (waiting on the contact) | closed (resolved). priority: low | normal | high | urgent. Either may be omitted to leave unchanged. An inbound reply auto-reopens a pending/closed thread, so use 'pending' when you've replied and are waiting, 'closed' when done. Args: conversation_id (req), id? (contact-id safety check), status?, priority?.",
+			InputSchema: schemaObject(map[string]any{
+				"id":              map[string]any{"type": "integer"},
+				"conversation_id": map[string]any{"type": "integer"},
+				"status":          map[string]any{"type": "string"},
+				"priority":        map[string]any{"type": "string"},
+			}, []string{"conversation_id"}),
+			Handler: a.toolSetConversationStatus,
 		},
 
 		// ─── lists tools ──────────────────────────────────────────────
@@ -912,7 +933,7 @@ func (a *App) toolGetContext(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	convoLimit := intArg(args, "conversation_limit", 10)
-	conversations, err := dbConversationsList(ctx.AppDB(), pid, c.ID, "", convoLimit)
+	conversations, err := dbConversationsList(ctx.AppDB(), pid, c.ID, "", "", convoLimit)
 	if err != nil {
 		return nil, err
 	}
