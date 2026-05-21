@@ -1,0 +1,140 @@
+package main
+
+// Tests for inbound routing rules (v0.8.0): the address-pattern matcher,
+// rule evaluation (recipient/sender -> add list/tag), and the inbox query.
+
+import (
+	"testing"
+)
+
+func TestAddressMatchesPattern(t *testing.T) {
+	cases := []struct {
+		pattern, addr string
+		want          bool
+	}{
+		{"", "a@b.com", true},
+		{"*", "a@b.com", true},
+		{"*@*", "a@b.com", true},
+		{"alice@acme.com", "alice@acme.com", true},
+		{"alice@acme.com", "bob@acme.com", false},
+		{"@acme.com", "anyone@acme.com", true},
+		{"@acme.com", "anyone@other.com", false},
+		{"*@acme.com", "anyone@acme.com", true},
+		{"support@*", "support@acme.com", true},
+		{"support@*", "support@other.io", true},
+		{"support@*", "sales@acme.com", false},
+		{"ALICE@ACME.COM", "alice@acme.com", true}, // case-insensitive
+		{"@acme.com", "", false},
+	}
+	for _, tc := range cases {
+		if got := addressMatchesPattern(tc.pattern, tc.addr); got != tc.want {
+			t.Errorf("addressMatchesPattern(%q, %q) = %v, want %v", tc.pattern, tc.addr, got, tc.want)
+		}
+	}
+}
+
+func TestApplyRoutingRules_RecipientAndSender(t *testing.T) {
+	ctx := newTestCtx(t)
+	db := ctx.AppDB()
+	app := &App{}
+
+	// A list to route into.
+	listOut, err := app.toolListsCreate(ctx, map[string]any{"name": "Support"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listID := listOut.(map[string]any)["list"].(*List).ID
+
+	// Rule 1: recipient support@acme.com -> add to Support list.
+	if _, err := dbCreateRoutingRule(db, "test-proj", &routingRule{
+		MatchRecipient: "support@acme.com", AddListID: &listID, Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Rule 2: sender @vip.com -> tag vip.
+	if _, err := dbCreateRoutingRule(db, "test-proj", &routingRule{
+		MatchSender: "@vip.com", AddTag: "vip", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c := mustCreate(t, ctx, map[string]any{"first_name": "Dana"})
+
+	// Inbound to support@acme.com from someone@vip.com → both rules fire.
+	acted, err := applyRoutingRules(db, "test-proj", c.ID, []string{"support@acme.com"}, "someone@vip.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(acted.Lists) != 1 || acted.Lists[0] != listID {
+		t.Errorf("expected list %d added, got %v", listID, acted.Lists)
+	}
+	if len(acted.Tags) != 1 || acted.Tags[0] != "vip" {
+		t.Errorf("expected vip tag, got %v", acted.Tags)
+	}
+	if !contactHasTag(t, ctx, c.ID, "vip") {
+		t.Errorf("contact should be tagged vip")
+	}
+
+	// Inbound to sales@acme.com from normal@x.com → neither rule matches.
+	c2 := mustCreate(t, ctx, map[string]any{"first_name": "Eve"})
+	acted2, _ := applyRoutingRules(db, "test-proj", c2.ID, []string{"sales@acme.com"}, "normal@x.com")
+	if len(acted2.Lists) != 0 || len(acted2.Tags) != 0 {
+		t.Errorf("no rule should match, got lists=%v tags=%v", acted2.Lists, acted2.Tags)
+	}
+}
+
+func TestApplyRoutingRules_RequiresBothWhenBothSet(t *testing.T) {
+	ctx := newTestCtx(t)
+	db := ctx.AppDB()
+	c := mustCreate(t, ctx, map[string]any{"first_name": "Sam"})
+
+	// Rule requires recipient support@* AND sender @acme.com.
+	if _, err := dbCreateRoutingRule(db, "test-proj", &routingRule{
+		MatchRecipient: "support@*", MatchSender: "@acme.com", AddTag: "acme-support", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Recipient matches but sender doesn't → no action.
+	acted, _ := applyRoutingRules(db, "test-proj", c.ID, []string{"support@us.io"}, "x@other.com")
+	if len(acted.Tags) != 0 {
+		t.Errorf("AND rule should not fire when sender mismatches, got %v", acted.Tags)
+	}
+	// Both match → fires.
+	acted, _ = applyRoutingRules(db, "test-proj", c.ID, []string{"support@us.io"}, "boss@acme.com")
+	if len(acted.Tags) != 1 {
+		t.Errorf("AND rule should fire when both match, got %v", acted.Tags)
+	}
+}
+
+func TestInboxConversations(t *testing.T) {
+	ctx := newTestCtx(t)
+	db := ctx.AppDB()
+	app := &App{}
+
+	c := mustCreate(t, ctx, map[string]any{"display_name": "Tom"})
+	openID := mkConversation(t, ctx, "test-proj", c.ID, "email")
+	closedID := mkConversation(t, ctx, "test-proj", c.ID, "email")
+	if _, err := app.toolSetConversationStatus(ctx, map[string]any{"conversation_id": closedID, "status": "closed"}); err != nil {
+		t.Fatal(err)
+	}
+
+	open, err := dbInboxConversations(db, "test-proj", "open", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 1 || open[0].ID != openID {
+		t.Fatalf("inbox(open) should return only the open convo, got %d", len(open))
+	}
+	if open[0].ContactName != "Tom" {
+		t.Errorf("inbox row should carry contact name, got %q", open[0].ContactName)
+	}
+
+	all, err := dbInboxConversations(db, "test-proj", "all", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("inbox(all) should return both, got %d", len(all))
+	}
+}

@@ -259,7 +259,7 @@ function extractPossibleMatchIds(activities: Activity[]): string[] {
   return [];
 }
 
-type Tab = "contacts" | "lists" | "segments" | "settings";
+type Tab = "contacts" | "inbox" | "lists" | "segments" | "settings";
 
 interface List {
   id: number;
@@ -805,6 +805,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       {/* Tabs */}
       <nav className="flex gap-1 border-b border-border px-3 pt-2 text-xs">
         <TabButton active={tab === "contacts"} onClick={() => setTab("contacts")}>Contacts</TabButton>
+        <TabButton active={tab === "inbox"} onClick={() => setTab("inbox")}>Inbox</TabButton>
         <TabButton active={tab === "lists"} onClick={() => setTab("lists")}>Lists</TabButton>
         <TabButton active={tab === "segments"} onClick={() => setTab("segments")}>Segments</TabButton>
         <TabButton active={tab === "settings"} onClick={() => setTab("settings")}>Settings</TabButton>
@@ -1012,6 +1013,11 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
               )}
             </main>
           </div>
+        ) : tab === "inbox" ? (
+          <InboxTab
+            api={api}
+            onOpenContact={(id) => { setTab("contacts"); selectContact(String(id)); }}
+          />
         ) : tab === "lists" ? (
           <ListsTab
             lists={lists}
@@ -1034,6 +1040,8 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
         ) : (
           <SettingsTab
             messagingTool={messagingTool}
+            api={api}
+            lists={lists}
             attrDefs={attrDefs}
             onAddField={() => setDefineFieldOpen(true)}
           />
@@ -1492,8 +1500,10 @@ function addressForChannel(c: Contact, channel: string): string {
 
 // ─── Settings tab ─────────────────────────────────────────────────
 
-function SettingsTab({ messagingTool, attrDefs, onAddField }: {
+function SettingsTab({ messagingTool, api, lists, attrDefs, onAddField }: {
   messagingTool: <T,>(tool: string, args?: Record<string, unknown>) => Promise<T>;
+  api: <T,>(method: string, path: string, body?: any, params?: Record<string, string>) => Promise<T>;
+  lists: List[];
   attrDefs: AttributeDef[];
   onAddField: () => void;
 }) {
@@ -1580,6 +1590,8 @@ function SettingsTab({ messagingTool, attrDefs, onAddField }: {
         )}
       </section>
 
+      <RoutingRulesSection api={api} lists={lists} />
+
       <section>
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-xs uppercase tracking-wide text-text-dim">Custom fields</h2>
@@ -1627,6 +1639,198 @@ function RouteRow({ label, wired, onWire, busy }: { label: string; wired: boolea
         disabled={busy || wired}
         className="ml-auto text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
       >{wired ? "Wired" : "Wire up"}</button>
+    </div>
+  );
+}
+
+// ─── Routing rules ────────────────────────────────────────────────
+
+interface RoutingRule {
+  id: number;
+  name?: string;
+  match_recipient?: string;
+  match_sender?: string;
+  add_list_id?: number;
+  add_tag?: string;
+  priority: number;
+  enabled: boolean;
+}
+
+function RoutingRulesSection({ api, lists }: {
+  api: <T,>(method: string, path: string, body?: any, params?: Record<string, string>) => Promise<T>;
+  lists: List[];
+}) {
+  const [rules, setRules] = useState<RoutingRule[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [recipient, setRecipient] = useState("");
+  const [sender, setSender] = useState("");
+  const [tag, setTag] = useState("");
+  const [listId, setListId] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setErr(null);
+    try {
+      const r = await api<{ rules?: RoutingRule[] }>("GET", "/routing-rules");
+      setRules(r.rules || []);
+    } catch (e) { setErr((e as Error).message); setRules([]); }
+  }, [api]);
+  useEffect(() => { load(); }, [load]);
+
+  const listName = (id?: number) => lists.find((l) => Number(l.id) === id)?.name || `list #${id}`;
+
+  const add = async () => {
+    if (!tag.trim() && !listId) { setErr("Set an action: a tag and/or a list"); return; }
+    setBusy(true); setErr(null);
+    try {
+      await api("POST", "/routing-rules", {
+        match_recipient: recipient.trim() || undefined,
+        match_sender: sender.trim() || undefined,
+        add_tag: tag.trim() || undefined,
+        add_list_id: listId ? Number(listId) : undefined,
+      });
+      setRecipient(""); setSender(""); setTag(""); setListId("");
+      await load();
+    } catch (e) { setErr((e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const del = async (id: number) => {
+    setBusy(true);
+    try { await api("DELETE", `/routing-rules/${id}`); await load(); }
+    catch (e) { setErr((e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const inp = "bg-bg-input border border-border rounded px-2 py-1 text-sm";
+  return (
+    <section>
+      <h2 className="text-xs uppercase tracking-wide text-text-dim mb-2">Inbound routing rules</h2>
+      <p className="text-text-dim text-xs mb-2">
+        Match inbound on the address it hit (recipient) and/or who sent it, then auto-add the
+        contact to a list and/or tag it. Patterns: <span className="font-mono">support@acme.com</span>,{" "}
+        <span className="font-mono">@acme.com</span>, <span className="font-mono">support@*</span>,{" "}
+        <span className="font-mono">*</span>. Leave a field blank for "any".
+      </p>
+
+      {rules && rules.length > 0 && (
+        <ul className="divide-y divide-border border border-border rounded mb-3">
+          {rules.map((r) => (
+            <li key={r.id} className="px-3 py-2 flex items-center gap-2 text-xs">
+              <span className="text-text-muted">to</span>
+              <span className="font-mono text-text">{r.match_recipient || "*"}</span>
+              <span className="text-text-muted">from</span>
+              <span className="font-mono text-text">{r.match_sender || "*"}</span>
+              <span className="text-text-dim">→</span>
+              {r.add_list_id ? <span className="px-1.5 py-0.5 rounded bg-accent/10 text-accent">{listName(r.add_list_id)}</span> : null}
+              {r.add_tag ? <span className="px-1.5 py-0.5 rounded bg-border text-text">#{r.add_tag}</span> : null}
+              <button type="button" onClick={() => del(r.id)} disabled={busy}
+                className="ml-auto text-text-dim hover:text-red disabled:opacity-50" aria-label="Delete rule">×</button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {rules && rules.length === 0 && (
+        <p className="text-text-muted text-sm mb-3">No rules yet — new inbound lands in the Inbox unrouted.</p>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2">
+        <input className={inp} style={{ width: 160 }} placeholder="recipient (to)" value={recipient} onChange={(e) => setRecipient(e.target.value)} />
+        <input className={inp} style={{ width: 160 }} placeholder="sender (from)" value={sender} onChange={(e) => setSender(e.target.value)} />
+        <span className="text-text-dim text-xs">→</span>
+        <select className={inp} value={listId} onChange={(e) => setListId(e.target.value)}>
+          <option value="">— list —</option>
+          {lists.map((l) => <option key={String(l.id)} value={String(l.id)}>{l.name}</option>)}
+        </select>
+        <input className={inp} style={{ width: 120 }} placeholder="tag" value={tag} onChange={(e) => setTag(e.target.value)} />
+        <button type="button" onClick={add} disabled={busy}
+          className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50">+ Add rule</button>
+      </div>
+      {err && <div className="mt-2 text-red text-xs">Error: {err}</div>}
+    </section>
+  );
+}
+
+// ─── Inbox (cross-contact triage queue) ───────────────────────────
+
+interface InboxItem {
+  id: number;
+  contact_id: number;
+  contact_name?: string;
+  contact_email?: string;
+  channel: string;
+  subject?: string;
+  status: string;
+  priority: string;
+  last_activity_at: string;
+  snippet?: string;
+  automated?: boolean;
+}
+
+function InboxTab({ api, onOpenContact }: {
+  api: <T,>(method: string, path: string, body?: any, params?: Record<string, string>) => Promise<T>;
+  onOpenContact: (contactId: number) => void;
+}) {
+  const [items, setItems] = useState<InboxItem[] | null>(null);
+  const [statusFilter, setStatusFilter] = useState("open");
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setErr(null);
+    try {
+      const r = await api<{ inbox?: InboxItem[] }>("GET", "/inbox", undefined, { status: statusFilter });
+      setItems(r.inbox || []);
+    } catch (e) { setErr((e as Error).message); setItems([]); }
+  }, [api, statusFilter]);
+  useEffect(() => { load(); }, [load]);
+
+  return (
+    <div className="h-full flex flex-col">
+      <div className="p-3 border-b border-border flex items-center gap-2">
+        <h2 className="text-sm text-text font-medium flex-1">Inbox</h2>
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          className="bg-bg-input border border-border rounded px-2 py-1 text-xs"
+        >
+          <option value="open">Open</option>
+          <option value="pending">Pending</option>
+          <option value="closed">Closed</option>
+          <option value="all">All</option>
+        </select>
+        <button type="button" onClick={load} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Refresh</button>
+      </div>
+      <div className="flex-1 overflow-auto">
+        {err && <div className="p-4 text-red text-xs">Error: {err}</div>}
+        {items === null ? (
+          <div className="p-4 text-text-muted text-sm">Loading…</div>
+        ) : items.length === 0 ? (
+          <div className="p-4 text-text-muted text-sm">Nothing here. New inbound conversations show up as they arrive.</div>
+        ) : (
+          <ul className="divide-y divide-border">
+            {items.map((it) => (
+              <li
+                key={it.id}
+                onClick={() => onOpenContact(it.contact_id)}
+                className="px-4 py-3 hover:bg-bg-input/40 cursor-pointer"
+              >
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${PRIORITY_DOT[it.priority] || PRIORITY_DOT.normal}`} title={`priority: ${it.priority}`} />
+                  <span className="text-sm text-text font-medium truncate flex-1">
+                    {it.contact_name || it.contact_email || `contact #${it.contact_id}`}
+                  </span>
+                  <span className="text-[10px] uppercase text-text-dim">{it.channel}</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded ${STATUS_STYLES[it.status] || STATUS_STYLES.open}`}>{it.status}</span>
+                  {it.automated && <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted">automated</span>}
+                </div>
+                {it.subject && <div className="text-xs text-text-muted truncate">{it.subject}</div>}
+                {it.snippet && <div className="text-xs text-text-dim truncate">{it.snippet}</div>}
+                <div className="text-[10px] text-text-dim mt-0.5">{formatTime(it.last_activity_at)}</div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }

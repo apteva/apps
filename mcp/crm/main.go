@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.6.0
+version: 0.8.0
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -91,6 +91,14 @@ provides:
       description: Fetch one conversation with its full activity chain.
     - name: contacts_set_conversation_status
       description: Set a conversation's status (open/pending/closed) and/or priority.
+    - name: conversations_inbox
+      description: Cross-contact triage queue of conversations (open by default).
+    - name: routing_rules_create
+      description: Create an inbound routing rule (recipient/sender -> add_to_list/add_tag).
+    - name: routing_rules_list
+      description: List inbound routing rules.
+    - name: routing_rules_delete
+      description: Delete (archive) an inbound routing rule.
     - name: lists_create
       description: Create a new contact list.
     - name: lists_list
@@ -190,6 +198,11 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/attribute-defs", Handler: a.handleHTTPAttrDefs},
 		// Inbound webhook from messaging.dispatchInbound. POST only.
 		{Pattern: "/inbound", Handler: a.handleInbound},
+		// Cross-contact triage queue.
+		{Pattern: "/inbox", Handler: a.handleHTTPInbox},
+		// Inbound routing rules CRUD.
+		{Pattern: "/routing-rules", Handler: a.handleHTTPRoutingRules},
+		{Pattern: "/routing-rules/", Handler: a.handleHTTPRoutingRuleItem},
 		// Lists CRUD + membership management.
 		{Pattern: "/lists", Handler: a.handleHTTPLists},
 		{Pattern: "/lists/", Handler: a.handleHTTPListItem},
@@ -538,10 +551,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_list_messageable",
-			Description: "List contacts reachable on the given channel (or any channel). Args: channel? (email|sms|whatsapp), limit? (default 100, max 500).",
+			Description: "List contacts reachable on the given channel (or any channel). Automated / no-reply senders (tagged 'automated') are excluded by default — pass include_automated=true to include them. Args: channel? (email|sms|whatsapp), include_automated? (default false), limit? (default 100, max 500).",
 			InputSchema: schemaObject(map[string]any{
-				"channel": map[string]any{"type": "string"},
-				"limit":   map[string]any{"type": "integer"},
+				"channel":           map[string]any{"type": "string"},
+				"include_automated": map[string]any{"type": "boolean"},
+				"limit":             map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolListMessageable,
 		},
@@ -575,6 +589,43 @@ func (a *App) MCPTools() []sdk.Tool {
 				"priority":        map[string]any{"type": "string"},
 			}, []string{"conversation_id"}),
 			Handler: a.toolSetConversationStatus,
+		},
+		{
+			Name:        "conversations_inbox",
+			Description: "Cross-contact triage queue: conversations across all contacts, newest activity first, with contact summary + last-message snippet + automated/priority flags. Args: status? (open [default] | pending | closed | all), limit? (default 50).",
+			InputSchema: schemaObject(map[string]any{
+				"status": map[string]any{"type": "string"},
+				"limit":  map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolInbox,
+		},
+		{
+			Name:        "routing_rules_create",
+			Description: "Create an inbound routing rule. Matches on recipient (which of our addresses it hit) and/or sender, then adds the contact to a list and/or tags it. Patterns: exact (a@b.com), domain (@b.com or *@b.com), local-any (support@*), or * for any. A rule needs at least one action. Args: name?, match_recipient?, match_sender?, add_list_id?, add_tag?, priority? (lower first), enabled? (default true).",
+			InputSchema: schemaObject(map[string]any{
+				"name":            map[string]any{"type": "string"},
+				"match_recipient": map[string]any{"type": "string"},
+				"match_sender":    map[string]any{"type": "string"},
+				"add_list_id":     map[string]any{"type": "integer"},
+				"add_tag":         map[string]any{"type": "string"},
+				"priority":        map[string]any{"type": "integer"},
+				"enabled":         map[string]any{"type": "boolean"},
+			}, nil),
+			Handler: a.toolRoutingRulesCreate,
+		},
+		{
+			Name:        "routing_rules_list",
+			Description: "List inbound routing rules in priority order.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler:     a.toolRoutingRulesList,
+		},
+		{
+			Name:        "routing_rules_delete",
+			Description: "Delete (archive) an inbound routing rule. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolRoutingRulesDelete,
 		},
 
 		// ─── lists tools ──────────────────────────────────────────────
@@ -1966,6 +2017,15 @@ func loadChannels(db *sql.DB, c *Contact) error {
 		}
 	}
 	return nil
+}
+
+// dbAddTag idempotently attaches a tag to a contact. Used by the
+// inbound classifier to mark automated/no-reply senders.
+func dbAddTag(db *sql.DB, pid string, contactID int64, tag string) error {
+	_, err := db.Exec(
+		`INSERT OR IGNORE INTO contact_tags (project_id, contact_id, tag_name) VALUES (?, ?, ?)`,
+		pid, contactID, tag)
+	return err
 }
 
 func loadTags(db *sql.DB, c *Contact) error {

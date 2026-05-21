@@ -832,6 +832,15 @@ func (a *App) toolListMessageable(ctx *sdk.AppCtx, args map[string]any) (any, er
 	case "":
 		where = append(where, "((primary_email IS NOT NULL AND primary_email <> '') OR (primary_phone IS NOT NULL AND primary_phone <> ''))")
 	}
+	// Exclude automated / no-reply senders from bulk-message audiences by
+	// default — you rarely want to blast noreply@…. Individual sends and
+	// explicit segments are unaffected; pass include_automated=true to
+	// override.
+	if includeAutomated, _ := args["include_automated"].(bool); !includeAutomated {
+		where = append(where, `NOT EXISTS (SELECT 1 FROM contact_tags t
+			WHERE t.project_id = contacts.project_id AND t.contact_id = contacts.id AND t.tag_name = ?)`)
+		qargs = append(qargs, tagAutomated)
+	}
 	qargs = append(qargs, limit)
 	rows, err := ctx.AppDB().Query(
 		`SELECT id, COALESCE(display_name,''), COALESCE(primary_email,''),
@@ -972,6 +981,149 @@ func (a *App) toolGetConversation(ctx *sdk.AppCtx, args map[string]any) (any, er
 	}, nil
 }
 
+// ─── Inbox (cross-contact triage queue) ───────────────────────────
+
+type inboxRow struct {
+	ID             int64  `json:"id"`
+	ContactID      int64  `json:"contact_id"`
+	ContactName    string `json:"contact_name,omitempty"`
+	ContactEmail   string `json:"contact_email,omitempty"`
+	Channel        string `json:"channel"`
+	Subject        string `json:"subject,omitempty"`
+	Status         string `json:"status"`
+	Priority       string `json:"priority"`
+	LastActivityAt string `json:"last_activity_at"`
+	Snippet        string `json:"snippet,omitempty"`
+	Automated      bool   `json:"automated,omitempty"`
+}
+
+// dbInboxConversations returns conversations across all contacts for the
+// triage queue. status="" defaults to 'open'; status="all" returns every
+// status. Each row carries the contact summary, a last-message snippet,
+// and whether the contact is tagged automated.
+func dbInboxConversations(db *sql.DB, pid, status string, limit int) ([]*inboxRow, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	where := "cc.project_id = ? AND c.deleted_at IS NULL"
+	args := []any{pid}
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "", "open":
+		where += " AND COALESCE(cc.status,'open') = 'open'"
+	case "all":
+		// no status filter
+	default:
+		where += " AND COALESCE(cc.status,'open') = ?"
+		args = append(args, strings.ToLower(strings.TrimSpace(status)))
+	}
+	args = append(args, limit)
+	rows, err := db.Query(
+		`SELECT cc.id, cc.contact_id, COALESCE(c.display_name,''), COALESCE(c.primary_email,''),
+				cc.channel, COALESCE(cc.subject,''), COALESCE(cc.status,'open'),
+				COALESCE(cc.priority,'normal'), cc.last_activity_at,
+				COALESCE((SELECT a.body FROM contact_activities a
+						  WHERE a.conversation_id = cc.id
+						  ORDER BY a.occurred_at DESC, a.id DESC LIMIT 1), ''),
+				EXISTS (SELECT 1 FROM contact_tags t
+						WHERE t.contact_id = cc.contact_id AND t.tag_name = ?)
+		 FROM contact_conversations cc
+		 JOIN contacts c ON c.id = cc.contact_id
+		 WHERE `+where+`
+		 ORDER BY cc.last_activity_at DESC LIMIT ?`,
+		append([]any{tagAutomated}, args...)...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*inboxRow{}
+	for rows.Next() {
+		r := &inboxRow{}
+		var autom int
+		if err := rows.Scan(&r.ID, &r.ContactID, &r.ContactName, &r.ContactEmail,
+			&r.Channel, &r.Subject, &r.Status, &r.Priority, &r.LastActivityAt,
+			&r.Snippet, &autom); err != nil {
+			return nil, err
+		}
+		r.Automated = autom != 0
+		r.Snippet = truncate(r.Snippet, 160)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// toolInbox — cross-contact triage queue. Args: status? (open|all|…),
+// limit?. Defaults to open conversations, newest activity first.
+func (a *App) toolInbox(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	status := strArg(args, "status")
+	limit := intArg(args, "limit", 50)
+	items, err := dbInboxConversations(ctx.AppDB(), pid, status, limit)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"inbox": items, "count": len(items)}, nil
+}
+
+// ─── Routing rules ────────────────────────────────────────────────
+
+func (a *App) toolRoutingRulesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	r := &routingRule{
+		Name:           strArg(args, "name"),
+		MatchRecipient: strArg(args, "match_recipient"),
+		MatchSender:    strArg(args, "match_sender"),
+		AddTag:         strArg(args, "add_tag"),
+		Priority:       intArg(args, "priority", 0),
+		Enabled:        true,
+	}
+	if v, ok := args["enabled"].(bool); ok {
+		r.Enabled = v
+	}
+	if lid := int64Arg(args, "add_list_id"); lid != 0 {
+		r.AddListID = &lid
+	}
+	id, err := dbCreateRoutingRule(ctx.AppDB(), pid, r)
+	if err != nil {
+		return nil, err
+	}
+	r.ID = id
+	return map[string]any{"rule": r}, nil
+}
+
+func (a *App) toolRoutingRulesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	rules, err := dbListRoutingRules(ctx.AppDB(), pid)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"rules": rules, "count": len(rules)}, nil
+}
+
+func (a *App) toolRoutingRulesDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	if err := dbDeleteRoutingRule(ctx.AppDB(), pid, id); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "id": id}, nil
+}
+
 // ─── Inbound webhook ──────────────────────────────────────────────
 
 // inboundPayload mirrors what messaging.dispatchInbound POSTs to us.
@@ -1051,6 +1203,29 @@ func (a *App) handleInbound(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Classify the sender. Machine / no-reply senders still get the
+	// contact + activity (the message may matter) but are tagged
+	// `automated` so bulk sends / segments can exclude them. Idempotent —
+	// re-tagging on repeat inbound is a no-op.
+	automated, autoReason := isAutomatedSender(body.Channel, body.From, body.Headers)
+	if automated {
+		if err := dbAddTag(db, pid, contact.ID, tagAutomated); err != nil {
+			globalCtx.Logger().Warn("auto-tag automated sender", "contact_id", contact.ID, "err", err)
+		}
+	}
+
+	// Routing rules: match on recipient (which of our addresses it hit)
+	// and/or sender, then apply add-to-list / add-tag actions. Generalizes
+	// the legacy list.inbound_route_pattern coupling below.
+	routeRecipients := append([]string{body.MatchedRecipient}, body.To...)
+	routed, err := applyRoutingRules(db, pid, contact.ID, routeRecipients, body.From)
+	if err != nil {
+		globalCtx.Logger().Warn("routing rules", "contact_id", contact.ID, "err", err)
+	}
+	for _, lid := range routed.Lists {
+		globalCtx.Emit("list.member.added", map[string]any{"list_id": lid, "contact_id": contact.ID})
+	}
+
 	convoID, err := resolveInboundConversation(db, pid, contact.ID, body)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, "convo: "+err.Error())
@@ -1088,6 +1263,8 @@ func (a *App) handleInbound(w http.ResponseWriter, r *http.Request) {
 			"in_reply_to":       body.InReplyTo,
 			"matched_pattern":   body.MatchedPattern,
 			"to":                body.To,
+			"sender_automated":  automated,
+			"sender_class":      autoReason,
 		},
 		ConversationID:  convoID,
 		MessageIDHeader: body.MessageIDHeader,
@@ -1502,6 +1679,84 @@ func (a *App) handleHTTPSetConversationStatus(w http.ResponseWriter, r *http.Req
 		args["_project_id"] = pid
 	}
 	out, err := a.toolSetConversationStatus(globalCtx, args)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpJSON(w, out)
+}
+
+// handleHTTPInbox — GET /inbox?status=&limit= → cross-contact triage queue.
+func (a *App) handleHTTPInbox(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	args := map[string]any{}
+	if s := r.URL.Query().Get("status"); s != "" {
+		args["status"] = s
+	}
+	if l := r.URL.Query().Get("limit"); l != "" {
+		args["limit"] = l
+	}
+	if pid, _ := resolveProjectFromRequest(r); pid != "" {
+		args["_project_id"] = pid
+	}
+	out, err := a.toolInbox(globalCtx, args)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpJSON(w, out)
+}
+
+// handleHTTPRoutingRules — GET /routing-rules (list) / POST (create).
+func (a *App) handleHTTPRoutingRules(w http.ResponseWriter, r *http.Request) {
+	pid, _ := resolveProjectFromRequest(r)
+	switch r.Method {
+	case http.MethodGet:
+		args := map[string]any{}
+		if pid != "" {
+			args["_project_id"] = pid
+		}
+		out, err := a.toolRoutingRulesList(globalCtx, args)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, out)
+	case http.MethodPost:
+		args := mustReadJSONArgs(r)
+		if pid != "" {
+			args["_project_id"] = pid
+		}
+		out, err := a.toolRoutingRulesCreate(globalCtx, args)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, out)
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "GET or POST")
+	}
+}
+
+// handleHTTPRoutingRuleItem — DELETE /routing-rules/<id>.
+func (a *App) handleHTTPRoutingRuleItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		httpErr(w, http.StatusMethodNotAllowed, "DELETE only")
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/routing-rules/")
+	if id == "" {
+		httpErr(w, http.StatusBadRequest, "id required")
+		return
+	}
+	args := map[string]any{"id": id}
+	if pid, _ := resolveProjectFromRequest(r); pid != "" {
+		args["_project_id"] = pid
+	}
+	out, err := a.toolRoutingRulesDelete(globalCtx, args)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
