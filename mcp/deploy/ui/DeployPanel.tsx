@@ -160,6 +160,23 @@ interface DeploymentDetail {
   url: string;
 }
 
+interface AutoRestartInfo {
+  Attempts: number;
+  LastAt: string;
+  Paused: boolean;
+}
+
+interface UnhealthyEntry {
+  deployment_id: number;
+  name: string;
+  domain?: string;
+  status: "crashed" | "failed" | "starting_stuck" | "auto_restart_paused";
+  release_id?: number;
+  reason?: string;
+  unhealthy_for_s: number;
+  auto_restart: AutoRestartInfo;
+}
+
 const API = "/api/apps/deploy/api";
 
 const FRAMEWORKS = ["", "go", "node", "bun", "static", "blank"] as const;
@@ -197,6 +214,8 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   const [logTargetId, setLogTargetId] = useState<number | null>(null);
   const [meta, setMeta] = useState<MetaInfo | null>(null);
   const [showAttachDomain, setShowAttachDomain] = useState(false);
+  const [showEditConfig, setShowEditConfig] = useState(false);
+  const [health, setHealth] = useState<Record<number, UnhealthyEntry>>({});
 
   const withParams = useCallback(
     (extra: Record<string, string> = {}) =>
@@ -286,8 +305,43 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
       if (selected != null && ev.data?.deployment_id === selected) {
         loadDetail(selected);
       }
+      // Crash / auto-restart events change the health snapshot — refresh
+      // immediately instead of waiting for the 15s poll.
+      if (
+        ev.topic === "deploy.release.crashed" ||
+        ev.topic === "deploy.release.live" ||
+        ev.topic === "deploy.release.stopped" ||
+        ev.topic === "deploy.release.failed" ||
+        ev.topic === "deploy.auto_restart_paused" ||
+        ev.topic === "deploy.auto_restart_attempted" ||
+        ev.topic === "deploy.auto_restart_failed" ||
+        ev.topic === "deploy.restarted"
+      ) {
+        loadHealth();
+      }
     }
   });
+
+  // Health snapshot poll. Unhealthy = crashed/failed/starting_stuck/
+  // auto_restart_paused. Cheap (~one query per deployment) so a 15s
+  // tick is fine; events bump it sooner when state actually changes.
+  const loadHealth = useCallback(async () => {
+    try {
+      const r = await api<{ unhealthy?: UnhealthyEntry[] }>("GET", "/health");
+      const byID: Record<number, UnhealthyEntry> = {};
+      (r.unhealthy || []).forEach((u) => { byID[u.deployment_id] = u; });
+      setHealth(byID);
+    } catch {
+      // Backend may be on an older version without /api/health. Surface
+      // nothing rather than spamming the user with errors.
+    }
+  }, [api]);
+
+  useEffect(() => {
+    loadHealth();
+    const handle = window.setInterval(loadHealth, 15000);
+    return () => window.clearInterval(handle);
+  }, [loadHealth]);
 
   // Auto-tail logs every 2s when there's an active build or live release.
   useEffect(() => {
@@ -369,6 +423,23 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
     });
   };
 
+  const handleRestart = async () => {
+    if (!detail) return;
+    setBusy(true);
+    try {
+      const r = await api<{ release: Release }>(
+        "POST", `/deployments/${detail.deployment.id}/restart`,
+      );
+      setLogKind("release");
+      setLogTargetId(r.release.id);
+      loadHealth();
+    } catch (e) {
+      setError("Restart failed: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleDetachDomain = () => {
     if (!detail) return;
     setConfirmState({
@@ -439,7 +510,22 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                         {d.framework}
                       </span>
                     )}
-                    {d.current_release_id ? (
+                    {health[d.id] ? (
+                      <span
+                        className={`text-[10px] px-1 py-0.5 rounded ${
+                          health[d.id].status === "auto_restart_paused"
+                            ? "bg-yellow/20 text-yellow"
+                            : "bg-red/20 text-red"
+                        }`}
+                        title={
+                          health[d.id].status === "auto_restart_paused"
+                            ? `Auto-restart paused after ${health[d.id].auto_restart.Attempts} attempts`
+                            : `${health[d.id].status}${health[d.id].reason ? `: ${health[d.id].reason}` : ""}`
+                        }
+                      >
+                        {health[d.id].status === "auto_restart_paused" ? "paused" : "!"}
+                      </span>
+                    ) : d.current_release_id ? (
                       <span className="text-[10px] px-1 py-0.5 rounded bg-green/15 text-green">live</span>
                     ) : (
                       <span className="text-[10px] px-1 py-0.5 rounded bg-border text-text-dim">idle</span>
@@ -514,6 +600,21 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                 disabled={busy}
                 className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-40"
               >Build only</button>
+              {detail.current_release && (
+                <button
+                  type="button"
+                  onClick={handleRestart}
+                  disabled={busy}
+                  className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-40"
+                  title="Stop and re-spawn the current release with whatever config the deployment row now holds. No rebuild."
+                >Restart</button>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowEditConfig(true)}
+                className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input"
+                title="Edit env, build/start commands, framework, port hint. Restart to apply without rebuilding."
+              >Edit config</button>
               {detail.current_release && detail.current_release.status === "live" && (
                 <button
                   type="button"
@@ -527,6 +628,13 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                 className="px-2 py-1 text-xs border border-red text-red/70 rounded hover:bg-red/10"
               >Destroy</button>
             </header>
+            {health[detail.deployment.id] && (
+              <UnhealthyBar
+                entry={health[detail.deployment.id]}
+                onRestart={handleRestart}
+                busy={busy}
+              />
+            )}
 
             <section className="grid grid-cols-2 gap-4 p-4 border-b border-border text-xs">
               <div>
@@ -542,6 +650,11 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                     <div className="text-text-dim">
                       build #{detail.current_release.build_id}
                       {detail.current_release.started_at && ` · started ${detail.current_release.started_at}`}
+                      {detail.current_release.restart_count > 0 && (
+                        <span className="text-yellow/80">
+                          {" · restarts: "}{detail.current_release.restart_count}
+                        </span>
+                      )}
                     </div>
                     {detail.current_release.error && (
                       <div className="text-red truncate" title={detail.current_release.error}>
@@ -684,6 +797,20 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
           onAttached={() => {
             setShowAttachDomain(false);
             loadDetail(detail.deployment.id);
+          }}
+          api={api}
+        />
+      )}
+
+      {showEditConfig && detail && (
+        <EditConfigDialog
+          deployment={detail.deployment}
+          hasCurrentRelease={!!detail.current_release}
+          onClose={() => setShowEditConfig(false)}
+          onSaved={(restarted) => {
+            setShowEditConfig(false);
+            loadDetail(detail.deployment.id);
+            if (restarted) loadHealth();
           }}
           api={api}
         />
@@ -1216,4 +1343,250 @@ function formatExpires(iso?: string): string {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return "?";
   return d.toISOString().slice(0, 10);
+}
+
+// ─── UnhealthyBar ─────────────────────────────────────────────────
+//
+// Inline warning rendered above the detail body when /api/health
+// flagged the currently-selected deployment. Yellow for "paused"
+// (operator decision needed — auto-restart gave up), red for the
+// active failure modes.
+
+function UnhealthyBar({
+  entry, onRestart, busy,
+}: {
+  entry: UnhealthyEntry;
+  onRestart: () => void;
+  busy: boolean;
+}) {
+  const paused = entry.status === "auto_restart_paused";
+  const tone = paused
+    ? "bg-yellow/10 border-yellow/40 text-yellow"
+    : "bg-red/10 border-red/40 text-red";
+  const label =
+    entry.status === "auto_restart_paused"
+      ? `Auto-restart paused after ${entry.auto_restart.Attempts} attempt${entry.auto_restart.Attempts === 1 ? "" : "s"}. Fix the config and restart manually to clear.`
+      : entry.status === "starting_stuck"
+        ? `Release stuck in "starting" for ${formatDurationSeconds(entry.unhealthy_for_s)} — pid never owned the port.`
+        : `Release ${entry.status}${entry.reason ? `: ${entry.reason}` : ""} (${formatDurationSeconds(entry.unhealthy_for_s)} ago).`;
+  return (
+    <div className={`px-4 py-2 text-xs border-b flex items-center gap-3 ${tone}`}>
+      <span className="font-medium">⚠</span>
+      <span className="flex-1">{label}</span>
+      {entry.auto_restart.Attempts > 0 && (
+        <span className="text-text-dim">
+          attempts: {entry.auto_restart.Attempts}
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={onRestart}
+        disabled={busy}
+        className="px-2 py-0.5 text-[11px] border border-current rounded hover:bg-current/10 disabled:opacity-40"
+      >Restart now</button>
+    </div>
+  );
+}
+
+function formatDurationSeconds(s: number): string {
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+}
+
+// ─── EditConfigDialog ─────────────────────────────────────────────
+//
+// PATCH /deployments/:id for the allowlisted mutable fields. Two
+// submit modes: "Save" updates the row only (applies on next build);
+// "Save & restart" PATCHes then POSTs /restart so the new env /
+// start_cmd / port_hint takes effect immediately without rebuilding.
+// env_json is a raw JSON textarea — same shape the create dialog
+// uses — to keep parity with the agent-facing tool.
+
+function EditConfigDialog({
+  deployment,
+  hasCurrentRelease,
+  onClose,
+  onSaved,
+  api,
+}: {
+  deployment: Deployment;
+  hasCurrentRelease: boolean;
+  onClose: () => void;
+  onSaved: (restarted: boolean) => void;
+  api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
+}) {
+  const [description, setDescription] = useState(deployment.description ?? "");
+  const [framework, setFramework] = useState<(typeof FRAMEWORKS)[number]>(
+    (FRAMEWORKS as readonly string[]).includes(deployment.framework)
+      ? (deployment.framework as (typeof FRAMEWORKS)[number])
+      : "",
+  );
+  const [buildCmd, setBuildCmd] = useState(deployment.build_cmd ?? "");
+  const [startCmd, setStartCmd] = useState(deployment.start_cmd ?? "");
+  const [portHint, setPortHint] = useState(
+    deployment.port_hint ? String(deployment.port_hint) : "",
+  );
+  const [envJSON, setEnvJSON] = useState(deployment.env_json ?? "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async (restart: boolean) => {
+    setErr("");
+    // Validate env_json client-side — server allowlist accepts the
+    // string verbatim and the running process gets it next release.
+    // A typo in the textarea silently means "no env"; bail early.
+    const env = envJSON.trim();
+    if (env !== "" && env !== "{}") {
+      try {
+        const parsed = JSON.parse(env);
+        if (typeof parsed !== "object" || Array.isArray(parsed) || parsed === null) {
+          setErr("env_json must be a JSON object");
+          return;
+        }
+      } catch (e) {
+        setErr("env_json: " + (e as Error).message);
+        return;
+      }
+    }
+    const port = portHint.trim();
+    let portN = 0;
+    if (port !== "") {
+      portN = Number(port);
+      if (!Number.isFinite(portN) || portN < 0 || portN > 65535 || Math.floor(portN) !== portN) {
+        setErr("port_hint must be an integer 0-65535");
+        return;
+      }
+    }
+    setBusy(true);
+    try {
+      // Diff against current values — sending only-changed keys keeps
+      // the deploy.updated event payload accurate (which downstream
+      // observers may key off).
+      const body: Record<string, string | number> = {};
+      if (description !== (deployment.description ?? "")) body.description = description;
+      if (framework !== deployment.framework) body.framework = framework;
+      if (buildCmd !== (deployment.build_cmd ?? "")) body.build_cmd = buildCmd;
+      if (startCmd !== (deployment.start_cmd ?? "")) body.start_cmd = startCmd;
+      if (portN !== deployment.port_hint) body.port_hint = portN;
+      if (env !== (deployment.env_json ?? "")) body.env_json = env;
+
+      if (Object.keys(body).length > 0) {
+        await api("PATCH", `/deployments/${deployment.id}`, body);
+      }
+      if (restart && hasCurrentRelease) {
+        await api("POST", `/deployments/${deployment.id}/restart`);
+      }
+      onSaved(restart && hasCurrentRelease);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <form
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={(e) => { e.preventDefault(); submit(false); }}
+        className="w-[520px] bg-bg border border-border rounded p-5 space-y-4"
+      >
+        <h2 className="text-text font-semibold">Edit deployment config</h2>
+        <p className="text-xs text-text-dim">
+          Changes apply on the next build/release.
+          {hasCurrentRelease && " Use “Save & restart” to apply immediately without rebuilding."}
+        </p>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="col-span-2">
+            <label className="text-xs text-text-muted block mb-1">Description</label>
+            <input
+              type="text"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-text-muted block mb-1">Framework</label>
+            <select
+              value={framework}
+              onChange={(e) => setFramework(e.target.value as (typeof FRAMEWORKS)[number])}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            >
+              {FRAMEWORKS.map((f) => (
+                <option key={f} value={f}>{f === "" ? "(auto-detect)" : f}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-text-muted block mb-1">
+              Port hint <span className="text-text-dim">(0 = auto)</span>
+            </label>
+            <input
+              type="number"
+              min={0}
+              max={65535}
+              value={portHint}
+              onChange={(e) => setPortHint(e.target.value)}
+              placeholder="0"
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+            />
+          </div>
+          <div className="col-span-2">
+            <label className="text-xs text-text-muted block mb-1">Build cmd</label>
+            <input
+              type="text"
+              value={buildCmd}
+              onChange={(e) => setBuildCmd(e.target.value)}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+            />
+          </div>
+          <div className="col-span-2">
+            <label className="text-xs text-text-muted block mb-1">Start cmd</label>
+            <input
+              type="text"
+              value={startCmd}
+              onChange={(e) => setStartCmd(e.target.value)}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+            />
+          </div>
+          <div className="col-span-2">
+            <label className="text-xs text-text-muted block mb-1">
+              Env <span className="text-text-dim">(JSON object)</span>
+            </label>
+            <textarea
+              value={envJSON}
+              onChange={(e) => setEnvJSON(e.target.value)}
+              placeholder='{"LOG_LEVEL":"info"}'
+              rows={5}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+            />
+          </div>
+        </div>
+        {err && <div className="text-red text-xs">{err}</div>}
+        <div className="flex items-center justify-end gap-2 pt-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input"
+          >Cancel</button>
+          <button
+            type="submit"
+            disabled={busy}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input disabled:opacity-50"
+          >{busy ? "Saving…" : "Save"}</button>
+          {hasCurrentRelease && (
+            <button
+              type="button"
+              onClick={() => submit(true)}
+              disabled={busy}
+              className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+            >{busy ? "Working…" : "Save & restart"}</button>
+          )}
+        </div>
+      </form>
+    </div>
+  );
 }

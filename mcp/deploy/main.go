@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.13.0
+version: 0.14.0
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
@@ -301,7 +301,25 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/builds/", Handler: a.handleBuildItem},
 		{Pattern: "/api/releases/", Handler: a.handleReleaseItem},
 		{Pattern: "/api/_meta", Handler: a.handleMeta},
+		{Pattern: "/api/health", Handler: a.handleHealth},
 	}
+}
+
+// handleHealth is the HTTP twin of toolHealth — the panel polls it on a
+// timer to surface paused-auto-restart / crashed / stuck-starting state
+// without an MCP roundtrip.
+func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	out, err := a.toolHealth(globalCtx, map[string]any{"_project_id": pid})
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, out)
 }
 
 // handleMeta exposes whether the optional Domains and Certs apps are
