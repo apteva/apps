@@ -429,6 +429,41 @@ func topicsWindowed(db *sql.DB, f Filter, limit int) ([]map[string]any, error) {
 	return out, rows.Err()
 }
 
+// distinctDimensions returns the full set of app and topic values seen,
+// for the panel's filter dropdowns.
+func distinctDimensions(db *sql.DB) (apps, topics []string, err error) {
+	if apps, err = distinctColumn(db, "app"); err != nil {
+		return nil, nil, err
+	}
+	topics, err = distinctColumn(db, "topic")
+	return apps, topics, err
+}
+
+// distinctColumn lists distinct non-null values of one column. col is a
+// fixed identifier from a closed set (never user input) — guarded here
+// so it can never become an injection vector if a caller is added.
+func distinctColumn(db *sql.DB, col string) ([]string, error) {
+	switch col {
+	case "app", "topic":
+	default:
+		return nil, fmt.Errorf("distinctColumn: unsupported column %q", col)
+	}
+	rows, err := db.Query("SELECT DISTINCT " + col + " FROM events WHERE " + col + " IS NOT NULL ORDER BY " + col)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
 func nullStr(s string) any {
 	if s == "" {
 		return nil

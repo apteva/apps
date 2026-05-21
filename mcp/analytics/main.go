@@ -19,13 +19,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.2.0
+version: 0.3.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
   top / topics surface aggregates over JSON props. Explicit-tracking
-  only; v0.2 adds a read-only dashboard panel. Auto-capture from the
-  platform event firehose is deferred to a later release.
+  only. v0.3 emits an event.recorded bus event on each track and adds
+  a live dashboard panel (filters by event type / app / props, a
+  real-time event feed). Auto-capture from the platform event firehose
+  is deferred to a later release.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [global]
@@ -105,6 +107,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/summary", Handler: a.handleSummary},
 		{Pattern: "/series", Handler: a.handleSeries},
 		{Pattern: "/top", Handler: a.handleTop},
+		{Pattern: "/events", Handler: a.handleEvents},
+		{Pattern: "/dimensions", Handler: a.handleDimensions},
 	}
 }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }

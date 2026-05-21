@@ -23,16 +23,25 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 // filterFromQuery builds a Filter from URL query params — the HTTP
-// counterpart to filterFromArgs. Only the fields the panel sends.
+// counterpart to filterFromArgs. `where` is a JSON-encoded object of
+// "props.X" → value (equality), URL-encoded by the panel; malformed
+// JSON is ignored rather than erroring the whole request.
 func filterFromQuery(r *http.Request) Filter {
 	q := r.URL.Query()
-	return Filter{
+	f := Filter{
 		App:       q.Get("app"),
 		Topic:     q.Get("topic"),
 		ProjectID: q.Get("project_id"),
 		Since:     parseInt64(q.Get("since")),
 		Until:     parseInt64(q.Get("until")),
 	}
+	if ws := q.Get("where"); ws != "" {
+		var w map[string]any
+		if json.Unmarshal([]byte(ws), &w) == nil {
+			f.Where = w
+		}
+	}
+	return f
 }
 
 func parseInt64(s string) int64 {
@@ -103,4 +112,35 @@ func (a *App) handleTop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"top": rows, "by": by})
+}
+
+// GET /events — recent raw rows within the filters, newest first. Backs
+// the panel's live event feed.
+func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	rows, err := queryRows(globalCtx.AppDB(), filterFromQuery(r), queryLimit(r, 50, 500))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"events": rows})
+}
+
+// GET /dimensions — distinct apps + topics across the whole store, for
+// the panel's filter dropdowns. Unfiltered on purpose so the option set
+// stays stable as the operator narrows other filters.
+func (a *App) handleDimensions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	apps, topics, err := distinctDimensions(globalCtx.AppDB())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"apps": apps, "topics": topics})
 }

@@ -1,18 +1,97 @@
-// AnalyticsPanel — read-only overview of the generic event store.
+// AnalyticsPanel — live overview of the generic event store.
 //
 // Layout:
-//   ┌─ header: title · window (24h/7d/30d/All) · refresh ──────────┐
-//   │ stat tiles: total events · topics · apps                     │
-//   │ events/day  — inline SVG bar chart over /series              │
-//   │ top values  — horizontal bars over /top?by=props.X           │
-//   │ topics      — table over /summary.topics                     │
+//   ┌─ header: title · window (24h/7d/30d/All) · live · refresh ─────┐
+//   │ filter bar: app · event type · props.key = value · clear       │
+//   │ stat tiles: total events · topics · apps                       │
+//   │ events/day  — inline SVG bar chart over /series                │
+//   │ top values  — horizontal bars over /top?by=props.X             │
+//   │ event feed  — recent rows over /events (real-time)             │
+//   │ topics      — table over /summary.topics_list                  │
 //   └──────────────────────────────────────────────────────────────┘
 //
-// Charts are hand-rolled inline SVG (no chart library, intentionally
-// modest) coloured via currentColor + a theme text token, matching the
-// other Apteva panels. Backend: GET /api/apps/analytics/{summary,series,top}.
+// Real-time: each analytics_track emits "event.recorded" on the app bus;
+// this panel subscribes via the inlined useAppEvents helper and reloads
+// (debounced) when events land — same pattern as the crm / calendar
+// panels. Charts are hand-rolled inline SVG coloured via currentColor +
+// a theme text token. Backend: GET /api/apps/analytics/{summary,series,
+// top,events,dimensions}.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+// Inlined SDK app-event subscription. Each app ships its own copy
+// because panels are bundled standalone and apps are independently
+// installable — cross-app imports would break a one-off install.
+interface AppEventEnvelope<T = unknown> {
+  topic: string;
+  app: string;
+  project_id: string;
+  install_id: number;
+  seq: number;
+  time: string;
+  data: T;
+}
+function useAppEvents<T = unknown>(
+  app: string,
+  projectId: string | undefined | null,
+  onEvent: (ev: AppEventEnvelope<T>) => void,
+) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+  useEffect(() => {
+    if (!app || !projectId) return;
+    const handler = (ev: AppEventEnvelope<T>) => handlerRef.current(ev);
+    // Cross-bundle multiplexer: the dashboard publishes a shared
+    // (app, project) channel pool on window.__aptevaAppEvents so every
+    // panel reuses one EventSource per (app, project).
+    const bridge = (window as unknown as {
+      __aptevaAppEvents?: {
+        subscribe(
+          app: string,
+          projectId: string,
+          fn: (ev: AppEventEnvelope<T>) => void,
+        ): () => void;
+      };
+    }).__aptevaAppEvents;
+    if (bridge) {
+      return bridge.subscribe(app, projectId, handler);
+    }
+    // Fallback: panel running outside the dashboard (or before its
+    // hook module loaded). Open an EventSource directly.
+    let lastSeq = 0;
+    let es: EventSource | null = null;
+    let cancelled = false;
+    let reconnectTimer: number | null = null;
+    const connect = () => {
+      if (cancelled) return;
+      const url =
+        `/api/app-events/${encodeURIComponent(app)}` +
+        `?project_id=${encodeURIComponent(projectId)}` +
+        (lastSeq > 0 ? `&since=${lastSeq}` : "");
+      es = new EventSource(url, { withCredentials: true });
+      es.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data) as AppEventEnvelope<T>;
+          if (ev.seq <= lastSeq) return;
+          lastSeq = ev.seq;
+          handlerRef.current(ev);
+        } catch {}
+      };
+      es.onerror = () => {
+        if (es && es.readyState === EventSource.CLOSED) {
+          if (reconnectTimer) window.clearTimeout(reconnectTimer);
+          reconnectTimer = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (es) es.close();
+    };
+  }, [app, projectId]);
+}
 
 const API = "/api/apps/analytics";
 
@@ -23,18 +102,18 @@ interface NativePanelProps {
   instanceId?: number;
 }
 
-interface Summary {
-  total: number;
-  apps: number;
-  topics: number;
-  topics_list: TopicRow[];
-}
-
 interface TopicRow {
   app: string;
   topic: string;
   last_ts: number;
   count: number;
+}
+
+interface Summary {
+  total: number;
+  apps: number;
+  topics: number;
+  topics_list: TopicRow[];
 }
 
 interface SeriesPoint {
@@ -45,6 +124,22 @@ interface SeriesPoint {
 interface TopRow {
   value: string | null;
   count: number;
+}
+
+interface EventRow {
+  id: number;
+  ts: number;
+  app: string;
+  topic: string;
+  source: string;
+  user_id?: string;
+  session_id?: string;
+  props: Record<string, unknown>;
+}
+
+interface Dimensions {
+  apps: string[];
+  topics: string[];
 }
 
 const WINDOWS = [
@@ -70,6 +165,14 @@ function relTime(ms: number): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
+function propsPreview(props: Record<string, unknown>): string {
+  if (!props || typeof props !== "object") return "";
+  return Object.entries(props)
+    .slice(0, 5)
+    .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : String(v)}`)
+    .join("  ");
+}
+
 function ChartIcon() {
   return (
     <svg
@@ -89,10 +192,16 @@ function ChartIcon() {
   );
 }
 
-function Empty({ label }: { label: string }) {
+function Dot() {
   return (
-    <div className="py-8 text-center text-text-muted text-sm">{label}</div>
+    <svg width="8" height="8" viewBox="0 0 8 8" className="text-success" aria-hidden="true">
+      <circle cx="4" cy="4" r="4" fill="currentColor" />
+    </svg>
   );
+}
+
+function Empty({ label }: { label: string }) {
+  return <div className="py-8 text-center text-text-muted text-sm">{label}</div>;
 }
 
 function Stat({ label, value }: { label: string; value: number }) {
@@ -148,26 +257,13 @@ function TopBars({ rows }: { rows: TopRow[] }) {
     <div className="flex flex-col gap-1.5">
       {rows.map((r) => (
         <div key={String(r.value)} className="flex items-center gap-2 text-xs">
-          <div
-            className="text-text-muted truncate"
-            style={{ width: "140px" }}
-            title={r.value ?? ""}
-          >
+          <div className="text-text-muted truncate" style={{ width: "140px" }} title={r.value ?? ""}>
             {r.value ?? "—"}
           </div>
-          <div
-            className="flex-1 bg-bg-input rounded overflow-hidden"
-            style={{ height: "14px" }}
-          >
-            <div
-              className="h-full bg-accent"
-              style={{ width: `${(r.count / max) * 100}%` }}
-            />
+          <div className="flex-1 bg-bg-input rounded overflow-hidden" style={{ height: "14px" }}>
+            <div className="h-full bg-accent" style={{ width: `${(r.count / max) * 100}%` }} />
           </div>
-          <div
-            className="text-text-dim tabular-nums"
-            style={{ width: "56px", textAlign: "right" }}
-          >
+          <div className="text-text-dim tabular-nums" style={{ width: "56px", textAlign: "right" }}>
             {fmt(r.count)}
           </div>
         </div>
@@ -176,29 +272,78 @@ function TopBars({ rows }: { rows: TopRow[] }) {
   );
 }
 
-export default function AnalyticsPanel(_props: NativePanelProps) {
+function EventFeed({ rows }: { rows: EventRow[] }) {
+  if (!rows.length) return <Empty label="No events match these filters." />;
+  return (
+    <div style={{ maxHeight: "320px", overflow: "auto" }}>
+      {rows.map((e) => (
+        <div key={e.id} className="flex items-center gap-3 text-xs border-t border-border py-1.5">
+          <span className="text-text-dim tabular-nums" style={{ width: "64px" }}>
+            {relTime(e.ts)}
+          </span>
+          <span className="text-text-muted truncate" style={{ width: "84px" }}>
+            {e.app}
+          </span>
+          <span className="text-text font-medium truncate" style={{ width: "120px" }}>
+            {e.topic}
+          </span>
+          <span className="text-text-dim truncate flex-1" title={JSON.stringify(e.props)}>
+            {propsPreview(e.props)}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export default function AnalyticsPanel({ projectId }: NativePanelProps) {
   const [windowKey, setWindowKey] = useState("7d");
   const [byKey, setByKey] = useState("props.platform");
+  const [appF, setAppF] = useState("");
+  const [topicF, setTopicF] = useState("");
+  const [whereKey, setWhereKey] = useState("");
+  const [whereVal, setWhereVal] = useState("");
+
   const [summary, setSummary] = useState<Summary | null>(null);
   const [series, setSeries] = useState<SeriesPoint[]>([]);
   const [top, setTop] = useState<TopRow[]>([]);
+  const [events, setEvents] = useState<EventRow[]>([]);
+  const [dims, setDims] = useState<Dimensions>({ apps: [], topics: [] });
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
+  const [lastEventAt, setLastEventAt] = useState(0);
 
   const since = useMemo(() => {
     const w = WINDOWS.find((x) => x.key === windowKey);
     return w && w.ms ? Date.now() - w.ms : 0;
   }, [windowKey]);
 
-  const qs = useMemo(() => (since ? `?since=${since}` : ""), [since]);
+  // Shared query string for every data endpoint: window + dimension
+  // filters (app / event type / one props.X = value equality).
+  const qs = useMemo(() => {
+    const p = new URLSearchParams();
+    if (since) p.set("since", String(since));
+    if (appF) p.set("app", appF);
+    if (topicF) p.set("topic", topicF);
+    if (whereKey.trim() && whereVal.trim()) {
+      p.set("where", JSON.stringify({ [whereKey.trim()]: whereVal.trim() }));
+    }
+    return p.toString();
+  }, [since, appF, topicF, whereKey, whereVal]);
+
+  const withQs = useCallback(
+    (base: string) => base + (qs ? (base.includes("?") ? "&" : "?") + qs : ""),
+    [qs],
+  );
 
   const loadMain = useCallback(async () => {
     setLoading(true);
     setErr("");
     try {
-      const [sumR, serR] = await Promise.all([
-        fetch(`${API}/summary${qs}`, { credentials: "same-origin" }),
-        fetch(`${API}/series${qs}`, { credentials: "same-origin" }),
+      const [sumR, serR, evR] = await Promise.all([
+        fetch(withQs(`${API}/summary`), { credentials: "same-origin" }),
+        fetch(withQs(`${API}/series`), { credentials: "same-origin" }),
+        fetch(withQs(`${API}/events?limit=50`), { credentials: "same-origin" }),
       ]);
       if (sumR.ok) {
         const d = await sumR.json();
@@ -212,24 +357,32 @@ export default function AnalyticsPanel(_props: NativePanelProps) {
         setErr(`summary ${sumR.status}`);
       }
       if (serR.ok) setSeries((await serR.json()).series ?? []);
+      if (evR.ok) setEvents((await evR.json()).events ?? []);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
       setLoading(false);
     }
-  }, [qs]);
+  }, [withQs]);
 
   const loadTop = useCallback(async () => {
     try {
-      const sep = qs ? "&" : "?";
-      const res = await fetch(`${API}/top${qs}${sep}by=${encodeURIComponent(byKey)}`, {
+      const res = await fetch(withQs(`${API}/top?by=${encodeURIComponent(byKey)}`), {
         credentials: "same-origin",
       });
       if (res.ok) setTop((await res.json()).top ?? []);
     } catch {
-      /* top is best-effort; main load surfaces errors */
+      /* top is best-effort; loadMain surfaces errors */
     }
-  }, [qs, byKey]);
+  }, [withQs, byKey]);
+
+  // Dimension options for the filter dropdowns — fetched once, unfiltered.
+  useEffect(() => {
+    fetch(`${API}/dimensions`, { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : { apps: [], topics: [] }))
+      .then((d) => setDims({ apps: d.apps ?? [], topics: d.topics ?? [] }))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     loadMain();
@@ -240,10 +393,32 @@ export default function AnalyticsPanel(_props: NativePanelProps) {
     return () => clearTimeout(t);
   }, [loadTop]);
 
+  // Live: debounce bus events so a burst of tracks = one reload.
+  const reloadTimer = useRef<number | null>(null);
+  const onBusEvent = useCallback(() => {
+    setLastEventAt(Date.now());
+    if (reloadTimer.current) window.clearTimeout(reloadTimer.current);
+    reloadTimer.current = window.setTimeout(() => {
+      loadMain();
+      loadTop();
+    }, 1200);
+  }, [loadMain, loadTop]);
+  useAppEvents("analytics", projectId, onBusEvent);
+
   const refresh = () => {
     loadMain();
     loadTop();
   };
+
+  const hasFilters = !!(appF || topicF || (whereKey && whereVal));
+  const clearFilters = () => {
+    setAppF("");
+    setTopicF("");
+    setWhereKey("");
+    setWhereVal("");
+  };
+
+  const selCls = "bg-bg-input border border-border rounded px-2 py-1 text-xs";
 
   return (
     <div className="h-full flex flex-col">
@@ -270,17 +445,64 @@ export default function AnalyticsPanel(_props: NativePanelProps) {
             </button>
           ))}
         </div>
+        <span className="flex items-center gap-1.5 text-text-dim text-xs ml-1" title="Live — updates as events are recorded">
+          <Dot />
+          {lastEventAt ? `live · ${relTime(lastEventAt)}` : "live"}
+        </span>
         <button
           onClick={refresh}
           disabled={loading}
-          className="px-3 py-1 text-sm border border-border rounded text-text-muted hover:text-text disabled:opacity-50"
+          className="ml-auto px-3 py-1 text-sm border border-border rounded text-text-muted hover:text-text disabled:opacity-50"
         >
           Refresh
         </button>
-        <span className="ml-auto text-text-dim text-xs">
+        <span className="text-text-dim text-xs" style={{ minWidth: "48px" }}>
           {err ? <span className="text-error">{err}</span> : loading ? "loading…" : ""}
         </span>
       </header>
+
+      <div className="flex items-center gap-2 flex-wrap border-b border-border px-4 py-2">
+        <select value={appF} onChange={(e) => setAppF(e.target.value)} className={selCls}>
+          <option value="">All apps</option>
+          {dims.apps.map((a) => (
+            <option key={a} value={a}>
+              {a}
+            </option>
+          ))}
+        </select>
+        <select value={topicF} onChange={(e) => setTopicF(e.target.value)} className={selCls}>
+          <option value="">All event types</option>
+          {dims.topics.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
+        </select>
+        <input
+          type="text"
+          value={whereKey}
+          onChange={(e) => setWhereKey(e.target.value)}
+          placeholder="props.country"
+          spellCheck={false}
+          className={selCls}
+          style={{ width: "140px" }}
+        />
+        <span className="text-text-dim text-xs">=</span>
+        <input
+          type="text"
+          value={whereVal}
+          onChange={(e) => setWhereVal(e.target.value)}
+          placeholder="value"
+          spellCheck={false}
+          className={selCls}
+          style={{ width: "120px" }}
+        />
+        {hasFilters && (
+          <button onClick={clearFilters} className="px-2 py-1 text-xs text-text-muted hover:text-text">
+            Clear
+          </button>
+        )}
+      </div>
 
       <div className="flex-1 overflow-auto p-4 flex flex-col gap-4">
         <div className="flex gap-3">
@@ -308,6 +530,11 @@ export default function AnalyticsPanel(_props: NativePanelProps) {
             />
           </div>
           <TopBars rows={top} />
+        </section>
+
+        <section className="border border-border rounded p-4 flex flex-col gap-2">
+          <div className="text-text-dim text-xs uppercase">Event feed</div>
+          <EventFeed rows={events} />
         </section>
 
         <section className="border border-border rounded p-4 flex flex-col gap-2">

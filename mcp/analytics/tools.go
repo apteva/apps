@@ -65,6 +65,20 @@ func (a *App) toolTrack(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("insert: %w", err)
 	}
+
+	// Announce on the app-event bus so live panels (and other apps) can
+	// react. analytics is global, so the event's project is a property
+	// of the data (its project_id), not the dispatch ctx — fall back to
+	// the calling context when the caller didn't supply one. Fire-and-
+	// forget; a missed fanout is recovered by the dashboard reconnecting.
+	pid := stringArg(args, "project_id")
+	if pid == "" {
+		pid = ctx.CurrentProject()
+	}
+	ctx.EmitWithProject("event.recorded", pid, map[string]any{
+		"id": id, "app": app, "topic": event, "ts": ts,
+	})
+
 	return map[string]any{"id": id, "ts": ts}, nil
 }
 
