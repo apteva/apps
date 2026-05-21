@@ -1,4 +1,4 @@
-# Checkout (v0.1.0)
+# Checkout (v0.1.1)
 
 Cart + checkout flow. Sits between the storefront (rendered by `content`) and the order ledger (`billing`).
 

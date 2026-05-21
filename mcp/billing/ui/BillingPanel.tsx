@@ -259,6 +259,7 @@ export default function BillingPanel({ projectId, installId }: NativePanelProps)
       const r = await fetch(`${API}${path}?${queryString(query)}`, {
         method,
         credentials: "same-origin",
+        cache: "no-store", // never serve a cached list/detail after a mutation
         headers: body ? { "Content-Type": "application/json" } : {},
         body: body ? JSON.stringify(body) : undefined,
       });
@@ -899,7 +900,7 @@ async function fetchCatalogPriceOptions(
 ): Promise<CatalogPriceOption[]> {
   const r = await fetch(
     `/api/apps/catalog/products?project_id=${encodeURIComponent(projectId)}&archived=false`,
-    { credentials: "same-origin" },
+    { credentials: "same-origin", cache: "no-store" },
   );
   if (!r.ok) {
     if (r.status === 404) {
@@ -920,7 +921,7 @@ async function fetchCatalogPriceOptions(
     try {
       const pr = await fetch(
         `/api/apps/catalog/products/${p.id}?project_id=${encodeURIComponent(projectId)}`,
-        { credentials: "same-origin" },
+        { credentials: "same-origin", cache: "no-store" },
       );
       if (!pr.ok) continue;
       const detail = (await pr.json()) as { product: CatalogProductWithPrices };
@@ -1030,7 +1031,7 @@ function CreateInvoiceModal({
   let taxTotal = 0;
   for (const it of items) {
     if (!it.description.trim()) continue;
-    const qty = parseFloat(it.quantity || "0");
+    const qty = parseFloat(it.quantity || "1");
     const unit = parseFloat(it.unit_price || "0");
     if (!isFinite(qty) || qty <= 0 || !isFinite(unit)) continue;
     const lineCents = Math.round(qty * unit * 100);
@@ -1061,7 +1062,7 @@ function CreateInvoiceModal({
         .map((it, i) => {
           const desc = it.description.trim();
           if (!desc) return null;
-          const qty = parseFloat(it.quantity || "0");
+          const qty = parseFloat(it.quantity || "1");
           if (!isFinite(qty) || qty <= 0) {
             throw new Error(`Line ${i + 1}: quantity must be > 0`);
           }
@@ -1623,7 +1624,7 @@ function EditInvoiceModal({
   let taxTotal = 0;
   for (const it of items) {
     if (!it.description.trim()) continue;
-    const qty = parseFloat(it.quantity || "0");
+    const qty = parseFloat(it.quantity || "1");
     const unit = parseFloat(it.unit_price || "0");
     if (!isFinite(qty) || qty <= 0 || !isFinite(unit)) continue;
     const lineCents = Math.round(qty * unit * 100);
@@ -1662,7 +1663,7 @@ function EditInvoiceModal({
           .map((it, i) => {
             const desc = it.description.trim();
             if (!desc) return null;
-            const qty = parseFloat(it.quantity || "0");
+            const qty = parseFloat(it.quantity || "1");
             if (!isFinite(qty) || qty <= 0) {
               throw new Error(`Line ${i + 1}: quantity must be > 0`);
             }

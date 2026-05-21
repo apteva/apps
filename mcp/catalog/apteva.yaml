@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: catalog
 display_name: Catalog
-version: 0.1.0
+version: 0.1.1
 description: |
   Products and prices — the source of truth for what your business
   sells. Modelled after Stripe's Product + Price split: one product,

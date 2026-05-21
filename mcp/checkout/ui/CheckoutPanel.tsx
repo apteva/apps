@@ -222,6 +222,7 @@ export default function CheckoutPanel({ projectId, installId }: NativePanelProps
       const r = await fetch(`${API}${path}?${queryString(query)}`, {
         method,
         credentials: "same-origin",
+        cache: "no-store", // never serve a cached list/detail after a mutation
         headers: body ? { "Content-Type": "application/json" } : {},
         body: body ? JSON.stringify(body) : undefined,
       });

@@ -3261,6 +3261,10 @@ func pathIntSegment(path, prefix string, n int) int64 {
 
 func httpJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	// no-store: these are dynamic, per-request reads. Without this the
+	// browser serves a cached list/detail after a mutation, so the
+	// panel shows stale data until a hard reload.
+	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(v)
 }
 

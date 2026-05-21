@@ -1798,6 +1798,9 @@ func newSessionToken() string {
 
 func httpJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	// no-store: dynamic per-request reads. Prevents the panel from
+	// showing stale data after a mutation until a hard reload.
+	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(v)
 }
 

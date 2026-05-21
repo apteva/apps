@@ -1,4 +1,4 @@
-# Catalog (v0.1.0)
+# Catalog (v0.1.1)
 
 Products and prices — the source of truth for what your business sells.
 
