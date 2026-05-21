@@ -1,13 +1,15 @@
 {{ define "post_card" }}
 <article class="post-card">
-  <h2 class="post-card-title">
+  <h2 class="post-card__title">
     <a href="posts/{{ .Slug }}">{{ .Title }}</a>
   </h2>
   {{ if .PublishedAt }}
-  <p class="post-card-meta">
+  <p class="post-card__meta">
     <time datetime="{{ .PublishedAt }}">{{ formatDate .PublishedAt "January 2, 2006" }}</time>
+    {{ if .Author }} &middot; {{ .Author }}{{ end }}
   </p>
   {{ end }}
-  {{ if .Excerpt }}<p class="post-card-excerpt">{{ .Excerpt }}</p>{{ end }}
+  {{ if .Excerpt }}<p class="post-card__excerpt">{{ .Excerpt }}</p>{{ end }}
+  <p class="post-card__more"><a href="posts/{{ .Slug }}">Read more →</a></p>
 </article>
 {{ end }}

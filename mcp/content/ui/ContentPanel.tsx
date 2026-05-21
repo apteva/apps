@@ -137,7 +137,7 @@ function defaultAttrs(type: string): Record<string, any> {
 // Switching between list and templates is via the top tab bar;
 // opening the editor replaces the view entirely (own back button).
 
-type View = "list" | "templates";
+type View = "list" | "templates" | "themes";
 
 interface SiteSummary {
   id: number;
@@ -207,6 +207,7 @@ export default function ContentPanel({ projectId }: NativePanelProps) {
       {view === "templates" && (
         <TemplatesView api={api} projectId={projectId} onApplied={() => setView("list")} />
       )}
+      {view === "themes" && <ThemesView api={api} />}
     </div>
   );
 }
@@ -245,6 +246,7 @@ function Tabs({
       <div className="flex gap-1">
         {tab("list", "Content")}
         {tab("templates", "Templates")}
+        {tab("themes", "Themes")}
       </div>
       {/* Site switcher — hidden when only one site exists (single-site UX). */}
       {sites.length >= 2 ? (
@@ -1412,5 +1414,115 @@ function SummaryTable({ s }: { s: ApplySummary }) {
         </li>
       )}
     </ul>
+  );
+}
+
+// ── themes view (catalog + switcher) ─────────────────────────────
+
+interface ThemeInfo {
+  slug: string;
+  name: string;
+  version: string;
+  source: string;
+  active: boolean;
+}
+
+function ThemesView({ api }: { api: ReturnType<typeof makeAPI> }) {
+  const [themes, setThemes] = useState<ThemeInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [switching, setSwitching] = useState<string | null>(null);
+
+  const refresh = useCallback(() => {
+    setLoading(true);
+    api<{ themes: ThemeInfo[] | null }>("/admin/themes")
+      .then((r) => setThemes(r.themes ?? []))
+      .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false));
+  }, [api]);
+
+  useEffect(refresh, [refresh]);
+
+  const activate = async (slug: string) => {
+    setSwitching(slug);
+    setError(null);
+    try {
+      // themes_set_active via the /tools/call surface — REST mirror is
+      // limited to listing for now; the agent path is /tools/call.
+      await api("/admin/themes", {
+        method: "POST",
+        body: JSON.stringify({ slug }),
+      });
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSwitching(null);
+    }
+  };
+
+  return (
+    <div className="p-4 text-sm">
+      <header className="mb-3">
+        <h2 className="text-base font-semibold">Themes</h2>
+        <p className="text-xs text-fg-muted">
+          A theme controls how rendered HTML looks. Each site picks its own
+          theme; the active theme on the current site is highlighted below.
+        </p>
+      </header>
+
+      {error && (
+        <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2">{error}</div>
+      )}
+      {loading && <div className="text-fg-muted py-4">Loading…</div>}
+
+      <ul className="grid grid-cols-1 md:grid-cols-2 gap-3 list-none p-0">
+        {themes.map((t) => (
+          <li
+            key={t.slug}
+            className={`border rounded p-3 flex flex-col ${
+              t.active ? "border-fg" : "border-border"
+            }`}
+          >
+            <div className="flex items-baseline justify-between gap-2">
+              <h3 className="font-semibold">{t.name}</h3>
+              <span className="text-xs text-fg-muted">v{t.version}</span>
+            </div>
+            <p className="text-fg-muted text-xs mt-1">
+              Source: {t.source}
+              {t.active && (
+                <span className="ml-2 inline-block px-2 py-0.5 rounded bg-bg-input border border-border text-fg">
+                  Active
+                </span>
+              )}
+            </p>
+            <div className="flex gap-2 mt-3">
+              <button
+                disabled={t.active || switching === t.slug}
+                onClick={() => activate(t.slug)}
+                className="flex-1 px-3 py-1 rounded border border-border disabled:opacity-50"
+              >
+                {switching === t.slug
+                  ? "Switching…"
+                  : t.active
+                    ? "Active"
+                    : "Use this theme"}
+              </button>
+            </div>
+          </li>
+        ))}
+        {!loading && themes.length === 0 && (
+          <li className="col-span-full text-fg-muted text-center py-8">
+            No themes installed.
+          </li>
+        )}
+      </ul>
+
+      <footer className="text-fg-muted text-xs pt-4 mt-4 border-t border-border">
+        Multiple themes are coming in v2.2 — for now, the default ships with the
+        binary. Custom themes will be loadable from the bound storage app under{" "}
+        <code>/.themes/&lt;slug&gt;/</code> once that path is wired.
+      </footer>
+    </div>
   );
 }

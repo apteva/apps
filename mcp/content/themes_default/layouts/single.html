@@ -1,8 +1,18 @@
 {{ define "main" }}
+{{- /* Pages don't get the post-header (no date, no terms) — the
+       page's first block IS the hero. Posts get the full editorial
+       chrome: title, date, author, featured image. */ -}}
+{{ if eq .Post.Kind "page" }}
+<article class="page-single">
+  <div class="page-body">
+    {{ renderBlocks .Post.BodyBlocks.Blocks }}
+  </div>
+</article>
+{{ else }}
 <article class="post-single">
-  <header class="post-header">
+  <header class="post-header container">
     <h1 class="post-title">{{ .Post.Title }}</h1>
-    {{ if and (eq .Post.Kind "post") .Post.PublishedAt }}
+    {{ if .Post.PublishedAt }}
     <p class="post-meta">
       <time datetime="{{ .Post.PublishedAt }}">{{ formatDate .Post.PublishedAt "January 2, 2006" }}</time>
       {{ if .Post.Author }} &middot; {{ .Post.Author }}{{ end }}
@@ -14,11 +24,11 @@
     </figure>
     {{ end }}
   </header>
-  <div class="post-body">
+  <div class="post-body container">
     {{ renderBlocks .Post.BodyBlocks.Blocks }}
   </div>
   {{ if .Terms }}
-  <footer class="post-footer">
+  <footer class="post-footer container">
     <ul class="post-terms">
       {{ range .Terms }}
       <li><a href="{{ .Kind }}/{{ .Slug }}">{{ .Name }}</a></li>
@@ -27,4 +37,5 @@
   </footer>
   {{ end }}
 </article>
+{{ end }}
 {{ end }}

@@ -14,6 +14,9 @@
 {{ if .MetaDescription }}<meta name="description" content="{{ .MetaDescription }}">{{ end }}
 {{ if .Canonical }}<link rel="canonical" href="{{ .Canonical }}">{{ end }}
 <link rel="alternate" type="application/rss+xml" title="{{ .SiteTitle }}" href="feed.xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="{{ asset "style.css" }}">
 {{ if .OpenGraph }}
 <meta property="og:title" content="{{ .OpenGraph.Title }}">

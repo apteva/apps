@@ -10,6 +10,7 @@ package main
 
 import (
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -258,9 +259,24 @@ func (a *App) toolThemesSetActive(ctx *sdk.AppCtx, args map[string]any) (any, er
 // ── REST handler (admin) ────────────────────────────────────────
 
 func (a *App) handleHTTPThemes(w http.ResponseWriter, r *http.Request) {
+	ctx := getAppCtx(r)
+	pid, _ := resolveProjectFromRequest(r)
 	switch r.Method {
 	case http.MethodGet:
-		out, _ := a.toolThemesList(nil, nil)
+		out, _ := a.toolThemesList(ctx, map[string]any{"_project_id": pid})
+		httpJSON(w, out)
+	case http.MethodPost:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		body["_project_id"] = pid
+		out, err := a.toolThemesSetActive(ctx, body)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		httpJSON(w, out)
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
