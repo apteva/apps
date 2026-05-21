@@ -82,147 +82,13 @@ function Icon({ name }: { name: string }) {
 }
 
 // ── shared api helper (scoped via closure to the panel's project) ─
-// Scoped <style> block — the dashboard's Tailwind JIT doesn't scan
-// apps/mcp/*/ui/*, so half our cp-fg-muted / border-border utilities
-// either don't get emitted or resolve to the same white in dark mode.
-// We solve it by defining a small set of cp-* classes here that use
-// the dashboard's CSS variables with sensible fallbacks. Every text
-// node in the panel uses these so contrast hierarchy is guaranteed in
-// both color schemes.
+// Scoped <style> — colored status pills ONLY. We don't redefine the
+// dashboard's text/border/bg tokens here; the dashboard's own
+// Tailwind utilities (text-fg, text-fg-muted, border-border,
+// bg-bg-input) already work and define contrast correctly in both
+// modes. Overriding them via CSS variables broke contrast in dark
+// mode (because our fallback was a light-mode color).
 const PANEL_STYLES = `
-.cp-fg        { color: var(--fg, #111827); }
-.cp-fg-muted  { color: color-mix(in srgb, var(--fg, #111827) 65%, transparent); }
-.cp-fg-soft   { color: color-mix(in srgb, var(--fg, #111827) 45%, transparent); }
-.cp-fg-accent { color: var(--accent, #4f46e5); }
-.cp-bg        { background: var(--bg, #ffffff); }
-.cp-bg-soft   { background: color-mix(in srgb, var(--fg, #111827) 4%, transparent); }
-.cp-bg-input  { background: var(--bg-input, color-mix(in srgb, var(--fg, #111827) 6%, transparent)); }
-.cp-bd        { border-color: color-mix(in srgb, var(--fg, #111827) 14%, transparent); }
-.cp-bd-strong { border-color: var(--fg, #111827); }
-
-.cp-card {
-  background: color-mix(in srgb, var(--fg, #111827) 3%, transparent);
-  border: 1px solid color-mix(in srgb, var(--fg, #111827) 12%, transparent);
-  border-radius: 6px;
-  padding: 0.75rem 0.9rem;
-}
-.cp-card:hover {
-  border-color: color-mix(in srgb, var(--fg, #111827) 22%, transparent);
-}
-.cp-card h3 { color: var(--fg, #111827); font-weight: 600; }
-
-.cp-chip {
-  display: inline-block;
-  font-size: 0.7rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  padding: 0.1rem 0.4rem;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--fg, #111827) 6%, transparent);
-  color: color-mix(in srgb, var(--fg, #111827) 70%, transparent);
-}
-
-.cp-btn {
-  background: transparent;
-  color: var(--fg, #111827);
-  border: 1px solid color-mix(in srgb, var(--fg, #111827) 14%, transparent);
-  border-radius: 5px;
-  padding: 0.3rem 0.7rem;
-  font-size: 0.85rem;
-  cursor: pointer;
-  transition: background 0.1s, border-color 0.1s;
-}
-.cp-btn:hover { background: color-mix(in srgb, var(--fg, #111827) 6%, transparent); }
-.cp-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.cp-btn.is-primary {
-  background: var(--accent, #4f46e5);
-  color: #ffffff;
-  border-color: var(--accent, #4f46e5);
-}
-.cp-btn.is-primary:hover { background: color-mix(in srgb, var(--accent, #4f46e5) 85%, black); }
-.cp-btn.is-danger {
-  color: #dc2626;
-}
-.cp-btn.is-danger:hover {
-  background: color-mix(in srgb, #dc2626 12%, transparent);
-}
-.cp-btn.is-danger-solid {
-  background: #dc2626;
-  color: #ffffff;
-  border-color: #dc2626;
-}
-.cp-btn.is-danger-solid:hover { background: #b91c1c; }
-
-.cp-input {
-  background: var(--bg-input, color-mix(in srgb, var(--fg, #111827) 5%, transparent));
-  border: 1px solid color-mix(in srgb, var(--fg, #111827) 14%, transparent);
-  border-radius: 5px;
-  padding: 0.35rem 0.6rem;
-  color: var(--fg, #111827);
-  font-size: 0.9rem;
-}
-.cp-input:focus { outline: 2px solid var(--accent, #4f46e5); outline-offset: -1px; }
-
-.cp-tab {
-  padding: 0.5rem 0.9rem;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  color: color-mix(in srgb, var(--fg, #111827) 55%, transparent);
-  border-bottom: 2px solid transparent;
-  font-size: 0.9rem;
-}
-.cp-tab:hover { color: var(--fg, #111827); }
-.cp-tab.is-active {
-  color: var(--fg, #111827);
-  font-weight: 600;
-  border-bottom-color: var(--fg, #111827);
-}
-
-.cp-tabbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  border-bottom: 1px solid color-mix(in srgb, var(--fg, #111827) 12%, transparent);
-  padding: 0.25rem 1rem 0;
-}
-
-.cp-error {
-  background: color-mix(in srgb, #dc2626 15%, transparent);
-  color: #b91c1c;
-  border-radius: 4px;
-  padding: 0.5rem 0.75rem;
-  font-size: 0.9rem;
-}
-.cp-warn {
-  background: color-mix(in srgb, #f59e0b 18%, transparent);
-  color: #92400e;
-  border-radius: 4px;
-  padding: 0.6rem 0.85rem;
-  font-size: 0.9rem;
-}
-@media (prefers-color-scheme: dark) {
-  .cp-warn { color: #fbbf24; }
-  .cp-error { color: #fca5a5; }
-}
-
-.cp-modal-backdrop {
-  position: fixed; inset: 0;
-  background: rgba(0,0,0,0.55);
-  display: flex; align-items: center; justify-content: center;
-  z-index: 50;
-}
-.cp-modal {
-  background: var(--bg, #ffffff);
-  color: var(--fg, #111827);
-  border: 1px solid color-mix(in srgb, var(--fg, #111827) 14%, transparent);
-  border-radius: 8px;
-  padding: 1.25rem;
-  width: 28rem;
-  max-width: calc(100vw - 2rem);
-  box-shadow: 0 16px 40px rgba(0,0,0,0.35);
-}
-.cp-modal h3 { margin: 0 0 0.5rem; font-size: 1rem; }
-
 .cp-status-pill {
   display: inline-block;
   padding: 0.1rem 0.5rem;
@@ -231,15 +97,17 @@ const PANEL_STYLES = `
   text-transform: uppercase;
   letter-spacing: 0.04em;
   font-weight: 600;
+  line-height: 1.4;
 }
-.cp-status-draft     { background: color-mix(in srgb, #6b7280 18%, transparent); color: color-mix(in srgb, var(--fg, #111827) 65%, transparent); }
-.cp-status-scheduled { background: color-mix(in srgb, #f59e0b 18%, transparent); color: #b45309; }
-.cp-status-published { background: color-mix(in srgb, #10b981 18%, transparent); color: #047857; }
-.cp-status-archived  { background: color-mix(in srgb, #dc2626 14%, transparent); color: #b91c1c; }
+.cp-status-pill.cp-status-draft     { background: rgba(107,114,128,0.18); color: rgb(107,114,128); }
+.cp-status-pill.cp-status-scheduled { background: rgba(245,158,11,0.20);  color: rgb(180,83,9); }
+.cp-status-pill.cp-status-published { background: rgba(16,185,129,0.22);  color: rgb(4,120,87); }
+.cp-status-pill.cp-status-archived  { background: rgba(220,38,38,0.18);   color: rgb(185,28,28); }
 @media (prefers-color-scheme: dark) {
-  .cp-status-scheduled { color: #fbbf24; }
-  .cp-status-published { color: #34d399; }
-  .cp-status-archived  { color: #fca5a5; }
+  .cp-status-pill.cp-status-draft     { color: rgb(156,163,175); }
+  .cp-status-pill.cp-status-scheduled { color: rgb(251,191,36); }
+  .cp-status-pill.cp-status-published { color: rgb(52,211,153); }
+  .cp-status-pill.cp-status-archived  { color: rgb(252,165,165); }
 }
 `;
 
@@ -405,14 +273,14 @@ function Tabs({
       key={id}
       onClick={() => onChange(id)}
       className={`px-4 py-2 text-sm border-b-2 ${
-        view === id ? "border-fg font-semibold" : "border-transparent cp-fg-muted"
+        view === id ? "border-fg font-semibold" : "border-transparent text-fg-muted"
       }`}
     >
       {label}
     </button>
   );
   return (
-    <div className="flex items-center justify-between border-b cp-bd px-4 pt-2 bg-bg">
+    <div className="flex items-center justify-between border-b border-border px-4 pt-2 bg-bg">
       <div className="flex gap-1">
         {tab("list", "Content")}
         {tab("templates", "Templates")}
@@ -422,11 +290,11 @@ function Tabs({
       {/* Site switcher — hidden when only one site exists (single-site UX). */}
       {sites.length >= 2 ? (
         <div className="flex items-center gap-2 pb-2">
-          <span className="text-xs cp-fg-muted">Site</span>
+          <span className="text-xs text-fg-muted">Site</span>
           <select
             value={activeSite ?? ""}
             onChange={(e) => onSiteChange(e.target.value)}
-            className="border cp-bd rounded px-2 py-1 cp-bg-input text-sm"
+            className="border border-border rounded px-2 py-1 bg-bg-input text-sm"
           >
             {sites.map((s) => (
               <option key={s.slug} value={s.slug}>
@@ -437,7 +305,7 @@ function Tabs({
           </select>
           <button
             onClick={() => setCreating(true)}
-            className="px-2 py-1 text-xs rounded border cp-bd"
+            className="px-2 py-1 text-xs rounded border border-border"
           >
             + New site
           </button>
@@ -448,7 +316,7 @@ function Tabs({
         <div className="pb-2">
           <button
             onClick={() => setCreating(true)}
-            className="text-xs cp-fg-muted hover:cp-fg"
+            className="text-xs text-fg-muted hover:text-fg"
           >
             + Add second site
           </button>
@@ -516,57 +384,57 @@ function NewSiteDialog({
       onClick={onClose}
     >
       <div
-        className="bg-bg border cp-bd rounded p-4 w-96"
+        className="bg-bg border border-border rounded p-4 w-96"
         onClick={(e) => e.stopPropagation()}
       >
         <h3 className="font-semibold mb-3">New site</h3>
-        <p className="text-xs cp-fg-muted mb-3">
+        <p className="text-xs text-fg-muted mb-3">
           Sites in the same project share templates but have their own posts,
           pages, menus, settings, and theme. Bind a hostname to make this site
           publicly addressable (requires the deploy app).
         </p>
         <label className="block mb-2">
-          <span className="text-xs cp-fg-muted">Slug (URL-safe id)</span>
+          <span className="text-xs text-fg-muted">Slug (URL-safe id)</span>
           <input
             type="text"
             value={slug}
             onChange={(e) => setSlug(e.target.value)}
             placeholder="e.g. blog"
-            className="block w-full mt-1 border cp-bd rounded px-2 py-1 cp-bg-input"
+            className="block w-full mt-1 border border-border rounded px-2 py-1 bg-bg-input"
             autoFocus
           />
         </label>
         <label className="block mb-2">
-          <span className="text-xs cp-fg-muted">Display name</span>
+          <span className="text-xs text-fg-muted">Display name</span>
           <input
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="e.g. Blog"
-            className="block w-full mt-1 border cp-bd rounded px-2 py-1 cp-bg-input"
+            className="block w-full mt-1 border border-border rounded px-2 py-1 bg-bg-input"
           />
         </label>
         <label className="block mb-3">
-          <span className="text-xs cp-fg-muted">Hostname (optional)</span>
+          <span className="text-xs text-fg-muted">Hostname (optional)</span>
           <input
             type="text"
             value={hostname}
             onChange={(e) => setHostname(e.target.value)}
             placeholder="e.g. blog.example.com"
-            className="block w-full mt-1 border cp-bd rounded px-2 py-1 cp-bg-input"
+            className="block w-full mt-1 border border-border rounded px-2 py-1 bg-bg-input"
           />
         </label>
         {error && (
           <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2">{error}</div>
         )}
         <div className="flex justify-end gap-2 mt-3">
-          <button onClick={onClose} className="px-3 py-1 rounded border cp-bd">
+          <button onClick={onClose} className="px-3 py-1 rounded border border-border">
             Cancel
           </button>
           <button
             onClick={submit}
             disabled={submitting}
-            className="px-3 py-1 rounded border cp-bd font-semibold disabled:opacity-50"
+            className="px-3 py-1 rounded border border-border font-semibold disabled:opacity-50"
           >
             {submitting ? "Creating…" : "Create site"}
           </button>
@@ -654,7 +522,7 @@ function ListView({
           <select
             value={kind}
             onChange={(e) => setKind(e.target.value as Kind)}
-            className="border cp-bd rounded px-2 py-1 cp-bg-input"
+            className="border border-border rounded px-2 py-1 bg-bg-input"
           >
             <option value="post">Posts</option>
             <option value="page">Pages</option>
@@ -662,7 +530,7 @@ function ListView({
           <select
             value={status}
             onChange={(e) => setStatus(e.target.value)}
-            className="border cp-bd rounded px-2 py-1 cp-bg-input"
+            className="border border-border rounded px-2 py-1 bg-bg-input"
           >
             <option value="">All statuses</option>
             <option value="draft">Draft</option>
@@ -680,29 +548,29 @@ function ListView({
           placeholder={`New ${kind} title…`}
           onChange={(e) => setDraftTitle(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && createDraft()}
-          className="flex-1 border cp-bd rounded px-2 py-1 cp-bg-input"
+          className="flex-1 border border-border rounded px-2 py-1 bg-bg-input"
         />
         <button
           onClick={createDraft}
-          className="flex items-center gap-1 px-3 py-1 rounded border cp-bd"
+          className="flex items-center gap-1 px-3 py-1 rounded border border-border"
         >
           <Icon name="plus" /> New & edit
         </button>
       </section>
 
       {error && <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2">{error}</div>}
-      {loading && <div className="cp-fg-muted py-4">Loading…</div>}
+      {loading && <div className="text-fg-muted py-4">Loading…</div>}
 
       <ul className="list-none p-0 m-0">
         {posts.map((p) => (
           <li
             key={p.id}
-            className="flex items-center justify-between py-3 border-b cp-bd"
+            className="flex items-center justify-between py-3 border-b border-border"
           >
             <div className="flex items-baseline gap-2">
               <strong>{p.title || <em>(untitled)</em>}</strong>
               <span className={`cp-status-pill cp-status-${p.status}`}>{p.status}</span>
-              <span className="text-xs cp-fg-muted">
+              <span className="text-xs text-fg-muted">
                 /{p.kind === "post" ? "posts/" : ""}
                 {p.slug}
               </span>
@@ -710,7 +578,7 @@ function ListView({
             <div className="flex gap-1">
               <button
                 onClick={() => onOpen(p.id)}
-                className="flex items-center gap-1 px-2 py-1 text-xs rounded border cp-bd"
+                className="flex items-center gap-1 px-2 py-1 text-xs rounded border border-border"
               >
                 <Icon name="edit" /> Edit
               </button>
@@ -718,7 +586,7 @@ function ListView({
                 // Archived rows: Restore (back to draft) + permanent Delete.
                 <button
                   onClick={() => act(p.id, "unpublish")}
-                  className="px-2 py-1 text-xs rounded border cp-bd"
+                  className="px-2 py-1 text-xs rounded border border-border"
                   title="Move back to draft"
                 >
                   Restore
@@ -728,14 +596,14 @@ function ListView({
                   {p.status !== "published" && (
                     <button
                       onClick={() => act(p.id, "publish")}
-                      className="px-2 py-1 text-xs rounded border cp-bd"
+                      className="px-2 py-1 text-xs rounded border border-border"
                     >
                       Publish
                     </button>
                   )}
                   <button
                     onClick={() => act(p.id, "archive")}
-                    className="px-2 py-1 text-xs rounded border cp-bd"
+                    className="px-2 py-1 text-xs rounded border border-border"
                     title="Soft-delete (restorable)"
                   >
                     Archive
@@ -744,7 +612,7 @@ function ListView({
               )}
               <button
                 onClick={() => remove(p)}
-                className="flex items-center px-2 py-1 text-xs rounded border cp-bd text-red-700 hover:bg-red-50"
+                className="flex items-center px-2 py-1 text-xs rounded border border-border text-red-700 hover:bg-red-50"
                 title="Permanently delete — cannot be undone"
               >
                 <Icon name="trash" />
@@ -757,7 +625,7 @@ function ListView({
                 }
                 target="_blank"
                 rel="noreferrer"
-                className="flex items-center px-2 py-1 text-xs rounded border cp-bd"
+                className="flex items-center px-2 py-1 text-xs rounded border border-border"
                 title={p.status === "published" ? "View rendered page" : "View JSON (drafts can't render publicly)"}
               >
                 <Icon name="eye" />
@@ -766,7 +634,7 @@ function ListView({
           </li>
         ))}
         {!loading && posts.length === 0 && (
-          <li className="cp-fg-muted py-8 text-center">
+          <li className="text-fg-muted py-8 text-center">
             No {kind}s yet — create one above.
           </li>
         )}
@@ -782,7 +650,7 @@ function ListView({
                 marked deleted and disappears from every list, feed, and
                 rendered page.
               </p>
-              <p className="cp-fg-muted text-xs mt-2">
+              <p className="text-fg-muted text-xs mt-2">
                 Want a recoverable removal? Cancel and use <strong>Archive</strong>{" "}
                 instead.
               </p>
@@ -834,7 +702,7 @@ function ConfirmDialog({
       onClick={onCancel}
     >
       <div
-        className="bg-bg border cp-bd rounded p-5 w-[28rem] max-w-[calc(100vw-2rem)] shadow-lg"
+        className="bg-bg border border-border rounded p-5 w-[28rem] max-w-[calc(100vw-2rem)] shadow-lg"
         onClick={(e) => e.stopPropagation()}
       >
         <h3 className="font-semibold text-base mb-2">{title}</h3>
@@ -843,7 +711,7 @@ function ConfirmDialog({
           <button
             onClick={onCancel}
             autoFocus
-            className="px-3 py-1 rounded border cp-bd"
+            className="px-3 py-1 rounded border border-border"
           >
             {cancelLabel ?? "Cancel"}
           </button>
@@ -852,7 +720,7 @@ function ConfirmDialog({
             className={`px-3 py-1 rounded font-semibold ${
               danger
                 ? "bg-red-600 text-white hover:bg-red-700 border border-red-600"
-                : "border cp-bd"
+                : "border border-border"
             }`}
           >
             {confirmLabel ?? "Confirm"}
@@ -971,7 +839,7 @@ function Editor({
     }
   };
 
-  if (loading) return <div className="p-4 cp-fg-muted">Loading…</div>;
+  if (loading) return <div className="p-4 text-fg-muted">Loading…</div>;
   if (!post) return <div className="p-4">Post not found.</div>;
 
   return (
@@ -979,25 +847,25 @@ function Editor({
       <header className="flex items-center justify-between gap-2 mb-3">
         <button
           onClick={onExit}
-          className="flex items-center gap-1 px-2 py-1 rounded border cp-bd"
+          className="flex items-center gap-1 px-2 py-1 rounded border border-border"
         >
           <Icon name="arrowLeft" /> Back
         </button>
         <div className="flex items-baseline gap-2">
           <span className={`cp-status-pill cp-status-${post.status}`}>{post.status}</span>
-          <span className="text-xs cp-fg-muted">/{post.kind === "post" ? "posts/" : ""}{post.slug}</span>
+          <span className="text-xs text-fg-muted">/{post.kind === "post" ? "posts/" : ""}{post.slug}</span>
         </div>
         <div className="flex gap-2">
           <button
             disabled={!dirty || saving}
             onClick={save}
-            className="flex items-center gap-1 px-3 py-1 rounded border cp-bd disabled:opacity-50"
+            className="flex items-center gap-1 px-3 py-1 rounded border border-border disabled:opacity-50"
           >
             <Icon name="save" /> {saving ? "Saving…" : dirty ? "Save" : "Saved"}
           </button>
           <button
             onClick={publish}
-            className="px-3 py-1 rounded border cp-bd"
+            className="px-3 py-1 rounded border border-border"
           >
             {post.status === "published" ? "Republish" : "Publish"}
           </button>
@@ -1018,7 +886,7 @@ function Editor({
         value={post.excerpt ?? ""}
         onChange={(e) => setExcerpt(e.target.value)}
         placeholder="Excerpt (optional)"
-        className="w-full cp-fg-muted border-0 bg-transparent py-1 mb-4 focus:outline-none"
+        className="w-full text-fg-muted border-0 bg-transparent py-1 mb-4 focus:outline-none"
       />
 
       <Insert types={types} onInsert={(t) => insertBlockAt(0, t)} />
@@ -1037,7 +905,7 @@ function Editor({
           </div>
         ))}
         {blocks.length === 0 && (
-          <div className="cp-fg-muted text-center py-8">Empty post — add a block above.</div>
+          <div className="text-fg-muted text-center py-8">Empty post — add a block above.</div>
         )}
       </div>
     </div>
@@ -1065,21 +933,21 @@ function Insert({
     return (
       <button
         onClick={() => setOpen(true)}
-        className="flex items-center gap-1 text-xs cp-fg-muted py-1 px-2 my-1 rounded border border-dashed cp-bd hover:cp-fg"
+        className="flex items-center gap-1 text-xs text-fg-muted py-1 px-2 my-1 rounded border border-dashed border-border hover:text-fg"
       >
         <Icon name="plus" /> Add block
       </button>
     );
   }
   return (
-    <div className="border cp-bd rounded p-2 my-2 cp-bg-input">
+    <div className="border border-border rounded p-2 my-2 bg-bg-input">
       <div className="flex justify-between items-center mb-2">
-        <span className="text-xs cp-fg-muted">Insert block</span>
-        <button onClick={() => setOpen(false)} className="text-xs cp-fg-muted">close</button>
+        <span className="text-xs text-fg-muted">Insert block</span>
+        <button onClick={() => setOpen(false)} className="text-xs text-fg-muted">close</button>
       </div>
       {Object.entries(grouped).map(([cat, ts]) => (
         <div key={cat} className="mb-2">
-          <div className="text-xs uppercase cp-fg-muted mb-1">{cat}</div>
+          <div className="text-xs uppercase text-fg-muted mb-1">{cat}</div>
           <div className="flex flex-wrap gap-1">
             {ts.map((t) => (
               <button
@@ -1089,7 +957,7 @@ function Insert({
                   setOpen(false);
                 }}
                 title={t.description ?? ""}
-                className="px-2 py-1 text-xs rounded border cp-bd"
+                className="px-2 py-1 text-xs rounded border border-border"
               >
                 {t.display_name}
               </button>
@@ -1120,21 +988,21 @@ function BlockCard({
   };
 
   return (
-    <div className="border cp-bd rounded p-3">
+    <div className="border border-border rounded p-3">
       <div className="flex justify-between items-center mb-2">
-        <span className="text-xs cp-fg-muted">{block.type}</span>
+        <span className="text-xs text-fg-muted">{block.type}</span>
         <div className="flex gap-1">
           {onMoveUp && (
-            <button onClick={onMoveUp} title="Move up" className="px-1 py-1 rounded border cp-bd">
+            <button onClick={onMoveUp} title="Move up" className="px-1 py-1 rounded border border-border">
               <Icon name="arrowUp" />
             </button>
           )}
           {onMoveDown && (
-            <button onClick={onMoveDown} title="Move down" className="px-1 py-1 rounded border cp-bd">
+            <button onClick={onMoveDown} title="Move down" className="px-1 py-1 rounded border border-border">
               <Icon name="arrowDown" />
             </button>
           )}
-          <button onClick={onDelete} title="Delete" className="px-1 py-1 rounded border cp-bd">
+          <button onClick={onDelete} title="Delete" className="px-1 py-1 rounded border border-border">
             <Icon name="trash" />
           </button>
         </div>
@@ -1154,9 +1022,9 @@ function BlockEditor({
 }) {
   const a = block.attrs ?? {};
   const input =
-    "w-full border cp-bd rounded px-2 py-1 cp-bg-input";
+    "w-full border border-border rounded px-2 py-1 bg-bg-input";
   const textarea =
-    "w-full border cp-bd rounded px-2 py-1 cp-bg-input font-mono text-xs";
+    "w-full border border-border rounded px-2 py-1 bg-bg-input font-mono text-xs";
 
   switch (block.type) {
     case "core/heading":
@@ -1165,7 +1033,7 @@ function BlockEditor({
           <select
             value={a.level ?? 2}
             onChange={(e) => setAttr("level", Number(e.target.value))}
-            className="border cp-bd rounded px-2 py-1 cp-bg-input"
+            className="border border-border rounded px-2 py-1 bg-bg-input"
           >
             {[1, 2, 3, 4, 5, 6].map((n) => (
               <option key={n} value={n}>H{n}</option>
@@ -1199,7 +1067,7 @@ function BlockEditor({
           <select
             value={a.style ?? "bullet"}
             onChange={(e) => setAttr("style", e.target.value)}
-            className="border cp-bd rounded px-2 py-1 cp-bg-input self-start"
+            className="border border-border rounded px-2 py-1 bg-bg-input self-start"
           >
             <option value="bullet">Bullet</option>
             <option value="number">Numbered</option>
@@ -1218,7 +1086,7 @@ function BlockEditor({
               />
               <button
                 onClick={() => setAttr("items", items.filter((_, i) => i !== idx))}
-                className="px-2 py-1 rounded border cp-bd"
+                className="px-2 py-1 rounded border border-border"
               >
                 <Icon name="trash" />
               </button>
@@ -1226,7 +1094,7 @@ function BlockEditor({
           ))}
           <button
             onClick={() => setAttr("items", [...items, ""])}
-            className="self-start px-2 py-1 text-xs rounded border cp-bd"
+            className="self-start px-2 py-1 text-xs rounded border border-border"
           >
             + Item
           </button>
@@ -1244,7 +1112,7 @@ function BlockEditor({
             placeholder="Citation (optional)"
             className={input}
           />
-          <div className="text-xs cp-fg-muted">
+          <div className="text-xs text-fg-muted">
             Quote body comes from nested blocks (add inside via MCP for now).
           </div>
         </div>
@@ -1286,7 +1154,7 @@ function BlockEditor({
         <select
           value={a.style ?? "plain"}
           onChange={(e) => setAttr("style", e.target.value)}
-          className="border cp-bd rounded px-2 py-1 cp-bg-input"
+          className="border border-border rounded px-2 py-1 bg-bg-input"
         >
           <option value="plain">Plain</option>
           <option value="wide">Wide</option>
@@ -1336,7 +1204,7 @@ function BlockEditor({
           <select
             value={a.style ?? "primary"}
             onChange={(e) => setAttr("style", e.target.value)}
-            className="border cp-bd rounded px-2 py-1 cp-bg-input"
+            className="border border-border rounded px-2 py-1 bg-bg-input"
           >
             <option value="primary">Primary</option>
             <option value="secondary">Secondary</option>
@@ -1395,7 +1263,7 @@ function BlockEditor({
             <select
               value={a.size ?? "inline"}
               onChange={(e) => setAttr("size", e.target.value)}
-              className="border cp-bd rounded px-2 py-1 cp-bg-input"
+              className="border border-border rounded px-2 py-1 bg-bg-input"
             >
               <option value="inline">Inline</option>
               <option value="wide">Wide</option>
@@ -1416,7 +1284,7 @@ function BlockEditor({
             placeholder="Caption (optional)"
             className={input}
           />
-          <div className="text-xs cp-fg-muted">
+          <div className="text-xs text-fg-muted">
             Upload media via the media library (coming v1.1). For now,
             media_id refers to an already-uploaded row.
           </div>
@@ -1426,7 +1294,7 @@ function BlockEditor({
     case "core/columns":
     case "core/group":
       return (
-        <div className="text-xs cp-fg-muted">
+        <div className="text-xs text-fg-muted">
           Container block — nested blocks edited via MCP tools in v1.0.
           {block.inner && block.inner.length > 0 && (
             <span> ({block.inner.length} inside)</span>
@@ -1521,7 +1389,7 @@ function TemplatesView({
     <div className="p-4 text-sm">
       <header className="flex items-baseline justify-between mb-3">
         <h2 className="text-base font-semibold">Templates</h2>
-        <p className="text-xs cp-fg-muted">
+        <p className="text-xs text-fg-muted">
           Apply a starter to populate your site with pages, posts, terms, and menus.
         </p>
       </header>
@@ -1529,30 +1397,30 @@ function TemplatesView({
       {error && (
         <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2">{error}</div>
       )}
-      {loading && <div className="cp-fg-muted py-4">Loading…</div>}
+      {loading && <div className="text-fg-muted py-4">Loading…</div>}
 
       <ul className="grid grid-cols-1 md:grid-cols-2 gap-3 list-none p-0">
         {templates.map((t) => (
-          <li key={t.name} className="border cp-bd rounded p-3 flex flex-col">
+          <li key={t.name} className="border border-border rounded p-3 flex flex-col">
             <div className="flex items-baseline justify-between gap-2">
               <h3 className="font-semibold">{t.display_name}</h3>
-              <span className="text-xs cp-fg-muted">v{t.version}</span>
+              <span className="text-xs text-fg-muted">v{t.version}</span>
             </div>
-            <p className="cp-fg-muted text-sm flex-1 mt-1">{t.description}</p>
+            <p className="text-fg-muted text-sm flex-1 mt-1">{t.description}</p>
             <div className="flex flex-wrap gap-1 mt-2">
               {(t.tags ?? []).map((tag) => (
-                <span key={tag} className="text-xs px-2 py-0.5 rounded cp-bg-input border cp-bd">
+                <span key={tag} className="text-xs px-2 py-0.5 rounded bg-bg-input border border-border">
                   {tag}
                 </span>
               ))}
-              <span className="text-xs px-2 py-0.5 rounded cp-bg-input border cp-bd ml-auto">
+              <span className="text-xs px-2 py-0.5 rounded bg-bg-input border border-border ml-auto">
                 {t.source}
               </span>
             </div>
             <div className="flex gap-2 mt-3">
               <button
                 onClick={() => setPicked(t)}
-                className="flex-1 px-3 py-1 rounded border cp-bd font-medium"
+                className="flex-1 px-3 py-1 rounded border border-border font-medium"
               >
                 Apply
               </button>
@@ -1560,7 +1428,7 @@ function TemplatesView({
           </li>
         ))}
         {!loading && templates.length === 0 && (
-          <li className="cp-fg-muted text-center py-8 col-span-full">No templates available.</li>
+          <li className="text-fg-muted text-center py-8 col-span-full">No templates available.</li>
         )}
       </ul>
     </div>
@@ -1615,7 +1483,7 @@ function ApplyTemplateDialog({
       <div className="p-4 text-sm">
         <h2 className="text-base font-semibold mb-3">Applied — {template.display_name}</h2>
         <SummaryTable s={result} />
-        <button onClick={onApplied} className="mt-4 px-3 py-1 rounded border cp-bd">
+        <button onClick={onApplied} className="mt-4 px-3 py-1 rounded border border-border">
           Back to content
         </button>
       </div>
@@ -1626,17 +1494,17 @@ function ApplyTemplateDialog({
     <div className="p-4 text-sm">
       <header className="flex items-baseline justify-between mb-3">
         <h2 className="text-base font-semibold">Apply — {template.display_name}</h2>
-        <button onClick={onClose} className="cp-fg-muted text-xs">close</button>
+        <button onClick={onClose} className="text-fg-muted text-xs">close</button>
       </header>
 
-      <p className="cp-fg-muted mb-3">{template.description}</p>
+      <p className="text-fg-muted mb-3">{template.description}</p>
 
       <label className="block mb-3">
-        <span className="text-xs cp-fg-muted">Mode</span>
+        <span className="text-xs text-fg-muted">Mode</span>
         <select
           value={mode}
           onChange={(e) => setMode(e.target.value as typeof mode)}
-          className="block mt-1 border cp-bd rounded px-2 py-1 cp-bg-input"
+          className="block mt-1 border border-border rounded px-2 py-1 bg-bg-input"
         >
           <option value="empty_only">Empty only — refuse if site has content</option>
           <option value="append">Append — add only missing slugs</option>
@@ -1644,9 +1512,9 @@ function ApplyTemplateDialog({
         </select>
       </label>
 
-      <div className="border cp-bd rounded p-3 my-3">
-        <p className="text-xs cp-fg-muted mb-2">Will create:</p>
-        {loading && <p className="cp-fg-muted">Loading preview…</p>}
+      <div className="border border-border rounded p-3 my-3">
+        <p className="text-xs text-fg-muted mb-2">Will create:</p>
+        {loading && <p className="text-fg-muted">Loading preview…</p>}
         {preview && <SummaryTable s={preview} />}
       </div>
 
@@ -1665,13 +1533,13 @@ function ApplyTemplateDialog({
       {error && <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2">{error}</div>}
 
       <div className="flex gap-2 mt-3">
-        <button onClick={onClose} className="px-3 py-1 rounded border cp-bd">
+        <button onClick={onClose} className="px-3 py-1 rounded border border-border">
           Cancel
         </button>
         <button
           onClick={apply}
           disabled={loading || applying || Boolean(preview?.would_refuse)}
-          className="px-3 py-1 rounded border cp-bd font-semibold disabled:opacity-50"
+          className="px-3 py-1 rounded border border-border font-semibold disabled:opacity-50"
           title={preview?.would_refuse ? "Change mode to enable Apply" : undefined}
         >
           {applying ? "Applying…" : "Apply"}
@@ -1699,8 +1567,8 @@ function SummaryTable({ s }: { s: ApplySummary }) {
       )}
       {(s.warnings ?? []).length > 0 && (
         <li className="mt-2">
-          <p className="text-xs cp-fg-muted">Warnings:</p>
-          <ul className="pl-4 text-xs cp-fg-muted list-disc">
+          <p className="text-xs text-fg-muted">Warnings:</p>
+          <ul className="pl-4 text-xs text-fg-muted list-disc">
             {s.warnings!.map((w, i) => (
               <li key={i}>{w}</li>
             ))}
@@ -1759,7 +1627,7 @@ function ThemesView({ api }: { api: ReturnType<typeof makeAPI> }) {
     <div className="p-4 text-sm">
       <header className="mb-3">
         <h2 className="text-base font-semibold">Themes</h2>
-        <p className="text-xs cp-fg-muted">
+        <p className="text-xs text-fg-muted">
           A theme controls how rendered HTML looks. Each site picks its own
           theme; the active theme on the current site is highlighted below.
         </p>
@@ -1768,24 +1636,24 @@ function ThemesView({ api }: { api: ReturnType<typeof makeAPI> }) {
       {error && (
         <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2">{error}</div>
       )}
-      {loading && <div className="cp-fg-muted py-4">Loading…</div>}
+      {loading && <div className="text-fg-muted py-4">Loading…</div>}
 
       <ul className="grid grid-cols-1 md:grid-cols-2 gap-3 list-none p-0">
         {themes.map((t) => (
           <li
             key={t.slug}
             className={`border rounded p-3 flex flex-col ${
-              t.active ? "cp-bd-strong" : "cp-bd"
+              t.active ? "border-fg" : "border-border"
             }`}
           >
             <div className="flex items-baseline justify-between gap-2">
               <h3 className="font-semibold">{t.name}</h3>
-              <span className="text-xs cp-fg-muted">v{t.version}</span>
+              <span className="text-xs text-fg-muted">v{t.version}</span>
             </div>
-            <p className="cp-fg-muted text-xs mt-1">
+            <p className="text-fg-muted text-xs mt-1">
               Source: {t.source}
               {t.active && (
-                <span className="ml-2 inline-block px-2 py-0.5 rounded cp-bg-input border cp-bd cp-fg">
+                <span className="ml-2 inline-block px-2 py-0.5 rounded bg-bg-input border border-border text-fg">
                   Active
                 </span>
               )}
@@ -1794,7 +1662,7 @@ function ThemesView({ api }: { api: ReturnType<typeof makeAPI> }) {
               <button
                 disabled={t.active || switching === t.slug}
                 onClick={() => activate(t.slug)}
-                className="flex-1 px-3 py-1 rounded border cp-bd disabled:opacity-50"
+                className="flex-1 px-3 py-1 rounded border border-border disabled:opacity-50"
               >
                 {switching === t.slug
                   ? "Switching…"
@@ -1806,13 +1674,13 @@ function ThemesView({ api }: { api: ReturnType<typeof makeAPI> }) {
           </li>
         ))}
         {!loading && themes.length === 0 && (
-          <li className="col-span-full cp-fg-muted text-center py-8">
+          <li className="col-span-full text-fg-muted text-center py-8">
             No themes installed.
           </li>
         )}
       </ul>
 
-      <footer className="cp-fg-muted text-xs pt-4 mt-4 border-t cp-bd">
+      <footer className="text-fg-muted text-xs pt-4 mt-4 border-t border-border">
         Multiple themes are coming in v2.2 — for now, the default ships with the
         binary. Custom themes will be loadable from the bound storage app under{" "}
         <code>/.themes/&lt;slug&gt;/</code> once that path is wired.
@@ -1862,7 +1730,7 @@ function BlocksView({ api }: { api: ReturnType<typeof makeAPI> }) {
     <div className="p-4 text-sm">
       <header className="mb-3">
         <h2 className="text-base font-semibold">Blocks</h2>
-        <p className="text-xs cp-fg-muted">
+        <p className="text-xs text-fg-muted">
           The catalog of block types available in the post editor. Use these
           as building blocks for pages and posts. Container blocks (✱) accept
           nested children — e.g. <code>columns</code>, <code>group</code>,{" "}
@@ -1871,33 +1739,33 @@ function BlocksView({ api }: { api: ReturnType<typeof makeAPI> }) {
       </header>
 
       {error && <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2">{error}</div>}
-      {loading && <div className="cp-fg-muted py-4">Loading…</div>}
+      {loading && <div className="text-fg-muted py-4">Loading…</div>}
 
       {cats.map((cat) => (
         <section key={cat} className="mb-6">
-          <h3 className="text-xs uppercase tracking-wider cp-fg-muted mb-2">
+          <h3 className="text-xs uppercase tracking-wider text-fg-muted mb-2">
             {cat} <span className="opacity-50">({grouped[cat].length})</span>
           </h3>
           <ul className="grid grid-cols-1 md:grid-cols-2 gap-2 list-none p-0">
             {grouped[cat].map((t) => (
-              <li key={t.name} className="border cp-bd rounded p-3">
+              <li key={t.name} className="border border-border rounded p-3">
                 <div className="flex items-baseline justify-between gap-2">
                   <strong>{t.display_name}</strong>
                   {t.container && (
-                    <span title="Container block" className="text-xs cp-fg-muted">✱</span>
+                    <span title="Container block" className="text-xs text-fg-muted">✱</span>
                   )}
                 </div>
-                <p className="text-xs cp-fg-muted mt-1">
+                <p className="text-xs text-fg-muted mt-1">
                   <code className="font-mono">{t.name}</code>
                 </p>
-                <p className="cp-fg-muted mt-2 leading-snug">{t.description}</p>
+                <p className="text-fg-muted mt-2 leading-snug">{t.description}</p>
               </li>
             ))}
           </ul>
         </section>
       ))}
 
-      <footer className="cp-fg-muted text-xs pt-4 mt-2 border-t cp-bd">
+      <footer className="text-fg-muted text-xs pt-4 mt-2 border-t border-border">
         Cross-app blocks (e.g. <code>image-studio/generated</code>,{" "}
         <code>crm/subscribe</code>) will appear here once those apps are bound
         and have registered their block types — scheduled for v2.5.
