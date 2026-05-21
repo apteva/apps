@@ -14,7 +14,108 @@
 // useAppEvents hook from tables/crm and remove the timer.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Card, CardHeader, Row, StatusPill, type StatusPillVariant } from "@apteva/ui-kit";
+import type { ReactNode } from "react";
+
+// Local theme-token StatusPill — mirrors CRM/storage's vocabulary so
+// fleet visually sits with the rest of the panels. The dashboard's JIT
+// only emits utilities it actually sees referenced in its own source +
+// these panels' bundled output; raw `text-blue-700`/`text-amber-700`
+// from the ui-kit's StatusPill fall outside that scan and render as
+// no-ops, which is what made fleet look different.
+type PillVariant = "success" | "info" | "warn" | "error" | "neutral";
+
+const PILL_CLASSES: Record<PillVariant, string> = {
+  success: "bg-green/15 text-green",
+  info: "bg-accent/15 text-accent",
+  warn: "bg-warn/15 text-warn",
+  error: "bg-red/15 text-red",
+  neutral: "bg-bg-input text-text-dim",
+};
+
+function StatusPill({ variant = "neutral", children }: { variant?: PillVariant; children: ReactNode }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium whitespace-nowrap ${PILL_CLASSES[variant]}`}
+    >
+      {children}
+    </span>
+  );
+}
+
+// Local shape for a card surface — matches CRM/storage's two-pane
+// rounded panel style. Drops ui-kit's Card (which carried `text-blue-700`
+// / `text-amber-700` in its descendants and dropped fleet off-theme).
+function Card({ className, children }: { className?: string; children: ReactNode }) {
+  return (
+    <div className={`flex flex-col overflow-hidden rounded-md border border-border bg-bg-card ${className ?? ""}`}>
+      {children}
+    </div>
+  );
+}
+
+function CardHeader({
+  title,
+  subtitle,
+  status,
+}: {
+  title: ReactNode;
+  subtitle?: ReactNode;
+  status?: { label: string; variant?: PillVariant };
+}) {
+  return (
+    <header className="flex items-center gap-3 px-4 py-3 border-b border-border">
+      <div className="min-w-0 flex-1 flex flex-col">
+        <div className="text-text text-sm font-semibold truncate leading-tight">{title}</div>
+        {subtitle && (
+          <div className="text-text-dim text-xs truncate mt-0.5 leading-tight">{subtitle}</div>
+        )}
+      </div>
+      {status && <StatusPill variant={status.variant}>{status.label}</StatusPill>}
+    </header>
+  );
+}
+
+function Row({
+  leading,
+  title,
+  subtitle,
+  trailing,
+  onClick,
+  flush,
+}: {
+  leading?: ReactNode;
+  title: ReactNode;
+  subtitle?: ReactNode;
+  trailing?: ReactNode;
+  onClick?: () => void;
+  flush?: boolean;
+}) {
+  const cls = `flex items-center gap-3 w-full text-left px-4 py-2.5 ${flush ? "" : "border-t border-border"} ${onClick ? "hover:bg-bg-input" : ""}`;
+  const inner = (
+    <>
+      {leading !== undefined && (
+        <span className="flex-shrink-0 flex items-center justify-center">{leading}</span>
+      )}
+      <div className="min-w-0 flex-1 flex flex-col">
+        <div className="text-text text-sm font-medium truncate leading-tight">{title}</div>
+        {subtitle !== undefined && (
+          <div className="text-text-dim text-xs truncate mt-0.5 leading-tight">{subtitle}</div>
+        )}
+      </div>
+      {trailing !== undefined && (
+        <span className="flex-shrink-0 text-xs text-text-dim tabular-nums">{trailing}</span>
+      )}
+    </>
+  );
+  if (onClick) {
+    return (
+      <button type="button" className={cls} onClick={onClick}>
+        {inner}
+      </button>
+    );
+  }
+  return <div className={cls}>{inner}</div>;
+}
 
 interface NativePanelProps {
   appName: string;
@@ -127,9 +228,9 @@ interface GetResp {
 const API = "/api/apps/fleet";
 const REFRESH_MS = 8000;
 
-// Status → pill variant. Same five-color semantic palette ui-kit
-// uses, so a list of mixed statuses reads as a coherent group.
-const STATUS_VARIANT: Record<TenantStatus, StatusPillVariant> = {
+// Status → pill variant. Same five-color semantic palette CRM/storage
+// use, so a list of mixed statuses reads as a coherent group.
+const STATUS_VARIANT: Record<TenantStatus, PillVariant> = {
   starting: "info",
   setup_pending: "warn",
   active: "success",
@@ -301,7 +402,7 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
   );
 
   return (
-    <div className="grid grid-cols-[340px_1fr] gap-3 h-full p-3 bg-zinc-50 dark:bg-zinc-950">
+    <div className="grid grid-cols-[340px_1fr] gap-3 h-full p-3 bg-bg">
       <TenantList
         tenants={tenants}
         selectedId={selectedId}
@@ -471,24 +572,24 @@ function TenantList({
   onRefresh: () => void;
 }) {
   return (
-    <Card fullWidth className="overflow-hidden flex flex-col">
+    <Card className="h-full">
       <CardHeader
         title="Tenants"
         subtitle={loading ? "Loading…" : status}
-        status={{ label: String(tenants.length), variant: "active" }}
+        status={{ label: String(tenants.length), variant: "info" }}
       />
       <div className="flex items-center gap-2 px-4 py-2 border-b border-border">
         <button
           type="button"
           onClick={onCreate}
-          className="px-2.5 py-1 rounded-md text-xs font-medium bg-accent/10 text-blue-700 dark:text-blue-400 hover:bg-accent/15"
+          className="px-2.5 py-1 rounded-md text-xs font-medium bg-accent/10 text-accent hover:bg-accent/15"
         >
           + Create local
         </button>
         <button
           type="button"
           onClick={onConnect}
-          className="px-2.5 py-1 rounded-md text-xs font-medium bg-zinc-100 dark:bg-bg-hover hover:bg-zinc-200 dark:hover:bg-zinc-800 text-text"
+          className="px-2.5 py-1 rounded-md text-xs font-medium bg-bg-input hover:bg-bg-hover text-text"
         >
           Connect remote
         </button>
@@ -497,7 +598,7 @@ function TenantList({
           type="button"
           onClick={onRefresh}
           title="Refresh"
-          className="px-2 py-1 rounded-md text-xs text-text-dim hover:text-text hover:bg-zinc-100 dark:hover:bg-bg-hover"
+          className="px-2 py-1 rounded-md text-xs text-text-dim hover:text-text hover:bg-bg-input"
         >
           ↻
         </button>
@@ -541,7 +642,7 @@ function TenantList({
                   t.current_version !== latest && (
                     <span
                       title={`npm latest: ${latest}`}
-                      className="text-amber-700 dark:text-amber-400"
+                      className="text-warn"
                     >
                       ↑
                     </span>
@@ -553,7 +654,7 @@ function TenantList({
                 {(t.respawn_attempts ?? 0) > 0 && (
                   <span
                     title={`${t.respawn_attempts} auto-respawn${t.respawn_attempts === 1 ? "" : "s"}`}
-                    className="text-[10px] font-medium text-amber-700 dark:text-amber-400 px-1.5 py-0.5 rounded bg-warn/10"
+                    className="text-[10px] font-medium text-warn px-1.5 py-0.5 rounded bg-warn/10"
                   >
                     ↻{t.respawn_attempts}
                   </span>
@@ -654,7 +755,7 @@ function TenantDetail({
 
   if (!tenant) {
     return (
-      <Card fullWidth className="flex items-center justify-center text-text-dim text-sm">
+      <Card className="h-full items-center justify-center text-text-dim text-sm">
         <p>Select a tenant to see details, events, and actions.</p>
       </Card>
     );
@@ -683,7 +784,7 @@ function TenantDetail({
   const isSetupPending = tenant.status === "setup_pending";
 
   return (
-    <Card fullWidth className="overflow-hidden flex flex-col">
+    <Card className="h-full">
       <CardHeader
         title={tenant.slug}
         subtitle={
@@ -692,21 +793,7 @@ function TenantDetail({
             {tenant.current_version ? ` · v${tenant.current_version}` : ""}
           </span>
         }
-        status={{
-          label: tenant.status,
-          variant:
-            tenant.status === "active"
-              ? "live"
-              : tenant.status === "starting"
-                ? "active"
-                : tenant.status === "failed"
-                  ? "error"
-                  : tenant.status === "disconnected" ||
-                      tenant.status === "suspended" ||
-                      isSetupPending
-                    ? "warn"
-                    : "muted",
-        }}
+        status={{ label: tenant.status, variant: STATUS_VARIANT[tenant.status] }}
       />
 
       {/* Action bar. When setup_pending we hide the normal lifecycle
@@ -936,7 +1023,7 @@ function TenantDetail({
         <Field label="Created">{formatTime(tenant.created_at)}</Field>
         {(tenant.respawn_attempts ?? 0) > 0 && (
           <Field label="Auto-respawns">
-            <span className="text-amber-700 dark:text-amber-400 font-medium">
+            <span className="text-warn font-medium">
               {tenant.respawn_attempts}
             </span>
             {tenant.last_respawn_at && (
@@ -995,7 +1082,7 @@ function SetupPendingBanner({
   return (
     <div className="px-4 py-3 border-b border-border bg-warn/5 space-y-2">
       <div className="flex items-start gap-2">
-        <span className="mt-0.5 text-[10px] uppercase tracking-wider font-semibold text-amber-700 dark:text-amber-400">
+        <span className="mt-0.5 text-[10px] uppercase tracking-wider font-semibold text-warn">
           Setup pending
         </span>
         <span className="text-xs text-text-dim flex-1">
@@ -1064,7 +1151,7 @@ function SetupPendingBanner({
         <button
           type="submit"
           disabled={busy || !apiKey.trim()}
-          className="px-2.5 py-1 rounded-md text-xs font-medium bg-accent/10 text-blue-700 dark:text-blue-400 hover:bg-accent/15 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="px-2.5 py-1 rounded-md text-xs font-medium bg-accent/10 text-accent hover:bg-accent/15 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {busy ? "Attaching…" : "Attach key"}
         </button>
@@ -1138,7 +1225,7 @@ function EventKindPill({ kind }: { kind: string }) {
     "api_key_revealed",
   ];
   const info = ["support_login", "remote_call"];
-  const variant: StatusPillVariant = success.includes(kind)
+  const variant: PillVariant = success.includes(kind)
     ? "success"
     : error.includes(kind)
       ? "error"
@@ -1167,8 +1254,8 @@ function ActionButton({
 }) {
   const cls =
     tone === "danger"
-      ? "bg-error/10 text-red-700 dark:text-red-400 hover:bg-error/15"
-      : "bg-zinc-100 dark:bg-bg-hover hover:bg-zinc-200 dark:hover:bg-zinc-800 text-text";
+      ? "bg-red/10 text-red hover:bg-red/15"
+      : "bg-bg-input hover:bg-bg-hover text-text";
   return (
     <button
       type="button"
@@ -1194,7 +1281,7 @@ function CredentialsRevealDialog({
 }) {
   return (
     <DialogFrame title={`Tenant ${creds.slug} ready — save these credentials`} onClose={onClose}>
-      <div className="bg-warn/10 border border-warn/30 rounded-md px-3 py-2 mb-3 text-xs text-amber-700 dark:text-amber-400">
+      <div className="bg-warn/10 border border-warn/30 rounded-md px-3 py-2 mb-3 text-xs text-warn">
         These are shown only once. The admin password and API key are not
         recoverable from the fleet registry — copy them somewhere safe
         before dismissing.
@@ -1209,7 +1296,7 @@ function CredentialsRevealDialog({
         <button
           type="button"
           onClick={onClose}
-          className="px-2.5 py-1 rounded-md text-xs font-medium bg-accent/10 text-blue-700 dark:text-blue-400 hover:bg-accent/15"
+          className="px-2.5 py-1 rounded-md text-xs font-medium bg-accent/10 text-accent hover:bg-accent/15"
         >
           I've saved them
         </button>
@@ -1259,7 +1346,7 @@ function CredentialRow({
               // Clipboard blocked — value is still on-screen if revealed.
             }
           }}
-          className="px-2 py-1 rounded-md text-xs font-medium bg-zinc-100 dark:bg-bg-hover hover:bg-zinc-200 dark:hover:bg-zinc-800 text-text"
+          className="px-2 py-1 rounded-md text-xs font-medium bg-bg-input hover:bg-bg-hover text-text"
         >
           {copied ? "Copied" : "Copy"}
         </button>
@@ -1505,7 +1592,7 @@ function DomainBlock({
     );
   }
   const cert = meta?.certs?.[tenant.domain];
-  const certVariant: StatusPillVariant = !cert
+  const certVariant: PillVariant = !cert
     ? "neutral"
     : cert.status === "live"
       ? "success"
@@ -1591,7 +1678,7 @@ function VersionBlock({
         {current || <span className="text-text-dim italic">unknown</span>}
       </span>
       {pendingApply && (
-        <span className="font-mono text-[11px] text-amber-700 dark:text-amber-400">
+        <span className="font-mono text-[11px] text-warn">
           → target {target}
         </span>
       )}
@@ -1859,7 +1946,7 @@ function ResetPasswordDialog({
 }) {
   return (
     <DialogFrame title={`New admin password — ${data.slug}`} onClose={onClose}>
-      <div className="bg-warn/10 border border-warn/30 rounded-md px-3 py-2 mb-3 text-xs text-amber-700 dark:text-amber-400">
+      <div className="bg-warn/10 border border-warn/30 rounded-md px-3 py-2 mb-3 text-xs text-warn">
         Shown only once. Every existing session for this admin has been
         revoked — give the operator the new password before dismissing.
       </div>
