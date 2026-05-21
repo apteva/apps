@@ -343,7 +343,7 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
       const [sumR, serR, evR] = await Promise.all([
         fetch(withQs(`${API}/summary`), { credentials: "same-origin" }),
         fetch(withQs(`${API}/series`), { credentials: "same-origin" }),
-        fetch(withQs(`${API}/events?limit=50`), { credentials: "same-origin" }),
+        fetch(withQs(`${API}/feed?limit=50`), { credentials: "same-origin" }),
       ]);
       if (sumR.ok) {
         const d = await sumR.json();

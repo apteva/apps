@@ -114,8 +114,9 @@ func (a *App) handleTop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"top": rows, "by": by})
 }
 
-// GET /events — recent raw rows within the filters, newest first. Backs
-// the panel's live event feed.
+// GET /feed — recent raw rows within the filters, newest first. Backs
+// the panel's live event feed. (Not /events — that path is reserved by
+// the app-sdk for platform event ingestion.)
 func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)

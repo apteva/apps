@@ -19,7 +19,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.3.0
+version: 0.3.1
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -107,7 +107,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/summary", Handler: a.handleSummary},
 		{Pattern: "/series", Handler: a.handleSeries},
 		{Pattern: "/top", Handler: a.handleTop},
-		{Pattern: "/events", Handler: a.handleEvents},
+		// NOT "/events": the app-sdk reserves /events for platform event
+		// ingestion (run.go) — registering it here panics the mux at boot.
+		{Pattern: "/feed", Handler: a.handleEvents},
 		{Pattern: "/dimensions", Handler: a.handleDimensions},
 	}
 }

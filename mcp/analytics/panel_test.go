@@ -20,9 +20,23 @@ func TestHTTPRoutesRegistered(t *testing.T) {
 	for _, r := range (&App{}).HTTPRoutes() {
 		got[r.Pattern] = true
 	}
-	for _, want := range []string{"/summary", "/series", "/top", "/events", "/dimensions"} {
+	for _, want := range []string{"/summary", "/series", "/top", "/feed", "/dimensions"} {
 		if !got[want] {
 			t.Errorf("missing route %s", want)
+		}
+	}
+}
+
+// The app-sdk mounts its own /health, /manifest, /mcp, /events, /ui/ on
+// the same ServeMux; an app route reusing any of those panics at boot
+// (this is how v0.3.0's /events route broke the install). Guard it.
+func TestHTTPRoutesAvoidReservedSDKRoutes(t *testing.T) {
+	reserved := map[string]bool{
+		"/health": true, "/manifest": true, "/mcp": true, "/events": true, "/ui/": true,
+	}
+	for _, r := range (&App{}).HTTPRoutes() {
+		if reserved[r.Pattern] {
+			t.Errorf("route %q collides with a reserved app-sdk framework route", r.Pattern)
 		}
 	}
 }
