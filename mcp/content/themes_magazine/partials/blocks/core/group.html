@@ -1,0 +1,4 @@
+{{- /* container with optional background + padding */ -}}
+<div class="block-group" style="{{ if .Attrs.background }}background:{{ .Attrs.background }};{{ end }}{{ if .Attrs.padding }}padding:{{ .Attrs.padding }};{{ end }}">
+  {{ renderBlocks .Inner }}
+</div>

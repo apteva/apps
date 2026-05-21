@@ -1,0 +1,2 @@
+{{- /* attrs: { style 'plain'|'wide'|'dots' } */ -}}
+<hr class="block-separator style-{{ if .Attrs.style }}{{ .Attrs.style }}{{ else }}plain{{ end }}">

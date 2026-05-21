@@ -1,0 +1,2 @@
+{{- /* attrs: { text_md, align } */ -}}
+<p{{ if .Attrs.align }} class="align-{{ .Attrs.align }}"{{ end }}>{{ markdown .Attrs.text_md }}</p>

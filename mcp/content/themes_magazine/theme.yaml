@@ -1,0 +1,18 @@
+name: magazine
+display_name: Magazine
+version: "1"
+description: |
+  Editorial single-column layout. Serif headings (system Georgia /
+  Charter), Inter body, narrow column for prose readability,
+  understated chrome. Built for blogs, newsletters, and content-first
+  sites — pairs best with the finance-blog and docs-site templates.
+supports:
+  - posts
+  - pages
+  - feed
+  - sitemap
+color_vars:
+  - --content-fg
+  - --content-bg
+  - --content-muted
+  - --content-accent

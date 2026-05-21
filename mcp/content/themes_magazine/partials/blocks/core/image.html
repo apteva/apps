@@ -1,0 +1,7 @@
+{{- /* attrs: { media_id, alt, caption, size, link } */ -}}
+<figure class="block-image size-{{ if .Attrs.size }}{{ .Attrs.size }}{{ else }}inline{{ end }}">
+  {{ if .Attrs.link }}<a href="{{ .Attrs.link }}">{{ end }}
+  <img src="{{ media .Attrs.media_id }}" alt="{{ .Attrs.alt }}">
+  {{ if .Attrs.link }}</a>{{ end }}
+  {{ if .Attrs.caption }}<figcaption>{{ .Attrs.caption }}</figcaption>{{ end }}
+</figure>

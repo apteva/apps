@@ -24,8 +24,24 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-//go:embed themes_default
+//go:embed themes_default themes_magazine
 var embeddedThemeFS embed.FS
+
+// bundledThemes is the static catalog of themes shipped inside the
+// binary. Each entry maps a slug to its embed-FS root directory.
+// Storage-loaded themes (source != 'embedded') merge in alongside
+// these once that path is wired (v2.3+).
+var bundledThemes = map[string]bundledTheme{
+	"default":  {Slug: "default", DisplayName: "Default", Version: "2", Root: "themes_default"},
+	"magazine": {Slug: "magazine", DisplayName: "Magazine", Version: "1", Root: "themes_magazine"},
+}
+
+type bundledTheme struct {
+	Slug        string
+	DisplayName string
+	Version     string
+	Root        string // embed-FS subdir
+}
 
 // Theme holds the parsed templates + the asset filesystem for one
 // theme.
@@ -78,18 +94,24 @@ func getCurrentTheme() *Theme {
 	return currentTheme
 }
 
-// loadActiveTheme reads `active_theme` from settings, attempts to load
-// it from storage, falls back to the embedded default when missing.
-// Called at OnMount and after any themes_set_active.
+// loadActiveTheme reads the active_theme setting (per-site) and loads
+// that bundled theme. Falls back to "default" when the setting is empty
+// or names an unknown slug. Storage-loaded custom themes (v2.3+) merge
+// in once that path is wired.
+//
+// Called at OnMount (no project context, picks default) and from
+// themes_set_active (with project + site context).
 func loadActiveTheme(ctx *sdk.AppCtx) error {
 	themeFuncMap = buildThemeFuncMap(ctx)
-	// For v1, the storage-loaded theme path is sketched but not wired —
-	// the loader always returns the embedded default. v1.1 will read
-	// /.themes/<slug>/ from the bound storage app and unpack the
-	// templates from there.
-	t, err := loadEmbeddedDefaultTheme()
+	slug := resolveActiveThemeSlug(ctx)
+	t, err := loadEmbeddedTheme(slug)
 	if err != nil {
-		return err
+		// Fall back to default if the configured theme is missing.
+		ctx.Logger().Warn("theme load failed; falling back to default", "slug", slug, "err", err.Error())
+		t, err = loadEmbeddedTheme("default")
+		if err != nil {
+			return err
+		}
 	}
 	themeMu.Lock()
 	currentTheme = t
@@ -97,8 +119,34 @@ func loadActiveTheme(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func loadEmbeddedDefaultTheme() (*Theme, error) {
-	root, err := fs.Sub(embeddedThemeFS, "themes_default")
+// resolveActiveThemeSlug reads the active_theme setting for the current
+// project + site. Project-scoped installs use APTEVA_PROJECT_ID + the
+// project's default site. Returns "default" when no setting exists.
+func resolveActiveThemeSlug(ctx *sdk.AppCtx) string {
+	if ctx == nil || ctx.AppDB() == nil {
+		return "default"
+	}
+	pid := strings.TrimSpace(getEnv("APTEVA_PROJECT_ID"))
+	if pid == "" {
+		return "default"
+	}
+	siteID, err := resolveOnlyOrDefaultSite(ctx.AppDB(), pid)
+	if err != nil {
+		return "default"
+	}
+	slug, _ := dbGetSetting(ctx.AppDB(), pid, siteID, "active_theme")
+	if slug == "" {
+		return "default"
+	}
+	return slug
+}
+
+func loadEmbeddedTheme(slug string) (*Theme, error) {
+	bt, ok := bundledThemes[slug]
+	if !ok {
+		return nil, fmt.Errorf("theme %q not found in bundle", slug)
+	}
+	root, err := fs.Sub(embeddedThemeFS, bt.Root)
 	if err != nil {
 		return nil, err
 	}
@@ -207,8 +255,8 @@ func loadEmbeddedDefaultTheme() (*Theme, error) {
 	}
 
 	return &Theme{
-		Name:          "default",
-		Version:       "1",
+		Name:          bt.Slug,
+		Version:       bt.Version,
 		AssetFS:       assets,
 		BlockTpls:     blockTpls,
 		source:        "embedded",
@@ -220,14 +268,56 @@ func loadEmbeddedDefaultTheme() (*Theme, error) {
 
 // ── MCP tools ─────────────────────────────────────────────────────
 
-func (a *App) toolThemesList(_ *sdk.AppCtx, _ map[string]any) (any, error) {
-	t := getCurrentTheme()
-	available := []map[string]any{
-		{"slug": "default", "name": "Default", "version": "1", "source": "embedded", "active": true},
+func (a *App) toolThemesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	// The "active" flag is per-site; resolve via args if a site
+	// selector was supplied, otherwise read the current theme.
+	activeSlug := ""
+	if ctx != nil && ctx.AppDB() != nil {
+		if pid, err := resolveProjectFromArgs(args); err == nil {
+			if siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args); err == nil {
+				activeSlug, _ = dbGetSetting(ctx.AppDB(), pid, siteID, "active_theme")
+			}
+		}
 	}
-	// v1.1: enumerate /.themes/* from storage and merge in.
-	_ = t
+	if activeSlug == "" {
+		activeSlug = currentThemeName()
+	}
+	if activeSlug == "" {
+		activeSlug = "default"
+	}
+
+	available := make([]map[string]any, 0, len(bundledThemes))
+	// Stable iteration: default first, then alphabetical.
+	order := []string{"default", "magazine"}
+	for slug, bt := range bundledThemes {
+		if !contains(order, slug) {
+			order = append(order, slug)
+		}
+		_ = bt
+	}
+	for _, slug := range order {
+		bt, ok := bundledThemes[slug]
+		if !ok {
+			continue
+		}
+		available = append(available, map[string]any{
+			"slug":    bt.Slug,
+			"name":    bt.DisplayName,
+			"version": bt.Version,
+			"source":  "embedded",
+			"active":  slug == activeSlug,
+		})
+	}
 	return map[string]any{"themes": available}, nil
+}
+
+func contains(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) toolThemesSetActive(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -239,8 +329,8 @@ func (a *App) toolThemesSetActive(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if slug == "" {
 		return nil, errors.New("slug required")
 	}
-	if slug != "default" {
-		return nil, errors.New("custom themes from storage not yet supported in v1.0 — only 'default'")
+	if _, ok := bundledThemes[slug]; !ok {
+		return nil, fmt.Errorf("theme %q not found (available: default, magazine)", slug)
 	}
 	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
 	if err != nil {

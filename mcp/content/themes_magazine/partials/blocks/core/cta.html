@@ -1,0 +1,7 @@
+{{- /* attrs: { heading, body, button_label, button_url }; inner optional */ -}}
+<aside class="block-cta">
+  {{ if .Attrs.heading }}<h3>{{ .Attrs.heading }}</h3>{{ end }}
+  {{ if .Attrs.body }}<p>{{ markdown .Attrs.body }}</p>{{ end }}
+  {{ renderBlocks .Inner }}
+  {{ if .Attrs.button_url }}<p><a class="button style-primary" href="{{ .Attrs.button_url }}">{{ if .Attrs.button_label }}{{ .Attrs.button_label }}{{ else }}Learn more{{ end }}</a></p>{{ end }}
+</aside>

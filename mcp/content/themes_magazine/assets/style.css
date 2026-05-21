@@ -1,0 +1,409 @@
+/* Magazine theme — editorial, single-column, serif-headed. Pairs with
+   blog-style templates (finance-blog) and any long-form writing.
+   Reuses the same Inter variable font self-hosted as in the default
+   theme; adds Georgia / Charter for headings (system fonts). */
+
+@font-face {
+  font-family: 'Inter';
+  src: url('fonts/InterVariable.woff2') format('woff2-variations'),
+       url('fonts/InterVariable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  size-adjust: 100%;
+}
+
+:root {
+  --fg:           #1a1a1a;
+  --fg-muted:     #5c5c5c;
+  --fg-soft:      #8a8a8a;
+  --bg:           #fdfcfa;     /* warm off-white */
+  --bg-soft:      #f5f3ef;
+  --bg-muted:     #ece9e3;
+  --border:       #e5e2da;
+  --border-soft:  #f0ede6;
+  --accent:       #9d2235;     /* magazine red */
+  --accent-hover: #7a1a29;
+  --accent-soft:  #fbe8eb;
+  --accent-fg:    #ffffff;
+  --font-serif:   Georgia, "Charter", "Iowan Old Style", "Apple Garamond", Cambria, "Times New Roman", serif;
+  --font-sans:    'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono:    SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --leading:      1.75;
+  --container-narrow: 680px;
+  --radius:       4px;
+  --shadow-sm:    0 1px 3px rgba(0, 0, 0, 0.06);
+  --shadow:       0 4px 12px rgba(0, 0, 0, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg:           #e8e6e1;
+    --fg-muted:     #a8a59f;
+    --fg-soft:      #7a7873;
+    --bg:           #16140f;
+    --bg-soft:      #1c1a14;
+    --bg-muted:     #2a2620;
+    --border:       #2a2620;
+    --border-soft:  #1f1c16;
+    --accent:       #e85a73;
+    --accent-soft:  #2a141a;
+  }
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 18px/var(--leading) var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2.5px; transition: color 0.15s; }
+a:hover { color: var(--accent-hover); }
+
+.container-narrow { max-width: var(--container-narrow); margin: 0 auto; padding: 0 1.5rem; }
+
+/* ---------- Header ---------- */
+
+.site-header {
+  padding: 3rem 0 1.5rem;
+  text-align: center;
+  border-bottom: 1px solid var(--border);
+}
+.site-header__inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+.site-title {
+  font-family: var(--font-serif);
+  font-weight: 700;
+  font-size: 2rem;
+  color: var(--fg);
+  text-decoration: none;
+  letter-spacing: -0.01em;
+}
+.site-title:hover { color: var(--accent); }
+.site-tagline {
+  margin: 0;
+  color: var(--fg-muted);
+  font-style: italic;
+  font-family: var(--font-serif);
+  font-size: 1.05rem;
+}
+.site-nav ul {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0 0;
+  display: flex;
+  gap: 2rem;
+}
+.site-nav a {
+  color: var(--fg);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  text-decoration: none;
+  font-weight: 500;
+}
+.site-nav a:hover { color: var(--accent); }
+
+.content-main { min-height: 60vh; padding: 3rem 0 4rem; }
+
+/* ---------- Page (kind=page) ---------- */
+
+.page-single .page-body > * {
+  margin-bottom: 1.25rem;
+}
+
+/* ---------- Post ---------- */
+
+.post-single { }
+.post-header {
+  text-align: center;
+  margin-bottom: 3rem;
+  padding-bottom: 2rem;
+  border-bottom: 1px solid var(--border);
+}
+.post-eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--accent);
+  margin: 0 0 1rem;
+}
+.post-eyebrow a { color: inherit; text-decoration: none; }
+.post-eyebrow a:hover { text-decoration: underline; }
+.post-title {
+  font-family: var(--font-serif);
+  font-weight: 700;
+  font-size: clamp(2rem, 5vw, 3.25rem);
+  line-height: 1.15;
+  letter-spacing: -0.015em;
+  margin: 0 0 1rem;
+}
+.post-meta {
+  color: var(--fg-muted);
+  font-size: 0.95rem;
+  font-style: italic;
+  font-family: var(--font-serif);
+  margin: 0;
+}
+.post-author { font-style: normal; font-weight: 500; }
+.post-hero { margin: 2.5rem 0 0; }
+.post-hero img { width: 100%; height: auto; border-radius: var(--radius); box-shadow: var(--shadow); }
+
+/* ---------- List ---------- */
+
+.list-title {
+  font-family: var(--font-serif);
+  font-size: 2.5rem;
+  font-weight: 700;
+  margin: 0 0 3rem;
+  text-align: center;
+  letter-spacing: -0.01em;
+}
+.post-card {
+  padding: 2.5rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.post-card:first-child { padding-top: 0; }
+.post-card__title {
+  font-family: var(--font-serif);
+  font-size: 1.75rem;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  margin: 0 0 0.5rem;
+}
+.post-card__title a { color: var(--fg); text-decoration: none; }
+.post-card__title a:hover { color: var(--accent); }
+.post-card__meta { color: var(--fg-muted); font-size: 0.9rem; font-style: italic; font-family: var(--font-serif); margin: 0 0 0.75rem; }
+.post-card__excerpt { color: var(--fg-muted); margin: 0; line-height: 1.7; }
+
+.pagination {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 3rem;
+  padding-top: 2rem;
+  border-top: 1px solid var(--border);
+}
+
+.empty { color: var(--fg-muted); padding: 5rem 0; text-align: center; font-style: italic; }
+
+/* ---------- Block typography ---------- */
+
+.page-body h1, .post-body h1 {
+  font-family: var(--font-serif);
+  font-size: 2.5rem;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+  margin: 3rem 0 1.25rem;
+}
+.page-body h2, .post-body h2 {
+  font-family: var(--font-serif);
+  font-size: 1.85rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 2.75rem 0 1rem;
+}
+.page-body h3, .post-body h3 {
+  font-family: var(--font-serif);
+  font-size: 1.4rem;
+  font-weight: 700;
+  margin: 2rem 0 0.75rem;
+}
+.page-body h4, .post-body h4,
+.page-body h5, .post-body h5,
+.page-body h6, .post-body h6 {
+  font-family: var(--font-sans);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--fg-muted);
+  margin: 2rem 0 0.5rem;
+}
+
+.page-body p, .post-body p { margin: 0 0 1.25rem; }
+.page-body > p:first-of-type, .post-body > p:first-of-type {
+  font-size: 1.18rem;
+  color: var(--fg-muted);
+  font-style: italic;
+  font-family: var(--font-serif);
+}
+
+.align-center { text-align: center; }
+.align-right  { text-align: right; }
+
+.block-list { padding-left: 1.5rem; }
+.block-list li { margin-bottom: 0.5rem; }
+
+.block-quote {
+  border: 0;
+  border-left: 3px solid var(--accent);
+  padding: 0.25rem 1.5rem;
+  margin: 2rem 0;
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 1.2rem;
+  color: var(--fg);
+}
+.block-quote cite {
+  display: block;
+  margin-top: 0.5rem;
+  font-size: 0.9rem;
+  font-style: normal;
+  color: var(--fg-muted);
+}
+
+.block-code {
+  background: var(--bg-soft);
+  padding: 1rem 1.25rem;
+  border-radius: var(--radius);
+  overflow-x: auto;
+  font: 0.88rem/1.6 var(--font-mono);
+  border: 1px solid var(--border);
+  margin: 1.5rem 0;
+}
+.post-body code:not(pre code), .page-body code:not(pre code) {
+  background: var(--bg-soft);
+  padding: 0.1em 0.4em;
+  border-radius: 3px;
+  font-size: 0.88em;
+  font-family: var(--font-mono);
+}
+
+.block-embed { margin: 2rem 0; }
+.block-embed iframe { width: 100%; aspect-ratio: 16/9; border: 0; }
+
+.block-separator {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 3rem auto;
+}
+.block-separator.style-wide {
+  width: 3rem;
+  border-top-width: 2px;
+  border-color: var(--accent);
+  margin: 4rem auto;
+}
+.block-separator.style-dots { border-top-style: dotted; }
+
+.block-image { margin: 2rem 0; }
+.block-image img { width: 100%; height: auto; border-radius: var(--radius); }
+.block-image figcaption {
+  font-size: 0.9rem;
+  color: var(--fg-muted);
+  text-align: center;
+  margin-top: 0.5rem;
+  font-style: italic;
+  font-family: var(--font-serif);
+}
+
+.block-gallery {
+  display: grid;
+  gap: 0.5rem;
+  margin: 1.5rem 0;
+}
+.block-gallery img { width: 100%; height: 100%; object-fit: cover; border-radius: var(--radius); }
+
+.block-columns {
+  display: grid;
+  gap: 2rem;
+  grid-template-columns: 1fr 1fr;
+  margin: 2rem 0;
+}
+@media (max-width: 640px) {
+  .block-columns { grid-template-columns: 1fr; }
+}
+
+.block-group { margin: 1.5rem 0; }
+
+.block-html, .block-markdown { margin: 0; }
+
+.block-table { width: 100%; border-collapse: collapse; margin: 1.5rem 0; }
+.block-table th, .block-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.65rem 0.85rem;
+  text-align: left;
+}
+.block-table th { font-family: var(--font-serif); font-weight: 700; border-bottom-width: 2px; }
+
+.block-button { margin: 2rem 0; text-align: center; }
+.button {
+  display: inline-block;
+  padding: 0.75rem 1.5rem;
+  border-radius: var(--radius);
+  font-weight: 600;
+  font-size: 0.95rem;
+  text-decoration: none;
+  transition: background 0.15s, color 0.15s;
+  border: 1px solid var(--accent);
+}
+.button.style-primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.button.style-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--accent-fg); }
+.button.style-secondary {
+  background: var(--bg-soft);
+  color: var(--fg);
+  border-color: var(--border);
+}
+.button.style-ghost {
+  background: transparent;
+  color: var(--accent);
+}
+.button.style-ghost:hover { background: var(--accent-soft); }
+
+.block-cta {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  padding: 2.5rem 2rem;
+  border-radius: var(--radius);
+  margin: 3rem 0;
+  text-align: center;
+}
+.block-cta h3 {
+  font-family: var(--font-serif);
+  font-size: 1.6rem;
+  margin: 0 0 0.75rem;
+  letter-spacing: -0.005em;
+}
+.block-cta p {
+  color: var(--fg-muted);
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 1.05rem;
+  margin: 0 0 1.5rem;
+}
+
+.block-fallback {
+  padding: 1rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--fg-muted);
+  margin: 1rem 0;
+  font-style: italic;
+  text-align: center;
+}
+
+/* ---------- Site footer ---------- */
+
+.site-footer {
+  border-top: 1px solid var(--border);
+  padding: 2rem 0;
+  margin-top: 4rem;
+  text-align: center;
+  color: var(--fg-muted);
+  font-size: 0.9rem;
+  font-style: italic;
+  font-family: var(--font-serif);
+}

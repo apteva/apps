@@ -1,0 +1,6 @@
+{{- /* attrs: { style 'bullet'|'number', items[] } */ -}}
+{{- if eq .Attrs.style "number" -}}
+<ol class="block-list">{{ range .Attrs.items }}<li>{{ . }}</li>{{ end }}</ol>
+{{- else -}}
+<ul class="block-list">{{ range .Attrs.items }}<li>{{ . }}</li>{{ end }}</ul>
+{{- end -}}

@@ -5,6 +5,33 @@
    Design tokens are CSS variables so sites can override accent / type
    without forking the theme. */
 
+/* Self-hosted Inter — kills the FOUC from external font fetches. The
+   variable font ships all weights in one file (~344KB). size-adjust
+   tunes the system fallback's x-height to match Inter so the swap is
+   visually invisible. */
+@font-face {
+  font-family: 'Inter';
+  src: url('fonts/InterVariable.woff2') format('woff2-variations'),
+       url('fonts/InterVariable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  size-adjust: 100%;
+}
+
+/* Tuned fallback face — when Inter is still loading, the system fallback
+   uses these metric overrides so character widths + x-height roughly
+   match Inter's. Cuts the visible swap to a flash you barely catch. */
+@font-face {
+  font-family: 'Inter Fallback';
+  src: local('-apple-system'), local('BlinkMacSystemFont'), local('Segoe UI'),
+       local('Roboto'), local('Helvetica Neue'), local('Arial');
+  ascent-override: 90%;
+  descent-override: 22%;
+  line-gap-override: 0%;
+  size-adjust: 107%;
+}
+
 :root {
   /* Palette */
   --fg:            #0f172a;
@@ -24,7 +51,7 @@
   --accent-fg:     #ffffff;
 
   /* Typography */
-  --font-sans:    'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-sans:    'Inter', 'Inter Fallback', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --font-mono:    SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --leading:      1.6;
 

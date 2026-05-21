@@ -1,0 +1,6 @@
+{{- /* attrs: { url, cached_html, provider_name } */ -}}
+<div class="block-embed" data-provider="{{ .Attrs.provider_name }}">
+{{ if .Attrs.cached_html }}{{ safeHTML .Attrs.cached_html }}{{ else }}
+<a href="{{ .Attrs.url }}">{{ .Attrs.url }}</a>
+{{ end }}
+</div>

@@ -1,0 +1,34 @@
+{{ define "main" }}
+{{ if eq .Post.Kind "page" }}
+<article class="page-single container-narrow">
+  <div class="page-body">
+    {{ renderBlocks .Post.BodyBlocks.Blocks }}
+  </div>
+</article>
+{{ else }}
+<article class="post-single container-narrow">
+  <header class="post-header">
+    {{ if .Terms }}
+    <p class="post-eyebrow">
+      {{ range $i, $t := .Terms }}{{ if $i }} &middot; {{ end }}<a href="{{ $t.Kind }}/{{ $t.Slug }}">{{ $t.Name }}</a>{{ end }}
+    </p>
+    {{ end }}
+    <h1 class="post-title">{{ .Post.Title }}</h1>
+    {{ if .Post.PublishedAt }}
+    <p class="post-meta">
+      <time datetime="{{ .Post.PublishedAt }}">{{ formatDate .Post.PublishedAt "January 2, 2006" }}</time>
+      {{ if .Post.Author }} &middot; <span class="post-author">{{ .Post.Author }}</span>{{ end }}
+    </p>
+    {{ end }}
+    {{ if .FeaturedMediaURL }}
+    <figure class="post-hero">
+      <img src="{{ .FeaturedMediaURL }}" alt="{{ .FeaturedMediaAlt }}">
+    </figure>
+    {{ end }}
+  </header>
+  <div class="post-body">
+    {{ renderBlocks .Post.BodyBlocks.Blocks }}
+  </div>
+</article>
+{{ end }}
+{{ end }}
