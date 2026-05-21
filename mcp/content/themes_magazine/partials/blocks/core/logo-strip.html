@@ -1,0 +1,9 @@
+{{- /* attrs: { label, image_urls[] } */ -}}
+<section class="block-logo-strip">
+  {{ if .Attrs.label }}<p class="block-logo-strip__label">{{ .Attrs.label }}</p>{{ end }}
+  <div class="block-logo-strip__logos">
+    {{ range .Attrs.image_urls }}
+    <img src="{{ . }}" alt="" loading="lazy">
+    {{ end }}
+  </div>
+</section>

@@ -1,0 +1,25 @@
+{{- /* attrs: { eyebrow, heading, body, image_url|image_media_id, image_alt,
+       button_label, button_url, reverse } */ -}}
+{{- $img := "" -}}
+{{- if .Attrs.image_url -}}{{- $img = .Attrs.image_url -}}
+{{- else if .Attrs.image_media_id -}}{{- $img = media .Attrs.image_media_id -}}
+{{- end -}}
+<section class="block-feature-row {{ if .Attrs.reverse }}is-reverse{{ end }}">
+  <div class="block-feature-row__text">
+    {{ if .Attrs.eyebrow }}<p class="block-feature-row__eyebrow">{{ .Attrs.eyebrow }}</p>{{ end }}
+    {{ if .Attrs.heading }}<h2 class="block-feature-row__heading">{{ .Attrs.heading }}</h2>{{ end }}
+    {{ if .Attrs.body }}<div class="block-feature-row__body">{{ markdown .Attrs.body }}</div>{{ end }}
+    {{ if .Attrs.button_url }}
+    <p class="block-feature-row__cta">
+      <a href="{{ .Attrs.button_url }}" class="button style-primary">
+        {{ if .Attrs.button_label }}{{ .Attrs.button_label }}{{ else }}Learn more{{ end }}
+      </a>
+    </p>
+    {{ end }}
+  </div>
+  {{ if $img }}
+  <div class="block-feature-row__media">
+    <img src="{{ $img }}" alt="{{ .Attrs.image_alt }}" loading="lazy">
+  </div>
+  {{ end }}
+</section>

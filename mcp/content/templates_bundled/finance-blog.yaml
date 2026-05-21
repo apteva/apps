@@ -1,13 +1,11 @@
 schema: apteva-content-template/v1
 name: finance-blog
 display_name: Finance Blog
-version: 1.0.0
+version: 2.0.0
 description: |
-  Personal-finance blogger starter. Magazine-style homepage with hero +
-  recent posts, three sample categories (Markets / Personal Finance /
-  Crypto), an About page, a legally-required Disclosure page, and two
-  sample posts demonstrating typical structure. Pairs cleanly with the
-  default theme.
+  Personal-finance blogger starter. Magazine-style homepage with hero
+  image, three sample categories, About / Disclosure pages, two sample
+  posts each with a hero photograph. Pairs best with the magazine theme.
 tags: [blog, finance, magazine]
 
 requires_apps: []
@@ -18,6 +16,7 @@ settings:
   site_tagline: Smart money, plain language
   posts_per_page: "8"
   blog_root_path: /posts
+  active_theme: magazine
 
 terms:
   - kind: category
@@ -46,50 +45,47 @@ pages:
     title: Welcome
     blocks:
       - type: core/heading
-        attrs:
-          level: 1
-          text: Smart money, plain language
+        attrs: { level: 1, text: Smart money, plain language }
       - type: core/paragraph
         attrs:
           text_md: "Markets, ETFs, and personal finance — without the jargon. New post every Tuesday."
+      - type: core/image
+        attrs:
+          url: https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=1600&q=80&auto=format&fit=crop
+          alt: Stock charts on a screen
+          size: wide
       - type: core/cta
         attrs:
-          heading: Subscribe
+          heading: Subscribe to the newsletter
           body: One email a week. Unsubscribe anytime.
           button_label: Subscribe
           button_url: /subscribe
-      - type: core/separator
-        attrs:
-          style: plain
       - type: core/heading
-        attrs:
-          level: 2
-          text: Latest from the blog
+        attrs: { level: 2, text: Latest from the blog }
       - type: core/paragraph
         attrs:
-          text_md: "_Recent posts appear below — to surface them on this page, swap this block for an `analytics/chart` or a custom posts-list block in v1.1._"
+          text_md: Scroll down for the most recent posts — or pick a category from the navigation.
 
   - slug: about
     title: About Finance Daily
     blocks:
-      - type: core/heading
+      - type: core/image
         attrs:
-          level: 1
-          text: About
+          url: https://images.unsplash.com/photo-1521737604893-d14cc237f11d?w=1600&q=80&auto=format&fit=crop
+          alt: Coffee and notebook on a desk
+          size: wide
+      - type: core/heading
+        attrs: { level: 1, text: About }
       - type: core/paragraph
         attrs:
           text_md: Finance Daily is a one-person newsletter about personal finance and markets. Written for people who'd rather not read a Bloomberg terminal.
       - type: core/heading
-        attrs:
-          level: 2
-          text: Who writes this
+        attrs: { level: 2, text: Who writes this }
       - type: core/paragraph
         attrs:
           text_md: Replace this section with your bio — background, credentials, why people should listen to you.
       - type: core/heading
-        attrs:
-          level: 2
-          text: Editorial principles
+        attrs: { level: 2, text: Editorial principles }
       - type: core/list
         attrs:
           style: bullet
@@ -103,30 +99,22 @@ pages:
     title: Disclosure
     blocks:
       - type: core/heading
-        attrs:
-          level: 1
-          text: Disclosure
+        attrs: { level: 1, text: Disclosure }
       - type: core/paragraph
         attrs:
           text_md: Nothing on this site is investment advice. The author may hold positions in securities discussed; specific holdings are listed below and updated quarterly.
       - type: core/heading
-        attrs:
-          level: 2
-          text: Current holdings
+        attrs: { level: 2, text: Current holdings }
       - type: core/paragraph
         attrs:
           text_md: _List your holdings here. Update on the first business day of each quarter._
       - type: core/heading
-        attrs:
-          level: 2
-          text: Sponsorships
+        attrs: { level: 2, text: Sponsorships }
       - type: core/paragraph
         attrs:
           text_md: 'Sponsored posts are labelled "Sponsored" in the title. Newsletter ads appear above the fold and below the signature.'
       - type: core/heading
-        attrs:
-          level: 2
-          text: Affiliate links
+        attrs: { level: 2, text: Affiliate links }
       - type: core/paragraph
         attrs:
           text_md: Some outbound links are affiliate links. Replace this paragraph with the specific programmes you participate in.
@@ -137,13 +125,16 @@ posts:
     excerpt: What this newsletter is about, and what you can expect.
     terms: [markets, personal-finance]
     blocks:
+      - type: core/image
+        attrs:
+          url: https://images.unsplash.com/photo-1554224155-6726b3ff858f?w=1600&q=80&auto=format&fit=crop
+          alt: Notebook and pen on a desk
+          size: wide
       - type: core/paragraph
         attrs:
           text_md: "If you're new here, welcome. Finance Daily covers three things: markets (what's moving and why), personal finance (how to think about your money), and crypto (the parts that matter)."
       - type: core/heading
-        attrs:
-          level: 2
-          text: What you'll get
+        attrs: { level: 2, text: What you'll get }
       - type: core/list
         attrs:
           style: bullet
@@ -152,9 +143,7 @@ posts:
             - A monthly portfolio review on the first Friday.
             - Occasional deeper dives when something big happens.
       - type: core/heading
-        attrs:
-          level: 2
-          text: What you won't get
+        attrs: { level: 2, text: What you won't get }
       - type: core/list
         attrs:
           style: bullet
@@ -171,20 +160,21 @@ posts:
     excerpt: What an ETF is, how it differs from a mutual fund, and why most people should hold some.
     terms: [etfs, markets, personal-finance]
     blocks:
+      - type: core/image
+        attrs:
+          url: https://images.unsplash.com/photo-1590283603385-17ffb3a7f29f?w=1600&q=80&auto=format&fit=crop
+          alt: Financial charts and graphs
+          size: wide
       - type: core/paragraph
         attrs:
           text_md: An ETF — exchange-traded fund — is a basket of securities (usually stocks or bonds) that you can buy or sell on a stock exchange the same way you'd buy or sell a single share.
       - type: core/heading
-        attrs:
-          level: 2
-          text: Why does this matter
+        attrs: { level: 2, text: Why does this matter }
       - type: core/paragraph
         attrs:
           text_md: "Three reasons. **Diversification**: one purchase gets you exposure to hundreds of underlying companies. **Cost**: passive ETFs have annual fees of 0.03%–0.10%, vs 0.5%–1.5% for actively-managed mutual funds. **Liquidity**: you can sell whenever the market's open, vs end-of-day for mutual funds."
       - type: core/heading
-        attrs:
-          level: 2
-          text: What to look for
+        attrs: { level: 2, text: What to look for }
       - type: core/list
         attrs:
           style: number
@@ -200,20 +190,10 @@ menus:
   - slug: primary
     name: Primary
     items:
-      - label: Markets
-        target_kind: term
-        target_slug: markets
-      - label: Personal Finance
-        target_kind: term
-        target_slug: personal-finance
-      - label: Crypto
-        target_kind: term
-        target_slug: crypto
-      - label: About
-        target_kind: page
-        target_slug: about
-      - label: Disclosure
-        target_kind: page
-        target_slug: disclosure
+      - { label: Markets,          target_kind: term, target_slug: markets }
+      - { label: Personal Finance, target_kind: term, target_slug: personal-finance }
+      - { label: Crypto,           target_kind: term, target_slug: crypto }
+      - { label: About,            target_kind: page, target_slug: about }
+      - { label: Disclosure,       target_kind: page, target_slug: disclosure }
 
 homepage_slug: home

@@ -557,6 +557,137 @@ a:hover { opacity: 0.8; }
   opacity: 0.92;
 }
 
+/* Feature row — alternating text + image. Looks like the SaaS-landing
+   "Comprehensive business lifecycle management" pattern. */
+.block-feature-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4rem;
+  align-items: center;
+  margin: 5rem auto;
+  max-width: var(--container);
+}
+.block-feature-row.is-reverse .block-feature-row__text { order: 2; }
+.block-feature-row.is-reverse .block-feature-row__media { order: 1; }
+.block-feature-row__eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--accent);
+  margin: 0 0 0.75rem;
+}
+.block-feature-row__heading {
+  font-size: clamp(1.6rem, 2.5vw, 2.25rem);
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+  margin: 0 0 1rem;
+}
+.block-feature-row__body {
+  color: var(--fg-muted);
+  font-size: 1.05rem;
+  line-height: 1.7;
+}
+.block-feature-row__body p { margin: 0 0 0.75rem; }
+.block-feature-row__body p:last-child { margin-bottom: 0; }
+.block-feature-row__body ul { padding-left: 1.25rem; }
+.block-feature-row__cta { margin: 1.5rem 0 0; }
+.block-feature-row__media img {
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+@media (max-width: 768px) {
+  .block-feature-row { grid-template-columns: 1fr; gap: 2rem; margin: 3rem auto; }
+  .block-feature-row.is-reverse .block-feature-row__text { order: 1; }
+  .block-feature-row.is-reverse .block-feature-row__media { order: 2; }
+}
+
+/* Logo strip — trusted-by section */
+.block-logo-strip {
+  text-align: center;
+  margin: 4rem auto;
+  padding: 2rem 0;
+}
+.block-logo-strip__label {
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.85rem;
+  color: var(--fg-muted);
+  margin: 0 0 2rem;
+}
+.block-logo-strip__logos {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 3rem;
+  filter: grayscale(100%);
+  opacity: 0.65;
+}
+.block-logo-strip__logos img {
+  max-height: 32px;
+  width: auto;
+}
+.block-logo-strip__logos:hover { filter: none; opacity: 1; }
+
+/* Stats — row of headline KPIs */
+.block-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 2rem;
+  margin: 4rem auto;
+  padding: 3rem 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  text-align: center;
+}
+.block-stats__value {
+  font-size: clamp(2rem, 4vw, 3rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--accent);
+  line-height: 1.1;
+}
+.block-stats__label {
+  color: var(--fg-muted);
+  font-size: 0.95rem;
+  margin-top: 0.5rem;
+}
+
+/* Testimonial */
+.block-testimonial {
+  background: var(--bg-soft);
+  border-radius: var(--radius-lg);
+  padding: 2.5rem;
+  margin: 3rem auto;
+  border: 1px solid var(--border);
+  max-width: var(--container-narrow);
+}
+.block-testimonial__quote {
+  margin: 0 0 1.5rem;
+  font-size: 1.25rem;
+  line-height: 1.5;
+  font-weight: 500;
+  color: var(--fg);
+}
+.block-testimonial__author {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  font-size: 0.95rem;
+}
+.block-testimonial__avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.block-testimonial__name { font-weight: 600; }
+.block-testimonial__role { color: var(--fg-muted); font-size: 0.9rem; }
+
 /* Fallback (unknown block type) */
 .block-fallback {
   padding: 1rem;

@@ -1,7 +1,13 @@
-{{- /* attrs: { media_id, alt, caption, size, link } */ -}}
+{{- /* attrs: { media_id|url, alt, caption, size, link }
+       Templates that don't have user-uploaded media yet use `url`;
+       user uploads via the panel use `media_id`. */ -}}
+{{- $src := "" -}}
+{{- if .Attrs.url -}}{{- $src = .Attrs.url -}}
+{{- else if .Attrs.media_id -}}{{- $src = media .Attrs.media_id -}}
+{{- end -}}
 <figure class="block-image size-{{ if .Attrs.size }}{{ .Attrs.size }}{{ else }}inline{{ end }}">
   {{ if .Attrs.link }}<a href="{{ .Attrs.link }}">{{ end }}
-  <img src="{{ media .Attrs.media_id }}" alt="{{ .Attrs.alt }}">
+  <img src="{{ $src }}" alt="{{ .Attrs.alt }}" loading="lazy">
   {{ if .Attrs.link }}</a>{{ end }}
   {{ if .Attrs.caption }}<figcaption>{{ .Attrs.caption }}</figcaption>{{ end }}
 </figure>

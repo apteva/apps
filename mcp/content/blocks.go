@@ -411,15 +411,68 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 	},
 	"core/image": {
 		Name: "core/image", DisplayName: "Image", Category: "media",
-		Description: "Image from the media library.",
+		Description: "Image from the media library OR an external URL (templates use url; user uploads use media_id).",
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"media_id": map[string]any{"type": "integer"},
+				"url":      map[string]any{"type": "string"},
 				"alt":      map[string]any{"type": "string"},
 				"caption":  map[string]any{"type": "string"},
 				"size":     map[string]any{"type": "string", "enum": []string{"inline", "wide", "full"}},
 				"link":     map[string]any{"type": "string"},
+			},
+		},
+	},
+	"core/feature-row": {
+		Name: "core/feature-row", DisplayName: "Feature Row", Category: "layout",
+		Description: "Side-by-side text + image. Use reverse:true to flip image to the left (alternates well across multiple rows).",
+		AttrsSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"eyebrow":      map[string]any{"type": "string"},
+				"heading":      map[string]any{"type": "string"},
+				"body":         map[string]any{"type": "string"},
+				"image_url":    map[string]any{"type": "string"},
+				"image_media_id": map[string]any{"type": "integer"},
+				"image_alt":    map[string]any{"type": "string"},
+				"button_label": map[string]any{"type": "string"},
+				"button_url":   map[string]any{"type": "string"},
+				"reverse":      map[string]any{"type": "boolean"},
+			},
+		},
+	},
+	"core/logo-strip": {
+		Name: "core/logo-strip", DisplayName: "Logo strip", Category: "layout",
+		Description: "Horizontal row of logos for a 'trusted by' / social-proof section. Accepts image_urls (array of external URLs).",
+		AttrsSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"label":      map[string]any{"type": "string"},
+				"image_urls": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			},
+		},
+	},
+	"core/stats": {
+		Name: "core/stats", DisplayName: "Stats row", Category: "layout",
+		Description: "Row of headline stats — KPI value + label per cell.",
+		AttrsSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"items": map[string]any{"type": "array"},
+			},
+		},
+	},
+	"core/testimonial": {
+		Name: "core/testimonial", DisplayName: "Testimonial", Category: "layout",
+		Description: "Quote + author + role + avatar image.",
+		AttrsSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"quote":       map[string]any{"type": "string"},
+				"author":      map[string]any{"type": "string"},
+				"role":        map[string]any{"type": "string"},
+				"avatar_url":  map[string]any{"type": "string"},
 			},
 		},
 	},

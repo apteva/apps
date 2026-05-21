@@ -1,13 +1,13 @@
 schema: apteva-content-template/v1
 name: saas-marketing
 display_name: SaaS Marketing
-version: 1.0.0
+version: 2.0.0
 description: |
-  Marketing-site starter for a B2B SaaS product. Homepage with hero +
-  features + social-proof + pricing CTA; dedicated pages for features,
-  pricing, about, and contact. No blog posts — this is a five-page
-  marketing site, not a content publication. Pairs with the default
-  theme or any landing-style theme.
+  Marketing-site starter for a B2B SaaS product. Hero with product
+  mockup, headline stats, three alternating feature rows with
+  imagery, pricing columns, customer testimonials, and CTA strips.
+  Uses Unsplash photography placeholders — every image is hot-swappable
+  via the block editor.
 tags: [marketing, saas, b2b, landing]
 
 requires_apps: []
@@ -25,6 +25,7 @@ pages:
   - slug: home
     title: Home
     blocks:
+      # ── HERO ────────────────────────────────────────────
       - type: core/heading
         attrs:
           level: 1
@@ -32,117 +33,89 @@ pages:
       - type: core/paragraph
         attrs:
           align: center
-          text_md: Acme is the all-in-one platform for teams that want to launch a SaaS product without spending six months on plumbing.
+          text_md: Acme is the all-in-one platform for teams that want to launch a SaaS product without spending six months on plumbing — auth, billing, email, and analytics out of the box.
       - type: core/button
         attrs:
           label: Start free trial
           url: /signup
           style: primary
-      - type: core/separator
+      - type: core/image
         attrs:
-          style: plain
+          url: https://images.unsplash.com/photo-1551288049-bebda4e38f71?w=1600&q=80&auto=format&fit=crop
+          alt: Product dashboard preview
+          size: wide
+
+      # ── STATS ───────────────────────────────────────────
+      - type: core/stats
+        attrs:
+          items:
+            - { value: "10,000+", label: Teams shipping with Acme }
+            - { value: "$2.4B",   label: Transactions processed }
+            - { value: "99.99%",  label: Uptime SLA }
+            - { value: "4.9/5",   label: Average G2 review }
+
+      # ── FEATURE ROWS ────────────────────────────────────
+      - type: core/feature-row
+        attrs:
+          eyebrow: Built for builders
+          heading: Ship the product, not the plumbing
+          body: |
+            Acme bundles the boring-but-essential parts of a SaaS — magic-link
+            auth, social login, SAML SSO, Stripe-powered subscriptions,
+            transactional email, and event-based analytics. Wire it once,
+            ship for years.
+
+            - Drop-in auth that handles edge cases
+            - Stripe-backed billing with usage metering
+            - Email templates with preview tooling
+          image_url: https://images.unsplash.com/photo-1600880292203-757bb62b4baf?w=1200&q=80&auto=format&fit=crop
+          image_alt: Engineering team collaborating
+          button_label: See all features
+          button_url: /features
+          reverse: false
+
+      - type: core/feature-row
+        attrs:
+          eyebrow: Built to scale
+          heading: From your first paying customer to Series B
+          body: |
+            Acme runs on the same infrastructure as some of the largest
+            SaaS companies in the world. No re-platforming, no surprise
+            cost cliffs, no late-night migrations. The shape of your
+            product stays the same; only the volume changes.
+          image_url: https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=1200&q=80&auto=format&fit=crop
+          image_alt: Analytics dashboard with growth charts
+          button_label: View architecture
+          button_url: /features
+          reverse: true
+
+      - type: core/feature-row
+        attrs:
+          eyebrow: Built for enterprise
+          heading: Security and compliance, built in
+          body: |
+            SOC 2 Type II, GDPR-ready data residency, HIPAA-eligible
+            tenants, and SCIM provisioning for enterprise plans.
+            Your security team's checklist is already done.
+          image_url: https://images.unsplash.com/photo-1614064641938-3bbee52942c7?w=1200&q=80&auto=format&fit=crop
+          image_alt: Padlock representing security
+          button_label: Trust & compliance
+          button_url: /about
+          reverse: false
+
+      # ── PRICING ─────────────────────────────────────────
       - type: core/heading
-        attrs:
-          level: 2
-          text: Why teams pick Acme
-      - type: core/columns
-        inner:
-          - type: core/group
-            inner:
-              - type: core/heading
-                attrs:
-                  level: 3
-                  text: Ship in days
-              - type: core/paragraph
-                attrs:
-                  text_md: Auth, billing, email, and analytics out of the box. Focus on what makes your product different.
-          - type: core/group
-            inner:
-              - type: core/heading
-                attrs:
-                  level: 3
-                  text: Scale with you
-              - type: core/paragraph
-                attrs:
-                  text_md: From the first paying customer to your Series B. No re-platforming.
-      - type: core/separator
-        attrs:
-          style: plain
-      - type: core/heading
-        attrs:
-          level: 2
-          text: Trusted by
+        attrs: { level: 2, text: Simple, transparent pricing }
       - type: core/paragraph
         attrs:
           align: center
-          text_md: _Replace with logos of customers, or testimonials if you don't have logos yet._
-      - type: core/separator
-        attrs:
-          style: plain
-      - type: core/cta
-        attrs:
-          heading: Try it free for 14 days
-          body: No credit card required.
-          button_label: Start free trial
-          button_url: /signup
-
-  - slug: features
-    title: Features
-    blocks:
-      - type: core/heading
-        attrs:
-          level: 1
-          text: What's in the box
-      - type: core/paragraph
-        attrs:
-          text_md: Acme bundles the boring-but-essential parts of a SaaS so you can spend your time on the differentiator.
-      - type: core/heading
-        attrs:
-          level: 2
-          text: Authentication
-      - type: core/paragraph
-        attrs:
-          text_md: Magic-link, social login (Google / GitHub / Apple), and SAML SSO for enterprise plans. Sessions are managed for you.
-      - type: core/heading
-        attrs:
-          level: 2
-          text: Billing
-      - type: core/paragraph
-        attrs:
-          text_md: Stripe-powered subscriptions, usage-based metering, trial logic, dunning, and proration — all without leaving Acme.
-      - type: core/heading
-        attrs:
-          level: 2
-          text: Transactional email
-      - type: core/paragraph
-        attrs:
-          text_md: Send welcome, password-reset, and trial-expiry emails through the bundled email API. Templates are versioned and previewable.
-      - type: core/heading
-        attrs:
-          level: 2
-          text: Analytics
-      - type: core/paragraph
-        attrs:
-          text_md: Event tracking with retention cohorts, funnels, and revenue dashboards. No JS snippet to install.
-
-  - slug: pricing
-    title: Pricing
-    blocks:
-      - type: core/heading
-        attrs:
-          level: 1
-          text: Simple, transparent pricing
-      - type: core/paragraph
-        attrs:
           text_md: Pick a plan that matches where you are. Upgrade whenever; downgrade anytime.
       - type: core/columns
         inner:
           - type: core/group
             inner:
               - type: core/heading
-                attrs:
-                  level: 3
-                  text: Starter — $29/mo
+                attrs: { level: 3, text: Starter — $29/mo }
               - type: core/list
                 attrs:
                   style: bullet
@@ -151,16 +124,11 @@ pages:
                     - All core features
                     - Email support
               - type: core/button
-                attrs:
-                  label: Start
-                  url: /signup?plan=starter
-                  style: secondary
+                attrs: { label: Start, url: "/signup?plan=starter", style: secondary }
           - type: core/group
             inner:
               - type: core/heading
-                attrs:
-                  level: 3
-                  text: Growth — $99/mo
+                attrs: { level: 3, text: Growth — $99/mo }
               - type: core/list
                 attrs:
                   style: bullet
@@ -170,16 +138,11 @@ pages:
                     - Custom domain
                     - Webhooks
               - type: core/button
-                attrs:
-                  label: Start
-                  url: /signup?plan=growth
-                  style: primary
+                attrs: { label: Start, url: "/signup?plan=growth", style: primary }
           - type: core/group
             inner:
               - type: core/heading
-                attrs:
-                  level: 3
-                  text: Enterprise — custom
+                attrs: { level: 3, text: Enterprise }
               - type: core/list
                 attrs:
                   style: bullet
@@ -189,38 +152,195 @@ pages:
                     - SLA + dedicated support
                     - Custom contract
               - type: core/button
+                attrs: { label: Talk to sales, url: /contact, style: ghost }
+
+      # ── TESTIMONIALS ───────────────────────────────────
+      - type: core/heading
+        attrs: { level: 2, text: What teams are saying }
+      - type: core/testimonial
+        attrs:
+          quote: We shipped our first paying-customer feature in 6 weeks instead of 6 months. Acme handled everything we used to dread.
+          author: Sarah Chen
+          role: CTO, Cardinal Logistics
+          avatar_url: https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=160&q=80&auto=format&fit=crop&crop=faces
+      - type: core/testimonial
+        attrs:
+          quote: The billing module alone saved us a quarter of engineering time. Dunning, proration, trials — done.
+          author: Marcus Patel
+          role: Co-founder, Vertex Labs
+          avatar_url: https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=160&q=80&auto=format&fit=crop&crop=faces
+
+      # ── FINAL CTA ──────────────────────────────────────
+      - type: core/cta
+        attrs:
+          heading: Try Acme free for 14 days
+          body: No credit card required. Cancel anytime.
+          button_label: Start free trial
+          button_url: /signup
+
+  - slug: features
+    title: Features
+    blocks:
+      - type: core/heading
+        attrs: { level: 1, text: What's in the box }
+      - type: core/paragraph
+        attrs:
+          align: center
+          text_md: Acme bundles the boring-but-essential parts of a SaaS so you can spend your time on the differentiator.
+      - type: core/feature-row
+        attrs:
+          eyebrow: Authentication
+          heading: Magic-link, social, and SSO out of the box
+          body: Sign in with Google, GitHub, Apple, or magic-link by default. SAML SSO and SCIM provisioning for enterprise plans. Sessions, refresh tokens, and security headers are managed for you.
+          image_url: https://images.unsplash.com/photo-1633265486064-086b219458ec?w=1200&q=80&auto=format&fit=crop
+          image_alt: Authentication interface
+      - type: core/feature-row
+        attrs:
+          eyebrow: Billing
+          heading: Subscriptions, metering, and dunning — done
+          body: Stripe-powered subscriptions, usage-based metering with idempotency, trial logic, proration, dunning emails — all without leaving Acme.
+          image_url: https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?w=1200&q=80&auto=format&fit=crop
+          image_alt: Credit card and laptop
+          reverse: true
+      - type: core/feature-row
+        attrs:
+          eyebrow: Transactional email
+          heading: Versioned templates with preview tooling
+          body: Send welcome, password-reset, and trial-expiry emails through the bundled email API. Templates are versioned, previewable, and per-environment.
+          image_url: https://images.unsplash.com/photo-1614849963640-9cc74b2a826f?w=1200&q=80&auto=format&fit=crop
+          image_alt: Email composer mockup
+      - type: core/feature-row
+        attrs:
+          eyebrow: Analytics
+          heading: Event tracking with retention and revenue cohorts
+          body: Funnels, retention cohorts, MRR / ARR dashboards, churn analysis — no JS snippet to install, no separate vendor to wire up.
+          image_url: https://images.unsplash.com/photo-1551288049-bebda4e38f71?w=1200&q=80&auto=format&fit=crop
+          image_alt: Analytics dashboard
+          reverse: true
+
+  - slug: pricing
+    title: Pricing
+    blocks:
+      - type: core/heading
+        attrs: { level: 1, text: Simple, transparent pricing }
+      - type: core/paragraph
+        attrs:
+          align: center
+          text_md: Pick a plan that matches where you are. Upgrade whenever; downgrade anytime.
+      - type: core/columns
+        inner:
+          - type: core/group
+            inner:
+              - type: core/heading
+                attrs: { level: 3, text: Starter — $29/mo }
+              - type: core/list
                 attrs:
-                  label: Talk to sales
-                  url: /contact
-                  style: ghost
+                  style: bullet
+                  items:
+                    - Up to 1,000 MAU
+                    - All core features
+                    - Email support
+              - type: core/button
+                attrs: { label: Start, url: "/signup?plan=starter", style: secondary }
+          - type: core/group
+            inner:
+              - type: core/heading
+                attrs: { level: 3, text: Growth — $99/mo }
+              - type: core/list
+                attrs:
+                  style: bullet
+                  items:
+                    - Up to 10,000 MAU
+                    - Priority support
+                    - Custom domain
+                    - Webhooks
+              - type: core/button
+                attrs: { label: Start, url: "/signup?plan=growth", style: primary }
+          - type: core/group
+            inner:
+              - type: core/heading
+                attrs: { level: 3, text: Enterprise }
+              - type: core/list
+                attrs:
+                  style: bullet
+                  items:
+                    - Unlimited MAU
+                    - SAML SSO + SCIM
+                    - SLA + dedicated support
+                    - Custom contract
+              - type: core/button
+                attrs: { label: Talk to sales, url: /contact, style: ghost }
+      - type: core/cta
+        attrs:
+          heading: Need a custom plan?
+          body: Volume discounts, custom contracts, regulated industries — we work with teams of any shape.
+          button_label: Talk to sales
+          button_url: /contact
 
   - slug: about
     title: About
     blocks:
       - type: core/heading
-        attrs:
-          level: 1
-          text: About Acme
+        attrs: { level: 1, text: About Acme }
       - type: core/paragraph
         attrs:
-          text_md: Replace this with your founder story. Who started the company, why, what makes the team uniquely qualified to build this product.
+          align: center
+          text_md: We started Acme because we kept rebuilding the same SaaS plumbing for every product. Now you don't have to.
+      - type: core/image
+        attrs:
+          url: https://images.unsplash.com/photo-1521737711867-e3b97375f902?w=1600&q=80&auto=format&fit=crop
+          alt: Team at work
+          size: wide
+      - type: core/heading
+        attrs: { level: 2, text: Our story }
+      - type: core/paragraph
+        attrs:
+          text_md: Replace this with your founder story — who started the company, why, what makes the team uniquely qualified to build this product.
+      - type: core/heading
+        attrs: { level: 2, text: Our values }
+      - type: core/list
+        attrs:
+          style: bullet
+          items:
+            - "**Ship the boring stuff right** so customers can ship the interesting stuff."
+            - "**Be honest about tradeoffs** — every architecture has them."
+            - "**Document everything**, even the things we wish weren't true."
 
   - slug: contact
     title: Contact
     blocks:
       - type: core/heading
-        attrs:
-          level: 1
-          text: Get in touch
+        attrs: { level: 1, text: Get in touch }
       - type: core/paragraph
         attrs:
-          text_md: "**Sales:** sales@example.com"
-      - type: core/paragraph
-        attrs:
-          text_md: "**Support:** support@example.com"
-      - type: core/paragraph
-        attrs:
-          text_md: "**Press:** press@example.com"
+          align: center
+          text_md: Pick the right channel — we route faster than a single inbox would.
+      - type: core/columns
+        inner:
+          - type: core/group
+            inner:
+              - type: core/heading
+                attrs: { level: 3, text: Sales }
+              - type: core/paragraph
+                attrs: { text_md: For pricing, demos, and enterprise contracts. }
+              - type: core/paragraph
+                attrs: { text_md: "[sales@example.com](mailto:sales@example.com)" }
+          - type: core/group
+            inner:
+              - type: core/heading
+                attrs: { level: 3, text: Support }
+              - type: core/paragraph
+                attrs: { text_md: Existing customers — bug reports, billing questions, general help. }
+              - type: core/paragraph
+                attrs: { text_md: "[support@example.com](mailto:support@example.com)" }
+          - type: core/group
+            inner:
+              - type: core/heading
+                attrs: { level: 3, text: Press }
+              - type: core/paragraph
+                attrs: { text_md: Interviews, partnership announcements, anything for the record. }
+              - type: core/paragraph
+                attrs: { text_md: "[press@example.com](mailto:press@example.com)" }
 
 posts: []
 
@@ -228,17 +348,9 @@ menus:
   - slug: primary
     name: Primary
     items:
-      - label: Features
-        target_kind: page
-        target_slug: features
-      - label: Pricing
-        target_kind: page
-        target_slug: pricing
-      - label: About
-        target_kind: page
-        target_slug: about
-      - label: Contact
-        target_kind: page
-        target_slug: contact
+      - { label: Features, target_kind: page, target_slug: features }
+      - { label: Pricing,  target_kind: page, target_slug: pricing }
+      - { label: About,    target_kind: page, target_slug: about }
+      - { label: Contact,  target_kind: page, target_slug: contact }
 
 homepage_slug: home

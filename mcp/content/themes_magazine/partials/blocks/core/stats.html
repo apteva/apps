@@ -1,0 +1,9 @@
+{{- /* attrs: { items: [ { value, label } ] } */ -}}
+<section class="block-stats">
+  {{ range .Attrs.items }}
+  <div class="block-stats__item">
+    <div class="block-stats__value">{{ index . "value" }}</div>
+    <div class="block-stats__label">{{ index . "label" }}</div>
+  </div>
+  {{ end }}
+</section>

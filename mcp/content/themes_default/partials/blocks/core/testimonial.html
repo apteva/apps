@@ -1,0 +1,11 @@
+{{- /* attrs: { quote, author, role, avatar_url } */ -}}
+<figure class="block-testimonial">
+  <blockquote class="block-testimonial__quote">"{{ .Attrs.quote }}"</blockquote>
+  <figcaption class="block-testimonial__author">
+    {{ if .Attrs.avatar_url }}<img src="{{ .Attrs.avatar_url }}" alt="" class="block-testimonial__avatar" loading="lazy">{{ end }}
+    <div>
+      <div class="block-testimonial__name">{{ .Attrs.author }}</div>
+      {{ if .Attrs.role }}<div class="block-testimonial__role">{{ .Attrs.role }}</div>{{ end }}
+    </div>
+  </figcaption>
+</figure>
