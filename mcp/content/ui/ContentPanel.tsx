@@ -455,8 +455,21 @@ function ListView({
       .catch((e) => setError(String(e)));
   };
 
-  const act = (id: number, action: "publish" | "archive") => {
+  const act = (id: number, action: "publish" | "unpublish" | "archive") => {
     api(`/admin/posts/${id}/${action}`, { method: "POST" })
+      .then(refresh)
+      .catch((e) => setError(String(e)));
+  };
+
+  // Permanent delete — confirms first. Goes through DELETE
+  // /admin/posts/:id?hard=true which sets deleted_at server-side.
+  const remove = (id: number, title: string) => {
+    const ok = window.confirm(
+      `Permanently delete "${title || "(untitled)"}"?\n\nThis cannot be undone. ` +
+        `If you want to keep the ability to restore it later, use Archive instead.`,
+    );
+    if (!ok) return;
+    api(`/admin/posts/${id}?hard=true`, { method: "DELETE" })
       .then(refresh)
       .catch((e) => setError(String(e)));
   };
@@ -529,22 +542,41 @@ function ListView({
               >
                 <Icon name="edit" /> Edit
               </button>
-              {p.status !== "published" && (
+              {p.status === "archived" ? (
+                // Archived rows: Restore (back to draft) + permanent Delete.
                 <button
-                  onClick={() => act(p.id, "publish")}
+                  onClick={() => act(p.id, "unpublish")}
                   className="px-2 py-1 text-xs rounded border border-border"
+                  title="Move back to draft"
                 >
-                  Publish
+                  Restore
                 </button>
+              ) : (
+                <>
+                  {p.status !== "published" && (
+                    <button
+                      onClick={() => act(p.id, "publish")}
+                      className="px-2 py-1 text-xs rounded border border-border"
+                    >
+                      Publish
+                    </button>
+                  )}
+                  <button
+                    onClick={() => act(p.id, "archive")}
+                    className="px-2 py-1 text-xs rounded border border-border"
+                    title="Soft-delete (restorable)"
+                  >
+                    Archive
+                  </button>
+                </>
               )}
-              {p.status !== "archived" && (
-                <button
-                  onClick={() => act(p.id, "archive")}
-                  className="px-2 py-1 text-xs rounded border border-border"
-                >
-                  Archive
-                </button>
-              )}
+              <button
+                onClick={() => remove(p.id, p.title)}
+                className="flex items-center px-2 py-1 text-xs rounded border border-border text-red-700 hover:bg-red-50"
+                title="Permanently delete — cannot be undone"
+              >
+                <Icon name="trash" />
+              </button>
               <a
                 href={
                   p.status === "published"

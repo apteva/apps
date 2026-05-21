@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: content
 display_name: Content
-version: 2.4.0
+version: 2.5.0
 description: |
   Block-based CMS for Apteva. Posts, pages, media, taxonomies, menus,
   revisions, redirects. Renders themed HTML and exposes a headless REST
@@ -108,7 +108,9 @@ provides:
     - name: posts_unpublish
       description: Move back to draft.
     - name: posts_archive
-      description: Soft-delete (archived).
+      description: Soft-delete (archived) — restorable via posts_unpublish.
+    - name: posts_delete
+      description: Permanently remove a post (sets deleted_at). For a recoverable removal, use posts_archive.
     - name: posts_set_homepage
       description: Pin a page as the site homepage.
     - name: posts_revisions_list

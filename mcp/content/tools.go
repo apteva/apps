@@ -98,11 +98,19 @@ func (a *App) mcpTools() []sdk.Tool {
 		},
 		{
 			Name:        "posts_archive",
-			Description: "Archive (soft-delete) a post.",
+			Description: "Move a post to the archive (soft-delete — status='archived'). Restorable via posts_unpublish. For a permanent removal, use posts_delete.",
 			InputSchema: schemaObject(map[string]any{
 				"id": map[string]any{"type": "integer"},
 			}, []string{"id"}),
 			Handler: a.toolPostsArchive,
+		},
+		{
+			Name:        "posts_delete",
+			Description: "Permanently remove a post (sets deleted_at — no longer queryable). For a recoverable removal, use posts_archive.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolPostsDelete,
 		},
 		{
 			Name:        "posts_set_homepage",

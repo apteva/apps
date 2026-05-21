@@ -406,6 +406,21 @@ func dbArchivePost(db *sql.DB, projectID string, siteID int64, id int64, source 
 	return dbGetPost(db, projectID, siteID, id)
 }
 
+// dbDeletePost is a HARD delete — sets deleted_at so the row is
+// excluded from every list/get (the WHERE clauses all check
+// deleted_at IS NULL). The row stays physically present for revision
+// integrity but is functionally gone. A future posts_purge tool could
+// drop the bytes if disk pressure ever matters.
+func dbDeletePost(db *sql.DB, projectID string, siteID int64, id int64, source string) error {
+	if _, err := db.Exec(`UPDATE posts SET deleted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND site_id=? AND id=?`, projectID, siteID, id); err != nil {
+		return err
+	}
+	logPublishEvent(db, id, "deleted", source, nil)
+	invalidatePageCache()
+	return nil
+}
+
 func logPublishEvent(db *sql.DB, postID int64, event, source string, metadata map[string]any) {
 	meta := "{}"
 	if metadata != nil {
@@ -909,6 +924,26 @@ func (a *App) toolPostsArchive(ctx *sdk.AppCtx, args map[string]any) (any, error
 	return map[string]any{"post": post}, nil
 }
 
+func (a *App) toolPostsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	id, ok := asInt64(args["id"])
+	if !ok || id == 0 {
+		return nil, errors.New("id required")
+	}
+	if err := dbDeletePost(ctx.AppDB(), pid, siteID, id, asStringDefault(args["source"], "agent")); err != nil {
+		return nil, err
+	}
+	ctx.Emit("post.deleted", map[string]any{"id": id})
+	return map[string]any{"ok": true, "id": id}, nil
+}
+
 func (a *App) toolPostsSetHomepage(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -1120,7 +1155,15 @@ func (a *App) handleHTTPPostItem(w http.ResponseWriter, r *http.Request) {
 		}
 		httpJSON(w, out)
 	case http.MethodDelete:
-		out, err := a.toolPostsArchive(ctx, map[string]any{"id": id, "_project_id": pid, "_site_id": siteID})
+		// DELETE /admin/posts/:id           → archive (soft, restorable)
+		// DELETE /admin/posts/:id?hard=true → hard delete (sets deleted_at)
+		var out any
+		var err error
+		if r.URL.Query().Get("hard") == "true" {
+			out, err = a.toolPostsDelete(ctx, map[string]any{"id": id, "_project_id": pid, "_site_id": siteID})
+		} else {
+			out, err = a.toolPostsArchive(ctx, map[string]any{"id": id, "_project_id": pid, "_site_id": siteID})
+		}
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
