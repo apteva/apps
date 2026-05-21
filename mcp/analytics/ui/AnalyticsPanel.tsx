@@ -546,6 +546,7 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
   // filters (app / event type / one props.X = value equality).
   const qs = useMemo(() => {
     const p = new URLSearchParams();
+    if (projectId) p.set("project_id", projectId); // scope the panel to this project
     if (since) p.set("since", String(since));
     if (appF) p.set("app", appF);
     if (topicF) p.set("topic", topicF);
@@ -553,7 +554,7 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
       p.set("where", JSON.stringify({ [whereKey.trim()]: whereVal.trim() }));
     }
     return p.toString();
-  }, [since, appF, topicF, whereKey, whereVal]);
+  }, [projectId, since, appF, topicF, whereKey, whereVal]);
 
   const withQs = useCallback(
     (base: string) => base + (qs ? (base.includes("?") ? "&" : "?") + qs : ""),
@@ -600,13 +601,14 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
     }
   }, [withQs, byKey]);
 
-  // Dimension options for the filter dropdowns — fetched once, unfiltered.
+  // Dimension options for the filter dropdowns — scoped to this project.
   useEffect(() => {
-    fetch(`${API}/dimensions`, { credentials: "same-origin" })
+    const p = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    fetch(`${API}/dimensions${p}`, { credentials: "same-origin" })
       .then((r) => (r.ok ? r.json() : { apps: [], topics: [] }))
       .then((d) => setDims({ apps: d.apps ?? [], topics: d.topics ?? [] }))
       .catch(() => {});
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     loadMain();

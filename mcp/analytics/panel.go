@@ -138,7 +138,7 @@ func (a *App) handleDimensions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
-	apps, topics, err := distinctDimensions(globalCtx.AppDB())
+	apps, topics, err := distinctDimensions(globalCtx.AppDB(), r.URL.Query().Get("project_id"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

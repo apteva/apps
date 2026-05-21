@@ -429,26 +429,33 @@ func topicsWindowed(db *sql.DB, f Filter, limit int) ([]map[string]any, error) {
 	return out, rows.Err()
 }
 
-// distinctDimensions returns the full set of app and topic values seen,
-// for the panel's filter dropdowns.
-func distinctDimensions(db *sql.DB) (apps, topics []string, err error) {
-	if apps, err = distinctColumn(db, "app"); err != nil {
+// distinctDimensions returns the set of app and topic values seen for a
+// project (or all when projectID == ""), for the panel's filter dropdowns.
+func distinctDimensions(db *sql.DB, projectID string) (apps, topics []string, err error) {
+	if apps, err = distinctColumn(db, "app", projectID); err != nil {
 		return nil, nil, err
 	}
-	topics, err = distinctColumn(db, "topic")
+	topics, err = distinctColumn(db, "topic", projectID)
 	return apps, topics, err
 }
 
-// distinctColumn lists distinct non-null values of one column. col is a
-// fixed identifier from a closed set (never user input) — guarded here
-// so it can never become an injection vector if a caller is added.
-func distinctColumn(db *sql.DB, col string) ([]string, error) {
+// distinctColumn lists distinct non-null values of one column, optionally
+// scoped to a project. col is a fixed identifier from a closed set (never
+// user input) — guarded here so it can never become an injection vector.
+func distinctColumn(db *sql.DB, col, projectID string) ([]string, error) {
 	switch col {
 	case "app", "topic":
 	default:
 		return nil, fmt.Errorf("distinctColumn: unsupported column %q", col)
 	}
-	rows, err := db.Query("SELECT DISTINCT " + col + " FROM events WHERE " + col + " IS NOT NULL ORDER BY " + col)
+	q := "SELECT DISTINCT " + col + " FROM events WHERE " + col + " IS NOT NULL"
+	var args []any
+	if projectID != "" {
+		q += " AND project_id = ?"
+		args = append(args, projectID)
+	}
+	q += " ORDER BY " + col
+	rows, err := db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
