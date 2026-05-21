@@ -83,8 +83,13 @@ type sendersCreateResp struct {
 	DkimTokens []string              `json:"dkim_tokens,omitempty"`
 	DkimStatus string                `json:"dkim_status,omitempty"`
 	DnsRecords []map[string]string   `json:"dns_records,omitempty"`
-	Inbound    *sendersCreateInbound `json:"inbound,omitempty"`
-	Steps      []bootstrapStep       `json:"steps"`
+	// DnsPublishPartial is true when one or more dns_* publish steps
+	// failed. Top-level signal so callers/UI can show a warning without
+	// scanning the per-step list — the buried ✗ used to be masked by a
+	// green dkim_status (which reflects SES, not whether DNS landed).
+	DnsPublishPartial bool                  `json:"dns_publish_partial,omitempty"`
+	Inbound           *sendersCreateInbound `json:"inbound,omitempty"`
+	Steps             []bootstrapStep       `json:"steps"`
 }
 
 // HTTP entry point — POST /senders/create.
@@ -237,6 +242,7 @@ func (a *App) sendersCreateEmailViaParentDomain(ctx *sdk.AppCtx, pid string, ses
 		resp.DkimTokens = domainResp.DkimTokens
 		resp.DkimStatus = domainResp.DkimStatus
 		resp.DnsRecords = domainResp.DnsRecords
+		resp.DnsPublishPartial = domainResp.DnsPublishPartial
 		resp.Inbound = domainResp.Inbound
 		resp.Steps = append(resp.Steps, domainResp.Steps...)
 		parentIdentity, _ = dbFindIdentity(ctx.AppDB(), pid, "email_domain", parent)
@@ -249,9 +255,24 @@ func (a *App) sendersCreateEmailViaParentDomain(ctx *sdk.AppCtx, pid string, ses
 		resp.DkimStatus = "SUCCESS"
 	}
 
+	// The mailbox inherits the parent domain's ACTUAL verification state,
+	// not a hard-coded SUCCESS. Persisting verified=true while the parent
+	// is still pending (or its DKIM DNS failed to publish) was the "lie
+	// about success" bug — the panel showed green for a mailbox that
+	// couldn't actually send yet.
 	var parentID int64
+	parentVerified := false
 	if parentIdentity != nil {
 		parentID = parentIdentity.ID
+		parentVerified = parentIdentity.Verified && parentIdentity.DeletedAt == nil
+	}
+	mboxStatus := "pending"
+	mboxDkim := resp.DkimStatus
+	if parentVerified {
+		mboxStatus = "verified"
+		if mboxDkim == "" {
+			mboxDkim = "SUCCESS"
+		}
 	}
 	a.persistSenderRow(ctx, pid, &senderUpsert{
 		ProjectID:          pid,
@@ -261,15 +282,23 @@ func (a *App) sendersCreateEmailViaParentDomain(ctx *sdk.AppCtx, pid string, ses
 		DisplayName:        req.DisplayName,
 		Provider:           "aws-ses",
 		ProviderIdentityID: addr,
-		Verified:           true,
-		VerificationStatus: "verified",
+		Verified:           parentVerified,
+		VerificationStatus: mboxStatus,
 		SendingEnabled:     true,
-		DkimStatus:         "SUCCESS",
+		DkimStatus:         mboxDkim,
 		ParentIdentityID:   parentID,
 		MarkSyncedNow:      true,
 	}, resp)
-	resp.Pending = false
-	resp.NextStep = fmt.Sprintf("inherits DKIM from %s — ready to send", parent)
+	if parentVerified {
+		resp.Pending = false
+		resp.NextStep = fmt.Sprintf("inherits DKIM from %s — ready to send", parent)
+	} else {
+		resp.Pending = true
+		resp.NextStep = fmt.Sprintf("%s registered; waiting on %s DKIM verification — check senders_get once DNS propagates.", addr, parent)
+		if resp.DnsPublishPartial {
+			resp.NextStep = "Some DNS records failed to publish — review the dns_* steps and re-run senders_create. " + resp.NextStep
+		}
+	}
 	return resp, nil
 }
 
@@ -431,7 +460,7 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 	// SES verify_domain — outbound + inbound both need DKIM. Idempotent:
 	// if the identity already exists in SES, bootstrapVerifyDomain
 	// adopts it and returns the existing DKIM tokens.
-	dkimTokens, dkimStatus, adopted, err := bootstrapVerifyDomain(ctx, sesConnID, domain)
+	dkimTokens, dkimStatus, adopted, reprobed, err := bootstrapVerifyDomain(ctx, sesConnID, domain)
 	if err != nil {
 		resp.Steps = append(resp.Steps, bootstrapStep{Step: "ses_verify_domain", OK: false, Error: err.Error()})
 		return resp, nil
@@ -443,31 +472,54 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 	if adopted {
 		detail += " (adopted existing identity)"
 	}
+	if reprobed {
+		detail += " — re-probed stuck DKIM (delete+recreate)"
+	}
 	resp.Steps = append(resp.Steps, bootstrapStep{Step: "ses_verify_domain", OK: true, Detail: detail})
+
+	// On adoption of an identity created elsewhere, reset any leftover
+	// custom MAIL FROM domain back to the SES default — messaging doesn't
+	// use custom MAIL FROM, so a carried-over (often FAILED) value is
+	// just noise. Skip after a re-probe: the recreated identity is clean.
+	if adopted && !reprobed {
+		resp.Steps = append(resp.Steps, bootstrapClearMailFrom(ctx, sesConnID, domain))
+	}
 
 	if publishDNS {
 		if isAppDepBound(ctx, "domains") {
 			for i, tok := range dkimTokens {
-				resp.Steps = append(resp.Steps, bootstrapPublishDNSRecord(
+				st := bootstrapPublishDNSRecord(
 					ctx, pid,
 					fmt.Sprintf("dns_dkim_%d", i+1),
 					domain,
 					tok+"._domainkey",
 					"CNAME",
 					tok+".dkim.amazonses.com",
-				))
+				)
+				if !st.OK {
+					resp.DnsPublishPartial = true
+				}
+				resp.Steps = append(resp.Steps, st)
 			}
 			if doInbound {
-				resp.Steps = append(resp.Steps, bootstrapPublishDNSRecord(
+				st := bootstrapPublishDNSRecord(
 					ctx, pid, "dns_mx", domain, "@", "MX",
 					"10 inbound-smtp."+region+".amazonaws.com",
-				))
+				)
+				if !st.OK {
+					resp.DnsPublishPartial = true
+				}
+				resp.Steps = append(resp.Steps, st)
 			}
 			if publishSPF {
-				resp.Steps = append(resp.Steps, bootstrapPublishDNSRecord(
+				st := bootstrapPublishDNSRecord(
 					ctx, pid, "dns_spf", domain, "@", "TXT",
 					"v=spf1 include:amazonses.com ~all",
-				))
+				)
+				if !st.OK {
+					resp.DnsPublishPartial = true
+				}
+				resp.Steps = append(resp.Steps, st)
 			}
 		} else {
 			resp.Steps = append(resp.Steps, bootstrapStep{
@@ -525,6 +577,9 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 	}
 
 	resp.NextStep = sendersCreateNextStep(doInbound, isAppDepBound(ctx, "domains"))
+	if resp.DnsPublishPartial {
+		resp.NextStep = "Some DNS records failed to publish — review the dns_* steps and re-run senders_create. " + resp.NextStep
+	}
 
 	// v0.12: persist the local row to identities, not senders. Domain
 	// identities aren't valid From values so they have no business in
@@ -989,12 +1044,12 @@ func bootstrapSetS3BucketPolicy(ctx *sdk.AppCtx, connID int64, bucket, policy st
 // the bootstrap wants. When that happens we fall through to
 // get_email_identity to read the existing DKIM tokens. The adopted
 // return flag lets the caller annotate the step.
-func bootstrapVerifyDomain(ctx *sdk.AppCtx, connID int64, domain string) (tokens []string, status string, adopted bool, err error) {
+func bootstrapVerifyDomain(ctx *sdk.AppCtx, connID int64, domain string) (tokens []string, status string, adopted bool, reprobed bool, err error) {
 	res, vErr := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "verify_domain", map[string]any{
 		"EmailIdentity": domain,
 	})
 	if vErr != nil {
-		return nil, "", false, fmt.Errorf("verify_domain: %w", vErr)
+		return nil, "", false, false, fmt.Errorf("verify_domain: %w", vErr)
 	}
 	if res == nil || !res.Success {
 		body := ""
@@ -1004,11 +1059,26 @@ func bootstrapVerifyDomain(ctx *sdk.AppCtx, connID int64, domain string) (tokens
 		if looksLikeAlreadyExists(res, body) {
 			t, s, gErr := getDomainDKIM(ctx, connID, domain)
 			if gErr != nil {
-				return nil, "", false, fmt.Errorf("verify_domain reported exists but get_identity_verification failed: %w", gErr)
+				return nil, "", false, false, fmt.Errorf("verify_domain reported exists but get_identity_verification failed: %w", gErr)
 			}
-			return t, s, true, nil
+			// Heal stuck adoptions: an identity imported with a broken
+			// DKIM status (TEMPORARY_FAILURE / FAILED — e.g. carried over
+			// from a prior tool's setup) won't re-probe on its own. Force
+			// a clean re-probe by delete + recreate. Easy-DKIM tokens are
+			// deterministic per (account, domain) and the caller
+			// republishes DNS afterward regardless, so existing CNAMEs
+			// keep working. On any re-probe failure we keep the adopted
+			// status rather than leaving the domain in limbo.
+			if isBrokenDkimStatus(s) {
+				if t2, s2, rErr := reprobeDomainIdentity(ctx, connID, domain); rErr == nil {
+					return t2, s2, true, true, nil
+				} else {
+					ctx.Logger().Warn("dkim re-probe failed; keeping adopted status", "domain", domain, "status", s, "err", rErr.Error())
+				}
+			}
+			return t, s, true, false, nil
 		}
-		return nil, "", false, fmt.Errorf("verify_domain non-2xx: %s", truncate(body, 400))
+		return nil, "", false, false, fmt.Errorf("verify_domain non-2xx: %s", truncate(body, 400))
 	}
 	var probe struct {
 		DkimAttributes struct {
@@ -1017,7 +1087,72 @@ func bootstrapVerifyDomain(ctx *sdk.AppCtx, connID int64, domain string) (tokens
 		} `json:"DkimAttributes"`
 	}
 	_ = json.Unmarshal(res.Data, &probe)
-	return probe.DkimAttributes.Tokens, probe.DkimAttributes.Status, false, nil
+	return probe.DkimAttributes.Tokens, probe.DkimAttributes.Status, false, false, nil
+}
+
+// isBrokenDkimStatus reports whether SES's DkimAttributes.Status is a
+// state that won't self-heal and warrants a forced re-probe.
+func isBrokenDkimStatus(s string) bool {
+	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case "FAILED", "TEMPORARY_FAILURE":
+		return true
+	}
+	return false
+}
+
+// reprobeDomainIdentity deletes the SES identity and re-creates it,
+// returning the fresh DKIM tokens + status. SES restarts its DKIM probe
+// schedule on the new identity. Tokens are deterministic per (account,
+// domain) under Easy DKIM, so the previously-published CNAMEs stay valid.
+func reprobeDomainIdentity(ctx *sdk.AppCtx, connID int64, domain string) ([]string, string, error) {
+	if _, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "delete_identity", map[string]any{
+		"EmailIdentity": domain,
+	}); err != nil {
+		return nil, "", fmt.Errorf("delete_identity: %w", err)
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "verify_domain", map[string]any{
+		"EmailIdentity": domain,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("verify_domain (re-create): %w", err)
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return nil, "", fmt.Errorf("verify_domain (re-create) non-2xx: %s", truncate(body, 400))
+	}
+	var probe struct {
+		DkimAttributes struct {
+			Tokens []string `json:"Tokens"`
+			Status string   `json:"Status"`
+		} `json:"DkimAttributes"`
+	}
+	_ = json.Unmarshal(res.Data, &probe)
+	return probe.DkimAttributes.Tokens, probe.DkimAttributes.Status, nil
+}
+
+// bootstrapClearMailFrom resets any leftover custom MAIL FROM domain on
+// an adopted identity back to the SES default (amazonses.com). Messaging
+// doesn't support custom MAIL FROM, so a carried-over MailFromDomain
+// (often stuck in FAILED) is pure noise. Non-fatal: a missing/older
+// integration catalog without set_mail_from degrades to a skipped step
+// so it can never break senders_create.
+func bootstrapClearMailFrom(ctx *sdk.AppCtx, connID int64, domain string) bootstrapStep {
+	// Omit MailFromDomain entirely — the documented way to reset the
+	// custom MAIL FROM to the SES default is to send no MailFromDomain
+	// (an empty string can be rejected as an invalid domain).
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "set_mail_from", map[string]any{
+		"EmailIdentity": domain,
+	})
+	if err != nil {
+		return bootstrapStep{Step: "clear_mail_from", OK: true, Skipped: "set_mail_from unavailable: " + err.Error()}
+	}
+	if res == nil || !res.Success {
+		return bootstrapStep{Step: "clear_mail_from", OK: true, Skipped: "set_mail_from not applied: " + truncateResData(res)}
+	}
+	return bootstrapStep{Step: "clear_mail_from", OK: true, Detail: "reset MAIL FROM to amazonses.com default"}
 }
 
 // looksLikeAlreadyExists classifies a SES failure as "identity is

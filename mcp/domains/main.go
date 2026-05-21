@@ -36,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: domains
 display_name: Domains
-version: 0.2.2
+version: 0.2.4
 description: |
   DNS + domain inventory. Other apps call this for record CRUD
   instead of talking to registrars directly. v0.1: Porkbun.
@@ -574,6 +574,19 @@ func (p *porkbunProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value stri
 	}
 
 	if len(matches) > 0 {
+		// Unchanged-value short-circuit. Porkbun's edit endpoint rejects
+		// an edit whose value is identical to what's already stored with
+		// EDIT_ERROR_WE_WERE_UNABLE_TO_EDIT_THE_DNS_RECORD — which we'd
+		// otherwise surface as a failure even though the desired state is
+		// already present. When the matched record already equals what we
+		// want, skip the edit and report a no-op.
+		wantPrio := 0
+		if prio != "" {
+			wantPrio, _ = strconv.Atoi(prio)
+		}
+		if porkbunRecordUnchanged(matches[0], content, ttl, wantPrio) {
+			return "unchanged", nil
+		}
 		payload := map[string]any{
 			"domain":    domain,
 			"type":      rtype,
@@ -642,6 +655,20 @@ func hasMatchingRecord(records []DNSRecord, wantFQ, sub, rtype, content string) 
 		}
 	}
 	return false
+}
+
+// porkbunRecordUnchanged reports whether an existing record already
+// holds exactly the value/ttl/prio we'd write — i.e. the edit would be
+// a true no-op (the case Porkbun rejects with EDIT_ERROR). Value is
+// compared trimmed + case-insensitively, matching hasMatchingRecord.
+func porkbunRecordUnchanged(existing DNSRecord, content string, ttl, prio int) bool {
+	if !strings.EqualFold(strings.TrimSpace(existing.Value), strings.TrimSpace(content)) {
+		return false
+	}
+	if existing.TTL != ttl {
+		return false
+	}
+	return existing.Prio == prio
 }
 
 func (p *porkbunProvider) Delete(ctx *sdk.AppCtx, domain, sub, rtype string) error {

@@ -397,6 +397,44 @@ func dbHasStaleSenders(db *sql.DB, projectID, channel string) (bool, error) {
 	return true, nil
 }
 
+// dbProjectsWithNonTerminalVerifications returns the distinct project
+// ids that have at least one sender OR identity still in a non-terminal
+// verification state (anything other than 'verified'/'failed') younger
+// than maxAge. Drives the background poller: an empty result means no
+// provider calls this tick, and the maxAge floor stops a permanently-
+// stuck identity from polling forever.
+func dbProjectsWithNonTerminalVerifications(db *sql.DB, maxAge time.Duration) ([]string, error) {
+	cutoff := fmt.Sprintf("-%d seconds", int(maxAge.Seconds()))
+	const nonTerminal = `COALESCE(verification_status,'pending') NOT IN ('verified','failed')`
+	rows, err := db.Query(
+		`SELECT DISTINCT project_id FROM (
+			SELECT project_id FROM senders
+			WHERE deleted_at IS NULL AND `+nonTerminal+`
+			  AND created_at > datetime('now', ?)
+			UNION
+			SELECT project_id FROM identities
+			WHERE deleted_at IS NULL AND `+nonTerminal+`
+			  AND created_at > datetime('now', ?)
+		 )`,
+		cutoff, cutoff,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var pid string
+		if err := rows.Scan(&pid); err != nil {
+			return nil, err
+		}
+		if pid != "" {
+			out = append(out, pid)
+		}
+	}
+	return out, rows.Err()
+}
+
 // senderRowToMap renders a senderRow as the panel-friendly JSON
 // shape used by tools — pruning sql.Null wrappers and inlining
 // inbound_config / metadata as nested objects when present.

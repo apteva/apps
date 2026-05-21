@@ -181,6 +181,32 @@ func (a *App) refreshSESIdentities(ctx *sdk.AppCtx, pid string, connID int64) er
 		if r.Kind == "email_mailbox" && r.ParentIdentityID != nil {
 			parent, _ := dbGetIdentity(ctx.AppDB(), *r.ParentIdentityID)
 			if parent != nil && parent.DeletedAt == nil {
+				// Inheritance mailbox: its per-address SES identity is
+				// gone (so it's not in seenMailboxes), but it still sends
+				// via the parent domain's DKIM. Re-stamp its verification
+				// state from the live parent instead of leaving a stale
+				// FAILED/pending value frozen from when the per-address
+				// identity last existed.
+				if r.Verified != parent.Verified ||
+					r.VerificationStatus != parent.VerificationStatus ||
+					r.DkimStatus != parent.DkimStatus {
+					if _, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{
+						ProjectID:          pid,
+						Channel:            r.Channel,
+						Address:            r.Address,
+						Kind:               "email_mailbox",
+						Provider:           "aws-ses",
+						ProviderIdentityID: r.Address,
+						Verified:           parent.Verified,
+						VerificationStatus: parent.VerificationStatus,
+						DkimStatus:         parent.DkimStatus,
+						SendingEnabled:     true,
+						ParentIdentityID:   parent.ID,
+						MarkSyncedNow:      true,
+					}); err != nil {
+						ctx.Logger().Warn("re-stamp inheritance mailbox", "addr", r.Address, "err", err)
+					}
+				}
 				continue
 			}
 		}

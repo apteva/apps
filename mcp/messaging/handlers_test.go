@@ -1128,10 +1128,20 @@ func TestSendersCreate_Mailbox_VerifiesParentWhenMissing(t *testing.T) {
 	if !hasVerifyDomain {
 		t.Errorf("expected verify_domain call on parent, got %v", tools)
 	}
-	// Inheritance still recorded on the mailbox row.
+	// Honest inheritance: the parent's DKIM is still PENDING (per the
+	// stub), so the mailbox must NOT claim verified. Persisting verified=
+	// true here while the parent isn't actually verified was the "lie
+	// about success" bug (#2) — the mailbox inherits the parent's REAL
+	// state, and only flips verified once the parent's DKIM does.
 	row, _ := dbFindSender(ctx.AppDB(), "test-proj", "email", "ops@newdomain.com")
-	if row == nil || !row.Verified {
-		t.Errorf("expected mailbox row to be verified by inheritance, got %+v", row)
+	if row == nil {
+		t.Fatalf("expected mailbox row to exist")
+	}
+	if row.Verified || row.VerificationStatus != "pending" {
+		t.Errorf("mailbox should inherit parent's pending state, got verified=%v status=%q", row.Verified, row.VerificationStatus)
+	}
+	if !resp.Pending {
+		t.Errorf("resp.Pending should be true while parent DKIM is pending")
 	}
 	// DKIM token surfaced from the parent's domain flow.
 	if len(resp.DkimTokens) != 3 {

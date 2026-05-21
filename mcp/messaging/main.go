@@ -19,6 +19,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -49,7 +50,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.12.7
+version: 0.13.0
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -144,6 +145,9 @@ provides:
       label: Messaging
       icon: mail
       entry: /ui/MessagingPanel.mjs
+  workers:
+    - name: ses-verify-poller
+      schedule: "@every 5m"
 runtime:
   kind: source
   source:
@@ -185,8 +189,53 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 
 func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+
+// pollVerifyMaxAge caps how long a non-terminal verification keeps
+// getting auto-polled. Past this, a stuck identity (e.g. a permanent
+// TEMPORARY_FAILURE) stops generating provider calls and waits for a
+// manual senders_refresh. SES DKIM probes normally resolve well within
+// this window.
+const pollVerifyMaxAge = 7 * 24 * time.Hour
+
+// Workers runs the background SES verification poller. It self-heals
+// NOT_STARTED / PENDING / TEMPORARY_FAILURE statuses that the cached
+// local row would otherwise hold stale until someone called
+// senders_list/get. The worker enumerates the projects with pending
+// rows straight from the DB (the install's DB carries every project's
+// rows under a project_id column), so it works the same on project- and
+// global-scope installs without depending on per-project tick dispatch.
+// It makes zero provider calls when every row is already terminal
+// (verified/failed) or older than the poll cap.
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{
+		{
+			Name:     "ses-verify-poller",
+			Schedule: "@every 5m",
+			Run: func(_ context.Context, app *sdk.AppCtx) error {
+				return a.pollVerifications(app)
+			},
+		},
+	}
+}
+
+func (a *App) pollVerifications(ctx *sdk.AppCtx) error {
+	bound := ctx.IntegrationFor("email_provider")
+	if bound == nil {
+		return nil
+	}
+	pids, err := dbProjectsWithNonTerminalVerifications(ctx.AppDB(), pollVerifyMaxAge)
+	if err != nil || len(pids) == 0 {
+		return err
+	}
+	var firstErr error
+	for _, pid := range pids {
+		if err := a.refreshSESIdentities(ctx, pid, bound.ConnectionID); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
