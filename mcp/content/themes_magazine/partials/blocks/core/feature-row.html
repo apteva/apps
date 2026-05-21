@@ -19,7 +19,7 @@
   </div>
   {{ if $img }}
   <div class="block-feature-row__media">
-    <img src="{{ $img }}" alt="{{ .Attrs.image_alt }}" loading="lazy">
+    <img src="{{ $img }}" alt="{{ .Attrs.image_alt }}" loading="lazy" decoding="async">
   </div>
   {{ end }}
 </section>

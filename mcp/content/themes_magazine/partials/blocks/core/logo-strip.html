@@ -3,7 +3,7 @@
   {{ if .Attrs.label }}<p class="block-logo-strip__label">{{ .Attrs.label }}</p>{{ end }}
   <div class="block-logo-strip__logos">
     {{ range .Attrs.image_urls }}
-    <img src="{{ . }}" alt="" loading="lazy">
+    <img src="{{ . }}" alt="" loading="lazy" decoding="async">
     {{ end }}
   </div>
 </section>

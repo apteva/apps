@@ -22,7 +22,7 @@
     {{ end }}
     {{ if .FeaturedMediaURL }}
     <figure class="post-hero">
-      <img src="{{ .FeaturedMediaURL }}" alt="{{ .FeaturedMediaAlt }}">
+      <img src="{{ .FeaturedMediaURL }}" alt="{{ .FeaturedMediaAlt }}" loading="eager" decoding="async" fetchpriority="high">
     </figure>
     {{ end }}
   </header>

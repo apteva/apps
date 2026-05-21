@@ -7,7 +7,7 @@
 {{- end -}}
 <figure class="block-image size-{{ if .Attrs.size }}{{ .Attrs.size }}{{ else }}inline{{ end }}">
   {{ if .Attrs.link }}<a href="{{ .Attrs.link }}">{{ end }}
-  <img src="{{ $src }}" alt="{{ .Attrs.alt }}" loading="lazy">
+  <img src="{{ $src }}" alt="{{ .Attrs.alt }}" loading="lazy" decoding="async">
   {{ if .Attrs.link }}</a>{{ end }}
   {{ if .Attrs.caption }}<figcaption>{{ .Attrs.caption }}</figcaption>{{ end }}
 </figure>
