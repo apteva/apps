@@ -389,7 +389,7 @@ type BlockTypeInfo struct {
 var coreBlockTypes = map[string]BlockTypeInfo{
 	"core/heading": {
 		Name: "core/heading", DisplayName: "Heading", Category: "text",
-		Description: "H1–H6 heading.",
+		Description: "H1–H6 heading. Use level=1 once per page (the page's hero); level 2 for section titles, 3 for subsections.",
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -400,7 +400,7 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 	},
 	"core/paragraph": {
 		Name: "core/paragraph", DisplayName: "Paragraph", Category: "text",
-		Description: "A paragraph; text_md accepts inline markdown.",
+		Description: "ONE paragraph with inline markdown — **bold**, *italic*, [link](url). For multi-paragraph prose, use the markdown block.",
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -425,8 +425,8 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 		},
 	},
 	"core/feature-row": {
-		Name: "core/feature-row", DisplayName: "Feature Row", Category: "layout",
-		Description: "Side-by-side text + image. Use reverse:true to flip image to the left (alternates well across multiple rows).",
+		Name: "core/feature-row", DisplayName: "Feature row", Category: "layout",
+		Description: "Side-by-side text + image — the classic SaaS landing-page pattern. reverse:true flips the image left; stack multiple rows for an alternating cadence. For an N-column grid of cards, use columns instead.",
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -444,7 +444,7 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 	},
 	"core/logo-strip": {
 		Name: "core/logo-strip", DisplayName: "Logo strip", Category: "layout",
-		Description: "Horizontal row of logos for a 'trusted by' / social-proof section. Accepts image_urls (array of external URLs).",
+		Description: "Horizontal row of customer logos with grayscale filter — the 'trusted by' / social-proof pattern. For a generic image grid, use gallery.",
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -455,7 +455,7 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 	},
 	"core/stats": {
 		Name: "core/stats", DisplayName: "Stats row", Category: "layout",
-		Description: "Row of headline stats — KPI value + label per cell.",
+		Description: "Row of headline KPIs — each cell has a big value + a small label ('10,000+ teams', '$2B processed'). Pre-styled for marketing social-proof bands.",
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -465,7 +465,7 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 	},
 	"core/testimonial": {
 		Name: "core/testimonial", DisplayName: "Testimonial", Category: "layout",
-		Description: "Quote + author + role + avatar image.",
+		Description: "Structured customer-testimonial card: quote + author + role + avatar. For a free-form pull-quote, use the quote block.",
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -478,7 +478,7 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 	},
 	"core/gallery": {
 		Name: "core/gallery", DisplayName: "Gallery", Category: "media",
-		Description: "Grid of images.",
+		Description: "Grid of multiple images by media_ids. For a horizontal customer-logo strip with grayscale filter, use logo-strip.",
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -500,7 +500,7 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 	},
 	"core/quote": {
 		Name: "core/quote", DisplayName: "Quote", Category: "text", Container: true,
-		Description: "Pull-quote; inner blocks form the quoted body.",
+		Description: "Free-form pull-quote — the body is whatever inner blocks you put inside, plus an optional citation. For structured customer testimonials with avatar + role, use the testimonial block.",
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -521,7 +521,7 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 	},
 	"core/embed": {
 		Name: "core/embed", DisplayName: "Embed", Category: "embed",
-		Description: "Generic oEmbed by URL.",
+		Description: "oEmbed by URL (YouTube, Twitter/X, Vimeo, …). The provider's cached HTML is what renders; for arbitrary HTML you control, use the html block.",
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -533,7 +533,7 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 	},
 	"core/separator": {
 		Name: "core/separator", DisplayName: "Separator", Category: "layout",
-		Description: "Horizontal rule.",
+		Description: "Horizontal rule between sections. style: plain | wide (short accent rule) | dots.",
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -543,7 +543,7 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 	},
 	"core/columns": {
 		Name: "core/columns", DisplayName: "Columns", Category: "layout", Container: true,
-		Description: "Side-by-side columns; each inner block becomes one column.",
+		Description: "N-column grid container — each inner block becomes one column (renders as a card on the default theme). For a 2-column hero-style text+image, use feature-row instead.",
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -553,7 +553,7 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 	},
 	"core/group": {
 		Name: "core/group", DisplayName: "Group", Category: "layout", Container: true,
-		Description: "Logical grouping wrapper.",
+		Description: "Generic container for grouping nested blocks (e.g. a card inside columns). Optional background + padding.",
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -564,7 +564,7 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 	},
 	"core/html": {
 		Name: "core/html", DisplayName: "Raw HTML", Category: "advanced",
-		Description: "Raw HTML, sanitized at render time.",
+		Description: "Raw HTML, sanitized through a strict allow-list at render time. The escape hatch when no other block fits.",
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -574,7 +574,7 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 	},
 	"core/markdown": {
 		Name: "core/markdown", DisplayName: "Markdown", Category: "text",
-		Description: "Multi-paragraph markdown; the escape hatch for power users.",
+		Description: "Multi-paragraph markdown source. Use when pasting prose with several paragraphs; for a single paragraph with inline formatting, use the paragraph block.",
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -595,7 +595,7 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 	},
 	"core/button": {
 		Name: "core/button", DisplayName: "Button", Category: "layout",
-		Description: "Link styled as a button.",
+		Description: "A single link styled as a button (primary / secondary / ghost). For a full-width call-to-action panel with heading + body, use cta.",
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -607,7 +607,7 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 	},
 	"core/cta": {
 		Name: "core/cta", DisplayName: "Call to action", Category: "layout", Container: true,
-		Description: "Heading + body + button bundle.",
+		Description: "Full-width call-to-action panel: heading + body + button on a brand-color background. For just a styled link, use the button block.",
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

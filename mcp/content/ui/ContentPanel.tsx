@@ -137,7 +137,7 @@ function defaultAttrs(type: string): Record<string, any> {
 // Switching between list and templates is via the top tab bar;
 // opening the editor replaces the view entirely (own back button).
 
-type View = "list" | "templates" | "themes";
+type View = "list" | "templates" | "themes" | "blocks";
 
 interface SiteSummary {
   id: number;
@@ -208,6 +208,7 @@ export default function ContentPanel({ projectId }: NativePanelProps) {
         <TemplatesView api={api} projectId={projectId} onApplied={() => setView("list")} />
       )}
       {view === "themes" && <ThemesView api={api} />}
+      {view === "blocks" && <BlocksView api={api} />}
     </div>
   );
 }
@@ -247,6 +248,7 @@ function Tabs({
         {tab("list", "Content")}
         {tab("templates", "Templates")}
         {tab("themes", "Themes")}
+        {tab("blocks", "Blocks")}
       </div>
       {/* Site switcher — hidden when only one site exists (single-site UX). */}
       {sites.length >= 2 ? (
@@ -1522,6 +1524,91 @@ function ThemesView({ api }: { api: ReturnType<typeof makeAPI> }) {
         Multiple themes are coming in v2.2 — for now, the default ships with the
         binary. Custom themes will be loadable from the bound storage app under{" "}
         <code>/.themes/&lt;slug&gt;/</code> once that path is wired.
+      </footer>
+    </div>
+  );
+}
+
+// ── blocks view (catalog browser) ────────────────────────────────
+
+interface BlockTypeInfoFull {
+  name: string;
+  display_name: string;
+  category: string;
+  description: string;
+  container?: boolean;
+}
+
+function BlocksView({ api }: { api: ReturnType<typeof makeAPI> }) {
+  const [types, setTypes] = useState<BlockTypeInfoFull[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLoading(true);
+    api<{ types: BlockTypeInfoFull[] | null }>("/admin/block-types")
+      .then((r) => setTypes(r.types ?? []))
+      .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false));
+  }, [api]);
+
+  // Group by category, in a stable order that puts the common ones first.
+  const ORDER = ["text", "media", "layout", "embed", "advanced"];
+  const grouped = useMemo(() => {
+    const out: Record<string, BlockTypeInfoFull[]> = {};
+    for (const t of types) (out[t.category] ??= []).push(t);
+    // Stable name order inside each category.
+    for (const cat in out) out[cat].sort((a, b) => a.name.localeCompare(b.name));
+    return out;
+  }, [types]);
+
+  const cats = Object.keys(grouped).sort(
+    (a, b) => (ORDER.indexOf(a) === -1 ? 99 : ORDER.indexOf(a)) - (ORDER.indexOf(b) === -1 ? 99 : ORDER.indexOf(b)),
+  );
+
+  return (
+    <div className="p-4 text-sm">
+      <header className="mb-3">
+        <h2 className="text-base font-semibold">Blocks</h2>
+        <p className="text-xs text-fg-muted">
+          The catalog of block types available in the post editor. Use these
+          as building blocks for pages and posts. Container blocks (✱) accept
+          nested children — e.g. <code>columns</code>, <code>group</code>,{" "}
+          <code>quote</code>, <code>cta</code>.
+        </p>
+      </header>
+
+      {error && <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2">{error}</div>}
+      {loading && <div className="text-fg-muted py-4">Loading…</div>}
+
+      {cats.map((cat) => (
+        <section key={cat} className="mb-6">
+          <h3 className="text-xs uppercase tracking-wider text-fg-muted mb-2">
+            {cat} <span className="opacity-50">({grouped[cat].length})</span>
+          </h3>
+          <ul className="grid grid-cols-1 md:grid-cols-2 gap-2 list-none p-0">
+            {grouped[cat].map((t) => (
+              <li key={t.name} className="border border-border rounded p-3">
+                <div className="flex items-baseline justify-between gap-2">
+                  <strong>{t.display_name}</strong>
+                  {t.container && (
+                    <span title="Container block" className="text-xs text-fg-muted">✱</span>
+                  )}
+                </div>
+                <p className="text-xs text-fg-muted mt-1">
+                  <code className="font-mono">{t.name}</code>
+                </p>
+                <p className="text-fg-muted mt-2 leading-snug">{t.description}</p>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+
+      <footer className="text-fg-muted text-xs pt-4 mt-2 border-t border-border">
+        Cross-app blocks (e.g. <code>image-studio/generated</code>,{" "}
+        <code>crm/subscribe</code>) will appear here once those apps are bound
+        and have registered their block types — scheduled for v2.5.
       </footer>
     </div>
   );
