@@ -249,21 +249,18 @@ a:hover { opacity: 0.8; }
    BLOCK STYLES — every core/* block partial
    ============================================================ */
 
-/* Page-body blocks get auto-centered narrow column; the few
-   "full-bleed" blocks (.block-cta-full, .block-hero) can opt out. */
+/* Page-body blocks span the full container width by default — matches
+   the site header so marketing layouts feel coherent edge-to-edge.
+   Text-only blocks (paragraph / list / quote / code) constrain
+   themselves to a reading-comfortable inner column via the rules
+   below, but they're CENTERED within the full container so they look
+   like part of a wide page, not a narrow blog. */
 .page-body > * {
-  max-width: var(--container-narrow);
+  max-width: var(--container);
   margin-left: auto;
   margin-right: auto;
   padding-left: 1.5rem;
   padding-right: 1.5rem;
-}
-.page-body > .block-columns,
-.page-body > .block-cta,
-.page-body > .block-gallery,
-.page-body > .block-separator,
-.page-body > .block-group {
-  max-width: var(--container);
 }
 
 .page-body > h1,
@@ -272,18 +269,27 @@ a:hover { opacity: 0.8; }
   text-align: center;
 }
 
-/* Headings */
-.page-body > h1, .post-body > h1 {
+/* Headings — wide on pages, narrow on posts. The first H1 on a page
+   gets a hero-style readable line length (clamp 2.25rem ↔ 3.5rem). */
+.page-body > h1 {
+  font-size: clamp(2.25rem, 5vw, 3.5rem);
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -0.025em;
+  margin: 4rem auto 1.5rem;
+  max-width: 880px;       /* readable hero line length */
+}
+.page-body > h1:first-child {
+  margin-top: 5rem;
+  text-align: center;
+}
+.post-body > h1 {
   font-size: clamp(2.25rem, 5vw, 3.5rem);
   font-weight: 800;
   line-height: 1.1;
   letter-spacing: -0.025em;
   margin: 4rem auto 1.5rem;
   max-width: var(--container-narrow);
-}
-.page-body > h1:first-child {
-  margin-top: 5rem;
-  text-align: center;
 }
 
 .page-body > h2, .post-body h2 {
@@ -302,10 +308,12 @@ a:hover { opacity: 0.8; }
 .page-body h5, .post-body h5 { font-size: 1rem; font-weight: 700; margin: 1.5rem auto 0.5rem; }
 .page-body h6, .post-body h6 { font-size: 0.9rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--fg-muted); margin: 1.5rem auto 0.5rem; }
 
-/* Paragraphs */
+/* Paragraphs — text constrained to readable inner column, but the
+   block itself spans the page container so it sits centered. */
 .page-body > p, .post-body > p {
   margin: 0 auto 1.25rem;
   color: var(--fg);
+  max-width: 720px;
 }
 .page-body > p:first-child,
 .page-body > h1 + p {
@@ -314,6 +322,18 @@ a:hover { opacity: 0.8; }
   line-height: 1.6;
   text-align: center;
   margin-bottom: 2rem;
+  max-width: 720px;
+}
+/* Lists, quotes, code blocks: same inner reading column on pages. */
+.page-body > ul,
+.page-body > ol,
+.page-body > .block-list,
+.page-body > .block-quote,
+.page-body > .block-code,
+.page-body > .block-markdown,
+.page-body > .block-html,
+.page-body > .block-table {
+  max-width: 720px;
 }
 .align-center { text-align: center; }
 .align-right  { text-align: right; }
