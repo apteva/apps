@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: analytics
 display_name: Analytics
-version: 0.3.1
+version: 0.4.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -10,15 +10,20 @@ description: |
   if analytics is uninstalled, callers' track calls fail silently and
   the rest of their flow continues.
 
-  Explicit-tracking only — apps opt in by calling analytics_track.
   Each track emits an "event.recorded" event on the app bus
   (project-scoped), so live panels and other apps can react. The
   dashboard panel is real-time (subscribes via useAppEvents) with
   overview tiles, an events-per-day chart, top values for a props
   key, a live event feed, and filters by event type / app / props
-  dimension. Auto-capture from the platform event firehose (waiting
-  on a global app-events stream endpoint in apteva-server) remains
-  deferred to a later release.
+  dimension.
+
+  v0.4 adds static-site tracking, like a classic analytics snippet:
+  mint a public write key from the panel's Tracking tab, drop the
+  hosted tag.js <script> on any website, and page views + custom
+  events flow into GET /collect (anonymous, key-gated, origin-
+  allowlisted, rate-limited). The write key is write-only and bound to
+  one project; the platform API key never touches the browser. Auto-
+  capture from the platform event firehose remains deferred.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/analytics

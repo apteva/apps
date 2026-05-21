@@ -19,15 +19,16 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.3.1
+version: 0.4.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
-  top / topics surface aggregates over JSON props. Explicit-tracking
-  only. v0.3 emits an event.recorded bus event on each track and adds
-  a live dashboard panel (filters by event type / app / props, a
-  real-time event feed). Auto-capture from the platform event firehose
-  is deferred to a later release.
+  top / topics surface aggregates over JSON props. Each track emits an
+  event.recorded bus event; the dashboard panel is real-time (filters
+  by event type / app / props, live event feed). v0.4 adds static-site
+  tracking: public write keys + a hosted tag.js + GET /collect, so any
+  website can send page views like a classic analytics snippet. Auto-
+  capture from the platform event firehose is deferred to a later release.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [global]
@@ -111,6 +112,18 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// ingestion (run.go) — registering it here panics the mux at boot.
 		{Pattern: "/feed", Handler: a.handleEvents},
 		{Pattern: "/dimensions", Handler: a.handleDimensions},
+
+		// Public static-site tag ingest. Rides the platform's anonymous
+		// GET fall-through; the ?k= write key is the credential.
+		{Pattern: "/collect", Handler: a.handleCollect},
+
+		// Write-key management — operator-only (handlers require X-User-ID).
+		// GET /keys is reachable via the anonymous fall-through, so the
+		// handler itself rejects unauthenticated callers. Method-prefixed
+		// so GET + POST on /keys don't collide on the ServeMux.
+		{Method: "GET", Pattern: "/keys", Handler: a.handleKeysList},
+		{Method: "POST", Pattern: "/keys", Handler: a.handleKeysCreate},
+		{Method: "POST", Pattern: "/keys/revoke", Handler: a.handleKeysRevoke},
 	}
 }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }

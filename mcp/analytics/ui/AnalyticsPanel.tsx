@@ -296,7 +296,231 @@ function EventFeed({ rows }: { rows: EventRow[] }) {
   );
 }
 
+interface WriteKey {
+  id: number;
+  key: string;
+  site: string;
+  project_id: string;
+  allowed_origins?: string[];
+  created_at: number;
+  revoked_at?: number;
+  last_used_ts?: number;
+  event_count: number;
+}
+
+function CopyButton({ text, label }: { text: string; label?: string }) {
+  const [done, setDone] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setDone(true);
+      setTimeout(() => setDone(false), 1500);
+    } catch {
+      /* clipboard blocked (insecure context) — no-op */
+    }
+  };
+  return (
+    <button
+      onClick={copy}
+      className={
+        "px-2 py-1 text-xs rounded border whitespace-nowrap " +
+        (done ? "border-success text-success" : "border-border text-text-muted hover:text-text")
+      }
+    >
+      {done ? "Copied" : label || "Copy"}
+    </button>
+  );
+}
+
+// TrackingTab — mint/copy public write keys and the static-site snippet.
+// All routes are authenticated (dashboard session cookie travels with
+// credentials: same-origin). The snippet points at this server's origin.
+function TrackingTab({ projectId }: { projectId: string }) {
+  const [keys, setKeys] = useState<WriteKey[]>([]);
+  const [site, setSite] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const r = await fetch(`${API}/keys?project_id=${encodeURIComponent(projectId)}`, {
+        credentials: "same-origin",
+      });
+      if (r.ok) setKeys((await r.json()).keys ?? []);
+      else setErr(`keys ${r.status}`);
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const create = async () => {
+    const s = site.trim();
+    if (!s) return;
+    setBusy(true);
+    setErr("");
+    try {
+      const r = await fetch(`${API}/keys`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ site: s, project_id: projectId }),
+      });
+      if (r.ok) {
+        setSite("");
+        load();
+      } else {
+        setErr("create: " + (await r.text()));
+      }
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revoke = async (id: number) => {
+    if (!confirm("Revoke this key? Sites using it stop tracking immediately.")) return;
+    try {
+      await fetch(`${API}/keys/revoke`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, project_id: projectId }),
+      });
+      load();
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  };
+
+  const active = keys.filter((k) => !k.revoked_at);
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const tagURL = `${origin}/api/apps/analytics/ui/tag.js`;
+  const featured = active[0];
+  const snippet = featured
+    ? `<script async src="${tagURL}" data-key="${featured.key}"></script>`
+    : "";
+
+  return (
+    <div className="flex-1 overflow-auto p-4 flex flex-col gap-4">
+      {err && <div className="text-error text-xs">{err}</div>}
+
+      <section className="border border-border rounded p-4 flex flex-col gap-3">
+        <div className="text-text-dim text-xs uppercase">Install on your site</div>
+        {featured ? (
+          <>
+            <div className="text-text-muted text-sm">
+              Paste this once in your site's <code>&lt;head&gt;</code>. It tracks page views
+              automatically; call <code>apa("event_name", {`{ ...props }`})</code> for custom events.
+            </div>
+            <div className="flex items-start gap-2">
+              <pre
+                className="flex-1 bg-bg-input border border-border rounded p-2 text-xs overflow-auto"
+                style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}
+              >
+                {snippet}
+              </pre>
+              <CopyButton text={snippet} label="Copy snippet" />
+            </div>
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-text-dim" style={{ width: "72px" }}>Write key</span>
+              <code className="text-text truncate flex-1">{featured.key}</code>
+              <CopyButton text={featured.key} label="Copy key" />
+            </div>
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-text-dim" style={{ width: "72px" }}>Script URL</span>
+              <code className="text-text-muted truncate flex-1">{tagURL}</code>
+              <CopyButton text={tagURL} label="Copy URL" />
+            </div>
+          </>
+        ) : (
+          <Empty label="Create a write key below to get your tracking snippet." />
+        )}
+      </section>
+
+      <section className="border border-border rounded p-4 flex flex-col gap-3">
+        <div className="text-text-dim text-xs uppercase">Write keys</div>
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={site}
+            onChange={(e) => setSite(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") create();
+            }}
+            placeholder="site name (e.g. marketing-site)"
+            spellCheck={false}
+            className="flex-1 bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+          />
+          <button
+            onClick={create}
+            disabled={busy || !site.trim()}
+            className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+          >
+            Create key
+          </button>
+        </div>
+        {keys.length ? (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-text-dim text-xs uppercase">
+                <th className="text-left font-normal py-1">Site</th>
+                <th className="text-left font-normal py-1">Key</th>
+                <th className="text-right font-normal py-1">Events</th>
+                <th className="text-right font-normal py-1">Last used</th>
+                <th className="py-1"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {keys.map((k) => (
+                <tr
+                  key={k.id}
+                  className="border-t border-border"
+                  style={{ opacity: k.revoked_at ? 0.5 : 1 }}
+                >
+                  <td className="py-1.5 text-text">{k.site}</td>
+                  <td className="py-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <code className="text-text-muted truncate" style={{ maxWidth: "190px" }}>
+                        {k.key}
+                      </code>
+                      {!k.revoked_at && <CopyButton text={k.key} />}
+                    </div>
+                  </td>
+                  <td className="py-1.5 text-right tabular-nums text-text">{fmt(k.event_count)}</td>
+                  <td className="py-1.5 text-right text-text-dim">
+                    {k.last_used_ts ? relTime(k.last_used_ts) : "—"}
+                  </td>
+                  <td className="py-1.5 text-right">
+                    {k.revoked_at ? (
+                      <span className="text-text-dim text-xs">revoked</span>
+                    ) : (
+                      <button
+                        onClick={() => revoke(k.id)}
+                        className="text-xs text-text-muted hover:text-error"
+                      >
+                        Revoke
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <Empty label="No write keys yet." />
+        )}
+      </section>
+    </div>
+  );
+}
+
 export default function AnalyticsPanel({ projectId }: NativePanelProps) {
+  const [view, setView] = useState<"overview" | "tracking">("overview");
   const [windowKey, setWindowKey] = useState("7d");
   const [byKey, setByKey] = useState("props.platform");
   const [appF, setAppF] = useState("");
@@ -430,37 +654,61 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
           Analytics
         </div>
         <div className="flex items-center gap-1 ml-2">
-          {WINDOWS.map((w) => (
+          {(["overview", "tracking"] as const).map((v) => (
             <button
-              key={w.key}
-              onClick={() => setWindowKey(w.key)}
+              key={v}
+              onClick={() => setView(v)}
               className={
                 "px-2 py-1 text-xs rounded border " +
-                (windowKey === w.key
+                (view === v
                   ? "border-accent text-accent"
                   : "border-border text-text-muted hover:text-text")
               }
             >
-              {w.label}
+              {v === "overview" ? "Overview" : "Tracking"}
             </button>
           ))}
         </div>
-        <span className="flex items-center gap-1.5 text-text-dim text-xs ml-1" title="Live — updates as events are recorded">
-          <Dot />
-          {lastEventAt ? `live · ${relTime(lastEventAt)}` : "live"}
-        </span>
-        <button
-          onClick={refresh}
-          disabled={loading}
-          className="ml-auto px-3 py-1 text-sm border border-border rounded text-text-muted hover:text-text disabled:opacity-50"
-        >
-          Refresh
-        </button>
-        <span className="text-text-dim text-xs" style={{ minWidth: "48px" }}>
-          {err ? <span className="text-error">{err}</span> : loading ? "loading…" : ""}
-        </span>
+        {view === "overview" && (
+          <>
+            <div className="flex items-center gap-1 ml-2">
+              {WINDOWS.map((w) => (
+                <button
+                  key={w.key}
+                  onClick={() => setWindowKey(w.key)}
+                  className={
+                    "px-2 py-1 text-xs rounded border " +
+                    (windowKey === w.key
+                      ? "border-accent text-accent"
+                      : "border-border text-text-muted hover:text-text")
+                  }
+                >
+                  {w.label}
+                </button>
+              ))}
+            </div>
+            <span className="flex items-center gap-1.5 text-text-dim text-xs ml-1" title="Live — updates as events are recorded">
+              <Dot />
+              {lastEventAt ? `live · ${relTime(lastEventAt)}` : "live"}
+            </span>
+            <button
+              onClick={refresh}
+              disabled={loading}
+              className="ml-auto px-3 py-1 text-sm border border-border rounded text-text-muted hover:text-text disabled:opacity-50"
+            >
+              Refresh
+            </button>
+            <span className="text-text-dim text-xs" style={{ minWidth: "48px" }}>
+              {err ? <span className="text-error">{err}</span> : loading ? "loading…" : ""}
+            </span>
+          </>
+        )}
       </header>
 
+      {view === "tracking" ? (
+        <TrackingTab projectId={projectId} />
+      ) : (
+      <>
       <div className="flex items-center gap-2 flex-wrap border-b border-border px-4 py-2">
         <select value={appF} onChange={(e) => setAppF(e.target.value)} className={selCls}>
           <option value="">All apps</option>
@@ -565,6 +813,8 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
           )}
         </section>
       </div>
+      </>
+      )}
     </div>
   );
 }
