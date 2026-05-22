@@ -225,7 +225,7 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
         </button>
       </div>
 
-      {error && <div className="mb-3 rounded-md border border-error bg-error/10 px-3 py-2 text-sm text-error">{error}</div>}
+      {error && <div className="mb-3 rounded-md border border-error px-3 py-2 text-sm text-error">{error}</div>}
 
       <div className="overflow-x-auto rounded-lg border border-border bg-bg-card">
         <table className="w-full text-sm">
@@ -253,7 +253,7 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
               <tr key={s.symbol} onClick={() => onOpen(s.symbol)}
                 className="cursor-pointer border-b border-border-subtle hover:bg-bg-hover">
                 <td className="px-3 py-2 font-medium text-text">{s.symbol}</td>
-                <td className="max-w-[16rem] truncate px-3 py-2 text-text-muted">{s.name}</td>
+                <td className="px-3 py-2 text-text-muted" style={{ maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</td>
                 <td className="px-3 py-2 text-text-dim">{s.sector}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-text">{fmtMoney(s.price, s.currency)}</td>
                 <td className="px-3 py-2 text-right tabular-nums" style={{ color: changeColor(s.change_pct) }}>{fmtPct(s.change_pct)}</td>
@@ -303,7 +303,7 @@ function Detail({ symbol, onBack }: { symbol: string; onBack: () => void }) {
         <svg {...ico}><polyline points="15 18 9 12 15 6" /></svg> All stocks
       </button>
 
-      {error && <div className="mb-3 rounded-md border border-error bg-error/10 px-3 py-2 text-sm text-error">{error}</div>}
+      {error && <div className="mb-3 rounded-md border border-error px-3 py-2 text-sm text-error">{error}</div>}
 
       <div className="mb-4 flex items-baseline gap-3">
         <h2 className="text-xl font-semibold text-text">{symbol}</h2>
@@ -364,7 +364,7 @@ function Detail({ symbol, onBack }: { symbol: string; onBack: () => void }) {
               <Stat label="5yr growth (CAGR)" value={fmtPct(divs.summary.cagr_5y_pct)} />
               <Stat label="Payments" value={String(divs.summary.payments)} />
             </div>
-            <div className="mb-1 text-xs uppercase tracking-wide text-text-dim">Payout history</div>
+            <div className="mb-1 text-xs uppercase tracking-wide text-text-dim">Dividend / share, by year</div>
             <DividendBars history={divs.history} />
             <div className="max-h-64 overflow-y-auto">
               <table className="w-full text-sm">
@@ -414,25 +414,48 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
-// Dividend payout bar chart — per-share amount per ex-date, oldest →
-// newest (last ~60 payments). Bars use the accent CSS var (Tailwind's
-// JIT doesn't reach this file).
+// Dividend history as annual dividend-per-share bars (summed per calendar
+// year) — the conventional view, far clearer than one bar per payment for
+// monthly/quarterly payers. The current, incomplete year is dropped so
+// its short bar doesn't break the trend; hover a bar for the exact total.
+// Heights use inline style: the dashboard's Tailwind JIT doesn't generate
+// arbitrary h-[…] utilities for panel files.
 function DividendBars({ history }: { history: Dividend[] }) {
-  const data = useMemo(() => [...history].reverse().slice(-60), [history]);
-  if (data.length < 2) return null;
-  const W = 600, H = 120, pad = 4;
-  const max = Math.max(...data.map((d) => d.amount)) || 1;
-  const bw = (W - 2 * pad) / data.length;
+  const years = useMemo(() => {
+    const byYear = new Map<number, number>();
+    for (const d of history) {
+      const y = new Date(d.ex_date * 1000).getFullYear();
+      byYear.set(y, (byYear.get(y) ?? 0) + d.amount);
+    }
+    const cur = new Date().getFullYear();
+    return [...byYear.entries()].filter(([y]) => y < cur).sort((a, b) => a[0] - b[0]).slice(-18);
+  }, [history]);
+  if (years.length < 2) return null;
+
+  const W = 600, H = 150, padX = 2, padTop = 10, baseY = H - 2;
+  const plotH = baseY - padTop;
+  const max = Math.max(...years.map(([, v]) => v)) || 1;
+  const bw = (W - 2 * padX) / years.length;
+
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="mb-3 h-[120px] w-full" role="img">
-      {data.map((d, i) => {
-        const h = (d.amount / max) * (H - 2 * pad);
-        return (
-          <rect key={d.ex_date} x={pad + i * bw + bw * 0.15} y={H - pad - h}
-            width={Math.max(bw * 0.7, 0.5)} height={h} fill="var(--accent)" opacity={0.85} />
-        );
-      })}
-    </svg>
+    <div className="mb-3">
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ height: 150, width: "100%" }} role="img">
+        <line x1={padX} y1={baseY} x2={W - padX} y2={baseY} stroke="var(--border)" strokeWidth={1} />
+        {years.map(([y, v], i) => {
+          const h = (v / max) * plotH;
+          return (
+            <rect key={y} x={padX + i * bw + bw * 0.16} y={baseY - h}
+              width={bw * 0.68} height={h} fill="var(--accent)" rx={1}>
+              <title>{`${y}: $${v.toFixed(2)}/share`}</title>
+            </rect>
+          );
+        })}
+      </svg>
+      <div className="mt-1 flex justify-between text-xs text-text-dim">
+        <span>{years[0][0]}</span>
+        <span>{years[years.length - 1][0]}</span>
+      </div>
+    </div>
   );
 }
 
@@ -441,7 +464,7 @@ function DividendBars({ history }: { history: Dividend[] }) {
 function LineChart({ bars }: { bars: Bar[] }) {
   const W = 600, H = 180, pad = 4;
   if (!bars || bars.length < 2) {
-    return <div className="flex h-[180px] items-center justify-center text-sm text-text-muted">No price data.</div>;
+    return <div className="flex items-center justify-center text-sm text-text-muted" style={{ height: 180 }}>No price data.</div>;
   }
   const closes = bars.map((b) => b.c);
   const min = Math.min(...closes), max = Math.max(...closes);
@@ -455,7 +478,7 @@ function LineChart({ bars }: { bars: Bar[] }) {
   const area = `${line} L${x(bars.length - 1).toFixed(1)},${H - pad} L${x(0).toFixed(1)},${H - pad} Z`;
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="h-[180px] w-full" role="img">
+    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ height: 180, width: "100%" }} role="img">
       <path d={area} fill={color} opacity={0.08} />
       <path d={line} fill="none" stroke={color} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
     </svg>
