@@ -9,7 +9,10 @@ package main
 import (
 	"context"
 	"database/sql"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -160,6 +163,74 @@ func TestLookupSourceExt(t *testing.T) {
 	if got := lookupSourceExt(db, "", []string{"7"}); got != "" {
 		t.Errorf("empty project should yield \"\", got %q", got)
 	}
+}
+
+func TestExtFromContentType(t *testing.T) {
+	cases := map[string]string{
+		"image/png":                ".png",
+		"image/jpeg":               ".jpg",
+		"image/gif":                ".gif",
+		"image/webp":               ".webp",
+		"video/mp4":                ".mp4",
+		"video/quicktime":          ".mov",
+		"audio/mpeg":               ".mp3",
+		"IMAGE/PNG":                ".png", // case-insensitive
+		"image/png; charset=utf8":  ".png", // params stripped
+		"application/octet-stream": "",
+		"":                         "",
+	}
+	for ct, want := range cases {
+		if got := extFromContentType(ct); got != want {
+			t.Errorf("extFromContentType(%q)=%q want %q", ct, got, want)
+		}
+	}
+}
+
+// resolveSourceExt must fall back to storage for files media never
+// indexed — the screenshots-in-/.screenshots/ case. Without this a
+// crop of an un-cataloged image silently produced a .mp4.
+func TestResolveSourceExt_StorageFallbackByName(t *testing.T) {
+	db := newMediaNameTestDB(t) // has rows 7,8 only — NOT 136/200
+	defer db.Close()
+	sc := newStorageStubClient(t)
+
+	// 136: name carries .png → use the name's extension.
+	if got := resolveSourceExt(context.Background(), sc, db, "p1", []string{"136"}); got != ".png" {
+		t.Errorf("resolveSourceExt(136)=%q want .png (from name)", got)
+	}
+	// 200: UUID name with no extension → fall back to content_type.
+	if got := resolveSourceExt(context.Background(), sc, db, "p1", []string{"200"}); got != ".png" {
+		t.Errorf("resolveSourceExt(200)=%q want .png (from content_type)", got)
+	}
+}
+
+func TestResolveSourceExt_PrefersMediaIndex(t *testing.T) {
+	db := newMediaNameTestDB(t) // row 7 = vacation.jpg
+	defer db.Close()
+	// sc=nil proves the media-index hit short-circuits before any
+	// storage call.
+	if got := resolveSourceExt(context.Background(), nil, db, "p1", []string{"7"}); got != ".jpg" {
+		t.Errorf("resolveSourceExt(7)=%q want .jpg (from media index, no storage)", got)
+	}
+}
+
+// newStorageStubClient returns a storageClient pointed at an httptest
+// server that answers GetFile for ids 136 (png name) and 200 (extension-
+// less name, png content-type).
+func newStorageStubClient(t *testing.T) *storageClient {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/files/136"):
+			_, _ = w.Write([]byte(`{"file":{"id":136,"name":"0251f8c06d398b45.png","content_type":"image/png"}}`))
+		case strings.Contains(r.URL.Path, "/files/200"):
+			_, _ = w.Write([]byte(`{"file":{"id":200,"name":"abcd1234","content_type":"image/png"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return &storageClient{base: srv.URL, token: "t", httpClient: srv.Client()}
 }
 
 func newMediaNameTestDB(t *testing.T) *sql.DB {

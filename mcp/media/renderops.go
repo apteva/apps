@@ -154,7 +154,7 @@ func planResize(sources []string, raw json.RawMessage, outputName, sourceExt str
 // the output extension; codecs are passed as -c:v / -c:a when set.
 
 type transcodeParams struct {
-	Format     string `json:"format"`              // mp4|mkv|webm|mov|m4a|mp3|wav|opus
+	Format     string `json:"format"`                // mp4|mkv|webm|mov|m4a|mp3|wav|opus
 	VideoCodec string `json:"video_codec,omitempty"` // libx264|libx265|libvpx-vp9|...
 	AudioCodec string `json:"audio_codec,omitempty"` // aac|libmp3lame|libopus|...
 	Bitrate    string `json:"bitrate,omitempty"`     // e.g. "2M", "192k"
@@ -366,8 +366,8 @@ func planExtractFrame(sources []string, raw json.RawMessage, outputName string) 
 type extractReelParams struct {
 	StartMs     int64  `json:"start_ms"`
 	EndMs       int64  `json:"end_ms"`
-	TargetRatio string `json:"target_ratio"` // "9:16" (default), "1:1", "4:5", "16:9", …
-	OutputWidth int    `json:"output_width"` // optional; default 1080
+	TargetRatio string `json:"target_ratio"`        // "9:16" (default), "1:1", "4:5", "16:9", …
+	OutputWidth int    `json:"output_width"`        // optional; default 1080
 	CropMode    string `json:"crop_mode,omitempty"` // "smart" (default) | "center" — passed through for logging; the actual crop_w/h/x/y is injected by preprocessSmartCrop
 
 	// crop_w/h/x/y are injected by preprocessSmartCrop at execute
@@ -430,7 +430,7 @@ func planExtractReel(sources []string, raw json.RawMessage, outputName string) (
 		"-to", msToSeconds(p.EndMs),
 		"-i", "{input}",
 		"-vf", cropExpr + "," + scaleExpr,
-		"-c:a", "copy",                        // audio passthrough — no re-encode
+		"-c:a", "copy", // audio passthrough — no re-encode
 		"-avoid_negative_ts", "make_zero",
 	}
 	name, ct := defaultOutputName(outputName, sources[0], "reel", ".mp4")
@@ -548,6 +548,54 @@ func contentTypeForName(name string) string {
 	default:
 		return "application/octet-stream"
 	}
+}
+
+// extFromContentType maps a storage content-type to a canonical file
+// extension. The inverse of contentTypeForName, used when a source
+// file's name carries no extension (e.g. a UUID name) so crop/resize
+// can still pick the right output container. Covers the image/audio/
+// video types media handles; "" for anything unrecognised (caller
+// falls back to the legacy default).
+func extFromContentType(ct string) string {
+	ct = strings.ToLower(strings.TrimSpace(ct))
+	if i := strings.IndexByte(ct, ';'); i >= 0 { // strip "; charset=..."
+		ct = strings.TrimSpace(ct[:i])
+	}
+	switch ct {
+	case "image/png":
+		return ".png"
+	case "image/jpeg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "image/bmp":
+		return ".bmp"
+	case "image/tiff":
+		return ".tiff"
+	case "image/heic", "image/heif":
+		return ".heic"
+	case "video/mp4":
+		return ".mp4"
+	case "video/quicktime":
+		return ".mov"
+	case "video/webm":
+		return ".webm"
+	case "video/x-matroska":
+		return ".mkv"
+	case "audio/mpeg":
+		return ".mp3"
+	case "audio/wav", "audio/x-wav":
+		return ".wav"
+	case "audio/mp4":
+		return ".m4a"
+	case "audio/opus":
+		return ".opus"
+	case "audio/flac":
+		return ".flac"
+	}
+	return ""
 }
 
 // isImageExt reports whether ext (with leading dot, any case) is one of

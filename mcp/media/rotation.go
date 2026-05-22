@@ -31,8 +31,10 @@ package main
 //    rotation=180 → transpose=1,transpose=1 (or hflip+vflip, same result).
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -108,18 +110,49 @@ func lookupSourceExt(db *sql.DB, projectID string, sourceFileIDs []string) strin
 	return strings.ToLower(filepath.Ext(name))
 }
 
+// resolveSourceExt is the executor-facing source-extension resolver used
+// by the shape-preserving ops (crop, resize) to keep the output the same
+// media type as the input. It prefers media's own index (lookupSourceExt
+// — no network) and falls back to storage's authoritative metadata when
+// the source isn't cataloged. That fallback matters because media_crop
+// accepts ANY storage file_id, while the indexer deliberately excludes
+// hidden folders (isExcludedFromCatalog: /.screenshots/, /.media/, …) —
+// so a screenshot crop has no media row and would otherwise default to
+// ".mp4". Returns "" only when neither source knows the type, leaving
+// the planner on its legacy default.
+func resolveSourceExt(ctx context.Context, sc *storageClient, db *sql.DB, projectID string, sourceFileIDs []string) string {
+	if ext := lookupSourceExt(db, projectID, sourceFileIDs); ext != "" {
+		return ext
+	}
+	if len(sourceFileIDs) != 1 || projectID == "" || sc == nil {
+		return ""
+	}
+	fid, err := strconv.ParseInt(sourceFileIDs[0], 10, 64)
+	if err != nil {
+		return ""
+	}
+	f, err := sc.GetFile(ctx, projectID, fid)
+	if err != nil || f == nil {
+		return ""
+	}
+	if ext := strings.ToLower(filepath.Ext(f.Name)); ext != "" {
+		return ext
+	}
+	return extFromContentType(f.ContentType)
+}
+
 // applyRotation mutates a built ffmpeg arg list to bake the source's
 // rotation into the output. Two changes:
 //
-//   1. Insert "-noautorotate" before each "-i" so ffmpeg doesn't
-//      apply rotation on top of what we're about to do. Without
-//      this we'd risk double-rotation, depending on the build's
-//      autorotate default.
+//  1. Insert "-noautorotate" before each "-i" so ffmpeg doesn't
+//     apply rotation on top of what we're about to do. Without
+//     this we'd risk double-rotation, depending on the build's
+//     autorotate default.
 //
-//   2. Prepend the transpose filter to any existing "-vf" chain.
-//      Composes via ","; ffmpeg processes filters left-to-right so
-//      the transpose runs first, then crop/scale see a frame that
-//      matches the indexer's stored Width/Height.
+//  2. Prepend the transpose filter to any existing "-vf" chain.
+//     Composes via ","; ffmpeg processes filters left-to-right so
+//     the transpose runs first, then crop/scale see a frame that
+//     matches the indexer's stored Width/Height.
 //
 // No-op when rotation == 0. Safe to call on every plan.
 //

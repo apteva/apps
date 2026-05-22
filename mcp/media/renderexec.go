@@ -125,7 +125,7 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 	row.Params = preprocessSmartCrop(ctx, app, sc, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
 
 	plan, err := buildPlan(row.Operation, row.SourceFileIDs, row.Params, row.OutputName,
-		lookupSourceExt(db, row.ProjectID, row.SourceFileIDs))
+		resolveSourceExt(ctx, sc, db, row.ProjectID, row.SourceFileIDs))
 	if err != nil {
 		return 0, fmt.Errorf("build plan: %w", err)
 	}

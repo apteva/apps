@@ -88,15 +88,16 @@ func (e *cloudinaryExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *
 		return 0, fmt.Errorf("cloudinary chain: %w", err)
 	}
 
+	sc := newStorageClient()
+
 	// Reuse the local plan helpers for output filename + content type
 	// so storage uploads from either backend look identical to panels.
 	plan, err := buildPlan(row.Operation, row.SourceFileIDs, row.Params, row.OutputName,
-		lookupSourceExt(app.AppDB(), row.ProjectID, row.SourceFileIDs))
+		resolveSourceExt(ctx, sc, app.AppDB(), row.ProjectID, row.SourceFileIDs))
 	if err != nil {
 		return 0, fmt.Errorf("plan: %w", err)
 	}
 
-	sc := newStorageClient()
 	signedURL, err := sc.GetSignedURL(ctx, row.ProjectID, srcID, cloudinarySignedURLTTL)
 	if err != nil {
 		return 0, fmt.Errorf("mint signed url: %w", err)
