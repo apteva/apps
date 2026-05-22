@@ -80,10 +80,13 @@ func TestValidateTarget(t *testing.T) {
 		"http://127.0.0.1:7100",
 		"https://internal.svc:443",
 		"http://localhost:8080/",
+		"app://storage",            // name-addressed origin (cdn)
+		"app://media-studio/files", // with a path prefix
 	}
 	bad := []string{
 		"", "127.0.0.1:7100", "tcp://127.0.0.1:5432",
 		"unix:///tmp/sock", "ssh://example.com",
+		"app://", "app://Storage", "app://stor age", "app://app_name",
 	}
 	for _, t1 := range good {
 		if err := validateTarget(t1); err != nil {

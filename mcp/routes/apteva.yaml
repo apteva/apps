@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: routes
 display_name: Routes
-version: 0.3.3
+version: 0.4.0
 description: |
   Hostname-based routing for Apteva. Owns the table mapping public
   hostnames (blog.example.com) to local backend targets
@@ -38,7 +38,7 @@ provides:
     - prefix: /
   mcp_tools:
     - name: routes_register
-      description: Register a hostname → target route. Idempotent on (hostname, target) from the same owner.
+      description: Register a hostname → target route. target is http(s)://host:port or app://<name> (live-resolved sidecar). Idempotent on (hostname, target) from the same owner.
     - name: routes_unregister
       description: Remove a route by hostname. Caller must own it (errors if not).
     - name: routes_list

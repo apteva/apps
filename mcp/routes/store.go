@@ -13,15 +13,15 @@ import (
 // "deploy" / "code" / "manual" and lets the panel show the right
 // affordances; the platform doesn't gate on it.
 type Route struct {
-	ID              int64  `json:"id"`
-	Hostname        string `json:"hostname"`
-	Target          string `json:"target"`
-	OwnerInstallID  int64  `json:"owner_install_id"`
-	OwnerKind       string `json:"owner_kind"`
-	CertFQDN        string `json:"cert_fqdn,omitempty"`
-	AllowHTTP       bool   `json:"allow_http,omitempty"`
-	CreatedAt       string `json:"created_at,omitempty"`
-	UpdatedAt       string `json:"updated_at,omitempty"`
+	ID             int64  `json:"id"`
+	Hostname       string `json:"hostname"`
+	Target         string `json:"target"`
+	OwnerInstallID int64  `json:"owner_install_id"`
+	OwnerKind      string `json:"owner_kind"`
+	CertFQDN       string `json:"cert_fqdn,omitempty"`
+	AllowHTTP      bool   `json:"allow_http,omitempty"`
+	CreatedAt      string `json:"created_at,omitempty"`
+	UpdatedAt      string `json:"updated_at,omitempty"`
 }
 
 // RegisterInput is the canonical write shape. Hostname and target
@@ -65,9 +65,15 @@ func validateHostname(h string) error {
 	return nil
 }
 
-// validateTarget rejects targets the matcher couldn't proxy. Must be
-// http:// or https:// with a host. Unix sockets and other schemes
-// are out of scope for v0.1; reject early with a clear message.
+// validateTarget rejects targets the matcher couldn't proxy. Three
+// forms are allowed:
+//   - http://host:port  / https://host:port  — a literal backend
+//   - app://<name>[/prefix]                   — a named app; apteva-
+//     server resolves <name> to the app's LIVE sidecar port at
+//     request time (survives sidecar restarts/redeploys that reassign
+//     the local port). Used by cdn app-origin zones.
+//
+// Unix sockets and other schemes are out of scope; reject early.
 func validateTarget(t string) error {
 	if t == "" {
 		return errors.New("target required")
@@ -76,13 +82,36 @@ func validateTarget(t string) error {
 	if err != nil {
 		return fmt.Errorf("invalid target URL: %w", err)
 	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("target scheme must be http or https; got %q", u.Scheme)
-	}
-	if u.Host == "" {
-		return errors.New("target must include a host")
+	switch u.Scheme {
+	case "http", "https":
+		if u.Host == "" {
+			return errors.New("target must include a host")
+		}
+	case "app":
+		if u.Host == "" {
+			return errors.New("app:// target must name an app (app://<name>)")
+		}
+		if !validAppName(u.Host) {
+			return fmt.Errorf("app:// target %q: app name must be lowercase letters, digits, and dashes", u.Host)
+		}
+	default:
+		return fmt.Errorf("target scheme must be http, https, or app; got %q", u.Scheme)
 	}
 	return nil
+}
+
+// validAppName matches the app-name shape apteva-server registers apps
+// under (lowercase alphanumerics + internal dashes).
+func validAppName(s string) bool {
+	if s == "" || s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // ─── DB ops ────────────────────────────────────────────────────────

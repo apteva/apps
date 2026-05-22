@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: routes
 display_name: Routes
-version: 0.3.2
+version: 0.4.0
 description: |
   Hostname-based routing for Apteva. Owns the table mapping public
   hostnames to local backend targets. Apps register routes; apteva-
@@ -57,7 +57,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: routes_register,   description: "Register a hostname → target route. Idempotent on (hostname, target) from the same owner. Args: hostname, target, cert_fqdn?, allow_http?." }
+    - { name: routes_register,   description: "Register a hostname → target route (target is http(s)://host:port or app://<name>, live-resolved). Idempotent on (hostname, target) from the same owner. Args: hostname, target, cert_fqdn?, allow_http?." }
     - { name: routes_unregister, description: "Remove a route by hostname. Caller must own it. Args: hostname." }
     - { name: routes_list,       description: "List routes. Args: owner_install_id? (filter)." }
     - { name: routes_get,        description: "Fetch one route by hostname. Args: hostname." }

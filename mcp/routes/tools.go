@@ -20,7 +20,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Register a hostname → target route. Idempotent on (hostname, target) from the same owner. " +
 				"Sidecars must pass their own install id as owner_install_id (read from APTEVA_INSTALL_ID env); " +
 				"the platform doesn't yet forward caller identity through CallApp. Args: hostname (req), " +
-				"target (req, http or https URL), owner_install_id (req — pass APTEVA_INSTALL_ID), " +
+				"target (req — http(s)://host:port for a literal backend, OR app://<name>[/prefix] to front an " +
+				"installed app by name; apteva-server resolves app:// to the app's live sidecar port per request, " +
+				"so it survives sidecar restarts), owner_install_id (req — pass APTEVA_INSTALL_ID), " +
 				"owner_kind? ('deploy' | 'code' | etc), cert_fqdn? (default = hostname; pass a wildcard to share certs), " +
 				"allow_http? (default false; true = serve plain HTTP without 301 to HTTPS).",
 			InputSchema: schemaObject(map[string]any{
