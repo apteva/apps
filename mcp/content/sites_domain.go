@@ -134,12 +134,24 @@ func (a *App) toolSitesAttachDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if os.Getenv("APTEVA_APP_PORT") == "" {
 		return nil, errors.New("APTEVA_APP_PORT not set — the platform should inject this; without it the routes target can't be built")
 	}
+	// allow_http defaults to !auto_tls — if we aren't managing TLS,
+	// something upstream is (ngrok tunnel, Cloudflare front, custom
+	// reverse proxy). Forcing a 301 → HTTPS on the host-router side
+	// would loop when that upstream is HTTPS-terminating and forwards
+	// plain HTTP to apteva-server. Caller can override explicitly.
+	allowHTTP := !autoTLS
+	if v, ok := args["allow_http"]; ok {
+		if b, ok := v.(bool); ok {
+			allowHTTP = b
+		}
+	}
 	routesArgs := map[string]any{
 		"hostname":         fqdn,
 		"target":           myTarget,
 		"owner_install_id": installID,
 		"owner_kind":       "content",
 		"cert_fqdn":        fqdn,
+		"allow_http":       allowHTTP,
 	}
 	var routeOut struct {
 		Route  map[string]any `json:"route"`
