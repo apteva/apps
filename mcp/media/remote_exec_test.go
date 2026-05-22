@@ -150,6 +150,8 @@ func TestBuildScript_TrimShape(t *testing.T) {
 		`if [ "$INIT_CODE" = "200" ]`,
 		`curl -sS --fail -X PUT -H "Content-Type: $CT" --upload-file "$OUT" "$UPLOAD_URL"`,
 		`"$STORAGE_BASE/files/$UPLOAD_ID/finalize?project_id=$PROJECT_ID"`,
+		// Dedup-hit branch (storage already has these bytes).
+		`"was_existing"`,
 		// Multipart fallback markers.
 		`"file=@$OUT;type=$CT;filename=$NAME"`,
 		`"$STORAGE_BASE/files?project_id=$PROJECT_ID"`,

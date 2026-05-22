@@ -358,14 +358,28 @@ if [ "$INIT_CODE" = "200" ]; then
       -d "{\"sha256\":\"$SHA\"}" \
       "$STORAGE_BASE/files/$UPLOAD_ID/finalize?project_id=$PROJECT_ID")
     FILE_ID=$(echo "$FIN_BODY" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)
+  elif grep -q '"was_existing"[[:space:]]*:[[:space:]]*true' "$INIT_BODY_FILE"; then
+    # Dedup hit: storage already stores these exact bytes (same sha256),
+    # so /files/init returns the existing file instead of a presigned
+    # URL: {"file":{"id":N,...},"mode":"deduplicated","was_existing":true}.
+    # Adopt that id — there is nothing to upload. This is the case that
+    # produced STORAGE_INIT_PARSE_FAILED on every re-render of an
+    # already-stored result (identical crop/resize params -> identical
+    # bytes -> same sha). The local executor never hit it because the
+    # storage Go client handles dedup; only this bash path was naive.
+    FILE_ID=$(sed -n 's/.*"file":[[:space:]]*{[[:space:]]*"id":[[:space:]]*\([0-9]*\).*/\1/p' "$INIT_BODY_FILE")
+    if [ -n "$FILE_ID" ]; then
+      NEED_MULTIPART=0
+    else
+      echo "STORAGE_INIT_DEDUP_NO_ID body[0:200]=$(head -c 200 "$INIT_BODY_FILE" | tr '\n\r\t' '   ')" >&2
+    fi
   else
-    # init returned 200 but not storage's presigned JSON — e.g. a
-    # tunnel/proxy interstitial or an SPA fallback page reached the
-    # remote box instead of storage. Surface exactly what came back
+    # init returned 200 but neither presigned fields nor a dedup hit —
+    # e.g. a tunnel/proxy interstitial or an SPA fallback page reached
+    # the remote box instead of storage. Surface exactly what came back
     # (the old "STORAGE_INIT_PARSE_FAILED" threw the body away, which
-    # made this undiagnosable), then fall through to the multipart
-    # proxy upload below — it hits a different endpoint and may still
-    # succeed.
+    # made this undiagnosable), then fall through to the multipart proxy
+    # upload below — it hits a different endpoint and may still succeed.
     echo "STORAGE_INIT_UNPARSEABLE code=$INIT_CODE body[0:200]=$(head -c 200 "$INIT_BODY_FILE" | tr '\n\r\t' '   ')" >&2
   fi
 fi
