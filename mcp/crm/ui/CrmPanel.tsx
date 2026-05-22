@@ -299,9 +299,79 @@ interface Segment {
   archived_at?: string;
 }
 
+// ─── Contact filters ──────────────────────────────────────────────
+// A UI filter row. `kind` decides how it serializes: core columns go
+// out as {field,…}, custom attributes as {attribute,…} — matching the
+// contacts_search backend.
+interface UIFilter {
+  kind: "core" | "attr";
+  key: string;
+  label: string;
+  type: string;        // text | number | date | bool | select | url
+  op: string;          // eq | contains | starts_with | gte | lte
+  value: string;
+  enumValues?: string[];
+}
+
+// Contacts list page size (matches the backend default limit).
+const CONTACTS_PAGE = 50;
+
+// Core columns the backend's buildFilterClause allow-lists.
+const CORE_FILTER_FIELDS: { key: string; label: string; type: string }[] = [
+  { key: "display_name", label: "Name", type: "text" },
+  { key: "company", label: "Company", type: "text" },
+  { key: "job_title", label: "Job title", type: "text" },
+  { key: "primary_email", label: "Email", type: "text" },
+  { key: "primary_phone", label: "Phone", type: "text" },
+  { key: "status", label: "Status", type: "text" },
+];
+
+function opsForType(type: string): { value: string; label: string }[] {
+  switch (type) {
+    case "number":
+    case "date":
+      return [{ value: "eq", label: "is" }, { value: "gte", label: "≥" }, { value: "lte", label: "≤" }];
+    case "bool":
+    case "select":
+      return [{ value: "eq", label: "is" }];
+    default:
+      return [{ value: "eq", label: "is" }, { value: "contains", label: "contains" }, { value: "starts_with", label: "starts with" }];
+  }
+}
+
+// serializeFilters → the contacts_search `filters` array.
+function serializeFilters(filters: UIFilter[]): any[] {
+  return filters.map((f) => {
+    let value: unknown = f.value;
+    if (f.type === "number") value = Number(f.value);
+    else if (f.type === "bool") value = f.value === "true";
+    return f.kind === "attr"
+      ? { attribute: f.key, op: f.op, value }
+      : { field: f.key, op: f.op, value };
+  });
+}
+
+// filtersToSegmentDefinition → the segments `definition` predicate array.
+function filtersToSegmentDefinition(filters: UIFilter[]): any[] {
+  return filters.map((f) => {
+    let value: unknown = f.value;
+    if (f.type === "number") value = Number(f.value);
+    else if (f.type === "bool") value = f.value === "true";
+    return f.kind === "attr"
+      ? { predicate: "attribute", key: f.key, op: f.op, value }
+      : { field: f.key, op: f.op, value };
+  });
+}
+
+function describeFilter(f: UIFilter): string {
+  const op = opsForType(f.type).find((o) => o.value === f.op)?.label || f.op;
+  return `${f.label} ${op} ${f.value}`;
+}
+
 export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const [tab, setTab] = useState<Tab>("contacts");
   const [contacts, setContacts] = useState<Contact[]>([]);
+  const [total, setTotal] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<Contact | null>(null);
   const [activities, setActivities] = useState<Activity[]>([]);
@@ -317,6 +387,14 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const [newContactOpen, setNewContactOpen] = useState(false);
   const [attrDefs, setAttrDefs] = useState<AttributeDef[]>([]);
   const [defineFieldOpen, setDefineFieldOpen] = useState(false);
+  // Structured filters on the contacts list. filtersRef mirrors the
+  // state so loadList (stable useCallback) always reads the current set.
+  const [filters, setFilters] = useState<UIFilter[]>([]);
+  const filtersRef = useRef<UIFilter[]>([]);
+  const applyFilters = useCallback((next: UIFilter[]) => {
+    filtersRef.current = next;
+    setFilters(next);
+  }, []);
   const [lists, setLists] = useState<List[]>([]);
   const [contactLists, setContactLists] = useState<List[]>([]);
   const [newListOpen, setNewListOpen] = useState(false);
@@ -361,12 +439,24 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     return res.json();
   }, [withParams, projectId]);
 
-  const loadList = useCallback(async (q = "") => {
+  // loadList(q, offset): offset 0 replaces the list; offset > 0 appends
+  // the next page (for "Load more"). total comes back from the backend
+  // so the UI can show "X of Y" and know when to stop paging.
+  const loadList = useCallback(async (q = "", offset = 0) => {
     setStatus("Loading…");
     try {
-      const r = await api<{ contacts?: Contact[] }>("GET", "/contacts", undefined, q ? { q } : {});
-      setContacts(r.contacts || []);
-      setStatus(`${(r.contacts || []).length} contact${(r.contacts || []).length !== 1 ? "s" : ""}`);
+      const params: Record<string, string> = { limit: String(CONTACTS_PAGE) };
+      if (q) params.q = q;
+      if (offset) params.offset = String(offset);
+      const ser = serializeFilters(filtersRef.current);
+      if (ser.length) params.filters = JSON.stringify(ser);
+      const r = await api<{ contacts?: Contact[]; total?: number }>("GET", "/contacts", undefined, params);
+      const rows = r.contacts || [];
+      setContacts((prev) => (offset > 0 ? [...prev, ...rows] : rows));
+      const t = typeof r.total === "number" ? r.total : rows.length;
+      setTotal(t);
+      const shown = offset > 0 ? offset + rows.length : rows.length;
+      setStatus(`${shown} of ${t}${ser.length ? ` · ${ser.length} filter${ser.length !== 1 ? "s" : ""}` : ""}`);
     } catch (e) {
       setStatus("Error: " + (e as Error).message);
     }
@@ -399,6 +489,15 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     }
   }, [api]);
 
+  // Turn the active filter set into a saved Segment (reuses the segment
+  // engine + tab). Returns the created name on success.
+  const saveFiltersAsSegment = useCallback(async (name: string) => {
+    const definition = filtersToSegmentDefinition(filtersRef.current);
+    if (!definition.length) throw new Error("add at least one filter first");
+    await api("POST", "/segments", { name, definition });
+    await loadSegments();
+  }, [api, loadSegments]);
+
   // Initial load.
   useEffect(() => { loadList(""); }, [loadList]);
   useEffect(() => { loadAttrDefs(); }, [loadAttrDefs]);
@@ -424,11 +523,11 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       .catch(() => setVerifiedSenders([]));
   }, [messagingTool]);
 
-  // Debounced search.
+  // Debounced search — re-runs on query OR filter changes.
   useEffect(() => {
     const id = setTimeout(() => loadList(query.trim()), 250);
     return () => clearTimeout(id);
-  }, [query, loadList]);
+  }, [query, filters, loadList]);
 
   // Live refresh: reload the contact list whenever a contact mutation
   // event lands on the (crm, project) lane. Activity-added refreshes
@@ -815,20 +914,28 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
         {tab === "contacts" ? (
           <div className="h-full flex">
             {/* List */}
-            <aside className="w-80 border-r border-border flex flex-col">
-              <div className="p-3 border-b border-border flex items-center gap-2">
-                <input
-                  type="text"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search contacts…"
-                  className="flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            <aside style={{ width: 460, maxWidth: "45%" }} className="shrink-0 border-r border-border flex flex-col">
+              <div className="p-3 border-b border-border space-y-2">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Search contacts…"
+                    className="flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setNewContactOpen(true)}
+                    className="px-2 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+                  >+ New</button>
+                </div>
+                <ContactFilterBar
+                  attrDefs={attrDefs}
+                  filters={filters}
+                  onChange={applyFilters}
+                  onSaveSegment={saveFiltersAsSegment}
                 />
-                <button
-                  type="button"
-                  onClick={() => setNewContactOpen(true)}
-                  className="px-2 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg"
-                >+ New</button>
               </div>
               <div className="flex-1 overflow-auto">
                 {contacts.length === 0 ? (
@@ -849,6 +956,15 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
                     ))}
                   </ul>
                 )}
+                {contacts.length > 0 && contacts.length < total && (
+                  <button
+                    type="button"
+                    onClick={() => loadList(query.trim(), contacts.length)}
+                    className="w-full px-3 py-2 text-xs text-accent hover:bg-bg-input border-b border-border"
+                  >
+                    Load {Math.min(CONTACTS_PAGE, total - contacts.length)} more ({contacts.length} of {total})
+                  </button>
+                )}
               </div>
               <div className="p-2 text-xs text-text-dim border-t border-border">{status}</div>
             </aside>
@@ -860,7 +976,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
                   {selectedId ? "Loading…" : "Select a contact to see details."}
                 </div>
               ) : (
-                <div className="max-w-2xl space-y-6">
+                <div className="max-w-4xl space-y-6">
                   <header className="flex items-start justify-between gap-3">
                     <div>
                       <h1 className="text-xl text-text font-semibold">{displayName(detail)}</h1>
@@ -1833,6 +1949,131 @@ function InboxTab({ api, onOpenContact }: {
       </div>
     </div>
   );
+}
+
+// ─── Contact filter bar ───────────────────────────────────────────
+
+function ContactFilterBar({ attrDefs, filters, onChange, onSaveSegment }: {
+  attrDefs: AttributeDef[];
+  filters: UIFilter[];
+  onChange: (f: UIFilter[]) => void;
+  onSaveSegment: (name: string) => Promise<void>;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [sel, setSel] = useState("");      // "kind:key"
+  const [op, setOp] = useState("eq");
+  const [value, setValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [segName, setSegName] = useState<string | null>(null); // non-null = naming a segment
+  const [err, setErr] = useState<string | null>(null);
+
+  const fieldOptions = useMemo(() => [
+    ...CORE_FILTER_FIELDS.map((f) => ({ kind: "core" as const, key: f.key, label: f.label, type: f.type, enumValues: undefined as string[] | undefined })),
+    ...attrDefs.map((d) => ({ kind: "attr" as const, key: d.key, label: d.label, type: d.type as string, enumValues: d.enum_values })),
+  ], [attrDefs]);
+  const current = fieldOptions.find((o) => `${o.kind}:${o.key}` === sel);
+
+  const startAdd = () => {
+    const first = fieldOptions[0];
+    if (!first) return;
+    setSel(`${first.kind}:${first.key}`);
+    setOp(opsForType(first.type)[0].value);
+    setValue(""); setErr(null); setAdding(true);
+  };
+  const pickField = (v: string) => {
+    setSel(v);
+    const o = fieldOptions.find((x) => `${x.kind}:${x.key}` === v);
+    if (o) { setOp(opsForType(o.type)[0].value); setValue(""); }
+  };
+  const commit = () => {
+    if (!current) return;
+    if (current.type !== "bool" && value.trim() === "") { setErr("enter a value"); return; }
+    onChange([...filters, {
+      kind: current.kind, key: current.key, label: current.label, type: current.type,
+      op, value: current.type === "bool" ? (value || "true") : value.trim(),
+      enumValues: current.enumValues,
+    }]);
+    setAdding(false); setValue(""); setErr(null);
+  };
+
+  const inp = "bg-bg-input border border-border rounded px-2 py-1 text-xs";
+
+  return (
+    <div className="space-y-2">
+      {filters.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {filters.map((f, i) => (
+            <span key={i} className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-accent/10 text-accent">
+              {describeFilter(f)}
+              <button type="button" onClick={() => onChange(filters.filter((_, idx) => idx !== i))} className="hover:text-text" aria-label="Remove filter">×</button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {adding ? (
+        <div className="flex flex-wrap items-center gap-1">
+          <select value={sel} onChange={(e) => pickField(e.target.value)} className={inp}>
+            {fieldOptions.map((o) => <option key={`${o.kind}:${o.key}`} value={`${o.kind}:${o.key}`}>{o.label}</option>)}
+          </select>
+          <select value={op} onChange={(e) => setOp(e.target.value)} className={inp}>
+            {opsForType(current?.type || "text").map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+          <FilterValueInput type={current?.type || "text"} enumValues={current?.enumValues} value={value} onChange={setValue} cls={inp} />
+          <button type="button" onClick={commit} className="text-[11px] px-1.5 py-0.5 border border-accent text-accent rounded hover:bg-accent hover:text-bg">Add</button>
+          <button type="button" onClick={() => { setAdding(false); setErr(null); }} className="text-[11px] px-1.5 py-0.5 text-text-dim hover:text-text">Cancel</button>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={startAdd} className="text-[11px] px-1.5 py-0.5 border border-border rounded hover:bg-bg-input text-text-muted">+ Filter</button>
+          {filters.length > 0 && segName === null && (
+            <>
+              <button type="button" onClick={() => setSegName("")} className="text-[11px] px-1.5 py-0.5 border border-border rounded hover:bg-bg-input text-text-muted">Save as segment</button>
+              <button type="button" onClick={() => onChange([])} className="text-[11px] text-text-dim hover:text-red">Clear</button>
+            </>
+          )}
+        </div>
+      )}
+
+      {segName !== null && (
+        <div className="flex items-center gap-1">
+          <input autoFocus value={segName} onChange={(e) => setSegName(e.target.value)} placeholder="Segment name" className={`${inp} flex-1`} />
+          <button type="button" disabled={saving || !segName.trim()} className="text-[11px] px-1.5 py-0.5 border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+            onClick={async () => {
+              setSaving(true); setErr(null);
+              try { await onSaveSegment(segName.trim()); setSegName(null); }
+              catch (e) { setErr((e as Error).message); }
+              finally { setSaving(false); }
+            }}>Save</button>
+          <button type="button" onClick={() => setSegName(null)} className="text-[11px] px-1.5 py-0.5 text-text-dim hover:text-text">Cancel</button>
+        </div>
+      )}
+      {err && <div className="text-red text-[11px]">{err}</div>}
+    </div>
+  );
+}
+
+function FilterValueInput({ type, enumValues, value, onChange, cls }: {
+  type: string; enumValues?: string[]; value: string; onChange: (v: string) => void; cls: string;
+}) {
+  if (type === "bool") {
+    return (
+      <select value={value || "true"} onChange={(e) => onChange(e.target.value)} className={cls}>
+        <option value="true">true</option>
+        <option value="false">false</option>
+      </select>
+    );
+  }
+  if (type === "select" && enumValues && enumValues.length > 0) {
+    return (
+      <select value={value} onChange={(e) => onChange(e.target.value)} className={cls}>
+        <option value="">—</option>
+        {enumValues.map((o) => <option key={o} value={o}>{o}</option>)}
+      </select>
+    );
+  }
+  const inputType = type === "number" ? "number" : type === "date" ? "date" : "text";
+  return <input type={inputType} value={value} onChange={(e) => onChange(e.target.value)} placeholder="value" className={cls} style={{ width: 130 }} />;
 }
 
 // ─── Generic modal shell ──────────────────────────────────────────

@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.1
+version: 0.8.2
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -390,11 +390,12 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "contacts_search",
-			Description: "Filtered contact search. Args: filters [{field,op,value}], q (free text), limit (default 50, max 200).",
+			Description: "Filtered contact search. Args: q (free text over name/email/phone/company), filters [], limit (default 50, max 200), offset (for paging). Returns {contacts, count, total, offset} — use total + offset to page. Each filter is either a core-field filter {field, op, value} (field ∈ first_name,last_name,display_name,company,job_title,primary_email,primary_phone,status,owner_user_id,source) OR a custom-field filter {attribute: \"<key>\", op, value}. ops: eq,neq,gt,gte,lt,lte,contains,starts_with,is_null,in.",
 			InputSchema: schemaObject(map[string]any{
 				"filters": map[string]any{"type": "array"},
 				"q":       map[string]any{"type": "string"},
 				"limit":   map[string]any{"type": "integer"},
+				"offset":  map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolSearch,
 		},
@@ -935,12 +936,17 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
+	offset := intArg(args, "offset", 0)
 	filters, _ := args["filters"].([]any)
-	rows, err := dbSearch(ctx.AppDB(), pid, q, filters, limit)
+	rows, err := dbSearch(ctx.AppDB(), pid, q, filters, limit, offset)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"contacts": rows, "count": len(rows)}, nil
+	total, err := dbSearchCount(ctx.AppDB(), pid, q, filters)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"contacts": rows, "count": len(rows), "total": total, "offset": offset}, nil
 }
 
 func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1266,12 +1272,28 @@ func (a *App) handleHTTPSearch(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := dbSearch(ctx.AppDB(), pid, q, nil, limit)
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	// Optional structured filters, passed as a URL-encoded JSON array so
+	// the panel can mix core-field {field,op,value} and custom-field
+	// {attribute,op,value} entries on a GET.
+	var filters []any
+	if raw := r.URL.Query().Get("filters"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &filters); err != nil {
+			httpErr(w, http.StatusBadRequest, "filters must be a JSON array: "+err.Error())
+			return
+		}
+	}
+	rows, err := dbSearch(ctx.AppDB(), pid, q, filters, limit, offset)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
+		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"contacts": rows})
+	total, err := dbSearchCount(ctx.AppDB(), pid, q, filters)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"contacts": rows, "total": total, "offset": offset})
 }
 
 func (a *App) handleHTTPCreate(w http.ResponseWriter, r *http.Request) {
@@ -1622,7 +1644,10 @@ func dbGetByPrimary(db *sql.DB, pid, kind, value string) (*Contact, error) {
 	return dbGetByID(db, pid, id)
 }
 
-func dbSearch(db *sql.DB, pid, q string, filters []any, limit int) ([]*Contact, error) {
+// buildSearchWhere assembles the WHERE clauses + args shared by
+// dbSearch and dbSearchCount, so the paged list and its total count
+// always filter identically.
+func buildSearchWhere(pid, q string, filters []any) ([]string, []any, error) {
 	where := []string{"project_id = ?", "deleted_at IS NULL", "status != 'merged'"}
 	args := []any{pid}
 
@@ -1647,20 +1672,54 @@ func dbSearch(db *sql.DB, pid, q string, filters []any, limit int) ([]*Contact, 
 		if !ok {
 			continue
 		}
-		field, _ := m["field"].(string)
 		op, _ := m["op"].(string)
-		val := m["value"]
-		clause, params, err := buildFilterClause(field, op, val)
+		// Custom-field filter: {attribute: "<key>", op, value}. Distinct
+		// from core-column filters ({field, op, value}) so the two never
+		// collide on a key name.
+		if attrKey, ok := m["attribute"].(string); ok && attrKey != "" {
+			clause, params, err := buildAttributeFilterClause(pid, attrKey, op, m["value"])
+			if err != nil {
+				return nil, nil, err
+			}
+			where = append(where, clause)
+			args = append(args, params...)
+			continue
+		}
+		field, _ := m["field"].(string)
+		clause, params, err := buildFilterClause(field, op, m["value"])
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		where = append(where, clause)
 		args = append(args, params...)
 	}
+	return where, args, nil
+}
+
+// dbSearchCount returns the total number of contacts matching the query
+// + filters (ignoring limit/offset) — drives the UI's "X of Y" + paging.
+func dbSearchCount(db *sql.DB, pid, q string, filters []any) (int, error) {
+	where, args, err := buildSearchWhere(pid, q, filters)
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	err = db.QueryRow(`SELECT COUNT(*) FROM contacts WHERE `+strings.Join(where, " AND "), args...).Scan(&n)
+	return n, err
+}
+
+func dbSearch(db *sql.DB, pid, q string, filters []any, limit, offset int) ([]*Contact, error) {
+	where, args, err := buildSearchWhere(pid, q, filters)
+	if err != nil {
+		return nil, err
+	}
+	if offset < 0 {
+		offset = 0
+	}
 
 	q2 := `SELECT id FROM contacts WHERE ` + strings.Join(where, " AND ") +
-		` ORDER BY updated_at DESC LIMIT ?`
-	args = append(args, limit)
+		` ORDER BY updated_at DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
 	rows, err := db.Query(q2, args...)
 	if err != nil {
 		return nil, err
@@ -1688,6 +1747,29 @@ func dbSearch(db *sql.DB, pid, q string, filters []any, limit int) ([]*Contact, 
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+// buildAttributeFilterClause builds an EXISTS clause that filters
+// contacts by a custom-attribute value. Reuses the segment engine's
+// type-aware column picker + op SQL so search and segments behave
+// identically. Key is bound as a parameter (never interpolated).
+func buildAttributeFilterClause(pid, key, op string, val any) (string, []any, error) {
+	if op == "" {
+		op = "eq"
+	}
+	col, casted, err := attrColumnForOp(op, val)
+	if err != nil {
+		return "", nil, err
+	}
+	opSQL, opArgs, err := attrOpSQL(col, op, casted)
+	if err != nil {
+		return "", nil, err
+	}
+	clause := `EXISTS (SELECT 1 FROM contact_attributes ca
+		JOIN contact_attribute_defs cad ON cad.id = ca.def_id
+		WHERE ca.contact_id = contacts.id AND ca.project_id = ?
+		  AND cad.key = ? AND ` + opSQL + `)`
+	return clause, append([]any{pid, key}, opArgs...), nil
 }
 
 // buildFilterClause translates a single Pipedrive-style filter into a
