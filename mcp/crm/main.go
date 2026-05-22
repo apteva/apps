@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.0
+version: 0.8.1
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -422,7 +422,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_create",
-			Description: "Create a contact. Args: first_name, last_name, display_name, company, job_title, channels [{kind,value,label,is_primary}], tags [string], attributes [{key,value}], source.",
+			Description: "Create a contact. Args: first_name, last_name, display_name, company, job_title, channels [{kind,value,label,is_primary}], tags [string], attributes [{key,value}], source, list_ids [int|slug] / list_id (add the new contact to these lists directly).",
 			InputSchema: schemaObject(map[string]any{
 				"first_name":   map[string]any{"type": "string"},
 				"last_name":    map[string]any{"type": "string"},
@@ -434,6 +434,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"tags":         map[string]any{"type": "array"},
 				"attributes":   map[string]any{"type": "array"},
 				"source":       map[string]any{"type": "string"},
+				"list_ids":     map[string]any{"type": "array"},
+				"list_id":      map[string]any{"type": "string"},
 			}, nil),
 			Handler: a.toolCreate,
 		},
@@ -449,12 +451,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_upsert_by_channel",
-			Description: "Find-or-create by email/phone. Returns {contact, was_created}. Args: kind (email|phone), value, defaults (subset of contact fields used only on create), source.",
+			Description: "Find-or-create by email/phone. Returns {contact, was_created}. Args: kind (email|phone), value, defaults (subset of contact fields used only on create), source, list_ids [int|slug] / list_id (ensure the contact is in these lists, whether found or created).",
 			InputSchema: schemaObject(map[string]any{
 				"kind":     map[string]any{"type": "string"},
 				"value":    map[string]any{"type": "string"},
 				"defaults": map[string]any{"type": "object"},
 				"source":   map[string]any{"type": "string"},
+				"list_ids": map[string]any{"type": "array"},
+				"list_id":  map[string]any{"type": "string"},
 			}, []string{"kind", "value"}),
 			Handler: a.toolUpsertByChannel,
 		},
@@ -1013,8 +1017,13 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := loadChannels(ctx.AppDB(), c); err != nil {
 		return nil, err
 	}
+	listsAdded := addContactToLists(ctx, pid, c.ID, args, "contacts_create")
 	emitContact(ctx, "contact.added", c)
-	return map[string]any{"contact": c}, nil
+	out := map[string]any{"contact": c}
+	if len(listsAdded) > 0 {
+		out["lists_added"] = listsAdded
+	}
+	return out, nil
 }
 
 func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1063,7 +1072,14 @@ func (a *App) toolUpsertByChannel(ctx *sdk.AppCtx, args map[string]any) (any, er
 	} else {
 		emitContact(ctx, "contact.updated", c)
 	}
-	return map[string]any{"contact": c, "was_created": created}, nil
+	// Ensure list membership regardless of created/found — "upsert into
+	// this list" is the natural semantic (idempotent).
+	listsAdded := addContactToLists(ctx, pid, c.ID, args, "contacts_upsert")
+	out := map[string]any{"contact": c, "was_created": created}
+	if len(listsAdded) > 0 {
+		out["lists_added"] = listsAdded
+	}
+	return out, nil
 }
 
 func (a *App) toolMerge(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1104,6 +1120,70 @@ func emitContact(ctx *sdk.AppCtx, topic string, c *Contact) {
 		"last_name":    c.LastName,
 		"archived":     c.Status == "archived",
 	})
+}
+
+// addContactToLists reads list_ids (array) and list_id (scalar) off the
+// args and adds the contact to each — referenced by numeric id OR slug.
+// Idempotent (INSERT OR IGNORE) and best-effort: an unknown/typo'd list
+// ref is skipped, not fatal, since the contact write already succeeded.
+// Returns the list ids actually applied (for the response + events).
+func addContactToLists(ctx *sdk.AppCtx, pid string, contactID int64, args map[string]any, source string) []int64 {
+	db := ctx.AppDB()
+	refs := []any{}
+	if arr, ok := args["list_ids"].([]any); ok {
+		refs = append(refs, arr...)
+	}
+	if v, ok := args["list_id"]; ok && v != nil {
+		refs = append(refs, v)
+	}
+	var applied []int64
+	for _, ref := range refs {
+		lid := resolveListRef(db, pid, ref)
+		if lid == 0 {
+			continue
+		}
+		if err := dbListAddContact(db, pid, lid, contactID, source); err == nil {
+			applied = append(applied, lid)
+			ctx.Emit("list.member.added", map[string]any{"list_id": lid, "contact_id": contactID})
+		}
+	}
+	return applied
+}
+
+// resolveListRef turns a list reference (numeric id or slug, in either
+// JSON-number or string form) into a verified list id, or 0 if it
+// doesn't resolve to a real list in this project.
+func resolveListRef(db *sql.DB, pid string, ref any) int64 {
+	var id int64
+	switch v := ref.(type) {
+	case float64:
+		id = int64(v)
+	case int:
+		id = int64(v)
+	case int64:
+		id = v
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return 0
+		}
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			id = n
+		} else if l, _ := dbListBySlug(db, pid, s); l != nil {
+			return l.ID // dbListBySlug already verified existence
+		} else {
+			return 0
+		}
+	default:
+		return 0
+	}
+	if id == 0 {
+		return 0
+	}
+	if l, _ := dbListGet(db, pid, id); l != nil {
+		return l.ID
+	}
+	return 0
 }
 
 func (a *App) toolLogActivity(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1215,8 +1295,13 @@ func (a *App) handleHTTPCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	listsAdded := addContactToLists(ctx, pid, c.ID, body, "contacts_create")
 	emitContact(ctx, "contact.added", c)
-	httpJSON(w, map[string]any{"contact": c})
+	out := map[string]any{"contact": c}
+	if len(listsAdded) > 0 {
+		out["lists_added"] = listsAdded
+	}
+	httpJSON(w, out)
 }
 
 // /contacts/<id> — split here between detail GET and the activities sub-route.
