@@ -317,7 +317,7 @@ export default function ContentPanel({ projectId }: NativePanelProps) {
       )}
       {view === "list" && <ListView api={api} projectId={projectId} onOpen={setEditing} />}
       {view === "templates" && (
-        <TemplatesView api={api} projectId={projectId} onApplied={() => setView("list")} />
+        <TemplatesView api={api} projectId={projectId} siteSlug={activeSite} onApplied={() => setView("list")} />
       )}
       {view === "themes" && <ThemesView api={api} />}
       {view === "blocks" && <BlocksView api={api} />}
@@ -1447,11 +1447,13 @@ interface ApplySummary {
 
 function TemplatesView({
   api,
-  projectId: _projectId,
+  projectId,
+  siteSlug,
   onApplied,
 }: {
   api: ReturnType<typeof makeAPI>;
   projectId: string;
+  siteSlug: string | null;
   onApplied: () => void;
 }) {
   const [templates, setTemplates] = useState<TemplateListItem[]>([]);
@@ -1471,6 +1473,8 @@ function TemplatesView({
     return (
       <ApplyTemplateDialog
         api={api}
+        projectId={projectId}
+        siteSlug={siteSlug}
         template={picked}
         onClose={() => setPicked(null)}
         onApplied={() => {
@@ -1531,32 +1535,83 @@ function TemplatesView({
   );
 }
 
+interface TemplatePageEntry {
+  kind: "page" | "post";
+  slug: string;
+  title: string;
+  blocks_count: number;
+}
+
+interface TemplateDetail {
+  pages: TemplatePageEntry[];
+  homepage_slug: string;
+}
+
 function ApplyTemplateDialog({
   api,
+  projectId,
+  siteSlug,
   template,
   onClose,
   onApplied,
 }: {
   api: ReturnType<typeof makeAPI>;
+  projectId: string;
+  siteSlug: string | null;
   template: TemplateListItem;
   onClose: () => void;
   onApplied: () => void;
 }) {
   const [mode, setMode] = useState<"empty_only" | "append" | "overwrite">("empty_only");
-  const [preview, setPreview] = useState<ApplySummary | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [detail, setDetail] = useState<TemplateDetail | null>(null);
+  const [summary, setSummary] = useState<ApplySummary | null>(null);
+  const [activePage, setActivePage] = useState<string>("");
+  const [detailLoading, setDetailLoading] = useState(true);
+  const [summaryLoading, setSummaryLoading] = useState(true);
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ApplySummary | null>(null);
 
+  // One-shot fetch of the template's page list. Independent of mode
+  // so the page picker doesn't re-flicker when mode changes.
   useEffect(() => {
-    setLoading(true);
+    setDetailLoading(true);
     setError(null);
-    api<{ summary: ApplySummary }>(`/admin/templates/${template.name}/preview?mode=${mode}`)
-      .then((r) => setPreview(r.summary))
+    api<TemplateDetail & { template: any }>(`/admin/templates/${template.name}`)
+      .then((r) => {
+        const d: TemplateDetail = { pages: r.pages ?? [], homepage_slug: r.homepage_slug ?? "" };
+        setDetail(d);
+        // Pick the homepage first; fall back to the first page in the
+        // template; fall back to "" so the right pane shows the empty
+        // state instead of a broken iframe.
+        const first = d.homepage_slug || d.pages[0]?.slug || "";
+        setActivePage(first);
+      })
       .catch((e) => setError(String(e)))
-      .finally(() => setLoading(false));
+      .finally(() => setDetailLoading(false));
+  }, [api, template.name]);
+
+  // Refetch the apply-summary whenever mode flips — that's what tells
+  // the user which slugs would be created vs skipped in their current
+  // site state.
+  useEffect(() => {
+    setSummaryLoading(true);
+    api<{ summary: ApplySummary }>(`/admin/templates/${template.name}/preview?mode=${mode}`)
+      .then((r) => setSummary(r.summary))
+      .catch((e) => setError(String(e)))
+      .finally(() => setSummaryLoading(false));
   }, [api, template.name, mode]);
+
+  // Build the iframe URL manually — we can't go through the api()
+  // closure because <iframe> takes a URL, not JSON-fetched bytes.
+  // Same query params makeAPI uses (project_id + site) so the same
+  // resolution rules apply.
+  const previewURL = activePage
+    ? `/api/apps/content/admin/templates/${encodeURIComponent(template.name)}/preview-render` +
+      `?page=${encodeURIComponent(activePage)}` +
+      `&project_id=${encodeURIComponent(projectId)}` +
+      (siteSlug ? `&site=${encodeURIComponent(siteSlug)}` : "")
+    : "";
 
   const apply = async () => {
     setApplying(true);
@@ -1587,59 +1642,126 @@ function ApplyTemplateDialog({
   }
 
   return (
-    <div className="p-4 text-sm">
-      <header className="flex items-baseline justify-between mb-3">
-        <h2 className="text-base font-semibold">Apply — {template.display_name}</h2>
+    <div className="flex flex-col text-sm" style={{ height: "calc(100vh - 8rem)" }}>
+      <header className="flex items-baseline justify-between px-4 py-3 border-b border-border">
+        <div>
+          <h2 className="text-base font-semibold">Apply — {template.display_name}</h2>
+          <p className="text-xs text-text-muted mt-0.5">Live preview of each page rendered through the active theme. Nothing is written until you click Apply.</p>
+        </div>
         <button onClick={onClose} className="text-text-muted text-xs">close</button>
       </header>
 
-      <p className="text-text-muted mb-3">{template.description}</p>
+      <div className="flex flex-1 min-h-0">
+        {/* LEFT RAIL: pages + apply controls */}
+        <aside className="w-72 shrink-0 border-r border-border overflow-y-auto p-3 flex flex-col gap-4">
+          <section>
+            <p className="text-xs text-text-muted leading-relaxed">{template.description}</p>
+          </section>
 
-      <label className="block mb-3">
-        <span className="text-xs text-text-muted">Mode</span>
-        <select
-          value={mode}
-          onChange={(e) => setMode(e.target.value as typeof mode)}
-          className="block mt-1 border border-border rounded px-2 py-1 bg-bg-input"
-        >
-          <option value="empty_only">Empty only — refuse if site has content</option>
-          <option value="append">Append — add only missing slugs</option>
-          <option value="overwrite">Overwrite — replace by slug</option>
-        </select>
-      </label>
+          <section>
+            <h3 className="text-xs uppercase tracking-wide text-text-muted mb-2">
+              Pages ({detail?.pages.length ?? 0})
+            </h3>
+            {detailLoading && <p className="text-xs text-text-muted">Loading…</p>}
+            <ul className="space-y-0.5">
+              {detail?.pages.map((p) => {
+                const isActive = activePage === p.slug;
+                const isHome = detail.homepage_slug === p.slug;
+                return (
+                  <li key={`${p.kind}-${p.slug}`}>
+                    <button
+                      onClick={() => setActivePage(p.slug)}
+                      className={`w-full text-left px-2 py-1.5 rounded text-xs flex items-baseline gap-2 ${
+                        isActive ? "bg-bg-card border border-border-strong" : "hover:bg-bg-card border border-transparent"
+                      }`}
+                    >
+                      <span className="flex-1 truncate text-text font-medium">{p.title}</span>
+                      {isHome && <span className="text-text-dim text-[10px] uppercase">home</span>}
+                      <span className="text-text-dim">/{p.slug}</span>
+                    </button>
+                  </li>
+                );
+              })}
+              {!detailLoading && detail && detail.pages.length === 0 && (
+                <li className="text-xs text-text-muted px-2 py-1">No pages in this template.</li>
+              )}
+            </ul>
+          </section>
 
-      <div className="border border-border rounded p-3 my-3">
-        <p className="text-xs text-text-muted mb-2">Will create:</p>
-        {loading && <p className="text-text-muted">Loading preview…</p>}
-        {preview && <SummaryTable s={preview} />}
-      </div>
+          <section className="border-t border-border pt-3">
+            <h3 className="text-xs uppercase tracking-wide text-text-muted mb-2">Apply</h3>
 
-      {preview?.would_refuse && (
-        <div className="bg-amber-100 text-amber-900 rounded px-3 py-2 my-2 flex items-center justify-between gap-2">
-          <span>{preview.refuse_reason}</span>
-          <button
-            onClick={() => setMode("append")}
-            className="text-xs px-2 py-1 rounded border border-amber-300 bg-white whitespace-nowrap"
-          >
-            Switch to append
-          </button>
-        </div>
-      )}
+            <label className="block mb-3">
+              <span className="text-xs text-text-muted">Mode</span>
+              <select
+                value={mode}
+                onChange={(e) => setMode(e.target.value as typeof mode)}
+                className="block mt-1 w-full border border-border rounded px-2 py-1 bg-bg-input text-text"
+              >
+                <option value="empty_only">Empty only — refuse if site has content</option>
+                <option value="append">Append — add only missing slugs</option>
+                <option value="overwrite">Overwrite — replace by slug</option>
+              </select>
+            </label>
 
-      {error && <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2">{error}</div>}
+            <div className="border border-border rounded p-2 my-2">
+              <p className="text-xs text-text-muted mb-1">Will create:</p>
+              {summaryLoading && <p className="text-text-muted text-xs">Loading…</p>}
+              {summary && <SummaryTable s={summary} />}
+            </div>
 
-      <div className="flex gap-2 mt-3">
-        <button onClick={onClose} className="px-3 py-1 rounded border border-border">
-          Cancel
-        </button>
-        <button
-          onClick={apply}
-          disabled={loading || applying || Boolean(preview?.would_refuse)}
-          className="px-3 py-1 rounded border border-border font-semibold disabled:opacity-50"
-          title={preview?.would_refuse ? "Change mode to enable Apply" : undefined}
-        >
-          {applying ? "Applying…" : "Apply"}
-        </button>
+            {summary?.would_refuse && (
+              <div className="bg-amber-100 text-amber-900 rounded px-2 py-2 my-2 text-xs">
+                <p className="mb-1">{summary.refuse_reason}</p>
+                <button
+                  onClick={() => setMode("append")}
+                  className="px-2 py-1 rounded border border-amber-300 bg-white"
+                >
+                  Switch to append
+                </button>
+              </div>
+            )}
+
+            {error && <div className="bg-red-100 text-red-800 rounded px-2 py-2 my-2 text-xs">{error}</div>}
+
+            <div className="flex gap-2 mt-3">
+              <button onClick={onClose} className="px-3 py-1 rounded border border-border text-xs">
+                Cancel
+              </button>
+              <button
+                onClick={apply}
+                disabled={summaryLoading || applying || Boolean(summary?.would_refuse)}
+                className="flex-1 px-3 py-1 rounded border border-border font-semibold text-xs disabled:opacity-50 bg-accent text-white border-accent"
+                title={summary?.would_refuse ? "Change mode to enable Apply" : undefined}
+              >
+                {applying ? "Applying…" : "Apply"}
+              </button>
+            </div>
+          </section>
+        </aside>
+
+        {/* RIGHT: live preview iframe */}
+        <section className="flex-1 bg-bg-card min-w-0 flex flex-col">
+          <div className="px-3 py-2 border-b border-border text-xs text-text-muted flex items-center gap-2">
+            <span>Preview</span>
+            {activePage && <code className="text-text-dim">/{activePage}</code>}
+            <span className="ml-auto text-text-dim">Forms are inert in preview.</span>
+          </div>
+          <div className="flex-1 min-h-0">
+            {previewURL ? (
+              <iframe
+                key={previewURL}
+                src={previewURL}
+                className="w-full h-full border-0 bg-white"
+                title={`Preview of ${activePage}`}
+              />
+            ) : (
+              <div className="flex items-center justify-center h-full text-text-muted text-sm">
+                Select a page to preview
+              </div>
+            )}
+          </div>
+        </section>
       </div>
     </div>
   );

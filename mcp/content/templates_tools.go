@@ -57,7 +57,36 @@ func (a *App) toolTemplatesGet(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil || t == nil {
 		return nil, fmt.Errorf("template %q not found", name)
 	}
-	return map[string]any{"template": t}, nil
+	// Enrich with a parsed page+post index so the panel can show a
+	// page picker without having to re-parse the YAML client-side.
+	out := map[string]any{"template": t}
+	var body TemplateBody
+	if err := yaml.Unmarshal([]byte(t.Body), &body); err == nil {
+		entries := make([]map[string]any, 0, len(body.Pages)+len(body.Posts))
+		for _, p := range body.Pages {
+			title := p.Title
+			if title == "" {
+				title = p.Slug
+			}
+			entries = append(entries, map[string]any{
+				"kind": "page", "slug": p.Slug, "title": title,
+				"blocks_count": len(p.Blocks),
+			})
+		}
+		for _, p := range body.Posts {
+			title := p.Title
+			if title == "" {
+				title = p.Slug
+			}
+			entries = append(entries, map[string]any{
+				"kind": "post", "slug": p.Slug, "title": title,
+				"blocks_count": len(p.Blocks),
+			})
+		}
+		out["pages"] = entries
+		out["homepage_slug"] = body.HomepageSlug
+	}
+	return out, nil
 }
 
 func (a *App) toolTemplatesPreview(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -257,6 +286,9 @@ func (a *App) handleHTTPTemplateItem(w http.ResponseWriter, r *http.Request) {
 			}
 			httpJSON(w, out)
 			return
+		case "preview-render":
+			a.handleTemplatePreviewRender(w, r, ctx, pid, name)
+			return
 		}
 	}
 	switch r.Method {
@@ -276,5 +308,124 @@ func (a *App) handleHTTPTemplateItem(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, out)
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// handleTemplatePreviewRender renders one of a template's pages
+// through the active theme without touching the database. The panel
+// iframes this URL so users can see exactly what they'll get before
+// hitting Apply.
+//
+// URL: GET /admin/templates/{name}/preview-render?page={slug}
+//
+// Defaults page to the template's homepage_slug, falling back to the
+// first declared page if homepage_slug is empty. Returns text/html
+// with X-Robots-Tag: noindex. Inline <script> blocks are stripped
+// from the response — form blocks render visually but their progressive
+// enhancement is disabled, so a stray Submit click in the preview
+// can't fire actions against the real database.
+func (a *App) handleTemplatePreviewRender(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid, name string) {
+	siteID, err := resolveSiteIDFromRequest(ctx.AppDB(), pid, r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	_ = seedBundledTemplates(ctx, pid)
+	t, err := dbGetTemplate(ctx.AppDB(), pid, name)
+	if err != nil || t == nil {
+		httpErr(w, http.StatusNotFound, "template not found")
+		return
+	}
+	var body TemplateBody
+	if err := yaml.Unmarshal([]byte(t.Body), &body); err != nil {
+		httpErr(w, http.StatusInternalServerError, "parse template: "+err.Error())
+		return
+	}
+	pageSlug := strings.TrimSpace(r.URL.Query().Get("page"))
+	if pageSlug == "" {
+		pageSlug = body.HomepageSlug
+	}
+	// Look across pages then posts.
+	var (
+		hit  *TemplatePost
+		kind string
+	)
+	for i := range body.Pages {
+		if pageSlug == "" || body.Pages[i].Slug == pageSlug {
+			hit = &body.Pages[i]
+			kind = "page"
+			break
+		}
+	}
+	if hit == nil {
+		for i := range body.Posts {
+			if body.Posts[i].Slug == pageSlug {
+				hit = &body.Posts[i]
+				kind = "post"
+				break
+			}
+		}
+	}
+	if hit == nil {
+		httpErr(w, http.StatusNotFound, "page slug not found in template")
+		return
+	}
+	// Build a synthetic Post. Block ids are assigned on the fly so the
+	// renderer validator doesn't reject the tree — the template's
+	// YAML doesn't carry stable ids (they're minted at apply time).
+	blocks := append([]Block(nil), hit.Blocks...)
+	assignMissingIDs(blocks)
+	title := hit.Title
+	if title == "" {
+		title = hit.Slug
+	}
+	post := &Post{
+		ID:         0,
+		ProjectID:  pid,
+		SiteID:     siteID,
+		Kind:       kind,
+		Slug:       hit.Slug,
+		Locale:     "en",
+		Status:     "published",
+		Title:      title,
+		BodyBlocks: Document{Version: documentVersion, Blocks: blocks},
+		Template:   hit.Template,
+	}
+
+	settings, _ := effectiveSettings(ctx, pid, siteID)
+	data := basePageData(ctx, pid, siteID, settings, r)
+	data.Post = post
+	data.PageTitle = title + " (preview)"
+
+	html, err := renderSingle(data)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	html = stripInlineScripts(html)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Robots-Tag", "noindex")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(html))
+}
+
+// stripInlineScripts removes every <script>…</script> pair from the
+// rendered HTML so the preview iframe is inert. The form block's
+// progressive-enhancement listener is the only thing currently
+// emitted as inline script; killing all of them is the
+// belt-and-braces version. If the renderer grows other legitimate
+// inline scripts later, this helper has to become more surgical.
+func stripInlineScripts(s string) string {
+	for {
+		i := strings.Index(s, "<script")
+		if i < 0 {
+			return s
+		}
+		j := strings.Index(s[i:], "</script>")
+		if j < 0 {
+			return s[:i]
+		}
+		s = s[:i] + s[i+j+len("</script>"):]
 	}
 }
