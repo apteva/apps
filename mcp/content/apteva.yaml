@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: content
 display_name: Content
-version: 2.9.3
+version: 2.10.0
 description: |
   Block-based CMS for Apteva. Posts, pages, media, taxonomies, menus,
   revisions, redirects. Renders themed HTML and exposes a headless REST
@@ -60,6 +60,25 @@ requires:
       required: false
       label: "Auth (signup forms)"
       hint: "When bound, core/form blocks can target auth_public_signup as an action — visitor signup creates a real user + mints session tokens. Without it, form actions that call auth fail with 'app not bound'."
+    - role: routing
+      kind: app
+      compatible_app_names: [routes]
+      capabilities: [route.register]
+      required: false
+      label: "Routes (custom domains)"
+      hint: "When bound, sites_attach_domain registers the hostname → content route so apteva-server's host-router proxies traffic to this site. Without it, a site can have its hostname field set but isn't reachable from the public internet."
+    - role: dns
+      kind: app
+      compatible_app_names: [domains]
+      required: false
+      label: "Domains (auto-DNS)"
+      hint: "Optional. When bound + the apex is in the domains inventory, sites_attach_domain auto-provisions the A/CNAME record. Without it, the tool returns the records you need to set manually at your registrar."
+    - role: tls
+      kind: app
+      compatible_app_names: [certs]
+      required: false
+      label: "Certs (auto-HTTPS)"
+      hint: "Optional. When bound, sites_attach_domain triggers Let's Encrypt issuance for the FQDN. Without it, the domain works on HTTP only (or you ship your own cert via a fronting proxy)."
     - role: seo
       kind: app
       compatible_app_names: [seo]
@@ -86,6 +105,10 @@ provides:
       description: Soft-delete a site (refuses if default).
     - name: sites_set_default
       description: Promote a site to default — picks the ambiguous-call target.
+    - name: sites_attach_domain
+      description: Attach a public FQDN to a site. Registers the route via the bound routes app; optionally auto-provisions DNS (when domains bound) and TLS (when certs bound). Returns the records to set manually when DNS isn't auto-managed.
+    - name: sites_detach_domain
+      description: Reverse a previous attach — clear the site's hostname, unregister the route, optionally remove the DNS record.
     # Templates (site kits)
     - name: templates_list
       description: List available site templates (bundled + user-imported).

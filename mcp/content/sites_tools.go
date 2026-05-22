@@ -196,6 +196,49 @@ func (a *App) handleHTTPSiteItem(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, map[string]any{"site": s})
 		return
 	}
+	if len(parts) == 2 && parts[1] == "attach-domain" {
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		if body == nil {
+			body = map[string]any{}
+		}
+		body["_project_id"] = pid
+		body["id"] = site.ID
+		out, err := a.toolSitesAttachDomain(ctx, body)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, out)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "detach-domain" {
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body == nil {
+			body = map[string]any{}
+		}
+		body["_project_id"] = pid
+		body["id"] = site.ID
+		out, err := a.toolSitesDetachDomain(ctx, body)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, out)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		httpJSON(w, map[string]any{"site": site})

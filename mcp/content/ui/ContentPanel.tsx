@@ -343,6 +343,7 @@ function Tabs({
   projectId: string;
 }) {
   const [creating, setCreating] = useState(false);
+  const [connectingDomain, setConnectingDomain] = useState(false);
   const tab = (id: View, label: string) => (
     <button
       key={id}
@@ -379,6 +380,13 @@ function Tabs({
             ))}
           </select>
           <button
+            onClick={() => setConnectingDomain(true)}
+            className="px-2 py-1 text-xs rounded border border-border"
+            title="Attach a custom hostname to this site"
+          >
+            Connect domain
+          </button>
+          <button
             onClick={() => setCreating(true)}
             className="px-2 py-1 text-xs rounded border border-border"
           >
@@ -388,7 +396,13 @@ function Tabs({
       ) : (
         // Single-site mode: show a discreet "+ Add second site" button
         // so users can discover multi-site without it being noisy.
-        <div className="pb-2">
+        <div className="pb-2 flex items-center gap-3">
+          <button
+            onClick={() => setConnectingDomain(true)}
+            className="text-xs text-text-muted hover:text-text"
+          >
+            Connect domain
+          </button>
           <button
             onClick={() => setCreating(true)}
             className="text-xs text-text-muted hover:text-text"
@@ -405,6 +419,18 @@ function Tabs({
             setCreating(false);
             onCreatedSite();
             onSiteChange(slug);
+          }}
+        />
+      )}
+      {connectingDomain && activeSite && (
+        <ConnectDomainDialog
+          projectId={projectId}
+          siteSlug={activeSite}
+          siteName={sites.find((s) => s.slug === activeSite)?.name ?? activeSite}
+          onClose={() => setConnectingDomain(false)}
+          onAttached={() => {
+            setConnectingDomain(false);
+            onCreatedSite();
           }}
         />
       )}
@@ -465,8 +491,9 @@ function NewSiteDialog({
         <h3 className="font-semibold mb-3">New site</h3>
         <p className="text-xs text-text-muted mb-3">
           Sites in the same project share templates but have their own posts,
-          pages, menus, settings, and theme. Bind a hostname to make this site
-          publicly addressable (requires the deploy app).
+          pages, menus, settings, and theme. After creating, use "Connect domain"
+          to attach a public hostname — that requires the routes app bound (and
+          optionally domains + certs for auto-DNS and auto-HTTPS).
         </p>
         <label className="block mb-2">
           <span className="text-xs text-text-muted">Slug (URL-safe id)</span>
@@ -512,6 +539,190 @@ function NewSiteDialog({
             className="px-3 py-1 rounded border border-border font-semibold disabled:opacity-50"
           >
             {submitting ? "Creating…" : "Create site"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── connect-domain dialog ────────────────────────────────────────
+//
+// One-shot custom-domain attach UI. Calls the
+// /admin/sites/{slug}/attach-domain endpoint which orchestrates
+// routes + (optionally) domains + (optionally) certs behind the
+// scenes. Shows the DNS records to set manually when auto-DNS isn't
+// available, or progress when it is.
+
+interface AttachDomainResp {
+  site: { id: number; slug: string; hostname: string };
+  route: { hostname: string; target: string; registered: boolean };
+  dns: { managed: boolean; records: { name: string; type: string; value: string; ttl?: number }[]; note?: string };
+  tls: { managed: boolean; status: string; cert_id?: string };
+}
+
+function ConnectDomainDialog({
+  projectId,
+  siteSlug,
+  siteName,
+  onClose,
+  onAttached,
+}: {
+  projectId: string;
+  siteSlug: string;
+  siteName: string;
+  onClose: () => void;
+  onAttached: () => void;
+}) {
+  const [fqdn, setFqdn] = useState("");
+  const [target, setTarget] = useState("");
+  const [autoDNS, setAutoDNS] = useState(true);
+  const [autoTLS, setAutoTLS] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<AttachDomainResp | null>(null);
+
+  const submit = async () => {
+    const value = fqdn.trim().toLowerCase();
+    if (!value) {
+      setError("FQDN required");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const url = `/api/apps/content/admin/sites/${encodeURIComponent(siteSlug)}/attach-domain?project_id=${encodeURIComponent(projectId)}`;
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fqdn: value,
+          target: target.trim() || undefined,
+          auto_dns: autoDNS,
+          auto_tls: autoTLS,
+        }),
+      });
+      const body = await r.json();
+      if (!r.ok) {
+        throw new Error(body?.error || `HTTP ${r.status}`);
+      }
+      setResult(body as AttachDomainResp);
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+      setSubmitting(false);
+    }
+  };
+
+  if (result) {
+    return (
+      <div
+        className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+        onClick={onClose}
+      >
+        <div
+          className="bg-bg border border-border rounded p-4 w-[28rem] max-h-[90vh] overflow-y-auto"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <h3 className="font-semibold mb-2">Domain connected — {siteName}</h3>
+          <p className="text-xs text-text-muted mb-3">
+            <code>{result.site.hostname}</code> is wired to this site. Routing is live; DNS + TLS status below.
+          </p>
+
+          <section className="text-sm border border-border rounded p-2 mb-2">
+            <p className="text-xs text-text-muted mb-1">Route</p>
+            <p>✓ registered → <code className="text-xs">{result.route.target}</code></p>
+          </section>
+
+          <section className="text-sm border border-border rounded p-2 mb-2">
+            <p className="text-xs text-text-muted mb-1">DNS — {result.dns.managed ? "auto-provisioned" : "set manually"}</p>
+            <table className="w-full text-xs">
+              <thead><tr className="text-text-muted">
+                <th className="text-left">Name</th><th className="text-left">Type</th><th className="text-left">Value</th>
+              </tr></thead>
+              <tbody>
+                {result.dns.records.map((rec, i) => (
+                  <tr key={i}>
+                    <td className="pr-2"><code>{rec.name}</code></td>
+                    <td className="pr-2">{rec.type}</td>
+                    <td><code className="break-all">{rec.value || "(your server IP)"}</code></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {result.dns.note && <p className="text-xs text-text-dim mt-2">{result.dns.note}</p>}
+          </section>
+
+          <section className="text-sm border border-border rounded p-2 mb-3">
+            <p className="text-xs text-text-muted mb-1">TLS</p>
+            <p>
+              {result.tls.managed
+                ? <>{result.tls.status === "pending" ? "⧗ issuance pending" : "✓ " + result.tls.status} {result.tls.cert_id && <span className="text-text-dim text-xs">cert #{result.tls.cert_id}</span>}</>
+                : <span className="text-text-dim">skipped (certs app not bound)</span>}
+            </p>
+          </section>
+
+          <div className="flex justify-end">
+            <button onClick={onAttached} className="px-3 py-1 rounded border border-border font-semibold">Done</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+      onClick={onClose}
+    >
+      <div
+        className="bg-bg border border-border rounded p-4 w-96"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="font-semibold mb-2">Connect a domain to {siteName}</h3>
+        <p className="text-xs text-text-muted mb-3">
+          The domain will point to this site. Requires the <code>routes</code> app bound; <code>domains</code> and <code>certs</code> are optional for auto-DNS + auto-HTTPS.
+        </p>
+        <label className="block mb-2">
+          <span className="text-xs text-text-muted">FQDN</span>
+          <input
+            type="text"
+            value={fqdn}
+            onChange={(e) => setFqdn(e.target.value)}
+            placeholder="e.g. acme.example.com"
+            className="block w-full mt-1 border border-border rounded px-2 py-1 bg-bg-input"
+            autoFocus
+          />
+        </label>
+        <label className="block mb-2">
+          <span className="text-xs text-text-muted">DNS target (optional)</span>
+          <input
+            type="text"
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
+            placeholder="server IP for A, or hostname for CNAME"
+            className="block w-full mt-1 border border-border rounded px-2 py-1 bg-bg-input"
+          />
+          <span className="block text-xs text-text-dim mt-1">Leave blank to infer from APTEVA_PUBLIC_URL.</span>
+        </label>
+        <label className="flex items-center gap-2 mb-1 text-xs">
+          <input type="checkbox" checked={autoDNS} onChange={(e) => setAutoDNS(e.target.checked)} />
+          Auto-provision DNS (requires domains app)
+        </label>
+        <label className="flex items-center gap-2 mb-3 text-xs">
+          <input type="checkbox" checked={autoTLS} onChange={(e) => setAutoTLS(e.target.checked)} />
+          Auto-issue HTTPS cert (requires certs app)
+        </label>
+        {error && (
+          <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2 text-xs">{error}</div>
+        )}
+        <div className="flex justify-end gap-2 mt-3">
+          <button onClick={onClose} className="px-3 py-1 rounded border border-border">Cancel</button>
+          <button
+            onClick={submit}
+            disabled={submitting}
+            className="px-3 py-1 rounded border border-border font-semibold disabled:opacity-50"
+          >
+            {submitting ? "Connecting…" : "Connect"}
           </button>
         </div>
       </div>

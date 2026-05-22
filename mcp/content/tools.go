@@ -492,6 +492,29 @@ func (a *App) mcpTools() []sdk.Tool {
 			}, []string{"id"}),
 			Handler: a.toolSitesSetDefault,
 		},
+		{
+			Name:        "sites_attach_domain",
+			Description: "Attach a public FQDN to a site. Updates the site's hostname, registers the route via the bound 'routes' app, optionally auto-provisions DNS (when 'domains' is bound) and TLS (when 'certs' is bound). Args: id OR slug (defaults to active site), fqdn (req), target? (DNS record value — IP for A, hostname for CNAME; inferred from APTEVA_PUBLIC_URL when omitted), auto_dns? (default true), auto_tls? (default true). Returns {site, route, dns: {managed, records[]}, tls: {managed, status, cert_id}}.",
+			InputSchema: schemaObject(map[string]any{
+				"id":       map[string]any{"type": "integer"},
+				"slug":     map[string]any{"type": "string"},
+				"fqdn":     map[string]any{"type": "string"},
+				"target":   map[string]any{"type": "string"},
+				"auto_dns": map[string]any{"type": "boolean"},
+				"auto_tls": map[string]any{"type": "boolean"},
+			}, []string{"fqdn"}),
+			Handler: a.toolSitesAttachDomain,
+		},
+		{
+			Name:        "sites_detach_domain",
+			Description: "Reverse a previous attach. Clears the site's hostname, unregisters the route. DNS removal is opt-in (remove_dns: true) — by default the record is left in place so a re-attach picks up the same value. TLS cert is always left in place (Let's Encrypt rate limits make discarding it a false economy). Args: id OR slug (defaults to active site), remove_dns? (default false).",
+			InputSchema: schemaObject(map[string]any{
+				"id":         map[string]any{"type": "integer"},
+				"slug":       map[string]any{"type": "string"},
+				"remove_dns": map[string]any{"type": "boolean"},
+			}, nil),
+			Handler: a.toolSitesDetachDomain,
+		},
 		// ── core/form submissions ──────────────────────────────
 		{
 			Name:        "forms_list",
