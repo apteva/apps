@@ -35,6 +35,7 @@ interface Stock {
   pe?: number;
   payout_pct?: number;
   growth_pct?: number;
+  mcap?: number;
   pinned?: boolean;
 }
 
@@ -54,6 +55,7 @@ interface StockDetail {
   volume: number;
   pe?: number;
   payout_pct?: number;
+  mcap?: number;
   dividend_yield_pct?: number;
   dividend_growth_5y_pct?: number;
   dividend_frequency: string;
@@ -91,7 +93,12 @@ interface SyncStatus {
 }
 
 interface Rules {
-  sector?: string; min_yield?: number; max_payout?: number; max_pe?: number; min_growth?: number; sort?: string;
+  sector?: string; sort?: string;
+  min_yield?: number; max_yield?: number;
+  min_payout?: number; max_payout?: number;
+  min_pe?: number; max_pe?: number;
+  min_growth?: number; max_growth?: number;
+  min_mcap?: number; max_mcap?: number;
 }
 interface Watchlist { id: number; name: string; kind: string; rules: Rules; }
 
@@ -111,18 +118,27 @@ function wlApi(projectId: string) {
 }
 type WLApi = ReturnType<typeof wlApi>;
 
-// Screener metrics, each with a [min,max] domain. A handle parked at the
-// domain edge means "no constraint" (shown as "Any"). Param/rules keys are
-// min_<key> / max_<key>.
+// Market cap is stored + filtered in billions; format compactly.
+function fmtMcap(v: number | undefined): string {
+  if (v == null || !isFinite(v) || v <= 0) return "—";
+  if (v >= 1000) return `$${(v / 1000).toFixed(v >= 10000 ? 0 : 2)}T`;
+  if (v >= 1) return `$${v.toFixed(v >= 100 ? 0 : 1)}B`;
+  return `$${(v * 1000).toFixed(0)}M`;
+}
+
+// Screener metrics, each with a [min,max] domain and a label formatter. A
+// handle parked at the domain edge means "no constraint" (shown as "Any").
+// Param/rules keys are min_<key> / max_<key>.
 const RANGE_DEFS = {
-  yield: { min: 0, max: 15, step: 0.25, label: "Dividend yield", suffix: "%" },
-  payout: { min: 0, max: 150, step: 5, label: "Payout ratio", suffix: "%" },
-  pe: { min: 0, max: 60, step: 1, label: "P/E", suffix: "" },
-  growth: { min: -10, max: 30, step: 0.5, label: "5yr dividend growth", suffix: "%" },
+  yield: { min: 0, max: 15, step: 0.25, label: "Dividend yield", fmt: (v: number) => `${v}%` },
+  payout: { min: 0, max: 150, step: 5, label: "Payout ratio", fmt: (v: number) => `${v}%` },
+  pe: { min: 0, max: 60, step: 1, label: "P/E", fmt: (v: number) => `${v}` },
+  growth: { min: -10, max: 30, step: 0.5, label: "5yr dividend growth", fmt: (v: number) => `${v}%` },
+  mcap: { min: 0, max: 4000, step: 25, label: "Market cap", fmt: (v: number) => fmtMcap(v) },
 } as const;
 type MetricKey = keyof typeof RANGE_DEFS;
 type Ranges = Record<MetricKey, [number, number]>;
-const defaultRanges = (): Ranges => ({ yield: [0, 15], payout: [0, 150], pe: [0, 60], growth: [-10, 30] });
+const defaultRanges = (): Ranges => ({ yield: [0, 15], payout: [0, 150], pe: [0, 60], growth: [-10, 30], mcap: [0, 4000] });
 const metricKeys = Object.keys(RANGE_DEFS) as MetricKey[];
 
 const RANGES = ["1mo", "6mo", "1y", "5y", "max"] as const;
@@ -181,8 +197,8 @@ export default function StocksPanel({ projectId }: NativePanelProps) {
   const [selected, setSelected] = useState<string | null>(null);
   const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
   const api = useMemo(() => wlApi(projectId), [projectId]);
-  const reloadWL = useCallback(() => {
-    api.list().then((j) => setWatchlists(j.watchlists ?? [])).catch(() => {});
+  const reloadWL = useCallback((): Promise<void> => {
+    return api.list().then((j) => setWatchlists(j.watchlists ?? [])).catch(() => {});
   }, [api]);
   useEffect(() => { reloadWL(); }, [reloadWL]);
 
@@ -199,7 +215,7 @@ function List({ onOpen, watchlists, api, reloadWL }: {
   onOpen: (sym: string) => void;
   watchlists: Watchlist[];
   api: WLApi;
-  reloadWL: () => void;
+  reloadWL: () => Promise<void>;
 }) {
   const [activeWL, setActiveWL] = useState<number | null>(null);
   const [stocks, setStocks] = useState<Stock[]>([]);
@@ -242,10 +258,12 @@ function List({ onOpen, watchlists, api, reloadWL }: {
     }
   }, [activeWL, sector, sort, ranges, api]);
 
-  // Save the current screener filters as a new dynamic watchlist.
-  const saveAsWatchlist = useCallback(async () => {
-    const name = window.prompt("Name this watchlist:");
-    if (!name) return;
+  const [nameOpen, setNameOpen] = useState(false);
+  const [nameVal, setNameVal] = useState("");
+  const [confirmDel, setConfirmDel] = useState(false);
+
+  // Translate the current screener controls into a rules blob.
+  const currentRules = useCallback((): Rules => {
     const rules: Rules = { sort };
     if (sector) rules.sector = sector;
     for (const k of metricKeys) {
@@ -254,16 +272,25 @@ function List({ onOpen, watchlists, api, reloadWL }: {
       if (lo > def.min) (rules as Record<string, unknown>)[`min_${k}`] = lo;
       if (hi < def.max) (rules as Record<string, unknown>)[`max_${k}`] = hi;
     }
-    const j = await api.save({ name, rules });
-    reloadWL();
-    if (j.id) setActiveWL(j.id);
-  }, [api, reloadWL, sector, sort, ranges]);
+    return rules;
+  }, [sector, sort, ranges]);
 
-  const deleteActive = useCallback(async () => {
-    if (activeWL == null || !window.confirm("Delete this watchlist?")) return;
+  const doSaveWatchlist = useCallback(async () => {
+    const name = nameVal.trim();
+    if (!name) return;
+    const j = await api.save({ name, rules: currentRules() });
+    setNameOpen(false);
+    setNameVal("");
+    await reloadWL();
+    if (j.id) setActiveWL(j.id);
+  }, [api, nameVal, currentRules, reloadWL]);
+
+  const doDeleteWatchlist = useCallback(async () => {
+    if (activeWL == null) return;
     await api.del(activeWL);
+    setConfirmDel(false);
     setActiveWL(null);
-    reloadWL();
+    await reloadWL();
   }, [activeWL, api, reloadWL]);
 
   // Star toggle in a watchlist view: every row shown is a member, so this
@@ -307,6 +334,16 @@ function List({ onOpen, watchlists, api, reloadWL }: {
 
       <SyncBar />
 
+      {watchlists.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <span className="text-xs uppercase tracking-wide text-text-dim">Watchlists</span>
+          <Chip label="All stocks" active={activeWL == null} onClick={() => setActiveWL(null)} />
+          {watchlists.map((w) => (
+            <Chip key={w.id} label={w.name} active={activeWL === w.id} onClick={() => setActiveWL(w.id)} />
+          ))}
+        </div>
+      )}
+
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <div className="relative">
           <input
@@ -316,12 +353,6 @@ function List({ onOpen, watchlists, api, reloadWL }: {
             className="rounded-md border border-border bg-bg-input px-3 py-1.5 text-sm text-text placeholder:text-text-dim"
           />
         </div>
-        <select value={activeWL ?? ""} onChange={(e) => setActiveWL(e.target.value ? Number(e.target.value) : null)}
-          className="rounded-md border border-border bg-bg-input px-2 py-1.5 text-sm text-text">
-          <option value="">All stocks</option>
-          {watchlists.length > 0 && <option disabled>──────────</option>}
-          {watchlists.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
-        </select>
         <select value={sort} onChange={(e) => setSort(e.target.value)}
           className="rounded-md border border-border bg-bg-input px-2 py-1.5 text-sm text-text">
           <option value="name">Sort: Name</option>
@@ -340,14 +371,14 @@ function List({ onOpen, watchlists, api, reloadWL }: {
               Filters
               {activeFilters > 0 && <span className="rounded-full bg-accent px-1.5 text-xs text-bg">{activeFilters}</span>}
             </button>
-            <button onClick={() => void saveAsWatchlist()}
+            <button onClick={() => { setNameVal(""); setNameOpen(true); }}
               className="flex items-center gap-1.5 rounded-md border border-border bg-bg-input px-3 py-1.5 text-sm text-text hover:bg-bg-hover">
               <svg {...ico}><polygon points="12 2 15 9 22 9 16 14 18 21 12 17 6 21 8 14 2 9 9 9 12 2" /></svg>
-              Save list
+              Save as list
             </button>
           </>
         ) : (
-          <button onClick={() => void deleteActive()}
+          <button onClick={() => setConfirmDel(true)}
             className="flex items-center gap-1.5 rounded-md border border-error px-3 py-1.5 text-sm text-error hover:bg-bg-hover">
             <svg {...ico}><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
             Delete list
@@ -367,6 +398,32 @@ function List({ onOpen, watchlists, api, reloadWL }: {
         matchCount={stocks.length} activeFilters={activeFilters} onReset={resetFilters}
       />
 
+      {nameOpen && (
+        <Modal title="New watchlist" onClose={() => setNameOpen(false)}>
+          <input autoFocus value={nameVal} onChange={(e) => setNameVal(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") void doSaveWatchlist(); }}
+            placeholder="e.g. Dividend growers"
+            className="mb-4 w-full rounded-md border border-border bg-bg-input px-3 py-2 text-sm text-text placeholder:text-text-dim" />
+          <div className="flex justify-end gap-2">
+            <button onClick={() => setNameOpen(false)}
+              className="rounded-md border border-border px-3 py-1.5 text-sm text-text-muted hover:bg-bg-hover">Cancel</button>
+            <button onClick={() => void doSaveWatchlist()} disabled={!nameVal.trim()}
+              className="rounded-md bg-accent px-3 py-1.5 text-sm text-bg hover:bg-accent-hover">Save</button>
+          </div>
+        </Modal>
+      )}
+      {confirmDel && (
+        <Modal title="Delete watchlist" onClose={() => setConfirmDel(false)}>
+          <p className="mb-4 text-sm text-text-muted">This removes the watchlist and its pins. The stocks themselves aren't affected.</p>
+          <div className="flex justify-end gap-2">
+            <button onClick={() => setConfirmDel(false)}
+              className="rounded-md border border-border px-3 py-1.5 text-sm text-text-muted hover:bg-bg-hover">Cancel</button>
+            <button onClick={() => void doDeleteWatchlist()}
+              className="rounded-md bg-error px-3 py-1.5 text-sm text-bg">Delete</button>
+          </div>
+        </Modal>
+      )}
+
       {error && <div className="mb-3 rounded-md border border-error px-3 py-2 text-sm text-error">{error}</div>}
 
       <div className="overflow-x-auto rounded-lg border border-border bg-bg-card">
@@ -377,6 +434,7 @@ function List({ onOpen, watchlists, api, reloadWL }: {
               <th className="px-3 py-2 text-left">Symbol</th>
               <th className="px-3 py-2 text-left">Name</th>
               <th className="px-3 py-2 text-left">Sector</th>
+              <th className="px-3 py-2 text-right">Mkt Cap</th>
               <th className="px-3 py-2 text-right">Price</th>
               <th className="px-3 py-2 text-right">Day</th>
               <th className="px-3 py-2 text-right">Yield</th>
@@ -387,10 +445,10 @@ function List({ onOpen, watchlists, api, reloadWL }: {
           </thead>
           <tbody>
             {loading && stocks.length === 0 && (
-              <tr><td colSpan={activeWL != null ? 10 : 9} className="px-3 py-8 text-center text-text-muted">Loading…</td></tr>
+              <tr><td colSpan={activeWL != null ? 11 : 10} className="px-3 py-8 text-center text-text-muted">Loading…</td></tr>
             )}
             {!loading && shown.length === 0 && (
-              <tr><td colSpan={activeWL != null ? 10 : 9} className="px-3 py-8 text-center text-text-muted">{activeWL != null ? "This watchlist is empty." : "No stocks match."}</td></tr>
+              <tr><td colSpan={activeWL != null ? 11 : 10} className="px-3 py-8 text-center text-text-muted">{activeWL != null ? "This watchlist is empty." : "No stocks match."}</td></tr>
             )}
             {shown.map((s) => (
               <tr key={s.symbol} onClick={() => onOpen(s.symbol)}
@@ -405,6 +463,7 @@ function List({ onOpen, watchlists, api, reloadWL }: {
                 <td className="px-3 py-2 font-medium text-text">{s.symbol}</td>
                 <td className="px-3 py-2 text-text-muted" style={{ maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</td>
                 <td className="px-3 py-2 text-text-dim">{s.sector}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-text-muted">{fmtMcap(s.mcap)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-text">{fmtMoney(s.price, s.currency)}</td>
                 <td className="px-3 py-2 text-right tabular-nums" style={{ color: changeColor(s.change_pct) }}>{fmtPct(s.change_pct)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-text-muted">{fmtYield(s.yield_pct)}</td>
@@ -510,6 +569,7 @@ function Detail({ symbol, onBack, watchlists, api }: {
       <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
         <Stat label="Day range" value={d ? `${fmtMoney(d.day_low, d.currency)} – ${fmtMoney(d.day_high, d.currency)}` : "—"} />
         <Stat label="52-week range" value={d ? `${fmtMoney(d.fifty_two_week_low, d.currency)} – ${fmtMoney(d.fifty_two_week_high, d.currency)}` : "—"} />
+        <Stat label="Market cap" value={fmtMcap(d?.mcap)} />
         <Stat label="Volume" value={fmtVolume(d?.volume)} />
         <Stat label="P/E (TTM)" value={d?.pe != null ? d.pe.toFixed(1) : "—"} />
         <Stat label="Payout ratio" value={fmtYield(d?.payout_pct)} />
@@ -622,13 +682,13 @@ const rangeCSS = `
 
 // DualRange — a min/max screener control. A handle at the domain edge means
 // no constraint on that side (shown as "Any"). Handles can't cross.
-function DualRange({ label, value, set, min, max, step, suffix }: {
+function DualRange({ label, value, set, min, max, step, fmt }: {
   label: string; value: [number, number]; set: (v: [number, number]) => void;
-  min: number; max: number; step: number; suffix: string;
+  min: number; max: number; step: number; fmt: (v: number) => string;
 }) {
   const [lo, hi] = value;
   const pct = (v: number) => ((v - min) / (max - min)) * 100;
-  const fmtEnd = (v: number, atEdge: boolean) => (atEdge ? "Any" : `${v}${suffix}`);
+  const fmtEnd = (v: number, atEdge: boolean) => (atEdge ? "Any" : fmt(v));
   return (
     <div className="mb-5">
       <div className="mb-1 flex items-center justify-between text-xs">
@@ -682,7 +742,7 @@ function FilterDrawer(props: {
         {metricKeys.map((k) => {
           const def = RANGE_DEFS[k];
           return (
-            <DualRange key={k} label={def.label} suffix={def.suffix}
+            <DualRange key={k} label={def.label} fmt={def.fmt}
               min={def.min} max={def.max} step={def.step}
               value={props.ranges[k]} set={(v) => props.setRange(k, v)} />
           );
@@ -697,6 +757,32 @@ function FilterDrawer(props: {
               className="rounded-md bg-accent px-3 py-1.5 text-sm text-bg hover:bg-accent-hover">Done</button>
           </div>
         </div>
+      </div>
+    </>
+  );
+}
+
+// Chip — a watchlist selector pill (active = accent fill).
+function Chip({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button onClick={onClick}
+      className={`rounded-full border px-3 py-1 text-xs ${active ? "border-accent bg-accent text-bg" : "border-border bg-bg-input text-text hover:bg-bg-hover"}`}>
+      {label}
+    </button>
+  );
+}
+
+// Modal — centered dialog over a dimmed backdrop (real modal, not a
+// browser prompt/confirm). Positioned with inline styles since the panel's
+// Tailwind can't generate arbitrary fixed-position utilities.
+function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
+  return (
+    <>
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 60 }} />
+      <div className="rounded-lg border border-border bg-bg-card p-4"
+        style={{ position: "fixed", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 360, maxWidth: "90%", zIndex: 70 }}>
+        <h3 className="mb-3 text-sm font-semibold text-text">{title}</h3>
+        {children}
       </div>
     </>
   );

@@ -536,27 +536,30 @@ func (y *yahooClient) fundamentalsState() (state string, retryAt *int64) {
 // for a symbol. Either may be nil when Yahoo doesn't report it; an error
 // means the whole fetch failed (throttle, crumb) and the caller should
 // leave both blank.
-func (y *yahooClient) fundamentals(symbol string, bg bool) (pe *float64, payoutPct *float64, err error) {
+// fundamentals returns trailing P/E, payout ratio (%), and market cap (in
+// billions) for a symbol. Any may be nil when Yahoo doesn't report it; an
+// error means the whole fetch failed (throttle, crumb).
+func (y *yahooClient) fundamentals(symbol string, bg bool) (pe, payoutPct, mcap *float64, err error) {
 	crumb, err := y.ensureCrumb(bg)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	pe, payoutPct, status, err := y.fetchSummary(symbol, crumb, bg)
+	pe, payoutPct, mcap, status, err := y.fetchSummary(symbol, crumb, bg)
 	if status == http.StatusUnauthorized {
 		// Stale crumb — refresh once and retry.
 		y.clearCrumb()
 		if crumb, err = y.ensureCrumb(bg); err == nil {
-			pe, payoutPct, _, err = y.fetchSummary(symbol, crumb, bg)
+			pe, payoutPct, mcap, _, err = y.fetchSummary(symbol, crumb, bg)
 		}
 	}
-	return pe, payoutPct, err
+	return pe, payoutPct, mcap, err
 }
 
-func (y *yahooClient) fetchSummary(symbol, crumb string, bg bool) (pe *float64, payoutPct *float64, status int, err error) {
+func (y *yahooClient) fetchSummary(symbol, crumb string, bg bool) (pe, payoutPct, mcap *float64, status int, err error) {
 	u := y.base + "/v10/finance/quoteSummary/" + url.PathEscape(strings.ToUpper(symbol)) +
 		"?modules=summaryDetail&crumb=" + url.QueryEscape(crumb)
 	if err := y.acquire(bg); err != nil {
-		return nil, nil, 0, err
+		return nil, nil, nil, 0, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 	defer cancel()
@@ -564,17 +567,17 @@ func (y *yahooClient) fetchSummary(symbol, crumb string, bg bool) (pe *float64, 
 	req.Header.Set("User-Agent", browserUA)
 	resp, err := y.client.Do(req)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, nil, 0, err
 	}
 	defer resp.Body.Close()
 	status = resp.StatusCode
 	if status != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 512))
-		return nil, nil, status, fmt.Errorf("quoteSummary HTTP %d", status)
+		return nil, nil, nil, status, fmt.Errorf("quoteSummary HTTP %d", status)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, nil, status, err
+		return nil, nil, nil, status, err
 	}
 	var doc struct {
 		QuoteSummary struct {
@@ -582,15 +585,16 @@ func (y *yahooClient) fetchSummary(symbol, crumb string, bg bool) (pe *float64, 
 				SummaryDetail struct {
 					TrailingPE  struct{ Raw float64 `json:"raw"` } `json:"trailingPE"`
 					PayoutRatio struct{ Raw float64 `json:"raw"` } `json:"payoutRatio"`
+					MarketCap   struct{ Raw float64 `json:"raw"` } `json:"marketCap"`
 				} `json:"summaryDetail"`
 			} `json:"result"`
 		} `json:"quoteSummary"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, nil, status, err
+		return nil, nil, nil, status, err
 	}
 	if len(doc.QuoteSummary.Result) == 0 {
-		return nil, nil, status, fmt.Errorf("quoteSummary: empty result for %s", symbol)
+		return nil, nil, nil, status, fmt.Errorf("quoteSummary: empty result for %s", symbol)
 	}
 	sd := doc.QuoteSummary.Result[0].SummaryDetail
 	if sd.TrailingPE.Raw > 0 {
@@ -602,5 +606,10 @@ func (y *yahooClient) fetchSummary(symbol, crumb string, bg bool) (pe *float64, 
 		v := sd.PayoutRatio.Raw * 100
 		payoutPct = &v
 	}
-	return pe, payoutPct, status, nil
+	// marketCap is raw currency; store in billions for a single screener unit.
+	if sd.MarketCap.Raw > 0 {
+		v := sd.MarketCap.Raw / 1e9
+		mcap = &v
+	}
+	return pe, payoutPct, mcap, status, nil
 }

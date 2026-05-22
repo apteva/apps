@@ -20,7 +20,7 @@ type store struct{ db *sql.DB }
 // (list, search) can't drift from the scan.
 const instrumentCols = `symbol, name, exchange, sector, currency,
 	last_price, last_change_pct, last_yield_pct, last_pe, last_payout_pct,
-	last_growth_pct, refreshed_at`
+	last_growth_pct, last_mcap, refreshed_at`
 
 // instrumentRow is one universe entry plus its last-warmed snapshot.
 // Pointer fields are nil until the symbol has been fetched at least once.
@@ -36,6 +36,7 @@ type instrumentRow struct {
 	PE          *float64 `json:"pe,omitempty"`
 	PayoutPct   *float64 `json:"payout_pct,omitempty"`
 	GrowthPct   *float64 `json:"growth_pct,omitempty"`
+	Mcap        *float64 `json:"mcap,omitempty"` // market cap in billions
 	RefreshedAt *int64   `json:"refreshed_at,omitempty"`
 	// Pinned is set only when resolving a watchlist: true when the symbol
 	// is an explicit include pin (vs a rule match), so the panel knows
@@ -56,6 +57,8 @@ type listFilter struct {
 	MaxPE     *float64
 	MinGrowth *float64
 	MaxGrowth *float64
+	MinMcap   *float64
+	MaxMcap   *float64
 	Sort      string // name | price | change | yield | pe | payout | growth
 	Limit     int
 }
@@ -90,13 +93,13 @@ func (s *store) updateSnapshot(symbol string, price, changePct float64, yieldPct
 	return err
 }
 
-// updateFundamentals writes P/E + payout (%) from the quoteSummary
-// endpoint. Left untouched by updateSnapshot so a /chart-only warm never
-// clears a previously-fetched fundamental.
-func (s *store) updateFundamentals(symbol string, pe, payoutPct *float64) error {
+// updateFundamentals writes P/E + payout (%) + market cap (billions) from
+// the quoteSummary endpoint. Left untouched by updateSnapshot so a
+// /chart-only warm never clears a previously-fetched fundamental.
+func (s *store) updateFundamentals(symbol string, pe, payoutPct, mcap *float64) error {
 	_, err := s.db.Exec(
-		`UPDATE instrument SET last_pe = ?, last_payout_pct = ? WHERE symbol = ?`,
-		pe, payoutPct, strings.ToUpper(symbol))
+		`UPDATE instrument SET last_pe = ?, last_payout_pct = ?, last_mcap = ? WHERE symbol = ?`,
+		pe, payoutPct, mcap, strings.ToUpper(symbol))
 	return err
 }
 
@@ -176,6 +179,7 @@ func (s *store) listUniverse(f listFilter) ([]instrumentRow, error) {
 	bound("last_payout_pct", f.MinPayout, f.MaxPayout, false)
 	bound("last_pe", f.MinPE, f.MaxPE, true)
 	bound("last_growth_pct", f.MinGrowth, f.MaxGrowth, false)
+	bound("last_mcap", f.MinMcap, f.MaxMcap, false)
 	q := "SELECT " + instrumentCols + " FROM instrument"
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
@@ -249,10 +253,10 @@ func (s *store) scanInstruments(q string, args ...any) ([]instrumentRow, error) 
 	out := []instrumentRow{}
 	for rows.Next() {
 		var r instrumentRow
-		var price, change, yield, pe, payout, growth sql.NullFloat64
+		var price, change, yield, pe, payout, growth, mcap sql.NullFloat64
 		var refreshed sql.NullInt64
 		if err := rows.Scan(&r.Symbol, &r.Name, &r.Exchange, &r.Sector, &r.Currency,
-			&price, &change, &yield, &pe, &payout, &growth, &refreshed); err != nil {
+			&price, &change, &yield, &pe, &payout, &growth, &mcap, &refreshed); err != nil {
 			return nil, err
 		}
 		if price.Valid {
@@ -272,6 +276,9 @@ func (s *store) scanInstruments(q string, args ...any) ([]instrumentRow, error) 
 		}
 		if growth.Valid {
 			r.GrowthPct = &growth.Float64
+		}
+		if mcap.Valid {
+			r.Mcap = &mcap.Float64
 		}
 		if refreshed.Valid {
 			r.RefreshedAt = &refreshed.Int64

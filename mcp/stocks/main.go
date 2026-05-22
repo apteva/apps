@@ -31,7 +31,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: stocks
 display_name: Stocks
-version: 0.5.0
+version: 0.6.0
 description: Explore + screen the S&P 1500 backed by Yahoo Finance — filter by yield/payout/P-E/dividend-growth, quote, price chart, dividend history. Read-only.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/stocks
@@ -193,6 +193,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"max_pe":     map[string]any{"type": "number", "description": "Max trailing P/E (> 0)"},
 				"min_growth": map[string]any{"type": "number", "description": "Min 5yr dividend CAGR %"},
 				"max_growth": map[string]any{"type": "number", "description": "Max 5yr dividend CAGR %"},
+				"min_mcap":   map[string]any{"type": "number", "description": "Min market cap (billions)"},
+				"max_mcap":   map[string]any{"type": "number", "description": "Max market cap (billions)"},
 				"sort":       map[string]any{"type": "string", "enum": []string{"name", "price", "change", "yield", "pe", "payout", "growth"}, "description": "Sort key (default name)"},
 				"limit":      map[string]any{"type": "integer", "description": "Max results (default: whole universe)"},
 			}, nil),
@@ -357,7 +359,7 @@ func (a *App) handleList(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("sort"); v != "" {
 		args["sort"] = v
 	}
-	for _, k := range []string{"min_yield", "max_yield", "min_payout", "max_payout", "min_pe", "max_pe", "min_growth", "max_growth"} {
+	for _, k := range []string{"min_yield", "max_yield", "min_payout", "max_payout", "min_pe", "max_pe", "min_growth", "max_growth", "min_mcap", "max_mcap"} {
 		if v := q.Get(k); v != "" {
 			if f, err := strconv.ParseFloat(v, 64); err == nil {
 				args[k] = f

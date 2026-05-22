@@ -88,6 +88,12 @@ func (a *App) toolList(args map[string]any) (any, error) {
 	if v, ok := floatArg(args, "max_growth"); ok {
 		f.MaxGrowth = &v
 	}
+	if v, ok := floatArg(args, "min_mcap"); ok {
+		f.MinMcap = &v
+	}
+	if v, ok := floatArg(args, "max_mcap"); ok {
+		f.MaxMcap = &v
+	}
 	rows, err := a.st.listUniverse(f)
 	if err != nil {
 		return nil, err
@@ -117,10 +123,10 @@ func (a *App) toolGet(args map[string]any) (any, error) {
 
 	// Fundamentals come from the crumb-gated quoteSummary endpoint;
 	// degrade gracefully (blank P/E + payout) when it's unavailable.
-	var pePtr, payoutPtr *float64
-	if pe, payout, ferr := a.y.fundamentals(sym, false); ferr == nil {
-		pePtr, payoutPtr = pe, payout
-		_ = a.st.updateFundamentals(sym, pe, payout)
+	var pePtr, payoutPtr, mcapPtr *float64
+	if pe, payout, mcap, ferr := a.y.fundamentals(sym, false); ferr == nil {
+		pePtr, payoutPtr, mcapPtr = pe, payout, mcap
+		_ = a.st.updateFundamentals(sym, pe, payout, mcap)
 	}
 
 	out := map[string]any{
@@ -140,6 +146,7 @@ func (a *App) toolGet(args map[string]any) (any, error) {
 		"volume":                 res.Meta.Volume,
 		"pe":                     pePtr,
 		"payout_pct":             payoutPtr,
+		"mcap":                   mcapPtr,
 		"dividend_yield_pct":     yld,
 		"dividend_growth_5y_pct": growth,
 		"dividend_frequency":     dividendFrequency(res.Dividends),
@@ -266,6 +273,8 @@ type watchlistRules struct {
 	MaxPE     *float64 `json:"max_pe,omitempty"`
 	MinGrowth *float64 `json:"min_growth,omitempty"`
 	MaxGrowth *float64 `json:"max_growth,omitempty"`
+	MinMcap   *float64 `json:"min_mcap,omitempty"`
+	MaxMcap   *float64 `json:"max_mcap,omitempty"`
 	Sort      string   `json:"sort,omitempty"`
 }
 
@@ -280,7 +289,7 @@ func parseRules(raw string) watchlistRules {
 func (r watchlistRules) hasConstraints() bool {
 	return r.Sector != "" || r.MinYield != nil || r.MaxYield != nil ||
 		r.MinPayout != nil || r.MaxPayout != nil || r.MinPE != nil || r.MaxPE != nil ||
-		r.MinGrowth != nil || r.MaxGrowth != nil
+		r.MinGrowth != nil || r.MaxGrowth != nil || r.MinMcap != nil || r.MaxMcap != nil
 }
 
 func (r watchlistRules) toFilter() listFilter {
@@ -290,6 +299,7 @@ func (r watchlistRules) toFilter() listFilter {
 		MinPayout: r.MinPayout, MaxPayout: r.MaxPayout,
 		MinPE: r.MinPE, MaxPE: r.MaxPE,
 		MinGrowth: r.MinGrowth, MaxGrowth: r.MaxGrowth,
+		MinMcap: r.MinMcap, MaxMcap: r.MaxMcap,
 	}
 }
 
@@ -530,8 +540,8 @@ func (a *App) warmOne(sym string) {
 	if _, err := a.refresh(sym, false, true); err != nil {
 		return
 	}
-	if pe, payout, err := a.y.fundamentals(sym, true); err == nil {
-		_ = a.st.updateFundamentals(sym, pe, payout)
+	if pe, payout, mcap, err := a.y.fundamentals(sym, true); err == nil {
+		_ = a.st.updateFundamentals(sym, pe, payout, mcap)
 	}
 }
 

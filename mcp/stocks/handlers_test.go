@@ -148,7 +148,7 @@ func TestStats(t *testing.T) {
 		t.Fatal(err)
 	}
 	pe := 12.0
-	_ = st.updateFundamentals("KO", &pe, nil)
+	_ = st.updateFundamentals("KO", &pe, nil, nil)
 	s1, _ := st.stats(time.Hour)
 	if s1.Warmed != 1 || s1.WithPrice != 1 || s1.WithYield != 1 || s1.WithFundamentals != 1 || s1.Fresh != 1 {
 		t.Fatalf("after warming KO: %+v", s1)
@@ -161,7 +161,7 @@ func TestStats(t *testing.T) {
 func TestPayoutAndPEFilters(t *testing.T) {
 	st := newTestStore(t)
 	pe, payout := 12.0, 40.0
-	if err := st.updateFundamentals("KO", &pe, &payout); err != nil {
+	if err := st.updateFundamentals("KO", &pe, &payout, nil); err != nil {
 		t.Fatal(err)
 	}
 	if rows, _ := st.listUniverse(listFilter{MaxPayout: floatPtr(50)}); !containsSym(rows, "KO") {
@@ -343,13 +343,13 @@ func TestLiveFundamentals(t *testing.T) {
 		return *p
 	}
 	y := newYahoo()
-	pe, payout, err := y.fundamentals("JNJ", false)
-	t.Logf("JNJ pe=%v payout=%v err=%v", deref(pe), deref(payout), err)
+	pe, payout, mcap, err := y.fundamentals("JNJ", false)
+	t.Logf("JNJ pe=%v payout=%v mcap(B)=%v err=%v", deref(pe), deref(payout), deref(mcap), err)
 	if err != nil {
 		t.Fatalf("fundamentals handshake failed: %v", err)
 	}
-	if pe == nil && payout == nil {
-		t.Fatal("handshake ok but no P/E or payout parsed")
+	if pe == nil && payout == nil && mcap == nil {
+		t.Fatal("handshake ok but no fundamentals parsed")
 	}
 }
 
