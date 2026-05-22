@@ -1572,8 +1572,13 @@ function ApplyTemplateDialog({
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ApplySummary | null>(null);
 
-  // One-shot fetch of the template's page list. Independent of mode
-  // so the page picker doesn't re-flicker when mode changes.
+  // One-shot fetch of the template's page list. Sequenced first
+  // because templates_get also runs seedBundledTemplates — the
+  // apply-summary fetch below relies on the template being present
+  // in the DB. Running them in parallel races: if summary fires
+  // before detail finishes seeding, applyTemplate's dbGetTemplate
+  // returns nil and the user sees "template not found" in the
+  // 'Will create:' panel even though the page picker renders fine.
   useEffect(() => {
     setDetailLoading(true);
     setError(null);
@@ -1593,14 +1598,17 @@ function ApplyTemplateDialog({
 
   // Refetch the apply-summary whenever mode flips — that's what tells
   // the user which slugs would be created vs skipped in their current
-  // site state.
+  // site state. Gated on detail having loaded so seedBundledTemplates
+  // has definitely run before applyTemplate's dbGetTemplate fires.
   useEffect(() => {
+    if (detailLoading) return;
     setSummaryLoading(true);
+    setError(null);
     api<{ summary: ApplySummary }>(`/admin/templates/${template.name}/preview?mode=${mode}`)
       .then((r) => setSummary(r.summary))
       .catch((e) => setError(String(e)))
       .finally(() => setSummaryLoading(false));
-  }, [api, template.name, mode]);
+  }, [api, template.name, mode, detailLoading]);
 
   // Build the iframe URL manually — we can't go through the api()
   // closure because <iframe> takes a URL, not JSON-fetched bytes.

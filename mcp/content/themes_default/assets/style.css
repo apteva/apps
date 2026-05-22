@@ -751,7 +751,8 @@ a:hover { opacity: 0.8; }
 }
 
 /* ============================================================
-   Forms (block-form)
+   Forms (block-form) — uses the same vars as testimonial / cards so
+   light + dark mode both pick up the right palette.
    ============================================================ */
 .block-form {
   display: flex;
@@ -760,49 +761,54 @@ a:hover { opacity: 0.8; }
   max-width: 480px;
   margin: 2rem auto;
   padding: 1.75rem;
-  background: var(--bg-card, #fff);
-  border: 1px solid var(--border, #e5e7eb);
-  border-radius: var(--radius, 8px);
+  background: var(--bg-soft);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 .block-form__field { display: flex; flex-direction: column; gap: 0.35rem; }
 .block-form__field label {
   font-size: 0.85rem;
   font-weight: 500;
-  color: var(--fg, #111827);
+  color: var(--fg);
 }
-.block-form__req { color: var(--accent, #2563eb); }
+.block-form__req { color: var(--accent); }
 .block-form__field input,
 .block-form__field textarea {
   font: inherit;
   padding: 0.65rem 0.85rem;
-  border: 1px solid var(--border, #d1d5db);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: #fff;
-  color: var(--fg, #111827);
+  background: var(--bg);
+  color: var(--fg);
   transition: border-color 0.15s, box-shadow 0.15s;
+}
+.block-form__field input::placeholder,
+.block-form__field textarea::placeholder {
+  color: var(--fg-soft);
 }
 .block-form__field input:focus,
 .block-form__field textarea:focus {
   outline: none;
-  border-color: var(--accent, #2563eb);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #2563eb) 18%, transparent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 .block-form__consent {
   font-size: 0.8rem;
-  color: var(--fg-muted, #6b7280);
+  color: var(--fg-muted);
   margin: 0.25rem 0 0;
 }
 .block-form__submit { align-self: flex-start; margin-top: 0.5rem; }
 .block-form__msg {
   font-size: 0.85rem;
-  color: #b91c1c;
+  color: #ef4444;
   min-height: 1.2em;
 }
 .block-form__success {
   padding: 1.25rem;
   margin: 0;
   text-align: center;
-  color: var(--fg, #111827);
+  color: var(--fg);
   font-weight: 500;
 }
 
