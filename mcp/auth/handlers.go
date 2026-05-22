@@ -127,87 +127,136 @@ func (a *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	var body struct {
-		Email            string `json:"email"`
-		Password         string `json:"password"`
-		DisplayName      string `json:"display_name"`
-		ClientID         string `json:"client_id"`
-		OrganizationSlug string `json:"organization_slug"`
-	}
+	var body signupRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
+	body.IP = r.RemoteAddr
+	body.UserAgent = r.UserAgent()
+
+	res, status, err := performSignup(ctx, pid, body, mintSessionFor(r))
+	if err != nil {
+		httpErr(w, status, err.Error())
+		return
+	}
+	if res.VerificationRequired {
+		httpStatus(w, status, map[string]any{"user": res.User, "verification_required": true})
+		return
+	}
+	httpStatus(w, status, map[string]any{
+		"user":          res.User,
+		"access_token":  res.AccessToken,
+		"refresh_token": res.RefreshToken,
+		"expires_in":    res.ExpiresIn,
+		"token_type":    "Bearer",
+	})
+}
+
+// signupRequest is the shared input to performSignup — used by both
+// the /signup HTTP handler (json-decoded body) and the
+// auth_public_signup MCP tool (args-decoded body). IP / UserAgent are
+// set by the caller from r.RemoteAddr / r.UserAgent() in the HTTP
+// path; MCP callers either pass them through from the originating
+// request or accept the "mcp" defaults.
+type signupRequest struct {
+	Email            string `json:"email"`
+	Password         string `json:"password"`
+	DisplayName      string `json:"display_name"`
+	ClientID         string `json:"client_id"`
+	OrganizationSlug string `json:"organization_slug"`
+	IP               string `json:"-"`
+	UserAgent        string `json:"-"`
+}
+
+// signupResult mirrors what /signup writes to the response body, but
+// as a typed value the MCP tool can return without re-serializing.
+// VerificationRequired splits the two HTTP statuses (202 vs 201):
+// when true, the access/refresh tokens are empty and the verify-email
+// has been (or attempted to be) sent.
+type signupResult struct {
+	User                 *User  `json:"user"`
+	AccessToken          string `json:"access_token,omitempty"`
+	RefreshToken         string `json:"refresh_token,omitempty"`
+	ExpiresIn            int    `json:"expires_in,omitempty"`
+	VerificationRequired bool   `json:"verification_required,omitempty"`
+}
+
+// mintSessionFor returns a closure that calls mintSession with the
+// originating HTTP request — letting performSignup stay HTTP-agnostic
+// (the MCP path supplies a closure backed by a synthetic request that
+// carries just the IP/UA the agent passed in).
+type sessionMinter func(ctx *sdk.AppCtx, pid string, org *Organization, user *User, client *Client) (tokenPair, error)
+
+func mintSessionFor(r *http.Request) sessionMinter {
+	return func(ctx *sdk.AppCtx, pid string, org *Organization, user *User, client *Client) (tokenPair, error) {
+		return mintSession(ctx, pid, org, user, client, r)
+	}
+}
+
+// performSignup runs the public signup flow shared by /signup and the
+// auth_public_signup MCP tool. Returns (result, http-status-to-use,
+// error). Status is meaningful even on error so the HTTP path can
+// surface 400/409/500 to the caller; the MCP path treats any non-nil
+// err as the tool error (status is ignored on the MCP side).
+func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint sessionMinter) (*signupResult, int, error) {
 	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
 	if body.Email == "" || body.Password == "" {
-		httpErr(w, http.StatusBadRequest, "email and password required")
-		return
+		return nil, http.StatusBadRequest, errors.New("email and password required")
 	}
 	client, clientErr := requireClient(ctx, pid, body.ClientID)
 	if clientErr != nil {
-		httpErr(w, http.StatusBadRequest, clientErr.Error())
-		return
+		return nil, http.StatusBadRequest, clientErr
 	}
 	org, orgErr := resolveOrgForRequest(ctx, pid, client, body.OrganizationSlug)
 	if orgErr != nil {
-		httpErr(w, http.StatusBadRequest, orgErr.Error())
-		return
+		return nil, http.StatusBadRequest, orgErr
 	}
 	if reason := validatePassword(body.Password,
 		cfgInt(ctx, "password_min_length", 8),
 		cfgInt(ctx, "password_classes_required", 0)); reason != "" {
-		httpErr(w, http.StatusBadRequest, reason)
-		return
+		return nil, http.StatusBadRequest, errors.New(reason)
 	}
-
 	if existing, err := dbGetUserByEmail(ctx.AppDB(), pid, org.ID, body.Email); err == nil && existing != nil {
 		dbAudit(ctx.AppDB(), pid, org.ID, &existing.ID, client.ClientID, "signup_conflict",
-			r.RemoteAddr, r.UserAgent(), nil)
-		httpErr(w, http.StatusConflict, "email already registered")
-		return
+			body.IP, body.UserAgent, nil)
+		return nil, http.StatusConflict, errors.New("email already registered")
 	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
+		return nil, http.StatusInternalServerError, err
 	}
 
 	pwHash, err := hashPassword(body.Password)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
+		return nil, http.StatusInternalServerError, err
 	}
 	verificationRequired := cfgBool(ctx, "email_verification_required", true)
 	uid, err := dbCreateUser(ctx.AppDB(), pid, org.ID, body.Email, pwHash, body.DisplayName, !verificationRequired)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
+		return nil, http.StatusInternalServerError, err
 	}
 	user, err := dbGetUserByID(ctx.AppDB(), pid, org.ID, uid)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
+		return nil, http.StatusInternalServerError, err
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, &uid, client.ClientID, "signup", r.RemoteAddr, r.UserAgent(), nil)
+	dbAudit(ctx.AppDB(), pid, org.ID, &uid, client.ClientID, "signup", body.IP, body.UserAgent, nil)
 
 	if verificationRequired {
 		if err := issueVerifyEmailToken(ctx, pid, org, uid, body.Email); err != nil {
 			ctx.Logger().Warn("verify-email send failed", "err", err)
 		}
-		httpStatus(w, http.StatusAccepted, map[string]any{"user": user, "verification_required": true})
-		return
+		return &signupResult{User: user, VerificationRequired: true}, http.StatusAccepted, nil
 	}
 
-	tokens, err := mintSession(ctx, pid, org, user, client, r)
+	tokens, err := mint(ctx, pid, org, user, client)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
+		return nil, http.StatusInternalServerError, err
 	}
-	httpStatus(w, http.StatusCreated, map[string]any{
-		"user":          user,
-		"access_token":  tokens.access,
-		"refresh_token": tokens.refresh,
-		"expires_in":    tokens.expiresIn,
-		"token_type":    "Bearer",
-	})
+	return &signupResult{
+		User:         user,
+		AccessToken:  tokens.access,
+		RefreshToken: tokens.refresh,
+		ExpiresIn:    tokens.expiresIn,
+	}, http.StatusCreated, nil
 }
 
 // ─── /login ──────────────────────────────────────────────────────────

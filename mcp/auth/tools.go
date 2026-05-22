@@ -11,6 +11,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net/http"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -440,6 +441,41 @@ func (a *App) toolClientsDisable(ctx *sdk.AppCtx, args map[string]any) (any, err
 	}
 	dbAudit(ctx.AppDB(), pid, c.OrganizationID, nil, clientID, "client_disabled", "", "agent", nil)
 	return map[string]any{"ok": true}, nil
+}
+
+// ─── auth_public_signup ──────────────────────────────────────────────
+//
+// Visitor-facing signup, identical to POST /signup. Exposed as an MCP
+// tool so agent-driven surfaces (content forms, chat onboarding) can
+// register a real user + receive tokens without HTTP plumbing. The
+// /signup HTTP endpoint stays for direct SaaS-frontend use.
+
+func (a *App) toolPublicSignup(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	req := signupRequest{
+		Email:            stringArg(args, "email", ""),
+		Password:         stringArg(args, "password", ""),
+		DisplayName:      stringArg(args, "display_name", ""),
+		ClientID:         stringArg(args, "client_id", ""),
+		OrganizationSlug: stringArg(args, "organization_slug", ""),
+		IP:               stringArg(args, "ip", ""),
+		UserAgent:        stringArg(args, "user_agent", "mcp:auth_public_signup"),
+	}
+	// Synthetic request so the session minter has UA/RemoteAddr to
+	// stamp on the sessions row (orgBaseURL falls back to PlatformInfo
+	// before consulting the request, so the missing Host is harmless).
+	r, _ := http.NewRequest("POST", "/signup", nil)
+	r.RemoteAddr = req.IP
+	r.Header.Set("User-Agent", req.UserAgent)
+
+	res, _, err := performSignup(ctx, pid, req, mintSessionFor(r))
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
 }
 
 // ─── arg coercion helpers ────────────────────────────────────────────

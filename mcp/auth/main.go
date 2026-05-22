@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.5.0
+version: 0.6.0
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One install
@@ -77,7 +77,9 @@ provides:
     - name: auth_users_search
       description: Filtered user search; org-scoped or project-wide.
     - name: auth_users_create
-      description: Provision a user (requires org). send_password_reset defaults false — bulk email imports stay silent.
+      description: ADMIN — provision a user (requires org). send_password_reset defaults false. No session minted. For visitor signup use auth_public_signup.
+    - name: auth_public_signup
+      description: Visitor-facing signup, equivalent to POST /signup. Resolves org from client_id, mints tokens or sends verify email.
     - name: auth_users_get
       description: Snapshot of one user (requires org).
     - name: auth_users_get_context
@@ -287,7 +289,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "auth_users_create",
-			Description: "Provision a user. Requires organization_id/slug + email. Optional: password (omit for passwordless/invite), display_name, email_verified (default true), send_password_reset (default false — no email is sent unless set, so bulk email imports stay silent). Returns the user + password_reset_sent.",
+			Description: "Provision a user. Requires organization_id/slug + email. Optional: password (omit for passwordless/invite), display_name, email_verified (default true), send_password_reset (default false — no email is sent unless set, so bulk email imports stay silent). Returns the user + password_reset_sent. ADMIN tool — does not mint a session and does not check password policy. For visitor-facing signup that issues tokens + verification email, use auth_public_signup.",
 			InputSchema: schemaObject(merge(map[string]any{
 				"email":               map[string]any{"type": "string"},
 				"password":            map[string]any{"type": "string"},
@@ -296,6 +298,20 @@ func (a *App) MCPTools() []sdk.Tool {
 				"send_password_reset": map[string]any{"type": "boolean"},
 			}), []string{"email"}),
 			Handler: a.toolUsersCreate,
+		},
+		{
+			Name:        "auth_public_signup",
+			Description: "Visitor-facing signup, identical to POST /signup. Resolves the org from client_id (or organization_slug when the client spans multiple orgs), validates the password against the configured policy, creates the user, issues a verification email when email_verification_required is true, otherwise mints an access + refresh token pair. Returns {user, access_token, refresh_token, expires_in, verification_required}. Use this from agent-driven onboarding (content forms, chat signup) — the auth_users_create tool is the ADMIN alternative for bulk provisioning without password policy / token issuance / verify email.",
+			InputSchema: schemaObject(map[string]any{
+				"email":             map[string]any{"type": "string"},
+				"password":          map[string]any{"type": "string"},
+				"display_name":      map[string]any{"type": "string"},
+				"client_id":         map[string]any{"type": "string"},
+				"organization_slug": map[string]any{"type": "string"},
+				"ip":                map[string]any{"type": "string"},
+				"user_agent":        map[string]any{"type": "string"},
+			}, []string{"email", "password"}),
+			Handler: a.toolPublicSignup,
 		},
 		{
 			Name:        "auth_users_get",
