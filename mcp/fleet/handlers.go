@@ -630,7 +630,15 @@ func (a *App) httpList(w http.ResponseWriter, r *http.Request) {
 		writeJSONErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tenants": list, "count": len(list)})
+	// Rewrite stored loopback base_urls to the public form before
+	// shipping. toolList (MCP) already does this; httpList didn't, so
+	// the dashboard panel was showing http://localhost:<port> on prod
+	// where the parent has a public_host set.
+	out := make([]*Tenant, len(list))
+	for i, t := range list {
+		out[i] = a.publicTenantView(t)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tenants": out, "count": len(out)})
 }
 
 func (a *App) httpGet(w http.ResponseWriter, r *http.Request) {
