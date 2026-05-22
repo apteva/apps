@@ -15,6 +15,13 @@ import (
 
 type store struct{ db *sql.DB }
 
+// instrumentCols is the column list every instrumentRow query selects, in
+// the order scanInstruments expects. Kept in one place so the two callers
+// (list, search) can't drift from the scan.
+const instrumentCols = `symbol, name, exchange, sector, currency,
+	last_price, last_change_pct, last_yield_pct, last_pe, last_payout_pct,
+	last_growth_pct, refreshed_at`
+
 // instrumentRow is one universe entry plus its last-warmed snapshot.
 // Pointer fields are nil until the symbol has been fetched at least once.
 type instrumentRow struct {
@@ -26,7 +33,23 @@ type instrumentRow struct {
 	Price       *float64 `json:"price,omitempty"`
 	ChangePct   *float64 `json:"change_pct,omitempty"`
 	YieldPct    *float64 `json:"yield_pct,omitempty"`
+	PE          *float64 `json:"pe,omitempty"`
+	PayoutPct   *float64 `json:"payout_pct,omitempty"`
+	GrowthPct   *float64 `json:"growth_pct,omitempty"`
 	RefreshedAt *int64   `json:"refreshed_at,omitempty"`
+}
+
+// listFilter carries the optional screener constraints for listUniverse.
+// Nil pointers mean "no constraint"; rows missing a filtered metric are
+// excluded from that filter (and sorted last when it's the sort key).
+type listFilter struct {
+	Sector    string
+	MinYield  *float64
+	MaxPayout *float64
+	MaxPE     *float64
+	MinGrowth *float64
+	Sort      string // name | price | change | yield | pe | payout | growth
+	Limit     int
 }
 
 // ensureInstrument inserts a symbol into the universe if absent, leaving
@@ -44,27 +67,41 @@ func (s *store) ensureInstrument(symbol, name, exchange, currency string) error 
 	return err
 }
 
-// updateSnapshot writes the lazily-warmed price/change/yield columns and
-// stamps refreshed_at. yieldPct may be nil (no dividends → unknown).
-func (s *store) updateSnapshot(symbol string, price, changePct float64, yieldPct *float64) error {
+// updateSnapshot writes the lazily-warmed price/change/yield/growth
+// columns (all from the /chart fetch) and stamps refreshed_at. yieldPct
+// and growthPct may be nil (unknown). Fundamentals (P/E, payout) come
+// from a separate endpoint — see updateFundamentals.
+func (s *store) updateSnapshot(symbol string, price, changePct float64, yieldPct, growthPct *float64) error {
 	_, err := s.db.Exec(
 		`UPDATE instrument
-		    SET last_price = ?, last_change_pct = ?, last_yield_pct = ?, refreshed_at = ?
+		    SET last_price = ?, last_change_pct = ?, last_yield_pct = ?,
+		        last_growth_pct = ?, refreshed_at = ?
 		  WHERE symbol = ?`,
-		nullF(price), nullF(changePct), yieldPct, time.Now().Unix(), strings.ToUpper(symbol),
+		nullF(price), nullF(changePct), yieldPct, growthPct, time.Now().Unix(), strings.ToUpper(symbol),
 	)
 	return err
 }
 
-// staleSymbols returns universe symbols whose snapshot is older than ttl
-// (or never warmed). Used by list to bound how many Yahoo calls a refresh
-// fans out.
-func (s *store) staleSymbols(ttl time.Duration) ([]string, error) {
+// updateFundamentals writes P/E + payout (%) from the quoteSummary
+// endpoint. Left untouched by updateSnapshot so a /chart-only warm never
+// clears a previously-fetched fundamental.
+func (s *store) updateFundamentals(symbol string, pe, payoutPct *float64) error {
+	_, err := s.db.Exec(
+		`UPDATE instrument SET last_pe = ?, last_payout_pct = ? WHERE symbol = ?`,
+		pe, payoutPct, strings.ToUpper(symbol))
+	return err
+}
+
+// staleSymbols returns up to `limit` universe symbols whose snapshot is
+// older than ttl (or never warmed), never-warmed first then oldest. The
+// warming worker uses this to bound its per-tick Yahoo fan-out.
+func (s *store) staleSymbols(ttl time.Duration, limit int) ([]string, error) {
 	cutoff := time.Now().Add(-ttl).Unix()
 	rows, err := s.db.Query(
 		`SELECT symbol FROM instrument
 		  WHERE refreshed_at IS NULL OR refreshed_at < ?
-		  ORDER BY symbol`, cutoff)
+		  ORDER BY refreshed_at IS NOT NULL, refreshed_at ASC
+		  LIMIT ?`, cutoff, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -81,38 +118,53 @@ func (s *store) staleSymbols(ttl time.Duration) ([]string, error) {
 }
 
 // listUniverse returns the universe filtered + sorted for the list tool.
-// sortBy ∈ {name, price, change, yield}; minYield (when non-nil) drops
-// rows whose yield is unknown or below the floor.
-func (s *store) listUniverse(sector, sortBy string, minYield *float64, limit int) ([]instrumentRow, error) {
+func (s *store) listUniverse(f listFilter) ([]instrumentRow, error) {
 	var where []string
 	var args []any
-	if sector != "" {
+	if f.Sector != "" {
 		where = append(where, "LOWER(sector) = LOWER(?)")
-		args = append(args, sector)
+		args = append(args, f.Sector)
 	}
-	if minYield != nil {
+	if f.MinYield != nil {
 		where = append(where, "last_yield_pct IS NOT NULL AND last_yield_pct >= ?")
-		args = append(args, *minYield)
+		args = append(args, *f.MinYield)
 	}
-	q := `SELECT symbol, name, exchange, sector, currency,
-	             last_price, last_change_pct, last_yield_pct, refreshed_at
-	        FROM instrument`
+	if f.MaxPayout != nil {
+		where = append(where, "last_payout_pct IS NOT NULL AND last_payout_pct <= ?")
+		args = append(args, *f.MaxPayout)
+	}
+	if f.MaxPE != nil {
+		where = append(where, "last_pe IS NOT NULL AND last_pe > 0 AND last_pe <= ?")
+		args = append(args, *f.MaxPE)
+	}
+	if f.MinGrowth != nil {
+		where = append(where, "last_growth_pct IS NOT NULL AND last_growth_pct >= ?")
+		args = append(args, *f.MinGrowth)
+	}
+	q := "SELECT " + instrumentCols + " FROM instrument"
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
-	// NULLS LAST on the metric sorts so un-warmed rows fall to the bottom.
-	switch sortBy {
+	// "<col> IS NULL" first in ORDER BY pushes un-warmed rows to the
+	// bottom (SQLite sorts false<true), so the metric sorts are dense.
+	switch f.Sort {
 	case "price":
 		q += " ORDER BY last_price IS NULL, last_price DESC"
 	case "change":
 		q += " ORDER BY last_change_pct IS NULL, last_change_pct DESC"
 	case "yield":
 		q += " ORDER BY last_yield_pct IS NULL, last_yield_pct DESC"
+	case "pe":
+		q += " ORDER BY last_pe IS NULL OR last_pe <= 0, last_pe ASC"
+	case "payout":
+		q += " ORDER BY last_payout_pct IS NULL, last_payout_pct ASC"
+	case "growth":
+		q += " ORDER BY last_growth_pct IS NULL, last_growth_pct DESC"
 	default:
 		q += " ORDER BY symbol ASC"
 	}
-	if limit > 0 {
-		q += fmt.Sprintf(" LIMIT %d", limit)
+	if f.Limit > 0 {
+		q += fmt.Sprintf(" LIMIT %d", f.Limit)
 	}
 	return s.scanInstruments(q, args...)
 }
@@ -123,8 +175,7 @@ func (s *store) searchUniverse(query string, limit int) ([]instrumentRow, error)
 	like := "%" + strings.ToLower(q) + "%"
 	prefix := strings.ToUpper(q) + "%"
 	return s.scanInstruments(
-		`SELECT symbol, name, exchange, sector, currency,
-		        last_price, last_change_pct, last_yield_pct, refreshed_at
+		`SELECT `+instrumentCols+`
 		   FROM instrument
 		  WHERE symbol LIKE ? OR LOWER(name) LIKE ?
 		  ORDER BY (symbol = ?) DESC, (symbol LIKE ?) DESC, symbol ASC
@@ -142,10 +193,10 @@ func (s *store) scanInstruments(q string, args ...any) ([]instrumentRow, error) 
 	out := []instrumentRow{}
 	for rows.Next() {
 		var r instrumentRow
-		var price, change, yield sql.NullFloat64
+		var price, change, yield, pe, payout, growth sql.NullFloat64
 		var refreshed sql.NullInt64
 		if err := rows.Scan(&r.Symbol, &r.Name, &r.Exchange, &r.Sector, &r.Currency,
-			&price, &change, &yield, &refreshed); err != nil {
+			&price, &change, &yield, &pe, &payout, &growth, &refreshed); err != nil {
 			return nil, err
 		}
 		if price.Valid {
@@ -156,6 +207,15 @@ func (s *store) scanInstruments(q string, args ...any) ([]instrumentRow, error) 
 		}
 		if yield.Valid {
 			r.YieldPct = &yield.Float64
+		}
+		if pe.Valid {
+			r.PE = &pe.Float64
+		}
+		if payout.Valid {
+			r.PayoutPct = &payout.Float64
+		}
+		if growth.Valid {
+			r.GrowthPct = &growth.Float64
 		}
 		if refreshed.Valid {
 			r.RefreshedAt = &refreshed.Int64

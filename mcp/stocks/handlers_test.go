@@ -8,6 +8,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,12 +24,25 @@ func newTestStore(t *testing.T) *store {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	body, err := os.ReadFile("migrations/001_init.sql")
+	entries, err := os.ReadDir("migrations")
 	if err != nil {
-		t.Fatalf("read migration: %v", err)
+		t.Fatalf("read migrations: %v", err)
 	}
-	if _, err := db.Exec(string(body)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	var files []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".sql") {
+			files = append(files, e.Name())
+		}
+	}
+	sort.Strings(files)
+	for _, f := range files {
+		body, err := os.ReadFile(filepath.Join("migrations", f))
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		if _, err := db.Exec(string(body)); err != nil {
+			t.Fatalf("apply %s: %v", f, err)
+		}
 	}
 	return &store{db: db}
 }
@@ -51,12 +66,12 @@ func TestEmbeddedManifest(t *testing.T) {
 
 func TestSeedUniverseLoaded(t *testing.T) {
 	st := newTestStore(t)
-	rows, err := st.listUniverse("", "name", nil, 100)
+	rows, err := st.listUniverse(listFilter{Sort: "name", Limit: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) < 20 {
-		t.Fatalf("expected the seed universe (~27), got %d", len(rows))
+	if len(rows) < 1000 {
+		t.Fatalf("expected the S&P 1500 seed (~1500), got %d", len(rows))
 	}
 }
 
@@ -72,19 +87,20 @@ func TestSearchUniverse(t *testing.T) {
 		t.Fatalf("AAPL search: want AAPL first, got %+v", rows)
 	}
 
-	// Name substring match, case-insensitive.
+	// Name substring match, case-insensitive (the universe has several
+	// Coca-Cola entities now, so just assert KO is among the hits).
 	rows, err = st.searchUniverse("coca", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) == 0 || rows[0].Symbol != "KO" {
-		t.Fatalf("coca search: want KO, got %+v", rows)
+	if !containsSym(rows, "KO") {
+		t.Fatalf("coca search: want KO among results, got %+v", rows)
 	}
 }
 
 func TestSectorFilter(t *testing.T) {
 	st := newTestStore(t)
-	rows, err := st.listUniverse("Energy", "name", nil, 100)
+	rows, err := st.listUniverse(listFilter{Sector: "Energy", Sort: "name", Limit: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,20 +117,59 @@ func TestSectorFilter(t *testing.T) {
 func TestSnapshotAndYieldFilter(t *testing.T) {
 	st := newTestStore(t)
 	y := 3.5
-	if err := st.updateSnapshot("KO", 60, 1.2, &y); err != nil {
+	if err := st.updateSnapshot("KO", 60, 1.2, &y, nil); err != nil {
 		t.Fatal(err)
 	}
 	// KO now has a 3.5% yield; a 3.0 floor keeps it, a 4.0 floor drops it.
-	rows, err := st.listUniverse("", "yield", floatPtr(3.0), 100)
+	rows, err := st.listUniverse(listFilter{Sort: "yield", MinYield: floatPtr(3.0)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !containsSym(rows, "KO") {
 		t.Fatal("min_yield=3.0 should include KO at 3.5%")
 	}
-	rows, _ = st.listUniverse("", "yield", floatPtr(4.0), 100)
+	rows, _ = st.listUniverse(listFilter{Sort: "yield", MinYield: floatPtr(4.0)})
 	if containsSym(rows, "KO") {
 		t.Fatal("min_yield=4.0 should exclude KO at 3.5%")
+	}
+}
+
+func TestPayoutAndPEFilters(t *testing.T) {
+	st := newTestStore(t)
+	pe, payout := 12.0, 40.0
+	if err := st.updateFundamentals("KO", &pe, &payout); err != nil {
+		t.Fatal(err)
+	}
+	if rows, _ := st.listUniverse(listFilter{MaxPayout: floatPtr(50)}); !containsSym(rows, "KO") {
+		t.Fatal("max_payout=50 should include KO at 40%")
+	}
+	if rows, _ := st.listUniverse(listFilter{MaxPayout: floatPtr(30)}); containsSym(rows, "KO") {
+		t.Fatal("max_payout=30 should exclude KO at 40%")
+	}
+	if rows, _ := st.listUniverse(listFilter{MaxPE: floatPtr(15)}); !containsSym(rows, "KO") {
+		t.Fatal("max_pe=15 should include KO at 12")
+	}
+	if rows, _ := st.listUniverse(listFilter{MaxPE: floatPtr(10)}); containsSym(rows, "KO") {
+		t.Fatal("max_pe=10 should exclude KO at 12")
+	}
+}
+
+func TestDividendCAGR5(t *testing.T) {
+	// base window (~5y ago) totals 1.0; trailing 12mo totals 2.0
+	// → CAGR = 2^(1/5) - 1 ≈ 14.87%.
+	divs := []Dividend{
+		{ExDate: daysAgo(30), Amount: 1.0}, {ExDate: daysAgo(120), Amount: 1.0},
+		{ExDate: daysAgo(5*365 + 30), Amount: 0.5}, {ExDate: daysAgo(5*365 + 120), Amount: 0.5},
+	}
+	g := dividendCAGR5(divs)
+	if g == nil {
+		t.Fatal("expected a CAGR")
+	}
+	if math.Abs(*g-14.87) > 0.5 {
+		t.Fatalf("cagr = %v, want ~14.87", *g)
+	}
+	if dividendCAGR5(nil) != nil {
+		t.Fatal("no history → nil")
 	}
 }
 
@@ -164,6 +219,52 @@ func TestTrailingYield(t *testing.T) {
 	}
 	if trailingYield(nil, 50) != nil {
 		t.Fatal("no dividends → unknown yield")
+	}
+}
+
+func TestDayChangeFallsBackToBars(t *testing.T) {
+	// previousClose=0 (Yahoo's daily-range behavior) → use the prior bar,
+	// NOT a 1-year-ago price. Bars: prior close 100, latest 110; price 110.
+	res := &chartResult{
+		Meta: quoteMeta{Price: 110},
+		Bars: []Bar{{C: 90}, {C: 100}, {C: 110}},
+	}
+	prev, pct := dayChange(res)
+	if prev != 100 {
+		t.Fatalf("prevClose = %v, want 100 (second-to-last bar)", prev)
+	}
+	if math.Abs(pct-10) > 1e-9 {
+		t.Fatalf("change = %v%%, want 10%% — not a multi-month return", pct)
+	}
+	// When Yahoo does give an intraday previousClose, prefer it.
+	res.Meta.PreviousClose = 108
+	if prev, _ := dayChange(res); prev != 108 {
+		t.Fatalf("prevClose = %v, want 108 (meta wins)", prev)
+	}
+}
+
+func TestPlausiblePriceRejectsBadReads(t *testing.T) {
+	bars := []Bar{{C: 230}, {C: 231}}
+	if !plausiblePrice(&chartResult{Meta: quoteMeta{Price: 231.73}, Bars: bars}) {
+		t.Fatal("231.73 vs last 231 should be plausible")
+	}
+	if plausiblePrice(&chartResult{Meta: quoteMeta{Price: 0.005}, Bars: bars}) {
+		t.Fatal("0.005 vs last 231 should be rejected (the JNJ-outlier class)")
+	}
+	if plausiblePrice(&chartResult{Meta: quoteMeta{Price: 0}, Bars: bars}) {
+		t.Fatal("zero price should be rejected")
+	}
+}
+
+func TestTrailingYieldGuardsAgainstBadPrice(t *testing.T) {
+	divs := []Dividend{{ExDate: daysAgo(30), Amount: 1.3}}
+	// A transient near-zero price would make 1.3/0.005 ≈ 26000% — must be
+	// reported as unknown, not stored.
+	if y := trailingYield(divs, 0.005); y != nil {
+		t.Fatalf("implausible yield should be nil, got %v", *y)
+	}
+	if y := trailingYield(divs, 50); y == nil {
+		t.Fatal("a sane 2.6%% yield should be returned")
 	}
 }
 

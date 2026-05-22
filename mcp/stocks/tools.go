@@ -7,10 +7,22 @@ package main
 // as a side effect.
 
 import (
+	"context"
 	"errors"
+	"math"
 	"strings"
 	"sync"
 	"time"
+)
+
+// Warming worker pacing. Each symbol costs ~2 Yahoo calls (chart +
+// fundamentals); a 100-symbol batch every ~10m keeps total traffic
+// (~1200/hr) under Yahoo's unofficial ~2k/hr ceiling while cycling the
+// full S&P 1500 in a couple of hours. warmGuard stops a global install's
+// per-project worker dispatches from stacking batches.
+const (
+	warmBatchSize = 100
+	warmGuard     = 8 * time.Minute
 )
 
 // toolSearch matches the local universe first; if nothing matches and the
@@ -38,23 +50,28 @@ func (a *App) toolSearch(args map[string]any) (any, error) {
 	return map[string]any{"results": rows, "count": len(rows)}, nil
 }
 
-// toolList warms any stale universe snapshots (bounded, concurrent) so
-// price/change/yield are fresh, then returns the filtered + sorted list.
+// toolList returns the filtered + sorted universe from the warmed
+// snapshot. It does NOT fetch from Yahoo — the background worker keeps
+// the snapshot fresh (the universe is too large to warm on every call).
 func (a *App) toolList(args map[string]any) (any, error) {
-	stale, err := a.st.staleSymbols(a.ttl)
-	if err != nil {
-		return nil, err
+	f := listFilter{
+		Sector: strArg(args, "sector"),
+		Sort:   orStr(strArg(args, "sort"), "name"),
+		Limit:  intArg(args, "limit", 0), // 0 = the whole universe
 	}
-	a.warmMany(stale)
-
-	sector := strArg(args, "sector")
-	sortBy := orStr(strArg(args, "sort"), "name")
-	limit := intArg(args, "limit", 100)
-	var minYield *float64
-	if f, ok := floatArg(args, "min_yield"); ok {
-		minYield = &f
+	if v, ok := floatArg(args, "min_yield"); ok {
+		f.MinYield = &v
 	}
-	rows, err := a.st.listUniverse(sector, sortBy, minYield, limit)
+	if v, ok := floatArg(args, "max_payout"); ok {
+		f.MaxPayout = &v
+	}
+	if v, ok := floatArg(args, "max_pe"); ok {
+		f.MaxPE = &v
+	}
+	if v, ok := floatArg(args, "min_growth"); ok {
+		f.MinGrowth = &v
+	}
+	rows, err := a.st.listUniverse(f)
 	if err != nil {
 		return nil, err
 	}
@@ -77,25 +94,38 @@ func (a *App) toolGet(args map[string]any) (any, error) {
 	}
 	divs, _ := a.st.loadDividends(sym)
 	yld := trailingYield(res.Dividends, res.Meta.Price)
+	growth := dividendCAGR5(res.Dividends)
+	prevClose, changePct := dayChange(res)
+
+	// Fundamentals come from the crumb-gated quoteSummary endpoint;
+	// degrade gracefully (blank P/E + payout) when it's unavailable.
+	var pePtr, payoutPtr *float64
+	if pe, payout, ferr := a.y.fundamentals(sym); ferr == nil {
+		pePtr, payoutPtr = pe, payout
+		_ = a.st.updateFundamentals(sym, pe, payout)
+	}
 
 	out := map[string]any{
-		"symbol":              sym,
-		"name":                res.Meta.Name,
-		"exchange":            res.Meta.Exchange,
-		"currency":            orStr(res.Meta.Currency, "USD"),
-		"type":                res.Meta.InstrumentType,
-		"price":               res.Meta.Price,
-		"previous_close":      res.Meta.PreviousClose,
-		"change":              res.Meta.Price - res.Meta.PreviousClose,
-		"change_pct":          pctChange(res.Meta.Price, res.Meta.PreviousClose),
-		"day_high":            res.Meta.DayHigh,
-		"day_low":             res.Meta.DayLow,
-		"fifty_two_week_high": res.Meta.FiftyTwoWeekHigh,
-		"fifty_two_week_low":  res.Meta.FiftyTwoWeekLow,
-		"volume":              res.Meta.Volume,
-		"dividend_yield_pct":  yld,
-		"dividend_frequency":  dividendFrequency(res.Dividends),
-		"last_dividend":       lastDividend(divs),
+		"symbol":                 sym,
+		"name":                   res.Meta.Name,
+		"exchange":               res.Meta.Exchange,
+		"currency":               orStr(res.Meta.Currency, "USD"),
+		"type":                   res.Meta.InstrumentType,
+		"price":                  res.Meta.Price,
+		"previous_close":         prevClose,
+		"change":                 res.Meta.Price - prevClose,
+		"change_pct":             changePct,
+		"day_high":               res.Meta.DayHigh,
+		"day_low":                res.Meta.DayLow,
+		"fifty_two_week_high":    res.Meta.FiftyTwoWeekHigh,
+		"fifty_two_week_low":     res.Meta.FiftyTwoWeekLow,
+		"volume":                 res.Meta.Volume,
+		"pe":                     pePtr,
+		"payout_pct":             payoutPtr,
+		"dividend_yield_pct":     yld,
+		"dividend_growth_5y_pct": growth,
+		"dividend_frequency":     dividendFrequency(res.Dividends),
+		"last_dividend":          lastDividend(divs),
 	}
 	_ = a.st.cacheSet("get:"+sym, out)
 	return out, nil
@@ -139,8 +169,13 @@ func (a *App) toolDividends(args map[string]any) (any, error) {
 	}
 
 	if _, fresh := a.st.cacheGet("div:"+sym, a.ttl); !fresh {
+		// Recent payments + an accurate price snapshot come from the 1y/1d
+		// path; the deep history comes from range=max. Run both so the
+		// summary is correct even when dividends is called in isolation
+		// (no preceding list/get warm). Tolerate a failure if we already
+		// have history on file.
+		_, _ = a.refresh(sym, false)
 		if _, err := a.refresh(sym, true); err != nil {
-			// Tolerate the fetch failing if we already have history on file.
 			if existing, _ := a.st.loadDividends(sym); len(existing) == 0 {
 				return nil, err
 			}
@@ -165,13 +200,19 @@ func (a *App) toolDividends(args map[string]any) (any, error) {
 
 // ─── Warming / refresh ─────────────────────────────────────────────
 
-// refresh fetches one /chart for a symbol, persists dividends, refreshes
-// the universe snapshot, and returns the parsed result. full=true pulls
-// the entire dividend history (range=max); full=false pulls a 1y window
-// (enough for price, day change, and trailing-12mo yield).
+// refresh fetches one /chart for a symbol, persists its dividends, and
+// returns the parsed result. full=false pulls a 10y/1d window — the
+// authoritative source for the universe snapshot (price, day change,
+// trailing-12mo yield, and the 5-year dividend CAGR). 10y (not 5y) so the
+// CAGR's baseline window — dividends paid 5–6 years ago — actually falls
+// inside the fetched range. full=true pulls the deep dividend history
+// (range=max) for the detail history table only: that monthly series can
+// omit the most recent payments and isn't a reliable price source, so it
+// never touches the snapshot. saveDividends is an idempotent upsert, so
+// the DB ends up holding the union.
 func (a *App) refresh(symbol string, full bool) (*chartResult, error) {
 	sym := strings.ToUpper(symbol)
-	rng, interval := "1y", "1d"
+	rng, interval := "10y", "1d"
 	if full {
 		rng, interval = "max", "1mo"
 	}
@@ -182,22 +223,56 @@ func (a *App) refresh(symbol string, full bool) (*chartResult, error) {
 	_ = a.st.ensureInstrument(sym, res.Meta.Name, res.Meta.Exchange, res.Meta.Currency)
 	_ = a.st.saveDividends(sym, res.Dividends)
 
-	yld := trailingYield(res.Dividends, res.Meta.Price)
-	_ = a.st.updateSnapshot(sym, res.Meta.Price, pctChange(res.Meta.Price, res.Meta.PreviousClose), yld)
+	if !full && plausiblePrice(res) {
+		_, changePct := dayChange(res)
+		_ = a.st.updateSnapshot(sym, res.Meta.Price, changePct,
+			trailingYield(res.Dividends, res.Meta.Price), dividendCAGR5(res.Dividends))
+	}
 	return res, nil
 }
 
-// warmMany refreshes a set of symbols concurrently (sem-capped), ignoring
-// per-symbol failures — a single dead ticker shouldn't fail a list call.
-func (a *App) warmMany(symbols []string) {
+// warmOne refreshes a single symbol's price/yield/growth snapshot and its
+// P/E + payout fundamentals. Best-effort — partial failures are fine.
+func (a *App) warmOne(sym string) {
+	if _, err := a.refresh(sym, false); err != nil {
+		return
+	}
+	if pe, payout, err := a.y.fundamentals(sym); err == nil {
+		_ = a.st.updateFundamentals(sym, pe, payout)
+	}
+}
+
+// warmBatch refreshes one paced batch of the stalest symbols, sem-capped.
+// Guarded by lastWarm so concurrent dispatches (a global install's
+// per-project worker ticks, or boot + first tick overlapping) don't
+// multiply Yahoo traffic.
+func (a *App) warmBatch(ctx context.Context) {
+	a.warmMu.Lock()
+	if time.Since(a.lastWarm) < warmGuard {
+		a.warmMu.Unlock()
+		return
+	}
+	a.lastWarm = time.Now()
+	a.warmMu.Unlock()
+
+	syms, err := a.st.staleSymbols(a.ttl, warmBatchSize)
+	if err != nil || len(syms) == 0 {
+		return
+	}
 	var wg sync.WaitGroup
-	for _, sym := range symbols {
+	for _, sym := range syms {
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return
+		default:
+		}
 		wg.Add(1)
 		go func(s string) {
 			defer wg.Done()
 			a.y.sem <- struct{}{}
 			defer func() { <-a.y.sem }()
-			_, _ = a.refresh(s, false)
+			a.warmOne(s)
 		}(sym)
 	}
 	wg.Wait()
@@ -241,7 +316,74 @@ func trailingYield(divs []Dividend, price float64) *float64 {
 		return nil
 	}
 	y := ttm / price * 100
+	// No real equity/ETF yield approaches this; a value above the guard
+	// means the price input was a transient bad read — report unknown
+	// rather than poisoning the snapshot with nonsense.
+	if y > 60 {
+		return nil
+	}
 	return &y
+}
+
+// dayChange returns the prior-day close and the day-over-day % change.
+// Yahoo only populates meta.previousClose on intraday ranges, so on the
+// 1y/1d series it's 0 — fall back to the second-to-last daily bar, which
+// is the genuine prior close (NOT chartPreviousClose, which is ≈1y ago
+// and would turn this into a 1-year return).
+func dayChange(res *chartResult) (prevClose float64, changePct float64) {
+	prev := res.Meta.PreviousClose
+	if prev <= 0 && len(res.Bars) >= 2 {
+		prev = res.Bars[len(res.Bars)-2].C
+	}
+	if prev <= 0 {
+		return 0, 0
+	}
+	return prev, pctChange(res.Meta.Price, prev)
+}
+
+// plausiblePrice rejects the transient near-zero / wildly-off quote Yahoo
+// occasionally returns under a concurrent burst, so a bad read can't
+// poison the universe snapshot. A real quote sits within a sane band of
+// the latest bar close.
+func plausiblePrice(res *chartResult) bool {
+	p := res.Meta.Price
+	if p <= 0 {
+		return false
+	}
+	n := len(res.Bars)
+	if n == 0 {
+		return true
+	}
+	last := res.Bars[n-1].C
+	if last <= 0 {
+		return true
+	}
+	r := p / last
+	return r > 0.5 && r < 2.0
+}
+
+// dividendCAGR5 is the 5-year compound annual growth rate of the
+// trailing-12mo dividend per share, computed from the payment history.
+// nil when there isn't enough history (no payments ~5 years ago) — so it
+// sorts/filters as "unknown" rather than a misleading 0.
+func dividendCAGR5(divs []Dividend) *float64 {
+	windowSum := func(yearsAgo int) float64 {
+		hi := time.Now().AddDate(-yearsAgo, 0, 0).Unix()
+		lo := time.Now().AddDate(-yearsAgo-1, 0, 0).Unix()
+		var s float64
+		for _, d := range divs {
+			if d.ExDate < hi && d.ExDate >= lo {
+				s += d.Amount
+			}
+		}
+		return s
+	}
+	ttm, base := windowSum(0), windowSum(5)
+	if ttm <= 0 || base <= 0 {
+		return nil
+	}
+	g := (math.Pow(ttm/base, 1.0/5) - 1) * 100
+	return &g
 }
 
 // dividendFrequency infers a cadence label from the count of payments in
@@ -277,18 +419,26 @@ func lastDividend(historyNewestFirst []Dividend) any {
 }
 
 // dividendSummary rolls up the payment history for the dividends tool.
+// Growth is computed from the per-share total in a trailing-12mo window
+// ending N years ago: growth_pct is year-over-year, cagr_5y_pct is the
+// 5-year compound annual growth rate.
 func dividendSummary(historyNewestFirst []Dividend, price float64) map[string]any {
-	cutoff := time.Now().AddDate(-1, 0, 0).Unix()
-	prevCutoff := time.Now().AddDate(-2, 0, 0).Unix()
-	var ttm, prevTTM float64
-	for _, d := range historyNewestFirst {
-		switch {
-		case d.ExDate >= cutoff:
-			ttm += d.Amount
-		case d.ExDate >= prevCutoff:
-			prevTTM += d.Amount
+	// windowSum totals the dividends paid in the 12-month window ending
+	// yearsAgo years before now (yearsAgo=0 → trailing 12 months).
+	windowSum := func(yearsAgo int) float64 {
+		hi := time.Now().AddDate(-yearsAgo, 0, 0).Unix()
+		lo := time.Now().AddDate(-yearsAgo-1, 0, 0).Unix()
+		var s float64
+		for _, d := range historyNewestFirst {
+			if d.ExDate < hi && d.ExDate >= lo {
+				s += d.Amount
+			}
 		}
+		return s
 	}
+	ttm := windowSum(0)
+	prevTTM := windowSum(1)
+
 	out := map[string]any{
 		"trailing_12mo": ttm,
 		"frequency":     dividendFrequency(historyNewestFirst),
@@ -299,6 +449,9 @@ func dividendSummary(historyNewestFirst []Dividend, price float64) map[string]an
 	}
 	if prevTTM > 0 {
 		out["growth_pct"] = (ttm - prevTTM) / prevTTM * 100
+	}
+	if g := dividendCAGR5(historyNewestFirst); g != nil {
+		out["cagr_5y_pct"] = *g
 	}
 	if len(historyNewestFirst) > 0 {
 		out["latest"] = map[string]any{

@@ -15,11 +15,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -29,8 +31,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: stocks
 display_name: Stocks
-version: 0.1.0
-description: Explore stocks backed by Yahoo Finance — list/filter, quote + key data, price chart, dividend history. Read-only.
+version: 0.2.0
+description: Explore + screen the S&P 1500 backed by Yahoo Finance — filter by yield/payout/P-E/dividend-growth, quote, price chart, dividend history. Read-only.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/stocks
 tags: [finance, stocks, equities, dividends, research]
@@ -47,9 +49,9 @@ provides:
     - name: search
       description: "Find stocks by symbol or name. Unknown-but-valid tickers are auto-added to the universe. Args: query, limit?."
     - name: list
-      description: "List/filter the universe with live price, day change, and dividend yield. Args: sector?, min_yield?, sort? (name|price|change|yield), limit?."
+      description: "List/screen the S&P 1500 by yield, payout ratio, P/E, and 5yr dividend growth. Args: sector?, min_yield?, max_payout?, max_pe?, min_growth?, sort? (name|price|change|yield|pe|payout|growth), limit?."
     - name: get
-      description: "One stock's data — name, exchange, price, day + 52-week range, volume, dividend yield + frequency, last dividend. Args: symbol."
+      description: "One stock's data — name, exchange, price, day + 52-week range, volume, P/E, payout, dividend yield + 5yr growth + frequency, last dividend. Args: symbol."
     - name: chart
       description: "OHLCV price history for a stock. Args: symbol, range? (1mo|6mo|1y|5y|max), interval? (1d|1wk|1mo)."
     - name: dividends
@@ -88,6 +90,11 @@ type App struct {
 	st  *store
 	y   *yahooClient
 	ttl time.Duration
+
+	// warmMu/lastWarm gate the background warming worker so overlapping
+	// dispatches don't stack Yahoo traffic. See warmBatch.
+	warmMu   sync.Mutex
+	lastWarm time.Time
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -111,12 +118,30 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		}
 	}
 	ctx.Logger().Info("stocks mounted", "cache_ttl", a.ttl.String())
+	// Kick an immediate first warm so a fresh install shows prices/yields
+	// without waiting a full worker interval; the worker keeps it fresh.
+	go a.warmBatch(context.Background())
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+
+// Workers — one background warmer that refreshes a paced batch of the
+// stalest universe symbols each tick (price/yield/growth + P/E/payout),
+// staying under Yahoo's rate ceiling. The list tool reads the snapshot
+// this maintains rather than fetching inline.
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{
+		Name:     "warm-universe",
+		Schedule: "@every 10m",
+		Run: func(ctx context.Context, _ *sdk.AppCtx) error {
+			a.warmBatch(ctx)
+			return nil
+		},
+	}}
+}
+
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 // ─── MCP tools ─────────────────────────────────────────────────────
@@ -138,12 +163,15 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "list",
-			Description: "List/filter the universe with live price, day change, and dividend yield.",
+			Description: "List/filter/screen the S&P 1500 universe by dividend yield, payout ratio, P/E, and 5-year dividend growth.",
 			InputSchema: schemaObject(map[string]any{
-				"sector":    map[string]any{"type": "string", "description": "Filter by sector (exact, case-insensitive)"},
-				"min_yield": map[string]any{"type": "number", "description": "Only stocks with dividend yield ≥ this %"},
-				"sort":      map[string]any{"type": "string", "enum": []string{"name", "price", "change", "yield"}, "description": "Sort key (default name)"},
-				"limit":     map[string]any{"type": "integer", "description": "Max results (default 100)"},
+				"sector":     map[string]any{"type": "string", "description": "Filter by GICS sector (exact, case-insensitive)"},
+				"min_yield":  map[string]any{"type": "number", "description": "Only stocks with dividend yield ≥ this %"},
+				"max_payout": map[string]any{"type": "number", "description": "Only stocks with payout ratio ≤ this %"},
+				"max_pe":     map[string]any{"type": "number", "description": "Only stocks with trailing P/E ≤ this (and > 0)"},
+				"min_growth": map[string]any{"type": "number", "description": "Only stocks with 5yr dividend CAGR ≥ this %"},
+				"sort":       map[string]any{"type": "string", "enum": []string{"name", "price", "change", "yield", "pe", "payout", "growth"}, "description": "Sort key (default name)"},
+				"limit":      map[string]any{"type": "integer", "description": "Max results (default: whole universe)"},
 			}, nil),
 			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) { return a.toolList(args) },
 		},
@@ -193,9 +221,11 @@ func (a *App) handleList(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("sort"); v != "" {
 		args["sort"] = v
 	}
-	if v := q.Get("min_yield"); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			args["min_yield"] = f
+	for _, k := range []string{"min_yield", "max_payout", "max_pe", "min_growth"} {
+		if v := q.Get(k); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				args[k] = f
+			}
 		}
 	}
 	if v := q.Get("limit"); v != "" {

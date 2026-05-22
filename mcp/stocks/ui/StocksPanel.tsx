@@ -32,6 +32,9 @@ interface Stock {
   price?: number;
   change_pct?: number;
   yield_pct?: number;
+  pe?: number;
+  payout_pct?: number;
+  growth_pct?: number;
 }
 
 interface StockDetail {
@@ -48,7 +51,10 @@ interface StockDetail {
   fifty_two_week_high: number;
   fifty_two_week_low: number;
   volume: number;
+  pe?: number;
+  payout_pct?: number;
   dividend_yield_pct?: number;
+  dividend_growth_5y_pct?: number;
   dividend_frequency: string;
   last_dividend?: { ex_date: number; amount: number } | null;
 }
@@ -65,6 +71,7 @@ interface DividendResp {
     payments: number;
     yield_pct?: number;
     growth_pct?: number;
+    cagr_5y_pct?: number;
     latest?: { ex_date: number; amount: number };
   };
   history: Dividend[];
@@ -133,6 +140,9 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
   const [sector, setSector] = useState("");
   const [sort, setSort] = useState("name");
   const [minYield, setMinYield] = useState("");
+  const [maxPayout, setMaxPayout] = useState("");
+  const [maxPE, setMaxPE] = useState("");
+  const [minGrowth, setMinGrowth] = useState("");
   const [query, setQuery] = useState("");
 
   const load = useCallback(async () => {
@@ -143,6 +153,9 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
       if (sector) p.set("sector", sector);
       if (sort) p.set("sort", sort);
       if (minYield) p.set("min_yield", minYield);
+      if (maxPayout) p.set("max_payout", maxPayout);
+      if (maxPE) p.set("max_pe", maxPE);
+      if (minGrowth) p.set("min_growth", minGrowth);
       const r = await fetch(`${API}/stocks?${p.toString()}`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
@@ -152,7 +165,7 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
     } finally {
       setLoading(false);
     }
-  }, [sector, sort, minYield]);
+  }, [sector, sort, minYield, maxPayout, maxPE, minGrowth]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -167,7 +180,7 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
   }, [stocks, query]);
 
   return (
-    <div className="p-4">
+    <div className="h-full overflow-y-auto p-4">
       <div className="mb-4 flex items-center gap-2">
         <svg {...ico} width={20} height={20} className="text-accent">
           <line x1="3" y1="3" x2="3" y2="21" /><line x1="3" y1="21" x2="21" y2="21" />
@@ -197,13 +210,14 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
           <option value="price">Sort: Price</option>
           <option value="change">Sort: Day change</option>
           <option value="yield">Sort: Yield</option>
+          <option value="pe">Sort: P/E (low→high)</option>
+          <option value="payout">Sort: Payout (low→high)</option>
+          <option value="growth">Sort: Div growth</option>
         </select>
-        <input
-          value={minYield}
-          onChange={(e) => setMinYield(e.target.value.replace(/[^0-9.]/g, ""))}
-          placeholder="Min yield %"
-          className="w-28 rounded-md border border-border bg-bg-input px-3 py-1.5 text-sm text-text placeholder:text-text-dim"
-        />
+        <NumFilter value={minYield} onChange={setMinYield} placeholder="Min yield %" />
+        <NumFilter value={maxPayout} onChange={setMaxPayout} placeholder="Max payout %" />
+        <NumFilter value={maxPE} onChange={setMaxPE} placeholder="Max P/E" />
+        <NumFilter value={minGrowth} onChange={setMinGrowth} placeholder="Min div growth %" />
         <button onClick={() => void load()}
           className="ml-auto flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm text-bg hover:bg-accent-hover">
           <svg {...ico}><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>
@@ -213,7 +227,7 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
 
       {error && <div className="mb-3 rounded-md border border-error bg-error/10 px-3 py-2 text-sm text-error">{error}</div>}
 
-      <div className="overflow-hidden rounded-lg border border-border bg-bg-card">
+      <div className="overflow-x-auto rounded-lg border border-border bg-bg-card">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-border text-xs uppercase tracking-wide text-text-muted">
@@ -223,24 +237,30 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
               <th className="px-3 py-2 text-right">Price</th>
               <th className="px-3 py-2 text-right">Day</th>
               <th className="px-3 py-2 text-right">Yield</th>
+              <th className="px-3 py-2 text-right">P/E</th>
+              <th className="px-3 py-2 text-right">Payout</th>
+              <th className="px-3 py-2 text-right">5Y Gr</th>
             </tr>
           </thead>
           <tbody>
             {loading && stocks.length === 0 && (
-              <tr><td colSpan={6} className="px-3 py-8 text-center text-text-muted">Loading the universe…</td></tr>
+              <tr><td colSpan={9} className="px-3 py-8 text-center text-text-muted">Loading the universe…</td></tr>
             )}
             {!loading && shown.length === 0 && (
-              <tr><td colSpan={6} className="px-3 py-8 text-center text-text-muted">No stocks match.</td></tr>
+              <tr><td colSpan={9} className="px-3 py-8 text-center text-text-muted">No stocks match.</td></tr>
             )}
             {shown.map((s) => (
               <tr key={s.symbol} onClick={() => onOpen(s.symbol)}
                 className="cursor-pointer border-b border-border-subtle hover:bg-bg-hover">
                 <td className="px-3 py-2 font-medium text-text">{s.symbol}</td>
-                <td className="px-3 py-2 text-text-muted">{s.name}</td>
+                <td className="max-w-[16rem] truncate px-3 py-2 text-text-muted">{s.name}</td>
                 <td className="px-3 py-2 text-text-dim">{s.sector}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-text">{fmtMoney(s.price, s.currency)}</td>
                 <td className="px-3 py-2 text-right tabular-nums" style={{ color: changeColor(s.change_pct) }}>{fmtPct(s.change_pct)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-text-muted">{fmtYield(s.yield_pct)}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-text-muted">{s.pe != null ? s.pe.toFixed(1) : "—"}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-text-muted">{fmtYield(s.payout_pct)}</td>
+                <td className="px-3 py-2 text-right tabular-nums" style={{ color: changeColor(s.growth_pct) }}>{fmtPct(s.growth_pct)}</td>
               </tr>
             ))}
           </tbody>
@@ -278,7 +298,7 @@ function Detail({ symbol, onBack }: { symbol: string; onBack: () => void }) {
   }, [symbol, range]);
 
   return (
-    <div className="p-4">
+    <div className="h-full overflow-y-auto p-4">
       <button onClick={onBack} className="mb-3 flex items-center gap-1 text-sm text-text-muted hover:text-text">
         <svg {...ico}><polyline points="15 18 9 12 15 6" /></svg> All stocks
       </button>
@@ -321,6 +341,8 @@ function Detail({ symbol, onBack }: { symbol: string; onBack: () => void }) {
         <Stat label="Day range" value={d ? `${fmtMoney(d.day_low, d.currency)} – ${fmtMoney(d.day_high, d.currency)}` : "—"} />
         <Stat label="52-week range" value={d ? `${fmtMoney(d.fifty_two_week_low, d.currency)} – ${fmtMoney(d.fifty_two_week_high, d.currency)}` : "—"} />
         <Stat label="Volume" value={fmtVolume(d?.volume)} />
+        <Stat label="P/E (TTM)" value={d?.pe != null ? d.pe.toFixed(1) : "—"} />
+        <Stat label="Payout ratio" value={fmtYield(d?.payout_pct)} />
         <Stat label="Dividend yield" value={fmtYield(d?.dividend_yield_pct)} />
         <Stat label="Frequency" value={d?.dividend_frequency ?? "—"} />
         <Stat label="Previous close" value={fmtMoney(d?.previous_close, d?.currency)} />
@@ -334,12 +356,16 @@ function Detail({ symbol, onBack }: { symbol: string; onBack: () => void }) {
         </div>
         {divs && divs.history.length > 0 ? (
           <>
-            <div className="mb-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="mb-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
               <Stat label="TTM / share" value={fmtMoney(divs.summary.trailing_12mo, d?.currency)} />
               <Stat label="Yield" value={fmtYield(divs.summary.yield_pct)} />
               <Stat label="Frequency" value={divs.summary.frequency} />
               <Stat label="YoY growth" value={fmtPct(divs.summary.growth_pct)} />
+              <Stat label="5yr growth (CAGR)" value={fmtPct(divs.summary.cagr_5y_pct)} />
+              <Stat label="Payments" value={String(divs.summary.payments)} />
             </div>
+            <div className="mb-1 text-xs uppercase tracking-wide text-text-dim">Payout history</div>
+            <DividendBars history={divs.history} />
             <div className="max-h-64 overflow-y-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -367,12 +393,46 @@ function Detail({ symbol, onBack }: { symbol: string; onBack: () => void }) {
   );
 }
 
+// NumFilter — a compact numeric screener input (digits + decimal only).
+function NumFilter({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder: string }) {
+  return (
+    <input
+      value={value}
+      onChange={(e) => onChange(e.target.value.replace(/[^0-9.]/g, ""))}
+      placeholder={placeholder}
+      className="w-32 rounded-md border border-border bg-bg-input px-3 py-1.5 text-sm text-text placeholder:text-text-dim"
+    />
+  );
+}
+
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-md border border-border-subtle bg-bg p-2.5">
       <div className="text-xs uppercase tracking-wide text-text-dim">{label}</div>
       <div className="mt-0.5 text-sm tabular-nums text-text">{value}</div>
     </div>
+  );
+}
+
+// Dividend payout bar chart — per-share amount per ex-date, oldest →
+// newest (last ~60 payments). Bars use the accent CSS var (Tailwind's
+// JIT doesn't reach this file).
+function DividendBars({ history }: { history: Dividend[] }) {
+  const data = useMemo(() => [...history].reverse().slice(-60), [history]);
+  if (data.length < 2) return null;
+  const W = 600, H = 120, pad = 4;
+  const max = Math.max(...data.map((d) => d.amount)) || 1;
+  const bw = (W - 2 * pad) / data.length;
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="mb-3 h-[120px] w-full" role="img">
+      {data.map((d, i) => {
+        const h = (d.amount / max) * (H - 2 * pad);
+        return (
+          <rect key={d.ex_date} x={pad + i * bw + bw * 0.15} y={H - pad - h}
+            width={Math.max(bw * 0.7, 0.5)} height={h} fill="var(--accent)" opacity={0.85} />
+        );
+      })}
+    </svg>
   );
 }
 

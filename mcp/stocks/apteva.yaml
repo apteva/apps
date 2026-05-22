@@ -2,16 +2,19 @@ schema: apteva-app/v1
 
 name: stocks
 display_name: Stocks
-version: 0.1.0
+version: 0.2.0
 description: |
-  Explore stocks, backed by Yahoo Finance. List and filter a universe of
-  tickers, open one stock to see its quote and key data, price chart, and
-  dividend history. Read-only — research only, never places orders.
+  Explore and screen stocks, backed by Yahoo Finance. Filter the S&P 1500
+  universe (every Dividend Aristocrat and King included) by dividend
+  yield, payout ratio, P/E, and 5-year dividend growth; open one stock to
+  see its quote, price chart, dividend payout chart, and full payment
+  history. Read-only — research only, never places orders.
 
-  v0.1 uses Yahoo's free, no-auth public endpoint directly (no binding
-  needed). v0.2 adds an optional equity-data integration (yahoo-finance /
-  finnhub) for richer fundamentals, and is designed to be registered as
-  the equity source behind market-intel's gateway.
+  All data is Yahoo's free public endpoints (no API key): /chart for
+  prices + dividends, and the cookie+crumb quoteSummary handshake for P/E
+  and payout ratio. A rate-limited background worker keeps the universe
+  snapshot warm. Designed to be registered as the equity source behind
+  market-intel's gateway.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/stocks
@@ -31,8 +34,8 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: search,    description: "Find stocks by symbol or name. Unknown-but-valid tickers are auto-added to the universe. Args: query, limit?." }
-    - { name: list,      description: "List/filter the universe with live price, day change, and dividend yield. Args: sector?, min_yield?, sort? (name|price|change|yield), limit?." }
-    - { name: get,       description: "One stock's data — name, exchange, price, day + 52-week range, volume, dividend yield + frequency, last dividend. Args: symbol." }
+    - { name: list,      description: "List/screen the S&P 1500 by yield, payout ratio, P/E, and 5yr dividend growth. Args: sector?, min_yield?, max_payout?, max_pe?, min_growth?, sort? (name|price|change|yield|pe|payout|growth), limit?." }
+    - { name: get,       description: "One stock's data — name, exchange, price, day + 52-week range, volume, P/E, payout, dividend yield + 5yr growth + frequency, last dividend. Args: symbol." }
     - { name: chart,     description: "OHLCV price history for a stock. Args: symbol, range? (1mo|6mo|1y|5y|max), interval? (1d|1wk|1mo)." }
     - { name: dividends, description: "Dividend history + summary (trailing-12mo total, yield, frequency, growth) for a stock. Args: symbol." }
   ui_panels:

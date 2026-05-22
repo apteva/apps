@@ -27,13 +27,19 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
 const yahooBase = "https://query1.finance.yahoo.com"
+
+// browserUA — Yahoo silently drops the Go default UA and gates the crumb
+// endpoint on a browser-ish agent.
+const browserUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
 type yahooClient struct {
 	base   string
@@ -42,12 +48,23 @@ type yahooClient struct {
 	// rate limit is ~2k/hour observed; capping at 4 in-flight keeps the
 	// universe warm-up well under that.
 	sem chan struct{}
+	// crumb + cookie state for the quoteSummary fundamentals endpoint,
+	// which (unlike /chart) requires the cookie+crumb handshake. Guarded
+	// by mu; cookies live in the client's jar. crumbRetryAt backs off the
+	// handshake after a failure (Yahoo throttles getcrumb hard) so the
+	// warmer doesn't hammer it once per symbol.
+	mu           sync.Mutex
+	crumb        string
+	crumbRetryAt time.Time
 }
 
+const crumbBackoff = 15 * time.Minute
+
 func newYahoo() *yahooClient {
+	jar, _ := cookiejar.New(nil)
 	return &yahooClient{
 		base:   yahooBase,
-		client: &http.Client{Timeout: 8 * time.Second},
+		client: &http.Client{Timeout: 8 * time.Second, Jar: jar},
 		sem:    make(chan struct{}, 4),
 	}
 }
@@ -185,7 +202,13 @@ func (y *yahooClient) fetchChart(symbol, rng, interval string, withDivs bool) (*
 		InstrumentType:   r.Meta.InstrumentType,
 		Name:             orStr(r.Meta.LongName, r.Meta.ShortName),
 		Price:            r.Meta.RegularMarketPrice,
-		PreviousClose:    orFloat(r.Meta.PreviousClose, r.Meta.ChartPreviousClose),
+		// previousClose is the *prior trading day's* close — but Yahoo only
+		// populates it on intraday ranges; on daily ranges it's null. Do NOT
+		// fall back to chartPreviousClose here: that's the close before the
+		// whole range window (≈1y ago for range=1y), which would turn the day
+		// change into a 1-year return. Callers derive the real prior close
+		// from the bars when this is 0 (see dayChange).
+		PreviousClose:    r.Meta.PreviousClose,
 		DayHigh:          r.Meta.RegularMarketDayHigh,
 		DayLow:           r.Meta.RegularMarketDayLow,
 		Volume:           r.Meta.RegularMarketVolume,
@@ -229,4 +252,134 @@ func (y *yahooClient) fetchChart(symbol, rng, interval string, withDivs bool) (*
 	sort.Slice(out.Dividends, func(i, j int) bool { return out.Dividends[i].ExDate < out.Dividends[j].ExDate })
 
 	return out, nil
+}
+
+// ─── Fundamentals (P/E, payout) via cookie+crumb quoteSummary ───────
+//
+// Yahoo's /v10/finance/quoteSummary endpoint carries the fundamentals
+// /chart doesn't (trailing P/E, payout ratio) but gates them behind a
+// cookie+crumb handshake — the same one yahoo-finance2 performs: seed an
+// A1/A3 cookie from a quote page, exchange it for a crumb at
+// /v1/test/getcrumb, then pass the crumb on every quoteSummary call. The
+// crumb is cached and only re-fetched on a 401. Every error degrades
+// gracefully (caller leaves P/E / payout blank).
+
+// ensureCrumb returns a cached crumb, fetching one if absent.
+func (y *yahooClient) ensureCrumb() (string, error) {
+	y.mu.Lock()
+	defer y.mu.Unlock()
+	if y.crumb != "" {
+		return y.crumb, nil
+	}
+	if time.Now().Before(y.crumbRetryAt) {
+		return "", fmt.Errorf("crumb handshake backing off until %s", y.crumbRetryAt.Format(time.RFC3339))
+	}
+	// On any failure below, back off so a throttled getcrumb isn't
+	// re-hit once per symbol (which would perpetuate the throttle).
+	fail := func(err error) (string, error) {
+		y.crumbRetryAt = time.Now().Add(crumbBackoff)
+		return "", err
+	}
+	// Seed cookies from a quote page into the client's jar.
+	if req, err := http.NewRequest(http.MethodGet, "https://finance.yahoo.com/quote/AAPL", nil); err == nil {
+		req.Header.Set("User-Agent", browserUA)
+		if resp, err := y.client.Do(req); err == nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+			resp.Body.Close()
+		}
+	}
+	req, _ := http.NewRequest(http.MethodGet, "https://query2.finance.yahoo.com/v1/test/getcrumb", nil)
+	req.Header.Set("User-Agent", browserUA)
+	resp, err := y.client.Do(req)
+	if err != nil {
+		return fail(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fail(fmt.Errorf("getcrumb HTTP %d", resp.StatusCode))
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	crumb := strings.TrimSpace(string(b))
+	if crumb == "" || strings.ContainsAny(crumb, "<{") {
+		return fail(fmt.Errorf("getcrumb returned no usable crumb"))
+	}
+	y.crumb = crumb
+	y.crumbRetryAt = time.Time{}
+	return crumb, nil
+}
+
+func (y *yahooClient) clearCrumb() {
+	y.mu.Lock()
+	y.crumb = ""
+	y.mu.Unlock()
+}
+
+// fundamentals returns trailing P/E and payout ratio (as a percentage)
+// for a symbol. Either may be nil when Yahoo doesn't report it; an error
+// means the whole fetch failed (throttle, crumb) and the caller should
+// leave both blank.
+func (y *yahooClient) fundamentals(symbol string) (pe *float64, payoutPct *float64, err error) {
+	crumb, err := y.ensureCrumb()
+	if err != nil {
+		return nil, nil, err
+	}
+	pe, payoutPct, status, err := y.fetchSummary(symbol, crumb)
+	if status == http.StatusUnauthorized {
+		// Stale crumb — refresh once and retry.
+		y.clearCrumb()
+		if crumb, err = y.ensureCrumb(); err == nil {
+			pe, payoutPct, _, err = y.fetchSummary(symbol, crumb)
+		}
+	}
+	return pe, payoutPct, err
+}
+
+func (y *yahooClient) fetchSummary(symbol, crumb string) (pe *float64, payoutPct *float64, status int, err error) {
+	u := y.base + "/v10/finance/quoteSummary/" + url.PathEscape(strings.ToUpper(symbol)) +
+		"?modules=summaryDetail&crumb=" + url.QueryEscape(crumb)
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req.Header.Set("User-Agent", browserUA)
+	resp, err := y.client.Do(req)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	defer resp.Body.Close()
+	status = resp.StatusCode
+	if status != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 512))
+		return nil, nil, status, fmt.Errorf("quoteSummary HTTP %d", status)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, nil, status, err
+	}
+	var doc struct {
+		QuoteSummary struct {
+			Result []struct {
+				SummaryDetail struct {
+					TrailingPE  struct{ Raw float64 `json:"raw"` } `json:"trailingPE"`
+					PayoutRatio struct{ Raw float64 `json:"raw"` } `json:"payoutRatio"`
+				} `json:"summaryDetail"`
+			} `json:"result"`
+		} `json:"quoteSummary"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, nil, status, err
+	}
+	if len(doc.QuoteSummary.Result) == 0 {
+		return nil, nil, status, fmt.Errorf("quoteSummary: empty result for %s", symbol)
+	}
+	sd := doc.QuoteSummary.Result[0].SummaryDetail
+	if sd.TrailingPE.Raw > 0 {
+		v := sd.TrailingPE.Raw
+		pe = &v
+	}
+	// payoutRatio is a fraction (0.45 = 45%); store as a percentage.
+	if sd.PayoutRatio.Raw > 0 {
+		v := sd.PayoutRatio.Raw * 100
+		payoutPct = &v
+	}
+	return pe, payoutPct, status, nil
 }
