@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: content
 display_name: Content
-version: 2.9.1
+version: 2.9.2
 description: |
   Block-based CMS for Apteva. Posts, pages, media, taxonomies, menus,
   revisions, redirects. Renders themed HTML and exposes a headless REST
@@ -53,6 +53,13 @@ requires:
       capabilities: [contacts.read, lists.read]
       required: false
       label: "CRM (subscribers + forms)"
+    - role: identity
+      kind: app
+      compatible_app_names: [auth]
+      capabilities: [users.create]
+      required: false
+      label: "Auth (signup forms)"
+      hint: "When bound, core/form blocks can target auth_public_signup as an action — visitor signup creates a real user + mints session tokens. Without it, form actions that call auth fail with 'app not bound'."
     - role: seo
       kind: app
       compatible_app_names: [seo]
