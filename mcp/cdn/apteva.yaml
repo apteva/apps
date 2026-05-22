@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: cdn
 display_name: CDN
-version: 0.2.0
+version: 0.2.1
 description: |
   Public-facing edge for apps that emit URLs. Composes domains (DNS),
   certs (TLS), and routes (host-based reverse-proxy) into one

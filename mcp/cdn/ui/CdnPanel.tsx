@@ -17,7 +17,8 @@ interface NativePanelProps {
 interface Zone {
   id: number;
   hostname: string;
-  origin_url: string;
+  origin_url?: string;
+  origin_app?: string;
   record_type: string;
   record_value: string;
   allow_http?: boolean;
@@ -155,14 +156,21 @@ export default function CdnPanel({ projectId }: NativePanelProps) {
   const addZone = useCallback(
     async (
       hostname: string,
-      originURL: string,
+      originType: "app" | "url",
+      originValue: string,
       recordType: string,
       allowHTTP: boolean,
       skipDNS: boolean,
     ) => {
+      // Origin is one-of: an installed app name (server resolves its
+      // live sidecar) or a static URL.
+      const origin =
+        originType === "app"
+          ? { origin_app: originValue }
+          : { origin_url: originValue };
       await callTool("cdn_zone_create", {
         hostname,
-        origin_url: originURL,
+        ...origin,
         record_type: recordType,
         allow_http: allowHTTP,
         skip_dns: skipDNS,
@@ -251,7 +259,9 @@ export default function CdnPanel({ projectId }: NativePanelProps) {
                       {z.record_type} → {z.record_value || "(skip_dns)"}
                     </div>
                   </td>
-                  <td className="px-4 py-2 font-mono text-text-dim break-all">{z.origin_url}</td>
+                  <td className="px-4 py-2 font-mono text-text-dim break-all">
+                    {z.origin_app ? `app://${z.origin_app}` : z.origin_url}
+                  </td>
                   <td className="px-4 py-2 whitespace-nowrap"><LegBadge value={z.dns_status} /></td>
                   <td className="px-4 py-2 whitespace-nowrap"><LegBadge value={z.cert_status} /></td>
                   <td className="px-4 py-2 whitespace-nowrap"><LegBadge value={z.route_status} /></td>
@@ -318,13 +328,16 @@ function AddZoneForm({
 }: {
   onAdd: (
     hostname: string,
-    originURL: string,
+    originType: "app" | "url",
+    originValue: string,
     recordType: string,
     allowHTTP: boolean,
     skipDNS: boolean,
   ) => Promise<void>;
 }) {
   const [hostname, setHostname] = useState("");
+  const [originType, setOriginType] = useState<"app" | "url">("app");
+  const [originApp, setOriginApp] = useState("");
   const [originURL, setOriginURL] = useState("");
   const [recordType, setRecordType] = useState("A");
   const [allowHTTP, setAllowHTTP] = useState(false);
@@ -332,14 +345,18 @@ function AddZoneForm({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
+  const originValue = originType === "app" ? originApp : originURL;
+  const ready = hostname.trim() !== "" && originValue.trim() !== "";
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!hostname.trim() || !originURL.trim()) return;
+    if (!ready) return;
     setBusy(true);
     setErr("");
     try {
-      await onAdd(hostname.trim(), originURL.trim(), recordType, allowHTTP, skipDNS);
+      await onAdd(hostname.trim(), originType, originValue.trim(), recordType, allowHTTP, skipDNS);
       setHostname("");
+      setOriginApp("");
       setOriginURL("");
       setAllowHTTP(false);
       setSkipDNS(false);
@@ -362,14 +379,37 @@ function AddZoneForm({
         />
       </label>
       <label className="block">
-        <div className="text-xs text-text-dim mb-1">Origin URL</div>
-        <input
-          className={inputCls + " w-72 font-mono"}
-          value={originURL}
-          onChange={(e) => setOriginURL(e.target.value)}
-          placeholder="http://127.0.0.1:8080"
-        />
+        <div className="text-xs text-text-dim mb-1">Origin</div>
+        <select
+          className={inputCls + " w-28"}
+          value={originType}
+          onChange={(e) => setOriginType(e.target.value as "app" | "url")}
+        >
+          <option value="app">App</option>
+          <option value="url">URL</option>
+        </select>
       </label>
+      {originType === "app" ? (
+        <label className="block">
+          <div className="text-xs text-text-dim mb-1">App name</div>
+          <input
+            className={inputCls + " w-56 font-mono"}
+            value={originApp}
+            onChange={(e) => setOriginApp(e.target.value)}
+            placeholder="storage"
+          />
+        </label>
+      ) : (
+        <label className="block">
+          <div className="text-xs text-text-dim mb-1">Origin URL</div>
+          <input
+            className={inputCls + " w-72 font-mono"}
+            value={originURL}
+            onChange={(e) => setOriginURL(e.target.value)}
+            placeholder="http://127.0.0.1:8080"
+          />
+        </label>
+      )}
       <label className="block">
         <div className="text-xs text-text-dim mb-1">DNS type</div>
         <select
@@ -402,11 +442,16 @@ function AddZoneForm({
       </div>
       <button
         type="submit"
-        disabled={busy || !hostname.trim() || !originURL.trim()}
+        disabled={busy || !ready}
         className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50"
       >
         {busy ? "Creating…" : "Create zone"}
       </button>
+      <div className="w-full text-xs text-text-dim">
+        {originType === "app"
+          ? "App origin: the server resolves the app's live sidecar each request (survives restarts). For local-dev, tick allow_http + skip_dns and reach it with a Host header."
+          : "URL origin: a static http(s)://host:port the edge reverse-proxies to."}
+      </div>
       {err && <div className="text-xs text-red-400 w-full">{err}</div>}
     </form>
   );

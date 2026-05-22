@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: cdn
 display_name: CDN
-version: 0.2.0
+version: 0.2.1
 description: |
   Public-facing edge for apps that emit URLs. v0.1: local-mode only
   — apteva-server is the origin, no third-party provider, no edge
