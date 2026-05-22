@@ -337,6 +337,8 @@ INIT_CODE=$(curl -sS -o "$INIT_BODY_FILE" -w "%{http_code}" \
   -H "Content-Type: application/json" \
   -d "{\"name\":\"$NAME\",\"folder\":\"$FOLDER\",\"content_type\":\"$CT\",\"size_bytes\":$SIZE,\"sha256\":\"$SHA\",\"visibility\":\"private\",\"source\":\"media-render\",\"tags\":[\"render\"]}" \
   "$STORAGE_BASE/files/init?project_id=$PROJECT_ID" || echo 000)
+FILE_ID=""
+NEED_MULTIPART=1
 if [ "$INIT_CODE" = "200" ]; then
   UPLOAD_URL=$(sed -n 's/.*"upload_url":[[:space:]]*"\([^"]*\)".*/\1/p' "$INIT_BODY_FILE")
   # Decode JSON-escaped ampersands. Go's encoding/json escapes & as
@@ -347,19 +349,28 @@ if [ "$INIT_CODE" = "200" ]; then
   # used in S3 URLs but cost nothing to handle defensively.
   UPLOAD_URL=$(printf '%s' "$UPLOAD_URL" | sed -e 's/\\u0026/\&/g' -e 's/\\u003c/</g' -e 's/\\u003e/>/g')
   UPLOAD_ID=$(sed -n 's/.*"upload_id":[[:space:]]*"\([^"]*\)".*/\1/p' "$INIT_BODY_FILE")
-  rm -f "$INIT_BODY_FILE"
-  if [ -z "$UPLOAD_URL" ] || [ -z "$UPLOAD_ID" ]; then
-    echo "STORAGE_INIT_PARSE_FAILED" >&2; exit 1
+  if [ -n "$UPLOAD_URL" ] && [ -n "$UPLOAD_ID" ]; then
+    NEED_MULTIPART=0
+    curl -sS --fail -X PUT -H "Content-Type: $CT" --upload-file "$OUT" "$UPLOAD_URL"
+    FIN_BODY=$(curl -sS --fail -X POST \
+      -H "Authorization: Bearer $STORAGE_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "{\"sha256\":\"$SHA\"}" \
+      "$STORAGE_BASE/files/$UPLOAD_ID/finalize?project_id=$PROJECT_ID")
+    FILE_ID=$(echo "$FIN_BODY" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)
+  else
+    # init returned 200 but not storage's presigned JSON — e.g. a
+    # tunnel/proxy interstitial or an SPA fallback page reached the
+    # remote box instead of storage. Surface exactly what came back
+    # (the old "STORAGE_INIT_PARSE_FAILED" threw the body away, which
+    # made this undiagnosable), then fall through to the multipart
+    # proxy upload below — it hits a different endpoint and may still
+    # succeed.
+    echo "STORAGE_INIT_UNPARSEABLE code=$INIT_CODE body[0:200]=$(head -c 200 "$INIT_BODY_FILE" | tr '\n\r\t' '   ')" >&2
   fi
-  curl -sS --fail -X PUT -H "Content-Type: $CT" --upload-file "$OUT" "$UPLOAD_URL"
-  FIN_BODY=$(curl -sS --fail -X POST \
-    -H "Authorization: Bearer $STORAGE_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "{\"sha256\":\"$SHA\"}" \
-    "$STORAGE_BASE/files/$UPLOAD_ID/finalize?project_id=$PROJECT_ID")
-  FILE_ID=$(echo "$FIN_BODY" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)
-else
-  rm -f "$INIT_BODY_FILE"
+fi
+rm -f "$INIT_BODY_FILE"
+if [ "$NEED_MULTIPART" = "1" ]; then
   RESP=$(curl -sS --fail -X POST \
     -H "Authorization: Bearer $STORAGE_TOKEN" \
     -F "folder=$FOLDER" \
