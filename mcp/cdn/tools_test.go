@@ -243,6 +243,86 @@ func TestZoneCreate_HappyPath_InjectsProjectIDOnAllLegs(t *testing.T) {
 	}
 }
 
+func TestZoneCreate_OriginApp_RegistersAppTarget(t *testing.T) {
+	p := newRecordingPlatform()
+	ctx := newCdnCtx(t, p, nil) // skip_dns avoids needing server_public_host
+	app := &App{}
+
+	out, err := app.toolZoneCreate(ctx, map[string]any{
+		"hostname":   "files.acme.com",
+		"origin_app": "storage",
+		"skip_dns":   true,
+		"allow_http": true,
+	})
+	if err != nil {
+		t.Fatalf("toolZoneCreate: %v", err)
+	}
+	z := out.(map[string]any)["zone"].(*Zone)
+	if z.OriginApp != "storage" || z.OriginURL != "" {
+		t.Errorf("zone origin_app=%q origin_url=%q, want storage / empty", z.OriginApp, z.OriginURL)
+	}
+	if z.RouteStatus != "ok" {
+		t.Errorf("route status=%q, want ok (detail: %s)", z.RouteStatus, z.StatusDetail)
+	}
+	// The route must be registered with an app:// target so the server
+	// resolves the live sidecar port — NOT a frozen host:port.
+	routesCall := p.callsTo("routes", "routes_register")[0]
+	if routesCall.Input["target"] != "app://storage?project_id=test-proj" {
+		t.Errorf("routes_register target = %v, want app://storage?project_id=test-proj", routesCall.Input["target"])
+	}
+}
+
+func TestLinkApp_CreatesAppZoneAndReportsConfigStep(t *testing.T) {
+	p := newRecordingPlatform()
+	ctx := newCdnCtx(t, p, nil)
+	app := &App{}
+
+	out, err := app.toolLinkApp(ctx, map[string]any{
+		"app":        "storage",
+		"hostname":   "files.acme.com",
+		"skip_dns":   true,
+		"allow_http": true,
+	})
+	if err != nil {
+		t.Fatalf("toolLinkApp: %v", err)
+	}
+	m := out.(map[string]any)
+	z := m["zone"].(*Zone)
+	if z.OriginApp != "storage" {
+		t.Errorf("zone origin_app=%q, want storage", z.OriginApp)
+	}
+	// Registered with an app:// target (project-scoped).
+	if tgt := p.callsTo("routes", "routes_register")[0].Input["target"]; tgt != "app://storage?project_id=test-proj" {
+		t.Errorf("route target=%v, want app://storage?project_id=test-proj", tgt)
+	}
+	// The remaining operator step is surfaced, not applied.
+	link := m["link"].(map[string]any)
+	if link["config_key"] != "cdn_zone_id" || link["config_value"] != z.ID {
+		t.Errorf("link hint = %+v, want cdn_zone_id=%d", link, z.ID)
+	}
+}
+
+func TestZoneCreate_OneOfOrigin(t *testing.T) {
+	app := &App{}
+	cases := []struct {
+		name string
+		args map[string]any
+	}{
+		{"neither", map[string]any{"hostname": "x.acme.com", "skip_dns": true}},
+		{"both", map[string]any{"hostname": "x.acme.com", "skip_dns": true,
+			"origin_url": "http://127.0.0.1:8080", "origin_app": "storage"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := newCdnCtx(t, newRecordingPlatform(), nil)
+			_, err := app.toolZoneCreate(ctx, c.args)
+			if err == nil || !strings.Contains(err.Error(), "exactly one of origin_url or origin_app") {
+				t.Errorf("err=%v, want one-of validation error", err)
+			}
+		})
+	}
+}
+
 func TestZoneCreate_RequiresServerPublicHost(t *testing.T) {
 	p := newRecordingPlatform()
 	ctx := newCdnCtx(t, p, nil) // no server_public_host
@@ -462,7 +542,6 @@ func TestURLFor_AllowHTTP_BuildsHTTPURL(t *testing.T) {
 		t.Errorf("url=%q, want %q (allow_http zone should mint http://)", got, want)
 	}
 }
-
 
 // ─── cdn_zone_list / get / delete ─────────────────────────────────
 

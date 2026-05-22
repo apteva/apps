@@ -17,7 +17,8 @@ type Zone struct {
 	ID           int64  `json:"id"`
 	ProjectID    string `json:"project_id,omitempty"`
 	Hostname     string `json:"hostname"`
-	OriginURL    string `json:"origin_url"`
+	OriginURL    string `json:"origin_url,omitempty"`
+	OriginApp    string `json:"origin_app,omitempty"`
 	RecordType   string `json:"record_type"`
 	RecordValue  string `json:"record_value"`
 	AllowHTTP    bool   `json:"allow_http"`
@@ -72,6 +73,45 @@ func validateOriginURL(s string) error {
 	return nil
 }
 
+// validateOriginApp checks an app-name origin (e.g. "storage",
+// "media-studio"). App names are lowercase alphanumerics plus dashes,
+// no scheme/host/port — the live sidecar address is resolved by
+// apteva-server at request time from the app name alone.
+func validateOriginApp(s string) error {
+	if s == "" {
+		return errors.New("origin_app required")
+	}
+	if strings.ContainsAny(s, " \t\r\n/:@") || strings.Contains(s, "://") {
+		return errors.New("origin_app must be a bare app name (no scheme, host, port, or path)")
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+			return fmt.Errorf("origin_app %q: only lowercase letters, digits, and dashes allowed", s)
+		}
+	}
+	if s[0] == '-' || s[len(s)-1] == '-' {
+		return errors.New("origin_app must not start or end with a dash")
+	}
+	return nil
+}
+
+// routeTarget returns the string handed to routes.routes_register as
+// the proxy target. For an app-origin zone it's
+// "app://<name>?project_id=<pid>" — the server resolves the named
+// app's LIVE sidecar for that project at request time (project_id
+// disambiguates project-scoped apps like storage). For a url-origin
+// zone it's the literal origin_url.
+func routeTarget(z *Zone) string {
+	if z.OriginApp == "" {
+		return z.OriginURL
+	}
+	t := "app://" + z.OriginApp
+	if z.ProjectID != "" {
+		t += "?project_id=" + url.QueryEscape(z.ProjectID)
+	}
+	return t
+}
+
 // splitApex splits "files.acme.com" into apex="acme.com" and sub="files".
 // For an apex hostname ("acme.com"), sub is "".
 //
@@ -92,14 +132,14 @@ func splitApex(hostname string) (apex, sub string) {
 
 const zoneSelectCols = `id, project_id, hostname, origin_url, record_type,
 		record_value, allow_http, status, status_detail, dns_status, cert_status, route_status,
-		COALESCE(created_at,''), COALESCE(updated_at,'')`
+		COALESCE(created_at,''), COALESCE(updated_at,''), COALESCE(origin_app,'')`
 
 func scanZone(s interface{ Scan(...any) error }) (*Zone, error) {
 	z := &Zone{}
 	var allow int
 	err := s.Scan(&z.ID, &z.ProjectID, &z.Hostname, &z.OriginURL, &z.RecordType,
 		&z.RecordValue, &allow, &z.Status, &z.StatusDetail, &z.DNSStatus, &z.CertStatus, &z.RouteStatus,
-		&z.CreatedAt, &z.UpdatedAt)
+		&z.CreatedAt, &z.UpdatedAt, &z.OriginApp)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -116,10 +156,10 @@ func dbInsertZone(db *sql.DB, z *Zone) (int64, error) {
 		allow = 1
 	}
 	res, err := db.Exec(
-		`INSERT INTO zones (project_id, hostname, origin_url, record_type, record_value,
+		`INSERT INTO zones (project_id, hostname, origin_url, origin_app, record_type, record_value,
 			allow_http, status, status_detail, dns_status, cert_status, route_status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		z.ProjectID, z.Hostname, z.OriginURL, z.RecordType, z.RecordValue,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		z.ProjectID, z.Hostname, z.OriginURL, z.OriginApp, z.RecordType, z.RecordValue,
 		allow, z.Status, z.StatusDetail, z.DNSStatus, z.CertStatus, z.RouteStatus,
 	)
 	if err != nil {

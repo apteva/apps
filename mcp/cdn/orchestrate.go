@@ -105,14 +105,18 @@ func revokeCert(ctx *sdk.AppCtx, projectID, hostname string) error {
 
 // registerRoute wires the host→target mapping into the routes app.
 // On success, apteva-server's HostRouter picks up the change via
-// the routes.changed event and starts reverse-proxying to
-// originURL. owner_install_id is required by the routes app so
-// it can refuse cross-owner overwrites.
+// the routes.changed event and starts reverse-proxying to the
+// target. owner_install_id is required by the routes app so it can
+// refuse cross-owner overwrites.
+//
+// target is either a literal http(s)://host:port (url-origin zones)
+// or "app://<name>" (app-origin zones — the server resolves the live
+// sidecar port at request time). See store.go::routeTarget.
 //
 // allowHTTP=true tells routes (and through it, apteva-server's
 // HostRouter) to serve over plain HTTP without the 301 to HTTPS
 // — used by local-dev zones that skip the cert leg.
-func registerRoute(ctx *sdk.AppCtx, projectID, hostname, originURL string, allowHTTP bool) error {
+func registerRoute(ctx *sdk.AppCtx, projectID, hostname, target string, allowHTTP bool) error {
 	myID := myInstallID()
 	if myID == 0 {
 		return errors.New("APTEVA_INSTALL_ID not set; cdn can't register routes without an owner id")
@@ -120,7 +124,7 @@ func registerRoute(ctx *sdk.AppCtx, projectID, hostname, originURL string, allow
 	args := map[string]any{
 		"_project_id":      projectID,
 		"hostname":         hostname,
-		"target":           originURL,
+		"target":           target,
 		"owner_install_id": myID,
 		"owner_kind":       "cdn",
 		"cert_fqdn":        hostname,

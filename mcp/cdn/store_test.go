@@ -46,6 +46,33 @@ func TestValidateOriginURL(t *testing.T) {
 	}
 }
 
+func TestValidateOriginApp(t *testing.T) {
+	good := []string{"storage", "media", "media-studio", "app1", "x"}
+	for _, s := range good {
+		if err := validateOriginApp(s); err != nil {
+			t.Errorf("validateOriginApp(%q) = %v, want nil", s, err)
+		}
+	}
+	bad := []string{"", "Storage", "stor age", "app/x", "app:8080", "http://x", "-app", "app-", "app_name"}
+	for _, s := range bad {
+		if err := validateOriginApp(s); err == nil {
+			t.Errorf("validateOriginApp(%q) = nil, want error", s)
+		}
+	}
+}
+
+func TestRouteTarget(t *testing.T) {
+	if got := routeTarget(&Zone{OriginApp: "storage"}); got != "app://storage" {
+		t.Errorf("app-origin (no project) target = %q, want app://storage", got)
+	}
+	if got := routeTarget(&Zone{OriginApp: "storage", ProjectID: "p1"}); got != "app://storage?project_id=p1" {
+		t.Errorf("app-origin target = %q, want app://storage?project_id=p1", got)
+	}
+	if got := routeTarget(&Zone{OriginURL: "http://127.0.0.1:8080"}); got != "http://127.0.0.1:8080" {
+		t.Errorf("url-origin target = %q, want the url", got)
+	}
+}
+
 func TestSplitApex(t *testing.T) {
 	cases := []struct {
 		host string

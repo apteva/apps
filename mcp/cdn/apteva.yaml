@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: cdn
 display_name: CDN
-version: 0.1.0
+version: 0.2.0
 description: |
   Public-facing edge for apps that emit URLs. Composes domains (DNS),
   certs (TLS), and routes (host-based reverse-proxy) into one
@@ -59,11 +59,15 @@ provides:
   mcp_tools:
     - name: cdn_zone_create
       description: |
-        Stand up a public hostname for an origin URL. Writes DNS via
+        Stand up a public hostname for an origin. Writes DNS via
         domains (A record to server_public_host), issues TLS via
-        certs, registers the host→target route via routes. Args:
-        hostname (FQDN), origin_url (http(s):// URL the edge should
-        reverse-proxy to), record_type? (A | CNAME, default A).
+        certs, registers the host→target route via routes. Origin is
+        one-of: origin_url (static http(s)://host:port) OR origin_app
+        (an installed app name, e.g. "storage" — the server resolves
+        its live sidecar port at request time, surviving restarts;
+        prefer this for fronting another Apteva app). Args: hostname
+        (FQDN), origin_url? | origin_app? (exactly one), record_type?
+        (A | CNAME, default A), skip_dns?, allow_http?.
       requires: zones.write
     - name: cdn_zone_get
       description: "Fetch one zone by id or hostname. Args: id OR hostname."
@@ -86,6 +90,14 @@ provides:
         with /). Returns { url }.
       requires: zones.read
       resource_from: "zone/{arg.zone_id}"
+    - name: cdn_link_app
+      description: |
+        Front an installed app on a public hostname in one call:
+        creates an app-origin zone (origin_app=<app>) and returns the
+        zone plus the one operator step left — set the consumer app's
+        URL config to this zone (storage uses cdn_zone_id). Args: app,
+        hostname (FQDN), skip_dns?, allow_http?, record_type?.
+      requires: zones.write
   ui_panels:
     - { slot: project.page, label: CDN, icon: cloud, entry: /ui/CdnPanel.mjs }
   skills:

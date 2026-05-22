@@ -16,21 +16,25 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "cdn_zone_create",
-			Description: "Stand up a public hostname for an origin URL. Writes DNS via domains (A or CNAME), issues TLS via certs, " +
+			Description: "Stand up a public hostname for an origin. Writes DNS via domains (A or CNAME), issues TLS via certs, " +
 				"registers the host→target route via routes. apteva-server's HostRouter then reverse-proxies inbound traffic. " +
 				"For local-dev installs without domains/certs bound, pass skip_dns:true + allow_http:true and resolve the hostname " +
 				"via /etc/hosts. The route leg is the only one that must land — dns and cert failures don't block 'active' status. " +
-				"Args: hostname (FQDN), origin_url (http(s):// reverse-proxy target), record_type? (A | CNAME, default A), " +
+				"Origin is one-of: origin_url (a static http(s)://host:port target) OR origin_app (the name of an installed app, " +
+				"e.g. \"storage\" — apteva-server resolves the app's LIVE sidecar port at request time, so the zone survives app " +
+				"restarts/redeploys; prefer this for fronting another Apteva app). " +
+				"Args: hostname (FQDN), origin_url? | origin_app? (exactly one), record_type? (A | CNAME, default A), " +
 				"skip_dns? (default false; true skips the DNS write — required if domains app isn't installed), " +
 				"allow_http? (default false; true serves over plain HTTP, skips cert issuance, no HTTPS redirect — " +
 				"required if certs app isn't installed). Returns the created zone row.",
 			InputSchema: schemaObject(map[string]any{
 				"hostname":    map[string]any{"type": "string"},
 				"origin_url":  map[string]any{"type": "string"},
+				"origin_app":  map[string]any{"type": "string"},
 				"record_type": map[string]any{"type": "string"},
 				"skip_dns":    map[string]any{"type": "boolean"},
 				"allow_http":  map[string]any{"type": "boolean"},
-			}, []string{"hostname", "origin_url"}),
+			}, []string{"hostname"}),
 			Handler: a.toolZoneCreate,
 		},
 		{
@@ -69,7 +73,59 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"zone_id", "origin_path"}),
 			Handler: a.toolURLFor,
 		},
+		{
+			Name: "cdn_link_app",
+			Description: "Front an installed app on a public hostname in one call: creates an app-origin zone " +
+				"(origin_app=<app>, so the server resolves the app's live sidecar) and returns the zone plus the one " +
+				"operator step left — pointing the consumer app's URL config at this zone (storage uses cdn_zone_id). " +
+				"Apps can't write each other's install config, so that flip is surfaced as `link`, not applied. " +
+				"Args: app (installed app name, e.g. \"storage\"), hostname (FQDN), skip_dns?, allow_http?, record_type?.",
+			InputSchema: schemaObject(map[string]any{
+				"app":         map[string]any{"type": "string"},
+				"hostname":    map[string]any{"type": "string"},
+				"skip_dns":    map[string]any{"type": "boolean"},
+				"allow_http":  map[string]any{"type": "boolean"},
+				"record_type": map[string]any{"type": "string"},
+			}, []string{"app", "hostname"}),
+			Handler: a.toolLinkApp,
+		},
 	}
+}
+
+// toolLinkApp is a turnkey wrapper over cdn_zone_create for the common
+// "expose another Apteva app on a hostname" case. It stands up an
+// app-origin zone and reports the single remaining operator step: the
+// consumer app must point its URL-minting config at this zone (storage
+// reads cdn_zone_id). The SDK has no cross-app config write, so this
+// tool surfaces that step rather than performing it.
+func (a *App) toolLinkApp(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	app := strings.TrimSpace(strings.ToLower(strArg(args, "app")))
+	if app == "" {
+		return nil, errors.New("app required")
+	}
+	zoneArgs := map[string]any{
+		"hostname":   strArg(args, "hostname"),
+		"origin_app": app,
+	}
+	for _, k := range []string{"_project_id", "skip_dns", "allow_http", "record_type"} {
+		if v, ok := args[k]; ok {
+			zoneArgs[k] = v
+		}
+	}
+	res, err := a.toolZoneCreate(ctx, zoneArgs)
+	if err != nil {
+		return nil, err
+	}
+	m := res.(map[string]any)
+	z := m["zone"].(*Zone)
+	m["link"] = map[string]any{
+		"app":          app,
+		"config_key":   "cdn_zone_id",
+		"config_value": z.ID,
+		"next_step": fmt.Sprintf("Set the %q app's install config cdn_zone_id=%d so it mints URLs on https://%s/...",
+			app, z.ID, z.Hostname),
+	}
+	return m, nil
 }
 
 // ─── handlers ─────────────────────────────────────────────────────
@@ -83,8 +139,18 @@ func (a *App) toolZoneCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err := validateHostname(hostname); err != nil {
 		return nil, err
 	}
+	// Origin is one-of: a static origin_url (http(s)://host:port) OR an
+	// app name (origin_app, resolved to the live sidecar by the server).
 	originURL := strings.TrimSpace(strArg(args, "origin_url"))
-	if err := validateOriginURL(originURL); err != nil {
+	originApp := strings.TrimSpace(strings.ToLower(strArg(args, "origin_app")))
+	if (originURL == "") == (originApp == "") {
+		return nil, errors.New("provide exactly one of origin_url or origin_app")
+	}
+	if originApp != "" {
+		if err := validateOriginApp(originApp); err != nil {
+			return nil, err
+		}
+	} else if err := validateOriginURL(originURL); err != nil {
 		return nil, err
 	}
 
@@ -117,6 +183,7 @@ func (a *App) toolZoneCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		ProjectID:   pid,
 		Hostname:    hostname,
 		OriginURL:   originURL,
+		OriginApp:   originApp,
 		RecordType:  recordType,
 		RecordValue: recordValue,
 		AllowHTTP:   allowHTTP,
@@ -136,7 +203,7 @@ func (a *App) toolZoneCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	dnsStatus := runDNSLeg(ctx, pid, hostname, recordType, recordValue, skipDNS, &detailParts)
 	certStatus := runCertLeg(ctx, pid, hostname, allowHTTP, &detailParts)
 	routeStatus := "ok"
-	if err := registerRoute(ctx, pid, hostname, originURL, allowHTTP); err != nil {
+	if err := registerRoute(ctx, pid, hostname, routeTarget(z), allowHTTP); err != nil {
 		routeStatus = "error"
 		detailParts = append(detailParts, "route: "+err.Error())
 	}

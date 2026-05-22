@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: cdn
 display_name: CDN
-version: 0.1.0
+version: 0.2.0
 description: |
   Public-facing edge for apps that emit URLs. v0.1: local-mode only
   — apteva-server is the origin, no third-party provider, no edge
@@ -57,6 +57,7 @@ provides:
     - { name: cdn_zone_list,   description: "List zones for this project." }
     - { name: cdn_zone_delete, description: "Tear down a zone." }
     - { name: cdn_url_for,     description: "Mint a public URL on a zone for an origin path." }
+    - { name: cdn_link_app,    description: "Front an installed app on a hostname in one call (app-origin zone)." }
   ui_panels:
     - { slot: project.page, label: CDN, icon: cloud, entry: /ui/CdnPanel.mjs }
 runtime:
