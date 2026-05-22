@@ -37,6 +37,10 @@ type instrumentRow struct {
 	PayoutPct   *float64 `json:"payout_pct,omitempty"`
 	GrowthPct   *float64 `json:"growth_pct,omitempty"`
 	RefreshedAt *int64   `json:"refreshed_at,omitempty"`
+	// Pinned is set only when resolving a watchlist: true when the symbol
+	// is an explicit include pin (vs a rule match), so the panel knows
+	// whether un-starring should drop the pin or add an exclude.
+	Pinned bool `json:"pinned,omitempty"`
 }
 
 // listFilter carries the optional screener constraints for listUniverse.
@@ -45,9 +49,13 @@ type instrumentRow struct {
 type listFilter struct {
 	Sector    string
 	MinYield  *float64
+	MaxYield  *float64
+	MinPayout *float64
 	MaxPayout *float64
+	MinPE     *float64
 	MaxPE     *float64
 	MinGrowth *float64
+	MaxGrowth *float64
 	Sort      string // name | price | change | yield | pe | payout | growth
 	Limit     int
 }
@@ -112,12 +120,16 @@ func (s *store) warmCandidates(limit int, coldTTL, hotTTL, hotWindow time.Durati
 	coldCut := now - int64(coldTTL.Seconds())
 	hotCut := now - int64(hotTTL.Seconds())
 	hotWin := now - int64(hotWindow.Seconds())
+	// Hot tier = recently-viewed OR include-pinned in any watchlist; both
+	// refresh on hotTTL and sort ahead of the cold tail (pins first).
 	rows, err := s.db.Query(
 		`SELECT symbol FROM instrument
 		  WHERE refreshed_at IS NULL
 		     OR refreshed_at < ?
-		     OR (viewed_at >= ? AND (refreshed_at IS NULL OR refreshed_at < ?))
-		  ORDER BY (viewed_at IS NOT NULL AND viewed_at >= ?) DESC,
+		     OR ((viewed_at >= ? OR symbol IN (SELECT symbol FROM watchlist_pin WHERE mode='include'))
+		         AND (refreshed_at IS NULL OR refreshed_at < ?))
+		  ORDER BY (symbol IN (SELECT symbol FROM watchlist_pin WHERE mode='include')) DESC,
+		           (viewed_at IS NOT NULL AND viewed_at >= ?) DESC,
 		           refreshed_at IS NOT NULL, refreshed_at ASC
 		  LIMIT ?`,
 		coldCut, hotWin, hotCut, hotWin, limit)
@@ -144,47 +156,72 @@ func (s *store) listUniverse(f listFilter) ([]instrumentRow, error) {
 		where = append(where, "LOWER(sector) = LOWER(?)")
 		args = append(args, f.Sector)
 	}
-	if f.MinYield != nil {
-		where = append(where, "last_yield_pct IS NOT NULL AND last_yield_pct >= ?")
-		args = append(args, *f.MinYield)
+	// bound adds a "col >= / <= ?" condition (NULL excluded). pePos guards
+	// the P/E column against the non-meaningful ≤0 values.
+	bound := func(col string, lo, hi *float64, pePos bool) {
+		guard := ""
+		if pePos {
+			guard = " AND " + col + " > 0"
+		}
+		if lo != nil {
+			where = append(where, col+" IS NOT NULL"+guard+" AND "+col+" >= ?")
+			args = append(args, *lo)
+		}
+		if hi != nil {
+			where = append(where, col+" IS NOT NULL"+guard+" AND "+col+" <= ?")
+			args = append(args, *hi)
+		}
 	}
-	if f.MaxPayout != nil {
-		where = append(where, "last_payout_pct IS NOT NULL AND last_payout_pct <= ?")
-		args = append(args, *f.MaxPayout)
-	}
-	if f.MaxPE != nil {
-		where = append(where, "last_pe IS NOT NULL AND last_pe > 0 AND last_pe <= ?")
-		args = append(args, *f.MaxPE)
-	}
-	if f.MinGrowth != nil {
-		where = append(where, "last_growth_pct IS NOT NULL AND last_growth_pct >= ?")
-		args = append(args, *f.MinGrowth)
-	}
+	bound("last_yield_pct", f.MinYield, f.MaxYield, false)
+	bound("last_payout_pct", f.MinPayout, f.MaxPayout, false)
+	bound("last_pe", f.MinPE, f.MaxPE, true)
+	bound("last_growth_pct", f.MinGrowth, f.MaxGrowth, false)
 	q := "SELECT " + instrumentCols + " FROM instrument"
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
-	// "<col> IS NULL" first in ORDER BY pushes un-warmed rows to the
-	// bottom (SQLite sorts false<true), so the metric sorts are dense.
-	switch f.Sort {
-	case "price":
-		q += " ORDER BY last_price IS NULL, last_price DESC"
-	case "change":
-		q += " ORDER BY last_change_pct IS NULL, last_change_pct DESC"
-	case "yield":
-		q += " ORDER BY last_yield_pct IS NULL, last_yield_pct DESC"
-	case "pe":
-		q += " ORDER BY last_pe IS NULL OR last_pe <= 0, last_pe ASC"
-	case "payout":
-		q += " ORDER BY last_payout_pct IS NULL, last_payout_pct ASC"
-	case "growth":
-		q += " ORDER BY last_growth_pct IS NULL, last_growth_pct DESC"
-	default:
-		q += " ORDER BY symbol ASC"
-	}
+	q += orderClause(f.Sort)
 	if f.Limit > 0 {
 		q += fmt.Sprintf(" LIMIT %d", f.Limit)
 	}
+	return s.scanInstruments(q, args...)
+}
+
+// orderClause maps a sort key to an ORDER BY. "<col> IS NULL" first pushes
+// un-warmed rows to the bottom (SQLite sorts false<true) so metric sorts
+// stay dense.
+func orderClause(sort string) string {
+	switch sort {
+	case "price":
+		return " ORDER BY last_price IS NULL, last_price DESC"
+	case "change":
+		return " ORDER BY last_change_pct IS NULL, last_change_pct DESC"
+	case "yield":
+		return " ORDER BY last_yield_pct IS NULL, last_yield_pct DESC"
+	case "pe":
+		return " ORDER BY last_pe IS NULL OR last_pe <= 0, last_pe ASC"
+	case "payout":
+		return " ORDER BY last_payout_pct IS NULL, last_payout_pct ASC"
+	case "growth":
+		return " ORDER BY last_growth_pct IS NULL, last_growth_pct DESC"
+	default:
+		return " ORDER BY symbol ASC"
+	}
+}
+
+// instrumentsBySymbols returns the snapshot rows for an explicit symbol set
+// (used to resolve watchlist membership), sorted like the list.
+func (s *store) instrumentsBySymbols(syms []string, sort string) ([]instrumentRow, error) {
+	if len(syms) == 0 {
+		return []instrumentRow{}, nil
+	}
+	ph := make([]string, len(syms))
+	args := make([]any, len(syms))
+	for i, sym := range syms {
+		ph[i] = "?"
+		args[i] = strings.ToUpper(sym)
+	}
+	q := "SELECT " + instrumentCols + " FROM instrument WHERE symbol IN (" + strings.Join(ph, ",") + ")" + orderClause(sort)
 	return s.scanInstruments(q, args...)
 }
 
@@ -361,6 +398,116 @@ func (s *store) cacheSet(key string, v any) error {
 		 ON CONFLICT(key) DO UPDATE SET json = excluded.json, fetched_at = excluded.fetched_at`,
 		key, string(body), time.Now().Unix())
 	return err
+}
+
+// ─── Watchlists (project-scoped) ───────────────────────────────────
+
+// watchlistRow is a saved list: rules (JSON filter blob; "{}" = manual)
+// plus manual include/exclude pins (in watchlist_pin).
+type watchlistRow struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Rules     string `json:"rules"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+func (s *store) watchlistCreate(projectID, name, rules string) (int64, error) {
+	if rules == "" {
+		rules = "{}"
+	}
+	res, err := s.db.Exec(
+		`INSERT INTO watchlist (project_id, name, rules) VALUES (?, ?, ?)`,
+		projectID, name, rules)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (s *store) watchlistUpdate(projectID string, id int64, name, rules string) error {
+	if rules == "" {
+		rules = "{}"
+	}
+	_, err := s.db.Exec(
+		`UPDATE watchlist SET name = ?, rules = ? WHERE id = ? AND project_id = ?`,
+		name, rules, id, projectID)
+	return err
+}
+
+func (s *store) watchlistDelete(projectID string, id int64) error {
+	_, err := s.db.Exec(`DELETE FROM watchlist WHERE id = ? AND project_id = ?`, id, projectID)
+	return err
+}
+
+func (s *store) watchlistList(projectID string) ([]watchlistRow, error) {
+	rows, err := s.db.Query(
+		`SELECT id, name, rules, created_at FROM watchlist WHERE project_id = ? ORDER BY name`,
+		projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []watchlistRow{}
+	for rows.Next() {
+		var w watchlistRow
+		if err := rows.Scan(&w.ID, &w.Name, &w.Rules, &w.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
+// watchlistByID returns the list iff it belongs to projectID (nil if not
+// found — the project guard is the authorization boundary).
+func (s *store) watchlistByID(projectID string, id int64) (*watchlistRow, error) {
+	var w watchlistRow
+	err := s.db.QueryRow(
+		`SELECT id, name, rules, created_at FROM watchlist WHERE id = ? AND project_id = ?`,
+		id, projectID).Scan(&w.ID, &w.Name, &w.Rules, &w.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &w, nil
+}
+
+// setPin force-includes or force-excludes a symbol on a watchlist.
+func (s *store) setPin(id int64, symbol, mode string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO watchlist_pin (watchlist_id, symbol, mode) VALUES (?, ?, ?)
+		 ON CONFLICT(watchlist_id, symbol) DO UPDATE SET mode = excluded.mode`,
+		id, strings.ToUpper(symbol), mode)
+	return err
+}
+
+// removePin clears any pin, returning the symbol to rule-driven membership.
+func (s *store) removePin(id int64, symbol string) error {
+	_, err := s.db.Exec(`DELETE FROM watchlist_pin WHERE watchlist_id = ? AND symbol = ?`,
+		id, strings.ToUpper(symbol))
+	return err
+}
+
+func (s *store) loadPins(id int64) (include, exclude []string, err error) {
+	rows, err := s.db.Query(`SELECT symbol, mode FROM watchlist_pin WHERE watchlist_id = ?`, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sym, mode string
+		if err := rows.Scan(&sym, &mode); err != nil {
+			return nil, nil, err
+		}
+		if mode == "include" {
+			include = append(include, sym)
+		} else {
+			exclude = append(exclude, sym)
+		}
+	}
+	return include, exclude, rows.Err()
 }
 
 // nullF maps a zero float to SQL NULL so an absent price/change doesn't

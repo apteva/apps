@@ -56,8 +56,8 @@ func TestEmbeddedManifest(t *testing.T) {
 	if m.Name != "stocks" {
 		t.Fatalf("name = %q, want stocks", m.Name)
 	}
-	if len(m.Provides.MCPTools) != 6 {
-		t.Fatalf("want 6 mcp tools, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 11 {
+		t.Fatalf("want 11 mcp tools, got %d", len(m.Provides.MCPTools))
 	}
 	if m.DB == nil || m.DB.Migrations != "migrations/" {
 		t.Fatalf("db block missing or wrong: %+v", m.DB)
@@ -350,6 +350,58 @@ func TestLiveFundamentals(t *testing.T) {
 	}
 	if pe == nil && payout == nil {
 		t.Fatal("handshake ok but no P/E or payout parsed")
+	}
+}
+
+func TestWatchlistMembership(t *testing.T) {
+	st := newTestStore(t)
+	a := &App{st: st}
+	// Warm KO (3.5% yield) and PEP (2.0%) so rules can evaluate.
+	yKO := 3.5
+	if err := st.updateSnapshot("KO", 60, 0, &yKO, nil); err != nil {
+		t.Fatal(err)
+	}
+	yPEP := 2.0
+	_ = st.updateSnapshot("PEP", 150, 0, &yPEP, nil)
+
+	// Dynamic list: yield ≥ 3 → KO matches, PEP doesn't.
+	id, err := st.watchlistCreate("proj1", "High yield", `{"min_yield":3}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, _ := st.watchlistByID("proj1", id)
+	rows, err := a.resolveWatchlist(w, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSym(rows, "KO") || containsSym(rows, "PEP") {
+		t.Fatal("rule yield≥3 should include KO and exclude PEP")
+	}
+
+	// Include-pin PEP → present and flagged Pinned.
+	if err := st.setPin(id, "PEP", "include"); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ = a.resolveWatchlist(w, "")
+	if !containsSym(rows, "PEP") {
+		t.Fatal("include pin should add PEP")
+	}
+	for _, r := range rows {
+		if r.Symbol == "PEP" && !r.Pinned {
+			t.Fatal("PEP should be flagged Pinned")
+		}
+	}
+
+	// Exclude-pin KO → dropped despite matching the rule.
+	_ = st.setPin(id, "KO", "exclude")
+	rows, _ = a.resolveWatchlist(w, "")
+	if containsSym(rows, "KO") {
+		t.Fatal("exclude pin should drop KO")
+	}
+
+	// Project isolation: another project can't load it.
+	if other, _ := st.watchlistByID("proj2", id); other != nil {
+		t.Fatal("watchlist must be project-scoped")
 	}
 }
 

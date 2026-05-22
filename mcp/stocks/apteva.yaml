@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: stocks
 display_name: Stocks
-version: 0.4.1
+version: 0.5.0
 description: |
   Explore and screen stocks, backed by Yahoo Finance. Filter the S&P 1500
   universe (every Dividend Aristocrat and King included) by dividend
@@ -39,6 +39,11 @@ provides:
     - { name: chart,     description: "OHLCV price history for a stock. Args: symbol, range? (1mo|6mo|1y|5y|max), interval? (1d|1wk|1mo)." }
     - { name: dividends, description: "Dividend history + summary (trailing-12mo total, yield, frequency, growth) for a stock. Args: symbol." }
     - { name: sync_status, description: "Background-warming progress (universe coverage of prices/yield/P-E) and fundamentals feed health." }
+    - { name: watchlists_list, description: "List saved watchlists (dynamic = rule-driven, manual = pinned)." }
+    - { name: watchlist_save,   description: "Create/update a watchlist (rules and/or pinned symbols). Args: name, rules?, id?." }
+    - { name: watchlist_delete, description: "Delete a watchlist. Args: id." }
+    - { name: watchlist_member, description: "Add/remove a symbol on a watchlist. Args: id, symbol, state (include|exclude|auto)." }
+    - { name: watchlist_get,    description: "Resolve a watchlist to its current member stocks (rules ∪ pins − excludes). Args: id, sort?." }
   ui_panels:
     - slot: project.page
       label: Stocks

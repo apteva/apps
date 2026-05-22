@@ -35,6 +35,7 @@ interface Stock {
   pe?: number;
   payout_pct?: number;
   growth_pct?: number;
+  pinned?: boolean;
 }
 
 interface StockDetail {
@@ -89,6 +90,41 @@ interface SyncStatus {
   fundamentals_retry_at?: number;
 }
 
+interface Rules {
+  sector?: string; min_yield?: number; max_payout?: number; max_pe?: number; min_growth?: number; sort?: string;
+}
+interface Watchlist { id: number; name: string; kind: string; rules: Rules; }
+
+// wlApi — thin REST client for the watchlist endpoints, project-scoped.
+function wlApi(projectId: string) {
+  const q = `project_id=${encodeURIComponent(projectId)}`;
+  const json = { "Content-Type": "application/json" };
+  return {
+    list: (): Promise<{ watchlists: Watchlist[] }> => fetch(`${API}/watchlists?${q}`).then((r) => r.json()),
+    save: (body: { id?: number; name: string; rules: Rules }): Promise<{ id: number }> =>
+      fetch(`${API}/watchlists?${q}`, { method: "POST", headers: json, body: JSON.stringify(body) }).then((r) => r.json()),
+    del: (id: number) => fetch(`${API}/watchlists/${id}?${q}`, { method: "DELETE" }),
+    member: (id: number, symbol: string, state: string) =>
+      fetch(`${API}/watchlists/${id}/member?${q}`, { method: "POST", headers: json, body: JSON.stringify({ symbol, state }) }),
+    get: (id: number, sort: string) => fetch(`${API}/watchlists/${id}?${q}&sort=${sort}`).then((r) => r.json()),
+  };
+}
+type WLApi = ReturnType<typeof wlApi>;
+
+// Screener metrics, each with a [min,max] domain. A handle parked at the
+// domain edge means "no constraint" (shown as "Any"). Param/rules keys are
+// min_<key> / max_<key>.
+const RANGE_DEFS = {
+  yield: { min: 0, max: 15, step: 0.25, label: "Dividend yield", suffix: "%" },
+  payout: { min: 0, max: 150, step: 5, label: "Payout ratio", suffix: "%" },
+  pe: { min: 0, max: 60, step: 1, label: "P/E", suffix: "" },
+  growth: { min: -10, max: 30, step: 0.5, label: "5yr dividend growth", suffix: "%" },
+} as const;
+type MetricKey = keyof typeof RANGE_DEFS;
+type Ranges = Record<MetricKey, [number, number]>;
+const defaultRanges = (): Ranges => ({ yield: [0, 15], payout: [0, 150], pe: [0, 60], growth: [-10, 30] });
+const metricKeys = Object.keys(RANGE_DEFS) as MetricKey[];
+
 const RANGES = ["1mo", "6mo", "1y", "5y", "max"] as const;
 type Range = (typeof RANGES)[number];
 
@@ -141,61 +177,109 @@ function changeColor(n: number | undefined): string {
   return n > 0 ? "var(--success)" : "var(--error)";
 }
 
-export default function StocksPanel(_props: NativePanelProps) {
+export default function StocksPanel({ projectId }: NativePanelProps) {
   const [selected, setSelected] = useState<string | null>(null);
+  const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
+  const api = useMemo(() => wlApi(projectId), [projectId]);
+  const reloadWL = useCallback(() => {
+    api.list().then((j) => setWatchlists(j.watchlists ?? [])).catch(() => {});
+  }, [api]);
+  useEffect(() => { reloadWL(); }, [reloadWL]);
+
   return selected ? (
-    <Detail symbol={selected} onBack={() => setSelected(null)} />
+    <Detail symbol={selected} watchlists={watchlists} api={api} onBack={() => setSelected(null)} />
   ) : (
-    <List onOpen={setSelected} />
+    <List onOpen={setSelected} watchlists={watchlists} api={api} reloadWL={reloadWL} />
   );
 }
 
 // ─── List view ─────────────────────────────────────────────────────
 
-function List({ onOpen }: { onOpen: (sym: string) => void }) {
+function List({ onOpen, watchlists, api, reloadWL }: {
+  onOpen: (sym: string) => void;
+  watchlists: Watchlist[];
+  api: WLApi;
+  reloadWL: () => void;
+}) {
+  const [activeWL, setActiveWL] = useState<number | null>(null);
   const [stocks, setStocks] = useState<Stock[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sector, setSector] = useState("");
   const [sort, setSort] = useState("name");
-  // Numeric filter state; each has an "Any" sentinel at its neutral end so
-  // a slider position can mean "no constraint".
-  const ANY = { yield: 0, payout: 150, pe: 60, growth: -10 };
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [minYield, setMinYield] = useState(ANY.yield);
-  const [maxPayout, setMaxPayout] = useState(ANY.payout);
-  const [maxPE, setMaxPE] = useState(ANY.pe);
-  const [minGrowth, setMinGrowth] = useState(ANY.growth);
+  const [ranges, setRanges] = useState<Ranges>(defaultRanges);
+  const setRange = (k: MetricKey, v: [number, number]) => setRanges((r) => ({ ...r, [k]: v }));
   const [query, setQuery] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const p = new URLSearchParams();
-      if (sector) p.set("sector", sector);
-      if (sort) p.set("sort", sort);
-      if (minYield > 0) p.set("min_yield", String(minYield));
-      if (maxPayout < 150) p.set("max_payout", String(maxPayout));
-      if (maxPE < 60) p.set("max_pe", String(maxPE));
-      if (minGrowth > -10) p.set("min_growth", String(minGrowth));
-      const r = await fetch(`${API}/stocks?${p.toString()}`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
+      let data: { stocks?: Stock[]; error?: string };
+      if (activeWL != null) {
+        data = await api.get(activeWL, sort);
+      } else {
+        const p = new URLSearchParams();
+        if (sector) p.set("sector", sector);
+        if (sort) p.set("sort", sort);
+        for (const k of metricKeys) {
+          const def = RANGE_DEFS[k];
+          const [lo, hi] = ranges[k];
+          if (lo > def.min) p.set(`min_${k}`, String(lo));
+          if (hi < def.max) p.set(`max_${k}`, String(hi));
+        }
+        const r = await fetch(`${API}/stocks?${p.toString()}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        data = await r.json();
+      }
+      if (data.error) throw new Error(data.error);
       setStocks(data.stocks ?? []);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [sector, sort, minYield, maxPayout, maxPE, minGrowth]);
+  }, [activeWL, sector, sort, ranges, api]);
+
+  // Save the current screener filters as a new dynamic watchlist.
+  const saveAsWatchlist = useCallback(async () => {
+    const name = window.prompt("Name this watchlist:");
+    if (!name) return;
+    const rules: Rules = { sort };
+    if (sector) rules.sector = sector;
+    for (const k of metricKeys) {
+      const def = RANGE_DEFS[k];
+      const [lo, hi] = ranges[k];
+      if (lo > def.min) (rules as Record<string, unknown>)[`min_${k}`] = lo;
+      if (hi < def.max) (rules as Record<string, unknown>)[`max_${k}`] = hi;
+    }
+    const j = await api.save({ name, rules });
+    reloadWL();
+    if (j.id) setActiveWL(j.id);
+  }, [api, reloadWL, sector, sort, ranges]);
+
+  const deleteActive = useCallback(async () => {
+    if (activeWL == null || !window.confirm("Delete this watchlist?")) return;
+    await api.del(activeWL);
+    setActiveWL(null);
+    reloadWL();
+  }, [activeWL, api, reloadWL]);
+
+  // Star toggle in a watchlist view: every row shown is a member, so this
+  // removes it — drop the include pin if it was pinned, else exclude it.
+  const removeFromWatchlist = useCallback(async (s: Stock) => {
+    if (activeWL == null) return;
+    await api.member(activeWL, s.symbol, s.pinned ? "auto" : "exclude");
+    void load();
+  }, [activeWL, api, load]);
 
   const activeFilters =
-    (sector ? 1 : 0) + (minYield > 0 ? 1 : 0) + (maxPayout < 150 ? 1 : 0) +
-    (maxPE < 60 ? 1 : 0) + (minGrowth > -10 ? 1 : 0);
+    (sector ? 1 : 0) +
+    metricKeys.filter((k) => ranges[k][0] > RANGE_DEFS[k].min || ranges[k][1] < RANGE_DEFS[k].max).length;
   const resetFilters = () => {
-    setSector(""); setMinYield(ANY.yield); setMaxPayout(ANY.payout);
-    setMaxPE(ANY.pe); setMinGrowth(ANY.growth);
+    setSector("");
+    setRanges(defaultRanges());
   };
 
   useEffect(() => { void load(); }, [load]);
@@ -232,6 +316,12 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
             className="rounded-md border border-border bg-bg-input px-3 py-1.5 text-sm text-text placeholder:text-text-dim"
           />
         </div>
+        <select value={activeWL ?? ""} onChange={(e) => setActiveWL(e.target.value ? Number(e.target.value) : null)}
+          className="rounded-md border border-border bg-bg-input px-2 py-1.5 text-sm text-text">
+          <option value="">All stocks</option>
+          {watchlists.length > 0 && <option disabled>──────────</option>}
+          {watchlists.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+        </select>
         <select value={sort} onChange={(e) => setSort(e.target.value)}
           className="rounded-md border border-border bg-bg-input px-2 py-1.5 text-sm text-text">
           <option value="name">Sort: Name</option>
@@ -242,14 +332,27 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
           <option value="payout">Sort: Payout (low→high)</option>
           <option value="growth">Sort: Div growth</option>
         </select>
-        <button onClick={() => setFiltersOpen(true)}
-          className="flex items-center gap-1.5 rounded-md border border-border bg-bg-input px-3 py-1.5 text-sm text-text hover:bg-bg-hover">
-          <svg {...ico}><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" /></svg>
-          Filters
-          {activeFilters > 0 && (
-            <span className="rounded-full bg-accent px-1.5 text-xs text-bg">{activeFilters}</span>
-          )}
-        </button>
+        {activeWL == null ? (
+          <>
+            <button onClick={() => setFiltersOpen(true)}
+              className="flex items-center gap-1.5 rounded-md border border-border bg-bg-input px-3 py-1.5 text-sm text-text hover:bg-bg-hover">
+              <svg {...ico}><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" /></svg>
+              Filters
+              {activeFilters > 0 && <span className="rounded-full bg-accent px-1.5 text-xs text-bg">{activeFilters}</span>}
+            </button>
+            <button onClick={() => void saveAsWatchlist()}
+              className="flex items-center gap-1.5 rounded-md border border-border bg-bg-input px-3 py-1.5 text-sm text-text hover:bg-bg-hover">
+              <svg {...ico}><polygon points="12 2 15 9 22 9 16 14 18 21 12 17 6 21 8 14 2 9 9 9 12 2" /></svg>
+              Save list
+            </button>
+          </>
+        ) : (
+          <button onClick={() => void deleteActive()}
+            className="flex items-center gap-1.5 rounded-md border border-error px-3 py-1.5 text-sm text-error hover:bg-bg-hover">
+            <svg {...ico}><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
+            Delete list
+          </button>
+        )}
         <button onClick={() => void load()}
           className="ml-auto flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm text-bg hover:bg-accent-hover">
           <svg {...ico}><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>
@@ -260,10 +363,7 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
       <FilterDrawer
         open={filtersOpen} onClose={() => setFiltersOpen(false)}
         sector={sector} setSector={setSector} sectors={sectors}
-        minYield={minYield} setMinYield={setMinYield}
-        maxPayout={maxPayout} setMaxPayout={setMaxPayout}
-        maxPE={maxPE} setMaxPE={setMaxPE}
-        minGrowth={minGrowth} setMinGrowth={setMinGrowth}
+        ranges={ranges} setRange={setRange}
         matchCount={stocks.length} activeFilters={activeFilters} onReset={resetFilters}
       />
 
@@ -273,6 +373,7 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-border text-xs uppercase tracking-wide text-text-muted">
+              {activeWL != null && <th className="px-2 py-2" />}
               <th className="px-3 py-2 text-left">Symbol</th>
               <th className="px-3 py-2 text-left">Name</th>
               <th className="px-3 py-2 text-left">Sector</th>
@@ -286,14 +387,21 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
           </thead>
           <tbody>
             {loading && stocks.length === 0 && (
-              <tr><td colSpan={9} className="px-3 py-8 text-center text-text-muted">Loading the universe…</td></tr>
+              <tr><td colSpan={activeWL != null ? 10 : 9} className="px-3 py-8 text-center text-text-muted">Loading…</td></tr>
             )}
             {!loading && shown.length === 0 && (
-              <tr><td colSpan={9} className="px-3 py-8 text-center text-text-muted">No stocks match.</td></tr>
+              <tr><td colSpan={activeWL != null ? 10 : 9} className="px-3 py-8 text-center text-text-muted">{activeWL != null ? "This watchlist is empty." : "No stocks match."}</td></tr>
             )}
             {shown.map((s) => (
               <tr key={s.symbol} onClick={() => onOpen(s.symbol)}
                 className="cursor-pointer border-b border-border-subtle hover:bg-bg-hover">
+                {activeWL != null && (
+                  <td className="px-2 py-2" onClick={(e) => { e.stopPropagation(); void removeFromWatchlist(s); }}>
+                    <svg {...ico} width={14} height={14} className="text-accent" style={{ cursor: "pointer" }} fill="var(--accent)">
+                      <polygon points="12 2 15 9 22 9 16 14 18 21 12 17 6 21 8 14 2 9 9 9 12 2" />
+                    </svg>
+                  </td>
+                )}
                 <td className="px-3 py-2 font-medium text-text">{s.symbol}</td>
                 <td className="px-3 py-2 text-text-muted" style={{ maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</td>
                 <td className="px-3 py-2 text-text-dim">{s.sector}</td>
@@ -314,12 +422,22 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
 
 // ─── Detail view ───────────────────────────────────────────────────
 
-function Detail({ symbol, onBack }: { symbol: string; onBack: () => void }) {
+function Detail({ symbol, onBack, watchlists, api }: {
+  symbol: string; onBack: () => void; watchlists: Watchlist[]; api: WLApi;
+}) {
   const [d, setD] = useState<StockDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [range, setRange] = useState<Range>("1y");
   const [chart, setChart] = useState<ChartResp | null>(null);
   const [divs, setDivs] = useState<DividendResp | null>(null);
+  const [addMsg, setAddMsg] = useState("");
+
+  const addTo = async (id: number) => {
+    const wl = watchlists.find((w) => w.id === id);
+    await api.member(id, symbol, "include");
+    setAddMsg(`Added to ${wl?.name ?? "watchlist"}`);
+    setTimeout(() => setAddMsg(""), 2500);
+  };
 
   useEffect(() => {
     let live = true;
@@ -341,9 +459,19 @@ function Detail({ symbol, onBack }: { symbol: string; onBack: () => void }) {
 
   return (
     <div className="h-full overflow-y-auto p-4">
-      <button onClick={onBack} className="mb-3 flex items-center gap-1 text-sm text-text-muted hover:text-text">
-        <svg {...ico}><polyline points="15 18 9 12 15 6" /></svg> All stocks
-      </button>
+      <div className="mb-3 flex items-center gap-3">
+        <button onClick={onBack} className="flex items-center gap-1 text-sm text-text-muted hover:text-text">
+          <svg {...ico}><polyline points="15 18 9 12 15 6" /></svg> All stocks
+        </button>
+        {addMsg && <span className="text-xs text-success">{addMsg}</span>}
+        {watchlists.length > 0 && (
+          <select value="" onChange={(e) => { if (e.target.value) void addTo(Number(e.target.value)); }}
+            className="ml-auto rounded-md border border-border bg-bg-input px-2 py-1 text-xs text-text">
+            <option value="">+ Add to watchlist…</option>
+            {watchlists.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+          </select>
+        )}
+      </div>
 
       {error && <div className="mb-3 rounded-md border border-error px-3 py-2 text-sm text-error">{error}</div>}
 
@@ -476,37 +604,45 @@ function SyncBar() {
   );
 }
 
-// rangeCSS themes the native range track + thumb (accent-color leaves the
-// unfilled track browser-default — bright white on dark). The webkit
-// filled portion is a gradient driven by the per-input --pct custom prop;
-// Firefox uses ::-moz-range-progress. Injected once by FilterDrawer.
+// rangeCSS themes the dual-handle range. Two native range inputs overlap a
+// shared track; pointer-events:none on the inputs + auto on the thumbs lets
+// both handles be grabbed (the .track/.fill divs draw the visible bar, so
+// accent-color's bright default track never shows). Injected by FilterDrawer.
 const rangeCSS = `
-.stx-range{-webkit-appearance:none;appearance:none;width:100%;height:18px;background:transparent;cursor:pointer;margin:0}
-.stx-range:focus{outline:none}
-.stx-range::-webkit-slider-runnable-track{height:6px;border-radius:9999px;background:linear-gradient(to right,var(--accent) 0 var(--pct,0%),var(--bg-hover) var(--pct,0%) 100%)}
-.stx-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:14px;height:14px;margin-top:-4px;border-radius:9999px;background:var(--accent);border:2px solid var(--bg-card)}
-.stx-range::-moz-range-track{height:6px;border-radius:9999px;background:var(--bg-hover)}
-.stx-range::-moz-range-progress{height:6px;border-radius:9999px;background:var(--accent)}
-.stx-range::-moz-range-thumb{width:14px;height:14px;border:2px solid var(--bg-card);border-radius:9999px;background:var(--accent)}
+.stx-dual{position:relative;height:24px}
+.stx-track{position:absolute;top:10px;left:0;right:0;height:4px;border-radius:9999px;background:var(--bg-hover)}
+.stx-fill{position:absolute;top:10px;height:4px;border-radius:9999px;background:var(--accent)}
+.stx-dual input[type=range]{position:absolute;top:0;left:0;width:100%;height:24px;margin:0;background:none;pointer-events:none;-webkit-appearance:none;appearance:none}
+.stx-dual input[type=range]:focus{outline:none}
+.stx-dual input[type=range]::-webkit-slider-runnable-track{height:24px;background:transparent}
+.stx-dual input[type=range]::-webkit-slider-thumb{pointer-events:auto;-webkit-appearance:none;appearance:none;width:14px;height:14px;margin-top:5px;border-radius:9999px;background:var(--accent);border:2px solid var(--bg-card);cursor:pointer}
+.stx-dual input[type=range]::-moz-range-track{height:24px;background:transparent}
+.stx-dual input[type=range]::-moz-range-thumb{pointer-events:auto;width:14px;height:14px;border:2px solid var(--bg-card);border-radius:9999px;background:var(--accent);cursor:pointer}
 `;
 
-// Slider — one screener range control. At its neutral end (anyAt) the
-// filter is off and the value reads "Any".
-function Slider({ label, value, set, min, max, step, anyAt, suffix }: {
-  label: string; value: number; set: (v: number) => void;
-  min: number; max: number; step: number; anyAt: number; suffix: string;
+// DualRange — a min/max screener control. A handle at the domain edge means
+// no constraint on that side (shown as "Any"). Handles can't cross.
+function DualRange({ label, value, set, min, max, step, suffix }: {
+  label: string; value: [number, number]; set: (v: [number, number]) => void;
+  min: number; max: number; step: number; suffix: string;
 }) {
-  const isAny = value === anyAt;
-  const pct = ((value - min) / (max - min)) * 100;
+  const [lo, hi] = value;
+  const pct = (v: number) => ((v - min) / (max - min)) * 100;
+  const fmtEnd = (v: number, atEdge: boolean) => (atEdge ? "Any" : `${v}${suffix}`);
   return (
-    <div className="mb-4">
+    <div className="mb-5">
       <div className="mb-1 flex items-center justify-between text-xs">
         <span className="text-text-muted">{label}</span>
-        <span className="tabular-nums text-text">{isAny ? "Any" : `${value}${suffix}`}</span>
+        <span className="tabular-nums text-text">{fmtEnd(lo, lo <= min)} – {fmtEnd(hi, hi >= max)}</span>
       </div>
-      <input type="range" min={min} max={max} step={step} value={value}
-        onChange={(e) => set(parseFloat(e.target.value))}
-        className="stx-range" style={{ ["--pct" as string]: `${pct}%` } as React.CSSProperties} />
+      <div className="stx-dual">
+        <div className="stx-track" />
+        <div className="stx-fill" style={{ left: `${pct(lo)}%`, width: `${Math.max(0, pct(hi) - pct(lo))}%` }} />
+        <input type="range" min={min} max={max} step={step} value={lo}
+          onChange={(e) => set([Math.min(parseFloat(e.target.value), hi), hi])} />
+        <input type="range" min={min} max={max} step={step} value={hi}
+          onChange={(e) => set([lo, Math.max(parseFloat(e.target.value), lo)])} />
+      </div>
     </div>
   );
 }
@@ -517,10 +653,7 @@ function Slider({ label, value, set, min, max, step, anyAt, suffix }: {
 function FilterDrawer(props: {
   open: boolean; onClose: () => void;
   sector: string; setSector: (v: string) => void; sectors: string[];
-  minYield: number; setMinYield: (v: number) => void;
-  maxPayout: number; setMaxPayout: (v: number) => void;
-  maxPE: number; setMaxPE: (v: number) => void;
-  minGrowth: number; setMinGrowth: (v: number) => void;
+  ranges: Ranges; setRange: (k: MetricKey, v: [number, number]) => void;
   matchCount: number; activeFilters: number; onReset: () => void;
 }) {
   if (!props.open) return null;
@@ -546,10 +679,14 @@ function FilterDrawer(props: {
           </select>
         </div>
 
-        <Slider label="Min dividend yield" value={props.minYield} set={props.setMinYield} min={0} max={15} step={0.25} anyAt={0} suffix="%" />
-        <Slider label="Max payout ratio" value={props.maxPayout} set={props.setMaxPayout} min={0} max={150} step={5} anyAt={150} suffix="%" />
-        <Slider label="Max P/E" value={props.maxPE} set={props.setMaxPE} min={0} max={60} step={1} anyAt={60} suffix="" />
-        <Slider label="Min 5yr dividend growth" value={props.minGrowth} set={props.setMinGrowth} min={-10} max={30} step={0.5} anyAt={-10} suffix="%" />
+        {metricKeys.map((k) => {
+          const def = RANGE_DEFS[k];
+          return (
+            <DualRange key={k} label={def.label} suffix={def.suffix}
+              min={def.min} max={def.max} step={def.step}
+              value={props.ranges[k]} set={(v) => props.setRange(k, v)} />
+          );
+        })}
 
         <div className="mt-5 flex items-center justify-between border-t border-border-subtle pt-3">
           <span className="text-xs text-text-muted">{props.matchCount.toLocaleString()} match</span>

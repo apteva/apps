@@ -8,11 +8,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"strings"
 	"sync"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 // Warming worker pacing. Each symbol costs ~2 Yahoo calls (chart +
@@ -64,14 +67,26 @@ func (a *App) toolList(args map[string]any) (any, error) {
 	if v, ok := floatArg(args, "min_yield"); ok {
 		f.MinYield = &v
 	}
+	if v, ok := floatArg(args, "max_yield"); ok {
+		f.MaxYield = &v
+	}
+	if v, ok := floatArg(args, "min_payout"); ok {
+		f.MinPayout = &v
+	}
 	if v, ok := floatArg(args, "max_payout"); ok {
 		f.MaxPayout = &v
+	}
+	if v, ok := floatArg(args, "min_pe"); ok {
+		f.MinPE = &v
 	}
 	if v, ok := floatArg(args, "max_pe"); ok {
 		f.MaxPE = &v
 	}
 	if v, ok := floatArg(args, "min_growth"); ok {
 		f.MinGrowth = &v
+	}
+	if v, ok := floatArg(args, "max_growth"); ok {
+		f.MaxGrowth = &v
 	}
 	rows, err := a.st.listUniverse(f)
 	if err != nil {
@@ -233,6 +248,247 @@ func (a *App) toolSyncStatus(_ map[string]any) (any, error) {
 		out["last_batch"] = u
 	}
 	return out, nil
+}
+
+// ─── Watchlists ────────────────────────────────────────────────────
+
+var errProjectRequired = errors.New("project_id required (pass _project_id on global installs)")
+
+// watchlistRules is the saved filter blob (JSON) behind a dynamic
+// watchlist. No constraints = a pure-manual list.
+type watchlistRules struct {
+	Sector    string   `json:"sector,omitempty"`
+	MinYield  *float64 `json:"min_yield,omitempty"`
+	MaxYield  *float64 `json:"max_yield,omitempty"`
+	MinPayout *float64 `json:"min_payout,omitempty"`
+	MaxPayout *float64 `json:"max_payout,omitempty"`
+	MinPE     *float64 `json:"min_pe,omitempty"`
+	MaxPE     *float64 `json:"max_pe,omitempty"`
+	MinGrowth *float64 `json:"min_growth,omitempty"`
+	MaxGrowth *float64 `json:"max_growth,omitempty"`
+	Sort      string   `json:"sort,omitempty"`
+}
+
+func parseRules(raw string) watchlistRules {
+	var r watchlistRules
+	if raw != "" {
+		_ = json.Unmarshal([]byte(raw), &r)
+	}
+	return r
+}
+
+func (r watchlistRules) hasConstraints() bool {
+	return r.Sector != "" || r.MinYield != nil || r.MaxYield != nil ||
+		r.MinPayout != nil || r.MaxPayout != nil || r.MinPE != nil || r.MaxPE != nil ||
+		r.MinGrowth != nil || r.MaxGrowth != nil
+}
+
+func (r watchlistRules) toFilter() listFilter {
+	return listFilter{
+		Sector: r.Sector,
+		MinYield: r.MinYield, MaxYield: r.MaxYield,
+		MinPayout: r.MinPayout, MaxPayout: r.MaxPayout,
+		MinPE: r.MinPE, MaxPE: r.MaxPE,
+		MinGrowth: r.MinGrowth, MaxGrowth: r.MaxGrowth,
+	}
+}
+
+// resolveProject picks the project for a watchlist op: the dispatch's
+// project (env on project-scoped installs, _project_id on global) first,
+// then an explicit project_id arg.
+func resolveProject(ctx *sdk.AppCtx, args map[string]any) string {
+	if ctx != nil {
+		if p := ctx.CurrentProject(); p != "" {
+			return p
+		}
+	}
+	if v := strArg(args, "_project_id"); v != "" {
+		return v
+	}
+	return strArg(args, "project_id")
+}
+
+// resolveWatchlist computes a list's members: (rule matches ∪ includes) −
+// excludes. Include-pinned rows are flagged so the UI can tell pins from
+// rule matches.
+func (a *App) resolveWatchlist(w *watchlistRow, sort string) ([]instrumentRow, error) {
+	rules := parseRules(w.Rules)
+	set := map[string]struct{}{}
+	if rules.hasConstraints() {
+		f := rules.toFilter()
+		rows, err := a.st.listUniverse(f)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range rows {
+			set[r.Symbol] = struct{}{}
+		}
+	}
+	inc, exc, err := a.st.loadPins(w.ID)
+	if err != nil {
+		return nil, err
+	}
+	incSet := map[string]struct{}{}
+	for _, sym := range inc {
+		set[sym] = struct{}{}
+		incSet[sym] = struct{}{}
+	}
+	for _, sym := range exc {
+		delete(set, sym)
+	}
+	syms := make([]string, 0, len(set))
+	for sym := range set {
+		syms = append(syms, sym)
+	}
+	srt := sort
+	if srt == "" {
+		srt = rules.Sort
+	}
+	rows, err := a.st.instrumentsBySymbols(syms, srt)
+	if err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		if _, ok := incSet[rows[i].Symbol]; ok {
+			rows[i].Pinned = true
+		}
+	}
+	return rows, nil
+}
+
+func (a *App) toolWatchlistsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid := resolveProject(ctx, args)
+	if pid == "" {
+		return nil, errProjectRequired
+	}
+	lists, err := a.st.watchlistList(pid)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(lists))
+	for _, w := range lists {
+		kind := "manual"
+		if parseRules(w.Rules).hasConstraints() {
+			kind = "dynamic"
+		}
+		out = append(out, map[string]any{
+			"id": w.ID, "name": w.Name, "kind": kind,
+			"rules": json.RawMessage(orStr(w.Rules, "{}")),
+		})
+	}
+	return map[string]any{"watchlists": out}, nil
+}
+
+func (a *App) toolWatchlistSave(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid := resolveProject(ctx, args)
+	if pid == "" {
+		return nil, errProjectRequired
+	}
+	name := strArg(args, "name")
+	if name == "" {
+		return nil, errors.New("name required")
+	}
+	rules := "{}"
+	if r, ok := args["rules"]; ok && r != nil {
+		if b, err := json.Marshal(r); err == nil {
+			rules = string(b)
+		}
+	}
+	if id := intArg(args, "id", 0); id > 0 {
+		w, err := a.st.watchlistByID(pid, int64(id))
+		if err != nil {
+			return nil, err
+		}
+		if w == nil {
+			return nil, errors.New("watchlist not found")
+		}
+		if err := a.st.watchlistUpdate(pid, int64(id), name, rules); err != nil {
+			return nil, err
+		}
+		return map[string]any{"id": id, "ok": true}, nil
+	}
+	id, err := a.st.watchlistCreate(pid, name, rules)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"id": id, "ok": true}, nil
+}
+
+func (a *App) toolWatchlistDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid := resolveProject(ctx, args)
+	if pid == "" {
+		return nil, errProjectRequired
+	}
+	id := intArg(args, "id", 0)
+	if id <= 0 {
+		return nil, errors.New("id required")
+	}
+	if err := a.st.watchlistDelete(pid, int64(id)); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
+}
+
+// toolWatchlistMember sets a symbol's membership in a list. state:
+// "include" (force in), "exclude" (force out), "auto" (clear pin → back to
+// rule-driven).
+func (a *App) toolWatchlistMember(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid := resolveProject(ctx, args)
+	if pid == "" {
+		return nil, errProjectRequired
+	}
+	id := intArg(args, "id", 0)
+	sym := strings.ToUpper(strArg(args, "symbol"))
+	state := strArg(args, "state")
+	if id <= 0 || sym == "" {
+		return nil, errors.New("id and symbol required")
+	}
+	w, err := a.st.watchlistByID(pid, int64(id))
+	if err != nil {
+		return nil, err
+	}
+	if w == nil {
+		return nil, errors.New("watchlist not found")
+	}
+	switch state {
+	case "include", "exclude":
+		err = a.st.setPin(int64(id), sym, state)
+	case "auto", "":
+		err = a.st.removePin(int64(id), sym)
+	default:
+		return nil, errors.New("state must be include, exclude, or auto")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
+}
+
+func (a *App) toolWatchlistGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid := resolveProject(ctx, args)
+	if pid == "" {
+		return nil, errProjectRequired
+	}
+	id := intArg(args, "id", 0)
+	if id <= 0 {
+		return nil, errors.New("id required")
+	}
+	w, err := a.st.watchlistByID(pid, int64(id))
+	if err != nil {
+		return nil, err
+	}
+	if w == nil {
+		return nil, errors.New("watchlist not found")
+	}
+	rows, err := a.resolveWatchlist(w, strArg(args, "sort"))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"watchlist": map[string]any{"id": w.ID, "name": w.Name, "rules": json.RawMessage(orStr(w.Rules, "{}"))},
+		"stocks":    rows,
+		"count":     len(rows),
+	}, nil
 }
 
 // ─── Warming / refresh ─────────────────────────────────────────────

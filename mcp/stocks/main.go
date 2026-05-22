@@ -31,7 +31,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: stocks
 display_name: Stocks
-version: 0.4.1
+version: 0.5.0
 description: Explore + screen the S&P 1500 backed by Yahoo Finance — filter by yield/payout/P-E/dividend-growth, quote, price chart, dividend history. Read-only.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/stocks
@@ -58,6 +58,16 @@ provides:
       description: "Dividend history + summary (trailing-12mo total, yield, frequency, growth) for a stock. Args: symbol."
     - name: sync_status
       description: "Background-warming progress (universe coverage of prices/yield/P-E) and fundamentals feed health."
+    - name: watchlists_list
+      description: "List saved watchlists (dynamic = rule-driven, manual = pinned)."
+    - name: watchlist_save
+      description: "Create/update a watchlist (rules and/or pinned symbols). Args: name, rules?, id?."
+    - name: watchlist_delete
+      description: "Delete a watchlist. Args: id."
+    - name: watchlist_member
+      description: "Add/remove a symbol on a watchlist. Args: id, symbol, state (include|exclude|auto)."
+    - name: watchlist_get
+      description: "Resolve a watchlist to its current member stocks (rules ∪ pins − excludes). Args: id, sort?."
   ui_panels:
     - slot: project.page
       label: Stocks
@@ -99,6 +109,12 @@ type App struct {
 	lastWarm time.Time
 }
 
+// globalCtx is stashed in OnMount so HTTP handlers (which the SDK invokes
+// without an AppCtx) can resolve project context for watchlist ops. On
+// project-scoped installs it carries the pinned project; on global installs
+// the panel passes ?project_id and resolveProject reads it from args.
+var globalCtx *sdk.AppCtx
+
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
 	if err != nil {
@@ -114,6 +130,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.st = &store{db: ctx.AppDB()}
 	a.y = newYahoo()
 	a.ttl = time.Hour
+	globalCtx = ctx
 	if v := ctx.Config().Get("cache_ttl_seconds"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			a.ttl = time.Duration(n) * time.Second
@@ -168,10 +185,14 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "List/filter/screen the S&P 1500 universe by dividend yield, payout ratio, P/E, and 5-year dividend growth.",
 			InputSchema: schemaObject(map[string]any{
 				"sector":     map[string]any{"type": "string", "description": "Filter by GICS sector (exact, case-insensitive)"},
-				"min_yield":  map[string]any{"type": "number", "description": "Only stocks with dividend yield ≥ this %"},
-				"max_payout": map[string]any{"type": "number", "description": "Only stocks with payout ratio ≤ this %"},
-				"max_pe":     map[string]any{"type": "number", "description": "Only stocks with trailing P/E ≤ this (and > 0)"},
-				"min_growth": map[string]any{"type": "number", "description": "Only stocks with 5yr dividend CAGR ≥ this %"},
+				"min_yield":  map[string]any{"type": "number", "description": "Min dividend yield %"},
+				"max_yield":  map[string]any{"type": "number", "description": "Max dividend yield %"},
+				"min_payout": map[string]any{"type": "number", "description": "Min payout ratio %"},
+				"max_payout": map[string]any{"type": "number", "description": "Max payout ratio %"},
+				"min_pe":     map[string]any{"type": "number", "description": "Min trailing P/E"},
+				"max_pe":     map[string]any{"type": "number", "description": "Max trailing P/E (> 0)"},
+				"min_growth": map[string]any{"type": "number", "description": "Min 5yr dividend CAGR %"},
+				"max_growth": map[string]any{"type": "number", "description": "Max 5yr dividend CAGR %"},
 				"sort":       map[string]any{"type": "string", "enum": []string{"name", "price", "change", "yield", "pe", "payout", "growth"}, "description": "Sort key (default name)"},
 				"limit":      map[string]any{"type": "integer", "description": "Max results (default: whole universe)"},
 			}, nil),
@@ -205,6 +226,49 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(nil, nil),
 			Handler:     func(_ *sdk.AppCtx, args map[string]any) (any, error) { return a.toolSyncStatus(args) },
 		},
+		{
+			Name:        "watchlists_list",
+			Description: "List saved watchlists (dynamic = rule-driven, manual = pinned). Args: none.",
+			InputSchema: schemaObject(nil, nil),
+			Handler:     a.toolWatchlistsList,
+		},
+		{
+			Name:        "watchlist_save",
+			Description: "Create or update a watchlist. A watchlist = rules (a screen) and/or pinned symbols. Args: name, rules? ({sector,min_yield,max_payout,max_pe,min_growth,sort}), id? (to update).",
+			InputSchema: schemaObject(map[string]any{
+				"id":    map[string]any{"type": "integer", "description": "Existing watchlist id to update; omit to create"},
+				"name":  map[string]any{"type": "string", "description": "Watchlist name"},
+				"rules": map[string]any{"type": "object", "description": "Optional filter rules; empty = manual list"},
+			}, []string{"name"}),
+			Handler: a.toolWatchlistSave,
+		},
+		{
+			Name:        "watchlist_delete",
+			Description: "Delete a watchlist. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolWatchlistDelete,
+		},
+		{
+			Name:        "watchlist_member",
+			Description: "Add/remove a symbol on a watchlist. state: include (force in), exclude (force out), auto (clear pin → rule-driven). Args: id, symbol, state.",
+			InputSchema: schemaObject(map[string]any{
+				"id":     map[string]any{"type": "integer"},
+				"symbol": map[string]any{"type": "string"},
+				"state":  map[string]any{"type": "string", "enum": []string{"include", "exclude", "auto"}},
+			}, []string{"id", "symbol", "state"}),
+			Handler: a.toolWatchlistMember,
+		},
+		{
+			Name:        "watchlist_get",
+			Description: "Resolve a watchlist to its current member stocks (rules ∪ pins − excludes) with full snapshot data. Args: id, sort?.",
+			InputSchema: schemaObject(map[string]any{
+				"id":   map[string]any{"type": "integer"},
+				"sort": map[string]any{"type": "string", "enum": []string{"name", "price", "change", "yield", "pe", "payout", "growth"}},
+			}, []string{"id"}),
+			Handler: a.toolWatchlistGet,
+		},
 	}
 }
 
@@ -218,12 +282,70 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "GET", Pattern: "/chart/{symbol}", Handler: a.handleChart},
 		{Method: "GET", Pattern: "/dividends/{symbol}", Handler: a.handleDividends},
 		{Method: "GET", Pattern: "/status", Handler: a.handleStatus},
+		{Method: "GET", Pattern: "/watchlists", Handler: a.handleWatchlists},
+		{Method: "POST", Pattern: "/watchlists", Handler: a.handleWatchlistSave},
+		{Method: "GET", Pattern: "/watchlists/{id}", Handler: a.handleWatchlistGet},
+		{Method: "DELETE", Pattern: "/watchlists/{id}", Handler: a.handleWatchlistDelete},
+		{Method: "POST", Pattern: "/watchlists/{id}/member", Handler: a.handleWatchlistMember},
 	}
 }
 
 func (a *App) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	body, err := a.toolSyncStatus(nil)
 	respond(w, body, err)
+}
+
+// ─── Watchlist HTTP handlers (panel) ───────────────────────────────
+// Project comes from globalCtx (project-scoped installs) or ?project_id=
+// (global installs); the panel always passes it.
+
+func (a *App) handleWatchlists(w http.ResponseWriter, r *http.Request) {
+	body, err := a.toolWatchlistsList(globalCtx, map[string]any{"project_id": r.URL.Query().Get("project_id")})
+	respond(w, body, err)
+}
+
+func (a *App) handleWatchlistSave(w http.ResponseWriter, r *http.Request) {
+	args := readJSONBody(r)
+	args["project_id"] = r.URL.Query().Get("project_id")
+	body, err := a.toolWatchlistSave(globalCtx, args)
+	respond(w, body, err)
+}
+
+func (a *App) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(r.PathValue("id"))
+	body, err := a.toolWatchlistGet(globalCtx, map[string]any{
+		"project_id": r.URL.Query().Get("project_id"),
+		"id":         id,
+		"sort":       r.URL.Query().Get("sort"),
+	})
+	respond(w, body, err)
+}
+
+func (a *App) handleWatchlistDelete(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(r.PathValue("id"))
+	body, err := a.toolWatchlistDelete(globalCtx, map[string]any{
+		"project_id": r.URL.Query().Get("project_id"), "id": id,
+	})
+	respond(w, body, err)
+}
+
+func (a *App) handleWatchlistMember(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(r.PathValue("id"))
+	args := readJSONBody(r)
+	args["project_id"] = r.URL.Query().Get("project_id")
+	args["id"] = id
+	body, err := a.toolWatchlistMember(globalCtx, args)
+	respond(w, body, err)
+}
+
+// readJSONBody decodes a JSON object request body into args (empty on
+// missing/invalid body).
+func readJSONBody(r *http.Request) map[string]any {
+	args := map[string]any{}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&args)
+	}
+	return args
 }
 
 func (a *App) handleList(w http.ResponseWriter, r *http.Request) {
@@ -235,7 +357,7 @@ func (a *App) handleList(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("sort"); v != "" {
 		args["sort"] = v
 	}
-	for _, k := range []string{"min_yield", "max_payout", "max_pe", "min_growth"} {
+	for _, k := range []string{"min_yield", "max_yield", "min_payout", "max_payout", "min_pe", "max_pe", "min_growth", "max_growth"} {
 		if v := q.Get(k); v != "" {
 			if f, err := strconv.ParseFloat(v, 64); err == nil {
 				args[k] = f
