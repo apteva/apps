@@ -185,6 +185,16 @@ func respondFormOK(w http.ResponseWriter, r *http.Request, results []ActionResul
 	if success == nil {
 		success = map[string]any{"kind": "inline", "message": "Thanks!"}
 	}
+	// Resolve a root-relative success.url against the app's mount
+	// prefix so the user lands on /api/apps/content/welcome (via the
+	// dashboard proxy) rather than the dashboard's own /welcome.
+	// Template authors write "/welcome" — they shouldn't have to know
+	// whether the form is being served direct or through the proxy.
+	if kind, _ := success["kind"].(string); kind == "redirect" {
+		if u, _ := success["url"].(string); u != "" {
+			success["url"] = resolveRedirectURL(r, u)
+		}
+	}
 	if !wantsJSON(r) {
 		// noscript path: redirect to success.url if present, else
 		// back to Referer (or "/" as a last resort).
@@ -208,6 +218,27 @@ func respondFormOK(w http.ResponseWriter, r *http.Request, results []ActionResul
 		"success": success,
 		"results": results,
 	})
+}
+
+// resolveRedirectURL prepends the app's URL prefix to root-relative
+// paths so the success-redirect lands on the proxied content mount
+// instead of the dashboard host root. Absolute URLs (http://, https://)
+// and truly-relative paths (no leading slash) pass through unchanged.
+func resolveRedirectURL(r *http.Request, raw string) string {
+	if raw == "" {
+		return raw
+	}
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		return raw
+	}
+	if !strings.HasPrefix(raw, "/") {
+		return raw
+	}
+	prefix := computeURLPrefix(r)
+	if prefix == "" || prefix == "/" {
+		return raw
+	}
+	return strings.TrimRight(prefix, "/") + raw
 }
 
 func respondFormError(w http.ResponseWriter, r *http.Request, status int, msg string) {
