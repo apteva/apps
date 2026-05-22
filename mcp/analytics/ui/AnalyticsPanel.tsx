@@ -296,6 +296,12 @@ function EventFeed({ rows }: { rows: EventRow[] }) {
   );
 }
 
+interface EventDecl {
+  name: string;
+  description?: string;
+  dynamic?: boolean;
+}
+
 interface WriteKey {
   id: number;
   key: string;
@@ -524,10 +530,14 @@ function TrackingTab({ projectId }: { projectId: string }) {
 function CaptureTab({ projectId }: { projectId: string }) {
   const [enabled, setEnabled] = useState(false);
   const [mode, setMode] = useState("denylist");
-  const [patterns, setPatterns] = useState("");
+  const [patterns, setPatterns] = useState<string[]>([]);
+  const [catalog, setCatalog] = useState<{ app: string; events: EventDecl[] }[]>([]);
   const [sampleRate, setSampleRate] = useState(1);
   const [captured, setCaptured] = useState(0);
   const [status, setStatus] = useState("");
+
+  const togglePattern = (name: string) =>
+    setPatterns((ps) => (ps.includes(name) ? ps.filter((p) => p !== name) : [...ps, name]));
 
   const load = useCallback(async () => {
     try {
@@ -541,7 +551,7 @@ function CaptureTab({ projectId }: { projectId: string }) {
       const d = await r.json();
       setEnabled(!!d.enabled);
       setMode(d.mode || "denylist");
-      setPatterns((d.topic_patterns ?? []).join("\n"));
+      setPatterns(Array.isArray(d.topic_patterns) ? d.topic_patterns : []);
       setSampleRate(typeof d.sample_rate === "number" ? d.sample_rate : 1);
       setCaptured(d.captured ?? 0);
     } catch (e) {
@@ -553,12 +563,25 @@ function CaptureTab({ projectId }: { projectId: string }) {
     load();
   }, [load]);
 
+  // Event catalog for the checklist: every installed app's declared
+  // `publishes` topics (GET /api/apps — the platform list, not this app).
+  useEffect(() => {
+    fetch(`/api/apps?project_id=${encodeURIComponent(projectId)}`, { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : []))
+      .then((j) => {
+        const rows = Array.isArray(j) ? j : j.apps ?? [];
+        setCatalog(
+          rows
+            .filter((a: any) => a.name !== "analytics" && Array.isArray(a.publishes) && a.publishes.length)
+            .map((a: any) => ({ app: a.name, events: a.publishes as EventDecl[] })),
+        );
+      })
+      .catch(() => {});
+  }, [projectId]);
+
   const save = async () => {
     setStatus("saving…");
-    const topic_patterns = patterns
-      .split(/[\n,]/)
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const topic_patterns = patterns;
     try {
       const r = await fetch(`${API}/capture`, {
         method: "POST",
@@ -609,19 +632,63 @@ function CaptureTab({ projectId }: { projectId: string }) {
         </div>
 
         {mode !== "all" && (
-          <div className="flex flex-col gap-1">
-            <span className="text-text-dim text-xs">
-              Topic patterns ({mode === "denylist" ? "exclude" : "include"}) — one per line; exact
-              (<code>file.deleted</code>), prefix (<code>campaign.*</code>), or <code>*</code>
-            </span>
-            <textarea
-              value={patterns}
-              onChange={(e) => setPatterns(e.target.value)}
-              spellCheck={false}
-              className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-xs"
-              style={{ minHeight: "80px", fontFamily: "monospace" }}
-            />
-          </div>
+          <>
+            {catalog.length > 0 && (
+              <div className="flex flex-col gap-1">
+                <span className="text-text-dim text-xs">
+                  {mode === "denylist" ? "Check events to exclude" : "Check events to capture"}
+                </span>
+                <div
+                  className="border border-border rounded p-2 flex flex-col gap-0.5"
+                  style={{ maxHeight: "260px", overflow: "auto" }}
+                >
+                  {catalog.map((a) => (
+                    <div key={a.app} className="flex flex-col">
+                      <div className="text-text-dim text-xs uppercase mt-1.5">{a.app}</div>
+                      {a.events.map((ev) => (
+                        <label
+                          key={ev.name}
+                          className="flex items-center gap-2 text-xs py-0.5"
+                          style={{ cursor: "pointer" }}
+                          title={ev.description || ""}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={patterns.includes(ev.name)}
+                            onChange={() => togglePattern(ev.name)}
+                          />
+                          <code className="text-text">{ev.name}</code>
+                          {ev.description && (
+                            <span className="text-text-dim truncate">{ev.description}</span>
+                          )}
+                        </label>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="flex flex-col gap-1">
+              <span className="text-text-dim text-xs">
+                Patterns (advanced) — one per line; exact (<code>file.deleted</code>), prefix
+                (<code>campaign.*</code>), or <code>*</code>. For topics apps don't declare.
+              </span>
+              <textarea
+                value={patterns.join("\n")}
+                onChange={(e) =>
+                  setPatterns(
+                    e.target.value
+                      .split(/[\n,]/)
+                      .map((s) => s.trim())
+                      .filter(Boolean),
+                  )
+                }
+                spellCheck={false}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-xs"
+                style={{ minHeight: "70px", fontFamily: "monospace" }}
+              />
+            </div>
+          </>
         )}
 
         <div className="flex items-center gap-2">
