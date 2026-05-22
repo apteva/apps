@@ -56,8 +56,8 @@ func TestEmbeddedManifest(t *testing.T) {
 	if m.Name != "stocks" {
 		t.Fatalf("name = %q, want stocks", m.Name)
 	}
-	if len(m.Provides.MCPTools) != 5 {
-		t.Fatalf("want 5 mcp tools, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 6 {
+		t.Fatalf("want 6 mcp tools, got %d", len(m.Provides.MCPTools))
 	}
 	if m.DB == nil || m.DB.Migrations != "migrations/" {
 		t.Fatalf("db block missing or wrong: %+v", m.DB)
@@ -131,6 +131,30 @@ func TestSnapshotAndYieldFilter(t *testing.T) {
 	rows, _ = st.listUniverse(listFilter{Sort: "yield", MinYield: floatPtr(4.0)})
 	if containsSym(rows, "KO") {
 		t.Fatal("min_yield=4.0 should exclude KO at 3.5%")
+	}
+}
+
+func TestStats(t *testing.T) {
+	st := newTestStore(t)
+	s0, err := st.stats(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s0.Universe < 1000 || s0.Warmed != 0 || s0.WithPrice != 0 {
+		t.Fatalf("fresh seed: want big universe, 0 warmed; got %+v", s0)
+	}
+	y := 3.0
+	if err := st.updateSnapshot("KO", 60, 1.0, &y, nil); err != nil {
+		t.Fatal(err)
+	}
+	pe := 12.0
+	_ = st.updateFundamentals("KO", &pe, nil)
+	s1, _ := st.stats(time.Hour)
+	if s1.Warmed != 1 || s1.WithPrice != 1 || s1.WithYield != 1 || s1.WithFundamentals != 1 || s1.Fresh != 1 {
+		t.Fatalf("after warming KO: %+v", s1)
+	}
+	if s1.NewestRefresh == nil {
+		t.Fatal("expected a newest_refresh timestamp")
 	}
 }
 

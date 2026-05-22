@@ -272,6 +272,51 @@ func (s *store) loadDividends(symbol string) ([]Dividend, error) {
 	return out, rows.Err()
 }
 
+// syncStats is the warming progress snapshot for the sync_status view.
+type syncStats struct {
+	Universe         int    `json:"universe"`
+	Warmed           int    `json:"warmed"` // refreshed at least once
+	WithPrice        int    `json:"with_price"`
+	WithYield        int    `json:"with_yield"`
+	WithFundamentals int    `json:"with_fundamentals"`
+	Fresh            int    `json:"fresh"` // refreshed within ttl
+	OldestRefresh    *int64 `json:"oldest_refresh,omitempty"`
+	NewestRefresh    *int64 `json:"newest_refresh,omitempty"`
+}
+
+// stats counts how much of the universe has been warmed, for the sync view.
+func (s *store) stats(ttl time.Duration) (syncStats, error) {
+	cutoff := time.Now().Add(-ttl).Unix()
+	var st syncStats
+	var warmed, price, yield, fund, fresh, oldest, newest sql.NullInt64
+	err := s.db.QueryRow(`SELECT
+		COUNT(*),
+		SUM(refreshed_at IS NOT NULL),
+		SUM(last_price IS NOT NULL),
+		SUM(last_yield_pct IS NOT NULL),
+		SUM(last_pe IS NOT NULL OR last_payout_pct IS NOT NULL),
+		SUM(refreshed_at >= ?),
+		MIN(refreshed_at),
+		MAX(refreshed_at)
+	  FROM instrument`, cutoff).
+		Scan(&st.Universe, &warmed, &price, &yield, &fund, &fresh, &oldest, &newest)
+	if err != nil {
+		return st, err
+	}
+	st.Warmed = int(warmed.Int64)
+	st.WithPrice = int(price.Int64)
+	st.WithYield = int(yield.Int64)
+	st.WithFundamentals = int(fund.Int64)
+	st.Fresh = int(fresh.Int64)
+	if oldest.Valid {
+		st.OldestRefresh = &oldest.Int64
+	}
+	if newest.Valid {
+		st.NewestRefresh = &newest.Int64
+	}
+	return st, nil
+}
+
 // cacheGet returns the cached JSON for key when it's younger than maxAge.
 func (s *store) cacheGet(key string, maxAge time.Duration) (json.RawMessage, bool) {
 	var body string

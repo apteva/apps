@@ -198,6 +198,39 @@ func (a *App) toolDividends(args map[string]any) (any, error) {
 	}, nil
 }
 
+// toolSyncStatus reports background-warming progress + the fundamentals
+// feed health, for the panel's sync strip and agent introspection.
+func (a *App) toolSyncStatus(_ map[string]any) (any, error) {
+	st, err := a.st.stats(a.ttl)
+	if err != nil {
+		return nil, err
+	}
+	fState, retryAt := a.y.fundamentalsState()
+	a.warmMu.Lock()
+	last := a.lastWarm
+	a.warmMu.Unlock()
+
+	out := map[string]any{
+		"universe":              st.Universe,
+		"warmed":                st.Warmed,
+		"with_price":            st.WithPrice,
+		"with_yield":            st.WithYield,
+		"with_fundamentals":     st.WithFundamentals,
+		"fresh":                 st.Fresh,
+		"oldest_refresh":        st.OldestRefresh,
+		"newest_refresh":        st.NewestRefresh,
+		"fundamentals_state":    fState,
+		"fundamentals_retry_at": retryAt,
+		"batch_size":            warmBatchSize,
+		"interval_seconds":      600,
+	}
+	if !last.IsZero() {
+		u := last.Unix()
+		out["last_batch"] = u
+	}
+	return out, nil
+}
+
 // ─── Warming / refresh ─────────────────────────────────────────────
 
 // refresh fetches one /chart for a symbol, persists its dividends, and

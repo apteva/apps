@@ -31,7 +31,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: stocks
 display_name: Stocks
-version: 0.2.1
+version: 0.3.0
 description: Explore + screen the S&P 1500 backed by Yahoo Finance — filter by yield/payout/P-E/dividend-growth, quote, price chart, dividend history. Read-only.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/stocks
@@ -56,6 +56,8 @@ provides:
       description: "OHLCV price history for a stock. Args: symbol, range? (1mo|6mo|1y|5y|max), interval? (1d|1wk|1mo)."
     - name: dividends
       description: "Dividend history + summary (trailing-12mo total, yield, frequency, growth) for a stock. Args: symbol."
+    - name: sync_status
+      description: "Background-warming progress (universe coverage of prices/yield/P-E) and fundamentals feed health."
   ui_panels:
     - slot: project.page
       label: Stocks
@@ -197,6 +199,12 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: symbolReq,
 			Handler:     func(_ *sdk.AppCtx, args map[string]any) (any, error) { return a.toolDividends(args) },
 		},
+		{
+			Name:        "sync_status",
+			Description: "Background-warming progress (how much of the universe has prices / yield / P-E) and the fundamentals feed health.",
+			InputSchema: schemaObject(nil, nil),
+			Handler:     func(_ *sdk.AppCtx, args map[string]any) (any, error) { return a.toolSyncStatus(args) },
+		},
 	}
 }
 
@@ -209,7 +217,13 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "GET", Pattern: "/stock/{symbol}", Handler: a.handleGet},
 		{Method: "GET", Pattern: "/chart/{symbol}", Handler: a.handleChart},
 		{Method: "GET", Pattern: "/dividends/{symbol}", Handler: a.handleDividends},
+		{Method: "GET", Pattern: "/status", Handler: a.handleStatus},
 	}
+}
+
+func (a *App) handleStatus(w http.ResponseWriter, _ *http.Request) {
+	body, err := a.toolSyncStatus(nil)
+	respond(w, body, err)
 }
 
 func (a *App) handleList(w http.ResponseWriter, r *http.Request) {

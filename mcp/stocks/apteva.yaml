@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: stocks
 display_name: Stocks
-version: 0.2.1
+version: 0.3.0
 description: |
   Explore and screen stocks, backed by Yahoo Finance. Filter the S&P 1500
   universe (every Dividend Aristocrat and King included) by dividend
@@ -38,6 +38,7 @@ provides:
     - { name: get,       description: "One stock's data — name, exchange, price, day + 52-week range, volume, P/E, payout, dividend yield + 5yr growth + frequency, last dividend. Args: symbol." }
     - { name: chart,     description: "OHLCV price history for a stock. Args: symbol, range? (1mo|6mo|1y|5y|max), interval? (1d|1wk|1mo)." }
     - { name: dividends, description: "Dividend history + summary (trailing-12mo total, yield, frequency, growth) for a stock. Args: symbol." }
+    - { name: sync_status, description: "Background-warming progress (universe coverage of prices/yield/P-E) and fundamentals feed health." }
   ui_panels:
     - slot: project.page
       label: Stocks

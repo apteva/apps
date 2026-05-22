@@ -314,6 +314,22 @@ func (y *yahooClient) clearCrumb() {
 	y.mu.Unlock()
 }
 
+// fundamentalsState reports the crumb handshake health for the sync view:
+// "ok" (have a crumb), "backoff" (handshake failed, retrying at retryAt),
+// or "untried" (no crumb yet, no failure recorded).
+func (y *yahooClient) fundamentalsState() (state string, retryAt *int64) {
+	y.mu.Lock()
+	defer y.mu.Unlock()
+	if y.crumb != "" {
+		return "ok", nil
+	}
+	if time.Now().Before(y.crumbRetryAt) {
+		t := y.crumbRetryAt.Unix()
+		return "backoff", &t
+	}
+	return "untried", nil
+}
+
 // fundamentals returns trailing P/E and payout ratio (as a percentage)
 // for a symbol. Either may be nil when Yahoo doesn't report it; an error
 // means the whole fetch failed (throttle, crumb) and the caller should

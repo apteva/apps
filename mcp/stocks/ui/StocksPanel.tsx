@@ -77,6 +77,18 @@ interface DividendResp {
   history: Dividend[];
 }
 
+interface SyncStatus {
+  universe: number;
+  warmed: number;
+  with_price: number;
+  with_yield: number;
+  with_fundamentals: number;
+  fresh: number;
+  last_batch?: number;
+  fundamentals_state: "ok" | "backoff" | "untried";
+  fundamentals_retry_at?: number;
+}
+
 const RANGES = ["1mo", "6mo", "1y", "5y", "max"] as const;
 type Range = (typeof RANGES)[number];
 
@@ -116,6 +128,13 @@ function fmtVolume(n: number | undefined): string {
 }
 function fmtDate(unix: number): string {
   return new Date(unix * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+function ago(unix: number): string {
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - unix));
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
 }
 function changeColor(n: number | undefined): string {
   if (n == null || n === 0) return "var(--text-dim)";
@@ -189,6 +208,8 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
         <h2 className="text-lg font-semibold text-text">Stocks</h2>
         <span className="text-xs text-text-muted">{shown.length} symbols</span>
       </div>
+
+      <SyncBar />
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <div className="relative">
@@ -388,6 +409,47 @@ function Detail({ symbol, onBack }: { symbol: string; onBack: () => void }) {
         ) : (
           <div className="py-6 text-center text-sm text-text-muted">No dividend history.</div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// SyncBar — background-warming progress strip. Polls /status every 20s so
+// the operator can see the universe filling in (and whether the P/E feed
+// is live or throttled) rather than wondering why some rows are blank.
+function SyncBar() {
+  const [s, setS] = useState<SyncStatus | null>(null);
+  useEffect(() => {
+    let live = true;
+    const poll = () =>
+      fetch(`${API}/status`).then((r) => r.json()).then((j) => { if (live && !j.error) setS(j); }).catch(() => {});
+    void poll();
+    const id = setInterval(poll, 20000);
+    return () => { live = false; clearInterval(id); };
+  }, []);
+  if (!s || !s.universe) return null;
+
+  const pct = Math.round((s.with_price / s.universe) * 100);
+  const synced = s.with_price >= s.universe;
+  const fund =
+    s.fundamentals_state === "ok" ? "P/E feed live"
+    : s.fundamentals_state === "backoff" ? "P/E feed throttled — retrying"
+    : "P/E feed pending";
+
+  return (
+    <div className="mb-3 rounded-md border border-border bg-bg-card px-3 py-2">
+      <div className="mb-1 flex flex-wrap items-center justify-between gap-x-3 text-xs text-text-muted">
+        <span>
+          {synced ? "Universe synced" : "Warming universe…"}{" "}
+          <span className="tabular-nums text-text">{s.with_price.toLocaleString()}</span> / {s.universe.toLocaleString()} priced
+          {" · "}<span className="tabular-nums">{s.with_fundamentals.toLocaleString()}</span> with P/E
+        </span>
+        <span className="text-text-dim">
+          {fund}{s.last_batch ? ` · updated ${ago(s.last_batch)}` : ""}
+        </span>
+      </div>
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-bg-hover">
+        <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: "var(--accent)" }} />
       </div>
     </div>
   );
