@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.6.2
+version: 0.7.0
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -337,15 +337,16 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tenant_attach_domain",
-			Description: "Attach a public hostname to a tenant. Orchestrates: Domains app writes the DNS record → Certs app issues a Let's Encrypt cert via DNS-01 → Routes app registers (fqdn → tenant apteva-server port) on the parent's routes table. Idempotent; partial-failure tolerant. Args: tenant_id, fqdn, target? (defaults to fleet's public_host), type? (A or CNAME; inferred from target), ttl?.",
+			Description: "Attach a public hostname to a tenant. Two modes: (1) manage_dns=true (default) — Domains app writes the DNS record, Certs app issues via DNS-01, Routes app proxies; needs the apex registered in the Domains catalog. (2) manage_dns=false — client already pointed DNS at this machine; fleet skips the registrar write, Certs auto-falls back to HTTP-01 (LE validates against the parent's Caddy on this IP), Routes still proxies. Idempotent; partial-failure tolerant. Args: tenant_id, fqdn, manage_dns? (default true), target? (DNS-mode only; defaults to fleet's public_host), type? (DNS-mode only; A or CNAME; inferred from target), ttl?.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"tenant_id": map[string]any{"type": "string"},
-					"fqdn":      map[string]any{"type": "string"},
-					"target":    map[string]any{"type": "string"},
-					"type":      map[string]any{"type": "string"},
-					"ttl":       map[string]any{"type": "integer"},
+					"tenant_id":  map[string]any{"type": "string"},
+					"fqdn":       map[string]any{"type": "string"},
+					"manage_dns": map[string]any{"type": "boolean"},
+					"target":     map[string]any{"type": "string"},
+					"type":       map[string]any{"type": "string"},
+					"ttl":        map[string]any{"type": "integer"},
 				},
 				"required": []string{"tenant_id", "fqdn"},
 			},

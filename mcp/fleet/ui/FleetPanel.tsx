@@ -1712,62 +1712,135 @@ function AttachDomainDialog({
     fqdn: string;
     target?: string;
     type?: string;
+    manage_dns?: boolean;
   }) => Promise<{ ok: boolean; error?: string }>;
 }) {
+  // Two attach modes:
+  //   "managed"  — apex is in our Domains catalog; Domains app writes
+  //                the DNS record. Original 0.6.x behavior.
+  //   "external" — client already pointed their DNS at this machine;
+  //                we skip the registrar write and just do cert (HTTP-01)
+  //                + route. Useful when we don't run the client's DNS.
+  type Mode = "managed" | "external";
+  const noDomains = meta.domains.length === 0;
+  const [mode, setMode] = useState<Mode>(noDomains ? "external" : "managed");
   const [fqdn, setFqdn] = useState("");
+  const [externalFqdn, setExternalFqdn] = useState("");
   const [apex, setApex] = useState(meta.domains[0]?.name || "");
   const [target, setTarget] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const composedFqdn = useMemo(() => {
+    if (mode === "external") {
+      return externalFqdn.trim().replace(/\.$/, "").toLowerCase();
+    }
     const sub = fqdn.trim().replace(/\.$/, "");
     if (!apex) return sub;
     if (!sub) return apex;
     return `${sub}.${apex}`;
-  }, [fqdn, apex]);
+  }, [mode, fqdn, externalFqdn, apex]);
 
-  const noDomains = meta.domains.length === 0;
-  const helpText = noDomains
-    ? "No domains registered in the Domains app yet. Add one there first, then come back."
-    : "Pick the apex you've registered with the Domains app, then a subdomain (leave empty to attach the apex itself). target defaults to the parent host's public IP.";
+  const helpText =
+    mode === "external"
+      ? `The client already pointed DNS at this machine (${meta.public_host || "the parent host"}). Fleet skips the DNS write — Let's Encrypt validates over HTTP-01 against the parent's Caddy. Routes still proxies to the tenant's port.`
+      : noDomains
+        ? "No domains registered in the Domains app yet. Add one there first, or switch to “Client-managed DNS”."
+        : "Pick the apex you've registered with the Domains app, then a subdomain (leave empty to attach the apex itself). target defaults to the parent host's public IP.";
 
   return (
     <DialogFrame title={`Attach domain to ${tenant.slug}`} onClose={onClose}>
-      <p className="text-xs text-text-dim mb-3">{helpText}</p>
-      <Label text="Apex">
-        <select
-          value={apex}
-          onChange={(e) => setApex(e.target.value)}
-          className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
+      {/* Mode toggle — primary UX affordance for the two attach paths. */}
+      <div className="flex items-center gap-1 mb-3 p-1 bg-bg-input rounded-md">
+        <button
+          type="button"
+          onClick={() => setMode("managed")}
           disabled={noDomains}
+          className={`flex-1 px-2 py-1 text-xs rounded ${
+            mode === "managed"
+              ? "bg-bg-card text-text font-medium"
+              : "text-text-dim hover:text-text disabled:opacity-40"
+          }`}
         >
-          {meta.domains.map((d) => (
-            <option key={d.name} value={d.name}>
-              {d.name}
-            </option>
-          ))}
-        </select>
-      </Label>
-      <Label text="Subdomain (optional)">
-        <input
-          type="text"
-          value={fqdn}
-          onChange={(e) => setFqdn(e.target.value)}
-          placeholder={`e.g. ${tenant.slug}`}
-          className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
-        />
-      </Label>
-      <Label text="Target (optional)">
-        <input
-          type="text"
-          value={target}
-          onChange={(e) => setTarget(e.target.value)}
-          placeholder={meta.public_host || "default: parent host's public IP"}
-          className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
-        />
-      </Label>
-      <div className="text-[11px] text-text-dim font-mono">
+          We manage DNS
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode("external")}
+          className={`flex-1 px-2 py-1 text-xs rounded ${
+            mode === "external"
+              ? "bg-bg-card text-text font-medium"
+              : "text-text-dim hover:text-text"
+          }`}
+        >
+          Client-managed DNS
+        </button>
+      </div>
+      <p className="text-xs text-text-dim mb-3">{helpText}</p>
+
+      {mode === "managed" ? (
+        <>
+          <Label text="Apex">
+            <select
+              value={apex}
+              onChange={(e) => setApex(e.target.value)}
+              className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
+              disabled={noDomains}
+            >
+              {meta.domains.map((d) => (
+                <option key={d.name} value={d.name}>
+                  {d.name}
+                </option>
+              ))}
+            </select>
+          </Label>
+          <Label text="Subdomain (optional)">
+            <input
+              type="text"
+              value={fqdn}
+              onChange={(e) => setFqdn(e.target.value)}
+              placeholder={`e.g. ${tenant.slug}`}
+              className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
+            />
+          </Label>
+          <Label text="Target (optional)">
+            <input
+              type="text"
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+              placeholder={meta.public_host || "default: parent host's public IP"}
+              className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
+            />
+          </Label>
+        </>
+      ) : (
+        <>
+          <Label text="Hostname (FQDN)">
+            <input
+              type="text"
+              value={externalFqdn}
+              onChange={(e) => setExternalFqdn(e.target.value)}
+              placeholder="app.client.com"
+              className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
+              autoFocus
+            />
+          </Label>
+          <div className="text-xs text-text-dim border border-border rounded-md px-3 py-2 bg-bg-input/50 space-y-1">
+            <div className="font-medium text-text">Before submitting, verify:</div>
+            <div>
+              · client's DNS for{" "}
+              <span className="font-mono text-text">{externalFqdn || "…"}</span>{" "}
+              resolves to{" "}
+              <span className="font-mono text-text">
+                {meta.public_host || "this machine"}
+              </span>
+            </div>
+            <div>· port 80 is reachable (Let's Encrypt HTTP-01)</div>
+          </div>
+        </>
+      )}
+
+      <div className="text-xs text-text-dim font-mono mt-2">
         Will attach: <span className="text-text">{composedFqdn || "—"}</span>
       </div>
       {err && <p className="text-xs text-error mt-2">{err}</p>}
@@ -1778,14 +1851,19 @@ function AttachDomainDialog({
           busy={busy}
           onClick={async () => {
             if (!composedFqdn) {
-              setErr("pick an apex (subdomain optional)");
+              setErr(
+                mode === "external"
+                  ? "enter the FQDN (e.g. app.client.com)"
+                  : "pick an apex (subdomain optional)",
+              );
               return;
             }
             setBusy(true);
             setErr(null);
             const r = await onSubmit({
               fqdn: composedFqdn,
-              ...(target ? { target } : {}),
+              ...(mode === "managed" && target ? { target } : {}),
+              ...(mode === "external" ? { manage_dns: false } : {}),
             });
             setBusy(false);
             if (!r.ok) setErr(r.error || "failed");

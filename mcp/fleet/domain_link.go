@@ -149,6 +149,13 @@ type attachDomainSpec struct {
 	Target string // record value; empty → fleet's publicHost
 	Type   string // "A" | "CNAME"; empty → inferred from target shape
 	TTL    int
+	// ManageDNS=true (default): the Domains app writes/owns the DNS
+	// record for fqdn. Used when the apex sits in our Domains catalog.
+	// ManageDNS=false: client already pointed fqdn at our parent
+	// machine; fleet skips the DNS write and still does cert + route.
+	// The certs app auto-falls back to HTTP-01 in that case, so the
+	// cert still gets issued without us touching the client's DNS.
+	ManageDNS bool
 }
 
 // resolveTarget picks the DNS record value: explicit > publicHost.
@@ -186,57 +193,69 @@ func inferRecordType(target string) string {
 // it so global-scoped Domains/Certs (the prod default) resolve their
 // per-project data correctly.
 func (a *App) attachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec attachDomainSpec) error {
-	if !a.domainsAvailable(ctx) {
-		return errors.New("domains app not installed — install + bind it as fleet's domains integration")
-	}
 	fqdn := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(spec.FQDN, ".")))
 	if fqdn == "" {
 		return errors.New("fqdn required")
 	}
-	target := a.resolveTarget(spec)
-	if target == "" {
-		return errors.New("target required — pass target explicitly or ensure APTEVA_PUBLIC_URL / detectPublicHost yields a usable IP")
-	}
-	rtype := strings.ToUpper(strings.TrimSpace(spec.Type))
-	if rtype == "" {
-		rtype = inferRecordType(target)
-	}
-	if rtype != "A" && rtype != "CNAME" {
-		return fmt.Errorf("unsupported record type %q (A or CNAME)", rtype)
-	}
-	if rtype == "CNAME" {
-		target = strings.TrimSuffix(target, ".")
-	}
-	ttl := spec.TTL
-	if ttl <= 0 {
-		ttl = 600
+
+	var recordID string
+	if spec.ManageDNS {
+		if !a.domainsAvailable(ctx) {
+			return errors.New("domains app not installed — install + bind it as fleet's domains integration, or pass manage_dns=false if the client already pointed DNS at this machine")
+		}
+		target := a.resolveTarget(spec)
+		if target == "" {
+			return errors.New("target required — pass target explicitly or ensure APTEVA_PUBLIC_URL / detectPublicHost yields a usable IP")
+		}
+		rtype := strings.ToUpper(strings.TrimSpace(spec.Type))
+		if rtype == "" {
+			rtype = inferRecordType(target)
+		}
+		if rtype != "A" && rtype != "CNAME" {
+			return fmt.Errorf("unsupported record type %q (A or CNAME)", rtype)
+		}
+		if rtype == "CNAME" {
+			target = strings.TrimSuffix(target, ".")
+		}
+		ttl := spec.TTL
+		if ttl <= 0 {
+			ttl = 600
+		}
+
+		apex, sub, err := resolveApex(ctx, projectID, fqdn)
+		if err != nil {
+			return err
+		}
+		subArg := sub
+		if subArg == "" {
+			subArg = "@"
+		}
+		if rtype == "CNAME" && sub == "" {
+			return errors.New("apex CNAME isn't allowed by DNS; use type=A with an IP, or attach a subdomain")
+		}
+
+		if err := callDomainsTool(ctx, projectID, "domain_records_set", map[string]any{
+			"domain": apex, "name": subArg, "type": rtype, "value": target, "ttl": ttl,
+		}, nil); err != nil {
+			return err
+		}
+		recordID = apex + "|" + rtype
+		_ = a.store.recordEvent(t.ID, "domain.attached", "tool:attach_domain", map[string]any{
+			"fqdn": fqdn, "apex": apex, "type": rtype, "target": target,
+		})
+	} else {
+		// Client-managed DNS: we don't touch the registrar. We just
+		// trust the operator that fqdn resolves to this machine and
+		// continue with cert + route. detach() keys off record_id ==
+		// "" to skip the corresponding domain_records_delete call.
+		_ = a.store.recordEvent(t.ID, "domain.attached", "tool:attach_domain", map[string]any{
+			"fqdn": fqdn, "manage_dns": false,
+		})
 	}
 
-	apex, sub, err := resolveApex(ctx, projectID, fqdn)
-	if err != nil {
-		return err
-	}
-	subArg := sub
-	if subArg == "" {
-		subArg = "@"
-	}
-	if rtype == "CNAME" && sub == "" {
-		return errors.New("apex CNAME isn't allowed by DNS; use type=A with an IP, or attach a subdomain")
-	}
-
-	if err := callDomainsTool(ctx, projectID, "domain_records_set", map[string]any{
-		"domain": apex, "name": subArg, "type": rtype, "value": target, "ttl": ttl,
-	}, nil); err != nil {
-		return err
-	}
-
-	recordID := apex + "|" + rtype
 	if err := a.store.setDomain(t.ID, fqdn, recordID, nowUTC()); err != nil {
 		return err
 	}
-	_ = a.store.recordEvent(t.ID, "domain.attached", "tool:attach_domain", map[string]any{
-		"fqdn": fqdn, "apex": apex, "type": rtype, "target": target,
-	})
 
 	// Fire-and-forget cert issuance; async on the certs side. The
 	// panel polls cert_get for status. Partial-failure mirror of

@@ -1001,9 +1001,13 @@ func (a *App) toolAttachDomain(_ *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	spec := attachDomainSpec{
-		FQDN:   getStr(args, "fqdn"),
-		Target: getStr(args, "target"),
-		Type:   getStr(args, "type"),
+		FQDN:      getStr(args, "fqdn"),
+		Target:    getStr(args, "target"),
+		Type:      getStr(args, "type"),
+		ManageDNS: true,
+	}
+	if v, ok := args["manage_dns"].(bool); ok {
+		spec.ManageDNS = v
 	}
 	if ttlF, ok := args["ttl"].(float64); ok {
 		spec.TTL = int(ttlF)
@@ -1074,18 +1078,27 @@ func (a *App) httpAttachDomain(w http.ResponseWriter, r *http.Request) {
 		writeJSONErr(w, http.StatusNotFound, err)
 		return
 	}
+	// ManageDNS defaults to true. Use a pointer so the panel can pass
+	// `false` explicitly; omitted → true (backward compat with v0.6.x
+	// callers and the old AttachDomainDialog).
 	var body struct {
-		FQDN   string `json:"fqdn"`
-		Target string `json:"target"`
-		Type   string `json:"type"`
-		TTL    int    `json:"ttl"`
+		FQDN      string `json:"fqdn"`
+		Target    string `json:"target"`
+		Type      string `json:"type"`
+		TTL       int    `json:"ttl"`
+		ManageDNS *bool  `json:"manage_dns"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSONErr(w, http.StatusBadRequest, err)
 		return
 	}
+	manageDNS := true
+	if body.ManageDNS != nil {
+		manageDNS = *body.ManageDNS
+	}
 	if err := a.attachDomain(globalCtx, projectID, t, attachDomainSpec{
 		FQDN: body.FQDN, Target: body.Target, Type: body.Type, TTL: body.TTL,
+		ManageDNS: manageDNS,
 	}); err != nil {
 		writeJSONErr(w, http.StatusBadRequest, err)
 		return
