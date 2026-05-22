@@ -618,6 +618,21 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 			},
 		},
 	},
+	"core/form": {
+		Name: "core/form", DisplayName: "Form", Category: "interactive",
+		Description: "Visitor-submittable form. fields[] declares the inputs (each {name, label, type, required, placeholder, autocomplete}); actions[] is an ordered list of {app, tool, args} that run on submit via MCP. args may template {{ field_name }} (submitted value) and {{ steps.N.path }} (output of the Nth prior action). on_failure: abort | continue. success: { kind: inline, message } | { kind: redirect, url }. Submissions land in form_submissions regardless of action outcomes — visible via forms_submissions_list. consent_text renders below the fields. Honeypot field is auto-injected; per-IP rate-limit is enforced server-side.",
+		AttrsSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"fields":       map[string]any{"type": "array"},
+				"actions":      map[string]any{"type": "array"},
+				"submit_label": map[string]any{"type": "string"},
+				"consent_text": map[string]any{"type": "string"},
+				"on_failure":   map[string]any{"type": "string", "enum": []string{"abort", "continue"}},
+				"success":      map[string]any{"type": "object"},
+			},
+		},
+	},
 }
 
 // listBlockTypes returns the registry sorted by category for stable

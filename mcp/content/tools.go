@@ -492,5 +492,29 @@ func (a *App) mcpTools() []sdk.Tool {
 			}, []string{"id"}),
 			Handler: a.toolSitesSetDefault,
 		},
+		// ── core/form submissions ──────────────────────────────
+		{
+			Name:        "forms_list",
+			Description: "List every core/form block across all published pages/posts in the project, with submission counts. Returns [{post_id, post_kind, post_slug, post_title, block_id, fields, actions_count, submissions_count, last_submission_at}]. Use this to populate a 'forms inbox' across the site.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler:     a.toolFormsList,
+		},
+		{
+			Name:        "forms_submissions_list",
+			Description: "List submissions, newest first. Args: block_id (optional — filter to one form), limit (default 50, max 500). Each row has payload + per-action results + status (ok | partial | rejected_honeypot | rejected_validation).",
+			InputSchema: schemaObject(map[string]any{
+				"block_id": map[string]any{"type": "string"},
+				"limit":    map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolFormsSubmissionsList,
+		},
+		{
+			Name:        "forms_submission_get",
+			Description: "Fetch one submission by id. Returns the full row including payload, results, and audit fields (ip_hash, user_agent, status, error).",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolFormsSubmissionGet,
+		},
 	}
 }

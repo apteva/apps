@@ -1,7 +1,7 @@
 schema: apteva-content-template/v1
 name: docs-site
 display_name: Docs Site
-version: 1.0.0
+version: 1.1.0
 description: |
   Documentation site for an open-source library or product. Homepage,
   getting-started, guides index, reference, FAQ, and changelog — all as
@@ -201,6 +201,25 @@ pages:
       - type: core/paragraph
         attrs:
           text_md: Beta release. Feedback welcome.
+      - type: core/heading
+        attrs:
+          level: 2
+          text: Get notified of releases
+      - type: core/form
+        attrs:
+          submit_label: Notify me
+          consent_text: "We'll only email you when there's a new release."
+          success: { kind: inline, message: "Subscribed — you'll hear from us on the next release." }
+          fields:
+            - { name: email, label: Email, type: email, required: true, autocomplete: email }
+          actions:
+            - app: crm
+              tool: contacts_upsert_by_channel
+              args:
+                kind: email
+                value:   "{{ email }}"
+                list_id: release-notifications
+                source: "form:changelog"
 
 posts: []
 

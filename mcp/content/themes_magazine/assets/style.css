@@ -524,6 +524,57 @@ a:hover { color: var(--accent-hover); }
   text-align: center;
 }
 
+/* ---------- Forms (block-form) ---------- */
+
+.block-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-width: 460px;
+  margin: 2.5rem auto;
+  padding: 2rem;
+  background: var(--bg-card, #fbfaf7);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.block-form__field { display: flex; flex-direction: column; gap: 0.4rem; }
+.block-form__field label {
+  font-family: var(--font-serif);
+  font-size: 0.9rem;
+  color: var(--fg);
+}
+.block-form__req { color: var(--accent); }
+.block-form__field input,
+.block-form__field textarea {
+  font: inherit;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--fg);
+}
+.block-form__field input:focus,
+.block-form__field textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.block-form__consent {
+  font-size: 0.8rem;
+  color: var(--fg-muted);
+  font-style: italic;
+  margin: 0.25rem 0 0;
+}
+.block-form__submit { align-self: flex-start; margin-top: 0.5rem; }
+.block-form__msg { font-size: 0.85rem; color: #9b2c2c; min-height: 1.2em; }
+.block-form__success {
+  padding: 1.25rem;
+  margin: 0;
+  text-align: center;
+  font-family: var(--font-serif);
+  font-style: italic;
+  color: var(--fg);
+}
+
 /* ---------- Site footer ---------- */
 
 .site-footer {

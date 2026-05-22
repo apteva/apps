@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: content
 display_name: Content
-version: 2.7.0
+version: 2.8.0
 description: |
   Block-based CMS for Apteva. Posts, pages, media, taxonomies, menus,
   revisions, redirects. Renders themed HTML and exposes a headless REST
@@ -172,6 +172,13 @@ provides:
       description: List installed themes (always includes the embedded default).
     - name: themes_set_active
       description: Switch the active theme by slug.
+    # Forms (core/form block)
+    - name: forms_list
+      description: List every core/form block across the project, with submission counts.
+    - name: forms_submissions_list
+      description: List submissions (optionally filtered by block_id), newest first.
+    - name: forms_submission_get
+      description: Fetch one submission by id, including payload + per-action results.
   ui_panels:
     - slot: project.page
       label: Content

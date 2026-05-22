@@ -138,6 +138,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// ── public render surface ───────────────────────────────
 		{Pattern: "/_theme/", Handler: a.handleThemeAsset, NoAuth: true},
 		{Pattern: "/_media/", Handler: a.handleMediaAsset, NoAuth: true},
+		{Pattern: "/_forms/submit/", Handler: a.handleFormSubmit, NoAuth: true},
 		{Pattern: "/preview/", Handler: a.handlePreview, NoAuth: true},
 		{Pattern: "/feed.xml", Handler: a.handleFeed, NoAuth: true},
 		{Pattern: "/sitemap.xml", Handler: a.handleSitemap, NoAuth: true},

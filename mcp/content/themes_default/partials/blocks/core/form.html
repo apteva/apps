@@ -1,0 +1,72 @@
+{{- /* core/form
+   Attrs: { fields, submit_label, consent_text, success }
+   Renders a real <form> with method=POST so noscript clients fall
+   back to a normal page-reload submit; the inline script upgrades
+   to XHR + inline success state when JS is on. The submission URL
+   is keyed by block id alone — the server resolves the parent post
+   on submit, so the partial doesn't need PostID threaded in.
+*/ -}}
+<form class="block-form" method="post" action="_forms/submit/{{ .ID }}" data-cp-form="{{ .ID }}">
+  {{ range .Attrs.fields }}
+  <div class="block-form__field">
+    {{ if .label }}
+    <label for="cpf-{{ $.ID }}-{{ .name }}">{{ .label }}{{ if .required }} <span class="block-form__req">*</span>{{ end }}</label>
+    {{ end }}
+    {{ if eq .type "textarea" }}
+    <textarea id="cpf-{{ $.ID }}-{{ .name }}" name="{{ .name }}" rows="4"
+      {{ if .required }}required{{ end }}
+      {{ if .placeholder }}placeholder="{{ .placeholder }}"{{ end }}
+      {{ if .autocomplete }}autocomplete="{{ .autocomplete }}"{{ end }}></textarea>
+    {{ else }}
+    <input id="cpf-{{ $.ID }}-{{ .name }}" name="{{ .name }}"
+      type="{{ if .type }}{{ .type }}{{ else }}text{{ end }}"
+      {{ if .required }}required{{ end }}
+      {{ if .placeholder }}placeholder="{{ .placeholder }}"{{ end }}
+      {{ if .autocomplete }}autocomplete="{{ .autocomplete }}"{{ end }}>
+    {{ end }}
+  </div>
+  {{ end }}
+  {{- /* Honeypot — invisible to humans, irresistible to dumb bots.
+         Server rejects any submission where this field is non-empty. */ -}}
+  <input type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true"
+    style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0">
+  {{ if .Attrs.consent_text }}<p class="block-form__consent">{{ .Attrs.consent_text }}</p>{{ end }}
+  <button type="submit" class="button style-primary block-form__submit">
+    {{ if .Attrs.submit_label }}{{ .Attrs.submit_label }}{{ else }}Submit{{ end }}
+  </button>
+  <div class="block-form__msg" role="status" aria-live="polite"></div>
+</form>
+<script>
+(function(){
+  var f=document.querySelector('form[data-cp-form="{{ .ID }}"]');
+  if(!f) return;
+  var esc=function(s){return String(s).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});};
+  f.addEventListener('submit', function(e){
+    e.preventDefault();
+    var btn=f.querySelector('button[type=submit]'); var msg=f.querySelector('.block-form__msg');
+    btn.disabled=true; msg.textContent='';
+    var data={}; new FormData(f).forEach(function(v,k){data[k]=v;});
+    fetch(f.action, {
+      method:'POST',
+      headers:{'Accept':'application/json','Content-Type':'application/json'},
+      body:JSON.stringify(data)
+    }).then(function(r){return r.json().then(function(j){return {status:r.status,body:j};});})
+      .then(function(out){
+        var b=out.body||{};
+        if(out.status>=200 && out.status<300 && b.ok){
+          if(b.success && b.success.kind==='redirect' && b.success.url){
+            window.location.href=b.success.url; return;
+          }
+          var t=(b.success && b.success.message) || 'Thanks!';
+          f.innerHTML='<p class="block-form__success">'+esc(t)+'</p>';
+        } else {
+          msg.textContent=(b.error||'Submission failed.');
+          btn.disabled=false;
+        }
+      }).catch(function(){
+        msg.textContent='Network error — please try again.';
+        btn.disabled=false;
+      });
+  });
+})();
+</script>

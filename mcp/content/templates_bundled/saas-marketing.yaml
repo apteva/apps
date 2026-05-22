@@ -1,7 +1,7 @@
 schema: apteva-content-template/v1
 name: saas-marketing
 display_name: SaaS Marketing
-version: 2.0.0
+version: 2.1.0
 description: |
   Marketing-site starter for a B2B SaaS product. Hero with product
   mockup, headline stats, three alternating feature rows with
@@ -341,6 +341,98 @@ pages:
                 attrs: { text_md: Interviews, partnership announcements, anything for the record. }
               - type: core/paragraph
                 attrs: { text_md: "[press@example.com](mailto:press@example.com)" }
+      - type: core/heading
+        attrs: { level: 2, text: Or send us a message }
+      - type: core/form
+        attrs:
+          submit_label: Send message
+          consent_text: "We reply within one business day. Your details are stored in our CRM as a contact."
+          success: { kind: inline, message: "Thanks — we'll get back to you shortly." }
+          fields:
+            - { name: email,      label: Email,   type: email,    required: true,  autocomplete: email }
+            - { name: first_name, label: Name,    type: text,                       autocomplete: given-name }
+            - { name: message,    label: Message, type: textarea, required: true }
+          actions:
+            # Upsert the contact in CRM (no list — these are inbound leads,
+            # routing rules can sweep them onto lists later).
+            - app: crm
+              tool: contacts_upsert_by_channel
+              args:
+                kind: email
+                value: "{{ email }}"
+                defaults:
+                  first_name: "{{ first_name }}"
+                source: "form:contact_page"
+            # Log the message body as an activity on the contact.
+            - app: crm
+              tool: contacts_log_activity
+              args:
+                contact_id: "{{ steps.0.contact.id }}"
+                kind: note_inbound
+                body: "{{ message }}"
+                source: "form:contact_page"
+
+  - slug: signup
+    title: Start your free trial
+    blocks:
+      - type: core/heading
+        attrs: { level: 1, text: Start your free trial }
+      - type: core/paragraph
+        attrs:
+          align: center
+          text_md: 14 days. No credit card. Cancel anytime.
+      - type: core/form
+        attrs:
+          submit_label: Create account
+          # consent_text doubles as a config reminder — REPLACE client_id
+          # below with one from auth_clients_list before going live.
+          consent_text: "By creating an account you agree to our Terms and Privacy Policy."
+          success: { kind: redirect, url: "/welcome" }
+          on_failure: abort
+          fields:
+            - { name: email,      label: Work email,  type: email,    required: true,  autocomplete: email }
+            - { name: password,   label: Password,    type: password, required: true,  autocomplete: new-password }
+            - { name: first_name, label: First name,  type: text,                       autocomplete: given-name }
+          actions:
+            # Step 0: register the user in auth. Returns {user, access_token, ...}
+            # on instant-login, or {user, verification_required: true} when
+            # auth's email_verification_required setting is on.
+            #
+            # IMPORTANT: replace client_id with a real OAuth client from
+            # auth_clients_list before going live. The placeholder will
+            # 4xx; the submission still lands in form_submissions so no
+            # signups are lost during configuration.
+            - app: auth
+              tool: auth_public_signup
+              args:
+                client_id: "ck_REPLACE_ME"
+                email:        "{{ email }}"
+                password:     "{{ password }}"
+                display_name: "{{ first_name }}"
+            # Step 1: also add them to CRM's 'customers' list so growth +
+            # marketing have a single view of new accounts. auth_user_id
+            # cross-links the two systems for later attribution.
+            - app: crm
+              tool: contacts_upsert_by_channel
+              args:
+                kind: email
+                value:    "{{ email }}"
+                list_id:  customers
+                defaults:
+                  first_name: "{{ first_name }}"
+                source: "form:signup_page"
+
+  - slug: welcome
+    title: Welcome to Acme
+    blocks:
+      - type: core/heading
+        attrs: { level: 1, text: "You're in." }
+      - type: core/paragraph
+        attrs:
+          align: center
+          text_md: Your account is ready. Check your inbox for a verification link, then come back and start building.
+      - type: core/button
+        attrs: { label: Open the dashboard, url: "/dashboard", style: primary }
 
 posts: []
 
@@ -352,5 +444,6 @@ menus:
       - { label: Pricing,  target_kind: page, target_slug: pricing }
       - { label: About,    target_kind: page, target_slug: about }
       - { label: Contact,  target_kind: page, target_slug: contact }
+      - { label: Sign up,  target_kind: page, target_slug: signup }
 
 homepage_slug: home

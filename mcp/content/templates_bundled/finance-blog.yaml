@@ -1,7 +1,7 @@
 schema: apteva-content-template/v1
 name: finance-blog
 display_name: Finance Blog
-version: 2.0.0
+version: 2.1.0
 description: |
   Personal-finance blogger starter. Magazine-style homepage with hero
   image, three sample categories, About / Disclosure pages, two sample
@@ -54,12 +54,30 @@ pages:
           url: https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=1600&q=80&auto=format&fit=crop
           alt: Stock charts on a screen
           size: wide
-      - type: core/cta
+      - type: core/heading
+        attrs: { level: 2, text: Subscribe to the newsletter }
+      - type: core/paragraph
         attrs:
-          heading: Subscribe to the newsletter
-          body: One email a week. Unsubscribe anytime.
-          button_label: Subscribe
-          button_url: /subscribe
+          align: center
+          text_md: One email a week. Unsubscribe anytime.
+      - type: core/form
+        attrs:
+          submit_label: Subscribe
+          consent_text: "We'll only email you new editions of Finance Daily. No spam, no sharing."
+          success: { kind: inline, message: "You're on the list — first issue arrives Tuesday." }
+          fields:
+            - { name: email,      label: Email,      type: email, required: true, autocomplete: email }
+            - { name: first_name, label: First name, type: text,                   autocomplete: given-name }
+          actions:
+            - app: crm
+              tool: contacts_upsert_by_channel
+              args:
+                kind: email
+                value:   "{{ email }}"
+                list_id: newsletter
+                defaults:
+                  first_name: "{{ first_name }}"
+                source: "form:home_newsletter"
       - type: core/heading
         attrs: { level: 2, text: Latest from the blog }
       - type: core/paragraph
