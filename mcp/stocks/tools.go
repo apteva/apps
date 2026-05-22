@@ -42,7 +42,7 @@ func (a *App) toolSearch(args map[string]any) (any, error) {
 		return nil, err
 	}
 	if len(rows) == 0 && looksLikeTicker(q) {
-		if _, werr := a.refresh(q, false); werr == nil {
+		if _, werr := a.refresh(q, false, false); werr == nil {
 			rows, err = a.st.searchUniverse(q, limit)
 			if err != nil {
 				return nil, err
@@ -91,7 +91,7 @@ func (a *App) toolGet(args map[string]any) (any, error) {
 		return cached, nil
 	}
 
-	res, err := a.refresh(sym, false)
+	res, err := a.refresh(sym, false, false)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +103,7 @@ func (a *App) toolGet(args map[string]any) (any, error) {
 	// Fundamentals come from the crumb-gated quoteSummary endpoint;
 	// degrade gracefully (blank P/E + payout) when it's unavailable.
 	var pePtr, payoutPtr *float64
-	if pe, payout, ferr := a.y.fundamentals(sym); ferr == nil {
+	if pe, payout, ferr := a.y.fundamentals(sym, false); ferr == nil {
 		pePtr, payoutPtr = pe, payout
 		_ = a.st.updateFundamentals(sym, pe, payout)
 	}
@@ -148,7 +148,7 @@ func (a *App) toolChart(args map[string]any) (any, error) {
 		return cached, nil
 	}
 
-	res, err := a.y.fetchChart(sym, rng, interval, false)
+	res, err := a.y.fetchChart(sym, rng, interval, false, false)
 	if err != nil {
 		return nil, err
 	}
@@ -178,8 +178,8 @@ func (a *App) toolDividends(args map[string]any) (any, error) {
 		// summary is correct even when dividends is called in isolation
 		// (no preceding list/get warm). Tolerate a failure if we already
 		// have history on file.
-		_, _ = a.refresh(sym, false)
-		if _, err := a.refresh(sym, true); err != nil {
+		_, _ = a.refresh(sym, false, false)
+		if _, err := a.refresh(sym, true, false); err != nil {
 			if existing, _ := a.st.loadDividends(sym); len(existing) == 0 {
 				return nil, err
 			}
@@ -247,13 +247,13 @@ func (a *App) toolSyncStatus(_ map[string]any) (any, error) {
 // omit the most recent payments and isn't a reliable price source, so it
 // never touches the snapshot. saveDividends is an idempotent upsert, so
 // the DB ends up holding the union.
-func (a *App) refresh(symbol string, full bool) (*chartResult, error) {
+func (a *App) refresh(symbol string, full, bg bool) (*chartResult, error) {
 	sym := strings.ToUpper(symbol)
 	rng, interval := "10y", "1d"
 	if full {
 		rng, interval = "max", "1mo"
 	}
-	res, err := a.y.fetchChart(sym, rng, interval, true)
+	res, err := a.y.fetchChart(sym, rng, interval, true, bg)
 	if err != nil {
 		return nil, err
 	}
@@ -271,10 +271,10 @@ func (a *App) refresh(symbol string, full bool) (*chartResult, error) {
 // warmOne refreshes a single symbol's price/yield/growth snapshot and its
 // P/E + payout fundamentals. Best-effort — partial failures are fine.
 func (a *App) warmOne(sym string) {
-	if _, err := a.refresh(sym, false); err != nil {
+	if _, err := a.refresh(sym, false, true); err != nil {
 		return
 	}
-	if pe, payout, err := a.y.fundamentals(sym); err == nil {
+	if pe, payout, err := a.y.fundamentals(sym, true); err == nil {
 		_ = a.st.updateFundamentals(sym, pe, payout)
 	}
 }

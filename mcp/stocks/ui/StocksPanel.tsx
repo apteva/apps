@@ -476,14 +476,28 @@ function SyncBar() {
   );
 }
 
+// rangeCSS themes the native range track + thumb (accent-color leaves the
+// unfilled track browser-default — bright white on dark). The webkit
+// filled portion is a gradient driven by the per-input --pct custom prop;
+// Firefox uses ::-moz-range-progress. Injected once by FilterDrawer.
+const rangeCSS = `
+.stx-range{-webkit-appearance:none;appearance:none;width:100%;height:18px;background:transparent;cursor:pointer;margin:0}
+.stx-range:focus{outline:none}
+.stx-range::-webkit-slider-runnable-track{height:6px;border-radius:9999px;background:linear-gradient(to right,var(--accent) 0 var(--pct,0%),var(--bg-hover) var(--pct,0%) 100%)}
+.stx-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:14px;height:14px;margin-top:-4px;border-radius:9999px;background:var(--accent);border:2px solid var(--bg-card)}
+.stx-range::-moz-range-track{height:6px;border-radius:9999px;background:var(--bg-hover)}
+.stx-range::-moz-range-progress{height:6px;border-radius:9999px;background:var(--accent)}
+.stx-range::-moz-range-thumb{width:14px;height:14px;border:2px solid var(--bg-card);border-radius:9999px;background:var(--accent)}
+`;
+
 // Slider — one screener range control. At its neutral end (anyAt) the
-// filter is off and the value reads "Any". accentColor styles the native
-// track/thumb (Tailwind utilities don't reach panel files).
+// filter is off and the value reads "Any".
 function Slider({ label, value, set, min, max, step, anyAt, suffix }: {
   label: string; value: number; set: (v: number) => void;
   min: number; max: number; step: number; anyAt: number; suffix: string;
 }) {
   const isAny = value === anyAt;
+  const pct = ((value - min) / (max - min)) * 100;
   return (
     <div className="mb-4">
       <div className="mb-1 flex items-center justify-between text-xs">
@@ -492,7 +506,7 @@ function Slider({ label, value, set, min, max, step, anyAt, suffix }: {
       </div>
       <input type="range" min={min} max={max} step={step} value={value}
         onChange={(e) => set(parseFloat(e.target.value))}
-        className="w-full" style={{ accentColor: "var(--accent)" }} />
+        className="stx-range" style={{ ["--pct" as string]: `${pct}%` } as React.CSSProperties} />
     </div>
   );
 }
@@ -515,6 +529,7 @@ function FilterDrawer(props: {
       <div onClick={props.onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 40 }} />
       <div className="border-l border-border bg-bg-card p-4"
         style={{ position: "fixed", top: 0, right: 0, bottom: 0, width: 320, zIndex: 50, overflowY: "auto" }}>
+        <style>{rangeCSS}</style>
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-text">Filters</h3>
           <button onClick={props.onClose} className="text-text-muted hover:text-text">

@@ -43,22 +43,29 @@ import (
 // page (csrfToken, sessionId, originalDoneUrl, namespace).
 var hiddenInputRe = regexp.MustCompile(`<input type="hidden" name="([^"]+)" value="([^"]*)">`)
 
-// yahooRatePerMin caps combined Yahoo traffic (worker + on-demand) well
-// under the informal ~2k/hr ceiling, leaving headroom for bursts of
-// agent/operator activity. chartBackoff pauses /chart after a 429.
+// Rate budget. perMin is the sustained refill; burst is the bucket
+// capacity, sized so an interactive detail open (~6 calls) clears
+// instantly. Background warming only draws above `reserve`, leaving that
+// many tokens for on-demand so detail loads never queue behind the warmer.
 const (
 	yahooRatePerMin = 20
+	yahooBurst      = 30
+	yahooReserve    = 12
 	chartBackoff    = 2 * time.Minute
 )
 
 // rateLimiter is a token bucket: every Yahoo request acquires a token
 // before going out, so total request rate is bounded no matter where the
 // call originates (the per-client semaphore only bounds concurrency).
-type rateLimiter struct{ tokens chan struct{} }
+// Background callers yield to on-demand via the reserve.
+type rateLimiter struct {
+	tokens  chan struct{}
+	reserve int
+}
 
-func newRateLimiter(perMin int) *rateLimiter {
-	rl := &rateLimiter{tokens: make(chan struct{}, perMin)}
-	for i := 0; i < perMin; i++ { // start full so the initial warm can burst
+func newRateLimiter(perMin, burst, reserve int) *rateLimiter {
+	rl := &rateLimiter{tokens: make(chan struct{}, burst), reserve: reserve}
+	for i := 0; i < burst; i++ { // start full so the initial warm can burst
 		rl.tokens <- struct{}{}
 	}
 	go func() {
@@ -74,13 +81,34 @@ func newRateLimiter(perMin int) *rateLimiter {
 	return rl
 }
 
-// wait blocks until a token is available or ctx is done.
-func (rl *rateLimiter) wait(ctx context.Context) error {
-	select {
-	case <-rl.tokens:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+// wait blocks for a token or until ctx is done. On-demand callers (bg=false)
+// take any available token immediately; background warming (bg=true) only
+// draws when the bucket is above the reserve, so it never starves a detail
+// load.
+func (rl *rateLimiter) wait(ctx context.Context, bg bool) error {
+	if !bg {
+		select {
+		case <-rl.tokens:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	t := time.NewTicker(150 * time.Millisecond)
+	defer t.Stop()
+	for {
+		if len(rl.tokens) > rl.reserve {
+			select {
+			case <-rl.tokens:
+				return nil
+			default:
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+		}
 	}
 }
 
@@ -121,17 +149,17 @@ func newYahoo() *yahooClient {
 		base:    yahooBase,
 		client:  &http.Client{Timeout: 8 * time.Second, Jar: jar},
 		sem:     make(chan struct{}, 4),
-		limiter: newRateLimiter(yahooRatePerMin),
+		limiter: newRateLimiter(yahooRatePerMin, yahooBurst, yahooReserve),
 	}
 }
 
-// acquire waits for a rate-limiter token. The budget is generous so the
-// background warmer queues rather than erroring; on-demand callers still
-// fail fast enough if the bucket is badly backed up.
-func (y *yahooClient) acquire() error {
+// acquire waits for a rate-limiter token. bg=true (background warming) waits
+// patiently and yields to on-demand; bg=false (interactive) takes a token
+// immediately from the burst budget.
+func (y *yahooClient) acquire(bg bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	return y.limiter.wait(ctx)
+	return y.limiter.wait(ctx, bg)
 }
 
 // Bar is one OHLCV candle. Short JSON keys keep the chart payload small
@@ -180,7 +208,7 @@ type chartResult struct {
 // interval are Yahoo's own enums (range: 1mo|6mo|1y|5y|max; interval:
 // 1d|1wk|1mo). withDivs adds events=div so the response carries the
 // dividend history.
-func (y *yahooClient) fetchChart(symbol, rng, interval string, withDivs bool) (*chartResult, error) {
+func (y *yahooClient) fetchChart(symbol, rng, interval string, withDivs, bg bool) (*chartResult, error) {
 	q := url.Values{}
 	q.Set("range", rng)
 	q.Set("interval", interval)
@@ -195,7 +223,7 @@ func (y *yahooClient) fetchChart(symbol, rng, interval string, withDivs bool) (*
 	if backoff {
 		return nil, fmt.Errorf("chart endpoint backing off after 429")
 	}
-	if err := y.acquire(); err != nil {
+	if err := y.acquire(bg); err != nil {
 		return nil, err
 	}
 
@@ -345,7 +373,7 @@ func (y *yahooClient) fetchChart(symbol, rng, interval string, withDivs bool) (*
 // gracefully (caller leaves P/E / payout blank).
 
 // ensureCrumb returns a cached crumb, fetching one if absent.
-func (y *yahooClient) ensureCrumb() (string, error) {
+func (y *yahooClient) ensureCrumb(bg bool) (string, error) {
 	y.mu.Lock()
 	defer y.mu.Unlock()
 	if y.crumb != "" {
@@ -363,15 +391,15 @@ func (y *yahooClient) ensureCrumb() (string, error) {
 	// Basic strategy: fc.yahoo.com 404s but sets the A1/A3 session cookie
 	// on most IPs — enough for getcrumb. (The publicsuffix jar is required
 	// so that .yahoo.com cookie is sent on to query1.)
-	_, _, _ = y.httpGet("https://fc.yahoo.com")
-	crumb, err := y.getCrumbRaw()
+	_, _, _ = y.httpGet("https://fc.yahoo.com", bg)
+	crumb, err := y.getCrumbRaw(bg)
 	if err != nil || !validCrumb(crumb) {
 		// Fallback for EU / consent-walled IPs where fc sets nothing: walk
 		// Yahoo's GDPR consent flow, then retry getcrumb.
-		if cerr := y.establishViaConsent(); cerr != nil {
+		if cerr := y.establishViaConsent(bg); cerr != nil {
 			return fail(fmt.Errorf("crumb handshake failed (fc: %v; consent: %v)", err, cerr))
 		}
-		crumb, err = y.getCrumbRaw()
+		crumb, err = y.getCrumbRaw(bg)
 		if err != nil {
 			return fail(err)
 		}
@@ -393,13 +421,13 @@ func validCrumb(c string) bool {
 // establishViaConsent loads a quote page and, if Yahoo redirects to its EU
 // GDPR consent wall, submits the consent form so the A1/A3 cookies get
 // set. Mirrors yahoo-finance2's getCrumb consent handling.
-func (y *yahooClient) establishViaConsent() error {
-	finalURL, body, err := y.httpGet("https://finance.yahoo.com/quote/AAPL")
+func (y *yahooClient) establishViaConsent(bg bool) error {
+	finalURL, body, err := y.httpGet("https://finance.yahoo.com/quote/AAPL", bg)
 	if err != nil {
 		return err
 	}
 	if strings.Contains(finalURL, "guce.yahoo") || strings.Contains(finalURL, "consent.yahoo") {
-		return y.submitConsent(finalURL, body)
+		return y.submitConsent(finalURL, body, bg)
 	}
 	return nil
 }
@@ -407,7 +435,7 @@ func (y *yahooClient) establishViaConsent() error {
 // submitConsent replays Yahoo's GDPR consent form (mirrors
 // yahoo-finance2's getCrumb): POST the hidden fields back with
 // agree=agree, then GET copyConsent so the platform sets the cookies.
-func (y *yahooClient) submitConsent(consentURL, body string) error {
+func (y *yahooClient) submitConsent(consentURL, body string, bg bool) error {
 	fields := map[string]string{}
 	for _, m := range hiddenInputRe.FindAllStringSubmatch(body, -1) {
 		fields[m[1]] = html.UnescapeString(m[2])
@@ -420,18 +448,18 @@ func (y *yahooClient) submitConsent(consentURL, body string) error {
 	}
 	form.Add("agree", "agree")
 	form.Add("agree", "agree")
-	if _, _, err := y.httpPost(consentURL, form); err != nil {
+	if _, _, err := y.httpPost(consentURL, form, bg); err != nil {
 		return err
 	}
 	if sid := fields["sessionId"]; sid != "" {
-		_, _, _ = y.httpGet("https://guce.yahoo.com/copyConsent?sessionId=" + url.QueryEscape(sid))
+		_, _, _ = y.httpGet("https://guce.yahoo.com/copyConsent?sessionId="+url.QueryEscape(sid), bg)
 	}
 	return nil
 }
 
 // getCrumbRaw fetches the crumb (cookies already in the client jar).
-func (y *yahooClient) getCrumbRaw() (string, error) {
-	_, body, err := y.httpGet("https://query1.finance.yahoo.com/v1/test/getcrumb")
+func (y *yahooClient) getCrumbRaw(bg bool) (string, error) {
+	_, body, err := y.httpGet("https://query1.finance.yahoo.com/v1/test/getcrumb", bg)
 	if err != nil {
 		return "", err
 	}
@@ -440,8 +468,8 @@ func (y *yahooClient) getCrumbRaw() (string, error) {
 
 // httpGet does a UA-stamped GET (cookies via the client jar, redirects
 // followed) and returns the final URL + body. Non-2xx is an error.
-func (y *yahooClient) httpGet(u string) (finalURL, body string, err error) {
-	if err := y.acquire(); err != nil {
+func (y *yahooClient) httpGet(u string, bg bool) (finalURL, body string, err error) {
+	if err := y.acquire(bg); err != nil {
 		return "", "", err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -464,8 +492,8 @@ func (y *yahooClient) httpGet(u string) (finalURL, body string, err error) {
 }
 
 // httpPost submits a form (UA-stamped, jar cookies, redirects followed).
-func (y *yahooClient) httpPost(u string, form url.Values) (finalURL, body string, err error) {
-	if err := y.acquire(); err != nil {
+func (y *yahooClient) httpPost(u string, form url.Values, bg bool) (finalURL, body string, err error) {
+	if err := y.acquire(bg); err != nil {
 		return "", "", err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -508,26 +536,26 @@ func (y *yahooClient) fundamentalsState() (state string, retryAt *int64) {
 // for a symbol. Either may be nil when Yahoo doesn't report it; an error
 // means the whole fetch failed (throttle, crumb) and the caller should
 // leave both blank.
-func (y *yahooClient) fundamentals(symbol string) (pe *float64, payoutPct *float64, err error) {
-	crumb, err := y.ensureCrumb()
+func (y *yahooClient) fundamentals(symbol string, bg bool) (pe *float64, payoutPct *float64, err error) {
+	crumb, err := y.ensureCrumb(bg)
 	if err != nil {
 		return nil, nil, err
 	}
-	pe, payoutPct, status, err := y.fetchSummary(symbol, crumb)
+	pe, payoutPct, status, err := y.fetchSummary(symbol, crumb, bg)
 	if status == http.StatusUnauthorized {
 		// Stale crumb — refresh once and retry.
 		y.clearCrumb()
-		if crumb, err = y.ensureCrumb(); err == nil {
-			pe, payoutPct, _, err = y.fetchSummary(symbol, crumb)
+		if crumb, err = y.ensureCrumb(bg); err == nil {
+			pe, payoutPct, _, err = y.fetchSummary(symbol, crumb, bg)
 		}
 	}
 	return pe, payoutPct, err
 }
 
-func (y *yahooClient) fetchSummary(symbol, crumb string) (pe *float64, payoutPct *float64, status int, err error) {
+func (y *yahooClient) fetchSummary(symbol, crumb string, bg bool) (pe *float64, payoutPct *float64, status int, err error) {
 	u := y.base + "/v10/finance/quoteSummary/" + url.PathEscape(strings.ToUpper(symbol)) +
 		"?modules=summaryDetail&crumb=" + url.QueryEscape(crumb)
-	if err := y.acquire(); err != nil {
+	if err := y.acquire(bg); err != nil {
 		return nil, nil, 0, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)

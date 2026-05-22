@@ -343,7 +343,7 @@ func TestLiveFundamentals(t *testing.T) {
 		return *p
 	}
 	y := newYahoo()
-	pe, payout, err := y.fundamentals("JNJ")
+	pe, payout, err := y.fundamentals("JNJ", false)
 	t.Logf("JNJ pe=%v payout=%v err=%v", deref(pe), deref(payout), err)
 	if err != nil {
 		t.Fatalf("fundamentals handshake failed: %v", err)
