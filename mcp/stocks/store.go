@@ -92,16 +92,35 @@ func (s *store) updateFundamentals(symbol string, pe, payoutPct *float64) error 
 	return err
 }
 
-// staleSymbols returns up to `limit` universe symbols whose snapshot is
-// older than ttl (or never warmed), never-warmed first then oldest. The
-// warming worker uses this to bound its per-tick Yahoo fan-out.
-func (s *store) staleSymbols(ttl time.Duration, limit int) ([]string, error) {
-	cutoff := time.Now().Add(-ttl).Unix()
+// touch records that a symbol was just opened, putting it in the warmer's
+// hot tier so the list snapshot for stocks the user actually looks at
+// stays fresh on a short cycle.
+func (s *store) touch(symbol string) error {
+	_, err := s.db.Exec(`UPDATE instrument SET viewed_at = ? WHERE symbol = ?`,
+		time.Now().Unix(), strings.ToUpper(symbol))
+	return err
+}
+
+// warmCandidates returns up to `limit` symbols to refresh next, prioritized:
+//  1. recently-viewed symbols stale beyond hotTTL (the hot tier),
+//  2. then never-warmed symbols,
+//  3. then the oldest cold symbols stale beyond coldTTL.
+// This keeps what the user is looking at fresh while the rest of the
+// universe trickles within the global rate budget.
+func (s *store) warmCandidates(limit int, coldTTL, hotTTL, hotWindow time.Duration) ([]string, error) {
+	now := time.Now().Unix()
+	coldCut := now - int64(coldTTL.Seconds())
+	hotCut := now - int64(hotTTL.Seconds())
+	hotWin := now - int64(hotWindow.Seconds())
 	rows, err := s.db.Query(
 		`SELECT symbol FROM instrument
-		  WHERE refreshed_at IS NULL OR refreshed_at < ?
-		  ORDER BY refreshed_at IS NOT NULL, refreshed_at ASC
-		  LIMIT ?`, cutoff, limit)
+		  WHERE refreshed_at IS NULL
+		     OR refreshed_at < ?
+		     OR (viewed_at >= ? AND (refreshed_at IS NULL OR refreshed_at < ?))
+		  ORDER BY (viewed_at IS NOT NULL AND viewed_at >= ?) DESC,
+		           refreshed_at IS NOT NULL, refreshed_at ASC
+		  LIMIT ?`,
+		coldCut, hotWin, hotCut, hotWin, limit)
 	if err != nil {
 		return nil, err
 	}

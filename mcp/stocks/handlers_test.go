@@ -330,6 +330,29 @@ func TestLooksLikeTicker(t *testing.T) {
 	}
 }
 
+// TestLiveFundamentals exercises the real cookie+consent+crumb handshake
+// against Yahoo. Skipped by default (network); run with STOCKS_LIVE=1.
+func TestLiveFundamentals(t *testing.T) {
+	if os.Getenv("STOCKS_LIVE") != "1" {
+		t.Skip("set STOCKS_LIVE=1 to run the live Yahoo handshake")
+	}
+	deref := func(p *float64) any {
+		if p == nil {
+			return nil
+		}
+		return *p
+	}
+	y := newYahoo()
+	pe, payout, err := y.fundamentals("JNJ")
+	t.Logf("JNJ pe=%v payout=%v err=%v", deref(pe), deref(payout), err)
+	if err != nil {
+		t.Fatalf("fundamentals handshake failed: %v", err)
+	}
+	if pe == nil && payout == nil {
+		t.Fatal("handshake ok but no P/E or payout parsed")
+	}
+}
+
 func floatPtr(f float64) *float64 { return &f }
 
 func containsSym(rows []instrumentRow, sym string) bool {

@@ -21,8 +21,10 @@ import (
 // full S&P 1500 in a couple of hours. warmGuard stops a global install's
 // per-project worker dispatches from stacking batches.
 const (
-	warmBatchSize = 100
-	warmGuard     = 8 * time.Minute
+	warmBatchSize = 80               // ~160 Yahoo calls/batch — drains within the 10m tick at the rate limit
+	warmGuard     = 9 * time.Minute  // keep consecutive batches from overlapping
+	hotTTL        = 15 * time.Minute // recently-viewed symbols are re-warmed this often
+	hotWindow     = 24 * time.Hour   // "recently viewed" = opened within this window
 )
 
 // toolSearch matches the local universe first; if nothing matches and the
@@ -84,6 +86,7 @@ func (a *App) toolGet(args map[string]any) (any, error) {
 	if sym == "" {
 		return nil, errors.New("symbol required")
 	}
+	_ = a.st.touch(sym) // mark hot so the warmer keeps it fresh in the list
 	if cached, ok := a.st.cacheGet("get:"+sym, a.ttl); ok {
 		return cached, nil
 	}
@@ -167,6 +170,7 @@ func (a *App) toolDividends(args map[string]any) (any, error) {
 	if sym == "" {
 		return nil, errors.New("symbol required")
 	}
+	_ = a.st.touch(sym)
 
 	if _, fresh := a.st.cacheGet("div:"+sym, a.ttl); !fresh {
 		// Recent payments + an accurate price snapshot come from the 1y/1d
@@ -288,7 +292,7 @@ func (a *App) warmBatch(ctx context.Context) {
 	a.lastWarm = time.Now()
 	a.warmMu.Unlock()
 
-	syms, err := a.st.staleSymbols(a.ttl, warmBatchSize)
+	syms, err := a.st.warmCandidates(warmBatchSize, a.ttl, hotTTL, hotWindow)
 	if err != nil || len(syms) == 0 {
 		return
 	}

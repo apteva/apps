@@ -158,10 +158,14 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
   const [error, setError] = useState<string | null>(null);
   const [sector, setSector] = useState("");
   const [sort, setSort] = useState("name");
-  const [minYield, setMinYield] = useState("");
-  const [maxPayout, setMaxPayout] = useState("");
-  const [maxPE, setMaxPE] = useState("");
-  const [minGrowth, setMinGrowth] = useState("");
+  // Numeric filter state; each has an "Any" sentinel at its neutral end so
+  // a slider position can mean "no constraint".
+  const ANY = { yield: 0, payout: 150, pe: 60, growth: -10 };
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [minYield, setMinYield] = useState(ANY.yield);
+  const [maxPayout, setMaxPayout] = useState(ANY.payout);
+  const [maxPE, setMaxPE] = useState(ANY.pe);
+  const [minGrowth, setMinGrowth] = useState(ANY.growth);
   const [query, setQuery] = useState("");
 
   const load = useCallback(async () => {
@@ -171,10 +175,10 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
       const p = new URLSearchParams();
       if (sector) p.set("sector", sector);
       if (sort) p.set("sort", sort);
-      if (minYield) p.set("min_yield", minYield);
-      if (maxPayout) p.set("max_payout", maxPayout);
-      if (maxPE) p.set("max_pe", maxPE);
-      if (minGrowth) p.set("min_growth", minGrowth);
+      if (minYield > 0) p.set("min_yield", String(minYield));
+      if (maxPayout < 150) p.set("max_payout", String(maxPayout));
+      if (maxPE < 60) p.set("max_pe", String(maxPE));
+      if (minGrowth > -10) p.set("min_growth", String(minGrowth));
       const r = await fetch(`${API}/stocks?${p.toString()}`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
@@ -185,6 +189,14 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
       setLoading(false);
     }
   }, [sector, sort, minYield, maxPayout, maxPE, minGrowth]);
+
+  const activeFilters =
+    (sector ? 1 : 0) + (minYield > 0 ? 1 : 0) + (maxPayout < 150 ? 1 : 0) +
+    (maxPE < 60 ? 1 : 0) + (minGrowth > -10 ? 1 : 0);
+  const resetFilters = () => {
+    setSector(""); setMinYield(ANY.yield); setMaxPayout(ANY.payout);
+    setMaxPE(ANY.pe); setMinGrowth(ANY.growth);
+  };
 
   useEffect(() => { void load(); }, [load]);
 
@@ -220,11 +232,6 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
             className="rounded-md border border-border bg-bg-input px-3 py-1.5 text-sm text-text placeholder:text-text-dim"
           />
         </div>
-        <select value={sector} onChange={(e) => setSector(e.target.value)}
-          className="rounded-md border border-border bg-bg-input px-2 py-1.5 text-sm text-text">
-          <option value="">All sectors</option>
-          {sectors.map((s) => <option key={s} value={s}>{s}</option>)}
-        </select>
         <select value={sort} onChange={(e) => setSort(e.target.value)}
           className="rounded-md border border-border bg-bg-input px-2 py-1.5 text-sm text-text">
           <option value="name">Sort: Name</option>
@@ -235,16 +242,30 @@ function List({ onOpen }: { onOpen: (sym: string) => void }) {
           <option value="payout">Sort: Payout (low→high)</option>
           <option value="growth">Sort: Div growth</option>
         </select>
-        <NumFilter value={minYield} onChange={setMinYield} placeholder="Min yield %" />
-        <NumFilter value={maxPayout} onChange={setMaxPayout} placeholder="Max payout %" />
-        <NumFilter value={maxPE} onChange={setMaxPE} placeholder="Max P/E" />
-        <NumFilter value={minGrowth} onChange={setMinGrowth} placeholder="Min div growth %" />
+        <button onClick={() => setFiltersOpen(true)}
+          className="flex items-center gap-1.5 rounded-md border border-border bg-bg-input px-3 py-1.5 text-sm text-text hover:bg-bg-hover">
+          <svg {...ico}><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" /></svg>
+          Filters
+          {activeFilters > 0 && (
+            <span className="rounded-full bg-accent px-1.5 text-xs text-bg">{activeFilters}</span>
+          )}
+        </button>
         <button onClick={() => void load()}
           className="ml-auto flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm text-bg hover:bg-accent-hover">
           <svg {...ico}><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>
           Refresh
         </button>
       </div>
+
+      <FilterDrawer
+        open={filtersOpen} onClose={() => setFiltersOpen(false)}
+        sector={sector} setSector={setSector} sectors={sectors}
+        minYield={minYield} setMinYield={setMinYield}
+        maxPayout={maxPayout} setMaxPayout={setMaxPayout}
+        maxPE={maxPE} setMaxPE={setMaxPE}
+        minGrowth={minGrowth} setMinGrowth={setMinGrowth}
+        matchCount={stocks.length} activeFilters={activeFilters} onReset={resetFilters}
+      />
 
       {error && <div className="mb-3 rounded-md border border-error px-3 py-2 text-sm text-error">{error}</div>}
 
@@ -455,15 +476,77 @@ function SyncBar() {
   );
 }
 
-// NumFilter — a compact numeric screener input (digits + decimal only).
-function NumFilter({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder: string }) {
+// Slider — one screener range control. At its neutral end (anyAt) the
+// filter is off and the value reads "Any". accentColor styles the native
+// track/thumb (Tailwind utilities don't reach panel files).
+function Slider({ label, value, set, min, max, step, anyAt, suffix }: {
+  label: string; value: number; set: (v: number) => void;
+  min: number; max: number; step: number; anyAt: number; suffix: string;
+}) {
+  const isAny = value === anyAt;
   return (
-    <input
-      value={value}
-      onChange={(e) => onChange(e.target.value.replace(/[^0-9.]/g, ""))}
-      placeholder={placeholder}
-      className="w-32 rounded-md border border-border bg-bg-input px-3 py-1.5 text-sm text-text placeholder:text-text-dim"
-    />
+    <div className="mb-4">
+      <div className="mb-1 flex items-center justify-between text-xs">
+        <span className="text-text-muted">{label}</span>
+        <span className="tabular-nums text-text">{isAny ? "Any" : `${value}${suffix}`}</span>
+      </div>
+      <input type="range" min={min} max={max} step={step} value={value}
+        onChange={(e) => set(parseFloat(e.target.value))}
+        className="w-full" style={{ accentColor: "var(--accent)" }} />
+    </div>
+  );
+}
+
+// FilterDrawer — right-side slide-over with the screener controls. Driven
+// by the same query params as the list; positioned with inline styles
+// (fixed overlay) since arbitrary Tailwind positions don't apply here.
+function FilterDrawer(props: {
+  open: boolean; onClose: () => void;
+  sector: string; setSector: (v: string) => void; sectors: string[];
+  minYield: number; setMinYield: (v: number) => void;
+  maxPayout: number; setMaxPayout: (v: number) => void;
+  maxPE: number; setMaxPE: (v: number) => void;
+  minGrowth: number; setMinGrowth: (v: number) => void;
+  matchCount: number; activeFilters: number; onReset: () => void;
+}) {
+  if (!props.open) return null;
+  return (
+    <>
+      <div onClick={props.onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 40 }} />
+      <div className="border-l border-border bg-bg-card p-4"
+        style={{ position: "fixed", top: 0, right: 0, bottom: 0, width: 320, zIndex: 50, overflowY: "auto" }}>
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-text">Filters</h3>
+          <button onClick={props.onClose} className="text-text-muted hover:text-text">
+            <svg {...ico}><path d="M18 6 6 18M6 6l12 12" /></svg>
+          </button>
+        </div>
+
+        <div className="mb-4">
+          <div className="mb-1 text-xs text-text-muted">Sector</div>
+          <select value={props.sector} onChange={(e) => props.setSector(e.target.value)}
+            className="w-full rounded-md border border-border bg-bg-input px-2 py-1.5 text-sm text-text">
+            <option value="">All sectors</option>
+            {props.sectors.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+
+        <Slider label="Min dividend yield" value={props.minYield} set={props.setMinYield} min={0} max={15} step={0.25} anyAt={0} suffix="%" />
+        <Slider label="Max payout ratio" value={props.maxPayout} set={props.setMaxPayout} min={0} max={150} step={5} anyAt={150} suffix="%" />
+        <Slider label="Max P/E" value={props.maxPE} set={props.setMaxPE} min={0} max={60} step={1} anyAt={60} suffix="" />
+        <Slider label="Min 5yr dividend growth" value={props.minGrowth} set={props.setMinGrowth} min={-10} max={30} step={0.5} anyAt={-10} suffix="%" />
+
+        <div className="mt-5 flex items-center justify-between border-t border-border-subtle pt-3">
+          <span className="text-xs text-text-muted">{props.matchCount.toLocaleString()} match</span>
+          <div className="flex gap-2">
+            <button onClick={props.onReset} disabled={props.activeFilters === 0}
+              className="rounded-md border border-border px-3 py-1.5 text-sm text-text-muted hover:bg-bg-hover">Reset</button>
+            <button onClick={props.onClose}
+              className="rounded-md bg-accent px-3 py-1.5 text-sm text-bg hover:bg-accent-hover">Done</button>
+          </div>
+        </div>
+      </div>
+    </>
   );
 }
 
