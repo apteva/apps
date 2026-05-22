@@ -32,6 +32,7 @@ package main
 
 import (
 	"database/sql"
+	"path/filepath"
 	"strings"
 )
 
@@ -81,6 +82,30 @@ func lookupSourceRotation(db *sql.DB, projectID string, sourceFileIDs []string) 
 		return 0
 	}
 	return r
+}
+
+// lookupSourceExt returns the lowercased file extension (e.g. ".jpg")
+// of the FIRST source file, read from its indexed media row's name.
+// Returns "" when there's no single source (concat), the row is
+// missing, the name was never captured (pre-name-column rows), or the
+// name has no extension. The shape-preserving planners (resize, crop)
+// use it to keep the output the same media type as the input; "" leaves
+// them on the legacy ".mp4" default.
+//
+// Project-scoped, single-source only — same constraints and rationale
+// as lookupSourceRotation above.
+func lookupSourceExt(db *sql.DB, projectID string, sourceFileIDs []string) string {
+	if len(sourceFileIDs) != 1 || projectID == "" {
+		return ""
+	}
+	var name string
+	if err := db.QueryRow(
+		`SELECT COALESCE(name, '') FROM media WHERE project_id = ? AND file_id = ?`,
+		projectID, sourceFileIDs[0],
+	).Scan(&name); err != nil {
+		return ""
+	}
+	return strings.ToLower(filepath.Ext(name))
 }
 
 // applyRotation mutates a built ffmpeg arg list to bake the source's

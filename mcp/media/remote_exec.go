@@ -135,7 +135,8 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 	// that don't crop (trim, concat, audio_extract, …).
 	row.Params = preprocessSmartCrop(ctx, app, sc, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
 
-	plan, err := buildPlan(row.Operation, row.SourceFileIDs, row.Params, row.OutputName)
+	plan, err := buildPlan(row.Operation, row.SourceFileIDs, row.Params, row.OutputName,
+		lookupSourceExt(app.AppDB(), row.ProjectID, row.SourceFileIDs))
 	if err != nil {
 		return 0, fmt.Errorf("build plan: %w", err)
 	}

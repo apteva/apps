@@ -33,18 +33,25 @@ type opPlan struct {
 
 // buildPlan dispatches to the per-op builder. Returns ErrNotImplemented
 // for ops scaffolded but not yet wired (resize/concat/etc. as of v0.2).
-func buildPlan(op string, sources []string, params json.RawMessage, outputName string) (*opPlan, error) {
+//
+// sourceExt is the first source file's extension (e.g. ".jpg"), or ""
+// when unknown. The shape-preserving ops (resize, crop) use it to keep
+// the output the same media type as the input — without it an image
+// source would silently default to a ".mp4" output. Other ops own their
+// extension (transcode via `format`, audio_extract via `format`,
+// extract_frame/reel are always image/mp4) and ignore the hint.
+func buildPlan(op string, sources []string, params json.RawMessage, outputName, sourceExt string) (*opPlan, error) {
 	switch op {
 	case "trim":
 		return planTrim(sources, params, outputName)
 	case "resize":
-		return planResize(sources, params, outputName)
+		return planResize(sources, params, outputName, sourceExt)
 	case "transcode":
 		return planTranscode(sources, params, outputName)
 	case "concat":
 		return planConcat(sources, params, outputName)
 	case "crop":
-		return planCrop(sources, params, outputName)
+		return planCrop(sources, params, outputName, sourceExt)
 	case "extract_frame":
 		return planExtractFrame(sources, params, outputName)
 	case "extract_reel":
@@ -117,7 +124,7 @@ type resizeParams struct {
 	KeepAspect bool `json:"keep_aspect"`
 }
 
-func planResize(sources []string, raw json.RawMessage, outputName string) (*opPlan, error) {
+func planResize(sources []string, raw json.RawMessage, outputName, sourceExt string) (*opPlan, error) {
 	if len(sources) != 1 {
 		return nil, errors.New("resize takes exactly one source file_id")
 	}
@@ -136,15 +143,8 @@ func planResize(sources []string, raw json.RawMessage, outputName string) (*opPl
 		height = "-2"
 	}
 	scale := fmt.Sprintf("scale=%d:%s", p.Width, height)
-	args := []string{
-		"-y",
-		"-loglevel", "error",
-		"-progress", "pipe:1",
-		"-i", "{input}",
-		"-vf", scale,
-		"-c:a", "copy",
-	}
-	name, ct := defaultOutputName(outputName, sources[0], "resize", "")
+	name, ct := defaultOutputName(outputName, sources[0], "resize", sourceExt)
+	args := imageAwareVideoFilterArgs(scale, name)
 	return &opPlan{Filename: name, ContentType: ct, Args: args}, nil
 }
 
@@ -235,7 +235,7 @@ type cropParams struct {
 	Height int `json:"height"`
 }
 
-func planCrop(sources []string, raw json.RawMessage, outputName string) (*opPlan, error) {
+func planCrop(sources []string, raw json.RawMessage, outputName, sourceExt string) (*opPlan, error) {
 	if len(sources) != 1 {
 		return nil, errors.New("crop takes exactly one source file_id")
 	}
@@ -250,15 +250,8 @@ func planCrop(sources []string, raw json.RawMessage, outputName string) (*opPlan
 		return nil, errors.New("crop: x and y must be >= 0")
 	}
 	vf := fmt.Sprintf("crop=%d:%d:%d:%d", p.Width, p.Height, p.X, p.Y)
-	args := []string{
-		"-y",
-		"-loglevel", "error",
-		"-progress", "pipe:1",
-		"-i", "{input}",
-		"-vf", vf,
-		"-c:a", "copy",
-	}
-	name, ct := defaultOutputName(outputName, sources[0], "crop", "")
+	name, ct := defaultOutputName(outputName, sources[0], "crop", sourceExt)
+	args := imageAwareVideoFilterArgs(vf, name)
 	return &opPlan{Filename: name, ContentType: ct, Args: args}, nil
 }
 
@@ -542,9 +535,59 @@ func contentTypeForName(name string) string {
 		return "image/png"
 	case ".jpg", ".jpeg":
 		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".bmp":
+		return "image/bmp"
+	case ".tif", ".tiff":
+		return "image/tiff"
+	case ".heic", ".heif":
+		return "image/heic"
 	default:
 		return "application/octet-stream"
 	}
+}
+
+// isImageExt reports whether ext (with leading dot, any case) is one of
+// the still-image extensions media indexes. Mirrors isMediaByExt's image
+// arm so resize/crop classify their output the same way the indexer
+// classified the input.
+func isImageExt(ext string) bool {
+	switch strings.ToLower(ext) {
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif":
+		return true
+	}
+	return false
+}
+
+// imageAwareVideoFilterArgs assembles the ffmpeg argv for a single
+// -vf filter (scale/crop) so the same op produces a valid still image
+// when the output is an image and a valid clip when it's video.
+//
+//	image out → "-frames:v 1" (single frame; required so animated
+//	            gif/webp sources don't try to write a sequence to one
+//	            filename) + "-q:v 3" for jpeg quality; no audio stream
+//	            to carry, so no "-c:a copy". Mirrors extractImageThumbnail.
+//	video out → "-c:a copy" to pass the audio track through untouched.
+func imageAwareVideoFilterArgs(vf, outputName string) []string {
+	args := []string{
+		"-y",
+		"-loglevel", "error",
+		"-progress", "pipe:1",
+		"-i", "{input}",
+		"-vf", vf,
+	}
+	ext := strings.ToLower(path.Ext(outputName))
+	if isImageExt(ext) {
+		args = append(args, "-frames:v", "1")
+		if ext == ".jpg" || ext == ".jpeg" {
+			args = append(args, "-q:v", "3")
+		}
+		return args
+	}
+	return append(args, "-c:a", "copy")
 }
 
 func audioFormatToCodec(format string) (codec, ext, contentType string, err error) {

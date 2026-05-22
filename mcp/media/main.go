@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.5
+version: 0.13.6
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -1533,9 +1533,12 @@ func (a *App) toolSubmitRender(operation string, paramKeys, sourceKeys []string)
 
 		// Pre-validate by building the plan now. Fast-fail bad params
 		// at submit time rather than letting the worker pick up a
-		// guaranteed-failed render.
+		// guaranteed-failed render. sourceExt is left "" here: the
+		// source may not be probed yet at submit time, and validation
+		// only cares about params, not the output extension (which the
+		// executor re-resolves from the indexed row).
 		paramJSON, _ := json.Marshal(params)
-		if _, err := buildPlan(operation, sources, paramJSON, outputName); err != nil {
+		if _, err := buildPlan(operation, sources, paramJSON, outputName, ""); err != nil {
 			return nil, err
 		}
 
@@ -1800,7 +1803,8 @@ func (a *App) handleRendersCollection(w http.ResponseWriter, r *http.Request) {
 			body.Params = map[string]any{}
 		}
 		paramJSON, _ := json.Marshal(body.Params)
-		if _, err := buildPlan(body.Operation, sources, paramJSON, body.OutputName); err != nil {
+		// sourceExt "" — validation-only; executor re-resolves it.
+		if _, err := buildPlan(body.Operation, sources, paramJSON, body.OutputName, ""); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

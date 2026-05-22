@@ -65,7 +65,7 @@ func generateSampleVideo(t *testing.T, dir string) string {
 func runOpAgainstFile(t *testing.T, op string, srcPaths []string, params map[string]any, outputName, dir string) string {
 	t.Helper()
 	raw, _ := json.Marshal(params)
-	plan, err := buildPlan(op, fakeFileIDs(srcPaths), raw, outputName)
+	plan, err := buildPlan(op, fakeFileIDs(srcPaths), raw, outputName, "")
 	if err != nil {
 		t.Fatalf("buildPlan(%s): %v", op, err)
 	}
@@ -353,7 +353,7 @@ func TestFFmpeg_Cancellation(t *testing.T) {
 	}
 
 	raw, _ := json.Marshal(map[string]any{"format": "mp4", "video_codec": "libx264"})
-	plan, _ := buildPlan("transcode", []string{"100"}, raw, "")
+	plan, _ := buildPlan("transcode", []string{"100"}, raw, "", "")
 	args, _ := materialiseArgs(plan.Args, []string{src}, dir)
 	args = append(args, "-preset", "veryslow") // make encode actually take time
 	args = append(args, filepath.Join(dir, plan.Filename))

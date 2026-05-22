@@ -90,7 +90,8 @@ func (e *cloudinaryExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *
 
 	// Reuse the local plan helpers for output filename + content type
 	// so storage uploads from either backend look identical to panels.
-	plan, err := buildPlan(row.Operation, row.SourceFileIDs, row.Params, row.OutputName)
+	plan, err := buildPlan(row.Operation, row.SourceFileIDs, row.Params, row.OutputName,
+		lookupSourceExt(app.AppDB(), row.ProjectID, row.SourceFileIDs))
 	if err != nil {
 		return 0, fmt.Errorf("plan: %w", err)
 	}

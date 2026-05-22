@@ -15,7 +15,7 @@ import (
 
 func TestPlanTrim_Valid(t *testing.T) {
 	plan, err := buildPlan("trim", []string{"42"},
-		raw(t, map[string]any{"start_ms": 1000, "end_ms": 3000}), "")
+		raw(t, map[string]any{"start_ms": 1000, "end_ms": 3000}), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestPlanTrim_BadParams(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := buildPlan("trim", []string{"42"}, raw(t, c.params), "")
+			_, err := buildPlan("trim", []string{"42"}, raw(t, c.params), "", "")
 			if err == nil {
 				t.Errorf("expected validation error for %v", c.params)
 			}
@@ -58,7 +58,7 @@ func TestPlanTrim_BadParams(t *testing.T) {
 
 func TestPlanResize_KeepAspect(t *testing.T) {
 	plan, err := buildPlan("resize", []string{"42"},
-		raw(t, map[string]any{"width": 640, "keep_aspect": true}), "")
+		raw(t, map[string]any{"width": 640, "keep_aspect": true}), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestPlanResize_KeepAspect(t *testing.T) {
 
 func TestPlanResize_ExplicitDimensions(t *testing.T) {
 	plan, err := buildPlan("resize", []string{"42"},
-		raw(t, map[string]any{"width": 320, "height": 240}), "")
+		raw(t, map[string]any{"width": 320, "height": 240}), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestPlanResize_ExplicitDimensions(t *testing.T) {
 
 func TestPlanResize_RequiresHeightUnlessKeepAspect(t *testing.T) {
 	_, err := buildPlan("resize", []string{"42"},
-		raw(t, map[string]any{"width": 640}), "")
+		raw(t, map[string]any{"width": 640}), "", "")
 	if err == nil {
 		t.Error("expected error when height missing without keep_aspect")
 	}
@@ -88,7 +88,7 @@ func TestPlanResize_RequiresHeightUnlessKeepAspect(t *testing.T) {
 
 func TestPlanTranscode_FormatDrivesExtension(t *testing.T) {
 	plan, err := buildPlan("transcode", []string{"42"},
-		raw(t, map[string]any{"format": "webm", "video_codec": "libvpx-vp9"}), "")
+		raw(t, map[string]any{"format": "webm", "video_codec": "libvpx-vp9"}), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestPlanTranscode_FormatDrivesExtension(t *testing.T) {
 
 func TestPlanCrop_Argv(t *testing.T) {
 	plan, err := buildPlan("crop", []string{"42"},
-		raw(t, map[string]any{"x": 10, "y": 20, "width": 100, "height": 200}), "")
+		raw(t, map[string]any{"x": 10, "y": 20, "width": 100, "height": 200}), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestPlanCrop_Argv(t *testing.T) {
 
 func TestPlanExtractFrame_Defaults(t *testing.T) {
 	plan, err := buildPlan("extract_frame", []string{"42"},
-		raw(t, map[string]any{"at_ms": 2500}), "")
+		raw(t, map[string]any{"at_ms": 2500}), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestPlanAudioExtract_Codecs(t *testing.T) {
 	for fmt, want := range cases {
 		t.Run(fmt, func(t *testing.T) {
 			plan, err := buildPlan("audio_extract", []string{"42"},
-				raw(t, map[string]any{"format": fmt}), "")
+				raw(t, map[string]any{"format": fmt}), "", "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -162,28 +162,28 @@ func TestPlanAudioExtract_Codecs(t *testing.T) {
 
 func TestPlanAudioExtract_RejectsUnknownFormat(t *testing.T) {
 	_, err := buildPlan("audio_extract", []string{"42"},
-		raw(t, map[string]any{"format": "ogg-vorbis"}), "")
+		raw(t, map[string]any{"format": "ogg-vorbis"}), "", "")
 	if err == nil {
 		t.Error("expected error for unsupported format")
 	}
 }
 
 func TestPlanConcat_RequiresMultipleSources(t *testing.T) {
-	_, err := buildPlan("concat", []string{"42"}, raw(t, map[string]any{}), "out.mp4")
+	_, err := buildPlan("concat", []string{"42"}, raw(t, map[string]any{}), "out.mp4", "")
 	if err == nil {
 		t.Error("expected error: concat needs 2+ sources")
 	}
 }
 
 func TestPlanConcat_RequiresOutputName(t *testing.T) {
-	_, err := buildPlan("concat", []string{"42", "43"}, raw(t, map[string]any{}), "")
+	_, err := buildPlan("concat", []string{"42", "43"}, raw(t, map[string]any{}), "", "")
 	if err == nil {
 		t.Error("expected error: concat without output_name")
 	}
 }
 
 func TestBuildPlan_UnknownOperation(t *testing.T) {
-	_, err := buildPlan("explode", []string{"42"}, raw(t, map[string]any{}), "")
+	_, err := buildPlan("explode", []string{"42"}, raw(t, map[string]any{}), "", "")
 	if err == nil {
 		t.Error("expected error for unknown op")
 	}
@@ -191,7 +191,7 @@ func TestBuildPlan_UnknownOperation(t *testing.T) {
 
 func TestExplicitOutputName_OverridesDefault(t *testing.T) {
 	plan, _ := buildPlan("trim", []string{"42"},
-		raw(t, map[string]any{"start_ms": 0, "end_ms": 1000}), "highlights.mp4")
+		raw(t, map[string]any{"start_ms": 0, "end_ms": 1000}), "highlights.mp4", "")
 	if plan.Filename != "highlights.mp4" {
 		t.Errorf("explicit name lost: %q", plan.Filename)
 	}
@@ -361,7 +361,7 @@ func TestToolCancelRender_PendingFlipsRow(t *testing.T) {
 
 func TestPlanExtractReel_Defaults(t *testing.T) {
 	plan, err := buildPlan("extract_reel", []string{"42"},
-		raw(t, map[string]any{"start_ms": 60_000, "end_ms": 90_000}), "")
+		raw(t, map[string]any{"start_ms": 60_000, "end_ms": 90_000}), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +405,7 @@ func TestPlanExtractReel_CustomRatio(t *testing.T) {
 		raw(t, map[string]any{
 			"start_ms": 0, "end_ms": 5000,
 			"target_ratio": "1:1", "output_width": 720,
-		}), "")
+		}), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +438,7 @@ func TestPlanExtractReel_BadParams(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := buildPlan("extract_reel", []string{"42"}, raw(t, tc.args), "")
+			_, err := buildPlan("extract_reel", []string{"42"}, raw(t, tc.args), "", "")
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("err=%v, want substring %q", err, tc.want)
 			}
