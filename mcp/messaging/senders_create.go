@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -550,6 +551,35 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 		}
 	}
 
+	publicURL := ""
+	includeWebhookProjectID := false
+	if id != nil {
+		publicURL = strings.TrimSuffix(strings.TrimSpace(id.PublicURL), "/")
+		includeWebhookProjectID = strings.TrimSpace(id.ProjectID) != ""
+	}
+
+	if doEvents {
+		if publicURL == "" {
+			resp.Steps = append(resp.Steps, bootstrapStep{
+				Step:  "sns_subscribe_events_webhook",
+				OK:    false,
+				Error: "platform PublicURL is unset — set Settings → Server → Public URL so SNS can reach /webhooks/ses-bounces",
+			})
+		} else {
+			eventsWebhookURL := messagingWebhookURL(publicURL, "/webhooks/ses-bounces", pid, includeWebhookProjectID)
+			subArn, already, err := bootstrapSubscribeWebhook(ctx, snsBound.ConnectionID, topicArn, eventsWebhookURL)
+			if err != nil {
+				resp.Steps = append(resp.Steps, bootstrapStep{Step: "sns_subscribe_events_webhook", OK: false, Error: err.Error()})
+			} else {
+				step := bootstrapStep{Step: "sns_subscribe_events_webhook", OK: true, Detail: subArn}
+				if already {
+					step.Skipped = "subscription already exists"
+				}
+				resp.Steps = append(resp.Steps, step)
+			}
+		}
+	}
+
 	if doInbound {
 		if err := bootstrapCreateRuleSet(ctx, sesConnID, ruleSetName); err != nil {
 			resp.Steps = append(resp.Steps, bootstrapStep{Step: "create_receipt_rule_set", OK: false, Error: err.Error()})
@@ -569,10 +599,6 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 		}
 		resp.Steps = append(resp.Steps, bootstrapStep{Step: "set_active_receipt_rule_set", OK: true})
 
-		publicURL := ""
-		if id != nil {
-			publicURL = strings.TrimSuffix(strings.TrimSpace(id.PublicURL), "/")
-		}
 		if publicURL == "" {
 			resp.Steps = append(resp.Steps, bootstrapStep{
 				Step:  "sns_subscribe_webhook",
@@ -581,7 +607,7 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 			})
 			return resp, nil
 		}
-		webhookURL := publicURL + "/api/apps/messaging/webhooks/ses-inbound?api_key=" + os.Getenv("APTEVA_APP_TOKEN")
+		webhookURL := messagingWebhookURL(publicURL, "/webhooks/ses-inbound", pid, includeWebhookProjectID)
 		resp.Inbound.WebhookURL = webhookURL
 		subArn, already, err := bootstrapSubscribeWebhook(ctx, snsBound.ConnectionID, topicArn, webhookURL)
 		if err != nil {
@@ -1560,6 +1586,15 @@ func bootstrapActivateRuleSet(ctx *sdk.AppCtx, connID int64, name string) error 
 		return fmt.Errorf("set_active_receipt_rule_set non-2xx: %s", truncateResData(res))
 	}
 	return nil
+}
+
+func messagingWebhookURL(publicURL, webhookPath, projectID string, includeProjectID bool) string {
+	q := url.Values{}
+	q.Set("api_key", os.Getenv("APTEVA_APP_TOKEN"))
+	if includeProjectID && projectID != "" {
+		q.Set("project_id", projectID)
+	}
+	return strings.TrimSuffix(publicURL, "/") + "/api/apps/messaging" + webhookPath + "?" + q.Encode()
 }
 
 func bootstrapSubscribeWebhook(ctx *sdk.AppCtx, connID int64, topicArn, endpoint string) (string, bool, error) {

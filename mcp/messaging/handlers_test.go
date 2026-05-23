@@ -33,8 +33,8 @@ type stubPlatform struct {
 	executeErr       error
 	callAppReply     json.RawMessage
 	callAppErr       error
-	bindingsOverride map[string]any            // when non-nil, replaces the default email_provider binding
-	whoAmIOverride   *sdk.InstallIdentity      // when non-nil, replaces the default identity
+	bindingsOverride map[string]any       // when non-nil, replaces the default email_provider binding
+	whoAmIOverride   *sdk.InstallIdentity // when non-nil, replaces the default identity
 	// executeOverride: when non-nil, called per ExecuteIntegrationTool
 	// invocation BEFORE replyByTool / defaults. The int is the
 	// 0-indexed count of prior calls for that tool — lets a test
@@ -127,9 +127,9 @@ func (s *stubPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) 
 func (s *stubPlatform) ListConnections(sdk.ConnectionFilter) ([]sdk.PlatformConnection, error) {
 	return nil, nil
 }
-func (s *stubPlatform) GetInstance(int64) (*sdk.PlatformInstance, error)        { return nil, nil }
-func (s *stubPlatform) SendEvent(int64, string) error                           { return nil }
-func (s *stubPlatform) SendToChannel(string, string, string) error              { return nil }
+func (s *stubPlatform) GetInstance(int64) (*sdk.PlatformInstance, error) { return nil, nil }
+func (s *stubPlatform) SendEvent(int64, string) error                    { return nil }
+func (s *stubPlatform) SendToChannel(string, string, string) error       { return nil }
 func (s *stubPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
 	// Provide a binding for the email_provider role so IntegrationFor returns non-nil.
 	bindings := map[string]any{"email_provider": float64(1)}
@@ -152,6 +152,7 @@ func (s *stubPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
 		Bindings:  bindings,
 	}, nil
 }
+
 // PlatformClient methods added in v0.1.3+ (StartOAuth, Disconnect,
 // ListOwnedConnections, GetGrants). Stubs return zero values; tests
 // don't exercise these paths.
@@ -340,8 +341,8 @@ func TestSendMessage_RespectsSuppression(t *testing.T) {
 	_, err := app.toolSendMessage(ctx, map[string]any{
 		"channel": "email",
 		"from":    fromAcme,
-		"to":   "bad@example.com",
-		"body": "you'll never see this",
+		"to":      "bad@example.com",
+		"body":    "you'll never see this",
 	})
 	if err == nil {
 		t.Fatal("expected suppression error")
@@ -364,8 +365,8 @@ func TestSendMessage_ProviderErrorMarksFailed(t *testing.T) {
 	out, err := app.toolSendMessage(ctx, map[string]any{
 		"channel": "email",
 		"from":    fromAcme,
-		"to":   "carol@example.com",
-		"body": "ping",
+		"to":      "carol@example.com",
+		"body":    "ping",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1434,9 +1435,9 @@ func TestResolveProjectFromInboundPhone_StripsWhatsAppPrefix(t *testing.T) {
 func TestSendersCreate_Domain_InboundRuleNameIsInstallScoped(t *testing.T) {
 	plat := &stubPlatform{
 		bindingsOverride: map[string]any{
-			"email_provider":         float64(1),
-			"inbound_storage":        float64(2),
-			"inbound_notifications":  float64(3),
+			"email_provider":        float64(1),
+			"inbound_storage":       float64(2),
+			"inbound_notifications": float64(3),
 		},
 		whoAmIOverride: &sdk.InstallIdentity{
 			AppName: "messaging", ProjectID: "test-proj", InstallID: 47,
@@ -1485,6 +1486,120 @@ func TestSendersCreate_Domain_InboundRuleNameIsInstallScoped(t *testing.T) {
 	}
 }
 
+func TestSendersCreate_Domain_SubscribeWebhookURLsAreProjectScoped(t *testing.T) {
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{
+			"email_provider":        float64(1),
+			"inbound_storage":       float64(2),
+			"inbound_notifications": float64(3),
+		},
+		whoAmIOverride: &sdk.InstallIdentity{
+			AppName:   "messaging",
+			ProjectID: "test-proj",
+			InstallID: 47,
+			PublicURL: "https://test.public.example",
+		},
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"create_sns_topic":            {Success: true, Status: 200, Data: json.RawMessage(`{"CreateTopicResponse":{"CreateTopicResult":{"TopicArn":"arn:aws:sns:eu-west-1:111:apteva-ses-inbound-47"}}}`)},
+			"set_topic_attributes":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"create_s3_bucket":            {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"put_s3_bucket_policy":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"verify_domain":               {Success: true, Status: 200, Data: json.RawMessage(`{"DkimAttributes":{"Tokens":["a","b","c"],"Status":"SUCCESS"}}`)},
+			"create_config_set":           {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"add_event_destination":       {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"create_receipt_rule_set":     {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"create_receipt_rule":         {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"set_active_receipt_rule_set": {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"subscribe":                   {Success: true, Status: 200, Data: json.RawMessage(`{"SubscribeResponse":{"SubscribeResult":{"SubscriptionArn":"arn:sub"}}}`)},
+		},
+	}
+	t.Setenv("APTEVA_APP_TOKEN", "dev-47")
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	if _, err := app.toolSendersCreate(ctx, map[string]any{
+		"address": "schwartzindustries.com",
+		"inbound": "true",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var endpoints []string
+	for _, call := range plat.executeCalls {
+		if call.Tool == "subscribe" {
+			endpoints = append(endpoints, fmt.Sprint(call.Input["Endpoint"]))
+		}
+	}
+	if len(endpoints) != 2 {
+		t.Fatalf("subscribe calls=%d endpoints=%v, want events + inbound", len(endpoints), endpoints)
+	}
+	joined := strings.Join(endpoints, "\n")
+	for _, want := range []string{
+		"/api/apps/messaging/webhooks/ses-bounces?",
+		"/api/apps/messaging/webhooks/ses-inbound?",
+		"api_key=dev-47",
+		"project_id=test-proj",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("subscribe endpoints missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestSendersCreate_Domain_GlobalInstallWebhookURLsOmitProject(t *testing.T) {
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{
+			"email_provider":        float64(1),
+			"inbound_storage":       float64(2),
+			"inbound_notifications": float64(3),
+		},
+		whoAmIOverride: &sdk.InstallIdentity{
+			AppName:   "messaging",
+			ProjectID: "",
+			InstallID: 47,
+			PublicURL: "https://test.public.example",
+		},
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"create_sns_topic":            {Success: true, Status: 200, Data: json.RawMessage(`{"CreateTopicResponse":{"CreateTopicResult":{"TopicArn":"arn:aws:sns:eu-west-1:111:apteva-ses-inbound-47"}}}`)},
+			"set_topic_attributes":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"create_s3_bucket":            {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"put_s3_bucket_policy":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"verify_domain":               {Success: true, Status: 200, Data: json.RawMessage(`{"DkimAttributes":{"Tokens":["a","b","c"],"Status":"SUCCESS"}}`)},
+			"create_config_set":           {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"add_event_destination":       {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"create_receipt_rule_set":     {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"create_receipt_rule":         {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"set_active_receipt_rule_set": {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"subscribe":                   {Success: true, Status: 200, Data: json.RawMessage(`{"SubscribeResponse":{"SubscribeResult":{"SubscriptionArn":"arn:sub"}}}`)},
+		},
+	}
+	t.Setenv("APTEVA_APP_TOKEN", "dev-47")
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	if _, err := app.toolSendersCreate(ctx, map[string]any{
+		"address":     "schwartzindustries.com",
+		"inbound":     "true",
+		"_project_id": "test-proj",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var endpoints []string
+	for _, call := range plat.executeCalls {
+		if call.Tool == "subscribe" {
+			endpoints = append(endpoints, fmt.Sprint(call.Input["Endpoint"]))
+		}
+	}
+	joined := strings.Join(endpoints, "\n")
+	if !strings.Contains(joined, "api_key=dev-47") {
+		t.Fatalf("subscribe endpoints missing api key:\n%s", joined)
+	}
+	if strings.Contains(joined, "project_id=") {
+		t.Fatalf("global install webhook endpoints should omit project_id:\n%s", joined)
+	}
+}
+
 // Same install adding a second domain: AlreadyExists must trigger
 // describe → merge → delete → recreate-with-both, not the pre-v0.12.5
 // silent no-op.
@@ -1501,25 +1616,25 @@ func TestSendersCreate_Domain_AlreadyExists_MergesRecipients(t *testing.T) {
 	}`
 	plat := &stubPlatform{
 		bindingsOverride: map[string]any{
-			"email_provider":         float64(1),
-			"inbound_storage":        float64(2),
-			"inbound_notifications":  float64(3),
+			"email_provider":        float64(1),
+			"inbound_storage":       float64(2),
+			"inbound_notifications": float64(3),
 		},
 		whoAmIOverride: &sdk.InstallIdentity{
 			AppName: "messaging", ProjectID: "test-proj", InstallID: 47,
 		},
 		replyByTool: map[string]*sdk.ExecuteResult{
-			"create_sns_topic":            {Success: true, Status: 200, Data: json.RawMessage(`{"CreateTopicResponse":{"CreateTopicResult":{"TopicArn":"arn:aws:sns:eu-west-1:111:apteva-ses-inbound-47"}}}`)},
-			"set_topic_attributes":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
-			"create_s3_bucket":            {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
-			"put_s3_bucket_policy":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
-			"verify_domain":               {Success: true, Status: 200, Data: json.RawMessage(`{"DkimAttributes":{"Tokens":["a","b","c"],"Status":"SUCCESS"}}`)},
-			"create_receipt_rule_set":     {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"create_sns_topic":        {Success: true, Status: 200, Data: json.RawMessage(`{"CreateTopicResponse":{"CreateTopicResult":{"TopicArn":"arn:aws:sns:eu-west-1:111:apteva-ses-inbound-47"}}}`)},
+			"set_topic_attributes":    {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"create_s3_bucket":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"put_s3_bucket_policy":    {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"verify_domain":           {Success: true, Status: 200, Data: json.RawMessage(`{"DkimAttributes":{"Tokens":["a","b","c"],"Status":"SUCCESS"}}`)},
+			"create_receipt_rule_set": {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
 			// First create_receipt_rule call (for the new domain) fails
 			// AlreadyExists; merge path then describes, deletes, recreates.
-			"set_active_receipt_rule_set": {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
-			"subscribe":                   {Success: true, Status: 200, Data: json.RawMessage(`{"SubscribeResponse":{"SubscribeResult":{"SubscriptionArn":"arn:sub"}}}`)},
-			"delete_receipt_rule":         {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"set_active_receipt_rule_set":      {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+			"subscribe":                        {Success: true, Status: 200, Data: json.RawMessage(`{"SubscribeResponse":{"SubscribeResult":{"SubscriptionArn":"arn:sub"}}}`)},
+			"delete_receipt_rule":              {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
 			"describe_active_receipt_rule_set": {Success: true, Status: 200, Data: json.RawMessage(describeReply)},
 		},
 		// create_receipt_rule needs a per-call switch: first AlreadyExists,
@@ -1745,7 +1860,7 @@ func TestSendMessage_UsesSenderDisplayNameAsFriendlyFrom(t *testing.T) {
 		Channel: "email", Address: "marco@socialcast.dev", Kind: "email_mailbox",
 		DisplayName: "Marco at Socialcast",
 		Provider:    "aws-ses", ProviderIdentityID: "marco@socialcast.dev",
-		Verified:    true, VerificationStatus: "verified", SendingEnabled: true,
+		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
 	})
 
 	if _, err := app.toolSendMessage(ctx, map[string]any{
@@ -1774,7 +1889,7 @@ func TestSendMessage_FromNameArgOverridesSenderDisplayName(t *testing.T) {
 		Channel: "email", Address: "marco@socialcast.dev", Kind: "email_mailbox",
 		DisplayName: "Marco at Socialcast",
 		Provider:    "aws-ses", ProviderIdentityID: "marco@socialcast.dev",
-		Verified:    true, VerificationStatus: "verified", SendingEnabled: true,
+		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
 	})
 
 	if _, err := app.toolSendMessage(ctx, map[string]any{
@@ -2313,12 +2428,12 @@ func TestTwilioInboundWebhook_PersistsSMSAndDispatches(t *testing.T) {
 
 	// Build a Twilio-shaped form POST.
 	form := url.Values{
-		"From":        []string{"+15551112222"},
-		"To":          []string{"+15553334444"},
-		"Body":        []string{"need help with order #1234"},
-		"MessageSid":  []string{"SMtest1"},
-		"AccountSid":  []string{"ACtest"},
-		"NumMedia":    []string{"0"},
+		"From":       []string{"+15551112222"},
+		"To":         []string{"+15553334444"},
+		"Body":       []string{"need help with order #1234"},
+		"MessageSid": []string{"SMtest1"},
+		"AccountSid": []string{"ACtest"},
+		"NumMedia":   []string{"0"},
 	}
 	publicURL := "https://test.apteva.ai/webhooks/twilio-inbound?project_id=test-proj"
 	keys := []string{"AccountSid", "Body", "From", "MessageSid", "NumMedia", "To"}
