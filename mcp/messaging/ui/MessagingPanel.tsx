@@ -231,6 +231,8 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
 
   const [selected, setSelected] = useState<MessageRow | null>(null);
   const [selectedEvents, setSelectedEvents] = useState<DeliveryEvent[]>([]);
+  const selectedRef = useRef<MessageRow | null>(null);
+  useEffect(() => { selectedRef.current = selected; }, [selected]);
 
   const withParams = useCallback((extra: Record<string, string>) => {
     return new URLSearchParams({ project_id: projectId, install_id: String(installId), ...extra }).toString();
@@ -300,6 +302,11 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
       setQuota(null);
     }
   }, [api]);
+  const loadMessageDetail = useCallback(async (id: number) => {
+    const r = await api<{ message: MessageRow; events: DeliveryEvent[] }>("GET", `/messages/${id}`, {});
+    setSelected(r.message);
+    setSelectedEvents(r.events || []);
+  }, [api]);
 
   const reload = useCallback(async () => {
     setBusy(true);
@@ -308,13 +315,16 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
         loadOutbox(), loadInbox(), loadTemplates(), loadRoutes(),
         loadSuppressions(), loadSenders(), loadIdentities(), loadQuota(),
       ]);
+      if (selectedRef.current) {
+        await loadMessageDetail(selectedRef.current.id);
+      }
       setStatus("");
     } catch (e) {
       setStatus("Error: " + (e as Error).message);
     } finally {
       setBusy(false);
     }
-  }, [loadOutbox, loadInbox, loadTemplates, loadRoutes, loadSuppressions, loadSenders, loadIdentities, loadQuota]);
+  }, [loadOutbox, loadInbox, loadTemplates, loadRoutes, loadSuppressions, loadSenders, loadIdentities, loadQuota, loadMessageDetail]);
 
   useEffect(() => { reload(); }, [reload]);
 
@@ -329,11 +339,9 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
     setSelected(m);
     setSelectedEvents([]);
     try {
-      const r = await api<{ message: MessageRow; events: DeliveryEvent[] }>("GET", `/messages/${m.id}`, {});
-      setSelected(r.message);
-      setSelectedEvents(r.events || []);
+      await loadMessageDetail(m.id);
     } catch {}
-  }, [api]);
+  }, [loadMessageDetail]);
 
   const counts = useMemo(() => ({
     outbox: outbox.length,
@@ -453,7 +461,6 @@ function MessageList({ rows, onSelect, selectedId }: { rows: MessageRow[]; onSel
               <td className="px-4 py-2">
                 <div className="flex items-center gap-1 flex-wrap">
                   <StatusPill status={m.direction === "in" ? (m.route_status || m.status) : m.status} />
-                  {m.direction === "out" && <EventBadges counts={m.event_counts} />}
                 </div>
               </td>
             </tr>
@@ -541,27 +548,6 @@ const messagingLiveTopics = new Set([
   "message.subscription_changed",
   "message.event",
 ]);
-
-function EventBadges({ counts }: { counts?: Record<string, number> }) {
-  if (!counts) return null;
-  const items: [string, string][] = [
-    ["delivered", "delivered"],
-    ["opened", "opened"],
-    ["clicked", "clicked"],
-    ["bounced", "bounced"],
-    ["complained", "complained"],
-    ["delivery_delayed", "delayed"],
-  ];
-  return (
-    <>
-      {items.map(([kind, label]) => {
-        const count = counts[kind] || 0;
-        if (!count) return null;
-        return <span key={kind} className={`text-[11px] border rounded px-1 ${statusPillClass(kind)}`}>{count} {label}</span>;
-      })}
-    </>
-  );
-}
 
 function EventDetail({ event }: { event: DeliveryEvent }) {
   const meta = eventMetadata(event.raw);

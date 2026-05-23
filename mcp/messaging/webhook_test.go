@@ -271,6 +271,40 @@ func TestMessageGet_DerivesEffectiveStatusFromEvents(t *testing.T) {
 	}
 }
 
+func TestMessageList_DerivesEffectiveStatusFromStoredEvents(t *testing.T) {
+	ctx := newTestCtx(t, nil)
+
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO messages (project_id, channel, direction, from_addr, to_addrs, status, provider_message_id)
+		 VALUES ('test-proj', 'email', 'out', 'noreply@acme.com', '["alice@example.com"]', 'delivered', 'ses-historical-open-list-1')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgID, _ := res.LastInsertId()
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO delivery_events (message_id, kind, recipient, raw)
+		 VALUES (?, 'opened', 'alice@example.com', '{}')`,
+		msgID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := dbMessageList(ctx.AppDB(), "test-proj", messageListOpts{Direction: "out", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("message count=%d want 1", len(rows))
+	}
+	if rows[0].Status != "opened" {
+		t.Fatalf("status=%q want opened", rows[0].Status)
+	}
+	if rows[0].EventCounts["opened"] != 1 {
+		t.Fatalf("opened count=%d want 1", rows[0].EventCounts["opened"])
+	}
+}
+
 // ─── Inbound webhook ──────────────────────────────────────────────
 
 const sampleEml = "From: customer@example.com\r\n" +
