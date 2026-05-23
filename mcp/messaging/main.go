@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.3
+version: 0.13.4
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -2429,8 +2429,14 @@ func mapSESKindToStatus(kind string) string {
 	switch kind {
 	case "sent":
 		return "sent"
+	case "delivery_delayed":
+		return "delivery_delayed"
 	case "delivered":
 		return "delivered"
+	case "opened":
+		return "opened"
+	case "clicked":
+		return "clicked"
 	case "bounced":
 		return "bounced"
 	case "complained":
@@ -2439,6 +2445,46 @@ func mapSESKindToStatus(kind string) string {
 		return "failed"
 	}
 	return ""
+}
+
+func messageStatusRank(status string) int {
+	switch status {
+	case "sent":
+		return 10
+	case "delivery_delayed":
+		return 15
+	case "delivered":
+		return 20
+	case "opened":
+		return 30
+	case "clicked":
+		return 40
+	case "failed", "bounced", "complained":
+		return 100
+	default:
+		return 0
+	}
+}
+
+func shouldPromoteMessageStatus(current, next string) bool {
+	if next == "" {
+		return false
+	}
+	return messageStatusRank(next) >= messageStatusRank(current)
+}
+
+func effectiveMessageStatus(current string, counts map[string]int) string {
+	status := current
+	for kind, count := range counts {
+		if count <= 0 {
+			continue
+		}
+		next := mapSESKindToStatus(kind)
+		if shouldPromoteMessageStatus(status, next) {
+			status = next
+		}
+	}
+	return status
 }
 
 // ─── Inbound webhook ───────────────────────────────────────────────
@@ -3343,11 +3389,12 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 		canonical := canonicalAddrForChannel(msg.Channel, ev.Recipient)
 		_ = dbSuppressionUpsert(ctx.AppDB(), msg.ProjectID, msg.Channel, canonical, suppressionReason, "auto")
 	}
-	if status := mapSESKindToStatus(ev.Kind); status != "" {
+	if status := mapSESKindToStatus(ev.Kind); status != "" && shouldPromoteMessageStatus(msg.Status, status) {
 		_, _ = ctx.AppDB().Exec(
 			`UPDATE messages SET status = ?, last_event_at = ? WHERE id = ?`,
 			status, occurred, msg.ID,
 		)
+		msg.Status = status
 	} else {
 		_, _ = ctx.AppDB().Exec(`UPDATE messages SET last_event_at = ? WHERE id = ?`, occurred, msg.ID)
 	}
@@ -4200,6 +4247,7 @@ func dbMessageGet(db *sql.DB, pid string, id int64) (*Message, error) {
 		return nil, err
 	}
 	m.EventCounts = dbDeliveryEventCounts(db, m.ID)
+	m.Status = effectiveMessageStatus(m.Status, m.EventCounts)
 	return m, nil
 }
 

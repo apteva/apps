@@ -557,7 +557,7 @@ function EventBadges({ counts }: { counts?: Record<string, number> }) {
       {items.map(([kind, label]) => {
         const count = counts[kind] || 0;
         if (!count) return null;
-        return <span key={kind} className="text-[11px] text-text-dim border border-border rounded px-1">{count} {label}</span>;
+        return <span key={kind} className={`text-[11px] border rounded px-1 ${statusPillClass(kind)}`}>{count} {label}</span>;
       })}
     </>
   );
@@ -1527,33 +1527,41 @@ function SendersCreateResult({ result, onDismiss }: { result: SendersCreateResp;
 // ─── Tiny UI primitives ──────────────────────────────────────────
 
 function StatusPill({ status }: { status: string }) {
-  const cls = (() => {
-    switch (status) {
-      case "sent":
-      case "delivered":
-      case "ok":
-      case "received":
-      case "verified":
-      case "SUCCESS":
-        return "bg-green-500/20 text-green-400";
-      case "pending":
-      case "no_match":
-      case "PENDING":
-        return "bg-yellow-500/20 text-yellow-400";
-      case "bounced":
-      case "complained":
-      case "complaint":
-      case "hard-bounce":
-      case "failed":
-      case "target_failed":
-        return "bg-red-500/20 text-red-400";
-      case "manual":
-        return "bg-blue-500/20 text-blue-400";
-      default:
-        return "bg-surface-2 text-text-dim";
-    }
-  })();
-  return <span className={`inline-block px-1.5 py-0.5 rounded text-xs ${cls}`}>{status}</span>;
+  return <span className={`inline-block px-1.5 py-0.5 rounded text-xs ${statusPillClass(status)}`}>{status}</span>;
+}
+
+function statusPillClass(status: string): string {
+  switch (status) {
+    case "sent":
+    case "delivered":
+    case "ok":
+    case "received":
+    case "verified":
+    case "SUCCESS":
+      return "bg-green-500/20 text-green-400 border-green-500/30";
+    case "opened":
+      return "bg-blue-500/20 text-blue-300 border-blue-500/30";
+    case "clicked":
+      return "bg-violet-500/20 text-violet-300 border-violet-500/30";
+    case "pending":
+    case "no_match":
+    case "PENDING":
+    case "delivery_delayed":
+      return "bg-yellow-500/20 text-yellow-400 border-yellow-500/30";
+    case "bounced":
+    case "complained":
+    case "complaint":
+    case "hard-bounce":
+    case "failed":
+    case "target_failed":
+    case "rejected":
+    case "rendering_failed":
+      return "bg-red-500/20 text-red-400 border-red-500/30";
+    case "manual":
+      return "bg-sky-500/20 text-sky-300 border-sky-500/30";
+    default:
+      return "bg-surface-2 text-text-dim border-border";
+  }
 }
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
