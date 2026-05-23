@@ -187,7 +187,12 @@ export default function DocsPanel({ projectId, installId }: NativePanelProps) {
       )}
 
       {view === "renders" && (
-        <RendersView renders={renders} loading={loading} onRefresh={loadRenders} />
+        <RendersView
+          renders={renders}
+          loading={loading}
+          onRefresh={loadRenders}
+          projectId={projectId}
+        />
       )}
     </div>
   );
@@ -716,10 +721,12 @@ function RendersView({
   renders,
   loading,
   onRefresh,
+  projectId,
 }: {
   renders: RenderRow[];
   loading: boolean;
   onRefresh: () => void;
+  projectId: string;
 }) {
   const formatBytes = (n?: number) => {
     if (!n) return "—";
@@ -792,7 +799,7 @@ function RendersView({
                 <td className="px-4 py-2 text-right">
                   {r.output_file_id ? (
                     <a
-                      href={storageContentURL(r)}
+                      href={storageContentURL(r, projectId)}
                       target="_blank"
                       rel="noopener"
                       className="text-xs text-accent hover:underline"
@@ -812,9 +819,10 @@ function RendersView({
   );
 }
 
-function storageContentURL(r: RenderRow): string {
+function storageContentURL(r: RenderRow, projectId?: string): string {
   const name = r.output_name || `render-${r.id}.pdf`;
-  return `/api/apps/storage/files/${encodeURIComponent(r.output_file_id)}/content/${encodeURIComponent(name)}`;
+  const q = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  return `/api/apps/storage/files/${encodeURIComponent(r.output_file_id)}/content/${encodeURIComponent(name)}${q}`;
 }
 
 // silence unused-var warnings for hooks we don't need in v0.1
