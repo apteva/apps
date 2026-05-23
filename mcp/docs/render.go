@@ -110,9 +110,9 @@ func mergeTemplate(body string, data map[string]any) (string, error) {
 func markdownToPDF(md string, opts RenderOptions) ([]byte, error) {
 	cfg := config.NewBuilder().
 		WithPageSize(pageSizeFromString(opts.PageSize)).
-		WithLeftMargin(20).
-		WithRightMargin(20).
-		WithTopMargin(20).
+		WithLeftMargin(18).
+		WithRightMargin(18).
+		WithTopMargin(18).
 		Build()
 	m := maroto.New(cfg)
 
@@ -156,9 +156,9 @@ func addRowsWithTableGuard(m core.Maroto, rows []core.Row) {
 	// Keep heading + table header + the first body row together. This
 	// avoids orphaned table headers at the bottom of a page without
 	// forcing every table onto a new page.
-	needed := 18 + float64(len(rows))*6
-	if needed > 46 {
-		needed = 46
+	needed := 14 + float64(len(rows))*4.4
+	if needed > 38 {
+		needed = 38
 	}
 	if !m.FitlnCurrentPage(needed) {
 		m.AddPages(page.New().Add(rows...))
@@ -188,10 +188,7 @@ func blockToRows(n gast.Node, source []byte, resolve imageResolver) []core.Row {
 	case *extast.Table:
 		return tableRows(b, source)
 	case *gast.ThematicBreak:
-		// --- horizontal rule. line.NewRow gives us a row whose
-		// content is a horizontal line at the configured offset;
-		// height 4mm gives some breathing room above + below.
-		return []core.Row{line.NewRow(4)}
+		return []core.Row{thematicBreakRow()}
 	case *gast.FencedCodeBlock:
 		return []core.Row{codeRow(extractText(b, source))}
 	case *gast.CodeBlock:
@@ -203,7 +200,8 @@ func blockToRows(n gast.Node, source []byte, resolve imageResolver) []core.Row {
 					Style: fontstyle.Italic,
 					Left:  10,
 					Top:   2,
-					Size:  9.5,
+					Size:  8.6,
+					Color: bodyColor(),
 				})),
 			),
 		}
@@ -215,30 +213,41 @@ func blockToRows(n gast.Node, source []byte, resolve imageResolver) []core.Row {
 
 func headingRow(h *gast.Heading, source []byte) core.Row {
 	size := 12.0
-	top := 3.0
+	top := 2.4
 	switch h.Level {
 	case 1:
-		size = 16.5
-		top = 3
+		size = 14.8
+		top = 2
 	case 2:
-		size = 13.5
+		size = 11.8
+		top = 3
 	case 3:
-		size = 11.3
-		top = 2
+		size = 9.8
+		top = 1.8
 	case 4:
-		size = 10.6
-		top = 2
+		size = 9.2
+		top = 1.6
 	default:
-		size = 10
-		top = 2
+		size = 8.8
+		top = 1.4
 	}
 	return row.New().Add(
 		col.New(12).Add(text.New(extractText(h, source), props.Text{
 			Size:  size,
 			Style: fontstyle.Bold,
 			Top:   top,
+			Color: headingColor(),
 		})),
 	)
+}
+
+func thematicBreakRow() core.Row {
+	return line.NewRow(8, props.Line{
+		Color:         ruleColor(),
+		Thickness:     0.12,
+		OffsetPercent: 72,
+		SizePercent:   100,
+	})
 }
 
 func paragraphRows(p *gast.Paragraph, source []byte) []core.Row {
@@ -248,11 +257,11 @@ func paragraphRows(p *gast.Paragraph, source []byte) []core.Row {
 		if s == "" {
 			continue
 		}
-		top := 1.4
+		top := 1.0
 		if i == 0 {
-			top = 1.8
+			top = 1.3
 		}
-		out = append(out, textRow(s, 9.7, top, 0))
+		out = append(out, textRow(s, 8.8, top, 0))
 	}
 	return out
 }
@@ -260,9 +269,11 @@ func paragraphRows(p *gast.Paragraph, source []byte) []core.Row {
 func textRow(s string, size, top, left float64) core.Row {
 	return row.New().Add(
 		col.New(12).Add(text.New(s, props.Text{
-			Size: size,
-			Top:  top,
-			Left: left,
+			Size:            size,
+			Top:             top,
+			Left:            left,
+			VerticalPadding: 0.35,
+			Color:           bodyColor(),
 		})),
 	)
 }
@@ -292,10 +303,18 @@ func listRows(list *gast.List, source []byte) []core.Row {
 			prefix = "• "
 		}
 		out = append(out, row.New().Add(
-			col.New(12).Add(text.New(prefix+txt, props.Text{
-				Size: 9.7,
-				Left: 5,
-				Top:  1,
+			col.New(1).Add(text.New(strings.TrimSpace(prefix), props.Text{
+				Size:  8.7,
+				Top:   0.7,
+				Align: align.Right,
+				Color: mutedColor(),
+			})),
+			col.New(11).Add(text.New(txt, props.Text{
+				Size:            8.8,
+				Left:            1.5,
+				Top:             0.7,
+				VerticalPadding: 0.35,
+				Color:           bodyColor(),
 			})),
 		))
 	}
@@ -306,9 +325,10 @@ func codeRow(s string) core.Row {
 	return row.New().Add(
 		col.New(12).Add(text.New(s, props.Text{
 			Family: "courier",
-			Size:   9,
+			Size:   8,
 			Top:    2,
 			Left:   6,
+			Color:  bodyColor(),
 		})),
 	)
 }
@@ -420,15 +440,25 @@ func tableLine(node gast.Node, source []byte, aligns []extast.Alignment, header 
 	cols := make([]core.Col, 0, n)
 	for i, cell := range cells {
 		span := spans[i]
-		tp := props.Text{Size: 8.9, Top: 1.4, Left: 2, Align: cellAlign(aligns, i)}
+		tp := props.Text{
+			Size:            8.1,
+			Top:             1.0,
+			Left:            1.6,
+			Right:           1.2,
+			Align:           cellAlign(aligns, i),
+			VerticalPadding: 0.25,
+			Color:           bodyColor(),
+		}
 		if header {
 			tp.Style = fontstyle.Bold
+			tp.Size = 8.2
+			tp.Color = headingColor()
 		}
 		cols = append(cols, col.New(span).WithStyle(tableCellStyle(header)).Add(text.New(strings.TrimSpace(renderInline(cell, source)), tp)))
 	}
 	r := row.New().Add(cols...)
 	if header {
-		r = r.WithStyle(&props.Cell{BackgroundColor: &props.Color{Red: 245, Green: 246, Blue: 247}})
+		r = r.WithStyle(&props.Cell{BackgroundColor: tableHeaderColor()})
 	}
 	return r
 }
@@ -461,11 +491,11 @@ func tableSpans(n int, aligns []extast.Alignment) []int {
 func tableCellStyle(header bool) *props.Cell {
 	c := &props.Cell{
 		BorderType:      border.Bottom,
-		BorderThickness: 0.08,
-		BorderColor:     &props.Color{Red: 225, Green: 228, Blue: 232},
+		BorderThickness: 0.04,
+		BorderColor:     ruleColor(),
 	}
 	if header {
-		c.BackgroundColor = &props.Color{Red: 245, Green: 246, Blue: 247}
+		c.BackgroundColor = tableHeaderColor()
 	}
 	return c
 }
@@ -514,7 +544,7 @@ func paragraphToRows(p gast.Node, source []byte, resolve imageResolver) []core.R
 		if s != "" {
 			for _, line := range splitRenderedLines(s) {
 				if line != "" {
-					rows = append(rows, textRow(line, 9.7, 1.8, 0))
+					rows = append(rows, textRow(line, 8.8, 1.3, 0))
 				}
 			}
 		}
@@ -571,9 +601,29 @@ func placeholderRow(alt, src string) core.Row {
 			Style: fontstyle.Italic,
 			Top:   2,
 			Left:  2,
-			Color: &props.Color{Red: 130, Green: 130, Blue: 130},
+			Color: mutedColor(),
 		})),
 	)
+}
+
+func headingColor() *props.Color {
+	return &props.Color{Red: 24, Green: 31, Blue: 42}
+}
+
+func bodyColor() *props.Color {
+	return &props.Color{Red: 36, Green: 43, Blue: 52}
+}
+
+func mutedColor() *props.Color {
+	return &props.Color{Red: 112, Green: 122, Blue: 135}
+}
+
+func ruleColor() *props.Color {
+	return &props.Color{Red: 218, Green: 224, Blue: 231}
+}
+
+func tableHeaderColor() *props.Color {
+	return &props.Color{Red: 247, Green: 249, Blue: 251}
 }
 
 // parseWidthPercent reads a width hint from a markdown image title:
