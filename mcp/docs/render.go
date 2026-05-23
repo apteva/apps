@@ -214,29 +214,36 @@ func blockToRows(n gast.Node, source []byte, resolve imageResolver) []core.Row {
 func headingRow(h *gast.Heading, source []byte) core.Row {
 	size := 12.0
 	top := 2.4
+	bottom := 0.9
 	switch h.Level {
 	case 1:
 		size = 14.8
 		top = 2
+		bottom = 2.4
 	case 2:
 		size = 11.8
-		top = 3
+		top = 4
+		bottom = 1.4
 	case 3:
 		size = 9.8
-		top = 1.8
+		top = 2.5
+		bottom = 0.9
 	case 4:
 		size = 9.2
-		top = 1.6
+		top = 2
+		bottom = 0.7
 	default:
 		size = 8.8
-		top = 1.4
+		top = 1.8
+		bottom = 0.6
 	}
 	return row.New().Add(
 		col.New(12).Add(text.New(extractText(h, source), props.Text{
-			Size:  size,
-			Style: fontstyle.Bold,
-			Top:   top,
-			Color: headingColor(),
+			Size:   size,
+			Style:  fontstyle.Bold,
+			Top:    top,
+			Bottom: bottom,
+			Color:  headingColor(),
 		})),
 	)
 }
@@ -271,6 +278,7 @@ func textRow(s string, size, top, left float64) core.Row {
 		col.New(12).Add(text.New(s, props.Text{
 			Size:            size,
 			Top:             top,
+			Bottom:          0.55,
 			Left:            left,
 			VerticalPadding: 0.35,
 			Color:           bodyColor(),
@@ -304,15 +312,17 @@ func listRows(list *gast.List, source []byte) []core.Row {
 		}
 		out = append(out, row.New().Add(
 			col.New(1).Add(text.New(strings.TrimSpace(prefix), props.Text{
-				Size:  8.7,
-				Top:   0.7,
-				Align: align.Right,
-				Color: mutedColor(),
+				Size:   8.7,
+				Top:    0.9,
+				Bottom: 0.3,
+				Align:  align.Right,
+				Color:  mutedColor(),
 			})),
 			col.New(11).Add(text.New(txt, props.Text{
 				Size:            8.8,
 				Left:            1.5,
-				Top:             0.7,
+				Top:             0.9,
+				Bottom:          0.3,
 				VerticalPadding: 0.35,
 				Color:           bodyColor(),
 			})),
@@ -442,11 +452,12 @@ func tableLine(node gast.Node, source []byte, aligns []extast.Alignment, header 
 		span := spans[i]
 		tp := props.Text{
 			Size:            8.1,
-			Top:             1.0,
+			Top:             1.45,
+			Bottom:          1.2,
 			Left:            1.6,
 			Right:           1.2,
 			Align:           cellAlign(aligns, i),
-			VerticalPadding: 0.25,
+			VerticalPadding: 0.45,
 			Color:           bodyColor(),
 		}
 		if header {
