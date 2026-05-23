@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: email-checker
 display_name: Email Checker
-version: 0.2.0
+version: 0.3.0
 description: |
   Stateless email validation. Live checks (RFC 5322 syntax, DNS MX
   lookup, optional SMTP RCPT probe) plus list-based classification
@@ -24,8 +24,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: email_check,       description: "Full check — syntax + MX + classification. Returns {valid, reasons, mx, disposable, role, free}." }
-    - { name: email_check_smtp,  description: "SMTP RCPT TO probe. Slow + unreliable on Google/MS; returns raw status with informative=true only when the response actually tells us something." }
+    - { name: email_check,       description: "Email validation — syntax + MX + classification, with optional SMTP RCPT TO probe via smtp=true. Returns {valid, reasons, mx, disposable, role, free, smtp}." }
   ui_panels:
     - slot: project.page
       label: Email Checker

@@ -28,6 +28,18 @@ interface CheckResult {
   disposable: boolean;
   role: boolean;
   free: boolean;
+  smtp: SMTPProbe;
+}
+
+interface SMTPProbe {
+  checked: boolean;
+  email?: string;
+  mx?: string;
+  rcpt_status?: string;
+  code?: number;
+  response?: string;
+  informative?: boolean;
+  note?: string;
 }
 
 // Disqualifying reasons → human labels. Falls back to the raw key for
@@ -37,6 +49,18 @@ const REASON_LABELS: Record<string, string> = {
   no_mx_records: "Domain has no MX records",
   disposable_domain: "Disposable provider",
   role_account: "Role account",
+};
+
+const SMTP_STATUS_LABELS: Record<string, string> = {
+  ok: "Accepted",
+  reject: "Rejected",
+  tempfail: "Temporary failure",
+  timeout: "Timeout",
+  blocked: "Blocked",
+  connect_failed: "Connect failed",
+  no_mx: "No MX records",
+  bad_syntax: "Invalid syntax",
+  unknown: "Unknown",
 };
 
 // Icons use stroke="currentColor" so their colour is inherited from the
@@ -79,6 +103,24 @@ function SignalRow({ label, badge, mono }: { label: string; badge: JSX.Element; 
       )}
     </div>
   );
+}
+
+function smtpBadgeClass(status?: string) {
+  switch (status) {
+    case "ok":
+      return "text-success";
+    case "reject":
+    case "bad_syntax":
+    case "no_mx":
+      return "text-error";
+    case "tempfail":
+    case "timeout":
+    case "blocked":
+    case "connect_failed":
+      return "text-warn";
+    default:
+      return "text-text-muted";
+  }
 }
 
 function Result({ r }: { r: CheckResult }) {
@@ -154,12 +196,38 @@ function Result({ r }: { r: CheckResult }) {
           ))}
         </div>
       )}
+
+      {r.smtp.checked && (
+        <div className="border-t border-border">
+          <div className="px-4 py-2 text-text-dim text-xs uppercase">SMTP probe</div>
+          <SignalRow
+            label="RCPT status"
+            badge={
+              <Badge
+                text={SMTP_STATUS_LABELS[r.smtp.rcpt_status ?? ""] ?? r.smtp.rcpt_status ?? "Unknown"}
+                cls={smtpBadgeClass(r.smtp.rcpt_status)}
+              />
+            }
+          />
+          {r.smtp.mx && <SignalRow label="MX host" badge={<span />} mono={r.smtp.mx} />}
+          {r.smtp.code !== undefined && <SignalRow label="SMTP code" badge={<span />} mono={String(r.smtp.code)} />}
+          <SignalRow
+            label="Informative"
+            badge={r.smtp.informative
+              ? <Badge text="Yes" cls="text-success" />
+              : <Badge text="No" cls="text-warn" />}
+          />
+          {r.smtp.note && <SignalRow label="Note" badge={<span />} mono={r.smtp.note} />}
+          {r.smtp.response && <SignalRow label="Response" badge={<span />} mono={r.smtp.response} />}
+        </div>
+      )}
     </section>
   );
 }
 
 export default function EmailCheckerPanel(_props: NativePanelProps) {
   const [email, setEmail] = useState("");
+  const [smtp, setSmtp] = useState(false);
   const [result, setResult] = useState<CheckResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -170,7 +238,9 @@ export default function EmailCheckerPanel(_props: NativePanelProps) {
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(`${API}/check?email=${encodeURIComponent(q)}`, {
+      const params = new URLSearchParams({ email: q });
+      if (smtp) params.set("smtp", "true");
+      const res = await fetch(`${API}/check?${params.toString()}`, {
         credentials: "same-origin",
       });
       if (!res.ok) {
@@ -185,7 +255,7 @@ export default function EmailCheckerPanel(_props: NativePanelProps) {
     } finally {
       setLoading(false);
     }
-  }, [email]);
+  }, [email, smtp]);
 
   return (
     <div className="h-full flex flex-col">
@@ -197,23 +267,33 @@ export default function EmailCheckerPanel(_props: NativePanelProps) {
       </header>
 
       <div className="flex-1 overflow-auto p-4 flex flex-col gap-4">
-        <section className="flex gap-2">
-          <input
-            type="email"
-            placeholder="name@example.com"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") run(); }}
-            className="flex-1 bg-bg-input border border-border rounded px-3 py-1.5 text-sm text-text"
-            autoFocus
-          />
-          <button
-            onClick={run}
-            disabled={!email.trim() || loading}
-            className="px-4 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
-          >
-            {loading ? "Checking…" : "Check"}
-          </button>
+        <section className="flex flex-col gap-3">
+          <div className="flex gap-2">
+            <input
+              type="email"
+              placeholder="name@example.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") run(); }}
+              className="flex-1 bg-bg-input border border-border rounded px-3 py-1.5 text-sm text-text"
+              autoFocus
+            />
+            <button
+              onClick={run}
+              disabled={!email.trim() || loading}
+              className="px-4 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+            >
+              {loading ? "Checking…" : "Check"}
+            </button>
+          </div>
+          <label className="flex items-center gap-2 text-sm text-text-muted">
+            <input
+              type="checkbox"
+              checked={smtp}
+              onChange={(e) => setSmtp(e.target.checked)}
+            />
+            <span>SMTP probe</span>
+          </label>
         </section>
 
         {error && <div className="text-error text-sm">{error}</div>}

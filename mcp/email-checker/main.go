@@ -2,21 +2,20 @@
 //
 // Three live signals + three list lookups:
 //
-//   live:
-//     - syntax (net/mail.ParseAddress, RFC 5322)
-//     - DNS MX records (3s timeout)
-//     - optional SMTP RCPT TO probe (separate tool, slow + unreliable)
+//	live:
+//	  - syntax (net/mail.ParseAddress, RFC 5322)
+//	  - DNS MX records (3s timeout)
+//	  - optional SMTP RCPT TO probe (slow + unreliable)
 //
-//   lists:
-//     - disposable provider (mailinator etc.)
-//     - free provider (gmail/outlook/yahoo etc.)
-//     - role account local-part (info@, support@, …)
+//	lists:
+//	  - disposable provider (mailinator etc.)
+//	  - free provider (gmail/outlook/yahoo etc.)
+//	  - role account local-part (info@, support@, …)
 //
-// No DB. Every call resolves fresh. The SMTP probe is gated to its
-// own tool because (a) it's the slow one and (b) its result is only
-// trustworthy for self-hosted servers — Google/MS accept every RCPT
-// and decide at DATA time, so we explicitly mark when the response
-// is informative versus not.
+// No DB. Every call resolves fresh. The SMTP probe is opt-in because
+// it is slow and only trustworthy for self-hosted servers — Google/MS
+// accept every RCPT and decide at DATA time, so we explicitly mark
+// when the response is informative versus not.
 package main
 
 import (
@@ -36,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: email-checker
 display_name: Email Checker
-version: 0.2.0
+version: 0.3.0
 description: |
   Stateless email validation — syntax, DNS MX, disposable/free/role
   classification, optional SMTP probe.
@@ -49,8 +48,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: email_check,      description: "Full check — syntax + MX + classification." }
-    - { name: email_check_smtp, description: "SMTP RCPT TO probe. Slow, unreliable on Google/MS." }
+    - { name: email_check, description: "Email validation — syntax + MX + classification, with optional SMTP RCPT TO probe via smtp=true." }
 runtime:
   kind: source
   source:
@@ -94,7 +92,9 @@ func (a *App) httpCheck(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "?email= required", http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, check(email))
+	withSMTP := parseBoolQuery(r.URL.Query().Get("smtp"))
+	timeout := parseTimeoutSeconds(r.URL.Query().Get("timeout_seconds"))
+	writeJSON(w, check(email, withSMTP, timeout))
 }
 
 // ─── MCP tools ─────────────────────────────────────────────────────
@@ -102,27 +102,13 @@ func (a *App) httpCheck(w http.ResponseWriter, r *http.Request) {
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
-			Name:        "email_check",
-			Description: "Validate an email. Args: email. Returns {email, valid, reasons[], syntax_ok, domain, mx[], disposable, role, free}.",
-			InputSchema: schemaObject(map[string]any{
-				"email": map[string]any{"type": "string"},
-			}, []string{"email"}),
-			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) {
-				email, _ := args["email"].(string)
-				if email == "" {
-					return nil, errors.New("email required")
-				}
-				return check(email), nil
-			},
-		},
-		{
-			Name: "email_check_smtp",
-			Description: "Connect to the domain's MX, do EHLO + MAIL FROM <> + RCPT TO, return the raw status. " +
-				"Slow (1–5s). Outbound :25 is blocked on most cloud hosts. Google/Microsoft accept every RCPT — " +
-				"`informative=false` flags responses that can't tell mailbox-exists from mailbox-doesn't-exist. " +
-				"Args: email, timeout_seconds? (default 5).",
+			Name: "email_check",
+			Description: "Validate an email. Args: email, smtp? (default false), timeout_seconds? (default 5). " +
+				"Returns {email, valid, reasons[], syntax_ok, domain, mx[], disposable, role, free, smtp}. " +
+				"SMTP is opt-in because it is slow and often non-informative on Google/Microsoft/Yahoo.",
 			InputSchema: schemaObject(map[string]any{
 				"email":           map[string]any{"type": "string"},
+				"smtp":            map[string]any{"type": "boolean"},
 				"timeout_seconds": map[string]any{"type": "integer"},
 			}, []string{"email"}),
 			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) {
@@ -130,11 +116,12 @@ func (a *App) MCPTools() []sdk.Tool {
 				if email == "" {
 					return nil, errors.New("email required")
 				}
+				withSMTP, _ := args["smtp"].(bool)
 				timeout := 5 * time.Second
 				if v, ok := args["timeout_seconds"].(float64); ok && v > 0 {
 					timeout = time.Duration(v) * time.Second
 				}
-				return checkSMTP(email, timeout), nil
+				return check(email, withSMTP, timeout), nil
 			},
 		},
 	}
@@ -145,19 +132,24 @@ func main() { sdk.Run(&App{}) }
 // ─── Live checks ───────────────────────────────────────────────────
 
 type CheckResult struct {
-	Email      string   `json:"email"`
-	Valid      bool     `json:"valid"`
-	Reasons    []string `json:"reasons"`
-	SyntaxOK   bool     `json:"syntax_ok"`
-	Domain     string   `json:"domain,omitempty"`
-	MX         []string `json:"mx,omitempty"`
-	Disposable bool     `json:"disposable"`
-	Role       bool     `json:"role"`
-	Free       bool     `json:"free"`
+	Email      string    `json:"email"`
+	Valid      bool      `json:"valid"`
+	Reasons    []string  `json:"reasons"`
+	SyntaxOK   bool      `json:"syntax_ok"`
+	Domain     string    `json:"domain,omitempty"`
+	MX         []string  `json:"mx,omitempty"`
+	Disposable bool      `json:"disposable"`
+	Role       bool      `json:"role"`
+	Free       bool      `json:"free"`
+	SMTP       SMTPProbe `json:"smtp"`
 }
 
-func check(input string) CheckResult {
-	res := CheckResult{Email: strings.TrimSpace(input), Reasons: []string{}}
+func check(input string, withSMTP bool, smtpTimeout time.Duration) CheckResult {
+	res := CheckResult{
+		Email:   strings.TrimSpace(input),
+		Reasons: []string{},
+		SMTP:    SMTPProbe{Checked: false},
+	}
 
 	// 1. Syntax — net/mail handles RFC 5322 + display-name forms.
 	addr, err := mail.ParseAddress(res.Email)
@@ -210,23 +202,27 @@ func check(input string) CheckResult {
 	// probably a shared mailbox") but they're not by themselves
 	// invalid — leave them out of the disqualifying-reasons set.
 	res.Valid = res.SyntaxOK && len(res.MX) > 0 && !res.Disposable
+	if withSMTP {
+		res.SMTP = checkSMTP(res.Email, smtpTimeout)
+	}
 	return res
 }
 
 // ─── SMTP probe ─────────────────────────────────────────────────────
 
-type SMTPResult struct {
-	Email       string `json:"email"`
+type SMTPProbe struct {
+	Checked     bool   `json:"checked"`
+	Email       string `json:"email,omitempty"`
 	MX          string `json:"mx,omitempty"`
-	RcptStatus  string `json:"rcpt_status"`        // ok | reject | tempfail | timeout | blocked | connect_failed | no_mx | bad_syntax | unknown
-	Code        int    `json:"code,omitempty"`     // SMTP reply code from RCPT TO
-	Response    string `json:"response,omitempty"` // raw SMTP text
-	Informative bool   `json:"informative"`        // whether rcpt_status actually tells us mailbox-exists
-	Note        string `json:"note,omitempty"`     // human-readable caveat ("Google accepts all RCPTs", etc.)
+	RcptStatus  string `json:"rcpt_status,omitempty"` // ok | reject | tempfail | timeout | blocked | connect_failed | no_mx | bad_syntax | unknown
+	Code        int    `json:"code,omitempty"`        // SMTP reply code from RCPT TO
+	Response    string `json:"response,omitempty"`    // raw SMTP text
+	Informative *bool  `json:"informative,omitempty"` // whether rcpt_status actually tells us mailbox-exists
+	Note        string `json:"note,omitempty"`        // human-readable caveat ("Google accepts all RCPTs", etc.)
 }
 
-func checkSMTP(input string, timeout time.Duration) SMTPResult {
-	res := SMTPResult{Email: strings.TrimSpace(input)}
+func checkSMTP(input string, timeout time.Duration) SMTPProbe {
+	res := SMTPProbe{Checked: true, Email: strings.TrimSpace(input)}
 	addr, err := mail.ParseAddress(res.Email)
 	if err != nil {
 		res.RcptStatus = "bad_syntax"
@@ -250,7 +246,9 @@ func checkSMTP(input string, timeout time.Duration) SMTPResult {
 	}
 	mxHost := strings.TrimSuffix(mxs[0].Host, ".")
 	res.MX = mxHost
-	res.Note, res.Informative = smtpProviderNote(mxHost)
+	note, informative := smtpProviderNote(mxHost)
+	res.Note = note
+	res.Informative = boolPtr(informative)
 
 	// Connect on :25 with the user's timeout. Cloud hosts (Hetzner,
 	// AWS, GCP) block outbound 25 by default; treat connect failure
@@ -265,7 +263,7 @@ func checkSMTP(input string, timeout time.Duration) SMTPResult {
 			res.RcptStatus = "blocked"
 		}
 		res.Response = err.Error()
-		res.Informative = false
+		res.Informative = boolPtr(false)
 		return res
 	}
 	defer conn.Close()
@@ -275,7 +273,7 @@ func checkSMTP(input string, timeout time.Duration) SMTPResult {
 	if err != nil {
 		res.RcptStatus = "connect_failed"
 		res.Response = err.Error()
-		res.Informative = false
+		res.Informative = boolPtr(false)
 		return res
 	}
 	defer c.Close()
@@ -283,14 +281,14 @@ func checkSMTP(input string, timeout time.Duration) SMTPResult {
 	if err := c.Hello("checker.apteva.local"); err != nil {
 		res.RcptStatus = "connect_failed"
 		res.Response = err.Error()
-		res.Informative = false
+		res.Informative = boolPtr(false)
 		return res
 	}
 	// Empty MAIL FROM (the standard probe form — RFC 5321 §4.5.5).
 	if err := c.Mail(""); err != nil {
 		res.RcptStatus = "connect_failed"
 		res.Response = err.Error()
-		res.Informative = false
+		res.Informative = boolPtr(false)
 		return res
 	}
 	err = c.Rcpt(email)
@@ -311,15 +309,15 @@ func checkSMTP(input string, timeout time.Duration) SMTPResult {
 		case code >= 400 && code < 500:
 			// 4xx is greylisting / temp fail. Not a definitive answer.
 			res.RcptStatus = "tempfail"
-			res.Informative = false
+			res.Informative = boolPtr(false)
 		default:
 			res.RcptStatus = "unknown"
-			res.Informative = false
+			res.Informative = boolPtr(false)
 		}
 		return res
 	}
 	res.RcptStatus = "unknown"
-	res.Informative = false
+	res.Informative = boolPtr(false)
 	return res
 }
 
@@ -388,3 +386,26 @@ func writeJSON(w http.ResponseWriter, v any) {
 	}
 	_, _ = w.Write(body)
 }
+
+func parseBoolQuery(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "t", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseTimeoutSeconds(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 5 * time.Second
+	}
+	d, err := time.ParseDuration(v + "s")
+	if err != nil || d <= 0 {
+		return 5 * time.Second
+	}
+	return d
+}
+
+func boolPtr(v bool) *bool { return &v }
