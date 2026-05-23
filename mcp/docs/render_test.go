@@ -10,6 +10,9 @@ package main
 
 import (
 	"bytes"
+	"image"
+	"image/color"
+	"image/png"
 	"strings"
 	"testing"
 )
@@ -105,28 +108,130 @@ func TestRender_PageSizes(t *testing.T) {
 	}
 }
 
-// Markdown blocks we deliberately don't render (tables, images,
-// HTML blocks) shouldn't error — they should silently emit nothing
-// so the rest of the document still renders.
-func TestRender_UnsupportedBlocksSkippedGracefully(t *testing.T) {
+// Raw HTML blocks (and other unhandled node types) are skipped
+// silently so the rest of the document still renders. Tables + images
+// are now supported (TestRender_Table / TestRender_Image*); an http(s)
+// image with no resolver degrades to a placeholder, never an error.
+func TestRender_UnhandledBlocksSkippedGracefully(t *testing.T) {
 	body := `# Heading
 
-| col1 | col2 |
-|------|------|
-| a    | b    |
-
-![image](https://example.com/x.png)
-
 <div>raw HTML</div>
+
+![remote](https://example.com/x.png)
 
 A paragraph that should still render.`
 	pdf, err := renderPDF(body, nil, RenderOptions{})
 	if err != nil {
-		t.Fatalf("render with unsupported blocks: %v", err)
+		t.Fatalf("render with unhandled blocks: %v", err)
 	}
 	if !bytes.HasPrefix(pdf, []byte("%PDF-")) {
 		t.Fatal("not a PDF")
 	}
+}
+
+// GFM tables render to a real PDF (pricing/deliverables grids). Column
+// alignment markers exercise cellAlign.
+func TestRender_Table(t *testing.T) {
+	body := `# Pricing
+
+| Item               | Qty | Amount  |
+|:-------------------|:---:|--------:|
+| Discovery workshop |  1  | $4,000  |
+| Model fine-tuning  |  2  | $12,000 |
+
+**Total: $16,000**`
+	pdf, err := renderPDF(body, nil, RenderOptions{})
+	if err != nil {
+		t.Fatalf("render table: %v", err)
+	}
+	if !bytes.HasPrefix(pdf, []byte("%PDF-")) {
+		t.Fatal("not a PDF")
+	}
+	if len(pdf) < 1000 {
+		t.Errorf("table PDF suspiciously small: %d bytes", len(pdf))
+	}
+}
+
+// An image whose src resolves to real bytes embeds into the PDF, and
+// the resolver receives the markdown src verbatim.
+func TestRender_ImageViaResolver(t *testing.T) {
+	pngBytes := tinyPNG(t)
+	var gotSrc string
+	resolver := func(src string) ([]byte, string, error) {
+		gotSrc = src
+		return pngBytes, "png", nil
+	}
+	body := "![logo](storage:7 \"width=40%\")\n\n# Proposal"
+	pdf, err := renderPDF(body, nil, RenderOptions{ImageResolver: resolver})
+	if err != nil {
+		t.Fatalf("render image: %v", err)
+	}
+	if gotSrc != "storage:7" {
+		t.Errorf("resolver got src %q, want storage:7", gotSrc)
+	}
+	if !bytes.HasPrefix(pdf, []byte("%PDF-")) {
+		t.Fatal("not a PDF")
+	}
+}
+
+// A nil resolver (and a resolver that errors) must degrade to a
+// placeholder, never fail the render.
+func TestRender_ImageNilResolverPlaceholder(t *testing.T) {
+	body := "![logo](storage:7)\n\nBody text."
+	pdf, err := renderPDF(body, nil, RenderOptions{})
+	if err != nil {
+		t.Fatalf("nil resolver should not error: %v", err)
+	}
+	if !bytes.HasPrefix(pdf, []byte("%PDF-")) {
+		t.Fatal("not a PDF")
+	}
+
+	errResolver := func(string) ([]byte, string, error) { return nil, "", errFake }
+	pdf, err = renderPDF(body, nil, RenderOptions{ImageResolver: errResolver})
+	if err != nil {
+		t.Fatalf("resolver error should degrade, not fail: %v", err)
+	}
+	if !bytes.HasPrefix(pdf, []byte("%PDF-")) {
+		t.Fatal("not a PDF")
+	}
+}
+
+func TestParseWidthPercent(t *testing.T) {
+	for in, want := range map[string]float64{
+		"width=30%": 30,
+		"30%":       30,
+		"75":        75,
+		"":          0,
+		"abc":       0,
+		"120%":      0,
+	} {
+		if got := parseWidthPercent(in); got != want {
+			t.Errorf("parseWidthPercent(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+var errFake = errFakeT("resolve failed")
+
+type errFakeT string
+
+func (e errFakeT) Error() string { return string(e) }
+
+// tinyPNG returns a small valid PNG that gofpdf (maroto's backend) can
+// embed — generated via the stdlib encoder so it's always well-formed.
+func tinyPNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			img.Set(x, y, color.RGBA{R: 20, G: 80, B: 160, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	return buf.Bytes()
 }
 
 func min(a, b int) int {

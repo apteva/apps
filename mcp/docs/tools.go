@@ -206,7 +206,7 @@ func (a *App) toolPreview(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	data, _ := args["data"].(map[string]any)
 	pageSize := ctx.Config().Get("page_size")
-	pdf, err := renderPDF(body, data, RenderOptions{PageSize: pageSize})
+	pdf, err := renderPDF(body, data, RenderOptions{PageSize: pageSize, ImageResolver: imageResolverFor(ctx)})
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +221,16 @@ func (a *App) toolPreview(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // config. Pulled out for testability — preview uses the same path.
 func renderTemplateToPDF(ctx *sdk.AppCtx, t *Template, data map[string]any) ([]byte, error) {
 	pageSize := ctx.Config().Get("page_size")
-	return renderPDF(t.Body, data, RenderOptions{PageSize: pageSize})
+	return renderPDF(t.Body, data, RenderOptions{PageSize: pageSize, ImageResolver: imageResolverFor(ctx)})
+}
+
+// imageResolverFor binds an imageResolver to this install's storage
+// connection so docs_render / docs_preview can pull logo + inline
+// images. Both paths share it, so the panel preview shows images too.
+func imageResolverFor(ctx *sdk.AppCtx) imageResolver {
+	return func(src string) ([]byte, string, error) {
+		return resolveImageSrc(ctx, src)
+	}
 }
 
 // lookupTemplateForRender — accept template_id (int) or

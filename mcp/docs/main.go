@@ -1,4 +1,4 @@
-// Docs v0.1 — generated client documents stored in storage.
+// Docs v0.2 — generated client documents stored in storage.
 //
 // Templates live in this app's DB; agents call docs_render(template,
 // data) to produce a PDF that lands in storage as a real file. All
@@ -6,12 +6,13 @@
 // surface — docs is purely the renderer + audit log.
 //
 // Files in this package:
-//   main.go         — App, manifest, OnMount, route + tool wiring
-//   store.go        — DB queries (templates + renders tables)
-//   render.go       — markdown + Go-template + maroto → PDF bytes
-//   storageclient.go — CallApp wrapper for uploading PDFs to storage
-//   handlers.go     — HTTP handlers (panel-facing)
-//   tools.go        — MCP tool handlers
+//
+//	main.go         — App, manifest, OnMount, route + tool wiring
+//	store.go        — DB queries (templates + renders tables)
+//	render.go       — markdown + Go-template + maroto → PDF bytes
+//	storageclient.go — CallApp wrapper for uploading PDFs to storage
+//	handlers.go     — HTTP handlers (panel-facing)
+//	tools.go        — MCP tool handlers
 package main
 
 import (
@@ -29,11 +30,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: docs
 display_name: Documents
-version: 0.1.2
+version: 0.2.0
 description: |
   Generate client-facing PDFs from markdown templates and store them
-  in storage. Pure-Go render pipeline (no Chromium). Audit trail on
-  every render.
+  in storage. Pure-Go render pipeline (no Chromium): headings, lists,
+  GFM tables, and images/logo (storage:<id> or data: URIs). Audit
+  trail on every render.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -63,8 +65,8 @@ provides:
     - { name: docs_create_template, description: "Create a template. Args - slug, name, body, description?, source_format? (markdown), output_format? (pdf), default_folder?.", requires: docs.write }
     - { name: docs_update_template, description: "Partial update. Args - id, plus any of name/description/body/default_folder.", requires: docs.write }
     - { name: docs_delete_template, description: "Remove a template. Past renders keep working.", requires: docs.write }
-    - { name: docs_render,          description: "Render a template with data into a file in storage. Args - template_id (int) or template_slug (string), data (object), output_name?, output_folder?.", requires: docs.render }
-    - { name: docs_preview,         description: "Render but do not persist. Returns base64 PDF bytes.", requires: docs.render }
+    - { name: docs_render,          description: "Render a template with data into a file in storage. Markdown supports headings, lists, GFM tables, and images (storage:<id> or data: URI, e.g. a logo). Args - template_id (int) or template_slug (string), data (object), output_name?, output_folder?.", requires: docs.render }
+    - { name: docs_preview,         description: "Render but do not persist. Returns base64 PDF bytes (images render too).", requires: docs.render }
     - { name: docs_list_renders,    description: "Audit trail. Filter by template_id, since, limit.", requires: docs.read }
     - { name: docs_get_render,      description: "Replay one render - data snapshot, output file_id, timestamps.", requires: docs.read }
   ui_panels:
@@ -107,7 +109,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	globalCtx = ctx
 	ctx.Logger().Info("docs mounted",
-		"version", "0.1.0",
+		"version", "0.2.0",
 		"default_folder", ctx.Config().Get("default_output_folder"),
 	)
 	return nil
@@ -194,7 +196,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "docs_render",
-			Description: "Render a template into a file in storage. Args: template_id or template_slug, data, output_name?, output_folder?.",
+			Description: "Render a template into a file in storage. Markdown supports headings, lists, GFM tables, and images (storage:<id> or data: URI, e.g. a logo). Args: template_id or template_slug, data, output_name?, output_folder?.",
 			InputSchema: schemaObject(map[string]any{
 				"template_id":   map[string]any{"type": "integer"},
 				"template_slug": map[string]any{"type": "string"},
@@ -206,7 +208,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "docs_preview",
-			Description: "Render but don't persist. Returns base64 PDF bytes.",
+			Description: "Render but don't persist. Returns base64 PDF bytes (images render too).",
 			InputSchema: schemaObject(map[string]any{
 				"template_id":   map[string]any{"type": "integer"},
 				"template_slug": map[string]any{"type": "string"},
@@ -274,4 +276,3 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 	}
 	return o
 }
-

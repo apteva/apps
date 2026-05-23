@@ -1,0 +1,53 @@
+name: render-proposal
+description: |
+  The v0.2 payoff — a branded consulting proposal. Exercises the two
+  features added in 0.2: a GFM pricing table and a logo image pulled
+  from storage (![logo](storage:<id>)). The agent uploads the firm
+  logo once, authors a proposal template that references it plus a
+  pricing table, then renders one proposal for a prospect and returns
+  the storage URL.
+
+timeout: 120s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  dependencies:
+    - storage: ../storage
+
+directive: |
+  We run an AI consulting firm and need a reusable client proposal.
+
+  1. Upload our logo to storage so we can brand the document. (Use any
+     small PNG you have; note the returned file id.)
+  2. Create a "proposal" template in the docs app. The body should use
+     markdown with Go-template placeholders and include:
+       - the logo at the top, referenced as ![logo](storage:<id>)
+         using the file id from step 1
+       - an h1 title with the client name ({{.client.name}})
+       - a short engagement overview ({{.overview}})
+       - a **pricing table** (GFM markdown table) with columns
+         Item | Qty | Amount, rows driven by {{range .pricing}}
+       - a bold total line ({{.total}})
+  3. Render the proposal for client "Northwind Trading" with:
+       overview: "A 6-week engagement to ship a support-triage agent."
+       pricing:
+         - Discovery workshop, qty 1, $4,000
+         - Agent build + eval harness, qty 1, $18,000
+         - Hypercare (2 weeks), qty 1, $6,000
+       total: "$28,000"
+
+  Use docs_render (not a direct storage upload) for the final PDF, and
+  tell me the URL when done.
+
+assert:
+  - tool_called: files_upload
+  - tool_called: docs_create_template
+  - tool_called: docs_render
+  - response_contains: "url"
+
+budget:
+  total_tokens: 26000
+  cost_usd: 0.45

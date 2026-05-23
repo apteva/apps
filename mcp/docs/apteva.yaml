@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: docs
 display_name: Documents
-version: 0.1.2
+version: 0.2.0
 description: |
   Generate client-facing documents (PDFs from markdown templates) and
   store them in storage. Templates live in this app's DB; agents call
@@ -10,7 +10,8 @@ description: |
   storage as a real file with all the URL/visibility/permissions
   machinery storage already provides. Pure-Go render pipeline (no
   Chromium): markdown body + Go template syntax for placeholders,
-  rendered via maroto.
+  rendered via maroto. Supports headings, lists, GFM tables, and
+  images/logo (referenced as storage:<id> or inline data: URIs).
 
   Audit trail on every render — who rendered what template with which
   data — for compliance use cases (invoices, contracts, NDAs). Past
@@ -61,8 +62,8 @@ provides:
     - { name: docs_update_template, description: "Partial update of a template. Args - id, plus any of name/description/body/default_folder.", requires: docs.write }
     - { name: docs_delete_template, description: "Remove a template. Past renders keep working - output_file_ids in storage are stable. Args - id.", requires: docs.write }
 
-    - { name: docs_render,          description: "Render a template with data into a file in storage. Args - template_id (int) OR template_slug (string), data (object), output_name?, output_folder? (defaults to template's default). Returns file_id + url + render_id.", requires: docs.render }
-    - { name: docs_preview,         description: "Render but do not persist. Returns base64 PDF bytes for inline display - used by the panel during template authoring. Args - template_id (or template_slug), data.", requires: docs.render }
+    - { name: docs_render,          description: "Render a template with data into a file in storage. Markdown supports headings, lists, GFM tables, and images (storage:<id> or data: URI, e.g. a logo). Args - template_id (int) OR template_slug (string), data (object), output_name?, output_folder? (defaults to template's default). Returns file_id + url + render_id.", requires: docs.render }
+    - { name: docs_preview,         description: "Render but do not persist. Returns base64 PDF bytes for inline display - used by the panel during template authoring (images render too). Args - template_id (or template_slug), data.", requires: docs.render }
 
     - { name: docs_list_renders,    description: "Audit trail. Filter by template_id, since (RFC3339), limit. Returns render_id, template_id, output_file_id, rendered_by, rendered_at, data_snapshot.", requires: docs.read }
     - { name: docs_get_render,      description: "Replay one render - data snapshot, output file_id, timestamps. Args - render_id.", requires: docs.read }
