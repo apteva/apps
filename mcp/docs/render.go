@@ -38,10 +38,12 @@ import (
 	"github.com/johnfercher/maroto/v2/pkg/components/col"
 	mimage "github.com/johnfercher/maroto/v2/pkg/components/image"
 	"github.com/johnfercher/maroto/v2/pkg/components/line"
+	"github.com/johnfercher/maroto/v2/pkg/components/page"
 	"github.com/johnfercher/maroto/v2/pkg/components/row"
 	"github.com/johnfercher/maroto/v2/pkg/components/text"
 	"github.com/johnfercher/maroto/v2/pkg/config"
 	"github.com/johnfercher/maroto/v2/pkg/consts/align"
+	"github.com/johnfercher/maroto/v2/pkg/consts/border"
 	mext "github.com/johnfercher/maroto/v2/pkg/consts/extension"
 	"github.com/johnfercher/maroto/v2/pkg/consts/fontstyle"
 	"github.com/johnfercher/maroto/v2/pkg/consts/pagesize"
@@ -120,11 +122,24 @@ func markdownToPDF(md string, opts RenderOptions) ([]byte, error) {
 	mdParser := goldmark.New(goldmark.WithExtensions(extension.Table)).Parser()
 	ast := mdParser.Parse(gtext.NewReader(source))
 
-	for n := ast.FirstChild(); n != nil; n = n.NextSibling() {
+	for n := ast.FirstChild(); n != nil; {
+		if h, ok := n.(*gast.Heading); ok {
+			if tbl, ok := n.NextSibling().(*extast.Table); ok {
+				rows := append([]core.Row{headingRow(h, source)}, tableRows(tbl, source)...)
+				addRowsWithTableGuard(m, rows)
+				n = tbl.NextSibling()
+				continue
+			}
+		}
 		rows := blockToRows(n, source, opts.ImageResolver)
 		if len(rows) > 0 {
-			m.AddRows(rows...)
+			if _, ok := n.(*extast.Table); ok {
+				addRowsWithTableGuard(m, rows)
+			} else {
+				m.AddRows(rows...)
+			}
 		}
+		n = n.NextSibling()
 	}
 
 	doc, err := m.Generate()
@@ -132,6 +147,24 @@ func markdownToPDF(md string, opts RenderOptions) ([]byte, error) {
 		return nil, fmt.Errorf("maroto generate: %w", err)
 	}
 	return doc.GetBytes(), nil
+}
+
+func addRowsWithTableGuard(m core.Maroto, rows []core.Row) {
+	if len(rows) == 0 {
+		return
+	}
+	// Keep heading + table header + the first body row together. This
+	// avoids orphaned table headers at the bottom of a page without
+	// forcing every table onto a new page.
+	needed := 18 + float64(len(rows))*6
+	if needed > 46 {
+		needed = 46
+	}
+	if !m.FitlnCurrentPage(needed) {
+		m.AddPages(page.New().Add(rows...))
+		return
+	}
+	m.AddRows(rows...)
 }
 
 // blockToRows turns one top-level AST block into 0+ maroto rows.
@@ -149,7 +182,7 @@ func blockToRows(n gast.Node, source []byte, resolve imageResolver) []core.Row {
 		if paragraphHasImage(b) {
 			return paragraphToRows(b, source, resolve)
 		}
-		return []core.Row{paragraphRow(b, source)}
+		return paragraphRows(b, source)
 	case *gast.List:
 		return listRows(b, source)
 	case *extast.Table:
@@ -170,7 +203,7 @@ func blockToRows(n gast.Node, source []byte, resolve imageResolver) []core.Row {
 					Style: fontstyle.Italic,
 					Left:  10,
 					Top:   2,
-					Size:  10,
+					Size:  9.5,
 				})),
 			),
 		}
@@ -185,18 +218,18 @@ func headingRow(h *gast.Heading, source []byte) core.Row {
 	top := 3.0
 	switch h.Level {
 	case 1:
-		size = 18
+		size = 16.5
 		top = 3
 	case 2:
-		size = 15
+		size = 13.5
 	case 3:
-		size = 12.5
+		size = 11.3
 		top = 2
 	case 4:
-		size = 12
+		size = 10.6
 		top = 2
 	default:
-		size = 11
+		size = 10
 		top = 2
 	}
 	return row.New().Add(
@@ -208,13 +241,39 @@ func headingRow(h *gast.Heading, source []byte) core.Row {
 	)
 }
 
-func paragraphRow(p *gast.Paragraph, source []byte) core.Row {
+func paragraphRows(p *gast.Paragraph, source []byte) []core.Row {
+	lines := splitRenderedLines(renderInline(p, source))
+	out := make([]core.Row, 0, len(lines))
+	for i, s := range lines {
+		if s == "" {
+			continue
+		}
+		top := 1.4
+		if i == 0 {
+			top = 1.8
+		}
+		out = append(out, textRow(s, 9.7, top, 0))
+	}
+	return out
+}
+
+func textRow(s string, size, top, left float64) core.Row {
 	return row.New().Add(
-		col.New(12).Add(text.New(renderInline(p, source), props.Text{
-			Size: 10.5,
-			Top:  2,
+		col.New(12).Add(text.New(s, props.Text{
+			Size: size,
+			Top:  top,
+			Left: left,
 		})),
 	)
+}
+
+func splitRenderedLines(s string) []string {
+	parts := strings.Split(s, "\n")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, strings.TrimSpace(p))
+	}
+	return out
 }
 
 // listRows iterates the list's children. Each ListItem becomes one
@@ -234,8 +293,8 @@ func listRows(list *gast.List, source []byte) []core.Row {
 		}
 		out = append(out, row.New().Add(
 			col.New(12).Add(text.New(prefix+txt, props.Text{
-				Size: 10.5,
-				Left: 6,
+				Size: 9.7,
+				Left: 5,
 				Top:  1,
 			})),
 		))
@@ -357,6 +416,30 @@ func tableLine(node gast.Node, source []byte, aligns []extast.Alignment, header 
 	if n == 0 {
 		return row.New()
 	}
+	spans := tableSpans(n, aligns)
+	cols := make([]core.Col, 0, n)
+	for i, cell := range cells {
+		span := spans[i]
+		tp := props.Text{Size: 8.9, Top: 1.4, Left: 2, Align: cellAlign(aligns, i)}
+		if header {
+			tp.Style = fontstyle.Bold
+		}
+		cols = append(cols, col.New(span).WithStyle(tableCellStyle(header)).Add(text.New(strings.TrimSpace(renderInline(cell, source)), tp)))
+	}
+	r := row.New().Add(cols...)
+	if header {
+		r = r.WithStyle(&props.Cell{BackgroundColor: &props.Color{Red: 245, Green: 246, Blue: 247}})
+	}
+	return r
+}
+
+func tableSpans(n int, aligns []extast.Alignment) []int {
+	if n == 3 {
+		if len(aligns) >= 3 && aligns[1] == extast.AlignCenter && aligns[2] == extast.AlignRight {
+			return []int{7, 2, 3}
+		}
+		return []int{4, 2, 6}
+	}
 	base := 12 / n
 	if base < 1 {
 		base = 1 // >12 columns: degrade rather than vanish
@@ -365,23 +448,26 @@ func tableLine(node gast.Node, source []byte, aligns []extast.Alignment, header 
 	if rem < 0 {
 		rem = 0
 	}
-	cols := make([]core.Col, 0, n)
-	for i, cell := range cells {
-		span := base
+	spans := make([]int, n)
+	for i := range spans {
+		spans[i] = base
 		if i == n-1 {
-			span += rem
+			spans[i] += rem
 		}
-		tp := props.Text{Size: 9.5, Top: 1.5, Left: 2, Align: cellAlign(aligns, i)}
-		if header {
-			tp.Style = fontstyle.Bold
-		}
-		cols = append(cols, col.New(span).Add(text.New(strings.TrimSpace(renderInline(cell, source)), tp)))
 	}
-	r := row.New().Add(cols...)
+	return spans
+}
+
+func tableCellStyle(header bool) *props.Cell {
+	c := &props.Cell{
+		BorderType:      border.Bottom,
+		BorderThickness: 0.08,
+		BorderColor:     &props.Color{Red: 225, Green: 228, Blue: 232},
+	}
 	if header {
-		r = r.WithStyle(&props.Cell{BackgroundColor: &props.Color{Red: 238, Green: 238, Blue: 238}})
+		c.BackgroundColor = &props.Color{Red: 245, Green: 246, Blue: 247}
 	}
-	return r
+	return c
 }
 
 func cellAlign(aligns []extast.Alignment, i int) align.Type {
@@ -426,7 +512,11 @@ func paragraphToRows(p gast.Node, source []byte, resolve imageResolver) []core.R
 		s := strings.TrimSpace(buf.String())
 		buf.Reset()
 		if s != "" {
-			rows = append(rows, row.New().Add(col.New(12).Add(text.New(s, props.Text{Size: 10.5, Top: 2}))))
+			for _, line := range splitRenderedLines(s) {
+				if line != "" {
+					rows = append(rows, textRow(line, 9.7, 1.8, 0))
+				}
+			}
 		}
 	}
 	for c := p.FirstChild(); c != nil; c = c.NextSibling() {

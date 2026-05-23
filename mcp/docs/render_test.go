@@ -98,6 +98,11 @@ func TestRenderInline_DropsEmphasisMarkersAndPreservesHardBreaks(t *testing.T) {
 	if !strings.Contains(got, "Triage\nDuration:") {
 		t.Fatalf("hard break was not preserved: %q", got)
 	}
+
+	rows := paragraphRows(p, source)
+	if len(rows) != 2 {
+		t.Fatalf("paragraphRows returned %d rows, want 2", len(rows))
+	}
 }
 
 // missingkey=zero — top-level unbound keys are blanked rather than
