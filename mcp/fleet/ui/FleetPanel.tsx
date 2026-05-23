@@ -155,6 +155,16 @@ interface Tenant {
   // v0.3 — auto-respawn bookkeeping
   respawn_attempts?: number;
   last_respawn_at?: string;
+  // v0.6+ — host placement. instance_id 0 = local parent host;
+  // >0 = a row in the Instances app (tenant runs on that VPS).
+  instance_id?: number;
+}
+
+interface InstanceOption {
+  id: number;
+  name: string;
+  public_ipv4: string;
+  status: string;
 }
 
 // Fleet's /api/_meta response. The panel calls this once per refresh
@@ -173,6 +183,11 @@ interface MetaResp {
     { status: string; expires_at?: string; error?: string }
   >;
   apteva_latest?: string;
+  // v0.8 — Instances integration. host_provider_available gates the
+  // "Run on" picker; instances is the ready remote-host list (parent /
+  // local instance already excluded server-side).
+  host_provider_available?: boolean;
+  instances?: InstanceOption[];
 }
 
 interface FleetEvent {
@@ -262,6 +277,7 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
   const [meta, setMeta] = useState<MetaResp | null>(null);
   const [showAttachDomain, setShowAttachDomain] = useState<Tenant | null>(null);
   const [showUpdate, setShowUpdate] = useState<Tenant | null>(null);
+  const [showMigrate, setShowMigrate] = useState<Tenant | null>(null);
   // Held in panel state because both fleet endpoints return sensitive
   // material the operator gets to see once and copy — same pattern as
   // the post-create credentialsReveal.
@@ -423,6 +439,7 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
         callTool={callTool}
         onOpenAttachDomain={(t) => setShowAttachDomain(t)}
         onOpenUpdate={(t) => setShowUpdate(t)}
+        onOpenMigrate={(t) => setShowMigrate(t)}
         onRevealAPIKey={setRevealedAPIKey}
         onResetPassword={setResetPassword}
         onAfterAction={async (after) => {
@@ -437,12 +454,15 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
       />
       {showCreate && (
         <CreateTenantDialog
+          meta={meta}
           onClose={() => setShowCreate(false)}
-          onSubmit={async ({ slug, owner_email }) => {
+          onSubmit={async ({ slug, owner_email, instance_id, port }) => {
             try {
               const r = await callTool<CreateResp>("tenant_create", {
                 slug,
                 owner_email,
+                ...(instance_id ? { instance_id } : {}),
+                ...(port ? { port } : {}),
               });
               await refreshList({ quiet: true });
               if (r.tenant_id) setSelectedId(r.tenant_id);
@@ -525,6 +545,28 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
               await refreshList({ quiet: true });
               if (selectedId) await refreshDetail(selectedId);
               setShowUpdate(null);
+              return { ok: true };
+            } catch (e) {
+              return { ok: false, error: (e as Error).message };
+            }
+          }}
+        />
+      )}
+      {showMigrate && meta && (
+        <MoveTenantDialog
+          tenant={showMigrate}
+          meta={meta}
+          onClose={() => setShowMigrate(null)}
+          onSubmit={async ({ instance_id, port }) => {
+            try {
+              await callTool("tenant_migrate", {
+                tenant_id: showMigrate.id,
+                instance_id,
+                ...(port ? { port } : {}),
+              });
+              await refreshList({ quiet: true });
+              if (selectedId) await refreshDetail(selectedId);
+              setShowMigrate(null);
               return { ok: true };
             } catch (e) {
               return { ok: false, error: (e as Error).message };
@@ -724,6 +766,7 @@ function TenantDetail({
   callTool,
   onOpenAttachDomain,
   onOpenUpdate,
+  onOpenMigrate,
   onRevealAPIKey,
   onResetPassword,
   onAfterAction,
@@ -736,6 +779,7 @@ function TenantDetail({
   callTool: <T>(tool: string, args: Record<string, unknown>) => Promise<T>;
   onOpenAttachDomain: (t: Tenant) => void;
   onOpenUpdate: (t: Tenant) => void;
+  onOpenMigrate: (t: Tenant) => void;
   onRevealAPIKey: (r: { slug: string; base_url: string; api_key: string }) => void;
   onResetPassword: (r: { slug: string; base_url: string; admin_email: string; admin_password: string }) => void;
   onAfterAction: (after?: "deselect") => Promise<void>;
@@ -782,6 +826,15 @@ function TenantDetail({
   const isLocal = tenant.kind === "local";
   const isRunning = tenant.status === "active" || tenant.status === "starting";
   const isSetupPending = tenant.status === "setup_pending";
+  // Host placement: instance_id 0/undefined = parent host; >0 = a VPS.
+  const onParentHost = (tenant.instance_id ?? 0) === 0;
+  const hostInstance = meta?.instances?.find((i) => i.id === tenant.instance_id);
+  const canMigrate =
+    isLocal &&
+    onParentHost &&
+    !isSetupPending &&
+    !!meta?.host_provider_available &&
+    (meta?.instances?.length ?? 0) > 0;
 
   return (
     <Card className="h-full">
@@ -789,7 +842,13 @@ function TenantDetail({
         title={tenant.slug}
         subtitle={
           <span className="font-mono text-[11px]">
-            {tenant.base_url} · {tenant.kind}
+            {tenant.base_url}
+            {" · "}
+            {onParentHost
+              ? "local"
+              : hostInstance
+                ? `on ${hostInstance.name}`
+                : `on instance ${tenant.instance_id}`}
             {tenant.current_version ? ` · v${tenant.current_version}` : ""}
           </span>
         }
@@ -848,6 +907,12 @@ function TenantDetail({
                 setBusy(null);
               }
             }}
+          />
+        )}
+        {canMigrate && (
+          <ActionButton
+            label="Move to instance…"
+            onClick={() => onOpenMigrate(tenant)}
           />
         )}
         <span className="flex-1" />
@@ -1358,17 +1423,32 @@ function CredentialRow({
 function CreateTenantDialog({
   onClose,
   onSubmit,
+  meta,
 }: {
   onClose: () => void;
-  onSubmit: (v: { slug: string; owner_email: string }) => Promise<{ ok: boolean; error?: string }>;
+  onSubmit: (v: {
+    slug: string;
+    owner_email: string;
+    instance_id?: number;
+    port?: number;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  meta: MetaResp | null;
 }) {
   const [slug, setSlug] = useState("");
   const [email, setEmail] = useState("");
+  // "Run on": 0 = local parent host; >0 = an Instances row id.
+  const [runOn, setRunOn] = useState(0);
+  const [port, setPort] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  const instances = meta?.instances ?? [];
+  const canHost = !!meta?.host_provider_available && instances.length > 0;
+  const hosted = runOn > 0;
+  const target = instances.find((i) => i.id === runOn);
+
   return (
-    <DialogFrame title="Create local tenant" onClose={onClose}>
+    <DialogFrame title="Create tenant" onClose={onClose}>
       <p className="text-xs text-text-dim mb-3">
         Spawns a fresh apteva process with its own data dir and port,
         registers an admin using <code className="font-mono">owner_email</code>,
@@ -1395,6 +1475,45 @@ function CreateTenantDialog({
           className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text"
         />
       </Label>
+      <Label text="Run on">
+        <select
+          value={runOn}
+          onChange={(e) => setRunOn(Number(e.target.value))}
+          className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text"
+        >
+          <option value={0}>Local (this server)</option>
+          {instances.map((i) => (
+            <option key={i.id} value={i.id}>
+              {i.name} — {i.public_ipv4}
+              {i.status !== "ready" ? ` (${i.status})` : ""}
+            </option>
+          ))}
+        </select>
+      </Label>
+      {!canHost && (
+        <p className="text-xs text-text-dim -mt-1">
+          {meta?.host_provider_available
+            ? "No ready remote instances. Provision one in the Instances app to host elsewhere."
+            : "Install + bind the Instances app to host tenants on remote VPSes."}
+        </p>
+      )}
+      {hosted && (
+        <Label text="Port (optional)">
+          <input
+            type="number"
+            value={port}
+            onChange={(e) => setPort(e.target.value)}
+            placeholder="auto (7100 + tenants on this instance)"
+            className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
+          />
+        </Label>
+      )}
+      {hosted && target && (
+        <div className="text-xs text-text-dim font-mono">
+          Will spawn on <span className="text-text">{target.name}</span> (
+          {target.public_ipv4})
+        </div>
+      )}
       {err && <p className="text-xs text-error mt-2">{err}</p>}
       <DialogActions>
         <ActionButton label="Cancel" onClick={onClose} />
@@ -1408,7 +1527,111 @@ function CreateTenantDialog({
             }
             setBusy(true);
             setErr(null);
-            const r = await onSubmit({ slug, owner_email: email });
+            const r = await onSubmit({
+              slug,
+              owner_email: email,
+              ...(hosted ? { instance_id: runOn } : {}),
+              ...(hosted && port.trim() ? { port: Number(port) } : {}),
+            });
+            setBusy(false);
+            if (!r.ok) setErr(r.error || "failed");
+          }}
+        />
+      </DialogActions>
+    </DialogFrame>
+  );
+}
+
+// ─── Move-tenant dialog ─────────────────────────────────────────────
+//
+// Migrates a LOCAL tenant onto a remote instance. Cold move — the
+// tenant is briefly down while fleet stops it, transfers the data dir,
+// and boots it on the VPS. The dialog makes the downtime + the
+// one-direction limitation explicit before the operator commits.
+
+function MoveTenantDialog({
+  tenant,
+  meta,
+  onClose,
+  onSubmit,
+}: {
+  tenant: Tenant;
+  meta: MetaResp;
+  onClose: () => void;
+  onSubmit: (args: { instance_id: number; port?: number }) => Promise<{ ok: boolean; error?: string }>;
+}) {
+  const instances = meta.instances ?? [];
+  const [instanceID, setInstanceID] = useState(instances[0]?.id ?? 0);
+  const [port, setPort] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const target = instances.find((i) => i.id === instanceID);
+  const noInstances = instances.length === 0;
+
+  return (
+    <DialogFrame title={`Move ${tenant.slug} to an instance`} onClose={onClose}>
+      <p className="text-xs text-text-dim mb-3">
+        Relocates this tenant from the parent host onto a remote VPS:
+        fleet stops the local process, copies its data dir over, boots
+        apteva-server on the instance, and re-points the route. The
+        tenant is briefly <span className="text-text">down</span> during
+        the transfer. If anything fails, the local process is restarted
+        automatically.
+      </p>
+      {noInstances ? (
+        <p className="text-xs text-text-dim">
+          No ready instances. Provision one in the Instances app first.
+        </p>
+      ) : (
+        <>
+          <Label text="Target instance">
+            <select
+              value={instanceID}
+              onChange={(e) => setInstanceID(Number(e.target.value))}
+              className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text"
+            >
+              {instances.map((i) => (
+                <option key={i.id} value={i.id}>
+                  {i.name} — {i.public_ipv4}
+                  {i.status !== "ready" ? ` (${i.status})` : ""}
+                </option>
+              ))}
+            </select>
+          </Label>
+          <Label text="Port (optional)">
+            <input
+              type="number"
+              value={port}
+              onChange={(e) => setPort(e.target.value)}
+              placeholder="auto (7100 + tenants on this instance)"
+              className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
+            />
+          </Label>
+          {target && (
+            <div className="text-xs text-text-dim font-mono">
+              {tenant.base_url} → {target.name} ({target.public_ipv4})
+            </div>
+          )}
+        </>
+      )}
+      {err && <p className="text-xs text-error mt-2">{err}</p>}
+      <DialogActions>
+        <ActionButton label="Cancel" onClick={onClose} />
+        <ActionButton
+          label={busy ? "Moving…" : "Move"}
+          busy={busy}
+          onClick={async () => {
+            if (!instanceID) {
+              setErr("pick a target instance");
+              return;
+            }
+            setBusy(true);
+            setErr(null);
+            const r = await onSubmit({
+              instance_id: instanceID,
+              ...(port.trim() ? { port: Number(port) } : {}),
+            });
             setBusy(false);
             if (!r.ok) setErr(r.error || "failed");
           }}

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.7.0
+version: 0.8.0
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -91,6 +91,8 @@ provides:
       description: "Attach a public hostname to a tenant. Orchestrates Domains (DNS record) → Certs (Let's Encrypt DNS-01) → Routes (register fqdn → tenant apteva-server port on the parent's routes table). Idempotent; partial-failure tolerant. Args: tenant_id, fqdn, target?, type?, ttl?."
     - name: tenant_detach_domain
       description: "Clear a tenant's domain link — DNS delete, cert revoke, route unregister, local clear. Local clear runs even on remote failure. Args: tenant_id."
+    - name: tenant_migrate
+      description: "Move a local tenant onto a remote instance (VPS managed by the Instances app). Cold migration: stop local, tar + upload + extract the data dir, boot apteva-server on the instance against the moved DB, re-point the route, remove the local copy. Brief downtime; auto-rollback restarts the local process on failure. local→instance only. Args: tenant_id, instance_id (>0), port?."
     - name: tenant_update
       description: "Per-tenant apteva version update. Installs the requested version into a fleet-owned npm prefix at ~/.apteva-fleet/versions/<v>/, records target_version, stops the running tenant, respawns with the new binary. Other tenants are unaffected. Local-only. Args: tenant_id, version? (empty → npm latest)."
     - name: tenant_check_updates

@@ -1184,12 +1184,79 @@ func (a *App) httpMeta(w http.ResponseWriter, r *http.Request) {
 			out["certs"] = byFQDN
 		}
 	}
+	// Instances picker — ready remote hosts the panel can target for
+	// hosted-create / migrate. host_provider_available gates the "Run
+	// on" dropdown; instances is the ready list (id=0 / provider=local
+	// is the parent itself, which is the local-tenant case, so it's
+	// filtered out here).
+	hostProviderOK := false
+	if _, err := a.instanceBindingFor(globalCtx); err == nil {
+		hostProviderOK = true
+		var resp struct {
+			Instances []struct {
+				ID         int64  `json:"id"`
+				Name       string `json:"name"`
+				Provider   string `json:"provider"`
+				PublicIPv4 string `json:"public_ipv4"`
+				Status     string `json:"status"`
+			} `json:"instances"`
+		}
+		if err := callSiblingTool(globalCtx, "instances", "", "instance_list", map[string]any{}, &resp); err == nil {
+			list := make([]map[string]any, 0, len(resp.Instances))
+			for _, in := range resp.Instances {
+				if in.ID == 0 || in.Provider == "local" {
+					continue
+				}
+				list = append(list, map[string]any{
+					"id": in.ID, "name": in.Name,
+					"public_ipv4": in.PublicIPv4, "status": in.Status,
+				})
+			}
+			out["instances"] = list
+		}
+	}
+	out["host_provider_available"] = hostProviderOK
+
 	// npm latest — best-effort; failure leaves the field absent so
 	// the panel doesn't render an empty version pill.
 	if v, err := npmLatestVersion(r.Context()); err == nil {
 		out["apteva_latest"] = v
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// httpMigrate — POST /tenants/<id>/migrate?project_id=...
+// body: {instance_id, port?}
+func (a *App) httpMigrate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONErr(w, http.StatusMethodNotAllowed, errors.New("POST"))
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/tenants/")
+	if i := strings.Index(id, "/"); i > 0 {
+		id = id[:i]
+	}
+	var body struct {
+		InstanceID int64 `json:"instance_id"`
+		Port       int   `json:"port"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONErr(w, http.StatusBadRequest, err)
+		return
+	}
+	args := map[string]any{
+		"tenant_id":   id,
+		"instance_id": float64(body.InstanceID), // int64Arg accepts float64 (JSON shape)
+	}
+	if body.Port > 0 {
+		args["port"] = float64(body.Port)
+	}
+	res, err := a.toolMigrate(globalCtx, args)
+	if err != nil {
+		writeJSONErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // httpUpdate — POST /tenants/<id>/update?project_id=...  body: {version?}

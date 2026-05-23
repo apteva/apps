@@ -365,6 +365,18 @@ func (s *store) setTargetVersion(id, version string) error {
 	return err
 }
 
+// setLocation moves a tenant between hosts: updates instance_id (0 =
+// local parent, >0 = a row in the Instances app), base_url, and
+// config_dir atomically. Used by tenant_migrate after the data dir has
+// been transferred and the new apteva-server is confirmed healthy.
+func (s *store) setLocation(id string, instanceID int64, baseURL, configDir string) error {
+	_, err := s.db.Exec(
+		`UPDATE fleet_tenants SET instance_id = ?, base_url = ?, config_dir = ?, updated_at = ? WHERE id = ?`,
+		instanceID, baseURL, configDir, time.Now().UTC(), id,
+	)
+	return err
+}
+
 // bumpRespawn records an auto-respawn attempt. The counter caps in code
 // (see tryRespawn); this is just the persistence half.
 func (s *store) bumpRespawn(id string) error {

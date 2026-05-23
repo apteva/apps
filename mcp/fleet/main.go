@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.7.0
+version: 0.8.0
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -79,6 +79,8 @@ provides:
       description: Attach a public hostname to a tenant via the Domains/Certs/Routes apps.
     - name: tenant_detach_domain
       description: Clear a tenant's domain link (DNS delete, cert revoke, route unregister).
+    - name: tenant_migrate
+      description: Move a local tenant onto a remote instance (VPS) — cold transfer of the data dir, re-spawn there, re-point the route.
     - name: tenant_update
       description: Update a tenant's apteva version. Installs the requested version into a fleet-owned npm prefix, then respawns.
     - name: tenant_check_updates
@@ -202,6 +204,8 @@ func (a *App) httpTenantItem(w http.ResponseWriter, r *http.Request) {
 		a.httpDetachDomain(w, r)
 	case "update":
 		a.httpUpdate(w, r)
+	case "migrate":
+		a.httpMigrate(w, r)
 	case "reveal-api-key":
 		a.httpRevealAPIKey(w, r)
 	case "reset-admin-password":
@@ -351,6 +355,20 @@ func (a *App) MCPTools() []sdk.Tool {
 				"required": []string{"tenant_id", "fqdn"},
 			},
 			Handler: a.toolAttachDomain,
+		},
+		{
+			Name:        "tenant_migrate",
+			Description: "Move a LOCAL tenant onto a remote instance (VPS managed by the Instances app). Cold migration: stops the local apteva-server, tars its data dir, uploads + extracts on the instance, boots apteva-server there against the moved DB (admin + api_key travel with the data), re-points the route, and removes the local copy. The tenant is briefly down during the transfer. On any failure the local process is restarted from the preserved data dir. Only local→instance for now. Args: tenant_id (required), instance_id (required, an Instances row id > 0), port? (hosted port; default 7100 + tenant-count-on-instance).",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id":   map[string]any{"type": "string"},
+					"instance_id": map[string]any{"type": "integer"},
+					"port":        map[string]any{"type": "integer"},
+				},
+				"required": []string{"tenant_id", "instance_id"},
+			},
+			Handler: a.toolMigrate,
 		},
 		{
 			Name:        "tenant_detach_domain",
