@@ -187,7 +187,7 @@ export default function DocsPanel({ projectId, installId }: NativePanelProps) {
       )}
 
       {view === "renders" && (
-        <RendersView renders={renders} loading={loading} />
+        <RendersView renders={renders} loading={loading} onRefresh={loadRenders} />
       )}
     </div>
   );
@@ -715,9 +715,11 @@ function VariablesPanel({
 function RendersView({
   renders,
   loading,
+  onRefresh,
 }: {
   renders: RenderRow[];
   loading: boolean;
+  onRefresh: () => void;
 }) {
   const formatBytes = (n?: number) => {
     if (!n) return "—";
@@ -731,47 +733,88 @@ function RendersView({
   }
   if (renders.length === 0) {
     return (
-      <div className="text-text-muted text-sm text-center mt-12">
-        No renders yet. Use the Render tab to produce one.
+      <div className="flex-1 flex flex-col items-center justify-center gap-3 text-text-muted text-sm">
+        <div>No renders yet. Use the Render tab to produce one.</div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          className="px-3 py-1 text-xs border border-border rounded hover:bg-bg-input"
+        >
+          Refresh audit log
+        </button>
       </div>
     );
   }
   return (
-    <div className="flex-1 overflow-auto border border-border rounded">
-      <table className="w-full text-sm">
-        <thead className="text-text-dim text-xs uppercase tracking-wide bg-bg-input/50">
-          <tr>
-            <th className="text-left px-4 py-2 font-normal">Template</th>
-            <th className="text-left px-4 py-2 font-normal">File</th>
-            <th className="text-left px-4 py-2 font-normal w-24">Size</th>
-            <th className="text-left px-4 py-2 font-normal w-48">Rendered at</th>
-          </tr>
-        </thead>
-        <tbody>
-          {renders.map((r) => (
-            <tr key={r.id} className="border-t border-border hover:bg-bg-input/30">
-              <td className="px-4 py-2">
-                <div className="text-text font-medium">{r.template_slug}</div>
-                <div className="text-xs text-text-dim">id {r.template_id}</div>
-              </td>
-              <td className="px-4 py-2">
-                <div className="text-text truncate max-w-md" title={r.output_name}>
-                  {r.output_name || "—"}
-                </div>
-                <div className="text-xs text-text-dim font-mono">
-                  storage:{r.output_file_id}
-                </div>
-              </td>
-              <td className="px-4 py-2 text-text-muted">{formatBytes(r.bytes)}</td>
-              <td className="px-4 py-2 text-text-muted text-xs">
-                {new Date(r.rendered_at).toLocaleString()}
-              </td>
+    <div className="flex-1 flex flex-col min-h-0 gap-2">
+      <div className="flex items-center justify-between text-xs text-text-dim">
+        <span>
+          {renders.length} render{renders.length === 1 ? "" : "s"}
+        </span>
+        <button
+          type="button"
+          onClick={onRefresh}
+          className="px-2 py-1 border border-border rounded hover:bg-bg-input"
+        >
+          Refresh
+        </button>
+      </div>
+      <div className="flex-1 overflow-auto border border-border rounded">
+        <table className="w-full text-sm">
+          <thead className="text-text-dim text-xs uppercase tracking-wide bg-bg-input/50">
+            <tr>
+              <th className="text-left px-4 py-2 font-normal">Template</th>
+              <th className="text-left px-4 py-2 font-normal">File</th>
+              <th className="text-left px-4 py-2 font-normal w-24">Size</th>
+              <th className="text-left px-4 py-2 font-normal w-48">Rendered at</th>
+              <th className="text-right px-4 py-2 font-normal w-24">Open</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {renders.map((r) => (
+              <tr key={r.id} className="border-t border-border hover:bg-bg-input/30">
+                <td className="px-4 py-2">
+                  <div className="text-text font-medium">{r.template_slug}</div>
+                  <div className="text-xs text-text-dim">render #{r.id}</div>
+                </td>
+                <td className="px-4 py-2">
+                  <div className="text-text truncate max-w-md" title={r.output_name}>
+                    {r.output_name || "—"}
+                  </div>
+                  <div className="text-xs text-text-dim font-mono">
+                    storage:{r.output_file_id}
+                  </div>
+                </td>
+                <td className="px-4 py-2 text-text-muted">{formatBytes(r.bytes)}</td>
+                <td className="px-4 py-2 text-text-muted text-xs">
+                  {new Date(r.rendered_at).toLocaleString()}
+                </td>
+                <td className="px-4 py-2 text-right">
+                  {r.output_file_id ? (
+                    <a
+                      href={storageContentURL(r)}
+                      target="_blank"
+                      rel="noopener"
+                      className="text-xs text-accent hover:underline"
+                    >
+                      View PDF
+                    </a>
+                  ) : (
+                    <span className="text-xs text-text-dim">—</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
+}
+
+function storageContentURL(r: RenderRow): string {
+  const name = r.output_name || `render-${r.id}.pdf`;
+  return `/api/apps/storage/files/${encodeURIComponent(r.output_file_id)}/content/${encodeURIComponent(name)}`;
 }
 
 // silence unused-var warnings for hooks we don't need in v0.1
