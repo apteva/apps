@@ -36,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: email-checker
 display_name: Email Checker
-version: 0.1.0
+version: 0.2.0
 description: |
   Stateless email validation — syntax, DNS MX, disposable/free/role
   classification, optional SMTP probe.
