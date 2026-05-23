@@ -1527,7 +1527,7 @@ function SendersCreateResult({ result, onDismiss }: { result: SendersCreateResp;
 // ─── Tiny UI primitives ──────────────────────────────────────────
 
 function StatusPill({ status }: { status: string }) {
-  return <span className={`inline-block px-1.5 py-0.5 rounded text-xs ${statusPillClass(status)}`}>{status}</span>;
+  return <span className={`inline-block px-1.5 py-0.5 rounded text-xs ${statusPillClass(status)}`} style={statusPillStyle(status)}>{status}</span>;
 }
 
 function statusPillClass(status: string): string {
@@ -1561,6 +1561,31 @@ function statusPillClass(status: string): string {
       return "bg-sky-500/20 text-sky-300 border-sky-500/30";
     default:
       return "bg-surface-2 text-text-dim border-border";
+  }
+}
+
+function statusPillStyle(status: string): React.CSSProperties | undefined {
+  switch (status) {
+    case "opened":
+      return {
+        backgroundColor: "rgba(59, 130, 246, 0.2)",
+        borderColor: "rgba(59, 130, 246, 0.3)",
+        color: "#93c5fd",
+      };
+    case "clicked":
+      return {
+        backgroundColor: "rgba(139, 92, 246, 0.2)",
+        borderColor: "rgba(139, 92, 246, 0.3)",
+        color: "#c4b5fd",
+      };
+    case "delivery_delayed":
+      return {
+        backgroundColor: "rgba(234, 179, 8, 0.2)",
+        borderColor: "rgba(234, 179, 8, 0.3)",
+        color: "#facc15",
+      };
+    default:
+      return undefined;
   }
 }
 
