@@ -15,6 +15,10 @@ import (
 	"image/png"
 	"strings"
 	"testing"
+
+	"github.com/yuin/goldmark"
+	gast "github.com/yuin/goldmark/ast"
+	gtext "github.com/yuin/goldmark/text"
 )
 
 func TestRender_BasicMarkdown(t *testing.T) {
@@ -57,6 +61,42 @@ func TestRender_TemplateSubstitution(t *testing.T) {
 	}
 	if !strings.Contains(merged, "Acme Corp") {
 		t.Errorf("customer name not substituted: %q", merged)
+	}
+}
+
+func TestRender_TemplateSubstitutionDoesNotHTMLEscapeMarkdownText(t *testing.T) {
+	merged, err := mergeTemplate("Client context: {{.note}}", map[string]any{
+		"note": "client's existing workflow",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(merged, "&#39;") {
+		t.Fatalf("template substitution HTML-escaped markdown text: %q", merged)
+	}
+	if !strings.Contains(merged, "client's existing workflow") {
+		t.Fatalf("apostrophe was not preserved: %q", merged)
+	}
+}
+
+func TestRenderInline_DropsEmphasisMarkersAndPreservesHardBreaks(t *testing.T) {
+	source := []byte("**Engagement:** AI Support Triage  \n**Duration:** 6 weeks")
+	parser := goldmark.New().Parser()
+	doc := parser.Parse(gtext.NewReader(source))
+	p, ok := doc.FirstChild().(*gast.Paragraph)
+	if !ok {
+		t.Fatalf("first node = %T, want paragraph", doc.FirstChild())
+	}
+
+	got := renderInline(p, source)
+	if strings.Contains(got, "**") {
+		t.Fatalf("inline emphasis markers leaked into output: %q", got)
+	}
+	if !strings.Contains(got, "Engagement: AI Support Triage") {
+		t.Fatalf("emphasized text missing: %q", got)
+	}
+	if !strings.Contains(got, "Triage\nDuration:") {
+		t.Fatalf("hard break was not preserved: %q", got)
 	}
 }
 

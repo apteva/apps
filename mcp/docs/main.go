@@ -30,7 +30,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: docs
 display_name: Documents
-version: 0.2.3
+version: 0.2.4
 description: |
   Generate client-facing PDFs from markdown templates and store them
   in storage. Pure-Go render pipeline (no Chromium): headings, lists,
@@ -109,7 +109,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	globalCtx = ctx
 	ctx.Logger().Info("docs mounted",
-		"version", "0.2.3",
+		"version", "0.2.4",
 		"default_folder", ctx.Config().Get("default_output_folder"),
 	)
 	return nil

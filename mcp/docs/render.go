@@ -30,9 +30,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	htemplate "html/template"
 	"strconv"
 	"strings"
+	ttemplate "text/template"
 
 	"github.com/johnfercher/maroto/v2"
 	"github.com/johnfercher/maroto/v2/pkg/components/col"
@@ -86,15 +86,13 @@ func renderPDF(body string, data map[string]any, opts RenderOptions) ([]byte, er
 	return markdownToPDF(merged, opts)
 }
 
-// mergeTemplate runs html/template against the body. The choice of
-// html/template (vs text/template) is intentional: caller data may
-// contain user-supplied strings, and html/template's contextual
-// auto-escaping prevents an injected `{{ ... }}` in the data from
-// being executed as template syntax. Markdown in the body still
-// renders normally because we run goldmark against the post-merge
-// string.
+// mergeTemplate runs text/template against the body. The merged output
+// is Markdown, not HTML, so HTML escaping would leak entities like
+// &#39; into the final PDF. Values are written as text after the template
+// is parsed; data containing `{{ ... }}` is not evaluated as template
+// syntax in a second pass.
 func mergeTemplate(body string, data map[string]any) (string, error) {
-	t, err := htemplate.New("doc").Option("missingkey=zero").Parse(body)
+	t, err := ttemplate.New("doc").Option("missingkey=zero").Parse(body)
 	if err != nil {
 		return "", err
 	}
@@ -184,23 +182,28 @@ func blockToRows(n gast.Node, source []byte, resolve imageResolver) []core.Row {
 
 func headingRow(h *gast.Heading, source []byte) core.Row {
 	size := 12.0
+	top := 3.0
 	switch h.Level {
 	case 1:
-		size = 22
-	case 2:
 		size = 18
+		top = 3
+	case 2:
+		size = 15
 	case 3:
-		size = 14
+		size = 12.5
+		top = 2
 	case 4:
 		size = 12
+		top = 2
 	default:
 		size = 11
+		top = 2
 	}
 	return row.New().Add(
 		col.New(12).Add(text.New(extractText(h, source), props.Text{
 			Size:  size,
 			Style: fontstyle.Bold,
-			Top:   4,
+			Top:   top,
 		})),
 	)
 }
@@ -208,7 +211,7 @@ func headingRow(h *gast.Heading, source []byte) core.Row {
 func paragraphRow(p *gast.Paragraph, source []byte) core.Row {
 	return row.New().Add(
 		col.New(12).Add(text.New(renderInline(p, source), props.Text{
-			Size: 11,
+			Size: 10.5,
 			Top:  2,
 		})),
 	)
@@ -231,7 +234,7 @@ func listRows(list *gast.List, source []byte) []core.Row {
 		}
 		out = append(out, row.New().Add(
 			col.New(12).Add(text.New(prefix+txt, props.Text{
-				Size: 11,
+				Size: 10.5,
 				Left: 6,
 				Top:  1,
 			})),
@@ -265,6 +268,11 @@ func extractText(n gast.Node, source []byte) string {
 		switch t := node.(type) {
 		case *gast.Text:
 			b.Write(t.Segment.Value(source))
+			if t.HardLineBreak() {
+				b.WriteByte('\n')
+			} else if t.SoftLineBreak() {
+				b.WriteByte(' ')
+			}
 		case *gast.CodeSpan:
 			// Inline code: surround with backticks so the reader can
 			// see "this is code" even without monospace.
@@ -282,10 +290,10 @@ func extractText(n gast.Node, source []byte) string {
 	return b.String()
 }
 
-// renderInline handles inline emphasis/bold/code by markdown-style
-// fallback. Maroto doesn't do mid-line styling in a single text run,
-// so we keep the markdown markers visible to preserve intent. Future
-// versions can split into multi-component rows.
+// renderInline flattens inline emphasis/bold/code into clean text.
+// Maroto doesn't do mid-line styling in a single text run, and visible
+// Markdown markers look broken in client PDFs, so emphasis markers are
+// dropped while the emphasized text stays intact.
 func renderInline(n gast.Node, source []byte) string {
 	var b strings.Builder
 	gast.Walk(n, func(node gast.Node, entering bool) (gast.WalkStatus, error) {
@@ -293,13 +301,14 @@ func renderInline(n gast.Node, source []byte) string {
 		case *gast.Text:
 			if entering {
 				b.Write(t.Segment.Value(source))
+				if t.HardLineBreak() {
+					b.WriteByte('\n')
+				} else if t.SoftLineBreak() {
+					b.WriteByte(' ')
+				}
 			}
 		case *gast.Emphasis:
-			marker := "*"
-			if t.Level == 2 {
-				marker = "**"
-			}
-			b.WriteString(marker)
+			return gast.WalkContinue, nil
 		case *gast.CodeSpan:
 			if entering {
 				b.WriteByte('`')
@@ -362,7 +371,7 @@ func tableLine(node gast.Node, source []byte, aligns []extast.Alignment, header 
 		if i == n-1 {
 			span += rem
 		}
-		tp := props.Text{Size: 10, Top: 2, Left: 2, Align: cellAlign(aligns, i)}
+		tp := props.Text{Size: 9.5, Top: 1.5, Left: 2, Align: cellAlign(aligns, i)}
 		if header {
 			tp.Style = fontstyle.Bold
 		}
@@ -417,7 +426,7 @@ func paragraphToRows(p gast.Node, source []byte, resolve imageResolver) []core.R
 		s := strings.TrimSpace(buf.String())
 		buf.Reset()
 		if s != "" {
-			rows = append(rows, row.New().Add(col.New(12).Add(text.New(s, props.Text{Size: 11, Top: 2}))))
+			rows = append(rows, row.New().Add(col.New(12).Add(text.New(s, props.Text{Size: 10.5, Top: 2}))))
 		}
 	}
 	for c := p.FirstChild(); c != nil; c = c.NextSibling() {
