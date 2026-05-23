@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"mime/quotedprintable"
 	"net/http"
@@ -50,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.2
+version: 0.13.3
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -1171,8 +1172,12 @@ func sendViaSES(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 	if in.BodyText != "" {
 		body["Text"] = map[string]any{"Data": in.BodyText, "Charset": "UTF-8"}
 	}
-	if in.BodyHTML != "" {
-		body["Html"] = map[string]any{"Data": in.BodyHTML, "Charset": "UTF-8"}
+	bodyHTML := in.BodyHTML
+	if bodyHTML == "" && in.BodyText != "" {
+		bodyHTML = textBodyToTrackingHTML(in.BodyText)
+	}
+	if bodyHTML != "" {
+		body["Html"] = map[string]any{"Data": bodyHTML, "Charset": "UTF-8"}
 	}
 	subj := in.Subject
 	if subj == "" {
@@ -1241,6 +1246,14 @@ parseResult:
 		}
 	}
 	return "", nil
+}
+
+func textBodyToTrackingHTML(s string) string {
+	escaped := html.EscapeString(s)
+	escaped = strings.ReplaceAll(escaped, "\r\n", "\n")
+	escaped = strings.ReplaceAll(escaped, "\r", "\n")
+	escaped = strings.ReplaceAll(escaped, "\n", "<br>\n")
+	return "<!doctype html><html><body>" + escaped + "</body></html>"
 }
 
 func looksLikeSESConfigSetMissing(body string) bool {

@@ -235,6 +235,17 @@ func TestSendMessage_PersistsAndCallsProvider(t *testing.T) {
 	if simple["Body"].(map[string]any)["Text"].(map[string]any)["Data"] != "hi there" {
 		t.Errorf("Body.Text.Data=%v", simple["Body"])
 	}
+	if simple["Body"].(map[string]any)["Html"].(map[string]any)["Data"] != "<!doctype html><html><body>hi there</body></html>" {
+		t.Errorf("Body.Html.Data=%v", simple["Body"])
+	}
+}
+
+func TestTextBodyToTrackingHTML_EscapesText(t *testing.T) {
+	got := textBodyToTrackingHTML("hi <there>\r\nnext & last")
+	want := "<!doctype html><html><body>hi &lt;there&gt;<br>\nnext &amp; last</body></html>"
+	if got != want {
+		t.Fatalf("html=%q, want %q", got, want)
+	}
 }
 
 func TestSendMessage_RequiresBodyOrTemplate(t *testing.T) {
