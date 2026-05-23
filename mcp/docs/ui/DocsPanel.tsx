@@ -46,6 +46,12 @@ interface RenderRow {
 const API = "/api/apps/docs";
 type View = "templates" | "render" | "renders";
 
+interface TemplateVar {
+  path: string;
+  kind: "value" | "list" | "object_list";
+  children: string[];
+}
+
 export default function DocsPanel({ projectId, installId }: NativePanelProps) {
   const [view, setView] = useState<View>("templates");
   const [templates, setTemplates] = useState<Template[]>([]);
@@ -212,6 +218,14 @@ function TemplatesView({
   const [previewURL, setPreviewURL] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState("");
+  const templateVars = useMemo(
+    () => extractTemplateVariables(editing?.body || ""),
+    [editing?.body],
+  );
+  const sampleData = useMemo(
+    () => sampleDataForVariables(templateVars),
+    [templateVars],
+  );
 
   // Load body when a template is selected (list view strips body to
   // keep the response light).
@@ -257,7 +271,7 @@ function TemplatesView({
       const res = await api<{ base64: string; content_type: string }>(
         "POST",
         path,
-        { data: {}, body: editing.body },
+        { data: sampleData, body: editing.body },
       );
       const url = `data:${res.content_type};base64,${res.base64}`;
       setPreviewURL(url);
@@ -341,6 +355,7 @@ function TemplatesView({
               placeholder="default output folder (e.g. /invoices/)"
               className="bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
             />
+            <VariablesPanel variables={templateVars} sampleData={sampleData} compact />
             <textarea
               value={editing.body || ""}
               onChange={(e) => setEditing({ ...editing, body: e.target.value })}
@@ -423,6 +438,26 @@ function RenderView({
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ url?: string; file_id?: number } | null>(null);
   const [error, setError] = useState("");
+  const selectedTemplate = useMemo(
+    () => templates.find((t) => t.id === templateID) || null,
+    [templates, templateID],
+  );
+  const templateVars = useMemo(
+    () => extractTemplateVariables(selectedTemplate?.body || ""),
+    [selectedTemplate?.body],
+  );
+  const sampleData = useMemo(
+    () => sampleDataForVariables(templateVars),
+    [templateVars],
+  );
+
+  useEffect(() => {
+    if (!selectedTemplate) return;
+    setDataJSON(JSON.stringify(sampleData, null, 2));
+    setOutputFolder(selectedTemplate.default_folder || "");
+    setResult(null);
+    setError("");
+  }, [selectedTemplate, sampleData]);
 
   const handleRender = async () => {
     setBusy(true);
@@ -476,6 +511,7 @@ function RenderView({
         className="bg-bg-input border border-border rounded p-2 text-xs font-mono min-h-[12rem]"
         spellCheck={false}
       />
+      <VariablesPanel variables={templateVars} sampleData={sampleData} compact={false} />
 
       <div className="grid grid-cols-2 gap-2">
         <input
@@ -518,6 +554,157 @@ function RenderView({
             {result.url}
           </a>
         </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Template variable helpers ─────────────────────────────────────
+
+function extractTemplateVariables(body: string): TemplateVar[] {
+  const vars = new Map<string, TemplateVar>();
+  const rangeStack: string[] = [];
+  const actions = body.matchAll(/{{\s*([^{}]+?)\s*}}/g);
+
+  const upsert = (path: string, kind: TemplateVar["kind"], child = "") => {
+    if (!path) return;
+    const prev = vars.get(path);
+    if (!prev) {
+      vars.set(path, { path, kind, children: child ? [child] : [] });
+      return;
+    }
+    if (prev.kind === "value" && kind !== "value") prev.kind = kind;
+    if (prev.kind === "list" && kind === "object_list") prev.kind = kind;
+    if (child && !prev.children.includes(child)) prev.children.push(child);
+  };
+
+  for (const m of actions) {
+    let action = m[1].trim();
+    if (action.startsWith("/*") || action === "end" || action.startsWith("else")) {
+      if (action === "end") rangeStack.pop();
+      continue;
+    }
+    if (action.startsWith("range ")) {
+      const path = cleanTemplatePath(action.replace(/^range\s+/, ""));
+      upsert(path, "list");
+      rangeStack.push(path);
+      continue;
+    }
+    if (action.startsWith("if ") || action.startsWith("with ")) {
+      action = action.replace(/^(if|with)\s+/, "");
+    }
+    const currentRange = rangeStack[rangeStack.length - 1] || "";
+    if (currentRange && action === ".") {
+      upsert(currentRange, "list");
+      continue;
+    }
+    if (currentRange && /^\.[A-Za-z0-9_]+$/.test(action)) {
+      upsert(currentRange, "object_list", action.slice(1));
+      continue;
+    }
+    const path = cleanTemplatePath(action);
+    if (path) upsert(path, "value");
+  }
+
+  return Array.from(vars.values()).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function cleanTemplatePath(action: string): string {
+  const first = action.trim().split(/\s+/)[0] || "";
+  if (!first.startsWith(".")) return "";
+  return first
+    .slice(1)
+    .replace(/[|,)]*$/g, "")
+    .split(".")
+    .filter(Boolean)
+    .join(".");
+}
+
+function sampleDataForVariables(vars: TemplateVar[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const v of vars) {
+    if (v.kind === "object_list") {
+      setPath(out, v.path, [
+        Object.fromEntries(v.children.map((child) => [child, sampleValue(child)])),
+      ]);
+      continue;
+    }
+    if (v.kind === "list") {
+      setPath(out, v.path, ["Sample item"]);
+      continue;
+    }
+    setPath(out, v.path, sampleValue(v.path.split(".").at(-1) || v.path));
+  }
+  return out;
+}
+
+function setPath(target: Record<string, unknown>, path: string, value: unknown) {
+  const parts = path.split(".").filter(Boolean);
+  let cur: Record<string, unknown> = target;
+  parts.forEach((part, idx) => {
+    if (idx === parts.length - 1) {
+      cur[part] = value;
+      return;
+    }
+    if (!cur[part] || typeof cur[part] !== "object" || Array.isArray(cur[part])) {
+      cur[part] = {};
+    }
+    cur = cur[part] as Record<string, unknown>;
+  });
+}
+
+function sampleValue(name: string): string {
+  const key = name.toLowerCase();
+  if (key.includes("email")) return "hello@example.com";
+  if (key.includes("website")) return "https://example.com";
+  if (key.includes("date")) return new Date().toISOString().slice(0, 10);
+  if (key.includes("duration")) return "6 weeks";
+  if (key.includes("amount") || key.includes("total")) return "$10,000";
+  if (key === "qty" || key.includes("quantity")) return "1";
+  if (key.includes("name")) return "Sample name";
+  if (key.includes("contact")) return "Sample contact";
+  if (key.includes("title") || key.includes("phase")) return "Sample title";
+  if (key.includes("folder")) return "/docs/";
+  return "Sample " + name.replace(/_/g, " ");
+}
+
+function VariablesPanel({
+  variables,
+  sampleData,
+  compact,
+}: {
+  variables: TemplateVar[];
+  sampleData: Record<string, unknown>;
+  compact: boolean;
+}) {
+  if (variables.length === 0) {
+    return (
+      <div className="border border-border rounded px-3 py-2 text-xs text-text-dim">
+        No template variables detected.
+      </div>
+    );
+  }
+  return (
+    <div className="border border-border rounded bg-bg-input/30 p-3">
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <div className="text-xs uppercase tracking-wide text-text-dim">Variables</div>
+        <div className="text-xs text-text-dim">{variables.length}</div>
+      </div>
+      <div className="flex flex-wrap gap-1.5 mb-2">
+        {variables.map((v) => (
+          <span
+            key={v.path}
+            className="px-2 py-0.5 rounded border border-border text-xs font-mono text-text-muted"
+            title={v.kind === "object_list" ? v.children.join(", ") : v.kind}
+          >
+            {v.kind === "object_list" ? `${v.path}[]` : v.kind === "list" ? `${v.path}[]` : v.path}
+          </span>
+        ))}
+      </div>
+      {!compact && (
+        <pre className="max-h-48 overflow-auto text-xs font-mono text-text-muted whitespace-pre-wrap">
+          {JSON.stringify(sampleData, null, 2)}
+        </pre>
       )}
     </div>
   );
