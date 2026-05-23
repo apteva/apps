@@ -114,6 +114,7 @@ interface MessageRow {
   sent_at?: string;
   received_at?: string;
   last_event_at?: string;
+  event_counts?: Record<string, number>;
 }
 interface DeliveryEvent {
   id: number;
@@ -121,6 +122,7 @@ interface DeliveryEvent {
   kind: string;
   recipient?: string;
   reason?: string;
+  raw?: unknown;
   occurred_at?: string;
 }
 interface TemplateRow {
@@ -318,7 +320,7 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
 
   // Live refresh on any messaging event.
   useAppEvents("messaging", projectId, (ev) => {
-    if (ev.topic === "message.sent" || ev.topic === "message.received" || ev.topic === "message.event") {
+    if (messagingLiveTopics.has(ev.topic)) {
       reload();
     }
   });
@@ -448,7 +450,12 @@ function MessageList({ rows, onSelect, selectedId }: { rows: MessageRow[]; onSel
               <td className="px-4 py-2 text-text-dim">{shortTime(m.last_event_at || m.created_at)}</td>
               <td className="px-4 py-2 truncate max-w-[20rem]">{stripScheme(counterpart)}</td>
               <td className="px-4 py-2 truncate max-w-[24rem]">{m.subject || <span className="text-text-dim">(no subject)</span>}</td>
-              <td className="px-4 py-2"><StatusPill status={m.direction === "in" ? (m.route_status || m.status) : m.status} /></td>
+              <td className="px-4 py-2">
+                <div className="flex items-center gap-1 flex-wrap">
+                  <StatusPill status={m.direction === "in" ? (m.route_status || m.status) : m.status} />
+                  {m.direction === "out" && <EventBadges counts={m.event_counts} />}
+                </div>
+              </td>
             </tr>
           );
         })}
@@ -501,14 +508,16 @@ function MessageDetail({ m, events, onClose }: { m: MessageRow; events: Delivery
       )}
       {events.length > 0 && (
         <div className="mt-4">
-          <div className="text-text-dim text-xs uppercase tracking-wide mb-1">Delivery events</div>
-          <ul className="space-y-1">
+          <div className="text-text-dim text-xs uppercase tracking-wide mb-1">Message events</div>
+          <ul className="space-y-2">
             {events.map((e) => (
-              <li key={e.id} className="text-xs flex items-center gap-2">
-                <StatusPill status={e.kind} />
-                <span className="text-text-dim">{shortTime(e.occurred_at)}</span>
-                {e.recipient && <span>{stripScheme(e.recipient)}</span>}
-                {e.reason && <span className="text-text-dim">— {e.reason}</span>}
+              <li key={e.id} className="text-xs">
+                <div className="flex items-center gap-2">
+                  <StatusPill status={e.kind} />
+                  <span className="text-text-dim">{shortTime(e.occurred_at)}</span>
+                  {e.recipient && <span>{stripScheme(e.recipient)}</span>}
+                </div>
+                <EventDetail event={e} />
               </li>
             ))}
           </ul>
@@ -516,6 +525,75 @@ function MessageDetail({ m, events, onClose }: { m: MessageRow; events: Delivery
       )}
     </div>
   );
+}
+
+const messagingLiveTopics = new Set([
+  "message.sent",
+  "message.received",
+  "message.delivered",
+  "message.bounced",
+  "message.complained",
+  "message.opened",
+  "message.clicked",
+  "message.rejected",
+  "message.delivery_delayed",
+  "message.rendering_failed",
+  "message.subscription_changed",
+  "message.event",
+]);
+
+function EventBadges({ counts }: { counts?: Record<string, number> }) {
+  if (!counts) return null;
+  const items: [string, string][] = [
+    ["delivered", "delivered"],
+    ["opened", "opened"],
+    ["clicked", "clicked"],
+    ["bounced", "bounced"],
+    ["complained", "complained"],
+    ["delivery_delayed", "delayed"],
+  ];
+  return (
+    <>
+      {items.map(([kind, label]) => {
+        const count = counts[kind] || 0;
+        if (!count) return null;
+        return <span key={kind} className="text-[11px] text-text-dim border border-border rounded px-1">{count} {label}</span>;
+      })}
+    </>
+  );
+}
+
+function EventDetail({ event }: { event: DeliveryEvent }) {
+  const meta = eventMetadata(event.raw);
+  const url = stringMeta(meta, "url") || stringMeta(meta, "link");
+  const userAgent = stringMeta(meta, "userAgent");
+  const ip = stringMeta(meta, "ipAddress");
+  return (
+    <div className="ml-2 mt-0.5 text-text-dim space-y-0.5">
+      {event.reason && <div>{event.reason}</div>}
+      {url && <div>URL: <span className="break-all text-text">{url}</span></div>}
+      {(ip || userAgent) && (
+        <div>
+          {ip && <span>IP: <span className="text-text">{ip}</span></span>}
+          {ip && userAgent && <span> · </span>}
+          {userAgent && <span>Agent: <span className="text-text">{userAgent}</span></span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function eventMetadata(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== "object") return {};
+  const obj = raw as Record<string, unknown>;
+  const nested = obj.metadata;
+  if (nested && typeof nested === "object") return nested as Record<string, unknown>;
+  return obj;
+}
+
+function stringMeta(meta: Record<string, unknown>, key: string): string {
+  const v = meta[key];
+  return typeof v === "string" ? v : "";
 }
 
 function ComposeView({
@@ -794,19 +872,6 @@ function SendersView({
     }
   };
 
-  const rerun = (address: string) => {
-    // Switch into manual mode so the value the user wants to retry
-    // shows up verbatim in the editable input.
-    setPickerMode(false);
-    setLocalPart("");
-    setPickedDomain("");
-    setAddr(stripScheme(address));
-    setResult(null);
-    setErr("");
-    // Scroll to top so the form is visible.
-    if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
-  };
-
   const makeDefault = async (address: string, channel: string) => {
     try {
       await api("POST", "/tools/call", {}, {
@@ -824,6 +889,25 @@ function SendersView({
       await api("POST", "/tools/call", {}, { tool: "senders_get", args: { address } });
       reload();
     } catch (e) { notify("error", `Re-check failed: ${(e as Error).message}`); }
+  };
+
+  const recheckSenderSetup = async (address: string, displayName?: string) => {
+    try {
+      const args: Record<string, unknown> = {
+        address: stripScheme(address),
+        inbound: "auto",
+        spf: true,
+      };
+      if (displayName) args.display_name = displayName;
+      const out = await api<SendersCreateResp>("POST", "/tools/call", {}, {
+        tool: "senders_create",
+        args,
+      });
+      setResult(out);
+      reload();
+    } catch (e) {
+      notify("error", `Setup re-check failed: ${(e as Error).message}`);
+    }
   };
 
   // saveDisplayName — inline-edit save. Calls the local-only edit
@@ -1032,15 +1116,13 @@ function SendersView({
                       title="Make this the default sender for this channel. send_message uses the default when 'from' is omitted."
                     >Make default</button>
                   )}
-                  {s.kind === "domain" && (
-                    <button
-                      type="button"
-                      className="text-accent hover:underline text-xs"
-                      onClick={() => rerun(s.address)}
-                      title="Pre-fills the Add sender form with this address. senders_create is idempotent — safe to re-run with different options."
-                    >Re-run</button>
-                  )}
-                  <button type="button" className="text-text-dim hover:text-text text-xs" onClick={() => recheck(s.address)}>Re-check</button>
+                  <button
+                    type="button"
+                    className="text-accent hover:underline text-xs"
+                    onClick={() => recheckSenderSetup(s.address, s.display_name)}
+                    title="Re-runs the full sender setup for this address: SES identity checks, DNS hints, inbound receiving, SNS notifications, and SES delivery/open/click events where available. Safe to run again."
+                  >Recheck setup</button>
+                  <button type="button" className="text-text-dim hover:text-text text-xs" onClick={() => recheck(s.address)}>Refresh</button>
                   <button type="button" className="text-text-dim hover:text-red-500 text-xs" onClick={() => remove(s.address)}>Delete</button>
                 </td>
               </tr>
@@ -1049,7 +1131,7 @@ function SendersView({
         </table>
       )}
 
-      <IdentitiesSection identities={identities} />
+      <IdentitiesSection identities={identities} onRecheckSetup={recheckSenderSetup} />
 
       {quota && (
         <div className="p-4 text-xs text-text-dim border-t border-border mt-4">
@@ -1122,7 +1204,7 @@ function DisplayNameCell({ value, onSave, placeholder }: {
 // rendered below the senders table in the Senders tab. Operator sees
 // what's verified upstream without these rows polluting any From
 // dropdown (they're not in the senders table at all).
-function IdentitiesSection({ identities }: { identities: IdentityRow[] }) {
+function IdentitiesSection({ identities, onRecheckSetup }: { identities: IdentityRow[]; onRecheckSetup: (address: string) => void }) {
   if (identities.length === 0) return null;
   return (
     <div className="border-t border-border mt-6 pt-4">
@@ -1139,7 +1221,8 @@ function IdentitiesSection({ identities }: { identities: IdentityRow[] }) {
             <th className="text-left px-4 py-2">Kind</th>
             <th className="text-left px-4 py-2">Provider</th>
             <th className="text-left px-4 py-2">Status</th>
-            <th className="text-left px-4 py-2">Inbound</th>
+            <th className="text-left px-4 py-2">Inbound / Events</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
@@ -1158,6 +1241,14 @@ function IdentitiesSection({ identities }: { identities: IdentityRow[] }) {
               </td>
               <td className="px-4 py-2 text-text-dim text-xs">
                 {i.inbound_bootstrapped ? "wired" : "—"}
+              </td>
+              <td className="px-4 py-2 text-right">
+                <button
+                  type="button"
+                  className="text-accent hover:underline text-xs"
+                  onClick={() => onRecheckSetup(i.address)}
+                  title="Re-runs the full domain/account setup: SES identity checks, DNS hints, inbound receiving, SNS notifications, and SES delivery/open/click events where available. Safe to run again."
+                >Recheck setup</button>
               </td>
             </tr>
           ))}

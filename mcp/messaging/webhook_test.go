@@ -120,6 +120,65 @@ func TestBounceWebhook_ComplaintSuppresses(t *testing.T) {
 	}
 }
 
+func TestSESEventPublishing_ClickPersistsAndEmitsSpecificTopic(t *testing.T) {
+	ctx := newTestCtx(t, nil)
+	app := &App{}
+
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO messages (project_id, channel, direction, from_addr, to_addrs, status, provider_message_id)
+		 VALUES ('test-proj', 'email', 'out', 'noreply@acme.com', '["alice@example.com"]', 'sent', 'ses-click-1')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgID, _ := res.LastInsertId()
+
+	innerSES := map[string]any{
+		"eventType": "Click",
+		"mail": map[string]any{
+			"messageId":   "ses-click-1",
+			"timestamp":   "2026-05-23T10:30:00Z",
+			"destination": []string{"alice@example.com"},
+		},
+		"click": map[string]any{
+			"timestamp": "2026-05-23T10:31:00Z",
+			"link":      "https://example.com/pricing",
+			"ipAddress": "203.0.113.10",
+			"userAgent": "Mozilla/5.0",
+		},
+	}
+	innerJSON, _ := json.Marshal(innerSES)
+	envelope := map[string]any{
+		"Type":           "Notification",
+		"Message":        string(innerJSON),
+		"SigningCertURL": "https://sns.us-east-1.amazonaws.com/cert.pem",
+	}
+	body, _ := json.Marshal(envelope)
+
+	r := httptest.NewRequest("POST", "/webhooks/ses-bounces?project_id=test-proj", strings.NewReader(string(body)))
+	r.Header.Set("X-Amz-Sns-Message-Type", "Notification")
+	w := httptest.NewRecorder()
+	app.handleBounceWebhook(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	events, _ := dbDeliveryEvents(ctx.AppDB(), msgID)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Kind != "clicked" {
+		t.Fatalf("kind=%q want clicked", events[0].Kind)
+	}
+	if !strings.Contains(string(events[0].Raw), "https://example.com/pricing") {
+		t.Fatalf("raw event did not include click metadata: %s", string(events[0].Raw))
+	}
+	counts := dbDeliveryEventCounts(ctx.AppDB(), msgID)
+	if counts["clicked"] != 1 {
+		t.Fatalf("clicked count=%d", counts["clicked"])
+	}
+}
+
 // ─── Inbound webhook ──────────────────────────────────────────────
 
 const sampleEml = "From: customer@example.com\r\n" +

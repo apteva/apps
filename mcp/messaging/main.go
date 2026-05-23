@@ -27,13 +27,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"net/url"
 	"errors"
 	"fmt"
 	"io"
 	"mime/quotedprintable"
 	"net/http"
 	"net/mail"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -462,8 +462,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "List sending identities. Returns canonical URI rows (mailto: today; tel: when SMS lands). " +
 				"Args: channel? (default 'email'), verified_only? (default false). Returns {senders: [{address, kind, verified, dkim_status?}]}.",
 			InputSchema: schemaObject(map[string]any{
-				"channel":        map[string]any{"type": "string"},
-				"verified_only":  map[string]any{"type": "boolean"},
+				"channel":       map[string]any{"type": "string"},
+				"verified_only": map[string]any{"type": "boolean"},
 			}, nil),
 			Handler: a.toolSendersList,
 		},
@@ -783,23 +783,24 @@ type Message struct {
 	ToSubaddress         string          `json:"to_subaddress,omitempty"`
 	TemplateID           int64           `json:"template_id,omitempty"`
 	// v0.5: verdicts (SES) and S3-mode raw .eml location.
-	Verdicts             json.RawMessage `json:"verdicts,omitempty"`
-	S3Key                string          `json:"s3_key,omitempty"`
-	CreatedAt            string          `json:"created_at,omitempty"`
-	SentAt               string          `json:"sent_at,omitempty"`
-	ReceivedAt           string          `json:"received_at,omitempty"`
-	LastEventAt          string          `json:"last_event_at,omitempty"`
+	Verdicts    json.RawMessage `json:"verdicts,omitempty"`
+	S3Key       string          `json:"s3_key,omitempty"`
+	CreatedAt   string          `json:"created_at,omitempty"`
+	SentAt      string          `json:"sent_at,omitempty"`
+	ReceivedAt  string          `json:"received_at,omitempty"`
+	LastEventAt string          `json:"last_event_at,omitempty"`
+	EventCounts map[string]int  `json:"event_counts,omitempty"`
 }
 
 type Template struct {
-	ID                 int64           `json:"id"`
-	ProjectID          string          `json:"project_id,omitempty"`
-	Channel            string          `json:"channel"`
-	Name               string          `json:"name"`
-	Subject            string          `json:"subject,omitempty"`
-	BodyText           string          `json:"body_text,omitempty"`
-	BodyHTML           string          `json:"body_html,omitempty"`
-	VarsSchema         json.RawMessage `json:"vars_schema"`
+	ID         int64           `json:"id"`
+	ProjectID  string          `json:"project_id,omitempty"`
+	Channel    string          `json:"channel"`
+	Name       string          `json:"name"`
+	Subject    string          `json:"subject,omitempty"`
+	BodyText   string          `json:"body_text,omitempty"`
+	BodyHTML   string          `json:"body_html,omitempty"`
+	VarsSchema json.RawMessage `json:"vars_schema"`
 	// Provider-mirrored fields (v0.4). NULL/empty for local templates.
 	ProviderTemplateID string `json:"provider_template_id,omitempty"` // Twilio ContentSid
 	ProviderStatus     string `json:"provider_status,omitempty"`      // approved | pending | rejected | deleted
@@ -838,6 +839,18 @@ type DeliveryEvent struct {
 	Reason     string          `json:"reason,omitempty"`
 	Raw        json.RawMessage `json:"raw"`
 	OccurredAt string          `json:"occurred_at,omitempty"`
+}
+
+type providerEvent struct {
+	Provider          string
+	ProviderMessageID string
+	Kind              string
+	Recipient         string
+	Reason            string
+	OccurredAt        string
+	Metadata          map[string]any
+	Raw               json.RawMessage
+	Permanent         bool
 }
 
 // ─── send_message ──────────────────────────────────────────────────
@@ -1040,6 +1053,8 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		MediaURL:         mediaURL,
 		ContentSid:       contentSid,
 		ContentVariables: contentVars,
+		MessageID:        id,
+		ProjectID:        pid,
 	}
 	var providerMessageID string
 	var providerErr error
@@ -1113,11 +1128,15 @@ type providerSendInput struct {
 	BodyText      string
 	BodyHTML      string
 	Headers       map[string]any
+	MessageID     int64
+	ProjectID     string
 	// SMS / WhatsApp only:
 	MediaURL         string
 	ContentSid       string
 	ContentVariables string
 }
+
+const sesEventConfigurationSetName = "apteva-messaging"
 
 // sendViaSES maps our flat input to AWS SES v2's nested SendEmail
 // payload (FromEmailAddress / Destination / Content.Simple). All
@@ -1169,6 +1188,14 @@ func sendViaSES(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 			},
 		},
 	}
+	trackingEnabled := in.MessageID > 0
+	if trackingEnabled {
+		payload["ConfigurationSetName"] = sesEventConfigurationSetName
+		payload["EmailTags"] = []map[string]string{
+			{"Name": "apteva_message_id", "Value": strconv.FormatInt(in.MessageID, 10)},
+			{"Name": "project_id", "Value": in.ProjectID},
+		}
+	}
 	if in.ReplyTo != "" {
 		payload["ReplyToAddresses"] = []string{in.ReplyTo}
 	}
@@ -1185,8 +1212,27 @@ func sendViaSES(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 		if res != nil {
 			body = string(res.Data)
 		}
+		if trackingEnabled && looksLikeSESConfigSetMissing(body) {
+			delete(payload, "ConfigurationSetName")
+			delete(payload, "EmailTags")
+			ctx.Logger().Warn("messaging: SES event config set missing; retrying send without event tracking",
+				"config_set", sesEventConfigurationSetName)
+			res, err = ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, tool, payload)
+			if err != nil {
+				return "", err
+			}
+			if res != nil && res.Success {
+				body = ""
+			} else if res != nil {
+				body = string(res.Data)
+			}
+		}
+		if res != nil && res.Success {
+			goto parseResult
+		}
 		return "", fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
 	}
+parseResult:
 	var probe map[string]any
 	_ = json.Unmarshal(res.Data, &probe)
 	for _, key := range []string{"MessageId", "message_id", "messageId", "id"} {
@@ -1195,6 +1241,14 @@ func sendViaSES(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+func looksLikeSESConfigSetMissing(body string) bool {
+	low := strings.ToLower(body)
+	return strings.Contains(low, "configuration set") &&
+		(strings.Contains(low, "not exist") ||
+			strings.Contains(low, "not found") ||
+			strings.Contains(low, "doesn't exist"))
 }
 
 // sendViaTwilio invokes the bound phone_provider for SMS or WhatsApp.
@@ -1549,9 +1603,9 @@ func (a *App) toolTemplateList(ctx *sdk.AppCtx, args map[string]any) (any, error
 	maybeAutoSync(ctx, pid, channel)
 	lastSynced, lastErr, _ := dbSyncStateGet(ctx.AppDB(), pid, channel)
 	return map[string]any{
-		"templates":      out,
-		"count":          len(out),
-		"last_synced_at": lastSynced,
+		"templates":       out,
+		"count":           len(out),
+		"last_synced_at":  lastSynced,
 		"last_sync_error": lastErr,
 	}, nil
 }
@@ -1621,9 +1675,9 @@ func (a *App) toolTemplatesSyncProvider(ctx *sdk.AppCtx, args map[string]any) (a
 	}
 	if !providerSyncableChannel(channel) {
 		return map[string]any{
-			"synced":   0,
-			"skipped":  true,
-			"reason":   fmt.Sprintf("no provider sync for channel %q (local templates only)", channel),
+			"synced":  0,
+			"skipped": true,
+			"reason":  fmt.Sprintf("no provider sync for channel %q (local templates only)", channel),
 		}, nil
 	}
 	if !tryStartSync(pid, channel) {
@@ -1811,12 +1865,12 @@ func (a *App) toolSuppressionCheck(ctx *sdk.AppCtx, args map[string]any) (any, e
 		return nil, err
 	}
 	return map[string]any{
-		"suppressed":     true,
-		"reason":         reason,
-		"source":         source,
-		"channel":        channel,
-		"address":        addr,
-		"suppressed_at":  firstSeen,
+		"suppressed":    true,
+		"reason":        reason,
+		"source":        source,
+		"channel":       channel,
+		"address":       addr,
+		"suppressed_at": firstSeen,
 	}, nil
 }
 
@@ -1872,9 +1926,9 @@ func guessChannelFromAddress(s string) string {
 // Domains are detected by absence of "@".
 
 type Sender struct {
-	Channel    string   `json:"channel"`               // "email" | "sms" | "whatsapp"
-	Address    string   `json:"address"`               // plain (alice@x.com or +15551234567)
-	Kind       string   `json:"kind"`                  // "email" | "domain" | "phone"
+	Channel    string   `json:"channel"` // "email" | "sms" | "whatsapp"
+	Address    string   `json:"address"` // plain (alice@x.com or +15551234567)
+	Kind       string   `json:"kind"`    // "email" | "domain" | "phone"
 	Verified   bool     `json:"verified"`
 	DKIMStatus string   `json:"dkim_status,omitempty"` // email-only — "SUCCESS"|"PENDING"|"FAILED"|"NOT_STARTED"
 	DKIMTokens []string `json:"dkim_tokens,omitempty"` // populated by senders_get for domain identities
@@ -2020,8 +2074,8 @@ func (a *App) refreshOneSESIdentity(ctx *sdk.AppCtx, pid, addr string) error {
 	//   { IdentityType, VerifiedForSendingStatus, DkimAttributes:{Status, Tokens, SigningEnabled},
 	//     FeedbackForwardingStatus, Policies, ConfigurationSetName? }
 	var inner struct {
-		IdentityType             string   `json:"IdentityType"`
-		VerifiedForSendingStatus bool     `json:"VerifiedForSendingStatus"`
+		IdentityType             string `json:"IdentityType"`
+		VerifiedForSendingStatus bool   `json:"VerifiedForSendingStatus"`
 		DkimAttributes           struct {
 			Status         string   `json:"Status"`
 			Tokens         []string `json:"Tokens"`
@@ -2266,23 +2320,23 @@ func (a *App) toolSendersGetQuota(ctx *sdk.AppCtx, args map[string]any) (any, er
 	//     SendingEnabled, ProductionAccessEnabled, EnforcementStatus, ... }
 	var inner struct {
 		SendQuota struct {
-			Max24HourSend    float64 `json:"Max24HourSend"`
-			MaxSendRate      float64 `json:"MaxSendRate"`
-			SentLast24Hours  float64 `json:"SentLast24Hours"`
+			Max24HourSend   float64 `json:"Max24HourSend"`
+			MaxSendRate     float64 `json:"MaxSendRate"`
+			SentLast24Hours float64 `json:"SentLast24Hours"`
 		} `json:"SendQuota"`
-		SendingEnabled           bool   `json:"SendingEnabled"`
-		ProductionAccessEnabled  bool   `json:"ProductionAccessEnabled"`
-		EnforcementStatus        string `json:"EnforcementStatus"`
+		SendingEnabled          bool   `json:"SendingEnabled"`
+		ProductionAccessEnabled bool   `json:"ProductionAccessEnabled"`
+		EnforcementStatus       string `json:"EnforcementStatus"`
 	}
 	_ = json.Unmarshal(res.Data, &inner)
 	return map[string]any{
-		"sandboxed":                !inner.ProductionAccessEnabled,
-		"sending_enabled":          inner.SendingEnabled,
-		"production_access":        inner.ProductionAccessEnabled,
-		"enforcement_status":       inner.EnforcementStatus,
-		"send_quota_24h":           inner.SendQuota.Max24HourSend,
-		"send_rate_per_second":     inner.SendQuota.MaxSendRate,
-		"sent_last_24h":            inner.SendQuota.SentLast24Hours,
+		"sandboxed":            !inner.ProductionAccessEnabled,
+		"sending_enabled":      inner.SendingEnabled,
+		"production_access":    inner.ProductionAccessEnabled,
+		"enforcement_status":   inner.EnforcementStatus,
+		"send_quota_24h":       inner.SendQuota.Max24HourSend,
+		"send_rate_per_second": inner.SendQuota.MaxSendRate,
+		"sent_last_24h":        inner.SendQuota.SentLast24Hours,
 	}, nil
 }
 
@@ -2323,9 +2377,13 @@ func (a *App) handleBounceWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	notif, err := parseSESNotification(env.Message)
+	events, err := parseSESProviderEvents(env.Message)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, "ses notification: "+err.Error())
+		return
+	}
+	if len(events) == 0 {
+		httpJSON(w, map[string]any{"ok": true, "matched": false, "skipped": "no SES event"})
 		return
 	}
 	pid, _ := resolveProjectFromRequest(r)
@@ -2334,57 +2392,40 @@ func (a *App) handleBounceWebhook(w http.ResponseWriter, r *http.Request) {
 		// looking up the message across all projects via provider id.
 		pid = ""
 	}
-	msg, err := dbMessageByProviderID(globalCtx.AppDB(), pid, notif.MessageID)
+	msg, err := dbMessageByProviderID(globalCtx.AppDB(), pid, events[0].ProviderMessageID)
 	if err != nil || msg == nil {
 		// Unknown SES message — store the event with a NULL
 		// message_id-attached row would violate FK, so we just log.
 		globalCtx.Logger().Warn("webhook: unknown provider message id",
-			"provider_message_id", notif.MessageID,
-			"kind", notif.Kind)
+			"provider_message_id", events[0].ProviderMessageID,
+			"kind", events[0].Kind)
 		httpJSON(w, map[string]any{"ok": true, "matched": false})
 		return
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
-	for _, recip := range notif.Recipients {
-		_, _ = globalCtx.AppDB().Exec(
-			`INSERT INTO delivery_events (message_id, kind, recipient, reason, raw)
-			 VALUES (?, ?, ?, ?, ?)`,
-			msg.ID, notif.Kind, recip.Address, recip.Reason, string(notif.Raw),
-		)
-		if (notif.Kind == "bounced" && recip.Permanent) || notif.Kind == "complained" {
-			suppressionReason := "hard-bounce"
-			if notif.Kind == "complained" {
-				suppressionReason = "complaint"
-			}
-			canonical := canonicalAddrForChannel(msg.Channel, recip.Address)
-			_ = dbSuppressionUpsert(globalCtx.AppDB(), msg.ProjectID, msg.Channel, canonical, suppressionReason, "auto")
-		}
+	for _, ev := range events {
+		persistAndEmitProviderEvent(globalCtx, msg, ev)
 	}
-	terminal := mapSESKindToStatus(notif.Kind)
-	_, _ = globalCtx.AppDB().Exec(
-		`UPDATE messages SET status = ?, last_event_at = ? WHERE id = ?`,
-		terminal, now, msg.ID,
-	)
-	globalCtx.Emit("message.event", map[string]any{
-		"message_id": msg.ID,
-		"kind":       notif.Kind,
+	httpJSON(w, map[string]any{
+		"ok": true, "matched": true, "message_id": msg.ID,
+		"events": len(events), "kind": events[0].Kind,
 	})
-	httpJSON(w, map[string]any{"ok": true, "matched": true, "message_id": msg.ID, "kind": notif.Kind})
 }
 
 func mapSESKindToStatus(kind string) string {
 	switch kind {
+	case "sent":
+		return "sent"
 	case "delivered":
 		return "delivered"
 	case "bounced":
 		return "bounced"
 	case "complained":
 		return "complained"
-	case "rejected":
+	case "rejected", "rendering_failed":
 		return "failed"
 	}
-	return "sent"
+	return ""
 }
 
 // ─── Inbound webhook ───────────────────────────────────────────────
@@ -2613,11 +2654,11 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 
 	toJSON, _ := json.Marshal([]string{to})
 	hdrs := map[string]string{
-		"X-Twilio-Message-Sid":        messageSid,
-		"X-Twilio-Account-Sid":        form.Get("AccountSid"),
-		"X-Twilio-MessagingService":   form.Get("MessagingServiceSid"),
-		"X-Twilio-NumMedia":           form.Get("NumMedia"),
-		"X-Twilio-FromCountry":        form.Get("FromCountry"),
+		"X-Twilio-Message-Sid":      messageSid,
+		"X-Twilio-Account-Sid":      form.Get("AccountSid"),
+		"X-Twilio-MessagingService": form.Get("MessagingServiceSid"),
+		"X-Twilio-NumMedia":         form.Get("NumMedia"),
+		"X-Twilio-FromCountry":      form.Get("FromCountry"),
 	}
 	hdrJSON, _ := json.Marshal(hdrs)
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -2671,10 +2712,11 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 
 // verifyTwilioSignature checks the X-Twilio-Signature header per
 // Twilio's documented algorithm:
-//   1. Concatenate fullURL (including query) with sorted form params
-//      written as KEY1VALUE1KEY2VALUE2... (no separators).
-//   2. HMAC-SHA1 with authToken as key.
-//   3. Base64-encode.
+//  1. Concatenate fullURL (including query) with sorted form params
+//     written as KEY1VALUE1KEY2VALUE2... (no separators).
+//  2. HMAC-SHA1 with authToken as key.
+//  3. Base64-encode.
+//
 // https://www.twilio.com/docs/usage/webhooks/webhooks-security
 func verifyTwilioSignature(fullURL string, form url.Values, authToken, expected string) bool {
 	if expected == "" {
@@ -2802,22 +2844,22 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 	hdr := map[string]any{}
 	_ = json.Unmarshal(m.Headers, &hdr)
 	payload := map[string]any{
-		"message_id":         m.ID,
-		"channel":            m.Channel,
-		"matched_recipient":  winner.recipient,
-		"matched_pattern":    winner.route.Pattern,
-		"to_subaddress":      winner.subaddr,
-		"from":               m.From,
-		"to":                 m.To,
-		"cc":                 m.CC,
-		"subject":            m.Subject,
-		"body_text":          m.BodyText,
-		"body_html":          m.BodyHTML,
-		"message_id_header":  m.MessageIDHeader,
-		"in_reply_to":        m.InReplyTo,
-		"references":         m.References,
-		"headers":            hdr,
-		"received_at":        m.ReceivedAt,
+		"message_id":        m.ID,
+		"channel":           m.Channel,
+		"matched_recipient": winner.recipient,
+		"matched_pattern":   winner.route.Pattern,
+		"to_subaddress":     winner.subaddr,
+		"from":              m.From,
+		"to":                m.To,
+		"cc":                m.CC,
+		"subject":           m.Subject,
+		"body_text":         m.BodyText,
+		"body_html":         m.BodyHTML,
+		"message_id_header": m.MessageIDHeader,
+		"in_reply_to":       m.InReplyTo,
+		"references":        m.References,
+		"headers":           hdr,
+		"received_at":       m.ReceivedAt,
 	}
 
 	_, callErr := ctx.PlatformAPI().CallApp(winner.route.TargetApp, normaliseRoutePath(winner.route.TargetRoute), payload)
@@ -3052,6 +3094,266 @@ func parseSESNotification(message string) (*sesNotification, error) {
 	return out, nil
 }
 
+func parseSESProviderEvents(message string) ([]providerEvent, error) {
+	var probe struct {
+		EventType        string `json:"eventType"`
+		NotificationType string `json:"notificationType"`
+	}
+	if err := json.Unmarshal([]byte(message), &probe); err != nil {
+		return nil, err
+	}
+	if probe.EventType != "" {
+		return parseSESEventPublishing(message)
+	}
+	notif, err := parseSESNotification(message)
+	if err != nil {
+		return nil, err
+	}
+	if notif.Kind == "" || notif.MessageID == "" {
+		return nil, nil
+	}
+	out := make([]providerEvent, 0, len(notif.Recipients))
+	if len(notif.Recipients) == 0 {
+		out = append(out, providerEvent{
+			Provider: "aws-ses", ProviderMessageID: notif.MessageID,
+			Kind: notif.Kind, Raw: notif.Raw,
+		})
+		return out, nil
+	}
+	for _, r := range notif.Recipients {
+		out = append(out, providerEvent{
+			Provider: "aws-ses", ProviderMessageID: notif.MessageID,
+			Kind: notif.Kind, Recipient: r.Address, Reason: r.Reason,
+			Raw: notif.Raw, Permanent: r.Permanent,
+		})
+	}
+	return out, nil
+}
+
+func parseSESEventPublishing(message string) ([]providerEvent, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(message), &raw); err != nil {
+		return nil, err
+	}
+	rawEvent := json.RawMessage(message)
+	var env struct {
+		EventType string `json:"eventType"`
+		Mail      struct {
+			MessageID   string              `json:"messageId"`
+			Timestamp   string              `json:"timestamp"`
+			Destination []string            `json:"destination"`
+			Tags        map[string][]string `json:"tags"`
+		} `json:"mail"`
+	}
+	_ = json.Unmarshal([]byte(message), &env)
+	kind := sesEventTypeToKind(env.EventType)
+	if kind == "" || env.Mail.MessageID == "" {
+		return nil, nil
+	}
+	occurred := eventTimestamp(raw, strings.ToLower(env.EventType), env.Mail.Timestamp)
+	recipients := eventRecipients(raw, strings.ToLower(env.EventType), env.Mail.Destination)
+	reason := eventReason(raw, strings.ToLower(env.EventType))
+	metadata := eventMetadata(raw, strings.ToLower(env.EventType), env.Mail.Tags)
+	if len(recipients) == 0 {
+		recipients = []string{""}
+	}
+	out := make([]providerEvent, 0, len(recipients))
+	for _, recip := range recipients {
+		out = append(out, providerEvent{
+			Provider: "aws-ses", ProviderMessageID: env.Mail.MessageID,
+			Kind: kind, Recipient: recip, Reason: reason, OccurredAt: occurred,
+			Metadata: metadata, Raw: rawEvent,
+			Permanent: kind == "complained" || (kind == "bounced" && isPermanentBounce(raw)),
+		})
+	}
+	return out, nil
+}
+
+func sesEventTypeToKind(t string) string {
+	switch strings.ToUpper(strings.TrimSpace(t)) {
+	case "SEND":
+		return "sent"
+	case "DELIVERY":
+		return "delivered"
+	case "BOUNCE":
+		return "bounced"
+	case "COMPLAINT":
+		return "complained"
+	case "REJECT":
+		return "rejected"
+	case "OPEN":
+		return "opened"
+	case "CLICK":
+		return "clicked"
+	case "RENDERING_FAILURE":
+		return "rendering_failed"
+	case "DELIVERY_DELAY":
+		return "delivery_delayed"
+	case "SUBSCRIPTION":
+		return "subscription_changed"
+	}
+	return ""
+}
+
+func eventTimestamp(raw map[string]json.RawMessage, section, fallback string) string {
+	if body, ok := raw[section]; ok {
+		var x struct {
+			Timestamp string `json:"timestamp"`
+		}
+		_ = json.Unmarshal(body, &x)
+		if x.Timestamp != "" {
+			return x.Timestamp
+		}
+	}
+	return fallback
+}
+
+func eventRecipients(raw map[string]json.RawMessage, section string, fallback []string) []string {
+	if body, ok := raw[section]; ok {
+		var x struct {
+			Recipients        []string `json:"recipients"`
+			Recipient         string   `json:"recipient"`
+			BouncedRecipients []struct {
+				EmailAddress string `json:"emailAddress"`
+			} `json:"bouncedRecipients"`
+			ComplainedRecipients []struct {
+				EmailAddress string `json:"emailAddress"`
+			} `json:"complainedRecipients"`
+		}
+		_ = json.Unmarshal(body, &x)
+		out := append([]string{}, x.Recipients...)
+		if x.Recipient != "" {
+			out = append(out, x.Recipient)
+		}
+		for _, r := range x.BouncedRecipients {
+			if r.EmailAddress != "" {
+				out = append(out, r.EmailAddress)
+			}
+		}
+		for _, r := range x.ComplainedRecipients {
+			if r.EmailAddress != "" {
+				out = append(out, r.EmailAddress)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return append([]string{}, fallback...)
+}
+
+func eventReason(raw map[string]json.RawMessage, section string) string {
+	if body, ok := raw[section]; ok {
+		var x struct {
+			BounceType            string `json:"bounceType"`
+			BounceSubType         string `json:"bounceSubType"`
+			ComplaintFeedbackType string `json:"complaintFeedbackType"`
+			Reason                string `json:"reason"`
+			FailureReason         string `json:"failureReason"`
+			DelayType             string `json:"delayType"`
+			DiagnosticCode        string `json:"diagnosticCode"`
+			BouncedRecipients     []struct {
+				DiagnosticCode string `json:"diagnosticCode"`
+			} `json:"bouncedRecipients"`
+		}
+		_ = json.Unmarshal(body, &x)
+		parts := []string{}
+		for _, p := range []string{x.BounceType, x.BounceSubType, x.ComplaintFeedbackType, x.DelayType, x.Reason, x.FailureReason, x.DiagnosticCode} {
+			if p != "" {
+				parts = append(parts, p)
+			}
+		}
+		for _, r := range x.BouncedRecipients {
+			if r.DiagnosticCode != "" {
+				parts = append(parts, r.DiagnosticCode)
+				break
+			}
+		}
+		return strings.Join(parts, ": ")
+	}
+	return ""
+}
+
+func eventMetadata(raw map[string]json.RawMessage, section string, tags map[string][]string) map[string]any {
+	out := map[string]any{}
+	if len(tags) > 0 {
+		out["tags"] = tags
+	}
+	if body, ok := raw[section]; ok {
+		var x map[string]any
+		_ = json.Unmarshal(body, &x)
+		for _, k := range []string{"ipAddress", "userAgent", "link", "url", "timestamp", "delayType", "expirationTime", "subscriptionTopic"} {
+			if v, ok := x[k]; ok {
+				out[k] = v
+			}
+		}
+	}
+	return out
+}
+
+func isPermanentBounce(raw map[string]json.RawMessage) bool {
+	if body, ok := raw["bounce"]; ok {
+		var x struct {
+			BounceType string `json:"bounceType"`
+		}
+		_ = json.Unmarshal(body, &x)
+		return strings.EqualFold(x.BounceType, "Permanent")
+	}
+	return false
+}
+
+func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent) {
+	if ctx == nil || msg == nil {
+		return
+	}
+	raw := ev.Raw
+	if len(ev.Metadata) > 0 {
+		enriched := map[string]any{"raw": json.RawMessage(ev.Raw), "metadata": ev.Metadata}
+		if b, err := json.Marshal(enriched); err == nil {
+			raw = b
+		}
+	}
+	occurred := ev.OccurredAt
+	if occurred == "" {
+		occurred = time.Now().UTC().Format(time.RFC3339)
+	}
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO delivery_events (message_id, kind, recipient, reason, raw, occurred_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		msg.ID, ev.Kind, ev.Recipient, ev.Reason, string(raw), occurred,
+	)
+	if (ev.Kind == "bounced" && ev.Permanent) || ev.Kind == "complained" {
+		suppressionReason := "hard-bounce"
+		if ev.Kind == "complained" {
+			suppressionReason = "complaint"
+		}
+		canonical := canonicalAddrForChannel(msg.Channel, ev.Recipient)
+		_ = dbSuppressionUpsert(ctx.AppDB(), msg.ProjectID, msg.Channel, canonical, suppressionReason, "auto")
+	}
+	if status := mapSESKindToStatus(ev.Kind); status != "" {
+		_, _ = ctx.AppDB().Exec(
+			`UPDATE messages SET status = ?, last_event_at = ? WHERE id = ?`,
+			status, occurred, msg.ID,
+		)
+	} else {
+		_, _ = ctx.AppDB().Exec(`UPDATE messages SET last_event_at = ? WHERE id = ?`, occurred, msg.ID)
+	}
+	payload := map[string]any{
+		"message_id":          msg.ID,
+		"provider":            ev.Provider,
+		"provider_message_id": ev.ProviderMessageID,
+		"kind":                ev.Kind,
+		"recipient":           ev.Recipient,
+		"occurred_at":         occurred,
+		"metadata":            ev.Metadata,
+	}
+	if ev.Reason != "" {
+		payload["reason"] = ev.Reason
+	}
+	ctx.Emit("message."+ev.Kind, payload)
+	ctx.Emit("message.event", payload)
+}
+
 // ─── SES inbound parsing ───────────────────────────────────────────
 
 type parsedInbound struct {
@@ -3074,7 +3376,7 @@ type sesInboundEnvelope struct {
 	NotificationType string `json:"notificationType"`
 	Content          string `json:"content"`
 	Mail             struct {
-		MessageID string                            `json:"messageId"`
+		MessageID string                         `json:"messageId"`
 		Headers   []struct{ Name, Value string } `json:"headers"`
 	} `json:"mail"`
 	Receipt struct {
@@ -3105,12 +3407,12 @@ type sesInboundEnvelope struct {
 // surfaces a clean error in that case.
 //
 // Order of trust:
-//   1. sesEnv.Receipt.Recipients (what the SES rule matched on —
-//      always present, even in S3-action mode where the .eml isn't
-//      fetched yet)
-//   2. parsed.To (inline-content path; equivalent in practice but
-//      kept as a fallback in case the receipt.recipients block is
-//      ever empty)
+//  1. sesEnv.Receipt.Recipients (what the SES rule matched on —
+//     always present, even in S3-action mode where the .eml isn't
+//     fetched yet)
+//  2. parsed.To (inline-content path; equivalent in practice but
+//     kept as a fallback in case the receipt.recipients block is
+//     ever empty)
 func resolveProjectFromInboundEmail(ctx *sdk.AppCtx, parsed *parsedInbound, sesEnv *sesInboundEnvelope) string {
 	if ctx == nil {
 		return ""
@@ -3834,6 +4136,11 @@ func (a *App) handleToolsCall(w http.ResponseWriter, r *http.Request) {
 	if body.Args == nil {
 		body.Args = map[string]any{}
 	}
+	if _, ok := body.Args["_project_id"]; !ok {
+		if pid := strings.TrimSpace(r.URL.Query().Get("project_id")); pid != "" {
+			body.Args["_project_id"] = pid
+		}
+	}
 	var handler sdk.ToolHandler
 	for _, t := range a.MCPTools() {
 		if t.Name == body.Tool {
@@ -3875,7 +4182,12 @@ func dbMessageGet(db *sql.DB, pid string, id int64) (*Message, error) {
 		args = append(args, pid)
 	}
 	row := db.QueryRow(q, args...)
-	return scanMessage(row)
+	m, err := scanMessage(row)
+	if err != nil {
+		return nil, err
+	}
+	m.EventCounts = dbDeliveryEventCounts(db, m.ID)
+	return m, nil
 }
 
 func dbMessageByProviderID(db *sql.DB, pid, providerID string) (*Message, error) {
@@ -3919,7 +4231,7 @@ func dbFindByIdempotencyKey(db *sql.DB, pid, key string) (*Message, error) {
 
 type messageListOpts struct {
 	Direction, Channel, Status, Since, Address string
-	Limit                                       int
+	Limit                                      int
 }
 
 func dbMessageList(db *sql.DB, pid string, opts messageListOpts) ([]*Message, error) {
@@ -4050,6 +4362,29 @@ func dbDeliveryEvents(db *sql.DB, msgID int64) ([]*DeliveryEvent, error) {
 		}
 	}
 	return out, nil
+}
+
+func dbDeliveryEventCounts(db *sql.DB, msgID int64) map[string]int {
+	rows, err := db.Query(
+		`SELECT kind, COUNT(*) FROM delivery_events WHERE message_id = ? GROUP BY kind`,
+		msgID,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var kind string
+		var count int
+		if err := rows.Scan(&kind, &count); err == nil && kind != "" {
+			out[kind] = count
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func dbTemplateGet(db *sql.DB, pid string, id int64) (*Template, error) {
@@ -4580,4 +4915,3 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
-

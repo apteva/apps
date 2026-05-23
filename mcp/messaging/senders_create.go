@@ -76,13 +76,13 @@ type sendersCreateInbound struct {
 }
 
 type sendersCreateResp struct {
-	Address    string                `json:"address"`
-	Kind       string                `json:"kind"` // "email" | "domain"
-	Pending    bool                  `json:"pending"`
-	NextStep   string                `json:"next_step,omitempty"`
-	DkimTokens []string              `json:"dkim_tokens,omitempty"`
-	DkimStatus string                `json:"dkim_status,omitempty"`
-	DnsRecords []map[string]string   `json:"dns_records,omitempty"`
+	Address    string              `json:"address"`
+	Kind       string              `json:"kind"` // "email" | "domain"
+	Pending    bool                `json:"pending"`
+	NextStep   string              `json:"next_step,omitempty"`
+	DkimTokens []string            `json:"dkim_tokens,omitempty"`
+	DkimStatus string              `json:"dkim_status,omitempty"`
+	DnsRecords []map[string]string `json:"dns_records,omitempty"`
 	// DnsPublishPartial is true when one or more dns_* publish steps
 	// failed. Top-level signal so callers/UI can show a warning without
 	// scanning the per-step list — the buried ✗ used to be masked by a
@@ -415,16 +415,18 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 			ruleName = fmt.Sprintf("messaging-inbound-%d", iid.InstallID)
 		}
 	}
-	if doInbound {
+	doEvents := snsBound != nil
+	if doInbound || doEvents {
 		resp.Inbound.BucketName = bucketName
 		resp.Inbound.RuleSetName = ruleSetName
 		resp.Inbound.RuleName = ruleName
 	}
 
 	// SNS topic + policy first (so we know the account id before
-	// writing the S3 bucket policy).
+	// writing the S3 bucket policy). The same topic receives both SES
+	// inbound S3 notifications and outbound engagement events.
 	var topicArn, accountID string
-	if doInbound {
+	if doInbound || doEvents {
 		topicArn, err = bootstrapCreateSNSTopic(ctx, snsBound.ConnectionID, topicName)
 		if err != nil {
 			resp.Steps = append(resp.Steps, bootstrapStep{Step: "create_sns_topic", OK: false, Error: err.Error()})
@@ -443,7 +445,9 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 			return resp, nil
 		}
 		resp.Steps = append(resp.Steps, bootstrapStep{Step: "set_sns_topic_policy", OK: true})
+	}
 
+	if doInbound {
 		if err := bootstrapCreateS3Bucket(ctx, s3Bound.ConnectionID, bucketName, region); err != nil {
 			resp.Steps = append(resp.Steps, bootstrapStep{Step: "create_s3_bucket", OK: false, Error: err.Error()})
 			return resp, nil
@@ -483,6 +487,23 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 	// just noise. Skip after a re-probe: the recreated identity is clean.
 	if adopted && !reprobed {
 		resp.Steps = append(resp.Steps, bootstrapClearMailFrom(ctx, sesConnID, domain))
+	}
+
+	if doEvents {
+		if err := bootstrapConfigureSESEvents(ctx, sesConnID, topicArn); err != nil {
+			resp.Steps = append(resp.Steps, bootstrapStep{Step: "ses_event_publishing", OK: false, Error: err.Error()})
+		} else {
+			resp.Steps = append(resp.Steps, bootstrapStep{
+				Step:   "ses_event_publishing",
+				OK:     true,
+				Detail: sesEventConfigurationSetName + " -> " + topicArn,
+			})
+		}
+	} else {
+		resp.Steps = append(resp.Steps, bootstrapStep{
+			Step: "ses_event_publishing", OK: true,
+			Skipped: "inbound_notifications (aws-sns) not bound — SES open/click/delivery events will not be published",
+		})
 	}
 
 	if publishDNS {
@@ -1036,6 +1057,82 @@ func bootstrapSetS3BucketPolicy(ctx *sdk.AppCtx, connID int64, bucket, policy st
 	return nil
 }
 
+var sesEventTypes = []string{
+	"SEND",
+	"REJECT",
+	"BOUNCE",
+	"COMPLAINT",
+	"DELIVERY",
+	"OPEN",
+	"CLICK",
+	"RENDERING_FAILURE",
+	"DELIVERY_DELAY",
+	"SUBSCRIPTION",
+}
+
+func bootstrapConfigureSESEvents(ctx *sdk.AppCtx, connID int64, topicArn string) error {
+	if topicArn == "" {
+		return errors.New("sns topic arn missing")
+	}
+	if err := bootstrapCreateSESConfigSet(ctx, connID, sesEventConfigurationSetName); err != nil {
+		return err
+	}
+	dest := map[string]any{
+		"Enabled":            true,
+		"MatchingEventTypes": sesEventTypes,
+		"SnsDestination": map[string]any{
+			"TopicArn": topicArn,
+		},
+	}
+	args := map[string]any{
+		"ConfigurationSetName": sesEventConfigurationSetName,
+		"EventDestinationName": "apteva-messaging-sns",
+		"EventDestination":     dest,
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "add_event_destination", args)
+	if err != nil {
+		return fmt.Errorf("add_event_destination: %w", err)
+	}
+	if res != nil && res.Success {
+		return nil
+	}
+	body := ""
+	if res != nil {
+		body = string(res.Data)
+	}
+	if !looksLikeAlreadyExists(res, body) {
+		return fmt.Errorf("add_event_destination non-2xx: %s", truncate(body, 400))
+	}
+	res, err = ctx.PlatformAPI().ExecuteIntegrationTool(connID, "update_event_destination", args)
+	if err != nil {
+		return fmt.Errorf("update_event_destination: %w", err)
+	}
+	if res == nil || !res.Success {
+		return fmt.Errorf("update_event_destination non-2xx: %s", truncateResData(res))
+	}
+	return nil
+}
+
+func bootstrapCreateSESConfigSet(ctx *sdk.AppCtx, connID int64, name string) error {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "create_config_set", map[string]any{
+		"ConfigurationSetName": name,
+	})
+	if err != nil {
+		return fmt.Errorf("create_config_set: %w", err)
+	}
+	if res != nil && res.Success {
+		return nil
+	}
+	body := ""
+	if res != nil {
+		body = string(res.Data)
+	}
+	if looksLikeAlreadyExists(res, body) {
+		return nil
+	}
+	return fmt.Errorf("create_config_set non-2xx: %s", truncate(body, 400))
+}
+
 // bootstrapVerifyDomain creates (or adopts) the SES email identity
 // for `domain` and returns its DKIM tokens + verification status.
 //
@@ -1273,10 +1370,10 @@ func bootstrapCreateReceiptRule(ctx *sdk.AppCtx, connID int64, ruleSetName, rule
 
 func buildReceiptRuleArgs(ruleSetName, ruleName string, recipients []string, bucket, topicArn string) map[string]any {
 	args := map[string]any{
-		"RuleSetName":                               ruleSetName,
-		"Rule.Name":                                 ruleName,
-		"Rule.Enabled":                              "true",
-		"Rule.ScanEnabled":                          "true",
+		"RuleSetName":      ruleSetName,
+		"Rule.Name":        ruleName,
+		"Rule.Enabled":     "true",
+		"Rule.ScanEnabled": "true",
 		"Rule.Actions.member.1.S3Action.BucketName": bucket,
 		"Rule.Actions.member.1.S3Action.TopicArn":   topicArn,
 	}
