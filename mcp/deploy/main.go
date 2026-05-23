@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.14.0
+version: 0.14.1
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
@@ -467,6 +467,14 @@ func (a *App) runBuild(d *Deployment) (*Build, error) {
 			return a.failBuild(build, "mkdir: "+err.Error()), nil
 		}
 	}
+	// srcDir is build-time scratch — the runtime only ever reads the
+	// artifact in distDir (builds.artifact_path), never the fetched
+	// source. Drop src on every exit path (success or failBuild) so
+	// builds/ doesn't keep a second full copy of every build's tree —
+	// for node/bun that's an entire node_modules duplicated alongside
+	// the one copyTreeAll already staged into dist. build.log lives in
+	// buildDir (sibling of src), so failure logs survive the cleanup.
+	defer os.RemoveAll(srcDir)
 	logF, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return a.failBuild(build, "open log: "+err.Error()), nil
