@@ -44,7 +44,7 @@ func emitRenderQueued(app *sdk.AppCtx, id int64, projectID, operation string, so
 	if app == nil {
 		return
 	}
-	app.Emit(topicRenderQueued, map[string]any{
+	app.EmitWithProject(topicRenderQueued, projectID, map[string]any{
 		"render_id":       id,
 		"project_id":      projectID,
 		"operation":       operation,
@@ -62,7 +62,7 @@ func emitRenderStarted(app *sdk.AppCtx, row *RenderRow, executor string) {
 	if app == nil || row == nil {
 		return
 	}
-	app.Emit(topicRenderStarted, map[string]any{
+	app.EmitWithProject(topicRenderStarted, row.ProjectID, map[string]any{
 		"render_id":       row.ID,
 		"project_id":      row.ProjectID,
 		"operation":       row.Operation,
@@ -81,7 +81,7 @@ func emitRenderProgress(app *sdk.AppCtx, id int64, projectID string, pct int) {
 	if app == nil {
 		return
 	}
-	app.Emit(topicRenderProgress, map[string]any{
+	app.EmitWithProject(topicRenderProgress, projectID, map[string]any{
 		"render_id":    id,
 		"project_id":   projectID,
 		"progress_pct": pct,
@@ -96,7 +96,7 @@ func emitRenderCompleted(app *sdk.AppCtx, id int64, projectID, operation string,
 	if app == nil {
 		return
 	}
-	app.Emit(topicRenderCompleted, map[string]any{
+	app.EmitWithProject(topicRenderCompleted, projectID, map[string]any{
 		"render_id":      id,
 		"project_id":     projectID,
 		"operation":      operation,
@@ -113,7 +113,7 @@ func emitRenderFailed(app *sdk.AppCtx, id int64, projectID, operation, errMsg st
 	if app == nil {
 		return
 	}
-	app.Emit(topicRenderFailed, map[string]any{
+	app.EmitWithProject(topicRenderFailed, projectID, map[string]any{
 		"render_id":  id,
 		"project_id": projectID,
 		"operation":  operation,
@@ -131,7 +131,7 @@ func emitRenderCancelled(app *sdk.AppCtx, id int64, projectID, operation string)
 	if app == nil {
 		return
 	}
-	app.Emit(topicRenderCancelled, map[string]any{
+	app.EmitWithProject(topicRenderCancelled, projectID, map[string]any{
 		"render_id":  id,
 		"project_id": projectID,
 		"operation":  operation,

@@ -205,7 +205,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
   // into a sub-folder keeps the toggle's current value.
   const [recursive, setRecursive] = useState(true);
 
-  const withParams = useCallback(
+  const withMediaParams = useCallback(
     (extra: Record<string, string> = {}) => {
       const u = new URLSearchParams({
         project_id: projectId,
@@ -215,6 +215,16 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
       return u.toString();
     },
     [projectId, installId],
+  );
+  const withStorageParams = useCallback(
+    (extra: Record<string, string> = {}) => {
+      const u = new URLSearchParams({
+        project_id: projectId,
+        ...extra,
+      });
+      return u.toString();
+    },
+    [projectId],
   );
 
   const load = useCallback(async () => {
@@ -255,8 +265,8 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
         if (recursive) params.recursive = "true";
       }
       const [mediaRes, foldersRes] = await Promise.all([
-        fetch(`${API}/media?${withParams(params)}`, { credentials: "same-origin" }),
-        fetch(`${API}/folders?${withParams({ parent: folder })}`, { credentials: "same-origin" }),
+        fetch(`${API}/media?${withMediaParams(params)}`, { credentials: "same-origin" }),
+        fetch(`${API}/folders?${withMediaParams({ parent: folder })}`, { credentials: "same-origin" }),
       ]);
       if (!mediaRes.ok) throw new Error(`${mediaRes.status}: ${await mediaRes.text().catch(() => "")}`);
       const data = (await mediaRes.json()) as { media: MediaRow[] };
@@ -272,7 +282,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
     } finally {
       setLoading(false);
     }
-  }, [withParams, kind, sort, folder, recursive]);
+  }, [withMediaParams, kind, sort, folder, recursive]);
 
   // Status counts via the MCP-style summary endpoint — implemented as
   // a fan over rows here to avoid a second roundtrip; once we add a
@@ -321,7 +331,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
   }, [rows]);
 
   const handleReindex = async (fileId: string) => {
-    await fetch(`${API}/media/${fileId}/reindex?${withParams()}`, {
+    await fetch(`${API}/media/${fileId}/reindex?${withMediaParams()}`, {
       method: "POST",
       credentials: "same-origin",
     });
@@ -333,7 +343,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
   // transcriber goroutine in the sidecar drains the queue async.
   const queueTranscribe = useCallback(
     async (fileId: string, force = false) => {
-      const params = withParams(force ? { force: "true" } : {});
+      const params = withMediaParams(force ? { force: "true" } : {});
       const res = await fetch(`${API}/media/${fileId}/transcribe?${params}`, {
         method: "POST",
         credentials: "same-origin",
@@ -354,7 +364,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
           : prev,
       );
     },
-    [withParams],
+    [withMediaParams],
   );
 
   // (transcript completion was its own useAppEvents; folded into
@@ -366,7 +376,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
   // waiting for a full refresh.
   const saveDescription = useCallback(
     async (fileId: string, fields: { title?: string; description?: string; alt_text?: string }) => {
-      const res = await fetch(`${API}/media/${fileId}/description?${withParams()}`, {
+      const res = await fetch(`${API}/media/${fileId}/description?${withMediaParams()}`, {
         method: "PUT",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -380,7 +390,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
       );
       setSelected((prev) => (prev && prev.file_id === fileId ? { ...prev, ...fields } : prev));
     },
-    [withParams],
+    [withMediaParams],
   );
 
   const renderTile = (r: MediaRow) => {
@@ -388,7 +398,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
     const wave = r.derivations?.find((d) => d.kind === "waveform" && d.status === "ok");
     const preview = thumb || wave;
     const previewURL = preview
-      ? `${STORAGE}/files/${preview.storage_file_id}/content?${withParams()}`
+      ? `${STORAGE}/files/${preview.storage_file_id}/content?${withStorageParams()}`
       : null;
     return (
       <button
@@ -616,7 +626,8 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
           onTranscribe={(force) => queueTranscribe(selected.file_id, force)}
           previewBase={`${STORAGE}/files`}
           apiBase={API}
-          query={withParams()}
+          mediaQuery={withMediaParams()}
+          storageQuery={withStorageParams()}
         />
       )}
     </div>
@@ -631,7 +642,8 @@ function DetailDrawer({
   onTranscribe,
   previewBase,
   apiBase,
-  query,
+  mediaQuery,
+  storageQuery,
 }: {
   row: MediaRow;
   onClose: () => void;
@@ -640,7 +652,8 @@ function DetailDrawer({
   onTranscribe: (force: boolean) => Promise<void>;
   previewBase: string;
   apiBase: string;
-  query: string;
+  mediaQuery: string;
+  storageQuery: string;
 }) {
   const thumb = row.derivations?.find((d) => d.kind === "thumbnail");
   const wave = row.derivations?.find((d) => d.kind === "waveform");
@@ -676,13 +689,13 @@ function DetailDrawer({
             // Click to open full-resolution in a new tab; the inline
             // preview keeps the drawer compact.
             <a
-              href={`${previewBase}/${row.file_id}/content?${query}`}
+              href={`${previewBase}/${row.file_id}/content?${storageQuery}`}
               target="_blank"
               rel="noopener"
               title="Open full image"
             >
               <img
-                src={`${previewBase}/${row.file_id}/content?${query}`}
+                src={`${previewBase}/${row.file_id}/content?${storageQuery}`}
                 alt={row.alt_text || row.title || ""}
                 className="w-full rounded border border-border"
               />
@@ -693,10 +706,10 @@ function DetailDrawer({
             // keyframe for the poster — opening the drawer is fast
             // even on a multi-GB clip; clicking play streams the rest.
             <video
-              src={`${previewBase}/${row.file_id}/content?${query}`}
+              src={`${previewBase}/${row.file_id}/content?${storageQuery}`}
               poster={
                 thumb
-                  ? `${previewBase}/${thumb.storage_file_id}/content?${query}`
+                  ? `${previewBase}/${thumb.storage_file_id}/content?${storageQuery}`
                   : undefined
               }
               controls
@@ -708,13 +721,13 @@ function DetailDrawer({
             <>
               {wave && (
                 <img
-                  src={`${previewBase}/${wave.storage_file_id}/content?${query}`}
+                  src={`${previewBase}/${wave.storage_file_id}/content?${storageQuery}`}
                   alt="waveform"
                   className="w-full rounded border border-border"
                 />
               )}
               <audio
-                src={`${previewBase}/${row.file_id}/content?${query}`}
+                src={`${previewBase}/${row.file_id}/content?${storageQuery}`}
                 controls
                 preload="metadata"
                 className="w-full"
@@ -722,13 +735,13 @@ function DetailDrawer({
             </>
           ) : (thumb || wave) ? (
             <img
-              src={`${previewBase}/${(thumb || wave)!.storage_file_id}/content?${query}`}
+              src={`${previewBase}/${(thumb || wave)!.storage_file_id}/content?${storageQuery}`}
               alt=""
               className="w-full rounded border border-border"
             />
           ) : null}
           <a
-            href={`${previewBase}/${row.file_id}/content?${query}`}
+            href={`${previewBase}/${row.file_id}/content?${storageQuery}`}
             target="_blank"
             rel="noopener"
             className="block text-xs text-accent hover:underline truncate"
@@ -736,19 +749,20 @@ function DetailDrawer({
             Open source file ↗
           </a>
           <DescriptionEditor row={row} onSave={onSaveDescription} />
-          <AudienceRatingSection row={row} apiBase={apiBase} query={query} />
-          <KeyframesStrip row={row} previewBase={previewBase} query={query} />
+          <AudienceRatingSection row={row} apiBase={apiBase} query={mediaQuery} />
+          <KeyframesStrip row={row} previewBase={previewBase} query={storageQuery} />
           <OperationsSection
             row={row}
             apiBase={apiBase}
             previewBase={previewBase}
-            query={query}
+            mediaQuery={mediaQuery}
+            storageQuery={storageQuery}
           />
           {row.has_audio ? (
             <TranscriptSection
               row={row}
               apiBase={apiBase}
-              query={query}
+              query={mediaQuery}
               onTranscribe={onTranscribe}
             />
           ) : null}
@@ -842,12 +856,13 @@ const ALL_OPS: OpDef[] = [
 ];
 
 function OperationsSection({
-  row, apiBase, previewBase, query,
+  row, apiBase, previewBase, mediaQuery, storageQuery,
 }: {
   row: MediaRow;
   apiBase: string;
   previewBase: string;
-  query: string;
+  mediaQuery: string;
+  storageQuery: string;
 }) {
   const [openOp, setOpenOp] = useState<OpName | null>(null);
   const [activeRenders, setActiveRenders] = useState<number[]>([]);
@@ -900,7 +915,8 @@ function OperationsSection({
               renderId={id}
               apiBase={apiBase}
               previewBase={previewBase}
-              query={query}
+              mediaQuery={mediaQuery}
+              storageQuery={storageQuery}
             />
           ))}
         </div>
@@ -925,12 +941,13 @@ interface RenderRow {
 // Stops polling on terminal states. No cleanup needed beyond the
 // interval clear in the effect's return value.
 function RenderStatusCard({
-  renderId, apiBase, previewBase, query,
+  renderId, apiBase, previewBase, mediaQuery, storageQuery,
 }: {
   renderId: number;
   apiBase: string;
   previewBase: string;
-  query: string;
+  mediaQuery: string;
+  storageQuery: string;
 }) {
   const [row, setRow] = useState<RenderRow | null>(null);
   const [err, setErr] = useState<string>("");
@@ -950,7 +967,7 @@ function RenderStatusCard({
     let clock: ReturnType<typeof setInterval> | null = null;
     const poll = async () => {
       try {
-        const r = await fetch(`${apiBase}/renders/${renderId}?${query}`, { credentials: "same-origin" });
+        const r = await fetch(`${apiBase}/renders/${renderId}?${mediaQuery}`, { credentials: "same-origin" });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const data = (await r.json()) as RenderRow;
         if (!mounted) return;
@@ -973,7 +990,7 @@ function RenderStatusCard({
       if (interval) clearInterval(interval);
       if (clock) clearInterval(clock);
     };
-  }, [renderId, apiBase, query]);
+  }, [renderId, apiBase, mediaQuery]);
 
   if (err && !row) {
     return (
@@ -1028,7 +1045,7 @@ function RenderStatusCard({
       {row.status === "ok" && row.output_file_id ? (
         <div className="space-y-1">
           <a
-            href={`${previewBase}/${row.output_file_id}/content?${query}`}
+            href={`${previewBase}/${row.output_file_id}/content?${storageQuery}`}
             target="_blank"
             rel="noopener"
             className="text-accent hover:underline block"

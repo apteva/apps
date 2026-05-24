@@ -37,12 +37,12 @@ const (
 // event-driven indexOneFile both consume. Read once via readIndexerConfig
 // rather than parsing the same env on every call.
 type indexerConfig struct {
-	maxSizeMB   any
-	thumbSeek   any
-	thumbWidth  any
+	maxSizeMB    any
+	thumbSeek    any
+	thumbWidth   any
 	waveW, waveH any
-	ffmpegPath  string
-	ffprobePath string
+	ffmpegPath   string
+	ffprobePath  string
 }
 
 func readIndexerConfig(app *sdk.AppCtx) indexerConfig {
@@ -331,7 +331,7 @@ func processOne(
 		"duration_ms", probe.DurationMs,
 		"video", probe.HasVideo, "audio", probe.HasAudio, "image", probe.IsImage,
 	)
-	app.Emit("media.indexed", map[string]any{
+	app.EmitWithProject("media.indexed", projectID, map[string]any{
 		"file_id":     fid,
 		"name":        f.Name,
 		"has_video":   probe.HasVideo,
@@ -393,16 +393,16 @@ func processOne(
 	// don't get silently starved on installs that only do indexing.
 	// Distinguishable from media.indexed (which on the local path fires
 	// BEFORE derivations) by the has_thumbnail / has_waveform fields.
-	app.Emit("media.derived", map[string]any{
-		"file_id":         fid,
-		"name":            f.Name,
-		"has_video":       probe.HasVideo,
-		"has_audio":       probe.HasAudio,
-		"is_image":        probe.IsImage,
-		"duration_ms":     probe.DurationMs,
-		"has_thumbnail":   hasThumb,
-		"has_waveform":    hasWave,
-		"keyframe_count":  keyframeCount,
+	app.EmitWithProject("media.derived", projectID, map[string]any{
+		"file_id":        fid,
+		"name":           f.Name,
+		"has_video":      probe.HasVideo,
+		"has_audio":      probe.HasAudio,
+		"is_image":       probe.IsImage,
+		"duration_ms":    probe.DurationMs,
+		"has_thumbnail":  hasThumb,
+		"has_waveform":   hasWave,
+		"keyframe_count": keyframeCount,
 	})
 
 	// Wake the right downstream worker the moment probe finishes:
@@ -489,7 +489,7 @@ func tryRemoteIndex(
 		"video", probe.HasVideo, "audio", probe.HasAudio, "image", probe.IsImage,
 		"thumb_id", thumbID, "wave_id", waveID,
 	)
-	app.Emit("media.indexed", map[string]any{
+	app.EmitWithProject("media.indexed", projectID, map[string]any{
 		"file_id":     fid,
 		"name":        f.Name,
 		"has_video":   probe.HasVideo,
@@ -524,7 +524,7 @@ func tryRemoteIndex(
 	// has_thumbnail / has_waveform truthfully reflect what the remote
 	// shell uploaded back (thumbID > 0 means the upload completed
 	// successfully).
-	app.Emit("media.derived", map[string]any{
+	app.EmitWithProject("media.derived", projectID, map[string]any{
 		"file_id":       fid,
 		"name":          f.Name,
 		"has_video":     probe.HasVideo,

@@ -265,7 +265,7 @@ func updateFolderFromEvent(app *sdk.AppCtx, data map[string]any, projectID strin
 	// events know to refetch. Without this, MediaCard / MediaPanel
 	// would only see storage's file.updated (different bus, different
 	// subscription) and stay stale until a manual reload.
-	app.Emit("media.updated", map[string]any{
+	app.EmitWithProject("media.updated", projectID, map[string]any{
 		"file_id": fid,
 		"folder":  folder,
 	})
@@ -417,7 +417,7 @@ func cascadeDeleteFromEvent(app *sdk.AppCtx, data map[string]any, projectID stri
 	}
 	log.Info("cascade-deleted media row from storage event",
 		"file_id", fileID, "derivations", len(row.Derivations))
-	app.Emit("media.deleted", map[string]any{"file_id": fileID})
+	app.EmitWithProject("media.deleted", projectID, map[string]any{"file_id": fileID})
 }
 
 // deleteStorageFile calls storage's HTTP DELETE for one file, with

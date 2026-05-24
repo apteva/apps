@@ -342,7 +342,7 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 		"chars", len(desc),
 		"audience_rating", parsed.AudienceRating,
 	)
-	app.Emit("media.described", map[string]any{
+	app.EmitWithProject("media.described", projectID, map[string]any{
 		"file_id":         fileID,
 		"chars":           len(desc),
 		"source":          "ai-generated",

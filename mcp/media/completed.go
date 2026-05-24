@@ -214,7 +214,7 @@ func maybeEmitMediaCompleted(app *sdk.AppCtx, projectID, fileID string) {
 		return // another caller emitted first
 	}
 
-	app.Emit("media.completed", map[string]any{
+	app.EmitWithProject("media.completed", projectID, map[string]any{
 		"file_id":         fileID,
 		"name":            row.Name,
 		"folder":          row.Folder,

@@ -277,9 +277,9 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 		language = "auto"
 	}
 	args := map[string]any{
-		"url":           signedURL,
-		"model":         model,
-		"smart_format":  true,
+		"url":          signedURL,
+		"model":        model,
+		"smart_format": true,
 	}
 	if language == "auto" {
 		args["detect_language"] = true
@@ -339,7 +339,7 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 	}
 	log.Info("transcribed", "file_id", row.FileID, "language", parsed.Language, "chars", len(parsed.Text))
 
-	app.Emit("media.transcribed", map[string]any{
+	app.EmitWithProject("media.transcribed", row.ProjectID, map[string]any{
 		"file_id":  row.FileID,
 		"language": parsed.Language,
 		"chars":    len(parsed.Text),
