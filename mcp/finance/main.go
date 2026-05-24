@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -2453,22 +2454,22 @@ func executeIntegrationJSON(ctx *sdk.AppCtx, connID int64, tool string, input ma
 
 func executeIntegrationPages(ctx *sdk.AppCtx, connID int64, tool string) ([]map[string]any, error) {
 	out := []map[string]any{}
-	cursor := ""
+	next := ""
 	for i := 0; i < 20; i++ {
 		args := map[string]any{"limit": float64(50)}
-		if cursor != "" {
-			args["cursor"] = cursor
+		for k, v := range paginationArgs(next) {
+			args[k] = v
 		}
 		var raw any
 		if err := executeIntegrationJSON(ctx, connID, tool, args, &raw); err != nil {
 			return nil, err
 		}
-		items, next := integrationItems(raw)
+		items, nextPage := integrationItems(raw)
 		out = append(out, items...)
-		if next == "" {
+		if nextPage == "" {
 			break
 		}
-		cursor = next
+		next = nextPage
 	}
 	return out, nil
 }
@@ -2500,18 +2501,32 @@ func mapSlice(in []any) []map[string]any {
 }
 
 func cursorFromNext(m map[string]any) string {
-	next := firstString(m, "nextPagePath", "next_page_path", "next", "cursor")
+	return firstString(m, "nextPagePath", "next_page_path", "next", "cursor")
+}
+
+func paginationArgs(next string) map[string]any {
+	args := map[string]any{}
+	next = strings.TrimSpace(next)
 	if next == "" {
-		return ""
+		return args
 	}
-	if i := strings.Index(next, "cursor="); i >= 0 {
-		s := next[i+len("cursor="):]
-		if j := strings.IndexAny(s, "&?"); j >= 0 {
-			s = s[:j]
+	query := next
+	if i := strings.Index(query, "?"); i >= 0 {
+		query = query[i+1:]
+	}
+	if strings.Contains(query, "=") {
+		vals, err := url.ParseQuery(query)
+		if err == nil {
+			for _, key := range []string{"cursor", "time"} {
+				if v := vals.Get(key); v != "" {
+					args[key] = v
+				}
+			}
+			return args
 		}
-		return s
 	}
-	return next
+	args["cursor"] = next
+	return args
 }
 
 func ensureBrokerageAccount(ctx *sdk.AppCtx, args map[string]any, conn sdk.PlatformConnection, summary map[string]any) (Account, error) {
@@ -2572,6 +2587,13 @@ func syncTrading212Positions(ctx *sdk.AppCtx, app *App, acc Account, connID int6
 		}
 		avg := firstFloat(item, "averagePrice", "average_price", "avgPrice", "averagePricePaid", "position.averagePrice")
 		cost := int64(math.Round(qty * avg * 100))
+		if wallet := childMap(item, "walletImpact"); len(wallet) > 0 {
+			if c := strings.ToUpper(firstString(wallet, "currency", "currencyCode")); c == "" || c == acc.Currency {
+				if total := math.Abs(firstFloat(wallet, "totalCost", "invested", "cost")); total > 0 {
+					cost = int64(math.Round(total * 100))
+				}
+			}
+		}
 		if !dry {
 			if _, err := app.toolHoldingsSet(ctx, map[string]any{
 				"account_id":    float64(acc.ID),
@@ -2598,6 +2620,9 @@ func syncTrading212Orders(ctx *sdk.AppCtx, app *App, acc Account, connID int64, 
 	items, err := executeIntegrationPages(ctx, connID, "get_order_history")
 	if err != nil {
 		return 0, 0, err
+	}
+	for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
+		items[i], items[j] = items[j], items[i]
 	}
 	n, skipped := 0, 0
 	for _, item := range items {
@@ -2661,11 +2686,18 @@ func syncTrading212Orders(ctx *sdk.AppCtx, app *App, acc Account, connID int64, 
 			n++
 			continue
 		}
+		amount := math.Abs(firstFloat(fill, "walletImpact.netValue", "walletImpact.totalCost", "walletImpact.currentValue"))
+		if amount == 0 {
+			amount = math.Abs(firstFloat(order, "walletImpact.netValue", "walletImpact.totalCost", "walletImpact.currentValue"))
+		}
+		if amount == 0 {
+			amount = qty * price
+		}
 		args := map[string]any{
 			"account_id":    float64(acc.ID),
 			"instrument_id": float64(inst.ID),
 			"quantity":      qty,
-			"amount":        float64(int64(math.Round(qty * price * 100))),
+			"amount":        float64(int64(math.Round(amount * 100))),
 			"posted_at":     postedAt,
 			"memo":          "Trading 212 " + side + " " + info.Symbol,
 			"external_id":   externalID,
@@ -2676,6 +2708,10 @@ func syncTrading212Orders(ctx *sdk.AppCtx, app *App, acc Account, connID int64, 
 			_, err = app.toolTxnsSell(ctx, args)
 		}
 		if err != nil {
+			if side == "sell" && strings.Contains(strings.ToLower(err.Error()), "no holding") {
+				skipped++
+				continue
+			}
 			return n, skipped, err
 		}
 		n++
