@@ -439,7 +439,8 @@ function DestroyConfirmDialog({
 
   return (
     <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 px-4"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/60"
+      style={{ padding: 24 }}
       onClick={() => { if (!busy) onCancel(); }}
       role="presentation"
     >
@@ -448,52 +449,58 @@ function DestroyConfirmDialog({
         aria-modal="true"
         aria-labelledby="destroy-instance-title"
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-[460px] bg-bg border border-red/40 rounded p-5 shadow-xl space-y-4"
+        className="bg-bg border border-red/40 rounded shadow-xl overflow-hidden"
+        style={{ width: "min(420px, 100%)" }}
       >
-        <div className="space-y-1">
+        <div
+          className="px-5 py-4 space-y-1"
+          style={{ borderBottom: `1px solid ${SUBTLE_BORDER}` }}
+        >
           <h2 id="destroy-instance-title" className="text-text font-semibold">
             Destroy instance
           </h2>
           <p className="text-xs text-text-muted">
-            This will terminate the upstream resource and remove it from the Instances inventory.
+            This removes the host from Instances and terminates the upstream resource.
           </p>
         </div>
 
-        <div
-          className="rounded-md p-3 space-y-2"
-          style={{ backgroundColor: "rgba(220,38,38,0.08)", border: "1px solid rgba(220,38,38,0.22)" }}
-        >
-          <div className="flex items-baseline justify-between gap-3">
-            <span className="text-sm text-text font-medium truncate">{inst.name}</span>
-            <span className={statusColor(inst.status) + " text-[11px] uppercase tracking-wider font-medium"}>
-              {inst.status}
-            </span>
+        <div className="p-5 space-y-4">
+          <div
+            className="rounded p-3 space-y-2"
+            style={{ backgroundColor: "rgba(220,38,38,0.08)", border: "1px solid rgba(220,38,38,0.22)" }}
+          >
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-sm text-text font-medium truncate">{inst.name}</span>
+              <span className={statusColor(inst.status) + " text-[11px] uppercase tracking-wider font-medium"}>
+                {inst.status}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-[11px] text-text-dim">
+              <span>Provider: <span className="text-text font-mono">{inst.provider}</span></span>
+              <span>Host: <span className="text-text font-mono">{ip}</span></span>
+              {inst.region && <span>Region: <span className="text-text font-mono">{inst.region}</span></span>}
+              {inst.size && <span>Size: <span className="text-text font-mono">{inst.size}</span></span>}
+            </div>
           </div>
-          <div className="grid grid-cols-2 gap-2 text-[11px] text-text-dim">
-            <span>Provider: <span className="text-text font-mono">{inst.provider}</span></span>
-            <span>Host: <span className="text-text font-mono">{ip}</span></span>
-            {inst.region && <span>Region: <span className="text-text font-mono">{inst.region}</span></span>}
-            {inst.size && <span>Size: <span className="text-text font-mono">{inst.size}</span></span>}
-          </div>
-        </div>
 
-        <div className="flex justify-end gap-2 pt-1">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={busy}
-            className="px-3 py-1.5 text-sm rounded border border-border text-text-muted hover:text-text disabled:opacity-50"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            disabled={busy}
-            className="px-3 py-1.5 text-sm rounded bg-red text-white hover:bg-red/90 disabled:opacity-50"
-          >
-            {busy ? "Destroying…" : "Destroy"}
-          </button>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={busy}
+              className="px-3 py-1.5 text-sm rounded border border-border text-text-muted hover:text-text disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={onConfirm}
+              disabled={busy}
+              className="px-3 py-1.5 text-sm rounded bg-red text-white hover:bg-red/90 disabled:opacity-50"
+            >
+              {busy ? "Destroying…" : "Destroy"}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -931,11 +938,16 @@ function CreateDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-30 flex items-center justify-center bg-black/50"
+      style={{ padding: 24 }}
+      onClick={onClose}
+    >
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
-        className="w-[480px] bg-bg border border-border rounded p-5 space-y-4"
+        className="bg-bg border border-border rounded p-5 space-y-4"
+        style={{ width: "min(480px, 100%)" }}
       >
         <h2 className="text-text font-semibold">Provision a new instance</h2>
         {catalogError ? (
