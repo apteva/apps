@@ -1405,10 +1405,6 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
   const titlePrefix = isEdit ? "Edit" : "Add";
   const title = kind === "transport" ? `${titlePrefix} transport` : kind === "accommodation" ? `${titlePrefix} accommodation` : `${titlePrefix} activity`;
 
-  // First destination (if any) is the natural anchor for nearby
-  // searches — its lat/lng come from autocomplete picks.
-  const firstDest = destinations && destinations.length > 0 ? destinations[0] : undefined;
-
   const onFlightPicked = (offer: FlightOffer) => {
     setTKind("flight");
     setProvider(offer.carrier);
@@ -1533,7 +1529,7 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
       {showFlightSearch && (
         <SearchFlightsModal
           trip={trip}
-          defaultTo={firstDest?.country || ""}
+          defaultTo=""
           defaultDepartAt={departAt}
           onPick={onFlightPicked}
           onClose={() => setShowFlightSearch(false)}

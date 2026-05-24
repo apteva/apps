@@ -62,10 +62,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 }
 
 // migrateLegacyCalendars walks every non-archived synced trip and
-//   1. consolidates any v0.1.x per-trip calendar into the shared
-//      "Trips" calendar (ensureSharedCalendar), and
-//   2. backfills the trip-level + destination all-day blocks added in
-//      v0.6 for trips that predate them.
+//  1. consolidates any v0.1.x per-trip calendar into the shared
+//     "Trips" calendar (ensureSharedCalendar), and
+//  2. backfills the trip-level + destination all-day blocks added in
+//     v0.6 for trips that predate them.
+//
 // Both steps are idempotent — ensureSharedCalendar short-circuits on
 // already-migrated trips, and rehydrate only creates events for rows
 // whose calendar_event_id is still NULL. Runs in a goroutine so a
@@ -449,24 +450,24 @@ func activitySchemaProps(forAdd bool) map[string]any {
 // ─── Types ───────────────────────────────────────────────────────
 
 type Trip struct {
-	ID            int64  `json:"id"`
-	ProjectID     string `json:"project_id"`
-	Name          string `json:"name"`
-	Purpose       string `json:"purpose"`
-	Status        string `json:"status"`
-	StartAt       string `json:"start_at"`
-	EndAt         string `json:"end_at"`
-	HomeCurrency  string `json:"home_currency"`
-	TotalBudget   *int64 `json:"total_budget,omitempty"`
-	Participants  []string `json:"participants"`
-	Notes         string `json:"notes"`
-	Color         string `json:"color"`
-	CalendarID    *int64 `json:"calendar_id,omitempty"`
-	CalendarEventID *int64 `json:"calendar_event_id,omitempty"`
-	SyncCalendar  bool   `json:"sync_calendar"`
-	Archived      bool   `json:"archived"`
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at"`
+	ID              int64    `json:"id"`
+	ProjectID       string   `json:"project_id"`
+	Name            string   `json:"name"`
+	Purpose         string   `json:"purpose"`
+	Status          string   `json:"status"`
+	StartAt         string   `json:"start_at"`
+	EndAt           string   `json:"end_at"`
+	HomeCurrency    string   `json:"home_currency"`
+	TotalBudget     *int64   `json:"total_budget,omitempty"`
+	Participants    []string `json:"participants"`
+	Notes           string   `json:"notes"`
+	Color           string   `json:"color"`
+	CalendarID      *int64   `json:"calendar_id,omitempty"`
+	CalendarEventID *int64   `json:"calendar_event_id,omitempty"`
+	SyncCalendar    bool     `json:"sync_calendar"`
+	Archived        bool     `json:"archived"`
+	CreatedAt       string   `json:"created_at"`
+	UpdatedAt       string   `json:"updated_at"`
 
 	// Aggregates populated by trips_list (and only there — toolTripsGet
 	// leaves them nil since the list rollup hits computeBudgetSummary
@@ -477,61 +478,61 @@ type Trip struct {
 }
 
 type Destination struct {
-	ID         int64    `json:"id"`
-	TripID     int64    `json:"trip_id"`
-	PlaceName  string   `json:"place_name"`
-	Country    string   `json:"country"`
-	Lat        *float64 `json:"lat,omitempty"`
-	Lng        *float64 `json:"lng,omitempty"`
-	ArriveAt   string   `json:"arrive_at"`
-	DepartAt   string   `json:"depart_at"`
-	OrderIdx   int      `json:"order_idx"`
-	Notes      string   `json:"notes"`
-	CalendarEventID *int64 `json:"calendar_event_id,omitempty"`
-	CreatedAt  string   `json:"created_at"`
+	ID              int64    `json:"id"`
+	TripID          int64    `json:"trip_id"`
+	PlaceName       string   `json:"place_name"`
+	Country         string   `json:"country"`
+	Lat             *float64 `json:"lat,omitempty"`
+	Lng             *float64 `json:"lng,omitempty"`
+	ArriveAt        string   `json:"arrive_at"`
+	DepartAt        string   `json:"depart_at"`
+	OrderIdx        int      `json:"order_idx"`
+	Notes           string   `json:"notes"`
+	CalendarEventID *int64   `json:"calendar_event_id,omitempty"`
+	CreatedAt       string   `json:"created_at"`
 }
 
 type TransportLeg struct {
-	ID                  int64  `json:"id"`
-	TripID              int64  `json:"trip_id"`
-	FromDestinationID   int64  `json:"from_destination_id,omitempty"`
-	ToDestinationID     int64  `json:"to_destination_id,omitempty"`
-	Kind                string `json:"kind"`
-	Provider            string `json:"provider"`
-	Reference           string `json:"reference"`
-	DepartAt            string `json:"depart_at"`
-	ArriveAt            string `json:"arrive_at"`
-	DepartLocation      string `json:"depart_location"`
-	ArriveLocation      string `json:"arrive_location"`
-	CostEstimated       *int64 `json:"cost_estimated,omitempty"`
-	CostActual          *int64 `json:"cost_actual,omitempty"`
-	Currency            string `json:"currency"`
-	ConfirmationNumber  string `json:"confirmation_number"`
-	Booked              bool   `json:"booked"`
-	Notes               string `json:"notes"`
-	CalendarEventID     *int64 `json:"calendar_event_id,omitempty"`
-	CreatedAt           string `json:"created_at"`
-	UpdatedAt           string `json:"updated_at"`
+	ID                 int64  `json:"id"`
+	TripID             int64  `json:"trip_id"`
+	FromDestinationID  int64  `json:"from_destination_id,omitempty"`
+	ToDestinationID    int64  `json:"to_destination_id,omitempty"`
+	Kind               string `json:"kind"`
+	Provider           string `json:"provider"`
+	Reference          string `json:"reference"`
+	DepartAt           string `json:"depart_at"`
+	ArriveAt           string `json:"arrive_at"`
+	DepartLocation     string `json:"depart_location"`
+	ArriveLocation     string `json:"arrive_location"`
+	CostEstimated      *int64 `json:"cost_estimated,omitempty"`
+	CostActual         *int64 `json:"cost_actual,omitempty"`
+	Currency           string `json:"currency"`
+	ConfirmationNumber string `json:"confirmation_number"`
+	Booked             bool   `json:"booked"`
+	Notes              string `json:"notes"`
+	CalendarEventID    *int64 `json:"calendar_event_id,omitempty"`
+	CreatedAt          string `json:"created_at"`
+	UpdatedAt          string `json:"updated_at"`
 }
 
 type Accommodation struct {
-	ID                  int64  `json:"id"`
-	TripID              int64  `json:"trip_id"`
-	DestinationID       int64  `json:"destination_id,omitempty"`
-	Name                string `json:"name"`
-	Kind                string `json:"kind"`
-	Address             string `json:"address"`
-	CheckInAt           string `json:"check_in_at"`
-	CheckOutAt          string `json:"check_out_at"`
-	CostEstimated       *int64 `json:"cost_estimated,omitempty"`
-	CostActual          *int64 `json:"cost_actual,omitempty"`
-	Currency            string `json:"currency"`
-	ConfirmationNumber  string `json:"confirmation_number"`
-	Booked              bool   `json:"booked"`
-	Notes               string `json:"notes"`
-	CalendarEventID     *int64 `json:"calendar_event_id,omitempty"`
-	CreatedAt           string `json:"created_at"`
-	UpdatedAt           string `json:"updated_at"`
+	ID                 int64  `json:"id"`
+	TripID             int64  `json:"trip_id"`
+	DestinationID      int64  `json:"destination_id,omitempty"`
+	Name               string `json:"name"`
+	Kind               string `json:"kind"`
+	Address            string `json:"address"`
+	CheckInAt          string `json:"check_in_at"`
+	CheckOutAt         string `json:"check_out_at"`
+	CostEstimated      *int64 `json:"cost_estimated,omitempty"`
+	CostActual         *int64 `json:"cost_actual,omitempty"`
+	Currency           string `json:"currency"`
+	ConfirmationNumber string `json:"confirmation_number"`
+	Booked             bool   `json:"booked"`
+	Notes              string `json:"notes"`
+	CalendarEventID    *int64 `json:"calendar_event_id,omitempty"`
+	CreatedAt          string `json:"created_at"`
+	UpdatedAt          string `json:"updated_at"`
 }
 
 type Activity struct {
@@ -3041,6 +3042,9 @@ func (a *App) toolSearchFlights(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if from == "" || to == "" || depart == "" {
 		return nil, errors.New("from, to, depart_date required (depart_date as YYYY-MM-DD)")
 	}
+	if !validIATA(from) || !validIATA(to) {
+		return nil, errors.New("from and to must be 3-letter IATA airport codes")
+	}
 	passengers := intArg(args, "passengers", settings.DefaultPassengers)
 	if passengers < 1 {
 		passengers = 1
@@ -3059,10 +3063,16 @@ func (a *App) toolSearchFlights(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	for i := range paxList {
 		paxList[i] = map[string]any{"type": "adult"}
 	}
+	request := map[string]any{
+		"slices":      slices,
+		"passengers":  paxList,
+		"cabin_class": cabin,
+	}
 	input := map[string]any{
-		"slices":       slices,
-		"passengers":   paxList,
-		"cabin_class":  cabin,
+		"data":             request,
+		"return_offers":    true,
+		"supplier_timeout": 10000,
+		"view":             "offers",
 	}
 	key := cacheKey("duffel", "search_flights", input)
 	if raw, ok := cacheGet(ctx, key); ok {
@@ -3087,6 +3097,18 @@ func (a *App) toolSearchFlights(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	// Duffel offers expire fast — 10-minute cache is plenty.
 	cacheSet(ctx, key, out, 10*time.Minute)
 	return out, nil
+}
+
+func validIATA(code string) bool {
+	if len(code) != 3 {
+		return false
+	}
+	for _, r := range code {
+		if r < 'A' || r > 'Z' {
+			return false
+		}
+	}
+	return true
 }
 
 // ─── Normalizers ─────────────────────────────────────────────────

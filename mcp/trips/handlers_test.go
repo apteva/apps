@@ -26,14 +26,14 @@ type callRecord struct {
 
 type fakeCalendar struct {
 	tk.BasePlatformClient
-	mu                  sync.Mutex
+	mu                   sync.Mutex
 	nextCalID, nextEvtID int64
-	calls               []callRecord
-	calendars           map[int64]map[string]any
-	events              map[int64]map[string]any
+	calls                []callRecord
+	calendars            map[int64]map[string]any
+	events               map[int64]map[string]any
 	// integration plumbing for the search tools (v0.4+)
 	integCalls     []integCall
-	integResponses map[string]any                   // tool name → canned response (unwrapped JSON)
+	integResponses map[string]any // tool name → canned response (unwrapped JSON)
 	connList       []sdk.PlatformConnection
 }
 
@@ -841,13 +841,13 @@ func TestUnit_SearchFlights_HappyPath(t *testing.T) {
 							"duration": "PT1H30M",
 							"segments": []any{
 								map[string]any{
-									"marketing_carrier":                map[string]any{"iata_code": "AF", "name": "Air France"},
+									"marketing_carrier":               map[string]any{"iata_code": "AF", "name": "Air France"},
 									"marketing_carrier_flight_number": "1234",
-									"departing_at":                     "2026-06-05T08:00:00",
-									"arriving_at":                      "2026-06-05T09:30:00",
-									"origin":                           map[string]any{"iata_code": "CDG"},
-									"destination":                      map[string]any{"iata_code": "LIN"},
-									"cabin_class":                      "economy",
+									"departing_at":                    "2026-06-05T08:00:00",
+									"arriving_at":                     "2026-06-05T09:30:00",
+									"origin":                          map[string]any{"iata_code": "CDG"},
+									"destination":                     map[string]any{"iata_code": "LIN"},
+									"cabin_class":                     "economy",
 								},
 							},
 						},
@@ -857,12 +857,12 @@ func TestUnit_SearchFlights_HappyPath(t *testing.T) {
 					"id": "off_2", "total_amount": "85.00", "total_currency": "EUR",
 					"slices": []any{map[string]any{"segments": []any{
 						map[string]any{
-							"marketing_carrier":                map[string]any{"iata_code": "U2", "name": "easyJet"},
+							"marketing_carrier":               map[string]any{"iata_code": "U2", "name": "easyJet"},
 							"marketing_carrier_flight_number": "4321",
-							"departing_at":                     "2026-06-05T10:00:00",
-							"arriving_at":                      "2026-06-05T11:30:00",
-							"origin":                           map[string]any{"iata_code": "CDG"},
-							"destination":                      map[string]any{"iata_code": "LIN"},
+							"departing_at":                    "2026-06-05T10:00:00",
+							"arriving_at":                     "2026-06-05T11:30:00",
+							"origin":                          map[string]any{"iata_code": "CDG"},
+							"destination":                     map[string]any{"iata_code": "LIN"},
 						},
 					}}},
 				},
@@ -886,9 +886,28 @@ func TestUnit_SearchFlights_HappyPath(t *testing.T) {
 	}
 	// Verify from defaulted to settings.home_airport.
 	in := fake.integCalls[0].Input
-	slices := in["slices"].([]map[string]any)
+	if in["return_offers"] != true || in["view"] != "offers" {
+		t.Errorf("Duffel query flags missing: %+v", in)
+	}
+	data := in["data"].(map[string]any)
+	slices := data["slices"].([]map[string]any)
 	if slices[0]["origin"] != "CDG" {
 		t.Errorf("default home_airport not applied: %+v", slices)
+	}
+}
+
+func TestUnit_SearchFlights_RejectsNonIATA(t *testing.T) {
+	ctx, _ := newCtx(t)
+	app := &App{}
+	_, _ = app.toolSettingsSet(ctx, map[string]any{
+		"duffel_connection_id": float64(11),
+		"home_airport":         "CDG",
+	})
+	if _, err := app.toolSearchFlights(ctx, map[string]any{
+		"to":          "FR",
+		"depart_date": "2026-06-05",
+	}); err == nil {
+		t.Fatal("expected invalid IATA destination to fail")
 	}
 }
 
