@@ -333,6 +333,77 @@ func TestUnit_StockHoldingValueFallsBackToManualPriceWhenStocksUnavailable(t *te
 	}
 }
 
+func TestUnit_StocksQuotePersistsPrice(t *testing.T) {
+	pf := &stockQuotePlatform{quote: map[string]any{
+		"symbol": "MSFT", "name": "Microsoft", "currency": "USD", "price": 421.37,
+	}}
+	ctx := newCtxWithPlatform(t, pf)
+	app := &App{}
+	inst := mustCreateInstrument(t, app, ctx, "stock", "MSFT", "Microsoft", "USD")
+
+	out, err := app.toolStocksQuote(ctx, map[string]any{"instrument_id": float64(inst.ID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quote := out.(stockQuoteResult)
+	if quote.PriceMinor != 42137 || quote.InstrumentID != inst.ID {
+		t.Fatalf("unexpected quote result: %+v", quote)
+	}
+	price, ok := latestPrice(ctx, inst.ID, time.Now().UTC())
+	if !ok || price != 42137 {
+		t.Fatalf("expected persisted price 42137, got %d ok=%v", price, ok)
+	}
+}
+
+func TestUnit_StocksDividendsImportIsIdempotent(t *testing.T) {
+	pf := &stockQuotePlatform{dividends: map[string]any{
+		"symbol": "AAPL",
+		"summary": map[string]any{
+			"frequency": "quarterly",
+		},
+		"history": []map[string]any{
+			{"ex_date": float64(time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC).Unix()), "amount": 0.25},
+			{"ex_date": float64(time.Date(2023, 6, 1, 0, 0, 0, 0, time.UTC).Unix()), "amount": 0.20},
+		},
+	}}
+	ctx := newCtxWithPlatform(t, pf)
+	app := &App{}
+	acc := mustCreateAccount(t, app, ctx, "Broker", "brokerage", "USD", 0)
+	inst := mustCreateInstrument(t, app, ctx, "stock", "AAPL", "Apple", "USD")
+	if _, err := app.toolTxnsBuy(ctx, map[string]any{
+		"account_id": float64(acc.ID), "instrument_id": float64(inst.ID),
+		"quantity": float64(10), "amount": float64(150000), "posted_at": "2024-01-01T00:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := app.toolStocksDividendsImport(ctx, map[string]any{
+		"account_id": float64(acc.ID), "instrument_id": float64(inst.ID),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(map[string]any)
+	if res["imported"].(int) != 1 {
+		t.Fatalf("expected one imported dividend, got %+v", res)
+	}
+	txns := res["txns"].([]Transaction)
+	if len(txns) != 1 || txns[0].Amount != 250 || txns[0].Kind != "dividend" {
+		t.Fatalf("unexpected imported txn: %+v", txns)
+	}
+
+	out, err = app.toolStocksDividendsImport(ctx, map[string]any{
+		"account_id": float64(acc.ID), "instrument_id": float64(inst.ID),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res = out.(map[string]any)
+	if res["imported"].(int) != 0 {
+		t.Fatalf("second import should be idempotent, got %+v", res)
+	}
+}
+
 // ─── Reports ─────────────────────────────────────────────────────
 
 func TestUnit_Cashflow_BucketsByMonth(t *testing.T) {
@@ -705,6 +776,8 @@ func newCtxWithPlatform(t *testing.T, platform sdk.PlatformClient) *sdk.AppCtx {
 type stockQuotePlatform struct {
 	tk.BasePlatformClient
 	quote      map[string]any
+	search     map[string]any
+	dividends  map[string]any
 	err        error
 	calls      int
 	lastApp    string
@@ -720,7 +793,14 @@ func (p *stockQuotePlatform) CallAppResult(app, tool string, input map[string]an
 	if p.err != nil {
 		return p.err
 	}
-	b, err := json.Marshal(p.quote)
+	body := p.quote
+	switch tool {
+	case "search":
+		body = p.search
+	case "dividends":
+		body = p.dividends
+	}
+	b, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}

@@ -55,7 +55,35 @@ interface StockSearchHit {
   symbol?: string;
   name?: string;
   exchange?: string;
+  sector?: string;
   currency?: string;
+  price?: number;
+  change_pct?: number;
+  yield_pct?: number;
+}
+
+interface StockSearchResponse {
+  results: StockSearchHit[];
+  count: number;
+}
+
+interface StockQuote {
+  symbol: string;
+  name?: string;
+  exchange?: string;
+  currency: string;
+  type?: string;
+  price: number;
+  price_minor?: number;
+  change_pct?: number;
+  dividend_yield_pct?: number;
+  dividend_frequency?: string;
+}
+
+interface DividendImportResult {
+  imported: number;
+  skipped: number;
+  candidates?: Array<{ already_imported?: boolean }>;
 }
 
 interface Holding {
@@ -214,7 +242,12 @@ function isInvestmentTxnKind(kind: TxnKind): kind is InvestmentTxnKind {
   return kind === "buy" || kind === "sell" || kind === "dividend";
 }
 
-async function resolveTradeInstrument(symbolInput: string, kind: TradeInstrumentKind, accountCurrency: string): Promise<Instrument> {
+async function resolveTradeInstrument(
+  symbolInput: string,
+  kind: TradeInstrumentKind,
+  accountCurrency: string,
+  hint?: StockSearchHit | StockQuote | null,
+): Promise<Instrument> {
   const symbol = symbolInput.trim().toUpperCase();
   if (!symbol) throw new Error("symbol required");
 
@@ -224,21 +257,20 @@ async function resolveTradeInstrument(symbolInput: string, kind: TradeInstrument
   const exact = (existing.instruments ?? []).find(ins => ins.symbol.toUpperCase() === symbol && ins.kind === kind);
   if (exact) return exact;
 
-  let name = symbol;
-  let exchange = "";
-  let quoteCurrency = accountCurrency;
-  try {
-    const r = await fetch(`/api/apps/stocks/search?q=${encodeURIComponent(symbol)}&limit=5`, { credentials: "include" });
-    if (r.ok) {
-      const body = await r.json() as { results?: StockSearchHit[] };
+  let name = hint?.name || hint?.symbol || symbol;
+  let exchange = hint?.exchange || "";
+  let quoteCurrency = (hint?.currency || accountCurrency).toUpperCase();
+  if (!hint) {
+    try {
+      const body = await api<StockSearchResponse>(`/stocks/search?query=${encodeURIComponent(symbol)}&limit=5`);
       const hit = (body.results ?? []).find(x => (x.symbol ?? "").toUpperCase() === symbol) ?? body.results?.[0];
       if (hit) {
         name = hit.name || hit.symbol || symbol;
         exchange = hit.exchange || "";
         quoteCurrency = (hit.currency || accountCurrency).toUpperCase();
       }
-    }
-  } catch {}
+    } catch {}
+  }
 
   return api<Instrument>("/instruments", {
     method: "POST",
@@ -263,6 +295,11 @@ function parseTradeGross(quantity: string, unitPrice: string): number {
   const price = Number(unitPrice.trim().replace(",", "."));
   if (!Number.isFinite(price) || price <= 0) throw new Error("price must be positive");
   return parseMoneyDecimal((qty * price).toFixed(2));
+}
+
+function fmtDecimal(n: number | undefined | null, digits = 2): string {
+  if (n == null || !Number.isFinite(n)) return "";
+  return n.toFixed(digits).replace(/\.?0+$/, "");
 }
 
 function fmtMoney(minor: number, currency: string, opts?: { signed?: boolean }): string {
@@ -1035,6 +1072,13 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
   const [kind, setKind] = useState<TxnKind>(INVESTMENT_ACCOUNT_KINDS.has(account.kind) ? "buy" : "expense");
   const [instrumentKind, setInstrumentKind] = useState<TradeInstrumentKind>("stock");
   const [symbol, setSymbol] = useState("");
+  const [selectedStock, setSelectedStock] = useState<StockSearchHit | null>(null);
+  const [stockMatches, setStockMatches] = useState<StockSearchHit[]>([]);
+  const [quote, setQuote] = useState<StockQuote | null>(null);
+  const [stockStatus, setStockStatus] = useState("");
+  const [autoPrice, setAutoPrice] = useState(false);
+  const [importDividends, setImportDividends] = useState(true);
+  const [importResult, setImportResult] = useState<DividendImportResult | null>(null);
   const [quantity, setQuantity] = useState("");
   const [unitPrice, setUnitPrice] = useState("");
   const [fee, setFee] = useState("");
@@ -1044,12 +1088,93 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
   const [memo, setMemo] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const investment = isInvestmentTxnKind(kind);
+  const trade = kind === "buy" || kind === "sell";
+
+  useEffect(() => {
+    const q = symbol.trim().toUpperCase();
+    if (!investment || q.length < 1) {
+      setStockMatches([]);
+      setQuote(null);
+      setStockStatus("");
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      setStockStatus("Searching stocks...");
+      try {
+        const search = await api<StockSearchResponse>(`/stocks/search?query=${encodeURIComponent(q)}&limit=6`);
+        if (cancelled) return;
+        setStockMatches(search.results ?? []);
+        const exact = (search.results ?? []).find(x => (x.symbol ?? "").toUpperCase() === q);
+        if (exact && !selectedStock) setSelectedStock(exact);
+        if (exact?.price && trade && (!unitPrice || autoPrice)) {
+          setUnitPrice(exact.price.toFixed(2));
+          setAutoPrice(true);
+        }
+        try {
+          const gotQuote = await api<StockQuote>(`/stocks/quote?symbol=${encodeURIComponent(q)}`);
+          if (cancelled) return;
+          setQuote(gotQuote);
+          setStockStatus("");
+          if (gotQuote.price > 0 && trade && (!unitPrice || autoPrice)) {
+            setUnitPrice(gotQuote.price.toFixed(2));
+            setAutoPrice(true);
+          }
+        } catch {
+          if (!cancelled) setStockStatus(search.results?.length ? "" : "Linked stocks has no match yet.");
+        }
+      } catch {
+        if (!cancelled) {
+          setStockMatches([]);
+          setQuote(null);
+          setStockStatus("Link stocks to enable symbol search, quotes, and dividend import.");
+        }
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [investment, symbol, kind]);
+
+  const applyStockHit = (hit: StockSearchHit) => {
+    const next = (hit.symbol ?? "").toUpperCase();
+    setSelectedStock(hit);
+    setSymbol(next);
+    if (hit.price && trade) {
+      setUnitPrice(hit.price.toFixed(2));
+      setAutoPrice(true);
+    }
+  };
+
+  const importDividendsFor = async (instrument: Instrument): Promise<DividendImportResult> => {
+    const result = await api<DividendImportResult>("/stocks/dividends/import", {
+      method: "POST",
+      body: JSON.stringify({ account_id: account.id, instrument_id: instrument.id }),
+    });
+    setImportResult(result);
+    return result;
+  };
+
+  const importDividendsNow = async () => {
+    setBusy(true); setErr(""); setImportResult(null);
+    try {
+      const instrument = await resolveTradeInstrument(symbol, instrumentKind, account.currency, quote ?? selectedStock);
+      await importDividendsFor(instrument);
+      setBusy(false);
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+
   const submit = async () => {
     setBusy(true); setErr("");
     try {
       const posted_at = postedAt + "T00:00:00Z";
       if (isInvestmentTxnKind(kind)) {
-        const instrument = await resolveTradeInstrument(symbol, instrumentKind, account.currency);
+        const instrument = await resolveTradeInstrument(symbol, instrumentKind, account.currency, quote ?? selectedStock);
         const baseBody = {
           account_id: account.id,
           instrument_id: instrument.id,
@@ -1073,6 +1198,9 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
             method: "POST",
             body: JSON.stringify({ ...baseBody, quantity: qty, amount: gross, fee: feeMinor }),
           });
+          if (importDividends) {
+            await importDividendsFor(instrument);
+          }
         }
       } else {
         const minor = parseMoneyDecimal(amount || "0");
@@ -1093,8 +1221,7 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
       setBusy(false);
     }
   };
-  const investment = isInvestmentTxnKind(kind);
-  const trade = kind === "buy" || kind === "sell";
+  const quoteCurrency = quote?.currency || selectedStock?.currency || account.currency;
   return (
     <Dialog title={`New transaction — ${account.name}`} onClose={onClose}>
       <Field label="Kind">
@@ -1113,28 +1240,81 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
               </select>
             </Field>
             <Field label="Symbol">
-              <input value={symbol} onChange={e => setSymbol(e.target.value.toUpperCase())} className="input uppercase" placeholder="AAPL" autoFocus />
+              <input
+                value={symbol}
+                onChange={e => { setSymbol(e.target.value.toUpperCase()); setSelectedStock(null); setImportResult(null); }}
+                className="input uppercase"
+                placeholder="AAPL"
+                autoFocus
+              />
             </Field>
           </div>
+          {(stockMatches.length > 0 || quote || stockStatus) && (
+            <div className="rounded-md border border-border-subtle bg-bg-hover/40 p-2 text-xs">
+              {stockMatches.length > 0 && (
+                <div className="mb-2 grid gap-1">
+                  {stockMatches.slice(0, 4).map(hit => (
+                    <button
+                      key={`${hit.symbol}-${hit.exchange}`}
+                      onClick={() => applyStockHit(hit)}
+                      className="flex items-center justify-between rounded px-2 py-1 text-left hover:bg-bg-hover"
+                    >
+                      <span className="min-w-0">
+                        <span className="font-medium">{hit.symbol}</span>
+                        <span className="ml-2 truncate text-text-muted">{hit.name}</span>
+                      </span>
+                      <span className="shrink-0 text-text-muted">
+                        {hit.price ? `${hit.currency ?? account.currency} ${fmtDecimal(hit.price)}` : hit.exchange}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {quote && (
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-text-muted">
+                  <span className="font-medium text-text">{quote.symbol}</span>
+                  <span>{quoteCurrency} {fmtDecimal(quote.price)}</span>
+                  {quote.change_pct != null && <span className={quote.change_pct >= 0 ? "text-success" : "text-error"}>{fmtPct(quote.change_pct)}</span>}
+                  {quote.dividend_yield_pct != null && <span>yield {fmtPct(quote.dividend_yield_pct)}</span>}
+                  {quote.dividend_frequency && quote.dividend_frequency !== "none" && <span>{quote.dividend_frequency}</span>}
+                </div>
+              )}
+              {!quote && stockStatus && <div className="text-text-muted">{stockStatus}</div>}
+            </div>
+          )}
           {trade ? (
             <>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Quantity">
                   <input value={quantity} onChange={e => setQuantity(e.target.value)} className="input" placeholder="10" />
                 </Field>
-                <Field label={`Price / share (${account.currency})`}>
-                  <input value={unitPrice} onChange={e => setUnitPrice(e.target.value)} className="input" placeholder="0.00" />
+                <Field label={`Price / share (${quoteCurrency})`}>
+                  <input value={unitPrice} onChange={e => { setUnitPrice(e.target.value); setAutoPrice(false); }} className="input" placeholder="0.00" />
                 </Field>
               </div>
               <Field label={`Fee (${account.currency})`}>
                 <input value={fee} onChange={e => setFee(e.target.value)} className="input" placeholder="0.00" />
               </Field>
+              <label className="flex items-center gap-2 text-sm text-text-muted">
+                <input type="checkbox" checked={importDividends} onChange={e => setImportDividends(e.target.checked)} />
+                Import linked dividend payouts after saving
+              </label>
             </>
           ) : (
             <Field label={`Amount (${account.currency})`}>
               <input value={amount} onChange={e => setAmount(e.target.value)} className="input" placeholder="0.00" />
             </Field>
           )}
+          <div className="flex items-center justify-between gap-3">
+            <button onClick={importDividendsNow} disabled={busy || !symbol} className="btn-secondary">
+              Import dividends
+            </button>
+            {importResult && (
+              <span className="text-xs text-text-muted">
+                {importResult.imported} imported, {importResult.skipped} skipped
+              </span>
+            )}
+          </div>
         </>
       ) : (
         <Field label={`Amount (${account.currency})`}>

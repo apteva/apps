@@ -92,6 +92,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/txns/dividend", Handler: a.handleTxnsDividend},
 		{Pattern: "/txns/interest", Handler: a.handleTxnsInterest},
 		{Pattern: "/txns/transfer", Handler: a.handleTxnsTransfer},
+		{Pattern: "/stocks/search", Handler: a.handleStocksSearch},
+		{Pattern: "/stocks/quote", Handler: a.handleStocksQuote},
+		{Pattern: "/stocks/dividends/import", Handler: a.handleStocksDividendsImport},
 		{Pattern: "/valuations", Handler: a.handleValuations},
 		{Pattern: "/categories", Handler: a.handleCategories},
 		{Pattern: "/categories/", Handler: a.handleCategoriesItem},
@@ -289,6 +292,28 @@ func (a *App) MCPTools() []sdk.Tool {
 				"memo":            map[string]any{"type": "string"},
 			}, []string{"from_account_id", "to_account_id", "amount", "posted_at"}),
 			Handler: a.toolTxnsTransfer},
+
+		{Name: "stocks_search", Description: "Search linked stocks app for symbols. Requires optional stocks dependency. Args: query, limit?.",
+			InputSchema: schemaObject(map[string]any{
+				"query": map[string]any{"type": "string"},
+				"limit": map[string]any{"type": "integer"},
+			}, []string{"query"}),
+			Handler: a.toolStocksSearch},
+		{Name: "stocks_quote", Description: "Fetch a linked stocks quote and persist the latest price when instrument_id is supplied. Args: symbol? or instrument_id?.",
+			InputSchema: schemaObject(map[string]any{
+				"symbol":        map[string]any{"type": "string"},
+				"instrument_id": map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolStocksQuote},
+		{Name: "stocks_dividends_import", Description: "Import cash dividend transactions from linked stocks app for an account holding. Args: account_id, instrument_id, from?, to?, dry_run?.",
+			InputSchema: schemaObject(map[string]any{
+				"account_id":    map[string]any{"type": "integer"},
+				"instrument_id": map[string]any{"type": "integer"},
+				"from":          map[string]any{"type": "string"},
+				"to":            map[string]any{"type": "string"},
+				"dry_run":       map[string]any{"type": "boolean"},
+			}, []string{"account_id", "instrument_id"}),
+			Handler: a.toolStocksDividendsImport},
 
 		{Name: "valuation_set", Description: "Re-value an illiquid holding. Writes a `prices` row + audit 'valuation' transaction. Args: instrument_id, value (per-unit minor units in instrument.quote_currency), as_of?, account_id?, memo?.",
 			InputSchema: schemaObject(map[string]any{
@@ -1892,9 +1917,53 @@ type storedPrice struct {
 }
 
 type stockQuoteResult struct {
-	Symbol   string  `json:"symbol"`
-	Currency string  `json:"currency"`
-	Price    float64 `json:"price"`
+	Symbol              string   `json:"symbol"`
+	Name                string   `json:"name,omitempty"`
+	Exchange            string   `json:"exchange,omitempty"`
+	Currency            string   `json:"currency"`
+	Type                string   `json:"type,omitempty"`
+	Price               float64  `json:"price"`
+	ChangePct           float64  `json:"change_pct,omitempty"`
+	DividendYieldPct    *float64 `json:"dividend_yield_pct,omitempty"`
+	DividendFrequency   string   `json:"dividend_frequency,omitempty"`
+	DividendGrowth5YPct *float64 `json:"dividend_growth_5y_pct,omitempty"`
+	PreviousClose       float64  `json:"previous_close,omitempty"`
+	FiftyTwoWeekHigh    float64  `json:"fifty_two_week_high,omitempty"`
+	FiftyTwoWeekLow     float64  `json:"fifty_two_week_low,omitempty"`
+	LastDividend        any      `json:"last_dividend,omitempty"`
+	InstrumentID        int64    `json:"instrument_id,omitempty"`
+	PriceMinor          int64    `json:"price_minor,omitempty"`
+}
+
+type stockSearchHit struct {
+	Symbol      string   `json:"symbol"`
+	Name        string   `json:"name"`
+	Exchange    string   `json:"exchange,omitempty"`
+	Sector      string   `json:"sector,omitempty"`
+	Currency    string   `json:"currency,omitempty"`
+	Price       *float64 `json:"price,omitempty"`
+	ChangePct   *float64 `json:"change_pct,omitempty"`
+	YieldPct    *float64 `json:"yield_pct,omitempty"`
+	PE          *float64 `json:"pe,omitempty"`
+	PayoutPct   *float64 `json:"payout_pct,omitempty"`
+	GrowthPct   *float64 `json:"growth_pct,omitempty"`
+	RefreshedAt *int64   `json:"refreshed_at,omitempty"`
+}
+
+type stockSearchResult struct {
+	Results []stockSearchHit `json:"results"`
+	Count   int              `json:"count"`
+}
+
+type stockDividendPayment struct {
+	ExDate int64   `json:"ex_date"`
+	Amount float64 `json:"amount"`
+}
+
+type stockDividendsResult struct {
+	Symbol  string                 `json:"symbol"`
+	Summary map[string]any         `json:"summary"`
+	History []stockDividendPayment `json:"history"`
 }
 
 func currentPrice(ctx *sdk.AppCtx, instrumentID int64, asOf time.Time) (int64, bool) {
@@ -1968,6 +2037,220 @@ func refreshStockPrice(ctx *sdk.AppCtx, instrumentID int64, asOf time.Time) (int
 		return 0, false
 	}
 	return price, true
+}
+
+func callStocksResult(ctx *sdk.AppCtx, tool string, input map[string]any, out any) error {
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return errors.New("stocks app is not linked")
+	}
+	if err := ctx.PlatformAPI().CallAppResult("stocks", tool, input, out); err != nil {
+		return fmt.Errorf("stocks %s: %w", tool, err)
+	}
+	return nil
+}
+
+func (a *App) toolStocksSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	q := strings.TrimSpace(strArg(args, "query", ""))
+	if q == "" {
+		return nil, errors.New("query required")
+	}
+	limit := intArg(args, "limit", 8)
+	if limit <= 0 || limit > 25 {
+		limit = 8
+	}
+	var out stockSearchResult
+	if err := callStocksResult(ctx, "search", map[string]any{"query": q, "limit": limit}, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (a *App) toolStocksQuote(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	instrumentID := int64(intArg(args, "instrument_id", 0))
+	symbol := strings.TrimSpace(strArg(args, "symbol", ""))
+	var ins Instrument
+	if instrumentID != 0 {
+		var err error
+		ins, err = readInstrument(ctx, instrumentID)
+		if err != nil {
+			return nil, err
+		}
+		symbol = ins.Symbol
+	}
+	if symbol == "" {
+		return nil, errors.New("symbol or instrument_id required")
+	}
+	var quote stockQuoteResult
+	if err := callStocksResult(ctx, "get", map[string]any{"symbol": strings.ToUpper(symbol)}, &quote); err != nil {
+		return nil, err
+	}
+	if quote.Price > 0 {
+		quote.PriceMinor = int64(math.Round(quote.Price * 100))
+	}
+	if instrumentID != 0 && quote.PriceMinor > 0 {
+		if quote.Currency == "" || ins.QuoteCurrency == "" || strings.EqualFold(quote.Currency, ins.QuoteCurrency) {
+			asOf := time.Now().UTC().Format(time.RFC3339)
+			_, _ = ctx.AppDB().Exec(
+				`INSERT OR REPLACE INTO prices (instrument_id, as_of, price, source) VALUES (?, ?, ?, ?)`,
+				instrumentID, asOf, quote.PriceMinor, "stocks",
+			)
+			quote.InstrumentID = instrumentID
+		}
+	}
+	return quote, nil
+}
+
+func (a *App) toolStocksDividendsImport(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	accountID := int64(intArg(args, "account_id", 0))
+	instrumentID := int64(intArg(args, "instrument_id", 0))
+	if accountID == 0 || instrumentID == 0 {
+		return nil, errors.New("account_id and instrument_id required")
+	}
+	acc, err := readAccount(ctx, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("account %d not found", accountID)
+	}
+	ins, err := readInstrument(ctx, instrumentID)
+	if err != nil {
+		return nil, err
+	}
+	if !contains([]string{"stock", "etf"}, ins.Kind) {
+		return nil, fmt.Errorf("instrument %d is %s, not stock/etf", instrumentID, ins.Kind)
+	}
+	if ins.QuoteCurrency != "" && acc.Currency != "" && !strings.EqualFold(ins.QuoteCurrency, acc.Currency) {
+		return nil, fmt.Errorf("dividend import requires account currency (%s) to match instrument quote currency (%s)", acc.Currency, ins.QuoteCurrency)
+	}
+	holdingID, err := holdingIDForAccountInstrument(ctx, accountID, instrumentID)
+	if err != nil {
+		return nil, err
+	}
+	from, to := time.Time{}, time.Now().UTC()
+	if s := strArg(args, "from", ""); s != "" {
+		if from, err = parseFlexibleTime(s); err != nil {
+			return nil, err
+		}
+	}
+	if s := strArg(args, "to", ""); s != "" {
+		if to, err = parseFlexibleTime(s); err != nil {
+			return nil, err
+		}
+	}
+	dryRun := boolArg(args, "dry_run", false)
+
+	var divs stockDividendsResult
+	if err := callStocksResult(ctx, "dividends", map[string]any{"symbol": ins.Symbol}, &divs); err != nil {
+		return nil, err
+	}
+	imported := []Transaction{}
+	candidates := []map[string]any{}
+	skipped := 0
+	for i := len(divs.History) - 1; i >= 0; i-- {
+		d := divs.History[i]
+		if d.ExDate <= 0 || d.Amount <= 0 {
+			skipped++
+			continue
+		}
+		postedAt := time.Unix(d.ExDate, 0).UTC()
+		if !from.IsZero() && postedAt.Before(from) {
+			continue
+		}
+		if postedAt.After(to) {
+			continue
+		}
+		qty, err := quantityAt(ctx, accountID, holdingID, postedAt)
+		if err != nil {
+			return nil, err
+		}
+		if qty <= 0 {
+			skipped++
+			continue
+		}
+		amount := int64(math.Round(d.Amount * qty * 100))
+		if amount <= 0 {
+			skipped++
+			continue
+		}
+		externalID := fmt.Sprintf("stocks:dividend:%s:%d", strings.ToUpper(ins.Symbol), d.ExDate)
+		candidate := map[string]any{
+			"posted_at":        postedAt.Format(time.RFC3339),
+			"symbol":           ins.Symbol,
+			"quantity":         qty,
+			"amount":           amount,
+			"currency":         acc.Currency,
+			"per_share":        d.Amount,
+			"external_id":      externalID,
+			"already_imported": txnExternalIDExists(ctx, accountID, externalID),
+		}
+		candidates = append(candidates, candidate)
+		if candidate["already_imported"].(bool) {
+			skipped++
+			continue
+		}
+		if dryRun {
+			continue
+		}
+		id, err := insertTxn(ctx, txnIn{
+			AccountID:  accountID,
+			HoldingID:  holdingID,
+			PostedAt:   postedAt.Format(time.RFC3339),
+			Kind:       "dividend",
+			Amount:     amount,
+			Currency:   acc.Currency,
+			Payee:      strings.ToUpper(ins.Symbol),
+			Memo:       fmt.Sprintf("Dividend %s @ %.6g/share", strings.ToUpper(ins.Symbol), d.Amount),
+			ExternalID: externalID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		txn, _ := readTxn(ctx, id)
+		imported = append(imported, txn)
+	}
+	ctx.Emit("stocks.dividends.imported", map[string]any{
+		"account_id": accountID, "instrument_id": instrumentID, "imported": len(imported), "dry_run": dryRun,
+	})
+	return map[string]any{
+		"symbol":     ins.Symbol,
+		"dry_run":    dryRun,
+		"imported":   len(imported),
+		"skipped":    skipped,
+		"candidates": candidates,
+		"txns":       imported,
+		"summary":    divs.Summary,
+	}, nil
+}
+
+func holdingIDForAccountInstrument(ctx *sdk.AppCtx, accountID, instrumentID int64) (int64, error) {
+	var id int64
+	if err := ctx.AppDB().QueryRow(
+		`SELECT id FROM holdings WHERE account_id=? AND instrument_id=?`, accountID, instrumentID,
+	).Scan(&id); err != nil {
+		return 0, fmt.Errorf("no holding for account=%d instrument=%d", accountID, instrumentID)
+	}
+	return id, nil
+}
+
+func quantityAt(ctx *sdk.AppCtx, accountID, holdingID int64, at time.Time) (float64, error) {
+	var qty sql.NullFloat64
+	err := ctx.AppDB().QueryRow(
+		`SELECT SUM(quantity) FROM transactions
+		 WHERE account_id=? AND holding_id=? AND kind IN ('buy','sell') AND posted_at <= ?`,
+		accountID, holdingID, at.UTC().Format(time.RFC3339),
+	).Scan(&qty)
+	if err != nil {
+		return 0, err
+	}
+	if !qty.Valid {
+		return 0, nil
+	}
+	return qty.Float64, nil
+}
+
+func txnExternalIDExists(ctx *sdk.AppCtx, accountID int64, externalID string) bool {
+	var id int64
+	return ctx.AppDB().QueryRow(
+		`SELECT id FROM transactions WHERE account_id=? AND external_id=? LIMIT 1`, accountID, externalID,
+	).Scan(&id) == nil
 }
 
 // convertCcy converts a minor-units amount from one currency to
@@ -3238,6 +3521,40 @@ func (a *App) handleTxnsInterest(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleTxnsTransfer(w http.ResponseWriter, r *http.Request) {
 	postBody(w, r, a.toolTxnsTransfer)
 }
+func (a *App) handleStocksSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET", http.StatusMethodNotAllowed)
+		return
+	}
+	args := map[string]any{"query": r.URL.Query().Get("query")}
+	if args["query"] == "" {
+		args["query"] = r.URL.Query().Get("q")
+	}
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			args["limit"] = n
+		}
+	}
+	out, err := a.toolStocksSearch(globalCtx, args)
+	writeOrErr(w, out, err)
+}
+func (a *App) handleStocksQuote(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET", http.StatusMethodNotAllowed)
+		return
+	}
+	args := map[string]any{"symbol": r.URL.Query().Get("symbol")}
+	if v := r.URL.Query().Get("instrument_id"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			args["instrument_id"] = float64(n)
+		}
+	}
+	out, err := a.toolStocksQuote(globalCtx, args)
+	writeOrErr(w, out, err)
+}
+func (a *App) handleStocksDividendsImport(w http.ResponseWriter, r *http.Request) {
+	postBody(w, r, a.toolStocksDividendsImport)
+}
 func (a *App) handleValuations(w http.ResponseWriter, r *http.Request) {
 	postBody(w, r, a.toolValuationSet)
 }
@@ -3450,6 +3767,18 @@ func intArgFromAny(v any, def int) int {
 	case string:
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 			return n
+		}
+	}
+	return def
+}
+
+func boolArg(m map[string]any, key string, def bool) bool {
+	switch v := m[key].(type) {
+	case bool:
+		return v
+	case string:
+		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
+			return b
 		}
 	}
 	return def
