@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -538,7 +539,7 @@ func basePageData(ctx *sdk.AppCtx, pid string, siteID int64, settings map[string
 	mainMenu, _ := dbGetMenuBySlug(ctx.AppDB(), pid, siteID, "primary")
 	var rendered []RenderedMenuItem
 	if mainMenu != nil {
-		rendered = renderMenuItems(mainMenu.Items, prefix)
+		rendered = renderMenuItems(mainMenu.Items, prefix, proxiedRenderQuery(r))
 	}
 	return PageData{
 		SiteTitle:     firstNonEmpty(settings["site_title"], "My Site"),
@@ -569,13 +570,13 @@ func computeURLPrefix(r *http.Request) string {
 	return "/"
 }
 
-func renderMenuItems(items []MenuItem, prefix string) []RenderedMenuItem {
+func renderMenuItems(items []MenuItem, prefix, querySuffix string) []RenderedMenuItem {
 	out := make([]RenderedMenuItem, 0, len(items))
 	for _, it := range items {
 		out = append(out, RenderedMenuItem{
 			Label:    it.Label,
-			URL:      resolveMenuURL(it, prefix),
-			Children: renderMenuItems(it.Children, prefix),
+			URL:      resolveMenuURL(it, prefix, querySuffix),
+			Children: renderMenuItems(it.Children, prefix, querySuffix),
 		})
 	}
 	return out
@@ -586,7 +587,7 @@ func renderMenuItems(items []MenuItem, prefix string) []RenderedMenuItem {
 // public render dispatches by slug (/posts/welcome, /about,
 // /category/markets), not by id. Falls back to # when the linked row
 // was deleted (TargetSlug empty).
-func resolveMenuURL(it MenuItem, prefix string) string {
+func resolveMenuURL(it MenuItem, prefix, querySuffix string) string {
 	if it.TargetURL != "" {
 		return it.TargetURL
 	}
@@ -595,16 +596,34 @@ func resolveMenuURL(it MenuItem, prefix string) string {
 	}
 	switch it.TargetKind {
 	case "post":
-		return prefix + "posts/" + it.TargetSlug
+		return prefix + "posts/" + it.TargetSlug + querySuffix
 	case "page":
-		return prefix + it.TargetSlug
+		return prefix + it.TargetSlug + querySuffix
 	case "term":
 		// term slug — both 'category' and 'tag' kinds get the
 		// /category/ route since menu_items doesn't store taxonomy.
-		return prefix + "category/" + it.TargetSlug
+		return prefix + "category/" + it.TargetSlug + querySuffix
 	default:
 		return "#"
 	}
+}
+
+func proxiedRenderQuery(r *http.Request) string {
+	if r.Header.Get("X-Apteva-App-Install-ID") == "" {
+		return ""
+	}
+	q := r.URL.Query()
+	out := make([]string, 0, 2)
+	if v := strings.TrimSpace(q.Get("project_id")); v != "" {
+		out = append(out, "project_id="+url.QueryEscape(v))
+	}
+	if v := strings.TrimSpace(q.Get("site")); v != "" {
+		out = append(out, "site="+url.QueryEscape(v))
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	return "?" + strings.Join(out, "&")
 }
 
 func firstNonEmpty(vals ...string) string {

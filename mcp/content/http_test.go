@@ -23,3 +23,24 @@ func TestComputeURLPrefix_DomainLinkedRequestUsesRoot(t *testing.T) {
 		t.Fatalf("computeURLPrefix() = %q, want /", got)
 	}
 }
+
+func TestResolveMenuURL_ProxiedPageKeepsProjectAndSite(t *testing.T) {
+	r := httptest.NewRequest("GET", "/home?project_id=proj-1&site=clawengine", nil)
+	r.Header.Set("X-Apteva-App-Install-ID", "51")
+
+	got := resolveMenuURL(MenuItem{TargetKind: "page", TargetSlug: "pricing"}, computeURLPrefix(r), proxiedRenderQuery(r))
+	want := "/api/apps/content/pricing?project_id=proj-1&site=clawengine"
+	if got != want {
+		t.Fatalf("resolveMenuURL() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveMenuURL_DomainLinkedPageStaysRootRelative(t *testing.T) {
+	r := httptest.NewRequest("GET", "/home?project_id=proj-1&site=clawengine", nil)
+	r.Header.Set("X-Forwarded-Host", "clawengine.example.com")
+
+	got := resolveMenuURL(MenuItem{TargetKind: "page", TargetSlug: "pricing"}, computeURLPrefix(r), proxiedRenderQuery(r))
+	if got != "/pricing" {
+		t.Fatalf("resolveMenuURL() = %q, want /pricing", got)
+	}
+}
