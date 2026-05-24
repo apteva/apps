@@ -54,8 +54,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("finance requires a db block")
 	}
 	globalCtx = ctx
-	// Ensure a settings row exists for the project.
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	// Ensure a settings row exists for the project when mounted as a
+	// project-scoped install. Global installs create settings lazily per
+	// dispatched project via CurrentProject.
+	pid := projectID(ctx)
 	if pid != "" {
 		_, _ = ctx.AppDB().Exec(
 			`INSERT OR IGNORE INTO settings (project_id, base_currency) VALUES (?, 'EUR')`,
@@ -115,8 +117,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler:     a.toolSettingsGet},
 		{Name: "settings_set", Description: "Update project settings. Args: base_currency?, week_starts_on?.",
 			InputSchema: schemaObject(map[string]any{
-				"base_currency":   map[string]any{"type": "string"},
-				"week_starts_on":  map[string]any{"type": "string", "enum": []string{"mon", "sun"}},
+				"base_currency":  map[string]any{"type": "string"},
+				"week_starts_on": map[string]any{"type": "string", "enum": []string{"mon", "sun"}},
 			}, nil),
 			Handler: a.toolSettingsSet},
 
@@ -435,9 +437,9 @@ func isInstrumentShared(kind string) bool {
 // ─── Types ───────────────────────────────────────────────────────
 
 type Settings struct {
-	ProjectID     string `json:"project_id"`
-	BaseCurrency  string `json:"base_currency"`
-	WeekStartsOn  string `json:"week_starts_on"`
+	ProjectID    string `json:"project_id"`
+	BaseCurrency string `json:"base_currency"`
+	WeekStartsOn string `json:"week_starts_on"`
 }
 
 type Account struct {
@@ -457,9 +459,9 @@ type Account struct {
 	SyncError      string `json:"sync_error,omitempty"`
 	CreatedAt      string `json:"created_at"`
 	// Computed
-	CashBalance  int64 `json:"cash_balance"`
-	HoldingsValue int64 `json:"holdings_value"`  // in account.currency
-	TotalValue   int64  `json:"total_value"`     // cash + holdings, account.currency
+	CashBalance   int64 `json:"cash_balance"`
+	HoldingsValue int64 `json:"holdings_value"` // in account.currency
+	TotalValue    int64 `json:"total_value"`    // cash + holdings, account.currency
 }
 
 type Instrument struct {
@@ -476,16 +478,16 @@ type Instrument struct {
 }
 
 type Holding struct {
-	ID            int64   `json:"id"`
-	AccountID     int64   `json:"account_id"`
-	InstrumentID  int64   `json:"instrument_id"`
-	Quantity      float64 `json:"quantity"`
-	CostBasis     int64   `json:"cost_basis"`
-	OpenedAt      string  `json:"opened_at,omitempty"`
-	ClosedAt      string  `json:"closed_at,omitempty"`
+	ID           int64   `json:"id"`
+	AccountID    int64   `json:"account_id"`
+	InstrumentID int64   `json:"instrument_id"`
+	Quantity     float64 `json:"quantity"`
+	CostBasis    int64   `json:"cost_basis"`
+	OpenedAt     string  `json:"opened_at,omitempty"`
+	ClosedAt     string  `json:"closed_at,omitempty"`
 	// Computed
 	CurrentPrice  *int64  `json:"current_price,omitempty"`
-	CurrentValue  int64   `json:"current_value"`   // in account.currency
+	CurrentValue  int64   `json:"current_value"` // in account.currency
 	UnrealizedPL  int64   `json:"unrealized_pl"`
 	UnrealizedPct float64 `json:"unrealized_pct"`
 }
@@ -576,7 +578,7 @@ func (a *App) toolSettingsGet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func (a *App) toolSettingsSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := projectID()
+	pid := projectID(ctx)
 	cols, vals := []string{}, []any{}
 	if v := strArg(args, "base_currency", ""); v != "" {
 		cols = append(cols, "base_currency=?")
@@ -601,7 +603,7 @@ func (a *App) toolSettingsSet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func loadSettings(ctx *sdk.AppCtx) (Settings, error) {
-	pid := projectID()
+	pid := projectID(ctx)
 	var s Settings
 	err := ctx.AppDB().QueryRow(
 		`SELECT project_id, base_currency, week_starts_on FROM settings WHERE project_id=?`, pid,
@@ -619,7 +621,7 @@ func loadSettings(ctx *sdk.AppCtx) (Settings, error) {
 // ─── Accounts ────────────────────────────────────────────────────
 
 func (a *App) toolAccountsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := projectID()
+	pid := projectID(ctx)
 	rows, err := ctx.AppDB().Query(
 		`SELECT id, project_id, name, kind, source, COALESCE(connection_id,''),
 		        COALESCE(external_id,''), currency, opening_balance, opening_at,
@@ -682,7 +684,7 @@ func (a *App) toolAccountsCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	color := strArg(args, "color", "#3b82f6")
 	openBal := int64(intArg(args, "opening_balance", 0))
 	openAt := strArg(args, "opening_at", time.Now().UTC().Format(time.RFC3339))
-	pid := projectID()
+	pid := projectID(ctx)
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO accounts (project_id, name, kind, currency, opening_balance, opening_at, color)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -814,7 +816,7 @@ func mustHoldingsValue(ctx *sdk.AppCtx, accountID int64, accountCcy string) int6
 	var total int64
 	now := time.Now().UTC()
 	for _, d := range bare {
-		price, ok := latestPrice(ctx, d.iid, now)
+		price, ok := currentPrice(ctx, d.iid, now)
 		if !ok {
 			continue
 		}
@@ -831,7 +833,7 @@ func (a *App) toolInstrumentsSearch(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if q == "" {
 		return nil, errors.New("query required")
 	}
-	pid := projectID()
+	pid := projectID(ctx)
 	kindFilter := strArg(args, "kind", "")
 	projectOnly, _ := args["project_only"].(bool)
 
@@ -892,7 +894,7 @@ func (a *App) toolInstrumentsCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	}
 	// Shared catalog kinds default to project_id NULL; project_only
 	// flag forces a private row. Private kinds are always scoped.
-	pid := projectID()
+	pid := projectID(ctx)
 	var projectScope sql.NullString
 	if isInstrumentShared(kind) {
 		projectOnly, _ := args["project_only"].(bool)
@@ -1093,7 +1095,7 @@ func listHoldingsRich(ctx *sdk.AppCtx, accountID, instrumentID int64, includeClo
 	now := time.Now().UTC()
 	for _, d := range bare {
 		h := d.h
-		if price, ok := latestPrice(ctx, h.InstrumentID, now); ok {
+		if price, ok := currentPrice(ctx, h.InstrumentID, now); ok {
 			h.CurrentPrice = &price
 			valueInQuote := int64(math.Round(h.Quantity * float64(price)))
 			h.CurrentValue = convertCcy(ctx, valueInQuote, d.quoteCcy, d.accCcy)
@@ -1511,13 +1513,13 @@ func (a *App) toolTxnsDividend(ctx *sdk.AppCtx, args map[string]any) (any, error
 	var hid int64
 	_ = ctx.AppDB().QueryRow(`SELECT id FROM holdings WHERE account_id=? AND instrument_id=?`, accountID, instrumentID).Scan(&hid)
 	id, err := insertTxn(ctx, txnIn{
-		AccountID:    accountID,
-		HoldingID:    hid,
-		PostedAt:     postedAt,
-		Kind:         "dividend",
-		Amount:       amount,
-		Currency:     acc.Currency,
-		Memo:         strArg(args, "memo", ""),
+		AccountID: accountID,
+		HoldingID: hid,
+		PostedAt:  postedAt,
+		Kind:      "dividend",
+		Amount:    amount,
+		Currency:  acc.Currency,
+		Memo:      strArg(args, "memo", ""),
 	})
 	if err != nil {
 		return nil, err
@@ -1653,7 +1655,7 @@ func (a *App) toolValuationSet(ctx *sdk.AppCtx, args map[string]any) (any, error
 // ─── Categories ──────────────────────────────────────────────────
 
 func (a *App) toolCategoriesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := projectID()
+	pid := projectID(ctx)
 	rows, err := ctx.AppDB().Query(
 		`SELECT id, project_id, COALESCE(parent_id,0), name, kind, color, archived, created_at
 		 FROM categories WHERE project_id=? ORDER BY kind, parent_id NULLS FIRST, name`, pid,
@@ -1686,7 +1688,7 @@ func (a *App) toolCategoriesCreate(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}
 	parentID := int64(intArg(args, "parent_id", 0))
 	color := strArg(args, "color", "#94a3b8")
-	pid := projectID()
+	pid := projectID(ctx)
 	var parentVal any
 	if parentID > 0 {
 		parentVal = parentID
@@ -1746,7 +1748,7 @@ func (a *App) toolCategoriesDelete(ctx *sdk.AppCtx, args map[string]any) (any, e
 }
 
 func (a *App) toolCategoriesSeed(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := projectID()
+	pid := projectID(ctx)
 	type cat struct {
 		name, kind, parent string
 	}
@@ -1857,7 +1859,7 @@ func (a *App) toolPricesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("as_of: %w", err)
 	}
-	price, ok := latestPrice(ctx, iid, asOfT)
+	price, ok := currentPrice(ctx, iid, asOfT)
 	if !ok {
 		return map[string]any{"instrument_id": iid, "as_of": asOf, "price": nil}, nil
 	}
@@ -1881,13 +1883,88 @@ func (a *App) toolFXSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{"base": base, "quote": quote, "as_of": asOf, "rate": rate}, nil
 }
 
+const stockPriceFreshFor = 15 * time.Minute
+
+type storedPrice struct {
+	Price  int64
+	AsOf   time.Time
+	Source string
+}
+
+type stockQuoteResult struct {
+	Symbol   string  `json:"symbol"`
+	Currency string  `json:"currency"`
+	Price    float64 `json:"price"`
+}
+
+func currentPrice(ctx *sdk.AppCtx, instrumentID int64, asOf time.Time) (int64, bool) {
+	if !isNearNow(asOf) {
+		return latestPrice(ctx, instrumentID, asOf)
+	}
+	if p, ok := latestStoredPrice(ctx, instrumentID, asOf); ok && time.Since(p.AsOf) <= stockPriceFreshFor {
+		return p.Price, true
+	}
+	if price, ok := refreshStockPrice(ctx, instrumentID, asOf); ok {
+		return price, true
+	}
+	return latestPrice(ctx, instrumentID, asOf)
+}
+
+func isNearNow(t time.Time) bool {
+	return time.Since(t) >= -stockPriceFreshFor && time.Since(t) <= 24*time.Hour
+}
+
 func latestPrice(ctx *sdk.AppCtx, instrumentID int64, asOf time.Time) (int64, bool) {
-	var price int64
+	p, ok := latestStoredPrice(ctx, instrumentID, asOf)
+	return p.Price, ok
+}
+
+func latestStoredPrice(ctx *sdk.AppCtx, instrumentID int64, asOf time.Time) (storedPrice, bool) {
+	var p storedPrice
+	var asOfStr string
 	err := ctx.AppDB().QueryRow(
-		`SELECT price FROM prices WHERE instrument_id=? AND as_of <= ? ORDER BY as_of DESC LIMIT 1`,
+		`SELECT price, as_of, source FROM prices WHERE instrument_id=? AND as_of <= ? ORDER BY as_of DESC LIMIT 1`,
 		instrumentID, asOf.UTC().Format(time.RFC3339),
-	).Scan(&price)
+	).Scan(&p.Price, &asOfStr, &p.Source)
 	if err != nil {
+		return p, false
+	}
+	t, err := time.Parse(time.RFC3339, asOfStr)
+	if err != nil {
+		return p, true
+	}
+	p.AsOf = t
+	return p, true
+}
+
+func refreshStockPrice(ctx *sdk.AppCtx, instrumentID int64, asOf time.Time) (int64, bool) {
+	ins, err := readInstrument(ctx, instrumentID)
+	if err != nil || !contains([]string{"stock", "etf"}, ins.Kind) || ins.Symbol == "" {
+		return 0, false
+	}
+	api := ctx.PlatformAPI()
+	if api == nil {
+		return 0, false
+	}
+	var quote stockQuoteResult
+	if err := api.CallAppResult("stocks", "get", map[string]any{"symbol": ins.Symbol}, &quote); err != nil {
+		return 0, false
+	}
+	if quote.Price <= 0 {
+		return 0, false
+	}
+	if quote.Currency != "" && ins.QuoteCurrency != "" && !strings.EqualFold(quote.Currency, ins.QuoteCurrency) {
+		return 0, false
+	}
+	price := int64(math.Round(quote.Price * 100))
+	if price <= 0 {
+		return 0, false
+	}
+	asOfStr := asOf.UTC().Format(time.RFC3339)
+	if _, err := ctx.AppDB().Exec(
+		`INSERT OR REPLACE INTO prices (instrument_id, as_of, price, source) VALUES (?, ?, ?, ?)`,
+		instrumentID, asOfStr, price, "stocks",
+	); err != nil {
 		return 0, false
 	}
 	return price, true
@@ -1955,12 +2032,12 @@ func (a *App) toolReportsNetWorth(ctx *sdk.AppCtx, args map[string]any) (any, er
 	}
 	total, byAccount, byKind, byCurrency := netWorthBreakdown(ctx, atT, base)
 	return map[string]any{
-		"at":             at,
-		"base_currency":  base,
-		"total":          total,
-		"by_account":     byAccount,
-		"by_kind":        byKind,
-		"by_currency":    byCurrency,
+		"at":            at,
+		"base_currency": base,
+		"total":         total,
+		"by_account":    byAccount,
+		"by_kind":       byKind,
+		"by_currency":   byCurrency,
 	}, nil
 }
 
@@ -1970,7 +2047,7 @@ func netWorthAt(ctx *sdk.AppCtx, at time.Time, base string) int64 {
 }
 
 func netWorthBreakdown(ctx *sdk.AppCtx, at time.Time, base string) (int64, []map[string]any, []map[string]any, []map[string]any) {
-	pid := projectID()
+	pid := projectID(ctx)
 	rows, err := ctx.AppDB().Query(
 		`SELECT id, name, kind, currency, opening_balance FROM accounts WHERE project_id=? AND archived=0`, pid,
 	)
@@ -1978,7 +2055,7 @@ func netWorthBreakdown(ctx *sdk.AppCtx, at time.Time, base string) (int64, []map
 		return 0, nil, nil, nil
 	}
 	type drained struct {
-		id, opening    int64
+		id, opening     int64
 		name, kind, ccy string
 	}
 	bare := []drained{}
@@ -2056,7 +2133,7 @@ func holdingsValueAt(ctx *sdk.AppCtx, accountID int64, accountCcy string, at tim
 	rows.Close()
 	var total int64
 	for _, d := range bare {
-		price, ok := latestPrice(ctx, d.iid, at)
+		price, ok := currentPrice(ctx, d.iid, at)
 		if !ok {
 			continue
 		}
@@ -2069,7 +2146,7 @@ func holdingsValueAt(ctx *sdk.AppCtx, accountID int64, accountCcy string, at tim
 func (a *App) toolReportsAllocation(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	settings, _ := loadSettings(ctx)
 	base := settings.BaseCurrency
-	pid := projectID()
+	pid := projectID(ctx)
 
 	accRows, err := ctx.AppDB().Query(
 		`SELECT a.id, a.kind, a.currency, a.opening_balance
@@ -2118,9 +2195,9 @@ func (a *App) toolReportsAllocation(ctx *sdk.AppCtx, args map[string]any) (any, 
 			continue
 		}
 		type holdBare struct {
-			iid                              int64
-			iKind, sym, name, quoteCcy       string
-			qty                              float64
+			iid                        int64
+			iKind, sym, name, quoteCcy string
+			qty                        float64
 		}
 		bare := []holdBare{}
 		for hRows.Next() {
@@ -2131,7 +2208,7 @@ func (a *App) toolReportsAllocation(ctx *sdk.AppCtx, args map[string]any) (any, 
 		}
 		hRows.Close()
 		for _, d := range bare {
-			price, ok := latestPrice(ctx, d.iid, now)
+			price, ok := currentPrice(ctx, d.iid, now)
 			if !ok {
 				continue
 			}
@@ -2243,14 +2320,14 @@ func (a *App) toolReportsPerformance(ctx *sdk.AppCtx, args map[string]any) (any,
 	unrealized = currentValueBase - costBase
 
 	return map[string]any{
-		"base_currency":      base,
-		"from":               from,
-		"to":                 to,
-		"holdings":           holdings,
-		"cost_basis_total":   costBase,
+		"base_currency":       base,
+		"from":                from,
+		"to":                  to,
+		"holdings":            holdings,
+		"cost_basis_total":    costBase,
 		"current_value_total": currentValueBase,
-		"unrealized_pl":      unrealized,
-		"realized_pl_window": realized,
+		"unrealized_pl":       unrealized,
+		"realized_pl_window":  realized,
 	}, nil
 }
 
@@ -2335,14 +2412,14 @@ func (a *App) toolReportsCashflow(ctx *sdk.AppCtx, args map[string]any) (any, er
 		}
 	}
 	return map[string]any{
-		"base_currency":  base,
-		"from":           from,
-		"to":             to,
-		"bucket":         bucket,
-		"points":         points,
-		"total_income":   totalIncome,
-		"total_expense":  totalExpense,
-		"net":            totalIncome + totalExpense,
+		"base_currency": base,
+		"from":          from,
+		"to":            to,
+		"bucket":        bucket,
+		"points":        points,
+		"total_income":  totalIncome,
+		"total_expense": totalExpense,
+		"net":           totalIncome + totalExpense,
 	}, nil
 }
 
@@ -2564,7 +2641,7 @@ func parseMoneyToMinor(s string) (int64, error) {
 // ─── Budgets ─────────────────────────────────────────────────────
 
 func (a *App) toolBudgetsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := projectID()
+	pid := projectID(ctx)
 	rows, err := ctx.AppDB().Query(
 		`SELECT id, project_id, COALESCE(category_id,0), period, amount, currency,
 		        starts_at, archived, created_at
@@ -2598,7 +2675,7 @@ func (a *App) toolBudgetsSet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if !contains([]string{"weekly", "monthly", "quarterly", "yearly"}, period) {
 		return nil, fmt.Errorf("period must be one of: weekly, monthly, quarterly, yearly")
 	}
-	pid := projectID()
+	pid := projectID(ctx)
 	settings, _ := loadSettings(ctx)
 	currency := settings.BaseCurrency
 
@@ -2668,7 +2745,7 @@ func (a *App) toolBudgetsStatus(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	periodStart, periodEnd := periodBounds(asOfT, period)
 
-	pid := projectID()
+	pid := projectID(ctx)
 	settings, _ := loadSettings(ctx)
 	base := settings.BaseCurrency
 
@@ -3334,7 +3411,14 @@ func queryToArgs(q map[string][]string, keys []string) map[string]any {
 	return out
 }
 
-func projectID() string { return os.Getenv("APTEVA_PROJECT_ID") }
+func projectID(ctx *sdk.AppCtx) string {
+	if ctx != nil {
+		if pid := ctx.CurrentProject(); pid != "" {
+			return pid
+		}
+	}
+	return os.Getenv("APTEVA_PROJECT_ID")
+}
 
 func schemaObject(props map[string]any, required []string) map[string]any {
 	s := map[string]any{"type": "object", "properties": props}

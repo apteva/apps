@@ -270,6 +270,69 @@ func TestUnit_ValuationFlowsThroughNetWorth(t *testing.T) {
 	}
 }
 
+func TestUnit_StockHoldingValueUsesStocksAppWhenPriceMissing(t *testing.T) {
+	pf := &stockQuotePlatform{quote: map[string]any{
+		"symbol": "AAPL", "currency": "USD", "price": 187.34,
+	}}
+	ctx := newCtxWithPlatform(t, pf)
+	app := &App{}
+	acc := mustCreateAccount(t, app, ctx, "Broker", "brokerage", "USD", 0)
+	inst := mustCreateInstrument(t, app, ctx, "stock", "AAPL", "Apple", "USD")
+	if _, err := app.toolHoldingsSet(ctx, map[string]any{
+		"account_id": float64(acc.ID), "instrument_id": float64(inst.ID),
+		"quantity": float64(3), "cost_basis": float64(45000),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := app.toolHoldingsList(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := out.(map[string]any)["holdings"].([]Holding)
+	if len(hs) != 1 {
+		t.Fatalf("expected one holding, got %+v", hs)
+	}
+	if hs[0].CurrentValue != 56202 || hs[0].CurrentPrice == nil || *hs[0].CurrentPrice != 18734 {
+		t.Fatalf("unexpected stock valuation: %+v", hs[0])
+	}
+	if pf.calls != 1 || pf.lastApp != "stocks" || pf.lastTool != "get" || pf.lastSymbol != "AAPL" {
+		t.Fatalf("stocks call not recorded correctly: %+v", pf)
+	}
+	price, ok := latestPrice(ctx, inst.ID, time.Now().UTC())
+	if !ok || price != 18734 {
+		t.Fatalf("expected fetched price persisted as 18734, got %d ok=%v", price, ok)
+	}
+}
+
+func TestUnit_StockHoldingValueFallsBackToManualPriceWhenStocksUnavailable(t *testing.T) {
+	ctx := newCtxWithPlatform(t, &stockQuotePlatform{err: tk.ErrNotImplemented})
+	app := &App{}
+	acc := mustCreateAccount(t, app, ctx, "Broker", "brokerage", "USD", 0)
+	inst := mustCreateInstrument(t, app, ctx, "stock", "AAPL", "Apple", "USD")
+	if _, err := app.toolPricesSet(ctx, map[string]any{
+		"instrument_id": float64(inst.ID), "price": float64(15000),
+		"as_of": "2026-05-24T00:00:00Z", "source": "manual",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolHoldingsSet(ctx, map[string]any{
+		"account_id": float64(acc.ID), "instrument_id": float64(inst.ID),
+		"quantity": float64(2), "cost_basis": float64(25000),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := app.toolHoldingsList(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := out.(map[string]any)["holdings"].([]Holding)
+	if len(hs) != 1 || hs[0].CurrentValue != 30000 {
+		t.Fatalf("expected manual fallback value 30000, got %+v", hs)
+	}
+}
+
 // ─── Reports ─────────────────────────────────────────────────────
 
 func TestUnit_Cashflow_BucketsByMonth(t *testing.T) {
@@ -596,6 +659,18 @@ func TestManifest_Valid(t *testing.T) {
 	if m.Name != "finance" {
 		t.Errorf("manifest name=%q", m.Name)
 	}
+	hasAppsCall := false
+	for _, p := range m.Requires.Permissions {
+		if string(p) == "platform.apps.call" {
+			hasAppsCall = true
+		}
+	}
+	if !hasAppsCall {
+		t.Errorf("manifest must declare platform.apps.call for optional stocks enrichment")
+	}
+	if len(m.Requires.Apps) != 1 || m.Requires.Apps[0].Name != "stocks" || !m.Requires.Apps[0].Optional {
+		t.Errorf("manifest must declare optional stocks dependency, got %#v", m.Requires.Apps)
+	}
 	tools := app.MCPTools()
 	if len(tools) < 20 {
 		t.Errorf("expected ≥20 mcp tools, got %d", len(tools))
@@ -613,6 +688,43 @@ func newCtx(t *testing.T) *sdk.AppCtx {
 	)
 	globalCtx = ctx
 	return ctx
+}
+
+func newCtxWithPlatform(t *testing.T, platform sdk.PlatformClient) *sdk.AppCtx {
+	t.Helper()
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml",
+		tk.WithProjectID("test-proj"),
+		tk.WithEmitter(rec),
+		tk.WithPlatform(platform),
+	)
+	globalCtx = ctx
+	return ctx
+}
+
+type stockQuotePlatform struct {
+	tk.BasePlatformClient
+	quote      map[string]any
+	err        error
+	calls      int
+	lastApp    string
+	lastTool   string
+	lastSymbol string
+}
+
+func (p *stockQuotePlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
+	p.calls++
+	p.lastApp = app
+	p.lastTool = tool
+	p.lastSymbol, _ = input["symbol"].(string)
+	if p.err != nil {
+		return p.err
+	}
+	b, err := json.Marshal(p.quote)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, out)
 }
 
 func newHTTPServer(t *testing.T) *httptest.Server {
