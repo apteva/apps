@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.7
+version: 0.4.8
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances (Hetzner in v0.1; DO/Vultr/AWS in later releases).
@@ -125,11 +125,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		"data_dir", ctx.DataDir())
 
 	// Recover any rows left in 'provisioning' by a previous sidecar
-	// instance. Two states get handled: rows that may have leaked a
-	// VPS (provider_id missing) get a server_list reconciliation
-	// against Hetzner; rows whose readiness-probe goroutine
-	// evaporated mid-boot get a fresh probe. Best-effort — runs in
-	// the background so it doesn't slow OnMount on a slow API call.
+	// instance. Rows with a recorded provider_id get a fresh readiness
+	// probe; rows without provider_id are marked error and left for
+	// manual cloud cleanup. We never infer a provider_id by name,
+	// because destroy must only target an upstream id recorded from
+	// the original create response.
 	go reconcileHetznerProvisioning(ctx)
 
 	return nil

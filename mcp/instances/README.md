@@ -61,6 +61,12 @@ with a 30s default timeout. `instance_upload_file` writes under
 `instance_destroy` calls `hetzner.server_delete` and removes the row.
 404 from upstream is treated as success (already gone).
 
+Destroy is strictly ID-bound: the app only calls `server_delete` with
+the `provider_id` captured from the original `server_create` response.
+If a sidecar restart interrupts provisioning before that ID is
+persisted, the row is marked error and the operator must inspect
+Hetzner manually; Instances will not infer or recover a server by name.
+
 ## Metrics
 
 Local: `gopsutil` for CPU / memory / disk / network / load / uptime.

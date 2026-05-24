@@ -22,14 +22,14 @@ import (
 
 // hetznerProvision does a best-effort end-to-end provisioning via the
 // integration. Steps:
-//   1. Generate a per-instance SSH keypair.
-//   2. Persist the row at status='provisioning' (so the panel shows
-//      progress immediately).
-//   3. Call hetzner.server_create with a cloud-init userdata that
-//      seeds authorized_keys with our new public key.
-//   4. Parse provider_id + public IP from the response, persist.
-//   5. Run the SSH readiness probe in the background; flip to 'ready'
-//      when the box accepts our key.
+//  1. Generate a per-instance SSH keypair.
+//  2. Persist the row at status='provisioning' (so the panel shows
+//     progress immediately).
+//  3. Call hetzner.server_create with a cloud-init userdata that
+//     seeds authorized_keys with our new public key.
+//  4. Parse provider_id + public IP from the response, persist.
+//  5. Run the SSH readiness probe in the background; flip to 'ready'
+//     when the box accepts our key.
 //
 // Returns the freshly-created instance row (status='provisioning'
 // initially; caller can poll instance_get for the transition).
@@ -108,9 +108,9 @@ func hetznerProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error
 		return nil, errors.New("hetzner.server_create response missing server id (catalog/upstream mismatch)")
 	}
 	_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{
-		"provider_id":  provID,
-		"public_ipv4":  ipv4,
-		"public_ipv6":  ipv6,
+		"provider_id": provID,
+		"public_ipv4": ipv4,
+		"public_ipv6": ipv6,
 	})
 
 	// Background readiness probe — let the caller's instance_create
@@ -155,21 +155,16 @@ func kickReadinessProbe(id int64) {
 // the previous sidecar dying mid-flight:
 //
 //  1. provider_id is empty → upstream server_create may have succeeded
-//     but we never persisted the result. Query Hetzner for any server
-//     with our `name`; if found, backfill provider_id + IPs and kick
-//     the readiness probe. If not found, mark error so the operator
-//     can clean up the row (and won't be billed for a VPS we never
-//     attached to).
+//     but we never persisted the response. We refuse to infer the
+//     upstream id by name; duplicate cloud names are possible and a
+//     wrong backfill would make destroy target the wrong server. Mark
+//     the row error and tell the operator to inspect Hetzner manually.
 //
 //  2. provider_id is set, status still 'provisioning' → the readiness
 //     probe goroutine evaporated when the sidecar died. Just kick a
-//     new one against the existing IP.
+//     new one against the recorded provider_id/IP.
 //
-// Best-effort, errors logged but don't fail OnMount. If the Hetzner
-// integration was unbound between previous boot and now, every
-// recovery in (1) marks error with a clear message; the operator
-// re-binds the integration and re-runs reconcile (manual destroy /
-// retry) from the panel.
+// Best-effort, errors logged but don't fail OnMount.
 func reconcileHetznerProvisioning(ctx *sdk.AppCtx) {
 	rows, err := dbListInstances(ctx.AppDB(), "hetzner", "provisioning")
 	if err != nil {
@@ -181,9 +176,6 @@ func reconcileHetznerProvisioning(ctx *sdk.AppCtx) {
 	}
 	ctx.Logger().Info("instances: reconciling provisioning rows", "count", len(rows))
 
-	bound := ctx.IntegrationFor("provider")
-	hasIntegration := bound != nil && bound.ConnectionID != 0
-
 	for _, inst := range rows {
 		// Path 2: just kick the probe; nothing upstream to recover.
 		if inst.ProviderID != "" {
@@ -191,113 +183,16 @@ func reconcileHetznerProvisioning(ctx *sdk.AppCtx) {
 			kickReadinessProbe(inst.ID)
 			continue
 		}
-		// Path 1: missing provider_id — we may have leaked a VPS.
-		if !hasIntegration {
-			_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{
-				"status":        "error",
-				"error_message": "provisioning interrupted; Hetzner integration not bound — re-bind and retry, then check the Hetzner dashboard for an orphan server named " + inst.Name,
-			})
-			ctx.Logger().Warn("instances: stuck provisioning, no integration bound",
-				"id", inst.ID, "name", inst.Name)
-			continue
-		}
-		recovered, recErr := tryRecoverHetznerByName(ctx, bound, inst)
-		if recErr != nil {
-			_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{
-				"status":        "error",
-				"error_message": fmt.Sprintf("provisioning interrupted; reconcile lookup failed: %v — check the Hetzner dashboard for an orphan server named %q", recErr, inst.Name),
-			})
-			continue
-		}
-		if recovered == nil {
-			// server_list succeeded but no match. Either the operator
-			// already cleaned it up, or it never got created. Safe to
-			// mark error — destroy will short-circuit (no provider_id).
-			_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{
-				"status":        "error",
-				"error_message": "provisioning interrupted; no upstream server named " + inst.Name + " found — presumed not created or already destroyed",
-			})
-			ctx.Logger().Info("instances: stuck provisioning, no upstream match", "id", inst.ID, "name", inst.Name)
-			continue
-		}
-		// Backfill and resume the readiness probe.
+		// Path 1: missing provider_id. Do not recover by name; this
+		// keeps destroy strictly bound to provider ids captured from
+		// server_create responses.
 		_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{
-			"provider_id": recovered.ID,
-			"public_ipv4": recovered.IPv4,
-			"public_ipv6": recovered.IPv6,
+			"status":        "error",
+			"error_message": "provisioning interrupted before Hetzner server id was recorded — Instances will not infer a server by name; check the Hetzner dashboard for an orphan server named " + inst.Name,
 		})
-		ctx.Logger().Info("instances: recovered orphan provisioning row",
-			"id", inst.ID, "provider_id", recovered.ID, "ipv4", recovered.IPv4)
-		kickReadinessProbe(inst.ID)
+		ctx.Logger().Warn("instances: stuck provisioning without provider_id; refusing name-based recovery",
+			"id", inst.ID, "name", inst.Name)
 	}
-}
-
-type hetznerServerSummary struct {
-	ID   string
-	IPv4 string
-	IPv6 string
-}
-
-// tryRecoverHetznerByName asks Hetzner for any server matching our
-// instance name. If exactly one matches, returns it. Multiple matches
-// (operator created another server with the same name out-of-band):
-// return the lexicographically-first id — arbitrary but deterministic;
-// the operator can re-destroy the wrong pick and re-reconcile.
-// No matches: returns nil, nil (not an error).
-func tryRecoverHetznerByName(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, inst *Instance) (*hetznerServerSummary, error) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "server_list", map[string]any{
-		"name": inst.Name,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("server_list: %w", err)
-	}
-	if res == nil || !res.Success {
-		return nil, fmt.Errorf("server_list: %s", upstreamErrorString(res))
-	}
-	servers := parseHetznerListResponse(res.Data, inst.Name)
-	if len(servers) == 0 {
-		return nil, nil
-	}
-	// Pick the first match — stable, lets operator iterate if wrong.
-	return &servers[0], nil
-}
-
-// parseHetznerListResponse extracts (id, ipv4, ipv6) tuples from a
-// server_list response, filtered to those whose name == wantName.
-// Tolerant of catalog envelope shapes — same defensive approach as
-// parseHetznerCreateResponse.
-func parseHetznerListResponse(data json.RawMessage, wantName string) []hetznerServerSummary {
-	if len(data) == 0 {
-		return nil
-	}
-	var v struct {
-		Servers []struct {
-			ID        any    `json:"id"`
-			Name      string `json:"name"`
-			PublicNet struct {
-				IPv4 struct{ IP string `json:"ip"` } `json:"ipv4"`
-				IPv6 struct{ IP string `json:"ip"` } `json:"ipv6"`
-			} `json:"public_net"`
-		} `json:"servers"`
-	}
-	if err := json.Unmarshal(data, &v); err != nil {
-		return nil
-	}
-	out := make([]hetznerServerSummary, 0, len(v.Servers))
-	for _, s := range v.Servers {
-		if s.Name != wantName {
-			continue
-		}
-		if s.ID == nil {
-			continue
-		}
-		out = append(out, hetznerServerSummary{
-			ID:   fmt.Sprintf("%v", s.ID),
-			IPv4: s.PublicNet.IPv4.IP,
-			IPv6: s.PublicNet.IPv6.IP,
-		})
-	}
-	return out
 }
 
 // hetznerDestroy terminates the upstream resource. Idempotent on
@@ -364,7 +259,9 @@ func buildCloudInit(pubKey string) string {
 // parseHetznerCreateResponse pulls the server id + public IPs from a
 // Hetzner server_create response. Hetzner's upstream returns an
 // envelope like:
-//   {"server": {"id": 12345, "public_net": {"ipv4": {"ip": "..."}, "ipv6": {"ip": "..."}}}, ...}
+//
+//	{"server": {"id": 12345, "public_net": {"ipv4": {"ip": "..."}, "ipv6": {"ip": "..."}}}, ...}
+//
 // We're tolerant of catalog-wrapping variations — try a few common
 // shapes and return what we find. Empty values fall through to the
 // caller's "catalog mismatch" error path.
@@ -376,8 +273,12 @@ func parseHetznerCreateResponse(data json.RawMessage) (id, ipv4, ipv6 string) {
 		Server struct {
 			ID        any `json:"id"`
 			PublicNet struct {
-				IPv4 struct{ IP string `json:"ip"` } `json:"ipv4"`
-				IPv6 struct{ IP string `json:"ip"` } `json:"ipv6"`
+				IPv4 struct {
+					IP string `json:"ip"`
+				} `json:"ipv4"`
+				IPv6 struct {
+					IP string `json:"ip"`
+				} `json:"ipv6"`
 			} `json:"public_net"`
 		} `json:"server"`
 	}
