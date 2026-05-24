@@ -337,15 +337,16 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "place_details", Description: "Fetch full details (phone, website, hours, photos, rating) for a single place by id. Cached 7 days.",
 			InputSchema: schemaObject(map[string]any{"place_id": map[string]any{"type": "string"}}, []string{"place_id"}),
 			Handler:     a.toolPlaceDetails},
-		{Name: "search_flights", Description: "Search flights via Duffel. Args: from (IATA, default settings.home_airport), to (IATA), depart_date (YYYY-MM-DD), return_date?, passengers? (default settings.default_passengers), cabin? (economy|premium_economy|business|first). Returns ranked offers (cheapest first).",
+		{Name: "search_flights", Description: "Search direct flights via Duffel by default. Args: from (IATA, default settings.home_airport), to (IATA), depart_date (YYYY-MM-DD), return_date?, passengers? (default settings.default_passengers), cabin? (economy|premium_economy|business|first), max_connections? (default 0/direct). Returns ranked offers (cheapest first).",
 			InputSchema: schemaObject(map[string]any{
-				"from":        map[string]any{"type": "string"},
-				"to":          map[string]any{"type": "string"},
-				"depart_date": map[string]any{"type": "string"},
-				"return_date": map[string]any{"type": "string"},
-				"passengers":  map[string]any{"type": "integer"},
-				"cabin":       map[string]any{"type": "string"},
-				"trip_id":     map[string]any{"type": "integer"},
+				"from":            map[string]any{"type": "string"},
+				"to":              map[string]any{"type": "string"},
+				"depart_date":     map[string]any{"type": "string"},
+				"return_date":     map[string]any{"type": "string"},
+				"passengers":      map[string]any{"type": "integer"},
+				"cabin":           map[string]any{"type": "string"},
+				"max_connections": map[string]any{"type": "integer"},
+				"trip_id":         map[string]any{"type": "integer"},
 			}, []string{"to", "depart_date"}),
 			Handler: a.toolSearchFlights},
 		{Name: "price_observations", Description: "List long-lived travel price observations and route summaries. Flights are recorded from Duffel searches; booking offer refs may be expired, so use this for planning intelligence, not direct booking.",
@@ -3139,6 +3140,10 @@ func (a *App) toolSearchFlights(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		passengers = 1
 	}
 	cabin := strArg(args, "cabin", "economy")
+	maxConnections := intArg(args, "max_connections", 0)
+	if maxConnections < 0 {
+		maxConnections = 0
+	}
 
 	slices := []map[string]any{
 		{"origin": from, "destination": to, "departure_date": depart},
@@ -3153,9 +3158,10 @@ func (a *App) toolSearchFlights(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		paxList[i] = map[string]any{"type": "adult"}
 	}
 	request := map[string]any{
-		"slices":      slices,
-		"passengers":  paxList,
-		"cabin_class": cabin,
+		"slices":          slices,
+		"passengers":      paxList,
+		"cabin_class":     cabin,
+		"max_connections": maxConnections,
 	}
 	input := map[string]any{
 		"data":             request,

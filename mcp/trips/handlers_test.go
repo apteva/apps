@@ -894,6 +894,9 @@ func TestUnit_SearchFlights_HappyPath(t *testing.T) {
 	if slices[0]["origin"] != "CDG" {
 		t.Errorf("default home_airport not applied: %+v", slices)
 	}
+	if data["max_connections"] != 0 {
+		t.Errorf("expected direct-flight search by default, got max_connections=%v", data["max_connections"])
+	}
 	priceOut, err := app.toolPriceObservations(ctx, map[string]any{"kind": "flight"})
 	if err != nil {
 		t.Fatal(err)
