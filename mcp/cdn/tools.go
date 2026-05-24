@@ -23,12 +23,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Origin is one-of: origin_url (a static http(s)://host:port target) OR origin_app (the name of an installed app, " +
 				"e.g. \"storage\" — apteva-server resolves the app's LIVE sidecar port at request time, so the zone survives app " +
 				"restarts/redeploys; prefer this for fronting another Apteva app). " +
-				"Args: hostname (FQDN), origin_url? | origin_app? (exactly one), record_type? (A | CNAME, default A), " +
+				"Args: hostname (FQDN) OR domain + subdomain (from Domains inventory), origin_url? | origin_app? " +
+				"(exactly one), record_type? (A | CNAME, default A), " +
 				"skip_dns? (default false; true skips the DNS write — required if domains app isn't installed), " +
 				"allow_http? (default false; true serves over plain HTTP, skips cert issuance, no HTTPS redirect — " +
 				"required if certs app isn't installed). Returns the created zone row.",
 			InputSchema: schemaObject(map[string]any{
 				"hostname":    map[string]any{"type": "string"},
+				"domain":      map[string]any{"type": "string"},
+				"subdomain":   map[string]any{"type": "string"},
 				"origin_url":  map[string]any{"type": "string"},
 				"origin_app":  map[string]any{"type": "string"},
 				"record_type": map[string]any{"type": "string"},
@@ -79,10 +82,12 @@ func (a *App) MCPTools() []sdk.Tool {
 				"(origin_app=<app>, so the server resolves the app's live sidecar) and returns the zone plus the one " +
 				"operator step left — pointing the consumer app's URL config at this zone (storage uses cdn_zone_id). " +
 				"Apps can't write each other's install config, so that flip is surfaced as `link`, not applied. " +
-				"Args: app (installed app name, e.g. \"storage\"), hostname (FQDN), skip_dns?, allow_http?, record_type?.",
+				"Args: app (installed app name, e.g. \"storage\"), hostname (FQDN) OR domain + subdomain, skip_dns?, allow_http?, record_type?.",
 			InputSchema: schemaObject(map[string]any{
 				"app":         map[string]any{"type": "string"},
 				"hostname":    map[string]any{"type": "string"},
+				"domain":      map[string]any{"type": "string"},
+				"subdomain":   map[string]any{"type": "string"},
 				"skip_dns":    map[string]any{"type": "boolean"},
 				"allow_http":  map[string]any{"type": "boolean"},
 				"record_type": map[string]any{"type": "string"},
@@ -107,7 +112,7 @@ func (a *App) toolLinkApp(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"hostname":   strArg(args, "hostname"),
 		"origin_app": app,
 	}
-	for _, k := range []string{"_project_id", "skip_dns", "allow_http", "record_type"} {
+	for _, k := range []string{"_project_id", "domain", "subdomain", "skip_dns", "allow_http", "record_type"} {
 		if v, ok := args[k]; ok {
 			zoneArgs[k] = v
 		}
@@ -135,8 +140,8 @@ func (a *App) toolZoneCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	hostname := strings.ToLower(strings.TrimSpace(strArg(args, "hostname")))
-	if err := validateHostname(hostname); err != nil {
+	hostname, dnsDomain, dnsName, err := resolveZoneHostname(args)
+	if err != nil {
 		return nil, err
 	}
 	// Origin is one-of: a static origin_url (http(s)://host:port) OR an
@@ -184,6 +189,8 @@ func (a *App) toolZoneCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		Hostname:    hostname,
 		OriginURL:   originURL,
 		OriginApp:   originApp,
+		DNSDomain:   dnsDomain,
+		DNSName:     dnsName,
 		RecordType:  recordType,
 		RecordValue: recordValue,
 		AllowHTTP:   allowHTTP,
@@ -200,7 +207,7 @@ func (a *App) toolZoneCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	// local-dev path).
 	var detailParts []string
 
-	dnsStatus := runDNSLeg(ctx, pid, hostname, recordType, recordValue, skipDNS, &detailParts)
+	dnsStatus := runDNSLeg(ctx, pid, hostname, dnsDomain, dnsName, recordType, recordValue, skipDNS, &detailParts)
 	certStatus := runCertLeg(ctx, pid, hostname, allowHTTP, &detailParts)
 	routeStatus := "ok"
 	if err := registerRoute(ctx, pid, hostname, routeTarget(z), allowHTTP); err != nil {
@@ -231,11 +238,11 @@ func (a *App) toolZoneCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 // and appends to detail on error/skip. Skipped reasons (explicit
 // skip_dns or domains-app-not-installed) are not appended to
 // detail since they're expected, not failures.
-func runDNSLeg(ctx *sdk.AppCtx, pid, hostname, recordType, recordValue string, skip bool, detail *[]string) string {
+func runDNSLeg(ctx *sdk.AppCtx, pid, hostname, dnsDomain, dnsName, recordType, recordValue string, skip bool, detail *[]string) string {
 	if skip {
 		return "skipped"
 	}
-	if err := writeDNS(ctx, pid, hostname, recordType, recordValue); err != nil {
+	if err := writeDNS(ctx, pid, hostname, dnsDomain, dnsName, recordType, recordValue); err != nil {
 		if looksLikeAppNotInstalled(err) {
 			return "skipped"
 		}
@@ -300,7 +307,7 @@ func (a *App) toolZoneDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	// registrar / certs panel.
 	_ = unregisterRoute(ctx, pid, z.Hostname)
 	_ = revokeCert(ctx, pid, z.Hostname)
-	_ = deleteDNS(ctx, pid, z.Hostname, z.RecordType)
+	_ = deleteDNS(ctx, pid, z.Hostname, z.DNSDomain, z.DNSName, z.RecordType)
 
 	removed, err := dbDeleteZone(ctx.AppDB(), pid, z.ID)
 	if err != nil {
@@ -343,6 +350,31 @@ func (a *App) toolURLFor(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 // ─── helpers ──────────────────────────────────────────────────────
+
+func resolveZoneHostname(args map[string]any) (hostname, dnsDomain, dnsName string, err error) {
+	domainRaw := strArg(args, "domain")
+	if strings.TrimSpace(domainRaw) != "" {
+		dnsDomain, err = normalizeDNSDomain(domainRaw)
+		if err != nil {
+			return "", "", "", err
+		}
+		dnsName, err = normalizeDNSName(strArg(args, "subdomain"))
+		if err != nil {
+			return "", "", "", err
+		}
+		hostname = hostnameFromDomain(dnsDomain, dnsName)
+		if err := validateHostname(hostname); err != nil {
+			return "", "", "", err
+		}
+		return hostname, dnsDomain, dnsName, nil
+	}
+
+	hostname = strings.ToLower(strings.TrimSpace(strArg(args, "hostname")))
+	if err := validateHostname(hostname); err != nil {
+		return "", "", "", err
+	}
+	return hostname, "", "", nil
+}
 
 func lookupZone(ctx *sdk.AppCtx, pid string, args map[string]any) (*Zone, error) {
 	if id := int64(intArg(args, "id", 0)); id != 0 {

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: cdn
 display_name: CDN
-version: 0.2.1
+version: 0.2.2
 description: |
   Public-facing edge for apps that emit URLs. Composes domains (DNS),
   certs (TLS), and routes (host-based reverse-proxy) into one
@@ -66,8 +66,9 @@ provides:
         (an installed app name, e.g. "storage" — the server resolves
         its live sidecar port at request time, surviving restarts;
         prefer this for fronting another Apteva app). Args: hostname
-        (FQDN), origin_url? | origin_app? (exactly one), record_type?
-        (A | CNAME, default A), skip_dns?, allow_http?.
+        (FQDN) OR domain + subdomain from Domains inventory,
+        origin_url? | origin_app? (exactly one), record_type? (A |
+        CNAME, default A), skip_dns?, allow_http?.
       requires: zones.write
     - name: cdn_zone_get
       description: "Fetch one zone by id or hostname. Args: id OR hostname."
@@ -96,7 +97,8 @@ provides:
         creates an app-origin zone (origin_app=<app>) and returns the
         zone plus the one operator step left — set the consumer app's
         URL config to this zone (storage uses cdn_zone_id). Args: app,
-        hostname (FQDN), skip_dns?, allow_http?, record_type?.
+        hostname (FQDN) OR domain + subdomain, skip_dns?, allow_http?,
+        record_type?.
       requires: zones.write
   ui_panels:
     - { slot: project.page, label: CDN, icon: cloud, entry: /ui/CdnPanel.mjs }

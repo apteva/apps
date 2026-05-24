@@ -19,6 +19,8 @@ interface Zone {
   hostname: string;
   origin_url?: string;
   origin_app?: string;
+  dns_domain?: string;
+  dns_name?: string;
   record_type: string;
   record_value: string;
   allow_http?: boolean;
@@ -31,7 +33,24 @@ interface Zone {
   updated_at?: string;
 }
 
+interface Domain {
+  id: number;
+  name: string;
+  dns_provider_slug?: string;
+  connection_id?: number;
+}
+
+interface AppRow {
+  install_id?: number;
+  name: string;
+  display_name?: string;
+  project_id?: string;
+  status?: string;
+  source?: string;
+}
+
 const API = "/api/apps/cdn";
+const DOMAINS_API = "/api/apps/domains";
 
 const inputCls =
   "w-full bg-surface-2 text-text border border-border rounded px-3 py-1.5 " +
@@ -112,6 +131,8 @@ function useAppEvents<T = unknown>(
 
 export default function CdnPanel({ projectId }: NativePanelProps) {
   const [zones, setZones] = useState<Zone[] | null>(null);
+  const [domains, setDomains] = useState<Domain[]>([]);
+  const [apps, setApps] = useState<AppRow[]>([]);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -135,6 +156,40 @@ export default function CdnPanel({ projectId }: NativePanelProps) {
 
   useEffect(() => { load(); }, [load]);
 
+  const loadOptions = useCallback(async () => {
+    const qs = withParams();
+    const [domainResult, appResult] = await Promise.allSettled([
+      fetch(`${DOMAINS_API}/domains?${qs}`, { credentials: "same-origin" }),
+      fetch(`/api/apps?${qs}`, { credentials: "same-origin" }),
+    ]);
+
+    if (domainResult.status === "fulfilled" && domainResult.value.ok) {
+      const j = (await domainResult.value.json().catch(() => ({ domains: [] }))) as { domains?: Domain[] };
+      setDomains(j.domains || []);
+    } else {
+      setDomains([]);
+    }
+
+    if (appResult.status === "fulfilled" && appResult.value.ok) {
+      const j = (await appResult.value.json().catch(() => [])) as AppRow[];
+      const byName = new Map<string, AppRow>();
+      for (const app of Array.isArray(j) ? j : []) {
+        if (!app.name || app.name === "cdn") continue;
+        if (app.source === "integration") continue;
+        if (app.status && app.status !== "running") continue;
+        const existing = byName.get(app.name);
+        if (!existing || (!existing.project_id && app.project_id === projectId)) {
+          byName.set(app.name, app);
+        }
+      }
+      setApps([...byName.values()].sort((a, b) => (a.display_name || a.name).localeCompare(b.display_name || b.name)));
+    } else {
+      setApps([]);
+    }
+  }, [projectId, withParams]);
+
+  useEffect(() => { loadOptions(); }, [loadOptions]);
+
   // Light auto-refresh on route changes (registrations land async on
   // the routes side via routes.changed).
   useAppEvents("routes", projectId, () => load());
@@ -156,6 +211,8 @@ export default function CdnPanel({ projectId }: NativePanelProps) {
   const addZone = useCallback(
     async (
       hostname: string,
+      domain: string,
+      subdomain: string,
       originType: "app" | "url",
       originValue: string,
       recordType: string,
@@ -168,8 +225,12 @@ export default function CdnPanel({ projectId }: NativePanelProps) {
         originType === "app"
           ? { origin_app: originValue }
           : { origin_url: originValue };
+      const hostArgs =
+        domain
+          ? { domain, subdomain }
+          : { hostname };
       await callTool("cdn_zone_create", {
-        hostname,
+        ...hostArgs,
         ...origin,
         record_type: recordType,
         allow_http: allowHTTP,
@@ -220,7 +281,7 @@ export default function CdnPanel({ projectId }: NativePanelProps) {
         </div>
       )}
 
-      <AddZoneForm onAdd={addZone} />
+      <AddZoneForm domains={domains} apps={apps} onAdd={addZone} />
 
       <div className="flex-1 min-h-0 overflow-auto">
         {zones === null ? (
@@ -256,7 +317,9 @@ export default function CdnPanel({ projectId }: NativePanelProps) {
                       <span className="ml-2 text-xs text-text-dim">http ok</span>
                     )}
                     <div className="text-xs text-text-dim mt-0.5">
-                      {z.record_type} → {z.record_value || "(skip_dns)"}
+                      {z.dns_domain
+                        ? `${z.record_type} ${z.dns_name || "@"}.${z.dns_domain} → ${z.record_value || "(skip_dns)"}`
+                        : `${z.record_type} → ${z.record_value || "(skip_dns)"}`}
                     </div>
                   </td>
                   <td className="px-4 py-2 font-mono text-text-dim break-all">
@@ -324,10 +387,14 @@ function StatusBadge({ value, detail }: { value: string; detail?: string }) {
 // ─── Add zone form ────────────────────────────────────────────────
 
 function AddZoneForm({
-  onAdd,
+  domains, apps, onAdd,
 }: {
+  domains: Domain[];
+  apps: AppRow[];
   onAdd: (
     hostname: string,
+    domain: string,
+    subdomain: string,
     originType: "app" | "url",
     originValue: string,
     recordType: string,
@@ -335,6 +402,9 @@ function AddZoneForm({
     skipDNS: boolean,
   ) => Promise<void>;
 }) {
+  const [hostMode, setHostMode] = useState<"managed" | "manual">("managed");
+  const [domain, setDomain] = useState("");
+  const [subdomain, setSubdomain] = useState("");
   const [hostname, setHostname] = useState("");
   const [originType, setOriginType] = useState<"app" | "url">("app");
   const [originApp, setOriginApp] = useState("");
@@ -345,8 +415,37 @@ function AddZoneForm({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
+  const hasDomains = domains.length > 0;
+  const selectedDomain = hasDomains ? domain || domains[0]?.name || "" : "";
+  const normalizedSubdomain = subdomain.trim();
+  const computedHostname =
+    hostMode === "managed" && selectedDomain
+      ? normalizedSubdomain && normalizedSubdomain !== "@"
+        ? `${normalizedSubdomain.toLowerCase()}.${selectedDomain}`
+        : selectedDomain
+      : hostname.trim();
   const originValue = originType === "app" ? originApp : originURL;
-  const ready = hostname.trim() !== "" && originValue.trim() !== "";
+  const ready = computedHostname !== "" && originValue.trim() !== "";
+
+  useEffect(() => {
+    if (!hasDomains && hostMode === "managed") {
+      setHostMode("manual");
+      setAllowHTTP(true);
+      setSkipDNS(true);
+    }
+  }, [hasDomains, hostMode]);
+
+  useEffect(() => {
+    if (!domain && domains.length > 0) {
+      setDomain(domains[0].name);
+    }
+  }, [domain, domains]);
+
+  useEffect(() => {
+    if (!originApp && apps.length > 0) {
+      setOriginApp(apps[0].name);
+    }
+  }, [originApp, apps]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -354,12 +453,22 @@ function AddZoneForm({
     setBusy(true);
     setErr("");
     try {
-      await onAdd(hostname.trim(), originType, originValue.trim(), recordType, allowHTTP, skipDNS);
+      await onAdd(
+        computedHostname,
+        hostMode === "managed" ? selectedDomain : "",
+        hostMode === "managed" ? normalizedSubdomain : "",
+        originType,
+        originValue.trim(),
+        recordType,
+        allowHTTP,
+        skipDNS,
+      );
+      setSubdomain("");
       setHostname("");
-      setOriginApp("");
+      if (apps.length === 0) setOriginApp("");
       setOriginURL("");
-      setAllowHTTP(false);
-      setSkipDNS(false);
+      setAllowHTTP(hostMode === "manual");
+      setSkipDNS(hostMode === "manual");
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -370,14 +479,59 @@ function AddZoneForm({
   return (
     <form onSubmit={submit} className="p-4 border-b border-border flex gap-2 items-end flex-wrap">
       <label className="block">
-        <div className="text-xs text-text-dim mb-1">Hostname</div>
-        <input
-          className={inputCls + " w-64 font-mono"}
-          value={hostname}
-          onChange={(e) => setHostname(e.target.value)}
-          placeholder="files.acme.com"
-        />
+        <div className="text-xs text-text-dim mb-1">Hostname mode</div>
+        <select
+          className={inputCls + " w-40"}
+          value={hostMode}
+          onChange={(e) => {
+            const mode = e.target.value as "managed" | "manual";
+            setHostMode(mode);
+            setAllowHTTP(mode === "manual");
+            setSkipDNS(mode === "manual");
+          }}
+          disabled={!hasDomains}
+        >
+          <option value="managed">Managed domain</option>
+          <option value="manual">Manual hostname</option>
+        </select>
       </label>
+      {hostMode === "managed" && hasDomains ? (
+        <>
+          <label className="block">
+            <div className="text-xs text-text-dim mb-1">Subdomain</div>
+            <input
+              className={inputCls + " w-36 font-mono"}
+              value={subdomain}
+              onChange={(e) => setSubdomain(e.target.value)}
+              placeholder="files"
+            />
+          </label>
+          <label className="block">
+            <div className="text-xs text-text-dim mb-1">Domain</div>
+            <select
+              className={inputCls + " w-56 font-mono"}
+              value={selectedDomain}
+              onChange={(e) => setDomain(e.target.value)}
+            >
+              {domains.map((d) => (
+                <option key={d.id || d.name} value={d.name}>
+                  {d.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </>
+      ) : (
+        <label className="block">
+          <div className="text-xs text-text-dim mb-1">Hostname</div>
+          <input
+            className={inputCls + " w-64 font-mono"}
+            value={hostname}
+            onChange={(e) => setHostname(e.target.value)}
+            placeholder="files.local.test"
+          />
+        </label>
+      )}
       <label className="block">
         <div className="text-xs text-text-dim mb-1">Origin</div>
         <select
@@ -391,13 +545,22 @@ function AddZoneForm({
       </label>
       {originType === "app" ? (
         <label className="block">
-          <div className="text-xs text-text-dim mb-1">App name</div>
-          <input
-            className={inputCls + " w-56 font-mono"}
+          <div className="text-xs text-text-dim mb-1">App</div>
+          <select
+            className={inputCls + " w-56"}
             value={originApp}
             onChange={(e) => setOriginApp(e.target.value)}
-            placeholder="storage"
-          />
+          >
+            {apps.length === 0 ? (
+              <option value="">No running apps</option>
+            ) : (
+              apps.map((a) => (
+                <option key={`${a.install_id || a.name}:${a.project_id || "global"}`} value={a.name}>
+                  {a.display_name || a.name}{a.project_id ? "" : " (global)"}
+                </option>
+              ))
+            )}
+          </select>
         </label>
       ) : (
         <label className="block">
@@ -448,9 +611,9 @@ function AddZoneForm({
         {busy ? "Creating…" : "Create zone"}
       </button>
       <div className="w-full text-xs text-text-dim">
-        {originType === "app"
-          ? "App origin: the server resolves the app's live sidecar each request (survives restarts). For local-dev, tick allow_http + skip_dns and reach it with a Host header."
-          : "URL origin: a static http(s)://host:port the edge reverse-proxies to."}
+        {hostMode === "managed" && hasDomains
+          ? `Will create ${computedHostname || "a hostname"} and ask Domains, Certs and Routes to configure it.`
+          : "Manual mode skips DNS/TLS by default; use it for local hosts or externally managed DNS."}
       </div>
       {err && <div className="text-xs text-red-400 w-full">{err}</div>}
     </form>

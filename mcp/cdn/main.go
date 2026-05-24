@@ -4,10 +4,10 @@
 // nodes, no caching. The apteva-server itself is always the origin.
 // Creating a zone wires three pieces:
 //
-//   domains.domain_records_set  → DNS (A or CNAME at the registrar)
-//   certs.cert_issue            → TLS material (served via CertCache)
-//   routes.routes_register      → host→target reverse-proxy entry
-//                                 (consumed by HostRouter)
+//	domains.domain_records_set  → DNS (A or CNAME at the registrar)
+//	certs.cert_issue            → TLS material (served via CertCache)
+//	routes.routes_register      → host→target reverse-proxy entry
+//	                              (consumed by HostRouter)
 //
 // Once the route is registered, apteva-server's HostRouter sees the
 // Host header on every inbound request and reverse-proxies to the
@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: cdn
 display_name: CDN
-version: 0.2.1
+version: 0.2.2
 description: |
   Public-facing edge for apps that emit URLs. v0.1: local-mode only
   — apteva-server is the origin, no third-party provider, no edge
@@ -52,7 +52,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: cdn_zone_create, description: "Stand up a public hostname for an origin URL." }
+    - { name: cdn_zone_create, description: "Stand up a public hostname for an origin URL or app." }
     - { name: cdn_zone_get,    description: "Fetch one zone by id or hostname." }
     - { name: cdn_zone_list,   description: "List zones for this project." }
     - { name: cdn_zone_delete, description: "Tear down a zone." }

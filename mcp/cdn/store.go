@@ -19,6 +19,8 @@ type Zone struct {
 	Hostname     string `json:"hostname"`
 	OriginURL    string `json:"origin_url,omitempty"`
 	OriginApp    string `json:"origin_app,omitempty"`
+	DNSDomain    string `json:"dns_domain,omitempty"`
+	DNSName      string `json:"dns_name,omitempty"`
 	RecordType   string `json:"record_type"`
 	RecordValue  string `json:"record_value"`
 	AllowHTTP    bool   `json:"allow_http"`
@@ -95,6 +97,56 @@ func validateOriginApp(s string) error {
 	return nil
 }
 
+func normalizeDNSDomain(s string) (string, error) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	s = strings.TrimSuffix(s, ".")
+	if s == "" {
+		return "", errors.New("domain required")
+	}
+	if err := validateHostname(s); err != nil {
+		return "", fmt.Errorf("domain: %w", err)
+	}
+	return s, nil
+}
+
+func normalizeDNSName(s string) (string, error) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	s = strings.TrimSuffix(s, ".")
+	if s == "@" {
+		return "", nil
+	}
+	if s == "" {
+		return "", nil
+	}
+	if strings.ContainsAny(s, " \t\r\n@/?#:") || strings.Contains(s, "://") {
+		return "", errors.New("subdomain must be a DNS label path like files or media.assets")
+	}
+	for _, part := range strings.Split(s, ".") {
+		if part == "" {
+			return "", errors.New("subdomain must not contain empty labels")
+		}
+		if len(part) > 63 {
+			return "", errors.New("subdomain label too long (>63 chars)")
+		}
+		if part[0] == '-' || part[len(part)-1] == '-' {
+			return "", errors.New("subdomain labels must not start or end with a dash")
+		}
+		for _, r := range part {
+			if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+				return "", fmt.Errorf("subdomain %q: only lowercase letters, digits, dashes, and dots allowed", s)
+			}
+		}
+	}
+	return s, nil
+}
+
+func hostnameFromDomain(domain, sub string) string {
+	if sub == "" {
+		return domain
+	}
+	return sub + "." + domain
+}
+
 // routeTarget returns the string handed to routes.routes_register as
 // the proxy target. For an app-origin zone it's
 // "app://<name>?project_id=<pid>" — the server resolves the named
@@ -132,14 +184,15 @@ func splitApex(hostname string) (apex, sub string) {
 
 const zoneSelectCols = `id, project_id, hostname, origin_url, record_type,
 		record_value, allow_http, status, status_detail, dns_status, cert_status, route_status,
-		COALESCE(created_at,''), COALESCE(updated_at,''), COALESCE(origin_app,'')`
+		COALESCE(created_at,''), COALESCE(updated_at,''), COALESCE(origin_app,''),
+		COALESCE(dns_domain,''), COALESCE(dns_name,'')`
 
 func scanZone(s interface{ Scan(...any) error }) (*Zone, error) {
 	z := &Zone{}
 	var allow int
 	err := s.Scan(&z.ID, &z.ProjectID, &z.Hostname, &z.OriginURL, &z.RecordType,
 		&z.RecordValue, &allow, &z.Status, &z.StatusDetail, &z.DNSStatus, &z.CertStatus, &z.RouteStatus,
-		&z.CreatedAt, &z.UpdatedAt, &z.OriginApp)
+		&z.CreatedAt, &z.UpdatedAt, &z.OriginApp, &z.DNSDomain, &z.DNSName)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -156,10 +209,10 @@ func dbInsertZone(db *sql.DB, z *Zone) (int64, error) {
 		allow = 1
 	}
 	res, err := db.Exec(
-		`INSERT INTO zones (project_id, hostname, origin_url, origin_app, record_type, record_value,
+		`INSERT INTO zones (project_id, hostname, origin_url, origin_app, dns_domain, dns_name, record_type, record_value,
 			allow_http, status, status_detail, dns_status, cert_status, route_status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		z.ProjectID, z.Hostname, z.OriginURL, z.OriginApp, z.RecordType, z.RecordValue,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		z.ProjectID, z.Hostname, z.OriginURL, z.OriginApp, z.DNSDomain, z.DNSName, z.RecordType, z.RecordValue,
 		allow, z.Status, z.StatusDetail, z.DNSStatus, z.CertStatus, z.RouteStatus,
 	)
 	if err != nil {

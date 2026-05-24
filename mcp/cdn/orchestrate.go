@@ -33,8 +33,11 @@ func myInstallID() int64 {
 // writeDNS calls domains.domain_records_set. The hostname is split
 // into (apex, sub) here so the caller doesn't have to know the
 // registrar's data model — domains hides the per-provider details.
-func writeDNS(ctx *sdk.AppCtx, projectID, hostname, recordType, recordValue string) error {
-	apex, sub := splitApex(hostname)
+func writeDNS(ctx *sdk.AppCtx, projectID, hostname, dnsDomain, dnsName, recordType, recordValue string) error {
+	apex, sub := dnsDomain, dnsName
+	if apex == "" {
+		apex, sub = splitApex(hostname)
+	}
 	subArg := sub
 	if subArg == "" {
 		subArg = "@"
@@ -60,8 +63,11 @@ func writeDNS(ctx *sdk.AppCtx, projectID, hostname, recordType, recordValue stri
 // deleteDNS is the inverse of writeDNS. Best-effort — a failed
 // delete is logged but doesn't block zone tear-down (operator can
 // clean up manually at the registrar).
-func deleteDNS(ctx *sdk.AppCtx, projectID, hostname, recordType string) error {
-	apex, sub := splitApex(hostname)
+func deleteDNS(ctx *sdk.AppCtx, projectID, hostname, dnsDomain, dnsName, recordType string) error {
+	apex, sub := dnsDomain, dnsName
+	if apex == "" {
+		apex, sub = splitApex(hostname)
+	}
 	subArg := sub
 	if subArg == "" {
 		subArg = "@"

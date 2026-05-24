@@ -243,6 +243,58 @@ func TestZoneCreate_HappyPath_InjectsProjectIDOnAllLegs(t *testing.T) {
 	}
 }
 
+func TestZoneCreate_ManagedDomainUsesExplicitDNSName(t *testing.T) {
+	p := newRecordingPlatform()
+	ctx := newCdnCtx(t, p, map[string]string{"server_public_host": "1.2.3.4"})
+	app := &App{}
+
+	out, err := app.toolZoneCreate(ctx, map[string]any{
+		"domain":     "acme.co.uk",
+		"subdomain":  "files",
+		"origin_app": "storage",
+	})
+	if err != nil {
+		t.Fatalf("toolZoneCreate: %v", err)
+	}
+	z := out.(map[string]any)["zone"].(*Zone)
+	if z.Hostname != "files.acme.co.uk" {
+		t.Errorf("hostname=%q, want files.acme.co.uk", z.Hostname)
+	}
+	if z.DNSDomain != "acme.co.uk" || z.DNSName != "files" {
+		t.Errorf("dns fields=(%q,%q), want (acme.co.uk,files)", z.DNSDomain, z.DNSName)
+	}
+	dnsCall := p.callsTo("domains", "domain_records_set")[0]
+	if dnsCall.Input["domain"] != "acme.co.uk" {
+		t.Errorf("domain = %v, want acme.co.uk", dnsCall.Input["domain"])
+	}
+	if dnsCall.Input["name"] != "files" {
+		t.Errorf("name = %v, want files", dnsCall.Input["name"])
+	}
+}
+
+func TestZoneCreate_ManagedDomainApexUsesAtRecord(t *testing.T) {
+	p := newRecordingPlatform()
+	ctx := newCdnCtx(t, p, map[string]string{"server_public_host": "1.2.3.4"})
+	app := &App{}
+
+	out, err := app.toolZoneCreate(ctx, map[string]any{
+		"domain":     "acme.com",
+		"subdomain":  "@",
+		"origin_url": "http://127.0.0.1:8080",
+	})
+	if err != nil {
+		t.Fatalf("toolZoneCreate: %v", err)
+	}
+	z := out.(map[string]any)["zone"].(*Zone)
+	if z.Hostname != "acme.com" {
+		t.Errorf("hostname=%q, want acme.com", z.Hostname)
+	}
+	dnsCall := p.callsTo("domains", "domain_records_set")[0]
+	if dnsCall.Input["domain"] != "acme.com" || dnsCall.Input["name"] != "@" {
+		t.Errorf("dns args domain/name=(%v,%v), want (acme.com,@)", dnsCall.Input["domain"], dnsCall.Input["name"])
+	}
+}
+
 func TestZoneCreate_OriginApp_RegistersAppTarget(t *testing.T) {
 	p := newRecordingPlatform()
 	ctx := newCdnCtx(t, p, nil) // skip_dns avoids needing server_public_host
