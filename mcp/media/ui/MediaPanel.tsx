@@ -1150,15 +1150,21 @@ function OperationModal({
   };
 
   const title = ALL_OPS.find((o) => o.name === op)?.label ?? op;
+  const isReel = op === "extract_reel";
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 px-4" onClick={onClose}>
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 p-3 sm:p-4" onClick={onClose}>
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
-        className="bg-bg border border-border rounded shadow-xl w-full max-w-4xl max-h-[90vh] overflow-auto"
+        className={[
+          "bg-bg border border-border rounded shadow-xl w-full overflow-x-hidden",
+          isReel
+            ? "max-w-[min(96vw,88rem)] max-h-[96vh] flex flex-col overflow-hidden"
+            : "max-w-4xl max-h-[90vh] overflow-y-auto",
+        ].join(" ")}
       >
-        <header className="px-5 py-4 border-b border-border flex items-center justify-between gap-3">
+        <header className="px-5 py-4 border-b border-border flex items-center justify-between gap-3 flex-shrink-0">
           <div className="min-w-0">
             <h3 className="text-text font-semibold text-sm">{title}</h3>
             <div className="text-xs text-text-dim truncate">
@@ -1174,18 +1180,27 @@ function OperationModal({
           >×</button>
         </header>
 
-        <div className="p-5 grid gap-5 lg:grid-cols-[minmax(0,1.25fr)_minmax(18rem,0.75fr)]">
-          <OperationPreview
-            op={op}
-            row={row}
-            fields={fields}
-            setField={set}
-            sourceURL={sourceURL}
-            posterURL={poster}
-            previewBase={previewBase}
-            storageQuery={storageQuery}
-          />
-          <div className="space-y-3">
+        <div
+          className={[
+            "grid min-w-0",
+            isReel
+              ? "p-4 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(22rem,26rem)] flex-1 min-h-0 overflow-y-auto overflow-x-hidden"
+              : "p-5 gap-5 lg:grid-cols-[minmax(0,1.25fr)_minmax(18rem,0.75fr)]",
+          ].join(" ")}
+        >
+          <div className="min-w-0">
+            <OperationPreview
+              op={op}
+              row={row}
+              fields={fields}
+              setField={set}
+              sourceURL={sourceURL}
+              posterURL={poster}
+              previewBase={previewBase}
+              storageQuery={storageQuery}
+            />
+          </div>
+          <div className="space-y-3 min-w-0">
             <OperationSummary op={op} row={row} fields={fields} />
             {op === "crop" ? (
               <CropPresetControls
@@ -1196,7 +1211,7 @@ function OperationModal({
                 setOutputName={setOutputName}
               />
             ) : null}
-            <div className="grid grid-cols-2 gap-3">
+            <div className={isReel ? "grid grid-cols-2 gap-3 xl:grid-cols-1" : "grid grid-cols-2 gap-3"}>
               {opFieldDefs(op).map((fd) => (
                 <OperationField key={fd.key} field={fd} value={fields[fd.key] || ""} onChange={(v) => set(fd.key, v)} />
               ))}
@@ -1212,7 +1227,7 @@ function OperationModal({
           </div>
         </div>
 
-        <footer className="px-5 py-4 border-t border-border flex justify-end gap-2">
+        <footer className="px-5 py-4 border-t border-border flex justify-end gap-2 flex-shrink-0">
           <button
             type="button"
             onClick={onClose}
@@ -1492,6 +1507,7 @@ function TimelinePreview({
   storageQuery: string;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const isReel = op === "extract_reel";
   const duration = Math.max(row.duration_ms || 0, 1);
   const start = clampMs(numField(fields, "start_ms", 0), 0, duration);
   const end = clampMs(numField(fields, "end_ms", duration), 0, duration);
@@ -1516,10 +1532,13 @@ function TimelinePreview({
     setField("end_ms", String(Math.max(ms, safeStart)));
   };
   return (
-    <div className="space-y-3">
+    <div className={isReel ? "space-y-2 min-w-0" : "space-y-3 min-w-0"}>
       <div className="text-xs uppercase tracking-wide text-text-dim">Preview</div>
-      <div className="bg-black rounded border border-border overflow-hidden flex items-center justify-center" style={{ minHeight: 260 }}>
-        <div className="relative inline-flex max-w-full max-h-[24rem]">
+      <div
+        className="bg-black rounded border border-border overflow-hidden flex items-center justify-center"
+        style={{ minHeight: isReel ? 220 : 260 }}
+      >
+        <div className={isReel ? "relative inline-flex max-w-full max-h-[18rem]" : "relative inline-flex max-w-full max-h-[24rem]"}>
           <video
             ref={videoRef}
             src={sourceURL}
@@ -1527,10 +1546,10 @@ function TimelinePreview({
             controls
             preload="metadata"
             playsInline
-            className="max-w-full max-h-[24rem]"
+            className={isReel ? "max-w-full max-h-[18rem]" : "max-w-full max-h-[24rem]"}
             onLoadedMetadata={() => seek(safeStart)}
           />
-          {op === "extract_reel" ? <ReelGuide ratio={fields.target_ratio || "9:16"} /> : null}
+          {isReel ? <ReelGuide ratio={fields.target_ratio || "9:16"} /> : null}
         </div>
       </div>
       <div className="space-y-2">
@@ -1563,6 +1582,7 @@ function TimelinePreview({
         row={row}
         previewBase={previewBase}
         storageQuery={storageQuery}
+        layout={isReel ? "wrap" : "scroll"}
         onPick={(ms) => {
           const length = Math.max(0, safeEnd - safeStart);
           const nextStart = clampMs(ms, 0, duration);
@@ -1691,19 +1711,24 @@ function TimelineSlider({
 }
 
 function KeyframeButtons({
-  row, previewBase, storageQuery, onPick,
+  row, previewBase, storageQuery, onPick, layout = "scroll",
 }: {
   row: MediaRow;
   previewBase: string;
   storageQuery: string;
   onPick: (ms: number) => void;
+  layout?: "scroll" | "wrap";
 }) {
   const frames = keyframesFor(row).slice(0, 12);
   if (frames.length === 0) return null;
+  const isWrap = layout === "wrap";
   return (
-    <div className="space-y-1">
+    <div className="space-y-1 min-w-0">
       <div className="text-xs uppercase tracking-wide text-text-dim">Keyframes</div>
-      <div className="flex gap-1 overflow-x-auto pb-1" style={{ scrollbarWidth: "thin" }}>
+      <div
+        className={isWrap ? "grid gap-1 grid-cols-4 sm:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10" : "flex gap-1 overflow-x-auto pb-1"}
+        style={isWrap ? undefined : { scrollbarWidth: "thin" }}
+      >
         {frames.map((f) => {
           const ms = f.position_ms ?? 0;
           const src = `${previewBase}/${f.storage_file_id}/content?${storageQuery}`;
@@ -1713,7 +1738,7 @@ function KeyframeButtons({
               type="button"
               onClick={() => onPick(ms)}
               className="relative flex-shrink-0 border border-border rounded overflow-hidden hover:border-accent"
-              style={{ width: 78, height: 44 }}
+              style={isWrap ? { height: 44 } : { width: 78, height: 44 }}
               title={formatDuration(ms)}
             >
               <img src={src} alt="" loading="lazy" className="absolute inset-0 w-full h-full object-cover" />
