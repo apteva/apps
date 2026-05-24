@@ -285,6 +285,7 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
+  const [pendingDestroy, setPendingDestroy] = useState<Instance | null>(null);
 
   const withParams = useCallback(
     () =>
@@ -317,15 +318,15 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
     return () => clearInterval(t);
   }, [load]);
 
-  const destroy = async (id: number, name: string) => {
-    if (!confirm(`Destroy instance "${name}"? Upstream resource will be terminated.`)) return;
+  const destroy = async (inst: Instance) => {
     setBusy(true);
     try {
-      const r = await fetch(`${API}/instances/${id}?${withParams()}`, {
+      const r = await fetch(`${API}/instances/${inst.id}?${withParams()}`, {
         method: "DELETE",
         credentials: "same-origin",
       });
       if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
+      setPendingDestroy(null);
       await load();
     } catch (e) {
       setError("Destroy failed: " + (e as Error).message);
@@ -391,11 +392,20 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
               inst={inst}
               withParams={withParams}
               busy={busy}
-              onDestroy={() => destroy(inst.id, inst.name)}
+              onDestroy={() => setPendingDestroy(inst)}
             />
           ))
         )}
       </main>
+
+      {pendingDestroy && (
+        <DestroyConfirmDialog
+          inst={pendingDestroy}
+          busy={busy}
+          onCancel={() => setPendingDestroy(null)}
+          onConfirm={() => destroy(pendingDestroy)}
+        />
+      )}
 
       {showCreate && (
         <CreateDialog
@@ -405,6 +415,87 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
           setError={setError}
         />
       )}
+    </div>
+  );
+}
+
+function DestroyConfirmDialog({
+  inst, busy, onCancel, onConfirm,
+}: {
+  inst: Instance;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const ip = inst.public_ipv4 || inst.public_ipv6 || "—";
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onCancel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onCancel]);
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 px-4"
+      onClick={() => { if (!busy) onCancel(); }}
+      role="presentation"
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="destroy-instance-title"
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-[460px] bg-bg border border-red/40 rounded p-5 shadow-xl space-y-4"
+      >
+        <div className="space-y-1">
+          <h2 id="destroy-instance-title" className="text-text font-semibold">
+            Destroy instance
+          </h2>
+          <p className="text-xs text-text-muted">
+            This will terminate the upstream resource and remove it from the Instances inventory.
+          </p>
+        </div>
+
+        <div
+          className="rounded-md p-3 space-y-2"
+          style={{ backgroundColor: "rgba(220,38,38,0.08)", border: "1px solid rgba(220,38,38,0.22)" }}
+        >
+          <div className="flex items-baseline justify-between gap-3">
+            <span className="text-sm text-text font-medium truncate">{inst.name}</span>
+            <span className={statusColor(inst.status) + " text-[11px] uppercase tracking-wider font-medium"}>
+              {inst.status}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-[11px] text-text-dim">
+            <span>Provider: <span className="text-text font-mono">{inst.provider}</span></span>
+            <span>Host: <span className="text-text font-mono">{ip}</span></span>
+            {inst.region && <span>Region: <span className="text-text font-mono">{inst.region}</span></span>}
+            {inst.size && <span>Size: <span className="text-text font-mono">{inst.size}</span></span>}
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 pt-1">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="px-3 py-1.5 text-sm rounded border border-border text-text-muted hover:text-text disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={busy}
+            className="px-3 py-1.5 text-sm rounded bg-red text-white hover:bg-red/90 disabled:opacity-50"
+          >
+            {busy ? "Destroying…" : "Destroy"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
