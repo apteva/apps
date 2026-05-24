@@ -156,12 +156,19 @@ interface Transcript {
   status: "pending" | "running" | "ok" | "failed" | "skipped";
   language?: string;
   text?: string;
-  segments?: Array<{ start_ms: number; end_ms: number; text: string; speaker?: string }>;
+  segments?: TranscriptSegment[];
   provider?: string;
   model?: string;
   duration_ms?: number;
   error?: string;
   source_kind?: "auto" | "manual" | "imported";
+}
+
+interface TranscriptSegment {
+  start_ms: number;
+  end_ms: number;
+  text: string;
+  speaker?: string;
 }
 
 const API = "/api/apps/media";
@@ -176,6 +183,15 @@ function formatDuration(ms?: number): string {
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = s % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+function formatTimestamp(ms?: number): string {
+  const safe = Math.max(0, Math.round((ms ?? 0) / 1000));
+  const h = Math.floor(safe / 3600);
+  const m = Math.floor((safe % 3600) / 60);
+  const sec = safe % 60;
   if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
   return `${m}:${String(sec).padStart(2, "0")}`;
 }
@@ -1497,6 +1513,7 @@ function TranscriptSection({
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const timedSegments = (transcript?.segments ?? []).filter((s) => s.text?.trim());
 
   const fetchTranscript = useCallback(async () => {
     setLoading(true);
@@ -1600,6 +1617,9 @@ function TranscriptSection({
           <div className="mt-2 whitespace-pre-wrap text-text-muted text-sm font-mono leading-relaxed">
             {transcript.text || "(empty)"}
           </div>
+          {timedSegments.length > 0 ? (
+            <TranscriptSegments segments={timedSegments} />
+          ) : null}
           <div className="mt-3 flex items-center gap-2">
             <button
               type="button"
@@ -1647,6 +1667,38 @@ function TranscriptSection({
         </div>
       ) : null}
     </section>
+  );
+}
+
+function TranscriptSegments({ segments }: { segments: TranscriptSegment[] }) {
+  return (
+    <div className="mt-3 border-t border-border pt-3">
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <h4 className="text-[11px] uppercase tracking-wide text-text-dim">Timed segments</h4>
+        <span className="text-[11px] text-text-dim">{segments.length}</span>
+      </div>
+      <ol className="max-h-72 overflow-auto pr-1 space-y-1.5" style={{ scrollbarWidth: "thin" }}>
+        {segments.map((seg, idx) => (
+          <li
+            key={`${seg.start_ms}-${seg.end_ms}-${idx}`}
+            className="grid grid-cols-[7rem_1fr] gap-2 text-xs"
+          >
+            <span
+              className="font-mono text-[10px] text-accent bg-accent/10 rounded px-1.5 py-1 text-center h-fit"
+              title={`${formatTimestamp(seg.start_ms)} - ${formatTimestamp(seg.end_ms)}`}
+            >
+              {formatTimestamp(seg.start_ms)}-{formatTimestamp(seg.end_ms)}
+            </span>
+            <span className="min-w-0 text-text-muted leading-relaxed">
+              {seg.speaker ? (
+                <span className="text-text-dim mr-1">Speaker {seg.speaker}</span>
+              ) : null}
+              {seg.text}
+            </span>
+          </li>
+        ))}
+      </ol>
+    </div>
   );
 }
 
