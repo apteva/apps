@@ -132,6 +132,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/search/places", Handler: a.handleSearchPlaces},
 		{Pattern: "/search/place", Handler: a.handlePlaceDetails},
 		{Pattern: "/search/flights", Handler: a.handleSearchFlights},
+		{Pattern: "/price-observations", Handler: a.handlePriceObservations},
 	}
 }
 
@@ -343,8 +344,19 @@ func (a *App) MCPTools() []sdk.Tool {
 				"return_date": map[string]any{"type": "string"},
 				"passengers":  map[string]any{"type": "integer"},
 				"cabin":       map[string]any{"type": "string"},
+				"trip_id":     map[string]any{"type": "integer"},
 			}, []string{"to", "depart_date"}),
 			Handler: a.toolSearchFlights},
+		{Name: "price_observations", Description: "List long-lived travel price observations and route summaries. Flights are recorded from Duffel searches; booking offer refs may be expired, so use this for planning intelligence, not direct booking.",
+			InputSchema: schemaObject(map[string]any{
+				"kind":        map[string]any{"type": "string"},
+				"origin":      map[string]any{"type": "string"},
+				"destination": map[string]any{"type": "string"},
+				"trip_id":     map[string]any{"type": "integer"},
+				"since_days":  map[string]any{"type": "integer"},
+				"limit":       map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolPriceObservations},
 	}
 }
 
@@ -3030,6 +3042,48 @@ type FlightOffer struct {
 	Currency         string `json:"currency"`
 }
 
+type TravelPriceObservation struct {
+	ID               int64  `json:"id"`
+	ProjectID        string `json:"project_id"`
+	TripID           *int64 `json:"trip_id,omitempty"`
+	Kind             string `json:"kind"`
+	Provider         string `json:"provider"`
+	OriginCode       string `json:"origin_code,omitempty"`
+	DestinationCode  string `json:"destination_code,omitempty"`
+	DepartDate       string `json:"depart_date,omitempty"`
+	ReturnDate       string `json:"return_date,omitempty"`
+	PartySize        int    `json:"party_size"`
+	CabinOrClass     string `json:"cabin_or_class,omitempty"`
+	ProviderName     string `json:"provider_name,omitempty"`
+	ItemName         string `json:"item_name,omitempty"`
+	StopsOrTransfers *int   `json:"stops_or_transfers,omitempty"`
+	Duration         string `json:"duration,omitempty"`
+	AmountCents      int64  `json:"amount_cents"`
+	Currency         string `json:"currency"`
+	ObservedAt       string `json:"observed_at"`
+	LiveUntil        string `json:"live_until,omitempty"`
+	BookableRef      string `json:"bookable_ref,omitempty"`
+}
+
+type TravelPriceRouteSummary struct {
+	Kind                 string `json:"kind"`
+	OriginCode           string `json:"origin_code,omitempty"`
+	DestinationCode      string `json:"destination_code,omitempty"`
+	Currency             string `json:"currency"`
+	PartySize            int    `json:"party_size"`
+	CabinOrClass         string `json:"cabin_or_class,omitempty"`
+	ObservationCount     int    `json:"observation_count"`
+	LowestAmountCents    int64  `json:"lowest_amount_cents"`
+	LatestAmountCents    int64  `json:"latest_amount_cents"`
+	CheapestDepartDate   string `json:"cheapest_depart_date,omitempty"`
+	CheapestReturnDate   string `json:"cheapest_return_date,omitempty"`
+	CheapestProviderName string `json:"cheapest_provider_name,omitempty"`
+	CheapestItemName     string `json:"cheapest_item_name,omitempty"`
+	CheapestObservedAt   string `json:"cheapest_observed_at,omitempty"`
+	LatestObservedAt     string `json:"latest_observed_at,omitempty"`
+	FirstObservedAt      string `json:"first_observed_at,omitempty"`
+}
+
 func (a *App) toolSearchFlights(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	settings, _ := loadSettings(ctx)
 	if settings.DuffelConnectionID == 0 {
@@ -3094,9 +3148,217 @@ func (a *App) toolSearchFlights(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return nil, fmt.Errorf("flight search failed: %s", body)
 	}
 	out := normalizeFlightsResponse(res.Data)
+	tripID := int64(intArg(args, "trip_id", 0))
+	if offers, ok := out["offers"].([]FlightOffer); ok {
+		recordFlightPriceObservations(ctx, tripID, key, input, offers)
+	}
 	// Duffel offers expire fast — 10-minute cache is plenty.
 	cacheSet(ctx, key, out, 10*time.Minute)
 	return out, nil
+}
+
+func recordFlightPriceObservations(ctx *sdk.AppCtx, tripID int64, signature string, input map[string]any, offers []FlightOffer) {
+	if len(offers) == 0 {
+		return
+	}
+	data, _ := input["data"].(map[string]any)
+	slices, _ := data["slices"].([]map[string]any)
+	origin, destination, departDate, returnDate := "", "", "", ""
+	if len(slices) > 0 {
+		origin = jsonString(slices[0]["origin"])
+		destination = jsonString(slices[0]["destination"])
+		departDate = jsonString(slices[0]["departure_date"])
+	}
+	if len(slices) > 1 {
+		returnDate = jsonString(slices[1]["departure_date"])
+	}
+	partySize := 1
+	if pax, ok := data["passengers"].([]map[string]any); ok && len(pax) > 0 {
+		partySize = len(pax)
+	}
+	cabin := jsonString(data["cabin_class"])
+	observedAt := time.Now().UTC()
+	liveUntil := observedAt.Add(10 * time.Minute).Format(time.RFC3339)
+	project := projectID()
+
+	for _, offer := range offers {
+		if offer.TotalAmountCents <= 0 || offer.Currency == "" {
+			continue
+		}
+		o := origin
+		if offer.DepartLocation != "" {
+			o = offer.DepartLocation
+		}
+		d := destination
+		if offer.ArriveLocation != "" {
+			d = offer.ArriveLocation
+		}
+		cc := cabin
+		if offer.Cabin != "" {
+			cc = offer.Cabin
+		}
+		itemName := strings.TrimSpace(strings.Join([]string{offer.CarrierCode + offer.Number, offer.Carrier}, " "))
+		meta, _ := json.Marshal(map[string]any{
+			"carrier_code":  offer.CarrierCode,
+			"flight_number": offer.Number,
+			"depart_at":     offer.DepartAt,
+			"arrive_at":     offer.ArriveAt,
+		})
+		var trip any = nil
+		if tripID > 0 {
+			trip = tripID
+		}
+		_, _ = ctx.AppDB().Exec(
+			`INSERT INTO travel_price_observations
+			 (project_id, trip_id, kind, provider, search_signature, origin_code, destination_code,
+			  depart_date, return_date, party_size, cabin_or_class, provider_name, item_name,
+			  stops_or_transfers, duration, amount_cents, currency, observed_at, live_until,
+			  bookable_ref, metadata_json)
+			 VALUES (?, ?, 'flight', 'duffel', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			project, trip, signature, o, d, departDate, returnDate, partySize, cc,
+			offer.Carrier, itemName, offer.Stops, offer.Duration, offer.TotalAmountCents,
+			offer.Currency, observedAt.Format(time.RFC3339), liveUntil, offer.OfferID, string(meta),
+		)
+	}
+}
+
+func (a *App) toolPriceObservations(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	kind := strArg(args, "kind", "flight")
+	origin := strings.ToUpper(strArg(args, "origin", ""))
+	destination := strings.ToUpper(strArg(args, "destination", ""))
+	tripID := int64(intArg(args, "trip_id", 0))
+	limit := intArg(args, "limit", 200)
+	if limit < 1 {
+		limit = 200
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	sinceDays := intArg(args, "since_days", 180)
+	if sinceDays < 1 {
+		sinceDays = 180
+	}
+	since := time.Now().UTC().AddDate(0, 0, -sinceDays).Format(time.RFC3339)
+
+	where := []string{"project_id=?", "kind=?", "observed_at>=?"}
+	params := []any{projectID(), kind, since}
+	if origin != "" {
+		where = append(where, "origin_code=?")
+		params = append(params, origin)
+	}
+	if destination != "" {
+		where = append(where, "destination_code=?")
+		params = append(params, destination)
+	}
+	if tripID > 0 {
+		where = append(where, "trip_id=?")
+		params = append(params, tripID)
+	}
+	params = append(params, limit)
+	q := `SELECT id, project_id, trip_id, kind, provider, origin_code, destination_code,
+	             depart_date, return_date, party_size, cabin_or_class, provider_name, item_name,
+	             stops_or_transfers, duration, amount_cents, currency, observed_at, live_until, bookable_ref
+	      FROM travel_price_observations
+	      WHERE ` + strings.Join(where, " AND ") + `
+	      ORDER BY observed_at DESC, amount_cents ASC
+	      LIMIT ?`
+	rows, err := ctx.AppDB().Query(q, params...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	observations := []TravelPriceObservation{}
+	for rows.Next() {
+		var o TravelPriceObservation
+		var trip sql.NullInt64
+		var origin, destination, depart, ret, cabin, providerName, itemName, duration, liveUntil, bookable sql.NullString
+		var stops sql.NullInt64
+		if err := rows.Scan(&o.ID, &o.ProjectID, &trip, &o.Kind, &o.Provider, &origin, &destination,
+			&depart, &ret, &o.PartySize, &cabin, &providerName, &itemName, &stops, &duration,
+			&o.AmountCents, &o.Currency, &o.ObservedAt, &liveUntil, &bookable); err != nil {
+			continue
+		}
+		if trip.Valid {
+			v := trip.Int64
+			o.TripID = &v
+		}
+		o.OriginCode = origin.String
+		o.DestinationCode = destination.String
+		o.DepartDate = depart.String
+		o.ReturnDate = ret.String
+		o.CabinOrClass = cabin.String
+		o.ProviderName = providerName.String
+		o.ItemName = itemName.String
+		if stops.Valid {
+			v := int(stops.Int64)
+			o.StopsOrTransfers = &v
+		}
+		o.Duration = duration.String
+		o.LiveUntil = liveUntil.String
+		o.BookableRef = bookable.String
+		observations = append(observations, o)
+	}
+	return map[string]any{
+		"observations": observations,
+		"routes":       summarizePriceObservations(observations),
+	}, nil
+}
+
+func summarizePriceObservations(observations []TravelPriceObservation) []TravelPriceRouteSummary {
+	byKey := map[string]*TravelPriceRouteSummary{}
+	for _, o := range observations {
+		key := strings.Join([]string{o.Kind, o.OriginCode, o.DestinationCode, o.Currency, strconv.Itoa(o.PartySize), o.CabinOrClass}, "|")
+		s := byKey[key]
+		if s == nil {
+			s = &TravelPriceRouteSummary{
+				Kind:              o.Kind,
+				OriginCode:        o.OriginCode,
+				DestinationCode:   o.DestinationCode,
+				Currency:          o.Currency,
+				PartySize:         o.PartySize,
+				CabinOrClass:      o.CabinOrClass,
+				LowestAmountCents: o.AmountCents,
+				LatestAmountCents: o.AmountCents,
+				FirstObservedAt:   o.ObservedAt,
+				LatestObservedAt:  o.ObservedAt,
+			}
+			byKey[key] = s
+		}
+		s.ObservationCount++
+		if o.AmountCents < s.LowestAmountCents {
+			s.LowestAmountCents = o.AmountCents
+			s.CheapestDepartDate = o.DepartDate
+			s.CheapestReturnDate = o.ReturnDate
+			s.CheapestProviderName = o.ProviderName
+			s.CheapestItemName = o.ItemName
+			s.CheapestObservedAt = o.ObservedAt
+		}
+		if s.CheapestObservedAt == "" && o.AmountCents == s.LowestAmountCents {
+			s.CheapestDepartDate = o.DepartDate
+			s.CheapestReturnDate = o.ReturnDate
+			s.CheapestProviderName = o.ProviderName
+			s.CheapestItemName = o.ItemName
+			s.CheapestObservedAt = o.ObservedAt
+		}
+		if o.ObservedAt > s.LatestObservedAt {
+			s.LatestObservedAt = o.ObservedAt
+			s.LatestAmountCents = o.AmountCents
+		}
+		if s.FirstObservedAt == "" || o.ObservedAt < s.FirstObservedAt {
+			s.FirstObservedAt = o.ObservedAt
+		}
+	}
+	out := make([]TravelPriceRouteSummary, 0, len(byKey))
+	for _, s := range byKey {
+		out = append(out, *s)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].LowestAmountCents == out[j].LowestAmountCents {
+			return out[i].LatestObservedAt > out[j].LatestObservedAt
+		}
+		return out[i].LowestAmountCents < out[j].LowestAmountCents
+	})
+	return out
 }
 
 func validIATA(code string) bool {
@@ -3456,11 +3718,38 @@ func (a *App) handleSearchFlights(w http.ResponseWriter, r *http.Request) {
 				args["passengers"] = float64(n)
 			}
 		}
+		if v := r.URL.Query().Get("trip_id"); v != "" {
+			if n, _ := strconv.ParseInt(v, 10, 64); n > 0 {
+				args["trip_id"] = float64(n)
+			}
+		}
 		out, err := a.toolSearchFlights(globalCtx, args)
 		writeOrErr(w, out, err)
 		return
 	}
 	postBody(w, r, a.toolSearchFlights)
+}
+
+func (a *App) handlePriceObservations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET", http.StatusMethodNotAllowed)
+		return
+	}
+	args := map[string]any{}
+	for _, k := range []string{"kind", "origin", "destination"} {
+		if v := r.URL.Query().Get(k); v != "" {
+			args[k] = v
+		}
+	}
+	for _, k := range []string{"trip_id", "since_days", "limit"} {
+		if v := r.URL.Query().Get(k); v != "" {
+			if n, _ := strconv.ParseInt(v, 10, 64); n > 0 {
+				args[k] = float64(n)
+			}
+		}
+	}
+	out, err := a.toolPriceObservations(globalCtx, args)
+	writeOrErr(w, out, err)
 }
 
 func queryToArgs(q map[string][]string, keys []string) map[string]any {

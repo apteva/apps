@@ -894,6 +894,18 @@ func TestUnit_SearchFlights_HappyPath(t *testing.T) {
 	if slices[0]["origin"] != "CDG" {
 		t.Errorf("default home_airport not applied: %+v", slices)
 	}
+	priceOut, err := app.toolPriceObservations(ctx, map[string]any{"kind": "flight"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obs := priceOut.(map[string]any)["observations"].([]TravelPriceObservation)
+	if len(obs) != 2 {
+		t.Fatalf("want 2 price observations, got %d", len(obs))
+	}
+	routes := priceOut.(map[string]any)["routes"].([]TravelPriceRouteSummary)
+	if len(routes) != 1 || routes[0].OriginCode != "CDG" || routes[0].DestinationCode != "LIN" || routes[0].LowestAmountCents != 8500 {
+		t.Fatalf("route summary wrong: %+v", routes)
+	}
 }
 
 func TestUnit_SearchFlights_RejectsNonIATA(t *testing.T) {

@@ -154,6 +154,52 @@ interface FlightOffer {
   currency: string;
 }
 
+interface TravelPriceObservation {
+  id: number;
+  trip_id?: number;
+  kind: string;
+  provider: string;
+  origin_code?: string;
+  destination_code?: string;
+  depart_date?: string;
+  return_date?: string;
+  party_size: number;
+  cabin_or_class?: string;
+  provider_name?: string;
+  item_name?: string;
+  stops_or_transfers?: number;
+  duration?: string;
+  amount_cents: number;
+  currency: string;
+  observed_at: string;
+  live_until?: string;
+  bookable_ref?: string;
+}
+
+interface TravelPriceRouteSummary {
+  kind: string;
+  origin_code?: string;
+  destination_code?: string;
+  currency: string;
+  party_size: number;
+  cabin_or_class?: string;
+  observation_count: number;
+  lowest_amount_cents: number;
+  latest_amount_cents: number;
+  cheapest_depart_date?: string;
+  cheapest_return_date?: string;
+  cheapest_provider_name?: string;
+  cheapest_item_name?: string;
+  cheapest_observed_at?: string;
+  latest_observed_at?: string;
+  first_observed_at?: string;
+}
+
+interface TravelPriceResponse {
+  observations: TravelPriceObservation[];
+  routes: TravelPriceRouteSummary[];
+}
+
 interface BudgetCategoryRow {
   category: string;
   cap: number;
@@ -181,7 +227,7 @@ interface TripDashboard {
   budget: BudgetSummary;
 }
 
-type Tab = "overview" | "itinerary" | "budget" | "todos";
+type Tab = "overview" | "itinerary" | "deals" | "budget" | "todos";
 
 // ─── App event subscription (inlined, mirrors finance pattern) ───
 
@@ -242,6 +288,20 @@ function fmtDateShort(s: string): string {
 
 function fmtTime(s: string): string {
   return new Date(s).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+function relativeTime(s?: string): string {
+  if (!s) return "";
+  const t = new Date(s).getTime();
+  if (!Number.isFinite(t)) return "";
+  const diff = Date.now() - t;
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (diff < minute) return "just now";
+  if (diff < hour) return `${Math.floor(diff / minute)}m ago`;
+  if (diff < day) return `${Math.floor(diff / hour)}h ago`;
+  return `${Math.floor(diff / day)}d ago`;
 }
 
 function daysUntil(startAt: string, endAt: string): { label: string; tone: "future" | "active" | "past" } {
@@ -715,7 +775,7 @@ function TripDetail({ tripID, onBack, onChanged }: { tripID: number; onBack: () 
             <Icon name="trash" size={14} />
           </button>
           <nav className="flex rounded-md border border-border overflow-hidden text-sm">
-            {(["overview", "itinerary", "budget", "todos"] as Tab[]).map(t => (
+            {(["overview", "itinerary", "deals", "budget", "todos"] as Tab[]).map(t => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -751,6 +811,7 @@ function TripDetail({ tripID, onBack, onChanged }: { tripID: number; onBack: () 
       <div className="flex-1 overflow-auto">
         {tab === "overview" && <OverviewTab data={data} onChanged={() => { refresh(); onChanged(); }} />}
         {tab === "itinerary" && <ItineraryTab data={data} onChanged={() => { refresh(); onChanged(); }} />}
+        {tab === "deals" && <DealsTab trip={trip} />}
         {tab === "budget" && <BudgetTab data={data} onChanged={() => { refresh(); onChanged(); }} />}
         {tab === "todos" && <TodosTab data={data} onChanged={() => { refresh(); onChanged(); }} />}
       </div>
@@ -825,6 +886,175 @@ function UpcomingList({ data }: { data: TripDashboard }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+// ─── Deals tab ───────────────────────────────────────────────────
+
+function DealsTab({ trip }: { trip: Trip }) {
+  const ui = useUI();
+  const [scope, setScope] = useState<"trip" | "all">("trip");
+  const [data, setData] = useState<TravelPriceResponse | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setBusy(true);
+    try {
+      const params = new URLSearchParams({ kind: "flight", since_days: "180", limit: "500" });
+      if (scope === "trip") params.set("trip_id", String(trip.id));
+      const r = await api<TravelPriceResponse>(`/price-observations?${params}`);
+      setData(r);
+    } catch (e: unknown) {
+      ui.notify(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [scope, trip.id, ui]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const routes = data?.routes ?? [];
+  const observations = data?.observations ?? [];
+  const best = routes[0];
+
+  return (
+    <div className="space-y-3">
+      <section className="rounded-lg border border-border bg-bg-card p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="text-xs uppercase tracking-wide text-text-muted">Flight price intelligence</div>
+            <div className="mt-1 text-sm text-text-muted">
+              {busy ? "Loading observed prices…" : `${observations.length} observed fare${observations.length === 1 ? "" : "s"} from the last 180 days`}
+            </div>
+          </div>
+          <div className="flex overflow-hidden rounded-md border border-border text-sm">
+            <button
+              type="button"
+              onClick={() => setScope("trip")}
+              className={`px-3 py-1.5 ${scope === "trip" ? "bg-accent text-bg" : "hover:bg-bg-hover"}`}
+            >
+              This trip
+            </button>
+            <button
+              type="button"
+              onClick={() => setScope("all")}
+              className={`px-3 py-1.5 ${scope === "all" ? "bg-accent text-bg" : "hover:bg-bg-hover"}`}
+            >
+              All
+            </button>
+          </div>
+        </div>
+      </section>
+
+      {best && (
+        <section className="rounded-lg border border-border bg-bg-card p-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <div className="mb-1 text-xs uppercase tracking-wide text-text-muted">Cheapest observed route</div>
+              <div className="flex items-center gap-2 text-lg font-semibold">
+                <Icon name="plane" size={18} />
+                <span>{best.origin_code || "—"} → {best.destination_code || "—"}</span>
+              </div>
+              <div className="mt-1 text-sm text-text-muted">
+                {best.cheapest_provider_name || "Flight"} {best.cheapest_item_name ? `• ${best.cheapest_item_name}` : ""}
+                {best.cheapest_depart_date ? ` • ${fmtDateShort(best.cheapest_depart_date)}` : ""}
+                {best.cheapest_return_date ? ` – ${fmtDateShort(best.cheapest_return_date)}` : ""}
+              </div>
+            </div>
+            <div className="text-left sm:text-right">
+              <div className="text-2xl font-semibold tabular-nums">{fmtMoney(best.lowest_amount_cents, best.currency)}</div>
+              <div className="text-xs text-text-muted">
+                latest {fmtMoney(best.latest_amount_cents, best.currency)} • seen {relativeTime(best.cheapest_observed_at)}
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {routes.length > 0 ? (
+        <section className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+          {routes.slice(0, 8).map(route => (
+            <FlightDealCard key={`${route.origin_code}-${route.destination_code}-${route.currency}-${route.party_size}-${route.cabin_or_class}`} route={route} />
+          ))}
+        </section>
+      ) : (
+        <section className="rounded-lg border border-border bg-bg-card">
+          <EmptyState message="No observed flight prices yet." />
+        </section>
+      )}
+
+      {observations.length > 0 && (
+        <section className="rounded-lg border border-border bg-bg-card p-4">
+          <div className="mb-3 text-xs uppercase tracking-wide text-text-muted">Recent observations</div>
+          <div className="overflow-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="text-xs uppercase tracking-wide text-text-muted">
+                <tr>
+                  <th className="pb-2 font-medium">Route</th>
+                  <th className="pb-2 font-medium">Date</th>
+                  <th className="pb-2 font-medium">Carrier</th>
+                  <th className="pb-2 text-right font-medium">Price</th>
+                  <th className="pb-2 text-right font-medium">Seen</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border-subtle">
+                {observations.slice(0, 12).map(o => (
+                  <tr key={o.id}>
+                    <td className="py-2 tabular-nums">{o.origin_code || "—"} → {o.destination_code || "—"}</td>
+                    <td className="py-2 text-text-muted">
+                      {o.depart_date ? fmtDateShort(o.depart_date) : "—"}
+                      {o.return_date ? ` – ${fmtDateShort(o.return_date)}` : ""}
+                    </td>
+                    <td className="py-2 text-text-muted">{o.provider_name || o.item_name || o.provider}</td>
+                    <td className="py-2 text-right tabular-nums">{fmtMoney(o.amount_cents, o.currency)}</td>
+                    <td className="py-2 text-right text-text-muted">{relativeTime(o.observed_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+function FlightDealCard({ route }: { route: TravelPriceRouteSummary }) {
+  const delta = route.latest_amount_cents - route.lowest_amount_cents;
+  const liveVsLow = delta === 0 ? "matches low" : `${delta > 0 ? "+" : ""}${fmtMoney(delta, route.currency)} vs low`;
+  return (
+    <article className="rounded-lg border border-border bg-bg-card p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 font-medium">
+            <Icon name="plane" size={16} />
+            <span className="tabular-nums">{route.origin_code || "—"} → {route.destination_code || "—"}</span>
+          </div>
+          <div className="mt-1 text-xs text-text-muted">
+            {route.party_size} pax
+            {route.cabin_or_class ? ` • ${route.cabin_or_class.replace("_", " ")}` : ""}
+            {route.observation_count ? ` • ${route.observation_count} seen` : ""}
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="text-lg font-semibold tabular-nums">{fmtMoney(route.lowest_amount_cents, route.currency)}</div>
+          <div className="text-xs text-text-muted">{liveVsLow}</div>
+        </div>
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
+        <div>
+          <div className="uppercase tracking-wide text-text-dim">Cheapest</div>
+          <div className="mt-1 text-text-muted">
+            {route.cheapest_depart_date ? fmtDateShort(route.cheapest_depart_date) : "—"}
+            {route.cheapest_return_date ? ` – ${fmtDateShort(route.cheapest_return_date)}` : ""}
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="uppercase tracking-wide text-text-dim">Observed</div>
+          <div className="mt-1 text-text-muted">{relativeTime(route.cheapest_observed_at || route.latest_observed_at)}</div>
+        </div>
+      </div>
+    </article>
   );
 }
 
@@ -1808,6 +2038,7 @@ function SearchFlightsModal({ trip, defaultTo, defaultDepartAt, onPick, onClose 
         from, to, depart_date: departDate,
         passengers: String(passengers),
         cabin,
+        trip_id: String(trip.id),
       });
       if (returnDate) params.set("return_date", returnDate);
       const r = await api<{ offers: FlightOffer[] }>(`/search/flights?${params}`);
