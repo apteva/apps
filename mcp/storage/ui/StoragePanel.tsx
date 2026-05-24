@@ -100,6 +100,7 @@ interface FileRow {
   visibility: "private" | "signed" | "public";
   sha256: string;
   created_at: string;
+  updated_at?: string;
   // Canonical absolute URL minted by storage. Same shape regardless
   // of visibility — what differs is whether the request needs auth.
   // For visibility=public, anyone with this URL can fetch; for
@@ -108,7 +109,16 @@ interface FileRow {
   url?: string;
 }
 
-interface FoldersResp { folders?: string[] }
+interface FolderRow {
+  name: string;
+  path: string;
+  created_at?: string;
+  updated_at?: string;
+  file_count?: number;
+  size_bytes?: number;
+}
+
+interface FoldersResp { folders?: string[]; folder_details?: FolderRow[] }
 interface FilesResp { files?: FileRow[] }
 interface RenameFolderResp { from: string; to: string; updated: number }
 
@@ -119,6 +129,31 @@ function formatSize(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} kB`;
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function formatDate(s?: string): string {
+  if (!s) return "-";
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return s;
+  return d.toLocaleString();
+}
+
+function formatFolderCount(n?: number): string {
+  if (n == null) return "-";
+  return `${n} file${n === 1 ? "" : "s"}`;
+}
+
+function folderRows(resp: FoldersResp, parent: string): FolderRow[] {
+  if (resp.folder_details && resp.folder_details.length > 0) {
+    return resp.folder_details.map((f) => ({
+      ...f,
+      path: f.path || `${parent}${f.name}/`,
+    }));
+  }
+  return (resp.folders || []).map((name) => ({
+    name,
+    path: `${parent}${name}/`,
+  }));
 }
 
 // Per-file upload state surfaced as a progress strip above the table.
@@ -143,7 +178,7 @@ interface UploadJob {
 
 export default function StoragePanel({ projectId, installId }: NativePanelProps) {
   const [folder, setFolder] = useState("/");
-  const [folders, setFolders] = useState<string[]>([]);
+  const [folders, setFolders] = useState<FolderRow[]>([]);
   const [files, setFiles] = useState<FileRow[]>([]);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
@@ -182,10 +217,11 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
         api<FoldersResp>("GET", "/folders", { parent: folder }),
         api<FilesResp>("GET", "/files", { folder }),
       ]);
-      setFolders(foldersResp.folders || []);
+      const nextFolders = folderRows(foldersResp, folder);
+      setFolders(nextFolders);
       setFiles(filesResp.files || []);
       const total = (filesResp.files || []).length;
-      const subs = (foldersResp.folders || []).length;
+      const subs = nextFolders.length;
       setStatus(`${total} file${total !== 1 ? "s" : ""} · ${subs} folder${subs !== 1 ? "s" : ""}`);
     } catch (e) {
       setStatus("Error: " + (e as Error).message);
@@ -545,29 +581,31 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
               <tr>
                 <th className="text-left px-4 py-2 font-normal">Name</th>
                 <th className="text-left px-4 py-2 font-normal w-24">Size</th>
+                <th className="text-left px-4 py-2 font-normal w-44">Modified</th>
                 <th className="text-left px-4 py-2 font-normal w-24">Visibility</th>
                 <th className="text-right px-4 py-2 font-normal w-32">Actions</th>
               </tr>
             </thead>
             <tbody>
               {folders.map((f) => (
-                <tr key={`folder-${f}`} className="border-t border-border hover:bg-bg-input/30">
+                <tr key={`folder-${f.path}`} className="border-t border-border hover:bg-bg-input/30">
                   <td className="px-4 py-2">
                     <button
                       type="button"
-                      onClick={() => setFolder(folder + f + "/")}
+                      onClick={() => setFolder(f.path)}
                       className="text-accent hover:underline flex items-center gap-1"
                     >
                       <span aria-hidden>📁</span>
-                      <span>{f}</span>
+                      <span>{f.name}</span>
                     </button>
                   </td>
-                  <td className="px-4 py-2 text-text-dim">—</td>
+                  <td className="px-4 py-2 text-text-dim">{formatFolderCount(f.file_count)}</td>
+                  <td className="px-4 py-2 text-text-dim whitespace-nowrap">{formatDate(f.updated_at || f.created_at)}</td>
                   <td className="px-4 py-2 text-text-dim">folder</td>
                   <td className="px-4 py-2 text-right">
                     <button
                       type="button"
-                      onClick={() => openRenameFolder(f)}
+                      onClick={() => openRenameFolder(f.name)}
                       className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
                     >Rename</button>
                   </td>
@@ -585,6 +623,7 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
                       <span className="text-text truncate max-w-md inline-block align-middle" title={f.name}>{f.name}</span>
                     </td>
                     <td className="px-4 py-2 text-text-muted">{formatSize(f.size_bytes)}</td>
+                    <td className="px-4 py-2 text-text-muted whitespace-nowrap">{formatDate(f.updated_at || f.created_at)}</td>
                     <td className="px-4 py-2">
                       <VisibilityBadge value={f.visibility} />
                     </td>

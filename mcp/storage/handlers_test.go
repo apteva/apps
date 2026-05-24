@@ -153,6 +153,40 @@ func TestListFolders_OneLevel(t *testing.T) {
 	}
 }
 
+func TestListChildFolderInfos_Metadata(t *testing.T) {
+	ctx := newTestCtx(t)
+	mustUpload(t, ctx, "a.txt", "/reports/2025/", "abc")
+	mustUpload(t, ctx, "b.txt", "/reports/2025/q1/", "de")
+	mustUpload(t, ctx, "c.txt", "/notes/", "x")
+
+	infos, err := dbListChildFolderInfos(ctx.AppDB(), "test-proj", "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reports *FolderInfo
+	for i := range infos {
+		if infos[i].Name == "reports" {
+			reports = &infos[i]
+			break
+		}
+	}
+	if reports == nil {
+		t.Fatalf("reports folder missing from %#v", infos)
+	}
+	if reports.Path != "/reports/" {
+		t.Errorf("path=%q, want /reports/", reports.Path)
+	}
+	if reports.FileCount != 2 {
+		t.Errorf("file_count=%d, want 2", reports.FileCount)
+	}
+	if reports.SizeBytes != 5 {
+		t.Errorf("size_bytes=%d, want 5", reports.SizeBytes)
+	}
+	if reports.CreatedAt == "" || reports.UpdatedAt == "" {
+		t.Errorf("expected folder dates, got created=%q updated=%q", reports.CreatedAt, reports.UpdatedAt)
+	}
+}
+
 func TestMove_ChangesFolderAndName(t *testing.T) {
 	ctx := newTestCtx(t)
 	f := mustUpload(t, ctx, "draft.txt", "/", "x")

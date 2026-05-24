@@ -396,6 +396,15 @@ type File struct {
 	UpdatedAt string `json:"updated_at,omitempty"`
 }
 
+type FolderInfo struct {
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	CreatedAt string `json:"created_at,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+	FileCount int    `json:"file_count"`
+	SizeBytes int64  `json:"size_bytes"`
+}
+
 // ─── Path / folder normalisation ───────────────────────────────────
 
 // normaliseFolder ensures the folder string is well-formed:
@@ -1131,12 +1140,20 @@ func (a *App) handleFolders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parent := normaliseFolder(r.URL.Query().Get("parent"))
-	folders, err := dbListChildFolders(ctx.AppDB(), pid, parent)
+	folderDetails, err := dbListChildFolderInfos(ctx.AppDB(), pid, parent)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"folders": folders, "parent": parent})
+	folders := make([]string, 0, len(folderDetails))
+	for _, f := range folderDetails {
+		folders = append(folders, f.Name)
+	}
+	httpJSON(w, map[string]any{
+		"folders":        folders,
+		"folder_details": folderDetails,
+		"parent":         parent,
+	})
 }
 
 func (a *App) httpRenameFolder(w http.ResponseWriter, r *http.Request) {
@@ -1862,9 +1879,22 @@ func dbFolderHasFiles(db *sql.DB, pid, folder string) (bool, error) {
 // level under `parent`. parent="/reports/" + a row at folder=
 // "/reports/2026/q1/" returns "2026" (one entry, deduped).
 func dbListChildFolders(db *sql.DB, pid, parent string) ([]string, error) {
+	infos, err := dbListChildFolderInfos(db, pid, parent)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(infos))
+	for _, info := range infos {
+		out = append(out, info.Name)
+	}
+	return out, nil
+}
+
+func dbListChildFolderInfos(db *sql.DB, pid, parent string) ([]FolderInfo, error) {
 	parent = normaliseFolder(parent)
 	rows, err := db.Query(
-		`SELECT DISTINCT folder FROM files
+		`SELECT folder, COALESCE(created_at,''), COALESCE(updated_at,''), COALESCE(size_bytes,0)
+		 FROM files
 		 WHERE project_id = ? AND folder LIKE ? AND folder != ? AND deleted_at IS NULL
 		 ORDER BY folder`,
 		pid, parent+"%", parent)
@@ -1872,11 +1902,12 @@ func dbListChildFolders(db *sql.DB, pid, parent string) ([]string, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	seen := map[string]bool{}
-	out := []string{}
+	seen := map[string]int{}
+	out := []FolderInfo{}
 	for rows.Next() {
-		var folder string
-		if err := rows.Scan(&folder); err != nil {
+		var folder, createdAt, updatedAt string
+		var sizeBytes int64
+		if err := rows.Scan(&folder, &createdAt, &updatedAt, &sizeBytes); err != nil {
 			continue
 		}
 		// Take the first path segment after parent.
@@ -1888,11 +1919,30 @@ func dbListChildFolders(db *sql.DB, pid, parent string) ([]string, error) {
 		if i := strings.IndexByte(rel, '/'); i >= 0 {
 			seg = rel[:i]
 		}
-		if seg == "" || seen[seg] {
+		if seg == "" {
 			continue
 		}
-		seen[seg] = true
-		out = append(out, seg)
+		idx, ok := seen[seg]
+		if !ok {
+			path := parent + seg + "/"
+			idx = len(out)
+			seen[seg] = idx
+			out = append(out, FolderInfo{
+				Name:      seg,
+				Path:      path,
+				CreatedAt: createdAt,
+				UpdatedAt: updatedAt,
+			})
+		}
+		info := &out[idx]
+		info.FileCount++
+		info.SizeBytes += sizeBytes
+		if createdAt != "" && (info.CreatedAt == "" || createdAt < info.CreatedAt) {
+			info.CreatedAt = createdAt
+		}
+		if updatedAt != "" && (info.UpdatedAt == "" || updatedAt > info.UpdatedAt) {
+			info.UpdatedAt = updatedAt
+		}
 	}
 	return out, nil
 }
