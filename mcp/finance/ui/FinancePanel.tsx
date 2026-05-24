@@ -107,6 +107,12 @@ interface Transaction {
   memo: string;
 }
 
+interface CSVImportResult {
+  imported: number;
+  skipped: number;
+  duplicates: number;
+}
+
 interface Category {
   id: number;
   parent_id?: number;
@@ -361,6 +367,8 @@ function Icon({ name, size = 16 }: { name: string; size?: number }) {
       return <svg {...common}><path d="M19 6h-1a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v1H3a1 1 0 0 0-1 1v3a1 1 0 0 0 1 1h1l1 8h13l1-8h2a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1h-1z"/></svg>;
     case "minus":
       return <svg {...common}><path d="M5 12h14"/></svg>;
+    case "upload":
+      return <svg {...common}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>;
     case "x":
       return <svg {...common}><path d="M18 6L6 18M6 6l12 12"/></svg>;
     case "chevron-left":
@@ -868,6 +876,7 @@ function AccountsTab({ accounts, base, onChanged }: { accounts: Account[]; base:
 function AccountDetail({ account, onBack, onChanged }: { account: Account; onBack: () => void; onChanged: () => void }) {
   const [txns, setTxns] = useState<Transaction[]>([]);
   const [showNewTxn, setShowNewTxn] = useState(false);
+  const [showImportCSV, setShowImportCSV] = useState(false);
   const refresh = useCallback(async () => {
     const r = await api<{ transactions: Transaction[] }>(`/txns?account_id=${account.id}&limit=200`);
     setTxns(r.transactions ?? []);
@@ -880,12 +889,22 @@ function AccountDetail({ account, onBack, onChanged }: { account: Account; onBac
         <button onClick={onBack} className="flex items-center gap-1 text-sm text-text-muted hover:text-text">
           <Icon name="chevron-left" size={14} /> Accounts
         </button>
-        <button
-          onClick={() => setShowNewTxn(true)}
-          className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm text-bg hover:bg-accent-hover"
-        >
-          <Icon name="plus" size={14} /> Transaction
-        </button>
+        <div className="flex items-center gap-2">
+          {account.kind === "cash" && (
+            <button
+              onClick={() => setShowImportCSV(true)}
+              className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm text-text hover:bg-bg-hover"
+            >
+              <Icon name="upload" size={14} /> CSV
+            </button>
+          )}
+          <button
+            onClick={() => setShowNewTxn(true)}
+            className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm text-bg hover:bg-accent-hover"
+          >
+            <Icon name="plus" size={14} /> Transaction
+          </button>
+        </div>
       </div>
 
       <div className="rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card">
@@ -932,6 +951,13 @@ function AccountDetail({ account, onBack, onChanged }: { account: Account; onBac
           account={account}
           onClose={() => setShowNewTxn(false)}
           onCreated={async () => { setShowNewTxn(false); await refresh(); onChanged(); }}
+        />
+      )}
+      {showImportCSV && (
+        <CSVImportDialog
+          account={account}
+          onClose={() => setShowImportCSV(false)}
+          onImported={async () => { await refresh(); onChanged(); }}
         />
       )}
     </div>
@@ -1084,6 +1110,185 @@ function NewAccountDialog({ onClose, onCreated, defaultCurrency }: { onClose: ()
       </DialogActions>
     </Dialog>
   );
+}
+
+function CSVImportDialog({ account, onClose, onImported }: { account: Account; onClose: () => void; onImported: () => void }) {
+  const [fileName, setFileName] = useState("");
+  const [csvText, setCsvText] = useState("");
+  const [headers, setHeaders] = useState<string[]>([]);
+  const [rowCount, setRowCount] = useState(0);
+  const [mapping, setMapping] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [result, setResult] = useState<CSVImportResult | null>(null);
+
+  const setMapped = (field: string, value: string) => {
+    setMapping(prev => ({ ...prev, [field]: value }));
+    setResult(null);
+  };
+
+  const loadFile = async (file: File | undefined) => {
+    setErr("");
+    setResult(null);
+    if (!file) return;
+    const text = await file.text();
+    const nextHeaders = parseCSVHeader(text);
+    setFileName(file.name);
+    setCsvText(text);
+    setHeaders(nextHeaders);
+    setRowCount(Math.max(0, text.split(/\r?\n/).filter(line => line.trim() !== "").length - 1));
+    setMapping(detectCSVMapping(nextHeaders));
+  };
+
+  const submit = async () => {
+    setBusy(true); setErr(""); setResult(null);
+    try {
+      const bodyMapping: Record<string, string> = {};
+      for (const [field, column] of Object.entries(mapping)) {
+        if (column) bodyMapping[field] = column;
+      }
+      const res = await api<CSVImportResult>("/import/csv", {
+        method: "POST",
+        body: JSON.stringify({ account_id: account.id, csv: csvText, mapping: bodyMapping }),
+      });
+      setResult(res);
+      await onImported();
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const canImport = !!csvText && !!mapping.date && (!!mapping.amount || !!mapping.debit || !!mapping.credit);
+
+  return (
+    <Dialog title={`Import CSV - ${account.name}`} onClose={onClose}>
+      <Field label="CSV file">
+        <input
+          type="file"
+          accept=".csv,text/csv"
+          onChange={e => { void loadFile(e.currentTarget.files?.[0]); }}
+          className="input"
+        />
+      </Field>
+      {fileName && (
+        <div className="rounded-md border border-border-subtle px-3 py-2 text-xs text-text-muted">
+          <span className="font-medium text-text">{fileName}</span>
+          <span className="ml-2">{rowCount} rows</span>
+        </div>
+      )}
+      {headers.length > 0 && (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <Field label="Date">
+            <ColumnSelect headers={headers} value={mapping.date || ""} onChange={v => setMapped("date", v)} required />
+          </Field>
+          <Field label="Amount">
+            <ColumnSelect headers={headers} value={mapping.amount || ""} onChange={v => setMapped("amount", v)} />
+          </Field>
+          <Field label="Money in">
+            <ColumnSelect headers={headers} value={mapping.credit || ""} onChange={v => setMapped("credit", v)} />
+          </Field>
+          <Field label="Money out">
+            <ColumnSelect headers={headers} value={mapping.debit || ""} onChange={v => setMapped("debit", v)} />
+          </Field>
+          <Field label="Payee">
+            <ColumnSelect headers={headers} value={mapping.payee || ""} onChange={v => setMapped("payee", v)} />
+          </Field>
+          <Field label="Memo">
+            <ColumnSelect headers={headers} value={mapping.memo || ""} onChange={v => setMapped("memo", v)} />
+          </Field>
+          <Field label="External ID">
+            <ColumnSelect headers={headers} value={mapping.external_id || ""} onChange={v => setMapped("external_id", v)} />
+          </Field>
+          <Field label="Kind">
+            <ColumnSelect headers={headers} value={mapping.kind || ""} onChange={v => setMapped("kind", v)} />
+          </Field>
+        </div>
+      )}
+      {result && (
+        <div className="rounded-md border border-border-subtle px-3 py-2 text-sm">
+          Imported {result.imported}; skipped {result.skipped}; duplicates {result.duplicates}.
+        </div>
+      )}
+      {err && <p className="text-sm text-error">{err}</p>}
+      <DialogActions>
+        <button onClick={onClose} className="btn-secondary">Close</button>
+        <button onClick={submit} disabled={busy || !canImport} className="btn-primary">
+          {busy ? "Importing..." : "Import"}
+        </button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+function ColumnSelect({
+  headers, value, onChange, required = false,
+}: {
+  headers: string[];
+  value: string;
+  onChange: (value: string) => void;
+  required?: boolean;
+}) {
+  return (
+    <select value={value} onChange={e => onChange(e.target.value)} className="input">
+      <option value="">{required ? "Choose column" : "None"}</option>
+      {headers.map((h, i) => <option key={`${h}-${i}`} value={h}>{h}</option>)}
+    </select>
+  );
+}
+
+function parseCSVHeader(text: string): string[] {
+  const firstLine = text.split(/\r?\n/, 1)[0] ?? "";
+  const delimiter = (firstLine.match(/;/g)?.length ?? 0) > (firstLine.match(/,/g)?.length ?? 0) ? ";" : ",";
+  const out: string[] = [];
+  let cur = "";
+  let quoted = false;
+  for (let i = 0; i < firstLine.length; i++) {
+    const ch = firstLine[i];
+    if (ch === "\"") {
+      if (quoted && firstLine[i + 1] === "\"") {
+        cur += "\"";
+        i++;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (ch === delimiter && !quoted) {
+      out.push(cur.trim());
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur.trim());
+  return out.filter(Boolean);
+}
+
+function detectCSVMapping(headers: string[]): Record<string, string> {
+  const find = (...needles: string[]) => {
+    for (const needle of needles) {
+      const exact = headers.find(h => normaliseHeader(h) === normaliseHeader(needle));
+      if (exact) return exact;
+    }
+    for (const needle of needles) {
+      const fuzzy = headers.find(h => normaliseHeader(h).includes(normaliseHeader(needle)));
+      if (fuzzy) return fuzzy;
+    }
+    return "";
+  };
+  const date = find("date", "completed date", "booking date", "value date", "transaction date", "started date");
+  const amount = find("amount", "transaction amount", "value");
+  const credit = amount ? "" : find("paid in", "money in", "credit", "received", "income");
+  const debit = amount ? "" : find("paid out", "money out", "debit", "spent", "paid");
+  const payee = find("merchant", "description", "counterparty", "payee", "name");
+  const memo = find("memo", "note", "notes", "reference", "description");
+  const external = find("transaction id", "id", "reference");
+  const kind = find("type", "kind");
+  return { date, amount, credit, debit, payee, memo, external_id: external, kind };
+}
+
+function normaliseHeader(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
 function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClose: () => void; onCreated: () => void }) {

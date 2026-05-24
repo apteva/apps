@@ -516,6 +516,48 @@ func TestUnit_ImportCSV_HappyPath(t *testing.T) {
 	if bal != 8750 { // 10000 − 1250
 		t.Errorf("balance after import=%d, want 8750", bal)
 	}
+
+	out, err = app.toolImportCSV(ctx, map[string]any{
+		"account_id": float64(acc.ID),
+		"csv":        csv,
+		"mapping":    map[string]any{"date": "Date", "amount": "Amount", "memo": "Memo"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res = out.(map[string]any)
+	if res["imported"].(int) != 0 || res["duplicates"].(int) != 2 {
+		t.Errorf("re-import should be idempotent, got %+v", res)
+	}
+}
+
+func TestUnit_ImportCSV_DebitCreditMapping(t *testing.T) {
+	ctx := newCtx(t)
+	app := &App{}
+	acc := mustCreateAccount(t, app, ctx, "Checking", "cash", "EUR", 0)
+	csv := "Completed Date;Description;Paid In;Paid Out;Reference\n05/01/2026;Salary;€1.000,00;;abc\n06/01/2026;Rent;;€700,00;def\n"
+	out, err := app.toolImportCSV(ctx, map[string]any{
+		"account_id": float64(acc.ID),
+		"csv":        csv,
+		"mapping": map[string]any{
+			"date":        "Completed Date",
+			"payee":       "Description",
+			"credit":      "Paid In",
+			"debit":       "Paid Out",
+			"external_id": "Reference",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(map[string]any)
+	if res["imported"].(int) != 2 || res["skipped"].(int) != 0 {
+		t.Fatalf("import: %+v", res)
+	}
+	bal := mustCashBalance(ctx, acc.ID, 0)
+	if bal != 30000 {
+		t.Errorf("balance after debit/credit import=%d, want 30000", bal)
+	}
 }
 
 func TestUnit_ParseMoneyToMinor(t *testing.T) {
@@ -529,6 +571,8 @@ func TestUnit_ParseMoneyToMinor(t *testing.T) {
 		{"-5.00", -500},
 		{"(5.00)", -500},
 		{"1.234,56", 123456}, // EU style
+		{"€1.234,56", 123456},
+		{"€ -5.00", -500},
 		{"0", 0},
 		{"100", 10000},
 	}

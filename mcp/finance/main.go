@@ -15,9 +15,11 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	_ "embed"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -415,7 +417,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"from", "to"}),
 			Handler: a.toolReportsCashflow},
 
-		{Name: "import_csv", Description: "Import CSV of transactions into an account. Args: account_id, csv (string), mapping (column-name → field; supports date, amount, memo, payee, kind?).",
+		{Name: "import_csv", Description: "Import CSV of cash transactions into an account. Args: account_id, csv (string), mapping ({date, amount? or debit/credit?, memo?, payee?, kind?, external_id?} -> column index/name).",
 			InputSchema: schemaObject(map[string]any{
 				"account_id": map[string]any{"type": "integer"},
 				"csv":        map[string]any{"type": "string"},
@@ -3684,6 +3686,7 @@ func (a *App) toolImportCSV(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	r := csv.NewReader(strings.NewReader(csvStr))
 	r.FieldsPerRecord = -1
+	r.Comma = detectCSVComma(csvStr)
 	records, err := r.ReadAll()
 	if err != nil {
 		return nil, fmt.Errorf("csv: %w", err)
@@ -3692,28 +3695,23 @@ func (a *App) toolImportCSV(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("csv must have a header row + at least one data row")
 	}
 	header := records[0]
-	colIdx := func(name any) int {
-		s, _ := name.(string)
-		for i, h := range header {
-			if strings.EqualFold(strings.TrimSpace(h), s) {
-				return i
-			}
-		}
-		return -1
+	dateCol := csvMappedColumn(header, mapping, "date")
+	amountCol := csvMappedColumn(header, mapping, "amount")
+	debitCol := csvMappedColumn(header, mapping, "debit")
+	creditCol := csvMappedColumn(header, mapping, "credit")
+	if dateCol < 0 || (amountCol < 0 && debitCol < 0 && creditCol < 0) {
+		return nil, errors.New("mapping must reference date and either amount or debit/credit columns")
 	}
-	dateCol := colIdx(mapping["date"])
-	amountCol := colIdx(mapping["amount"])
-	if dateCol < 0 || amountCol < 0 {
-		return nil, errors.New("mapping must reference 'date' and 'amount' columns by name")
-	}
-	memoCol := colIdx(mapping["memo"])
-	payeeCol := colIdx(mapping["payee"])
-	kindCol := colIdx(mapping["kind"])
+	memoCol := csvMappedColumn(header, mapping, "memo")
+	payeeCol := csvMappedColumn(header, mapping, "payee")
+	kindCol := csvMappedColumn(header, mapping, "kind")
+	externalCol := csvMappedColumn(header, mapping, "external_id")
 
 	imported := 0
 	skipped := 0
-	for _, row := range records[1:] {
-		if len(row) <= dateCol || len(row) <= amountCol {
+	duplicates := 0
+	for rowIdx, row := range records[1:] {
+		if len(row) <= dateCol {
 			skipped++
 			continue
 		}
@@ -3722,10 +3720,12 @@ func (a *App) toolImportCSV(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			skipped++
 			continue
 		}
-		// Amount is treated as a decimal in major units (e.g. "12.34")
-		// because that's what bank CSVs emit. We convert to minor units.
-		amount, err := parseMoneyToMinor(row[amountCol])
+		amount, err := csvRowAmount(row, amountCol, debitCol, creditCol)
 		if err != nil {
+			skipped++
+			continue
+		}
+		if amount == 0 {
 			skipped++
 			continue
 		}
@@ -3739,6 +3739,16 @@ func (a *App) toolImportCSV(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				kind = k
 			}
 		}
+		switch kind {
+		case "deposit", "income":
+			if amount < 0 {
+				amount = -amount
+			}
+		case "withdraw", "expense", "fee", "tax":
+			if amount > 0 {
+				amount = -amount
+			}
+		}
 		memo, payee := "", ""
 		if memoCol >= 0 && memoCol < len(row) {
 			memo = row[memoCol]
@@ -3746,21 +3756,133 @@ func (a *App) toolImportCSV(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if payeeCol >= 0 && payeeCol < len(row) {
 			payee = row[payeeCol]
 		}
+		externalID := csvRowExternalID(accountID, header, row, rowIdx, externalCol)
+		var existing int64
+		if err := ctx.AppDB().QueryRow(
+			`SELECT id FROM transactions WHERE account_id=? AND external_id=? LIMIT 1`,
+			accountID, externalID,
+		).Scan(&existing); err == nil {
+			duplicates++
+			continue
+		}
 		if _, err := insertTxn(ctx, txnIn{
-			AccountID: accountID,
-			PostedAt:  dt.UTC().Format(time.RFC3339),
-			Kind:      kind,
-			Amount:    amount,
-			Currency:  acc.Currency,
-			Payee:     payee,
-			Memo:      memo,
+			AccountID:  accountID,
+			PostedAt:   dt.UTC().Format(time.RFC3339),
+			Kind:       kind,
+			Amount:     amount,
+			Currency:   acc.Currency,
+			Payee:      payee,
+			Memo:       memo,
+			ExternalID: externalID,
 		}); err != nil {
 			skipped++
 			continue
 		}
 		imported++
 	}
-	return map[string]any{"imported": imported, "skipped": skipped}, nil
+	return map[string]any{"imported": imported, "skipped": skipped, "duplicates": duplicates}, nil
+}
+
+func detectCSVComma(s string) rune {
+	first := s
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		first = s[:i]
+	}
+	if strings.Count(first, ";") > strings.Count(first, ",") {
+		return ';'
+	}
+	return ','
+}
+
+func csvMappedColumn(header []string, mapping map[string]any, field string) int {
+	if idx := csvColumnIndex(header, mapping[field]); idx >= 0 {
+		return idx
+	}
+	for col, mapped := range mapping {
+		if strings.EqualFold(strings.TrimSpace(fmt.Sprint(mapped)), field) {
+			return csvColumnIndex(header, col)
+		}
+	}
+	return -1
+}
+
+func csvColumnIndex(header []string, ref any) int {
+	switch v := ref.(type) {
+	case float64:
+		i := int(v)
+		if i >= 0 && i < len(header) {
+			return i
+		}
+	case int:
+		if v >= 0 && v < len(header) {
+			return v
+		}
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return -1
+		}
+		if n, err := strconv.Atoi(s); err == nil && n >= 0 && n < len(header) {
+			return n
+		}
+		for i, h := range header {
+			if strings.EqualFold(strings.TrimSpace(h), s) {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func csvRowAmount(row []string, amountCol, debitCol, creditCol int) (int64, error) {
+	if amountCol >= 0 {
+		if amountCol >= len(row) {
+			return 0, errors.New("amount column missing")
+		}
+		// Amount is treated as a decimal in major units (e.g. "12.34")
+		// because that's what bank CSVs emit. We convert to minor units.
+		return parseMoneyToMinor(row[amountCol])
+	}
+	var amount int64
+	seen := false
+	if creditCol >= 0 && creditCol < len(row) && strings.TrimSpace(row[creditCol]) != "" {
+		v, err := parseMoneyToMinor(row[creditCol])
+		if err != nil {
+			return 0, err
+		}
+		amount += absInt64(v)
+		seen = true
+	}
+	if debitCol >= 0 && debitCol < len(row) && strings.TrimSpace(row[debitCol]) != "" {
+		v, err := parseMoneyToMinor(row[debitCol])
+		if err != nil {
+			return 0, err
+		}
+		amount -= absInt64(v)
+		seen = true
+	}
+	if !seen {
+		return 0, errors.New("empty amount")
+	}
+	return amount, nil
+}
+
+func csvRowExternalID(accountID int64, header, row []string, rowIdx, externalCol int) string {
+	if externalCol >= 0 && externalCol < len(row) {
+		if v := strings.TrimSpace(row[externalCol]); v != "" {
+			return "csv:" + v
+		}
+	}
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "account:%d\nrow:%d\n", accountID, rowIdx)
+	for i, name := range header {
+		val := ""
+		if i < len(row) {
+			val = row[i]
+		}
+		_, _ = fmt.Fprintf(h, "%s=%s\n", strings.TrimSpace(name), strings.TrimSpace(val))
+	}
+	return "csv:" + hex.EncodeToString(h.Sum(nil))[:32]
 }
 
 // parseMoneyToMinor accepts "12.34", "12,34", "1,234.56", "-5.00",
@@ -3780,8 +3902,20 @@ func parseMoneyToMinor(s string) (int64, error) {
 		neg = true
 		s = strings.TrimPrefix(s, "-")
 	}
+	if strings.Contains(s, "-") {
+		neg = true
+	}
+	if strings.HasPrefix(s, "+") {
+		s = strings.TrimPrefix(s, "+")
+	}
 	// Normalise thousands separators + decimal mark.
-	s = strings.ReplaceAll(s, " ", "")
+	s = strings.Map(func(r rune) rune {
+		if (r >= '0' && r <= '9') || r == '.' || r == ',' || r == '\'' {
+			return r
+		}
+		return -1
+	}, s)
+	s = strings.ReplaceAll(s, "'", "")
 	// If both '.' and ',' present, the later one is the decimal mark.
 	lastDot := strings.LastIndex(s, ".")
 	lastComma := strings.LastIndex(s, ",")
@@ -4764,6 +4898,9 @@ func parseFlexibleTime(s string) (time.Time, error) {
 		"2006-01-02T15:04:05",
 		"2006-01-02 15:04:05",
 		"2006-01-02",
+		"02/01/2006 15:04:05",
+		"02/01/2006 15:04",
+		"02/01/2006",
 	}
 	for _, f := range formats {
 		if t, err := time.Parse(f, s); err == nil {

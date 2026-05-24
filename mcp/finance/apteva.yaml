@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: finance
 display_name: Finance
-version: 0.1.11
+version: 0.1.12
 description: |
   Unified personal-wealth tracker. Cash, stocks, ETFs, crypto, P2P,
   real estate, vehicles, pensions, loans — all in one ledger. v0.1
@@ -106,7 +106,7 @@ provides:
     - { name: reports_performance, description: "Per-holding & portfolio cost basis vs current value, unrealised P&L, realised P&L from sells. Args: from?, to?." }
     - { name: reports_cashflow,    description: "Income vs expense per period bucket. Args: from, to, bucket? ('weekly'|'monthly'; default monthly)." }
 
-    - { name: import_csv,          description: "Import a CSV of transactions. Args: account_id, csv (string), mapping ({date,amount,memo,payee,category? → column index/name})." }
+    - { name: import_csv,          description: "Import a CSV of cash transactions. Args: account_id, csv (string), mapping ({date,amount? or debit/credit?, memo?, payee?, kind?, external_id?} -> column index/name)." }
 
     - { name: budgets_list,        description: "List active budgets." }
     - { name: budgets_set,         description: "Upsert a per-category budget. Args: category_id? (NULL for total-spend), period? (default monthly), amount (minor units, base currency)." }
