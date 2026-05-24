@@ -110,6 +110,7 @@ interface FileRow {
 
 interface FoldersResp { folders?: string[] }
 interface FilesResp { files?: FileRow[] }
+interface RenameFolderResp { from: string; to: string; updated: number }
 
 const API = "/api/apps/storage";
 
@@ -315,6 +316,24 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
     }
   };
 
+  const handleRenameFolder = async (child: string) => {
+    const nextName = window.prompt("Rename folder", child)?.trim();
+    if (!nextName || nextName === child) return;
+    if (nextName.includes("/") || nextName.includes("\\")) {
+      alert("Folder name cannot contain slashes.");
+      return;
+    }
+    const from = folder + child + "/";
+    const to = folder + nextName + "/";
+    try {
+      const resp = await api<RenameFolderResp>("PATCH", "/folders", undefined, { from, to });
+      setStatus(`Renamed folder · ${resp.updated} file${resp.updated === 1 ? "" : "s"} moved`);
+      load();
+    } catch (e) {
+      alert("Rename folder failed: " + (e as Error).message);
+    }
+  };
+
   // handleShare adapts to the file's current visibility instead of
   // unconditionally flipping it to signed.
   //
@@ -514,7 +533,13 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
                   </td>
                   <td className="px-4 py-2 text-text-dim">—</td>
                   <td className="px-4 py-2 text-text-dim">folder</td>
-                  <td className="px-4 py-2"></td>
+                  <td className="px-4 py-2 text-right">
+                    <button
+                      type="button"
+                      onClick={() => handleRenameFolder(f)}
+                      className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
+                    >Rename</button>
+                  </td>
                 </tr>
               ))}
               {files.map((f) => {

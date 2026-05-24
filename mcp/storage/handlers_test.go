@@ -171,6 +171,72 @@ func TestMove_ChangesFolderAndName(t *testing.T) {
 	}
 }
 
+func TestRenameFolder_MovesEntireTree(t *testing.T) {
+	ctx := newTestCtx(t)
+	mustUpload(t, ctx, "root.txt", "/work/", "root")
+	mustUpload(t, ctx, "deep.txt", "/work/drafts/", "deep")
+	mustUpload(t, ctx, "other.txt", "/other/", "other")
+
+	app := &App{}
+	out, err := app.toolRenameFolder(ctx, map[string]any{
+		"from": "/work/",
+		"to":   "/archive/work/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out.(map[string]any)["updated"].(int); got != 2 {
+		t.Fatalf("updated=%d, want 2", got)
+	}
+
+	list, err := app.toolList(ctx, map[string]any{
+		"folder":    "/archive/work/",
+		"recursive": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := list.(map[string]any)["count"].(int); got != 2 {
+		t.Errorf("archive recursive count=%d, want 2", got)
+	}
+	old, err := app.toolList(ctx, map[string]any{
+		"folder":    "/work/",
+		"recursive": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := old.(map[string]any)["count"].(int); got != 0 {
+		t.Errorf("old recursive count=%d, want 0", got)
+	}
+	other, err := app.toolList(ctx, map[string]any{
+		"folder": "/other/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := other.(map[string]any)["count"].(int); got != 1 {
+		t.Errorf("other count=%d, want 1", got)
+	}
+}
+
+func TestRenameFolder_RejectsRootAndDescendant(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	if _, err := app.toolRenameFolder(ctx, map[string]any{
+		"from": "/",
+		"to":   "/archive/",
+	}); err == nil {
+		t.Fatal("expected root source error")
+	}
+	if _, err := app.toolRenameFolder(ctx, map[string]any{
+		"from": "/work/",
+		"to":   "/work/archive/",
+	}); err == nil {
+		t.Fatal("expected descendant destination error")
+	}
+}
+
 func TestSetVisibility_Cycles(t *testing.T) {
 	ctx := newTestCtx(t)
 	f := mustUpload(t, ctx, "x.txt", "/", "x")

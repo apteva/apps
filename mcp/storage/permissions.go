@@ -103,6 +103,22 @@ func (a *App) toolSetVisibilityCtx(ctx context.Context, app *sdk.AppCtx, args ma
 	return a.toolSetVisibility(app, args)
 }
 
+func (a *App) toolRenameFolderCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	from, to, err := renameFolderArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if caller := sdk.CallerFrom(ctx); caller != nil {
+		for _, folder := range []string{from, to} {
+			res := fileResource(folder)
+			if !caller.Allows("files.write", res) {
+				return nil, sdk.Forbidden("files.write", res)
+			}
+		}
+	}
+	return a.toolRenameFolder(app, args)
+}
+
 // ─── list / search / list_folders ──────────────────────────────────
 //
 // For these the platform can't pre-compute the resource (it'd have

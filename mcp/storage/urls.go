@@ -23,10 +23,10 @@ package main
 //   1. cdn zone (when cdn_zone_id != 0 in install config) — public
 //      URLs only; signed and private always go to publicBase. cdn
 //      mints "https://<zone-hostname>/files/<id>/content".
-//   2. ctx.PlatformAPI().WhoAmI().PublicURL — live-fresh from the
-//      platform's server_settings.public_url (admin-editable from
-//      Settings → Server). Sub-second cache via the SDK so setting
-//      changes propagate without sidecar restart.
+//   2. ctx.PlatformInfo().PublicURL — live-fresh from the platform's
+//      server_settings.public_url (admin-editable from Settings →
+//      Server). Short cache via the SDK so setting changes propagate
+//      without sidecar restart.
 //   3. APTEVA_PUBLIC_URL / STORAGE_PUBLIC_URL env — fallback for
 //      older platforms / test harnesses. Frozen at spawn.
 //   4. "" — neither available; fall back to relative paths so the
@@ -44,9 +44,9 @@ import (
 // publicBase resolves the platform's externally-reachable base URL.
 // Trailing slashes are stripped so callers can append paths directly.
 func publicBase(ctx *sdk.AppCtx) string {
-	if ctx != nil && ctx.PlatformAPI() != nil {
-		if id, err := ctx.PlatformAPI().WhoAmI(); err == nil && id != nil && id.PublicURL != "" {
-			return strings.TrimRight(id.PublicURL, "/")
+	if ctx != nil {
+		if info, err := ctx.PlatformInfo(); err == nil && info != nil && info.PublicURL != "" {
+			return strings.TrimRight(info.PublicURL, "/")
 		}
 	}
 	if v := envPublicURL(); v != "" {

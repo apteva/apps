@@ -3,7 +3,7 @@
 //
 // Blob layout (key, identical on both backends):
 //
-//   <sha256[:2]>/<storage_key>
+//	<sha256[:2]>/<storage_key>
 //
 // Disk: relative to blobsDir (filesystem path). S3: bucket-relative
 // object key. The two-byte hex prefix exists for the disk's benefit
@@ -20,6 +20,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
+	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -40,84 +41,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// ─── Manifest (also lives in apteva.yaml) ──────────────────────────
+// ─── Manifest ──────────────────────────────────────────────────────
 
-const manifestYAML = `schema: apteva-app/v1
-name: storage
-display_name: Storage
-version: 0.10.8
-description: |
-  File storage with virtual folders, signed URLs, dedup. Pluggable
-  backend: local disk by default, S3-compatible (AWS / R2 / B2 /
-  Wasabi / MinIO) when an integration is bound. Direct presigned
-  uploads + downloads on S3 — bytes never touch the storage container.
-author: Apteva
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - platform.connections.read_credentials
-  integrations:
-    - role: backend
-      kind: integration
-      compatible_slugs: [aws-s3, cloudflare-r2, backblaze-b2, hetzner-object-storage]
-      required: false
-      label: "S3-compatible backend (optional)"
-      hint: "Bind to host blobs in S3/R2/B2/Hetzner; otherwise blobs live on local disk."
-provides:
-  http_routes:
-    - prefix: /
-  resources:
-    - name: folder
-      label: "Folder"
-      list_endpoint: /folders
-      matcher: glob
-      picker: tree
-      listing_visibility: navigable
-  permissions:
-    - { name: files.read,   resource: folder, description: "List + download files" }
-    - { name: files.write,  resource: folder, description: "Upload, move, rename, set tags + visibility" }
-    - { name: files.delete, resource: folder, description: "Hard-delete or soft-delete files" }
-  mcp_tools:
-    - { name: files_upload,         description: "Upload bytes (base64). Returns id, url, sha256.", requires: files.write,  resource_from: "folder/{arg.folder?}" }
-    - { name: files_get,            description: "Metadata for one file." }
-    - { name: files_get_url,        description: "Mint a signed time-limited URL." }
-    - { name: files_get_content,    description: "Fetch bytes inline as base64 (≤25 MB). For cross-sidecar reads where signed-URL routing is fragile across multiple storage installs." }
-    - { name: files_search,         description: "Filtered file list." }
-    - { name: files_list,           description: "List files in one folder." }
-    - { name: files_list_folders,   description: "List immediate child folders." }
-    - { name: files_create_folder,  description: "Create an empty folder via a 0-byte .placeholder upload. Idempotent.", requires: files.write, resource_from: "folder/{arg.path?}" }
-    - { name: files_move,           description: "Move + optionally rename a file.", requires: files.write,  resource_from: "folder/{arg.folder?}" }
-    - { name: files_set_tags,       description: "Append/remove tags." }
-    - { name: files_set_visibility, description: "private | signed | public." }
-    - { name: files_dedupe_check,   description: "Find an existing file by sha256." }
-    - { name: files_delete,         description: "Delete a file (hard or soft)." }
-    - { name: files_from_url,       description: "Fetch a URL into storage.", requires: files.write, resource_from: "folder/{arg.folder?}" }
-    - { name: storage_abort_upload, description: "Abort a leaked multipart upload session and reclaim its bytes." }
-  ui_panels:
-    - slot: project.page
-      label: Files
-      icon: folder
-      entry: /ui/StoragePanel.mjs
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/storage
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/storage.db
-  migrations: migrations/
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML []byte
 
 type App struct{}
 
 func (a *App) Manifest() sdk.Manifest {
-	m, err := sdk.ParseManifest([]byte(manifestYAML))
+	m, err := sdk.ParseManifest(manifestYAML)
 	if err != nil {
 		panic("invalid embedded manifest: " + err.Error())
 	}
@@ -193,10 +125,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error          { return nil }
-func (a *App) Channels() []sdk.ChannelFactory       { return nil }
-func (a *App) Workers() []sdk.Worker                { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler    { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) Channels() []sdk.ChannelFactory    { return nil }
+func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 // ─── HTTP routes ────────────────────────────────────────────────────
 
@@ -227,13 +159,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "files_upload",
 			Description: "Upload bytes via base64. Args: name, content_base64, folder?, content_type?, tags?, source?, visibility?. Returns {id, url, sha256, was_existing} — was_existing=true means an identical file already existed and the upload returned its id.",
 			InputSchema: schemaObject(map[string]any{
-				"name":            map[string]any{"type": "string"},
-				"content_base64":  map[string]any{"type": "string"},
-				"folder":          map[string]any{"type": "string"},
-				"content_type":    map[string]any{"type": "string"},
-				"tags":            map[string]any{"type": "array"},
-				"source":          map[string]any{"type": "string"},
-				"visibility":      map[string]any{"type": "string"},
+				"name":           map[string]any{"type": "string"},
+				"content_base64": map[string]any{"type": "string"},
+				"folder":         map[string]any{"type": "string"},
+				"content_type":   map[string]any{"type": "string"},
+				"tags":           map[string]any{"type": "array"},
+				"source":         map[string]any{"type": "string"},
+				"visibility":     map[string]any{"type": "string"},
 			}, []string{"name", "content_base64"}),
 			Handler: a.toolUpload,
 		},
@@ -297,6 +229,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"path": map[string]any{"type": "string"},
 			}, []string{"path"}),
 			HandlerCtx: a.toolCreateFolderCtx,
+		},
+		{
+			Name:        "files_rename_folder",
+			Description: "Rename or move a virtual folder and all files below it. Args: from, to. Example: from='/work/drafts/' to='/archive/drafts/'.",
+			InputSchema: schemaObject(map[string]any{
+				"from": map[string]any{"type": "string"},
+				"to":   map[string]any{"type": "string"},
+			}, []string{"from", "to"}),
+			HandlerCtx: a.toolRenameFolderCtx,
 		},
 		{
 			Name:        "files_move",
@@ -450,9 +391,9 @@ type File struct {
 	// and only differ in query params. Agents share `url` with
 	// external recipients when visibility=public; for signed sharing
 	// they call files_get_url and share the returned (signed) form.
-	URL         string   `json:"url,omitempty"`
-	CreatedAt   string   `json:"created_at,omitempty"`
-	UpdatedAt   string   `json:"updated_at,omitempty"`
+	URL       string `json:"url,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
 }
 
 // ─── Path / folder normalisation ───────────────────────────────────
@@ -539,6 +480,48 @@ func (a *App) toolCreateFolderCtx(_ context.Context, ctx *sdk.AppCtx, args map[s
 	}
 	emitFileEvent(ctx, "file.added", f, existed)
 	return map[string]any{"created": true, "path": path}, nil
+}
+
+func renameFolderArgs(args map[string]any) (string, string, error) {
+	from := normaliseFolder(strArg(args, "from"))
+	to := normaliseFolder(strArg(args, "to"))
+	if from == "" || from == "/" {
+		return "", "", errors.New("from required and cannot be root")
+	}
+	if to == "" || to == "/" {
+		return "", "", errors.New("to required and cannot be root")
+	}
+	if from == to {
+		return "", "", errors.New("from and to are the same folder")
+	}
+	if strings.HasPrefix(to, from) {
+		return "", "", errors.New("cannot move a folder inside itself")
+	}
+	return from, to, nil
+}
+
+func (a *App) toolRenameFolder(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	from, to, err := renameFolderArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	files, err := dbRenameFolder(ctx.AppDB(), pid, from, to)
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range files {
+		emitFileEvent(ctx, "file.updated", f, false)
+	}
+	return map[string]any{
+		"from":    from,
+		"to":      to,
+		"updated": len(files),
+		"files":   files,
+	}, nil
 }
 
 func (a *App) toolUpload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1119,6 +1102,10 @@ func (a *App) httpFromURL(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleFolders(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPatch {
+		a.httpRenameFolder(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -1150,6 +1137,27 @@ func (a *App) handleFolders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpJSON(w, map[string]any{"folders": folders, "parent": parent})
+}
+
+func (a *App) httpRenameFolder(w http.ResponseWriter, r *http.Request) {
+	ctx := globalCtx
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	body["_project_id"] = pid
+	out, err := a.toolRenameFolder(ctx, body)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpJSON(w, out)
 }
 
 // dbAllFoldersAsPickerTree returns every folder in the project as a
@@ -1915,6 +1923,72 @@ func dbUpdate(db *sql.DB, pid string, id int64, updates map[string]any) (*File, 
 		return nil, err
 	}
 	return dbGetByID(db, pid, id)
+}
+
+func dbRenameFolder(db *sql.DB, pid, from, to string) ([]*File, error) {
+	from = normaliseFolder(from)
+	to = normaliseFolder(to)
+	rows, err := db.Query(
+		`SELECT id, folder FROM files
+		 WHERE project_id = ? AND deleted_at IS NULL
+		   AND (folder = ? OR substr(folder, 1, ?) = ?)
+		 ORDER BY id`,
+		pid, from, len(from), from,
+	)
+	if err != nil {
+		return nil, err
+	}
+	type moveRow struct {
+		id     int64
+		folder string
+	}
+	moves := []moveRow{}
+	for rows.Next() {
+		var row moveRow
+		if err := rows.Scan(&row.id, &row.folder); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		moves = append(moves, row)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if len(moves) == 0 {
+		return []*File{}, nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	for _, row := range moves {
+		suffix := strings.TrimPrefix(row.folder, from)
+		next := to + suffix
+		if _, err := tx.Exec(
+			`UPDATE files SET folder = ?, updated_at = CURRENT_TIMESTAMP
+			 WHERE id = ? AND project_id = ?`,
+			next, row.id, pid,
+		); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	out := make([]*File, 0, len(moves))
+	for _, row := range moves {
+		f, err := dbGetByID(db, pid, row.id)
+		if err != nil {
+			return nil, err
+		}
+		if f != nil {
+			out = append(out, f)
+		}
+	}
+	return out, nil
 }
 
 func dbSoftDelete(db *sql.DB, pid string, id int64) error {

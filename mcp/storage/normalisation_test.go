@@ -23,11 +23,11 @@ func TestNormaliseFolder(t *testing.T) {
 
 func TestNormaliseFilename(t *testing.T) {
 	cases := map[string]string{
-		"summary.pdf":           "summary.pdf",
-		"  trim me ":            "trim me",
-		"path/to/file.txt":      "path_to_file.txt",
-		`path\to\file.txt`:      "path_to_file.txt",
-		"":                      "untitled",
+		"summary.pdf":      "summary.pdf",
+		"  trim me ":       "trim me",
+		"path/to/file.txt": "path_to_file.txt",
+		`path\to\file.txt`: "path_to_file.txt",
+		"":                 "untitled",
 	}
 	for in, want := range cases {
 		if got := normaliseFilename(in); got != want {
@@ -38,15 +38,22 @@ func TestNormaliseFilename(t *testing.T) {
 
 func TestVisibilityOrDefault(t *testing.T) {
 	for in, want := range map[string]string{
-		"":         "private",
+		"":         "",
 		"private":  "private",
 		"PUBLIC":   "public",
 		"  signed": "signed",
-		"weird":    "private",
+		"weird":    "",
 	} {
 		if got := visibilityOrDefault(in); got != want {
 			t.Errorf("visibilityOrDefault(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestConfiguredDefaultVisibility_FallsBackPrivate(t *testing.T) {
+	ctx := newTestCtx(t)
+	if got := configuredDefaultVisibility(ctx); got != "private" {
+		t.Errorf("configuredDefaultVisibility(empty) = %q, want private", got)
 	}
 }
 

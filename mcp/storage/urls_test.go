@@ -13,7 +13,19 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
 )
+
+type urlPlatform struct {
+	tk.BasePlatformClient
+	publicURL string
+}
+
+func (p *urlPlatform) PlatformInfo() (*sdk.PlatformInfo, error) {
+	return &sdk.PlatformInfo{PublicURL: p.publicURL}, nil
+}
 
 func TestAbsoluteContentURL_WithEnv(t *testing.T) {
 	t.Setenv("STORAGE_PUBLIC_URL", "https://agents.example.com")
@@ -43,6 +55,17 @@ func TestAbsoluteContentURL_StripsTrailingSlash(t *testing.T) {
 	want := "https://agents.example.com/api/apps/storage/files/7/content/x.png"
 	if got != want {
 		t.Fatalf("got %q, want %q (trailing slash should be stripped)", got, want)
+	}
+}
+
+func TestAbsoluteContentURL_PrefersPlatformInfo(t *testing.T) {
+	t.Setenv("STORAGE_PUBLIC_URL", "https://stale.example.com")
+	ctx := newTestCtx(t, tk.WithPlatform(&urlPlatform{publicURL: "https://fresh.example.com/"}))
+	f := &File{ID: 7, Name: "x.png"}
+	got := absoluteContentURL(ctx, f)
+	want := "https://fresh.example.com/api/apps/storage/files/7/content/x.png"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 
