@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.13
+version: 0.13.20
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -105,7 +105,7 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: media_get,             description: "Fetch one media record by storage file_id." }
-    - { name: media_search,          description: "Filter by folder / duration / dimensions / codec / has_video / has_audio." }
+    - { name: media_search,          description: "Filter by folder / canonical media_type / aspect / duration / dimensions / codec." }
     - { name: media_list_folders,    description: "List immediate child folders of parent that contain media." }
     - { name: media_create_folder,   description: "Create an empty folder in storage that media files can later land in. Idempotent. Args - path." }
     - { name: media_move,            description: "Move and/or rename a media file in storage. Media's row auto-updates via the file.updated event handler. Args - file_id, folder?, name?." }
@@ -264,6 +264,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	// the data routes here.
 	return []sdk.Route{
 		{Pattern: "/media", Handler: a.handleMediaCollection},
+		{Pattern: "/media/facets", Handler: a.handleMediaFacets},
 		{Pattern: "/media/", Handler: a.handleMediaItem},
 		{Pattern: "/folders", Handler: a.handleFolders},
 		{Pattern: "/status", Handler: a.handleStatus},
@@ -323,21 +324,39 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_search",
-			Description: "Filter the catalog. Args: folder, recursive, duration_min_ms, duration_max_ms, has_video, has_audio, is_image, width_min, width_max, video_codec, audio_codec, limit, order_by ('duration_ms'|'created_at'|'updated_at').",
+			Description: "Filter the catalog. Prefer media_type ('image'|'video'|'audio'), aspect ('portrait'|'landscape'|'square'|'reel'|'wide'), and duration ('short'|'medium'|'long'|'extended') over raw probe flags. Args: folder, recursive, media_type, aspect, duration, duration_min_ms, duration_max_ms, width_min, width_max, video_codec, audio_codec, limit, offset, order_by ('duration_ms'|'created_at'|'updated_at').",
 			InputSchema: schemaObject(map[string]any{
 				"folder":          map[string]any{"type": "string"},
 				"recursive":       map[string]any{"type": "boolean"},
+				"media_type":      map[string]any{"type": "string", "enum": []string{"image", "video", "audio"}},
+				"aspect":          map[string]any{"type": "string", "enum": []string{"portrait", "landscape", "square", "reel", "wide"}},
+				"duration":        map[string]any{"type": "string", "enum": []string{"short", "medium", "long", "extended"}},
 				"duration_min_ms": map[string]any{"type": "integer"},
 				"duration_max_ms": map[string]any{"type": "integer"},
-				"has_video":       map[string]any{"type": "boolean"},
-				"has_audio":       map[string]any{"type": "boolean"},
-				"is_image":        map[string]any{"type": "boolean"},
-				"width_min":       map[string]any{"type": "integer"},
-				"width_max":       map[string]any{"type": "integer"},
-				"video_codec":     map[string]any{"type": "string"},
-				"audio_codec":     map[string]any{"type": "string"},
-				"limit":           map[string]any{"type": "integer"},
-				"order_by":        map[string]any{"type": "string"},
+				// Legacy raw ffprobe flags remain supported for
+				// compatibility, but media_type is safer for agents.
+				"has_video":   map[string]any{"type": "boolean"},
+				"has_audio":   map[string]any{"type": "boolean"},
+				"is_image":    map[string]any{"type": "boolean"},
+				"width_min":   map[string]any{"type": "integer"},
+				"width_max":   map[string]any{"type": "integer"},
+				"video_codec": map[string]any{"type": "string"},
+				"audio_codec": map[string]any{"type": "string"},
+				"audience_rating": map[string]any{
+					"oneOf": []map[string]any{
+						{"type": "string", "enum": []string{"general", "mature", "adult", "unrated"}},
+						{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"general", "mature", "adult", "unrated"}}},
+					},
+				},
+				"exclude_audience_rating": map[string]any{
+					"oneOf": []map[string]any{
+						{"type": "string", "enum": []string{"general", "mature", "adult", "unrated"}},
+						{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"general", "mature", "adult", "unrated"}}},
+					},
+				},
+				"limit":    map[string]any{"type": "integer"},
+				"offset":   map[string]any{"type": "integer"},
+				"order_by": map[string]any{"type": "string"},
 			}, nil),
 			Handler: a.toolSearch,
 		},
@@ -910,6 +929,101 @@ func (a *App) toolSetTranscript(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	return map[string]any{"file_id": fid, "status": "ok"}, nil
 }
 
+func normalizeMediaType(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "image", "images":
+		return "image"
+	case "video", "videos":
+		return "video"
+	case "audio", "audios":
+		return "audio"
+	default:
+		return ""
+	}
+}
+
+func normalizeAspect(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "portrait", "vertical":
+		return "portrait"
+	case "landscape":
+		return "landscape"
+	case "square", "1:1":
+		return "square"
+	case "reel", "story", "9:16":
+		return "reel"
+	case "wide", "16:9":
+		return "wide"
+	default:
+		return ""
+	}
+}
+
+func applyDurationBucket(f *SearchFilters, v string) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "short":
+		f.DurationMinMs = 1
+		f.DurationMaxMs = 30_000
+	case "medium":
+		f.DurationMinMs = 30_000
+		f.DurationMaxMs = 120_000
+	case "long":
+		f.DurationMinMs = 120_000
+		f.DurationMaxMs = 600_000
+	case "extended":
+		f.DurationMinMs = 600_000
+		f.DurationMaxMs = 0
+	}
+}
+
+func normalizeFolderFilter(folder string) string {
+	folder = strings.TrimSpace(folder)
+	if folder == "" {
+		return ""
+	}
+	if !strings.HasPrefix(folder, "/") {
+		folder = "/" + folder
+	}
+	if !strings.HasSuffix(folder, "/") {
+		folder = folder + "/"
+	}
+	return folder
+}
+
+func ratingFilterArg(v any) []string {
+	var out []string
+	add := func(s string) {
+		s = strings.ToLower(strings.TrimSpace(s))
+		switch s {
+		case "general", "mature", "adult", "unrated":
+			out = append(out, s)
+		}
+	}
+	switch x := v.(type) {
+	case string:
+		add(x)
+	case []any:
+		for _, item := range x {
+			if s, ok := item.(string); ok {
+				add(s)
+			}
+		}
+	case []string:
+		for _, s := range x {
+			add(s)
+		}
+	}
+	return out
+}
+
+func ratingFilterQuery(values []string) []string {
+	var out []string
+	for _, s := range values {
+		out = append(out, ratingFilterArg(s)...)
+	}
+	return out
+}
+
 func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -918,6 +1032,15 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	f := SearchFilters{}
 	f.DurationMinMs = int64Arg(args["duration_min_ms"])
 	f.DurationMaxMs = int64Arg(args["duration_max_ms"])
+	if v, ok := args["duration"].(string); ok {
+		applyDurationBucket(&f, v)
+	}
+	if v, ok := args["media_type"].(string); ok {
+		f.MediaType = normalizeMediaType(v)
+	}
+	if v, ok := args["aspect"].(string); ok {
+		f.Aspect = normalizeAspect(v)
+	}
 	if v, ok := args["has_video"].(bool); ok {
 		f.HasVideo = &v
 	}
@@ -932,39 +1055,15 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	f.VideoCodec, _ = args["video_codec"].(string)
 	f.AudioCodec, _ = args["audio_codec"].(string)
 	f.Folder, _ = args["folder"].(string)
-	if f.Folder != "" {
-		// Normalize so callers can pass "clips", "/clips", "/clips/"
-		// and all hit the same rows.
-		if !strings.HasPrefix(f.Folder, "/") {
-			f.Folder = "/" + f.Folder
-		}
-		if !strings.HasSuffix(f.Folder, "/") {
-			f.Folder = f.Folder + "/"
-		}
-	}
+	f.Folder = normalizeFolderFilter(f.Folder)
 	if v, ok := args["recursive"].(bool); ok {
 		f.Recursive = v
 	}
 	f.Limit = int(int64Arg(args["limit"]))
+	f.Offset = int(int64Arg(args["offset"]))
 	f.OrderBy, _ = args["order_by"].(string)
-	// audience_rating accepts a single string ("general") or an
-	// array of strings (["general","mature"]). Both shapes coerce to
-	// the f.AudienceRatingIn slice — the SQL builder turns it into
-	// an IN clause.
-	switch v := args["audience_rating"].(type) {
-	case string:
-		if v != "" {
-			f.AudienceRatingIn = []string{v}
-		}
-	case []any:
-		for _, x := range v {
-			if s, ok := x.(string); ok && s != "" {
-				f.AudienceRatingIn = append(f.AudienceRatingIn, s)
-			}
-		}
-	case []string:
-		f.AudienceRatingIn = v
-	}
+	f.AudienceRatingIn = ratingFilterArg(args["audience_rating"])
+	f.AudienceRatingNotIn = ratingFilterArg(args["exclude_audience_rating"])
 	rows, err := searchMedia(ctx.AppDB(), pid, f)
 	if err != nil {
 		return nil, err
@@ -1136,6 +1235,9 @@ func (a *App) handleMediaCollection(w http.ResponseWriter, r *http.Request) {
 	f := SearchFilters{}
 	f.DurationMinMs, _ = strconv.ParseInt(q.Get("duration_min_ms"), 10, 64)
 	f.DurationMaxMs, _ = strconv.ParseInt(q.Get("duration_max_ms"), 10, 64)
+	applyDurationBucket(&f, q.Get("duration"))
+	f.MediaType = normalizeMediaType(q.Get("media_type"))
+	f.Aspect = normalizeAspect(q.Get("aspect"))
 	if v := q.Get("has_video"); v != "" {
 		b := v == "true"
 		f.HasVideo = &b
@@ -1151,16 +1253,21 @@ func (a *App) handleMediaCollection(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("limit"); v != "" {
 		f.Limit, _ = strconv.Atoi(v)
 	}
-	f.OrderBy = q.Get("order_by")
-	if folder := q.Get("folder"); folder != "" {
-		if !strings.HasPrefix(folder, "/") {
-			folder = "/" + folder
-		}
-		if !strings.HasSuffix(folder, "/") {
-			folder = folder + "/"
-		}
-		f.Folder = folder
+	if v := q.Get("offset"); v != "" {
+		f.Offset, _ = strconv.Atoi(v)
 	}
+	if v := q.Get("width_min"); v != "" {
+		f.WidthMin, _ = strconv.Atoi(v)
+	}
+	if v := q.Get("width_max"); v != "" {
+		f.WidthMax, _ = strconv.Atoi(v)
+	}
+	f.VideoCodec = q.Get("video_codec")
+	f.AudioCodec = q.Get("audio_codec")
+	f.AudienceRatingIn = ratingFilterQuery(q["audience_rating"])
+	f.AudienceRatingNotIn = ratingFilterQuery(q["exclude_audience_rating"])
+	f.OrderBy = q.Get("order_by")
+	f.Folder = normalizeFolderFilter(q.Get("folder"))
 	if v := q.Get("recursive"); v != "" {
 		f.Recursive = v == "true" || v == "1"
 	}
@@ -1170,6 +1277,29 @@ func (a *App) handleMediaCollection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"media": rows})
+}
+
+func (a *App) handleMediaFacets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	q := r.URL.Query()
+	f := SearchFilters{Folder: normalizeFolderFilter(q.Get("folder"))}
+	if v := q.Get("recursive"); v != "" {
+		f.Recursive = v == "true" || v == "1"
+	}
+	counts, err := mediaFacetCounts(globalCtx.AppDB(), pid, f)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"counts": counts})
 }
 
 func (a *App) handleMediaItem(w http.ResponseWriter, r *http.Request) {

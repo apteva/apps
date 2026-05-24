@@ -21,9 +21,9 @@ import (
 // what /media and media_get expose; raw_probe stays a string so
 // callers that want it pretty-print client-side.
 type MediaRow struct {
-	FileID       string  `json:"file_id"`
-	ProjectID    string  `json:"project_id"`
-	SourceSHA256 string  `json:"source_sha256"`
+	FileID       string `json:"file_id"`
+	ProjectID    string `json:"project_id"`
+	SourceSHA256 string `json:"source_sha256"`
 	// Folder mirrors storage.files.folder on the row so media's own
 	// queries can filter + paginate by folder without joining to
 	// storage. Populated by upsertMedia at probe time + by the
@@ -51,8 +51,8 @@ type MediaRow struct {
 	// The indexer pre-swaps these when the source has a 90°/270°
 	// rotation tag, so downstream consumers don't need to know about
 	// rotation at all. See probe.go::parseProbeBytes for the swap.
-	Width  int     `json:"width,omitempty"`
-	Height int     `json:"height,omitempty"`
+	Width  int `json:"width,omitempty"`
+	Height int `json:"height,omitempty"`
 	// Rotation in degrees (0/90/180/270). Renderers read this and
 	// emit `transpose=…` + `-noautorotate` so ffmpeg's filter chain
 	// sees a frame oriented to match Width/Height above.
@@ -80,7 +80,7 @@ type MediaRow struct {
 	// Description provenance (v0.5). Lets agents + the panel tell
 	// human-set descriptions from ai-generated ones, and lets the
 	// auto-describer respect cooldown after a failed attempt.
-	DescriptionSource      string `json:"description_source,omitempty"`       // human|ai-generated|imported|''
+	DescriptionSource      string `json:"description_source,omitempty"` // human|ai-generated|imported|''
 	DescriptionUpdatedAt   string `json:"description_updated_at,omitempty"`
 	DescriptionAttemptedAt string `json:"description_attempted_at,omitempty"`
 	DescriptionError       string `json:"description_error,omitempty"`
@@ -114,10 +114,10 @@ type DerivationRow struct {
 	// thumbnail/waveform/cover (single-frame derivations). Migration
 	// 012_keyframes.sql added the column and shifted the UNIQUE
 	// constraint to (file_id, kind, position_ms).
-	PositionMs    int64  `json:"position_ms,omitempty"`
-	Status        string `json:"status"`
-	Error         string `json:"error,omitempty"`
-	GeneratedAt   string `json:"generated_at,omitempty"`
+	PositionMs  int64  `json:"position_ms,omitempty"`
+	Status      string `json:"status"`
+	Error       string `json:"error,omitempty"`
+	GeneratedAt string `json:"generated_at,omitempty"`
 }
 
 // upsertMedia INSERT-or-UPDATEs the media row. Source-of-truth fields
@@ -383,11 +383,11 @@ func setDescription(db *sql.DB, projectID, fileID string, f DescriptionFields) (
 // list needed.
 //
 // Cleanup order:
-//   1. Find all derivation storage_file_ids (thumbnail, waveform,
-//      keyframes) for this row.
-//   2. Delete each from storage via files_delete (hard delete —
-//      derivations are byproducts, not audit history).
-//   3. Delete the local DB rows (derivations → transcripts → media).
+//  1. Find all derivation storage_file_ids (thumbnail, waveform,
+//     keyframes) for this row.
+//  2. Delete each from storage via files_delete (hard delete —
+//     derivations are byproducts, not audit history).
+//  3. Delete the local DB rows (derivations → transcripts → media).
 //
 // Storage-side delete failures are logged but DON'T block the DB
 // cleanup. The media DB needs to be consistent with what's actually
@@ -451,11 +451,11 @@ func cascadeDeleteOne(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID,
 // fired.
 //
 // Reconciliation strategy:
-//   1. Read every media row's file_id for this project.
-//   2. Ask storage about EXACTLY those ids via ResolveFiles (batched
-//      at storage's per-call cap, internally chunked).
-//   3. Any media row whose file_id is missing from the resolved
-//      response is an orphan.
+//  1. Read every media row's file_id for this project.
+//  2. Ask storage about EXACTLY those ids via ResolveFiles (batched
+//     at storage's per-call cap, internally chunked).
+//  3. Any media row whose file_id is missing from the resolved
+//     response is an orphan.
 //
 // Why this beats the old "list all + diff" approach: storage's
 // listing endpoint caps the page size, and a project with more
@@ -747,26 +747,56 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 type SearchFilters struct {
 	DurationMinMs int64
 	DurationMaxMs int64
-	HasVideo      *bool
-	HasAudio      *bool
-	IsImage       *bool
-	WidthMin      int
-	WidthMax      int
-	VideoCodec    string
-	AudioCodec    string
+	// MediaType is the canonical type filter agents and UI should
+	// prefer over raw probe booleans. Valid values: image, video,
+	// audio. Images often have has_video=1 in ffprobe, so video
+	// explicitly excludes is_image rows.
+	MediaType string
+	// Aspect filters by width/height bucket. Valid values:
+	// portrait, landscape, square, reel, wide.
+	Aspect     string
+	HasVideo   *bool
+	HasAudio   *bool
+	IsImage    *bool
+	WidthMin   int
+	WidthMax   int
+	VideoCodec string
+	AudioCodec string
 	// Folder filters by storage folder. Empty = no filter.
 	// "/clips/" = exact-folder match. With Recursive=true, treated
 	// as a prefix so "/clips/" also matches "/clips/q3/", etc.
 	Folder    string
 	Recursive bool
 	Limit     int
+	Offset    int
 	OrderBy   string // duration_ms | created_at | updated_at
 	// AudienceRating filters by the column populated by the
 	// describer (v0.13.0+). Nil/empty = no filter (everything,
 	// including unrated). Multiple values OR'd: ["general","mature"]
 	// returns rows at either rating. Use this rather than a single
 	// status string when callers want "exclude adult" semantics.
-	AudienceRatingIn []string
+	AudienceRatingIn    []string
+	AudienceRatingNotIn []string
+}
+
+type MediaFacetCounts struct {
+	All    int `json:"all"`
+	Video  int `json:"video"`
+	Audio  int `json:"audio"`
+	Image  int `json:"image"`
+	Aspect struct {
+		Portrait  int `json:"portrait"`
+		Landscape int `json:"landscape"`
+		Square    int `json:"square"`
+		Reel      int `json:"reel"`
+		Wide      int `json:"wide"`
+	} `json:"aspect"`
+	Duration struct {
+		Short    int `json:"short"`
+		Medium   int `json:"medium"`
+		Long     int `json:"long"`
+		Extended int `json:"extended"`
+	} `json:"duration"`
 }
 
 // searchMedia returns rows matching f. Joins derivations once at the
@@ -776,39 +806,61 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 	args := []any{projectID}
 
 	if f.DurationMinMs > 0 {
-		clauses = append(clauses, "duration_ms >= ?")
+		clauses = append(clauses, "m.duration_ms >= ?")
 		args = append(args, f.DurationMinMs)
 	}
 	if f.DurationMaxMs > 0 {
-		clauses = append(clauses, "duration_ms <= ?")
+		clauses = append(clauses, "m.duration_ms <= ?")
 		args = append(args, f.DurationMaxMs)
 	}
+	switch f.MediaType {
+	case "image":
+		clauses = append(clauses, "m.is_image = 1")
+	case "video":
+		clauses = append(clauses, "m.has_video = 1", "m.is_image = 0")
+	case "audio":
+		clauses = append(clauses, "m.has_audio = 1", "m.has_video = 0", "m.is_image = 0")
+	}
+	switch f.Aspect {
+	case "portrait":
+		clauses = append(clauses, "m.width > 0", "m.height > 0", "CAST(m.width AS REAL) / m.height < 0.95")
+	case "landscape":
+		clauses = append(clauses, "m.width > 0", "m.height > 0", "CAST(m.width AS REAL) / m.height > 1.05")
+	case "square":
+		clauses = append(clauses, "m.width > 0", "m.height > 0", "CAST(m.width AS REAL) / m.height BETWEEN 0.95 AND 1.05")
+	case "reel":
+		clauses = append(clauses, "m.width > 0", "m.height > 0", "ABS((CAST(m.width AS REAL) / m.height) - ?) <= ?")
+		args = append(args, 9.0/16.0, 0.08)
+	case "wide":
+		clauses = append(clauses, "m.width > 0", "m.height > 0", "ABS((CAST(m.width AS REAL) / m.height) - ?) <= ?")
+		args = append(args, 16.0/9.0, 0.15)
+	}
 	if f.HasVideo != nil {
-		clauses = append(clauses, "has_video = ?")
+		clauses = append(clauses, "m.has_video = ?")
 		args = append(args, boolInt(*f.HasVideo))
 	}
 	if f.HasAudio != nil {
-		clauses = append(clauses, "has_audio = ?")
+		clauses = append(clauses, "m.has_audio = ?")
 		args = append(args, boolInt(*f.HasAudio))
 	}
 	if f.IsImage != nil {
-		clauses = append(clauses, "is_image = ?")
+		clauses = append(clauses, "m.is_image = ?")
 		args = append(args, boolInt(*f.IsImage))
 	}
 	if f.WidthMin > 0 {
-		clauses = append(clauses, "width >= ?")
+		clauses = append(clauses, "m.width >= ?")
 		args = append(args, f.WidthMin)
 	}
 	if f.WidthMax > 0 {
-		clauses = append(clauses, "width <= ?")
+		clauses = append(clauses, "m.width <= ?")
 		args = append(args, f.WidthMax)
 	}
 	if f.VideoCodec != "" {
-		clauses = append(clauses, "video_codec = ?")
+		clauses = append(clauses, "m.video_codec = ?")
 		args = append(args, f.VideoCodec)
 	}
 	if f.AudioCodec != "" {
-		clauses = append(clauses, "audio_codec = ?")
+		clauses = append(clauses, "m.audio_codec = ?")
 		args = append(args, f.AudioCodec)
 	}
 	// Folder filter — exact match by default, prefix LIKE when
@@ -817,10 +869,10 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 	// won't match "/clips-archive/".
 	if f.Folder != "" {
 		if f.Recursive {
-			clauses = append(clauses, "folder LIKE ?")
+			clauses = append(clauses, "m.folder LIKE ?")
 			args = append(args, f.Folder+"%")
 		} else {
-			clauses = append(clauses, "folder = ?")
+			clauses = append(clauses, "m.folder = ?")
 			args = append(args, f.Folder)
 		}
 	}
@@ -829,8 +881,16 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 	if len(f.AudienceRatingIn) > 0 {
 		placeholders := strings.Repeat("?,", len(f.AudienceRatingIn))
 		placeholders = strings.TrimSuffix(placeholders, ",")
-		clauses = append(clauses, "audience_rating IN ("+placeholders+")")
+		clauses = append(clauses, "m.audience_rating IN ("+placeholders+")")
 		for _, r := range f.AudienceRatingIn {
+			args = append(args, r)
+		}
+	}
+	if len(f.AudienceRatingNotIn) > 0 {
+		placeholders := strings.Repeat("?,", len(f.AudienceRatingNotIn))
+		placeholders = strings.TrimSuffix(placeholders, ",")
+		clauses = append(clauses, "COALESCE(NULLIF(m.audience_rating, ''), 'unrated') NOT IN ("+placeholders+")")
+		for _, r := range f.AudienceRatingNotIn {
 			args = append(args, r)
 		}
 	}
@@ -848,6 +908,10 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 	limit := 50
 	if f.Limit > 0 && f.Limit <= 500 {
 		limit = f.Limit
+	}
+	offset := 0
+	if f.Offset > 0 {
+		offset = f.Offset
 	}
 
 	// Project-scope every clause to the m. alias since we now join.
@@ -869,8 +933,8 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 	FROM media m
 	LEFT JOIN transcripts t
 	  ON t.file_id = m.file_id AND t.project_id = m.project_id
-	WHERE ` + strings.Join(clauses, " AND ") + " ORDER BY m." + order + " LIMIT ?"
-	args = append(args, limit)
+	WHERE ` + strings.Join(clauses, " AND ") + " ORDER BY m." + order + " LIMIT ? OFFSET ?"
+	args = append(args, limit, offset)
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -897,6 +961,54 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 		}
 	}
 	return out, nil
+}
+
+func mediaFacetCounts(db *sql.DB, projectID string, f SearchFilters) (MediaFacetCounts, error) {
+	clauses := []string{"project_id = ?", "probe_status = 'ok'"}
+	whereArgs := []any{projectID}
+	if f.Folder != "" {
+		if f.Recursive {
+			clauses = append(clauses, "folder LIKE ?")
+			whereArgs = append(whereArgs, f.Folder+"%")
+		} else {
+			clauses = append(clauses, "folder = ?")
+			whereArgs = append(whereArgs, f.Folder)
+		}
+	}
+
+	query := `SELECT
+		COUNT(*),
+		COALESCE(SUM(CASE WHEN has_video = 1 AND is_image = 0 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN has_audio = 1 AND has_video = 0 AND is_image = 0 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN is_image = 1 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN width > 0 AND height > 0 AND CAST(width AS REAL) / height < 0.95 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN width > 0 AND height > 0 AND CAST(width AS REAL) / height > 1.05 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN width > 0 AND height > 0 AND CAST(width AS REAL) / height BETWEEN 0.95 AND 1.05 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN width > 0 AND height > 0 AND ABS((CAST(width AS REAL) / height) - ?) <= ? THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN width > 0 AND height > 0 AND ABS((CAST(width AS REAL) / height) - ?) <= ? THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN has_video = 1 AND is_image = 0 AND duration_ms > 0 AND duration_ms < ? THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN has_video = 1 AND is_image = 0 AND duration_ms >= ? AND duration_ms < ? THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN has_video = 1 AND is_image = 0 AND duration_ms >= ? AND duration_ms < ? THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN has_video = 1 AND is_image = 0 AND duration_ms >= ? THEN 1 ELSE 0 END), 0)
+	FROM media
+	WHERE ` + strings.Join(clauses, " AND ")
+	args := []any{
+		9.0 / 16.0, 0.08,
+		16.0 / 9.0, 0.15,
+		int64(30_000),
+		int64(30_000), int64(120_000),
+		int64(120_000), int64(600_000),
+		int64(600_000),
+	}
+	args = append(args, whereArgs...)
+
+	var c MediaFacetCounts
+	err := db.QueryRow(query, args...).Scan(
+		&c.All, &c.Video, &c.Audio, &c.Image,
+		&c.Aspect.Portrait, &c.Aspect.Landscape, &c.Aspect.Square, &c.Aspect.Reel, &c.Aspect.Wide,
+		&c.Duration.Short, &c.Duration.Medium, &c.Duration.Long, &c.Duration.Extended,
+	)
+	return c, err
 }
 
 func listDerivations(db *sql.DB, projectID, fileID string) ([]DerivationRow, error) {

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.13.19
+version: 0.13.20
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -108,7 +108,7 @@ provides:
     - name: media_get
       description: Fetch one media record by storage file_id (probe + derivation pointers).
     - name: media_search
-      description: Filter by folder / duration / dimensions / codec / has_video / has_audio. Returns rows with absolute storage URLs. Args include folder (e.g. "/clips/") and recursive (descend into sub-folders).
+      description: Filter by folder, canonical media_type (image|video|audio), aspect (portrait|landscape|square|reel|wide), duration bucket or duration_min_ms/duration_max_ms, audience_rating or exclude_audience_rating, dimensions, and codec. Returns rows with absolute storage URLs. Args include folder (e.g. "/clips/"), recursive, limit, and offset.
     - name: media_list_folders
       description: List immediate child folders of `parent` that contain media. Args - parent (default "/"). Mirrors storage's files_list_folders semantics; only folders with at least one audio/video/image row appear.
     - name: media_create_folder

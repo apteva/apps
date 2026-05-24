@@ -161,6 +161,119 @@ func TestSearchMedia_Filters(t *testing.T) {
 	}
 }
 
+func TestSearchMedia_CanonicalMediaTypeAndAspect(t *testing.T) {
+	ctx := newTestCtx(t)
+	wide := sampleVideoProbe()
+	wide.Width = 1920
+	wide.Height = 1080
+	wide.DurationMs = 45_000
+	upsertMedia(ctx.AppDB(), testProj, "wide", wide, "a", "", "")
+
+	reel := sampleVideoProbe()
+	reel.Width = 1080
+	reel.Height = 1920
+	reel.DurationMs = 15_000
+	upsertMedia(ctx.AppDB(), testProj, "reel", reel, "b", "", "")
+
+	img := sampleImageProbe()
+	img.Width = 1080
+	img.Height = 1920
+	upsertMedia(ctx.AppDB(), testProj, "img", img, "c", "", "")
+	upsertMedia(ctx.AppDB(), testProj, "aud", sampleAudioProbe(), "d", "", "")
+
+	rows, err := searchMedia(ctx.AppDB(), testProj, SearchFilters{MediaType: "video"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("media_type=video returned %d rows, want 2: %+v", len(rows), rows)
+	}
+	for _, r := range rows {
+		if r.IsImage || !r.HasVideo {
+			t.Fatalf("media_type=video leaked non-video row: %+v", r)
+		}
+	}
+
+	rows, err = searchMedia(ctx.AppDB(), testProj, SearchFilters{MediaType: "image"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].FileID != "img" {
+		t.Fatalf("media_type=image = %+v, want img only", rows)
+	}
+
+	rows, err = searchMedia(ctx.AppDB(), testProj, SearchFilters{MediaType: "video", Aspect: "reel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].FileID != "reel" {
+		t.Fatalf("video + aspect=reel = %+v, want reel only", rows)
+	}
+
+	rows, err = searchMedia(ctx.AppDB(), testProj, SearchFilters{MediaType: "video", DurationMinMs: 30_000, DurationMaxMs: 120_000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].FileID != "wide" {
+		t.Fatalf("video duration range = %+v, want wide only", rows)
+	}
+}
+
+func TestSearchMedia_ExcludesAudienceRating(t *testing.T) {
+	ctx := newTestCtx(t)
+	upsertMedia(ctx.AppDB(), testProj, "general", sampleVideoProbe(), "a", "", "")
+	upsertMedia(ctx.AppDB(), testProj, "adult", sampleVideoProbe(), "b", "", "")
+	if err := setAudienceRating(ctx.AppDB(), testProj, "general", "general", "ok"); err != nil {
+		t.Fatal(err)
+	}
+	if err := setAudienceRating(ctx.AppDB(), testProj, "adult", "adult", "explicit"); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := searchMedia(ctx.AppDB(), testProj, SearchFilters{
+		MediaType:           "video",
+		AudienceRatingNotIn: []string{"adult"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].FileID != "general" {
+		t.Fatalf("exclude adult = %+v, want general only", rows)
+	}
+}
+
+func TestMediaFacetCounts_CanonicalBuckets(t *testing.T) {
+	ctx := newTestCtx(t)
+	wide := sampleVideoProbe()
+	wide.Width = 1920
+	wide.Height = 1080
+	wide.DurationMs = 45_000
+	upsertMedia(ctx.AppDB(), testProj, "wide", wide, "a", "/clips/", "")
+
+	reel := sampleVideoProbe()
+	reel.Width = 1080
+	reel.Height = 1920
+	reel.DurationMs = 15_000
+	upsertMedia(ctx.AppDB(), testProj, "reel", reel, "b", "/clips/", "")
+	upsertMedia(ctx.AppDB(), testProj, "img", sampleImageProbe(), "c", "/clips/", "")
+	upsertMedia(ctx.AppDB(), testProj, "aud", sampleAudioProbe(), "d", "/clips/", "")
+	upsertMedia(ctx.AppDB(), testProj, "other", sampleVideoProbe(), "e", "/other/", "")
+
+	counts, err := mediaFacetCounts(ctx.AppDB(), testProj, SearchFilters{Folder: "/clips/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.All != 4 || counts.Video != 2 || counts.Image != 1 || counts.Audio != 1 {
+		t.Fatalf("type facets = %+v, want all=4 video=2 image=1 audio=1", counts)
+	}
+	if counts.Aspect.Reel != 1 || counts.Aspect.Wide != 1 {
+		t.Fatalf("aspect facets = %+v, want reel=1 wide=1", counts.Aspect)
+	}
+	if counts.Duration.Short != 1 || counts.Duration.Medium != 1 {
+		t.Fatalf("duration facets = %+v, want short=1 medium=1", counts.Duration)
+	}
+}
+
 func TestSearchMedia_OmitsNonOk(t *testing.T) {
 	ctx := newTestCtx(t)
 	upsertMedia(ctx.AppDB(), testProj, "good", sampleAudioProbe(), "a", "", "")
@@ -201,8 +314,8 @@ func TestIndexerCandidates(t *testing.T) {
 	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "shaA", "", "")
 
 	files := []StorageFile{
-		{ID: 1, Name: "old.wav", ContentType: "audio/wav", SHA256: "shaA"}, // unchanged → skip
-		{ID: 2, Name: "new.mp4", ContentType: "video/mp4", SHA256: "shaB"}, // new → pick up
+		{ID: 1, Name: "old.wav", ContentType: "audio/wav", SHA256: "shaA"},      // unchanged → skip
+		{ID: 2, Name: "new.mp4", ContentType: "video/mp4", SHA256: "shaB"},      // new → pick up
 		{ID: 1, Name: "replaced.wav", ContentType: "audio/wav", SHA256: "shaZ"}, // sha changed → re-probe
 	}
 	got := indexerCandidates(ctx.AppDB(), testProj, files, 100)

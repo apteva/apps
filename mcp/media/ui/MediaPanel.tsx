@@ -178,6 +178,8 @@ type Kind = "all" | "video" | "audio" | "image";
 type Sort = "created_at" | "duration_ms" | "updated_at";
 type AspectFilter = "all" | "portrait" | "landscape" | "square" | "reel" | "wide";
 type DurationFilter = "all" | "short" | "medium" | "long" | "extended";
+type RatingFilter = "all" | "not_adult" | "general" | "mature" | "adult" | "unrated";
+const PAGE_LIMIT = 100;
 
 function formatDuration(ms?: number): string {
   if (ms === undefined || ms === null) return "—";
@@ -204,46 +206,28 @@ function formatBitrate(b?: number): string {
   return `${(b / 1_000_000).toFixed(1)} Mbps`;
 }
 
-function rowKind(row: MediaRow): Exclude<Kind, "all"> | null {
-  if (row.is_image) return "image";
-  if (row.has_video) return "video";
-  if (row.has_audio) return "audio";
-  return null;
-}
-
-function matchesAspect(row: MediaRow, filter: AspectFilter): boolean {
-  if (filter === "all") return true;
-  if (!row.width || !row.height) return false;
-  const ratio = row.width / row.height;
-  if (filter === "portrait") return ratio < 0.95;
-  if (filter === "landscape") return ratio > 1.05;
-  if (filter === "square") return ratio >= 0.95 && ratio <= 1.05;
-  if (filter === "reel") return Math.abs(ratio - 9 / 16) <= 0.08;
-  if (filter === "wide") return Math.abs(ratio - 16 / 9) <= 0.15;
-  return true;
-}
-
-function matchesDuration(row: MediaRow, filter: DurationFilter): boolean {
-  if (filter === "all") return true;
-  if (rowKind(row) !== "video") return false;
-  const ms = row.duration_ms || 0;
-  if (filter === "short") return ms > 0 && ms < 30_000;
-  if (filter === "medium") return ms >= 30_000 && ms < 2 * 60_000;
-  if (filter === "long") return ms >= 2 * 60_000 && ms < 10 * 60_000;
-  if (filter === "extended") return ms >= 10 * 60_000;
-  return true;
+interface MediaFacetCounts {
+  all: number;
+  video: number;
+  audio: number;
+  image: number;
+  aspect?: Partial<Record<Exclude<AspectFilter, "all">, number>>;
+  duration?: Partial<Record<Exclude<DurationFilter, "all">, number>>;
 }
 
 export default function MediaPanel({ projectId, installId }: NativePanelProps) {
   const [rows, setRows] = useState<MediaRow[]>([]);
   const [status, setStatus] = useState<Record<string, number>>({});
+  const [counts, setCounts] = useState<MediaFacetCounts>({ all: 0, video: 0, audio: 0, image: 0 });
   const [kind, setKind] = useState<Kind>("all");
   const [aspectFilter, setAspectFilter] = useState<AspectFilter>("all");
   const [durationFilter, setDurationFilter] = useState<DurationFilter>("all");
+  const [ratingFilter, setRatingFilter] = useState<RatingFilter>("all");
   const [sort, setSort] = useState<Sort>("created_at");
   const [selected, setSelected] = useState<MediaRow | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [hasMore, setHasMore] = useState(false);
   // Folder navigation. "/" = root (all folders). Recursive toggle
   // makes the current view include sub-folders.
   const [folder, setFolder] = useState("/");
@@ -277,7 +261,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
     [projectId],
   );
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (offset = 0) => {
     // Guard against empty projectId on first paint. The dashboard
     // host re-renders the panel a few times before its project
     // context is hydrated; without this guard the fetch goes out
@@ -295,8 +279,14 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
     try {
       const params: Record<string, string> = {
         order_by: sort,
-        limit: "500",
+        limit: String(PAGE_LIMIT),
+        offset: String(offset),
       };
+      if (kind !== "all") params.media_type = kind;
+      if (aspectFilter !== "all") params.aspect = aspectFilter;
+      if (durationFilter !== "all") params.duration = durationFilter;
+      if (ratingFilter === "not_adult") params.exclude_audience_rating = "adult";
+      else if (ratingFilter !== "all") params.audience_rating = ratingFilter;
       // Root non-recursive → only files literally at "/" (matches
       // storage panel's behavior). Root recursive → everything in
       // the project (no folder filter). In a sub-folder → exact
@@ -307,25 +297,38 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
         params.folder = folder;
         if (recursive) params.recursive = "true";
       }
-      const [mediaRes, foldersRes] = await Promise.all([
+      const folderParams: Record<string, string> = { parent: folder };
+      const facetParams: Record<string, string> = {};
+      if (!(recursive && folder === "/")) {
+        facetParams.folder = folder;
+        if (recursive) facetParams.recursive = "true";
+      }
+      const [mediaRes, foldersRes, facetsRes] = await Promise.all([
         fetch(`${API}/media?${withMediaParams(params)}`, { credentials: "same-origin" }),
-        fetch(`${API}/folders?${withMediaParams({ parent: folder })}`, { credentials: "same-origin" }),
+        fetch(`${API}/folders?${withMediaParams(folderParams)}`, { credentials: "same-origin" }),
+        fetch(`${API}/media/facets?${withMediaParams(facetParams)}`, { credentials: "same-origin" }),
       ]);
       if (!mediaRes.ok) throw new Error(`${mediaRes.status}: ${await mediaRes.text().catch(() => "")}`);
       const data = (await mediaRes.json()) as { media: MediaRow[] };
-      setRows(data.media || []);
+      const nextRows = data.media || [];
+      setRows((prev) => offset > 0 ? [...prev, ...nextRows] : nextRows);
+      setHasMore(nextRows.length === PAGE_LIMIT);
       if (foldersRes.ok) {
         const fdata = (await foldersRes.json()) as { folders?: string[] };
         setChildFolders(fdata.folders || []);
       } else {
         setChildFolders([]);
       }
+      if (facetsRes.ok) {
+        const fdata = (await facetsRes.json()) as { counts?: MediaFacetCounts };
+        if (fdata.counts) setCounts(fdata.counts);
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setLoading(false);
     }
-  }, [withMediaParams, sort, folder, recursive]);
+  }, [withMediaParams, kind, aspectFilter, durationFilter, ratingFilter, sort, folder, recursive]);
 
   // Status counts via the MCP-style summary endpoint — implemented as
   // a fan over rows here to avoid a second roundtrip; once we add a
@@ -362,25 +365,6 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
         return;
     }
   });
-
-  const counts = useMemo(() => {
-    const c = { all: rows.length, video: 0, audio: 0, image: 0 };
-    for (const r of rows) {
-      const k = rowKind(r);
-      if (k) c[k]++;
-    }
-    return c;
-  }, [rows]);
-
-  const visibleRows = useMemo(() => {
-    return rows.filter((r) => {
-      const k = rowKind(r);
-      if (kind !== "all" && k !== kind) return false;
-      if (!matchesAspect(r, aspectFilter)) return false;
-      if (!matchesDuration(r, durationFilter)) return false;
-      return true;
-    });
-  }, [rows, kind, aspectFilter, durationFilter]);
 
   const handleReindex = async (fileId: string) => {
     await fetch(`${API}/media/${fileId}/reindex?${withMediaParams()}`, {
@@ -631,12 +615,26 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
           <option value="long">2:00-10:00</option>
           <option value="extended">&gt;= 10:00</option>
         </select>
-        {aspectFilter !== "all" || durationFilter !== "all" ? (
+        <label className="text-xs text-text-dim">rating</label>
+        <select
+          value={ratingFilter}
+          onChange={(e) => setRatingFilter(e.target.value as RatingFilter)}
+          className="bg-bg-input border border-border rounded px-2 py-1 text-xs"
+        >
+          <option value="all">any</option>
+          <option value="not_adult">not adult</option>
+          <option value="general">general</option>
+          <option value="mature">mature</option>
+          <option value="adult">adult</option>
+          <option value="unrated">unrated</option>
+        </select>
+        {aspectFilter !== "all" || durationFilter !== "all" || ratingFilter !== "all" ? (
           <button
             type="button"
             onClick={() => {
               setAspectFilter("all");
               setDurationFilter("all");
+              setRatingFilter("all");
             }}
             className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input"
           >
@@ -646,7 +644,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
         <div className="flex-1" />
         <button
           type="button"
-          onClick={load}
+          onClick={() => load()}
           className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input"
         >
           Refresh
@@ -658,13 +656,13 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
           <div className="text-red text-sm p-4">{error}</div>
         ) : loading && rows.length === 0 && childFolders.length === 0 ? (
           <div className="text-text-muted text-sm text-center mt-12">Loading…</div>
-        ) : visibleRows.length === 0 && childFolders.length === 0 ? (
+        ) : rows.length === 0 && childFolders.length === 0 ? (
           <div className="text-text-muted text-sm text-center mt-12">
             {folder === "/"
-              ? rows.length === 0
+              ? counts.all === 0
                 ? "No indexed media yet. Upload audio, video, or image files to storage — the indexer picks them up within ~30s."
                 : "No media matches the current filters."
-              : rows.length === 0
+              : counts.all === 0
                 ? `No media in ${folder}.`
                 : "No media matches the current filters."}
           </div>
@@ -692,15 +690,27 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
                 gap: "0.75rem",
               }}
             >
-              {visibleRows.map(renderTile)}
+              {rows.map(renderTile)}
             </div>
+            {hasMore ? (
+              <div className="flex justify-center mt-4">
+                <button
+                  type="button"
+                  onClick={() => load(rows.length)}
+                  disabled={loading}
+                  className="px-3 py-1.5 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50"
+                >
+                  {loading ? "Loading..." : "Load more"}
+                </button>
+              </div>
+            ) : null}
           </>
         )}
       </div>
 
       <footer className="text-xs text-text-dim flex items-center gap-3 border-t border-border pt-2">
-        <span>{visibleRows.length} shown</span>
-        {visibleRows.length !== rows.length ? <span>· {rows.length} indexed</span> : null}
+        <span>{rows.length} shown</span>
+        {hasMore ? <span>· more available</span> : null}
         {(["pending", "failed", "unsupported", "skipped_size"] as const).map((s) =>
           status[s] ? (
             <span
