@@ -3097,6 +3097,28 @@ type TravelPriceRouteSummary struct {
 	FirstObservedAt      string `json:"first_observed_at,omitempty"`
 }
 
+type TravelPriceStats struct {
+	QuoteCount     int `json:"quote_count"`
+	SearchCount    int `json:"search_count"`
+	RouteCount     int `json:"route_count"`
+	RouteDateCount int `json:"route_date_count"`
+}
+
+type TravelPriceRouteDate struct {
+	Kind              string `json:"kind"`
+	OriginCode        string `json:"origin_code,omitempty"`
+	DestinationCode   string `json:"destination_code,omitempty"`
+	DepartDate        string `json:"depart_date,omitempty"`
+	ReturnDate        string `json:"return_date,omitempty"`
+	Currency          string `json:"currency"`
+	PartySize         int    `json:"party_size"`
+	CabinOrClass      string `json:"cabin_or_class,omitempty"`
+	QuoteCount        int    `json:"quote_count"`
+	SearchCount       int    `json:"search_count"`
+	LowestAmountCents int64  `json:"lowest_amount_cents"`
+	LatestObservedAt  string `json:"latest_observed_at,omitempty"`
+}
+
 func (a *App) toolSearchFlights(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	settings, _ := loadSettings(ctx)
 	if settings.DuffelConnectionID == 0 {
@@ -3244,8 +3266,8 @@ func (a *App) toolPriceObservations(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if limit < 1 {
 		limit = 200
 	}
-	if limit > 1000 {
-		limit = 1000
+	if limit > 5000 {
+		limit = 5000
 	}
 	sinceDays := intArg(args, "since_days", 180)
 	if sinceDays < 1 {
@@ -3254,25 +3276,30 @@ func (a *App) toolPriceObservations(ctx *sdk.AppCtx, args map[string]any) (any, 
 	since := time.Now().UTC().AddDate(0, 0, -sinceDays).Format(time.RFC3339)
 
 	where := []string{"project_id=?", "kind=?", "observed_at>=?"}
-	params := []any{projectID(), kind, since}
+	baseParams := []any{projectID(), kind, since}
 	if origin != "" {
 		where = append(where, "origin_code=?")
-		params = append(params, origin)
+		baseParams = append(baseParams, origin)
 	}
 	if destination != "" {
 		where = append(where, "destination_code=?")
-		params = append(params, destination)
+		baseParams = append(baseParams, destination)
 	}
 	if tripID > 0 {
 		where = append(where, "trip_id=?")
-		params = append(params, tripID)
+		baseParams = append(baseParams, tripID)
 	}
+	whereSQL := strings.Join(where, " AND ")
+	stats := readPriceObservationStats(ctx, whereSQL, baseParams)
+	routeDates := readPriceRouteDates(ctx, whereSQL, baseParams)
+	routes := summarizeRouteDates(routeDates)
+	params := append([]any{}, baseParams...)
 	params = append(params, limit)
 	q := `SELECT id, project_id, trip_id, kind, provider, origin_code, destination_code,
 	             depart_date, return_date, party_size, cabin_or_class, provider_name, item_name,
 	             stops_or_transfers, duration, amount_cents, currency, observed_at, live_until, bookable_ref
 	      FROM travel_price_observations
-	      WHERE ` + strings.Join(where, " AND ") + `
+	      WHERE ` + whereSQL + `
 	      ORDER BY observed_at DESC, amount_cents ASC
 	      LIMIT ?`
 	rows, err := ctx.AppDB().Query(q, params...)
@@ -3313,8 +3340,54 @@ func (a *App) toolPriceObservations(ctx *sdk.AppCtx, args map[string]any) (any, 
 	}
 	return map[string]any{
 		"observations": observations,
-		"routes":       summarizePriceObservations(observations),
+		"route_dates":  routeDates,
+		"routes":       routes,
+		"stats":        stats,
 	}, nil
+}
+
+func readPriceObservationStats(ctx *sdk.AppCtx, whereSQL string, params []any) TravelPriceStats {
+	q := `SELECT COUNT(*),
+	             COUNT(DISTINCT search_signature),
+	             COUNT(DISTINCT COALESCE(origin_code, '') || '-' || COALESCE(destination_code, '')),
+	             COUNT(DISTINCT COALESCE(origin_code, '') || '-' || COALESCE(destination_code, '') || '-' || COALESCE(depart_date, '') || '-' || COALESCE(return_date, ''))
+	      FROM travel_price_observations WHERE ` + whereSQL
+	var s TravelPriceStats
+	_ = ctx.AppDB().QueryRow(q, params...).Scan(&s.QuoteCount, &s.SearchCount, &s.RouteCount, &s.RouteDateCount)
+	return s
+}
+
+func readPriceRouteDates(ctx *sdk.AppCtx, whereSQL string, params []any) []TravelPriceRouteDate {
+	q := `SELECT kind, origin_code, destination_code, depart_date, return_date, currency,
+	             party_size, cabin_or_class, COUNT(*), COUNT(DISTINCT search_signature),
+	             MIN(amount_cents) AS lowest_amount_cents, MAX(observed_at)
+	      FROM travel_price_observations
+	      WHERE ` + whereSQL + `
+	      GROUP BY kind, origin_code, destination_code, depart_date, return_date, currency, party_size, cabin_or_class
+	      ORDER BY depart_date ASC, lowest_amount_cents ASC
+	      LIMIT 500`
+	rows, err := ctx.AppDB().Query(q, params...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := []TravelPriceRouteDate{}
+	for rows.Next() {
+		var r TravelPriceRouteDate
+		var origin, destination, depart, ret, cabin sql.NullString
+		if err := rows.Scan(&r.Kind, &origin, &destination, &depart, &ret, &r.Currency,
+			&r.PartySize, &cabin, &r.QuoteCount, &r.SearchCount, &r.LowestAmountCents,
+			&r.LatestObservedAt); err != nil {
+			continue
+		}
+		r.OriginCode = origin.String
+		r.DestinationCode = destination.String
+		r.DepartDate = depart.String
+		r.ReturnDate = ret.String
+		r.CabinOrClass = cabin.String
+		out = append(out, r)
+	}
+	return out
 }
 
 func (a *App) toolScanFlightPrices(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -3486,6 +3559,59 @@ func summarizePriceObservations(observations []TravelPriceObservation) []TravelP
 		}
 		if s.FirstObservedAt == "" || o.ObservedAt < s.FirstObservedAt {
 			s.FirstObservedAt = o.ObservedAt
+		}
+	}
+	out := make([]TravelPriceRouteSummary, 0, len(byKey))
+	for _, s := range byKey {
+		out = append(out, *s)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].LowestAmountCents == out[j].LowestAmountCents {
+			return out[i].LatestObservedAt > out[j].LatestObservedAt
+		}
+		return out[i].LowestAmountCents < out[j].LowestAmountCents
+	})
+	return out
+}
+
+func summarizeRouteDates(routeDates []TravelPriceRouteDate) []TravelPriceRouteSummary {
+	byKey := map[string]*TravelPriceRouteSummary{}
+	for _, r := range routeDates {
+		key := strings.Join([]string{r.Kind, r.OriginCode, r.DestinationCode, r.Currency, strconv.Itoa(r.PartySize), r.CabinOrClass}, "|")
+		s := byKey[key]
+		if s == nil {
+			s = &TravelPriceRouteSummary{
+				Kind:              r.Kind,
+				OriginCode:        r.OriginCode,
+				DestinationCode:   r.DestinationCode,
+				Currency:          r.Currency,
+				PartySize:         r.PartySize,
+				CabinOrClass:      r.CabinOrClass,
+				LowestAmountCents: r.LowestAmountCents,
+				LatestAmountCents: r.LowestAmountCents,
+				FirstObservedAt:   r.LatestObservedAt,
+				LatestObservedAt:  r.LatestObservedAt,
+			}
+			byKey[key] = s
+		}
+		s.ObservationCount += r.QuoteCount
+		if r.LowestAmountCents < s.LowestAmountCents {
+			s.LowestAmountCents = r.LowestAmountCents
+			s.CheapestDepartDate = r.DepartDate
+			s.CheapestReturnDate = r.ReturnDate
+			s.CheapestObservedAt = r.LatestObservedAt
+		}
+		if s.CheapestObservedAt == "" && r.LowestAmountCents == s.LowestAmountCents {
+			s.CheapestDepartDate = r.DepartDate
+			s.CheapestReturnDate = r.ReturnDate
+			s.CheapestObservedAt = r.LatestObservedAt
+		}
+		if r.LatestObservedAt > s.LatestObservedAt {
+			s.LatestObservedAt = r.LatestObservedAt
+			s.LatestAmountCents = r.LowestAmountCents
+		}
+		if s.FirstObservedAt == "" || r.LatestObservedAt < s.FirstObservedAt {
+			s.FirstObservedAt = r.LatestObservedAt
 		}
 	}
 	out := make([]TravelPriceRouteSummary, 0, len(byKey))

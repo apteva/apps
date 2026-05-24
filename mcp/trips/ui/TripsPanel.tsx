@@ -195,9 +195,33 @@ interface TravelPriceRouteSummary {
   first_observed_at?: string;
 }
 
+interface TravelPriceStats {
+  quote_count: number;
+  search_count: number;
+  route_count: number;
+  route_date_count: number;
+}
+
+interface TravelPriceRouteDate {
+  kind: string;
+  origin_code?: string;
+  destination_code?: string;
+  depart_date?: string;
+  return_date?: string;
+  currency: string;
+  party_size: number;
+  cabin_or_class?: string;
+  quote_count: number;
+  search_count: number;
+  lowest_amount_cents: number;
+  latest_observed_at?: string;
+}
+
 interface TravelPriceResponse {
   observations: TravelPriceObservation[];
   routes: TravelPriceRouteSummary[];
+  route_dates?: TravelPriceRouteDate[];
+  stats?: TravelPriceStats;
 }
 
 interface FlightPriceScanResponse {
@@ -776,6 +800,9 @@ function GlobalDealsPanel({ settings }: { settings: Settings }) {
 
   const routes = data?.routes ?? [];
   const observations = data?.observations ?? [];
+  const routeDates = data?.route_dates ?? [];
+  const stats = data?.stats;
+  const quoteCount = stats?.quote_count ?? observations.length;
 
   return (
     <section className="rounded-lg border border-border bg-bg-card p-4">
@@ -786,7 +813,7 @@ function GlobalDealsPanel({ settings }: { settings: Settings }) {
             <span>Flight deals</span>
           </div>
           <div className="mt-1 text-sm text-text-muted">
-            {observations.length} observed fare{observations.length === 1 ? "" : "s"} saved for route discovery.
+            {quoteCount} quote{quoteCount === 1 ? "" : "s"} from {stats?.search_count ?? "—"} search{stats?.search_count === 1 ? "" : "es"}, {stats?.route_count ?? routes.length} route{(stats?.route_count ?? routes.length) === 1 ? "" : "s"}, {stats?.route_date_count ?? routeDates.length} date option{(stats?.route_date_count ?? routeDates.length) === 1 ? "" : "s"}.
             {scanSummary && <span className="ml-2 text-text">{scanSummary}.</span>}
           </div>
         </div>
@@ -817,8 +844,9 @@ function GlobalDealsPanel({ settings }: { settings: Settings }) {
             minDate={todayPlus(0)}
           />
           <div className="grid grid-cols-2 gap-3">
-            <Field label="Lengths">
+            <Field label="Trip lengths (days)">
               <input value={tripLengths} onChange={e => setTripLengths(e.target.value)} className="input" placeholder="3,5,7" />
+              <div className="mt-1 text-xs text-text-muted">Return after these many days. Example: 3,5,7 checks weekend, midweek, and week-long trips.</div>
             </Field>
             <Field label="Passengers">
               <input type="number" min={1} value={passengers} onChange={e => setPassengers(Math.max(1, parseInt(e.target.value || "1", 10)))} className="input" />
@@ -846,32 +874,32 @@ function GlobalDealsPanel({ settings }: { settings: Settings }) {
               <EmptyState message="No observed deals yet — run a scan to seed prices." />
             </div>
           )}
-          <FlightHeatmap observations={observations} />
+          <FlightHeatmap routeDates={routeDates} />
         </div>
       </div>
     </section>
   );
 }
 
-function FlightHeatmap({ observations }: { observations: TravelPriceObservation[] }) {
-  const byCell = new Map<string, TravelPriceObservation>();
-  for (const o of observations) {
+function FlightHeatmap({ routeDates }: { routeDates: TravelPriceRouteDate[] }) {
+  const byCell = new Map<string, TravelPriceRouteDate>();
+  for (const o of routeDates) {
     if (!o.destination_code || !o.depart_date) continue;
     const key = `${o.destination_code}|${o.depart_date}`;
     const prev = byCell.get(key);
-    if (!prev || o.amount_cents < prev.amount_cents) byCell.set(key, o);
+    if (!prev || o.lowest_amount_cents < prev.lowest_amount_cents) byCell.set(key, o);
   }
-  const destinations = Array.from(new Set(observations.map(o => o.destination_code).filter(Boolean) as string[]))
+  const destinations = Array.from(new Set(routeDates.map(o => o.destination_code).filter(Boolean) as string[]))
     .sort((a, b) => {
-      const mina = Math.min(...observations.filter(o => o.destination_code === a).map(o => o.amount_cents));
-      const minb = Math.min(...observations.filter(o => o.destination_code === b).map(o => o.amount_cents));
+      const mina = Math.min(...routeDates.filter(o => o.destination_code === a).map(o => o.lowest_amount_cents));
+      const minb = Math.min(...routeDates.filter(o => o.destination_code === b).map(o => o.lowest_amount_cents));
       return mina - minb;
     })
     .slice(0, 6);
-  const dates = Array.from(new Set(observations.map(o => o.depart_date).filter(Boolean) as string[]))
+  const dates = Array.from(new Set(routeDates.map(o => o.depart_date).filter(Boolean) as string[]))
     .sort()
-    .slice(0, 14);
-  const amounts = Array.from(byCell.values()).map(o => o.amount_cents);
+    .slice(0, 31);
+  const amounts = Array.from(byCell.values()).map(o => o.lowest_amount_cents);
   const min = amounts.length ? Math.min(...amounts) : 0;
   const max = amounts.length ? Math.max(...amounts) : 0;
 
@@ -887,8 +915,11 @@ function FlightHeatmap({ observations }: { observations: TravelPriceObservation[
 
   return (
     <div className="rounded-lg border border-border-subtle p-3">
-      <div className="mb-3 flex items-center justify-between">
-        <div className="text-xs uppercase tracking-wide text-text-muted">When to go</div>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div>
+          <div className="text-xs uppercase tracking-wide text-text-muted">When to go</div>
+          <div className="mt-1 text-xs text-text-muted">Calendar heatmap from grouped route/date options, not raw offer count.</div>
+        </div>
         <div className="text-xs text-text-muted">lowest observed per route/date</div>
       </div>
       <div className="overflow-auto">
@@ -901,8 +932,12 @@ function FlightHeatmap({ observations }: { observations: TravelPriceObservation[
               {dates.map(date => {
                 const o = byCell.get(`${dest}|${date}`);
                 return (
-                  <div key={`${dest}-${date}`} className={`flex h-9 items-center justify-center rounded text-[11px] tabular-nums ${o ? tone(o.amount_cents) : "bg-bg-hover text-text-dim"}`}>
-                    {o ? fmtMoney(o.amount_cents, o.currency).replace(/\D00$/, "") : "—"}
+                  <div
+                    key={`${dest}-${date}`}
+                    title={o ? `${dest} ${date}${o.return_date ? ` to ${o.return_date}` : ""}: ${fmtMoney(o.lowest_amount_cents, o.currency)} from ${o.quote_count} quotes` : `${dest} ${date}: no data`}
+                    className={`flex h-9 items-center justify-center rounded text-[11px] tabular-nums ${o ? tone(o.lowest_amount_cents) : "bg-bg-hover text-text-dim"}`}
+                  >
+                    {o ? fmtMoney(o.lowest_amount_cents, o.currency).replace(/\D00$/, "") : "—"}
                   </div>
                 );
               })}
@@ -1285,7 +1320,7 @@ function FlightDealCard({ route }: { route: TravelPriceRouteSummary }) {
           <div className="mt-1 text-xs text-text-muted">
             {route.party_size} pax
             {route.cabin_or_class ? ` • ${route.cabin_or_class.replace("_", " ")}` : ""}
-            {route.observation_count ? ` • ${route.observation_count} seen` : ""}
+            {route.observation_count ? ` • ${route.observation_count} quotes` : ""}
           </div>
         </div>
         <div className="text-right">
