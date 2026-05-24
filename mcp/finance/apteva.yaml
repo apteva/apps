@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: finance
 display_name: Finance
-version: 0.1.5
+version: 0.1.6
 description: |
   Unified personal-wealth tracker. Cash, stocks, ETFs, crypto, P2P,
   real estate, vehicles, pensions, loans — all in one ledger. v0.1
@@ -22,12 +22,32 @@ requires:
   permissions:
     - db.write.app
     - platform.apps.call
+    - platform.connections.execute
+    - platform.connections.read
   apps:
     - name: stocks
       version: ">=0.6.0"
       optional: true
       reason: optional market-data enrichment for stock and ETF holdings; finance degrades to local/manual prices when absent
-  integrations: []
+  integrations:
+    - role: brokerage_import
+      kind: integration
+      required: false
+      compatible_slugs: [trading212]
+      capabilities:
+        - account.summary
+        - positions.list
+        - orders.history
+        - dividends.history
+        - transactions.history
+      tools:
+        account.summary: get_account_summary
+        positions.list: get_positions
+        orders.history: get_order_history
+        dividends.history: get_dividend_history
+        transactions.history: get_transaction_history
+      label: "Brokerage import"
+      hint: "Connect Trading 212 to import account cash, current positions, filled orders, dividends, and cash movements into Finance. Finance never places broker orders."
 
 provides:
   http_routes:
@@ -66,6 +86,7 @@ provides:
     - { name: stocks_search,       description: "Search linked stocks app for symbols. Args: query, limit?." }
     - { name: stocks_quote,        description: "Fetch a linked stocks quote or historical close and persist the price when instrument_id is supplied. Args: symbol? or instrument_id?, date?." }
     - { name: stocks_dividends_import, description: "Import cash dividend transactions from linked stocks app for an account holding. Args: account_id, instrument_id, from?, to?, dry_run?." }
+    - { name: brokerage_sync,      description: "Read-only import from a bound brokerage integration such as Trading 212. Args: connection_id?, account_id?, import_positions?, import_orders?, import_dividends?, import_cash?, dry_run?." }
 
     - { name: valuation_set,       description: "Re-value an illiquid holding (real estate / vehicle / private). Writes a price-series row + audit 'valuation' transaction. Args: instrument_id, value, as_of?, account_id? (for the audit row)." }
 

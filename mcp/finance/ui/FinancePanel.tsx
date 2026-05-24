@@ -402,6 +402,7 @@ export default function FinancePanel({ projectId }: NativePanelProps) {
   const [categories, setCategories] = useState<Category[]>([]);
   const [showNewAccount, setShowNewAccount] = useState(false);
   const [showNewBudget, setShowNewBudget] = useState(false);
+  const [syncingBroker, setSyncingBroker] = useState(false);
   const [error, setError] = useState<string>("");
 
   const refresh = useCallback(async () => {
@@ -434,6 +435,18 @@ export default function FinancePanel({ projectId }: NativePanelProps) {
 
   useAppEvents("finance", projectId, () => { refresh(); });
 
+  const syncBrokerage = async () => {
+    setSyncingBroker(true);
+    try {
+      await api("/brokerage/sync", { method: "POST", body: JSON.stringify({}) });
+      await refresh();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSyncingBroker(false);
+    }
+  };
+
   const base = settings?.base_currency ?? "EUR";
 
   return (
@@ -458,6 +471,13 @@ export default function FinancePanel({ projectId }: NativePanelProps) {
             className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm text-bg hover:bg-accent-hover"
           >
             <Icon name="plus" size={14} /> Account
+          </button>
+          <button
+            onClick={syncBrokerage}
+            disabled={syncingBroker}
+            className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm text-text hover:bg-bg-hover disabled:opacity-50"
+          >
+            <Icon name="trending-up" size={14} /> {syncingBroker ? "Syncing..." : "Sync broker"}
           </button>
         </div>
       </header>

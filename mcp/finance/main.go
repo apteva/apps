@@ -95,6 +95,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/stocks/search", Handler: a.handleStocksSearch},
 		{Pattern: "/stocks/quote", Handler: a.handleStocksQuote},
 		{Pattern: "/stocks/dividends/import", Handler: a.handleStocksDividendsImport},
+		{Pattern: "/brokerage/sync", Handler: a.handleBrokerageSync},
 		{Pattern: "/valuations", Handler: a.handleValuations},
 		{Pattern: "/categories", Handler: a.handleCategories},
 		{Pattern: "/categories/", Handler: a.handleCategoriesItem},
@@ -315,6 +316,17 @@ func (a *App) MCPTools() []sdk.Tool {
 				"dry_run":       map[string]any{"type": "boolean"},
 			}, []string{"account_id", "instrument_id"}),
 			Handler: a.toolStocksDividendsImport},
+		{Name: "brokerage_sync", Description: "Read-only import from a bound brokerage integration such as Trading 212. Args: connection_id?, account_id?, import_positions?, import_orders?, import_dividends?, import_cash?, dry_run?.",
+			InputSchema: schemaObject(map[string]any{
+				"connection_id":    map[string]any{"type": "integer"},
+				"account_id":       map[string]any{"type": "integer"},
+				"import_positions": map[string]any{"type": "boolean"},
+				"import_orders":    map[string]any{"type": "boolean"},
+				"import_dividends": map[string]any{"type": "boolean"},
+				"import_cash":      map[string]any{"type": "boolean"},
+				"dry_run":          map[string]any{"type": "boolean"},
+			}, nil),
+			Handler: a.toolBrokerageSync},
 
 		{Name: "valuation_set", Description: "Re-value an illiquid holding. Writes a `prices` row + audit 'valuation' transaction. Args: instrument_id, value (per-unit minor units in instrument.quote_currency), as_of?, account_id?, memo?.",
 			InputSchema: schemaObject(map[string]any{
@@ -1324,6 +1336,7 @@ func (a *App) toolTxnsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		Payee:      strArg(args, "payee", ""),
 		Memo:       strArg(args, "memo", ""),
 		CategoryID: int64(intArg(args, "category_id", 0)),
+		ExternalID: strArg(args, "external_id", ""),
 	})
 	if err != nil {
 		return nil, err
@@ -1440,6 +1453,7 @@ func (a *App) toolTxnsBuy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		Price:          &pricePer,
 		CostBasisDelta: amount,
 		Memo:           strArg(args, "memo", ""),
+		ExternalID:     strArg(args, "external_id", ""),
 	})
 	if err != nil {
 		return nil, err
@@ -1499,6 +1513,7 @@ func (a *App) toolTxnsSell(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		Price:          &pricePer,
 		CostBasisDelta: -released,
 		Memo:           strArg(args, "memo", ""),
+		ExternalID:     strArg(args, "external_id", ""),
 	})
 	if err != nil {
 		return nil, err
@@ -1539,13 +1554,15 @@ func (a *App) toolTxnsDividend(ctx *sdk.AppCtx, args map[string]any) (any, error
 	var hid int64
 	_ = ctx.AppDB().QueryRow(`SELECT id FROM holdings WHERE account_id=? AND instrument_id=?`, accountID, instrumentID).Scan(&hid)
 	id, err := insertTxn(ctx, txnIn{
-		AccountID: accountID,
-		HoldingID: hid,
-		PostedAt:  postedAt,
-		Kind:      "dividend",
-		Amount:    amount,
-		Currency:  acc.Currency,
-		Memo:      strArg(args, "memo", ""),
+		AccountID:  accountID,
+		HoldingID:  hid,
+		PostedAt:   postedAt,
+		Kind:       "dividend",
+		Amount:     amount,
+		Currency:   acc.Currency,
+		Payee:      strArg(args, "payee", ""),
+		Memo:       strArg(args, "memo", ""),
+		ExternalID: strArg(args, "external_id", ""),
 	})
 	if err != nil {
 		return nil, err
@@ -2312,6 +2329,672 @@ func txnExternalIDExists(ctx *sdk.AppCtx, accountID int64, externalID string) bo
 	return ctx.AppDB().QueryRow(
 		`SELECT id FROM transactions WHERE account_id=? AND external_id=? LIMIT 1`, accountID, externalID,
 	).Scan(&id) == nil
+}
+
+type brokerageSyncStats struct {
+	Broker       string `json:"broker"`
+	ConnectionID int64  `json:"connection_id"`
+	AccountID    int64  `json:"account_id"`
+	DryRun       bool   `json:"dry_run"`
+	Positions    int    `json:"positions"`
+	Orders       int    `json:"orders"`
+	Dividends    int    `json:"dividends"`
+	Cash         int    `json:"cash"`
+	Skipped      int    `json:"skipped"`
+}
+
+func (a *App) toolBrokerageSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	conn, err := brokerageConnection(ctx, int64(intArg(args, "connection_id", 0)))
+	if err != nil {
+		return nil, err
+	}
+	if conn.AppSlug != "trading212" {
+		return nil, fmt.Errorf("unsupported brokerage %q", conn.AppSlug)
+	}
+	summary := map[string]any{}
+	_ = executeIntegrationJSON(ctx, conn.ID, "get_account_summary", nil, &summary)
+	acc, err := ensureBrokerageAccount(ctx, args, conn, summary)
+	if err != nil {
+		return nil, err
+	}
+	stats := brokerageSyncStats{
+		Broker:       conn.AppSlug,
+		ConnectionID: conn.ID,
+		AccountID:    acc.ID,
+		DryRun:       boolArg(args, "dry_run", false),
+	}
+	if boolArg(args, "import_orders", true) {
+		n, skipped, err := syncTrading212Orders(ctx, a, acc, conn.ID, stats.DryRun)
+		if err != nil {
+			return nil, err
+		}
+		stats.Orders += n
+		stats.Skipped += skipped
+	}
+	if boolArg(args, "import_dividends", true) {
+		n, skipped, err := syncTrading212Dividends(ctx, a, acc, conn.ID, stats.DryRun)
+		if err != nil {
+			return nil, err
+		}
+		stats.Dividends += n
+		stats.Skipped += skipped
+	}
+	if boolArg(args, "import_cash", true) {
+		n, skipped, err := syncTrading212Cash(ctx, a, acc, conn.ID, stats.DryRun)
+		if err != nil {
+			return nil, err
+		}
+		stats.Cash += n
+		stats.Skipped += skipped
+	}
+	if boolArg(args, "import_positions", true) {
+		n, skipped, err := syncTrading212Positions(ctx, a, acc, conn.ID, stats.DryRun)
+		if err != nil {
+			return nil, err
+		}
+		stats.Positions += n
+		stats.Skipped += skipped
+	}
+	if !stats.DryRun {
+		_, _ = ctx.AppDB().Exec(
+			`UPDATE accounts SET last_sync_at=?, sync_error=NULL WHERE id=?`,
+			time.Now().UTC().Format(time.RFC3339), acc.ID,
+		)
+	}
+	ctx.Emit("brokerage.synced", stats)
+	return stats, nil
+}
+
+func brokerageConnection(ctx *sdk.AppCtx, requested int64) (sdk.PlatformConnection, error) {
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return sdk.PlatformConnection{}, errors.New("platform connections are not available")
+	}
+	if requested != 0 {
+		c, err := ctx.PlatformAPI().GetConnection(requested)
+		if err != nil {
+			return sdk.PlatformConnection{}, err
+		}
+		if c == nil {
+			return sdk.PlatformConnection{}, fmt.Errorf("connection %d not found", requested)
+		}
+		return *c, nil
+	}
+	conns, err := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{AppSlug: "trading212"})
+	if err != nil {
+		return sdk.PlatformConnection{}, err
+	}
+	for _, c := range conns {
+		if c.Status == "" || c.Status == "active" || c.Status == "connected" {
+			return c, nil
+		}
+	}
+	return sdk.PlatformConnection{}, errors.New("no active Trading 212 connection bound")
+}
+
+func executeIntegrationJSON(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any, out any) error {
+	if input == nil {
+		input = map[string]any{}
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, input)
+	if err != nil {
+		return err
+	}
+	if res == nil {
+		return errors.New("empty integration response")
+	}
+	if !res.Success {
+		return fmt.Errorf("%s failed: HTTP %d %s", tool, res.Status, strings.TrimSpace(string(res.Data)))
+	}
+	if len(res.Data) == 0 {
+		res.Data = []byte("null")
+	}
+	return json.Unmarshal(res.Data, out)
+}
+
+func executeIntegrationPages(ctx *sdk.AppCtx, connID int64, tool string) ([]map[string]any, error) {
+	out := []map[string]any{}
+	cursor := ""
+	for i := 0; i < 20; i++ {
+		args := map[string]any{"limit": float64(50)}
+		if cursor != "" {
+			args["cursor"] = cursor
+		}
+		var raw any
+		if err := executeIntegrationJSON(ctx, connID, tool, args, &raw); err != nil {
+			return nil, err
+		}
+		items, next := integrationItems(raw)
+		out = append(out, items...)
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	return out, nil
+}
+
+func integrationItems(raw any) ([]map[string]any, string) {
+	switch v := raw.(type) {
+	case []any:
+		return mapSlice(v), ""
+	case map[string]any:
+		for _, key := range []string{"items", "data", "results"} {
+			if arr, ok := v[key].([]any); ok {
+				return mapSlice(arr), cursorFromNext(v)
+			}
+		}
+		return []map[string]any{v}, cursorFromNext(v)
+	default:
+		return nil, ""
+	}
+}
+
+func mapSlice(in []any) []map[string]any {
+	out := []map[string]any{}
+	for _, v := range in {
+		if m, ok := v.(map[string]any); ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func cursorFromNext(m map[string]any) string {
+	next := firstString(m, "nextPagePath", "next_page_path", "next", "cursor")
+	if next == "" {
+		return ""
+	}
+	if i := strings.Index(next, "cursor="); i >= 0 {
+		s := next[i+len("cursor="):]
+		if j := strings.IndexAny(s, "&?"); j >= 0 {
+			s = s[:j]
+		}
+		return s
+	}
+	return next
+}
+
+func ensureBrokerageAccount(ctx *sdk.AppCtx, args map[string]any, conn sdk.PlatformConnection, summary map[string]any) (Account, error) {
+	if id := int64(intArg(args, "account_id", 0)); id != 0 {
+		return readAccount(ctx, id)
+	}
+	pid := projectID(ctx)
+	source := "integration:" + conn.AppSlug
+	externalID := fmt.Sprintf("%s:%d", conn.AppSlug, conn.ID)
+	var id int64
+	if err := ctx.AppDB().QueryRow(
+		`SELECT id FROM accounts WHERE project_id=? AND source=? AND external_id=?`,
+		pid, source, externalID,
+	).Scan(&id); err == nil {
+		return readAccount(ctx, id)
+	}
+	ccy := strings.ToUpper(firstString(summary, "currency", "currencyCode", "accountCurrency", "baseCurrency", "cash.currency"))
+	if ccy == "" {
+		ccy = "EUR"
+	}
+	name := conn.Name
+	if name == "" {
+		name = "Trading 212"
+	}
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO accounts (project_id, name, kind, source, connection_id, external_id, currency, color)
+		 VALUES (?, ?, 'brokerage', ?, ?, ?, ?, ?)`,
+		pid, name, source, strconv.FormatInt(conn.ID, 10), externalID, ccy, "#f97316",
+	)
+	if err != nil {
+		return Account{}, err
+	}
+	id, _ = res.LastInsertId()
+	return readAccount(ctx, id)
+}
+
+func syncTrading212Positions(ctx *sdk.AppCtx, app *App, acc Account, connID int64, dry bool) (int, int, error) {
+	var raw any
+	if err := executeIntegrationJSON(ctx, connID, "get_positions", nil, &raw); err != nil {
+		return 0, 0, err
+	}
+	items, _ := integrationItems(raw)
+	n, skipped := 0, 0
+	for _, item := range items {
+		info := t212InstrumentInfo(item, acc.Currency)
+		if info.Symbol == "" {
+			skipped++
+			continue
+		}
+		qty := math.Abs(firstFloat(item, "quantity", "qty", "ownedQuantity", "position.quantity"))
+		if qty <= 0 {
+			skipped++
+			continue
+		}
+		inst, err := ensureBrokerInstrument(ctx, app, info)
+		if err != nil {
+			return n, skipped, err
+		}
+		avg := firstFloat(item, "averagePrice", "average_price", "avgPrice", "averagePricePaid", "position.averagePrice")
+		cost := int64(math.Round(qty * avg * 100))
+		if !dry {
+			if _, err := app.toolHoldingsSet(ctx, map[string]any{
+				"account_id":    float64(acc.ID),
+				"instrument_id": float64(inst.ID),
+				"quantity":      qty,
+				"cost_basis":    float64(cost),
+			}); err != nil {
+				return n, skipped, err
+			}
+			if price := firstFloat(item, "currentPrice", "current_price", "price", "marketPrice"); price > 0 {
+				_, _ = app.toolPricesSet(ctx, map[string]any{
+					"instrument_id": float64(inst.ID),
+					"price":         float64(int64(math.Round(price * 100))),
+					"source":        "trading212",
+				})
+			}
+		}
+		n++
+	}
+	return n, skipped, nil
+}
+
+func syncTrading212Orders(ctx *sdk.AppCtx, app *App, acc Account, connID int64, dry bool) (int, int, error) {
+	items, err := executeIntegrationPages(ctx, connID, "get_order_history")
+	if err != nil {
+		return 0, 0, err
+	}
+	n, skipped := 0, 0
+	for _, item := range items {
+		order := childMap(item, "order")
+		fill := childMap(item, "fill")
+		if len(order) == 0 {
+			order = item
+		}
+		info := t212InstrumentInfo(order, acc.Currency)
+		if info.Symbol == "" {
+			info = t212InstrumentInfo(item, acc.Currency)
+		}
+		if info.Symbol == "" {
+			skipped++
+			continue
+		}
+		side := strings.ToLower(firstString(order, "side", "type", "operation"))
+		if side == "" {
+			side = strings.ToLower(firstString(item, "side", "type", "operation"))
+		}
+		if strings.Contains(side, "buy") {
+			side = "buy"
+		} else if strings.Contains(side, "sell") {
+			side = "sell"
+		} else {
+			skipped++
+			continue
+		}
+		status := strings.ToLower(firstString(order, "status", "state"))
+		if status != "" && !strings.Contains(status, "fill") && len(fill) == 0 {
+			skipped++
+			continue
+		}
+		qty := math.Abs(firstFloat(fill, "quantity", "filledQuantity"))
+		if qty == 0 {
+			qty = math.Abs(firstFloat(order, "filledQuantity", "filled_quantity", "quantity", "qty"))
+		}
+		price := firstFloat(fill, "price", "averagePrice")
+		if price == 0 {
+			price = firstFloat(order, "averagePrice", "average_price", "avgFillPrice", "price", "limitPrice")
+		}
+		postedAt := firstTime(fill, order, item)
+		if qty <= 0 || price <= 0 || postedAt == "" {
+			skipped++
+			continue
+		}
+		if c := strings.ToUpper(firstString(fill, "currency", "currencyCode")); c != "" && acc.Currency != "" && c != acc.Currency {
+			skipped++
+			continue
+		}
+		externalID := "trading212:order:" + stableBrokerID(item, order, postedAt, info.Symbol, side, qty, price)
+		if txnExternalIDExists(ctx, acc.ID, externalID) {
+			skipped++
+			continue
+		}
+		inst, err := ensureBrokerInstrument(ctx, app, info)
+		if err != nil {
+			return n, skipped, err
+		}
+		if dry {
+			n++
+			continue
+		}
+		args := map[string]any{
+			"account_id":    float64(acc.ID),
+			"instrument_id": float64(inst.ID),
+			"quantity":      qty,
+			"amount":        float64(int64(math.Round(qty * price * 100))),
+			"posted_at":     postedAt,
+			"memo":          "Trading 212 " + side + " " + info.Symbol,
+			"external_id":   externalID,
+		}
+		if side == "buy" {
+			_, err = app.toolTxnsBuy(ctx, args)
+		} else {
+			_, err = app.toolTxnsSell(ctx, args)
+		}
+		if err != nil {
+			return n, skipped, err
+		}
+		n++
+	}
+	return n, skipped, nil
+}
+
+func syncTrading212Dividends(ctx *sdk.AppCtx, app *App, acc Account, connID int64, dry bool) (int, int, error) {
+	items, err := executeIntegrationPages(ctx, connID, "get_dividend_history")
+	if err != nil {
+		return 0, 0, err
+	}
+	n, skipped := 0, 0
+	for _, item := range items {
+		info := t212InstrumentInfo(item, acc.Currency)
+		if info.Symbol == "" {
+			skipped++
+			continue
+		}
+		amount := math.Abs(firstFloat(item, "amount", "paidAmount", "grossAmount", "netAmount", "total"))
+		postedAt := firstTime(item)
+		if amount <= 0 || postedAt == "" {
+			skipped++
+			continue
+		}
+		if c := strings.ToUpper(firstString(item, "currency", "currencyCode")); c != "" && acc.Currency != "" && c != acc.Currency {
+			skipped++
+			continue
+		}
+		externalID := "trading212:dividend:" + stableBrokerID(item, nil, postedAt, info.Symbol, "dividend", 0, amount)
+		if txnExternalIDExists(ctx, acc.ID, externalID) {
+			skipped++
+			continue
+		}
+		inst, err := ensureBrokerInstrument(ctx, app, info)
+		if err != nil {
+			return n, skipped, err
+		}
+		if dry {
+			n++
+			continue
+		}
+		if _, err := app.toolTxnsDividend(ctx, map[string]any{
+			"account_id":    float64(acc.ID),
+			"instrument_id": float64(inst.ID),
+			"amount":        float64(int64(math.Round(amount * 100))),
+			"posted_at":     postedAt,
+			"payee":         info.Symbol,
+			"memo":          "Trading 212 dividend " + info.Symbol,
+			"external_id":   externalID,
+		}); err != nil {
+			return n, skipped, err
+		}
+		n++
+	}
+	return n, skipped, nil
+}
+
+func syncTrading212Cash(ctx *sdk.AppCtx, app *App, acc Account, connID int64, dry bool) (int, int, error) {
+	items, err := executeIntegrationPages(ctx, connID, "get_transaction_history")
+	if err != nil {
+		return 0, 0, err
+	}
+	n, skipped := 0, 0
+	for _, item := range items {
+		amount := firstFloat(item, "amount", "value", "total")
+		postedAt := firstTime(item)
+		if amount == 0 || postedAt == "" {
+			skipped++
+			continue
+		}
+		if c := strings.ToUpper(firstString(item, "currency", "currencyCode")); c != "" && acc.Currency != "" && c != acc.Currency {
+			skipped++
+			continue
+		}
+		typ := strings.ToLower(firstString(item, "type", "transactionType", "category"))
+		kind := "deposit"
+		if amount < 0 {
+			kind = "withdraw"
+		}
+		if strings.Contains(typ, "fee") {
+			kind = "fee"
+		} else if strings.Contains(typ, "tax") {
+			kind = "tax"
+		} else if strings.Contains(typ, "interest") {
+			kind = "income"
+		} else if strings.Contains(typ, "withdraw") {
+			kind = "withdraw"
+		} else if strings.Contains(typ, "deposit") {
+			kind = "deposit"
+		}
+		externalID := "trading212:cash:" + stableBrokerID(item, nil, postedAt, typ, kind, 0, amount)
+		if txnExternalIDExists(ctx, acc.ID, externalID) {
+			skipped++
+			continue
+		}
+		if dry {
+			n++
+			continue
+		}
+		if _, err := app.toolTxnsCreate(ctx, map[string]any{
+			"account_id":  float64(acc.ID),
+			"kind":        kind,
+			"amount":      float64(int64(math.Round(amount * 100))),
+			"posted_at":   postedAt,
+			"payee":       "Trading 212",
+			"memo":        firstString(item, "description", "reference", "type"),
+			"external_id": externalID,
+		}); err != nil {
+			return n, skipped, err
+		}
+		n++
+	}
+	return n, skipped, nil
+}
+
+type brokerInstrumentInfo struct {
+	Symbol   string
+	Ticker   string
+	Name     string
+	Kind     string
+	Currency string
+	ISIN     string
+	Exchange string
+}
+
+func t212InstrumentInfo(m map[string]any, fallbackCurrency string) brokerInstrumentInfo {
+	inst := childMap(m, "instrument")
+	ticker := strings.ToUpper(firstString(m, "ticker", "instrumentTicker", "instrument_ticker", "symbol"))
+	if ticker == "" {
+		ticker = strings.ToUpper(firstString(inst, "ticker", "shortName", "symbol"))
+	}
+	symbol := canonicalT212Symbol(ticker)
+	if symbol == "" {
+		symbol = canonicalT212Symbol(strings.ToUpper(firstString(m, "isin", "instrumentIsin", "isinCode")))
+	}
+	name := firstString(m, "name", "instrumentName", "instrument_name")
+	if name == "" {
+		name = firstString(inst, "name", "shortName")
+	}
+	if name == "" {
+		name = symbol
+	}
+	kind := "stock"
+	typ := strings.ToLower(firstString(m, "type", "instrumentType", "instrument_type"))
+	if typ == "" {
+		typ = strings.ToLower(firstString(inst, "type", "instrumentType", "category"))
+	}
+	if strings.Contains(typ, "etf") {
+		kind = "etf"
+	}
+	ccy := strings.ToUpper(firstString(m, "currency", "currencyCode", "currency_code"))
+	if ccy == "" {
+		ccy = strings.ToUpper(firstString(inst, "currency", "currencyCode", "currency_code"))
+	}
+	if ccy == "" {
+		ccy = fallbackCurrency
+	}
+	return brokerInstrumentInfo{
+		Symbol: symbol, Ticker: ticker, Name: name, Kind: kind, Currency: ccy,
+		ISIN:     firstString(m, "isin", "instrumentIsin", "isinCode"),
+		Exchange: firstString(m, "exchange", "exchangeName", "exchangeCode"),
+	}
+}
+
+func canonicalT212Symbol(s string) string {
+	s = strings.ToUpper(strings.TrimSpace(s))
+	if s == "" {
+		return ""
+	}
+	if i := strings.Index(s, "_"); i > 0 {
+		return s[:i]
+	}
+	return s
+}
+
+func ensureBrokerInstrument(ctx *sdk.AppCtx, app *App, info brokerInstrumentInfo) (Instrument, error) {
+	if info.Symbol == "" {
+		return Instrument{}, errors.New("broker instrument symbol required")
+	}
+	if info.Kind == "" {
+		info.Kind = "stock"
+	}
+	if info.Currency == "" {
+		info.Currency = "EUR"
+	}
+	out, err := app.toolInstrumentsSearch(ctx, map[string]any{"query": info.Symbol, "kind": info.Kind})
+	if err == nil {
+		for _, ins := range out.(map[string]any)["instruments"].([]Instrument) {
+			if strings.EqualFold(ins.Symbol, info.Symbol) && ins.Kind == info.Kind {
+				return ins, nil
+			}
+		}
+	}
+	created, err := app.toolInstrumentsCreate(ctx, map[string]any{
+		"kind":           info.Kind,
+		"symbol":         info.Symbol,
+		"name":           info.Name,
+		"quote_currency": info.Currency,
+		"isin":           info.ISIN,
+		"exchange":       info.Exchange,
+		"metadata": map[string]any{
+			"broker": "trading212",
+			"ticker": info.Ticker,
+		},
+	})
+	if err != nil {
+		return Instrument{}, err
+	}
+	return created.(Instrument), nil
+}
+
+func stableBrokerID(item, child map[string]any, postedAt, symbol, kind string, qty, amount float64) string {
+	for _, m := range []map[string]any{child, item} {
+		if m == nil {
+			continue
+		}
+		if id := firstString(m, "id", "orderId", "order_id", "transactionId", "reference", "eventId"); id != "" {
+			return strings.ReplaceAll(id, " ", "_")
+		}
+	}
+	return fmt.Sprintf("%s:%s:%s:%.8g:%.8g", postedAt, symbol, kind, qty, amount)
+}
+
+func childMap(m map[string]any, key string) map[string]any {
+	if m == nil {
+		return nil
+	}
+	if v, ok := m[key].(map[string]any); ok {
+		return v
+	}
+	return nil
+}
+
+func firstString(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := nestedAny(m, k); ok {
+			if s := stringAny(v); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func firstFloat(m map[string]any, keys ...string) float64 {
+	for _, k := range keys {
+		if v, ok := nestedAny(m, k); ok {
+			if f, ok := floatAny(v); ok {
+				return f
+			}
+		}
+	}
+	return 0
+}
+
+func nestedAny(m map[string]any, path string) (any, bool) {
+	if m == nil {
+		return nil, false
+	}
+	cur := any(m)
+	for _, part := range strings.Split(path, ".") {
+		cm, ok := cur.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		cur, ok = cm[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return cur, true
+}
+
+func stringAny(v any) string {
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x)
+	case float64:
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case int:
+		return strconv.Itoa(x)
+	case int64:
+		return strconv.FormatInt(x, 10)
+	}
+	return ""
+}
+
+func floatAny(v any) (float64, bool) {
+	switch x := v.(type) {
+	case float64:
+		return x, true
+	case int:
+		return float64(x), true
+	case int64:
+		return float64(x), true
+	case string:
+		s := strings.TrimSpace(strings.ReplaceAll(x, ",", ""))
+		if s == "" {
+			return 0, false
+		}
+		f, err := strconv.ParseFloat(s, 64)
+		return f, err == nil
+	}
+	return 0, false
+}
+
+func firstTime(maps ...map[string]any) string {
+	keys := []string{"date", "dateTime", "date_time", "created", "createdAt", "created_at", "executedAt", "paidOn", "paid_on", "time", "timestamp"}
+	for _, m := range maps {
+		for _, k := range keys {
+			if s := firstString(m, k); s != "" {
+				if t, err := parseFlexibleTime(s); err == nil {
+					return t.Format(time.RFC3339)
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // convertCcy converts a minor-units amount from one currency to
@@ -3618,6 +4301,9 @@ func (a *App) handleStocksQuote(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) handleStocksDividendsImport(w http.ResponseWriter, r *http.Request) {
 	postBody(w, r, a.toolStocksDividendsImport)
+}
+func (a *App) handleBrokerageSync(w http.ResponseWriter, r *http.Request) {
+	postBody(w, r, a.toolBrokerageSync)
 }
 func (a *App) handleValuations(w http.ResponseWriter, r *http.Request) {
 	postBody(w, r, a.toolValuationSet)
