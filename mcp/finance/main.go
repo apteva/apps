@@ -2364,6 +2364,14 @@ func (a *App) toolBrokerageSync(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		AccountID:    acc.ID,
 		DryRun:       boolArg(args, "dry_run", false),
 	}
+	if boolArg(args, "import_positions", true) {
+		n, skipped, err := syncTrading212Positions(ctx, a, acc, conn.ID, stats.DryRun)
+		if err != nil {
+			return nil, err
+		}
+		stats.Positions += n
+		stats.Skipped += skipped
+	}
 	if boolArg(args, "import_orders", true) {
 		n, skipped, err := syncTrading212Orders(ctx, a, acc, conn.ID, stats.DryRun)
 		if err != nil {
@@ -2386,14 +2394,6 @@ func (a *App) toolBrokerageSync(ctx *sdk.AppCtx, args map[string]any) (any, erro
 			return nil, err
 		}
 		stats.Cash += n
-		stats.Skipped += skipped
-	}
-	if boolArg(args, "import_positions", true) {
-		n, skipped, err := syncTrading212Positions(ctx, a, acc, conn.ID, stats.DryRun)
-		if err != nil {
-			return nil, err
-		}
-		stats.Positions += n
 		stats.Skipped += skipped
 	}
 	if !stats.DryRun {
@@ -2456,12 +2456,15 @@ func executeIntegrationPages(ctx *sdk.AppCtx, connID int64, tool string) ([]map[
 	out := []map[string]any{}
 	next := ""
 	for i := 0; i < 20; i++ {
+		if i > 0 {
+			time.Sleep(900 * time.Millisecond)
+		}
 		args := map[string]any{"limit": float64(50)}
 		for k, v := range paginationArgs(next) {
 			args[k] = v
 		}
 		var raw any
-		if err := executeIntegrationJSON(ctx, connID, tool, args, &raw); err != nil {
+		if err := executeIntegrationJSONWithRetry(ctx, connID, tool, args, &raw); err != nil {
 			if len(out) > 0 && tool == "get_transaction_history" && isTrading212PaginationError(err) {
 				break
 			}
@@ -2475,6 +2478,28 @@ func executeIntegrationPages(ctx *sdk.AppCtx, connID int64, tool string) ([]map[
 		next = nextPage
 	}
 	return out, nil
+}
+
+func executeIntegrationJSONWithRetry(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any, out any) error {
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt*attempt) * 2 * time.Second)
+		}
+		err = executeIntegrationJSON(ctx, connID, tool, input, out)
+		if !isRateLimitError(err) {
+			return err
+		}
+	}
+	return err
+}
+
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "http 429") || strings.Contains(msg, "too many requests")
 }
 
 func isTrading212PaginationError(err error) bool {
