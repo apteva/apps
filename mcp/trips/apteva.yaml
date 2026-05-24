@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trips
 display_name: Trips
-version: 0.7.5
+version: 0.7.6
 description: |
   Plan trips end-to-end: destinations, transport, accommodation,
   activities, packing, budget. Calendar-synced — each trip owns a
@@ -10,8 +10,8 @@ description: |
   items are added / moved / removed. Optional Duffel and Google Places
   integrations power flight and place search. Flight searches now feed
   a long-lived travel price intelligence view for route/deal planning,
-  including global deal scans and route/date heatmaps; finance + storage
-  remain future layers.
+  including global deal scans, Duffel airport autocomplete, and route/date
+  heatmaps; finance + storage remain future layers.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/trips
@@ -86,6 +86,7 @@ provides:
     - { name: available_connections,      description: "List integration connections this project has access to. Args: provider? (e.g. 'duffel' or 'google-places'). Used by the settings dialog to pick which key to wire in." }
     - { name: search_places,              description: "Search Google Places. One generic tool with three modes: kind=destination + query → autocomplete; query + optional kind/coords → text search; kind + (lat/lng or destination_id) without query → nearby search. Cached 24h." }
     - { name: place_details,              description: "Full details for one place (phone, website, hours, photos, rating). Args: place_id. Cached 7d." }
+    - { name: search_airports,            description: "Search Duffel airports for flight planning. Args: query? (IATA code, country code, city, or airport name), limit?. Cached 30d." }
     - { name: search_flights,             description: "Search flights via Duffel. Args: from (IATA, default home_airport), to, depart_date, return_date?, passengers?, cabin?. Returns offers ranked cheapest first." }
 
   ui_panels:

@@ -131,6 +131,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/connections", Handler: a.handleAvailableConnections},
 		{Pattern: "/search/places", Handler: a.handleSearchPlaces},
 		{Pattern: "/search/place", Handler: a.handlePlaceDetails},
+		{Pattern: "/search/airports", Handler: a.handleSearchAirports},
 		{Pattern: "/search/flights", Handler: a.handleSearchFlights},
 		{Pattern: "/search/flights/scan", Handler: a.handleScanFlightPrices},
 		{Pattern: "/price-observations", Handler: a.handlePriceObservations},
@@ -337,6 +338,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "place_details", Description: "Fetch full details (phone, website, hours, photos, rating) for a single place by id. Cached 7 days.",
 			InputSchema: schemaObject(map[string]any{"place_id": map[string]any{"type": "string"}}, []string{"place_id"}),
 			Handler:     a.toolPlaceDetails},
+		{Name: "search_airports", Description: "Search Duffel airports for flight planning. Args: query? (IATA code, country code, city, or airport name), limit?. Returns airport IATA codes with city/country labels. Cached 30 days.",
+			InputSchema: schemaObject(map[string]any{
+				"query": map[string]any{"type": "string"},
+				"limit": map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolSearchAirports},
 		{Name: "search_flights", Description: "Search direct flights via Duffel by default. Args: from (IATA, default settings.home_airport), to (IATA), depart_date (YYYY-MM-DD), return_date?, passengers? (default settings.default_passengers), cabin? (economy|premium_economy|business|first), max_connections? (default 0/direct). Returns ranked offers (cheapest first).",
 			InputSchema: schemaObject(map[string]any{
 				"from":            map[string]any{"type": "string"},
@@ -3038,6 +3045,69 @@ func (a *App) toolPlaceDetails(ctx *sdk.AppCtx, args map[string]any) (any, error
 	return out, nil
 }
 
+// ─── Search: airports ────────────────────────────────────────────
+
+type AirportResult struct {
+	ID          string `json:"id,omitempty"`
+	IATACode    string `json:"iata_code"`
+	Name        string `json:"name"`
+	CityName    string `json:"city_name,omitempty"`
+	CountryCode string `json:"country_code,omitempty"`
+	CountryName string `json:"country_name,omitempty"`
+}
+
+func (a *App) toolSearchAirports(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	settings, _ := loadSettings(ctx)
+	if settings.DuffelConnectionID == 0 {
+		return nil, errors.New("no Duffel connection — set duffel_connection_id in trips settings")
+	}
+	query := strings.ToUpper(strings.TrimSpace(strArg(args, "query", "")))
+	limit := intArg(args, "limit", 25)
+	if limit < 1 {
+		limit = 25
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	input := map[string]any{"limit": limit}
+	if len(query) == 3 && validIATA(query) {
+		input["iata_code"] = query
+	} else if len(query) == 2 {
+		input["iata_country_code"] = query
+		input["limit"] = 200
+	} else if query != "" {
+		input["limit"] = 200
+	}
+	key := cacheKey("duffel", "search_airports", input)
+	if raw, ok := cacheGet(ctx, key); ok {
+		var cached map[string]any
+		if err := json.Unmarshal(raw, &cached); err == nil {
+			cached["cached"] = true
+			if query != "" {
+				cached["airports"] = filterAirports(cached["airports"], query, limit)
+			}
+			return cached, nil
+		}
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(settings.DuffelConnectionID, "search_airports", input)
+	if err != nil {
+		return nil, fmt.Errorf("airport search failed: %w", err)
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return nil, fmt.Errorf("airport search failed: %s", body)
+	}
+	out := normalizeAirportsResponse(res.Data)
+	cacheSet(ctx, key, out, 30*24*time.Hour)
+	if query != "" {
+		out["airports"] = filterAirports(out["airports"], query, limit)
+	}
+	return out, nil
+}
+
 // ─── Search: flights ─────────────────────────────────────────────
 
 type FlightOffer struct {
@@ -3785,6 +3855,76 @@ func normalizePlaceDetails(data json.RawMessage) map[string]any {
 	return out
 }
 
+func normalizeAirportsResponse(data json.RawMessage) map[string]any {
+	out := map[string]any{"airports": []AirportResult{}, "cached": false}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return out
+	}
+	var rawAirports []any
+	if a, ok := raw["data"].([]any); ok {
+		rawAirports = a
+	} else if root, ok := raw["data"].(map[string]any); ok {
+		rawAirports, _ = root["airports"].([]any)
+	} else {
+		rawAirports, _ = raw["airports"].([]any)
+	}
+	airports := []AirportResult{}
+	for _, item := range rawAirports {
+		m, _ := item.(map[string]any)
+		if m == nil {
+			continue
+		}
+		code := jsonString(m["iata_code"])
+		if code == "" {
+			continue
+		}
+		r := AirportResult{
+			ID:          jsonString(m["id"]),
+			IATACode:    code,
+			Name:        firstString(m["name"], m["airport_name"]),
+			CityName:    firstString(m["city_name"], jsonGet(m, "city", "name")),
+			CountryCode: firstString(m["iata_country_code"], m["country_code"]),
+			CountryName: firstString(m["country_name"], jsonGet(m, "country", "name")),
+		}
+		airports = append(airports, r)
+	}
+	sort.Slice(airports, func(i, j int) bool { return airports[i].IATACode < airports[j].IATACode })
+	out["airports"] = airports
+	return out
+}
+
+func filterAirports(raw any, query string, limit int) []AirportResult {
+	q := strings.ToUpper(strings.TrimSpace(query))
+	if q == "" {
+		if airports, ok := raw.([]AirportResult); ok {
+			return airports
+		}
+	}
+	airports := []AirportResult{}
+	switch xs := raw.(type) {
+	case []AirportResult:
+		airports = xs
+	case []any:
+		b, _ := json.Marshal(xs)
+		_ = json.Unmarshal(b, &airports)
+	default:
+		b, _ := json.Marshal(raw)
+		_ = json.Unmarshal(b, &airports)
+	}
+	matches := []AirportResult{}
+	for _, a := range airports {
+		hay := strings.ToUpper(strings.Join([]string{a.IATACode, a.Name, a.CityName, a.CountryCode, a.CountryName}, " "))
+		if strings.Contains(hay, q) {
+			matches = append(matches, a)
+		}
+	}
+	if len(matches) > limit {
+		matches = matches[:limit]
+	}
+	return matches
+}
+
 // normalizeFlightsResponse flattens Duffel's offers array into our
 // FlightOffer shape — one row per offer's first slice's first segment
 // (good enough for direct + ranked-by-price display; multi-leg detail
@@ -3962,6 +4102,14 @@ func jsonString(v any) string {
 	}
 	return ""
 }
+func firstString(values ...any) string {
+	for _, v := range values {
+		if s := jsonString(v); s != "" {
+			return s
+		}
+	}
+	return ""
+}
 func jsonFloat(v any) *float64 {
 	if f, ok := v.(float64); ok {
 		return &f
@@ -4041,6 +4189,24 @@ func (a *App) handleSearchPlaces(w http.ResponseWriter, r *http.Request) {
 func (a *App) handlePlaceDetails(w http.ResponseWriter, r *http.Request) {
 	args := queryToArgs(r.URL.Query(), []string{"place_id"})
 	out, err := a.toolPlaceDetails(globalCtx, args)
+	writeOrErr(w, out, err)
+}
+
+func (a *App) handleSearchAirports(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET", http.StatusMethodNotAllowed)
+		return
+	}
+	args := map[string]any{}
+	if v := r.URL.Query().Get("query"); v != "" {
+		args["query"] = v
+	}
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, _ := strconv.Atoi(v); n > 0 {
+			args["limit"] = float64(n)
+		}
+	}
+	out, err := a.toolSearchAirports(globalCtx, args)
 	writeOrErr(w, out, err)
 }
 

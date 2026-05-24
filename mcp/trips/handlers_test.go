@@ -926,6 +926,46 @@ func TestUnit_SearchFlights_RejectsNonIATA(t *testing.T) {
 	}
 }
 
+func TestUnit_SearchAirports_UsesDuffelAndFilters(t *testing.T) {
+	ctx, fake := newCtx(t)
+	app := &App{}
+	_, _ = app.toolSettingsSet(ctx, map[string]any{
+		"duffel_connection_id": float64(11),
+	})
+	fake.integResponses["search_airports"] = map[string]any{
+		"data": []any{
+			map[string]any{
+				"id": "arp_bcn", "iata_code": "BCN", "name": "Josep Tarradellas Barcelona-El Prat Airport",
+				"city_name": "Barcelona", "iata_country_code": "ES", "country_name": "Spain",
+			},
+			map[string]any{
+				"id": "arp_cdg", "iata_code": "CDG", "name": "Charles de Gaulle Airport",
+				"city_name": "Paris", "iata_country_code": "FR", "country_name": "France",
+			},
+		},
+	}
+	r, err := app.toolSearchAirports(ctx, map[string]any{"query": "CDG"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	airports := r.(map[string]any)["airports"].([]AirportResult)
+	if len(airports) != 1 || airports[0].IATACode != "CDG" || airports[0].CityName != "Paris" {
+		t.Fatalf("airport parse/filter wrong: %+v", airports)
+	}
+	if fake.integCalls[0].Input["iata_code"] != "CDG" {
+		t.Fatalf("expected Duffel IATA filter, got %+v", fake.integCalls[0].Input)
+	}
+
+	r, err = app.toolSearchAirports(ctx, map[string]any{"query": "par", "limit": float64(5)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	airports = r.(map[string]any)["airports"].([]AirportResult)
+	if len(airports) != 1 || airports[0].IATACode != "CDG" {
+		t.Fatalf("city search filter wrong: %+v", airports)
+	}
+}
+
 func TestUnit_ScanFlightPrices_CapsMatrixAndRecords(t *testing.T) {
 	ctx, fake := newCtx(t)
 	app := &App{}

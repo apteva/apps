@@ -138,6 +138,15 @@ interface PlaceResult {
   google_maps_uri?: string;
 }
 
+interface AirportResult {
+  id?: string;
+  iata_code: string;
+  name: string;
+  city_name?: string;
+  country_code?: string;
+  country_name?: string;
+}
+
 interface FlightOffer {
   offer_id: string;
   carrier: string;
@@ -754,6 +763,7 @@ function GlobalDealsPanel({ settings }: { settings: Settings }) {
   const [maxSearches, setMaxSearches] = useState(18);
   const [busy, setBusy] = useState(false);
   const [scanSummary, setScanSummary] = useState("");
+  const [destinationSearch, setDestinationSearch] = useState("");
 
   const load = useCallback(async () => {
     const params = new URLSearchParams({ kind: "flight", since_days: "180", limit: "800" });
@@ -803,6 +813,16 @@ function GlobalDealsPanel({ settings }: { settings: Settings }) {
   const routeDates = data?.route_dates ?? [];
   const stats = data?.stats;
   const quoteCount = stats?.quote_count ?? observations.length;
+  const addDestination = (airport: AirportResult) => {
+    const code = airport.iata_code.toUpperCase();
+    const codes = destinations
+      .split(/[\s,;]+/)
+      .map(x => x.trim().toUpperCase())
+      .filter(Boolean);
+    if (!codes.includes(code)) codes.push(code);
+    setDestinations(codes.join(", "));
+    setDestinationSearch("");
+  };
 
   return (
     <section className="rounded-lg border border-border bg-bg-card p-4">
@@ -831,7 +851,7 @@ function GlobalDealsPanel({ settings }: { settings: Settings }) {
         <div className="space-y-3 lg:col-span-4">
           <div className="grid grid-cols-2 gap-3">
             <Field label="From">
-              <input value={origin} onChange={e => setOrigin(e.target.value.toUpperCase())} className="input uppercase" maxLength={3} placeholder="BCN" />
+              <AirportCodeInput value={origin} onChange={setOrigin} placeholder="BCN" />
             </Field>
             <Field label="Max calls">
               <input type="number" min={1} max={60} value={maxSearches} onChange={e => setMaxSearches(Math.max(1, Math.min(60, parseInt(e.target.value || "1", 10))))} className="input" />
@@ -839,6 +859,14 @@ function GlobalDealsPanel({ settings }: { settings: Settings }) {
           </div>
           <Field label="Destinations">
             <input value={destinations} onChange={e => setDestinations(e.target.value.toUpperCase())} className="input uppercase" placeholder="CDG, LIS, FCO" />
+          </Field>
+          <Field label="Add destination">
+            <AirportCodeInput
+              value={destinationSearch}
+              onChange={setDestinationSearch}
+              onPick={addDestination}
+              placeholder="Search city or airport"
+            />
           </Field>
           <DateRangeField
             startLabel="Depart from"
@@ -2290,6 +2318,86 @@ function PlaceAutocomplete({ value, onChange, onPick }: {
   );
 }
 
+function AirportCodeInput({ value, onChange, onPick, placeholder = "BCN", autoFocus = false }: {
+  value: string;
+  onChange: (v: string) => void;
+  onPick?: (airport: AirportResult) => void;
+  placeholder?: string;
+  autoFocus?: boolean;
+}) {
+  const [suggestions, setSuggestions] = useState<AirportResult[]>([]);
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const debounceRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (debounceRef.current) window.clearTimeout(debounceRef.current);
+    const query = value.trim();
+    if (query.length < 2) {
+      setSuggestions([]);
+      return;
+    }
+    debounceRef.current = window.setTimeout(async () => {
+      setLoading(true);
+      try {
+        const r = await api<{ airports: AirportResult[] }>(`/search/airports?query=${encodeURIComponent(query)}&limit=12`);
+        setSuggestions(r.airports ?? []);
+      } catch {
+        setSuggestions([]);
+      } finally {
+        setLoading(false);
+      }
+    }, 220);
+    return () => {
+      if (debounceRef.current) window.clearTimeout(debounceRef.current);
+    };
+  }, [value]);
+
+  const pick = (airport: AirportResult) => {
+    const code = airport.iata_code.toUpperCase();
+    onChange(code);
+    onPick?.(airport);
+    setOpen(false);
+  };
+
+  return (
+    <div className="relative">
+      <input
+        value={value}
+        onChange={e => { onChange(e.target.value.toUpperCase()); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => window.setTimeout(() => setOpen(false), 150)}
+        className="input uppercase"
+        placeholder={placeholder}
+        autoFocus={autoFocus}
+      />
+      {open && suggestions.length > 0 && (
+        <ul className="absolute left-0 right-0 top-full z-20 mt-1 max-h-64 overflow-auto rounded-md border border-border bg-bg-card shadow-lg">
+          {suggestions.map(a => (
+            <li key={a.id || a.iata_code}>
+              <button
+                type="button"
+                onMouseDown={e => e.preventDefault()}
+                onClick={() => pick(a)}
+                className="flex w-full items-start gap-3 px-3 py-2 text-left text-sm hover:bg-bg-hover"
+              >
+                <span className="min-w-10 font-semibold text-text">{a.iata_code}</span>
+                <span className="min-w-0">
+                  <span className="block truncate text-text">{a.city_name || a.name}</span>
+                  <span className="block truncate text-xs text-text-muted">
+                    {[a.name, a.country_name || a.country_code].filter(Boolean).join(" · ")}
+                  </span>
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {loading && <span className="absolute right-2 top-2 text-xs text-text-dim">…</span>}
+    </div>
+  );
+}
+
 function SearchFlightsModal({ trip, defaultTo, defaultDepartAt, onPick, onClose }: {
   trip: Trip;
   defaultTo: string;
@@ -2345,8 +2453,8 @@ function SearchFlightsModal({ trip, defaultTo, defaultDepartAt, onPick, onClose 
   return (
     <Dialog title="Search flights" onClose={onClose}>
       <div className="grid grid-cols-2 gap-3">
-        <Field label="From"><input value={from} onChange={e => setFrom(e.target.value.toUpperCase())} className="input uppercase" maxLength={3} placeholder="CDG" /></Field>
-        <Field label="To"><input value={to} onChange={e => setTo(e.target.value.toUpperCase())} className="input uppercase" maxLength={3} placeholder="LIN" /></Field>
+        <Field label="From"><AirportCodeInput value={from} onChange={setFrom} placeholder="CDG" /></Field>
+        <Field label="To"><AirportCodeInput value={to} onChange={setTo} placeholder="LIN" /></Field>
       </div>
       <DateRangeField
         startLabel="Depart"
