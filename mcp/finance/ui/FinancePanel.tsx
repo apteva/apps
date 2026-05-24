@@ -51,6 +51,13 @@ interface Instrument {
   quote_currency: string;
 }
 
+interface StockSearchHit {
+  symbol?: string;
+  name?: string;
+  exchange?: string;
+  currency?: string;
+}
+
 interface Holding {
   id: number;
   account_id: number;
@@ -109,6 +116,27 @@ interface BudgetStatus {
 }
 
 type Tab = "overview" | "accounts" | "holdings";
+type CashTxnKind = "deposit" | "withdraw" | "income" | "expense" | "fee" | "tax";
+type InvestmentTxnKind = "buy" | "sell" | "dividend";
+type TxnKind = CashTxnKind | InvestmentTxnKind;
+type TradeInstrumentKind = "stock" | "etf";
+
+const CASH_TXN_OPTIONS: Array<{ value: CashTxnKind; label: string }> = [
+  { value: "deposit", label: "Deposit" },
+  { value: "withdraw", label: "Withdraw" },
+  { value: "income", label: "Income" },
+  { value: "expense", label: "Expense" },
+  { value: "fee", label: "Fee" },
+  { value: "tax", label: "Tax" },
+];
+
+const INVESTMENT_TXN_OPTIONS: Array<{ value: InvestmentTxnKind; label: string }> = [
+  { value: "buy", label: "Buy stock / ETF" },
+  { value: "sell", label: "Sell stock / ETF" },
+  { value: "dividend", label: "Dividend" },
+];
+
+const INVESTMENT_ACCOUNT_KINDS = new Set(["brokerage", "pension", "crypto"]);
 
 // ─── App-event subscription (inlined, matches calendar's pattern) ─
 
@@ -180,6 +208,61 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   return r.json();
+}
+
+function isInvestmentTxnKind(kind: TxnKind): kind is InvestmentTxnKind {
+  return kind === "buy" || kind === "sell" || kind === "dividend";
+}
+
+async function resolveTradeInstrument(symbolInput: string, kind: TradeInstrumentKind, accountCurrency: string): Promise<Instrument> {
+  const symbol = symbolInput.trim().toUpperCase();
+  if (!symbol) throw new Error("symbol required");
+
+  const existing = await api<{ instruments: Instrument[] }>(
+    `/instruments?query=${encodeURIComponent(symbol)}&kind=${encodeURIComponent(kind)}`,
+  );
+  const exact = (existing.instruments ?? []).find(ins => ins.symbol.toUpperCase() === symbol && ins.kind === kind);
+  if (exact) return exact;
+
+  let name = symbol;
+  let exchange = "";
+  let quoteCurrency = accountCurrency;
+  try {
+    const r = await fetch(`/api/apps/stocks/search?q=${encodeURIComponent(symbol)}&limit=5`, { credentials: "include" });
+    if (r.ok) {
+      const body = await r.json() as { results?: StockSearchHit[] };
+      const hit = (body.results ?? []).find(x => (x.symbol ?? "").toUpperCase() === symbol) ?? body.results?.[0];
+      if (hit) {
+        name = hit.name || hit.symbol || symbol;
+        exchange = hit.exchange || "";
+        quoteCurrency = (hit.currency || accountCurrency).toUpperCase();
+      }
+    }
+  } catch {}
+
+  return api<Instrument>("/instruments", {
+    method: "POST",
+    body: JSON.stringify({
+      kind,
+      symbol,
+      name,
+      exchange,
+      quote_currency: quoteCurrency || accountCurrency,
+    }),
+  });
+}
+
+function parsePositiveQuantity(s: string): number {
+  const qty = Number(s.trim().replace(",", "."));
+  if (!Number.isFinite(qty) || qty <= 0) throw new Error("quantity must be positive");
+  return qty;
+}
+
+function parseTradeGross(quantity: string, unitPrice: string): number {
+  const qty = parsePositiveQuantity(quantity);
+  const price = Number(unitPrice.trim().replace(",", "."));
+  if (!Number.isFinite(price) || price <= 0) throw new Error("price must be positive");
+  return parseMoneyDecimal((qty * price).toFixed(2));
 }
 
 function fmtMoney(minor: number, currency: string, opts?: { signed?: boolean }): string {
@@ -949,7 +1032,12 @@ function NewAccountDialog({ onClose, onCreated, defaultCurrency }: { onClose: ()
 }
 
 function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClose: () => void; onCreated: () => void }) {
-  const [kind, setKind] = useState<"deposit" | "withdraw" | "income" | "expense" | "fee" | "tax">("expense");
+  const [kind, setKind] = useState<TxnKind>(INVESTMENT_ACCOUNT_KINDS.has(account.kind) ? "buy" : "expense");
+  const [instrumentKind, setInstrumentKind] = useState<TradeInstrumentKind>("stock");
+  const [symbol, setSymbol] = useState("");
+  const [quantity, setQuantity] = useState("");
+  const [unitPrice, setUnitPrice] = useState("");
+  const [fee, setFee] = useState("");
   const [amount, setAmount] = useState("");
   const [postedAt, setPostedAt] = useState(() => new Date().toISOString().slice(0, 10));
   const [payee, setPayee] = useState("");
@@ -959,51 +1047,121 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
   const submit = async () => {
     setBusy(true); setErr("");
     try {
-      const minor = parseMoneyDecimal(amount || "0");
-      await api<Transaction>("/txns", {
-        method: "POST",
-        body: JSON.stringify({
+      const posted_at = postedAt + "T00:00:00Z";
+      if (isInvestmentTxnKind(kind)) {
+        const instrument = await resolveTradeInstrument(symbol, instrumentKind, account.currency);
+        const baseBody = {
           account_id: account.id,
-          kind,
-          amount: minor,
-          posted_at: postedAt + "T00:00:00Z",
-          payee, memo,
-        }),
-      });
+          instrument_id: instrument.id,
+          posted_at,
+          memo,
+        };
+        if (kind === "dividend") {
+          const minor = parseMoneyDecimal(amount || "0");
+          if (minor <= 0) throw new Error("amount must be positive");
+          await api<Transaction>("/txns/dividend", {
+            method: "POST",
+            body: JSON.stringify({ ...baseBody, amount: minor }),
+          });
+        } else {
+          const qty = parsePositiveQuantity(quantity);
+          const gross = parseTradeGross(quantity, unitPrice);
+          const feeMinor = parseMoneyDecimal(fee || "0");
+          if (gross <= 0) throw new Error("amount must be positive");
+          if (feeMinor < 0) throw new Error("fee must not be negative");
+          await api<Transaction>(`/txns/${kind}`, {
+            method: "POST",
+            body: JSON.stringify({ ...baseBody, quantity: qty, amount: gross, fee: feeMinor }),
+          });
+        }
+      } else {
+        const minor = parseMoneyDecimal(amount || "0");
+        await api<Transaction>("/txns", {
+          method: "POST",
+          body: JSON.stringify({
+            account_id: account.id,
+            kind,
+            amount: minor,
+            posted_at,
+            payee, memo,
+          }),
+        });
+      }
       onCreated();
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : String(e));
       setBusy(false);
     }
   };
+  const investment = isInvestmentTxnKind(kind);
+  const trade = kind === "buy" || kind === "sell";
   return (
     <Dialog title={`New transaction — ${account.name}`} onClose={onClose}>
       <Field label="Kind">
-        <select value={kind} onChange={e => setKind(e.target.value as "deposit" | "withdraw" | "income" | "expense" | "fee" | "tax")} className="input">
-          <option value="deposit">Deposit</option>
-          <option value="withdraw">Withdraw</option>
-          <option value="income">Income</option>
-          <option value="expense">Expense</option>
-          <option value="fee">Fee</option>
-          <option value="tax">Tax</option>
+        <select value={kind} onChange={e => setKind(e.target.value as TxnKind)} className="input">
+          {INVESTMENT_TXN_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          {CASH_TXN_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
       </Field>
-      <Field label={`Amount (${account.currency})`}>
-        <input value={amount} onChange={e => setAmount(e.target.value)} className="input" placeholder="0.00" autoFocus />
-      </Field>
+      {investment ? (
+        <>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Asset type">
+              <select value={instrumentKind} onChange={e => setInstrumentKind(e.target.value as TradeInstrumentKind)} className="input">
+                <option value="stock">Stock</option>
+                <option value="etf">ETF</option>
+              </select>
+            </Field>
+            <Field label="Symbol">
+              <input value={symbol} onChange={e => setSymbol(e.target.value.toUpperCase())} className="input uppercase" placeholder="AAPL" autoFocus />
+            </Field>
+          </div>
+          {trade ? (
+            <>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Quantity">
+                  <input value={quantity} onChange={e => setQuantity(e.target.value)} className="input" placeholder="10" />
+                </Field>
+                <Field label={`Price / share (${account.currency})`}>
+                  <input value={unitPrice} onChange={e => setUnitPrice(e.target.value)} className="input" placeholder="0.00" />
+                </Field>
+              </div>
+              <Field label={`Fee (${account.currency})`}>
+                <input value={fee} onChange={e => setFee(e.target.value)} className="input" placeholder="0.00" />
+              </Field>
+            </>
+          ) : (
+            <Field label={`Amount (${account.currency})`}>
+              <input value={amount} onChange={e => setAmount(e.target.value)} className="input" placeholder="0.00" />
+            </Field>
+          )}
+        </>
+      ) : (
+        <Field label={`Amount (${account.currency})`}>
+          <input value={amount} onChange={e => setAmount(e.target.value)} className="input" placeholder="0.00" autoFocus />
+        </Field>
+      )}
       <Field label="Date">
         <input type="date" value={postedAt} onChange={e => setPostedAt(e.target.value)} className="input" />
       </Field>
-      <Field label="Payee">
-        <input value={payee} onChange={e => setPayee(e.target.value)} className="input" />
-      </Field>
+      {!investment && (
+        <Field label="Payee">
+          <input value={payee} onChange={e => setPayee(e.target.value)} className="input" />
+        </Field>
+      )}
       <Field label="Memo">
         <input value={memo} onChange={e => setMemo(e.target.value)} className="input" />
       </Field>
       {err && <p className="text-sm text-error">{err}</p>}
       <DialogActions>
         <button onClick={onClose} className="btn-secondary">Cancel</button>
-        <button onClick={submit} disabled={busy} className="btn-primary">{busy ? "Saving…" : "Save"}</button>
+        <button
+          onClick={submit}
+          disabled={busy || (investment && !symbol) || (trade && (!quantity || !unitPrice)) || (kind === "dividend" && !amount)}
+          className="btn-primary"
+        >
+          {busy ? "Saving…" : "Save"}
+        </button>
       </DialogActions>
     </Dialog>
   );
