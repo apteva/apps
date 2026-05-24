@@ -178,7 +178,7 @@ type Kind = "all" | "video" | "audio" | "image";
 type Sort = "created_at" | "duration_ms" | "updated_at";
 
 function formatDuration(ms?: number): string {
-  if (!ms) return "—";
+  if (ms === undefined || ms === null) return "—";
   const s = Math.round(ms / 1000);
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
@@ -915,6 +915,8 @@ function OperationsSection({
           op={openOp}
           row={row}
           apiBase={apiBase}
+          previewBase={previewBase}
+          storageQuery={storageQuery}
           onClose={() => setOpenOp(null)}
           onSubmitted={(id) => {
             setOpenOp(null);
@@ -1084,11 +1086,13 @@ function RenderStatusCard({
 // source duration). Submit POSTs to /renders and bubbles the
 // render_id up so the section can start polling.
 function OperationModal({
-  op, row, apiBase, onClose, onSubmitted, onError,
+  op, row, apiBase, previewBase, storageQuery, onClose, onSubmitted, onError,
 }: {
   op: OpName;
   row: MediaRow;
   apiBase: string;
+  previewBase: string;
+  storageQuery: string;
   onClose: () => void;
   onSubmitted: (id: number) => void;
   onError: (msg: string) => void;
@@ -1099,6 +1103,8 @@ function OperationModal({
   const [busy, setBusy] = useState(false);
 
   const set = (k: string, v: string) => setFields((f) => ({ ...f, [k]: v }));
+  const sourceURL = `${previewBase}/${row.file_id}/content?${storageQuery}`;
+  const poster = posterURL(row, previewBase, storageQuery);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1128,61 +1134,505 @@ function OperationModal({
   const title = ALL_OPS.find((o) => o.name === op)?.label ?? op;
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50" onClick={onClose}>
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 px-4" onClick={onClose}>
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
-        className="bg-bg border border-border rounded p-5 space-y-3"
-        style={{ width: 360 }}
+        className="bg-bg border border-border rounded shadow-xl w-full max-w-4xl max-h-[90vh] overflow-auto"
       >
-        <h3 className="text-text font-semibold text-sm">{title}</h3>
-        {opFieldDefs(op).map((fd) => (
-          <label key={fd.key} className="block">
-            <span className="text-xs text-text-muted">{fd.label}</span>
-            {fd.type === "select" ? (
-              <select
-                value={fields[fd.key] || ""}
-                onChange={(e) => set(fd.key, e.target.value)}
-                className="w-full mt-1 bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
-              >
-                {fd.options!.map((opt) => (
-                  <option key={opt} value={opt}>{opt}</option>
-                ))}
-              </select>
-            ) : (
-              <input
-                type={fd.type === "number" ? "number" : "text"}
-                value={fields[fd.key] || ""}
-                onChange={(e) => set(fd.key, e.target.value)}
-                placeholder={fd.placeholder}
-                className="w-full mt-1 bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
-              />
-            )}
-            {fd.hint && (
-              <span className="text-[10px] text-text-dim block mt-0.5">{fd.hint}</span>
-            )}
-          </label>
-        ))}
-        <div className="flex justify-end gap-2 pt-1">
+        <header className="px-5 py-4 border-b border-border flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="text-text font-semibold text-sm">{title}</h3>
+            <div className="text-xs text-text-dim truncate">
+              {row.name || `file #${row.file_id}`}
+            </div>
+          </div>
           <button
             type="button"
             onClick={onClose}
             disabled={busy}
-            className="px-3 py-1 text-sm border border-border rounded text-text-muted hover:text-text"
+            className="text-text-muted hover:text-text text-lg leading-none px-1"
+            aria-label="Close"
+          >×</button>
+        </header>
+
+        <div className="p-5 grid gap-5 lg:grid-cols-[minmax(0,1.25fr)_minmax(18rem,0.75fr)]">
+          <OperationPreview
+            op={op}
+            row={row}
+            fields={fields}
+            setField={set}
+            sourceURL={sourceURL}
+            posterURL={poster}
+            previewBase={previewBase}
+            storageQuery={storageQuery}
+          />
+          <div className="space-y-3">
+            <OperationSummary op={op} row={row} fields={fields} />
+            <div className="grid grid-cols-2 gap-3">
+              {opFieldDefs(op).map((fd) => (
+                <OperationField key={fd.key} field={fd} value={fields[fd.key] || ""} onChange={(v) => set(fd.key, v)} />
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <footer className="px-5 py-4 border-t border-border flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="px-3 py-1.5 text-sm border border-border rounded text-text-muted hover:text-text"
           >
             Cancel
           </button>
           <button
             type="submit"
             disabled={busy}
-            className="px-3 py-1 text-sm bg-accent text-bg rounded hover:bg-accent-hover disabled:opacity-50"
+            className="px-3 py-1.5 text-sm bg-accent text-bg rounded hover:bg-accent-hover disabled:opacity-50"
           >
-            {busy ? "Submitting…" : "Submit"}
+            {busy ? "Submitting…" : "Start render"}
           </button>
-        </div>
+        </footer>
       </form>
     </div>
   );
+}
+
+function OperationField({
+  field, value, onChange,
+}: {
+  field: FieldDef;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="block min-w-0">
+      <span className="text-xs text-text-muted">{field.label}</span>
+      {field.type === "select" ? (
+        <select
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="w-full mt-1 bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+        >
+          {field.options!.map((opt) => (
+            <option key={opt} value={opt}>{opt}</option>
+          ))}
+        </select>
+      ) : (
+        <input
+          type={field.type === "number" ? "number" : "text"}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={field.placeholder}
+          className="w-full mt-1 bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+        />
+      )}
+      {field.hint && (
+        <span className="text-[10px] text-text-dim block mt-0.5">{field.hint}</span>
+      )}
+    </label>
+  );
+}
+
+function OperationPreview({
+  op, row, fields, setField, sourceURL, posterURL, previewBase, storageQuery,
+}: {
+  op: OpName;
+  row: MediaRow;
+  fields: Record<string, string>;
+  setField: (key: string, value: string) => void;
+  sourceURL: string;
+  posterURL?: string;
+  previewBase: string;
+  storageQuery: string;
+}) {
+  if (op === "trim" || op === "extract_reel") {
+    return (
+      <TimelinePreview
+        op={op}
+        row={row}
+        fields={fields}
+        setField={setField}
+        sourceURL={sourceURL}
+        posterURL={posterURL}
+        previewBase={previewBase}
+        storageQuery={storageQuery}
+      />
+    );
+  }
+  if (op === "extract_frame") {
+    return (
+      <FramePreview
+        row={row}
+        fields={fields}
+        setField={setField}
+        sourceURL={sourceURL}
+        posterURL={posterURL}
+        previewBase={previewBase}
+        storageQuery={storageQuery}
+      />
+    );
+  }
+  if (op === "resize" || op === "crop") {
+    return <SpatialPreview op={op} row={row} fields={fields} sourceURL={sourceURL} />;
+  }
+  return <SourcePreview row={row} sourceURL={sourceURL} posterURL={posterURL} />;
+}
+
+function SourcePreview({ row, sourceURL, posterURL }: { row: MediaRow; sourceURL: string; posterURL?: string }) {
+  return (
+    <div className="space-y-2">
+      <div className="text-xs uppercase tracking-wide text-text-dim">Preview</div>
+      <div className="bg-black rounded border border-border overflow-hidden flex items-center justify-center" style={{ minHeight: 220 }}>
+        {row.is_image ? (
+          <img src={sourceURL} alt="" className="max-w-full max-h-[22rem] object-contain" />
+        ) : row.has_video ? (
+          <video src={sourceURL} poster={posterURL} controls preload="metadata" playsInline className="max-w-full max-h-[22rem]" />
+        ) : row.has_audio ? (
+          <audio src={sourceURL} controls preload="metadata" className="w-full px-4" />
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function TimelinePreview({
+  op, row, fields, setField, sourceURL, posterURL, previewBase, storageQuery,
+}: {
+  op: OpName;
+  row: MediaRow;
+  fields: Record<string, string>;
+  setField: (key: string, value: string) => void;
+  sourceURL: string;
+  posterURL?: string;
+  previewBase: string;
+  storageQuery: string;
+}) {
+  const duration = Math.max(row.duration_ms || 0, 1);
+  const start = clampMs(numField(fields, "start_ms", 0), 0, duration);
+  const end = clampMs(numField(fields, "end_ms", duration), 0, duration);
+  const safeStart = Math.min(start, end);
+  const safeEnd = Math.max(start, end);
+  const selectedPct = duration > 0 ? ((safeEnd - safeStart) / duration) * 100 : 0;
+  return (
+    <div className="space-y-3">
+      <div className="text-xs uppercase tracking-wide text-text-dim">Preview</div>
+      <div className="relative bg-black rounded border border-border overflow-hidden flex items-center justify-center" style={{ minHeight: 260 }}>
+        <video src={sourceURL} poster={posterURL} controls preload="metadata" playsInline className="max-w-full max-h-[24rem]" />
+        {op === "extract_reel" ? <ReelGuide ratio={fields.target_ratio || "9:16"} /> : null}
+      </div>
+      <div className="space-y-2">
+        <div className="flex items-center justify-between text-xs text-text-dim">
+          <span>{formatDuration(safeStart)}</span>
+          <span>{formatDuration(safeEnd)}</span>
+        </div>
+        <div className="h-2 rounded bg-bg-input overflow-hidden">
+          <div
+            className="h-full bg-accent/40"
+            style={{ marginLeft: `${(safeStart / duration) * 100}%`, width: `${selectedPct}%` }}
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <TimelineSlider
+            label="Start"
+            value={safeStart}
+            max={duration}
+            onChange={(v) => setField("start_ms", String(Math.min(v, safeEnd)))}
+          />
+          <TimelineSlider
+            label="End"
+            value={safeEnd}
+            max={duration}
+            onChange={(v) => setField("end_ms", String(Math.max(v, safeStart)))}
+          />
+        </div>
+      </div>
+      <KeyframeButtons
+        row={row}
+        previewBase={previewBase}
+        storageQuery={storageQuery}
+        onPick={(ms) => {
+          const distStart = Math.abs(ms - safeStart);
+          const distEnd = Math.abs(ms - safeEnd);
+          setField(distStart <= distEnd ? "start_ms" : "end_ms", String(ms));
+        }}
+      />
+    </div>
+  );
+}
+
+function FramePreview({
+  row, fields, setField, sourceURL, posterURL, previewBase, storageQuery,
+}: {
+  row: MediaRow;
+  fields: Record<string, string>;
+  setField: (key: string, value: string) => void;
+  sourceURL: string;
+  posterURL?: string;
+  previewBase: string;
+  storageQuery: string;
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const duration = Math.max(row.duration_ms || 0, 1);
+  const atMs = clampMs(numField(fields, "at_ms", Math.floor(duration / 2)), 0, duration);
+  const seek = (ms: number) => {
+    setField("at_ms", String(ms));
+    const video = videoRef.current;
+    if (video && Number.isFinite(ms)) {
+      try { video.currentTime = ms / 1000; } catch {}
+    }
+  };
+  return (
+    <div className="space-y-3">
+      <div className="text-xs uppercase tracking-wide text-text-dim">Frame</div>
+      <div className="bg-black rounded border border-border overflow-hidden flex items-center justify-center" style={{ minHeight: 260 }}>
+        <video
+          ref={videoRef}
+          src={sourceURL}
+          poster={posterURL}
+          controls
+          preload="metadata"
+          playsInline
+          className="max-w-full max-h-[24rem]"
+          onLoadedMetadata={() => seek(atMs)}
+          onTimeUpdate={(e) => setField("at_ms", String(Math.round(e.currentTarget.currentTime * 1000)))}
+        />
+      </div>
+      <TimelineSlider label="At" value={atMs} max={duration} onChange={seek} />
+      <KeyframeButtons row={row} previewBase={previewBase} storageQuery={storageQuery} onPick={seek} />
+    </div>
+  );
+}
+
+function SpatialPreview({
+  op, row, fields, sourceURL,
+}: {
+  op: OpName;
+  row: MediaRow;
+  fields: Record<string, string>;
+  sourceURL: string;
+}) {
+  const dims = outputDimensions(row, fields);
+  const crop = {
+    x: numField(fields, "x", 0),
+    y: numField(fields, "y", 0),
+    width: numField(fields, "width", row.width || 0),
+    height: numField(fields, "height", row.height || 0),
+  };
+  return (
+    <div className="space-y-3">
+      <div className="text-xs uppercase tracking-wide text-text-dim">Preview</div>
+      <div className="bg-black rounded border border-border overflow-hidden flex items-center justify-center relative" style={{ minHeight: 260 }}>
+        {row.is_image ? (
+          <img src={sourceURL} alt="" className="max-w-full max-h-[24rem] object-contain" />
+        ) : (
+          <video src={sourceURL} controls preload="metadata" playsInline className="max-w-full max-h-[24rem]" />
+        )}
+        {op === "crop" && row.width && row.height && crop.width > 0 && crop.height > 0 ? (
+          <div
+            className="absolute border-2 border-accent bg-accent/10 pointer-events-none"
+            style={cropOverlayStyle(row, crop)}
+          />
+        ) : null}
+      </div>
+      <div className="grid grid-cols-3 gap-2 text-xs">
+        <Metric label="Source" value={row.width && row.height ? `${row.width}x${row.height}` : "-"} />
+        <Metric label={op === "crop" ? "Crop" : "Output"} value={dims ? `${dims.width}x${dims.height}` : "-"} />
+        <Metric label="Aspect" value={dims ? aspectText(dims.width, dims.height) : "-"} />
+      </div>
+    </div>
+  );
+}
+
+function TimelineSlider({
+  label, value, max, onChange,
+}: {
+  label: string;
+  value: number;
+  max: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="block min-w-0">
+      <div className="flex items-center justify-between text-xs text-text-dim mb-1">
+        <span>{label}</span>
+        <span className="font-mono">{formatDuration(value)}</span>
+      </div>
+      <input
+        type="range"
+        min={0}
+        max={Math.max(1, max)}
+        step={100}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full accent-accent"
+      />
+    </label>
+  );
+}
+
+function KeyframeButtons({
+  row, previewBase, storageQuery, onPick,
+}: {
+  row: MediaRow;
+  previewBase: string;
+  storageQuery: string;
+  onPick: (ms: number) => void;
+}) {
+  const frames = keyframesFor(row).slice(0, 12);
+  if (frames.length === 0) return null;
+  return (
+    <div className="space-y-1">
+      <div className="text-xs uppercase tracking-wide text-text-dim">Keyframes</div>
+      <div className="flex gap-1 overflow-x-auto pb-1" style={{ scrollbarWidth: "thin" }}>
+        {frames.map((f) => {
+          const ms = f.position_ms ?? 0;
+          const src = `${previewBase}/${f.storage_file_id}/content?${storageQuery}`;
+          return (
+            <button
+              key={f.id}
+              type="button"
+              onClick={() => onPick(ms)}
+              className="relative flex-shrink-0 border border-border rounded overflow-hidden hover:border-accent"
+              style={{ width: 78, height: 44 }}
+              title={formatDuration(ms)}
+            >
+              <img src={src} alt="" loading="lazy" className="absolute inset-0 w-full h-full object-cover" />
+              <span className="absolute bottom-0 right-0 px-1 font-mono text-white bg-black/70 rounded-tl" style={{ fontSize: 9 }}>
+                {formatDuration(ms)}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ReelGuide({ ratio }: { ratio: string }) {
+  return (
+    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+      <div
+        className="border-2 border-accent bg-black/10 shadow-[0_0_0_999px_rgba(0,0,0,0.28)]"
+        style={{ height: "82%", aspectRatio: cssAspectRatio(ratio) }}
+      />
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="border border-border rounded px-2 py-1 min-w-0">
+      <div className="text-[10px] uppercase text-text-dim">{label}</div>
+      <div className="font-mono text-text truncate">{value}</div>
+    </div>
+  );
+}
+
+function OperationSummary({ op, row, fields }: { op: OpName; row: MediaRow; fields: Record<string, string> }) {
+  const duration = Math.max(row.duration_ms || 0, 1);
+  if (op === "trim" || op === "extract_reel") {
+    const start = clampMs(numField(fields, "start_ms", 0), 0, duration);
+    const end = clampMs(numField(fields, "end_ms", duration), 0, duration);
+    return (
+      <div className="grid grid-cols-3 gap-2 text-xs">
+        <Metric label="Start" value={formatDuration(Math.min(start, end))} />
+        <Metric label="End" value={formatDuration(Math.max(start, end))} />
+        <Metric label="Length" value={formatDuration(Math.abs(end - start))} />
+      </div>
+    );
+  }
+  if (op === "extract_frame") {
+    return <Metric label="Frame" value={formatDuration(numField(fields, "at_ms", 0))} />;
+  }
+  if (op === "resize" || op === "crop") {
+    const dims = outputDimensions(row, fields);
+    return (
+      <div className="grid grid-cols-2 gap-2 text-xs">
+        <Metric label="Source" value={row.width && row.height ? `${row.width}x${row.height}` : "-"} />
+        <Metric label="Output" value={dims ? `${dims.width}x${dims.height}` : "-"} />
+      </div>
+    );
+  }
+  return (
+    <div className="grid grid-cols-2 gap-2 text-xs">
+      <Metric label="Source" value={row.has_video ? "video" : row.has_audio ? "audio" : "file"} />
+      <Metric label="Duration" value={formatDuration(row.duration_ms)} />
+    </div>
+  );
+}
+
+function posterURL(row: MediaRow, previewBase: string, storageQuery: string): string | undefined {
+  const poster = (row.derivations ?? []).find((d) => (d.kind === "thumbnail" || d.kind === "cover") && d.status === "ok");
+  return poster ? `${previewBase}/${poster.storage_file_id}/content?${storageQuery}` : undefined;
+}
+
+function keyframesFor(row: MediaRow): Derivation[] {
+  return (row.derivations ?? [])
+    .filter((d) => d.kind === "keyframe" && d.status === "ok")
+    .sort((a, b) => (a.position_ms ?? 0) - (b.position_ms ?? 0));
+}
+
+function numField(fields: Record<string, string>, key: string, fallback: number): number {
+  const raw = (fields[key] ?? "").trim();
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function clampMs(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+function outputDimensions(row: MediaRow, fields: Record<string, string>): { width: number; height: number } | null {
+  const sourceW = row.width || 0;
+  const sourceH = row.height || 0;
+  const width = numField(fields, "width", 0);
+  const height = numField(fields, "height", 0);
+  if (width > 0 && height > 0) return { width, height };
+  if (fields.keep_aspect !== "false" && sourceW > 0 && sourceH > 0) {
+    if (width > 0) return { width, height: Math.round(width * sourceH / sourceW) };
+    if (height > 0) return { width: Math.round(height * sourceW / sourceH), height };
+  }
+  if (width > 0) return { width, height: sourceH };
+  if (height > 0) return { width: sourceW, height };
+  if (sourceW > 0 && sourceH > 0) return { width: sourceW, height: sourceH };
+  return null;
+}
+
+function cropOverlayStyle(row: MediaRow, crop: { x: number; y: number; width: number; height: number }): React.CSSProperties {
+  const sourceW = row.width || 1;
+  const sourceH = row.height || 1;
+  return {
+    left: `${Math.max(0, Math.min(100, crop.x / sourceW * 100))}%`,
+    top: `${Math.max(0, Math.min(100, crop.y / sourceH * 100))}%`,
+    width: `${Math.max(0, Math.min(100, crop.width / sourceW * 100))}%`,
+    height: `${Math.max(0, Math.min(100, crop.height / sourceH * 100))}%`,
+  };
+}
+
+function aspectText(width: number, height: number): string {
+  if (!width || !height) return "-";
+  const g = gcd(width, height);
+  return `${Math.round(width / g)}:${Math.round(height / g)}`;
+}
+
+function gcd(a: number, b: number): number {
+  let x = Math.abs(Math.round(a));
+  let y = Math.abs(Math.round(b));
+  while (y) {
+    const t = y;
+    y = x % y;
+    x = t;
+  }
+  return x || 1;
+}
+
+function cssAspectRatio(ratio: string): string {
+  const [w, h] = ratio.split(":").map((n) => Number(n));
+  if (!w || !h) return "9 / 16";
+  return `${w} / ${h}`;
 }
 
 // ─── per-op field definitions ────────────────────────────────────
