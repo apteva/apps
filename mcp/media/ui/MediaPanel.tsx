@@ -176,6 +176,8 @@ const STORAGE = "/api/apps/storage";
 
 type Kind = "all" | "video" | "audio" | "image";
 type Sort = "created_at" | "duration_ms" | "updated_at";
+type AspectFilter = "all" | "portrait" | "landscape" | "square" | "reel" | "wide";
+type DurationFilter = "all" | "short" | "medium" | "long" | "extended";
 
 function formatDuration(ms?: number): string {
   if (ms === undefined || ms === null) return "—";
@@ -202,10 +204,42 @@ function formatBitrate(b?: number): string {
   return `${(b / 1_000_000).toFixed(1)} Mbps`;
 }
 
+function rowKind(row: MediaRow): Exclude<Kind, "all"> | null {
+  if (row.is_image) return "image";
+  if (row.has_video) return "video";
+  if (row.has_audio) return "audio";
+  return null;
+}
+
+function matchesAspect(row: MediaRow, filter: AspectFilter): boolean {
+  if (filter === "all") return true;
+  if (!row.width || !row.height) return false;
+  const ratio = row.width / row.height;
+  if (filter === "portrait") return ratio < 0.95;
+  if (filter === "landscape") return ratio > 1.05;
+  if (filter === "square") return ratio >= 0.95 && ratio <= 1.05;
+  if (filter === "reel") return Math.abs(ratio - 9 / 16) <= 0.08;
+  if (filter === "wide") return Math.abs(ratio - 16 / 9) <= 0.15;
+  return true;
+}
+
+function matchesDuration(row: MediaRow, filter: DurationFilter): boolean {
+  if (filter === "all") return true;
+  if (rowKind(row) !== "video") return false;
+  const ms = row.duration_ms || 0;
+  if (filter === "short") return ms > 0 && ms < 30_000;
+  if (filter === "medium") return ms >= 30_000 && ms < 2 * 60_000;
+  if (filter === "long") return ms >= 2 * 60_000 && ms < 10 * 60_000;
+  if (filter === "extended") return ms >= 10 * 60_000;
+  return true;
+}
+
 export default function MediaPanel({ projectId, installId }: NativePanelProps) {
   const [rows, setRows] = useState<MediaRow[]>([]);
   const [status, setStatus] = useState<Record<string, number>>({});
   const [kind, setKind] = useState<Kind>("all");
+  const [aspectFilter, setAspectFilter] = useState<AspectFilter>("all");
+  const [durationFilter, setDurationFilter] = useState<DurationFilter>("all");
   const [sort, setSort] = useState<Sort>("created_at");
   const [selected, setSelected] = useState<MediaRow | null>(null);
   const [error, setError] = useState("");
@@ -261,15 +295,8 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
     try {
       const params: Record<string, string> = {
         order_by: sort,
-        limit: "200",
+        limit: "500",
       };
-      if (kind === "video") params.has_video = "true";
-      if (kind === "audio") {
-        params.has_audio = "true";
-        // exclude videos that happen to have audio
-        params.is_image = "false";
-      }
-      if (kind === "image") params.is_image = "true";
       // Root non-recursive → only files literally at "/" (matches
       // storage panel's behavior). Root recursive → everything in
       // the project (no folder filter). In a sub-folder → exact
@@ -298,7 +325,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
     } finally {
       setLoading(false);
     }
-  }, [withMediaParams, kind, sort, folder, recursive]);
+  }, [withMediaParams, sort, folder, recursive]);
 
   // Status counts via the MCP-style summary endpoint — implemented as
   // a fan over rows here to avoid a second roundtrip; once we add a
@@ -339,12 +366,21 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
   const counts = useMemo(() => {
     const c = { all: rows.length, video: 0, audio: 0, image: 0 };
     for (const r of rows) {
-      if (r.is_image) c.image++;
-      else if (r.has_video) c.video++;
-      else if (r.has_audio) c.audio++;
+      const k = rowKind(r);
+      if (k) c[k]++;
     }
     return c;
   }, [rows]);
+
+  const visibleRows = useMemo(() => {
+    return rows.filter((r) => {
+      const k = rowKind(r);
+      if (kind !== "all" && k !== kind) return false;
+      if (!matchesAspect(r, aspectFilter)) return false;
+      if (!matchesDuration(r, durationFilter)) return false;
+      return true;
+    });
+  }, [rows, kind, aspectFilter, durationFilter]);
 
   const handleReindex = async (fileId: string) => {
     await fetch(`${API}/media/${fileId}/reindex?${withMediaParams()}`, {
@@ -541,7 +577,15 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
           <button
             key={k}
             type="button"
-            onClick={() => setKind(k)}
+            onClick={() => {
+              setKind(k);
+              if (k === "audio") {
+                setAspectFilter("all");
+                setDurationFilter("all");
+              } else if (k === "image") {
+                setDurationFilter("all");
+              }
+            }}
             className={`px-2 py-1 text-xs rounded border transition-colors ${
               kind === k
                 ? "bg-accent text-bg border-accent"
@@ -562,6 +606,43 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
           <option value="duration_ms">longest</option>
           <option value="updated_at">recently updated</option>
         </select>
+        <label className="text-xs text-text-dim">aspect</label>
+        <select
+          value={aspectFilter}
+          onChange={(e) => setAspectFilter(e.target.value as AspectFilter)}
+          className="bg-bg-input border border-border rounded px-2 py-1 text-xs"
+        >
+          <option value="all">any</option>
+          <option value="portrait">portrait</option>
+          <option value="landscape">landscape</option>
+          <option value="square">square</option>
+          <option value="reel">9:16</option>
+          <option value="wide">16:9</option>
+        </select>
+        <label className="text-xs text-text-dim">length</label>
+        <select
+          value={durationFilter}
+          onChange={(e) => setDurationFilter(e.target.value as DurationFilter)}
+          className="bg-bg-input border border-border rounded px-2 py-1 text-xs"
+        >
+          <option value="all">any</option>
+          <option value="short">&lt; 0:30</option>
+          <option value="medium">0:30-2:00</option>
+          <option value="long">2:00-10:00</option>
+          <option value="extended">&gt;= 10:00</option>
+        </select>
+        {aspectFilter !== "all" || durationFilter !== "all" ? (
+          <button
+            type="button"
+            onClick={() => {
+              setAspectFilter("all");
+              setDurationFilter("all");
+            }}
+            className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input"
+          >
+            Clear filters
+          </button>
+        ) : null}
         <div className="flex-1" />
         <button
           type="button"
@@ -577,11 +658,15 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
           <div className="text-red text-sm p-4">{error}</div>
         ) : loading && rows.length === 0 && childFolders.length === 0 ? (
           <div className="text-text-muted text-sm text-center mt-12">Loading…</div>
-        ) : rows.length === 0 && childFolders.length === 0 ? (
+        ) : visibleRows.length === 0 && childFolders.length === 0 ? (
           <div className="text-text-muted text-sm text-center mt-12">
             {folder === "/"
-              ? "No indexed media yet. Upload audio, video, or image files to storage — the indexer picks them up within ~30s."
-              : `No media in ${folder}.`}
+              ? rows.length === 0
+                ? "No indexed media yet. Upload audio, video, or image files to storage — the indexer picks them up within ~30s."
+                : "No media matches the current filters."
+              : rows.length === 0
+                ? `No media in ${folder}.`
+                : "No media matches the current filters."}
           </div>
         ) : (
           <>
@@ -607,14 +692,15 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
                 gap: "0.75rem",
               }}
             >
-              {rows.map(renderTile)}
+              {visibleRows.map(renderTile)}
             </div>
           </>
         )}
       </div>
 
       <footer className="text-xs text-text-dim flex items-center gap-3 border-t border-border pt-2">
-        <span>{rows.length} indexed</span>
+        <span>{visibleRows.length} shown</span>
+        {visibleRows.length !== rows.length ? <span>· {rows.length} indexed</span> : null}
         {(["pending", "failed", "unsupported", "skipped_size"] as const).map((s) =>
           status[s] ? (
             <span
@@ -1151,6 +1237,18 @@ function OperationModal({
 
   const title = ALL_OPS.find((o) => o.name === op)?.label ?? op;
   const isReel = op === "extract_reel";
+  const formStyle: React.CSSProperties | undefined = isReel
+    ? { width: "min(96vw, 1120px)", maxHeight: "96vh", display: "flex", flexDirection: "column", overflow: "hidden" }
+    : undefined;
+  const bodyStyle: React.CSSProperties | undefined = isReel
+    ? {
+        gridTemplateColumns: "minmax(0, 1fr) minmax(280px, 340px)",
+        flex: "1 1 auto",
+        minHeight: 0,
+        overflowY: "auto",
+        overflowX: "hidden",
+      }
+    : undefined;
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 p-3 sm:p-4" onClick={onClose}>
@@ -1158,11 +1256,12 @@ function OperationModal({
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
         className={[
-          "bg-bg border border-border rounded shadow-xl w-full overflow-x-hidden",
+          "bg-bg border border-border rounded shadow-xl w-full",
           isReel
-            ? "max-w-[min(96vw,88rem)] max-h-[96vh] flex flex-col overflow-hidden"
+            ? "overflow-hidden"
             : "max-w-4xl max-h-[90vh] overflow-y-auto",
         ].join(" ")}
+        style={formStyle}
       >
         <header className="px-5 py-4 border-b border-border flex items-center justify-between gap-3 flex-shrink-0">
           <div className="min-w-0">
@@ -1184,9 +1283,10 @@ function OperationModal({
           className={[
             "grid min-w-0",
             isReel
-              ? "p-4 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(22rem,26rem)] flex-1 min-h-0 overflow-y-auto overflow-x-hidden"
+              ? "p-4 gap-4"
               : "p-5 gap-5 lg:grid-cols-[minmax(0,1.25fr)_minmax(18rem,0.75fr)]",
           ].join(" ")}
+          style={bodyStyle}
         >
           <div className="min-w-0">
             <OperationPreview
@@ -1211,7 +1311,10 @@ function OperationModal({
                 setOutputName={setOutputName}
               />
             ) : null}
-            <div className={isReel ? "grid grid-cols-2 gap-3 xl:grid-cols-1" : "grid grid-cols-2 gap-3"}>
+            <div
+              className="grid gap-3"
+              style={{ gridTemplateColumns: isReel ? "1fr" : "repeat(2, minmax(0, 1fr))" }}
+            >
               {opFieldDefs(op).map((fd) => (
                 <OperationField key={fd.key} field={fd} value={fields[fd.key] || ""} onChange={(v) => set(fd.key, v)} />
               ))}
@@ -1531,14 +1634,23 @@ function TimelinePreview({
   const setEnd = (ms: number) => {
     setField("end_ms", String(Math.max(ms, safeStart)));
   };
+  const previewShellStyle: React.CSSProperties = isReel
+    ? { minHeight: 0, maxHeight: "42vh" }
+    : { minHeight: 260 };
+  const mediaWrapStyle: React.CSSProperties = isReel
+    ? { maxWidth: "100%", maxHeight: "42vh", position: "relative", display: "inline-flex" }
+    : { maxWidth: "100%", maxHeight: "24rem", position: "relative", display: "inline-flex" };
+  const videoStyle: React.CSSProperties = isReel
+    ? { maxWidth: "100%", maxHeight: "42vh", width: "auto", height: "auto", display: "block" }
+    : { maxWidth: "100%", maxHeight: "24rem" };
   return (
     <div className={isReel ? "space-y-2 min-w-0" : "space-y-3 min-w-0"}>
       <div className="text-xs uppercase tracking-wide text-text-dim">Preview</div>
       <div
         className="bg-black rounded border border-border overflow-hidden flex items-center justify-center"
-        style={{ minHeight: isReel ? 220 : 260 }}
+        style={previewShellStyle}
       >
-        <div className={isReel ? "relative inline-flex max-w-full max-h-[18rem]" : "relative inline-flex max-w-full max-h-[24rem]"}>
+        <div style={mediaWrapStyle}>
           <video
             ref={videoRef}
             src={sourceURL}
@@ -1546,7 +1658,7 @@ function TimelinePreview({
             controls
             preload="metadata"
             playsInline
-            className={isReel ? "max-w-full max-h-[18rem]" : "max-w-full max-h-[24rem]"}
+            style={videoStyle}
             onLoadedMetadata={() => seek(safeStart)}
           />
           {isReel ? <ReelGuide ratio={fields.target_ratio || "9:16"} /> : null}
@@ -1722,12 +1834,15 @@ function KeyframeButtons({
   const frames = keyframesFor(row).slice(0, 12);
   if (frames.length === 0) return null;
   const isWrap = layout === "wrap";
+  const listStyle: React.CSSProperties = isWrap
+    ? { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(92px, 1fr))", gap: 4 }
+    : { scrollbarWidth: "thin" };
   return (
     <div className="space-y-1 min-w-0">
       <div className="text-xs uppercase tracking-wide text-text-dim">Keyframes</div>
       <div
-        className={isWrap ? "grid gap-1 grid-cols-4 sm:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10" : "flex gap-1 overflow-x-auto pb-1"}
-        style={isWrap ? undefined : { scrollbarWidth: "thin" }}
+        className={isWrap ? "" : "flex gap-1 overflow-x-auto pb-1"}
+        style={listStyle}
       >
         {frames.map((f) => {
           const ms = f.position_ms ?? 0;
