@@ -1187,6 +1187,15 @@ function OperationModal({
           />
           <div className="space-y-3">
             <OperationSummary op={op} row={row} fields={fields} />
+            {op === "crop" ? (
+              <CropPresetControls
+                row={row}
+                fields={fields}
+                setField={set}
+                outputName={outputName}
+                setOutputName={setOutputName}
+              />
+            ) : null}
             <div className="grid grid-cols-2 gap-3">
               {opFieldDefs(op).map((fd) => (
                 <OperationField key={fd.key} field={fd} value={fields[fd.key] || ""} onChange={(v) => set(fd.key, v)} />
@@ -1273,6 +1282,101 @@ function OutputOptions({
           Empty uses the app render_output_folder setting.
         </span>
       </label>
+    </div>
+  );
+}
+
+function CropPresetControls({
+  row,
+  fields,
+  setField,
+  outputName,
+  setOutputName,
+}: {
+  row: MediaRow;
+  fields: Record<string, string>;
+  setField: (key: string, value: string) => void;
+  outputName: string;
+  setOutputName: (value: string) => void;
+}) {
+  const [anchor, setAnchor] = useState<CropAnchor>("center");
+  const sourceW = row.width || 0;
+  const sourceH = row.height || 0;
+  if (!sourceW || !sourceH) return null;
+
+  const applyPreset = (preset: CropPreset) => {
+    const crop = cropForRatio(sourceW, sourceH, preset.ratioW, preset.ratioH, anchor);
+    setField("x", String(crop.x));
+    setField("y", String(crop.y));
+    setField("width", String(crop.width));
+    setField("height", String(crop.height));
+  };
+
+  const current = {
+    width: numField(fields, "width", sourceW),
+    height: numField(fields, "height", sourceH),
+  };
+
+  return (
+    <div className="border border-border rounded p-3 space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs uppercase tracking-wide text-text-dim">Crop presets</div>
+        <span className="text-[10px] text-text-dim font-mono">
+          {current.width}x{current.height}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-1.5">
+        {CROP_PRESETS.map((preset) => {
+          const crop = cropForRatio(sourceW, sourceH, preset.ratioW, preset.ratioH, anchor);
+          const ratio = preset.ratioW && preset.ratioH ? `${preset.ratioW}:${preset.ratioH}` : "source";
+          return (
+            <button
+              key={preset.key}
+              type="button"
+              onClick={() => applyPreset(preset)}
+              className="text-left border border-border rounded px-2 py-1.5 hover:border-accent hover:bg-bg-input"
+              title={`${crop.width}x${crop.height}`}
+            >
+              <div className="text-xs text-text">{preset.label}</div>
+              <div className="text-[10px] text-text-dim font-mono">
+                {ratio} - {crop.width}x{crop.height}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      <label className="block">
+        <span className="text-xs text-text-muted">Anchor</span>
+        <select
+          value={anchor}
+          onChange={(e) => setAnchor(e.target.value as CropAnchor)}
+          className="w-full mt-1 bg-bg-input border border-border rounded px-2 py-1 text-sm"
+        >
+          <option value="center">Center</option>
+          <option value="top">Top</option>
+          <option value="bottom">Bottom</option>
+          <option value="left">Left</option>
+          <option value="right">Right</option>
+        </select>
+      </label>
+      {row.is_image ? (
+        <label className="block">
+          <span className="text-xs text-text-muted">Output format</span>
+          <select
+            value={imageOutputExt(outputName)}
+            onChange={(e) => {
+              const ext = e.target.value;
+              setOutputName(ext ? withImageExtension(outputName || row.name || `crop-${row.file_id}`, ext) : "");
+            }}
+            className="w-full mt-1 bg-bg-input border border-border rounded px-2 py-1 text-sm"
+          >
+            <option value="">Same as source</option>
+            <option value=".jpg">JPEG</option>
+            <option value=".png">PNG</option>
+            <option value=".webp">WebP</option>
+          </select>
+        </label>
+      ) : null}
     </div>
   );
 }
@@ -1535,18 +1639,20 @@ function SpatialPreview({
   return (
     <div className="space-y-3">
       <div className="text-xs uppercase tracking-wide text-text-dim">Preview</div>
-      <div className="bg-black rounded border border-border overflow-hidden flex items-center justify-center relative" style={{ minHeight: 260 }}>
-        {row.is_image ? (
-          <img src={sourceURL} alt="" className="max-w-full max-h-[24rem] object-contain" />
-        ) : (
-          <video src={sourceURL} controls preload="metadata" playsInline className="max-w-full max-h-[24rem]" />
-        )}
-        {op === "crop" && row.width && row.height && crop.width > 0 && crop.height > 0 ? (
-          <div
-            className="absolute border-2 border-accent bg-accent/10 pointer-events-none"
-            style={cropOverlayStyle(row, crop)}
-          />
-        ) : null}
+      <div className="bg-black rounded border border-border overflow-hidden flex items-center justify-center" style={{ minHeight: 260 }}>
+        <div className="relative inline-flex max-w-full max-h-[24rem]">
+          {row.is_image ? (
+            <img src={sourceURL} alt="" className="max-w-full max-h-[24rem] object-contain" />
+          ) : (
+            <video src={sourceURL} controls preload="metadata" playsInline className="max-w-full max-h-[24rem]" />
+          )}
+          {op === "crop" && row.width && row.height && crop.width > 0 && crop.height > 0 ? (
+            <div
+              className="absolute border-2 border-accent bg-accent/10 pointer-events-none"
+              style={cropOverlayStyle(row, crop)}
+            />
+          ) : null}
+        </div>
       </div>
       <div className="grid grid-cols-3 gap-2 text-xs">
         <Metric label="Source" value={row.width && row.height ? `${row.width}x${row.height}` : "-"} />
@@ -1696,6 +1802,65 @@ function normaliseFolderInput(value: string): string {
   if (!v.startsWith("/")) v = "/" + v;
   if (!v.endsWith("/")) v += "/";
   return v.replace(/\/+/g, "/");
+}
+
+interface CropPreset {
+  key: string;
+  label: string;
+  ratioW: number;
+  ratioH: number;
+}
+
+type CropAnchor = "center" | "top" | "bottom" | "left" | "right";
+
+const CROP_PRESETS: CropPreset[] = [
+  { key: "source", label: "Full source", ratioW: 0, ratioH: 0 },
+  { key: "square", label: "Square", ratioW: 1, ratioH: 1 },
+  { key: "portrait", label: "Portrait", ratioW: 4, ratioH: 5 },
+  { key: "story", label: "Story/Reel", ratioW: 9, ratioH: 16 },
+  { key: "landscape", label: "Landscape", ratioW: 16, ratioH: 9 },
+  { key: "banner", label: "Banner", ratioW: 3, ratioH: 1 },
+];
+
+function cropForRatio(sourceW: number, sourceH: number, ratioW: number, ratioH: number, anchor: CropAnchor) {
+  if (!ratioW || !ratioH) {
+    return { x: 0, y: 0, width: sourceW, height: sourceH };
+  }
+  const target = ratioW / ratioH;
+  const source = sourceW / sourceH;
+  let width = sourceW;
+  let height = sourceH;
+  if (source > target) {
+    width = Math.round(sourceH * target);
+  } else {
+    height = Math.round(sourceW / target);
+  }
+  width = Math.max(1, Math.min(sourceW, width));
+  height = Math.max(1, Math.min(sourceH, height));
+  const x = anchor === "left" ? 0 : anchor === "right" ? sourceW - width : Math.round((sourceW - width) / 2);
+  const y = anchor === "top" ? 0 : anchor === "bottom" ? sourceH - height : Math.round((sourceH - height) / 2);
+  return { x, y, width, height };
+}
+
+function imageOutputExt(outputName: string): string {
+  const explicit = extensionOf(outputName);
+  if (explicit) return explicit;
+  return "";
+}
+
+function withImageExtension(name: string, ext: string): string {
+  const trimmed = name.trim() || "crop";
+  if (!ext) return stripExtension(trimmed);
+  return `${stripExtension(trimmed)}${ext}`;
+}
+
+function extensionOf(name?: string): string {
+  const m = (name || "").toLowerCase().match(/\.[a-z0-9]+$/);
+  return m ? m[0] : "";
+}
+
+function stripExtension(name: string): string {
+  return name.replace(/\.[a-z0-9]+$/i, "");
 }
 
 function keyframesFor(row: MediaRow): Derivation[] {
@@ -1851,8 +2016,8 @@ function defaultFields(op: OpName, row: MediaRow): Record<string, string> {
     case "crop":
       out.x = "0";
       out.y = "0";
-      if (row.width) out.width = String(Math.floor(row.width / 2));
-      if (row.height) out.height = String(Math.floor(row.height / 2));
+      if (row.width) out.width = String(row.width);
+      if (row.height) out.height = String(row.height);
       break;
   }
   return out;
@@ -1861,8 +2026,8 @@ function defaultFields(op: OpName, row: MediaRow): Record<string, string> {
 // buildParams converts the form's stringy fields into the typed
 // params object the backend expects. Numbers parse to Number,
 // "true"/"false" to bool, empty strings drop the field so the
-// backend default applies. Output name is intentionally not
-// configurable here — the backend builds "<src>-<op>.<ext>".
+// backend default applies. Output name/folder are carried separately
+// on the render request.
 function buildParams(op: OpName, fields: Record<string, string>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const fd of opFieldDefs(op)) {
