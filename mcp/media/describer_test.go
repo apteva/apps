@@ -32,6 +32,28 @@ func boundOpencodeGo() *stubPlatform {
 	}
 }
 
+func boundOpenAI() *stubPlatform {
+	return &stubPlatform{
+		whoami: &sdk.InstallIdentity{
+			Bindings: map[string]any{"descriptions": float64(12)},
+		},
+		connections: map[int64]*sdk.PlatformConnection{
+			12: {ID: 12, AppSlug: "openai-api", Status: "active"},
+		},
+	}
+}
+
+func boundOpenAICodex() *stubPlatform {
+	return &stubPlatform{
+		whoami: &sdk.InstallIdentity{
+			Bindings: map[string]any{"descriptions": float64(13)},
+		},
+		connections: map[int64]*sdk.PlatformConnection{
+			13: {ID: 13, AppSlug: "openai-codex", Status: "active"},
+		},
+	}
+}
+
 // canonOK is a minimal opencode-go-shape happy-path response.
 func canonOK(content string) json.RawMessage {
 	return json.RawMessage(`{
@@ -44,6 +66,27 @@ func canonOK(content string) json.RawMessage {
 func jsonStr(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+func TestDefaultDescribeModel_ByProvider(t *testing.T) {
+	if got := defaultDescribeModel("opencode-go", ""); got != "kimi-k2.6" {
+		t.Errorf("opencode default=%q, want kimi-k2.6", got)
+	}
+	if got := defaultDescribeModel("openai-api", ""); got != "gpt-4o-mini" {
+		t.Errorf("openai default=%q, want gpt-4o-mini", got)
+	}
+	if got := defaultDescribeModel("openai-api", "kimi-k2.6"); got != "gpt-4o-mini" {
+		t.Errorf("openai old schema default=%q, want gpt-4o-mini", got)
+	}
+	if got := defaultDescribeModel("openai-api", "gpt-custom"); got != "gpt-custom" {
+		t.Errorf("openai configured model=%q, want gpt-custom", got)
+	}
+	if got := defaultDescribeModel("openai-codex", ""); got != "gpt-5.5" {
+		t.Errorf("codex default=%q, want gpt-5.5", got)
+	}
+	if got := defaultDescribeModel("openai-codex", "kimi-k2.6"); got != "gpt-5.5" {
+		t.Errorf("codex old schema default=%q, want gpt-5.5", got)
+	}
 }
 
 // ─── candidate query ───────────────────────────────────────────────
@@ -175,6 +218,66 @@ func TestRunOneDescription_TextOnly_FromTranscript(t *testing.T) {
 	// Default model from config.
 	if model, _ := args["model"].(string); model != "kimi-k2.6" {
 		t.Errorf("model=%q want kimi-k2.6", model)
+	}
+}
+
+func TestRunOneDescription_OpenAIBindingUsesOpenAIModel(t *testing.T) {
+	stub := boundOpenAI()
+	stub.executeResp = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: canonOK(`{"description":"A short meeting summary.","audience_rating":"general","audience_reasoning":""}`),
+	}
+	ctx := newTestCtxWithPlatform(t, stub)
+
+	probe := &Probe{FormatName: "wav", DurationMs: 3000, HasAudio: true, AudioCodec: "pcm_s16le", Raw: "{}"}
+	upsertMedia(ctx.AppDB(), testProj, "1", probe, "sha", "", "audio.wav")
+	upsertTranscript(ctx.AppDB(), &TranscriptRow{
+		FileID: "1", ProjectID: testProj, Status: "ok",
+		Text: "A short team meeting.",
+	})
+
+	describerSweep(ctx)
+
+	if len(stub.ExecuteCalls) != 1 {
+		t.Fatalf("expected 1 ExecuteIntegrationTool call, got %d", len(stub.ExecuteCalls))
+	}
+	if stub.ExecuteCalls[0].Tool != "chat_completion" {
+		t.Errorf("tool=%q want chat_completion", stub.ExecuteCalls[0].Tool)
+	}
+	if model, _ := stub.ExecuteCalls[0].Input["model"].(string); model != "gpt-4o-mini" {
+		t.Errorf("model=%q want gpt-4o-mini", model)
+	}
+	got, _ := getMedia(ctx.AppDB(), testProj, "1")
+	if got.Description != "A short meeting summary." {
+		t.Errorf("description=%q", got.Description)
+	}
+}
+
+func TestRunOneDescription_OpenAICodexBindingUsesCodexModel(t *testing.T) {
+	stub := boundOpenAICodex()
+	stub.executeResp = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: canonOK(`{"description":"A short meeting summary.","audience_rating":"general","audience_reasoning":""}`),
+	}
+	ctx := newTestCtxWithPlatform(t, stub)
+
+	probe := &Probe{FormatName: "wav", DurationMs: 3000, HasAudio: true, AudioCodec: "pcm_s16le", Raw: "{}"}
+	upsertMedia(ctx.AppDB(), testProj, "1", probe, "sha", "", "audio.wav")
+	upsertTranscript(ctx.AppDB(), &TranscriptRow{
+		FileID: "1", ProjectID: testProj, Status: "ok",
+		Text: "A short team meeting.",
+	})
+
+	describerSweep(ctx)
+
+	if len(stub.ExecuteCalls) != 1 {
+		t.Fatalf("expected 1 ExecuteIntegrationTool call, got %d", len(stub.ExecuteCalls))
+	}
+	if stub.ExecuteCalls[0].Tool != "chat_completion" {
+		t.Errorf("tool=%q want chat_completion", stub.ExecuteCalls[0].Tool)
+	}
+	if model, _ := stub.ExecuteCalls[0].Input["model"].(string); model != "gpt-5.5" {
+		t.Errorf("model=%q want gpt-5.5", model)
 	}
 }
 

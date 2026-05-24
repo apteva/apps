@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.13.9
+version: 0.13.10
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -64,14 +64,14 @@ requires:
       hint: "Connect Deepgram to auto-transcribe audio + video. Without it, transcripts stay manual."
     - role: descriptions
       kind: integration
-      compatible_slugs: [opencode-go]
+      compatible_slugs: [opencode-go, openai-api, openai-codex]
       capabilities: [chat.complete, vision.describe]
       tools:
         chat.complete: chat_completion
         vision.describe: chat_completion
       required: false
       label: "Auto-description provider"
-      hint: "Connect OpenCode Go for kimi-k2.6 (vision-capable) auto-descriptions of images, video frames, and audio transcripts."
+      hint: "Connect OpenCode Go, OpenAI API, or OpenAI Codex for vision-capable auto-descriptions of images, video frames, and audio transcripts."
     - role: render_executor
       kind: integration
       compatible_slugs: [cloudinary]
@@ -536,10 +536,10 @@ config_schema:
     description: Master switch for the auto-describer. When false, the worker doesn't sweep — manual media_describe still works.
   - name: describe_model
     type: text
-    default: "kimi-k2.6"
+    default: ""
     label: Description model
     description: |
-      Model slug from the OpenCode Go catalog. kimi-k2.6 is the default (vision-capable, 256K context, reasoning model). Faster non-reasoning options like glm-5.1 / qwen3.6-plus may work depending on vision support.
+      Optional model override. Leave empty for provider defaults: kimi-k2.6 on OpenCode Go, gpt-4o-mini on OpenAI API, gpt-5.5 on OpenAI Codex. Faster non-reasoning OpenCode models like glm-5.1 / qwen3.6-plus may work depending on vision support.
   - name: describe_max_tokens
     type: text
     default: "4000"

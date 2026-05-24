@@ -22,15 +22,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.9
+version: 0.13.10
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
   waveform), runs on-demand edits (trim/resize/transcode/concat/
   crop/extract_frame/audio_extract) via local ffmpeg by default or
   Cloudinary when bound, auto-transcribes audio + video via Deepgram,
-  and auto-generates descriptions via OpenCode Go (Kimi K2.6 default
-  — vision-capable) when integrations are bound. Outputs all flow
+  and auto-generates descriptions via OpenCode Go, OpenAI API, or
+  OpenAI Codex when integrations are bound. Outputs all flow
   through storage.
 author: Apteva
 scopes: [project, global]
@@ -65,14 +65,14 @@ requires:
       hint: "Connect Deepgram to auto-transcribe audio + video. Without it, transcripts stay manual (media_set_transcript)."
     - role: descriptions
       kind: integration
-      compatible_slugs: [opencode-go]
+      compatible_slugs: [opencode-go, openai-api, openai-codex]
       capabilities: [chat.complete, vision.describe]
       tools:
         chat.complete: chat_completion
         vision.describe: chat_completion
       required: false
       label: "Auto-description provider"
-      hint: "Connect OpenCode Go to auto-generate descriptions from thumbnails + transcripts. Default model: kimi-k2.6 (vision-capable). Without it, descriptions stay manual."
+      hint: "Connect OpenCode Go, OpenAI API, or OpenAI Codex to auto-generate descriptions from thumbnails + transcripts. Defaults: kimi-k2.6 on OpenCode Go, gpt-4o-mini on OpenAI API, gpt-5.5 on OpenAI Codex. Without it, descriptions stay manual."
     - role: render_executor
       kind: integration
       compatible_slugs: [cloudinary]
@@ -203,8 +203,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// gracefully when the deepgram integration isn't bound.
 	startTranscriber(ctx)
 	// Auto-describer: another isolated goroutine. Reads transcripts
-	// + thumbnails when present, calls opencode-go (Kimi K2.6 by
-	// default), writes the description back via setDescription.
+	// + thumbnails when present, calls the bound LLM integration,
+	// writes the description back via setDescription.
 	startDescriber(ctx)
 	// Storage event subscriber — listens for storage.file.deleted
 	// over SSE and cascades cleanup immediately. Indexer's 30s
@@ -405,9 +405,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "media_trim",
 			Description: "Cut a clip from a video/audio file. Args: file_id (string), start_ms, end_ms (int), output_name (string, optional).",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":     map[string]any{"type": "string"},
-				"start_ms":    map[string]any{"type": "integer"},
-				"end_ms":      map[string]any{"type": "integer"},
+				"file_id":       map[string]any{"type": "string"},
+				"start_ms":      map[string]any{"type": "integer"},
+				"end_ms":        map[string]any{"type": "integer"},
 				"output_name":   map[string]any{"type": "string"},
 				"output_folder": map[string]any{"type": "string"},
 			}, []string{"file_id", "start_ms", "end_ms"}),
@@ -417,10 +417,10 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "media_resize",
 			Description: "Scale a video/image. Args: file_id, width (int), height (int, optional if keep_aspect), keep_aspect (bool, optional), output_name (string, optional).",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":     map[string]any{"type": "string"},
-				"width":       map[string]any{"type": "integer"},
-				"height":      map[string]any{"type": "integer"},
-				"keep_aspect": map[string]any{"type": "boolean"},
+				"file_id":       map[string]any{"type": "string"},
+				"width":         map[string]any{"type": "integer"},
+				"height":        map[string]any{"type": "integer"},
+				"keep_aspect":   map[string]any{"type": "boolean"},
 				"output_name":   map[string]any{"type": "string"},
 				"output_folder": map[string]any{"type": "string"},
 			}, []string{"file_id", "width"}),
@@ -430,11 +430,11 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "media_transcode",
 			Description: "Re-encode to a new container/codec. Args: file_id, format (mp4|webm|mp3|...), video_codec (string, optional), audio_codec (string, optional), bitrate (string, optional, e.g. '2M').",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":     map[string]any{"type": "string"},
-				"format":      map[string]any{"type": "string"},
-				"video_codec": map[string]any{"type": "string"},
-				"audio_codec": map[string]any{"type": "string"},
-				"bitrate":     map[string]any{"type": "string"},
+				"file_id":       map[string]any{"type": "string"},
+				"format":        map[string]any{"type": "string"},
+				"video_codec":   map[string]any{"type": "string"},
+				"audio_codec":   map[string]any{"type": "string"},
+				"bitrate":       map[string]any{"type": "string"},
 				"output_name":   map[string]any{"type": "string"},
 				"output_folder": map[string]any{"type": "string"},
 			}, []string{"file_id", "format"}),
@@ -444,7 +444,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "media_concat",
 			Description: "Join multiple sources end-to-end (must share container/codec). Args: file_ids (array of strings, 2+), output_name (string, required).",
 			InputSchema: schemaObject(map[string]any{
-				"file_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"file_ids":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 				"output_name":   map[string]any{"type": "string"},
 				"output_folder": map[string]any{"type": "string"},
 			}, []string{"file_ids", "output_name"}),
@@ -454,11 +454,11 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "media_crop",
 			Description: "Crop a video or image. Args: file_id, x, y, width, height (all int, in pixels).",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":     map[string]any{"type": "string"},
-				"x":           map[string]any{"type": "integer"},
-				"y":           map[string]any{"type": "integer"},
-				"width":       map[string]any{"type": "integer"},
-				"height":      map[string]any{"type": "integer"},
+				"file_id":       map[string]any{"type": "string"},
+				"x":             map[string]any{"type": "integer"},
+				"y":             map[string]any{"type": "integer"},
+				"width":         map[string]any{"type": "integer"},
+				"height":        map[string]any{"type": "integer"},
 				"output_name":   map[string]any{"type": "string"},
 				"output_folder": map[string]any{"type": "string"},
 			}, []string{"file_id", "x", "y", "width", "height"}),
@@ -483,15 +483,15 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "media_audio_extract",
 			Description: "Pull the audio track from a video into a standalone file. Args: file_id, format (mp3|wav|m4a|opus|flac).",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":     map[string]any{"type": "string"},
-				"format":      map[string]any{"type": "string"},
+				"file_id":       map[string]any{"type": "string"},
+				"format":        map[string]any{"type": "string"},
 				"output_name":   map[string]any{"type": "string"},
 				"output_folder": map[string]any{"type": "string"},
 			}, []string{"file_id", "format"}),
 			Handler: a.toolSubmitRender("audio_extract", []string{"format"}, []string{"file_id"}),
 		},
 		{
-			Name: "media_extract_reel",
+			Name:        "media_extract_reel",
 			Description: "Cut a clip from a video AND reframe it to a target aspect ratio in a single ffmpeg pass. Replaces the manual chain media_trim → media_crop → media_resize for the common 'make a 9:16 reel from a 16:9 source' workflow. Args: file_id, start_ms, end_ms (same units + names as media_trim), target_ratio? (default '9:16', e.g. '1:1', '4:5'), output_width? (default 1080; height auto-derives from ratio), output_name?, output_folder?.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":       map[string]any{"type": "string", "description": "Storage file_id of the source video."},
@@ -586,7 +586,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_describe",
-			Description: "Queue an auto-generated description for one media file. The describer worker picks it up on its next sweep, calls the bound LLM integration (OpenCode Go default), and writes the result via media_set_description with description_source='ai-generated'. force=true ignores both the cooldown and any existing ai-generated description. Won't overwrite human-set descriptions in any case. Args: file_id, force?.",
+			Description: "Queue an auto-generated description for one media file. The describer worker picks it up on its next sweep, calls the bound LLM integration, and writes the result via media_set_description with description_source='ai-generated'. force=true ignores both the cooldown and any existing ai-generated description. Won't overwrite human-set descriptions in any case. Args: file_id, force?.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id": map[string]any{"type": "string"},
 				"force":   map[string]any{"type": "boolean"},
@@ -1897,4 +1897,3 @@ func (a *App) handleRenderItem(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET or DELETE", http.StatusMethodNotAllowed)
 	}
 }
-

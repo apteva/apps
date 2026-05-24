@@ -1,8 +1,8 @@
 package main
 
 // Auto-describer worker. Generates a 2-3 sentence description for
-// every media file that doesn't have one yet, using the opencode-go
-// integration (Kimi K2.6 by default — vision-capable reasoning model).
+// every media file that doesn't have one yet, using the bound
+// descriptions integration (OpenCode Go, OpenAI API, or OpenAI Codex).
 //
 // Three input paths, picked per file:
 //
@@ -186,7 +186,7 @@ func describerSweepOne(app *sdk.AppCtx) {
 }
 
 // runOneDescription is the per-row lifecycle. Builds a prompt based
-// on what's available (transcript? image? both?), calls opencode-go,
+// on what's available (transcript? image? both?), calls the bound LLM,
 // writes the response back as the description.
 func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, fileID string) {
 	log := app.Logger()
@@ -239,7 +239,7 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 
 	// Build the prompt + optional image_url. Three branches map onto
 	// the three input paths. Each returns the messages array we POST
-	// to opencode-go's chat_completion endpoint.
+	// to the bound integration's OpenAI-compatible chat_completion endpoint.
 	messages, err := buildDescribePrompt(app, projectID, media)
 	if err != nil {
 		_ = markDescribeAttempt(db, projectID, fileID, "build prompt: "+err.Error())
@@ -253,9 +253,7 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 	}
 
 	model := strings.TrimSpace(cfg.Get("describe_model"))
-	if model == "" {
-		model = "kimi-k2.6"
-	}
+	model = defaultDescribeModel(bound.AppSlug, model)
 	// 8000 default since v0.13.0+ — the JSON-output prompt + up to 4
 	// keyframe images + (potentially) a long transcript eats the
 	// reasoning budget on Kimi K2.6 / DeepSeek V4. 4000 was the right
@@ -356,6 +354,30 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 	// emit the completion here. Idempotent — earlier stages already
 	// tried and bailed because description was empty.
 	maybeEmitMediaCompleted(app, projectID, fileID)
+}
+
+func defaultDescribeModel(providerSlug, configured string) string {
+	configured = strings.TrimSpace(configured)
+	switch providerSlug {
+	case "openai-api":
+		// Old installs may have inherited the prior schema default.
+		// That model belongs to OpenCode Go, so treat it as unset for
+		// OpenAI bindings.
+		if configured == "" || configured == "kimi-k2.6" {
+			return "gpt-4o-mini"
+		}
+		return configured
+	case "openai-codex":
+		if configured == "" || configured == "kimi-k2.6" || configured == "gpt-4o-mini" {
+			return "gpt-5.5"
+		}
+		return configured
+	default:
+		if configured == "" {
+			return "kimi-k2.6"
+		}
+		return configured
+	}
 }
 
 // ─── prompt building ───────────────────────────────────────────────
@@ -470,13 +492,13 @@ func buildDescribePrompt(app *sdk.AppCtx, projectID string, media *MediaRow) ([]
 // buildPromptImageURLs collects the image URLs the describer feeds
 // into the multimodal LLM call.
 //
-//   Images:  the file itself (no thumbnail derivation step).
-//   Video:   canonical thumbnail + up to N evenly-sampled keyframes
-//            (when present). The thumbnail is the "best
-//            representative" frame, picked by the indexer via the
-//            multi-seek + luma-check pipeline; keyframes are
-//            timeline samples that add scene variety.
-//   Audio-only: empty (no frames).
+//	Images:  the file itself (no thumbnail derivation step).
+//	Video:   canonical thumbnail + up to N evenly-sampled keyframes
+//	         (when present). The thumbnail is the "best
+//	         representative" frame, picked by the indexer via the
+//	         multi-seek + luma-check pipeline; keyframes are
+//	         timeline samples that add scene variety.
+//	Audio-only: empty (no frames).
 //
 // Sample count comes from describe_keyframe_sample_count config
 // (default 4). When fewer keyframes exist than the sample count, we
