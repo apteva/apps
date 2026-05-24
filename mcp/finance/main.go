@@ -2364,14 +2364,6 @@ func (a *App) toolBrokerageSync(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		AccountID:    acc.ID,
 		DryRun:       boolArg(args, "dry_run", false),
 	}
-	if boolArg(args, "import_positions", true) {
-		n, skipped, err := syncTrading212Positions(ctx, a, acc, conn.ID, stats.DryRun)
-		if err != nil {
-			return nil, err
-		}
-		stats.Positions += n
-		stats.Skipped += skipped
-	}
 	if boolArg(args, "import_orders", true) {
 		n, skipped, err := syncTrading212Orders(ctx, a, acc, conn.ID, stats.DryRun)
 		if err != nil {
@@ -2393,6 +2385,20 @@ func (a *App) toolBrokerageSync(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		if err != nil {
 			return nil, err
 		}
+		stats.Cash += n
+		stats.Skipped += skipped
+	}
+	if boolArg(args, "import_positions", true) {
+		n, skipped, err := syncTrading212Positions(ctx, a, acc, conn.ID, stats.DryRun)
+		if err != nil {
+			return nil, err
+		}
+		stats.Positions += n
+		stats.Skipped += skipped
+	}
+	if n, skipped, err := reconcileTrading212Cash(ctx, a, acc, summary, stats.DryRun); err != nil {
+		return nil, err
+	} else {
 		stats.Cash += n
 		stats.Skipped += skipped
 	}
@@ -2864,6 +2870,63 @@ func syncTrading212Cash(ctx *sdk.AppCtx, app *App, acc Account, connID int64, dr
 		n++
 	}
 	return n, skipped, nil
+}
+
+func reconcileTrading212Cash(ctx *sdk.AppCtx, app *App, acc Account, summary map[string]any, dry bool) (int, int, error) {
+	reported := firstFloat(summary, "cash.availableToTrade") +
+		firstFloat(summary, "cash.reservedForOrders") +
+		firstFloat(summary, "cash.inPies")
+	if reported == 0 {
+		reported = firstFloat(summary, "free", "cash.free", "availableToTrade")
+	}
+	reportedMinor := int64(math.Round(reported * 100))
+	current := mustCashBalance(ctx, acc.ID, acc.OpeningBalance)
+	delta := reportedMinor - current
+	if delta == 0 {
+		return 0, 1, nil
+	}
+	today := time.Now().UTC().Format("2006-01-02")
+	externalID := "trading212:cash-reconcile:" + today
+	if dry {
+		return 1, 0, nil
+	}
+	kind := "deposit"
+	if delta < 0 {
+		kind = "withdraw"
+	}
+	var existingID, existingAmount int64
+	if err := ctx.AppDB().QueryRow(
+		`SELECT id, amount FROM transactions WHERE account_id=? AND external_id=? LIMIT 1`,
+		acc.ID, externalID,
+	).Scan(&existingID, &existingAmount); err == nil {
+		target := existingAmount + delta
+		if target == 0 {
+			_, err = ctx.AppDB().Exec(`DELETE FROM transactions WHERE id=?`, existingID)
+			return 1, 0, err
+		}
+		if target < 0 {
+			kind = "withdraw"
+		} else {
+			kind = "deposit"
+		}
+		_, err = ctx.AppDB().Exec(
+			`UPDATE transactions SET kind=?, amount=?, posted_at=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+			kind, target, time.Now().UTC().Format(time.RFC3339), existingID,
+		)
+		return 1, 0, err
+	}
+	if _, err := app.toolTxnsCreate(ctx, map[string]any{
+		"account_id":  float64(acc.ID),
+		"kind":        kind,
+		"amount":      float64(absInt64(delta)),
+		"posted_at":   time.Now().UTC().Format(time.RFC3339),
+		"payee":       "Trading 212",
+		"memo":        "Trading 212 cash reconciliation",
+		"external_id": externalID,
+	}); err != nil {
+		return 0, 0, err
+	}
+	return 1, 0, nil
 }
 
 type brokerInstrumentInfo struct {
