@@ -270,6 +270,9 @@ func TestRunOneDescription_OpenAIBindingUsesOpenAIModel(t *testing.T) {
 	if model, _ := stub.ExecuteCalls[0].Input["model"].(string); model != "gpt-4o-mini" {
 		t.Errorf("model=%q want gpt-4o-mini", model)
 	}
+	if _, ok := stub.ExecuteCalls[0].Input["temperature"]; !ok {
+		t.Errorf("openai-api payload should include temperature")
+	}
 	got, _ := getMedia(ctx.AppDB(), testProj, "1")
 	if got.Description != "A short meeting summary." {
 		t.Errorf("description=%q", got.Description)
@@ -301,6 +304,9 @@ func TestRunOneDescription_OpenAICodexBindingUsesCodexModel(t *testing.T) {
 	}
 	if model, _ := stub.ExecuteCalls[0].Input["model"].(string); model != "gpt-5.5" {
 		t.Errorf("model=%q want gpt-5.5", model)
+	}
+	if _, ok := stub.ExecuteCalls[0].Input["temperature"]; ok {
+		t.Errorf("openai-codex payload must omit temperature")
 	}
 }
 

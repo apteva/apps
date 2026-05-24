@@ -265,10 +265,15 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 	_ = timeout // timeout is enforced by the platform's HTTP client; reserved for future per-call override.
 
 	args := map[string]any{
-		"model":       model,
-		"messages":    messages,
-		"temperature": 0.3, // mostly factual; a hair of creativity for nicer prose
-		"max_tokens":  maxTokens,
+		"model":      model,
+		"messages":   messages,
+		"max_tokens": maxTokens,
+	}
+	if bound.AppSlug != "openai-codex" {
+		// Mostly factual; a hair of creativity for nicer prose. The
+		// ChatGPT subscription-backed Codex Responses runtime rejects
+		// this parameter, so omit it for openai-codex bindings.
+		args["temperature"] = 0.3
 	}
 
 	res, err := app.PlatformAPI().ExecuteIntegrationTool(
