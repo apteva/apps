@@ -315,7 +315,7 @@ export default function ContentPanel({ projectId }: NativePanelProps) {
       {sitesError && (
         <div className="bg-red-100 text-red-800 rounded px-3 py-2 mx-4 mt-2">{sitesError}</div>
       )}
-      {view === "list" && <ListView api={api} projectId={projectId} onOpen={setEditing} />}
+      {view === "list" && <ListView api={api} projectId={projectId} siteSlug={activeSite} onOpen={setEditing} />}
       {view === "templates" && (
         <TemplatesView api={api} projectId={projectId} siteSlug={activeSite} onApplied={() => setView("list")} />
       )}
@@ -734,10 +734,12 @@ function ConnectDomainDialog({
 function ListView({
   api,
   projectId,
+  siteSlug,
   onOpen,
 }: {
   api: ReturnType<typeof makeAPI>;
   projectId: string;
+  siteSlug: string | null;
   onOpen: (id: number) => void;
 }) {
   const [posts, setPosts] = useState<Post[]>([]);
@@ -819,6 +821,12 @@ function ListView({
       setError(String(e));
       setPendingDelete(null);
     }
+  };
+
+  const withProjectAndSite = (path: string) => {
+    const params = new URLSearchParams({ project_id: projectId });
+    if (siteSlug) params.set("site", siteSlug);
+    return `/api/apps/content${path}?${params.toString()}`;
   };
 
   return (
@@ -927,8 +935,8 @@ function ListView({
               <a
                 href={
                   p.status === "published"
-                    ? `/api/apps/content/${p.kind === "post" ? "posts/" : ""}${p.slug}?project_id=${encodeURIComponent(projectId)}`
-                    : `/api/apps/content/admin/posts/${p.id}?project_id=${encodeURIComponent(projectId)}`
+                    ? withProjectAndSite(`/${p.kind === "post" ? "posts/" : ""}${p.slug}`)
+                    : withProjectAndSite(`/admin/posts/${p.id}`)
                 }
                 target="_blank"
                 rel="noreferrer"
