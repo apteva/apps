@@ -817,7 +817,12 @@ function GlobalDealsPanel({ settings }: { settings: Settings }) {
             {scanSummary && <span className="ml-2 text-text">{scanSummary}.</span>}
           </div>
         </div>
-        <button onClick={scan} disabled={busy} className="btn-secondary">
+        <button
+          type="button"
+          onClick={scan}
+          disabled={busy}
+          className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md border border-border bg-accent px-3 py-1.5 text-sm font-medium text-bg hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
+        >
           <Icon name="search" size={14} /> {busy ? "Scanning…" : "Scan prices"}
         </button>
       </div>
