@@ -148,6 +148,10 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [newFolder, setNewFolder] = useState("");
+  const [renameFolder, setRenameFolder] = useState<string | null>(null);
+  const [renameName, setRenameName] = useState("");
+  const [renameError, setRenameError] = useState("");
+  const [renameBusy, setRenameBusy] = useState(false);
   const [selected, setSelected] = useState<FileRow | null>(null);
   const [uploads, setUploads] = useState<UploadJob[]>([]);
   const uploadRef = useRef<HTMLInputElement | null>(null);
@@ -316,21 +320,48 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
     }
   };
 
-  const handleRenameFolder = async (child: string) => {
-    const nextName = window.prompt("Rename folder", child)?.trim();
-    if (!nextName || nextName === child) return;
-    if (nextName.includes("/") || nextName.includes("\\")) {
-      alert("Folder name cannot contain slashes.");
+  const openRenameFolder = (child: string) => {
+    setRenameFolder(child);
+    setRenameName(child);
+    setRenameError("");
+  };
+
+  const closeRenameFolder = () => {
+    if (renameBusy) return;
+    setRenameFolder(null);
+    setRenameName("");
+    setRenameError("");
+  };
+
+  const submitRenameFolder = async () => {
+    if (!renameFolder) return;
+    const nextName = renameName.trim();
+    if (!nextName) {
+      setRenameError("Folder name is required.");
       return;
     }
-    const from = folder + child + "/";
+    if (nextName.includes("/") || nextName.includes("\\")) {
+      setRenameError("Folder name cannot contain slashes.");
+      return;
+    }
+    if (nextName === renameFolder) {
+      closeRenameFolder();
+      return;
+    }
+    const from = folder + renameFolder + "/";
     const to = folder + nextName + "/";
+    setRenameBusy(true);
+    setRenameError("");
     try {
       const resp = await api<RenameFolderResp>("PATCH", "/folders", undefined, { from, to });
-      setStatus(`Renamed folder · ${resp.updated} file${resp.updated === 1 ? "" : "s"} moved`);
+      setStatus(`Renamed folder - ${resp.updated} file${resp.updated === 1 ? "" : "s"} moved`);
+      setRenameFolder(null);
+      setRenameName("");
       load();
     } catch (e) {
-      alert("Rename folder failed: " + (e as Error).message);
+      setRenameError((e as Error).message);
+    } finally {
+      setRenameBusy(false);
     }
   };
 
@@ -536,7 +567,7 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
                   <td className="px-4 py-2 text-right">
                     <button
                       type="button"
-                      onClick={() => handleRenameFolder(f)}
+                      onClick={() => openRenameFolder(f)}
                       className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
                     >Rename</button>
                   </td>
@@ -586,6 +617,99 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
         onDelete={() => handleDelete(selected)}
       />
     )}
+    {renameFolder && (
+      <RenameFolderModal
+        currentName={renameFolder}
+        value={renameName}
+        error={renameError}
+        busy={renameBusy}
+        onChange={setRenameName}
+        onCancel={closeRenameFolder}
+        onSubmit={submitRenameFolder}
+      />
+    )}
+    </div>
+  );
+}
+
+function RenameFolderModal({
+  currentName, value, error, busy, onChange, onCancel, onSubmit,
+}: {
+  currentName: string;
+  value: string;
+  error: string;
+  busy: boolean;
+  onChange: (value: string) => void;
+  onCancel: () => void;
+  onSubmit: () => void;
+}) {
+  const trimmed = value.trim();
+  const canSubmit = trimmed.length > 0 && trimmed !== currentName && !busy;
+
+  useEffect(() => {
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 px-4"
+      role="presentation"
+      onMouseDown={onCancel}
+    >
+      <form
+        className="w-full max-w-md rounded border border-border bg-bg-card shadow-xl"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="rename-folder-title"
+        onMouseDown={(ev) => ev.stopPropagation()}
+        onSubmit={(ev) => {
+          ev.preventDefault();
+          if (canSubmit) onSubmit();
+        }}
+      >
+        <header className="px-4 py-3 border-b border-border">
+          <h2 id="rename-folder-title" className="text-sm font-medium text-text">Rename folder</h2>
+          <p className="mt-1 text-xs text-text-dim truncate" title={currentName}>
+            Current name: {currentName}
+          </p>
+        </header>
+
+        <div className="p-4 flex flex-col gap-2">
+          <label className="text-xs text-text-muted" htmlFor="rename-folder-name">Folder name</label>
+          <input
+            id="rename-folder-name"
+            autoFocus
+            className="w-full rounded border border-border bg-bg-input px-3 py-2 text-sm text-text outline-none focus:border-accent"
+            value={value}
+            onChange={(ev) => onChange(ev.target.value)}
+            disabled={busy}
+            aria-invalid={error ? "true" : "false"}
+          />
+          {error && (
+            <div className="text-xs text-red" role="alert">
+              Rename failed: {error}
+            </div>
+          )}
+        </div>
+
+        <footer className="px-4 py-3 border-t border-border flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="text-xs px-3 py-1.5 border border-border rounded hover:bg-bg-input disabled:opacity-50"
+          >Cancel</button>
+          <button
+            type="submit"
+            disabled={!canSubmit}
+            className="text-xs px-3 py-1.5 rounded bg-accent text-bg disabled:opacity-50"
+          >{busy ? "Renaming..." : "Rename"}</button>
+        </footer>
+      </form>
     </div>
   );
 }
