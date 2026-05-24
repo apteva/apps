@@ -2462,6 +2462,9 @@ func executeIntegrationPages(ctx *sdk.AppCtx, connID int64, tool string) ([]map[
 		}
 		var raw any
 		if err := executeIntegrationJSON(ctx, connID, tool, args, &raw); err != nil {
+			if len(out) > 0 && tool == "get_transaction_history" && isTrading212PaginationError(err) {
+				break
+			}
 			return nil, err
 		}
 		items, nextPage := integrationItems(raw)
@@ -2472,6 +2475,16 @@ func executeIntegrationPages(ctx *sdk.AppCtx, connID int64, tool string) ([]map[
 		next = nextPage
 	}
 	return out, nil
+}
+
+func isTrading212PaginationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "http 404") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "both or none of cursor")
 }
 
 func integrationItems(raw any) ([]map[string]any, string) {
