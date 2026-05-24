@@ -559,9 +559,7 @@ func computeURLPrefix(r *http.Request) string {
 		}
 		return v
 	}
-	throughDashboardProxy := r.Header.Get("X-Apteva-App-Install-ID") != "" &&
-		r.Header.Get("X-Forwarded-Host") == ""
-	if throughDashboardProxy {
+	if r.Header.Get("X-Apteva-App-Install-ID") != "" {
 		name := "content"
 		if globalCtx != nil && globalCtx.Manifest() != nil && globalCtx.Manifest().Name != "" {
 			name = globalCtx.Manifest().Name
