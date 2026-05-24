@@ -543,6 +543,7 @@ export default function TripsPanel(props: NativePanelProps) {
 function TripsPanelInner({ projectId }: NativePanelProps) {
   const [trips, setTrips] = useState<Trip[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [mainTab, setMainTab] = useState<"trips" | "deals">("trips");
   const [selectedID, setSelectedID] = useState<number | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -587,6 +588,24 @@ function TripsPanelInner({ projectId }: NativePanelProps) {
         <div className="flex items-center gap-3">
           <Icon name="map" size={20} />
           <h1 className="text-lg font-semibold">Trips</h1>
+          <nav className="flex overflow-hidden rounded-md border border-border text-sm">
+            <button
+              type="button"
+              onClick={() => setMainTab("trips")}
+              className={`px-3 py-1.5 ${mainTab === "trips" ? "bg-accent text-bg" : "hover:bg-bg-hover"}`}
+            >
+              Trips
+            </button>
+            {settings?.duffel_connection_id && (
+              <button
+                type="button"
+                onClick={() => setMainTab("deals")}
+                className={`px-3 py-1.5 ${mainTab === "deals" ? "bg-accent text-bg" : "hover:bg-bg-hover"}`}
+              >
+                Deals
+              </button>
+            )}
+          </nav>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -613,16 +632,19 @@ function TripsPanelInner({ projectId }: NativePanelProps) {
 
       <div className="flex-1 overflow-auto">
         <div className="flex flex-col gap-3">
-          {settings?.duffel_connection_id ? <GlobalDealsPanel settings={settings} /> : null}
-          {trips.length === 0 ? (
-            <EmptyState message="No trips yet. Click 'New trip' to plan one." />
+          {mainTab === "deals" && settings?.duffel_connection_id ? (
+            <GlobalDealsPanel settings={settings} />
           ) : (
-            <>
-              <OverallBudgetBar trips={trips} />
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {trips.map(t => <TripCard key={t.id} trip={t} onOpen={() => setSelectedID(t.id)} />)}
-              </div>
-            </>
+            trips.length === 0 ? (
+              <EmptyState message="No trips yet. Click 'New trip' to plan one." />
+            ) : (
+              <>
+                <OverallBudgetBar trips={trips} />
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {trips.map(t => <TripCard key={t.id} trip={t} onOpen={() => setSelectedID(t.id)} />)}
+                </div>
+              </>
+            )
           )}
         </div>
       </div>
