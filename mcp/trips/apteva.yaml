@@ -2,15 +2,16 @@ schema: apteva-app/v1
 
 name: trips
 display_name: Trips
-version: 0.7.0
+version: 0.7.1
 description: |
   Plan trips end-to-end: destinations, transport, accommodation,
   activities, packing, budget. Calendar-synced — each trip owns a
   dedicated calendar that mirrors its itinerary, kept in step as
   items are added / moved / removed. Optional Duffel and Google Places
   integrations power flight and place search. Flight searches now feed
-  a long-lived travel price intelligence view for route/deal planning;
-  finance + storage remain future layers.
+  a long-lived travel price intelligence view for route/deal planning,
+  including global deal scans and route/date heatmaps; finance + storage
+  remain future layers.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/trips

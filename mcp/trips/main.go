@@ -132,6 +132,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/search/places", Handler: a.handleSearchPlaces},
 		{Pattern: "/search/place", Handler: a.handlePlaceDetails},
 		{Pattern: "/search/flights", Handler: a.handleSearchFlights},
+		{Pattern: "/search/flights/scan", Handler: a.handleScanFlightPrices},
 		{Pattern: "/price-observations", Handler: a.handlePriceObservations},
 	}
 }
@@ -357,6 +358,18 @@ func (a *App) MCPTools() []sdk.Tool {
 				"limit":       map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolPriceObservations},
+		{Name: "scan_flight_prices", Description: "Run a capped matrix of live Duffel flight searches to nourish travel price observations. Args: origin IATA, destinations as CSV or array, depart_from/depart_to YYYY-MM-DD, trip_lengths as CSV/array of days, passengers?, cabin?, max_searches?.",
+			InputSchema: schemaObject(map[string]any{
+				"origin":       map[string]any{"type": "string"},
+				"destinations": map[string]any{"type": "string"},
+				"depart_from":  map[string]any{"type": "string"},
+				"depart_to":    map[string]any{"type": "string"},
+				"trip_lengths": map[string]any{"type": "string"},
+				"passengers":   map[string]any{"type": "integer"},
+				"cabin":        map[string]any{"type": "string"},
+				"max_searches": map[string]any{"type": "integer"},
+			}, []string{"origin", "destinations", "depart_from", "depart_to"}),
+			Handler: a.toolScanFlightPrices},
 	}
 }
 
@@ -3304,6 +3317,133 @@ func (a *App) toolPriceObservations(ctx *sdk.AppCtx, args map[string]any) (any, 
 	}, nil
 }
 
+func (a *App) toolScanFlightPrices(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	settings, _ := loadSettings(ctx)
+	if settings.DuffelConnectionID == 0 {
+		return nil, errors.New("no Duffel connection — set duffel_connection_id in trips settings")
+	}
+	origin := strings.ToUpper(strArg(args, "origin", settings.HomeAirport))
+	if !validIATA(origin) {
+		return nil, errors.New("origin must be a 3-letter IATA airport code")
+	}
+	destinations := parseStringList(args["destinations"])
+	if len(destinations) == 0 {
+		return nil, errors.New("destinations required")
+	}
+	cleanDestinations := []string{}
+	for _, d := range destinations {
+		d = strings.ToUpper(strings.TrimSpace(d))
+		if d == origin {
+			continue
+		}
+		if !validIATA(d) {
+			return nil, fmt.Errorf("destination %q must be a 3-letter IATA airport code", d)
+		}
+		cleanDestinations = append(cleanDestinations, d)
+	}
+	if len(cleanDestinations) == 0 {
+		return nil, errors.New("at least one destination different from origin required")
+	}
+	fromDate, err := parseYMDDate(strArg(args, "depart_from", ""))
+	if err != nil {
+		return nil, fmt.Errorf("depart_from: %w", err)
+	}
+	toDate, err := parseYMDDate(strArg(args, "depart_to", ""))
+	if err != nil {
+		return nil, fmt.Errorf("depart_to: %w", err)
+	}
+	if toDate.Before(fromDate) {
+		return nil, errors.New("depart_to must be on or after depart_from")
+	}
+	if toDate.Sub(fromDate) > 120*24*time.Hour {
+		return nil, errors.New("date range too large; choose 120 days or less")
+	}
+	lengths := parseIntList(args["trip_lengths"])
+	if len(lengths) == 0 {
+		lengths = []int{3, 5, 7}
+	}
+	cleanLengths := []int{}
+	for _, n := range lengths {
+		if n < 0 || n > 30 {
+			return nil, errors.New("trip_lengths must be between 0 and 30 days")
+		}
+		cleanLengths = append(cleanLengths, n)
+	}
+	maxSearches := intArg(args, "max_searches", 18)
+	if maxSearches < 1 {
+		maxSearches = 1
+	}
+	if maxSearches > 60 {
+		maxSearches = 60
+	}
+	passengers := intArg(args, "passengers", settings.DefaultPassengers)
+	if passengers < 1 {
+		passengers = 1
+	}
+	cabin := strArg(args, "cabin", "economy")
+
+	type scanResult struct {
+		Destination string `json:"destination"`
+		DepartDate  string `json:"depart_date"`
+		ReturnDate  string `json:"return_date,omitempty"`
+		Cached      bool   `json:"cached"`
+		Offers      int    `json:"offers"`
+		Error       string `json:"error,omitempty"`
+	}
+	results := []scanResult{}
+	searches := 0
+	for d := fromDate; !d.After(toDate) && searches < maxSearches; d = d.AddDate(0, 0, 1) {
+		for _, dest := range cleanDestinations {
+			for _, length := range cleanLengths {
+				if searches >= maxSearches {
+					break
+				}
+				depart := d.Format("2006-01-02")
+				returnDate := ""
+				if length > 0 {
+					returnDate = d.AddDate(0, 0, length).Format("2006-01-02")
+				}
+				callArgs := map[string]any{
+					"from":        origin,
+					"to":          dest,
+					"depart_date": depart,
+					"passengers":  float64(passengers),
+					"cabin":       cabin,
+				}
+				if returnDate != "" {
+					callArgs["return_date"] = returnDate
+				}
+				out, err := a.toolSearchFlights(ctx, callArgs)
+				searches++
+				row := scanResult{Destination: dest, DepartDate: depart, ReturnDate: returnDate}
+				if err != nil {
+					row.Error = err.Error()
+					results = append(results, row)
+					continue
+				}
+				if m, ok := out.(map[string]any); ok {
+					if cached, ok := m["cached"].(bool); ok {
+						row.Cached = cached
+					}
+					if offers, ok := m["offers"].([]FlightOffer); ok {
+						row.Offers = len(offers)
+					}
+				}
+				results = append(results, row)
+				if searches < maxSearches {
+					time.Sleep(350 * time.Millisecond)
+				}
+			}
+		}
+	}
+	obs, _ := a.toolPriceObservations(ctx, map[string]any{"kind": "flight", "origin": origin, "since_days": float64(180), "limit": float64(500)})
+	return map[string]any{
+		"searched": searches,
+		"results":  results,
+		"prices":   obs,
+	}, nil
+}
+
 func summarizePriceObservations(observations []TravelPriceObservation) []TravelPriceRouteSummary {
 	byKey := map[string]*TravelPriceRouteSummary{}
 	for _, o := range observations {
@@ -3617,6 +3757,73 @@ func parseMoneyDecimal(s string) (int64, error) {
 	return v, nil
 }
 
+func parseYMDDate(s string) (time.Time, error) {
+	if strings.TrimSpace(s) == "" {
+		return time.Time{}, errors.New("required")
+	}
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return time.Time{}, errors.New("must be YYYY-MM-DD")
+	}
+	return t, nil
+}
+
+func parseStringList(v any) []string {
+	switch x := v.(type) {
+	case []string:
+		return x
+	case []any:
+		out := []string{}
+		for _, item := range x {
+			if s := strings.TrimSpace(fmt.Sprint(item)); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case string:
+		parts := strings.FieldsFunc(x, func(r rune) bool {
+			return r == ',' || r == '\n' || r == ';' || r == ' '
+		})
+		out := []string{}
+		for _, p := range parts {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func parseIntList(v any) []int {
+	switch x := v.(type) {
+	case []int:
+		return x
+	case []any:
+		out := []int{}
+		for _, item := range x {
+			if n := intArgFromAny(item, -1); n >= 0 {
+				out = append(out, n)
+			}
+		}
+		return out
+	case string:
+		parts := strings.FieldsFunc(x, func(r rune) bool {
+			return r == ',' || r == '\n' || r == ';' || r == ' '
+		})
+		out := []int{}
+		for _, p := range parts {
+			if n, err := strconv.Atoi(strings.TrimSpace(p)); err == nil {
+				out = append(out, n)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
 func jsonString(v any) string {
 	if s, ok := v.(string); ok {
 		return s
@@ -3728,6 +3935,14 @@ func (a *App) handleSearchFlights(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	postBody(w, r, a.toolSearchFlights)
+}
+
+func (a *App) handleScanFlightPrices(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST", http.StatusMethodNotAllowed)
+		return
+	}
+	postBody(w, r, a.toolScanFlightPrices)
 }
 
 func (a *App) handlePriceObservations(w http.ResponseWriter, r *http.Request) {

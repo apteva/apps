@@ -923,6 +923,58 @@ func TestUnit_SearchFlights_RejectsNonIATA(t *testing.T) {
 	}
 }
 
+func TestUnit_ScanFlightPrices_CapsMatrixAndRecords(t *testing.T) {
+	ctx, fake := newCtx(t)
+	app := &App{}
+	_, _ = app.toolSettingsSet(ctx, map[string]any{
+		"duffel_connection_id": float64(11),
+		"home_airport":         "BCN",
+	})
+	fake.integResponses["search_flights"] = map[string]any{
+		"data": map[string]any{
+			"offers": []any{
+				map[string]any{
+					"id":             "off_scan",
+					"total_amount":   "42.00",
+					"total_currency": "EUR",
+					"slices": []any{map[string]any{"segments": []any{
+						map[string]any{
+							"marketing_carrier":               map[string]any{"iata_code": "VY", "name": "Vueling"},
+							"marketing_carrier_flight_number": "8000",
+							"departing_at":                    "2026-06-05T08:00:00",
+							"arriving_at":                     "2026-06-05T09:30:00",
+							"origin":                          map[string]any{"iata_code": "BCN"},
+							"destination":                     map[string]any{"iata_code": "CDG"},
+						},
+					}}},
+				},
+			},
+		},
+	}
+	out, err := app.toolScanFlightPrices(ctx, map[string]any{
+		"origin":       "BCN",
+		"destinations": "CDG,LIS",
+		"depart_from":  "2026-06-05",
+		"depart_to":    "2026-06-08",
+		"trip_lengths": "3,5",
+		"max_searches": float64(3),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["searched"].(int) != 3 {
+		t.Fatalf("scan did not respect max_searches: %+v", out)
+	}
+	priceOut, err := app.toolPriceObservations(ctx, map[string]any{"kind": "flight", "origin": "BCN"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obs := priceOut.(map[string]any)["observations"].([]TravelPriceObservation)
+	if len(obs) != 3 {
+		t.Fatalf("want 3 observations, got %d", len(obs))
+	}
+}
+
 func TestUnit_AvailableConnections_FiltersByProvider(t *testing.T) {
 	ctx, fake := newCtx(t)
 	app := &App{}

@@ -200,6 +200,19 @@ interface TravelPriceResponse {
   routes: TravelPriceRouteSummary[];
 }
 
+interface FlightPriceScanResponse {
+  searched: number;
+  results: {
+    destination: string;
+    depart_date: string;
+    return_date?: string;
+    cached: boolean;
+    offers: number;
+    error?: string;
+  }[];
+  prices?: TravelPriceResponse;
+}
+
 interface BudgetCategoryRow {
   category: string;
   cap: number;
@@ -302,6 +315,12 @@ function relativeTime(s?: string): string {
   if (diff < hour) return `${Math.floor(diff / minute)}m ago`;
   if (diff < day) return `${Math.floor(diff / hour)}h ago`;
   return `${Math.floor(diff / day)}d ago`;
+}
+
+function todayPlus(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return toYMD(d);
 }
 
 function daysUntil(startAt: string, endAt: string): { label: string; tone: "future" | "active" | "past" } {
@@ -523,6 +542,7 @@ export default function TripsPanel(props: NativePanelProps) {
 
 function TripsPanelInner({ projectId }: NativePanelProps) {
   const [trips, setTrips] = useState<Trip[]>([]);
+  const [settings, setSettings] = useState<Settings | null>(null);
   const [selectedID, setSelectedID] = useState<number | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -538,7 +558,17 @@ function TripsPanelInner({ projectId }: NativePanelProps) {
     }
   }, []);
 
+  const refreshSettings = useCallback(async () => {
+    try {
+      const s = await api<Settings>("/settings");
+      setSettings(s);
+    } catch {
+      setSettings(null);
+    }
+  }, []);
+
   useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => { refreshSettings(); }, [refreshSettings]);
   useAppEvents("trips", projectId, () => refresh());
 
   if (selectedID != null) {
@@ -582,16 +612,19 @@ function TripsPanelInner({ projectId }: NativePanelProps) {
       )}
 
       <div className="flex-1 overflow-auto">
-        {trips.length === 0 ? (
-          <EmptyState message="No trips yet. Click 'New trip' to plan one." />
-        ) : (
-          <div className="flex flex-col gap-3">
-            <OverallBudgetBar trips={trips} />
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {trips.map(t => <TripCard key={t.id} trip={t} onOpen={() => setSelectedID(t.id)} />)}
-            </div>
-          </div>
-        )}
+        <div className="flex flex-col gap-3">
+          {settings?.duffel_connection_id ? <GlobalDealsPanel settings={settings} /> : null}
+          {trips.length === 0 ? (
+            <EmptyState message="No trips yet. Click 'New trip' to plan one." />
+          ) : (
+            <>
+              <OverallBudgetBar trips={trips} />
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {trips.map(t => <TripCard key={t.id} trip={t} onOpen={() => setSelectedID(t.id)} />)}
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
       {showNew && (
@@ -659,6 +692,203 @@ function TripCard({ trip, onOpen }: { trip: Trip; onOpen: () => void }) {
         )}
       </div>
     </button>
+  );
+}
+
+function GlobalDealsPanel({ settings }: { settings: Settings }) {
+  const ui = useUI();
+  const [data, setData] = useState<TravelPriceResponse | null>(null);
+  const [origin, setOrigin] = useState(settings.home_airport || "");
+  const [destinations, setDestinations] = useState("CDG, LIS, FCO, AMS, LHR");
+  const [departFrom, setDepartFrom] = useState(todayPlus(14));
+  const [departTo, setDepartTo] = useState(todayPlus(44));
+  const [tripLengths, setTripLengths] = useState("3,5,7");
+  const [passengers, setPassengers] = useState(settings.default_passengers || 1);
+  const [cabin, setCabin] = useState("economy");
+  const [maxSearches, setMaxSearches] = useState(18);
+  const [busy, setBusy] = useState(false);
+  const [scanSummary, setScanSummary] = useState("");
+
+  const load = useCallback(async () => {
+    const params = new URLSearchParams({ kind: "flight", since_days: "180", limit: "800" });
+    if (origin) params.set("origin", origin);
+    const r = await api<TravelPriceResponse>(`/price-observations?${params}`);
+    setData(r);
+  }, [origin]);
+
+  useEffect(() => {
+    load().catch(() => setData(null));
+  }, [load]);
+
+  const scan = async () => {
+    if (!origin || !destinations || !departFrom || !departTo) {
+      ui.notify("origin, destinations, and date range required");
+      return;
+    }
+    setBusy(true);
+    setScanSummary("");
+    try {
+      const r = await api<FlightPriceScanResponse>("/search/flights/scan", {
+        method: "POST",
+        body: JSON.stringify({
+          origin,
+          destinations,
+          depart_from: departFrom,
+          depart_to: departTo,
+          trip_lengths: tripLengths,
+          passengers,
+          cabin,
+          max_searches: maxSearches,
+        }),
+      });
+      if (r.prices) setData(r.prices);
+      else await load();
+      const failures = r.results.filter(x => x.error).length;
+      setScanSummary(`${r.searched} search${r.searched === 1 ? "" : "es"} run${failures ? `, ${failures} failed` : ""}`);
+    } catch (e: unknown) {
+      ui.notify(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const routes = data?.routes ?? [];
+  const observations = data?.observations ?? [];
+
+  return (
+    <section className="rounded-lg border border-border bg-bg-card p-4">
+      <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <div className="flex items-center gap-2 text-base font-semibold">
+            <Icon name="plane" size={18} />
+            <span>Flight deals</span>
+          </div>
+          <div className="mt-1 text-sm text-text-muted">
+            {observations.length} observed fare{observations.length === 1 ? "" : "s"} saved for route discovery.
+            {scanSummary && <span className="ml-2 text-text">{scanSummary}.</span>}
+          </div>
+        </div>
+        <button onClick={scan} disabled={busy} className="btn-secondary">
+          <Icon name="search" size={14} /> {busy ? "Scanning…" : "Scan prices"}
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
+        <div className="space-y-3 lg:col-span-4">
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="From">
+              <input value={origin} onChange={e => setOrigin(e.target.value.toUpperCase())} className="input uppercase" maxLength={3} placeholder="BCN" />
+            </Field>
+            <Field label="Max calls">
+              <input type="number" min={1} max={60} value={maxSearches} onChange={e => setMaxSearches(Math.max(1, Math.min(60, parseInt(e.target.value || "1", 10))))} className="input" />
+            </Field>
+          </div>
+          <Field label="Destinations">
+            <input value={destinations} onChange={e => setDestinations(e.target.value.toUpperCase())} className="input uppercase" placeholder="CDG, LIS, FCO" />
+          </Field>
+          <DateRangeField
+            startLabel="Depart from"
+            endLabel="Depart to"
+            start={departFrom}
+            end={departTo}
+            onChange={(s, e) => { setDepartFrom(s); setDepartTo(e); }}
+            minDate={todayPlus(0)}
+          />
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Lengths">
+              <input value={tripLengths} onChange={e => setTripLengths(e.target.value)} className="input" placeholder="3,5,7" />
+            </Field>
+            <Field label="Passengers">
+              <input type="number" min={1} value={passengers} onChange={e => setPassengers(Math.max(1, parseInt(e.target.value || "1", 10)))} className="input" />
+            </Field>
+          </div>
+          <Field label="Cabin">
+            <select value={cabin} onChange={e => setCabin(e.target.value)} className="input">
+              <option value="economy">Economy</option>
+              <option value="premium_economy">Premium economy</option>
+              <option value="business">Business</option>
+              <option value="first">First</option>
+            </select>
+          </Field>
+        </div>
+
+        <div className="space-y-3 lg:col-span-8">
+          {routes.length > 0 ? (
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              {routes.slice(0, 4).map(route => (
+                <FlightDealCard key={`${route.origin_code}-${route.destination_code}-${route.currency}-${route.party_size}-${route.cabin_or_class}`} route={route} />
+              ))}
+            </div>
+          ) : (
+            <div className="rounded-lg border border-border-subtle">
+              <EmptyState message="No observed deals yet — run a scan to seed prices." />
+            </div>
+          )}
+          <FlightHeatmap observations={observations} />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function FlightHeatmap({ observations }: { observations: TravelPriceObservation[] }) {
+  const byCell = new Map<string, TravelPriceObservation>();
+  for (const o of observations) {
+    if (!o.destination_code || !o.depart_date) continue;
+    const key = `${o.destination_code}|${o.depart_date}`;
+    const prev = byCell.get(key);
+    if (!prev || o.amount_cents < prev.amount_cents) byCell.set(key, o);
+  }
+  const destinations = Array.from(new Set(observations.map(o => o.destination_code).filter(Boolean) as string[]))
+    .sort((a, b) => {
+      const mina = Math.min(...observations.filter(o => o.destination_code === a).map(o => o.amount_cents));
+      const minb = Math.min(...observations.filter(o => o.destination_code === b).map(o => o.amount_cents));
+      return mina - minb;
+    })
+    .slice(0, 6);
+  const dates = Array.from(new Set(observations.map(o => o.depart_date).filter(Boolean) as string[]))
+    .sort()
+    .slice(0, 14);
+  const amounts = Array.from(byCell.values()).map(o => o.amount_cents);
+  const min = amounts.length ? Math.min(...amounts) : 0;
+  const max = amounts.length ? Math.max(...amounts) : 0;
+
+  if (destinations.length === 0 || dates.length === 0) return null;
+
+  const tone = (amount: number) => {
+    if (max <= min) return "bg-success/50";
+    const ratio = (amount - min) / (max - min);
+    if (ratio < 0.34) return "bg-success/60 text-bg";
+    if (ratio < 0.67) return "bg-warn/50";
+    return "bg-error/40";
+  };
+
+  return (
+    <div className="rounded-lg border border-border-subtle p-3">
+      <div className="mb-3 flex items-center justify-between">
+        <div className="text-xs uppercase tracking-wide text-text-muted">When to go</div>
+        <div className="text-xs text-text-muted">lowest observed per route/date</div>
+      </div>
+      <div className="overflow-auto">
+        <div className="grid min-w-[680px] gap-1" style={{ gridTemplateColumns: `72px repeat(${dates.length}, minmax(38px, 1fr))` }}>
+          <div />
+          {dates.map(d => <div key={d} className="truncate text-center text-[11px] text-text-muted">{d.slice(5)}</div>)}
+          {destinations.map(dest => (
+            <div key={dest} className="contents">
+              <div className="flex h-9 items-center text-xs font-medium">{dest}</div>
+              {dates.map(date => {
+                const o = byCell.get(`${dest}|${date}`);
+                return (
+                  <div key={`${dest}-${date}`} className={`flex h-9 items-center justify-center rounded text-[11px] tabular-nums ${o ? tone(o.amount_cents) : "bg-bg-hover text-text-dim"}`}>
+                    {o ? fmtMoney(o.amount_cents, o.currency).replace(/\D00$/, "") : "—"}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 
