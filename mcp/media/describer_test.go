@@ -89,6 +89,29 @@ func TestDefaultDescribeModel_ByProvider(t *testing.T) {
 	}
 }
 
+func TestBuildDescribePromptIncludesProjectContext(t *testing.T) {
+	stub := boundOpenAICodex()
+	stub.whoami.ProjectName = "Cooking Clips"
+	stub.whoami.ProjectDescription = "Short recipe videos for the public website."
+	ctx := newTestCtxWithPlatform(t, stub)
+	upsertTranscript(ctx.AppDB(), &TranscriptRow{
+		FileID: "1", ProjectID: testProj, Status: "ok",
+		Text: "Stir the sauce and add basil.",
+	})
+
+	messages, err := buildDescribePrompt(ctx, testProj, &MediaRow{FileID: "1"})
+	if err != nil {
+		t.Fatalf("buildDescribePrompt: %v", err)
+	}
+	if len(messages) < 3 {
+		t.Fatalf("messages=%#v, want system prompt, project context, user prompt", messages)
+	}
+	projectContext, _ := messages[1]["content"].(string)
+	if !strings.Contains(projectContext, "Cooking Clips") || !strings.Contains(projectContext, "Short recipe videos") {
+		t.Fatalf("project context missing from prompt: %q", projectContext)
+	}
+}
+
 // ─── candidate query ───────────────────────────────────────────────
 
 func TestDescribeCandidates_FiltersHumanSet(t *testing.T) {
