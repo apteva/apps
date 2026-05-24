@@ -299,10 +299,11 @@ func (a *App) MCPTools() []sdk.Tool {
 				"limit": map[string]any{"type": "integer"},
 			}, []string{"query"}),
 			Handler: a.toolStocksSearch},
-		{Name: "stocks_quote", Description: "Fetch a linked stocks quote and persist the latest price when instrument_id is supplied. Args: symbol? or instrument_id?.",
+		{Name: "stocks_quote", Description: "Fetch a linked stocks quote or historical close and persist the price when instrument_id is supplied. Args: symbol? or instrument_id?, date?.",
 			InputSchema: schemaObject(map[string]any{
 				"symbol":        map[string]any{"type": "string"},
 				"instrument_id": map[string]any{"type": "integer"},
+				"date":          map[string]any{"type": "string"},
 			}, nil),
 			Handler: a.toolStocksQuote},
 		{Name: "stocks_dividends_import", Description: "Import cash dividend transactions from linked stocks app for an account holding. Args: account_id, instrument_id, from?, to?, dry_run?.",
@@ -1966,6 +1967,23 @@ type stockDividendsResult struct {
 	History []stockDividendPayment `json:"history"`
 }
 
+type stockChartBar struct {
+	T int64   `json:"t"`
+	O float64 `json:"o,omitempty"`
+	H float64 `json:"h,omitempty"`
+	L float64 `json:"l,omitempty"`
+	C float64 `json:"c"`
+	V float64 `json:"v,omitempty"`
+}
+
+type stockChartResult struct {
+	Symbol   string          `json:"symbol"`
+	Range    string          `json:"range"`
+	Interval string          `json:"interval"`
+	Currency string          `json:"currency"`
+	Bars     []stockChartBar `json:"bars"`
+}
+
 func currentPrice(ctx *sdk.AppCtx, instrumentID int64, asOf time.Time) (int64, bool) {
 	if !isNearNow(asOf) {
 		return latestPrice(ctx, instrumentID, asOf)
@@ -2080,24 +2098,67 @@ func (a *App) toolStocksQuote(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if symbol == "" {
 		return nil, errors.New("symbol or instrument_id required")
 	}
+	asOf := time.Now().UTC()
+	historical := false
+	if s := strArg(args, "date", ""); s != "" {
+		t, err := parseFlexibleTime(s)
+		if err != nil {
+			return nil, err
+		}
+		asOf = t
+		historical = !isNearNow(t)
+	}
 	var quote stockQuoteResult
-	if err := callStocksResult(ctx, "get", map[string]any{"symbol": strings.ToUpper(symbol)}, &quote); err != nil {
-		return nil, err
+	if historical {
+		var chart stockChartResult
+		if err := callStocksResult(ctx, "chart", map[string]any{"symbol": strings.ToUpper(symbol), "range": "max", "interval": "1d"}, &chart); err != nil {
+			return nil, err
+		}
+		bar, ok := barAtOrBefore(chart.Bars, asOf)
+		if !ok {
+			return nil, fmt.Errorf("stocks chart has no price for %s at or before %s", symbol, asOf.Format("2006-01-02"))
+		}
+		quote = stockQuoteResult{
+			Symbol:   strings.ToUpper(symbol),
+			Currency: chart.Currency,
+			Price:    bar.C,
+		}
+	} else {
+		if err := callStocksResult(ctx, "get", map[string]any{"symbol": strings.ToUpper(symbol)}, &quote); err != nil {
+			return nil, err
+		}
 	}
 	if quote.Price > 0 {
 		quote.PriceMinor = int64(math.Round(quote.Price * 100))
 	}
 	if instrumentID != 0 && quote.PriceMinor > 0 {
 		if quote.Currency == "" || ins.QuoteCurrency == "" || strings.EqualFold(quote.Currency, ins.QuoteCurrency) {
-			asOf := time.Now().UTC().Format(time.RFC3339)
 			_, _ = ctx.AppDB().Exec(
 				`INSERT OR REPLACE INTO prices (instrument_id, as_of, price, source) VALUES (?, ?, ?, ?)`,
-				instrumentID, asOf, quote.PriceMinor, "stocks",
+				instrumentID, asOf.UTC().Format(time.RFC3339), quote.PriceMinor, "stocks",
 			)
 			quote.InstrumentID = instrumentID
 		}
 	}
 	return quote, nil
+}
+
+func barAtOrBefore(bars []stockChartBar, asOf time.Time) (stockChartBar, bool) {
+	cutoff := endOfUTCDate(asOf).Unix()
+	var best stockChartBar
+	ok := false
+	for _, b := range bars {
+		if b.T <= cutoff && b.C > 0 && (!ok || b.T > best.T) {
+			best = b
+			ok = true
+		}
+	}
+	return best, ok
+}
+
+func endOfUTCDate(t time.Time) time.Time {
+	y, m, d := t.UTC().Date()
+	return time.Date(y, m, d, 23, 59, 59, 0, time.UTC)
 }
 
 func (a *App) toolStocksDividendsImport(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -3548,6 +3609,9 @@ func (a *App) handleStocksQuote(w http.ResponseWriter, r *http.Request) {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			args["instrument_id"] = float64(n)
 		}
+	}
+	if v := r.URL.Query().Get("date"); v != "" {
+		args["date"] = v
 	}
 	out, err := a.toolStocksQuote(globalCtx, args)
 	writeOrErr(w, out, err)

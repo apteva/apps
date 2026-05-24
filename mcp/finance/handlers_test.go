@@ -355,6 +355,35 @@ func TestUnit_StocksQuotePersistsPrice(t *testing.T) {
 	}
 }
 
+func TestUnit_StocksQuoteUsesHistoricalChartForTradeDate(t *testing.T) {
+	pf := &stockQuotePlatform{chart: map[string]any{
+		"symbol": "MSFT", "currency": "USD", "range": "max", "interval": "1d",
+		"bars": []map[string]any{
+			{"t": float64(time.Date(2024, 5, 20, 0, 0, 0, 0, time.UTC).Unix()), "c": 410.11},
+			{"t": float64(time.Date(2024, 5, 21, 0, 0, 0, 0, time.UTC).Unix()), "c": 412.34},
+		},
+	}}
+	ctx := newCtxWithPlatform(t, pf)
+	app := &App{}
+	inst := mustCreateInstrument(t, app, ctx, "stock", "MSFT", "Microsoft", "USD")
+
+	out, err := app.toolStocksQuote(ctx, map[string]any{
+		"instrument_id": float64(inst.ID),
+		"date":          "2024-05-21",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quote := out.(stockQuoteResult)
+	if quote.PriceMinor != 41234 || pf.lastTool != "chart" {
+		t.Fatalf("expected historical chart quote, got quote=%+v platform=%+v", quote, pf)
+	}
+	price, ok := latestPrice(ctx, inst.ID, time.Date(2024, 5, 21, 12, 0, 0, 0, time.UTC))
+	if !ok || price != 41234 {
+		t.Fatalf("expected persisted historical price 41234, got %d ok=%v", price, ok)
+	}
+}
+
 func TestUnit_StocksDividendsImportIsIdempotent(t *testing.T) {
 	pf := &stockQuotePlatform{dividends: map[string]any{
 		"symbol": "AAPL",
@@ -778,6 +807,7 @@ type stockQuotePlatform struct {
 	quote      map[string]any
 	search     map[string]any
 	dividends  map[string]any
+	chart      map[string]any
 	err        error
 	calls      int
 	lastApp    string
@@ -799,6 +829,8 @@ func (p *stockQuotePlatform) CallAppResult(app, tool string, input map[string]an
 		body = p.search
 	case "dividends":
 		body = p.dividends
+	case "chart":
+		body = p.chart
 	}
 	b, err := json.Marshal(body)
 	if err != nil {

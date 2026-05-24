@@ -80,12 +80,6 @@ interface StockQuote {
   dividend_frequency?: string;
 }
 
-interface DividendImportResult {
-  imported: number;
-  skipped: number;
-  candidates?: Array<{ already_imported?: boolean }>;
-}
-
 interface Holding {
   id: number;
   account_id: number;
@@ -1074,11 +1068,10 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
   const [symbol, setSymbol] = useState("");
   const [selectedStock, setSelectedStock] = useState<StockSearchHit | null>(null);
   const [stockMatches, setStockMatches] = useState<StockSearchHit[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
   const [quote, setQuote] = useState<StockQuote | null>(null);
   const [stockStatus, setStockStatus] = useState("");
   const [autoPrice, setAutoPrice] = useState(false);
-  const [importDividends, setImportDividends] = useState(true);
-  const [importResult, setImportResult] = useState<DividendImportResult | null>(null);
   const [quantity, setQuantity] = useState("");
   const [unitPrice, setUnitPrice] = useState("");
   const [fee, setFee] = useState("");
@@ -1105,7 +1098,7 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
       try {
         const search = await api<StockSearchResponse>(`/stocks/search?query=${encodeURIComponent(q)}&limit=6`);
         if (cancelled) return;
-        setStockMatches(search.results ?? []);
+        setStockMatches(showSuggestions ? search.results ?? [] : []);
         const exact = (search.results ?? []).find(x => (x.symbol ?? "").toUpperCase() === q);
         if (exact && !selectedStock) setSelectedStock(exact);
         if (exact?.price && trade && (!unitPrice || autoPrice)) {
@@ -1113,7 +1106,7 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
           setAutoPrice(true);
         }
         try {
-          const gotQuote = await api<StockQuote>(`/stocks/quote?symbol=${encodeURIComponent(q)}`);
+          const gotQuote = await api<StockQuote>(`/stocks/quote?symbol=${encodeURIComponent(q)}&date=${encodeURIComponent(postedAt)}`);
           if (cancelled) return;
           setQuote(gotQuote);
           setStockStatus("");
@@ -1136,37 +1129,25 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [investment, symbol, kind]);
+  }, [investment, symbol, kind, postedAt, showSuggestions]);
 
   const applyStockHit = (hit: StockSearchHit) => {
     const next = (hit.symbol ?? "").toUpperCase();
     setSelectedStock(hit);
     setSymbol(next);
+    setStockMatches([]);
+    setShowSuggestions(false);
     if (hit.price && trade) {
       setUnitPrice(hit.price.toFixed(2));
       setAutoPrice(true);
     }
   };
 
-  const importDividendsFor = async (instrument: Instrument): Promise<DividendImportResult> => {
-    const result = await api<DividendImportResult>("/stocks/dividends/import", {
+  const importDividendsFor = async (instrument: Instrument): Promise<void> => {
+    await api("/stocks/dividends/import", {
       method: "POST",
       body: JSON.stringify({ account_id: account.id, instrument_id: instrument.id }),
     });
-    setImportResult(result);
-    return result;
-  };
-
-  const importDividendsNow = async () => {
-    setBusy(true); setErr(""); setImportResult(null);
-    try {
-      const instrument = await resolveTradeInstrument(symbol, instrumentKind, account.currency, quote ?? selectedStock);
-      await importDividendsFor(instrument);
-      setBusy(false);
-    } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : String(e));
-      setBusy(false);
-    }
   };
 
   const submit = async () => {
@@ -1198,9 +1179,9 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
             method: "POST",
             body: JSON.stringify({ ...baseBody, quantity: qty, amount: gross, fee: feeMinor }),
           });
-          if (importDividends) {
+          try {
             await importDividendsFor(instrument);
-          }
+          } catch {}
         }
       } else {
         const minor = parseMoneyDecimal(amount || "0");
@@ -1242,7 +1223,8 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
             <Field label="Symbol">
               <input
                 value={symbol}
-                onChange={e => { setSymbol(e.target.value.toUpperCase()); setSelectedStock(null); setImportResult(null); }}
+                onChange={e => { setSymbol(e.target.value.toUpperCase()); setSelectedStock(null); setShowSuggestions(true); }}
+                onFocus={() => setShowSuggestions(true)}
                 className="input uppercase"
                 placeholder="AAPL"
                 autoFocus
@@ -1251,7 +1233,7 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
           </div>
           {(stockMatches.length > 0 || quote || stockStatus) && (
             <div className="rounded-md border border-border-subtle bg-bg-hover/40 p-2 text-xs">
-              {stockMatches.length > 0 && (
+              {showSuggestions && stockMatches.length > 0 && (
                 <div className="mb-2 grid gap-1">
                   {stockMatches.slice(0, 4).map(hit => (
                     <button
@@ -1295,26 +1277,12 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
               <Field label={`Fee (${account.currency})`}>
                 <input value={fee} onChange={e => setFee(e.target.value)} className="input" placeholder="0.00" />
               </Field>
-              <label className="flex items-center gap-2 text-sm text-text-muted">
-                <input type="checkbox" checked={importDividends} onChange={e => setImportDividends(e.target.checked)} />
-                Import linked dividend payouts after saving
-              </label>
             </>
           ) : (
             <Field label={`Amount (${account.currency})`}>
               <input value={amount} onChange={e => setAmount(e.target.value)} className="input" placeholder="0.00" />
             </Field>
           )}
-          <div className="flex items-center justify-between gap-3">
-            <button onClick={importDividendsNow} disabled={busy || !symbol} className="btn-secondary">
-              Import dividends
-            </button>
-            {importResult && (
-              <span className="text-xs text-text-muted">
-                {importResult.imported} imported, {importResult.skipped} skipped
-              </span>
-            )}
-          </div>
         </>
       ) : (
         <Field label={`Amount (${account.currency})`}>

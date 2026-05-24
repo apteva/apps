@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: finance
 display_name: Finance
-version: 0.1.4
+version: 0.1.5
 description: |
   Unified personal-wealth tracker. Cash, stocks, ETFs, crypto, P2P,
   real estate, vehicles, pensions, loans — all in one ledger. v0.1
@@ -64,7 +64,7 @@ provides:
     - { name: txns_transfer,       description: "Move cash between two accounts (same currency in v0.1). Args: from_account_id, to_account_id, amount, posted_at, memo?." }
 
     - { name: stocks_search,       description: "Search linked stocks app for symbols. Args: query, limit?." }
-    - { name: stocks_quote,        description: "Fetch a linked stocks quote and persist the latest price when instrument_id is supplied. Args: symbol? or instrument_id?." }
+    - { name: stocks_quote,        description: "Fetch a linked stocks quote or historical close and persist the price when instrument_id is supplied. Args: symbol? or instrument_id?, date?." }
     - { name: stocks_dividends_import, description: "Import cash dividend transactions from linked stocks app for an account holding. Args: account_id, instrument_id, from?, to?, dry_run?." }
 
     - { name: valuation_set,       description: "Re-value an illiquid holding (real estate / vehicle / private). Writes a price-series row + audit 'valuation' transaction. Args: instrument_id, value, as_of?, account_id? (for the audit row)." }
