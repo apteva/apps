@@ -871,7 +871,13 @@ function CreateDialog({
         // operators shouldn't pick them for a new server.
         const types: ServerTypeWire[] = (stJson.server_types || []).filter((t: ServerTypeWire) => !t.deprecated);
         const locs: LocationWire[] = locJson.locations || [];
-        const imgs: ImageWire[] = imgJson.images || [];
+        const imgs: ImageWire[] = [];
+        const seenImages = new Set<string>();
+        for (const img of (imgJson.images || []) as ImageWire[]) {
+          if (!img.name || seenImages.has(img.name)) continue;
+          seenImages.add(img.name);
+          imgs.push(img);
+        }
         // Stable, predictable orderings. Price for sizes (cheapest
         // first), alphabetical for locations + images.
         types.sort((a, b) => (a.monthly_price_eur ?? 0) - (b.monthly_price_eur ?? 0));
@@ -935,6 +941,16 @@ function CreateDialog({
   const locLabel = (l: LocationWire): string => {
     const place = [l.city, l.country].filter(Boolean).join(", ");
     return place ? `${place} (${l.name})` : l.name;
+  };
+
+  const imageLabel = (i: ImageWire): string => {
+    const label = i.description && i.description !== i.name
+      ? `${i.description} (${i.name})`
+      : i.name;
+    const details = [i.architecture, i.os_flavor && i.os_version ? `${i.os_flavor} ${i.os_version}` : ""]
+      .filter(Boolean)
+      .join(", ");
+    return details ? `${label} — ${details}` : label;
   };
 
   return (
@@ -1013,7 +1029,7 @@ function CreateDialog({
               >
                 {images.length === 0 && <option value="">—</option>}
                 {images.map((i) => (
-                  <option key={i.name} value={i.name}>{i.description || i.name}</option>
+                  <option key={i.name} value={i.name}>{imageLabel(i)}</option>
                 ))}
               </select>
             </div>
