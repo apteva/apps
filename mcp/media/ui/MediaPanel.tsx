@@ -636,6 +636,8 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
       {selected && (
         <DetailDrawer
           row={selected}
+          currentFolder={folder}
+          childFolders={childFolders}
           onClose={() => setSelected(null)}
           onReindex={() => handleReindex(selected.file_id)}
           onSaveDescription={(fields) => saveDescription(selected.file_id, fields)}
@@ -652,6 +654,8 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
 
 function DetailDrawer({
   row,
+  currentFolder,
+  childFolders,
   onClose,
   onReindex,
   onSaveDescription,
@@ -662,6 +666,8 @@ function DetailDrawer({
   storageQuery,
 }: {
   row: MediaRow;
+  currentFolder: string;
+  childFolders: string[];
   onClose: () => void;
   onReindex: () => void;
   onSaveDescription: (fields: { title?: string; description?: string; alt_text?: string }) => Promise<void>;
@@ -769,6 +775,8 @@ function DetailDrawer({
           <KeyframesStrip row={row} previewBase={previewBase} query={storageQuery} />
           <OperationsSection
             row={row}
+            currentFolder={currentFolder}
+            childFolders={childFolders}
             apiBase={apiBase}
             previewBase={previewBase}
             mediaQuery={mediaQuery}
@@ -872,9 +880,11 @@ const ALL_OPS: OpDef[] = [
 ];
 
 function OperationsSection({
-  row, apiBase, previewBase, mediaQuery, storageQuery,
+  row, currentFolder, childFolders, apiBase, previewBase, mediaQuery, storageQuery,
 }: {
   row: MediaRow;
+  currentFolder: string;
+  childFolders: string[];
   apiBase: string;
   previewBase: string;
   mediaQuery: string;
@@ -914,6 +924,8 @@ function OperationsSection({
         <OperationModal
           op={openOp}
           row={row}
+          currentFolder={currentFolder}
+          childFolders={childFolders}
           apiBase={apiBase}
           previewBase={previewBase}
           storageQuery={storageQuery}
@@ -1086,10 +1098,12 @@ function RenderStatusCard({
 // source duration). Submit POSTs to /renders and bubbles the
 // render_id up so the section can start polling.
 function OperationModal({
-  op, row, apiBase, previewBase, storageQuery, onClose, onSubmitted, onError,
+  op, row, currentFolder, childFolders, apiBase, previewBase, storageQuery, onClose, onSubmitted, onError,
 }: {
   op: OpName;
   row: MediaRow;
+  currentFolder: string;
+  childFolders: string[];
   apiBase: string;
   previewBase: string;
   storageQuery: string;
@@ -1100,6 +1114,8 @@ function OperationModal({
   // One state object keyed by field name — cheaper than threading a
   // separate useState per per-op field.
   const [fields, setFields] = useState<Record<string, string>>(() => defaultFields(op, row));
+  const [outputName, setOutputName] = useState("");
+  const [outputFolder, setOutputFolder] = useState("");
   const [busy, setBusy] = useState(false);
 
   const set = (k: string, v: string) => setFields((f) => ({ ...f, [k]: v }));
@@ -1119,6 +1135,8 @@ function OperationModal({
           operation: op,
           file_id: row.file_id,
           params,
+          output_name: outputName.trim() || undefined,
+          output_folder: outputFolder.trim() ? normaliseFolderInput(outputFolder) : undefined,
         }),
       });
       if (!r.ok) throw new Error(await r.text().catch(() => `HTTP ${r.status}`));
@@ -1174,6 +1192,14 @@ function OperationModal({
                 <OperationField key={fd.key} field={fd} value={fields[fd.key] || ""} onChange={(v) => set(fd.key, v)} />
               ))}
             </div>
+            <OutputOptions
+              outputName={outputName}
+              outputFolder={outputFolder}
+              currentFolder={currentFolder}
+              childFolders={childFolders}
+              onOutputName={setOutputName}
+              onOutputFolder={setOutputFolder}
+            />
           </div>
         </div>
 
@@ -1195,6 +1221,58 @@ function OperationModal({
           </button>
         </footer>
       </form>
+    </div>
+  );
+}
+
+function OutputOptions({
+  outputName,
+  outputFolder,
+  currentFolder,
+  childFolders,
+  onOutputName,
+  onOutputFolder,
+}: {
+  outputName: string;
+  outputFolder: string;
+  currentFolder: string;
+  childFolders: string[];
+  onOutputName: (value: string) => void;
+  onOutputFolder: (value: string) => void;
+}) {
+  const folderOptions = outputFolderOptions(currentFolder, childFolders);
+  return (
+    <div className="border-t border-border pt-3 space-y-3">
+      <div className="text-xs uppercase tracking-wide text-text-dim">Output</div>
+      <label className="block">
+        <span className="text-xs text-text-muted">Filename</span>
+        <input
+          type="text"
+          value={outputName}
+          onChange={(e) => onOutputName(e.target.value)}
+          placeholder="auto"
+          className="w-full mt-1 bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+        />
+      </label>
+      <label className="block">
+        <span className="text-xs text-text-muted">Folder</span>
+        <input
+          type="text"
+          list="media-render-output-folders"
+          value={outputFolder}
+          onChange={(e) => onOutputFolder(e.target.value)}
+          placeholder="default render folder"
+          className="w-full mt-1 bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+        />
+        <datalist id="media-render-output-folders">
+          {folderOptions.map((f) => (
+            <option key={f} value={f} />
+          ))}
+        </datalist>
+        <span className="text-[10px] text-text-dim block mt-0.5">
+          Empty uses the app render_output_folder setting.
+        </span>
+      </label>
     </div>
   );
 }
@@ -1309,18 +1387,47 @@ function TimelinePreview({
   previewBase: string;
   storageQuery: string;
 }) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const duration = Math.max(row.duration_ms || 0, 1);
   const start = clampMs(numField(fields, "start_ms", 0), 0, duration);
   const end = clampMs(numField(fields, "end_ms", duration), 0, duration);
   const safeStart = Math.min(start, end);
   const safeEnd = Math.max(start, end);
   const selectedPct = duration > 0 ? ((safeEnd - safeStart) / duration) * 100 : 0;
+  const seek = (ms: number) => {
+    const video = videoRef.current;
+    if (video && Number.isFinite(ms)) {
+      try { video.currentTime = ms / 1000; } catch {}
+    }
+  };
+  useEffect(() => {
+    seek(safeStart);
+  }, [safeStart, sourceURL]);
+  const setStart = (ms: number) => {
+    const next = Math.min(ms, safeEnd);
+    setField("start_ms", String(next));
+    seek(next);
+  };
+  const setEnd = (ms: number) => {
+    setField("end_ms", String(Math.max(ms, safeStart)));
+  };
   return (
     <div className="space-y-3">
       <div className="text-xs uppercase tracking-wide text-text-dim">Preview</div>
-      <div className="relative bg-black rounded border border-border overflow-hidden flex items-center justify-center" style={{ minHeight: 260 }}>
-        <video src={sourceURL} poster={posterURL} controls preload="metadata" playsInline className="max-w-full max-h-[24rem]" />
-        {op === "extract_reel" ? <ReelGuide ratio={fields.target_ratio || "9:16"} /> : null}
+      <div className="bg-black rounded border border-border overflow-hidden flex items-center justify-center" style={{ minHeight: 260 }}>
+        <div className="relative inline-flex max-w-full max-h-[24rem]">
+          <video
+            ref={videoRef}
+            src={sourceURL}
+            poster={posterURL}
+            controls
+            preload="metadata"
+            playsInline
+            className="max-w-full max-h-[24rem]"
+            onLoadedMetadata={() => seek(safeStart)}
+          />
+          {op === "extract_reel" ? <ReelGuide ratio={fields.target_ratio || "9:16"} /> : null}
+        </div>
       </div>
       <div className="space-y-2">
         <div className="flex items-center justify-between text-xs text-text-dim">
@@ -1338,13 +1445,13 @@ function TimelinePreview({
             label="Start"
             value={safeStart}
             max={duration}
-            onChange={(v) => setField("start_ms", String(Math.min(v, safeEnd)))}
+            onChange={setStart}
           />
           <TimelineSlider
             label="End"
             value={safeEnd}
             max={duration}
-            onChange={(v) => setField("end_ms", String(Math.max(v, safeStart)))}
+            onChange={setEnd}
           />
         </div>
       </div>
@@ -1353,9 +1460,14 @@ function TimelinePreview({
         previewBase={previewBase}
         storageQuery={storageQuery}
         onPick={(ms) => {
-          const distStart = Math.abs(ms - safeStart);
-          const distEnd = Math.abs(ms - safeEnd);
-          setField(distStart <= distEnd ? "start_ms" : "end_ms", String(ms));
+          const length = Math.max(0, safeEnd - safeStart);
+          const nextStart = clampMs(ms, 0, duration);
+          const nextEnd = Math.min(duration, nextStart + length);
+          setField("start_ms", String(nextStart));
+          if (op === "extract_reel" && length > 0) {
+            setField("end_ms", String(nextEnd));
+          }
+          seek(nextStart);
         }}
       />
     </div>
@@ -1512,10 +1624,10 @@ function KeyframeButtons({
 
 function ReelGuide({ ratio }: { ratio: string }) {
   return (
-    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+    <div className="absolute inset-0 flex items-center justify-center pointer-events-none overflow-hidden">
       <div
         className="border-2 border-accent bg-black/10 shadow-[0_0_0_999px_rgba(0,0,0,0.28)]"
-        style={{ height: "82%", aspectRatio: cssAspectRatio(ratio) }}
+        style={{ height: "100%", maxWidth: "100%", aspectRatio: cssAspectRatio(ratio) }}
       />
     </div>
   );
@@ -1566,6 +1678,24 @@ function OperationSummary({ op, row, fields }: { op: OpName; row: MediaRow; fiel
 function posterURL(row: MediaRow, previewBase: string, storageQuery: string): string | undefined {
   const poster = (row.derivations ?? []).find((d) => (d.kind === "thumbnail" || d.kind === "cover") && d.status === "ok");
   return poster ? `${previewBase}/${poster.storage_file_id}/content?${storageQuery}` : undefined;
+}
+
+function outputFolderOptions(currentFolder: string, childFolders: string[]): string[] {
+  const out = new Set<string>();
+  out.add("/renders/");
+  if (currentFolder) out.add(normaliseFolderInput(currentFolder));
+  for (const child of childFolders) {
+    out.add(normaliseFolderInput(`${currentFolder}${child}/`));
+  }
+  return Array.from(out);
+}
+
+function normaliseFolderInput(value: string): string {
+  let v = value.trim();
+  if (!v) return "/";
+  if (!v.startsWith("/")) v = "/" + v;
+  if (!v.endsWith("/")) v += "/";
+  return v.replace(/\/+/g, "/");
 }
 
 function keyframesFor(row: MediaRow): Derivation[] {
