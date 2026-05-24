@@ -561,6 +561,34 @@ interface AttachDomainResp {
   tls: { managed: boolean; status: string; cert_id?: string };
 }
 
+interface DomainOption {
+  id?: number;
+  name: string;
+  dns_provider_slug?: string;
+  connection_id?: number;
+}
+
+interface DomainOptionsResp {
+  routing_bound: boolean;
+  dns_bound: boolean;
+  tls_bound: boolean;
+  target?: string;
+  domains: DomainOption[];
+  warnings?: string[];
+}
+
+type DomainConnectMode = "managed" | "manual";
+type HostMode = "root" | "subdomain";
+
+function isIPv4Literal(value: string): boolean {
+  const parts = value.trim().split(".");
+  if (parts.length !== 4) return false;
+  return parts.every((part) => {
+    const n = Number(part);
+    return part !== "" && Number.isInteger(n) && n >= 0 && n <= 255;
+  });
+}
+
 function ConnectDomainDialog({
   projectId,
   siteSlug,
@@ -574,18 +602,87 @@ function ConnectDomainDialog({
   onClose: () => void;
   onAttached: () => void;
 }) {
-  const [fqdn, setFqdn] = useState("");
+  const [options, setOptions] = useState<DomainOptionsResp | null>(null);
+  const [optionsLoading, setOptionsLoading] = useState(true);
+  const [connectMode, setConnectMode] = useState<DomainConnectMode>("manual");
+  const [hostMode, setHostMode] = useState<HostMode>("subdomain");
+  const [selectedDomain, setSelectedDomain] = useState("");
+  const [subdomain, setSubdomain] = useState("");
+  const [manualFqdn, setManualFqdn] = useState("");
   const [target, setTarget] = useState("");
-  const [autoDNS, setAutoDNS] = useState(true);
+  const [autoDNS, setAutoDNS] = useState(false);
   const [autoTLS, setAutoTLS] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AttachDomainResp | null>(null);
 
+  const loadOptions = useCallback(async () => {
+    setOptionsLoading(true);
+    setError(null);
+    try {
+      const url = `/api/apps/content/admin/domain-options?project_id=${encodeURIComponent(projectId)}`;
+      const r = await fetch(url, { headers: { "Content-Type": "application/json" } });
+      const body = await r.json();
+      if (!r.ok) throw new Error(body?.error || `HTTP ${r.status}`);
+      const next = body as DomainOptionsResp;
+      next.domains = next.domains ?? [];
+      next.warnings = next.warnings ?? [];
+      setOptions(next);
+      const managed = next.dns_bound && next.domains.length > 0;
+      setConnectMode(managed ? "managed" : "manual");
+      setAutoDNS(managed);
+      setAutoTLS(next.tls_bound);
+      if (managed) {
+        setSelectedDomain((current) => current || next.domains[0]?.name || "");
+      }
+    } catch (e) {
+      setOptions({
+        routing_bound: false,
+        dns_bound: false,
+        tls_bound: false,
+        domains: [],
+        warnings: [String(e instanceof Error ? e.message : e)],
+      });
+      setConnectMode("manual");
+      setAutoDNS(false);
+      setAutoTLS(false);
+    } finally {
+      setOptionsLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    loadOptions();
+  }, [loadOptions]);
+
+  const managedAvailable = Boolean(options?.dns_bound && options.domains.length > 0);
+  const cleanSubdomain = subdomain.trim().toLowerCase().replace(/^\.+|\.+$/g, "");
+  const fqdn = useMemo(() => {
+    if (connectMode === "managed") {
+      if (!selectedDomain) return "";
+      if (hostMode === "root") return selectedDomain;
+      return cleanSubdomain ? `${cleanSubdomain}.${selectedDomain}` : "";
+    }
+    return manualFqdn.trim().toLowerCase().replace(/^\.+|\.+$/g, "");
+  }, [cleanSubdomain, connectMode, hostMode, manualFqdn, selectedDomain]);
+  const targetPreview = target.trim() || options?.target || "";
+  const recordPreview = useMemo(() => {
+    if (!fqdn) return null;
+    const targetIsIP = targetPreview && isIPv4Literal(targetPreview);
+    const type = targetIsIP ? "A" : hostMode === "root" ? "A" : "CNAME";
+    const name = connectMode === "managed"
+      ? hostMode === "root"
+        ? "@"
+        : cleanSubdomain
+      : fqdn;
+    const value = type === "A" && targetPreview && !targetIsIP ? "(IP required)" : targetPreview || "(infer at connect)";
+    return { name, type, value };
+  }, [cleanSubdomain, connectMode, fqdn, hostMode, targetPreview]);
+
   const submit = async () => {
-    const value = fqdn.trim().toLowerCase();
+    const value = fqdn;
     if (!value) {
-      setError("FQDN required");
+      setError(connectMode === "managed" ? "Choose root or enter a subdomain" : "Domain required");
       return;
     }
     setSubmitting(true);
@@ -675,43 +772,159 @@ function ConnectDomainDialog({
       onClick={onClose}
     >
       <div
-        className="bg-bg border border-border rounded p-4 w-96"
+        className="bg-bg border border-border rounded p-4 w-[32rem] max-w-[calc(100vw-2rem)] max-h-[90vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <h3 className="font-semibold mb-2">Connect a domain to {siteName}</h3>
-        <p className="text-xs text-text-muted mb-3">
-          The domain will point to this site. Requires the <code>routes</code> app bound; <code>domains</code> and <code>certs</code> are optional for auto-DNS + auto-HTTPS.
-        </p>
-        <label className="block mb-2">
-          <span className="text-xs text-text-muted">FQDN</span>
-          <input
-            type="text"
-            value={fqdn}
-            onChange={(e) => setFqdn(e.target.value)}
-            placeholder="e.g. acme.example.com"
-            className="block w-full mt-1 border border-border rounded px-2 py-1 bg-bg-input"
-            autoFocus
-          />
-        </label>
-        <label className="block mb-2">
-          <span className="text-xs text-text-muted">DNS target (optional)</span>
-          <input
-            type="text"
-            value={target}
-            onChange={(e) => setTarget(e.target.value)}
-            placeholder="server IP for A, or hostname for CNAME"
-            className="block w-full mt-1 border border-border rounded px-2 py-1 bg-bg-input"
-          />
-          <span className="block text-xs text-text-dim mt-1">Leave blank to infer from APTEVA_PUBLIC_URL.</span>
-        </label>
+
+        {optionsLoading && <div className="text-xs text-text-muted py-3">Loading domains…</div>}
+
+        {!optionsLoading && managedAvailable && (
+          <div className="space-y-3">
+            <div className="flex rounded border border-border overflow-hidden w-fit">
+              <button
+                type="button"
+                onClick={() => {
+                  setConnectMode("managed");
+                  setAutoDNS(true);
+                }}
+                className={`px-3 py-1 text-xs ${connectMode === "managed" ? "bg-bg-input font-semibold" : ""}`}
+              >
+                Managed
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setConnectMode("manual");
+                  setAutoDNS(false);
+                }}
+                className={`px-3 py-1 text-xs border-l border-border ${connectMode === "manual" ? "bg-bg-input font-semibold" : ""}`}
+              >
+                Manual
+              </button>
+            </div>
+
+            {connectMode === "managed" && (
+              <>
+                <label className="block">
+                  <span className="text-xs text-text-muted">Domain</span>
+                  <select
+                    value={selectedDomain}
+                    onChange={(e) => setSelectedDomain(e.target.value)}
+                    className="block w-full mt-1 border border-border rounded px-2 py-1 bg-bg-input"
+                    autoFocus
+                  >
+                    {options!.domains.map((domain) => (
+                      <option key={domain.name} value={domain.name}>
+                        {domain.name}{domain.dns_provider_slug ? ` · ${domain.dns_provider_slug}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div>
+                  <span className="text-xs text-text-muted">Host</span>
+                  <div className="flex rounded border border-border overflow-hidden w-fit mt-1">
+                    <button
+                      type="button"
+                      onClick={() => setHostMode("root")}
+                      className={`px-3 py-1 text-xs ${hostMode === "root" ? "bg-bg-input font-semibold" : ""}`}
+                    >
+                      Root
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setHostMode("subdomain")}
+                      className={`px-3 py-1 text-xs border-l border-border ${hostMode === "subdomain" ? "bg-bg-input font-semibold" : ""}`}
+                    >
+                      Subdomain
+                    </button>
+                  </div>
+                </div>
+                {hostMode === "subdomain" && (
+                  <label className="block">
+                    <span className="text-xs text-text-muted">Subdomain</span>
+                    <div className="flex items-center mt-1">
+                      <input
+                        type="text"
+                        value={subdomain}
+                        onChange={(e) => setSubdomain(e.target.value)}
+                        placeholder="www"
+                        className="flex-1 border border-border rounded-l px-2 py-1 bg-bg-input"
+                      />
+                      <span className="border border-l-0 border-border rounded-r px-2 py-1 text-sm text-text-muted bg-bg-card">
+                        .{selectedDomain}
+                      </span>
+                    </div>
+                  </label>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {!optionsLoading && (!managedAvailable || connectMode === "manual") && (
+          <label className="block mb-2">
+            <span className="text-xs text-text-muted">Domain</span>
+            <input
+              type="text"
+              value={manualFqdn}
+              onChange={(e) => setManualFqdn(e.target.value)}
+              placeholder="e.g. acme.example.com"
+              className="block w-full mt-1 border border-border rounded px-2 py-1 bg-bg-input"
+              autoFocus={!managedAvailable}
+            />
+          </label>
+        )}
+
+        {fqdn && (
+          <div className="border border-border rounded p-2 my-3 text-xs">
+            <div className="text-text-muted mb-1">Will connect</div>
+            <code className="break-all">{fqdn}</code>
+            {recordPreview && (
+              <div className="text-text-dim mt-2">
+                DNS: <code>{recordPreview.name}</code> {recordPreview.type} <code>{recordPreview.value}</code>
+              </div>
+            )}
+          </div>
+        )}
+
+        <details className="border border-border rounded p-2 my-3">
+          <summary className="cursor-pointer text-xs text-text-muted">Advanced</summary>
+          <label className="block mt-2">
+            <span className="text-xs text-text-muted">DNS target (optional)</span>
+            <input
+              type="text"
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+              placeholder={options?.target || "server IP for A, or hostname for CNAME"}
+              className="block w-full mt-1 border border-border rounded px-2 py-1 bg-bg-input"
+            />
+          </label>
+        </details>
+
         <label className="flex items-center gap-2 mb-1 text-xs">
-          <input type="checkbox" checked={autoDNS} onChange={(e) => setAutoDNS(e.target.checked)} />
-          Auto-provision DNS (requires domains app)
+          <input
+            type="checkbox"
+            checked={autoDNS}
+            disabled={!options?.dns_bound}
+            onChange={(e) => setAutoDNS(e.target.checked)}
+          />
+          Auto-provision DNS
         </label>
         <label className="flex items-center gap-2 mb-3 text-xs">
-          <input type="checkbox" checked={autoTLS} onChange={(e) => setAutoTLS(e.target.checked)} />
-          Auto-issue HTTPS cert (requires certs app)
+          <input
+            type="checkbox"
+            checked={autoTLS}
+            disabled={!options?.tls_bound}
+            onChange={(e) => setAutoTLS(e.target.checked)}
+          />
+          Auto-issue HTTPS cert
         </label>
+        {(options?.warnings ?? []).length > 0 && (
+          <div className="bg-amber-100 text-amber-900 rounded px-3 py-2 my-2 text-xs">
+            {(options?.warnings ?? []).map((warning, i) => <div key={i}>{warning}</div>)}
+          </div>
+        )}
         {error && (
           <div className="bg-red-100 text-red-800 rounded px-3 py-2 my-2 text-xs">{error}</div>
         )}
@@ -719,7 +932,7 @@ function ConnectDomainDialog({
           <button onClick={onClose} className="px-3 py-1 rounded border border-border">Cancel</button>
           <button
             onClick={submit}
-            disabled={submitting}
+            disabled={optionsLoading || submitting}
             className="px-3 py-1 rounded border border-border font-semibold disabled:opacity-50"
           >
             {submitting ? "Connecting…" : "Connect"}

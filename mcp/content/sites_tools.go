@@ -164,6 +164,20 @@ func (a *App) handleHTTPSites(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *App) handleHTTPDomainOptions(w http.ResponseWriter, r *http.Request) {
+	ctx := getAppCtx(r)
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	httpJSON(w, buildDomainOptions(ctx, pid))
+}
+
 func (a *App) handleHTTPSiteItem(w http.ResponseWriter, r *http.Request) {
 	ctx := getAppCtx(r)
 	pid, err := resolveProjectFromRequest(r)

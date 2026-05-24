@@ -130,6 +130,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/admin/settings", Handler: a.handleHTTPSettings},
 		{Pattern: "/admin/themes", Handler: a.handleHTTPThemes},
 		{Pattern: "/admin/block-types", Handler: a.handleHTTPBlockTypes},
+		{Pattern: "/admin/domain-options", Handler: a.handleHTTPDomainOptions},
 		{Pattern: "/admin/templates", Handler: a.handleHTTPTemplates},
 		{Pattern: "/admin/templates/", Handler: a.handleHTTPTemplateItem},
 		{Pattern: "/admin/sites", Handler: a.handleHTTPSites},

@@ -28,7 +28,10 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -74,9 +77,25 @@ type DNSRecord struct {
 }
 
 type AttachTLSStatus struct {
-	Managed bool   `json:"managed"`  // true if certs is bound and we kicked off issuance
-	Status  string `json:"status"`   // pending | issued | skipped | error
+	Managed bool   `json:"managed"` // true if certs is bound and we kicked off issuance
+	Status  string `json:"status"`  // pending | issued | skipped | error
 	CertID  string `json:"cert_id,omitempty"`
+}
+
+type DomainOption struct {
+	ID              int64  `json:"id,omitempty"`
+	Name            string `json:"name"`
+	DNSProviderSlug string `json:"dns_provider_slug,omitempty"`
+	ConnectionID    int64  `json:"connection_id,omitempty"`
+}
+
+type DomainOptionsResult struct {
+	RoutingBound bool           `json:"routing_bound"`
+	DNSBound     bool           `json:"dns_bound"`
+	TLSBound     bool           `json:"tls_bound"`
+	Target       string         `json:"target,omitempty"`
+	Domains      []DomainOption `json:"domains"`
+	Warnings     []string       `json:"warnings,omitempty"`
 }
 
 // toolSitesAttachDomain implements the sites_attach_domain MCP tool.
@@ -107,6 +126,34 @@ func (a *App) toolSitesAttachDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 		target = inferDNSTarget(ctx)
 	}
 
+	if ctx.IntegrationFor("routing") == nil {
+		return nil, errors.New("routing integration not bound — install the routes app and bind it to this content install to register the hostname → sidecar route")
+	}
+	dnsBound := ctx.IntegrationFor("dns") != nil
+	manageDNS := autoDNS && dnsBound
+	apex, sub, err := domainPartsForAttach(ctx, pid, fqdn, manageDNS)
+	if err != nil {
+		return nil, err
+	}
+	suggested := suggestDNSRecord(sub, target)
+	if manageDNS {
+		if target == "" {
+			return nil, errors.New("auto-DNS requires a DNS target — pass target explicitly or set APTEVA_PUBLIC_URL so the platform host can be inferred")
+		}
+		if suggested.Value == "" {
+			return nil, errors.New("auto-DNS for a root domain requires an IP target; use a subdomain for CNAME-style targets or pass an IP target")
+		}
+	}
+	installID, err := myInstallID()
+	if err != nil {
+		return nil, err
+	}
+	appPort := os.Getenv("APTEVA_APP_PORT")
+	if appPort == "" {
+		return nil, errors.New("APTEVA_APP_PORT not set — the platform should inject this; without it the routes target can't be built")
+	}
+	myTarget := fmt.Sprintf("http://127.0.0.1:%s", appPort)
+
 	// 1. Update site hostname so resolveSiteIDFromRequest picks it up
 	//    on the next inbound request matching this hostname.
 	hostnamePtr := fqdn
@@ -119,21 +166,7 @@ func (a *App) toolSitesAttachDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 		Site: AttachSite{ID: updatedSite.ID, Slug: updatedSite.Slug, Hostname: updatedSite.Hostname},
 	}
 
-	// 2. Routes — required. Without the routing role bound we still
-	//    persist the hostname (above) so a future bind picks it up,
-	//    but we surface the missing-role as an error so the caller
-	//    knows the domain isn't actually reachable yet.
-	if ctx.IntegrationFor("routing") == nil {
-		return nil, errors.New("routing integration not bound — install the routes app and bind it to this content install to register the hostname → sidecar route")
-	}
-	installID, err := myInstallID()
-	if err != nil {
-		return nil, err
-	}
-	myTarget := fmt.Sprintf("http://127.0.0.1:%s", os.Getenv("APTEVA_APP_PORT"))
-	if os.Getenv("APTEVA_APP_PORT") == "" {
-		return nil, errors.New("APTEVA_APP_PORT not set — the platform should inject this; without it the routes target can't be built")
-	}
+	// 2. Routes — required and preflighted before mutating the site row.
 	// allow_http defaults to !auto_tls — if we aren't managing TLS,
 	// something upstream is (ngrok tunnel, Cloudflare front, custom
 	// reverse proxy). Forcing a 301 → HTTPS on the host-router side
@@ -165,9 +198,7 @@ func (a *App) toolSitesAttachDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 	// 3. DNS — optional. Either we have the domains role and an apex
 	//    on file → auto-provision; or we just emit the suggested
 	//    records so the user can set them manually.
-	apex, sub := splitFQDN(fqdn)
-	suggested := suggestDNSRecord(sub, target)
-	if autoDNS && ctx.IntegrationFor("dns") != nil && target != "" && apex != "" {
+	if manageDNS && apex != "" {
 		dnsArgs := map[string]any{
 			"domain": apex,
 			"name":   firstNonEmpty(sub, "@"),
@@ -275,8 +306,10 @@ func (a *App) toolSitesDetachDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 	// detach (commonly: repointing the FQDN elsewhere, or swapping
 	// the underlying site).
 	if boolArgOr(args, "remove_dns", false) && ctx.IntegrationFor("dns") != nil {
-		apex, sub := splitFQDN(fqdn)
-		if apex != "" {
+		apex, sub, err := domainPartsForAttach(ctx, pid, fqdn, true)
+		if err != nil {
+			out["dns_records_remove_error"] = err.Error()
+		} else if apex != "" {
 			subArg := firstNonEmpty(sub, "@")
 			var dOut map[string]any
 			// Try the most likely types — A and CNAME — and ignore
@@ -296,6 +329,97 @@ func (a *App) toolSitesDetachDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 }
 
 // ── helpers ──────────────────────────────────────────────────────
+
+func buildDomainOptions(ctx *sdk.AppCtx, pid string) DomainOptionsResult {
+	out := DomainOptionsResult{
+		RoutingBound: ctx != nil && ctx.IntegrationFor("routing") != nil,
+		DNSBound:     ctx != nil && ctx.IntegrationFor("dns") != nil,
+		TLSBound:     ctx != nil && ctx.IntegrationFor("tls") != nil,
+		Target:       inferDNSTarget(ctx),
+		Domains:      []DomainOption{},
+	}
+	if !out.RoutingBound {
+		out.Warnings = append(out.Warnings, "Routes app is not bound; custom host routing cannot be registered yet.")
+	}
+	if !out.DNSBound {
+		out.Warnings = append(out.Warnings, "Domains app is not bound; DNS records must be created manually.")
+		return out
+	}
+	domains, err := listManagedDomains(ctx, pid)
+	if err != nil {
+		out.Warnings = append(out.Warnings, "Could not load Domains inventory: "+err.Error())
+		return out
+	}
+	out.Domains = domains
+	if len(out.Domains) == 0 {
+		out.Warnings = append(out.Warnings, "No domains are registered in the Domains app for this project.")
+	}
+	return out
+}
+
+func listManagedDomains(ctx *sdk.AppCtx, pid string) ([]DomainOption, error) {
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return nil, errors.New("platform unavailable")
+	}
+	args := map[string]any{}
+	if pid != "" {
+		args["_project_id"] = pid
+	}
+	var resp struct {
+		Domains []DomainOption `json:"domains"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("domains", "domain_list", args, &resp); err != nil {
+		return nil, fmt.Errorf("domains.domain_list failed: %w", err)
+	}
+	domains := resp.Domains
+	for i := range domains {
+		domains[i].Name = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(domains[i].Name, ".")))
+	}
+	sort.SliceStable(domains, func(i, j int) bool {
+		return domains[i].Name < domains[j].Name
+	})
+	return domains, nil
+}
+
+func domainPartsForAttach(ctx *sdk.AppCtx, pid, fqdn string, requireManaged bool) (apex, sub string, err error) {
+	fqdn = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(fqdn, ".")))
+	if requireManaged {
+		domains, err := listManagedDomains(ctx, pid)
+		if err != nil {
+			return "", "", err
+		}
+		apex, sub, ok := matchManagedDomain(fqdn, domains)
+		if !ok {
+			return "", "", fmt.Errorf("no registered domain matches %q — add the root domain in the Domains app first, or disable auto-DNS", fqdn)
+		}
+		return apex, sub, nil
+	}
+	apex, sub = splitFQDN(fqdn)
+	return apex, sub, nil
+}
+
+func matchManagedDomain(fqdn string, domains []DomainOption) (apex, sub string, ok bool) {
+	fqdn = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(fqdn, ".")))
+	best := ""
+	for _, d := range domains {
+		name := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(d.Name, ".")))
+		if name == "" {
+			continue
+		}
+		if fqdn == name || strings.HasSuffix(fqdn, "."+name) {
+			if len(name) > len(best) {
+				best = name
+			}
+		}
+	}
+	if best == "" {
+		return "", "", false
+	}
+	if fqdn == best {
+		return best, "", true
+	}
+	return best, strings.TrimSuffix(fqdn, "."+best), true
+}
 
 // siteFromAttachArgs resolves the site from id OR slug. Falls back to
 // the project's default site when neither is supplied, so the panel's
@@ -413,17 +537,41 @@ func inferDNSTarget(_ *sdk.AppCtx) string {
 	if u == "" {
 		return ""
 	}
-	// Strip scheme + path; keep host.
-	if i := strings.Index(u, "://"); i >= 0 {
-		u = u[i+3:]
+	host := u
+	if parsed, err := url.Parse(u); err == nil && parsed.Host != "" {
+		host = parsed.Hostname()
+	} else {
+		// Strip scheme + path; keep host.
+		if i := strings.Index(host, "://"); i >= 0 {
+			host = host[i+3:]
+		}
+		if i := strings.IndexAny(host, "/?"); i >= 0 {
+			host = host[:i]
+		}
+		if j := strings.LastIndex(host, ":"); j >= 0 {
+			host = host[:j]
+		}
 	}
-	if i := strings.IndexAny(u, "/?"); i >= 0 {
-		u = u[:i]
+	host = strings.TrimSpace(host)
+	if host == "" || host == "localhost" {
+		return ""
 	}
-	if j := strings.LastIndex(u, ":"); j >= 0 {
-		u = u[:j]
+	if ip := net.ParseIP(host); ip != nil {
+		return host
 	}
-	return strings.TrimSpace(u)
+	if ips, err := net.LookupIP(host); err == nil {
+		for _, ip := range ips {
+			if v4 := ip.To4(); v4 != nil && !v4.IsLoopback() && !v4.IsPrivate() {
+				return v4.String()
+			}
+		}
+		for _, ip := range ips {
+			if v4 := ip.To4(); v4 != nil {
+				return v4.String()
+			}
+		}
+	}
+	return host
 }
 
 // boolArgOr coerces an args map value to bool with a default. JSON
