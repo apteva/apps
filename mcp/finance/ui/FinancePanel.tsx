@@ -84,6 +84,8 @@ interface Holding {
   id: number;
   account_id: number;
   instrument_id: number;
+  instrument?: string;
+  symbol?: string;
   quantity: number;
   cost_basis: number;
   current_price?: number | null;
@@ -603,12 +605,12 @@ function OverviewTab({
         ) : (
           <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             {movers.map(h => {
-              const inst = ""; // resolved via instrument id mapping if needed
               const acc = accounts.find(a => a.id === h.account_id);
+              const label = h.instrument || h.symbol || `#${h.instrument_id}`;
               return (
                 <li key={h.id} className="flex items-center justify-between rounded-md border border-border px-3 py-2 border-border">
                   <div>
-                    <div className="text-sm font-medium">#{h.instrument_id} {inst}</div>
+                    <div className="text-sm font-medium">{label}</div>
                     <div className="text-xs text-text-muted">{acc?.name ?? "—"} • {h.quantity}</div>
                   </div>
                   <div className={`text-right text-sm ${h.unrealized_pl >= 0 ? "text-success" : "text-error"}`}>
@@ -1009,11 +1011,13 @@ function HoldingsTab({ holdings, accounts }: { holdings: Holding[]; accounts: Ac
           {sorted.map(h => {
             const acc = accounts.find(a => a.id === h.account_id);
             const ins = instruments[h.instrument_id];
+            const symbol = ins?.symbol ?? h.symbol ?? `#${h.instrument_id}`;
+            const name = ins?.name ?? h.instrument ?? "";
             return (
               <tr key={h.id} className="border-b border-border-subtle last:border-0 border-border-subtle">
                 <td className="px-3 py-2">
-                  <div className="font-medium">{ins?.symbol ?? `#${h.instrument_id}`}</div>
-                  <div className="text-xs text-text-muted">{ins?.name ?? ""}</div>
+                  <div className="font-medium">{symbol}</div>
+                  <div className="text-xs text-text-muted">{name}</div>
                 </td>
                 <td className="px-3 py-2 text-text-muted">{acc?.name ?? "—"}</td>
                 <td className="px-3 py-2 text-right tabular-nums">{h.quantity}</td>

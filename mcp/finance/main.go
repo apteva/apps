@@ -520,6 +520,8 @@ type Holding struct {
 	ID           int64   `json:"id"`
 	AccountID    int64   `json:"account_id"`
 	InstrumentID int64   `json:"instrument_id"`
+	Instrument   string  `json:"instrument,omitempty"`
+	Symbol       string  `json:"symbol,omitempty"`
 	Quantity     float64 `json:"quantity"`
 	CostBasis    int64   `json:"cost_basis"`
 	OpenedAt     string  `json:"opened_at,omitempty"`
@@ -1094,7 +1096,7 @@ func (a *App) toolHoldingsSet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 func listHoldingsRich(ctx *sdk.AppCtx, accountID, instrumentID int64, includeClosed bool) ([]Holding, error) {
 	q := `SELECT h.id, h.account_id, h.instrument_id, h.quantity, h.cost_basis,
 	             COALESCE(h.opened_at,''), COALESCE(h.closed_at,''),
-	             i.quote_currency, a.currency
+	             i.name, i.symbol, i.quote_currency, a.currency
 	      FROM holdings h
 	      JOIN instruments i ON i.id = h.instrument_id
 	      JOIN accounts    a ON a.id = h.account_id
@@ -1125,7 +1127,7 @@ func listHoldingsRich(ctx *sdk.AppCtx, accountID, instrumentID int64, includeClo
 	for rows.Next() {
 		var d drained
 		if err := rows.Scan(&d.h.ID, &d.h.AccountID, &d.h.InstrumentID, &d.h.Quantity,
-			&d.h.CostBasis, &d.h.OpenedAt, &d.h.ClosedAt, &d.quoteCcy, &d.accCcy); err == nil {
+			&d.h.CostBasis, &d.h.OpenedAt, &d.h.ClosedAt, &d.h.Instrument, &d.h.Symbol, &d.quoteCcy, &d.accCcy); err == nil {
 			bare = append(bare, d)
 		}
 	}
@@ -2647,7 +2649,15 @@ func syncTrading212Positions(ctx *sdk.AppCtx, app *App, acc Account, connID int6
 			}); err != nil {
 				return n, skipped, err
 			}
-			if price := firstFloat(item, "currentPrice", "current_price", "price", "marketPrice"); price > 0 {
+			price := firstFloat(item, "currentPrice", "current_price", "price", "marketPrice")
+			if wallet := childMap(item, "walletImpact"); len(wallet) > 0 {
+				if c := strings.ToUpper(firstString(wallet, "currency", "currencyCode")); c == "" || c == acc.Currency {
+					if value := firstFloat(wallet, "currentValue", "marketValue", "value"); value > 0 && qty > 0 {
+						price = value / qty
+					}
+				}
+			}
+			if price > 0 {
 				_, _ = app.toolPricesSet(ctx, map[string]any{
 					"instrument_id": float64(inst.ID),
 					"price":         float64(int64(math.Round(price * 100))),
@@ -2999,13 +3009,15 @@ func ensureBrokerInstrument(ctx *sdk.AppCtx, app *App, info brokerInstrumentInfo
 	if info.Currency == "" {
 		info.Currency = "EUR"
 	}
-	out, err := app.toolInstrumentsSearch(ctx, map[string]any{"query": info.Symbol, "kind": info.Kind})
-	if err == nil {
-		for _, ins := range out.(map[string]any)["instruments"].([]Instrument) {
-			if strings.EqualFold(ins.Symbol, info.Symbol) && ins.Kind == info.Kind {
-				return ins, nil
-			}
+	if info.Name == "" {
+		info.Name = info.Symbol
+	}
+	if ins, ok := findBrokerInstrument(ctx, info); ok {
+		if info.Name != "" && (ins.Name == "" || ins.Name == ins.Symbol || strings.HasPrefix(ins.Name, "Trading 212")) {
+			_, _ = ctx.AppDB().Exec(`UPDATE instruments SET name=? WHERE id=?`, info.Name, ins.ID)
+			ins.Name = info.Name
 		}
+		return ins, nil
 	}
 	created, err := app.toolInstrumentsCreate(ctx, map[string]any{
 		"kind":           info.Kind,
@@ -3023,6 +3035,26 @@ func ensureBrokerInstrument(ctx *sdk.AppCtx, app *App, info brokerInstrumentInfo
 		return Instrument{}, err
 	}
 	return created.(Instrument), nil
+}
+
+func findBrokerInstrument(ctx *sdk.AppCtx, info brokerInstrumentInfo) (Instrument, bool) {
+	rows, err := ctx.AppDB().Query(
+		`SELECT id, project_id, kind, symbol, name, COALESCE(isin,''), COALESCE(exchange,''), quote_currency, metadata, created_at
+		 FROM instruments
+		 WHERE kind=? AND (UPPER(symbol)=UPPER(?) OR (isin IS NOT NULL AND isin=?))
+		 ORDER BY CASE WHEN quote_currency=? THEN 0 ELSE 1 END, id
+		 LIMIT 1`,
+		info.Kind, info.Symbol, info.ISIN, info.Currency,
+	)
+	if err != nil {
+		return Instrument{}, false
+	}
+	defer rows.Close()
+	if rows.Next() {
+		ins, err := scanInstrument(rows)
+		return ins, err == nil
+	}
+	return Instrument{}, false
 }
 
 func stableBrokerID(item, child map[string]any, postedAt, symbol, kind string, qty, amount float64) string {
