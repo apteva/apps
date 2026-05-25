@@ -1390,11 +1390,12 @@ function ComposeDialog({
   // time keeps the form readable; null = nothing expanded.
   const [expanded, setExpanded] = useState<number | null>(null);
   // Media attached to the post. We upload immediately to the storage app
-  // (so the post_create call only carries IDs, not bytes) and remember the
-  // returned id + a local preview URL. The previewURL is a local
-  // ObjectURL — cheap, but we revoke it on remove + unmount so the
-  // browser doesn't keep the bytes around forever.
-  const [media, setMedia] = useState<{ id: number; name: string; mime: string; previewURL: string }[]>([]);
+  // (so post_create only carries IDs), and keep lightweight preview
+  // URLs for the compose modal. Videos prefer Media thumbnails when
+  // present; otherwise we generate a small poster from metadata/range
+  // loading instead of trying to load the whole file.
+  const [media, setMedia] = useState<ComposeMedia[]>([]);
+  const mediaRef = useRef<ComposeMedia[]>([]);
   const [uploading, setUploading] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1434,13 +1435,47 @@ function ComposeDialog({
     });
   };
 
+  useEffect(() => {
+    mediaRef.current = media;
+  }, [media]);
+
   // Revoke any object URLs we created when the modal closes.
   useEffect(() => {
     return () => {
-      for (const m of media) URL.revokeObjectURL(m.previewURL);
+      for (const m of mediaRef.current) revokeComposeMedia(m);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    const pending = media.filter((m) =>
+      isVideoMime(m.mime, m.name) && !m.posterURL && !m.posterLoading && !m.posterTried
+    );
+    if (pending.length === 0) return;
+    setMedia((prev) => prev.map((m) =>
+      pending.some((p) => p.id === m.id) ? { ...m, posterLoading: true } : m
+    ));
+    for (const item of pending) {
+      buildVideoPoster(item.previewURL).then((posterURL) => {
+        setMedia((prev) => {
+          let found = false;
+          const next = prev.map((m) => {
+            if (m.id !== item.id) return m;
+            found = true;
+            if (m.posterObjectURL && m.posterURL) URL.revokeObjectURL(m.posterURL);
+            return {
+              ...m,
+              posterURL: posterURL || m.posterURL,
+              posterObjectURL: posterURL ? true : m.posterObjectURL,
+              posterLoading: false,
+              posterTried: true,
+            };
+          });
+          if (!found && posterURL) URL.revokeObjectURL(posterURL);
+          return next;
+        });
+      });
+    }
+  }, [media]);
 
   const toggle = (id: number) => {
     setSelected((s) => {
@@ -1456,7 +1491,7 @@ function ComposeDialog({
     if (fileList.length === 0) return;
     setUploading(true);
     try {
-      const uploaded: typeof media = [];
+      const uploaded: ComposeMedia[] = [];
       let i = 0;
       for (const file of fileList) {
         i += 1;
@@ -1476,11 +1511,14 @@ function ComposeDialog({
         if (typeof row.id !== "number") {
           throw new Error("storage didn't return a file id");
         }
+        const previewURL = URL.createObjectURL(file);
         uploaded.push({
           id: row.id,
           name: file.name,
           mime: file.type,
-          previewURL: URL.createObjectURL(file),
+          previewURL,
+          previewObjectURL: true,
+          posterTried: !isVideoMime(file.type, file.name),
         });
       }
       setMedia((prev) => [...prev, ...uploaded]);
@@ -1496,7 +1534,7 @@ function ComposeDialog({
   const removeMedia = (id: number) => {
     setMedia((prev) => {
       const dropped = prev.find((m) => m.id === id);
-      if (dropped) URL.revokeObjectURL(dropped.previewURL);
+      if (dropped) revokeComposeMedia(dropped);
       return prev.filter((m) => m.id !== id);
     });
   };
@@ -1505,17 +1543,23 @@ function ComposeDialog({
   // upload flow — the only difference is previewURL points at storage's
   // /content endpoint instead of a local ObjectURL. Skip ids already in
   // media so users don't double-attach the same file.
-  const addFromStorage = (picked: { id: number; name: string; content_type: string }[]) => {
+  const addFromStorage = (picked: { id: number; name: string; content_type: string; preview_url?: string }[]) => {
     setMedia((prev) => {
       const existing = new Set(prev.map((m) => m.id));
       const adds = picked
         .filter((f) => !existing.has(f.id))
-        .map((f) => ({
-          id: f.id,
-          name: f.name,
-          mime: f.content_type || "",
-          previewURL: storageURL(`/files/${f.id}/content`, projectId),
-        }));
+        .map((f) => {
+          const mime = f.content_type || "";
+          const isVideo = isVideoMime(mime, f.name);
+          return {
+            id: f.id,
+            name: f.name,
+            mime,
+            previewURL: storageURL(`/files/${f.id}/content`, projectId),
+            posterURL: isVideo ? f.preview_url : undefined,
+            posterTried: !isVideo || !!f.preview_url,
+          };
+        });
       return [...prev, ...adds];
     });
     setStatus(`Added ${picked.length} file${picked.length !== 1 ? "s" : ""} from storage.`);
@@ -1565,8 +1609,8 @@ function ComposeDialog({
       setBody("");
       setSelected(new Set());
       setScheduleAt("");
-      // Don't revoke the object URLs here — the cleanup effect handles
-      // them on unmount. Just clear the list visually.
+      for (const m of mediaRef.current) revokeComposeMedia(m);
+      mediaRef.current = [];
       setMedia([]);
       setStatus("Done.");
       onCreated();
@@ -1640,10 +1684,23 @@ function ComposeDialog({
                 <div
                   key={m.id}
                   className="relative w-20 h-20 rounded border border-border overflow-hidden bg-bg-input flex-shrink-0 group"
-                  title={m.name}
+                  aria-label={m.name}
                 >
-                  {m.mime.startsWith("video/") ? (
-                    <video src={m.previewURL} className="w-full h-full object-cover" muted />
+                  {isVideoMime(m.mime, m.name) ? (
+                    <>
+                      {m.posterURL ? (
+                        <img src={m.posterURL} alt="" className="w-full h-full object-cover" />
+                      ) : (
+                        <video
+                          src={m.previewURL}
+                          className="w-full h-full object-cover"
+                          muted
+                          playsInline
+                          preload="metadata"
+                        />
+                      )}
+                      <PlayBadge />
+                    </>
                   ) : (
                     <img src={m.previewURL} alt={m.name} className="w-full h-full object-cover" />
                   )}
@@ -1790,6 +1847,7 @@ interface StorageFile {
   content_type: string;
   folder?: string;
   size_bytes?: number;
+  preview_url?: string;
 }
 
 interface MediaDerivation {
@@ -1812,6 +1870,18 @@ interface MediaLibraryRow {
   description?: string;
   audience_rating?: "unrated" | "general" | "mature" | "adult" | "";
   derivations?: MediaDerivation[];
+}
+
+interface ComposeMedia {
+  id: number;
+  name: string;
+  mime: string;
+  previewURL: string;
+  previewObjectURL?: boolean;
+  posterURL?: string;
+  posterObjectURL?: boolean;
+  posterLoading?: boolean;
+  posterTried?: boolean;
 }
 
 type PickerTab = "media" | "storage";
@@ -1848,6 +1918,81 @@ function mediaPreviewURL(row: MediaLibraryRow, projectId?: string | null): strin
 
 function mediaHasThumbnail(row: MediaLibraryRow): boolean {
   return !!row.derivations?.some((d) => d.kind === "thumbnail" && d.status === "ok" && d.storage_file_id);
+}
+
+function isVideoMime(mime: string, name = ""): boolean {
+  return mime.startsWith("video/") || /\.(mp4|m4v|mov|webm|avi|mkv)$/i.test(name);
+}
+
+function revokeComposeMedia(m: ComposeMedia) {
+  if (m.previewObjectURL) URL.revokeObjectURL(m.previewURL);
+  if (m.posterObjectURL && m.posterURL) URL.revokeObjectURL(m.posterURL);
+}
+
+async function buildVideoPoster(src: string): Promise<string | null> {
+  if (typeof document === "undefined") return null;
+  return new Promise((resolve) => {
+    const video = document.createElement("video");
+    let done = false;
+    let timer: number | undefined;
+    const finish = (url: string | null) => {
+      if (done) return;
+      done = true;
+      if (timer != null) window.clearTimeout(timer);
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+      resolve(url);
+    };
+    const capture = () => {
+      if (!video.videoWidth || !video.videoHeight) {
+        finish(null);
+        return;
+      }
+      const maxSide = 240;
+      const scale = Math.min(1, maxSide / Math.max(video.videoWidth, video.videoHeight));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        finish(null);
+        return;
+      }
+      try {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob((blob) => {
+          finish(blob ? URL.createObjectURL(blob) : null);
+        }, "image/jpeg", 0.72);
+      } catch {
+        finish(null);
+      }
+    };
+    video.preload = "metadata";
+    video.muted = true;
+    video.playsInline = true;
+    video.addEventListener("error", () => finish(null), { once: true });
+    video.addEventListener("loadedmetadata", () => {
+      const target = Number.isFinite(video.duration) && video.duration > 0.2 ? 0.1 : 0;
+      if (Math.abs(video.currentTime - target) < 0.01) {
+        if (video.readyState >= 2) {
+          capture();
+          return;
+        }
+        video.addEventListener("loadeddata", capture, { once: true });
+        return;
+      }
+      video.addEventListener("seeked", capture, { once: true });
+      try {
+        video.currentTime = target;
+      } catch {
+        video.addEventListener("loadeddata", capture, { once: true });
+      }
+    }, { once: true });
+    timer = window.setTimeout(() => finish(null), 7000);
+    video.src = src;
+    video.load();
+  });
 }
 
 function PlayBadge() {
@@ -2057,6 +2202,7 @@ function StoragePickerDialog({
             name: mediaDisplayName(row),
             content_type: mediaContentType(row),
             folder: row.folder,
+            preview_url: mediaHasThumbnail(row) ? mediaPreviewURL(row, projectId) : undefined,
           } as StorageFile;
         })
         .filter((f): f is StorageFile => !!f);
