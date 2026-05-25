@@ -1202,9 +1202,33 @@ function PagePicker({
                   className="flex items-center gap-3 px-3 py-2 border border-border rounded hover:border-accent hover:bg-bg-input/40 text-sm disabled:opacity-50 disabled:cursor-not-allowed text-left transition-colors"
                 >
                   {p.avatar_url ? (
-                    <img src={p.avatar_url} alt="" className="w-9 h-9 rounded-full flex-shrink-0 object-cover" />
+                    <img
+                      src={p.avatar_url}
+                      alt=""
+                      className="w-9 h-9 rounded-full flex-shrink-0 object-cover"
+                      style={{
+                        width: 36,
+                        height: 36,
+                        minWidth: 36,
+                        minHeight: 36,
+                        maxWidth: 36,
+                        maxHeight: 36,
+                        objectFit: "cover",
+                        borderRadius: 9999,
+                      }}
+                    />
                   ) : (
-                    <div className="w-9 h-9 rounded-full bg-bg-input flex-shrink-0 grid place-items-center text-text-dim text-xs font-medium">
+                    <div
+                      className="w-9 h-9 rounded-full bg-bg-input flex-shrink-0 grid place-items-center text-text-dim text-xs font-medium"
+                      style={{
+                        width: 36,
+                        height: 36,
+                        minWidth: 36,
+                        minHeight: 36,
+                        maxWidth: 36,
+                        maxHeight: 36,
+                      }}
+                    >
                       {p.name.slice(0, 2).toUpperCase()}
                     </div>
                   )}
