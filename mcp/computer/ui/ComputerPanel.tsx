@@ -676,8 +676,16 @@ function InteractivePreview({
     const rect = img.getBoundingClientRect();
     const naturalW = img.naturalWidth || session.width || rect.width;
     const naturalH = img.naturalHeight || session.height || rect.height;
-    const x = ((e.clientX - rect.left) / rect.width) * naturalW;
-    const y = ((e.clientY - rect.top) / rect.height) * naturalH;
+    const scale = Math.min(rect.width / naturalW, rect.height / naturalH);
+    const renderedW = naturalW * scale;
+    const renderedH = naturalH * scale;
+    const offsetX = (rect.width - renderedW) / 2;
+    const offsetY = (rect.height - renderedH) / 2;
+    const localX = e.clientX - rect.left - offsetX;
+    const localY = e.clientY - rect.top - offsetY;
+    if (localX < 0 || localY < 0 || localX > renderedW || localY > renderedH) return;
+    const x = (localX / renderedW) * naturalW;
+    const y = (localY / renderedH) * naturalH;
     onClickPoint(x, y);
   };
 
