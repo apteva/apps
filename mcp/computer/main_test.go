@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"sort"
 	"sync"
@@ -203,6 +207,69 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	}
 }
 
+func TestHTTPRoutesUseCanonicalToolHandlers(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	proxy := true
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1200, Height: 700},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a},
+		url:     "https://example.test/app",
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		if cfg.Type != "local" {
+			t.Errorf("backend type: want local, got %q", cfg.Type)
+		}
+		if cfg.Width != 1200 || cfg.Height != 700 {
+			t.Errorf("viewport cfg: want 1200x700, got %dx%d", cfg.Width, cfg.Height)
+		}
+		return fake, nil
+	}
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	globalCtx = tk.NewAppCtx(t, "apteva.yaml")
+	t.Cleanup(func() { globalCtx = nil })
+
+	openBody := map[string]any{
+		"action":     "open",
+		"backend":    "local",
+		"url":        "https://example.test/app",
+		"context_id": "ctx-login",
+		"persist":    false,
+		"proxy":      proxy,
+		"viewport": map[string]any{
+			"width":  1200,
+			"height": 700,
+		},
+	}
+	openOut := postJSON(t, app.handleOpenSession, "/sessions", openBody)
+	sessionID, _ := openOut["session_id"].(string)
+	if sessionID == "" {
+		t.Fatalf("open returned no session_id: %v", openOut)
+	}
+	if fake.openContextID != "ctx-login" {
+		t.Errorf("context_id: want ctx-login, got %q", fake.openContextID)
+	}
+	if fake.openPersist {
+		t.Errorf("persist: want false")
+	}
+	if fake.openProxy == nil || *fake.openProxy != true {
+		t.Errorf("proxy: want true, got %v", fake.openProxy)
+	}
+
+	useOut := postJSON(t, app.handleComputerUse, "/sessions/"+sessionID+"/use", map[string]any{
+		"action":     "click",
+		"coordinate": "42,64",
+	})
+	if got := useOut["current_url"]; got != "https://example.test/app" {
+		t.Errorf("current_url: want example.test, got %v", got)
+	}
+	if fake.lastAction.Type != "click" || fake.lastAction.X != 42 || fake.lastAction.Y != 64 {
+		t.Errorf("last action: want click 42,64 got %+v", fake.lastAction)
+	}
+}
+
 // ─── fake Computer ─────────────────────────────────────────────────
 
 // fakeComp implements backends.Computer + SessionOpener + SessionInfo
@@ -212,13 +279,20 @@ type fakeComp struct {
 	png             []byte
 	url             string
 	openSessionURL  string
+	openContextID   string
+	openPersist     bool
+	openProxy       *bool
+	lastAction      backends.Action
 	screenshotCalls int
 	closeCalls      int
 	mu              sync.Mutex // for the unlikely concurrent test
 }
 
-func (f *fakeComp) Execute(_ backends.Action) ([]byte, error) {
-	return nil, nil
+func (f *fakeComp) Execute(action backends.Action) ([]byte, error) {
+	f.mu.Lock()
+	f.lastAction = action
+	f.mu.Unlock()
+	return f.png, nil
 }
 
 func (f *fakeComp) Screenshot() ([]byte, error) {
@@ -239,6 +313,9 @@ func (f *fakeComp) Close() error {
 
 func (f *fakeComp) OpenSession(opts backends.OpenOptions) error {
 	f.openSessionURL = opts.URL
+	f.openContextID = opts.ContextID
+	f.openPersist = opts.Persist
+	f.openProxy = opts.Proxy
 	return nil
 }
 
@@ -288,4 +365,24 @@ func samePermissions(a, b []sdk.Permission) bool {
 		}
 	}
 	return true
+}
+
+func postJSON(t *testing.T, handler http.HandlerFunc, path string, body any) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler(w, req)
+	if w.Code < 200 || w.Code >= 300 {
+		t.Fatalf("POST %s: status=%d body=%s", path, w.Code, w.Body.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
+	}
+	return out
 }

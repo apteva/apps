@@ -34,10 +34,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.4.0
+version: 0.5.0
 description: |
-  Watch and steer browser sessions. v0.4 exposes the generic
-  browser_session / computer_use MCP surface directly from the app.
+  Watch and steer browser sessions. v0.5 lets the operator panel use
+  the same browser_session / computer_use surface as agents.
 scopes: [project, global]
 requires:
   permissions:
@@ -227,8 +227,8 @@ func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
-// HTTPRoutes — three endpoints the dashboard panel uses to list +
-// open + close sessions. UI bundles under /ui/* are served by the
+// HTTPRoutes — endpoints the dashboard panel uses to list, open,
+// steer, and close sessions. UI bundles under /ui/* are served by the
 // platform's static handler; /health is auto-registered by the SDK.
 // All routes are reachable through the platform proxy at
 // /api/apps/computer/<pattern>.
@@ -237,6 +237,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: http.MethodGet, Pattern: "/sessions", Handler: a.handleListSessions},
 		{Method: http.MethodPost, Pattern: "/sessions", Handler: a.handleOpenSession},
 		{Method: http.MethodDelete, Pattern: "/sessions/{id}", Handler: a.handleCloseSession},
+		{Method: http.MethodPost, Pattern: "/sessions/{id}/use", Handler: a.handleComputerUse},
 		// /sessions/{id}/screenshot returns the raw PNG inline (not the
 		// base64-wrapped MCP-tool shape) so the panel's <img src> can
 		// poll it directly for a cheap "live" view.
@@ -870,7 +871,10 @@ func (a *App) handleOpenSession(w http.ResponseWriter, r *http.Request) {
 	if body == nil {
 		body = map[string]any{}
 	}
-	out, err := a.toolBrowserOpen(globalCtx, body)
+	if stringArg(body, "action") == "" {
+		body["action"] = "open"
+	}
+	out, err := a.toolBrowserSession(globalCtx, body)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -893,15 +897,36 @@ func (a *App) handleCloseSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+func (a *App) handleComputerUse(w http.ResponseWriter, r *http.Request) {
+	id := pathSessionID(r.URL.Path, "/use")
+	if id == "" {
+		httpErr(w, http.StatusBadRequest, "session id required")
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
+		httpErr(w, http.StatusBadRequest, "bad JSON body: "+err.Error())
+		return
+	}
+	if body == nil {
+		body = map[string]any{}
+	}
+	body["session_id"] = id
+	out, err := a.toolComputerUse(globalCtx, body)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, out)
+}
+
 // handleSessionScreenshot streams the session's current screenshot inline.
 // Path is /sessions/{id}/screenshot — strip the prefix + suffix to
 // get id. Returns 404 if the session is unknown; the panel will then
 // stop polling that id on its own when the session disappears from
 // the list.
 func (a *App) handleSessionScreenshot(w http.ResponseWriter, r *http.Request) {
-	rest := strings.TrimPrefix(r.URL.Path, "/sessions/")
-	rest = strings.TrimSuffix(rest, "/screenshot")
-	rest = strings.Trim(rest, "/")
+	rest := pathSessionID(r.URL.Path, "/screenshot")
 	if rest == "" {
 		httpErr(w, http.StatusBadRequest, "session id required")
 		return
@@ -922,6 +947,12 @@ func (a *App) handleSessionScreenshot(w http.ResponseWriter, r *http.Request) {
 	// through.
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(shot)
+}
+
+func pathSessionID(path, suffix string) string {
+	rest := strings.TrimPrefix(path, "/sessions/")
+	rest = strings.TrimSuffix(rest, suffix)
+	return strings.Trim(rest, "/")
 }
 
 func writeJSON(w http.ResponseWriter, payload any) {

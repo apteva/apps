@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.4.0
+version: 0.5.0
 description: |
-  Watch and steer browser sessions. v0.4 exposes the generic
-  browser_session / computer_use MCP surface directly from the app.
+  Watch and steer browser sessions. v0.5 lets the operator panel use
+  the same browser_session / computer_use surface as agents.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
