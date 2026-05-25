@@ -1,0 +1,168 @@
+schema: apteva-app/v1
+
+name: affiliate
+display_name: Affiliate
+version: 0.1.0
+description: |
+  Publisher-side affiliate manager. Connect affiliate networks, refresh
+  offers and stats, create monetized links, and optionally wrap them
+  with branded redirects.
+
+  Mental model:
+    - Networks: where the affiliate relationship lives.
+    - Offers: what the publisher can promote.
+    - Links: URLs the publisher places in content.
+    - Stats: normalized performance by day, network, offer, or link.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/affiliate
+tags: [affiliate, publishers, offers, links, marketing]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: redirects
+      optional: true
+      reason: "Creates branded short links for affiliate URLs and provides first-party hit counts."
+    - name: target-circle
+      optional: true
+      reason: "Imports Circlewise offers, generates tracking links, and refreshes clicks/transactions."
+    - name: impact
+      optional: true
+      reason: "Imports Impact advertisers/campaigns, generates deeplinks, and refreshes reporting."
+    - name: awin
+      optional: true
+      reason: "Imports Awin advertisers, generates deeplinks, and refreshes reporting."
+    - name: cj-affiliate
+      optional: true
+      reason: "Imports CJ advertisers, links, and performance data."
+    - name: amazon-associates
+      optional: true
+      reason: "Generates Amazon affiliate links and imports product/link performance where available."
+    - name: skimlinks
+      optional: true
+      reason: "Searches Skimlinks merchants and generates monetized links."
+    - name: sovrn
+      optional: true
+      reason: "Searches Sovrn merchants and generates monetized links."
+    - name: partnerstack
+      optional: true
+      reason: "Imports PartnerStack partnerships/programs and rewards or transaction data."
+    - name: shareasale
+      optional: true
+      reason: "Imports ShareASale merchants/products and affiliate reporting."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: affiliate_networks
+      description: "List configured affiliate networks. Args: enabled? (bool filter)."
+    - name: affiliate_refresh
+      description: "Refresh offers and/or stats from a network dependency. Args: network (req), kind? (offers|stats|all), from?, to?, plus provider IDs such as publisherId, requestor-cid, website-id, partnerTag, campaignId, keywords."
+    - name: affiliate_offers
+      description: "Search offers. Args: q?, network?, status?, limit?."
+    - name: affiliate_link_create
+      description: "Create a monetized link. Args: url (req), network?, offer_id?, affiliate_url? (manual fallback), campaign?, subid?, shorten?, short_hostname?, short_path?, plus provider IDs such as publisherId, website-id, partnerTag, adInventorySid."
+    - name: affiliate_links
+      description: "Search managed links. Args: q?, network?, offer_id?, status?, limit?."
+    - name: affiliate_stats
+      description: "Read normalized stats. Args: from?, to?, network?, offer_id?, link_id?, group_by? (network|offer|link|day)."
+  ui_panels:
+    - slot: project.page
+      label: Affiliate
+      icon: badge-percent
+      entry: /ui/AffiliatePanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/affiliate
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/affiliate.db
+  migrations: migrations/
+
+config_schema:
+  - name: default_short_hostname
+    type: text
+    default: ""
+    label: Default short-link hostname
+    description: Optional hostname passed to redirects when affiliate_link_create is called with shorten=true and no short_hostname.
+  - name: awin_publisher_id
+    type: text
+    default: ""
+    label: Awin publisher ID
+    description: Optional default Awin publisherId used for refreshes and link generation.
+  - name: cj_requestor_cid
+    type: text
+    default: ""
+    label: CJ requestor CID
+    description: Optional default CJ publisher CID used for advertiser lookup.
+  - name: cj_website_id
+    type: text
+    default: ""
+    label: CJ website ID
+    description: Optional default CJ website/property ID used for link and product search.
+  - name: amazon_partner_tag
+    type: text
+    default: ""
+    label: Amazon partner tag
+    description: Optional default Amazon Associates partnerTag.
+  - name: amazon_marketplace
+    type: text
+    default: "www.amazon.com"
+    label: Amazon marketplace
+    description: Optional default Amazon marketplace domain.
+  - name: amazon_keywords
+    type: text
+    default: ""
+    label: Amazon refresh keywords
+    description: Optional default keyword query for Amazon Associates offer refreshes.
+  - name: amazon_search_index
+    type: text
+    default: "All"
+    label: Amazon search index
+    description: Optional default Amazon Creators API searchIndex.
+  - name: awin_relationship
+    type: text
+    default: "joined"
+    label: Awin relationship
+    description: Optional default Awin programme relationship filter.
+  - name: awin_date_type
+    type: text
+    default: "transaction"
+    label: Awin date type
+    description: Optional default Awin transaction dateType.
+  - name: cj_advertiser_ids
+    type: text
+    default: "joined"
+    label: CJ advertiser IDs
+    description: Optional default CJ advertiser-ids filter.
+  - name: impact_insertion_order_status
+    type: text
+    default: "Active"
+    label: Impact contract status
+    description: Optional default Impact InsertionOrderStatus filter.
+  - name: sovrn_campaign_id
+    type: text
+    default: ""
+    label: Sovrn campaign ID
+    description: Optional default Sovrn campaignId for merchant refreshes.
+  - name: target_circle_ad_inventory_sid
+    type: text
+    default: ""
+    label: Target Circle ad inventory SID
+    description: Optional default Target Circle adInventorySid used when generating codes/deeplinks.
+
+upgrade_policy: auto-patch
