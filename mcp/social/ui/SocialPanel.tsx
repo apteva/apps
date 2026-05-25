@@ -13,6 +13,14 @@
 // this file uses the same useAppEvents pattern as media-studio.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Area,
+  AreaChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { uploadResumable } from "./uploadResumable";
 
 const API = "/api/apps/social";
@@ -3071,28 +3079,49 @@ function InsightCharts({ metrics, compact = false }: { metrics: AccountMetrics; 
 }
 
 function Sparkline({ points }: { points: { time?: string; value: number }[] }) {
-  const values = points.map((p) => Number(p.value) || 0);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const span = max - min || 1;
-  const width = 220;
-  const height = 54;
-  const xStep = values.length > 1 ? width / (values.length - 1) : width;
-  const coords = values.map((value, i) => {
-    const x = values.length > 1 ? i * xStep : width / 2;
-    const y = height - ((value - min) / span) * (height - 8) - 4;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  });
-  const fill = coords.length > 1
-    ? `0,${height} ${coords.join(" ")} ${width},${height}`
-    : "";
+  const data = points.map((point, index) => ({
+    index,
+    label: point.time ? new Date(point.time).toLocaleDateString() : String(index + 1),
+    value: Number(point.value) || 0,
+  }));
+  if (data.length === 0) return null;
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="mt-2 h-14 w-full overflow-visible" role="img" aria-hidden="true">
-      <line x1="0" y1={height - 4} x2={width} y2={height - 4} stroke="currentColor" className="text-border" strokeWidth="1" />
-      {fill && <polygon points={fill} className="fill-accent/10" />}
-      <polyline points={coords.join(" ")} fill="none" className="stroke-accent" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-      {coords.length === 1 && <circle cx={width / 2} cy={height / 2} r="3" className="fill-accent" />}
-    </svg>
+    <div className="mt-2 h-16 w-full" role="img" aria-hidden="true">
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={data} margin={{ top: 4, right: 0, bottom: 0, left: 0 }}>
+          <defs>
+            <linearGradient id="socialMetricFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#f97316" stopOpacity={0.28} />
+              <stop offset="100%" stopColor="#f97316" stopOpacity={0.02} />
+            </linearGradient>
+          </defs>
+          <XAxis dataKey="index" hide />
+          <YAxis hide domain={["dataMin", "dataMax"]} />
+          <Tooltip
+            cursor={{ stroke: "#3a3a3a", strokeWidth: 1 }}
+            contentStyle={{
+              background: "#111",
+              border: "1px solid #333",
+              borderRadius: 4,
+              color: "#e5e5e5",
+              fontSize: 12,
+            }}
+            labelFormatter={(_, payload) => payload?.[0]?.payload?.label || ""}
+            formatter={(value) => [formatNumber(Number(value) || 0), "value"]}
+          />
+          <Area
+            type="monotone"
+            dataKey="value"
+            stroke="#f97316"
+            strokeWidth={2}
+            fill="url(#socialMetricFill)"
+            dot={false}
+            activeDot={{ r: 3, stroke: "#f97316", strokeWidth: 1, fill: "#111" }}
+            isAnimationActive={false}
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
   );
 }
 

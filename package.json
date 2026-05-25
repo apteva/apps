@@ -3,6 +3,7 @@
   "private": true,
   "description": "Frontend panel build deps for first-party Apteva apps. The panels themselves live under mcp/<app>/ui/*.tsx and are bundled by scripts/build-panels.ts. React + ui-kit are externalised; everything else (yaml round-trip, etc.) gets bundled into each panel that imports it.",
   "dependencies": {
+    "recharts": "^3.8.1",
     "yaml": "^2.6.0"
   },
   "devDependencies": {
