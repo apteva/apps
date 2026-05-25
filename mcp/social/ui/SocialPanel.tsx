@@ -1786,6 +1786,11 @@ interface StorageFile {
   size_bytes?: number;
 }
 
+function isHiddenStorageFile(file: StorageFile): boolean {
+  const folderParts = (file.folder || "/").split("/").filter(Boolean);
+  return folderParts.some((part) => part.startsWith("."));
+}
+
 function StoragePickerDialog({
   excludeIds, projectId, onClose, onPick,
 }: {
@@ -1812,7 +1817,7 @@ function StoragePickerDialog({
       setError(null);
       try {
         const params = new URLSearchParams();
-        params.set("limit", "100");
+        params.set("limit", "1000");
         if (q.trim()) params.set("q", q.trim());
         if (kind === "image") params.set("content_type", "image/");
         else if (kind === "video") params.set("content_type", "video/");
@@ -1824,9 +1829,11 @@ function StoragePickerDialog({
         const data = await res.json() as { files: StorageFile[] };
         if (cancelled) return;
         const usable = (data.files || []).filter(
-          (f) => kind !== "all" ||
+          (f) => !isHiddenStorageFile(f) && (
+            kind !== "all" ||
             (f.content_type || "").startsWith("image/") ||
             (f.content_type || "").startsWith("video/")
+          )
         );
         setFiles(usable);
       } catch (e) {
