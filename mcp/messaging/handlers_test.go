@@ -2265,6 +2265,66 @@ func TestTemplatesSyncProvider_NoOpForEmail(t *testing.T) {
 	}
 }
 
+func TestSendersProviderOptions_ListsTwilioPhoneAndWhatsAppSenders(t *testing.T) {
+	plat := newPhoneStub(nil)
+	plat.replyByTool = map[string]*sdk.ExecuteResult{
+		"list_phone_numbers": {
+			Success: true,
+			Status:  200,
+			Data: json.RawMessage(`{
+				"incoming_phone_numbers": [{
+					"sid": "PN123",
+					"phone_number": "+15551112222",
+					"friendly_name": "Support SMS",
+					"capabilities": {"sms": true}
+				}]
+			}`),
+		},
+		"list_whatsapp_senders": {
+			Success: true,
+			Status:  200,
+			Data: json.RawMessage(`{
+				"senders": [{
+					"sid": "XE123",
+					"sender_id": "whatsapp:+15553334444",
+					"friendly_name": "Support WhatsApp",
+					"status": "ONLINE"
+				}]
+			}`),
+		},
+	}
+	newTestCtx(t, plat)
+	app := &App{}
+
+	r := httptest.NewRequest("GET", "/senders/provider-options?project_id=test-proj", nil)
+	w := httptest.NewRecorder()
+	app.handleSendersProviderOptions(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Available bool `json:"available"`
+		Options   []struct {
+			Channel string `json:"channel"`
+			Address string `json:"address"`
+			Label   string `json:"label"`
+			Status  string `json:"status"`
+		} `json:"options"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Available || len(out.Options) != 2 {
+		t.Fatalf("unexpected output: %+v", out)
+	}
+	if out.Options[0].Channel != "sms" || out.Options[0].Address != "+15551112222" {
+		t.Errorf("sms option: %+v", out.Options[0])
+	}
+	if out.Options[1].Channel != "whatsapp" || out.Options[1].Address != "+15553334444" || out.Options[1].Status != "online" {
+		t.Errorf("whatsapp option: %+v", out.Options[1])
+	}
+}
+
 func TestTemplateCreate_WhatsAppCreatesAndSubmitsProviderTemplate(t *testing.T) {
 	plat := newPhoneStub(nil)
 	plat.replyByTool = map[string]*sdk.ExecuteResult{

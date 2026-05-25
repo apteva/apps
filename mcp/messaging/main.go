@@ -52,7 +52,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.10
+version: 0.13.11
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -254,6 +254,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/senders", Handler: a.handleSendersList},
 		{Pattern: "/senders/quota", Handler: a.handleSendersQuota},
 		{Pattern: "/senders/domains", Handler: a.handleSendersDomains},
+		{Pattern: "/senders/provider-options", Handler: a.handleSendersProviderOptions},
 		{Pattern: "/senders/edit", Handler: a.handleSendersEdit},
 		{Pattern: "/identities", Handler: a.handleIdentitiesList},
 		// Internal/panel routes for provider-template sync. Not MCP —
@@ -4415,6 +4416,145 @@ func (a *App) handleSendersDomains(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpJSON(w, map[string]any{"available": true, "domains": domains})
+}
+
+type providerSenderOption struct {
+	Channel    string `json:"channel"`
+	Address    string `json:"address"`
+	Label      string `json:"label,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	ProviderID string `json:"provider_id,omitempty"`
+	Status     string `json:"status,omitempty"`
+}
+
+// handleSendersProviderOptions lists upstream phone senders from the
+// bound phone_provider so the panel can offer a picker before calling
+// the generic senders_create adoption flow. This stays HTTP-only:
+// agents still manage senders through senders_create/list/get.
+func (a *App) handleSendersProviderOptions(w http.ResponseWriter, r *http.Request) {
+	if _, err := resolveProjectFromRequest(r); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	bound := globalCtx.IntegrationFor("phone_provider")
+	if bound == nil {
+		httpJSON(w, map[string]any{"available": false, "options": []any{}, "error": "no phone_provider bound"})
+		return
+	}
+	channel := strings.TrimSpace(r.URL.Query().Get("channel"))
+	if channel != "" && channel != channelSMS && channel != channelWhatsApp {
+		httpErr(w, http.StatusBadRequest, "channel must be sms or whatsapp")
+		return
+	}
+	options := []providerSenderOption{}
+	errorsOut := []string{}
+	if channel == "" || channel == channelSMS {
+		sms, err := listTwilioPhoneSenderOptions(globalCtx, bound.ConnectionID)
+		if err != nil {
+			errorsOut = append(errorsOut, err.Error())
+		} else {
+			options = append(options, sms...)
+		}
+	}
+	if channel == "" || channel == channelWhatsApp {
+		wa, err := listTwilioWhatsAppSenderOptions(globalCtx, bound.ConnectionID)
+		if err != nil {
+			errorsOut = append(errorsOut, err.Error())
+		} else {
+			options = append(options, wa...)
+		}
+	}
+	out := map[string]any{"available": true, "options": options}
+	if len(errorsOut) > 0 {
+		out["error"] = strings.Join(errorsOut, "; ")
+	}
+	httpJSON(w, out)
+}
+
+func listTwilioPhoneSenderOptions(ctx *sdk.AppCtx, connID int64) ([]providerSenderOption, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_phone_numbers", map[string]any{"PageSize": 100})
+	if err != nil {
+		return nil, fmt.Errorf("list_phone_numbers: %w", err)
+	}
+	if res == nil || !res.Success {
+		return nil, fmt.Errorf("list_phone_numbers: provider non-2xx: %s", truncateResData(res))
+	}
+	var raw struct {
+		IncomingPhoneNumbers []map[string]any `json:"incoming_phone_numbers"`
+	}
+	if err := json.Unmarshal(res.Data, &raw); err != nil {
+		return nil, fmt.Errorf("list_phone_numbers: parse: %w", err)
+	}
+	out := []providerSenderOption{}
+	for _, row := range raw.IncomingPhoneNumbers {
+		addr := strings.TrimSpace(strFromMap(row, "phone_number", "PhoneNumber"))
+		if addr == "" {
+			continue
+		}
+		if caps, ok := row["capabilities"].(map[string]any); ok {
+			if v, ok := caps["sms"].(bool); ok && !v {
+				continue
+			}
+		}
+		label := strings.TrimSpace(strFromMap(row, "friendly_name", "FriendlyName"))
+		out = append(out, providerSenderOption{
+			Channel:    channelSMS,
+			Address:    addr,
+			Label:      label,
+			Kind:       "phone",
+			ProviderID: strings.TrimSpace(strFromMap(row, "sid", "Sid")),
+			Status:     "active",
+		})
+	}
+	return out, nil
+}
+
+func listTwilioWhatsAppSenderOptions(ctx *sdk.AppCtx, connID int64) ([]providerSenderOption, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_whatsapp_senders", map[string]any{"PageSize": 100})
+	if err != nil {
+		return nil, fmt.Errorf("list_whatsapp_senders: %w", err)
+	}
+	if res == nil || !res.Success {
+		return nil, fmt.Errorf("list_whatsapp_senders: provider non-2xx: %s", truncateResData(res))
+	}
+	var raw struct {
+		Senders []map[string]any `json:"senders"`
+	}
+	if err := json.Unmarshal(res.Data, &raw); err != nil {
+		return nil, fmt.Errorf("list_whatsapp_senders: parse: %w", err)
+	}
+	out := []providerSenderOption{}
+	for _, row := range raw.Senders {
+		addr := strings.TrimSpace(strFromMap(row, "phone_number", "PhoneNumber", "address", "sender_id", "SenderId"))
+		addr = strings.TrimPrefix(addr, "whatsapp:")
+		if addr == "" {
+			continue
+		}
+		label := strings.TrimSpace(strFromMap(row, "friendly_name", "FriendlyName", "name"))
+		out = append(out, providerSenderOption{
+			Channel:    channelWhatsApp,
+			Address:    addr,
+			Label:      label,
+			Kind:       "whatsapp_number",
+			ProviderID: strings.TrimSpace(strFromMap(row, "sid", "Sid")),
+			Status:     strings.ToLower(strings.TrimSpace(strFromMap(row, "status", "Status"))),
+		})
+	}
+	return out, nil
+}
+
+func strFromMap(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			switch x := v.(type) {
+			case string:
+				return x
+			case float64, int, int64, bool:
+				return fmt.Sprint(x)
+			}
+		}
+	}
+	return ""
 }
 
 // handleTemplatesSync — panel "Sync templates" button. Pulls Twilio

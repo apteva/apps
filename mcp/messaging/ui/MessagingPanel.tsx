@@ -186,6 +186,14 @@ interface SenderRow {
   provider?: string;
   last_synced_at?: string;
 }
+interface ProviderSenderOption {
+  channel: "sms" | "whatsapp";
+  address: string;
+  label?: string;
+  kind?: string;
+  provider_id?: string;
+  status?: string;
+}
 interface QuotaInfo {
   sandboxed: boolean;
   sending_enabled: boolean;
@@ -800,6 +808,7 @@ function SendersView({
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<SendersCreateResp | null>(null);
   const [err, setErr] = useState("");
+  const [senderChannel, setSenderChannel] = useState<"email" | "sms" | "whatsapp">("email");
 
   // Domain inventory from the Domains app, when bound. Lets the
   // operator compose <mailbox>@<domain> by picking from a curated
@@ -813,6 +822,10 @@ function SendersView({
   // false → original free-text input. Flips to false automatically
   // when inventory loads empty / unavailable.
   const [pickerMode, setPickerMode] = useState(true);
+  const [providerOptions, setProviderOptions] = useState<ProviderSenderOption[]>([]);
+  const [providerOptionsError, setProviderOptionsError] = useState("");
+  const [providerPickerMode, setProviderPickerMode] = useState(true);
+  const [pickedProviderAddress, setPickedProviderAddress] = useState("");
 
   useEffect(() => {
     api<{ available: boolean; domains: { name: string }[] }>("GET", "/senders/domains")
@@ -826,21 +839,58 @@ function SendersView({
       .catch(() => { setInventoryDomains([]); setPickerMode(false); });
   }, [api]);
 
+  useEffect(() => {
+    api<{ available: boolean; options: ProviderSenderOption[]; error?: string }>("GET", "/senders/provider-options")
+      .then((r) => {
+        setProviderOptions(r.available && Array.isArray(r.options) ? r.options : []);
+        setProviderOptionsError(r.error || "");
+        if (!r.available || !Array.isArray(r.options) || r.options.length === 0) {
+          setProviderPickerMode(false);
+        }
+      })
+      .catch((e) => {
+        setProviderOptions([]);
+        setProviderOptionsError(parseSendersError((e as Error).message));
+        setProviderPickerMode(false);
+      });
+  }, [api]);
+
   // Compose addr from picker controls. In manual mode the user types
   // directly into addr; this effect is a no-op there.
   useEffect(() => {
     if (!pickerMode) return;
+    if (senderChannel !== "email") return;
     if (!pickedDomain) { setAddr(""); return; }
     setAddr(localPart ? `${localPart}@${pickedDomain}` : pickedDomain);
-  }, [pickerMode, pickedDomain, localPart]);
+  }, [pickerMode, senderChannel, pickedDomain, localPart]);
 
-  const addressIsDomain = addr.length > 0 && !addr.includes("@");
+  const channelProviderOptions = providerOptions.filter((o) => o.channel === senderChannel);
+
+  useEffect(() => {
+    if (senderChannel === "email") return;
+    if (!providerPickerMode) return;
+    setAddr(pickedProviderAddress);
+  }, [senderChannel, providerPickerMode, pickedProviderAddress]);
+
+  useEffect(() => {
+    setAddr("");
+    setLocalPart("");
+    setPickedDomain("");
+    setPickedProviderAddress("");
+    setAdvanced(false);
+    setErr("");
+  }, [senderChannel]);
+
+  const addressIsDomain = senderChannel === "email" && addr.length > 0 && !addr.includes("@");
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true); setErr(""); setResult(null);
     try {
       const args: Record<string, unknown> = { address: addr };
+      if (senderChannel !== "email") {
+        args.channel = senderChannel;
+      }
       if (addressIsDomain) {
         args.inbound = inbound;
         args.spf = spf;
@@ -857,6 +907,7 @@ function SendersView({
       setAddr("");
       setLocalPart("");
       setPickedDomain("");
+      setPickedProviderAddress("");
       setDisplayName("");
       reload();
     } catch (e) {
@@ -878,20 +929,21 @@ function SendersView({
     }
   };
 
-  const recheck = async (address: string) => {
+  const recheck = async (address: string, channel?: string) => {
     try {
-      await api("POST", "/tools/call", {}, { tool: "senders_get", args: { address } });
+      await api("POST", "/tools/call", {}, { tool: "senders_get", args: { address, channel } });
       reload();
     } catch (e) { notify("error", `Re-check failed: ${(e as Error).message}`); }
   };
 
-  const recheckSenderSetup = async (address: string, displayName?: string) => {
+  const recheckSenderSetup = async (address: string, displayName?: string, channel?: string) => {
     try {
       const args: Record<string, unknown> = {
         address: stripScheme(address),
         inbound: "auto",
         spf: true,
       };
+      if (channel) args.channel = channel;
       if (displayName) args.display_name = displayName;
       const out = await api<SendersCreateResp>("POST", "/tools/call", {}, {
         tool: "senders_create",
@@ -916,10 +968,10 @@ function SendersView({
     }
   };
 
-  const remove = async (address: string) => {
-    if (!confirm(`Delete ${stripScheme(address)} from SES? Future sends from this identity will fail.`)) return;
+  const remove = async (address: string, channel: string) => {
+    if (!confirm(`Delete ${stripScheme(address)} from Messaging? Future sends from this sender will fail.`)) return;
     try {
-      await api("POST", "/tools/call", {}, { tool: "senders_delete", args: { address } });
+      await api("POST", "/tools/call", {}, { tool: "senders_delete", args: { address, channel } });
       reload();
     } catch (e) { notify("error", `Delete failed: ${(e as Error).message}`); }
   };
@@ -939,7 +991,18 @@ function SendersView({
       )}
       <form onSubmit={onSubmit} className="p-4 border-b border-border space-y-3">
         <div className="flex gap-2 items-end flex-wrap">
-          {pickerMode && inventoryDomains.length > 0 ? (
+          <Field label="Channel">
+            <select
+              className={inputCls + " w-36"}
+              value={senderChannel}
+              onChange={(e) => setSenderChannel(e.target.value as "email" | "sms" | "whatsapp")}
+            >
+              <option value="email">Email</option>
+              <option value="sms">SMS</option>
+              <option value="whatsapp">WhatsApp</option>
+            </select>
+          </Field>
+          {senderChannel === "email" && pickerMode && inventoryDomains.length > 0 ? (
             <>
               <Field label="Mailbox (optional)" hint="leave empty for the whole domain">
                 <input
@@ -971,20 +1034,52 @@ function SendersView({
                 </select>
               </Field>
             </>
+          ) : senderChannel !== "email" && providerPickerMode && channelProviderOptions.length > 0 ? (
+            <Field
+              label={senderChannel === "whatsapp" ? "WhatsApp sender" : "Twilio number"}
+              hint="loaded from the bound Twilio connection"
+            >
+              <select
+                className={inputCls + " w-80"}
+                value={pickedProviderAddress}
+                onChange={(e) => {
+                  if (e.target.value === "__manual__") {
+                    setProviderPickerMode(false);
+                    setPickedProviderAddress("");
+                    setAddr("");
+                  } else {
+                    setPickedProviderAddress(e.target.value);
+                  }
+                }}
+                required
+              >
+                <option value="">— pick a sender —</option>
+                {channelProviderOptions.map((o) => (
+                  <option key={`${o.channel}:${o.address}:${o.provider_id || ""}`} value={o.address}>
+                    {o.address}{o.label ? ` · ${o.label}` : ""}{o.status ? ` · ${o.status}` : ""}
+                  </option>
+                ))}
+                <option value="__manual__">Other / type manually…</option>
+              </select>
+            </Field>
           ) : (
             <Field
               label="Add sender"
               hint={
-                inventoryDomains.length > 0
+                senderChannel === "email" && inventoryDomains.length > 0
                   ? "alice@acme.com / acme.com — or pick from your domains"
-                  : "alice@acme.com (one mailbox) or acme.com (whole domain)"
+                  : senderChannel === "email"
+                    ? "alice@acme.com (one mailbox) or acme.com (whole domain)"
+                    : senderChannel === "whatsapp"
+                      ? "E.164 WhatsApp sender from Twilio, e.g. +14155238886"
+                      : "E.164 Twilio SMS number, e.g. +14155238886"
               }
             >
               <input
                 className={inputCls + " w-80"}
                 value={addr}
                 onChange={(e) => setAddr(e.target.value)}
-                placeholder="email or domain"
+                placeholder={senderChannel === "email" ? "email or domain" : "+14155238886"}
                 required
               />
             </Field>
@@ -1004,13 +1099,22 @@ function SendersView({
           >
             {busy ? "Working…" : "Add"}
           </button>
-          {!pickerMode && inventoryDomains.length > 0 && (
+          {senderChannel === "email" && !pickerMode && inventoryDomains.length > 0 && (
             <button
               type="button"
               className="text-xs text-text-dim hover:text-text underline"
               onClick={() => { setAddr(""); setLocalPart(""); setPickedDomain(""); setPickerMode(true); }}
             >
               Pick from domains
+            </button>
+          )}
+          {!providerPickerMode && senderChannel !== "email" && channelProviderOptions.length > 0 && (
+            <button
+              type="button"
+              className="text-xs text-text-dim hover:text-text underline"
+              onClick={() => { setAddr(""); setPickedProviderAddress(""); setProviderPickerMode(true); }}
+            >
+              Pick from Twilio
             </button>
           )}
           {addressIsDomain && (
@@ -1023,6 +1127,9 @@ function SendersView({
             </button>
           )}
         </div>
+        {senderChannel !== "email" && providerOptionsError && (
+          <div className="text-xs text-yellow-300">{providerOptionsError}</div>
+        )}
 
         {addressIsDomain && advanced && (
           <div className="ml-1 pl-3 border-l border-border space-y-2 text-sm">
@@ -1113,11 +1220,11 @@ function SendersView({
                   <button
                     type="button"
                     className="text-accent hover:underline text-xs"
-                    onClick={() => recheckSenderSetup(s.address, s.display_name)}
+                    onClick={() => recheckSenderSetup(s.address, s.display_name, s.channel)}
                     title="Re-runs the full sender setup for this address: SES identity checks, DNS hints, inbound receiving, SNS notifications, and SES delivery/open/click events where available. Safe to run again."
                   >Recheck setup</button>
-                  <button type="button" className="text-text-dim hover:text-text text-xs" onClick={() => recheck(s.address)}>Refresh</button>
-                  <button type="button" className="text-text-dim hover:text-red-500 text-xs" onClick={() => remove(s.address)}>Delete</button>
+                  <button type="button" className="text-text-dim hover:text-text text-xs" onClick={() => recheck(s.address, s.channel)}>Refresh</button>
+                  <button type="button" className="text-text-dim hover:text-red-500 text-xs" onClick={() => remove(s.address, s.channel)}>Delete</button>
                 </td>
               </tr>
             ))}
@@ -1125,7 +1232,7 @@ function SendersView({
         </table>
       )}
 
-      <IdentitiesSection identities={identities} onRecheckSetup={recheckSenderSetup} />
+      <IdentitiesSection identities={identities} onRecheckSetup={(address) => recheckSenderSetup(address)} />
 
       {quota && (
         <div className="p-4 text-xs text-text-dim border-t border-border mt-4">
