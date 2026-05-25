@@ -23,7 +23,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: affiliate
 display_name: Affiliate
-version: 0.1.4
+version: 0.1.5
 description: Publisher-side affiliate manager.
 author: Apteva
 scopes: [project, global]
@@ -332,6 +332,8 @@ type Link struct {
 	ID             int64  `json:"id"`
 	NetworkKey     string `json:"network_key"`
 	OfferID        int64  `json:"offer_id,omitempty"`
+	MerchantName   string `json:"merchant_name,omitempty"`
+	OfferName      string `json:"offer_name,omitempty"`
 	DestinationURL string `json:"destination_url"`
 	AffiliateURL   string `json:"affiliate_url"`
 	ShortURL       string `json:"short_url,omitempty"`
@@ -671,6 +673,10 @@ const linkCols = `id, network_key, COALESCE(offer_id,0), destination_url, affili
 	short_url, redirect_rule_id, campaign, subid, status, raw_json, last_checked_at,
 	created_at, updated_at`
 
+const linkColsQualified = `l.id, l.network_key, COALESCE(l.offer_id,0), l.destination_url, l.affiliate_url,
+	l.short_url, l.redirect_rule_id, l.campaign, l.subid, l.status, l.raw_json, l.last_checked_at,
+	l.created_at, l.updated_at`
+
 func dbListLinks(db *sql.DB, q, network string, offerID int64, status string, limit int) ([]Link, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 50
@@ -678,35 +684,42 @@ func dbListLinks(db *sql.DB, q, network string, offerID int64, status string, li
 	where := []string{"1=1"}
 	args := []any{}
 	if network != "" {
-		where = append(where, "network_key = ?")
+		where = append(where, "l.network_key = ?")
 		args = append(args, network)
 	}
 	if offerID != 0 {
-		where = append(where, "offer_id = ?")
+		where = append(where, "l.offer_id = ?")
 		args = append(args, offerID)
 	}
 	if status != "" {
-		where = append(where, "status = ?")
+		where = append(where, "l.status = ?")
 		args = append(args, status)
 	}
 	if q != "" {
 		like := "%" + q + "%"
-		where = append(where, "(destination_url LIKE ? OR affiliate_url LIKE ? OR short_url LIKE ? OR campaign LIKE ? OR subid LIKE ?)")
-		args = append(args, like, like, like, like, like)
+		where = append(where, `(l.destination_url LIKE ? OR l.affiliate_url LIKE ? OR l.short_url LIKE ?
+			OR l.campaign LIKE ? OR l.subid LIKE ? OR o.merchant_name LIKE ? OR o.offer_name LIKE ?)`)
+		args = append(args, like, like, like, like, like, like, like)
 	}
 	args = append(args, limit)
-	rows, err := db.Query(`SELECT `+linkCols+` FROM links WHERE `+strings.Join(where, " AND ")+` ORDER BY id DESC LIMIT ?`, args...)
+	rows, err := db.Query(`SELECT `+linkColsQualified+`, COALESCE(o.merchant_name,''), COALESCE(o.offer_name,'')
+		FROM links l
+		LEFT JOIN offers o ON o.id = l.offer_id
+		WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY l.id DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []Link
 	for rows.Next() {
-		l, err := scanLink(rows)
-		if err != nil {
+		var l Link
+		if err := rows.Scan(&l.ID, &l.NetworkKey, &l.OfferID, &l.DestinationURL, &l.AffiliateURL,
+			&l.ShortURL, &l.RedirectRuleID, &l.Campaign, &l.SubID, &l.Status, &l.RawJSON,
+			&l.LastCheckedAt, &l.CreatedAt, &l.UpdatedAt, &l.MerchantName, &l.OfferName); err != nil {
 			return nil, err
 		}
-		out = append(out, *l)
+		out = append(out, l)
 	}
 	return out, rows.Err()
 }

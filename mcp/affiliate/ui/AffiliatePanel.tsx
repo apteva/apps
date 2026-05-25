@@ -33,6 +33,8 @@ interface Link {
   id: number;
   network_key: string;
   offer_id?: number;
+  merchant_name?: string;
+  offer_name?: string;
   destination_url: string;
   affiliate_url: string;
   short_url?: string;
@@ -262,6 +264,7 @@ function LinksView({ links }: { links: Link[] }) {
     <Table empty="No links created yet.">
       <thead>
         <tr className="text-left text-xs text-text-dim border-b border-border">
+          <th className="px-3 py-2">Offer</th>
           <th className="px-3 py-2">Destination</th>
           <th className="px-3 py-2">Affiliate URL</th>
           <th className="px-3 py-2">Short URL</th>
@@ -272,6 +275,12 @@ function LinksView({ links }: { links: Link[] }) {
       <tbody>
         {links.map((l) => (
           <tr key={l.id} className="border-b border-border last:border-b-0">
+            <td className="px-3 py-2 max-w-[220px] truncate" title={linkOfferTitle(l)}>
+              <div className="font-medium truncate">{l.merchant_name || (l.offer_id ? `Offer #${l.offer_id}` : "-")}</div>
+              {l.offer_name && l.offer_name !== l.merchant_name && (
+                <div className="text-xs text-text-dim truncate">{l.offer_name}</div>
+              )}
+            </td>
             <td className="px-3 py-2 max-w-[280px] truncate" title={l.destination_url}>{l.destination_url}</td>
             <td className="px-3 py-2 max-w-[280px] truncate text-text-dim" title={l.affiliate_url}>{l.affiliate_url}</td>
             <td className="px-3 py-2 max-w-[220px] truncate">{l.short_url || "-"}</td>
@@ -285,29 +294,82 @@ function LinksView({ links }: { links: Link[] }) {
 }
 
 function StatsView({ stats }: { stats: StatRow[] }) {
+  const ordered = [...stats].sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+  const totals = stats.reduce((acc, row) => ({
+    clicks: acc.clicks + row.clicks,
+    conversions: acc.conversions + row.conversions,
+    revenue_cents: acc.revenue_cents + row.revenue_cents,
+    commission_cents: acc.commission_cents + row.commission_cents,
+  }), { clicks: 0, conversions: 0, revenue_cents: 0, commission_cents: 0 });
+  const maxConversions = Math.max(1, ...ordered.map((row) => row.conversions));
+  const maxCommission = Math.max(1, ...ordered.map((row) => row.commission_cents));
+  const currency = stats.find((row) => row.currency)?.currency || "USD";
+
   return (
-    <Table empty="No stats imported yet.">
-      <thead>
-        <tr className="text-left text-xs text-text-dim border-b border-border">
-          <th className="px-3 py-2">Date</th>
-          <th className="px-3 py-2 text-right">Clicks</th>
-          <th className="px-3 py-2 text-right">Conversions</th>
-          <th className="px-3 py-2 text-right">Revenue</th>
-          <th className="px-3 py-2 text-right">Commission</th>
-        </tr>
-      </thead>
-      <tbody>
-        {stats.map((s, i) => (
-          <tr key={`${s.date}-${i}`} className="border-b border-border last:border-b-0">
-            <td className="px-3 py-2">{s.date || "-"}</td>
-            <td className="px-3 py-2 text-right">{s.clicks}</td>
-            <td className="px-3 py-2 text-right">{s.conversions}</td>
-            <td className="px-3 py-2 text-right">{money(s.revenue_cents, s.currency)}</td>
-            <td className="px-3 py-2 text-right">{money(s.commission_cents, s.currency)}</td>
-          </tr>
-        ))}
-      </tbody>
-    </Table>
+    <div className="p-4 space-y-4">
+      {stats.length > 0 && (
+        <div className="border border-border rounded overflow-hidden">
+          <div className="grid grid-cols-4 border-b border-border text-xs">
+            <Metric label="Clicks" value={String(totals.clicks)} muted={totals.clicks === 0} />
+            <Metric label="Conversions" value={String(totals.conversions)} />
+            <Metric label="Revenue" value={money(totals.revenue_cents, currency)} />
+            <Metric label="Commission" value={money(totals.commission_cents, currency)} />
+          </div>
+          <div className="h-48 px-3 py-4 flex items-end gap-1">
+            {ordered.map((row, i) => {
+              const conversionHeight = Math.max(4, Math.round((row.conversions / maxConversions) * 128));
+              const commissionHeight = Math.max(2, Math.round((row.commission_cents / maxCommission) * 128));
+              return (
+                <div key={`${row.date}-${i}`} className="flex-1 min-w-[10px] h-36 flex items-end" title={`${row.date}: ${row.conversions} conversions, ${money(row.commission_cents, row.currency)}`}>
+                  <div className="relative w-full h-32 flex items-end justify-center">
+                    <div className="w-full max-w-[18px] bg-accent/25 rounded-t" style={{ height: conversionHeight }} />
+                    <div className="absolute bottom-0 w-1.5 bg-accent rounded-t" style={{ height: commissionHeight }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="flex items-center gap-4 px-3 pb-3 text-xs text-text-dim">
+            <span className="inline-flex items-center gap-1"><span className="h-2 w-2 bg-accent/25 border border-accent/30" />Conversions</span>
+            <span className="inline-flex items-center gap-1"><span className="h-2 w-2 bg-accent" />Commission</span>
+          </div>
+        </div>
+      )}
+      <div className="border border-border rounded overflow-hidden">
+        <table className="w-full border-collapse">
+          <thead>
+            <tr className="text-left text-xs text-text-dim border-b border-border">
+              <th className="px-3 py-2">Date</th>
+              <th className="px-3 py-2 text-right">Clicks</th>
+              <th className="px-3 py-2 text-right">Conversions</th>
+              <th className="px-3 py-2 text-right">Revenue</th>
+              <th className="px-3 py-2 text-right">Commission</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stats.map((s, i) => (
+              <tr key={`${s.date}-${i}`} className="border-b border-border last:border-b-0">
+                <td className="px-3 py-2">{s.date || "-"}</td>
+                <td className="px-3 py-2 text-right">{s.clicks}</td>
+                <td className="px-3 py-2 text-right">{s.conversions}</td>
+                <td className="px-3 py-2 text-right">{money(s.revenue_cents, s.currency)}</td>
+                <td className="px-3 py-2 text-right">{money(s.commission_cents, s.currency)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {stats.length === 0 && <div className="text-center text-text-dim py-8">No stats imported yet.</div>}
+    </div>
+  );
+}
+
+function Metric({ label, value, muted = false }: { label: string; value: string; muted?: boolean }) {
+  return (
+    <div className="px-3 py-2 border-r border-border last:border-r-0">
+      <div className="text-text-dim">{label}</div>
+      <div className={`font-medium truncate ${muted ? "text-text-muted" : "text-text"}`}>{value}</div>
+    </div>
   );
 }
 
@@ -440,6 +502,13 @@ function timeAgo(value: string): string {
 
 function money(cents: number, currency: string): string {
   return `${currency || "USD"} ${(cents / 100).toFixed(2)}`;
+}
+
+function linkOfferTitle(link: Link): string {
+  if (link.merchant_name && link.offer_name && link.merchant_name !== link.offer_name) {
+    return `${link.merchant_name} - ${link.offer_name}`;
+  }
+  return link.merchant_name || link.offer_name || (link.offer_id ? `Offer #${link.offer_id}` : "");
 }
 
 function slug(value: string): string {
