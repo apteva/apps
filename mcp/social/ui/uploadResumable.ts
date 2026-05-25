@@ -20,6 +20,14 @@ const defaultPartSize = 5 * 1024 * 1024;
 const defaultParallel = 4;
 const maxRetriesPerPart = 5;
 
+function scopeQS(opts: Pick<UploadResumableOptions, "projectId" | "installId">): string {
+  const params = new URLSearchParams();
+  if (opts.projectId) params.set("project_id", opts.projectId);
+  if (opts.installId) params.set("install_id", String(opts.installId));
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
+}
+
 export interface UploadedFile {
   id: number;
   name: string;
@@ -35,6 +43,8 @@ export interface UploadResumableOptions {
   folder?: string;
   tags?: string[];
   visibility?: "private" | "signed" | "public";
+  projectId?: string | null;
+  installId?: number | null;
   /** Pre-computed SHA-256 hex string. If supplied AND the server
    *  already holds matching bytes, the upload is skipped entirely. */
   sha256?: string;
@@ -68,7 +78,7 @@ async function uploadSimple(
   if (opts.visibility) fd.append("visibility", opts.visibility);
   if (opts.tags?.length) fd.append("tags", JSON.stringify(opts.tags));
 
-  const res = await fetch(`${STORAGE_API}/files`, {
+  const res = await fetch(`${STORAGE_API}/files${scopeQS(opts)}`, {
     method: "POST",
     credentials: "same-origin",
     body: fd,
@@ -99,7 +109,7 @@ async function uploadChunked(
   file: File,
   opts: UploadResumableOptions,
 ): Promise<UploadedFile> {
-  const init = (await jsonFetch<InitResponse>("POST", `${STORAGE_API}/uploads`, {
+  const init = (await jsonFetch<InitResponse>("POST", `${STORAGE_API}/uploads${scopeQS(opts)}`, {
     body: {
       filename: file.name,
       size: file.size,
@@ -162,7 +172,7 @@ async function uploadChunked(
       while (attempt < maxRetriesPerPart) {
         try {
           const blob = file.slice(part.start, part.end);
-          const res = await fetch(`${STORAGE_API}/uploads/${id}/parts/${part.n}`, {
+          const res = await fetch(`${STORAGE_API}/uploads/${id}/parts/${part.n}${scopeQS(opts)}`, {
             method: "PUT",
             credentials: "same-origin",
             headers: { "Content-Type": "application/octet-stream" },
@@ -202,7 +212,7 @@ async function uploadChunked(
   // All parts are on the server. Complete.
   const completion = (await jsonFetch<{ file: UploadedFile; was_existing: boolean }>(
     "POST",
-    `${STORAGE_API}/uploads/${id}/complete`,
+    `${STORAGE_API}/uploads/${id}/complete${scopeQS(opts)}`,
     { body: {}, signal: opts.signal },
   )).body;
   return completion.file;

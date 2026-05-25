@@ -24,6 +24,18 @@ import {
 import { uploadResumable } from "./uploadResumable";
 
 const API = "/api/apps/social";
+const STORAGE_API = "/api/apps/storage";
+
+function storageURL(path: string, projectId?: string | null): string {
+  const params = new URLSearchParams();
+  if (projectId) params.set("project_id", projectId);
+  const qs = params.toString();
+  return `${STORAGE_API}${path}${qs ? `?${qs}` : ""}`;
+}
+
+function appendStorageScope(params: URLSearchParams, projectId?: string | null) {
+  if (projectId) params.set("project_id", projectId);
+}
 
 interface NativePanelProps {
   appName: string;
@@ -371,7 +383,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
           />
         )}
         {tab === "posts" && (
-          <PostsView posts={posts} onChange={loadPosts} setStatus={setStatus} />
+          <PostsView posts={posts} onChange={loadPosts} setStatus={setStatus} projectId={projectId} />
         )}
         {tab === "metrics" && (
           <MetricsView posts={posts} accounts={accounts} setStatus={setStatus} onPostsChanged={loadPosts} />
@@ -386,6 +398,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
           onClose={() => setComposeOpen(false)}
           onCreated={() => { loadPosts(); setComposeOpen(false); setTab("posts"); }}
           setStatus={setStatus}
+          projectId={projectId}
         />
       )}
       {manageOpen && (
@@ -1349,7 +1362,7 @@ function OptionFieldInput({
 }
 
 function ComposeDialog({
-  accounts, platforms, activeProfile, onClose, onCreated, setStatus,
+  accounts, platforms, activeProfile, onClose, onCreated, setStatus, projectId,
 }: {
   accounts: SocialAccount[];
   platforms: PlatformInfo[];
@@ -1357,6 +1370,7 @@ function ComposeDialog({
   onClose: () => void;
   onCreated: () => void;
   setStatus: (s: string) => void;
+  projectId?: string | null;
 }) {
   const [body, setBody] = useState("");
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -1448,6 +1462,7 @@ function ComposeDialog({
         // resumes from the server-known offset.
         const row = await uploadResumable(file, {
           folder: "social/",
+          projectId,
           onProgress: (bytes, total) => {
             const pct = total > 0 ? Math.floor((bytes / total) * 100) : 0;
             setStatus(`Uploading ${label} — ${pct}%`);
@@ -1494,7 +1509,7 @@ function ComposeDialog({
           id: f.id,
           name: f.name,
           mime: f.content_type || "",
-          previewURL: `/api/apps/storage/files/${f.id}/content`,
+          previewURL: storageURL(`/files/${f.id}/content`, projectId),
         }));
       return [...prev, ...adds];
     });
@@ -1738,6 +1753,7 @@ function ComposeDialog({
     {showPicker && (
       <StoragePickerDialog
         excludeIds={new Set(media.map((m) => m.id))}
+        projectId={projectId}
         onClose={() => setShowPicker(false)}
         onPick={(picked) => {
           addFromStorage(picked);
@@ -1770,9 +1786,10 @@ interface StorageFile {
 }
 
 function StoragePickerDialog({
-  excludeIds, onClose, onPick,
+  excludeIds, projectId, onClose, onPick,
 }: {
   excludeIds: Set<number>;
+  projectId?: string | null;
   onClose: () => void;
   onPick: (files: StorageFile[]) => void;
 }) {
@@ -1798,7 +1815,8 @@ function StoragePickerDialog({
         if (q.trim()) params.set("q", q.trim());
         if (kind === "image") params.set("content_type", "image/");
         else if (kind === "video") params.set("content_type", "video/");
-        const res = await fetch(`/api/apps/storage/files?${params.toString()}`, {
+        appendStorageScope(params, projectId);
+        const res = await fetch(`${STORAGE_API}/files?${params.toString()}`, {
           credentials: "same-origin",
         });
         if (!res.ok) throw new Error(await res.text());
@@ -1819,7 +1837,7 @@ function StoragePickerDialog({
     // Debounce text input so we don't hammer storage on every keystroke.
     const t = setTimeout(run, q.trim() ? 200 : 0);
     return () => { cancelled = true; clearTimeout(t); };
-  }, [q, kind]);
+  }, [q, kind, projectId]);
 
   const toggle = (id: number) => {
     setPicked((s) => {
@@ -1891,7 +1909,7 @@ function StoragePickerDialog({
                 const already = excludeIds.has(f.id);
                 const sel = picked.has(f.id);
                 const isVideo = (f.content_type || "").startsWith("video/");
-                const src = `/api/apps/storage/files/${f.id}/content`;
+                const src = storageURL(`/files/${f.id}/content`, projectId);
                 return (
                   <button
                     key={f.id}
@@ -1958,8 +1976,8 @@ function StoragePickerDialog({
 // --- PostsView ----------------------------------------------------
 
 function PostsView({
-  posts, onChange, setStatus,
-}: { posts: Post[]; onChange: () => void; setStatus: (s: string) => void }) {
+  posts, onChange, setStatus, projectId,
+}: { posts: Post[]; onChange: () => void; setStatus: (s: string) => void; projectId?: string | null }) {
   // Open reschedule dialog for a specific post (null = closed).
   const [rescheduleFor, setRescheduleFor] = useState<Post | null>(null);
   // Same pattern for the delete-confirm modal: which post (null = closed).
@@ -2061,7 +2079,7 @@ function PostsView({
           {p.media_storage_ids && p.media_storage_ids.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
               {p.media_storage_ids.map((id) => (
-                <MediaThumb key={id} fileId={id} />
+                <MediaThumb key={id} fileId={id} projectId={projectId} />
               ))}
             </div>
           )}
@@ -2612,37 +2630,38 @@ function RescheduleDialog({
 //
 // Cache is process-wide: the same fileId rendered in five posts
 // only triggers one /files/<id> fetch, even before React Query.
-const mediaMetaCache = new Map<number, { mime: string; name: string } | "loading" | "error">();
-const mediaMetaWaiters = new Map<number, ((m: { mime: string; name: string } | null) => void)[]>();
+const mediaMetaCache = new Map<string, { mime: string; name: string } | "loading" | "error">();
+const mediaMetaWaiters = new Map<string, ((m: { mime: string; name: string } | null) => void)[]>();
 
-async function loadMediaMeta(fileId: number): Promise<{ mime: string; name: string } | null> {
-  const cached = mediaMetaCache.get(fileId);
+async function loadMediaMeta(fileId: number, projectId?: string | null): Promise<{ mime: string; name: string } | null> {
+  const key = `${projectId || ""}:${fileId}`;
+  const cached = mediaMetaCache.get(key);
   if (cached && cached !== "loading" && cached !== "error") return cached;
   if (cached === "loading") {
     return new Promise((resolve) => {
-      const w = mediaMetaWaiters.get(fileId) ?? [];
+      const w = mediaMetaWaiters.get(key) ?? [];
       w.push(resolve);
-      mediaMetaWaiters.set(fileId, w);
+      mediaMetaWaiters.set(key, w);
     });
   }
-  mediaMetaCache.set(fileId, "loading");
+  mediaMetaCache.set(key, "loading");
   try {
-    const res = await fetch(`/api/apps/storage/files/${fileId}`, { credentials: "same-origin" });
+    const res = await fetch(storageURL(`/files/${fileId}`, projectId), { credentials: "same-origin" });
     if (!res.ok) throw new Error("HTTP " + res.status);
     const data = (await res.json()) as { file?: { content_type?: string; name?: string } };
     const meta = {
       mime: data?.file?.content_type ?? "",
       name: data?.file?.name ?? "",
     };
-    mediaMetaCache.set(fileId, meta);
-    const waiters = mediaMetaWaiters.get(fileId) ?? [];
-    mediaMetaWaiters.delete(fileId);
+    mediaMetaCache.set(key, meta);
+    const waiters = mediaMetaWaiters.get(key) ?? [];
+    mediaMetaWaiters.delete(key);
     for (const w of waiters) w(meta);
     return meta;
   } catch {
-    mediaMetaCache.set(fileId, "error");
-    const waiters = mediaMetaWaiters.get(fileId) ?? [];
-    mediaMetaWaiters.delete(fileId);
+    mediaMetaCache.set(key, "error");
+    const waiters = mediaMetaWaiters.get(key) ?? [];
+    mediaMetaWaiters.delete(key);
     for (const w of waiters) w(null);
     return null;
   }
@@ -3196,15 +3215,15 @@ function formatNumber(n: number): string {
   return n.toString();
 }
 
-function MediaThumb({ fileId }: { fileId: number }) {
+function MediaThumb({ fileId, projectId }: { fileId: number; projectId?: string | null }) {
   const [meta, setMeta] = useState<{ mime: string; name: string } | null>(null);
   const [open, setOpen] = useState(false);
-  const url = `/api/apps/storage/files/${fileId}/content`;
+  const url = storageURL(`/files/${fileId}/content`, projectId);
   useEffect(() => {
     let alive = true;
-    loadMediaMeta(fileId).then((m) => { if (alive) setMeta(m); });
+    loadMediaMeta(fileId, projectId).then((m) => { if (alive) setMeta(m); });
     return () => { alive = false; };
-  }, [fileId]);
+  }, [fileId, projectId]);
   const isVideo = meta?.mime.startsWith("video/") ?? false;
   return (
     <>
