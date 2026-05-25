@@ -143,7 +143,9 @@ export default function ComputerPanel() {
         display: "grid",
         gridTemplateColumns: "320px minmax(0, 1fr)",
         gap: "12px",
-        height: "100%",
+        height: "calc(100vh - 24px)",
+        minHeight: "680px",
+        minWidth: 0,
         padding: "12px",
       }}
     >
@@ -219,7 +221,7 @@ function BrowsersList({
   onDeleteContext: (id: string) => void;
 }) {
   return (
-    <Card className="overflow-hidden flex flex-col">
+    <Card className="overflow-hidden flex flex-col h-full min-h-0">
       <CardHeader
         title="Browsers"
         right={
@@ -439,11 +441,20 @@ function SessionDetail({
 
   if (!session) {
     return (
-      <Card>
+      <Card className="h-full min-h-0 flex flex-col">
         <CardHeader title="Session" />
         <div
           className="text-text-muted"
-          style={{ padding: "32px 16px", textAlign: "center", fontSize: "13px" }}
+          style={{
+            flex: 1,
+            minHeight: 0,
+            padding: "32px 16px",
+            textAlign: "center",
+            fontSize: "13px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
         >
           Select a browser session on the left.
         </div>
@@ -482,36 +493,39 @@ function SessionDetail({
   const viewport = `${session.width ?? 0} x ${session.height ?? 0}`;
 
   return (
-    <Card>
+    <Card className="h-full min-h-0 flex flex-col overflow-hidden">
       <CardHeader
         title={host || "Session"}
         right={<StatusPill variant="neutral" label={BACKEND_LABEL[session.backend] ?? session.backend} />}
       />
-      <div style={{ padding: "0 16px 16px", display: "grid", gap: "12px" }}>
-        {session.stream_url && embedLive ? (
-          <div
-            className="border border-border bg-bg-subtle"
-            style={{
-              width: "100%",
-              aspectRatio: `${session.width || 16} / ${session.height || 10}`,
-              borderRadius: "6px",
-              overflow: "hidden",
-            }}
-          >
-            <iframe
-              src={session.stream_url}
-              title="Live browser stream"
-              style={{ width: "100%", height: "100%", border: 0, display: "block" }}
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          padding: "0 16px 16px",
+          display: "grid",
+          gridTemplateRows: "minmax(360px, 1fr) auto auto auto",
+          gap: "12px",
+        }}
+      >
+        <div style={{ minHeight: 0 }}>
+          {session.stream_url && embedLive ? (
+            <div className="border border-border bg-bg-subtle" style={browserViewportStyle}>
+              <iframe
+                src={session.stream_url}
+                title="Live browser stream"
+                style={{ width: "100%", height: "100%", border: 0, display: "block" }}
+              />
+            </div>
+          ) : (
+            <InteractivePreview
+              session={session}
+              tick={tick}
+              busy={Boolean(busy)}
+              onClickPoint={(x, y) => sendCoordinate("click", x, y)}
             />
-          </div>
-        ) : (
-          <InteractivePreview
-            session={session}
-            tick={tick}
-            busy={Boolean(busy)}
-            onClickPoint={(x, y) => sendCoordinate("click", x, y)}
-          />
-        )}
+          )}
+        </div>
 
         <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
           {session.stream_url && (
@@ -647,8 +661,6 @@ function InteractivePreview({
   const imgRef = useRef<HTMLImageElement | null>(null);
   const [stale, setStale] = useState(false);
   const src = `${SESSIONS_URL}/${encodeURIComponent(session.session_id)}/screenshot?t=${tick}`;
-  const aspectW = session.width && session.height ? session.width : 16;
-  const aspectH = session.width && session.height ? session.height : 10;
 
   useEffect(() => {
     setStale(false);
@@ -670,11 +682,8 @@ function InteractivePreview({
     <div
       className="border border-border bg-bg-subtle"
       style={{
+        ...browserViewportStyle,
         position: "relative",
-        width: "100%",
-        aspectRatio: `${aspectW} / ${aspectH}`,
-        borderRadius: "6px",
-        overflow: "hidden",
       }}
     >
       <img
@@ -1086,6 +1095,14 @@ const linkButtonStyle = {
   borderRadius: "6px",
   fontSize: "13px",
   fontWeight: 500,
+} as const;
+
+const browserViewportStyle = {
+  width: "100%",
+  height: "100%",
+  minHeight: "360px",
+  borderRadius: "6px",
+  overflow: "hidden",
 } as const;
 
 const previewOverlayStyle = {

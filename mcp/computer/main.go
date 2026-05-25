@@ -39,10 +39,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.0
+version: 0.7.1
 description: |
-  Watch and steer browser sessions. v0.7.0 adds app-managed browser
-  contexts linked to local, Browserbase, Steel, and Browser Engine.
+  Watch and steer browser sessions. v0.7.1 expands the desktop
+  session panel so the browser viewport uses the available space.
 scopes: [project, global]
 requires:
   permissions:
