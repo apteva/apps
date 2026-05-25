@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: affiliate
 display_name: Affiliate
-version: 0.1.0
+version: 0.1.1
 description: |
   Publisher-side affiliate manager. Connect affiliate networks, refresh
   offers and stats, create monetized links, and optionally wrap them
@@ -25,37 +25,66 @@ requires:
   permissions:
     - db.write.app
     - platform.apps.call
+    - platform.connections.execute
   apps:
     - name: redirects
       optional: true
       reason: "Creates branded short links for affiliate URLs and provides first-party hit counts."
-    - name: target-circle
-      optional: true
-      reason: "Imports Circlewise offers, generates tracking links, and refreshes clicks/transactions."
-    - name: impact
-      optional: true
-      reason: "Imports Impact advertisers/campaigns, generates deeplinks, and refreshes reporting."
-    - name: awin
-      optional: true
-      reason: "Imports Awin advertisers, generates deeplinks, and refreshes reporting."
-    - name: cj-affiliate
-      optional: true
-      reason: "Imports CJ advertisers, links, and performance data."
-    - name: amazon-associates
-      optional: true
-      reason: "Generates Amazon affiliate links and imports product/link performance where available."
-    - name: skimlinks
-      optional: true
-      reason: "Searches Skimlinks merchants and generates monetized links."
-    - name: sovrn
-      optional: true
-      reason: "Searches Sovrn merchants and generates monetized links."
-    - name: partnerstack
-      optional: true
-      reason: "Imports PartnerStack partnerships/programs and rewards or transaction data."
-    - name: shareasale
-      optional: true
-      reason: "Imports ShareASale merchants/products and affiliate reporting."
+  integrations:
+    - role: target-circle
+      kind: integration
+      required: false
+      compatible_slugs: [target-circle]
+      label: Target Circle / Circlewise
+      hint: "Imports Circlewise offers, generates tracking links, and refreshes clicks/transactions."
+    - role: impact
+      kind: integration
+      required: false
+      compatible_slugs: [impact]
+      label: Impact
+      hint: "Imports Impact advertisers/campaigns, generates deeplinks, and refreshes reporting."
+    - role: awin
+      kind: integration
+      required: false
+      compatible_slugs: [awin]
+      label: Awin
+      hint: "Imports Awin advertisers, generates deeplinks, and refreshes reporting."
+    - role: cj-affiliate
+      kind: integration
+      required: false
+      compatible_slugs: [cj-affiliate]
+      label: CJ Affiliate
+      hint: "Imports CJ advertisers, links, and performance data."
+    - role: amazon-associates
+      kind: integration
+      required: false
+      compatible_slugs: [amazon-associates]
+      label: Amazon Associates
+      hint: "Generates Amazon affiliate links and imports product/link performance where available."
+    - role: skimlinks
+      kind: integration
+      required: false
+      compatible_slugs: [skimlinks]
+      label: Skimlinks
+      hint: "Searches Skimlinks merchants and generates monetized links."
+    - role: sovrn
+      kind: integration
+      required: false
+      compatible_slugs: [sovrn]
+      label: Sovrn
+      hint: "Searches Sovrn merchants and generates monetized links."
+    - role: partnerstack
+      kind: integration
+      required: false
+      compatible_slugs: [partnerstack]
+      label: PartnerStack
+      hint: "Imports PartnerStack partnerships/programs and rewards or transaction data."
+    - role: shareasale
+      kind: integration
+      required: false
+      compatible_slugs: [shareasale]
+      label: ShareASale
+      hint: "Imports ShareASale merchants/products and affiliate reporting."
 
 provides:
   http_routes:

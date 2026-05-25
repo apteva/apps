@@ -1,9 +1,8 @@
 // Apteva Affiliate app — publisher-side affiliate manager.
 //
 // The app owns a small normalized model: networks, offers, links, and
-// daily stats. Provider-specific apps stay as thin adapters; this app
-// calls them through PlatformAPI.CallAppResult when a refresh or link
-// generation needs external data.
+// daily stats. Provider-specific connectors stay as integrations; this
+// app executes their tools through bound integration roles.
 package main
 
 import (
@@ -24,7 +23,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: affiliate
 display_name: Affiliate
-version: 0.1.0
+version: 0.1.1
 description: Publisher-side affiliate manager.
 author: Apteva
 scopes: [project, global]
@@ -32,28 +31,57 @@ requires:
   permissions:
     - db.write.app
     - platform.apps.call
+    - platform.connections.execute
   apps:
     - name: redirects
       optional: true
       reason: Creates branded short links for affiliate URLs.
-    - name: target-circle
-      optional: true
-    - name: impact
-      optional: true
-    - name: awin
-      optional: true
-    - name: cj-affiliate
-      optional: true
-    - name: amazon-associates
-      optional: true
-    - name: skimlinks
-      optional: true
-    - name: sovrn
-      optional: true
-    - name: partnerstack
-      optional: true
-    - name: shareasale
-      optional: true
+  integrations:
+    - role: target-circle
+      kind: integration
+      required: false
+      compatible_slugs: [target-circle]
+      label: Target Circle / Circlewise
+    - role: impact
+      kind: integration
+      required: false
+      compatible_slugs: [impact]
+      label: Impact
+    - role: awin
+      kind: integration
+      required: false
+      compatible_slugs: [awin]
+      label: Awin
+    - role: cj-affiliate
+      kind: integration
+      required: false
+      compatible_slugs: [cj-affiliate]
+      label: CJ Affiliate
+    - role: amazon-associates
+      kind: integration
+      required: false
+      compatible_slugs: [amazon-associates]
+      label: Amazon Associates
+    - role: skimlinks
+      kind: integration
+      required: false
+      compatible_slugs: [skimlinks]
+      label: Skimlinks
+    - role: sovrn
+      kind: integration
+      required: false
+      compatible_slugs: [sovrn]
+      label: Sovrn
+    - role: partnerstack
+      kind: integration
+      required: false
+      compatible_slugs: [partnerstack]
+      label: PartnerStack
+    - role: shareasale
+      kind: integration
+      required: false
+      compatible_slugs: [shareasale]
+      label: ShareASale
 provides:
   http_routes:
     - prefix: /
@@ -902,8 +930,8 @@ func (a *App) refreshNetwork(ctx *sdk.AppCtx, network, kind, from, to string, ar
 		}
 		for _, call := range calls {
 			out := map[string]any{}
-			if err := ctx.PlatformAPI().CallAppResult(call.App, call.Tool, call.Input, &out); err != nil {
-				return nil, fmt.Errorf("%s.%s: %w", call.App, call.Tool, err)
+			if err := executeProviderCall(ctx, call, &out); err != nil {
+				return nil, err
 			}
 			offers := collectMaps(out, "offers", "Campaigns", "campaigns", "programs", "partnerships", "advertisers", "data", "items", "results")
 			for _, m := range offers {
@@ -926,8 +954,8 @@ func (a *App) refreshNetwork(ctx *sdk.AppCtx, network, kind, from, to string, ar
 		}
 		for _, call := range calls {
 			out := map[string]any{}
-			if err := ctx.PlatformAPI().CallAppResult(call.App, call.Tool, call.Input, &out); err != nil {
-				return nil, fmt.Errorf("%s.%s: %w", call.App, call.Tool, err)
+			if err := executeProviderCall(ctx, call, &out); err != nil {
+				return nil, err
 			}
 			stats := collectMaps(out, "stats", "Actions", "actions", "transactions", "Transactions", "rewards", "records", "data", "items", "results")
 			for _, m := range stats {
@@ -961,10 +989,38 @@ func (a *App) createProviderLink(ctx *sdk.AppCtx, network, destination string, o
 		return nil, err
 	}
 	out := map[string]any{}
-	if err := ctx.PlatformAPI().CallAppResult(call.App, call.Tool, call.Input, &out); err != nil {
-		return nil, fmt.Errorf("%s.%s: %w", call.App, call.Tool, err)
+	if err := executeProviderCall(ctx, call, &out); err != nil {
+		return nil, err
 	}
 	return out, nil
+}
+
+func executeProviderCall(ctx *sdk.AppCtx, call providerCall, out any) error {
+	bound := ctx.IntegrationFor(call.Role)
+	if bound == nil || bound.ConnectionID == 0 {
+		return fmt.Errorf("%s integration is not bound", call.Role)
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, call.Tool, call.Input)
+	if err != nil {
+		return fmt.Errorf("%s.%s: %w", call.Role, call.Tool, err)
+	}
+	if res == nil {
+		return fmt.Errorf("%s.%s: empty integration response", call.Role, call.Tool)
+	}
+	if !res.Success {
+		body := string(res.Data)
+		if len(body) > 400 {
+			body = body[:400]
+		}
+		return fmt.Errorf("%s.%s failed with status %d: %s", call.Role, call.Tool, res.Status, body)
+	}
+	if out == nil || len(res.Data) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(res.Data, out); err != nil {
+		return fmt.Errorf("%s.%s decode: %w", call.Role, call.Tool, err)
+	}
+	return nil
 }
 
 func (a *App) createRedirect(ctx *sdk.AppCtx, link *Link, args map[string]any, offer *Offer) (*Link, error) {
@@ -1088,7 +1144,7 @@ func (a *App) handleStats(w http.ResponseWriter, r *http.Request) {
 // --- provider routing + normalization --------------------------------------
 
 type providerCall struct {
-	App   string
+	Role  string
 	Tool  string
 	Input map[string]any
 }
@@ -1097,12 +1153,12 @@ func providerOfferCalls(network string, args map[string]any) ([]providerCall, er
 	network = canonicalNetworkKey(network)
 	switch network {
 	case "target-circle":
-		return []providerCall{{App: "target-circle", Tool: "offers_list", Input: compactMap(map[string]any{
+		return []providerCall{{Role: "target-circle", Tool: "offers_list", Input: compactMap(map[string]any{
 			"limit":  intArg(args, "limit", 100),
 			"status": strArg(args, "status"),
 		})}}, nil
 	case "impact":
-		return []providerCall{{App: "impact", Tool: "programs_list", Input: compactMap(map[string]any{
+		return []providerCall{{Role: "impact", Tool: "programs_list", Input: compactMap(map[string]any{
 			"InsertionOrderStatus": argOrConfig(args, "InsertionOrderStatus", "impact_insertion_order_status", "Active"),
 			"PageSize":             intArg(args, "limit", 100),
 		})}}, nil
@@ -1111,7 +1167,7 @@ func providerOfferCalls(network string, args map[string]any) ([]providerCall, er
 		if publisherID == "" {
 			return nil, errors.New("awin publisherId required; pass publisherId or set awin_publisher_id")
 		}
-		return []providerCall{{App: "awin", Tool: "programs_list", Input: compactMap(map[string]any{
+		return []providerCall{{Role: "awin", Tool: "programs_list", Input: compactMap(map[string]any{
 			"publisherId":  publisherID,
 			"relationship": argOrConfig(args, "relationship", "awin_relationship", "joined"),
 			"countryCode":  strArg(args, "countryCode"),
@@ -1121,7 +1177,7 @@ func providerOfferCalls(network string, args map[string]any) ([]providerCall, er
 		if requestorCID == "" {
 			return nil, errors.New("cj-affiliate requestor-cid required; pass requestor-cid or set cj_requestor_cid")
 		}
-		return []providerCall{{App: "cj-affiliate", Tool: "advertisers_lookup", Input: compactMap(map[string]any{
+		return []providerCall{{Role: "cj-affiliate", Tool: "advertisers_lookup", Input: compactMap(map[string]any{
 			"requestor-cid":    requestorCID,
 			"advertiser-ids":   argOrConfig(args, "advertiser-ids", "cj_advertiser_ids", "joined"),
 			"keywords":         strArg(args, "keywords"),
@@ -1133,7 +1189,7 @@ func providerOfferCalls(network string, args map[string]any) ([]providerCall, er
 		if partnerTag == "" || keywords == "" {
 			return nil, errors.New("amazon-associates partnerTag and keywords required; pass them or set amazon_partner_tag and amazon_keywords")
 		}
-		return []providerCall{{App: "amazon-associates", Tool: "items_search", Input: compactMap(map[string]any{
+		return []providerCall{{Role: "amazon-associates", Tool: "items_search", Input: compactMap(map[string]any{
 			"partnerTag":  partnerTag,
 			"marketplace": argOrConfig(args, "marketplace", "amazon_marketplace", "www.amazon.com"),
 			"keywords":    keywords,
@@ -1146,20 +1202,20 @@ func providerOfferCalls(network string, args map[string]any) ([]providerCall, er
 		if campaignID == "" {
 			return nil, errors.New("sovrn campaignId required; pass campaignId or set sovrn_campaign_id")
 		}
-		return []providerCall{{App: "sovrn", Tool: "merchants_approved", Input: compactMap(map[string]any{
+		return []providerCall{{Role: "sovrn", Tool: "merchants_approved", Input: compactMap(map[string]any{
 			"campaignId": toInt64(campaignID),
 			"page":       intArg(args, "page", 1),
 			"pageSize":   intArg(args, "limit", 1000),
 			"filters":    firstAny(args, "filters"),
 		})}}, nil
 	case "partnerstack":
-		return []providerCall{{App: "partnerstack", Tool: "partnerships_list", Input: compactMap(map[string]any{
+		return []providerCall{{Role: "partnerstack", Tool: "partnerships_list", Input: compactMap(map[string]any{
 			"include_offers":   true,
 			"include_archived": boolArg(args, "include_archived", false),
 			"limit":            intArg(args, "limit", 100),
 		})}}, nil
 	case "shareasale":
-		return []providerCall{{App: "shareasale", Tool: "merchants_search", Input: compactMap(map[string]any{
+		return []providerCall{{Role: "shareasale", Tool: "merchants_search", Input: compactMap(map[string]any{
 			"keyword":   strArg(args, "keyword"),
 			"category":  strArg(args, "category"),
 			"XMLFormat": 0,
@@ -1175,13 +1231,13 @@ func providerStatCalls(network, from, to string, args map[string]any) ([]provide
 	network = canonicalNetworkKey(network)
 	switch network {
 	case "target-circle":
-		return []providerCall{{App: "target-circle", Tool: "transactions_list", Input: compactMap(map[string]any{
+		return []providerCall{{Role: "target-circle", Tool: "transactions_list", Input: compactMap(map[string]any{
 			"from":  from,
 			"to":    to,
 			"limit": intArg(args, "limit", 100),
 		})}}, nil
 	case "impact":
-		return []providerCall{{App: "impact", Tool: "actions_list", Input: compactMap(map[string]any{
+		return []providerCall{{Role: "impact", Tool: "actions_list", Input: compactMap(map[string]any{
 			"ActionDateStart": firstNonEmpty(from, strArg(args, "ActionDateStart")),
 			"ActionDateEnd":   firstNonEmpty(to, strArg(args, "ActionDateEnd")),
 			"CampaignId":      strArg(args, "CampaignId"),
@@ -1193,7 +1249,7 @@ func providerStatCalls(network, from, to string, args map[string]any) ([]provide
 		if publisherID == "" || from == "" || to == "" {
 			return nil, errors.New("awin stats require publisherId, from, and to")
 		}
-		return []providerCall{{App: "awin", Tool: "transactions_list", Input: compactMap(map[string]any{
+		return []providerCall{{Role: "awin", Tool: "transactions_list", Input: compactMap(map[string]any{
 			"publisherId": publisherID,
 			"startDate":   from,
 			"endDate":     to,
@@ -1204,7 +1260,7 @@ func providerStatCalls(network, from, to string, args map[string]any) ([]provide
 		if query == "" {
 			query = `query PublisherCommissions($since: DateTime, $before: DateTime) { publisherCommissions(since: $since, before: $before) { count records { actionTrackerName advertiserName commissionId eventDate postingDate saleAmountUsd pubCommissionAmountUsd } } }`
 		}
-		return []providerCall{{App: "cj-affiliate", Tool: "commission_query", Input: compactMap(map[string]any{
+		return []providerCall{{Role: "cj-affiliate", Tool: "commission_query", Input: compactMap(map[string]any{
 			"query": query,
 			"variables": map[string]any{
 				"since":  from,
@@ -1213,20 +1269,20 @@ func providerStatCalls(network, from, to string, args map[string]any) ([]provide
 		})}}, nil
 	case "sovrn":
 		date := firstNonEmpty(strArg(args, "clickDate"), from, time.Now().UTC().Format("2006-01-02"))
-		return []providerCall{{App: "sovrn", Tool: "transactions_report", Input: compactMap(map[string]any{
+		return []providerCall{{Role: "sovrn", Tool: "transactions_report", Input: compactMap(map[string]any{
 			"clickDate":        date,
 			"campaignIds":      strArg(args, "campaignIds"),
 			"merchantGroupIds": strArg(args, "merchantGroupIds"),
 			"programType":      strArg(args, "programType"),
 		})}}, nil
 	case "partnerstack":
-		return []providerCall{{App: "partnerstack", Tool: "transactions_list", Input: compactMap(map[string]any{
+		return []providerCall{{Role: "partnerstack", Tool: "transactions_list", Input: compactMap(map[string]any{
 			"min_created": toInt64(firstAny(args, "min_created")),
 			"max_created": toInt64(firstAny(args, "max_created")),
 			"limit":       intArg(args, "limit", 100),
 		})}}, nil
 	case "shareasale":
-		return []providerCall{{App: "shareasale", Tool: "daily_activity", Input: compactMap(map[string]any{
+		return []providerCall{{Role: "shareasale", Tool: "daily_activity", Input: compactMap(map[string]any{
 			"XMLFormat": 0,
 		})}}, nil
 	case "amazon-associates", "skimlinks":
@@ -1248,7 +1304,7 @@ func providerLinkCall(network, destination string, offer *Offer, args map[string
 		if offerSID == "" {
 			return providerCall{}, errors.New("target-circle link creation requires offerSid or offer_id")
 		}
-		return providerCall{App: "target-circle", Tool: "codes_list", Input: compactMap(map[string]any{
+		return providerCall{Role: "target-circle", Tool: "codes_list", Input: compactMap(map[string]any{
 			"offerSid":             offerSID,
 			"adInventorySid":       argOrConfig(args, "adInventorySid", "target_circle_ad_inventory_sid", ""),
 			"deeplink":             destination,
@@ -1260,7 +1316,7 @@ func providerLinkCall(network, destination string, offer *Offer, args map[string
 		if programID == "" {
 			return providerCall{}, errors.New("impact link creation requires program_id or offer_id")
 		}
-		return providerCall{App: "impact", Tool: "tracking_link_create", Input: compactMap(map[string]any{
+		return providerCall{Role: "impact", Tool: "tracking_link_create", Input: compactMap(map[string]any{
 			"program_id": programID,
 			"DeepLink":   destination,
 			"SubId1":     strArg(args, "campaign"),
@@ -1271,7 +1327,7 @@ func providerLinkCall(network, destination string, offer *Offer, args map[string
 		if publisherID == "" || offerExternalID == "" {
 			return providerCall{}, errors.New("awin link creation requires publisherId and offer_id/advertiserId")
 		}
-		return providerCall{App: "awin", Tool: "tracking_link_generate", Input: compactMap(map[string]any{
+		return providerCall{Role: "awin", Tool: "tracking_link_generate", Input: compactMap(map[string]any{
 			"publisherId":    publisherID,
 			"advertiserId":   toInt64(offerExternalID),
 			"destinationUrl": destination,
@@ -1286,7 +1342,7 @@ func providerLinkCall(network, destination string, offer *Offer, args map[string
 		if websiteID == "" {
 			return providerCall{}, errors.New("cj-affiliate link creation requires website-id or cj_website_id")
 		}
-		return providerCall{App: "cj-affiliate", Tool: "links_search", Input: compactMap(map[string]any{
+		return providerCall{Role: "cj-affiliate", Tool: "links_search", Input: compactMap(map[string]any{
 			"website-id":           websiteID,
 			"advertiser-ids":       firstNonEmpty(strArg(args, "advertiser-ids"), offerExternalID, "joined"),
 			"keywords":             firstNonEmpty(strArg(args, "keywords"), strArg(args, "campaign")),
@@ -1307,7 +1363,7 @@ func providerLinkCall(network, destination string, offer *Offer, args map[string
 		if asin == "" {
 			return providerCall{}, errors.New("amazon-associates link creation requires asin, an Amazon /dp/<ASIN> URL, or an offer with ASIN external_id")
 		}
-		return providerCall{App: "amazon-associates", Tool: "items_get", Input: map[string]any{
+		return providerCall{Role: "amazon-associates", Tool: "items_get", Input: map[string]any{
 			"partnerTag":  partnerTag,
 			"marketplace": argOrConfig(args, "marketplace", "amazon_marketplace", "www.amazon.com"),
 			"itemIds":     []string{asin},
@@ -1315,13 +1371,13 @@ func providerLinkCall(network, destination string, offer *Offer, args map[string
 			"resources":   defaultAmazonResources(),
 		}}, nil
 	case "skimlinks":
-		return providerCall{App: "skimlinks", Tool: "link_wrapper_url", Input: compactMap(map[string]any{
+		return providerCall{Role: "skimlinks", Tool: "link_wrapper_url", Input: compactMap(map[string]any{
 			"url":   destination,
 			"xs":    1,
 			"xcust": firstNonEmpty(strArg(args, "subid"), strArg(args, "campaign")),
 		})}, nil
 	case "sovrn":
-		return providerCall{App: "sovrn", Tool: "affiliate_link_url", Input: compactMap(map[string]any{
+		return providerCall{Role: "sovrn", Tool: "affiliate_link_url", Input: compactMap(map[string]any{
 			"u":    destination,
 			"cuid": firstNonEmpty(strArg(args, "subid"), strArg(args, "campaign")),
 		})}, nil

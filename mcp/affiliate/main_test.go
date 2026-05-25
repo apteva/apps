@@ -15,6 +15,7 @@ type recordingPlatform struct {
 	mu        sync.Mutex
 	calls     []callAppCall
 	responses map[string]json.RawMessage
+	bindings  map[string]int64
 }
 
 type callAppCall struct {
@@ -24,7 +25,61 @@ type callAppCall struct {
 }
 
 func newRecordingPlatform() *recordingPlatform {
-	return &recordingPlatform{responses: map[string]json.RawMessage{}}
+	return &recordingPlatform{
+		responses: map[string]json.RawMessage{},
+		bindings: map[string]int64{
+			"target-circle":     101,
+			"impact":            102,
+			"awin":              103,
+			"cj-affiliate":      104,
+			"amazon-associates": 105,
+			"skimlinks":         106,
+			"sovrn":             107,
+			"partnerstack":      108,
+			"shareasale":        109,
+		},
+	}
+}
+
+func (p *recordingPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
+	bindings := map[string]any{}
+	for role, id := range p.bindings {
+		bindings[role] = float64(id)
+	}
+	return &sdk.InstallIdentity{
+		AppName:   "affiliate",
+		ProjectID: "test-project",
+		Bindings:  bindings,
+	}, nil
+}
+
+func (p *recordingPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
+	for role, connID := range p.bindings {
+		if connID == id {
+			return &sdk.PlatformConnection{ID: id, AppSlug: role, Status: "active"}, nil
+		}
+	}
+	return nil, fmt.Errorf("unknown connection %d", id)
+}
+
+func (p *recordingPlatform) ExecuteIntegrationTool(connID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	role := ""
+	for r, id := range p.bindings {
+		if id == connID {
+			role = r
+			break
+		}
+	}
+	if role == "" {
+		return nil, fmt.Errorf("unknown connection %d", connID)
+	}
+	p.mu.Lock()
+	p.calls = append(p.calls, callAppCall{App: role, Tool: tool, Input: input})
+	p.mu.Unlock()
+	if raw, ok := p.responses[role+":"+tool]; ok {
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: raw}, nil
+	}
+	return nil, fmt.Errorf("no stub response for %s:%s", role, tool)
 }
 
 func (p *recordingPlatform) CallApp(app, tool string, input map[string]any) (json.RawMessage, error) {
