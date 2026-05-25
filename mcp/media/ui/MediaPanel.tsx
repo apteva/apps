@@ -117,6 +117,7 @@ interface Derivation {
 interface MediaRow {
   file_id: string;
   project_id: string;
+  folder?: string;
   name?: string;
   format_name?: string;
   duration_ms?: number;
@@ -365,6 +366,19 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
         return;
     }
   });
+
+  const folderSuggestions = useMemo(() => {
+    const out = new Set<string>();
+    out.add(normaliseFolderInput(folder));
+    for (const child of childFolders) {
+      out.add(normaliseFolderInput(`${folder}${child}/`));
+    }
+    for (const row of rows) {
+      if (row.folder) out.add(normaliseFolderInput(row.folder));
+    }
+    if (selected?.folder) out.add(normaliseFolderInput(selected.folder));
+    return Array.from(out).sort();
+  }, [folder, childFolders, rows, selected?.folder]);
 
   const handleReindex = async (fileId: string) => {
     await fetch(`${API}/media/${fileId}/reindex?${withMediaParams()}`, {
@@ -734,6 +748,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
           row={selected}
           currentFolder={folder}
           childFolders={childFolders}
+          folderSuggestions={folderSuggestions}
           onClose={() => setSelected(null)}
           onReindex={() => handleReindex(selected.file_id)}
           onSaveDescription={(fields) => saveDescription(selected.file_id, fields)}
@@ -752,6 +767,7 @@ function DetailDrawer({
   row,
   currentFolder,
   childFolders,
+  folderSuggestions,
   onClose,
   onReindex,
   onSaveDescription,
@@ -764,6 +780,7 @@ function DetailDrawer({
   row: MediaRow;
   currentFolder: string;
   childFolders: string[];
+  folderSuggestions: string[];
   onClose: () => void;
   onReindex: () => void;
   onSaveDescription: (fields: { title?: string; description?: string; alt_text?: string }) => Promise<void>;
@@ -873,6 +890,7 @@ function DetailDrawer({
             row={row}
             currentFolder={currentFolder}
             childFolders={childFolders}
+            folderSuggestions={folderSuggestions}
             apiBase={apiBase}
             previewBase={previewBase}
             mediaQuery={mediaQuery}
@@ -976,11 +994,12 @@ const ALL_OPS: OpDef[] = [
 ];
 
 function OperationsSection({
-  row, currentFolder, childFolders, apiBase, previewBase, mediaQuery, storageQuery,
+  row, currentFolder, childFolders, folderSuggestions, apiBase, previewBase, mediaQuery, storageQuery,
 }: {
   row: MediaRow;
   currentFolder: string;
   childFolders: string[];
+  folderSuggestions: string[];
   apiBase: string;
   previewBase: string;
   mediaQuery: string;
@@ -1022,6 +1041,7 @@ function OperationsSection({
           row={row}
           currentFolder={currentFolder}
           childFolders={childFolders}
+          folderSuggestions={folderSuggestions}
           apiBase={apiBase}
           previewBase={previewBase}
           storageQuery={storageQuery}
@@ -1194,12 +1214,13 @@ function RenderStatusCard({
 // source duration). Submit POSTs to /renders and bubbles the
 // render_id up so the section can start polling.
 function OperationModal({
-  op, row, currentFolder, childFolders, apiBase, previewBase, storageQuery, onClose, onSubmitted, onError,
+  op, row, currentFolder, childFolders, folderSuggestions, apiBase, previewBase, storageQuery, onClose, onSubmitted, onError,
 }: {
   op: OpName;
   row: MediaRow;
   currentFolder: string;
   childFolders: string[];
+  folderSuggestions: string[];
   apiBase: string;
   previewBase: string;
   storageQuery: string;
@@ -1334,6 +1355,8 @@ function OperationModal({
               outputFolder={outputFolder}
               currentFolder={currentFolder}
               childFolders={childFolders}
+              sourceFolder={row.folder}
+              folderSuggestions={folderSuggestions}
               onOutputName={setOutputName}
               onOutputFolder={setOutputFolder}
             />
@@ -1367,6 +1390,8 @@ function OutputOptions({
   outputFolder,
   currentFolder,
   childFolders,
+  sourceFolder,
+  folderSuggestions,
   onOutputName,
   onOutputFolder,
 }: {
@@ -1374,10 +1399,12 @@ function OutputOptions({
   outputFolder: string;
   currentFolder: string;
   childFolders: string[];
+  sourceFolder?: string;
+  folderSuggestions: string[];
   onOutputName: (value: string) => void;
   onOutputFolder: (value: string) => void;
 }) {
-  const folderOptions = outputFolderOptions(currentFolder, childFolders);
+  const folderOptions = outputFolderOptions(currentFolder, childFolders, sourceFolder, folderSuggestions);
   return (
     <div className="border-t border-border pt-3 space-y-3">
       <div className="text-xs uppercase tracking-wide text-text-dim">Output</div>
@@ -1936,10 +1963,14 @@ function posterURL(row: MediaRow, previewBase: string, storageQuery: string): st
   return poster ? `${previewBase}/${poster.storage_file_id}/content?${storageQuery}` : undefined;
 }
 
-function outputFolderOptions(currentFolder: string, childFolders: string[]): string[] {
+function outputFolderOptions(currentFolder: string, childFolders: string[], sourceFolder?: string, folderSuggestions: string[] = []): string[] {
   const out = new Set<string>();
   out.add("/renders/");
   if (currentFolder) out.add(normaliseFolderInput(currentFolder));
+  if (sourceFolder) out.add(normaliseFolderInput(sourceFolder));
+  for (const folder of folderSuggestions) {
+    out.add(normaliseFolderInput(folder));
+  }
   for (const child of childFolders) {
     out.add(normaliseFolderInput(`${currentFolder}${child}/`));
   }
