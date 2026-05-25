@@ -2370,6 +2370,139 @@ func TestSendMessageTemplate_RejectsCrossChannelMismatch(t *testing.T) {
 	}
 }
 
+func TestSendMessageSMS_UsesDefaultSenderAndStatusCallback(t *testing.T) {
+	plat := newPhoneStub(nil)
+	plat.whoAmIOverride = &sdk.InstallIdentity{
+		AppName:   "messaging",
+		ProjectID: "test-proj",
+		PublicURL: "https://test.apteva.ai",
+	}
+	plat.replyByTool = map[string]*sdk.ExecuteResult{}
+	plat.replyByTool["send_sms"] = &sdk.ExecuteResult{
+		Success: true, Status: 201,
+		Data: json.RawMessage(`{"sid":"SMsms1"}`),
+	}
+	ctx := newTestCtx(t, plat)
+	t.Setenv("APTEVA_APP_TOKEN", "tok")
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "sms", Address: "+15551112222", Kind: "phone",
+		Provider: "twilio", ProviderIdentityID: "PNsms",
+		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
+	})
+	if err := dbSetDefaultSender(ctx.AppDB(), "test-proj", "sms", "+15551112222"); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+
+	if _, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "sms",
+		"to":      "+15553334444",
+		"body":    "hello sms",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var sendCall *executeCall
+	for i := range plat.executeCalls {
+		if plat.executeCalls[i].Tool == "send_sms" {
+			sendCall = &plat.executeCalls[i]
+			break
+		}
+	}
+	if sendCall == nil {
+		t.Fatal("send_sms was not called")
+	}
+	if sendCall.Input["From"] != "+15551112222" {
+		t.Errorf("From=%v, want default sender", sendCall.Input["From"])
+	}
+	cb, _ := sendCall.Input["StatusCallback"].(string)
+	if !strings.Contains(cb, "/api/apps/messaging/webhooks/twilio-status") ||
+		!strings.Contains(cb, "project_id=test-proj") ||
+		!strings.Contains(cb, "api_key=tok") {
+		t.Errorf("StatusCallback=%q", cb)
+	}
+}
+
+func TestSendersCreateSMS_WiresSmsMethodPost(t *testing.T) {
+	plat := newPhoneStub(nil)
+	plat.whoAmIOverride = &sdk.InstallIdentity{
+		AppName:   "messaging",
+		ProjectID: "test-proj",
+		PublicURL: "https://test.apteva.ai",
+	}
+	plat.replyByTool = map[string]*sdk.ExecuteResult{
+		"list_phone_numbers": {
+			Success: true, Status: 200,
+			Data: json.RawMessage(`{"incoming_phone_numbers":[{"sid":"PNsms","phone_number":"+15551112222","sms_url":"","sms_method":""}]}`),
+		},
+		"update_phone_number": {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+	}
+	ctx := newTestCtx(t, plat)
+	t.Setenv("APTEVA_APP_TOKEN", "tok")
+	app := &App{}
+
+	if _, err := app.toolSendersCreate(ctx, map[string]any{
+		"channel": "sms",
+		"address": "+15551112222",
+		"inbound": "true",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var updateCall *executeCall
+	for i := range plat.executeCalls {
+		if plat.executeCalls[i].Tool == "update_phone_number" {
+			updateCall = &plat.executeCalls[i]
+			break
+		}
+	}
+	if updateCall == nil {
+		t.Fatal("update_phone_number was not called")
+	}
+	if updateCall.Input["SmsMethod"] != "POST" {
+		t.Errorf("SmsMethod=%v, want POST", updateCall.Input["SmsMethod"])
+	}
+	if !strings.Contains(fmt.Sprint(updateCall.Input["SmsUrl"]), "/api/apps/messaging/webhooks/twilio-inbound") {
+		t.Errorf("SmsUrl=%v", updateCall.Input["SmsUrl"])
+	}
+}
+
+func TestSendersCreateWhatsApp_AdoptsApprovedSender(t *testing.T) {
+	plat := newPhoneStub(nil)
+	plat.whoAmIOverride = &sdk.InstallIdentity{
+		AppName:   "messaging",
+		ProjectID: "test-proj",
+		PublicURL: "https://test.apteva.ai",
+	}
+	plat.replyByTool = map[string]*sdk.ExecuteResult{
+		"list_whatsapp_senders": {
+			Success: true, Status: 200,
+			Data: json.RawMessage(`{"senders":[{"sid":"WAsender","sender_id":"whatsapp:+15551112222","status":"approved"}]}`),
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolSendersCreate(ctx, map[string]any{
+		"channel":      "whatsapp",
+		"address":      "+15551112222",
+		"display_name": "WhatsApp Support",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := out.(*sendersCreateResp)
+	if resp.Pending {
+		t.Fatalf("approved sender should not be pending: %+v", resp)
+	}
+	row, _ := dbFindSender(ctx.AppDB(), "test-proj", "whatsapp", "+15551112222")
+	if row == nil {
+		rows, _ := dbListSenders(ctx.AppDB(), "test-proj", "", false)
+		t.Fatalf("sender row not persisted; resp=%+v rows=%+v", resp, rows)
+	}
+	if !row.Verified || row.VerificationStatus != "verified" || row.ProviderIdentityID != "WAsender" {
+		t.Fatalf("row=%+v", row)
+	}
+}
+
 // ─── v0.5 inbound: Twilio + STOP + verdicts ───────────────────────
 
 func TestVerifyTwilioSignature_HappyPath(t *testing.T) {
@@ -2597,6 +2730,109 @@ func TestTwilioInboundWebhook_RejectsBadSignature(t *testing.T) {
 	app.handleTwilioInboundWebhook(w, r)
 	if w.Code != http.StatusForbidden {
 		t.Errorf("expected 403, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestTwilioStatusWebhook_PersistsDeliveredEvent(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat, tk.WithConfig(map[string]string{
+		"twilio_auth_token": "secret",
+	}))
+	app := &App{}
+
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO messages (project_id, channel, direction, from_addr, to_addrs, status, provider_message_id)
+		 VALUES ('test-proj', 'sms', 'out', '+15551112222', '["+15553334444"]', 'sent', 'SMdelivered1')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgID, _ := res.LastInsertId()
+
+	form := url.Values{
+		"MessageSid":    []string{"SMdelivered1"},
+		"MessageStatus": []string{"delivered"},
+		"From":          []string{"+15551112222"},
+		"To":            []string{"+15553334444"},
+	}
+	publicURL := "https://test.apteva.ai/webhooks/twilio-status?project_id=test-proj"
+	keys := []string{"From", "MessageSid", "MessageStatus", "To"}
+	var b strings.Builder
+	b.WriteString(publicURL)
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteString(form.Get(k))
+	}
+	mac := hmac.New(sha1.New, []byte("secret"))
+	mac.Write([]byte(b.String()))
+	sig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+
+	r := httptest.NewRequest("POST", "/webhooks/twilio-status?project_id=test-proj", strings.NewReader(form.Encode()))
+	r.Host = "test.apteva.ai"
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("X-Forwarded-Host", "test.apteva.ai")
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("X-Twilio-Signature", sig)
+	w := httptest.NewRecorder()
+	app.handleTwilioStatusWebhook(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	events, _ := dbDeliveryEvents(ctx.AppDB(), msgID)
+	if len(events) != 1 || events[0].Kind != "delivered" {
+		t.Fatalf("events=%+v, want one delivered event", events)
+	}
+	m, _ := dbMessageGet(ctx.AppDB(), "test-proj", msgID)
+	if m.Status != "delivered" {
+		t.Fatalf("status=%q want delivered", m.Status)
+	}
+}
+
+func TestTwilioStatusWebhook_ReadPromotesWhatsAppToOpened(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat, tk.WithConfig(map[string]string{
+		"twilio_auth_token": "secret",
+	}))
+	app := &App{}
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO messages (project_id, channel, direction, from_addr, to_addrs, status, provider_message_id)
+		 VALUES ('test-proj', 'whatsapp', 'out', '+15551112222', '["+15553334444"]', 'delivered', 'SMread1')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgID, _ := res.LastInsertId()
+	form := url.Values{
+		"MessageSid":    []string{"SMread1"},
+		"MessageStatus": []string{"read"},
+		"From":          []string{"whatsapp:+15551112222"},
+		"To":            []string{"whatsapp:+15553334444"},
+	}
+	publicURL := "https://test.apteva.ai/webhooks/twilio-status?project_id=test-proj"
+	keys := []string{"From", "MessageSid", "MessageStatus", "To"}
+	var b strings.Builder
+	b.WriteString(publicURL)
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteString(form.Get(k))
+	}
+	mac := hmac.New(sha1.New, []byte("secret"))
+	mac.Write([]byte(b.String()))
+	sig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	r := httptest.NewRequest("POST", "/webhooks/twilio-status?project_id=test-proj", strings.NewReader(form.Encode()))
+	r.Host = "test.apteva.ai"
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("X-Forwarded-Host", "test.apteva.ai")
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("X-Twilio-Signature", sig)
+	w := httptest.NewRecorder()
+	app.handleTwilioStatusWebhook(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	m, _ := dbMessageGet(ctx.AppDB(), "test-proj", msgID)
+	if m.Status != "opened" {
+		t.Fatalf("status=%q want opened", m.Status)
 	}
 }
 

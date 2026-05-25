@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.6
+version: 0.13.7
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -243,6 +243,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/webhooks/ses-bounces", Handler: a.handleBounceWebhook},
 		{Pattern: "/webhooks/ses-inbound", Handler: a.handleInboundWebhook},
 		{Pattern: "/webhooks/twilio-inbound", Handler: a.handleTwilioInboundWebhook},
+		{Pattern: "/webhooks/twilio-status", Handler: a.handleTwilioStatusWebhook},
 		{Pattern: "/messages", Handler: a.handleMessagesList},
 		{Pattern: "/messages/", Handler: a.handleMessageItem},
 		{Pattern: "/templates", Handler: a.handleTemplatesList},
@@ -490,7 +491,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "senders_create",
 			Description: "Register a sender end-to-end across email + SMS providers. The address shape picks the path: " +
-				"\"foo@x.com\" → SES verify_email; \"x.com\" → SES verify_domain + DKIM/SPF DNS + (auto when aws-s3+aws-sns bound) full inbound bootstrap; \"+15551234567\" → adopt the Twilio phone + (when inbound=auto/true) wire SmsUrl to /webhooks/twilio-inbound. " +
+				"\"foo@x.com\" → SES verify_email; \"x.com\" → SES verify_domain + DKIM/SPF DNS + (auto when aws-s3+aws-sns bound) full inbound bootstrap; \"+15551234567\" → adopt the Twilio phone for SMS or the approved WhatsApp sender for WhatsApp; SMS inbound auto-wires SmsUrl to /webhooks/twilio-inbound. " +
 				"Args: address (required), channel? (email|sms|whatsapp; auto-detected if blank), inbound? (auto|true|false; default auto), publish_dns? (default true), spf? (default true), region? (email/SES inbound, default eu-west-1), bucket_name?, topic_name?, rule_set_name?, rule_name?, display_name?, set_default? (bool). " +
 				"Idempotent. Writes a row in the local senders table. Returns {address, kind, dkim_tokens?, dns_records?, inbound:{bootstrapped, …}, steps[]}.",
 			InputSchema: schemaObject(map[string]any{
@@ -968,7 +969,12 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 
 	from := strArg(args, "from")
 	if from == "" {
-		return nil, errors.New("from: required (pick a verified sender via senders_list)")
+		if def, err := dbDefaultSender(ctx.AppDB(), pid, channel); err == nil && def != nil {
+			from = def.Address
+		}
+	}
+	if from == "" {
+		return nil, errors.New("from: required (pick a verified sender via senders_list or set a default sender)")
 	}
 	from, err = normaliseAddress(channel, from)
 	if err != nil {
@@ -1307,6 +1313,9 @@ func sendViaTwilio(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 			"From": prefix + in.From,
 			"To":   prefix + to,
 		}
+		if cb := twilioWebhookURL(ctx, "/webhooks/twilio-status", in.ProjectID); cb != "" {
+			payload["StatusCallback"] = cb
+		}
 		if in.ContentSid != "" {
 			// ContentSid path: server-side rendering against approved
 			// template. Body is omitted; ContentVariables is a JSON
@@ -1354,6 +1363,29 @@ func sendViaTwilio(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 		return "", firstErr
 	}
 	return firstSID, nil
+}
+
+func twilioWebhookURL(ctx *sdk.AppCtx, routePath, projectID string) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.PlatformAPI().WhoAmI()
+	if id == nil || strings.TrimSpace(id.PublicURL) == "" {
+		return ""
+	}
+	base := strings.TrimSuffix(strings.TrimSpace(id.PublicURL), "/")
+	q := url.Values{}
+	if token := strings.TrimSpace(os.Getenv("APTEVA_APP_TOKEN")); token != "" {
+		q.Set("api_key", token)
+	}
+	if projectID != "" {
+		q.Set("project_id", projectID)
+	}
+	out := base + "/api/apps/messaging" + routePath
+	if enc := q.Encode(); enc != "" {
+		out += "?" + enc
+	}
+	return out
 }
 
 // ─── message_get / message_list ────────────────────────────────────
@@ -2441,7 +2473,7 @@ func mapSESKindToStatus(kind string) string {
 		return "bounced"
 	case "complained":
 		return "complained"
-	case "rejected", "rendering_failed":
+	case "failed", "undelivered", "rejected", "rendering_failed":
 		return "failed"
 	}
 	return ""
@@ -2767,6 +2799,103 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 	// tells Twilio "I handled it; no auto-reply please."
 	w.Header().Set("Content-Type", "text/xml")
 	w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><Response/>`))
+}
+
+func (a *App) handleTwilioStatusWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		httpErr(w, http.StatusBadRequest, "form parse: "+err.Error())
+		return
+	}
+	form := r.PostForm
+
+	bound := globalCtx.IntegrationFor("phone_provider")
+	if bound == nil {
+		httpErr(w, http.StatusServiceUnavailable, "no phone_provider bound")
+		return
+	}
+	conn, err := globalCtx.PlatformAPI().GetConnection(bound.ConnectionID)
+	if err != nil || conn == nil {
+		httpErr(w, http.StatusServiceUnavailable, "lookup phone_provider connection: "+errString(err))
+		return
+	}
+	signedURL := reconstructPublicURL(r)
+	authToken := lookupConnectionCredential(globalCtx, bound.ConnectionID, "auth_token")
+	if authToken == "" {
+		globalCtx.Logger().Warn("twilio status: auth_token not retrievable, signature NOT verified", "url", signedURL)
+	} else if !verifyTwilioSignature(signedURL, form, authToken, r.Header.Get("X-Twilio-Signature")) {
+		httpErr(w, http.StatusForbidden, "twilio signature failed")
+		return
+	}
+
+	messageSID := strings.TrimSpace(form.Get("MessageSid"))
+	if messageSID == "" {
+		messageSID = strings.TrimSpace(form.Get("SmsSid"))
+	}
+	if messageSID == "" {
+		httpErr(w, http.StatusBadRequest, "MessageSid required")
+		return
+	}
+	status := strings.ToLower(strings.TrimSpace(form.Get("MessageStatus")))
+	if status == "" {
+		status = strings.ToLower(strings.TrimSpace(form.Get("SmsStatus")))
+	}
+	kind := mapTwilioMessageStatusToEventKind(status)
+	if kind == "" {
+		httpJSON(w, map[string]any{"ok": true, "matched": false, "skipped": "unknown Twilio status"})
+		return
+	}
+
+	pid, _ := resolveProjectFromRequest(r)
+	msg, err := dbMessageByProviderID(globalCtx.AppDB(), pid, messageSID)
+	if err != nil || msg == nil {
+		globalCtx.Logger().Warn("twilio status: unknown provider message id",
+			"provider_message_id", messageSID, "status", status)
+		httpJSON(w, map[string]any{"ok": true, "matched": false})
+		return
+	}
+	raw, _ := json.Marshal(form)
+	reason := strings.TrimSpace(status)
+	if code := strings.TrimSpace(form.Get("ErrorCode")); code != "" {
+		reason = strings.TrimSpace(reason + " error_code=" + code)
+	}
+	if msgText := strings.TrimSpace(form.Get("ErrorMessage")); msgText != "" {
+		reason = strings.TrimSpace(reason + " " + msgText)
+	}
+	ev := providerEvent{
+		Provider:          "twilio",
+		ProviderMessageID: messageSID,
+		Kind:              kind,
+		Recipient:         strings.TrimSpace(stripScheme(form.Get("To"))),
+		Reason:            reason,
+		Raw:               raw,
+		OccurredAt:        time.Now().UTC().Format(time.RFC3339),
+		Metadata: map[string]any{
+			"twilio_status": status,
+			"error_code":    strings.TrimSpace(form.Get("ErrorCode")),
+			"error_message": strings.TrimSpace(form.Get("ErrorMessage")),
+		},
+	}
+	persistAndEmitProviderEvent(globalCtx, msg, ev)
+	httpJSON(w, map[string]any{"ok": true, "matched": true, "message_id": msg.ID, "kind": kind})
+}
+
+func mapTwilioMessageStatusToEventKind(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "accepted", "queued", "scheduled", "sending", "sent":
+		return "sent"
+	case "delivered":
+		return "delivered"
+	case "read":
+		return "opened"
+	case "failed", "undelivered", "canceled":
+		return "failed"
+	default:
+		return ""
+	}
 }
 
 // verifyTwilioSignature checks the X-Twilio-Signature header per

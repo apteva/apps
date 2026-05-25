@@ -123,6 +123,7 @@ func (a *App) handleSendersCreate(w http.ResponseWriter, r *http.Request) {
 func (a *App) toolSendersCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	body := sendersCreateReq{
 		Address:     strArg(args, "address"),
+		Channel:     strArg(args, "channel"),
 		Inbound:     strArg(args, "inbound"),
 		Region:      strArg(args, "region"),
 		BucketName:  strArg(args, "bucket_name"),
@@ -725,20 +726,15 @@ func (a *App) persistSenderRow(ctx *sdk.AppCtx, pid string, u *senderUpsert, res
 // twilio.buy_phone_number tool. senders_create is the adoption /
 // configuration entry point.
 func (a *App) sendersCreatePhone(ctx *sdk.AppCtx, pid, channel, addr string, req sendersCreateReq) (*sendersCreateResp, error) {
-	if channel == "whatsapp" {
-		// Twilio WhatsApp senders live behind a separate API (
-		// list_whatsapp_senders / register_whatsapp_sender ) with
-		// approval workflow. Out of scope for v0.9 — send_message
-		// channel=whatsapp already works for outbound against an
-		// already-approved WhatsApp number.
-		return nil, errors.New("channel=whatsapp adoption not yet supported in senders_create — register the WhatsApp sender via twilio.register_whatsapp_sender, then call senders_create again")
-	}
 	if addr == "" || !strings.HasPrefix(addr, "+") || !allDigits(addr[1:]) {
 		return nil, fmt.Errorf("phone address must be E.164 (e.g. +15551234567), got %q", addr)
 	}
 	phoneBound := ctx.IntegrationFor("phone_provider")
 	if phoneBound == nil {
 		return nil, errors.New("phone_provider (twilio) not bound")
+	}
+	if channel == "whatsapp" {
+		return a.sendersCreateWhatsApp(ctx, pid, addr, req, phoneBound.ConnectionID)
 	}
 
 	resp := &sendersCreateResp{
@@ -840,9 +836,7 @@ func (a *App) sendersCreatePhone(ctx *sdk.AppCtx, pid, channel, addr string, req
 			updRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(phoneBound.ConnectionID, "update_phone_number", map[string]any{
 				"PhoneNumberSid": match.SID,
 				"SmsUrl":         webhookURL,
-				// SmsMethod isn't in the integration's schema today;
-				// Twilio defaults to POST when SmsUrl is set without
-				// SmsMethod, so this is fine.
+				"SmsMethod":      "POST",
 			})
 			if err != nil {
 				resp.Steps = append(resp.Steps, bootstrapStep{Step: "twilio_update_phone_number", OK: false, Error: err.Error()})
@@ -862,8 +856,10 @@ func (a *App) sendersCreatePhone(ctx *sdk.AppCtx, pid, channel, addr string, req
 	inboundCfg := ""
 	if resp.Inbound != nil && resp.Inbound.Bootstrapped {
 		cfg := map[string]any{
-			"sms_url":          resp.Inbound.WebhookURL,
-			"previous_sms_url": match.SmsURL,
+			"sms_url":             resp.Inbound.WebhookURL,
+			"sms_method":          "POST",
+			"previous_sms_url":    match.SmsURL,
+			"previous_sms_method": match.SmsMethod,
 		}
 		if b, err := json.Marshal(cfg); err == nil {
 			inboundCfg = string(b)
@@ -891,6 +887,151 @@ func (a *App) sendersCreatePhone(ctx *sdk.AppCtx, pid, channel, addr string, req
 		resp.NextStep = "Phone " + addr + " adopted. Inbound webhook not wired — set inbound=true to point Twilio at /webhooks/twilio-inbound."
 	}
 	return resp, nil
+}
+
+func (a *App) sendersCreateWhatsApp(ctx *sdk.AppCtx, pid, addr string, req sendersCreateReq, connID int64) (*sendersCreateResp, error) {
+	resp := &sendersCreateResp{
+		Address: addr,
+		Kind:    "phone",
+		Pending: true,
+	}
+	listRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_whatsapp_senders", map[string]any{
+		"PageSize": 100,
+	})
+	if err != nil {
+		resp.Steps = append(resp.Steps, bootstrapStep{Step: "twilio_list_whatsapp_senders", OK: false, Error: err.Error()})
+		return resp, nil
+	}
+	if listRes == nil || !listRes.Success {
+		resp.Steps = append(resp.Steps, bootstrapStep{Step: "twilio_list_whatsapp_senders", OK: false, Error: truncateResData(listRes)})
+		return resp, nil
+	}
+	sender, ok := findTwilioWhatsAppSender(listRes.Data, addr)
+	if !ok {
+		resp.Steps = append(resp.Steps, bootstrapStep{
+			Step:  "twilio_list_whatsapp_senders",
+			OK:    false,
+			Error: fmt.Sprintf("WhatsApp sender whatsapp:%s not found in the bound Twilio account — register it via twilio.register_whatsapp_sender first", addr),
+		})
+		return resp, nil
+	}
+	resp.Steps = append(resp.Steps, bootstrapStep{
+		Step:   "twilio_list_whatsapp_senders",
+		OK:     true,
+		Detail: fmt.Sprintf("sid=%s status=%s", sender.SID, sender.Status),
+	})
+	verified := twilioWhatsAppSenderVerified(sender.Status)
+	resp.Pending = !verified
+
+	inboundCfg := ""
+	id, _ := ctx.PlatformAPI().WhoAmI()
+	if id != nil && strings.TrimSpace(id.PublicURL) != "" {
+		webhookURL := strings.TrimSuffix(strings.TrimSpace(id.PublicURL), "/") +
+			"/api/apps/messaging/webhooks/twilio-inbound?api_key=" + url.QueryEscape(os.Getenv("APTEVA_APP_TOKEN"))
+		cfg := map[string]any{
+			"webhook_url": webhookURL,
+			"note":        "Configure this URL on the Twilio WhatsApp sender if it is not already set.",
+		}
+		if b, err := json.Marshal(cfg); err == nil {
+			inboundCfg = string(b)
+		}
+		resp.Inbound = &sendersCreateInbound{
+			Bootstrapped:  false,
+			SkippedReason: "Twilio WhatsApp sender webhook update is not exposed; configure the webhook URL in Twilio if needed.",
+			WebhookURL:    webhookURL,
+		}
+	}
+
+	a.persistSenderRow(ctx, pid, &senderUpsert{
+		ProjectID:           pid,
+		Channel:             "whatsapp",
+		Address:             addr,
+		Kind:                "phone",
+		DisplayName:         req.DisplayName,
+		Provider:            "twilio",
+		ProviderIdentityID:  sender.SID,
+		Verified:            verified,
+		VerificationStatus:  twilioWhatsAppVerificationStatus(sender.Status),
+		SendingEnabled:      verified,
+		InboundBootstrapped: false,
+		InboundConfig:       inboundCfg,
+		MarkSyncedNow:       true,
+	}, resp)
+	if verified {
+		resp.NextStep = "WhatsApp sender " + addr + " is approved and ready for outbound WhatsApp via messaging."
+	} else {
+		resp.NextStep = "WhatsApp sender " + addr + " is tracked but not approved yet — refresh after Twilio/Meta approval."
+	}
+	return resp, nil
+}
+
+type twilioWhatsAppSender struct {
+	SID      string
+	SenderID string
+	Status   string
+}
+
+func findTwilioWhatsAppSender(raw []byte, addr string) (twilioWhatsAppSender, bool) {
+	var root any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return twilioWhatsAppSender{}, false
+	}
+	wantPlain := strings.TrimSpace(stripScheme(addr))
+	wantWA := "whatsapp:" + wantPlain
+	var walk func(any) (twilioWhatsAppSender, bool)
+	walk = func(v any) (twilioWhatsAppSender, bool) {
+		switch x := v.(type) {
+		case map[string]any:
+			senderID := firstStringField(x, "sender_id", "SenderId", "phone_number", "phoneNumber", "address", "from")
+			if strings.EqualFold(strings.TrimSpace(senderID), wantPlain) || strings.EqualFold(strings.TrimSpace(senderID), wantWA) {
+				return twilioWhatsAppSender{
+					SID:      firstStringField(x, "sid", "Sid", "SID", "sender_sid", "SenderSid"),
+					SenderID: senderID,
+					Status:   firstStringField(x, "status", "Status", "state", "State"),
+				}, true
+			}
+			for _, child := range x {
+				if got, ok := walk(child); ok {
+					return got, true
+				}
+			}
+		case []any:
+			for _, child := range x {
+				if got, ok := walk(child); ok {
+					return got, true
+				}
+			}
+		}
+		return twilioWhatsAppSender{}, false
+	}
+	return walk(root)
+}
+
+func firstStringField(m map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := m[key].(string); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func twilioWhatsAppSenderVerified(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "approved", "online", "active", "verified":
+		return true
+	}
+	return false
+}
+
+func twilioWhatsAppVerificationStatus(status string) string {
+	if twilioWhatsAppSenderVerified(status) {
+		return "verified"
+	}
+	if strings.TrimSpace(status) == "" {
+		return "pending"
+	}
+	return strings.ToLower(strings.TrimSpace(status))
 }
 
 // resolveInboundMode returns (doInbound, skipReason, err).

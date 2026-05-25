@@ -542,6 +542,7 @@ const messagingLiveTopics = new Set([
   "message.complained",
   "message.opened",
   "message.clicked",
+  "message.failed",
   "message.rejected",
   "message.delivery_delayed",
   "message.rendering_failed",
