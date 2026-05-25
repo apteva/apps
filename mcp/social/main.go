@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.18
+version: 0.14.19
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -483,6 +483,32 @@ var platforms = map[string]platformDef{
 
 var globalCtx *sdk.AppCtx
 
+func requestCtx(r *http.Request) *sdk.AppCtx {
+	return globalCtx
+}
+
+func projectIDForTool(ctx *sdk.AppCtx, args map[string]any) string {
+	if pid := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); pid != "" {
+		return pid
+	}
+	return strings.TrimSpace(stringArgAny(args, "_project_id", "project_id"))
+}
+
+func queryToolArgs(r *http.Request) map[string]any {
+	args := map[string]any{}
+	q := r.URL.Query()
+	if pid := strings.TrimSpace(q.Get("project_id")); pid != "" {
+		args["_project_id"] = pid
+	}
+	if profileID := strings.TrimSpace(q.Get("profile_id")); profileID != "" {
+		args["profile_id"] = profileID
+	}
+	if status := strings.TrimSpace(q.Get("status")); status != "" {
+		args["status"] = status
+	}
+	return args
+}
+
 type App struct{}
 
 func (a *App) Manifest() sdk.Manifest {
@@ -815,7 +841,10 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if !ok {
 		return mcpError(fmt.Sprintf("unsupported platform %q — available: %s", plat, strings.Join(platformKeys(), ", "))), nil
 	}
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
+	if pid == "" {
+		return mcpError("project_id required for global Social install"), nil
+	}
 	forceNew, _ := args["force_new"].(bool)
 	// Profile assignment for the new account. resolveProfileArg
 	// returns -1 if a non-empty slug doesn't resolve; that's a
@@ -1087,7 +1116,10 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	avatar = a.cacheAvatar(ctx, avatar)
 
 	// Insert the finalized social_account row.
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
+	if pid == "" {
+		pid = row.projectID
+	}
 	// Profile assignment: use the value the operator set on the
 	// pending row at account_add time, falling back to the project's
 	// current default if 0. Resolves the case where the default was
@@ -1125,7 +1157,7 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 // ─── account_list ─────────────────────────────────────────────────
 
 func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
 	platformFilter, _ := args["platform"].(string)
 	statusFilter, _ := args["status"].(string)
 	profileID := resolveProfileArg(ctx, pid, args)
@@ -1185,7 +1217,7 @@ func (a *App) toolAccountDisconnect(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if id <= 0 {
 		return nil, errors.New("id required")
 	}
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
 	var connID int64
 	if err := ctx.AppDB().QueryRow(
 		`SELECT connection_id FROM social_accounts WHERE id=? AND project_id=?`,
@@ -1225,7 +1257,7 @@ func (a *App) toolAccountDisconnect(ctx *sdk.AppCtx, args map[string]any) (any, 
 // than strict validation here. Empty platforms (or platforms with
 // only `body` semantics) accept just `body`.
 func (a *App) validateTargetOptions(ctx *sdk.AppCtx, targets []targetSpec) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
 	for _, t := range targets {
 		if len(t.Options) == 0 {
 			continue
@@ -1333,9 +1365,15 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 	}
 	mediaJSON, _ := json.Marshal(mediaIDs)
-	mediaProjectID := strings.TrimSpace(stringArgAny(args, "media_project_id", "storage_project_id", "_project_id", "project_id"))
+	mediaProjectID := strings.TrimSpace(stringArgAny(args, "media_project_id", "storage_project_id"))
+	if mediaProjectID == "" && len(mediaIDs) > 0 {
+		mediaProjectID = projectIDForTool(ctx, args)
+	}
 
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
+	if pid == "" {
+		return mcpError("project_id required for global Social install"), nil
+	}
 	status := "publishing"
 	if scheduleAt != "" {
 		status = "scheduled"
@@ -2331,12 +2369,21 @@ func (a *App) scheduleJob(ctx *sdk.AppCtx, postID int64, scheduleAt string) (int
 	if err != nil {
 		return 0, fmt.Errorf("invalid schedule_at %q: %w", scheduleAt, err)
 	}
+	var projectID string
+	_ = ctx.AppDB().QueryRow(
+		`SELECT COALESCE(project_id,'') FROM posts WHERE id=?`,
+		postID,
+	).Scan(&projectID)
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return 0, errors.New("post has no project_id; cannot schedule through global jobs app")
+	}
 	var jr struct {
 		Job struct {
 			ID int64 `json:"id"`
 		} `json:"job"`
 	}
-	if err := ctx.PlatformAPI().CallAppResult("jobs", "jobs_schedule", map[string]any{
+	input := map[string]any{
 		"name": fmt.Sprintf("social.publish_post.%d", postID),
 		"schedule": map[string]any{
 			"kind":   "once",
@@ -2353,7 +2400,11 @@ func (a *App) scheduleJob(ctx *sdk.AppCtx, postID int64, scheduleAt string) (int
 		"max_retries":     3,
 		"backoff_seconds": 60,
 		"owner_app":       "social",
-	}, &jr); err != nil {
+	}
+	if strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")) == "" {
+		input["_project_id"] = projectID
+	}
+	if err := ctx.PlatformAPI().CallAppResult("jobs", "jobs_schedule", input, &jr); err != nil {
 		return 0, fmt.Errorf("jobs_schedule: %w", err)
 	}
 	jobID := jr.Job.ID
@@ -2364,16 +2415,20 @@ func (a *App) scheduleJob(ctx *sdk.AppCtx, postID int64, scheduleAt string) (int
 // cancelJob asks jobs to cancel a previously-created job. Quiet on
 // failure — post_delete proceeds regardless so a stale jobs row
 // doesn't block deletion.
-func (a *App) cancelJob(ctx *sdk.AppCtx, jobID int64) {
+func (a *App) cancelJob(ctx *sdk.AppCtx, jobID int64, projectID string) {
 	if jobID <= 0 {
 		return
 	}
 	if ctx.IntegrationFor("jobs") == nil {
 		return
 	}
-	if err := ctx.PlatformAPI().CallAppResult("jobs", "jobs_cancel", map[string]any{
+	input := map[string]any{
 		"id": jobID,
-	}, nil); err != nil {
+	}
+	if strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")) == "" {
+		input["_project_id"] = projectID
+	}
+	if err := ctx.PlatformAPI().CallAppResult("jobs", "jobs_cancel", input, nil); err != nil {
 		ctx.Logger().Warn("cancelJob failed", "job_id", jobID, "err", err)
 	}
 }
@@ -2422,7 +2477,7 @@ func (a *App) markTargetFailed(ctx *sdk.AppCtx, targetID int64, msg string) {
 // ─── post_list ────────────────────────────────────────────────────
 
 func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
 	limit := intArg(args, "limit", 50)
 	if limit > 200 {
 		limit = 200
@@ -2432,7 +2487,7 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if profileID < 0 {
 		return mcpError(fmt.Sprintf("profile %q not found in this project", args["profile"])), nil
 	}
-	q := `SELECT id, body, COALESCE(media_storage_ids,'[]'), COALESCE(schedule_at,''),
+	q := `SELECT id, body, COALESCE(media_storage_ids,'[]'), COALESCE(media_project_id,''), COALESCE(schedule_at,''),
 	             status, created_at, COALESCE(published_at,''), COALESCE(profile_id,0)
 	      FROM posts WHERE project_id=?`
 	qArgs := []any{pid}
@@ -2454,10 +2509,10 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id, profID                                         int64
-			body, mediaJSON, schedAt, status, createdAt, pubAt string
+			id, profID                                                         int64
+			body, mediaJSON, mediaProjectID, schedAt, status, createdAt, pubAt string
 		)
-		if err := rows.Scan(&id, &body, &mediaJSON, &schedAt, &status, &createdAt, &pubAt, &profID); err != nil {
+		if err := rows.Scan(&id, &body, &mediaJSON, &mediaProjectID, &schedAt, &status, &createdAt, &pubAt, &profID); err != nil {
 			continue
 		}
 		var mediaIDs []int64
@@ -2467,6 +2522,7 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			"id":                id,
 			"body":              body,
 			"media_storage_ids": mediaIDs,
+			"media_project_id":  mediaProjectID,
 			"profile_id":        profID,
 			"schedule_at":       schedAt,
 			"status":            status,
@@ -2551,7 +2607,7 @@ func (a *App) toolPostReschedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if scheduleAt == "" {
 		return mcpError("schedule_at required"), nil
 	}
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
 	var status string
 	var jobID int64
 	err := ctx.AppDB().QueryRow(
@@ -2570,7 +2626,7 @@ func (a *App) toolPostReschedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 	// with a post in 'scheduled' but no job — caught by the rollback
 	// below: the post status is flipped to 'failed' so the operator
 	// notices.
-	a.cancelJob(ctx, jobID)
+	a.cancelJob(ctx, jobID, pid)
 
 	newJobID, err := a.scheduleJob(ctx, postID, scheduleAt)
 	if err != nil {
@@ -2982,8 +3038,7 @@ type insightPoint struct {
 
 type insightSeries map[string][]insightPoint
 
-func (a *App) getAccountMetrics(ctx *sdk.AppCtx, accountID int64, period string) accountMetricsResult {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+func (a *App) getAccountMetrics(ctx *sdk.AppCtx, accountID int64, period string, pid string) accountMetricsResult {
 	var platform, displayName, extID, pageCreds string
 	var connID int64
 	err := ctx.AppDB().QueryRow(
@@ -3381,7 +3436,7 @@ func (a *App) toolPostMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if postID <= 0 {
 		return mcpError("post_id required"), nil
 	}
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
 	// Existence + ownership check — also surfaces post status / body
 	// in the response so the agent gets context without a second call.
 	var body, status string
@@ -3451,7 +3506,7 @@ func (a *App) toolAccountMetrics(ctx *sdk.AppCtx, args map[string]any) (any, err
 	}
 	period, _ := args["period"].(string) // currently unused; reserved for future
 	_ = period
-	res := a.getAccountMetrics(ctx, id, period)
+	res := a.getAccountMetrics(ctx, id, period, projectIDForTool(ctx, args))
 	return res, nil
 }
 
@@ -3480,11 +3535,10 @@ type importResult struct {
 	Error           string `json:"error,omitempty"`
 }
 
-func (a *App) importAccountPosts(ctx *sdk.AppCtx, accountID int64, limit int) importResult {
+func (a *App) importAccountPosts(ctx *sdk.AppCtx, accountID int64, limit int, pid string) importResult {
 	if limit <= 0 || limit > 200 {
 		limit = 25
 	}
-	pid := os.Getenv("APTEVA_PROJECT_ID")
 	var platform, extID, pageCreds string
 	var connID int64
 	var profileID int64
@@ -3500,13 +3554,13 @@ func (a *App) importAccountPosts(ctx *sdk.AppCtx, accountID int64, limit int) im
 	out := importResult{AccountID: accountID, Platform: platform}
 	switch platform {
 	case "facebook":
-		return a.importFacebookPosts(ctx, out, accountID, connID, extID, pageCreds, profileID, limit)
+		return a.importFacebookPosts(ctx, out, accountID, connID, extID, pageCreds, profileID, limit, pid)
 	case "instagram":
-		return a.importInstagramPosts(ctx, out, accountID, connID, extID, pageCreds, profileID, limit)
+		return a.importInstagramPosts(ctx, out, accountID, connID, extID, pageCreds, profileID, limit, pid)
 	case "tiktok":
-		return a.importTikTokPosts(ctx, out, accountID, connID, profileID, limit)
+		return a.importTikTokPosts(ctx, out, accountID, connID, profileID, limit, pid)
 	case "youtube":
-		return a.importYoutubePosts(ctx, out, accountID, connID, profileID, limit)
+		return a.importYoutubePosts(ctx, out, accountID, connID, profileID, limit, pid)
 	default:
 		out.Status = "unsupported"
 		out.Reason = "import for this platform isn't wired yet"
@@ -3517,7 +3571,7 @@ func (a *App) importAccountPosts(ctx *sdk.AppCtx, accountID int64, limit int) im
 func (a *App) importFacebookPosts(
 	ctx *sdk.AppCtx, out importResult,
 	accountID, connID int64, pageID, pageCreds string,
-	profileID int64, limit int,
+	profileID int64, limit int, pid string,
 ) importResult {
 	if pageID == "" {
 		out.Status = "failed"
@@ -3557,7 +3611,6 @@ func (a *App) importFacebookPosts(
 		out.Status, out.Error = "failed", "decode page posts: "+err.Error()
 		return out
 	}
-	pid := os.Getenv("APTEVA_PROJECT_ID")
 	if profileID == 0 {
 		profileID = projectDefaultProfileID(ctx, pid)
 	}
@@ -3621,7 +3674,7 @@ func (a *App) importFacebookPosts(
 func (a *App) importInstagramPosts(
 	ctx *sdk.AppCtx, out importResult,
 	accountID, connID int64, instagramAccountID, pageCreds string,
-	profileID int64, limit int,
+	profileID int64, limit int, pid string,
 ) importResult {
 	if instagramAccountID == "" {
 		out.Status = "failed"
@@ -3662,7 +3715,6 @@ func (a *App) importInstagramPosts(
 		out.Status, out.Error = "failed", "decode instagram media: "+err.Error()
 		return out
 	}
-	pid := os.Getenv("APTEVA_PROJECT_ID")
 	if profileID == 0 {
 		profileID = projectDefaultProfileID(ctx, pid)
 	}
@@ -3692,9 +3744,8 @@ func (a *App) importInstagramPosts(
 func (a *App) importTikTokPosts(
 	ctx *sdk.AppCtx, out importResult,
 	accountID, connID int64,
-	profileID int64, limit int,
+	profileID int64, limit int, pid string,
 ) importResult {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
 	if profileID == 0 {
 		profileID = projectDefaultProfileID(ctx, pid)
 	}
@@ -3778,7 +3829,7 @@ func (a *App) importTikTokPosts(
 func (a *App) importYoutubePosts(
 	ctx *sdk.AppCtx, out importResult,
 	accountID, connID int64,
-	profileID int64, limit int,
+	profileID int64, limit int, pid string,
 ) importResult {
 	chRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_my_channel", map[string]any{
 		"part": "contentDetails",
@@ -3806,7 +3857,6 @@ func (a *App) importYoutubePosts(
 		out.Error = "youtube uploads playlist not found"
 		return out
 	}
-	pid := os.Getenv("APTEVA_PROJECT_ID")
 	if profileID == 0 {
 		profileID = projectDefaultProfileID(ctx, pid)
 	}
@@ -3999,7 +4049,7 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if !hasBody && len(rawTargets) == 0 {
 		return mcpError("nothing to edit — pass body and/or targets"), nil
 	}
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
 	var currentBody, status string
 	err := ctx.AppDB().QueryRow(
 		`SELECT body, status FROM posts WHERE id=? AND project_id=?`,
@@ -4277,7 +4327,7 @@ func (a *App) toolPostDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return mcpError("post_id required"), nil
 	}
 	forceLocal := boolArg(args, "force_local_only", false)
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
 	var status string
 	var jobID int64
 	err := ctx.AppDB().QueryRow(
@@ -4290,7 +4340,7 @@ func (a *App) toolPostDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	// Cancel the upstream jobs row first (best-effort — if the post
 	// already fired, jobs treats the cancel as a no-op).
 	if status == "scheduled" && jobID > 0 {
-		a.cancelJob(ctx, jobID)
+		a.cancelJob(ctx, jobID, pid)
 	}
 	// Fan out upstream deletes for every published target with a
 	// platform_post_id. Best-effort: failures are recorded but the
@@ -4438,7 +4488,9 @@ func (a *App) handleAccountsAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
-	out, err := a.toolAccountList(globalCtx, map[string]any{})
+	ctx := requestCtx(r)
+	args := queryToolArgs(r)
+	out, err := a.toolAccountList(ctx, args)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -4459,7 +4511,8 @@ func (a *App) handleAccountsStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	out, err := a.toolAccountAdd(globalCtx, map[string]any{
+	ctx := requestCtx(r)
+	out, err := a.toolAccountAdd(ctx, map[string]any{
 		"platform":  body.Platform,
 		"return_to": body.ReturnTo,
 	})
@@ -4519,7 +4572,8 @@ func (a *App) handleAccountsFinalize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	out, err := a.toolAccountFinalize(globalCtx, map[string]any{
+	ctx := requestCtx(r)
+	out, err := a.toolAccountFinalize(ctx, map[string]any{
 		"pending_account_id": body.PendingAccountID,
 		"page_id":            body.PageID,
 		"name":               body.Name,
@@ -4532,6 +4586,7 @@ func (a *App) handleAccountsFinalize(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
+	ctx := requestCtx(r)
 	rest := strings.TrimPrefix(r.URL.Path, "/accounts/")
 	if rest == "" {
 		http.Error(w, "id required", http.StatusBadRequest)
@@ -4544,7 +4599,7 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 && parts[1] == "pages" && r.Method == http.MethodGet {
-		out, err := a.toolAccountListPendingPages(globalCtx, map[string]any{"pending_account_id": id})
+		out, err := a.toolAccountListPendingPages(ctx, map[string]any{"pending_account_id": id})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -4553,9 +4608,13 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 && parts[1] == "metrics" && r.Method == http.MethodGet {
-		out, err := a.toolAccountMetrics(globalCtx, map[string]any{
-			"social_account_id": id,
-			"period":            r.URL.Query().Get("period"),
+		args := queryToolArgs(r)
+		args["social_account_id"] = id
+		args["period"] = r.URL.Query().Get("period")
+		out, err := a.toolAccountMetrics(ctx, map[string]any{
+			"social_account_id": args["social_account_id"],
+			"period":            args["period"],
+			"_project_id":       args["_project_id"],
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -4573,12 +4632,12 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 				limit = n
 			}
 		}
-		out := a.importAccountPosts(globalCtx, id, limit)
+		out := a.importAccountPosts(ctx, id, limit, strings.TrimSpace(r.URL.Query().Get("project_id")))
 		writeJSON(w, out)
 		return
 	}
 	if r.Method == http.MethodDelete {
-		out, err := a.toolAccountDisconnect(globalCtx, map[string]any{"id": id})
+		out, err := a.toolAccountDisconnect(ctx, map[string]any{"id": id})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -4590,9 +4649,10 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handlePostsAPI(w http.ResponseWriter, r *http.Request) {
+	ctx := requestCtx(r)
 	switch r.Method {
 	case http.MethodGet:
-		out, err := a.toolPostList(globalCtx, map[string]any{})
+		out, err := a.toolPostList(ctx, queryToolArgs(r))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -4609,7 +4669,7 @@ func (a *App) handlePostsAPI(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		out, err := a.toolPostCreate(globalCtx, raw)
+		out, err := a.toolPostCreate(ctx, raw)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -4621,6 +4681,7 @@ func (a *App) handlePostsAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
+	ctx := requestCtx(r)
 	rest := strings.TrimPrefix(r.URL.Path, "/posts/")
 	parts := strings.Split(rest, "/")
 	id, err := strconv.ParseInt(parts[0], 10, 64)
@@ -4633,7 +4694,7 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 		// post; post_list is granular enough).
 		switch r.Method {
 		case http.MethodDelete:
-			out, err := a.toolPostDelete(globalCtx, map[string]any{"post_id": id})
+			out, err := a.toolPostDelete(ctx, map[string]any{"post_id": id})
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -4646,7 +4707,7 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(parts) == 2 && parts[1] == "retry" && r.Method == http.MethodPost {
-		out, err := a.toolPostRetry(globalCtx, map[string]any{"post_id": id})
+		out, err := a.toolPostRetry(ctx, map[string]any{"post_id": id})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -4657,14 +4718,16 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 2 && parts[1] == "reschedule" && r.Method == http.MethodPost {
 		var body struct {
 			ScheduleAt string `json:"schedule_at"`
+			ProjectID  string `json:"_project_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		out, err := a.toolPostReschedule(globalCtx, map[string]any{
+		out, err := a.toolPostReschedule(ctx, map[string]any{
 			"post_id":     id,
 			"schedule_at": body.ScheduleAt,
+			"_project_id": body.ProjectID,
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -4674,7 +4737,7 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 && parts[1] == "metrics" && r.Method == http.MethodGet {
-		out, err := a.toolPostMetrics(globalCtx, map[string]any{"post_id": id})
+		out, err := a.toolPostMetrics(ctx, map[string]any{"post_id": id})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -4692,7 +4755,7 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		raw["post_id"] = id
-		out, err := a.toolPostEdit(globalCtx, raw)
+		out, err := a.toolPostEdit(ctx, raw)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -4737,7 +4800,11 @@ func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	ctx := requestCtx(r)
+	pid := strings.TrimSpace(r.URL.Query().Get("project_id"))
+	if pid == "" {
+		pid = strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
+	}
 	out := make([]map[string]any, 0, len(platforms))
 	for _, def := range platforms {
 		// available — a platform's "Add account" button only makes
@@ -4746,7 +4813,7 @@ func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
 		// fails with "missing client_id". Probe per-platform so the UI
 		// can gray out buttons we know will fail.
 		available := false
-		if conns, err := globalCtx.PlatformAPI().ListConnections(sdk.ConnectionFilter{
+		if conns, err := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{
 			ProjectID: pid,
 			AppSlug:   def.IntegrationSlug,
 		}); err == nil && len(conns) > 0 {
@@ -4777,6 +4844,7 @@ func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
 
 type pendingRow struct {
 	id              int64
+	projectID       string
 	platform        string
 	integrationSlug string
 	connectionID    int64
@@ -4787,10 +4855,10 @@ type pendingRow struct {
 func (a *App) getPending(id int64) (*pendingRow, error) {
 	var row pendingRow
 	err := globalCtx.AppDB().QueryRow(
-		`SELECT id, platform, integration_slug, COALESCE(connection_id,0), status,
+		`SELECT id, COALESCE(project_id,''), platform, integration_slug, COALESCE(connection_id,0), status,
 		        COALESCE(profile_id,0)
 		 FROM pending_accounts WHERE id=?`, id,
-	).Scan(&row.id, &row.platform, &row.integrationSlug, &row.connectionID, &row.status, &row.profileID)
+	).Scan(&row.id, &row.projectID, &row.platform, &row.integrationSlug, &row.connectionID, &row.status, &row.profileID)
 	if err != nil {
 		return nil, err
 	}

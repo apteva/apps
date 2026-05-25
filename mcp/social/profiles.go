@@ -160,7 +160,7 @@ func loadProfile(db *sql.DB, projectID string, id int64) (*Profile, error) {
 func (a *App) profileTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
-			Name: "profile_create",
+			Name:        "profile_create",
 			Description: "Create a profile (brand/client/site container) inside the social app. Args: name, description?, color? (#hex), is_default?. Returns the row including the auto-generated slug. The first profile in a project is automatically marked default.",
 			InputSchema: schemaObject(map[string]any{
 				"name":        map[string]any{"type": "string"},
@@ -171,13 +171,13 @@ func (a *App) profileTools() []sdk.Tool {
 			Handler: a.toolProfileCreate,
 		},
 		{
-			Name: "profile_list",
+			Name:        "profile_list",
 			Description: "List profiles in the current project with their account_count + post_count. Returns [{id, slug, name, color, account_count, post_count, is_default}]. Use this when the agent prompt mentions a profile name and you need its slug/id, or to surface available brands to the operator.",
 			InputSchema: schemaObject(nil, nil),
 			Handler:     a.toolProfileList,
 		},
 		{
-			Name: "profile_get",
+			Name:        "profile_get",
 			Description: "Fetch one profile by id or slug. Returns the row + nested accounts + recent posts. Args: id?, profile? (slug). One of the two is required.",
 			InputSchema: schemaObject(map[string]any{
 				"id":      map[string]any{"type": "integer"},
@@ -186,7 +186,7 @@ func (a *App) profileTools() []sdk.Tool {
 			Handler: a.toolProfileGet,
 		},
 		{
-			Name: "profile_update",
+			Name:        "profile_update",
 			Description: "Rename / recolor / promote-to-default a profile. Args: id (required), name?, description?, color?, is_default?. Setting is_default=true demotes the previous default.",
 			InputSchema: schemaObject(map[string]any{
 				"id":          map[string]any{"type": "integer"},
@@ -198,11 +198,11 @@ func (a *App) profileTools() []sdk.Tool {
 			Handler: a.toolProfileUpdate,
 		},
 		{
-			Name: "profile_delete",
+			Name:        "profile_delete",
 			Description: "Delete a profile. Args: id (required), reassign_to? (profile_id to move accounts+posts to; defaults to 0 = unassigned). Refuses to delete the last default profile if other profiles still exist — promote a replacement first.",
 			InputSchema: schemaObject(map[string]any{
-				"id":           map[string]any{"type": "integer"},
-				"reassign_to":  map[string]any{"type": "integer"},
+				"id":          map[string]any{"type": "integer"},
+				"reassign_to": map[string]any{"type": "integer"},
 			}, []string{"id"}),
 			Handler: a.toolProfileDelete,
 		},
@@ -210,7 +210,10 @@ func (a *App) profileTools() []sdk.Tool {
 }
 
 func (a *App) toolProfileCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
+	if pid == "" {
+		return mcpError("project_id required for global Social install"), nil
+	}
 	name, _ := args["name"].(string)
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -262,7 +265,7 @@ func (a *App) toolProfileCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func (a *App) toolProfileList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
 	// First pass: gather row data + close the cursor BEFORE issuing
 	// the per-row count queries. Holding a Rows open while running
 	// nested QueryRows deadlocks under MaxOpenConns(1) in tests
@@ -301,7 +304,7 @@ func (a *App) toolProfileList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func (a *App) toolProfileGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		if slug, _ := args["profile"].(string); slug != "" {
@@ -334,8 +337,8 @@ func (a *App) toolProfileGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err == nil {
 		for rows.Next() {
 			var (
-				aid                                            int64
-				platform, ext, name, avatar, status            string
+				aid                                 int64
+				platform, ext, name, avatar, status string
 			)
 			if err := rows.Scan(&aid, &platform, &ext, &name, &avatar, &status); err != nil {
 				continue
@@ -355,7 +358,7 @@ func (a *App) toolProfileGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func (a *App) toolProfileUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return mcpError("id required"), nil
@@ -415,7 +418,7 @@ func (a *App) toolProfileUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func (a *App) toolProfileDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return mcpError("id required"), nil
@@ -485,7 +488,8 @@ func (a *App) toolProfileDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 func (a *App) handleProfilesCollection(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		out, err := a.toolProfileList(globalCtx, map[string]any{})
+		ctx := requestCtx(r)
+		out, err := a.toolProfileList(ctx, queryToolArgs(r))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -510,7 +514,8 @@ func (a *App) handleProfilesCollection(w http.ResponseWriter, r *http.Request) {
 		if body.IsDefault != nil {
 			args["is_default"] = *body.IsDefault
 		}
-		out, err := a.toolProfileCreate(globalCtx, args)
+		ctx := requestCtx(r)
+		out, err := a.toolProfileCreate(ctx, args)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -524,6 +529,7 @@ func (a *App) handleProfilesCollection(w http.ResponseWriter, r *http.Request) {
 // handleProfilesItem: GET/PATCH/DELETE /profiles/:id and
 // POST /profiles/:id/move (bulk-reassigns accounts to this profile).
 func (a *App) handleProfilesItem(w http.ResponseWriter, r *http.Request) {
+	ctx := requestCtx(r)
 	rest := strings.TrimPrefix(r.URL.Path, "/profiles/")
 	if rest == "" {
 		http.Error(w, "id required", http.StatusBadRequest)
@@ -543,7 +549,7 @@ func (a *App) handleProfilesItem(w http.ResponseWriter, r *http.Request) {
 	case "":
 		switch r.Method {
 		case http.MethodGet:
-			out, err := a.toolProfileGet(globalCtx, map[string]any{"id": id})
+			out, err := a.toolProfileGet(ctx, map[string]any{"id": id})
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -556,7 +562,7 @@ func (a *App) handleProfilesItem(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			body["id"] = id
-			out, err := a.toolProfileUpdate(globalCtx, body)
+			out, err := a.toolProfileUpdate(ctx, body)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -569,7 +575,7 @@ func (a *App) handleProfilesItem(w http.ResponseWriter, r *http.Request) {
 					args["reassign_to"] = rt
 				}
 			}
-			out, err := a.toolProfileDelete(globalCtx, args)
+			out, err := a.toolProfileDelete(ctx, args)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -594,7 +600,7 @@ func (a *App) handleProfilesItem(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		out, err := a.bulkAssignAccounts(globalCtx, id, body.AccountIDs)
+		out, err := a.bulkAssignAccounts(ctx, id, body.AccountIDs, strings.TrimSpace(r.URL.Query().Get("project_id")))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -605,8 +611,10 @@ func (a *App) handleProfilesItem(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *App) bulkAssignAccounts(ctx *sdk.AppCtx, profileID int64, accountIDs []int64) (map[string]any, error) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+func (a *App) bulkAssignAccounts(ctx *sdk.AppCtx, profileID int64, accountIDs []int64, pid string) (map[string]any, error) {
+	if pid == "" {
+		pid = strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
+	}
 	target, err := loadProfile(ctx.AppDB(), pid, profileID)
 	if err != nil {
 		return nil, err

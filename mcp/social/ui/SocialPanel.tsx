@@ -27,6 +27,16 @@ const API = "/api/apps/social";
 const STORAGE_API = "/api/apps/storage";
 const MEDIA_API = "/api/apps/media";
 
+function socialURL(path: string, projectId?: string | null, extra?: Record<string, string | number | undefined | null>): string {
+  const params = new URLSearchParams();
+  if (projectId) params.set("project_id", projectId);
+  for (const [key, value] of Object.entries(extra || {})) {
+    if (value !== undefined && value !== null && value !== "") params.set(key, String(value));
+  }
+  const qs = params.toString();
+  return `${API}${path}${qs ? `?${qs}` : ""}`;
+}
+
 function storageURL(path: string, projectId?: string | null): string {
   const params = new URLSearchParams();
   if (projectId) params.set("project_id", projectId);
@@ -79,6 +89,7 @@ interface Post {
   id: number;
   body: string;
   media_storage_ids: number[];
+  media_project_id?: string;
   schedule_at: string;
   status: string;
   created_at: string;
@@ -258,49 +269,44 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
 
   const loadProfiles = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/profiles`, { credentials: "same-origin" });
+      const res = await fetch(socialURL("/profiles", projectId), { credentials: "same-origin" });
       const data = await res.json();
       setProfiles(data.profiles || []);
     } catch (e) {
       setStatus("Load profiles: " + (e as Error).message);
     }
-  }, []);
+  }, [projectId]);
 
   // Profile-scoped fetches — when activeProfileId is set, the
   // accounts/posts queries pass profile_id and the panel only sees
   // that brand's rows. activeProfileId=null = project-wide.
-  const profileQuery = useCallback(() => {
-    if (activeProfileId == null) return "";
-    return `?profile_id=${activeProfileId}`;
-  }, [activeProfileId]);
-
   const loadAccounts = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/accounts${profileQuery()}`, { credentials: "same-origin" });
+      const res = await fetch(socialURL("/accounts", projectId, { profile_id: activeProfileId ?? undefined }), { credentials: "same-origin" });
       const data = await res.json();
       setAccounts(data.accounts || []);
     } catch (e) {
       setStatus("Load accounts: " + (e as Error).message);
     }
-  }, [profileQuery]);
+  }, [activeProfileId, projectId]);
 
   const loadPosts = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/posts${profileQuery()}`, { credentials: "same-origin" });
+      const res = await fetch(socialURL("/posts", projectId, { profile_id: activeProfileId ?? undefined }), { credentials: "same-origin" });
       const data = await res.json();
       setPosts(data.posts || []);
     } catch (e) {
       setStatus("Load posts: " + (e as Error).message);
     }
-  }, [profileQuery]);
+  }, [activeProfileId, projectId]);
 
   const loadPlatforms = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/platforms`, { credentials: "same-origin" });
+      const res = await fetch(socialURL("/platforms", projectId), { credentials: "same-origin" });
       const data = await res.json();
       setPlatforms(data.platforms || []);
     } catch {}
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     loadProfiles();
@@ -379,6 +385,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
             accounts={accounts}
             platforms={platforms}
             oauthLanding={oauthLanding}
+            projectId={projectId}
             onClearLanding={() => setOauthLanding(null)}
             onSetLanding={(pendingId, connId) =>
               setOauthLanding({ pendingId, connectionId: connId })
@@ -391,7 +398,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
           <PostsView posts={posts} onChange={loadPosts} setStatus={setStatus} projectId={projectId} />
         )}
         {tab === "metrics" && (
-          <MetricsView posts={posts} accounts={accounts} setStatus={setStatus} onPostsChanged={loadPosts} />
+          <MetricsView posts={posts} accounts={accounts} setStatus={setStatus} onPostsChanged={loadPosts} projectId={projectId} />
         )}
       </div>
 
@@ -410,6 +417,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
         <ProfileManageModal
           profiles={profiles}
           accounts={accounts}
+          projectId={projectId}
           onClose={() => setManageOpen(false)}
           onChanged={() => { loadProfiles(); loadAccounts(); }}
           setStatus={setStatus}
@@ -503,10 +511,11 @@ function ProfileSwitcher({
 // --- ProfileManageModal: create / rename / set-default / delete ---
 
 function ProfileManageModal({
-  profiles, accounts, onClose, onChanged, setStatus,
+  profiles, accounts, projectId, onClose, onChanged, setStatus,
 }: {
   profiles: Profile[];
   accounts: SocialAccount[];
+  projectId?: string | null;
   onClose: () => void;
   onChanged: () => void;
   setStatus: (s: string) => void;
@@ -521,7 +530,7 @@ function ProfileManageModal({
     if (!name) return;
     setBusy(true);
     try {
-      const res = await fetch(`${API}/profiles`, {
+      const res = await fetch(socialURL("/profiles", projectId), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -539,7 +548,7 @@ function ProfileManageModal({
 
   const promote = async (id: number) => {
     try {
-      await fetch(`${API}/profiles/${id}`, {
+      await fetch(socialURL(`/profiles/${id}`, projectId), {
         method: "PATCH",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -553,7 +562,7 @@ function ProfileManageModal({
 
   const rename = async (id: number, name: string) => {
     try {
-      await fetch(`${API}/profiles/${id}`, {
+      await fetch(socialURL(`/profiles/${id}`, projectId), {
         method: "PATCH",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -567,7 +576,7 @@ function ProfileManageModal({
 
   const recolor = async (id: number, color: string) => {
     try {
-      await fetch(`${API}/profiles/${id}`, {
+      await fetch(socialURL(`/profiles/${id}`, projectId), {
         method: "PATCH",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -581,7 +590,7 @@ function ProfileManageModal({
 
   const removeProfile = async (id: number) => {
     try {
-      const res = await fetch(`${API}/profiles/${id}`, {
+      const res = await fetch(socialURL(`/profiles/${id}`, projectId), {
         method: "DELETE",
         credentials: "same-origin",
       });
@@ -594,7 +603,7 @@ function ProfileManageModal({
 
   const moveAccount = async (accountId: number, profileId: number) => {
     try {
-      await fetch(`${API}/profiles/${profileId}/move`, {
+      await fetch(socialURL(`/profiles/${profileId}/move`, projectId), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -783,10 +792,11 @@ function Tab({
 // --- AccountsView -------------------------------------------------
 
 function AccountsView({
-  accounts, platforms, oauthLanding, onClearLanding, onSetLanding, onChange, setStatus,
+  accounts, platforms, oauthLanding, projectId, onClearLanding, onSetLanding, onChange, setStatus,
 }: {
   accounts: SocialAccount[]; platforms: PlatformInfo[];
   oauthLanding: { pendingId: number; connectionId: number } | null;
+  projectId?: string | null;
   onClearLanding: () => void;
   onSetLanding: (pendingId: number, connectionId: number) => void;
   onChange: () => void; setStatus: (s: string) => void;
@@ -798,10 +808,10 @@ function AccountsView({
     // finalize directly. Otherwise, keep oauthLanding set so the picker
     // renders below.
     try {
-      const res = await fetch(`${API}/accounts/${pendingId}/pages`, { credentials: "same-origin" });
+      const res = await fetch(socialURL(`/accounts/${pendingId}/pages`, projectId), { credentials: "same-origin" });
       const data = await res.json();
       if (!data.requires_picker) {
-        await fetch(`${API}/accounts/finalize`, {
+        await fetch(socialURL("/accounts/finalize", projectId), {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
@@ -815,7 +825,7 @@ function AccountsView({
     } catch (e) {
       setStatus("Finalize failed: " + (e as Error).message);
     }
-  }, [onChange, onClearLanding, setStatus]);
+  }, [onChange, onClearLanding, projectId, setStatus]);
 
   // When oauthLanding flips, kick the auto-finalize / picker decision.
   useEffect(() => {
@@ -841,7 +851,7 @@ function AccountsView({
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {accounts.map((a) => (
-            <AccountCard key={a.id} account={a} onChange={onChange} setStatus={setStatus} />
+            <AccountCard key={a.id} account={a} onChange={onChange} setStatus={setStatus} projectId={projectId} />
           ))}
         </div>
       )}
@@ -851,6 +861,7 @@ function AccountsView({
           platforms={platforms}
           onClose={() => setAdding(false)}
           setStatus={setStatus}
+          projectId={projectId}
           onReuseExisting={(pendingId, connId) => {
             // Backend returned 'reusing existing connection' — skip the
             // OAuth popup entirely, jump straight into the page picker.
@@ -863,6 +874,7 @@ function AccountsView({
       {oauthLanding && (
         <PagePicker
           pendingId={oauthLanding.pendingId}
+          projectId={projectId}
           onClose={() => { onClearLanding(); onChange(); }}
           setStatus={setStatus}
         />
@@ -872,13 +884,13 @@ function AccountsView({
 }
 
 function AccountCard({
-  account, onChange, setStatus,
-}: { account: SocialAccount; onChange: () => void; setStatus: (s: string) => void }) {
+  account, onChange, setStatus, projectId,
+}: { account: SocialAccount; onChange: () => void; setStatus: (s: string) => void; projectId?: string | null }) {
   const [confirming, setConfirming] = useState(false);
   const [importing, setImporting] = useState(false);
   const doRemove = async () => {
     try {
-      await fetch(`${API}/accounts/${account.id}`, { method: "DELETE", credentials: "same-origin" });
+      await fetch(socialURL(`/accounts/${account.id}`, projectId), { method: "DELETE", credentials: "same-origin" });
       setStatus("Disconnected.");
       onChange();
     } catch (e) {
@@ -894,7 +906,7 @@ function AccountCard({
     setImporting(true);
     setStatus(`Importing recent posts from ${account.display_name}…`);
     try {
-      const res = await fetch(`${API}/accounts/${account.id}/import?limit=25`, {
+      const res = await fetch(socialURL(`/accounts/${account.id}/import`, projectId, { limit: 25 }), {
         method: "POST",
         credentials: "same-origin",
       });
@@ -970,12 +982,13 @@ function AccountCard({
 }
 
 function AddAccountDialog({
-  platforms, onClose, setStatus, onReuseExisting,
+  platforms, onClose, setStatus, onReuseExisting, projectId,
 }: {
   platforms: PlatformInfo[];
   onClose: () => void;
   setStatus: (s: string) => void;
   onReuseExisting: (pendingId: number, connectionId: number) => void;
+  projectId?: string | null;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   // Inline error inside the modal. The panel-header status used to
@@ -1018,7 +1031,7 @@ function AddAccountDialog({
         try { popup.close(); } catch {}
       };
       try {
-        const res = await fetch(`${API}/accounts/start`, {
+        const res = await fetch(socialURL("/accounts/start", projectId), {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
@@ -1119,8 +1132,8 @@ function AddAccountDialog({
 }
 
 function PagePicker({
-  pendingId, onClose, setStatus,
-}: { pendingId: number; onClose: () => void; setStatus: (s: string) => void }) {
+  pendingId, projectId, onClose, setStatus,
+}: { pendingId: number; projectId?: string | null; onClose: () => void; setStatus: (s: string) => void }) {
   const [pages, setPages] = useState<PageEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState("");
@@ -1129,7 +1142,7 @@ function PagePicker({
   const kind = pickerKind(platform);
 
   useEffect(() => {
-    fetch(`${API}/accounts/${pendingId}/pages`, { credentials: "same-origin" })
+    fetch(socialURL(`/accounts/${pendingId}/pages`, projectId), { credentials: "same-origin" })
       .then((r) => r.json())
       .then((d) => {
         setPages(d.pages || []);
@@ -1140,12 +1153,12 @@ function PagePicker({
         }
       })
       .catch(() => setLoading(false));
-  }, [pendingId, onClose]);
+  }, [pendingId, onClose, projectId]);
 
   const pick = async (page: PageEntry) => {
     setBusyID(page.id);
     try {
-      await fetch(`${API}/accounts/finalize`, {
+      await fetch(socialURL("/accounts/finalize", projectId), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -1578,6 +1591,7 @@ function ComposeDialog({
       const anyCustomized = selectedIds.some((id) => isCustomized(id));
       const payload: Record<string, any> = {
         body,
+        _project_id: projectId || undefined,
         schedule_at: scheduleAt || undefined,
         media_storage_ids: media.length > 0 ? media.map((m) => m.id) : undefined,
         media_project_id: media.length > 0 ? projectId : undefined,
@@ -1596,7 +1610,7 @@ function ComposeDialog({
       } else {
         payload.social_account_ids = selectedIds;
       }
-      const res = await fetch(`${API}/posts`, {
+      const res = await fetch(socialURL("/posts", projectId), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -2509,7 +2523,7 @@ function PostsView({
 
   const retry = async (postId: number) => {
     try {
-      await fetch(`${API}/posts/${postId}/retry`, { method: "POST", credentials: "same-origin" });
+      await fetch(socialURL(`/posts/${postId}/retry`, projectId), { method: "POST", credentials: "same-origin" });
       setStatus("Retry triggered.");
       onChange();
     } catch (e) {
@@ -2519,7 +2533,7 @@ function PostsView({
 
   const executeDelete = async (post: Post) => {
     try {
-      const res = await fetch(`${API}/posts/${post.id}`, {
+      const res = await fetch(socialURL(`/posts/${post.id}`, projectId), {
         method: "DELETE", credentials: "same-origin",
       });
       if (!res.ok) throw new Error(await res.text());
@@ -2601,7 +2615,7 @@ function PostsView({
           {p.media_storage_ids && p.media_storage_ids.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
               {p.media_storage_ids.map((id) => (
-                <MediaThumb key={id} fileId={id} projectId={projectId} />
+                <MediaThumb key={id} fileId={id} projectId={p.media_project_id || projectId} />
               ))}
             </div>
           )}
@@ -2620,6 +2634,7 @@ function PostsView({
           onClose={() => setRescheduleFor(null)}
           onChanged={() => { setRescheduleFor(null); onChange(); }}
           setStatus={setStatus}
+          projectId={projectId}
         />
       )}
       {deleteFor && (
@@ -2639,6 +2654,7 @@ function PostsView({
           onClose={() => setEditFor(null)}
           onSaved={() => { setEditFor(null); onChange(); }}
           setStatus={setStatus}
+          projectId={projectId}
         />
       )}
     </div>
@@ -2859,12 +2875,13 @@ interface TargetEditOutcome {
 }
 
 function EditPostDialog({
-  post, onClose, onSaved, setStatus,
+  post, onClose, onSaved, setStatus, projectId,
 }: {
   post: Post;
   onClose: () => void;
   onSaved: () => void;
   setStatus: (s: string) => void;
+  projectId?: string | null;
 }) {
   const [body, setBody] = useState(post.body || "");
   // Per-target option overrides, keyed by social_account_id. Seeded
@@ -2904,7 +2921,7 @@ function EditPostDialog({
         setBusy(false);
         return;
       }
-      const res = await fetch(`${API}/posts/${post.id}/edit`, {
+      const res = await fetch(socialURL(`/posts/${post.id}/edit`, projectId), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -3074,12 +3091,13 @@ function FieldText({
 }
 
 function RescheduleDialog({
-  post, onClose, onChanged, setStatus,
+  post, onClose, onChanged, setStatus, projectId,
 }: {
   post: Post;
   onClose: () => void;
   onChanged: () => void;
   setStatus: (s: string) => void;
+  projectId?: string | null;
 }) {
   // Seed the input with the post's current schedule_at as a
   // datetime-local value (the input wants "YYYY-MM-DDTHH:MM",
@@ -3092,11 +3110,11 @@ function RescheduleDialog({
     if (!when) return;
     setBusy(true);
     try {
-      const res = await fetch(`${API}/posts/${post.id}/reschedule`, {
+      const res = await fetch(socialURL(`/posts/${post.id}/reschedule`, projectId), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ schedule_at: when }),
+        body: JSON.stringify({ schedule_at: when, _project_id: projectId || undefined }),
       });
       if (!res.ok) throw new Error(await res.text());
       setStatus("Rescheduled.");
@@ -3294,12 +3312,13 @@ interface AccountMetrics {
 }
 
 function MetricsView({
-  posts, accounts, setStatus, onPostsChanged,
+  posts, accounts, setStatus, onPostsChanged, projectId,
 }: {
   posts: Post[];
   accounts: SocialAccount[];
   setStatus: (s: string) => void;
   onPostsChanged: () => void;
+  projectId?: string | null;
 }) {
   const [accountFor, setAccountFor] = useState<Record<number, AccountMetrics | "loading" | { error: string }>>({});
   const [postFor, setPostFor] = useState<Record<number, PostMetrics | "loading" | { error: string }>>({});
@@ -3322,7 +3341,7 @@ function MetricsView({
   const loadAccount = async (id: number) => {
     setAccountFor((prev) => ({ ...prev, [id]: "loading" }));
     try {
-      const res = await fetch(`${API}/accounts/${id}/metrics`, { credentials: "same-origin" });
+      const res = await fetch(socialURL(`/accounts/${id}/metrics`, projectId), { credentials: "same-origin" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json() as AccountMetrics;
       setAccountFor((prev) => ({ ...prev, [id]: data }));
@@ -3334,7 +3353,7 @@ function MetricsView({
   const syncAccountPosts = async (id: number, quiet = false) => {
     setSyncFor((prev) => ({ ...prev, [id]: "loading" }));
     try {
-      const res = await fetch(`${API}/accounts/${id}/import?limit=100`, {
+      const res = await fetch(socialURL(`/accounts/${id}/import`, projectId, { limit: 100 }), {
         method: "POST",
         credentials: "same-origin",
       });
@@ -3367,7 +3386,7 @@ function MetricsView({
   const loadPost = async (id: number) => {
     setPostFor((prev) => ({ ...prev, [id]: "loading" }));
     try {
-      const res = await fetch(`${API}/posts/${id}/metrics`, { credentials: "same-origin" });
+      const res = await fetch(socialURL(`/posts/${id}/metrics`, projectId), { credentials: "same-origin" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json() as PostMetrics;
       setPostFor((prev) => ({ ...prev, [id]: data }));

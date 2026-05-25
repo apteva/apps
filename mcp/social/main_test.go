@@ -978,9 +978,10 @@ func TestSchedule_DispatchesToJobsApp(t *testing.T) {
 	// install id (kind=app bindings store install ids, not conn ids).
 	pf.identity.Bindings = map[string]any{"jobs": float64(101)}
 	ctx := newSocialCtx(t, pf)
+	t.Setenv("APTEVA_PROJECT_ID", "")
 	r, _ := ctx.AppDB().Exec(
 		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
-		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
+		 VALUES ('', 'twitter', 42, '@me', 'active')`,
 	)
 	acctID, _ := r.LastInsertId()
 
@@ -989,6 +990,7 @@ func TestSchedule_DispatchesToJobsApp(t *testing.T) {
 		"body":               "later",
 		"social_account_ids": []any{acctID},
 		"schedule_at":        "2026-05-01T10:00:00Z",
+		"_project_id":        "ui-proj",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1025,6 +1027,9 @@ func TestSchedule_DispatchesToJobsApp(t *testing.T) {
 			}
 			if c.Input["idempotency_key"] == "" {
 				t.Errorf("missing idempotency_key")
+			}
+			if c.Input["_project_id"] != "ui-proj" {
+				t.Errorf("jobs _project_id = %v, want ui-proj", c.Input["_project_id"])
 			}
 		}
 	}
