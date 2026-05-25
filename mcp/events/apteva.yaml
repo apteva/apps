@@ -1,0 +1,75 @@
+schema: apteva-app/v1
+
+name: events
+display_name: Events
+version: 0.1.0
+description: Create shows, collect performer applications, curate lineups, issue simple tickets, and run check-in.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/events
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/events/icon.svg
+tags: [events, ticketing, performers, scheduling]
+
+scopes: [project]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: events_create
+      description: Create a show/event.
+    - name: events_list
+      description: List events.
+    - name: applications_submit
+      description: Submit a performer application for an event.
+    - name: applications_list
+      description: List performer applications.
+    - name: applications_review
+      description: Shortlist, accept, reject, or annotate a performer application.
+    - name: schedule_application
+      description: Accept an application if needed and place it into a performance slot.
+    - name: tickets_issue
+      description: Issue a simple ticket.
+    - name: tickets_check_in
+      description: Check in a ticket by id or code.
+  ui_panels:
+    - slot: project.page
+      label: Events
+      icon: calendar-days
+      entry: /ui/EventsPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/events
+  port: 8080
+  health_check: /health
+  resources:
+    cpu: 0.05
+    memory: 64
+    cpu_limit: 1
+    memory_limit: 256
+  storage:
+    - name: data
+      mount_path: /data
+  env:
+    APTEVA_GATEWAY_URL: { from: platform }
+    APTEVA_APP_TOKEN:   { from: platform }
+    APTEVA_INSTALL_ID:  { from: platform }
+    APTEVA_PROJECT_ID:  { from: platform }
+    APTEVA_APP_CONFIG:  { from: platform }
+
+db:
+  driver: sqlite
+  path: /data/events.db
+  migrations: migrations/
+
+config_schema: []
+
+upgrade_policy: auto-patch
