@@ -45,11 +45,22 @@ interface ContextListResponse {
   error?: string;
 }
 
+interface ComputerSettings {
+  default_backend: "local" | "browserbase" | "steel" | "browser-engine" | "service" | string;
+  lock_backend: boolean;
+}
+
+interface SettingsResponse {
+  settings?: ComputerSettings;
+  error?: string;
+}
+
 type OpenMode = "open" | "resume" | "context" | "create_context";
 type ProxyMode = "" | "true" | "false";
 
 const SESSIONS_URL = "/api/apps/computer/sessions";
 const CONTEXTS_URL = "/api/apps/computer/contexts";
+const SETTINGS_URL = "/api/apps/computer/settings";
 const POLL_MS = 4000;
 
 const BACKEND_LABEL: Record<string, string> = {
@@ -60,9 +71,18 @@ const BACKEND_LABEL: Record<string, string> = {
   service: "Browser Service",
 };
 
+const backendOptions = [
+  { value: "local", label: "Local Chrome" },
+  { value: "browserbase", label: "Browserbase" },
+  { value: "steel", label: "Steel" },
+  { value: "browser-engine", label: "Browser Engine" },
+  { value: "service", label: "Browser Service" },
+] as const;
+
 export default function ComputerPanel() {
   const [rows, setRows] = useState<SessionRow[]>([]);
   const [contexts, setContexts] = useState<ContextRow[]>([]);
+  const [settings, setSettings] = useState<ComputerSettings>({ default_backend: "local", lock_backend: false });
   const [err, setErr] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [showOpen, setShowOpen] = useState(false);
@@ -71,18 +91,23 @@ export default function ComputerPanel() {
 
   const refresh = useCallback(async () => {
     try {
-      const [sessionsRes, contextsRes] = await Promise.all([
+      const [sessionsRes, contextsRes, settingsRes] = await Promise.all([
         fetch(SESSIONS_URL, { credentials: "include" }),
         fetch(CONTEXTS_URL, { credentials: "include" }),
+        fetch(SETTINGS_URL, { credentials: "include" }),
       ]);
       if (!sessionsRes.ok) throw new Error(`sessions HTTP ${sessionsRes.status}`);
       if (!contextsRes.ok) throw new Error(`contexts HTTP ${contextsRes.status}`);
+      if (!settingsRes.ok) throw new Error(`settings HTTP ${settingsRes.status}`);
       const body = (await sessionsRes.json()) as ListResponse;
       const contextBody = (await contextsRes.json()) as ContextListResponse;
+      const settingsBody = (await settingsRes.json()) as SettingsResponse;
       if (body.error) throw new Error(body.error);
       if (contextBody.error) throw new Error(contextBody.error);
+      if (settingsBody.error) throw new Error(settingsBody.error);
       setRows(body.sessions ?? []);
       setContexts(contextBody.contexts ?? []);
+      if (settingsBody.settings) setSettings(settingsBody.settings);
       setErr(null);
     } catch (e: any) {
       setErr(String(e?.message ?? e));
@@ -136,6 +161,29 @@ export default function ComputerPanel() {
     [refresh],
   );
 
+  const updateSettings = useCallback(
+    async (patch: Partial<ComputerSettings>) => {
+      const next = { ...settings, ...patch };
+      setSettings(next);
+      try {
+        const r = await fetch(SETTINGS_URL, {
+          method: "PATCH",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(patch),
+        });
+        const body = (await r.json()) as SettingsResponse;
+        if (!r.ok || body.error) throw new Error(body.error ?? `HTTP ${r.status}`);
+        if (body.settings) setSettings(body.settings);
+        setErr(null);
+      } catch (e: any) {
+        setErr(`settings failed: ${String(e?.message ?? e)}`);
+        void refresh();
+      }
+    },
+    [refresh, settings],
+  );
+
   return (
     <div
       className="bg-bg"
@@ -161,12 +209,15 @@ export default function ComputerPanel() {
         onOpen={() => setShowOpen(true)}
         contexts={contexts}
         onDeleteContext={setPendingContextDelete}
+        settings={settings}
+        onUpdateSettings={updateSettings}
       />
       <SessionDetail session={sel} onClose={setPendingClose} onRefresh={refresh} />
       {showOpen && (
         <OpenSessionModal
           onClose={() => setShowOpen(false)}
           contexts={contexts}
+          settings={settings}
           onOpened={(newID) => {
             setShowOpen(false);
             setSelected(newID);
@@ -213,6 +264,8 @@ function BrowsersList({
   onOpen,
   contexts,
   onDeleteContext,
+  settings,
+  onUpdateSettings,
 }: {
   rows: SessionRow[];
   err: string | null;
@@ -222,6 +275,8 @@ function BrowsersList({
   onOpen: () => void;
   contexts: ContextRow[];
   onDeleteContext: (id: string) => void;
+  settings: ComputerSettings;
+  onUpdateSettings: (patch: Partial<ComputerSettings>) => void;
 }) {
   return (
     <Card fullWidth className="overflow-hidden flex flex-col h-full min-h-0">
@@ -264,6 +319,39 @@ function BrowsersList({
             />
           ))}
         </ul>
+        <div className="border-t border-border" style={{ marginTop: "12px", paddingTop: "10px" }}>
+          <div
+            className="text-text-muted"
+            style={{ fontSize: "11px", fontWeight: 600, textTransform: "uppercase", marginBottom: "8px" }}
+          >
+            Provider
+          </div>
+          <select
+            value={settings.default_backend}
+            onChange={(e) => onUpdateSettings({ default_backend: e.target.value })}
+            className="border border-border bg-bg text-text"
+            style={inputStyle}
+            title="Default provider"
+          >
+            <option value="local">Local Chrome</option>
+            <option value="browserbase">Browserbase</option>
+            <option value="steel">Steel</option>
+            <option value="browser-engine">Browser Engine</option>
+            <option value="service">Browser Service</option>
+          </select>
+          <label
+            className="text-text-muted"
+            style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "8px", fontSize: "12px" }}
+            title="Reject explicit session requests for any other provider"
+          >
+            <input
+              type="checkbox"
+              checked={settings.lock_backend}
+              onChange={(e) => onUpdateSettings({ lock_backend: e.target.checked })}
+            />
+            Force this provider for agents
+          </label>
+        </div>
         <div className="border-t border-border" style={{ marginTop: "12px", paddingTop: "10px" }}>
           <div
             className="text-text-muted"
@@ -733,10 +821,12 @@ function InteractivePreview({
 function OpenSessionModal({
   onClose,
   contexts,
+  settings,
   onOpened,
 }: {
   onClose: () => void;
   contexts: ContextRow[];
+  settings: ComputerSettings;
   onOpened: (sessionID: string) => void;
 }) {
   const [mode, setMode] = useState<OpenMode>("open");
@@ -837,12 +927,16 @@ function OpenSessionModal({
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
           <Field label="Backend">
             <select value={backend} onChange={(e) => setBackend(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle}>
-              <option value="">Default</option>
-              <option value="local">Local Chrome</option>
-              <option value="browserbase">Browserbase</option>
-              <option value="steel">Steel</option>
-              <option value="browser-engine">Browser Engine</option>
-              <option value="service">Browser Service</option>
+              <option value="">App default ({BACKEND_LABEL[settings.default_backend] ?? settings.default_backend})</option>
+              {backendOptions.map((opt) => (
+                <option
+                  key={opt.value}
+                  value={opt.value}
+                  disabled={settings.lock_backend && opt.value !== settings.default_backend}
+                >
+                  {opt.label}
+                </option>
+              ))}
             </select>
           </Field>
           <Field label="URL">

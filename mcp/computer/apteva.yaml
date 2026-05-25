@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.5
+version: 0.7.6
 description: |
-  Watch and steer browser sessions. v0.7.5 keeps the enlarged browser
-  viewport stable while action status changes.
+  Watch and steer browser sessions. v0.7.6 adds app-managed default
+  provider settings and optional provider enforcement.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -67,6 +67,14 @@ provides:
       description: |
         Delete or unlink an app-managed browser context. Args: id,
         delete_provider?.
+    - name: computer_settings_get
+      description: |
+        Get Computer app runtime settings, including the default browser
+        provider and provider lock.
+    - name: computer_settings_update
+      description: |
+        Update Computer app runtime settings. Args: default_backend?,
+        lock_backend?.
     - name: browser_open
       description: |
         Compatibility alias for browser_session(action=open).

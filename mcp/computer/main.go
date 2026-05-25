@@ -39,10 +39,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.5
+version: 0.7.6
 description: |
-  Watch and steer browser sessions. v0.7.5 keeps the enlarged browser
-  viewport stable while action status changes.
+  Watch and steer browser sessions. v0.7.6 adds app-managed default
+  provider settings and optional provider enforcement.
 scopes: [project, global]
 requires:
   permissions:
@@ -80,6 +80,10 @@ provides:
       description: "Update browser context metadata/defaults. Args: id, name?, provider_context_id?, persist_default?, metadata?."
     - name: computer_context_delete
       description: "Delete or unlink an app-managed browser context. Args: id, delete_provider?."
+    - name: computer_settings_get
+      description: "Get Computer app runtime settings, including the default browser provider and provider lock."
+    - name: computer_settings_update
+      description: "Update Computer app runtime settings. Args: default_backend?, lock_backend?."
     - name: browser_open
       description: "Compatibility alias for browser_session(action=open)."
     - name: browser_list
@@ -265,6 +269,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: http.MethodGet, Pattern: "/contexts/{id}", Handler: a.handleContextItem},
 		{Method: http.MethodPatch, Pattern: "/contexts/{id}", Handler: a.handleContextItem},
 		{Method: http.MethodDelete, Pattern: "/contexts/{id}", Handler: a.handleContextItem},
+		{Method: http.MethodGet, Pattern: "/settings", Handler: a.handleSettings},
+		{Method: http.MethodPatch, Pattern: "/settings", Handler: a.handleSettings},
 		{Method: http.MethodGet, Pattern: "/sessions", Handler: a.handleListSessions},
 		{Method: http.MethodPost, Pattern: "/sessions", Handler: a.handleOpenSession},
 		{Method: http.MethodDelete, Pattern: "/sessions/{id}", Handler: a.handleCloseSession},
@@ -381,8 +387,23 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolContextDelete,
 		},
 		{
+			Name:        "computer_settings_get",
+			Description: "Get Computer app runtime settings. The default_backend is used whenever browser_session/browser_open omit backend.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler:     a.toolSettingsGet,
+		},
+		{
+			Name:        "computer_settings_update",
+			Description: "Update Computer app runtime settings. Set lock_backend=true to reject browser_session/browser_open calls that explicitly request another backend.",
+			InputSchema: schemaObject(map[string]any{
+				"default_backend": map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
+				"lock_backend":    map[string]any{"type": "boolean"},
+			}, nil),
+			Handler: a.toolSettingsUpdate,
+		},
+		{
 			Name: "browser_open",
-			Description: "Compatibility alias for browser_session(action=open). Args: backend? (local|browserbase|steel|browser-engine, default per APTEVA_BROWSER_BACKEND env then \"local\"), " +
+			Description: "Compatibility alias for browser_session(action=open). Args: backend? (local|browserbase|steel|browser-engine, default from Computer app settings), " +
 				"url? (navigate after open), viewport? ({width:int, height:int}, default 1600x800). " +
 				"Returns {session_id, backend, current_url, width, height}. " +
 				"Session owned by this sidecar until browser_close or 30-minute idle reaper.",
@@ -548,6 +569,26 @@ func (a *App) toolContextDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	return map[string]any{"deleted": true, "provider_deleted": providerDeleted}, nil
 }
 
+func (a *App) toolSettingsGet(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	settings, err := currentSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"settings": settings}, nil
+}
+
+func (a *App) toolSettingsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	db := appDB(ctx)
+	if db == nil {
+		return nil, fmt.Errorf("computer settings unavailable")
+	}
+	settings, err := dbUpdateSettings(db, args)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"settings": settings}, nil
+}
+
 func (a *App) createContextRecord(ctx *sdk.AppCtx, args map[string]any) (*ComputerContext, error) {
 	db := appDB(ctx)
 	if db == nil {
@@ -559,9 +600,16 @@ func (a *App) createContextRecord(ctx *sdk.AppCtx, args map[string]any) (*Comput
 	}
 	backend := stringArg(args, "backend")
 	if backend == "" {
-		backend = os.Getenv("APTEVA_BROWSER_BACKEND")
+		settings, err := currentSettings(ctx)
+		if err != nil {
+			return nil, err
+		}
+		backend = settings.DefaultBackend
 	}
 	backend = normalizeBackend(backend)
+	if !isContextBackend(backend) {
+		return nil, fmt.Errorf("backend %q does not support managed contexts", backend)
+	}
 	providerID := stringArg(args, "provider_context_id")
 	persistDefault := boolArgDefault(args, "persist_default", true)
 	autoCreateProvider := boolArgDefault(args, "auto_create_provider", true)
@@ -715,12 +763,9 @@ func (a *App) resolveSessionContext(ctx *sdk.AppCtx, backend string, args map[st
 }
 
 func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bool) (any, error) {
-	backend := stringArg(args, "backend")
-	if backend == "" {
-		backend = os.Getenv("APTEVA_BROWSER_BACKEND")
-	}
-	if backend == "" {
-		backend = "local"
+	backend, err := a.resolveBackend(ctx, args)
+	if err != nil {
+		return nil, err
 	}
 
 	width, height := 0, 0
@@ -816,6 +861,25 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		ctx.Logger().Info("browser_open", "session_id", id, "backend", backend)
 	}
 	return a.sessionOutput(id, &session{comp: comp, backend: backend, appContextID: rc.AppContextID, contextName: rc.ContextName, persist: rc.Persist, openedAt: now, lastUsed: now}), nil
+}
+
+func (a *App) resolveBackend(ctx *sdk.AppCtx, args map[string]any) (string, error) {
+	settings, err := currentSettings(ctx)
+	if err != nil {
+		return "", err
+	}
+	requested := strings.TrimSpace(stringArg(args, "backend"))
+	if requested == "" {
+		return settings.DefaultBackend, nil
+	}
+	requested = normalizeBackend(requested)
+	if !isSessionBackend(requested) {
+		return "", fmt.Errorf("backend %q is not supported", requested)
+	}
+	if settings.LockBackend && requested != settings.DefaultBackend {
+		return "", fmt.Errorf("backend %q is disabled by Computer app settings; default provider is locked to %q", requested, settings.DefaultBackend)
+	}
+	return requested, nil
 }
 
 // sessionInfo is the shape each row in browser_list / /api/sessions
@@ -1033,6 +1097,14 @@ func appDB(ctx *sdk.AppCtx) *sql.DB {
 		return nil
 	}
 	return ctx.AppDB()
+}
+
+func currentSettings(ctx *sdk.AppCtx) (ComputerSettings, error) {
+	db := appDB(ctx)
+	if db == nil {
+		return defaultComputerSettings(), nil
+	}
+	return dbGetSettings(db)
 }
 
 func normalizeBackend(backend string) string {
@@ -1424,6 +1496,35 @@ func (a *App) handleContextItem(w http.ResponseWriter, r *http.Request) {
 			"id":              id,
 			"delete_provider": r.URL.Query().Get("delete_provider"),
 		})
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, out)
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		out, err := a.toolSettingsGet(globalCtx, nil)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, out)
+	case http.MethodPatch:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
+			httpErr(w, http.StatusBadRequest, "bad JSON body: "+err.Error())
+			return
+		}
+		if body == nil {
+			body = map[string]any{}
+		}
+		out, err := a.toolSettingsUpdate(globalCtx, body)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return

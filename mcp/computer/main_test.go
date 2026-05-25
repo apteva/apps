@@ -322,6 +322,63 @@ func TestContextCatalogResolvesBrowserSessionContextName(t *testing.T) {
 	}
 }
 
+func TestComputerSettingsDriveDefaultBackend(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	var gotBackend string
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a},
+		url:     "https://example.test",
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		gotBackend = cfg.Type
+		return fake, nil
+	}
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	if _, err := app.toolSettingsUpdate(ctx, map[string]any{"default_backend": "browserbase"}); err != nil {
+		t.Fatalf("settings update: %v", err)
+	}
+	out, err := app.toolBrowserSession(ctx, map[string]any{"action": "open"})
+	if err != nil {
+		t.Fatalf("browser_session open: %v", err)
+	}
+	if gotBackend != "browserbase" {
+		t.Errorf("newBackend type: want browserbase, got %q", gotBackend)
+	}
+	if out.(map[string]any)["backend"] != "browserbase" {
+		t.Errorf("output backend: want browserbase, got %v", out.(map[string]any)["backend"])
+	}
+}
+
+func TestComputerSettingsLockRejectsExplicitBackend(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		t.Fatalf("newBackend should not be called when backend is locked")
+		return nil, nil
+	}
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	if _, err := app.toolSettingsUpdate(ctx, map[string]any{
+		"default_backend": "browserbase",
+		"lock_backend":    true,
+	}); err != nil {
+		t.Fatalf("settings update: %v", err)
+	}
+	if _, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":  "open",
+		"backend": "local",
+	}); err == nil {
+		t.Fatal("browser_session open with locked non-default backend: want error")
+	}
+}
+
 // ─── fake Computer ─────────────────────────────────────────────────
 
 // fakeComp implements backends.Computer + SessionOpener + SessionInfo
