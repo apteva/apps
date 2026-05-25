@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.3
+version: 0.14.4
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -3153,7 +3153,7 @@ func (a *App) getInstagramAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResu
 	since, until := metricsDateWindow(90)
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_account_insights", map[string]any{
 		"instagramAccountId": instagramAccountID,
-		"metric":             "reach,follower_count,accounts_engaged,total_interactions",
+		"metric":             "reach,follower_count",
 		"period":             period,
 		"metric_type":        "time_series",
 		"since":              since,
@@ -3172,10 +3172,6 @@ func (a *App) getInstagramAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResu
 	out.Status = "ok"
 	out.Followers = latestInsight(series, "follower_count")
 	out.Reach = latestInsight(series, "reach")
-	out.Engagements = latestInsight(series, "accounts_engaged")
-	if out.Engagements == 0 {
-		out.Engagements = latestInsight(series, "total_interactions")
-	}
 	out.Insights = series
 	out.Raw = res.Data
 	return out

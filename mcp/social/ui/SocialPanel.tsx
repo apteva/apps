@@ -2711,7 +2711,6 @@ function MetricsView({
   const [activeAccountId, setActiveAccountId] = useState<number | null>(accounts[0]?.id ?? null);
   const [syncFor, setSyncFor] = useState<Record<number, "loading" | "done" | { error: string }>>({});
   const autoLoadedAccounts = useRef<Set<number>>(new Set());
-  const autoSyncedAccounts = useRef<Set<number>>(new Set());
   const accountIds = accounts.map((a) => a.id).join(",");
 
   useEffect(() => {
@@ -2765,10 +2764,6 @@ function MetricsView({
       if (!autoLoadedAccounts.current.has(account.id)) {
         autoLoadedAccounts.current.add(account.id);
         loadAccount(account.id);
-      }
-      if (!autoSyncedAccounts.current.has(account.id)) {
-        autoSyncedAccounts.current.add(account.id);
-        syncAccountPosts(account.id, true);
       }
     }
   }, [accountIds]);
