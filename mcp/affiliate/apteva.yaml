@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: affiliate
 display_name: Affiliate
-version: 0.1.2
+version: 0.1.3
 description: |
   Publisher-side affiliate manager. Connect affiliate networks, refresh
   offers and stats, create monetized links, and optionally wrap them

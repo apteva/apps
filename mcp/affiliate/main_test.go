@@ -165,7 +165,7 @@ func TestRefreshOffersAndStatsFromProvider(t *testing.T) {
 	ctx := newTestCtx(t, platform, nil)
 	app := &App{}
 
-	out, err := app.toolRefresh(ctx, map[string]any{"network": "target-circle", "kind": "all"})
+	out, err := app.toolRefresh(ctx, map[string]any{"network": "target-circle", "kind": "all", "pages": 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,6 +183,60 @@ func TestRefreshOffersAndStatsFromProvider(t *testing.T) {
 	stats, err := dbStats(ctx.AppDB(), "", "", "target-circle", offers[0].ID, 0, "day")
 	if err != nil || len(stats) != 1 || stats[0].CommissionCents != 1000 {
 		t.Fatalf("stats=%+v err=%v", stats, err)
+	}
+}
+
+func TestTargetCircleRefreshCreatesLinksAndStats(t *testing.T) {
+	platform := newRecordingPlatform()
+	platform.responses["target-circle:offers_list"] = json.RawMessage(`{
+		"data": [{
+			"adInventorySid": "obcsig",
+			"offers": [{
+				"offerSid": "mintos",
+				"name": "Mintos",
+				"advertiser": "Mintos",
+				"defaultTrackingUrl": "https://c.trackmytarget.com/?a=v80f9f&i=obcsig"
+			}]
+		}]
+	}`)
+	platform.responses["target-circle:transactions_list"] = json.RawMessage(`{
+		"data": [{
+			"saved": "2026-04-30 01:00:25",
+			"offerSid": "mintos",
+			"transactionId": "tx-1",
+			"transactionAmount": 88.50,
+			"payout": 0.885,
+			"currency": "EUR"
+		}, {
+			"saved": "2026-04-30 03:00:00",
+			"offerSid": "mintos",
+			"transactionId": "tx-2",
+			"transactionAmount": 10.00,
+			"payout": 1.00,
+			"currency": "EUR"
+		}]
+	}`)
+	ctx := newTestCtx(t, platform, nil)
+	app := &App{}
+
+	out, err := app.toolRefresh(ctx, map[string]any{"network": "target-circle", "kind": "all", "pages": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := out.(*RefreshSummary)
+	if summary.OffersUpserted != 1 || summary.LinksUpserted != 1 || summary.StatsDaysUpserted != 1 {
+		t.Fatalf("bad summary: %+v", summary)
+	}
+	links, err := dbListLinks(ctx.AppDB(), "", "target-circle", 0, "", 10)
+	if err != nil || len(links) != 1 {
+		t.Fatalf("links len=%d err=%v", len(links), err)
+	}
+	stats, err := dbStats(ctx.AppDB(), "", "", "target-circle", 0, 0, "day")
+	if err != nil || len(stats) != 1 {
+		t.Fatalf("stats len=%d err=%v", len(stats), err)
+	}
+	if stats[0].Date != "2026-04-30" || stats[0].Conversions != 2 || stats[0].RevenueCents != 9850 || stats[0].CommissionCents != 188 {
+		t.Fatalf("unexpected stats: %+v", stats[0])
 	}
 }
 

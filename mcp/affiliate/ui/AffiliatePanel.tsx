@@ -74,7 +74,7 @@ export default function AffiliatePanel({}: NativePanelProps) {
   }, []);
 
   const loadOffers = useCallback(async () => {
-    const params = new URLSearchParams();
+    const params = new URLSearchParams({ limit: "500" });
     if (q) params.set("q", q);
     if (network) params.set("network", network);
     const res = await fetch(`${API}/offers?${params}`, { credentials: "same-origin" });
@@ -83,7 +83,7 @@ export default function AffiliatePanel({}: NativePanelProps) {
   }, [q, network]);
 
   const loadLinks = useCallback(async () => {
-    const params = new URLSearchParams();
+    const params = new URLSearchParams({ limit: "500" });
     if (q) params.set("q", q);
     if (network) params.set("network", network);
     const res = await fetch(`${API}/links?${params}`, { credentials: "same-origin" });
@@ -124,7 +124,7 @@ export default function AffiliatePanel({}: NativePanelProps) {
       return;
     }
     const data = await res.json();
-    setStatus(`${data.offers_upserted || 0} offers, ${data.stats_days_upserted || 0} stat rows`);
+    setStatus(`${data.offers_upserted || 0} offers, ${data.links_upserted || 0} links, ${data.stats_days_upserted || 0} stat rows`);
     refreshCurrent();
   };
 

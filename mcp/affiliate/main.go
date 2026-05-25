@@ -23,7 +23,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: affiliate
 display_name: Affiliate
-version: 0.1.2
+version: 0.1.3
 description: Publisher-side affiliate manager.
 author: Apteva
 scopes: [project, global]
@@ -361,6 +361,7 @@ type RefreshSummary struct {
 	Network           string `json:"network"`
 	Kind              string `json:"kind"`
 	OffersUpserted    int    `json:"offers_upserted"`
+	LinksUpserted     int    `json:"links_upserted"`
 	StatsDaysUpserted int    `json:"stats_days_upserted"`
 	RefreshedAt       string `json:"refreshed_at"`
 }
@@ -607,6 +608,45 @@ func dbInsertLink(db *sql.DB, in LinkInput) (*Link, error) {
 	}
 	id, _ := res.LastInsertId()
 	return dbGetLink(db, id)
+}
+
+func dbUpsertDefaultLink(db *sql.DB, in LinkInput) (*Link, bool, error) {
+	if err := validateAbsoluteURL(in.DestinationURL); err != nil {
+		return nil, false, fmt.Errorf("destination url: %w", err)
+	}
+	if err := validateAbsoluteURL(in.AffiliateURL); err != nil {
+		return nil, false, fmt.Errorf("affiliate url: %w", err)
+	}
+	if in.NetworkKey == "" {
+		return nil, false, errors.New("network required")
+	}
+	if in.Status == "" {
+		in.Status = "active"
+	}
+	if in.RawJSON == "" {
+		in.RawJSON = "{}"
+	}
+	var id int64
+	err := db.QueryRow(`
+		SELECT id FROM links
+		WHERE network_key = ? AND COALESCE(offer_id, 0) = ? AND affiliate_url = ?
+		LIMIT 1`, in.NetworkKey, in.OfferID, in.AffiliateURL).Scan(&id)
+	if err == nil {
+		_, err = db.Exec(`
+			UPDATE links
+			SET destination_url = ?, raw_json = ?, updated_at = ?
+			WHERE id = ?`, in.DestinationURL, in.RawJSON, nowUTC(), id)
+		if err != nil {
+			return nil, false, err
+		}
+		link, err := dbGetLink(db, id)
+		return link, false, err
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, false, err
+	}
+	link, err := dbInsertLink(db, in)
+	return link, true, err
 }
 
 func dbUpdateLinkShortURL(db *sql.DB, id, redirectRuleID int64, shortURL string) (*Link, error) {
@@ -939,10 +979,16 @@ func (a *App) refreshNetwork(ctx *sdk.AppCtx, network, kind, from, to string, ar
 				if in.ExternalID == "" || in.MerchantName == "" {
 					continue
 				}
-				if _, err := dbUpsertOffer(ctx.AppDB(), in); err != nil {
+				offer, err := dbUpsertOffer(ctx.AppDB(), in)
+				if err != nil {
 					return nil, err
 				}
 				summary.OffersUpserted++
+				if upserted, err := upsertDefaultLinkFromOffer(ctx.AppDB(), network, offer, m); err != nil {
+					return nil, err
+				} else if upserted {
+					summary.LinksUpserted++
+				}
 			}
 			_, _ = dbUpsertNetwork(ctx.AppDB(), network, displayNetworkName(network), out)
 		}
@@ -958,16 +1004,30 @@ func (a *App) refreshNetwork(ctx *sdk.AppCtx, network, kind, from, to string, ar
 				return nil, err
 			}
 			stats := collectMaps(out, "stats", "Actions", "actions", "transactions", "Transactions", "rewards", "records", "data", "items", "results")
+			aggregated := map[string]StatInput{}
 			for _, m := range stats {
 				row := statInputFromMap(network, m)
 				if row.Date == "" {
 					continue
 				}
-				if ext := firstString(m, "offer_external_id", "offerId", "offer_id", "external_id", "CampaignId", "campaignId", "advertiserId", "merchantGroupId", "company_key"); ext != "" && row.OfferID == 0 {
+				if ext := firstString(m, "offer_external_id", "offerSid", "offerId", "offer_id", "external_id", "CampaignId", "campaignId", "advertiserId", "merchantGroupId", "company_key"); ext != "" && row.OfferID == 0 {
 					if o, err := dbGetOfferByExternal(ctx.AppDB(), network, ext); err == nil && o != nil {
 						row.OfferID = o.ID
 					}
 				}
+				key := fmt.Sprintf("%s\x00%s\x00%d\x00%d\x00%s", row.Date, row.NetworkKey, row.OfferID, row.LinkID, row.Currency)
+				if existing, ok := aggregated[key]; ok {
+					existing.Clicks += row.Clicks
+					existing.Conversions += row.Conversions
+					existing.RevenueCents += row.RevenueCents
+					existing.CommissionCents += row.CommissionCents
+					existing.RawJSON = row.RawJSON
+					aggregated[key] = existing
+					continue
+				}
+				aggregated[key] = row
+			}
+			for _, row := range aggregated {
 				if err := dbUpsertStat(ctx.AppDB(), row); err != nil {
 					return nil, err
 				}
@@ -977,6 +1037,32 @@ func (a *App) refreshNetwork(ctx *sdk.AppCtx, network, kind, from, to string, ar
 		}
 	}
 	return summary, nil
+}
+
+func upsertDefaultLinkFromOffer(db *sql.DB, network string, offer *Offer, raw map[string]any) (bool, error) {
+	if offer == nil {
+		return false, nil
+	}
+	affiliateURL := firstString(raw, "defaultTrackingUrl", "defaultClickTrackingUrl", "clickTrackingUrl", "clickUrl", "trackingLink")
+	if affiliateURL == "" {
+		return false, nil
+	}
+	destinationURL := firstString(raw, "targetUrl", "defaultTargetUrl", "destinationUrl", "url")
+	if destinationURL == "" {
+		destinationURL = affiliateURL
+	}
+	link, inserted, err := dbUpsertDefaultLink(db, LinkInput{
+		NetworkKey:     network,
+		OfferID:        offer.ID,
+		DestinationURL: destinationURL,
+		AffiliateURL:   affiliateURL,
+		Status:         "active",
+		RawJSON:        mustJSON(raw),
+	})
+	if err != nil || link == nil {
+		return false, err
+	}
+	return inserted, nil
 }
 
 func (a *App) createProviderLink(ctx *sdk.AppCtx, network, destination string, offer *Offer, args map[string]any) (map[string]any, error) {
@@ -1153,10 +1239,23 @@ func providerOfferCalls(network string, args map[string]any) ([]providerCall, er
 	network = canonicalNetworkKey(network)
 	switch network {
 	case "target-circle":
-		return []providerCall{{Role: "target-circle", Tool: "offers_list", Input: compactMap(map[string]any{
-			"limit":  intArg(args, "limit", 50),
-			"status": strArg(args, "status"),
-		})}}, nil
+		limit := intArg(args, "limit", 50)
+		if limit <= 0 || limit > 50 {
+			limit = 50
+		}
+		pages := intArg(args, "pages", 10)
+		if pages <= 0 || pages > 20 {
+			pages = 10
+		}
+		calls := make([]providerCall, 0, pages)
+		for page := 0; page < pages; page++ {
+			calls = append(calls, providerCall{Role: "target-circle", Tool: "offers_list", Input: compactMap(map[string]any{
+				"limit":  limit,
+				"offset": page * limit,
+				"status": strArg(args, "status"),
+			})})
+		}
+		return calls, nil
 	case "impact":
 		return []providerCall{{Role: "impact", Tool: "programs_list", Input: compactMap(map[string]any{
 			"InsertionOrderStatus": argOrConfig(args, "InsertionOrderStatus", "impact_insertion_order_status", "Active"),
@@ -1231,11 +1330,24 @@ func providerStatCalls(network, from, to string, args map[string]any) ([]provide
 	network = canonicalNetworkKey(network)
 	switch network {
 	case "target-circle":
-		return []providerCall{{Role: "target-circle", Tool: "transactions_list", Input: compactMap(map[string]any{
-			"from":  from,
-			"to":    to,
-			"limit": intArg(args, "limit", 25),
-		})}}, nil
+		limit := intArg(args, "limit", 25)
+		if limit <= 0 || limit > 25 {
+			limit = 25
+		}
+		pages := intArg(args, "pages", 4)
+		if pages <= 0 || pages > 20 {
+			pages = 4
+		}
+		calls := make([]providerCall, 0, pages)
+		for page := 0; page < pages; page++ {
+			calls = append(calls, providerCall{Role: "target-circle", Tool: "transactions_list", Input: compactMap(map[string]any{
+				"savedFrom": firstNonEmpty(from, strArg(args, "savedFrom")),
+				"savedTo":   firstNonEmpty(to, strArg(args, "savedTo")),
+				"offset":    page * limit,
+				"limit":     limit,
+			})})
+		}
+		return calls, nil
 	case "impact":
 		return []providerCall{{Role: "impact", Tool: "actions_list", Input: compactMap(map[string]any{
 			"ActionDateStart": firstNonEmpty(from, strArg(args, "ActionDateStart")),
@@ -1414,18 +1526,42 @@ func offerInputFromMap(network string, m map[string]any) OfferInput {
 }
 
 func statInputFromMap(network string, m map[string]any) StatInput {
+	date := normalizeStatDate(firstString(m, "date", "day", "ActionDate", "eventDate", "postingDate", "transactionDate", "saved", "clickSaved", "updatedAt", "validationDate", "click.clickDate", "commission.commissionDate", "commission.updateDate", "created_at"))
+	conversions := toInt64(firstAny(m, "conversions", "sales", "transactions", "Actions"))
+	if conversions == 0 && firstString(m, "transactionId", "transactionHash", "commissionId") != "" {
+		conversions = 1
+	}
+	revenueCents := centsFromAny(firstAny(m, "revenue_cents"))
+	if revenueCents == 0 {
+		revenueCents = moneyCentsFromAny(firstAny(m, "revenue", "order_value", "orderValue", "transactionAmount", "saleAmountUsd", "SaleAmount", "commission.orderValue"))
+	}
+	commissionCents := centsFromAny(firstAny(m, "commission_cents"))
+	if commissionCents == 0 {
+		commissionCents = moneyCentsFromAny(firstAny(m, "commission", "payout", "Payout", "pubCommissionAmountUsd", "publisherNetRevenue", "commission.publisherNetRevenue"))
+	}
 	return StatInput{
-		Date:            firstString(m, "date", "day", "ActionDate", "eventDate", "postingDate", "transactionDate", "click.clickDate", "commission.commissionDate", "commission.updateDate", "created_at"),
+		Date:            date,
 		NetworkKey:      network,
 		OfferID:         toInt64(firstAny(m, "offer_id")),
 		LinkID:          toInt64(firstAny(m, "link_id")),
 		Clicks:          toInt64(firstAny(m, "clicks", "Clicks")),
-		Conversions:     toInt64(firstAny(m, "conversions", "sales", "transactions", "Actions")),
-		RevenueCents:    centsFromAny(firstAny(m, "revenue_cents", "revenue", "order_value", "orderValue", "saleAmountUsd", "SaleAmount", "commission.orderValue")),
-		CommissionCents: centsFromAny(firstAny(m, "commission_cents", "commission", "payout", "Payout", "pubCommissionAmountUsd", "publisherNetRevenue", "commission.publisherNetRevenue")),
+		Conversions:     conversions,
+		RevenueCents:    revenueCents,
+		CommissionCents: commissionCents,
 		Currency:        firstNonEmpty(firstString(m, "currency", "Currency"), "USD"),
 		RawJSON:         mustJSON(m),
 	}
+}
+
+func normalizeStatDate(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if len(s) >= 10 {
+		return s[:10]
+	}
+	return s
 }
 
 func collectMaps(root map[string]any, keys ...string) []map[string]any {
@@ -1735,6 +1871,28 @@ func centsFromAny(v any) int64 {
 			return int64(f * 100)
 		}
 		return toInt64(s)
+	}
+	return 0
+}
+
+func moneyCentsFromAny(v any) int64 {
+	switch x := v.(type) {
+	case float64:
+		return int64(x * 100)
+	case int:
+		return int64(x * 100)
+	case int64:
+		return x * 100
+	case json.Number:
+		f, _ := strconv.ParseFloat(x.String(), 64)
+		return int64(f * 100)
+	case string:
+		s := strings.TrimSpace(x)
+		if s == "" {
+			return 0
+		}
+		f, _ := strconv.ParseFloat(s, 64)
+		return int64(f * 100)
 	}
 	return 0
 }
