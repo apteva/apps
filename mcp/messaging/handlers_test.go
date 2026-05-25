@@ -33,6 +33,7 @@ type stubPlatform struct {
 	executeErr       error
 	callAppReply     json.RawMessage
 	callAppErr       error
+	connectionCreds  map[int64]map[string]string
 	bindingsOverride map[string]any       // when non-nil, replaces the default email_provider binding
 	whoAmIOverride   *sdk.InstallIdentity // when non-nil, replaces the default identity
 	// executeOverride: when non-nil, called per ExecuteIntegrationTool
@@ -123,6 +124,16 @@ func (s *stubPlatform) CallAppResult(app, tool string, input map[string]any, out
 // them would panic, which is the intended signal.
 func (s *stubPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
 	return &sdk.PlatformConnection{ID: id, AppSlug: "aws-ses", Status: "active"}, nil
+}
+func (s *stubPlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCredentials, error) {
+	if s.connectionCreds == nil {
+		return nil, tk.ErrNotImplemented
+	}
+	fields, ok := s.connectionCreds[id]
+	if !ok {
+		return nil, tk.ErrNotImplemented
+	}
+	return &sdk.ConnectionCredentials{ConnectionID: id, Slug: "twilio", Fields: fields}, nil
 }
 func (s *stubPlatform) ListConnections(sdk.ConnectionFilter) ([]sdk.PlatformConnection, error) {
 	return nil, nil
@@ -2614,6 +2625,50 @@ func TestTwilioInboundWebhook_PersistsSMSAndDispatches(t *testing.T) {
 	}
 	if m.RouteStatus != "ok" || m.RouteTargetApp != "support" {
 		t.Errorf("dispatch: status=%q app=%q", m.RouteStatus, m.RouteTargetApp)
+	}
+}
+
+func TestTwilioInboundWebhook_UsesBoundConnectionCredentials(t *testing.T) {
+	plat := newPhoneStub(nil)
+	plat.connectionCreds = map[int64]map[string]string{
+		2: map[string]string{"auth_token": "secret"},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	form := url.Values{
+		"From":       []string{"+15551112222"},
+		"To":         []string{"+15553334444"},
+		"Body":       []string{"credential-backed signature"},
+		"MessageSid": []string{"SMcred1"},
+		"AccountSid": []string{"ACtest"},
+	}
+	publicURL := "https://test.apteva.ai/webhooks/twilio-inbound?project_id=test-proj"
+	keys := []string{"AccountSid", "Body", "From", "MessageSid", "To"}
+	var b strings.Builder
+	b.WriteString(publicURL)
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteString(form.Get(k))
+	}
+	mac := hmac.New(sha1.New, []byte("secret"))
+	mac.Write([]byte(b.String()))
+	sig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+
+	r := httptest.NewRequest("POST", "/webhooks/twilio-inbound?project_id=test-proj", strings.NewReader(form.Encode()))
+	r.Host = "test.apteva.ai"
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("X-Forwarded-Host", "test.apteva.ai")
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("X-Twilio-Signature", sig)
+	w := httptest.NewRecorder()
+	app.handleTwilioInboundWebhook(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	rows, _ := dbMessageList(ctx.AppDB(), "test-proj", messageListOpts{Direction: "in", Channel: "sms", Limit: 10})
+	if len(rows) != 1 {
+		t.Fatalf("expected one inbound row, got %d", len(rows))
 	}
 }
 

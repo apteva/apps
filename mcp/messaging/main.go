@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.7
+version: 0.13.8
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -62,6 +62,7 @@ requires:
     - db.write.app
     - net.egress
     - platform.connections.execute
+    - platform.connections.read_credentials
     - platform.apps.call
   integrations:
     - role: email_provider
@@ -2950,19 +2951,24 @@ func reconstructPublicURL(r *http.Request) string {
 	return scheme + "://" + host + path
 }
 
-// lookupConnectionCredential is a placeholder for retrieving a single
-// credential field (e.g. auth_token) for signature verification.
-// PlatformClient.GetConnection currently returns metadata only — no
-// plaintext credentials cross the wire. v0.5 ships the verification
-// structure; production deployments either expose a credential-fetch
-// method on the platform API, or rely on a shared webhook secret
-// that's stored as a config field on the messaging install.
+// lookupConnectionCredential retrieves a single field from a bound
+// integration connection. Server-side gates enforce that the manifest
+// declared platform.connections.read_credentials, the connection is
+// actually bound to this install, and its slug is compatible with the
+// declared role. The local config value remains as a fallback for
+// older platform builds or emergency override.
 func lookupConnectionCredential(ctx *sdk.AppCtx, connID int64, field string) string {
-	// Allow operator override via app config — useful for the
-	// "platform doesn't expose plaintext" case. They set
-	// twilio_auth_token on the messaging install and we use that.
-	if v := strings.TrimSpace(ctx.Config().Get("twilio_auth_token")); v != "" && field == "auth_token" {
-		return v
+	if ctx != nil && connID > 0 {
+		if creds, err := ctx.PlatformAPI().GetConnectionCredentials(connID); err == nil && creds != nil {
+			if v := strings.TrimSpace(creds.Fields[field]); v != "" {
+				return v
+			}
+		}
+	}
+	if ctx != nil && field == "auth_token" {
+		if v := strings.TrimSpace(ctx.Config().Get("twilio_auth_token")); v != "" {
+			return v
+		}
 	}
 	return ""
 }
