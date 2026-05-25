@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.11
+version: 0.14.12
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -61,6 +61,12 @@ requires:
       capabilities: [files.write]
       required: false
       label: "Storage (optional)"
+    - role: media
+      kind: app
+      compatible_app_names: [media]
+      capabilities: [media.search]
+      required: false
+      label: "Media library (optional)"
     - role: jobs
       kind: app
       compatible_app_names: [jobs]

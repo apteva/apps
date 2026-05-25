@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.14.11
+version: 0.14.12
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -37,6 +37,13 @@ requires:
       required: false
       label: "Storage (optional)"
       hint: "Persist uploaded media so posts can reference stable URLs across restarts."
+    - role: media
+      kind: app
+      compatible_app_names: [media]
+      capabilities: [media.search]
+      required: false
+      label: "Media library (optional)"
+      hint: "Use indexed media metadata, thumbnails, ratings, duration, and aspect-ratio filters when choosing post attachments."
     - role: jobs
       kind: app
       compatible_app_names: [jobs]

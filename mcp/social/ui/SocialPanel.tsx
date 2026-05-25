@@ -25,6 +25,7 @@ import { uploadResumable } from "./uploadResumable";
 
 const API = "/api/apps/social";
 const STORAGE_API = "/api/apps/storage";
+const MEDIA_API = "/api/apps/media";
 
 function storageURL(path: string, projectId?: string | null): string {
   const params = new URLSearchParams();
@@ -34,6 +35,10 @@ function storageURL(path: string, projectId?: string | null): string {
 }
 
 function appendStorageScope(params: URLSearchParams, projectId?: string | null) {
+  if (projectId) params.set("project_id", projectId);
+}
+
+function appendProjectScope(params: URLSearchParams, projectId?: string | null) {
   if (projectId) params.set("project_id", projectId);
 }
 
@@ -1786,9 +1791,90 @@ interface StorageFile {
   size_bytes?: number;
 }
 
+interface MediaDerivation {
+  kind: "thumbnail" | "waveform" | "cover" | "keyframe" | string;
+  storage_file_id: string;
+  status: "ok" | "failed" | "stale" | string;
+}
+
+interface MediaLibraryRow {
+  file_id: string;
+  name?: string;
+  folder?: string;
+  has_video?: boolean;
+  has_audio?: boolean;
+  is_image?: boolean;
+  duration_ms?: number;
+  width?: number;
+  height?: number;
+  title?: string;
+  description?: string;
+  audience_rating?: "unrated" | "general" | "mature" | "adult" | "";
+  derivations?: MediaDerivation[];
+}
+
+type PickerTab = "media" | "storage";
+type PickerKind = "all" | "image" | "video";
+type RatingFilter = "all" | "general" | "mature" | "adult" | "unrated";
+type LengthFilter = "all" | "short" | "medium" | "long" | "very-long";
+type AspectFilter = "all" | "9:16" | "1:1" | "4:5" | "16:9";
+
 function isHiddenStorageFile(file: StorageFile): boolean {
   const folderParts = (file.folder || "/").split("/").filter(Boolean);
   return folderParts.some((part) => part.startsWith("."));
+}
+
+function mediaStorageID(row: MediaLibraryRow): number | null {
+  const id = Number(row.file_id);
+  return Number.isFinite(id) ? id : null;
+}
+
+function mediaContentType(row: MediaLibraryRow): string {
+  if (row.is_image) return "image/*";
+  if (row.has_video) return "video/*";
+  return "";
+}
+
+function mediaDisplayName(row: MediaLibraryRow): string {
+  return row.title?.trim() || row.name?.trim() || `file #${row.file_id}`;
+}
+
+function mediaPreviewURL(row: MediaLibraryRow, projectId?: string | null): string {
+  const pick = row.derivations?.find((d) => d.kind === "thumbnail" && d.status === "ok");
+  if (pick?.storage_file_id) return storageURL(`/files/${pick.storage_file_id}/content`, projectId);
+  return storageURL(`/files/${row.file_id}/content`, projectId);
+}
+
+function mediaHasThumbnail(row: MediaLibraryRow): boolean {
+  return !!row.derivations?.some((d) => d.kind === "thumbnail" && d.status === "ok" && d.storage_file_id);
+}
+
+function formatDurationMS(ms?: number): string {
+  if (!ms || ms <= 0) return "";
+  const total = Math.round(ms / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function aspectMatches(row: MediaLibraryRow, aspect: AspectFilter): boolean {
+  if (aspect === "all") return true;
+  if (!row.width || !row.height) return false;
+  const [w, h] = aspect.split(":").map(Number);
+  const target = w / h;
+  const actual = row.width / row.height;
+  return Math.abs(actual - target) <= 0.08;
+}
+
+function lengthMatches(row: MediaLibraryRow, length: LengthFilter): boolean {
+  if (length === "all") return true;
+  const ms = row.duration_ms || 0;
+  if (length === "short") return ms > 0 && ms < 15_000;
+  if (length === "medium") return ms >= 15_000 && ms <= 60_000;
+  if (length === "long") return ms > 60_000 && ms <= 300_000;
+  return ms > 300_000;
 }
 
 function StoragePickerDialog({
@@ -1799,12 +1885,82 @@ function StoragePickerDialog({
   onClose: () => void;
   onPick: (files: StorageFile[]) => void;
 }) {
+  const [tab, setTab] = useState<PickerTab>("media");
+  const [mediaRows, setMediaRows] = useState<MediaLibraryRow[]>([]);
+  const [mediaLoading, setMediaLoading] = useState(true);
+  const [mediaError, setMediaError] = useState<string | null>(null);
   const [files, setFiles] = useState<StorageFile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState("");
-  const [kind, setKind] = useState<"all" | "image" | "video">("all");
+  const [kind, setKind] = useState<PickerKind>("all");
+  const [rating, setRating] = useState<RatingFilter>("all");
+  const [length, setLength] = useState<LengthFilter>("all");
+  const [aspect, setAspect] = useState<AspectFilter>("all");
+  const [folder, setFolder] = useState("/");
+  const [recursive, setRecursive] = useState(true);
   const [picked, setPicked] = useState<Set<number>>(new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      setMediaLoading(true);
+      setMediaError(null);
+      try {
+        const params = new URLSearchParams();
+        params.set("limit", "300");
+        params.set("order_by", "updated_at");
+        if (kind === "image") params.set("is_image", "true");
+        else if (kind === "video") params.set("has_video", "true");
+        if (length === "short") params.set("duration_max_ms", "14999");
+        else if (length === "medium") {
+          params.set("duration_min_ms", "15000");
+          params.set("duration_max_ms", "60000");
+        } else if (length === "long") {
+          params.set("duration_min_ms", "60001");
+          params.set("duration_max_ms", "300000");
+        } else if (length === "very-long") {
+          params.set("duration_min_ms", "300001");
+        }
+        const cleanFolder = folder.trim();
+        if (cleanFolder && cleanFolder !== "/") {
+          params.set("folder", cleanFolder);
+          if (recursive) params.set("recursive", "true");
+        }
+        appendProjectScope(params, projectId);
+        const res = await fetch(`${MEDIA_API}/media?${params.toString()}`, {
+          credentials: "same-origin",
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json() as { media?: MediaLibraryRow[] };
+        if (cancelled) return;
+        const needle = q.trim().toLowerCase();
+        const usable = (data.media || []).filter((row) => {
+          const id = mediaStorageID(row);
+          if (id == null) return false;
+          const name = mediaDisplayName(row).toLowerCase();
+          const description = (row.description || "").toLowerCase();
+          const rowFolder = row.folder || "/";
+          if (rowFolder.split("/").filter(Boolean).some((part) => part.startsWith("."))) return false;
+          if (needle && !name.includes(needle) && !description.includes(needle)) return false;
+          if (rating !== "all" && (row.audience_rating || "unrated") !== rating) return false;
+          if (!aspectMatches(row, aspect)) return false;
+          if (!lengthMatches(row, length)) return false;
+          return row.is_image || row.has_video;
+        });
+        setMediaRows(usable);
+      } catch (e) {
+        if (!cancelled) {
+          setMediaError((e as Error).message);
+          setTab("storage");
+        }
+      } finally {
+        if (!cancelled) setMediaLoading(false);
+      }
+    };
+    const t = setTimeout(run, q.trim() ? 200 : 0);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [q, kind, rating, length, aspect, folder, recursive, projectId]);
 
   // Re-fetch on q/kind change. The storage app does prefix-match on
   // content_type via SQL LIKE, so passing "image/" filters server-side;
@@ -1813,6 +1969,7 @@ function StoragePickerDialog({
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
+      if (tab !== "storage") return;
       setLoading(true);
       setError(null);
       try {
@@ -1845,7 +2002,7 @@ function StoragePickerDialog({
     // Debounce text input so we don't hammer storage on every keystroke.
     const t = setTimeout(run, q.trim() ? 200 : 0);
     return () => { cancelled = true; clearTimeout(t); };
-  }, [q, kind, projectId]);
+  }, [q, kind, projectId, tab]);
 
   const toggle = (id: number) => {
     setPicked((s) => {
@@ -1857,6 +2014,23 @@ function StoragePickerDialog({
   };
 
   const confirm = () => {
+    if (tab === "media") {
+      const chosen = mediaRows
+        .map((row) => {
+          const id = mediaStorageID(row);
+          if (id == null || !picked.has(id)) return null;
+          return {
+            id,
+            name: mediaDisplayName(row),
+            content_type: mediaContentType(row),
+            folder: row.folder,
+          } as StorageFile;
+        })
+        .filter((f): f is StorageFile => !!f);
+      if (chosen.length === 0) return;
+      onPick(chosen);
+      return;
+    }
     const chosen = files.filter((f) => picked.has(f.id));
     if (chosen.length === 0) return;
     onPick(chosen);
@@ -1873,7 +2047,7 @@ function StoragePickerDialog({
         style={{ width: "min(720px, 92vw)", maxHeight: "85vh" }}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-          <div className="text-sm font-bold text-text">Pick from storage</div>
+          <div className="text-sm font-bold text-text">Pick media</div>
           <button
             type="button"
             onClick={onClose}
@@ -1885,9 +2059,33 @@ function StoragePickerDialog({
         </div>
 
         <div className="flex items-center gap-2 px-4 py-2 border-b border-border">
+          <button
+            type="button"
+            onClick={() => setTab("media")}
+            className={
+              "px-2 py-1 text-xs rounded border " +
+              (tab === "media" ? "border-accent text-accent" : "border-border text-text-dim hover:text-text")
+            }
+          >
+            Media library
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("storage")}
+            className={
+              "px-2 py-1 text-xs rounded border " +
+              (tab === "storage" ? "border-accent text-accent" : "border-border text-text-dim hover:text-text")
+            }
+          >
+            Storage files
+          </button>
+        </div>
+
+        <div className="flex flex-col gap-2 px-4 py-2 border-b border-border">
+          <div className="flex items-center gap-2">
           <input
             type="text"
-            placeholder="Search by name…"
+            placeholder={tab === "media" ? "Search title, name, description..." : "Search by name..."}
             value={q}
             onChange={(e) => setQ(e.target.value)}
             className="flex-1 bg-bg-input border border-border rounded px-3 py-1.5 text-sm"
@@ -1901,21 +2099,146 @@ function StoragePickerDialog({
             <option value="image">Images</option>
             <option value="video">Videos</option>
           </select>
+          </div>
+          {tab === "media" && (
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={rating}
+                onChange={(e) => setRating(e.target.value as RatingFilter)}
+                className="bg-bg-input border border-border rounded px-2 py-1.5 text-xs"
+              >
+                <option value="all">Any rating</option>
+                <option value="general">General</option>
+                <option value="mature">Mature</option>
+                <option value="adult">Adult</option>
+                <option value="unrated">Unrated</option>
+              </select>
+              <select
+                value={length}
+                onChange={(e) => setLength(e.target.value as LengthFilter)}
+                className="bg-bg-input border border-border rounded px-2 py-1.5 text-xs"
+              >
+                <option value="all">Any length</option>
+                <option value="short">&lt;15s</option>
+                <option value="medium">15-60s</option>
+                <option value="long">1-5m</option>
+                <option value="very-long">5m+</option>
+              </select>
+              <select
+                value={aspect}
+                onChange={(e) => setAspect(e.target.value as AspectFilter)}
+                className="bg-bg-input border border-border rounded px-2 py-1.5 text-xs"
+              >
+                <option value="all">Any aspect</option>
+                <option value="9:16">9:16</option>
+                <option value="1:1">1:1</option>
+                <option value="4:5">4:5</option>
+                <option value="16:9">16:9</option>
+              </select>
+              <input
+                type="text"
+                value={folder}
+                onChange={(e) => setFolder(e.target.value)}
+                className="bg-bg-input border border-border rounded px-2 py-1.5 text-xs"
+                style={{ width: 120 }}
+                title="Folder"
+              />
+              <label className="inline-flex items-center gap-1 text-xs text-text-dim">
+                <input
+                  type="checkbox"
+                  checked={recursive}
+                  onChange={(e) => setRecursive(e.target.checked)}
+                  className="accent-accent"
+                />
+                recursive
+              </label>
+            </div>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto p-4">
-          {loading && (
+          {tab === "media" && mediaLoading && (
             <div className="py-12 text-center text-text-dim text-sm">Loading…</div>
           )}
-          {error && !loading && (
+          {tab === "media" && mediaError && !mediaLoading && (
+            <div className="py-12 text-center text-text-dim text-sm">
+              Media library unavailable. Use Storage files.
+            </div>
+          )}
+          {tab === "media" && !mediaLoading && !mediaError && mediaRows.length === 0 && (
+            <div className="py-12 text-center text-text-dim text-sm">
+              No matching indexed media.
+            </div>
+          )}
+          {tab === "media" && !mediaLoading && !mediaError && mediaRows.length > 0 && (
+            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3">
+              {mediaRows.map((row) => {
+                const id = mediaStorageID(row);
+                if (id == null) return null;
+                const already = excludeIds.has(id);
+                const sel = picked.has(id);
+                const name = mediaDisplayName(row);
+                const isVideo = !!row.has_video;
+                const preview = mediaPreviewURL(row, projectId);
+                const hasThumb = mediaHasThumbnail(row);
+                const meta = [
+                  row.audience_rating || "unrated",
+                  formatDurationMS(row.duration_ms),
+                  row.width && row.height ? `${row.width}x${row.height}` : "",
+                ].filter(Boolean).join(" · ");
+                return (
+                  <button
+                    key={row.file_id}
+                    type="button"
+                    disabled={already}
+                    onClick={() => toggle(id)}
+                    className={
+                      "relative aspect-square rounded border overflow-hidden bg-bg-input flex flex-col items-stretch text-left transition-colors " +
+                      (already
+                        ? "opacity-40 cursor-not-allowed border-border"
+                        : sel
+                          ? "border-accent ring-2 ring-accent"
+                          : "border-border hover:border-text-dim")
+                    }
+                    title={already ? `${name} (already attached)` : name}
+                  >
+                    {isVideo && !hasThumb ? (
+                      <video src={preview} className="w-full h-full object-cover" muted preload="metadata" />
+                    ) : (
+                      <img src={preview} alt={name} className="w-full h-full object-cover" loading="lazy" />
+                    )}
+                    {isVideo && (
+                      <div className="absolute inset-0 grid place-items-center bg-black/10">
+                        <div className="w-7 h-7 rounded-full bg-black/60 text-white grid place-items-center text-xs">▶</div>
+                      </div>
+                    )}
+                    {sel && (
+                      <div className="absolute top-1 right-1 w-5 h-5 rounded-full bg-accent text-bg text-xs font-bold grid place-items-center">
+                        ✓
+                      </div>
+                    )}
+                    <div className="absolute bottom-0 inset-x-0 bg-black/60 text-white px-1.5 py-0.5">
+                      <div className="truncate" style={{ fontSize: 10 }}>{name}</div>
+                      {meta && <div className="truncate opacity-80" style={{ fontSize: 9 }}>{meta}</div>}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {tab === "storage" && loading && (
+            <div className="py-12 text-center text-text-dim text-sm">Loading…</div>
+          )}
+          {tab === "storage" && error && !loading && (
             <div className="py-12 text-center text-red text-sm">Couldn't load files: {error}</div>
           )}
-          {!loading && !error && files.length === 0 && (
+          {tab === "storage" && !loading && !error && files.length === 0 && (
             <div className="py-12 text-center text-text-dim text-sm">
               No matching files in storage. Upload one with "+ Attach image / video".
             </div>
           )}
-          {!loading && !error && files.length > 0 && (
+          {tab === "storage" && !loading && !error && files.length > 0 && (
             <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3">
               {files.map((f) => {
                 const already = excludeIds.has(f.id);
@@ -1960,7 +2283,11 @@ function StoragePickerDialog({
 
         <div className="flex items-center justify-between px-4 py-3 border-t border-border">
           <div className="text-xs text-text-dim">
-            {picked.size > 0 ? `${picked.size} selected` : `${files.length} file${files.length !== 1 ? "s" : ""}`}
+            {picked.size > 0
+              ? `${picked.size} selected`
+              : tab === "media"
+                ? `${mediaRows.length} media item${mediaRows.length !== 1 ? "s" : ""}`
+                : `${files.length} file${files.length !== 1 ? "s" : ""}`}
           </div>
           <div className="flex gap-2">
             <button
