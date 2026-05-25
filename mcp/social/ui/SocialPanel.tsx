@@ -1850,6 +1850,38 @@ function mediaHasThumbnail(row: MediaLibraryRow): boolean {
   return !!row.derivations?.some((d) => d.kind === "thumbnail" && d.status === "ok" && d.storage_file_id);
 }
 
+function PlayBadge() {
+  return (
+    <div
+      aria-hidden="true"
+      className="absolute rounded-full bg-black/60"
+      style={{
+        width: 34,
+        height: 34,
+        left: "50%",
+        top: "50%",
+        transform: "translate(-50%, -50%)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        pointerEvents: "none",
+      }}
+    >
+      <span
+        style={{
+          width: 0,
+          height: 0,
+          borderTop: "7px solid transparent",
+          borderBottom: "7px solid transparent",
+          borderLeft: "10px solid white",
+          marginLeft: 3,
+          display: "block",
+        }}
+      />
+    </div>
+  );
+}
+
 function formatDurationMS(ms?: number): string {
   if (!ms || ms <= 0) return "";
   const total = Math.round(ms / 1000);
@@ -2172,7 +2204,10 @@ function StoragePickerDialog({
             </div>
           )}
           {tab === "media" && !mediaLoading && !mediaError && mediaRows.length > 0 && (
-            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3">
+            <div
+              className="grid gap-3"
+              style={{ gridTemplateColumns: "repeat(auto-fill, minmax(132px, 1fr))" }}
+            >
               {mediaRows.map((row) => {
                 const id = mediaStorageID(row);
                 if (id == null) return null;
@@ -2201,18 +2236,14 @@ function StoragePickerDialog({
                           ? "border-accent ring-2 ring-accent"
                           : "border-border hover:border-text-dim")
                     }
-                    title={already ? `${name} (already attached)` : name}
+                    aria-label={already ? `${name} already attached` : `Select ${name}`}
                   >
                     {isVideo && !hasThumb ? (
                       <video src={preview} className="w-full h-full object-cover" muted preload="metadata" />
                     ) : (
                       <img src={preview} alt={name} className="w-full h-full object-cover" loading="lazy" />
                     )}
-                    {isVideo && (
-                      <div className="absolute inset-0 grid place-items-center bg-black/10">
-                        <div className="w-7 h-7 rounded-full bg-black/60 text-white grid place-items-center text-xs">▶</div>
-                      </div>
-                    )}
+                    {isVideo && <PlayBadge />}
                     {sel && (
                       <div className="absolute top-1 right-1 w-5 h-5 rounded-full bg-accent text-bg text-xs font-bold grid place-items-center">
                         ✓
@@ -2240,7 +2271,10 @@ function StoragePickerDialog({
             </div>
           )}
           {tab === "storage" && !loading && !error && files.length > 0 && (
-            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3">
+            <div
+              className="grid gap-3"
+              style={{ gridTemplateColumns: "repeat(auto-fill, minmax(132px, 1fr))" }}
+            >
               {files.map((f) => {
                 const already = excludeIds.has(f.id);
                 const sel = picked.has(f.id);
@@ -2260,13 +2294,14 @@ function StoragePickerDialog({
                           ? "border-accent ring-2 ring-accent"
                           : "border-border hover:border-text-dim")
                     }
-                    title={already ? `${f.name} (already attached)` : f.name}
+                    aria-label={already ? `${f.name} already attached` : `Select ${f.name}`}
                   >
                     {isVideo ? (
                       <video src={src} className="w-full h-full object-cover" muted preload="metadata" />
                     ) : (
                       <img src={src} alt={f.name} className="w-full h-full object-cover" loading="lazy" />
                     )}
+                    {isVideo && <PlayBadge />}
                     {sel && (
                       <div className="absolute top-1 right-1 w-5 h-5 rounded-full bg-accent text-bg text-xs font-bold grid place-items-center">
                         ✓
