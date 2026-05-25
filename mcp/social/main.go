@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.1
+version: 0.14.3
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -190,9 +190,9 @@ type platformDef struct {
 	// ProfileTool — integration tool that returns the authorising
 	// user's own identity (used to seed display_name/avatar for
 	// platforms without page-selection). Empty = use a default label.
-	ProfileTool          string
-	ProfileNameField     string
-	ProfileAvatarField   string
+	ProfileTool        string
+	ProfileNameField   string
+	ProfileAvatarField string
 	// ProfileToolArgs — optional input passed to ProfileTool. YouTube's
 	// get_my_channel needs `part=snippet` (it's a `required` field on
 	// the integration's input schema; without it the upstream Graph
@@ -228,12 +228,12 @@ type platformDef struct {
 // a "Write" flag means inbox_reply / inbox_send can target it.
 // PrivateReply is Instagram-only (reply to a comment as a DM).
 type inboxCaps struct {
-	CommentsRead, CommentsWrite                          bool
-	CommentsHide, CommentsLike, CommentsDelete           bool
-	DMsRead, DMsWrite                                    bool
-	MentionsRead                                         bool
-	ReviewsRead, ReviewsReply                            bool
-	PrivateReply                                         bool
+	CommentsRead, CommentsWrite                bool
+	CommentsHide, CommentsLike, CommentsDelete bool
+	DMsRead, DMsWrite                          bool
+	MentionsRead                               bool
+	ReviewsRead, ReviewsReply                  bool
+	PrivateReply                               bool
 }
 
 // optionField describes one customizable knob on a platform — its key
@@ -268,12 +268,12 @@ var platforms = map[string]platformDef{
 		DeleteTool:         "delete_tweet",
 		DeleteIDField:      "tweet_id",
 		Inbox: inboxCaps{
-			CommentsRead:    true,
-			CommentsWrite:   true,
-			CommentsDelete:  true,
-			DMsRead:         true,
-			DMsWrite:        true,
-			MentionsRead:    true,
+			CommentsRead:   true,
+			CommentsWrite:  true,
+			CommentsDelete: true,
+			DMsRead:        true,
+			DMsWrite:       true,
+			MentionsRead:   true,
 		},
 	},
 	"facebook": {
@@ -388,11 +388,11 @@ var platforms = map[string]platformDef{
 		// TikTok's input is nested: {post_info: {title}, source_info:
 		// {source: "PULL_FROM_URL", video_url}}. The "tiktok" strategy
 		// builds that shape from our flat (body, media_url) inputs.
-		Strategy:           "tiktok",
-		PostTool:           "post_video",
-		BodyField:          "title", // logical, lifted into post_info.title
-		MediaRequired:      true,
-		MediaType: "video",
+		Strategy:      "tiktok",
+		PostTool:      "post_video",
+		BodyField:     "title", // logical, lifted into post_info.title
+		MediaRequired: true,
+		MediaType:     "video",
 		// TikTok's catalog has no "get_creator_info" tool (an older name
 		// that never existed); the right primitive for our profile-fetch
 		// use case is /user/info/ via get_user_info — same scope
@@ -463,7 +463,7 @@ var platforms = map[string]platformDef{
 				Help: "Shown on the video page. Falls back to the post body when blank."},
 			{Name: "visibility", Type: "select", Label: "Visibility",
 				Options: []string{"public", "unlisted", "private"},
-				Help: "Defaults to private if blank — safer for first-pass uploads."},
+				Help:    "Defaults to private if blank — safer for first-pass uploads."},
 			{Name: "category", Type: "text", Label: "Category ID",
 				Help: "YouTube numeric category id (e.g. 22 = People & Blogs, 27 = Education). Optional."},
 		},
@@ -686,7 +686,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		// ─── inbox ────────────────────────────────────────────────
 		{
-			Name: "inbox_list",
+			Name:        "inbox_list",
 			Description: "List inbox items (comments, DMs, mentions, reviews) pulled from connected social accounts. Items are kind-discriminated; filter by `kinds` (comment|dm|mention|review), `status` (unread|read|replied|hidden|archived; archived hidden by default), `social_account_ids`, and `since` (RFC3339). Returns {items: [...], count}. Newest first by occurred_at. Args: social_account_ids?, kinds?, status?, since?, limit? (default 50, max 200).",
 			InputSchema: schemaObject(map[string]any{
 				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
@@ -1427,9 +1427,9 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		"accounts": acctIDs,
 	})
 	return map[string]any{
-		"post_id":  postID,
-		"status":   status,
-		"targets":  len(acctIDs),
+		"post_id": postID,
+		"status":  status,
+		"targets": len(acctIDs),
 	}, nil
 }
 
@@ -2252,7 +2252,6 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64) ([]mediaItem, error) {
 	return out, nil
 }
 
-
 // extractContainerID pulls the IG containerId from create_media_container.
 // IG returns either {id: "<container>"} or {containerId: "..."}.
 func extractContainerID(raw json.RawMessage) string {
@@ -2387,7 +2386,6 @@ func normaliseScheduleAt(s string) (string, error) {
 	return "", fmt.Errorf("unrecognised time format")
 }
 
-
 func (a *App) markTargetFailed(ctx *sdk.AppCtx, targetID int64, msg string) {
 	_, _ = ctx.AppDB().Exec(
 		`UPDATE post_targets SET status='failed', last_error=? WHERE id=?`,
@@ -2434,8 +2432,8 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id, profID                                           int64
-			body, mediaJSON, schedAt, status, createdAt, pubAt   string
+			id, profID                                         int64
+			body, mediaJSON, schedAt, status, createdAt, pubAt string
 		)
 		if err := rows.Scan(&id, &body, &mediaJSON, &schedAt, &status, &createdAt, &pubAt, &profID); err != nil {
 			continue
@@ -2474,9 +2472,9 @@ func (a *App) loadTargets(ctx *sdk.AppCtx, postID int64) []map[string]any {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			tid, acctID                                                 int64
-			platform, name, avatar, status, ppid, purl, lastErr, pubAt  string
-			attempts                                                    int
+			tid, acctID                                                int64
+			platform, name, avatar, status, ppid, purl, lastErr, pubAt string
+			attempts                                                   int
 		)
 		if err := rows.Scan(&tid, &acctID, &platform, &name, &avatar, &status, &ppid, &purl, &attempts, &lastErr, &pubAt); err != nil {
 			continue
@@ -2565,9 +2563,9 @@ func (a *App) toolPostReschedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 		rfc, newJobID, postID,
 	)
 	ctx.Emit("post.rescheduled", map[string]any{
-		"post_id":  postID,
-		"job_id":   newJobID,
-		"run_at":   rfc,
+		"post_id": postID,
+		"job_id":  newJobID,
+		"run_at":  rfc,
 	})
 	return map[string]any{
 		"post_id":     postID,
@@ -2947,18 +2945,31 @@ type accountMetricsResult struct {
 	Following       int64           `json:"following,omitempty"`
 	TotalLikes      int64           `json:"total_likes,omitempty"`
 	TotalVideos     int64           `json:"total_videos,omitempty"`
+	Reach           int64           `json:"reach,omitempty"`
+	Impressions     int64           `json:"impressions,omitempty"`
+	Engagements     int64           `json:"engagements,omitempty"`
+	Views           int64           `json:"views,omitempty"`
+	Insights        insightSeries   `json:"insights,omitempty"`
 	Raw             json.RawMessage `json:"raw,omitempty"`
 }
 
+type insightPoint struct {
+	Time  string `json:"time,omitempty"`
+	Value int64  `json:"value"`
+}
+
+type insightSeries map[string][]insightPoint
+
 func (a *App) getAccountMetrics(ctx *sdk.AppCtx, accountID int64, period string) accountMetricsResult {
 	pid := os.Getenv("APTEVA_PROJECT_ID")
-	var platform, displayName string
+	var platform, displayName, extID, pageCreds string
 	var connID int64
 	err := ctx.AppDB().QueryRow(
-		`SELECT platform, COALESCE(display_name,''), connection_id
+		`SELECT platform, COALESCE(display_name,''), connection_id,
+		        COALESCE(external_account_id,''), COALESCE(page_credentials,'')
 		 FROM social_accounts WHERE id=? AND project_id=?`,
 		accountID, pid,
-	).Scan(&platform, &displayName, &connID)
+	).Scan(&platform, &displayName, &connID, &extID, &pageCreds)
 	if err != nil {
 		return accountMetricsResult{
 			SocialAccountID: accountID,
@@ -2976,12 +2987,11 @@ func (a *App) getAccountMetrics(ctx *sdk.AppCtx, accountID int64, period string)
 		return a.getYoutubeChannelMetrics(ctx, out, connID)
 	case "tiktok":
 		return a.getTikTokAccountMetrics(ctx, out, connID)
+	case "facebook":
+		return a.getFacebookAccountMetrics(ctx, out, connID, extID, pageCreds, period)
+	case "instagram":
+		return a.getInstagramAccountMetrics(ctx, out, connID, extID, pageCreds, period)
 	default:
-		// FB pages have follower counts via /me/accounts fields, IG via
-		// instagram_business_account.followers_count, X via get_me — but
-		// each takes a different shape and the existing platformDef
-		// machinery doesn't surface them yet. Mark as unsupported with
-		// a clear reason; agents and the UI both render that gracefully.
 		out.Status = "unsupported"
 		out.Reason = "account-level metrics not wired for this platform yet"
 		return out
@@ -3019,8 +3029,154 @@ func (a *App) getYoutubeChannelMetrics(ctx *sdk.AppCtx, out accountMetricsResult
 	out.Status = "ok"
 	out.Followers = parseInt64(s.SubscriberCount)
 	out.TotalVideos = parseInt64(s.VideoCount)
-	// Stash totalViewCount in raw — useful for "channel reach" but
-	// doesn't fit the per-account shape cleanly.
+	out.Views = parseInt64(s.ViewCount)
+	a.addYoutubeAnalytics(ctx, &out, connID)
+	out.Raw = res.Data
+	return out
+}
+
+func (a *App) addYoutubeAnalytics(ctx *sdk.AppCtx, out *accountMetricsResult, connID int64) {
+	since, until := metricsDateWindow(90)
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "query_analytics_report", map[string]any{
+		"ids":        "channel==MINE",
+		"startDate":  since,
+		"endDate":    until,
+		"metrics":    "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,subscribersGained,subscribersLost,likes,comments,shares",
+		"dimensions": "day",
+		"sort":       "day",
+	})
+	if err != nil {
+		out.Reason = "youtube analytics unavailable: " + err.Error()
+		return
+	}
+	if res == nil || !res.Success {
+		out.Reason = "youtube analytics unavailable: " + upstreamError(res).Error()
+		return
+	}
+	if series := parseYoutubeAnalyticsSeries(res.Data); len(series) > 0 {
+		out.Insights = series
+	}
+}
+
+func parseYoutubeAnalyticsSeries(raw json.RawMessage) insightSeries {
+	var resp struct {
+		ColumnHeaders []struct {
+			Name string `json:"name"`
+		} `json:"columnHeaders"`
+		Rows [][]any `json:"rows"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil || len(resp.ColumnHeaders) < 2 {
+		return nil
+	}
+	out := insightSeries{}
+	for _, row := range resp.Rows {
+		if len(row) == 0 {
+			continue
+		}
+		day := fmt.Sprintf("%v", row[0])
+		for i := 1; i < len(row) && i < len(resp.ColumnHeaders); i++ {
+			name := resp.ColumnHeaders[i].Name
+			if name == "" {
+				continue
+			}
+			out[name] = append(out[name], insightPoint{
+				Time:  day,
+				Value: insightValueToInt64(row[i]),
+			})
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (a *App) getFacebookAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64, pageID, pageCreds, period string) accountMetricsResult {
+	if pageID == "" {
+		out.Status = "failed"
+		out.Error = "facebook account has no page id stored"
+		return out
+	}
+	token := extractPageToken(pageCreds)
+	if token == "" {
+		out.Status = "failed"
+		out.Error = "facebook page access_token missing — reconnect the account"
+		return out
+	}
+	if period == "" {
+		period = "day"
+	}
+	since, until := metricsDateWindow(90)
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_page_insights", map[string]any{
+		"pageId":       pageID,
+		"metric":       "page_fans,page_impressions,page_impressions_unique,page_post_engagements,page_views_total",
+		"period":       period,
+		"since":        since,
+		"until":        until,
+		"access_token": token,
+	})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	series := parseInsightSeries(res.Data)
+	out.Status = "ok"
+	out.Followers = latestInsight(series, "page_fans")
+	out.Impressions = latestInsight(series, "page_impressions")
+	out.Reach = latestInsight(series, "page_impressions_unique")
+	out.Engagements = latestInsight(series, "page_post_engagements")
+	out.Views = latestInsight(series, "page_views_total")
+	out.Insights = series
+	out.Raw = res.Data
+	return out
+}
+
+func (a *App) getInstagramAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64, instagramAccountID, pageCreds, period string) accountMetricsResult {
+	if instagramAccountID == "" {
+		out.Status = "failed"
+		out.Error = "instagram account id missing"
+		return out
+	}
+	token := extractPageToken(pageCreds)
+	if token == "" {
+		out.Status = "failed"
+		out.Error = "instagram page access_token missing — reconnect the account"
+		return out
+	}
+	if period == "" {
+		period = "day"
+	}
+	since, until := metricsDateWindow(90)
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_account_insights", map[string]any{
+		"instagramAccountId": instagramAccountID,
+		"metric":             "reach,follower_count,accounts_engaged,total_interactions",
+		"period":             period,
+		"metric_type":        "time_series",
+		"since":              since,
+		"until":              until,
+		"access_token":       token,
+	})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	series := parseInsightSeries(res.Data)
+	out.Status = "ok"
+	out.Followers = latestInsight(series, "follower_count")
+	out.Reach = latestInsight(series, "reach")
+	out.Engagements = latestInsight(series, "accounts_engaged")
+	if out.Engagements == 0 {
+		out.Engagements = latestInsight(series, "total_interactions")
+	}
+	out.Insights = series
 	out.Raw = res.Data
 	return out
 }
@@ -3056,6 +3212,68 @@ func (a *App) getTikTokAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult,
 	out.TotalVideos = u.VideoCount
 	out.Raw = res.Data
 	return out
+}
+
+func metricsDateWindow(days int) (string, string) {
+	if days <= 0 {
+		days = 90
+	}
+	until := time.Now().UTC()
+	since := until.AddDate(0, 0, -days)
+	return since.Format("2006-01-02"), until.Format("2006-01-02")
+}
+
+func parseInsightSeries(raw json.RawMessage) insightSeries {
+	var resp struct {
+		Data []struct {
+			Name   string `json:"name"`
+			Values []struct {
+				Value   any    `json:"value"`
+				EndTime string `json:"end_time"`
+			} `json:"values"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil
+	}
+	out := insightSeries{}
+	for _, item := range resp.Data {
+		if item.Name == "" {
+			continue
+		}
+		for _, v := range item.Values {
+			out[item.Name] = append(out[item.Name], insightPoint{
+				Time:  v.EndTime,
+				Value: insightValueToInt64(v.Value),
+			})
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func insightValueToInt64(v any) int64 {
+	switch x := v.(type) {
+	case float64:
+		if x < 0 {
+			return 0
+		}
+		return int64(x)
+	case string:
+		return parseInt64(x)
+	default:
+		return 0
+	}
+}
+
+func latestInsight(series insightSeries, name string) int64 {
+	points := series[name]
+	if len(points) == 0 {
+		return 0
+	}
+	return points[len(points)-1].Value
 }
 
 // toolPostMetrics is the post_metrics MCP entrypoint. Walks the
@@ -3149,8 +3367,7 @@ func (a *App) toolAccountMetrics(ctx *sdk.AppCtx, args map[string]any) (any, err
 // importAccountPosts pulls recent posts from one connected account
 // into our local posts/post_targets tables so they show up in the
 // Posts tab and the Metrics tab can query them like any locally-
-// authored post. v1 supports Facebook (page posts); other platforms
-// return an "unsupported, defer to follow-up" outcome.
+// authored post.
 //
 // Dedup is handled by a unique partial index on
 // post_targets(social_account_id, platform_post_id) — INSERT OR IGNORE
@@ -3187,9 +3404,15 @@ func (a *App) importAccountPosts(ctx *sdk.AppCtx, accountID int64, limit int) im
 	switch platform {
 	case "facebook":
 		return a.importFacebookPosts(ctx, out, accountID, connID, extID, pageCreds, profileID, limit)
+	case "instagram":
+		return a.importInstagramPosts(ctx, out, accountID, connID, extID, pageCreds, profileID, limit)
+	case "tiktok":
+		return a.importTikTokPosts(ctx, out, accountID, connID, profileID, limit)
+	case "youtube":
+		return a.importYoutubePosts(ctx, out, accountID, connID, profileID, limit)
 	default:
 		out.Status = "unsupported"
-		out.Reason = "import for this platform isn't wired yet (v1 covers Facebook; Twitter/IG/YouTube/TikTok pending)"
+		out.Reason = "import for this platform isn't wired yet"
 		return out
 	}
 }
@@ -3296,6 +3519,348 @@ func (a *App) importFacebookPosts(
 	}
 	out.Status = "ok"
 	return out
+}
+
+func (a *App) importInstagramPosts(
+	ctx *sdk.AppCtx, out importResult,
+	accountID, connID int64, instagramAccountID, pageCreds string,
+	profileID int64, limit int,
+) importResult {
+	if instagramAccountID == "" {
+		out.Status = "failed"
+		out.Error = "instagram account id missing"
+		return out
+	}
+	token := extractPageToken(pageCreds)
+	if token == "" {
+		out.Status = "failed"
+		out.Error = "instagram page access_token missing — reconnect the account"
+		return out
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_account_media", map[string]any{
+		"instagramAccountId": instagramAccountID,
+		"limit":              limit,
+		"fields":             "id,media_type,media_url,thumbnail_url,permalink,caption,timestamp,like_count,comments_count",
+		"access_token":       token,
+	})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	var resp struct {
+		Data []struct {
+			ID           string `json:"id"`
+			Caption      string `json:"caption"`
+			MediaURL     string `json:"media_url"`
+			ThumbnailURL string `json:"thumbnail_url"`
+			Permalink    string `json:"permalink"`
+			Timestamp    string `json:"timestamp"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(res.Data, &resp); err != nil {
+		out.Status, out.Error = "failed", "decode instagram media: "+err.Error()
+		return out
+	}
+	pid := os.Getenv("APTEVA_PROJECT_ID")
+	if profileID == 0 {
+		profileID = projectDefaultProfileID(ctx, pid)
+	}
+	for _, p := range resp.Data {
+		if p.ID == "" {
+			continue
+		}
+		mediaURL := p.MediaURL
+		if mediaURL == "" {
+			mediaURL = p.ThumbnailURL
+		}
+		imported, err := a.insertImportedPost(ctx, pid, accountID, profileID, p.Caption, p.ID, p.Permalink, p.Timestamp, []string{mediaURL})
+		if err != nil {
+			ctx.Logger().Warn("import: insert instagram post failed", "media_id", p.ID, "err", err)
+			continue
+		}
+		if imported {
+			out.Imported++
+		} else {
+			out.SkippedExisting++
+		}
+	}
+	out.Status = "ok"
+	return out
+}
+
+func (a *App) importTikTokPosts(
+	ctx *sdk.AppCtx, out importResult,
+	accountID, connID int64,
+	profileID int64, limit int,
+) importResult {
+	pid := os.Getenv("APTEVA_PROJECT_ID")
+	if profileID == 0 {
+		profileID = projectDefaultProfileID(ctx, pid)
+	}
+	var cursor int64
+	seen := 0
+	for seen < limit {
+		maxCount := limit - seen
+		if maxCount > 20 {
+			maxCount = 20
+		}
+		args := map[string]any{
+			"max_count": maxCount,
+			"fields":    "id,title,video_description,create_time,cover_image_url,share_url,like_count,comment_count,share_count,view_count",
+		}
+		if cursor > 0 {
+			args["cursor"] = cursor
+		}
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_videos", args)
+		if err != nil {
+			out.Status, out.Error = "failed", err.Error()
+			return out
+		}
+		if res == nil || !res.Success {
+			out.Status, out.Error = "failed", upstreamError(res).Error()
+			return out
+		}
+		var resp struct {
+			Data struct {
+				Videos []struct {
+					ID               string `json:"id"`
+					Title            string `json:"title"`
+					VideoDescription string `json:"video_description"`
+					CoverImageURL    string `json:"cover_image_url"`
+					ShareURL         string `json:"share_url"`
+					CreateTime       int64  `json:"create_time"`
+				} `json:"videos"`
+				Cursor  int64 `json:"cursor"`
+				HasMore bool  `json:"has_more"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(res.Data, &resp); err != nil {
+			out.Status, out.Error = "failed", "decode tiktok videos: "+err.Error()
+			return out
+		}
+		if len(resp.Data.Videos) == 0 {
+			break
+		}
+		for _, v := range resp.Data.Videos {
+			if v.ID == "" {
+				continue
+			}
+			seen++
+			body := v.Title
+			if body == "" {
+				body = v.VideoDescription
+			}
+			publishedAt := ""
+			if v.CreateTime > 0 {
+				publishedAt = time.Unix(v.CreateTime, 0).UTC().Format(time.RFC3339)
+			}
+			imported, err := a.insertImportedPost(ctx, pid, accountID, profileID, body, v.ID, v.ShareURL, publishedAt, []string{v.CoverImageURL})
+			if err != nil {
+				ctx.Logger().Warn("import: insert tiktok post failed", "video_id", v.ID, "err", err)
+				continue
+			}
+			if imported {
+				out.Imported++
+			} else {
+				out.SkippedExisting++
+			}
+		}
+		if !resp.Data.HasMore || resp.Data.Cursor == 0 || resp.Data.Cursor == cursor {
+			break
+		}
+		cursor = resp.Data.Cursor
+	}
+	out.Status = "ok"
+	return out
+}
+
+func (a *App) importYoutubePosts(
+	ctx *sdk.AppCtx, out importResult,
+	accountID, connID int64,
+	profileID int64, limit int,
+) importResult {
+	chRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_my_channel", map[string]any{
+		"part": "contentDetails",
+	})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if chRes == nil || !chRes.Success {
+		out.Status, out.Error = "failed", upstreamError(chRes).Error()
+		return out
+	}
+	var ch struct {
+		Items []struct {
+			ContentDetails struct {
+				RelatedPlaylists struct {
+					Uploads string `json:"uploads"`
+				} `json:"relatedPlaylists"`
+			} `json:"contentDetails"`
+		} `json:"items"`
+	}
+	_ = json.Unmarshal(chRes.Data, &ch)
+	if len(ch.Items) == 0 || ch.Items[0].ContentDetails.RelatedPlaylists.Uploads == "" {
+		out.Status = "failed"
+		out.Error = "youtube uploads playlist not found"
+		return out
+	}
+	pid := os.Getenv("APTEVA_PROJECT_ID")
+	if profileID == 0 {
+		profileID = projectDefaultProfileID(ctx, pid)
+	}
+	pageToken := ""
+	seen := 0
+	for seen < limit {
+		maxResults := limit - seen
+		if maxResults > 50 {
+			maxResults = 50
+		}
+		args := map[string]any{
+			"playlistId": ch.Items[0].ContentDetails.RelatedPlaylists.Uploads,
+			"maxResults": maxResults,
+			"part":       "snippet,contentDetails,status",
+		}
+		if pageToken != "" {
+			args["pageToken"] = pageToken
+		}
+		plRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_playlist_items", args)
+		if err != nil {
+			out.Status, out.Error = "failed", err.Error()
+			return out
+		}
+		if plRes == nil || !plRes.Success {
+			out.Status, out.Error = "failed", upstreamError(plRes).Error()
+			return out
+		}
+		var pl struct {
+			NextPageToken string `json:"nextPageToken"`
+			Items         []struct {
+				Snippet struct {
+					Title       string `json:"title"`
+					Description string `json:"description"`
+					PublishedAt string `json:"publishedAt"`
+					ResourceID  struct {
+						VideoID string `json:"videoId"`
+					} `json:"resourceId"`
+					Thumbnails map[string]struct {
+						URL string `json:"url"`
+					} `json:"thumbnails"`
+				} `json:"snippet"`
+				ContentDetails struct {
+					VideoID          string `json:"videoId"`
+					VideoPublishedAt string `json:"videoPublishedAt"`
+				} `json:"contentDetails"`
+			} `json:"items"`
+		}
+		if err := json.Unmarshal(plRes.Data, &pl); err != nil {
+			out.Status, out.Error = "failed", "decode youtube playlist: "+err.Error()
+			return out
+		}
+		if len(pl.Items) == 0 {
+			break
+		}
+		for _, item := range pl.Items {
+			videoID := item.ContentDetails.VideoID
+			if videoID == "" {
+				videoID = item.Snippet.ResourceID.VideoID
+			}
+			if videoID == "" {
+				continue
+			}
+			seen++
+			publishedAt := item.ContentDetails.VideoPublishedAt
+			if publishedAt == "" {
+				publishedAt = item.Snippet.PublishedAt
+			}
+			thumb := bestYoutubeThumb(item.Snippet.Thumbnails)
+			imported, err := a.insertImportedPost(ctx, pid, accountID, profileID, item.Snippet.Title, videoID, "https://www.youtube.com/watch?v="+videoID, publishedAt, []string{thumb})
+			if err != nil {
+				ctx.Logger().Warn("import: insert youtube post failed", "video_id", videoID, "err", err)
+				continue
+			}
+			if imported {
+				out.Imported++
+			} else {
+				out.SkippedExisting++
+			}
+		}
+		if pl.NextPageToken == "" || pl.NextPageToken == pageToken {
+			break
+		}
+		pageToken = pl.NextPageToken
+	}
+	out.Status = "ok"
+	return out
+}
+
+func (a *App) insertImportedPost(
+	ctx *sdk.AppCtx,
+	pid string,
+	accountID, profileID int64,
+	body, platformPostID, platformURL, publishedAt string,
+	mediaURLs []string,
+) (bool, error) {
+	var existing int64
+	_ = ctx.AppDB().QueryRow(
+		`SELECT id FROM post_targets WHERE social_account_id=? AND platform_post_id=?`,
+		accountID, platformPostID,
+	).Scan(&existing)
+	if existing > 0 {
+		return false, nil
+	}
+	filteredMedia := make([]string, 0, len(mediaURLs))
+	for _, u := range mediaURLs {
+		if u != "" {
+			filteredMedia = append(filteredMedia, u)
+		}
+	}
+	var extMediaJSON sql.NullString
+	if len(filteredMedia) > 0 {
+		b, _ := json.Marshal(filteredMedia)
+		extMediaJSON = sql.NullString{String: string(b), Valid: true}
+	}
+	postRes, err := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, media_storage_ids, status, profile_id,
+		                    imported_at, external_media_urls, published_at)
+		 VALUES (?, ?, '[]', 'published', ?, CURRENT_TIMESTAMP, ?, ?)`,
+		pid, body, profileID, extMediaJSON, nullable(publishedAt),
+	)
+	if err != nil {
+		return false, err
+	}
+	postID, _ := postRes.LastInsertId()
+	_, err = ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id, social_account_id, status,
+		                           platform_post_id, platform_url, published_at)
+		 VALUES (?, ?, 'published', ?, ?, ?)`,
+		postID, accountID, platformPostID, nullable(platformURL), nullable(publishedAt),
+	)
+	if err != nil {
+		_, _ = ctx.AppDB().Exec(`DELETE FROM posts WHERE id=?`, postID)
+		return false, err
+	}
+	return true, nil
+}
+
+func bestYoutubeThumb(thumbnails map[string]struct {
+	URL string `json:"url"`
+}) string {
+	for _, key := range []string{"maxres", "standard", "high", "medium", "default"} {
+		if t, ok := thumbnails[key]; ok && t.URL != "" {
+			return t.URL
+		}
+	}
+	for _, t := range thumbnails {
+		if t.URL != "" {
+			return t.URL
+		}
+	}
+	return ""
 }
 
 // ─── post_edit ────────────────────────────────────────────────────
@@ -3674,14 +4239,14 @@ func (a *App) toolPostDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 // Status semantics:
 //   - "deleted"     — upstream confirmed the removal
 //   - "unsupported" — platform's API doesn't allow deletion (Instagram media,
-//                     TikTok), or the catalog doesn't expose a verb yet
-//                     (LinkedIn, Reddit, Threads). Local row will still be
-//                     removed; the upstream copy stays
+//     TikTok), or the catalog doesn't expose a verb yet
+//     (LinkedIn, Reddit, Threads). Local row will still be
+//     removed; the upstream copy stays
 //   - "skipped"     — target was never published (no platform_post_id) or
-//                     its social_account row is gone (account disconnected
-//                     after posting), so we have nothing to delete upstream
+//     its social_account row is gone (account disconnected
+//     after posting), so we have nothing to delete upstream
 //   - "failed"      — integration call returned an error; user can verify
-//                     manually with platform_post_id
+//     manually with platform_post_id
 func (a *App) deletePostUpstream(ctx *sdk.AppCtx, postID int64) []targetDeleteOutcome {
 	rows, err := ctx.AppDB().Query(
 		`SELECT t.id, t.status, COALESCE(t.platform_post_id,''),

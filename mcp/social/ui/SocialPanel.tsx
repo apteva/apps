@@ -366,7 +366,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
           <PostsView posts={posts} onChange={loadPosts} setStatus={setStatus} />
         )}
         {tab === "metrics" && (
-          <MetricsView posts={posts} accounts={accounts} setStatus={setStatus} />
+          <MetricsView posts={posts} accounts={accounts} setStatus={setStatus} onPostsChanged={loadPosts} />
         )}
       </div>
 
@@ -2689,21 +2689,40 @@ interface AccountMetrics {
   following?: number;
   total_likes?: number;
   total_videos?: number;
+  reach?: number;
+  impressions?: number;
+  engagements?: number;
+  views?: number;
+  insights?: Record<string, { time?: string; value: number }[]>;
   raw?: any;
 }
 
 function MetricsView({
-  posts, accounts, setStatus,
+  posts, accounts, setStatus, onPostsChanged,
 }: {
   posts: Post[];
   accounts: SocialAccount[];
   setStatus: (s: string) => void;
+  onPostsChanged: () => void;
 }) {
-  // accountFor[accountId] = AccountMetrics — fetched lazily.
   const [accountFor, setAccountFor] = useState<Record<number, AccountMetrics | "loading" | { error: string }>>({});
-  // postFor[postId] = PostMetrics — fetched on row expand.
   const [postFor, setPostFor] = useState<Record<number, PostMetrics | "loading" | { error: string }>>({});
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [activeAccountId, setActiveAccountId] = useState<number | null>(accounts[0]?.id ?? null);
+  const [syncFor, setSyncFor] = useState<Record<number, "loading" | "done" | { error: string }>>({});
+  const autoLoadedAccounts = useRef<Set<number>>(new Set());
+  const autoSyncedAccounts = useRef<Set<number>>(new Set());
+  const accountIds = accounts.map((a) => a.id).join(",");
+
+  useEffect(() => {
+    if (accounts.length === 0) {
+      setActiveAccountId(null);
+      return;
+    }
+    if (!activeAccountId || !accounts.some((a) => a.id === activeAccountId)) {
+      setActiveAccountId(accounts[0].id);
+    }
+  }, [accounts, activeAccountId]);
 
   const loadAccount = async (id: number) => {
     setAccountFor((prev) => ({ ...prev, [id]: "loading" }));
@@ -2716,6 +2735,43 @@ function MetricsView({
       setAccountFor((prev) => ({ ...prev, [id]: { error: (e as Error).message } }));
     }
   };
+
+  const syncAccountPosts = async (id: number, quiet = false) => {
+    setSyncFor((prev) => ({ ...prev, [id]: "loading" }));
+    try {
+      const res = await fetch(`${API}/accounts/${id}/import?limit=100`, {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as { status: string; imported?: number; skipped_existing?: number; reason?: string; error?: string };
+      if (data.status === "ok") {
+        setSyncFor((prev) => ({ ...prev, [id]: "done" }));
+        if (!quiet) setStatus(`Imported ${data.imported || 0}; skipped ${data.skipped_existing || 0}`);
+        onPostsChanged();
+      } else if (data.status === "unsupported") {
+        setSyncFor((prev) => ({ ...prev, [id]: { error: data.reason || "import unsupported" } }));
+      } else {
+        throw new Error(data.error || "import failed");
+      }
+    } catch (e) {
+      setSyncFor((prev) => ({ ...prev, [id]: { error: (e as Error).message } }));
+      if (!quiet) setStatus("Post sync failed: " + (e as Error).message);
+    }
+  };
+
+  useEffect(() => {
+    for (const account of accounts) {
+      if (!autoLoadedAccounts.current.has(account.id)) {
+        autoLoadedAccounts.current.add(account.id);
+        loadAccount(account.id);
+      }
+      if (!autoSyncedAccounts.current.has(account.id)) {
+        autoSyncedAccounts.current.add(account.id);
+        syncAccountPosts(account.id, true);
+      }
+    }
+  }, [accountIds]);
 
   const loadPost = async (id: number) => {
     setPostFor((prev) => ({ ...prev, [id]: "loading" }));
@@ -2741,28 +2797,34 @@ function MetricsView({
     }
   };
 
-  const published = posts.filter((p) => p.status === "published" || p.status === "partial");
+  const activeAccount = accounts.find((a) => a.id === activeAccountId) || accounts[0] || null;
+  const activeMetrics = activeAccount ? accountFor[activeAccount.id] : null;
+  const published = posts.filter((p) =>
+    (p.status === "published" || p.status === "partial") &&
+    (!activeAccount || (p.targets || []).some((t) => t.social_account_id === activeAccount.id))
+  );
 
   return (
     <div className="p-4 flex flex-col gap-6">
-      {/* ── Accounts section ── */}
       <section className="flex flex-col gap-2">
         <div className="flex items-center justify-between">
           <h2 className="text-sm uppercase tracking-wide text-text-dim">Accounts</h2>
-          <span className="text-text-dim text-xs">Click to load totals</span>
+          <span className="text-text-dim text-xs">Auto-loads first account</span>
         </div>
         {accounts.length === 0 ? (
           <div className="text-text-dim text-sm py-6 text-center">No accounts connected.</div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          <div className="flex gap-2 overflow-x-auto pb-1">
             {accounts.map((a) => {
               const m = accountFor[a.id];
               return (
                 <button
                   key={a.id}
-                  onClick={() => loadAccount(a.id)}
+                  onClick={() => setActiveAccountId(a.id)}
                   disabled={m === "loading"}
-                  className="text-left flex items-center gap-3 px-3 py-2 border border-border rounded hover:border-text-dim disabled:opacity-50"
+                  className={`text-left flex items-center gap-3 px-3 py-2 border rounded min-w-[220px] disabled:opacity-50 ${
+                    activeAccount?.id === a.id ? "border-accent bg-bg-card" : "border-border hover:border-text-dim"
+                  }`}
                 >
                   {a.avatar_url ? (
                     <img src={a.avatar_url} alt="" className="w-8 h-8 rounded-full flex-shrink-0" />
@@ -2781,11 +2843,56 @@ function MetricsView({
         )}
       </section>
 
-      {/* ── Posts section ── */}
+      {activeAccount && (
+        <section className="flex flex-col gap-3 border border-border rounded p-3 bg-bg-card/30">
+          <div className="flex items-center gap-3">
+            <div className="flex-1 min-w-0">
+              <div className="text-text font-medium truncate">{activeAccount.display_name}</div>
+              <div className="text-text-dim text-xs">{activeAccount.platform}</div>
+            </div>
+            <button
+              onClick={() => loadAccount(activeAccount.id)}
+              className="text-xs text-accent hover:underline"
+            >
+              Refresh metrics
+            </button>
+            <button
+              onClick={() => syncAccountPosts(activeAccount.id)}
+              disabled={syncFor[activeAccount.id] === "loading"}
+              className="text-xs text-accent hover:underline disabled:opacity-50"
+            >
+              {syncFor[activeAccount.id] === "loading" ? "Syncing..." : "Sync posts"}
+            </button>
+          </div>
+          {activeMetrics === "loading" ? (
+            <div className="text-text-dim text-sm">Loading account metrics...</div>
+          ) : activeMetrics && typeof activeMetrics === "object" && "error" in activeMetrics ? (
+            <div className="text-red text-sm">{activeMetrics.error}</div>
+          ) : activeMetrics && typeof activeMetrics === "object" && "status" in activeMetrics ? (
+            <>
+              <AccountMetricsSummary metrics={activeMetrics as AccountMetrics} />
+              <InsightCharts metrics={activeMetrics as AccountMetrics} />
+            </>
+          ) : (
+            <div className="text-text-dim text-sm">Waiting for metrics...</div>
+          )}
+          {syncFor[activeAccount.id] && typeof syncFor[activeAccount.id] === "object" && "error" in syncFor[activeAccount.id] && (
+            <div className="text-text-dim text-xs">{(syncFor[activeAccount.id] as { error: string }).error}</div>
+          )}
+        </section>
+      )}
+
+      {accounts.length > 1 && (
+        <AccountHistoryGrid accounts={accounts} accountFor={accountFor} />
+      )}
+
       <section className="flex flex-col gap-2">
-        <h2 className="text-sm uppercase tracking-wide text-text-dim">Recent posts</h2>
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm uppercase tracking-wide text-text-dim">Recent posts</h2>
+          {activeAccount && <span className="text-text-dim text-xs">{published.length} loaded</span>}
+        </div>
         {published.length === 0 ? (
-          <div className="text-text-dim text-sm py-6 text-center">No published posts yet.</div>
+          <div className="text-text-dim text-sm py-6 text-center">No posts loaded for this account yet.</div>
         ) : (
           <div className="flex flex-col gap-2">
             {published.map((p) => {
@@ -2869,6 +2976,129 @@ function AccountMetricsCell({ m }: { m: any }) {
   if (am.followers != null) bits.push(`${formatNumber(am.followers)} followers`);
   if (am.total_videos != null && am.total_videos > 0) bits.push(`${am.total_videos} videos`);
   return <span className="text-text text-xs">{bits.join(" · ") || "ok"}</span>;
+}
+
+function AccountMetricsSummary({ metrics }: { metrics: AccountMetrics }) {
+  if (metrics.status === "unsupported") {
+    return <div className="text-text-dim text-sm">{metrics.reason || "Account metrics are not available for this platform yet."}</div>;
+  }
+  if (metrics.status === "failed") {
+    return <div className="text-red text-sm">{metrics.error || "Metrics fetch failed."}</div>;
+  }
+  const stats = [
+    ["followers", metrics.followers],
+    ["following", metrics.following],
+    ["videos", metrics.total_videos],
+    ["likes", metrics.total_likes],
+    ["reach", metrics.reach],
+    ["impressions", metrics.impressions],
+    ["engagements", metrics.engagements],
+    ["views", metrics.views],
+  ].filter(([, value]) => value != null && Number(value) > 0) as [string, number][];
+  if (stats.length === 0) {
+    return <div className="text-text-dim text-sm">No totals returned by the platform.</div>;
+  }
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+      {stats.map(([label, value]) => (
+        <div key={label} className="border border-border rounded px-3 py-2 bg-bg">
+          <div className="text-text font-medium">{formatNumber(value)}</div>
+          <div className="text-text-dim text-[10px] uppercase tracking-wide">{label}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AccountHistoryGrid({
+  accounts,
+  accountFor,
+}: {
+  accounts: SocialAccount[];
+  accountFor: Record<number, AccountMetrics | "loading" | { error: string }>;
+}) {
+  const loaded = accounts
+    .map((account) => ({ account, metrics: accountFor[account.id] }))
+    .filter(({ metrics }) => metrics && metrics !== "loading" && typeof metrics === "object" && "status" in metrics) as {
+      account: SocialAccount;
+      metrics: AccountMetrics;
+    }[];
+  if (loaded.length === 0) return null;
+  return (
+    <section className="flex flex-col gap-2">
+      <h2 className="text-sm uppercase tracking-wide text-text-dim">Account history</h2>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+        {loaded.map(({ account, metrics }) => (
+          <div key={account.id} className="border border-border rounded p-3 bg-bg-card/30">
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <div className="min-w-0">
+                <div className="text-text text-sm truncate">{account.display_name}</div>
+                <div className="text-text-dim text-xs">{account.platform}</div>
+              </div>
+              <AccountMetricsCell m={metrics} />
+            </div>
+            <InsightCharts metrics={metrics} compact />
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function InsightCharts({ metrics, compact = false }: { metrics: AccountMetrics; compact?: boolean }) {
+  const entries = Object.entries(metrics.insights || {})
+    .map(([name, points]) => ({ name, points }))
+    .filter((entry) => entry.points.length > 0);
+  if (entries.length === 0) {
+    if (compact) return <div className="text-text-dim text-xs">Totals only</div>;
+    return null;
+  }
+  return (
+    <div className={`grid grid-cols-1 ${compact ? "" : "md:grid-cols-2"} gap-2`}>
+      {entries.map(({ name, points }) => {
+        const latest = points[points.length - 1];
+        return (
+          <div key={name} className="border border-border rounded px-3 py-2 bg-bg">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-text text-sm">{name.replace(/_/g, " ")}</span>
+              <span className="text-text font-medium">{formatNumber(latest.value)}</span>
+            </div>
+            <Sparkline points={points} />
+            <div className="text-text-dim text-xs mt-1">
+              {points.length} point{points.length !== 1 ? "s" : ""}
+              {latest.time ? ` · latest ${new Date(latest.time).toLocaleDateString()}` : ""}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function Sparkline({ points }: { points: { time?: string; value: number }[] }) {
+  const values = points.map((p) => Number(p.value) || 0);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const width = 220;
+  const height = 54;
+  const xStep = values.length > 1 ? width / (values.length - 1) : width;
+  const coords = values.map((value, i) => {
+    const x = values.length > 1 ? i * xStep : width / 2;
+    const y = height - ((value - min) / span) * (height - 8) - 4;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  const fill = coords.length > 1
+    ? `0,${height} ${coords.join(" ")} ${width},${height}`
+    : "";
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} className="mt-2 h-14 w-full overflow-visible" role="img" aria-hidden="true">
+      <line x1="0" y1={height - 4} x2={width} y2={height - 4} stroke="currentColor" className="text-border" strokeWidth="1" />
+      {fill && <polygon points={fill} className="fill-accent/10" />}
+      <polyline points={coords.join(" ")} fill="none" className="stroke-accent" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      {coords.length === 1 && <circle cx={width / 2} cy={height / 2} r="3" className="fill-accent" />}
+    </svg>
+  );
 }
 
 function MetricsRow({ totals }: { totals: { views: number; likes: number; comments: number; shares: number } }) {
