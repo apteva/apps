@@ -2163,6 +2163,7 @@ function opFieldDefs(op: OpName): FieldDef[] {
         { key: "start_ms",     label: "Start (ms)",       type: "number", placeholder: "0" },
         { key: "end_ms",       label: "End (ms)",         type: "number", placeholder: "10000" },
         { key: "target_ratio", label: "Aspect ratio",     type: "select", options: ["9:16", "1:1", "4:5", "16:9"] },
+        { key: "crop_mode",    label: "Crop mode",        type: "select", options: ["smart", "center"] },
         { key: "output_width", label: "Output width (px)",type: "number", placeholder: "1080" },
       ];
   }
@@ -2192,6 +2193,7 @@ function defaultFields(op: OpName, row: MediaRow): Record<string, string> {
       out.start_ms = "0";
       if (row.duration_ms) out.end_ms = String(Math.min(row.duration_ms, 10000));
       out.target_ratio = "9:16";
+      out.crop_mode = "smart";
       out.output_width = "1080";
       break;
     case "crop":

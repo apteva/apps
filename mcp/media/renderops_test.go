@@ -368,12 +368,19 @@ func TestPlanExtractReel_Defaults(t *testing.T) {
 	if plan.ContentType != "video/mp4" {
 		t.Errorf("content_type=%q want video/mp4", plan.ContentType)
 	}
-	// Time pair lands as fractional seconds, same as media_trim.
-	if !argPair(plan.Args, "-ss", "60.000") {
-		t.Errorf("missing -ss 60.000: %v", plan.Args)
+	// Reel extraction uses a short preroll before the input and an
+	// output-side seek to land on the requested first frame.
+	if !argPair(plan.Args, "-ss", "58.000") {
+		t.Errorf("missing preroll -ss 58.000: %v", plan.Args)
 	}
-	if !argPair(plan.Args, "-to", "90.000") {
-		t.Errorf("missing -to 90.000: %v", plan.Args)
+	if !argPair(plan.Args, "-ss", "2.000") {
+		t.Errorf("missing output -ss 2.000: %v", plan.Args)
+	}
+	if !argPair(plan.Args, "-t", "30.000") {
+		t.Errorf("missing -t 30.000: %v", plan.Args)
+	}
+	if contains(plan.Args, "-to") {
+		t.Errorf("extract_reel should use duration, not absolute -to: %v", plan.Args)
 	}
 	// Audio passthrough — no re-encode needed.
 	if !argPair(plan.Args, "-c:a", "copy") {

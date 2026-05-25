@@ -360,8 +360,12 @@ func planExtractFrame(sources []string, raw json.RawMessage, outputName string) 
 // `gt(iw/ih, target_aspect)` test inside the expression picks the
 // branch at render time.
 //
-// Audio: copied through. The trim happens server-side via -ss / -to
-// before re-encoding the video, so we save audio bandwidth too.
+// Audio: copied through. The trim uses a short demuxer-level preroll
+// and then an output seek. That avoids the black leading frames some
+// phone MOVs produce when a reframe starts exactly at a non-keyframe,
+// while still avoiding a decode from the beginning of long sources.
+
+const extractReelSeekPrerollMs int64 = 2000
 
 type extractReelParams struct {
 	StartMs     int64  `json:"start_ms"`
@@ -421,15 +425,20 @@ func planExtractReel(sources []string, raw json.RawMessage, outputName string) (
 	}
 	outputWidth, outputHeight := reelOutputDimensions(p.OutputWidth, rw, rh)
 	scaleExpr := fmt.Sprintf("scale=%d:%d,setsar=1", outputWidth, outputHeight)
+	seekStartMs := p.StartMs - extractReelSeekPrerollMs
+	if seekStartMs < 0 {
+		seekStartMs = 0
+	}
+	outputSeekMs := p.StartMs - seekStartMs
+	durationMs := p.EndMs - p.StartMs
 	args := []string{
 		"-y",
 		"-loglevel", "error",
 		"-progress", "pipe:1",
-		// Demuxer-level seek before -i: fast + frame-accurate enough
-		// for the typical reel use case. Same convention as planTrim.
-		"-ss", msToSeconds(p.StartMs),
-		"-to", msToSeconds(p.EndMs),
+		"-ss", msToSeconds(seekStartMs),
 		"-i", "{input}",
+		"-ss", msToSeconds(outputSeekMs),
+		"-t", msToSeconds(durationMs),
 		"-vf", cropExpr + "," + scaleExpr,
 		"-c:a", "copy", // audio passthrough — no re-encode
 		"-avoid_negative_ts", "make_zero",
