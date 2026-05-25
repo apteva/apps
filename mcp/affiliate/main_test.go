@@ -147,8 +147,8 @@ func TestRefreshOffersAndStatsFromProvider(t *testing.T) {
 				"advertiser": "Mintos",
 				"name": "Mintos Investment Marketplace",
 				"category": "Fintech",
-				"commission": "CPL 5 EUR",
-				"tracking": {"deeplinking": true}
+				"pricings": [{"commissionType": "Fixed", "transactionType": "lead", "payout": 5, "currency": "EUR"}],
+				"tracking": {"deeplinking": true, "cookieExpiration": 2592000}
 			}]
 		}]
 	}`)
@@ -179,6 +179,9 @@ func TestRefreshOffersAndStatsFromProvider(t *testing.T) {
 	offers, err := dbListOffers(ctx.AppDB(), "mintos", "", "", 10)
 	if err != nil || len(offers) != 1 {
 		t.Fatalf("offers len=%d err=%v", len(offers), err)
+	}
+	if offers[0].CommissionSummary != "Fixed lead 5 EUR" || !offers[0].TrackingDeepLink {
+		t.Fatalf("offer normalization failed: %+v", offers[0])
 	}
 	stats, err := dbStats(ctx.AppDB(), "", "", "target-circle", offers[0].ID, 0, "day")
 	if err != nil || len(stats) != 1 || stats[0].CommissionCents != 1000 {

@@ -23,7 +23,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: affiliate
 display_name: Affiliate
-version: 0.1.3
+version: 0.1.4
 description: Publisher-side affiliate manager.
 author: Apteva
 scopes: [project, global]
@@ -1517,12 +1517,54 @@ func offerInputFromMap(network string, m map[string]any) OfferInput {
 		Status:            strings.ToLower(firstString(m, "status", "relationship_status", "relationship-status", "approval_status", "approvalStatus", "ContractStatus")),
 		Category:          firstString(m, "category", "primaryCategory", "Category"),
 		Vertical:          firstString(m, "vertical"),
-		CountriesJSON:     mustJSON(firstAny(m, "countries", "country", "allowed_countries", "ShippingRegions")),
-		CommissionSummary: firstString(m, "commission_summary", "commission", "payout", "payout_summary", "commissionRange", "defaultCommissionRate", "rate"),
-		CookieWindow:      firstString(m, "cookie_window", "cookieWindow", "cookie_expiration", "cookieExpiration", "cookieDuration"),
-		TrackingDeepLink:  firstBool(m, "tracking_deeplink", "deeplinking", "deepLinking", "deeplink", "AllowsDeeplinking"),
+		CountriesJSON:     mustJSON(firstAny(m, "countries", "country", "targetedCountries", "allowed_countries", "ShippingRegions")),
+		CommissionSummary: firstNonEmpty(firstString(m, "commission_summary", "commission", "payout", "payout_summary", "commissionRange", "defaultCommissionRate", "rate"), pricingSummaryFromMap(m)),
+		CookieWindow:      firstString(m, "cookie_window", "cookieWindow", "cookie_expiration", "cookieExpiration", "cookieDuration", "tracking.cookieExpiration"),
+		TrackingDeepLink:  firstBool(m, "tracking_deeplink", "deeplinking", "tracking.deeplinking", "deepLinking", "deeplink", "AllowsDeeplinking"),
 		RawJSON:           mustJSON(m),
 	}
+}
+
+func pricingSummaryFromMap(m map[string]any) string {
+	raw := firstAny(m, "pricings", "priceCombinations")
+	items, ok := raw.([]any)
+	if !ok || len(items) == 0 {
+		return ""
+	}
+	parts := []string{}
+	for _, item := range items {
+		pm, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if payout, ok := firstAny(pm, "payout").(map[string]any); ok {
+			value := firstString(payout, "value")
+			if value == "" {
+				continue
+			}
+			typ := firstString(payout, "type")
+			currency := firstString(payout, "currency")
+			transactionType := firstString(pm, "transactionType")
+			if typ == "percentage" {
+				parts = append(parts, strings.TrimSpace(fmt.Sprintf("%s%% %s", value, transactionType)))
+			} else {
+				parts = append(parts, strings.TrimSpace(fmt.Sprintf("%s %s %s", value, currency, transactionType)))
+			}
+			continue
+		}
+		value := firstString(pm, "payout", "value")
+		if value == "" {
+			continue
+		}
+		commissionType := firstString(pm, "commissionType")
+		transactionType := firstString(pm, "transactionType")
+		currency := firstString(pm, "currency")
+		parts = append(parts, strings.TrimSpace(fmt.Sprintf("%s %s %s %s", commissionType, transactionType, value, currency)))
+	}
+	if len(parts) > 3 {
+		parts = parts[:3]
+	}
+	return strings.Join(parts, "; ")
 }
 
 func statInputFromMap(network string, m map[string]any) StatInput {
