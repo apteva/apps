@@ -3738,14 +3738,37 @@ function formatNumber(n: number): string {
 
 function MediaThumb({ fileId, projectId }: { fileId: number; projectId?: string | null }) {
   const [meta, setMeta] = useState<{ mime: string; name: string } | null>(null);
+  const [posterURL, setPosterURL] = useState<string | null>(null);
+  const [posterTried, setPosterTried] = useState(false);
   const [open, setOpen] = useState(false);
   const url = storageURL(`/files/${fileId}/content`, projectId);
   useEffect(() => {
     let alive = true;
+    setMeta(null);
+    setPosterURL(null);
+    setPosterTried(false);
     loadMediaMeta(fileId, projectId).then((m) => { if (alive) setMeta(m); });
     return () => { alive = false; };
   }, [fileId, projectId]);
-  const isVideo = meta?.mime.startsWith("video/") ?? false;
+  const isVideo = isVideoMime(meta?.mime || "", meta?.name || "");
+  useEffect(() => {
+    if (!isVideo || posterURL || posterTried) return;
+    let alive = true;
+    setPosterTried(true);
+    buildVideoPoster(url).then((poster) => {
+      if (!alive) {
+        if (poster) URL.revokeObjectURL(poster);
+        return;
+      }
+      setPosterURL(poster);
+    });
+    return () => { alive = false; };
+  }, [isVideo, posterURL, posterTried, url]);
+  useEffect(() => {
+    return () => {
+      if (posterURL) URL.revokeObjectURL(posterURL);
+    };
+  }, [posterURL]);
   return (
     <>
       <button
@@ -3754,23 +3777,19 @@ function MediaThumb({ fileId, projectId }: { fileId: number; projectId?: string 
         title={meta?.name || `file #${fileId}`}
       >
         {isVideo ? (
-          // preload="metadata" → browser pulls just the container
-          // header + first keyframe for the still, not the whole
-          // file. <video muted> with no controls renders as a
-          // single-frame poster in this size.
           <>
-            <video
-              src={url}
-              preload="metadata"
-              muted
-              playsInline
-              className="w-full h-full object-cover"
-            />
-            <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/50 transition-colors">
-              <div className="w-8 h-8 rounded-full bg-bg/80 grid place-items-center">
-                <span className="text-text text-xs leading-none">▶</span>
-              </div>
-            </div>
+            {posterURL ? (
+              <img src={posterURL} alt={meta?.name || ""} className="w-full h-full object-cover" />
+            ) : (
+              <video
+                src={url}
+                preload="metadata"
+                muted
+                playsInline
+                className="w-full h-full object-cover"
+              />
+            )}
+            <PlayBadge />
           </>
         ) : (
           <img src={url} alt={meta?.name || ""} className="w-full h-full object-cover" />
