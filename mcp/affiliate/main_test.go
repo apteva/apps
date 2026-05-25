@@ -139,14 +139,17 @@ func TestManualLinkCreate(t *testing.T) {
 func TestRefreshOffersAndStatsFromProvider(t *testing.T) {
 	platform := newRecordingPlatform()
 	platform.responses["target-circle:offers_list"] = json.RawMessage(`{
-		"offers": [{
-			"id": "mintos",
-			"advertiser": "Mintos",
-			"offerName": "Mintos Investment Marketplace",
-			"status": "accepted",
-			"category": "Fintech",
-			"commission": "CPL 5 EUR",
-			"deeplinking": true
+		"data": [{
+			"adInventorySid": "site-main",
+			"name": "Publisher Site",
+			"offers": [{
+				"offerSid": "mintos",
+				"advertiser": "Mintos",
+				"name": "Mintos Investment Marketplace",
+				"category": "Fintech",
+				"commission": "CPL 5 EUR",
+				"tracking": {"deeplinking": true}
+			}]
 		}]
 	}`)
 	platform.responses["target-circle:transactions_list"] = json.RawMessage(`{
@@ -165,6 +168,9 @@ func TestRefreshOffersAndStatsFromProvider(t *testing.T) {
 	out, err := app.toolRefresh(ctx, map[string]any{"network": "target-circle", "kind": "all"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := platform.calls[0].Input["limit"]; got != 50 {
+		t.Fatalf("target-circle offers limit = %v, want 50", got)
 	}
 	summary := out.(*RefreshSummary)
 	if summary.OffersUpserted != 1 || summary.StatsDaysUpserted != 1 {
@@ -221,6 +227,9 @@ func TestLinkCreateCallsProviderAndRedirects(t *testing.T) {
 	}
 	if platform.calls[0].App != "target-circle" || platform.calls[0].Tool != "codes_list" {
 		t.Fatalf("provider call wrong: %+v", platform.calls[0])
+	}
+	if got := platform.calls[0].Input["parameters[ref1]"]; got != "p2p-guide" {
+		t.Fatalf("target-circle ref1 = %v", got)
 	}
 	if platform.calls[1].App != "redirects" || platform.calls[1].Tool != "redirect_add" {
 		t.Fatalf("redirect call wrong: %+v", platform.calls[1])

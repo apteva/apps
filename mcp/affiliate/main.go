@@ -23,7 +23,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: affiliate
 display_name: Affiliate
-version: 0.1.1
+version: 0.1.2
 description: Publisher-side affiliate manager.
 author: Apteva
 scopes: [project, global]
@@ -1154,7 +1154,7 @@ func providerOfferCalls(network string, args map[string]any) ([]providerCall, er
 	switch network {
 	case "target-circle":
 		return []providerCall{{Role: "target-circle", Tool: "offers_list", Input: compactMap(map[string]any{
-			"limit":  intArg(args, "limit", 100),
+			"limit":  intArg(args, "limit", 50),
 			"status": strArg(args, "status"),
 		})}}, nil
 	case "impact":
@@ -1234,7 +1234,7 @@ func providerStatCalls(network, from, to string, args map[string]any) ([]provide
 		return []providerCall{{Role: "target-circle", Tool: "transactions_list", Input: compactMap(map[string]any{
 			"from":  from,
 			"to":    to,
-			"limit": intArg(args, "limit", 100),
+			"limit": intArg(args, "limit", 25),
 		})}}, nil
 	case "impact":
 		return []providerCall{{Role: "impact", Tool: "actions_list", Input: compactMap(map[string]any{
@@ -1308,7 +1308,7 @@ func providerLinkCall(network, destination string, offer *Offer, args map[string
 			"offerSid":             offerSID,
 			"adInventorySid":       argOrConfig(args, "adInventorySid", "target_circle_ad_inventory_sid", ""),
 			"deeplink":             destination,
-			"parameters[ref1]":     strArg(args, "campaign"),
+			"parameters[ref1]":     firstNonEmpty(strArg(args, "campaign"), "apteva"),
 			"parameters[click_id]": strArg(args, "subid"),
 		})}, nil
 	case "impact":
@@ -1399,7 +1399,7 @@ func offerInputFromMap(network string, m map[string]any) OfferInput {
 	}
 	return OfferInput{
 		NetworkKey:        network,
-		ExternalID:        firstString(m, "external_id", "id", "slug", "key", "company_key", "asin", "offer_id", "offerId", "campaign_id", "campaignId", "CampaignId", "advertiserId", "advertiser-id", "merchantGroupId"),
+		ExternalID:        firstString(m, "external_id", "id", "slug", "sid", "key", "company_key", "asin", "offerSid", "offer_id", "offerId", "campaign_id", "campaignId", "CampaignId", "advertiserId", "advertiser-id", "merchantGroupId"),
 		MerchantName:      merchant,
 		OfferName:         name,
 		Status:            strings.ToLower(firstString(m, "status", "relationship_status", "relationship-status", "approval_status", "approvalStatus", "ContractStatus")),
@@ -1460,7 +1460,7 @@ func collectMaps(root map[string]any, keys ...string) []map[string]any {
 }
 
 func looksLikeRecord(m map[string]any) bool {
-	return firstString(m, "external_id", "id", "slug", "key", "asin", "offer_id", "offerId", "CampaignId", "campaignId", "advertiserId", "merchantGroupId", "company_key", "date", "day", "ActionDate", "eventDate", "transactionDate") != ""
+	return firstString(m, "external_id", "id", "slug", "sid", "key", "asin", "offerSid", "offer_id", "offerId", "CampaignId", "campaignId", "advertiserId", "merchantGroupId", "company_key", "date", "day", "ActionDate", "eventDate", "transactionDate") != ""
 }
 
 // --- helpers ---------------------------------------------------------------
