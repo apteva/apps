@@ -52,7 +52,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.9
+version: 0.13.10
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -127,9 +127,6 @@ provides:
     - { name: inbound_route_delete,   description: "Remove an inbound route." }
     - { name: template_create,        description: "Create a template." }
     - { name: template_update,        description: "Update a template (partial)." }
-    - { name: template_submit,        description: "Submit a provider-backed template for channel approval." }
-    - { name: template_sync,          description: "Sync provider-backed templates into the generic template table." }
-    - { name: template_refresh_status, description: "Refresh one provider-backed template approval status." }
     - { name: template_get,           description: "Fetch a template." }
     - { name: template_list,          description: "List templates." }
     - { name: template_delete,        description: "Delete a template." }
@@ -402,32 +399,6 @@ func (a *App) MCPTools() []sdk.Tool {
 				"vars_schema": map[string]any{"type": "object"},
 			}, []string{"id"}),
 			Handler: a.toolTemplateUpdate,
-		},
-		{
-			Name:        "template_submit",
-			Description: "Submit a provider-backed template for channel approval. Args: id, category?, language?. WhatsApp uses the bound phone provider behind the generic template API.",
-			InputSchema: schemaObject(map[string]any{
-				"id":       map[string]any{"type": "integer"},
-				"category": map[string]any{"type": "string", "enum": []string{"UTILITY", "MARKETING", "AUTHENTICATION"}},
-				"language": map[string]any{"type": "string"},
-			}, []string{"id"}),
-			Handler: a.toolTemplateSubmit,
-		},
-		{
-			Name:        "template_sync",
-			Description: "Sync provider-backed templates into the generic template table. Args: channel. For WhatsApp, imports existing provider templates and approval statuses.",
-			InputSchema: schemaObject(map[string]any{
-				"channel": map[string]any{"type": "string", "enum": []string{"email", "sms", "whatsapp"}},
-			}, []string{"channel"}),
-			Handler: a.toolTemplateSync,
-		},
-		{
-			Name:        "template_refresh_status",
-			Description: "Refresh one provider-backed template's approval status. Args: id.",
-			InputSchema: schemaObject(map[string]any{
-				"id": map[string]any{"type": "integer"},
-			}, []string{"id"}),
-			Handler: a.toolTemplateRefreshStatus,
 		},
 		{
 			Name:        "template_get",
@@ -1867,14 +1838,6 @@ func (a *App) toolTemplateList(ctx *sdk.AppCtx, args map[string]any) (any, error
 		"last_synced_at":  lastSynced,
 		"last_sync_error": lastErr,
 	}, nil
-}
-
-func (a *App) toolTemplateSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return a.toolTemplatesSyncProvider(ctx, args)
-}
-
-func (a *App) toolTemplateRefreshStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return a.toolTemplatesRefreshStatus(ctx, args)
 }
 
 // autoSyncTTL gates how often template_list-driven background syncs
@@ -4468,7 +4431,7 @@ func (a *App) handleTemplatesSync(w http.ResponseWriter, r *http.Request) {
 	if channel == "" {
 		channel = channelWhatsApp
 	}
-	out, err := a.toolTemplateSync(globalCtx, map[string]any{"channel": channel})
+	out, err := a.toolTemplatesSyncProvider(globalCtx, map[string]any{"channel": channel})
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -4492,8 +4455,10 @@ func isAppDepBound(ctx *sdk.AppCtx, name string) bool {
 }
 
 // handleTemplateItem dispatches /templates/<id>/<action>. Today the
-// only action is refresh-status; future actions (preview, force-resync)
-// land here.
+// actions are panel-only provider operations such as refresh-status
+// and submit. They deliberately stay off the MCP tool surface; agents
+// manage generic template rows, while the operator panel controls
+// provider synchronization and approval checks.
 func (a *App) handleTemplateItem(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/templates/")
 	parts := strings.SplitN(rest, "/", 2)
@@ -4512,7 +4477,24 @@ func (a *App) handleTemplateItem(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusMethodNotAllowed, "POST only")
 			return
 		}
-		out, err := a.toolTemplateRefreshStatus(globalCtx, map[string]any{"id": id})
+		out, err := a.toolTemplatesRefreshStatus(globalCtx, map[string]any{"id": id})
+		if err != nil {
+			httpErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		httpJSON(w, out)
+	case "submit":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body == nil {
+			body = map[string]any{}
+		}
+		body["id"] = id
+		out, err := a.toolTemplateSubmit(globalCtx, body)
 		if err != nil {
 			httpErr(w, http.StatusBadGateway, err.Error())
 			return

@@ -1290,10 +1290,7 @@ function TemplatesView({ rows, api, reload, notify }: { rows: TemplateRow[]; api
   const handleSync = async () => {
     setBusy(true);
     try {
-      const out = await api<{ synced?: number }>("POST", "/tools/call", {}, {
-        tool: "template_sync",
-        args: { channel: "whatsapp" },
-      });
+      const out = await api<{ synced?: number }>("POST", "/templates/sync", { channel: "whatsapp" });
       reload();
       notify("info", `Synced ${out.synced ?? 0} WhatsApp template${out.synced === 1 ? "" : "s"}.`);
     } catch (e) {
@@ -1314,7 +1311,7 @@ function TemplatesView({ rows, api, reload, notify }: { rows: TemplateRow[]; api
   };
   const handleRefreshStatus = async (id: number) => {
     try {
-      await api("POST", "/tools/call", {}, { tool: "template_refresh_status", args: { id } });
+      await api("POST", `/templates/${id}/refresh-status`, {});
       reload();
     } catch (e) {
       notify("error", `Refresh failed: ${parseSendersError((e as Error).message)}`);
@@ -1322,7 +1319,7 @@ function TemplatesView({ rows, api, reload, notify }: { rows: TemplateRow[]; api
   };
   const handleSubmit = async (id: number) => {
     try {
-      await api("POST", "/tools/call", {}, { tool: "template_submit", args: { id, category, language } });
+      await api("POST", `/templates/${id}/submit`, {}, { category, language });
       reload();
     } catch (e) {
       notify("error", `Submit failed: ${parseSendersError((e as Error).message)}`);
