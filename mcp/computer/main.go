@@ -34,10 +34,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.5.0
+version: 0.5.1
 description: |
-  Watch and steer browser sessions. v0.5 lets the operator panel use
-  the same browser_session / computer_use surface as agents.
+  Watch and steer browser sessions. v0.5.1 replaces browser-native
+  panel confirmations with app-rendered modals.
 scopes: [project, global]
 requires:
   permissions:

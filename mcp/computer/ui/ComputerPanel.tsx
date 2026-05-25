@@ -43,6 +43,7 @@ export default function ComputerPanel() {
   const [err, setErr] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [showOpen, setShowOpen] = useState(false);
+  const [pendingClose, setPendingClose] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -72,7 +73,6 @@ export default function ComputerPanel() {
 
   const onClose = useCallback(
     async (id: string) => {
-      if (!confirm("Close this browser session?")) return;
       const r = await fetch(`${SESSIONS_URL}/${encodeURIComponent(id)}`, {
         method: "DELETE",
         credentials: "include",
@@ -87,6 +87,7 @@ export default function ComputerPanel() {
   );
 
   const sel = rows.find((r) => r.session_id === selected) ?? null;
+  const closeTarget = rows.find((r) => r.session_id === pendingClose) ?? null;
 
   return (
     <div
@@ -104,10 +105,10 @@ export default function ComputerPanel() {
         err={err}
         selected={selected}
         onSelect={setSelected}
-        onClose={onClose}
+        onClose={setPendingClose}
         onOpen={() => setShowOpen(true)}
       />
-      <SessionDetail session={sel} onClose={onClose} onRefresh={refresh} />
+      <SessionDetail session={sel} onClose={setPendingClose} onRefresh={refresh} />
       {showOpen && (
         <OpenSessionModal
           onClose={() => setShowOpen(false)}
@@ -115,6 +116,19 @@ export default function ComputerPanel() {
             setShowOpen(false);
             setSelected(newID);
             void refresh();
+          }}
+        />
+      )}
+      {closeTarget && (
+        <ConfirmModal
+          title="Close Browser Session"
+          body={`Close ${hostFor(closeTarget.current_url)}? The app session will be removed and the backend browser will be released.`}
+          confirmLabel="Close session"
+          busyLabel="Closing..."
+          onCancel={() => setPendingClose(null)}
+          onConfirm={async () => {
+            await onClose(closeTarget.session_id);
+            setPendingClose(null);
           }}
         />
       )}
@@ -724,6 +738,80 @@ function OpenSessionModal({
   );
 }
 
+function ConfirmModal({
+  title,
+  body,
+  confirmLabel,
+  busyLabel,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  busyLabel: string;
+  onCancel: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const confirm = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await onConfirm();
+    } catch (e: any) {
+      setErr(String(e?.message ?? e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      onClick={busy ? undefined : onCancel}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.4)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 60,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="bg-bg border border-border text-text"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="computer-confirm-title"
+        style={{
+          width: "380px",
+          maxWidth: "92vw",
+          padding: "18px",
+          borderRadius: "8px",
+          boxShadow: "0 18px 50px rgba(0,0,0,0.25)",
+        }}
+      >
+        <h2 id="computer-confirm-title" style={{ fontSize: "16px", fontWeight: 600, marginBottom: "8px" }}>
+          {title}
+        </h2>
+        <p className="text-text-muted" style={{ fontSize: "13px", lineHeight: 1.5, margin: 0 }}>
+          {body}
+        </p>
+        {err && <div style={{ marginTop: "10px", fontSize: "12px", color: "#dc2626" }}>{err}</div>}
+        <div style={{ marginTop: "16px", display: "flex", justifyContent: "flex-end", gap: "8px" }}>
+          <IconButton onClick={onCancel} disabled={busy} title="Cancel">Cancel</IconButton>
+          <DangerButton onClick={confirm} disabled={busy} title={confirmLabel}>
+            {busy ? busyLabel : confirmLabel}
+          </DangerButton>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Field({ label, children }: { label: string; children: any }) {
   return (
     <label style={{ fontSize: "12px" }} className="text-text-muted">
@@ -775,6 +863,44 @@ function IconButton({
         fontWeight: 500,
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.55 : 1,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function DangerButton({
+  onClick,
+  disabled,
+  title,
+  children,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  title: string;
+  children: any;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: "6px",
+        padding: "6px 10px",
+        borderRadius: "6px",
+        border: "1px solid #b91c1c",
+        background: "#dc2626",
+        color: "white",
+        fontSize: "13px",
+        fontWeight: 600,
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.65 : 1,
       }}
     >
       {children}
