@@ -909,7 +909,7 @@ func TestPublishTikTok_FileUploadInit_MultiChunkMath(t *testing.T) {
 
 func TestPublishYouTube_InitCallShape(t *testing.T) {
 	// Verify publishYoutube calls upload_video_init with the right
-	// snippet shape (title from post body, default privacy=private),
+	// snippet shape (title from post body, default privacy=public),
 	// and surfaces a clear error when the server didn't forward the
 	// Location header (older apteva-server / network drop).
 	pf := newRecordingPlatform()
@@ -950,8 +950,8 @@ func TestPublishYouTube_InitCallShape(t *testing.T) {
 				t.Errorf("snippet.title = %v, want body", snippet["title"])
 			}
 			status, _ := c.Input["status"].(map[string]any)
-			if status["privacyStatus"] != "private" {
-				t.Errorf("default privacyStatus should be private, got %v", status["privacyStatus"])
+			if status["privacyStatus"] != "public" {
+				t.Errorf("default privacyStatus should be public, got %v", status["privacyStatus"])
 			}
 		}
 	}

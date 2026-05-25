@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.16
+version: 0.14.17
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -469,7 +469,7 @@ var platforms = map[string]platformDef{
 				Help: "Shown on the video page. Falls back to the post body when blank."},
 			{Name: "visibility", Type: "select", Label: "Visibility",
 				Options: []string{"public", "unlisted", "private"},
-				Help:    "Defaults to private if blank — safer for first-pass uploads."},
+				Help:    "Defaults to public if blank."},
 			{Name: "category", Type: "text", Label: "Category ID",
 				Help: "YouTube numeric category id (e.g. 22 = People & Blogs, 27 = Education). Optional."},
 		},
@@ -1788,9 +1788,8 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	//   body        — already merged into j.body upstream, so the
 	//                 description below uses j.body directly.
 	//   visibility  — status.privacyStatus (public|unlisted|private).
-	//                 Defaults to private — safer for first-pass
-	//                 uploads, matches what most users want when
-	//                 they didn't explicitly set it.
+	//                 Defaults to public so uploaded videos are visible
+	//                 unless the caller explicitly chooses otherwise.
 	//   category    — snippet.categoryId (numeric string).
 	//   tags        — snippet.tags (array of strings).
 	title := strOption(j.options, "title")
@@ -1802,7 +1801,7 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	}
 	visibility := strOption(j.options, "visibility")
 	if visibility == "" {
-		visibility = "private"
+		visibility = "public"
 	}
 	snippet := map[string]any{
 		"title":       title,
