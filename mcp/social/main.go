@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.4
+version: 0.14.5
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -3107,31 +3107,47 @@ func (a *App) getFacebookAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResul
 		period = "day"
 	}
 	since, until := metricsDateWindow(90)
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_page_insights", map[string]any{
-		"pageId":       pageID,
-		"metric":       "page_fans,page_impressions,page_impressions_unique,page_post_engagements,page_views_total",
-		"period":       period,
-		"since":        since,
-		"until":        until,
-		"access_token": token,
-	})
-	if err != nil {
-		out.Status, out.Error = "failed", err.Error()
+	series := insightSeries{}
+	var raw json.RawMessage
+	var skipped []string
+	for _, metric := range []string{"page_fans", "page_impressions", "page_impressions_unique", "page_post_engagements"} {
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_page_insights", map[string]any{
+			"pageId":       pageID,
+			"metric":       metric,
+			"period":       period,
+			"since":        since,
+			"until":        until,
+			"access_token": token,
+		})
+		if err != nil {
+			skipped = append(skipped, metric+": "+err.Error())
+			continue
+		}
+		if res == nil || !res.Success {
+			skipped = append(skipped, metric+": "+upstreamError(res).Error())
+			continue
+		}
+		mergeInsightSeries(series, parseInsightSeries(res.Data))
+		raw = res.Data
+	}
+	if len(series) == 0 {
+		out.Status = "unsupported"
+		out.Reason = "facebook page insights unavailable for this page/API version"
+		if len(skipped) > 0 {
+			out.Raw, _ = json.Marshal(map[string]any{"skipped": skipped})
+		}
 		return out
 	}
-	if res == nil || !res.Success {
-		out.Status, out.Error = "failed", upstreamError(res).Error()
-		return out
-	}
-	series := parseInsightSeries(res.Data)
 	out.Status = "ok"
+	if len(skipped) > 0 {
+		out.Reason = "some Facebook metrics were unavailable for this page/API version"
+	}
 	out.Followers = latestInsight(series, "page_fans")
 	out.Impressions = latestInsight(series, "page_impressions")
 	out.Reach = latestInsight(series, "page_impressions_unique")
 	out.Engagements = latestInsight(series, "page_post_engagements")
-	out.Views = latestInsight(series, "page_views_total")
 	out.Insights = series
-	out.Raw = res.Data
+	out.Raw = raw
 	return out
 }
 
@@ -3150,7 +3166,7 @@ func (a *App) getInstagramAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResu
 	if period == "" {
 		period = "day"
 	}
-	since, until := metricsDateWindow(90)
+	since, until := metricsDateWindow(30)
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_account_insights", map[string]any{
 		"instagramAccountId": instagramAccountID,
 		"metric":             "reach,follower_count",
@@ -3270,6 +3286,14 @@ func latestInsight(series insightSeries, name string) int64 {
 		return 0
 	}
 	return points[len(points)-1].Value
+}
+
+func mergeInsightSeries(dst, src insightSeries) {
+	for name, points := range src {
+		if len(points) > 0 {
+			dst[name] = append(dst[name], points...)
+		}
+	}
 }
 
 // toolPostMetrics is the post_metrics MCP entrypoint. Walks the
