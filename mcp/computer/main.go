@@ -39,10 +39,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.1
+version: 0.7.2
 description: |
-  Watch and steer browser sessions. v0.7.1 expands the desktop
-  session panel so the browser viewport uses the available space.
+  Watch and steer browser sessions. v0.7.2 lets the desktop panel
+  span the available viewport width for a larger browser view.
 scopes: [project, global]
 requires:
   permissions:
