@@ -36,6 +36,7 @@ import (
 	"net/mail"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,7 +52,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.8
+version: 0.13.9
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -126,6 +127,9 @@ provides:
     - { name: inbound_route_delete,   description: "Remove an inbound route." }
     - { name: template_create,        description: "Create a template." }
     - { name: template_update,        description: "Update a template (partial)." }
+    - { name: template_submit,        description: "Submit a provider-backed template for channel approval." }
+    - { name: template_sync,          description: "Sync provider-backed templates into the generic template table." }
+    - { name: template_refresh_status, description: "Refresh one provider-backed template approval status." }
     - { name: template_get,           description: "Fetch a template." }
     - { name: template_list,          description: "List templates." }
     - { name: template_delete,        description: "Delete a template." }
@@ -372,14 +376,17 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "template_create",
 			Description: "Create a template. Args: name, channel? (default 'email'), subject?, body_text?, body_html?, vars_schema?. " +
-				"Body fields use {{var}} placeholders.",
+				"Body fields use {{var}} placeholders. WhatsApp creates provider-backed content via the bound phone provider and submits for approval by default.",
 			InputSchema: schemaObject(map[string]any{
-				"name":        map[string]any{"type": "string"},
-				"channel":     map[string]any{"type": "string"},
-				"subject":     map[string]any{"type": "string"},
-				"body_text":   map[string]any{"type": "string"},
-				"body_html":   map[string]any{"type": "string"},
-				"vars_schema": map[string]any{"type": "object"},
+				"name":                map[string]any{"type": "string"},
+				"channel":             map[string]any{"type": "string"},
+				"subject":             map[string]any{"type": "string"},
+				"body_text":           map[string]any{"type": "string"},
+				"body_html":           map[string]any{"type": "string"},
+				"vars_schema":         map[string]any{"type": "object"},
+				"language":            map[string]any{"type": "string"},
+				"category":            map[string]any{"type": "string", "enum": []string{"UTILITY", "MARKETING", "AUTHENTICATION"}},
+				"submit_for_approval": map[string]any{"type": "boolean"},
 			}, []string{"name"}),
 			Handler: a.toolTemplateCreate,
 		},
@@ -395,6 +402,32 @@ func (a *App) MCPTools() []sdk.Tool {
 				"vars_schema": map[string]any{"type": "object"},
 			}, []string{"id"}),
 			Handler: a.toolTemplateUpdate,
+		},
+		{
+			Name:        "template_submit",
+			Description: "Submit a provider-backed template for channel approval. Args: id, category?, language?. WhatsApp uses the bound phone provider behind the generic template API.",
+			InputSchema: schemaObject(map[string]any{
+				"id":       map[string]any{"type": "integer"},
+				"category": map[string]any{"type": "string", "enum": []string{"UTILITY", "MARKETING", "AUTHENTICATION"}},
+				"language": map[string]any{"type": "string"},
+			}, []string{"id"}),
+			Handler: a.toolTemplateSubmit,
+		},
+		{
+			Name:        "template_sync",
+			Description: "Sync provider-backed templates into the generic template table. Args: channel. For WhatsApp, imports existing provider templates and approval statuses.",
+			InputSchema: schemaObject(map[string]any{
+				"channel": map[string]any{"type": "string", "enum": []string{"email", "sms", "whatsapp"}},
+			}, []string{"channel"}),
+			Handler: a.toolTemplateSync,
+		},
+		{
+			Name:        "template_refresh_status",
+			Description: "Refresh one provider-backed template's approval status. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolTemplateRefreshStatus,
 		},
 		{
 			Name:        "template_get",
@@ -417,12 +450,6 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			Handler:     a.toolTemplateDelete,
 		},
-		// templates_sync_provider + templates_refresh_status are NOT
-		// MCP tools — agents should never trigger a Twilio list call;
-		// sync is operator-driven (panel button) or automatic (TTL on
-		// template_list). The handlers live as plain methods and are
-		// reachable only via the internal HTTP routes
-		// /templates/sync + /templates/<id>/refresh-status.
 		{
 			Name:        "suppression_list",
 			Description: "List suppressed addresses. Args: channel?, limit?.",
@@ -1551,20 +1578,137 @@ func (a *App) toolTemplateCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if channel == "" {
 		channel = channelEmail
 	}
-	varsRaw, _ := json.Marshal(mapArg(args, "vars_schema"))
+	if !validChannel(channel) {
+		return nil, fmt.Errorf("channel: unsupported value %q (one of email, sms, whatsapp)", channel)
+	}
+	subject := strArg(args, "subject")
+	bodyText := strArg(args, "body_text")
+	bodyHTML := strArg(args, "body_html")
+	varsSchema := mapArg(args, "vars_schema")
+	varsRaw, _ := json.Marshal(varsSchema)
+	var providerID, providerStatus string
+	varStyle := "named"
+	var lastSynced any
+	providerMeta := map[string]any{}
+	if channel == channelWhatsApp {
+		created, err := createProviderTemplate(ctx, name, bodyText, varsSchema, args)
+		if err != nil {
+			return nil, err
+		}
+		providerID = created.ProviderTemplateID
+		providerStatus = created.ProviderStatus
+		varStyle = "numbered"
+		lastSynced = time.Now().UTC().Format(time.RFC3339)
+		providerMeta = created.Meta
+	}
 	res, err := ctx.AppDB().Exec(
-		`INSERT INTO templates (project_id, channel, name, subject, body_text, body_html, vars_schema)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		pid, channel, name, strArg(args, "subject"),
-		strArg(args, "body_text"), strArg(args, "body_html"),
-		string(varsRaw),
+		`INSERT INTO templates
+			(project_id, channel, name, subject, body_text, body_html, vars_schema,
+			 provider_template_id, provider_status, var_style, last_synced_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pid, channel, name, subject, bodyText, bodyHTML, string(varsRaw),
+		nullableString(providerID), nullableString(providerStatus), varStyle, lastSynced,
 	)
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
 	t, _ := dbTemplateGet(ctx.AppDB(), pid, id)
-	return map[string]any{"template": t}, nil
+	out := map[string]any{"template": t}
+	if len(providerMeta) > 0 {
+		out["provider"] = providerMeta
+	}
+	return out, nil
+}
+
+type providerTemplateCreate struct {
+	ProviderTemplateID string
+	ProviderStatus     string
+	Meta               map[string]any
+}
+
+func createProviderTemplate(ctx *sdk.AppCtx, name, bodyText string, varsSchema map[string]any, args map[string]any) (*providerTemplateCreate, error) {
+	if bodyText == "" {
+		return nil, errors.New("body_text required for whatsapp provider-backed templates")
+	}
+	if err := validateWhatsAppTemplatePlaceholders(bodyText); err != nil {
+		return nil, err
+	}
+	bound := ctx.IntegrationFor("phone_provider")
+	if bound == nil {
+		return nil, errors.New("no phone_provider bound — install/select a Twilio connection for WhatsApp templates")
+	}
+	language := strings.TrimSpace(strArg(args, "language"))
+	if language == "" {
+		language = "en"
+	}
+	category := normaliseTemplateCategory(strArg(args, "category"))
+	variables := twilioTemplateVariables(bodyText, varsSchema)
+	createRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "create_content_template", map[string]any{
+		"friendly_name": name,
+		"language":      language,
+		"variables":     variables,
+		"types": map[string]any{
+			"twilio/text": map[string]any{"body": bodyText},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create provider template: %w", err)
+	}
+	if createRes == nil || !createRes.Success {
+		body := ""
+		if createRes != nil {
+			body = string(createRes.Data)
+		}
+		return nil, fmt.Errorf("create provider template: provider non-2xx: %s", truncate(body, 400))
+	}
+	providerID := extractProviderTemplateID(createRes.Data)
+	if providerID == "" {
+		return nil, fmt.Errorf("create provider template: provider response missing template id: %s", truncate(string(createRes.Data), 400))
+	}
+	status := "draft"
+	submitted := false
+	if boolArg(args, "submit_for_approval", true) {
+		submitStatus, err := submitProviderTemplate(ctx, bound.ConnectionID, providerID, name, category)
+		if err != nil {
+			return nil, err
+		}
+		status = submitStatus
+		submitted = true
+	}
+	return &providerTemplateCreate{
+		ProviderTemplateID: providerID,
+		ProviderStatus:     status,
+		Meta: map[string]any{
+			"provider_template_id": providerID,
+			"provider_status":      status,
+			"submitted":            submitted,
+			"language":             language,
+			"category":             category,
+		},
+	}, nil
+}
+
+func submitProviderTemplate(ctx *sdk.AppCtx, connectionID int64, providerID, name, category string) (string, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connectionID, "submit_content_template_approval", map[string]any{
+		"ContentSid": providerID,
+		"name":       providerApprovalName(name),
+		"category":   normaliseTemplateCategory(category),
+	})
+	if err != nil {
+		return "", fmt.Errorf("submit provider template: %w", err)
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return "", fmt.Errorf("submit provider template: provider non-2xx: %s", truncate(body, 400))
+	}
+	if status := extractApprovalStatus(res.Data); status != "" {
+		return status, nil
+	}
+	return "pending", nil
 }
 
 func (a *App) toolTemplateUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1611,6 +1755,75 @@ func (a *App) toolTemplateUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	return map[string]any{"template": t}, nil
 }
 
+func (a *App) toolTemplateSubmit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	t, err := dbTemplateGet(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if t == nil {
+		return nil, fmt.Errorf("template_id %d not found", id)
+	}
+	if t.Channel != channelWhatsApp {
+		return map[string]any{
+			"template": t,
+			"skipped":  true,
+			"reason":   fmt.Sprintf("no provider approval flow for channel %q", t.Channel),
+		}, nil
+	}
+	bound := ctx.IntegrationFor("phone_provider")
+	if bound == nil {
+		return nil, errors.New("no phone_provider bound — install/select a Twilio connection for WhatsApp templates")
+	}
+	providerID := t.ProviderTemplateID
+	if providerID == "" {
+		vars := map[string]any{}
+		if len(t.VarsSchema) > 0 {
+			_ = json.Unmarshal(t.VarsSchema, &vars)
+		}
+		created, err := createProviderTemplate(ctx, t.Name, t.BodyText, vars, map[string]any{
+			"language":            strArg(args, "language"),
+			"category":            strArg(args, "category"),
+			"submit_for_approval": false,
+		})
+		if err != nil {
+			return nil, err
+		}
+		providerID = created.ProviderTemplateID
+		_, err = ctx.AppDB().Exec(
+			`UPDATE templates SET provider_template_id = ?, provider_status = ?, var_style = 'numbered',
+			       last_synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+			 WHERE id = ? AND project_id = ?`,
+			providerID, created.ProviderStatus, id, pid,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+	status, err := submitProviderTemplate(ctx, bound.ConnectionID, providerID, t.Name, strArg(args, "category"))
+	if err != nil {
+		return nil, err
+	}
+	_, err = ctx.AppDB().Exec(
+		`UPDATE templates SET provider_status = ?, var_style = 'numbered',
+		       last_synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND project_id = ?`,
+		status, id, pid,
+	)
+	if err != nil {
+		return nil, err
+	}
+	updated, _ := dbTemplateGet(ctx.AppDB(), pid, id)
+	return map[string]any{"template": updated, "status": status, "submitted": true}, nil
+}
+
 func (a *App) toolTemplateGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -1654,6 +1867,14 @@ func (a *App) toolTemplateList(ctx *sdk.AppCtx, args map[string]any) (any, error
 		"last_synced_at":  lastSynced,
 		"last_sync_error": lastErr,
 	}, nil
+}
+
+func (a *App) toolTemplateSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.toolTemplatesSyncProvider(ctx, args)
+}
+
+func (a *App) toolTemplateRefreshStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.toolTemplatesRefreshStatus(ctx, args)
 }
 
 // autoSyncTTL gates how often template_list-driven background syncs
@@ -4247,7 +4468,7 @@ func (a *App) handleTemplatesSync(w http.ResponseWriter, r *http.Request) {
 	if channel == "" {
 		channel = channelWhatsApp
 	}
-	out, err := a.toolTemplatesSyncProvider(globalCtx, map[string]any{"channel": channel})
+	out, err := a.toolTemplateSync(globalCtx, map[string]any{"channel": channel})
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -4291,7 +4512,7 @@ func (a *App) handleTemplateItem(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusMethodNotAllowed, "POST only")
 			return
 		}
-		out, err := a.toolTemplatesRefreshStatus(globalCtx, map[string]any{"id": id})
+		out, err := a.toolTemplateRefreshStatus(globalCtx, map[string]any{"id": id})
 		if err != nil {
 			httpErr(w, http.StatusBadGateway, err.Error())
 			return
@@ -4869,6 +5090,138 @@ func syncProviderTemplates(ctx *sdk.AppCtx, pid, channel string) (int, error) {
 	return count, nil
 }
 
+var templatePlaceholderRE = regexp.MustCompile(`\{\{\s*([A-Za-z0-9_]+)\s*\}\}`)
+
+func validateWhatsAppTemplatePlaceholders(body string) error {
+	for _, m := range templatePlaceholderRE.FindAllStringSubmatch(body, -1) {
+		if len(m) < 2 {
+			continue
+		}
+		if _, err := strconv.Atoi(m[1]); err != nil {
+			return fmt.Errorf("whatsapp templates use numbered placeholders like {{1}}; found {{%s}}", m[1])
+		}
+	}
+	return nil
+}
+
+func twilioTemplateVariables(body string, schema map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range schema {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+		out[key] = templateVariableExample(key, v)
+	}
+	for _, m := range templatePlaceholderRE.FindAllStringSubmatch(body, -1) {
+		if len(m) < 2 {
+			continue
+		}
+		key := m[1]
+		if _, ok := out[key]; !ok {
+			out[key] = "example " + key
+		}
+	}
+	return out
+}
+
+func templateVariableExample(key string, v any) string {
+	switch x := v.(type) {
+	case string:
+		if strings.TrimSpace(x) != "" {
+			return x
+		}
+	case map[string]any:
+		for _, k := range []string{"example", "default", "sample", "name", "description"} {
+			if s, ok := x[k].(string); ok && strings.TrimSpace(s) != "" {
+				return s
+			}
+		}
+	case float64, int, int64, bool:
+		return fmt.Sprint(x)
+	}
+	return "example " + key
+}
+
+func extractProviderTemplateID(raw json.RawMessage) string {
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return ""
+	}
+	for _, k := range []string{"sid", "content_sid", "ContentSid", "id"} {
+		if s, ok := m[k].(string); ok && strings.TrimSpace(s) != "" {
+			return strings.TrimSpace(s)
+		}
+	}
+	if content, ok := m["content"].(map[string]any); ok {
+		for _, k := range []string{"sid", "content_sid", "ContentSid", "id"} {
+			if s, ok := content[k].(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	return ""
+}
+
+func extractApprovalStatus(raw json.RawMessage) string {
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return ""
+	}
+	for _, k := range []string{"status", "approval_status"} {
+		if s, ok := m[k].(string); ok && strings.TrimSpace(s) != "" {
+			return strings.ToLower(strings.TrimSpace(s))
+		}
+	}
+	if req, ok := m["approval_request"].(map[string]any); ok {
+		if s, ok := req["status"].(string); ok && strings.TrimSpace(s) != "" {
+			return strings.ToLower(strings.TrimSpace(s))
+		}
+	}
+	if arr, ok := m["approval_requests"].([]any); ok && len(arr) > 0 {
+		if req, ok := arr[0].(map[string]any); ok {
+			if s, ok := req["status"].(string); ok && strings.TrimSpace(s) != "" {
+				return strings.ToLower(strings.TrimSpace(s))
+			}
+		}
+	}
+	return ""
+}
+
+func normaliseTemplateCategory(s string) string {
+	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case "MARKETING":
+		return "MARKETING"
+	case "AUTHENTICATION":
+		return "AUTHENTICATION"
+	default:
+		return "UTILITY"
+	}
+}
+
+func providerApprovalName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range name {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if ok {
+			b.WriteRune(r)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore {
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return "template"
+	}
+	return out
+}
+
 func dbInboundRouteUpsert(db *sql.DB, pid, channel, pattern, app, route string, priority int) (int64, error) {
 	var id int64
 	err := db.QueryRow(
@@ -5028,6 +5381,22 @@ func intArg(args map[string]any, key string, def int) int {
 	return def
 }
 
+func boolArg(args map[string]any, key string, def bool) bool {
+	switch v := args[key].(type) {
+	case bool:
+		return v
+	case string:
+		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
+			return b
+		}
+	case float64:
+		return v != 0
+	case int:
+		return v != 0
+	}
+	return def
+}
+
 func int64Arg(args map[string]any, key string) int64 {
 	switch v := args[key].(type) {
 	case float64:
@@ -5078,6 +5447,13 @@ func mapArg(args map[string]any, key string) map[string]any {
 
 func nullableInt64(v int64) any {
 	if v == 0 {
+		return nil
+	}
+	return v
+}
+
+func nullableString(v string) any {
+	if strings.TrimSpace(v) == "" {
 		return nil
 	}
 	return v

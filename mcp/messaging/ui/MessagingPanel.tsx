@@ -132,6 +132,10 @@ interface TemplateRow {
   subject?: string;
   body_text?: string;
   body_html?: string;
+  provider_template_id?: string;
+  provider_status?: string;
+  var_style?: string;
+  last_synced_at?: string;
   created_at?: string;
   updated_at?: string;
 }
@@ -259,7 +263,10 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
     setInbox(r.messages || []);
   }, [api]);
   const loadTemplates = useCallback(async () => {
-    const r = await api<{ templates: TemplateRow[] }>("GET", "/templates", {});
+    const r = await api<{ templates: TemplateRow[] }>("POST", "/tools/call", {}, {
+      tool: "template_list",
+      args: { limit: 200 },
+    });
     setTemplates(r.templates || []);
   }, [api]);
   const loadRoutes = useCallback(async () => {
@@ -1246,9 +1253,56 @@ function IdentitiesSection({ identities, onRecheckSetup }: { identities: Identit
 }
 
 function TemplatesView({ rows, api, reload, notify }: { rows: TemplateRow[]; api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>; reload: () => void; notify: Notify }) {
-  if (rows.length === 0) {
-    return <div className="p-6 text-text-dim text-sm">No templates yet. Create one via the <code>template_create</code> tool.</div>;
-  }
+  const [channel, setChannel] = useState("whatsapp");
+  const [name, setName] = useState("");
+  const [bodyText, setBodyText] = useState("");
+  const [language, setLanguage] = useState("en");
+  const [category, setCategory] = useState("UTILITY");
+  const [submitForApproval, setSubmitForApproval] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await api("POST", "/tools/call", {}, {
+        tool: "template_create",
+        args: {
+          channel,
+          name,
+          body_text: bodyText,
+          language,
+          category,
+          submit_for_approval: submitForApproval,
+        },
+      });
+      setName("");
+      setBodyText("");
+      reload();
+      notify("info", "Template added.");
+    } catch (e) {
+      notify("error", `Add failed: ${parseSendersError((e as Error).message)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSync = async () => {
+    setBusy(true);
+    try {
+      const out = await api<{ synced?: number }>("POST", "/tools/call", {}, {
+        tool: "template_sync",
+        args: { channel: "whatsapp" },
+      });
+      reload();
+      notify("info", `Synced ${out.synced ?? 0} WhatsApp template${out.synced === 1 ? "" : "s"}.`);
+    } catch (e) {
+      notify("error", `Sync failed: ${parseSendersError((e as Error).message)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleDelete = async (id: number) => {
     if (!confirm("Delete this template?")) return;
     try {
@@ -1258,31 +1312,103 @@ function TemplatesView({ rows, api, reload, notify }: { rows: TemplateRow[]; api
       notify("error", `Delete failed: ${(e as Error).message}`);
     }
   };
+  const handleRefreshStatus = async (id: number) => {
+    try {
+      await api("POST", "/tools/call", {}, { tool: "template_refresh_status", args: { id } });
+      reload();
+    } catch (e) {
+      notify("error", `Refresh failed: ${parseSendersError((e as Error).message)}`);
+    }
+  };
+  const handleSubmit = async (id: number) => {
+    try {
+      await api("POST", "/tools/call", {}, { tool: "template_submit", args: { id, category, language } });
+      reload();
+    } catch (e) {
+      notify("error", `Submit failed: ${parseSendersError((e as Error).message)}`);
+    }
+  };
   return (
-    <table className="w-full text-sm">
-      <thead className="text-xs text-text-dim">
-        <tr className="border-b border-border">
-          <th className="text-left px-4 py-2">Name</th>
-          <th className="text-left px-4 py-2">Channel</th>
-          <th className="text-left px-4 py-2">Subject</th>
-          <th className="text-left px-4 py-2">Updated</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((t) => (
-          <tr key={t.id} className="border-b border-border">
-            <td className="px-4 py-2 font-medium">{t.name}</td>
-            <td className="px-4 py-2">{t.channel}</td>
-            <td className="px-4 py-2 text-text-dim truncate max-w-md">{t.subject || "—"}</td>
-            <td className="px-4 py-2 text-text-dim">{shortTime(t.updated_at)}</td>
-            <td className="px-4 py-2 text-right">
-              <button type="button" className="text-text-dim hover:text-red-500 text-xs" onClick={() => handleDelete(t.id)}>Delete</button>
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <div>
+      <form onSubmit={handleCreate} className="p-4 flex gap-2 items-end border-b border-border flex-wrap">
+        <Field label="Channel">
+          <select className={inputCls + " w-36"} value={channel} onChange={(e) => setChannel(e.target.value)}>
+            <option value="whatsapp">WhatsApp</option>
+            <option value="sms">SMS</option>
+            <option value="email">Email</option>
+          </select>
+        </Field>
+        <Field label="Name">
+          <input className={inputCls + " w-56"} value={name} onChange={(e) => setName(e.target.value)} required placeholder="appointment_reminder" />
+        </Field>
+        {channel === "whatsapp" && (
+          <>
+            <Field label="Category">
+              <select className={inputCls + " w-44"} value={category} onChange={(e) => setCategory(e.target.value)}>
+                <option value="UTILITY">Utility</option>
+                <option value="MARKETING">Marketing</option>
+                <option value="AUTHENTICATION">Authentication</option>
+              </select>
+            </Field>
+            <Field label="Language">
+              <input className={inputCls + " w-24"} value={language} onChange={(e) => setLanguage(e.target.value)} />
+            </Field>
+            <label className="flex items-center gap-2 text-xs text-text-dim pb-2">
+              <input type="checkbox" checked={submitForApproval} onChange={(e) => setSubmitForApproval(e.target.checked)} />
+              Submit
+            </label>
+          </>
+        )}
+        <Field label="Body">
+          <input className={inputCls + " w-[28rem]"} value={bodyText} onChange={(e) => setBodyText(e.target.value)} required placeholder="Hi {{1}}, your appointment is {{2}}." />
+        </Field>
+        <button type="submit" className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50" disabled={busy}>Add</button>
+        <button type="button" className="px-3 py-1.5 rounded border border-border text-text-dim hover:text-text hover:bg-surface-2 disabled:opacity-50" onClick={handleSync} disabled={busy}>Sync WhatsApp</button>
+      </form>
+      {rows.length === 0 ? (
+        <div className="p-6 text-text-dim text-sm">No templates.</div>
+      ) : (
+        <table className="w-full text-sm">
+          <thead className="text-xs text-text-dim">
+            <tr className="border-b border-border">
+              <th className="text-left px-4 py-2">Name</th>
+              <th className="text-left px-4 py-2">Channel</th>
+              <th className="text-left px-4 py-2">Status</th>
+              <th className="text-left px-4 py-2">Body</th>
+              <th className="text-left px-4 py-2">Updated</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((t) => (
+              <tr key={t.id} className="border-b border-border">
+                <td className="px-4 py-2">
+                  <div className="font-medium">{t.name}</div>
+                  {t.provider_template_id && <div className="text-[11px] text-text-dim font-mono">{t.provider_template_id}</div>}
+                </td>
+                <td className="px-4 py-2">{t.channel}</td>
+                <td className="px-4 py-2">
+                  {t.provider_status ? <StatusPill status={t.provider_status} /> : <span className="text-text-dim">local</span>}
+                </td>
+                <td className="px-4 py-2 text-text-dim truncate max-w-xl">{t.subject || t.body_text || "—"}</td>
+                <td className="px-4 py-2 text-text-dim">{shortTime(t.updated_at)}</td>
+                <td className="px-4 py-2 text-right">
+                  {t.channel === "whatsapp" && (
+                    <>
+                      <button type="button" className="text-accent hover:underline text-xs mr-3" onClick={() => handleRefreshStatus(t.id)}>Refresh</button>
+                      {t.provider_status !== "approved" && (
+                        <button type="button" className="text-accent hover:underline text-xs mr-3" onClick={() => handleSubmit(t.id)}>Submit</button>
+                      )}
+                    </>
+                  )}
+                  <button type="button" className="text-text-dim hover:text-red-500 text-xs" onClick={() => handleDelete(t.id)}>Delete</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
   );
 }
 
@@ -1524,6 +1650,7 @@ function statusPillClass(status: string): string {
     case "ok":
     case "received":
     case "verified":
+    case "approved":
     case "SUCCESS":
       return "bg-green-500/20 text-green-400 border-green-500/30";
     case "opened":
@@ -1534,6 +1661,7 @@ function statusPillClass(status: string): string {
     case "no_match":
     case "PENDING":
     case "delivery_delayed":
+    case "draft":
       return "bg-yellow-500/20 text-yellow-400 border-yellow-500/30";
     case "bounced":
     case "complained":
@@ -1543,6 +1671,7 @@ function statusPillClass(status: string): string {
     case "target_failed":
     case "rejected":
     case "rendering_failed":
+    case "deleted":
       return "bg-red-500/20 text-red-400 border-red-500/30";
     case "manual":
       return "bg-sky-500/20 text-sky-300 border-sky-500/30";

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.8
+version: 0.13.9
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES; SMS and push are reserved channel namespaces. Tracks
@@ -101,8 +101,11 @@ provides:
     - { name: inbound_route_list,     description: "List configured inbound routes." }
     - { name: inbound_route_delete,   description: "Remove an inbound route. Args: id." }
     # templates
-    - { name: template_create,        description: "Create a template. Args: name, channel (default 'email'), subject?, body_text?, body_html?, vars_schema?." }
+    - { name: template_create,        description: "Create a template. Args: name, channel (default 'email'), subject?, body_text?, body_html?, vars_schema?, language?, category?, submit_for_approval?. For WhatsApp, creates a provider-backed approved-template draft through the bound phone provider and submits for approval by default." }
     - { name: template_update,        description: "Update a template (partial). Args: id, fields…" }
+    - { name: template_submit,        description: "Submit a provider-backed template for channel approval. Args: id, category?, language?. For WhatsApp, creates provider content first if the row is still local." }
+    - { name: template_sync,          description: "Sync provider-backed templates into the generic template table. Args: channel. For WhatsApp, imports existing Twilio Content templates and approval statuses." }
+    - { name: template_refresh_status, description: "Refresh one provider-backed template's approval status. Args: id." }
     - { name: template_get,           description: "Fetch one template by id." }
     - { name: template_list,          description: "List templates. Args: channel?, limit?." }
     - { name: template_delete,        description: "Delete a template. Args: id." }

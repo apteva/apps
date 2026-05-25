@@ -2265,6 +2265,73 @@ func TestTemplatesSyncProvider_NoOpForEmail(t *testing.T) {
 	}
 }
 
+func TestTemplateCreate_WhatsAppCreatesAndSubmitsProviderTemplate(t *testing.T) {
+	plat := newPhoneStub(nil)
+	plat.replyByTool = map[string]*sdk.ExecuteResult{
+		"create_content_template": {
+			Success: true,
+			Status:  201,
+			Data:    json.RawMessage(`{"sid":"HXcreated"}`),
+		},
+		"submit_content_template_approval": {
+			Success: true,
+			Status:  201,
+			Data:    json.RawMessage(`{"status":"pending"}`),
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolTemplateCreate(ctx, map[string]any{
+		"channel":     "whatsapp",
+		"name":        "Appointment Reminder",
+		"body_text":   "Hi {{1}}, your appointment is {{2}}.",
+		"vars_schema": map[string]any{"1": "Alice", "2": "tomorrow"},
+		"category":    "UTILITY",
+		"language":    "en",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tpl := out.(map[string]any)["template"].(*Template)
+	if tpl.ProviderTemplateID != "HXcreated" {
+		t.Fatalf("ProviderTemplateID=%q", tpl.ProviderTemplateID)
+	}
+	if tpl.ProviderStatus != "pending" {
+		t.Fatalf("ProviderStatus=%q", tpl.ProviderStatus)
+	}
+	if tpl.VarStyle != "numbered" {
+		t.Fatalf("VarStyle=%q", tpl.VarStyle)
+	}
+
+	var createCall, submitCall *executeCall
+	for i := range plat.executeCalls {
+		switch plat.executeCalls[i].Tool {
+		case "create_content_template":
+			createCall = &plat.executeCalls[i]
+		case "submit_content_template_approval":
+			submitCall = &plat.executeCalls[i]
+		}
+	}
+	if createCall == nil || submitCall == nil {
+		t.Fatalf("provider calls missing: %+v", plat.executeCalls)
+	}
+	if createCall.Input["friendly_name"] != "Appointment Reminder" {
+		t.Errorf("friendly_name=%v", createCall.Input["friendly_name"])
+	}
+	types := createCall.Input["types"].(map[string]any)
+	text := types["twilio/text"].(map[string]any)
+	if text["body"] != "Hi {{1}}, your appointment is {{2}}." {
+		t.Errorf("body=%v", text["body"])
+	}
+	if submitCall.Input["ContentSid"] != "HXcreated" {
+		t.Errorf("ContentSid=%v", submitCall.Input["ContentSid"])
+	}
+	if submitCall.Input["name"] != "appointment_reminder" {
+		t.Errorf("approval name=%v", submitCall.Input["name"])
+	}
+}
+
 func TestSendMessageTemplate_UsesContentSidWhenProviderTemplate(t *testing.T) {
 	twilioListReply := &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
 		"contents": [{
