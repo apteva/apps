@@ -1775,7 +1775,8 @@ function ComposeDialog({
 // to the caller, who folds them into the compose dialog's `media`
 // state with the same shape as a fresh upload.
 //
-// Stacked on top of ComposeDialog (z-[60] vs ComposeDialog's z-50).
+// Stacked on top of ComposeDialog. Use inline zIndex because the
+// production CSS build may not include arbitrary Tailwind classes.
 
 interface StorageFile {
   id: number;
@@ -1856,7 +1857,8 @@ function StoragePickerDialog({
 
   return (
     <div
-      className="fixed inset-0 z-[60] grid place-items-center bg-black/60"
+      className="fixed inset-0 grid place-items-center bg-black/60"
+      style={{ zIndex: 60 }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div className="bg-bg border border-border rounded-lg w-[min(720px,92vw)] max-h-[85vh] flex flex-col">
