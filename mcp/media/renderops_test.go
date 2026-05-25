@@ -379,7 +379,7 @@ func TestPlanExtractReel_Defaults(t *testing.T) {
 	if !argPair(plan.Args, "-c:a", "copy") {
 		t.Errorf("missing -c:a copy: %v", plan.Args)
 	}
-	// Filter chain encodes 9:16 default + 1080-wide scale.
+	// Filter chain encodes 9:16 default + exact 1080x1920 scale.
 	vfIdx := -1
 	for i, a := range plan.Args {
 		if a == "-vf" && i+1 < len(plan.Args) {
@@ -392,7 +392,7 @@ func TestPlanExtractReel_Defaults(t *testing.T) {
 	}
 	vf := plan.Args[vfIdx]
 	for _, want := range []string{
-		"crop=", "ih*9/16", "iw*16/9", "scale=1080:-2",
+		"crop=", "ih*9/16", "iw*16/9", "scale=1080:1920", "setsar=1",
 	} {
 		if !strings.Contains(vf, want) {
 			t.Errorf("vf chain missing %q: %s", want, vf)
@@ -420,8 +420,33 @@ func TestPlanExtractReel_CustomRatio(t *testing.T) {
 	if !strings.Contains(vf, "ih*1/1") || !strings.Contains(vf, "iw*1/1") {
 		t.Errorf("1:1 ratio not encoded: %s", vf)
 	}
-	if !strings.Contains(vf, "scale=720:-2") {
+	if !strings.Contains(vf, "scale=720:720") {
 		t.Errorf("output_width=720 not honoured: %s", vf)
+	}
+}
+
+func TestPlanExtractReel_CustomRatioExactHeight(t *testing.T) {
+	plan, err := buildPlan("extract_reel", []string{"42"},
+		raw(t, map[string]any{
+			"start_ms": 0, "end_ms": 5000,
+			"target_ratio": "4:5", "output_width": 1080,
+		}), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vfIdx := -1
+	for i, a := range plan.Args {
+		if a == "-vf" {
+			vfIdx = i + 1
+			break
+		}
+	}
+	if vfIdx == -1 {
+		t.Fatalf("no -vf in args: %v", plan.Args)
+	}
+	vf := plan.Args[vfIdx]
+	if !strings.Contains(vf, "scale=1080:1350") || !strings.Contains(vf, "setsar=1") {
+		t.Errorf("4:5 exact scale not encoded: %s", vf)
 	}
 }
 

@@ -146,7 +146,7 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 	// identical argv shape, so the helper works against either.
 	if shouldRotate(row.Operation, plan.Args) {
 		rotation := canonicalRotation(lookupSourceRotation(app.AppDB(), row.ProjectID, row.SourceFileIDs))
-		plan.Args = applyRotation(plan.Args, rotation)
+		plan.Args = applyRotation(plan.Args, rotation, row.Operation == "extract_reel")
 	}
 	signedURLs := make([]string, 0, len(row.SourceFileIDs))
 	sourceNames := make([]string, 0, len(row.SourceFileIDs))

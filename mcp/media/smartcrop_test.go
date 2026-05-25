@@ -134,7 +134,7 @@ func TestPlanExtractReel_UsesExplicitCropWhenPresent(t *testing.T) {
 		t.Fatalf("planExtractReel: %v", err)
 	}
 	got := strings.Join(plan.Args, " ")
-	if !strings.Contains(got, "crop=606:1080:657:0,scale=1080:-2") {
+	if !strings.Contains(got, "crop=606:1080:657:0,scale=1080:1920,setsar=1") {
 		t.Errorf("expected explicit crop=606:1080:657:0 in args, got: %s", got)
 	}
 	// Make sure the symbolic iw/ih expression is NOT also present —

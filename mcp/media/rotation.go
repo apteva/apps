@@ -154,6 +154,13 @@ func resolveSourceExt(ctx context.Context, sc *storageClient, db *sql.DB, projec
 //     the transpose runs first, then crop/scale see a frame that
 //     matches the indexer's stored Width/Height.
 //
+// For extract_reel only, clearDisplayRotation also adds
+// "-display_rotation 0" before the input. This strips the source's
+// display matrix from ffmpeg's output-side stream metadata after we
+// have baked the rotation into pixels; without it, a vertical reel can
+// be encoded as 1080x1920 but still play horizontally because the
+// inherited matrix rotates it again.
+//
 // No-op when rotation == 0. Safe to call on every plan.
 //
 // For ops that produce video output but DON'T have a -vf chain
@@ -163,7 +170,7 @@ func resolveSourceExt(ctx context.Context, sc *storageClient, db *sql.DB, projec
 // an op needs baked-in rotation but doesn't have a -vf chain
 // today, switch it to a real re-encode and add this call's
 // downstream branch will handle it automatically.
-func applyRotation(args []string, rotation int) []string {
+func applyRotation(args []string, rotation int, clearDisplayRotation bool) []string {
 	if rotation == 0 {
 		return args
 	}
@@ -171,11 +178,18 @@ func applyRotation(args []string, rotation int) []string {
 	if transpose == "" {
 		return args
 	}
-	out := make([]string, 0, len(args)+2)
+	extra := 2
+	if clearDisplayRotation {
+		extra += 2
+	}
+	out := make([]string, 0, len(args)+extra)
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "-i":
 			// Inject -noautorotate before -i, then copy "-i" + URL.
+			if clearDisplayRotation {
+				out = append(out, "-display_rotation", "0")
+			}
 			out = append(out, "-noautorotate", "-i")
 			if i+1 < len(args) {
 				out = append(out, args[i+1])

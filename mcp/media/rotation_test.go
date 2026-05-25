@@ -17,11 +17,11 @@ func TestTransposeFilterFor(t *testing.T) {
 		want string
 	}{
 		{0, ""},
-		{90, "transpose=2"},                // 90° CCW
-		{180, "transpose=1,transpose=1"},    // 180°
-		{270, "transpose=1"},                // 90° CW
-		{45, ""},                            // off-axis → nothing (caller should normalise first)
-		{-90, ""},                           // negative → nothing (canonicalRotation handles normalisation)
+		{90, "transpose=2"},              // 90° CCW
+		{180, "transpose=1,transpose=1"}, // 180°
+		{270, "transpose=1"},             // 90° CW
+		{45, ""},                         // off-axis → nothing (caller should normalise first)
+		{-90, ""},                        // negative → nothing (canonicalRotation handles normalisation)
 	}
 	for _, c := range cases {
 		if got := transposeFilterFor(c.in); got != c.want {
@@ -35,8 +35,8 @@ func TestCanonicalRotation(t *testing.T) {
 		{0, 0}, {90, 90}, {180, 180}, {270, 270},
 		{-90, 270}, {-180, 180}, {-270, 90},
 		{360, 0}, {450, 90},
-		{45, 0},     // off-axis → 0
-		{135, 0},    // off-axis → 0
+		{45, 0},  // off-axis → 0
+		{135, 0}, // off-axis → 0
 	}
 	for _, c := range cases {
 		if got := canonicalRotation(c.in); got != c.want {
@@ -59,7 +59,7 @@ func TestApplyRotation_InjectsNoautorotateAndPrependsTranspose(t *testing.T) {
 		"-c:a", "copy",
 		"-avoid_negative_ts", "make_zero",
 	}
-	got := applyRotation(args, 90)
+	got := applyRotation(args, 90, false)
 	want := []string{
 		"-y", "-loglevel", "error",
 		"-progress", "pipe:1",
@@ -77,7 +77,7 @@ func TestApplyRotation_InjectsNoautorotateAndPrependsTranspose(t *testing.T) {
 
 func TestApplyRotation_ZeroIsNoOp(t *testing.T) {
 	in := []string{"-y", "-i", "input.mov", "-vf", "scale=320:-2"}
-	out := applyRotation(in, 0)
+	out := applyRotation(in, 0, true)
 	if !reflect.DeepEqual(out, in) {
 		t.Errorf("applyRotation(0) should be no-op; got %v want %v", out, in)
 	}
@@ -85,10 +85,23 @@ func TestApplyRotation_ZeroIsNoOp(t *testing.T) {
 
 func TestApplyRotation_180UsesDoubleTranspose(t *testing.T) {
 	args := []string{"-i", "{input}", "-vf", "scale=640:-2"}
-	got := applyRotation(args, 180)
+	got := applyRotation(args, 180, false)
 	want := []string{"-noautorotate", "-i", "{input}", "-vf", "transpose=1,transpose=1,scale=640:-2"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("applyRotation(180) wrong.\n got: %v\nwant: %v", got, want)
+	}
+}
+
+func TestApplyRotation_ClearsDisplayRotationWhenRequested(t *testing.T) {
+	args := []string{"-ss", "0.000", "-i", "{input}", "-vf", "scale=1080:1920,setsar=1"}
+	got := applyRotation(args, 90, true)
+	want := []string{
+		"-ss", "0.000",
+		"-display_rotation", "0", "-noautorotate", "-i", "{input}",
+		"-vf", "transpose=2,scale=1080:1920,setsar=1",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("applyRotation(clearDisplayRotation) wrong.\n got: %v\nwant: %v", got, want)
 	}
 }
 

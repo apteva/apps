@@ -137,7 +137,7 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 	// raw codec orientation. No-op when the source has rotation=0.
 	if shouldRotate(row.Operation, plan.Args) {
 		rotation := canonicalRotation(lookupSourceRotation(db, row.ProjectID, row.SourceFileIDs))
-		plan.Args = applyRotation(plan.Args, rotation)
+		plan.Args = applyRotation(plan.Args, rotation, row.Operation == "extract_reel")
 	}
 
 	// Download source(s) to scratch.

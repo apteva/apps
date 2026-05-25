@@ -419,7 +419,8 @@ func planExtractReel(sources []string, raw json.RawMessage, outputName string) (
 			rw, rh, rw, rh, rw, rh, rh, rw,
 		)
 	}
-	scaleExpr := fmt.Sprintf("scale=%d:-2", p.OutputWidth)
+	outputWidth, outputHeight := reelOutputDimensions(p.OutputWidth, rw, rh)
+	scaleExpr := fmt.Sprintf("scale=%d:%d,setsar=1", outputWidth, outputHeight)
 	args := []string{
 		"-y",
 		"-loglevel", "error",
@@ -435,6 +436,18 @@ func planExtractReel(sources []string, raw json.RawMessage, outputName string) (
 	}
 	name, ct := defaultOutputName(outputName, sources[0], "reel", ".mp4")
 	return &opPlan{Filename: name, ContentType: ct, Args: args}, nil
+}
+
+func reelOutputDimensions(width, ratioW, ratioH int) (int, int) {
+	w := roundEven(width)
+	if w <= 0 {
+		w = 1080
+	}
+	h := roundEven(w * ratioH / ratioW)
+	if h <= 0 {
+		h = 2
+	}
+	return w, h
 }
 
 // parseAspectRatio splits "9:16" / "1:1" / "16:9" into integer (w, h)
