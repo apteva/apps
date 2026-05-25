@@ -143,9 +143,8 @@ export default function ComputerPanel() {
         display: "grid",
         gridTemplateColumns: "320px minmax(0, 1fr)",
         gap: "12px",
-        width: "calc(100vw - 24px)",
-        maxWidth: "none",
-        height: "calc(100vh - 24px)",
+        width: "100%",
+        height: "100%",
         minHeight: "680px",
         minWidth: 0,
         boxSizing: "border-box",
@@ -225,7 +224,7 @@ function BrowsersList({
   onDeleteContext: (id: string) => void;
 }) {
   return (
-    <Card className="overflow-hidden flex flex-col h-full min-h-0 w-full max-w-none">
+    <Card fullWidth className="overflow-hidden flex flex-col h-full min-h-0">
       <CardHeader
         title="Browsers"
         right={
@@ -445,7 +444,7 @@ function SessionDetail({
 
   if (!session) {
     return (
-      <Card className="h-full min-h-0 flex flex-col w-full max-w-none">
+      <Card fullWidth className="h-full min-h-0 flex flex-col">
         <CardHeader title="Session" />
         <div
           className="text-text-muted"
@@ -497,7 +496,7 @@ function SessionDetail({
   const viewport = `${session.width ?? 0} x ${session.height ?? 0}`;
 
   return (
-    <Card className="h-full min-h-0 flex flex-col overflow-hidden w-full max-w-none">
+    <Card fullWidth className="h-full min-h-0 flex flex-col overflow-hidden">
       <CardHeader
         title={host || "Session"}
         right={<StatusPill variant="neutral" label={BACKEND_LABEL[session.backend] ?? session.backend} />}
