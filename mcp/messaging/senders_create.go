@@ -482,6 +482,7 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 		detail += " — re-probed stuck DKIM (delete+recreate)"
 	}
 	resp.Steps = append(resp.Steps, bootstrapStep{Step: "ses_verify_domain", OK: true, Detail: detail})
+	persistDomainIdentity(ctx, pid, domain, resp, false, "persist_domain_identity")
 
 	// On adoption of an identity created elsewhere, reset any leftover
 	// custom MAIL FROM domain back to the SES default — messaging doesn't
@@ -629,10 +630,23 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 		resp.NextStep = "Some DNS records failed to publish — review the dns_* steps and re-run senders_create. " + resp.NextStep
 	}
 
-	// v0.12: persist the local row to identities, not senders. Domain
-	// identities aren't valid From values so they have no business in
-	// the senders table; the inbound bootstrap state belongs with the
-	// anchor anyway (per-domain config, not per-mailbox).
+	if resp.Inbound != nil && resp.Inbound.Bootstrapped {
+		persistDomainIdentity(ctx, pid, domain, resp, true, "persist_domain_identity_inbound")
+	}
+	return resp, nil
+}
+
+// persistDomainIdentity writes the DKIM anchor as soon as SES returns
+// domain verification state. Inbound/SNS bootstrap happens later and
+// may fail independently; the mailbox inheritance path must still see
+// a verified parent domain when DKIM is already SUCCESS.
+func persistDomainIdentity(ctx *sdk.AppCtx, pid, domain string, resp *sendersCreateResp, includeInbound bool, stepName string) {
+	inboundBootstrapped := false
+	inboundConfig := ""
+	if includeInbound && resp.Inbound != nil {
+		inboundBootstrapped = resp.Inbound.Bootstrapped
+		inboundConfig = inboundConfigJSON(resp.Inbound)
+	}
 	identityID, persistErr := dbUpsertIdentity(ctx.AppDB(), &identityUpsert{
 		ProjectID:           pid,
 		Kind:                "email_domain",
@@ -642,16 +656,15 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 		Verified:            strings.EqualFold(resp.DkimStatus, "SUCCESS"),
 		VerificationStatus:  domainVerificationStatus(resp.DkimStatus),
 		DkimStatus:          resp.DkimStatus,
-		InboundBootstrapped: resp.Inbound != nil && resp.Inbound.Bootstrapped,
-		InboundConfig:       inboundConfigJSON(resp.Inbound),
+		InboundBootstrapped: inboundBootstrapped,
+		InboundConfig:       inboundConfig,
 		MarkSyncedNow:       true,
 	})
 	if persistErr != nil {
-		resp.Steps = append(resp.Steps, bootstrapStep{Step: "persist_local", OK: false, Error: persistErr.Error()})
-	} else {
-		resp.Steps = append(resp.Steps, bootstrapStep{Step: "persist_local", OK: true, Detail: fmt.Sprintf("identity id=%d", identityID)})
+		resp.Steps = append(resp.Steps, bootstrapStep{Step: stepName, OK: false, Error: persistErr.Error()})
+		return
 	}
-	return resp, nil
+	resp.Steps = append(resp.Steps, bootstrapStep{Step: stepName, OK: true, Detail: fmt.Sprintf("identity id=%d", identityID)})
 }
 
 // domainVerificationStatus maps SES's DkimAttributes.Status to our

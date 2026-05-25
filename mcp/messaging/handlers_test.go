@@ -1172,6 +1172,46 @@ func TestSendersCreate_Mailbox_VerifiesParentWhenMissing(t *testing.T) {
 	}
 }
 
+func TestSendersCreate_MailboxPersistsVerifiedParentDespiteInboundFailure(t *testing.T) {
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{
+			"email_provider":        float64(1),
+			"domains":               float64(42),
+			"inbound_storage":       float64(3),
+			"inbound_notifications": float64(4),
+		},
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"create_topic": {Success: true, Status: 200, Data: json.RawMessage(
+				`{"TopicArn":"arn:aws:sns:eu-west-1:123456789012:apteva-test"}`)},
+			"verify_domain": {Success: true, Status: 200, Data: json.RawMessage(
+				`{"DkimAttributes":{"Tokens":["t1","t2","t3"],"Status":"SUCCESS"}}`)},
+		},
+		callAppReply: json.RawMessage(`{"action":"created"}`),
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolSendersCreate(ctx, map[string]any{"address": "ops@newdomain.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := out.(*sendersCreateResp)
+	if !hasStep(resp.Steps, "sns_subscribe_webhook", false) {
+		t.Fatalf("expected inbound webhook failure before final domain persist, got %+v", resp.Steps)
+	}
+	parent, _ := dbFindIdentity(ctx.AppDB(), "test-proj", "email_domain", "newdomain.com")
+	if parent == nil || !parent.Verified || parent.DkimStatus != "SUCCESS" {
+		t.Fatalf("verified parent identity should persist despite later inbound failure, got %+v", parent)
+	}
+	row, _ := dbFindSender(ctx.AppDB(), "test-proj", "email", "ops@newdomain.com")
+	if row == nil || !row.Verified || row.VerificationStatus != "verified" || row.ParentIdentityID == nil {
+		t.Fatalf("mailbox should inherit verified parent despite later inbound failure, got %+v", row)
+	}
+	if resp.Pending {
+		t.Errorf("resp.Pending should be false after DKIM SUCCESS inheritance")
+	}
+}
+
 // Legacy fallback: when Domains is NOT bound, the old per-mailbox
 // verify_email flow must still work for mailboxes at uncontrolled
 // domains (e.g., me@gmail.com).
