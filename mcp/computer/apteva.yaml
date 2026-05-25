@@ -2,25 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.3.4
+version: 0.4.0
 description: |
-  Watch and steer the agent's browser. Operator panel for browsing
-  the sessions this sidecar owns; inline chat components the agent
-  attaches so its work surfaces visually instead of as plain text.
-
-  v0.3 adds the first MCP tools — browser_open / browser_list /
-  browser_screenshot / browser_close — so callers (first the
-  `screenshots` app, then later the agent loop itself) can drive
-  browser sessions through this app instead of through the core
-  binary. Sessions are owned by this sidecar; attaching to a
-  session the agent already opened in core is not yet supported
-  (cloud-backed resume + local CDP attach land in later releases).
-
-  v0.3.1 exposes browser_list + a /sessions HTTP route (proxied as
-  /api/apps/computer/sessions) so the operator panel and other UIs
-  can render the live session set without round-tripping through
-  apteva-server. v0.3.2 corrects the route prefix (the v0.3.1 panel
-  fetched the wrong URL and 404'd).
+  Watch and steer browser sessions. v0.4 exposes the generic
+  browser_session / computer_use MCP surface directly from the app.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -31,41 +16,49 @@ min_apteva_version: "0.10.0"
 
 requires:
   permissions:
-    - net.egress           # Browserbase / Steel API calls
+    - net.egress
+    - platform.connections.read_credentials
+  integrations:
+    - role: browserbase
+      kind: integration
+      required: false
+      compatible_slugs: [browserbase]
+    - role: steel
+      kind: integration
+      required: false
+      compatible_slugs: [steel]
+    - role: browser-engine
+      kind: integration
+      required: false
+      compatible_slugs: [browser-engine]
 
 provides:
   http_routes:
     - prefix: /
 
   mcp_tools:
+    - name: browser_session
+      description: |
+        Open, resume, list, inspect, or close app-owned browser sessions.
+        Args: action, session_id?, backend?, backend_session_id?, url?,
+        context_id?, persist?, timeout?, proxy?, proxy_country?, viewport?.
+    - name: computer_use
+      description: |
+        Drive an app-owned browser session. Args: session_id, action,
+        coordinate?, label?, text?, key?, direction?, amount?, duration?.
+        Returns screenshot bytes for visual actions.
     - name: browser_open
       description: |
-        Open a new browser session. Args: backend? (local|browserbase|steel,
-        default reads APTEVA_BROWSER_BACKEND env then falls back to "local"),
-        url? (navigate after open), viewport? ({width:int, height:int},
-        default 1600x800). Returns {session_id, backend, current_url,
-        width, height}. The session is owned by this app and persists
-        until browser_close or the 30-minute idle reaper, whichever
-        comes first.
+        Compatibility alias for browser_session(action=open).
     - name: browser_list
       description: |
-        List sessions currently owned by this sidecar. Returns
-        {sessions:[{session_id, backend, current_url, debug_url,
-        opened_at, last_used_at}]}. Empty when the sidecar holds none.
-        Operators reach the same data via GET /sessions on the
-        sidecar (the dashboard hits /api/apps/computer/sessions).
+        Compatibility alias for browser_session(action=list).
     - name: browser_screenshot
       description: |
-        Capture a PNG of the session's current viewport. Args: session_id.
-        Returns {png_b64, current_url, width, height}. Full-page capture
-        and SoM overlay are not yet supported — the computer/ package
-        exposes only a single Screenshot() that returns the current
-        viewport bytes.
+        Compatibility alias for computer_use(action=screenshot).
     - name: browser_close
       description: |
-        Close a session opened by this app. Args: session_id. Idempotent —
-        closing an unknown id returns {closed:false}. Always returns
-        without error so callers can safely close-on-defer.
+        Compatibility alias for browser_session(action=close).
 
   ui_panels:
     - slot: project.page
@@ -86,7 +79,7 @@ provides:
         required: [instance_id, backend, url]
         properties:
           instance_id: { type: string }
-          backend:     { type: string, enum: [local, browserbase, steel] }
+          backend:     { type: string, enum: [local, browserbase, steel, browser-engine, service] }
           url:         { type: string }
           status:      { type: string }
       preview_props:

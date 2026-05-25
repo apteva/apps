@@ -10,8 +10,7 @@ import (
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
-	backends "github.com/apteva/computer"
-	pkgcomputer "github.com/apteva/core/pkg/computer"
+	backends "github.com/apteva/apps/mcp/computer/internal/browser"
 )
 
 // TestEmbeddedManifestMatchesYAML guards the dual-source-of-truth
@@ -104,20 +103,20 @@ func TestRegistry(t *testing.T) {
 	}
 }
 
-// TestBrowserOpenScreenshotClose drives the three handlers end-to-end
-// against a fake backend. The fake records OpenSession + Screenshot
-// + Close calls so we can verify the registry actually closes the
-// underlying Computer on browser_close.
-func TestBrowserOpenScreenshotClose(t *testing.T) {
+// TestBrowserSessionComputerUseClose drives the generic MCP surface
+// end-to-end against a fake backend. The fake records OpenSession +
+// Screenshot + Close calls so we can verify the registry actually
+// closes the underlying Computer on browser_session(close).
+func TestBrowserSessionComputerUseClose(t *testing.T) {
 	prev := newBackend
 	t.Cleanup(func() { newBackend = prev })
 
 	fake := &fakeComp{
-		display: pkgcomputer.DisplaySize{Width: 1024, Height: 768},
-		png:     []byte{0x89, 0x50, 0x4e, 0x47}, // PNG magic prefix is enough for the test
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a},
 		url:     "https://example.com",
 	}
-	newBackend = func(cfg backends.Config) (pkgcomputer.Computer, error) {
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
 		if cfg.Type != "local" {
 			t.Errorf("backend type: want local, got %q", cfg.Type)
 		}
@@ -128,12 +127,13 @@ func TestBrowserOpenScreenshotClose(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml")
 
 	// open
-	openOut, err := app.toolBrowserOpen(ctx, map[string]any{
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":  "open",
 		"backend": "local",
 		"url":     "https://example.com",
 	})
 	if err != nil {
-		t.Fatalf("browser_open: %v", err)
+		t.Fatalf("browser_session open: %v", err)
 	}
 	openMap, ok := openOut.(map[string]any)
 	if !ok {
@@ -154,14 +154,20 @@ func TestBrowserOpenScreenshotClose(t *testing.T) {
 	}
 
 	// screenshot
-	shotOut, err := app.toolBrowserScreenshot(ctx, map[string]any{"session_id": sessionID})
+	shotOut, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "screenshot",
+	})
 	if err != nil {
-		t.Fatalf("browser_screenshot: %v", err)
+		t.Fatalf("computer_use screenshot: %v", err)
 	}
 	shotMap := shotOut.(map[string]any)
-	gotPNG, _ := base64.StdEncoding.DecodeString(shotMap["png_b64"].(string))
+	gotPNG, _ := base64.StdEncoding.DecodeString(shotMap["screenshot_b64"].(string))
 	if len(gotPNG) != len(fake.png) || gotPNG[0] != 0x89 {
 		t.Errorf("screenshot bytes round-trip failed: got %v", gotPNG)
+	}
+	if shotMap["mime_type"] != "image/png" {
+		t.Errorf("screenshot mime: want image/png, got %v", shotMap["mime_type"])
 	}
 	if shotMap["current_url"] != "https://example.com" {
 		t.Errorf("current_url: want example.com, got %v", shotMap["current_url"])
@@ -171,9 +177,9 @@ func TestBrowserOpenScreenshotClose(t *testing.T) {
 	}
 
 	// close
-	closeOut, err := app.toolBrowserClose(ctx, map[string]any{"session_id": sessionID})
+	closeOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "close", "session_id": sessionID})
 	if err != nil {
-		t.Fatalf("browser_close: %v", err)
+		t.Fatalf("browser_session close: %v", err)
 	}
 	if closeOut.(map[string]any)["closed"] != true {
 		t.Errorf("close closed=true expected; got %v", closeOut)
@@ -183,26 +189,26 @@ func TestBrowserOpenScreenshotClose(t *testing.T) {
 	}
 
 	// close again — idempotent
-	closeOut2, err := app.toolBrowserClose(ctx, map[string]any{"session_id": sessionID})
+	closeOut2, err := app.toolBrowserSession(ctx, map[string]any{"action": "close", "session_id": sessionID})
 	if err != nil {
-		t.Fatalf("browser_close (2nd): %v", err)
+		t.Fatalf("browser_session close (2nd): %v", err)
 	}
 	if closeOut2.(map[string]any)["closed"] != false {
 		t.Errorf("2nd close: closed=false expected; got %v", closeOut2)
 	}
 
 	// screenshot after close — error, not panic
-	if _, err := app.toolBrowserScreenshot(ctx, map[string]any{"session_id": sessionID}); err == nil {
+	if _, err := app.toolComputerUse(ctx, map[string]any{"session_id": sessionID, "action": "screenshot"}); err == nil {
 		t.Errorf("screenshot after close: want error, got nil")
 	}
 }
 
 // ─── fake Computer ─────────────────────────────────────────────────
 
-// fakeComp implements pkgcomputer.Computer + SessionOpener + SessionInfo
+// fakeComp implements backends.Computer + SessionOpener + SessionInfo
 // for handler tests. Mutation is unguarded — tests are single-goroutine.
 type fakeComp struct {
-	display         pkgcomputer.DisplaySize
+	display         backends.DisplaySize
 	png             []byte
 	url             string
 	openSessionURL  string
@@ -211,7 +217,7 @@ type fakeComp struct {
 	mu              sync.Mutex // for the unlikely concurrent test
 }
 
-func (f *fakeComp) Execute(_ pkgcomputer.Action) ([]byte, error) {
+func (f *fakeComp) Execute(_ backends.Action) ([]byte, error) {
 	return nil, nil
 }
 
@@ -222,7 +228,7 @@ func (f *fakeComp) Screenshot() ([]byte, error) {
 	return f.png, nil
 }
 
-func (f *fakeComp) DisplaySize() pkgcomputer.DisplaySize { return f.display }
+func (f *fakeComp) DisplaySize() backends.DisplaySize { return f.display }
 
 func (f *fakeComp) Close() error {
 	f.mu.Lock()
@@ -231,7 +237,7 @@ func (f *fakeComp) Close() error {
 	return nil
 }
 
-func (f *fakeComp) OpenSession(opts pkgcomputer.OpenOptions) error {
+func (f *fakeComp) OpenSession(opts backends.OpenOptions) error {
 	f.openSessionURL = opts.URL
 	return nil
 }

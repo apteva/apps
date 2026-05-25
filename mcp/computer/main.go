@@ -1,20 +1,11 @@
-// Computer v0.3 — first three MCP tools (browser_open / browser_screenshot
-// / browser_close) on top of the existing UI surface.
+// Computer app — MCP browser runtime.
 //
 // Sessions opened via these tools are owned by this sidecar: an
 // in-memory map keyed by sidecar-generated session_id holds the
-// computer.Computer value, and an idle reaper closes anything not
+// browser.Computer value, and an idle reaper closes anything not
 // touched in 30 minutes. Attaching to a session the agent opened in
-// core is NOT yet supported — Browserbase/Steel resume comes with the
-// next release, and local CDP attach needs core-side plumbing.
-//
-// The browser backends (local Chrome, Browserbase, Steel, Browser
-// Engine) live in github.com/apteva/computer; we never duplicate any
-// CDP / HTTP plumbing here. Backend choice comes from the per-call
-// `backend` arg, falling back to APTEVA_BROWSER_BACKEND env, falling
-// back to "local". Cloud credentials are read from env at open time
-// (BROWSERBASE_API_KEY / BROWSERBASE_PROJECT_ID / STEEL_API_KEY) —
-// the integration-bindings migration is a later refinement.
+// core is not needed in the app-only model: browser_session opens or
+// resumes app-owned sessions, and computer_use drives them.
 package main
 
 import (
@@ -25,13 +16,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
-	backends "github.com/apteva/computer"
-	pkgcomputer "github.com/apteva/core/pkg/computer"
+	backends "github.com/apteva/apps/mcp/computer/internal/browser"
 )
 
 // ─── Manifest (also lives in apteva.yaml) ──────────────────────────
@@ -43,26 +34,44 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.3.4
+version: 0.4.0
 description: |
-  Watch and steer the agent's browser. v0.3 adds the first MCP tools
-  (browser_open / browser_list / browser_screenshot / browser_close).
+  Watch and steer browser sessions. v0.4 exposes the generic
+  browser_session / computer_use MCP surface directly from the app.
 scopes: [project, global]
 requires:
   permissions:
     - net.egress
+    - platform.connections.read_credentials
+  integrations:
+    - role: browserbase
+      kind: integration
+      required: false
+      compatible_slugs: [browserbase]
+    - role: steel
+      kind: integration
+      required: false
+      compatible_slugs: [steel]
+    - role: browser-engine
+      kind: integration
+      required: false
+      compatible_slugs: [browser-engine]
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - name: browser_session
+      description: "Open, resume, list, inspect, or close app-owned browser sessions. Args: action, session_id?, backend?, backend_session_id?, url?, context_id?, persist?, timeout?, proxy?, proxy_country?, viewport?."
+    - name: computer_use
+      description: "Drive an app-owned browser session. Args: session_id, action, coordinate?, label?, text?, key?, direction?, amount?, duration?. Returns screenshot bytes for visual actions."
     - name: browser_open
-      description: "Open a browser session. Args: backend?, url?, viewport?. Returns {session_id, backend, current_url, width, height}."
+      description: "Compatibility alias for browser_session(action=open)."
     - name: browser_list
-      description: "List sessions currently owned by this sidecar. Returns {sessions:[{session_id, backend, current_url, debug_url, opened_at, last_used_at}]}."
+      description: "Compatibility alias for browser_session(action=list)."
     - name: browser_screenshot
-      description: "Capture a PNG of the session's current viewport. Args: session_id. Returns {png_b64, current_url, width, height}."
+      description: "Compatibility alias for computer_use(action=screenshot)."
     - name: browser_close
-      description: "Close a session opened by this app. Args: session_id. Idempotent."
+      description: "Compatibility alias for browser_session(action=close)."
   ui_panels:
     - slot: project.page
       label: Browsers
@@ -106,7 +115,7 @@ const reapInterval = 5 * time.Minute
 
 // session is one open browser, owned by this sidecar.
 type session struct {
-	comp     pkgcomputer.Computer
+	comp     backends.Computer
 	backend  string
 	openedAt time.Time
 	lastUsed time.Time
@@ -194,7 +203,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.reg = &registry{m: map[string]*session{}}
 	globalCtx = ctx
 	go a.reaper(ctx)
-	ctx.Logger().Info("computer mounted", "tools", 4, "idle_ttl", idleTTL.String())
+	ctx.Logger().Info("computer mounted", "tools", len(a.MCPTools()), "idle_ttl", idleTTL.String())
 	return nil
 }
 
@@ -238,14 +247,64 @@ func (a *App) HTTPRoutes() []sdk.Route {
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
+			Name: "browser_session",
+			Description: "Session lifecycle for app-owned browsers. Actions: open, resume, status, close, list. " +
+				"Open/resume args: backend? (local|browserbase|steel|browser-engine|service), url?, context_id?, persist?, " +
+				"backend_session_id? (provider attach), timeout?, proxy?, proxy_country?, viewport?. " +
+				"Returns {session_id, backend_session_id, backend, current_url, context_id, debug_url, width, height}.",
+			InputSchema: schemaObject(map[string]any{
+				"action":             map[string]any{"type": "string", "enum": []string{"open", "resume", "status", "close", "list"}},
+				"session_id":         map[string]any{"type": "string", "description": "App session id for status/close; for resume, accepted as provider session id when backend_session_id is omitted."},
+				"backend_session_id": map[string]any{"type": "string", "description": "Provider session id to attach/resume for Browserbase or Browser Engine."},
+				"backend":            map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
+				"url":                map[string]any{"type": "string"},
+				"context_id":         map[string]any{"type": "string"},
+				"persist":            map[string]any{"type": "boolean"},
+				"timeout":            map[string]any{"type": "integer"},
+				"proxy":              map[string]any{"type": "boolean"},
+				"proxy_country":      map[string]any{"type": "string"},
+				"viewport": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"width":  map[string]any{"type": "integer"},
+						"height": map[string]any{"type": "integer"},
+					},
+				},
+			}, []string{"action"}),
+			Handler: a.toolBrowserSession,
+		},
+		{
+			Name: "computer_use",
+			Description: "Drive a browser session opened by browser_session. Actions: screenshot, click, double_click, type, key, scroll, wait. " +
+				"Args: session_id, action, coordinate? (\"x,y\"), label? (SoM label), text?, key?, direction?, amount?, duration?. " +
+				"Returns a binary screenshot envelope plus current_url, width, height.",
+			InputSchema: schemaObject(map[string]any{
+				"session_id": map[string]any{"type": "string"},
+				"action":     map[string]any{"type": "string", "enum": []string{"screenshot", "click", "double_click", "type", "key", "scroll", "wait"}},
+				"coordinate": map[string]any{"type": "string"},
+				"label":      map[string]any{"type": "integer"},
+				"text":       map[string]any{"type": "string"},
+				"key":        map[string]any{"type": "string"},
+				"direction":  map[string]any{"type": "string"},
+				"amount":     map[string]any{"type": "integer"},
+				"duration":   map[string]any{"type": "integer"},
+			}, []string{"session_id", "action"}),
+			Handler: a.toolComputerUse,
+		},
+		{
 			Name: "browser_open",
-			Description: "Open a new browser session. Args: backend? (local|browserbase|steel, default per APTEVA_BROWSER_BACKEND env then \"local\"), " +
+			Description: "Compatibility alias for browser_session(action=open). Args: backend? (local|browserbase|steel|browser-engine, default per APTEVA_BROWSER_BACKEND env then \"local\"), " +
 				"url? (navigate after open), viewport? ({width:int, height:int}, default 1600x800). " +
 				"Returns {session_id, backend, current_url, width, height}. " +
 				"Session owned by this sidecar until browser_close or 30-minute idle reaper.",
 			InputSchema: schemaObject(map[string]any{
-				"backend": map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel"}},
-				"url":     map[string]any{"type": "string"},
+				"backend":       map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
+				"url":           map[string]any{"type": "string"},
+				"context_id":    map[string]any{"type": "string"},
+				"persist":       map[string]any{"type": "boolean"},
+				"timeout":       map[string]any{"type": "integer"},
+				"proxy":         map[string]any{"type": "boolean"},
+				"proxy_country": map[string]any{"type": "string"},
 				"viewport": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -265,14 +324,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "browser_screenshot",
 			Description: "Capture a PNG of the session's current viewport. Args: session_id. " +
-				"Returns {png_b64, current_url, width, height}. Full-page and SoM are not yet supported.",
+				"Returns {png_b64, current_url, width, height}.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
 			}, []string{"session_id"}),
 			Handler: a.toolBrowserScreenshot,
 		},
 		{
-			Name: "browser_close",
+			Name:        "browser_close",
 			Description: "Close a session opened by this app. Args: session_id. Idempotent — unknown ids return {closed:false}.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
@@ -284,7 +343,40 @@ func (a *App) MCPTools() []sdk.Tool {
 
 // ─── Tool handlers ─────────────────────────────────────────────────
 
+func (a *App) toolBrowserSession(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	action := stringArg(args, "action")
+	if action == "" {
+		return nil, fmt.Errorf("action required")
+	}
+	switch action {
+	case "open":
+		return a.openBrowserSession(ctx, args, false)
+	case "resume":
+		return a.openBrowserSession(ctx, args, true)
+	case "list":
+		return map[string]any{"sessions": a.listSessions()}, nil
+	case "status":
+		id := stringArg(args, "session_id")
+		if id == "" {
+			return nil, fmt.Errorf("session_id required")
+		}
+		sess, ok := a.reg.get(id)
+		if !ok {
+			return nil, fmt.Errorf("session %s not found", id)
+		}
+		return a.sessionOutput(id, sess), nil
+	case "close":
+		return a.toolBrowserClose(ctx, args)
+	default:
+		return nil, fmt.Errorf("unknown browser_session action %q", action)
+	}
+}
+
 func (a *App) toolBrowserOpen(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.openBrowserSession(ctx, args, false)
+}
+
+func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bool) (any, error) {
 	backend := stringArg(args, "backend")
 	if backend == "" {
 		backend = os.Getenv("APTEVA_BROWSER_BACKEND")
@@ -299,7 +391,7 @@ func (a *App) toolBrowserOpen(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		height = intArg(vp, "height")
 	}
 
-	cfg := backendConfig(backend, width, height)
+	cfg := backendConfig(ctx, args, backend, width, height)
 	comp, err := newBackend(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("backend %q open failed: %w", backend, err)
@@ -308,15 +400,42 @@ func (a *App) toolBrowserOpen(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, fmt.Errorf("backend %q unknown", backend)
 	}
 
-	opener, ok := comp.(pkgcomputer.SessionOpener)
-	if !ok {
-		_ = comp.Close()
-		return nil, fmt.Errorf("backend %q does not support OpenSession", backend)
+	backendSessionID := firstNonEmpty(
+		stringArg(args, "backend_session_id"),
+		stringArg(args, "provider_session_id"),
+	)
+	if resume && backendSessionID == "" {
+		// Compatibility with the old browser_session(resume,
+		// session_id=provider-session) convention. Once the app
+		// returns its own session_id, that id is used for status/close
+		// and computer_use.
+		backendSessionID = stringArg(args, "session_id")
 	}
-	openOpts := pkgcomputer.OpenOptions{URL: stringArg(args, "url")}
-	if err := opener.OpenSession(openOpts); err != nil {
-		_ = comp.Close()
-		return nil, fmt.Errorf("OpenSession: %w", err)
+	openOpts := backends.OpenOptions{
+		URL:          stringArg(args, "url"),
+		ContextID:    stringArg(args, "context_id"),
+		Persist:      boolArgDefault(args, "persist", true),
+		SessionID:    backendSessionID,
+		Timeout:      intArg(args, "timeout"),
+		Proxy:        boolPtrArg(args, "proxy"),
+		ProxyCountry: stringArg(args, "proxy_country"),
+	}
+	if opener, ok := comp.(backends.SessionOpener); ok {
+		if err := opener.OpenSession(openOpts); err != nil {
+			_ = comp.Close()
+			return nil, fmt.Errorf("OpenSession: %w", err)
+		}
+	} else {
+		if openOpts.ContextID != "" || openOpts.SessionID != "" || openOpts.Proxy != nil {
+			_ = comp.Close()
+			return nil, fmt.Errorf("backend %q does not support context_id/session_id/proxy", backend)
+		}
+		if openOpts.URL != "" {
+			if _, err := comp.Execute(backends.Action{Type: "navigate", URL: openOpts.URL}); err != nil {
+				_ = comp.Close()
+				return nil, fmt.Errorf("navigate: %w", err)
+			}
+		}
 	}
 
 	id := newSessionID()
@@ -328,28 +447,27 @@ func (a *App) toolBrowserOpen(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		lastUsed: now,
 	})
 
-	disp := comp.DisplaySize()
-	out := map[string]any{
-		"session_id":  id,
-		"backend":     backend,
-		"current_url": currentURL(comp),
-		"width":       disp.Width,
-		"height":      disp.Height,
+	if ctx != nil {
+		ctx.Logger().Info("browser_open", "session_id", id, "backend", backend)
 	}
-	ctx.Logger().Info("browser_open", "session_id", id, "backend", backend)
-	return out, nil
+	return a.sessionOutput(id, &session{comp: comp, backend: backend, openedAt: now, lastUsed: now}), nil
 }
 
 // sessionInfo is the shape each row in browser_list / /api/sessions
 // reports. Kept tight: session_id + provenance + the URLs the
 // operator needs to identify or open the session.
 type sessionInfo struct {
-	SessionID  string `json:"session_id"`
-	Backend    string `json:"backend"`
-	CurrentURL string `json:"current_url"`
-	DebugURL   string `json:"debug_url,omitempty"`
-	OpenedAt   string `json:"opened_at"`
-	LastUsedAt string `json:"last_used_at"`
+	SessionID        string `json:"session_id"`
+	BackendSessionID string `json:"backend_session_id,omitempty"`
+	Backend          string `json:"backend"`
+	ContextID        string `json:"context_id,omitempty"`
+	CurrentURL       string `json:"current_url"`
+	DebugURL         string `json:"debug_url,omitempty"`
+	StreamURL        string `json:"stream_url,omitempty"`
+	Width            int    `json:"width"`
+	Height           int    `json:"height"`
+	OpenedAt         string `json:"opened_at"`
+	LastUsedAt       string `json:"last_used_at"`
 }
 
 func (a *App) toolBrowserList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
@@ -364,7 +482,7 @@ func (a *App) toolBrowserList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 func (a *App) listSessions() []sessionInfo {
 	type frozen struct {
 		id      string
-		comp    pkgcomputer.Computer
+		comp    backends.Computer
 		backend string
 		opened  time.Time
 		used    time.Time
@@ -378,37 +496,109 @@ func (a *App) listSessions() []sessionInfo {
 
 	out := make([]sessionInfo, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, sessionInfo{
-			SessionID:  r.id,
-			Backend:    r.backend,
-			CurrentURL: currentURL(r.comp),
-			DebugURL:   debugURL(r.comp),
-			OpenedAt:   r.opened.UTC().Format(time.RFC3339),
-			LastUsedAt: r.used.UTC().Format(time.RFC3339),
-		})
+		out = append(out, a.sessionInfo(r.id, &session{comp: r.comp, backend: r.backend, openedAt: r.opened, lastUsed: r.used}))
 	}
 	return out
 }
 
+func (a *App) sessionInfo(id string, s *session) sessionInfo {
+	disp := s.comp.DisplaySize()
+	return sessionInfo{
+		SessionID:        id,
+		BackendSessionID: backendSessionID(s.comp),
+		Backend:          s.backend,
+		ContextID:        contextID(s.comp),
+		CurrentURL:       currentURL(s.comp),
+		DebugURL:         debugURL(s.comp),
+		StreamURL:        streamURL(s.comp),
+		Width:            disp.Width,
+		Height:           disp.Height,
+		OpenedAt:         s.openedAt.UTC().Format(time.RFC3339),
+		LastUsedAt:       s.lastUsed.UTC().Format(time.RFC3339),
+	}
+}
+
+func (a *App) sessionOutput(id string, s *session) map[string]any {
+	info := a.sessionInfo(id, s)
+	return map[string]any{
+		"session_id":         info.SessionID,
+		"backend_session_id": info.BackendSessionID,
+		"backend":            info.Backend,
+		"context_id":         info.ContextID,
+		"current_url":        info.CurrentURL,
+		"debug_url":          info.DebugURL,
+		"stream_url":         info.StreamURL,
+		"width":              info.Width,
+		"height":             info.Height,
+		"opened_at":          info.OpenedAt,
+		"last_used_at":       info.LastUsedAt,
+	}
+}
+
 func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	out, err := a.toolComputerUse(ctx, mapWithDefault(args, "action", "screenshot"))
+	if err != nil {
+		return nil, err
+	}
+	m := out.(map[string]any)
+	return map[string]any{
+		"png_b64":     m["screenshot_b64"],
+		"screenshot":  m["screenshot"],
+		"current_url": m["current_url"],
+		"width":       m["width"],
+		"height":      m["height"],
+	}, nil
+}
+
+func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := stringArg(args, "session_id")
 	if id == "" {
 		return nil, fmt.Errorf("session_id required")
+	}
+	action := stringArg(args, "action")
+	if action == "" {
+		return nil, fmt.Errorf("action required")
+	}
+	if action == "navigate" {
+		return nil, fmt.Errorf("use browser_session(action=open, url=...) to navigate")
 	}
 	sess, ok := a.reg.get(id)
 	if !ok {
 		return nil, fmt.Errorf("session %s not found (may have been reaped or never opened by this sidecar)", id)
 	}
-	png, err := sess.comp.Screenshot()
+
+	act := backends.Action{
+		Type:      action,
+		Label:     intArg(args, "label"),
+		Text:      stringArg(args, "text"),
+		Key:       stringArg(args, "key"),
+		Direction: stringArg(args, "direction"),
+		Amount:    intArg(args, "amount"),
+		Duration:  intArg(args, "duration"),
+	}
+	act.X, act.Y = coordinateArg(args)
+
+	var shot []byte
+	var err error
+	if action == "screenshot" {
+		shot, err = sess.comp.Screenshot()
+	} else {
+		shot, err = sess.comp.Execute(act)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("screenshot: %w", err)
+		return nil, fmt.Errorf("%s: %w", action, err)
 	}
 	disp := sess.comp.DisplaySize()
+	mime := imageMIME(shot)
 	return map[string]any{
-		"png_b64":     base64.StdEncoding.EncodeToString(png),
-		"current_url": currentURL(sess.comp),
-		"width":       disp.Width,
-		"height":      disp.Height,
+		"text":           fmt.Sprintf("Success: %s action completed. Screenshot attached.", action),
+		"screenshot":     binaryEnvelope(shot, mime),
+		"screenshot_b64": base64.StdEncoding.EncodeToString(shot),
+		"mime_type":      mime,
+		"session_id":     id,
+		"current_url":    currentURL(sess.comp),
+		"width":          disp.Width,
+		"height":         disp.Height,
 	}, nil
 }
 
@@ -422,7 +612,9 @@ func (a *App) toolBrowserClose(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return map[string]any{"closed": false}, nil
 	}
 	if err := sess.comp.Close(); err != nil {
-		ctx.Logger().Warn("browser_close underlying Close error", "session_id", id, "err", err.Error())
+		if ctx != nil {
+			ctx.Logger().Warn("browser_close underlying Close error", "session_id", id, "err", err.Error())
+		}
 	}
 	return map[string]any{"closed": true}, nil
 }
@@ -453,21 +645,82 @@ func newSessionID() string {
 	return "br_" + hex.EncodeToString(b[:])
 }
 
-func backendConfig(backend string, width, height int) backends.Config {
+func backendConfig(ctx *sdk.AppCtx, args map[string]any, backend string, width, height int) backends.Config {
 	cfg := backends.Config{Type: backend, Width: width, Height: height}
 	switch backend {
 	case "browserbase":
-		cfg.APIKey = os.Getenv("BROWSERBASE_API_KEY")
-		cfg.ProjectID = os.Getenv("BROWSERBASE_PROJECT_ID")
+		fields := integrationFields(ctx, "browserbase")
+		cfg.APIKey = firstNonEmpty(fields["api_key"], fields["BROWSERBASE_API_KEY"], os.Getenv("BROWSERBASE_API_KEY"))
+		cfg.ProjectID = firstNonEmpty(fields["project_id"], fields["BROWSERBASE_PROJECT_ID"], os.Getenv("BROWSERBASE_PROJECT_ID"))
+		cfg.KeepAlive = boolArgDefault(args, "keep_alive", false)
+		cfg.Region = stringArg(args, "region")
+		cfg.Timeout = intArg(args, "timeout")
+		if boolArgDefault(args, "solve_captchas", false) {
+			cfg.SolveCaptchas = true
+		}
 	case "steel":
-		cfg.APIKey = os.Getenv("STEEL_API_KEY")
+		fields := integrationFields(ctx, "steel")
+		cfg.APIKey = firstNonEmpty(fields["token"], fields["api_key"], fields["STEEL_API_KEY"], os.Getenv("STEEL_API_KEY"))
+		cfg.ProxyURL = firstNonEmpty(stringArg(args, "proxy_url"), os.Getenv("STEEL_PROXY_URL"))
+		cfg.UseProxy = boolArgDefault(args, "use_proxy", false)
+		cfg.BlockAds = boolArgDefault(args, "block_ads", false)
+		cfg.SolveCaptcha = boolArgDefault(args, "solve_captcha", false)
+		cfg.Region = stringArg(args, "region")
+		cfg.Timeout = intArg(args, "timeout")
+		cfg.UserAgent = stringArg(args, "user_agent")
+	case "browser-engine":
+		fields := integrationFields(ctx, "browser-engine")
+		cfg.APIKey = firstNonEmpty(fields["BROWSER_API_KEY"], fields["api_key"], fields["token"], os.Getenv("BROWSER_API_KEY"), os.Getenv("NEXT_PUBLIC_BROWSER_API_KEY"))
+		cfg.URL = firstNonEmpty(stringArg(args, "backend_url"), fields["BROWSER_API_URL"], fields["base_url"], os.Getenv("BROWSER_API_URL"))
+		cfg.InitialURL = stringArg(args, "initial_url")
+		cfg.UserAgent = stringArg(args, "user_agent")
+		cfg.Timeout = intArg(args, "timeout")
+		cfg.ProxyEnabled = boolArgDefault(args, "proxy_enabled", false)
+		cfg.ProxyCountry = stringArg(args, "proxy_country")
+		cfg.BrowserProjectID = intArg(args, "browser_project_id")
+	case "local":
+		cfg.ProxyURL = firstNonEmpty(stringArg(args, "proxy_url"), os.Getenv("APTEVA_LOCAL_PROXY_URL"))
+	case "service":
+		cfg.URL = firstNonEmpty(stringArg(args, "backend_url"), os.Getenv("APTEVA_BROWSER_SERVICE_URL"))
 	}
 	return cfg
 }
 
-func currentURL(c pkgcomputer.Computer) string {
-	if si, ok := c.(pkgcomputer.SessionInfo); ok {
+func integrationFields(ctx *sdk.AppCtx, role string) map[string]string {
+	if ctx == nil {
+		return nil
+	}
+	b := ctx.IntegrationFor(role)
+	if b == nil || b.ConnectionID == 0 {
+		return nil
+	}
+	creds, err := ctx.PlatformAPI().GetConnectionCredentials(b.ConnectionID)
+	if err != nil || creds == nil {
+		if err != nil {
+			ctx.Logger().Warn("integration credentials unavailable", "role", role, "err", err.Error())
+		}
+		return nil
+	}
+	return creds.Fields
+}
+
+func currentURL(c backends.Computer) string {
+	if si, ok := c.(backends.SessionInfo); ok {
 		return si.CurrentURL()
+	}
+	return ""
+}
+
+func backendSessionID(c backends.Computer) string {
+	if si, ok := c.(backends.SessionInfo); ok {
+		return si.SessionID()
+	}
+	return ""
+}
+
+func contextID(c backends.Computer) string {
+	if ci, ok := c.(backends.ContextInfo); ok {
+		return ci.ContextID()
 	}
 	return ""
 }
@@ -477,9 +730,16 @@ func currentURL(c pkgcomputer.Computer) string {
 // browserengine) implements. Returns "" if the backend doesn't
 // expose one. Operators use this to attach DevTools / open the
 // vendor's live viewer.
-func debugURL(c pkgcomputer.Computer) string {
+func debugURL(c backends.Computer) string {
 	if dbg, ok := c.(interface{ DebugURL() string }); ok {
 		return dbg.DebugURL()
+	}
+	return ""
+}
+
+func streamURL(c backends.Computer) string {
+	if stream, ok := c.(interface{ StreamURL() string }); ok {
+		return stream.StreamURL()
 	}
 	return ""
 }
@@ -501,6 +761,86 @@ func intArg(args map[string]any, k string) int {
 		return int(v)
 	}
 	return 0
+}
+
+func boolArgDefault(args map[string]any, k string, def bool) bool {
+	if v, ok := boolArg(args, k); ok {
+		return v
+	}
+	return def
+}
+
+func boolPtrArg(args map[string]any, k string) *bool {
+	if v, ok := boolArg(args, k); ok {
+		return &v
+	}
+	return nil
+}
+
+func boolArg(args map[string]any, k string) (bool, bool) {
+	switch v := args[k].(type) {
+	case bool:
+		return v, true
+	case string:
+		switch strings.ToLower(strings.Trim(v, `"`)) {
+		case "true", "1", "yes", "on":
+			return true, true
+		case "false", "0", "no", "off":
+			return false, true
+		}
+	}
+	return false, false
+}
+
+func coordinateArg(args map[string]any) (int, int) {
+	if coord := strings.TrimSpace(stringArg(args, "coordinate")); coord != "" {
+		parts := strings.Split(coord, ",")
+		if len(parts) == 2 {
+			x, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
+			y, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+			return x, y
+		}
+	}
+	return intArg(args, "x"), intArg(args, "y")
+}
+
+func mapWithDefault(args map[string]any, k string, v any) map[string]any {
+	out := make(map[string]any, len(args)+1)
+	for key, val := range args {
+		out[key] = val
+	}
+	if _, ok := out[k]; !ok {
+		out[k] = v
+	}
+	return out
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func imageMIME(b []byte) string {
+	if len(b) >= 8 && b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4e && b[3] == 0x47 {
+		return "image/png"
+	}
+	if len(b) >= 3 && b[0] == 0xff && b[1] == 0xd8 && b[2] == 0xff {
+		return "image/jpeg"
+	}
+	return "application/octet-stream"
+}
+
+func binaryEnvelope(b []byte, mime string) map[string]any {
+	return map[string]any{
+		"_binary":  true,
+		"base64":   base64.StdEncoding.EncodeToString(b),
+		"mimeType": mime,
+		"size":     len(b),
+	}
 }
 
 func schemaObject(props map[string]any, required []string) map[string]any {
@@ -553,7 +893,7 @@ func (a *App) handleCloseSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-// handleSessionScreenshot streams the session's current PNG inline.
+// handleSessionScreenshot streams the session's current screenshot inline.
 // Path is /sessions/{id}/screenshot — strip the prefix + suffix to
 // get id. Returns 404 if the session is unknown; the panel will then
 // stop polling that id on its own when the session disappears from
@@ -571,17 +911,17 @@ func (a *App) handleSessionScreenshot(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "session not found")
 		return
 	}
-	png, err := sess.comp.Screenshot()
+	shot, err := sess.comp.Screenshot()
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, "screenshot: "+err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Content-Type", imageMIME(shot))
 	// No-cache so the panel's cache-busting query-string isn't even
 	// needed — but we set it anyway for proxies that don't pass it
 	// through.
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(png)
+	_, _ = w.Write(shot)
 }
 
 func writeJSON(w http.ResponseWriter, payload any) {

@@ -11,7 +11,7 @@ import { Card, CardHeader, StatusPill, DataList } from "@apteva/ui-kit";
 
 interface Props {
   instance_id: string;
-  backend: "local" | "browserbase" | "steel";
+  backend: "local" | "browserbase" | "steel" | "browser-engine" | "service" | string;
   url: string;
   status?: string;
   /** Injected by the host — preview mode renders synthetic data so
@@ -19,10 +19,12 @@ interface Props {
   preview?: boolean;
 }
 
-const BACKEND_LABEL: Record<Props["backend"], string> = {
+const BACKEND_LABEL: Record<string, string> = {
   local: "Local Chrome",
   browserbase: "Browserbase",
   steel: "Steel",
+  "browser-engine": "Browser Engine",
+  service: "Browser Service",
 };
 
 export default function BrowserCard(props: Props) {

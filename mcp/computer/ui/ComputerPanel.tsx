@@ -5,13 +5,12 @@
 // loop today; the dashboard's own chat surface is the right place
 // for that.
 //
-// Data source: this sidecar's own GET /api/sessions endpoint backed
+// Data source: this sidecar's own GET /sessions route backed
 // by the in-memory session registry. No more apteva-server endpoints
 // (those were always speculative — see the v0.2.x comment block that
 // referenced "endpoints added by a separate server-side PR" that
-// never landed). Live screencast also stayed unbuilt; for v0.3.x the
-// "view" button just deep-links to the backend's DevTools URL so
-// operators can attach a real Chrome DevTools window.
+// never landed). The live preview polls this app's screenshot route so
+// it works for every backend exposed by browser_session.
 
 import { useCallback, useEffect, useState } from "react";
 import { Card, CardHeader, StatusDot, StatusPill, DataList } from "@apteva/ui-kit";
@@ -45,6 +44,8 @@ const BACKEND_LABEL: Record<string, string> = {
   local: "Local Chrome",
   browserbase: "Browserbase",
   steel: "Steel",
+  "browser-engine": "Browser Engine",
+  service: "Browser Service",
 };
 
 export default function ComputerPanel() {
@@ -535,6 +536,8 @@ function OpenSessionModal({
               <option value="local">Local Chrome</option>
               <option value="browserbase">Browserbase</option>
               <option value="steel">Steel</option>
+              <option value="browser-engine">Browser Engine</option>
+              <option value="service">Browser Service</option>
             </select>
           </label>
         </div>
@@ -628,7 +631,7 @@ function XIcon() {
 // LivePreview — cheap "live" view of the session's current page by
 // polling /sessions/{id}/screenshot every ~800ms with a cache-busting
 // query string. Not as smooth as CDP screencast but works for every
-// backend (local Chrome, Browserbase, Steel) without WebSocket
+// backend (local Chrome, Browserbase, Steel, Browser Engine, service) without WebSocket
 // plumbing, and degrades gracefully if Screenshot errors (placeholder
 // kept, next tick retries).
 function LivePreview({ session }: { session: SessionRow }) {
