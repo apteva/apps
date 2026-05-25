@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.4.9
+version: 0.4.10
 description: |
   Compute-host inventory + lifecycle for Apteva. The local Apteva
   machine is always available as a built-in instance (id 0); remote
@@ -82,6 +82,51 @@ provides:
         Live list of bootable OS images from the bound provider (system images only — snapshots/backups/apps excluded).
         Returns name + os_flavor + os_version + architecture. Discovery surface for instance_create's `image` arg.
         Args: provider? (default 'hetzner').
+  publishes:
+    - name: instance.created
+      description: A new instance row was created in Instances.
+      payload:
+        id: integer
+        name: string
+        provider: string
+        status: string
+    - name: instance.provisioning
+      description: A remote instance entered provisioning.
+      payload:
+        id: integer
+        name: string
+        provider: string
+        status: string
+        region: string
+        size: string
+        image: string
+    - name: instance.ready
+      description: An instance became ready for SSH-backed operations.
+      payload:
+        id: integer
+        name: string
+        provider: string
+        status: string
+        public_ipv4: string
+        public_ipv6: string
+        ready_at: string
+    - name: instance.error
+      description: An instance entered an error state.
+      payload:
+        id: integer
+        name: string
+        provider: string
+        status: string
+        error: string
+    - name: instance.destroyed
+      description: An instance was destroyed and removed from Instances.
+      payload:
+        id: integer
+        name: string
+        provider: string
+        status: string
+        provider_id: string
+        destroyed_at: string
   ui_panels:
     - slot: project.page
       label: Instances

@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.9
+version: 0.4.10
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances (Hetzner in v0.1; DO/Vultr/AWS in later releases).
@@ -77,6 +77,51 @@ provides:
     - { name: instance_list_server_types, description: "Live list of VPS server types (sizes) from the bound provider — name, cores, memory_gb, disk_gb, price, deprecation. Use to discover valid sizes for instance_create. Args: provider? (default 'hetzner')." }
     - { name: instance_list_locations,    description: "Live list of VPS regions from the bound provider — name, city, country, network_zone. Args: provider? (default 'hetzner')." }
     - { name: instance_list_images,       description: "Live list of bootable OS images from the bound provider (system images only). Args: provider? (default 'hetzner')." }
+  publishes:
+    - name: instance.created
+      description: A new instance row was created in Instances.
+      payload:
+        id: integer
+        name: string
+        provider: string
+        status: string
+    - name: instance.provisioning
+      description: A remote instance entered provisioning.
+      payload:
+        id: integer
+        name: string
+        provider: string
+        status: string
+        region: string
+        size: string
+        image: string
+    - name: instance.ready
+      description: An instance became ready for SSH-backed operations.
+      payload:
+        id: integer
+        name: string
+        provider: string
+        status: string
+        public_ipv4: string
+        public_ipv6: string
+        ready_at: string
+    - name: instance.error
+      description: An instance entered an error state.
+      payload:
+        id: integer
+        name: string
+        provider: string
+        status: string
+        error: string
+    - name: instance.destroyed
+      description: An instance was destroyed and removed from Instances.
+      payload:
+        id: integer
+        name: string
+        provider: string
+        status: string
+        provider_id: string
+        destroyed_at: string
   ui_panels:
     - { slot: project.page, label: "Instances", icon: server, entry: /ui/InstancesPanel.mjs }
 runtime:

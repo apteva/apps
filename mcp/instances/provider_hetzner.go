@@ -68,6 +68,8 @@ func hetznerProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error
 	if err != nil {
 		return nil, err
 	}
+	emitInstanceCreated(ctx, inst)
+	emitInstanceStatus(ctx, inst)
 
 	cloudInit := buildCloudInit(pubKey)
 
@@ -85,7 +87,7 @@ func hetznerProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error
 	}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "server_create", args)
 	if err != nil {
-		_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{
+		_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{
 			"status":        "error",
 			"error_message": fmt.Sprintf("hetzner.server_create: %v", err),
 		})
@@ -93,7 +95,7 @@ func hetznerProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error
 	}
 	if res == nil || !res.Success {
 		msg := upstreamErrorString(res)
-		_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{
+		_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{
 			"status":        "error",
 			"error_message": msg,
 		})
@@ -101,7 +103,7 @@ func hetznerProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error
 	}
 	provID, ipv4, ipv6 := parseHetznerCreateResponse(res.Data)
 	if provID == "" {
-		_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{
+		_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{
 			"status":        "error",
 			"error_message": "hetzner.server_create response missing server id; catalog shape may be out of sync with upstream API",
 		})
@@ -117,7 +119,7 @@ func hetznerProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error
 	// return immediately; a separate instance_wait_ready or polling
 	// instance_get drives the transition from 'provisioning' to
 	// 'ready'. Hetzner servers come up in 30-60s typically.
-	kickReadinessProbe(inst.ID)
+	kickReadinessProbe(ctx, inst.ID)
 
 	// Return the row as it stands now (status='provisioning', ip set).
 	return dbGetInstance(ctx.AppDB(), inst.ID)
@@ -130,20 +132,20 @@ func hetznerProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error
 //
 // Best-effort: every error path lives inside the goroutine, the
 // caller (provision or reconcile) doesn't block on this.
-func kickReadinessProbe(id int64) {
+func kickReadinessProbe(ctx *sdk.AppCtx, id int64) {
 	go func() {
-		fresh, err := dbGetInstance(globalCtx.AppDB(), id)
+		fresh, err := dbGetInstance(ctx.AppDB(), id)
 		if err != nil {
 			return
 		}
 		if err := probeSSHReady(fresh, 5*time.Minute); err != nil {
-			_ = dbUpdateInstance(globalCtx.AppDB(), id, map[string]any{
+			_, _ = updateInstanceAndEmit(ctx, id, map[string]any{
 				"status":        "error",
 				"error_message": fmt.Sprintf("ssh probe: %v", err),
 			})
 			return
 		}
-		_ = dbUpdateInstance(globalCtx.AppDB(), id, map[string]any{
+		_, _ = updateInstanceAndEmit(ctx, id, map[string]any{
 			"status":   "ready",
 			"ready_at": nowUTC(),
 		})
@@ -180,13 +182,13 @@ func reconcileHetznerProvisioning(ctx *sdk.AppCtx) {
 		// Path 2: just kick the probe; nothing upstream to recover.
 		if inst.ProviderID != "" {
 			ctx.Logger().Info("instances: re-kick readiness probe", "id", inst.ID, "provider_id", inst.ProviderID)
-			kickReadinessProbe(inst.ID)
+			kickReadinessProbe(ctx, inst.ID)
 			continue
 		}
 		// Path 1: missing provider_id. Do not recover by name; this
 		// keeps destroy strictly bound to provider ids captured from
 		// server_create responses.
-		_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{
+		_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{
 			"status":        "error",
 			"error_message": "provisioning interrupted before Hetzner server id was recorded — Instances will not infer a server by name; check the Hetzner dashboard for an orphan server named " + inst.Name,
 		})

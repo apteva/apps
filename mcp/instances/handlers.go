@@ -140,6 +140,7 @@ func (a *App) httpGet(w http.ResponseWriter, r *http.Request, id int64) {
 }
 
 func (a *App) httpCreate(w http.ResponseWriter, r *http.Request) {
+	ctx := appCtxForRequest(r)
 	var body struct {
 		Name     string `json:"name"`
 		Provider string `json:"provider"`
@@ -170,7 +171,7 @@ func (a *App) httpCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	switch body.Provider {
 	case "hetzner":
-		inst, err := hetznerProvision(globalCtx, in)
+		inst, err := hetznerProvision(ctx, in)
 		if err != nil {
 			httpErr(w, http.StatusBadGateway, err.Error())
 			return
@@ -182,26 +183,28 @@ func (a *App) httpCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) httpDestroy(w http.ResponseWriter, r *http.Request, id int64) {
+	ctx := appCtxForRequest(r)
 	if id == 0 {
 		httpErr(w, http.StatusBadRequest, ErrLocalInstanceImmutable.Error())
 		return
 	}
-	inst, err := dbGetInstance(globalCtx.AppDB(), id)
+	inst, err := dbGetInstance(ctx.AppDB(), id)
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "instance not found")
 		return
 	}
 	switch inst.Provider {
 	case "hetzner":
-		if err := hetznerDestroy(globalCtx, inst); err != nil {
+		if err := hetznerDestroy(ctx, inst); err != nil {
 			httpErr(w, http.StatusBadGateway, err.Error())
 			return
 		}
 	}
-	if err := dbDeleteInstance(globalCtx.AppDB(), id); err != nil {
+	if err := deleteInstanceAndEmit(ctx, inst); err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	globalSSHPool.evict(id)
 	httpJSON(w, map[string]any{"destroyed": true, "id": id})
 }
 
@@ -211,8 +214,8 @@ func (a *App) httpRun(w http.ResponseWriter, r *http.Request, id int64) {
 		return
 	}
 	var body struct {
-		Cmd       string `json:"cmd"`
-		TimeoutS  int    `json:"timeout_s"`
+		Cmd      string `json:"cmd"`
+		TimeoutS int    `json:"timeout_s"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
@@ -285,6 +288,7 @@ func (a *App) httpUpload(w http.ResponseWriter, r *http.Request, id int64) {
 }
 
 func (a *App) httpWaitReady(w http.ResponseWriter, r *http.Request, id int64) {
+	ctx := appCtxForRequest(r)
 	if r.Method != http.MethodPost {
 		httpErr(w, http.StatusMethodNotAllowed, "POST")
 		return
@@ -297,7 +301,7 @@ func (a *App) httpWaitReady(w http.ResponseWriter, r *http.Request, id int64) {
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
 	}
-	inst, err := dbGetInstance(globalCtx.AppDB(), id)
+	inst, err := dbGetInstance(ctx.AppDB(), id)
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "instance not found")
 		return
@@ -310,7 +314,7 @@ func (a *App) httpWaitReady(w http.ResponseWriter, r *http.Request, id int64) {
 		httpErr(w, http.StatusGatewayTimeout, err.Error())
 		return
 	}
-	_ = dbUpdateInstance(globalCtx.AppDB(), id, map[string]any{"status": "ready", "ready_at": nowUTC()})
+	_, _ = updateInstanceAndEmit(ctx, id, map[string]any{"status": "ready", "ready_at": nowUTC()})
 	httpJSON(w, map[string]any{"ready": true, "id": id, "status": "ready"})
 }
 

@@ -184,7 +184,7 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			return nil, err
 		}
 	}
-	if err := dbDeleteInstance(ctx.AppDB(), id); err != nil {
+	if err := deleteInstanceAndEmit(ctx, inst); err != nil {
 		return nil, err
 	}
 	// Release any pooled SSH connection to the now-dead host so we
@@ -265,7 +265,7 @@ func (a *App) toolWaitReady(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := probeSSHReady(inst, timeout); err != nil {
 		return nil, err
 	}
-	_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{"status": "ready", "ready_at": nowUTC()})
+	_, _ = updateInstanceAndEmit(ctx, id, map[string]any{"status": "ready", "ready_at": nowUTC()})
 	return map[string]any{"ready": true, "id": id, "status": "ready"}, nil
 }
 
