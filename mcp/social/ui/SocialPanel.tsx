@@ -1861,7 +1861,10 @@ function StoragePickerDialog({
       style={{ zIndex: 60 }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div className="bg-bg border border-border rounded-lg w-[min(720px,92vw)] max-h-[85vh] flex flex-col">
+      <div
+        className="bg-bg border border-border rounded-lg flex flex-col"
+        style={{ width: "min(720px, 92vw)", maxHeight: "85vh" }}
+      >
         <div className="flex items-center justify-between px-4 py-3 border-b border-border">
           <div className="text-sm font-bold text-text">Pick from storage</div>
           <button
