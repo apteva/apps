@@ -628,8 +628,15 @@ function SessionDetail({
               Double
             </IconButton>
           </div>
-          {err && <div style={{ color: "#dc2626", fontSize: "12px" }}>{err}</div>}
-          {busy && <div className="text-text-muted" style={{ fontSize: "12px" }}>{busy}...</div>}
+          <div style={actionStatusStyle}>
+            {err ? (
+              <span style={{ color: "#dc2626" }}>{err}</span>
+            ) : busy ? (
+              <span className="text-text-muted">{busy}...</span>
+            ) : (
+              <span aria-hidden>&nbsp;</span>
+            )}
+          </div>
         </div>
 
         <DataList
@@ -1114,6 +1121,15 @@ const browserViewportStyle = {
   minHeight: "360px",
   borderRadius: "6px",
   overflow: "hidden",
+} as const;
+
+const actionStatusStyle = {
+  minHeight: "16px",
+  fontSize: "12px",
+  lineHeight: "16px",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
 } as const;
 
 const previewOverlayStyle = {

@@ -39,10 +39,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.4
+version: 0.7.5
 description: |
-  Watch and steer browser sessions. v0.7.4 fixes click coordinates
-  in the enlarged object-fit browser preview.
+  Watch and steer browser sessions. v0.7.5 keeps the enlarged browser
+  viewport stable while action status changes.
 scopes: [project, global]
 requires:
   permissions:
