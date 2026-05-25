@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.5
+version: 0.14.6
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -3110,7 +3110,7 @@ func (a *App) getFacebookAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResul
 	series := insightSeries{}
 	var raw json.RawMessage
 	var skipped []string
-	for _, metric := range []string{"page_fans", "page_impressions", "page_impressions_unique", "page_post_engagements"} {
+	for _, metric := range []string{"page_impressions", "page_impressions_unique", "page_post_engagements"} {
 		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_page_insights", map[string]any{
 			"pageId":       pageID,
 			"metric":       metric,
@@ -3142,7 +3142,7 @@ func (a *App) getFacebookAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResul
 	if len(skipped) > 0 {
 		out.Reason = "some Facebook metrics were unavailable for this page/API version"
 	}
-	out.Followers = latestInsight(series, "page_fans")
+	out.Followers = a.getFacebookPageFollowers(ctx, connID, pageID)
 	out.Impressions = latestInsight(series, "page_impressions")
 	out.Reach = latestInsight(series, "page_impressions_unique")
 	out.Engagements = latestInsight(series, "page_post_engagements")
@@ -3169,7 +3169,7 @@ func (a *App) getInstagramAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResu
 	since, until := metricsDateWindow(30)
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_account_insights", map[string]any{
 		"instagramAccountId": instagramAccountID,
-		"metric":             "reach,follower_count",
+		"metric":             "reach",
 		"period":             period,
 		"metric_type":        "time_series",
 		"since":              since,
@@ -3186,11 +3186,66 @@ func (a *App) getInstagramAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResu
 	}
 	series := parseInsightSeries(res.Data)
 	out.Status = "ok"
-	out.Followers = latestInsight(series, "follower_count")
+	followers, following, mediaCount := a.getInstagramAccountTotals(ctx, connID, instagramAccountID)
+	out.Followers = followers
+	out.Following = following
+	out.TotalVideos = mediaCount
 	out.Reach = latestInsight(series, "reach")
 	out.Insights = series
 	out.Raw = res.Data
 	return out
+}
+
+func (a *App) getFacebookPageFollowers(ctx *sdk.AppCtx, connID int64, pageID string) int64 {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_pages", map[string]any{
+		"fields": "id,name,fan_count,followers_count",
+		"limit":  100,
+	})
+	if err != nil || res == nil || !res.Success {
+		return 0
+	}
+	var resp struct {
+		Data []map[string]any `json:"data"`
+	}
+	if json.Unmarshal(res.Data, &resp) != nil {
+		return 0
+	}
+	for _, page := range resp.Data {
+		if toString(page["id"]) != pageID {
+			continue
+		}
+		if n := insightValueToInt64(page["followers_count"]); n > 0 {
+			return n
+		}
+		return insightValueToInt64(page["fan_count"])
+	}
+	return 0
+}
+
+func (a *App) getInstagramAccountTotals(ctx *sdk.AppCtx, connID int64, instagramAccountID string) (int64, int64, int64) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_pages", map[string]any{
+		"fields": "id,name,instagram_business_account{id,username,followers_count,follows_count,media_count}",
+		"limit":  100,
+	})
+	if err != nil || res == nil || !res.Success {
+		return 0, 0, 0
+	}
+	var resp struct {
+		Data []map[string]any `json:"data"`
+	}
+	if json.Unmarshal(res.Data, &resp) != nil {
+		return 0, 0, 0
+	}
+	for _, page := range resp.Data {
+		ig, _ := page["instagram_business_account"].(map[string]any)
+		if toString(ig["id"]) != instagramAccountID {
+			continue
+		}
+		return insightValueToInt64(ig["followers_count"]),
+			insightValueToInt64(ig["follows_count"]),
+			insightValueToInt64(ig["media_count"])
+	}
+	return 0, 0, 0
 }
 
 func (a *App) getTikTokAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64) accountMetricsResult {
