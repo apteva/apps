@@ -270,6 +270,58 @@ func TestHTTPRoutesUseCanonicalToolHandlers(t *testing.T) {
 	}
 }
 
+func TestContextCatalogResolvesBrowserSessionContextName(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a},
+		url:     "https://example.test",
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		return fake, nil
+	}
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	if ctx.AppDB() == nil {
+		t.Fatal("test context has no AppDB")
+	}
+
+	created, err := app.toolContextCreate(ctx, map[string]any{
+		"name":            "login",
+		"backend":         "local",
+		"persist_default": false,
+	})
+	if err != nil {
+		t.Fatalf("context create: %v", err)
+	}
+	contextRow := created.(map[string]any)["context"].(*ComputerContext)
+	if contextRow.ProviderContextID == "" {
+		t.Fatalf("provider context id empty: %+v", contextRow)
+	}
+
+	out, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":       "open",
+		"backend":      "local",
+		"context_name": "login",
+	})
+	if err != nil {
+		t.Fatalf("browser_session open with context_name: %v", err)
+	}
+	openMap := out.(map[string]any)
+	if openMap["app_context_id"] != contextRow.ID {
+		t.Errorf("app_context_id: want %q, got %v", contextRow.ID, openMap["app_context_id"])
+	}
+	if fake.openContextID != contextRow.ProviderContextID {
+		t.Errorf("OpenSession context id: want %q, got %q", contextRow.ProviderContextID, fake.openContextID)
+	}
+	if fake.openPersist {
+		t.Errorf("persist should use context default false")
+	}
+}
+
 // ─── fake Computer ─────────────────────────────────────────────────
 
 // fakeComp implements backends.Computer + SessionOpener + SessionInfo

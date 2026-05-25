@@ -9,11 +9,15 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -23,6 +27,7 @@ import (
 
 	sdk "github.com/apteva/app-sdk"
 	backends "github.com/apteva/apps/mcp/computer/internal/browser"
+	_ "modernc.org/sqlite"
 )
 
 // ─── Manifest (also lives in apteva.yaml) ──────────────────────────
@@ -34,13 +39,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.5.1
+version: 0.7.0
 description: |
-  Watch and steer browser sessions. v0.5.1 replaces browser-native
-  panel confirmations with app-rendered modals.
+  Watch and steer browser sessions. v0.7.0 adds app-managed browser
+  contexts linked to local, Browserbase, Steel, and Browser Engine.
 scopes: [project, global]
 requires:
   permissions:
+    - db.write.app
     - net.egress
     - platform.connections.read_credentials
   integrations:
@@ -64,6 +70,16 @@ provides:
       description: "Open, resume, list, inspect, or close app-owned browser sessions. Args: action, session_id?, backend?, backend_session_id?, url?, context_id?, persist?, timeout?, proxy?, proxy_country?, viewport?."
     - name: computer_use
       description: "Drive an app-owned browser session. Args: session_id, action, coordinate?, label?, text?, key?, direction?, amount?, duration?. Returns screenshot bytes for visual actions."
+    - name: computer_context_create
+      description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
+    - name: computer_context_list
+      description: "List app-managed browser contexts. Args: backend?."
+    - name: computer_context_get
+      description: "Fetch one browser context by id or backend+name."
+    - name: computer_context_update
+      description: "Update browser context metadata/defaults. Args: id, name?, provider_context_id?, persist_default?, metadata?."
+    - name: computer_context_delete
+      description: "Delete or unlink an app-managed browser context. Args: id, delete_provider?."
     - name: browser_open
       description: "Compatibility alias for browser_session(action=open)."
     - name: browser_list
@@ -98,6 +114,10 @@ runtime:
     entry: mcp/computer
   port: 8080
   health_check: /health
+db:
+  driver: sqlite
+  path: /data/computer.db
+  migrations: migrations/
 `
 
 // newBackend is the factory the handlers use to construct a backend.
@@ -115,10 +135,13 @@ const reapInterval = 5 * time.Minute
 
 // session is one open browser, owned by this sidecar.
 type session struct {
-	comp     backends.Computer
-	backend  string
-	openedAt time.Time
-	lastUsed time.Time
+	comp         backends.Computer
+	backend      string
+	appContextID string
+	contextName  string
+	persist      bool
+	openedAt     time.Time
+	lastUsed     time.Time
 }
 
 // registry holds open sessions across all callers in this sidecar
@@ -200,6 +223,9 @@ func (a *App) Manifest() sdk.Manifest {
 }
 
 func (a *App) OnMount(ctx *sdk.AppCtx) error {
+	if ctx.AppDB() == nil {
+		return errors.New("computer requires a db block")
+	}
 	a.reg = &registry{m: map[string]*session{}}
 	globalCtx = ctx
 	go a.reaper(ctx)
@@ -234,6 +260,11 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 // /api/apps/computer/<pattern>.
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Method: http.MethodGet, Pattern: "/contexts", Handler: a.handleContextsCollection},
+		{Method: http.MethodPost, Pattern: "/contexts", Handler: a.handleContextsCollection},
+		{Method: http.MethodGet, Pattern: "/contexts/{id}", Handler: a.handleContextItem},
+		{Method: http.MethodPatch, Pattern: "/contexts/{id}", Handler: a.handleContextItem},
+		{Method: http.MethodDelete, Pattern: "/contexts/{id}", Handler: a.handleContextItem},
 		{Method: http.MethodGet, Pattern: "/sessions", Handler: a.handleListSessions},
 		{Method: http.MethodPost, Pattern: "/sessions", Handler: a.handleOpenSession},
 		{Method: http.MethodDelete, Pattern: "/sessions/{id}", Handler: a.handleCloseSession},
@@ -259,11 +290,16 @@ func (a *App) MCPTools() []sdk.Tool {
 				"backend_session_id": map[string]any{"type": "string", "description": "Provider session id to attach/resume for Browserbase or Browser Engine."},
 				"backend":            map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
 				"url":                map[string]any{"type": "string"},
-				"context_id":         map[string]any{"type": "string"},
-				"persist":            map[string]any{"type": "boolean"},
-				"timeout":            map[string]any{"type": "integer"},
-				"proxy":              map[string]any{"type": "boolean"},
-				"proxy_country":      map[string]any{"type": "string"},
+				"context_id":         map[string]any{"type": "string", "description": "App context id preferred; legacy raw provider context ids still work."},
+				"context_name":       map[string]any{"type": "string"},
+				"provider_context_id": map[string]any{
+					"type": "string",
+				},
+				"auto_create_context": map[string]any{"type": "boolean"},
+				"persist":             map[string]any{"type": "boolean"},
+				"timeout":             map[string]any{"type": "integer"},
+				"proxy":               map[string]any{"type": "boolean"},
+				"proxy_country":       map[string]any{"type": "string"},
 				"viewport": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -293,19 +329,76 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolComputerUse,
 		},
 		{
+			Name:        "computer_context_create",
+			Description: "Create or import an app-managed browser context. Browserbase creates a provider Context immediately; local/browser-engine use the app id as provider id; Steel materializes the profile id on first persisted session.",
+			InputSchema: schemaObject(map[string]any{
+				"name":                 map[string]any{"type": "string"},
+				"backend":              map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine"}},
+				"provider_context_id":  map[string]any{"type": "string"},
+				"persist_default":      map[string]any{"type": "boolean"},
+				"metadata":             map[string]any{"type": "object"},
+				"auto_create_provider": map[string]any{"type": "boolean"},
+			}, []string{"name"}),
+			Handler: a.toolContextCreate,
+		},
+		{
+			Name:        "computer_context_list",
+			Description: "List app-managed browser contexts. Args: backend?.",
+			InputSchema: schemaObject(map[string]any{
+				"backend": map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine"}},
+			}, nil),
+			Handler: a.toolContextList,
+		},
+		{
+			Name:        "computer_context_get",
+			Description: "Fetch one app-managed browser context by id, or by backend+name.",
+			InputSchema: schemaObject(map[string]any{
+				"id":      map[string]any{"type": "string"},
+				"backend": map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine"}},
+				"name":    map[string]any{"type": "string"},
+			}, nil),
+			Handler: a.toolContextGet,
+		},
+		{
+			Name:        "computer_context_update",
+			Description: "Update context name, provider id, persist default, or metadata. Args: id, name?, provider_context_id?, persist_default?, metadata?.",
+			InputSchema: schemaObject(map[string]any{
+				"id":                  map[string]any{"type": "string"},
+				"name":                map[string]any{"type": "string"},
+				"provider_context_id": map[string]any{"type": "string"},
+				"persist_default":     map[string]any{"type": "boolean"},
+				"metadata":            map[string]any{"type": "object"},
+			}, []string{"id"}),
+			Handler: a.toolContextUpdate,
+		},
+		{
+			Name:        "computer_context_delete",
+			Description: "Delete or unlink an app-managed browser context. Args: id, delete_provider? (Browserbase only; default false).",
+			InputSchema: schemaObject(map[string]any{
+				"id":              map[string]any{"type": "string"},
+				"delete_provider": map[string]any{"type": "boolean"},
+			}, []string{"id"}),
+			Handler: a.toolContextDelete,
+		},
+		{
 			Name: "browser_open",
 			Description: "Compatibility alias for browser_session(action=open). Args: backend? (local|browserbase|steel|browser-engine, default per APTEVA_BROWSER_BACKEND env then \"local\"), " +
 				"url? (navigate after open), viewport? ({width:int, height:int}, default 1600x800). " +
 				"Returns {session_id, backend, current_url, width, height}. " +
 				"Session owned by this sidecar until browser_close or 30-minute idle reaper.",
 			InputSchema: schemaObject(map[string]any{
-				"backend":       map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
-				"url":           map[string]any{"type": "string"},
-				"context_id":    map[string]any{"type": "string"},
-				"persist":       map[string]any{"type": "boolean"},
-				"timeout":       map[string]any{"type": "integer"},
-				"proxy":         map[string]any{"type": "boolean"},
-				"proxy_country": map[string]any{"type": "string"},
+				"backend":      map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
+				"url":          map[string]any{"type": "string"},
+				"context_id":   map[string]any{"type": "string"},
+				"context_name": map[string]any{"type": "string"},
+				"provider_context_id": map[string]any{
+					"type": "string",
+				},
+				"auto_create_context": map[string]any{"type": "boolean"},
+				"persist":             map[string]any{"type": "boolean"},
+				"timeout":             map[string]any{"type": "integer"},
+				"proxy":               map[string]any{"type": "boolean"},
+				"proxy_country":       map[string]any{"type": "string"},
 				"viewport": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -344,6 +437,161 @@ func (a *App) MCPTools() []sdk.Tool {
 
 // ─── Tool handlers ─────────────────────────────────────────────────
 
+func (a *App) toolContextCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	rec, err := a.createContextRecord(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"context": rec}, nil
+}
+
+func (a *App) toolContextList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	db := appDB(ctx)
+	if db == nil {
+		return nil, fmt.Errorf("context catalog unavailable")
+	}
+	rows, err := dbListContexts(db, stringArg(args, "backend"))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"contexts": rows}, nil
+}
+
+func (a *App) toolContextGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	db := appDB(ctx)
+	if db == nil {
+		return nil, fmt.Errorf("context catalog unavailable")
+	}
+	var rec *ComputerContext
+	var err error
+	if id := stringArg(args, "id"); id != "" {
+		rec, err = dbGetContext(db, id)
+	} else {
+		backend := stringArg(args, "backend")
+		if backend == "" {
+			backend = "local"
+		}
+		name := stringArg(args, "name")
+		if name == "" {
+			return nil, fmt.Errorf("id or name required")
+		}
+		rec, err = dbGetContextByName(db, backend, name)
+	}
+	if err != nil {
+		if errors.Is(err, errContextNotFound) {
+			return map[string]any{"found": false}, nil
+		}
+		return nil, err
+	}
+	return map[string]any{"found": true, "context": rec}, nil
+}
+
+func (a *App) toolContextUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	db := appDB(ctx)
+	if db == nil {
+		return nil, fmt.Errorf("context catalog unavailable")
+	}
+	id := stringArg(args, "id")
+	if id == "" {
+		return nil, fmt.Errorf("id required")
+	}
+	fields := map[string]any{}
+	if name := strings.TrimSpace(stringArg(args, "name")); name != "" {
+		fields["name"] = name
+	}
+	if providerID := stringArg(args, "provider_context_id"); providerID != "" {
+		fields["provider_context_id"] = providerID
+	}
+	if v, ok := boolArg(args, "persist_default"); ok {
+		fields["persist_default"] = v
+	}
+	if raw, ok := args["metadata"]; ok {
+		metadataJSON, err := marshalMetadata(raw)
+		if err != nil {
+			return nil, err
+		}
+		fields["metadata_json"] = metadataJSON
+	}
+	rec, err := dbUpdateContext(db, id, fields)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"context": rec}, nil
+}
+
+func (a *App) toolContextDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	db := appDB(ctx)
+	if db == nil {
+		return nil, fmt.Errorf("context catalog unavailable")
+	}
+	id := stringArg(args, "id")
+	if id == "" {
+		return nil, fmt.Errorf("id required")
+	}
+	rec, err := dbGetContext(db, id)
+	if err != nil {
+		if errors.Is(err, errContextNotFound) {
+			return map[string]any{"deleted": false}, nil
+		}
+		return nil, err
+	}
+	providerDeleted := false
+	if boolArgDefault(args, "delete_provider", false) && rec.ProviderContextID != "" {
+		if err := deleteProviderContext(ctx, rec.Backend, rec.ProviderContextID); err != nil {
+			return nil, err
+		}
+		providerDeleted = true
+	}
+	if err := dbDeleteContext(db, id); err != nil {
+		return nil, err
+	}
+	return map[string]any{"deleted": true, "provider_deleted": providerDeleted}, nil
+}
+
+func (a *App) createContextRecord(ctx *sdk.AppCtx, args map[string]any) (*ComputerContext, error) {
+	db := appDB(ctx)
+	if db == nil {
+		return nil, fmt.Errorf("context catalog unavailable")
+	}
+	name := strings.TrimSpace(stringArg(args, "name"))
+	if name == "" {
+		return nil, fmt.Errorf("name required")
+	}
+	backend := stringArg(args, "backend")
+	if backend == "" {
+		backend = os.Getenv("APTEVA_BROWSER_BACKEND")
+	}
+	backend = normalizeBackend(backend)
+	providerID := stringArg(args, "provider_context_id")
+	persistDefault := boolArgDefault(args, "persist_default", true)
+	autoCreateProvider := boolArgDefault(args, "auto_create_provider", true)
+
+	if providerID == "" && autoCreateProvider {
+		id, err := createProviderContext(ctx, backend)
+		if err != nil {
+			return nil, err
+		}
+		providerID = id
+	}
+	if providerID == "" && (backend == "local" || backend == "browser-engine") {
+		providerID = newContextID()
+	}
+
+	metadataJSON, err := marshalMetadata(args["metadata"])
+	if err != nil {
+		return nil, err
+	}
+	autoCreated := boolArgDefault(args, "auto_created", false)
+	return dbCreateContext(db, contextCreateInput{
+		Name:              name,
+		Backend:           backend,
+		ProviderContextID: providerID,
+		PersistDefault:    persistDefault,
+		AutoCreated:       autoCreated,
+		MetadataJSON:      metadataJSON,
+	})
+}
+
 func (a *App) toolBrowserSession(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	action := stringArg(args, "action")
 	if action == "" {
@@ -377,6 +625,95 @@ func (a *App) toolBrowserOpen(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	return a.openBrowserSession(ctx, args, false)
 }
 
+type resolvedContext struct {
+	AppContextID         string
+	ContextName          string
+	Backend              string
+	ProviderContextID    string
+	Persist              bool
+	CreateProviderOnOpen bool
+}
+
+func (a *App) resolveSessionContext(ctx *sdk.AppCtx, backend string, args map[string]any, resume bool) (resolvedContext, error) {
+	persist := boolArgDefault(args, "persist", true)
+	out := resolvedContext{Persist: persist}
+	if resume {
+		return out, nil
+	}
+
+	rawProviderID := firstNonEmpty(stringArg(args, "provider_context_id"), stringArg(args, "provider_context"))
+	contextIDArg := stringArg(args, "context_id")
+	contextName := strings.TrimSpace(stringArg(args, "context_name"))
+	autoCreate := boolArgDefault(args, "auto_create_context", false)
+
+	db := appDB(ctx)
+	if db == nil {
+		out.ProviderContextID = firstNonEmpty(rawProviderID, contextIDArg)
+		return out, nil
+	}
+
+	var rec *ComputerContext
+	var err error
+	if contextIDArg != "" {
+		rec, err = dbGetContext(db, contextIDArg)
+		if err != nil && !errors.Is(err, errContextNotFound) {
+			return out, fmt.Errorf("get context %q: %w", contextIDArg, err)
+		}
+		if err != nil {
+			rec = nil
+		}
+	}
+	if rec == nil && contextName != "" {
+		rec, err = dbGetContextByName(db, backend, contextName)
+		if err != nil && !errors.Is(err, errContextNotFound) {
+			return out, fmt.Errorf("get context %q/%q: %w", backend, contextName, err)
+		}
+		if err != nil {
+			rec = nil
+		}
+	}
+	if rec == nil && rawProviderID != "" {
+		rec, err = dbGetContextByProviderID(db, backend, rawProviderID)
+		if err != nil && !errors.Is(err, errContextNotFound) {
+			return out, fmt.Errorf("get provider context %q/%q: %w", backend, rawProviderID, err)
+		}
+		if err != nil {
+			rec = nil
+		}
+	}
+	if rec == nil && autoCreate {
+		name := firstNonEmpty(contextName, contextIDArg)
+		if name == "" {
+			return out, fmt.Errorf("context_name required when auto_create_context=true")
+		}
+		rec, err = a.createContextRecord(ctx, map[string]any{
+			"name":                 name,
+			"backend":              backend,
+			"provider_context_id":  rawProviderID,
+			"persist_default":      persist,
+			"auto_create_provider": true,
+			"auto_created":         true,
+		})
+		if err != nil {
+			return out, err
+		}
+	}
+	if rec != nil {
+		out.AppContextID = rec.ID
+		out.ContextName = rec.Name
+		out.Backend = rec.Backend
+		out.ProviderContextID = rec.ProviderContextID
+		out.Persist = boolArgDefault(args, "persist", rec.PersistDefault)
+		if out.ProviderContextID == "" && backend == "steel" {
+			out.CreateProviderOnOpen = true
+		}
+		return out, nil
+	}
+
+	out.ProviderContextID = firstNonEmpty(rawProviderID, contextIDArg)
+	return out, nil
+}
+
 func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bool) (any, error) {
 	backend := stringArg(args, "backend")
 	if backend == "" {
@@ -390,6 +727,14 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 	if vp, ok := args["viewport"].(map[string]any); ok {
 		width = intArg(vp, "width")
 		height = intArg(vp, "height")
+	}
+
+	rc, err := a.resolveSessionContext(ctx, backend, args, resume)
+	if err != nil {
+		return nil, err
+	}
+	if rc.Backend != "" {
+		backend = rc.Backend
 	}
 
 	cfg := backendConfig(ctx, args, backend, width, height)
@@ -413,13 +758,14 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		backendSessionID = stringArg(args, "session_id")
 	}
 	openOpts := backends.OpenOptions{
-		URL:          stringArg(args, "url"),
-		ContextID:    stringArg(args, "context_id"),
-		Persist:      boolArgDefault(args, "persist", true),
-		SessionID:    backendSessionID,
-		Timeout:      intArg(args, "timeout"),
-		Proxy:        boolPtrArg(args, "proxy"),
-		ProxyCountry: stringArg(args, "proxy_country"),
+		URL:           stringArg(args, "url"),
+		ContextID:     rc.ProviderContextID,
+		CreateContext: rc.CreateProviderOnOpen,
+		Persist:       rc.Persist,
+		SessionID:     backendSessionID,
+		Timeout:       intArg(args, "timeout"),
+		Proxy:         boolPtrArg(args, "proxy"),
+		ProxyCountry:  stringArg(args, "proxy_country"),
 	}
 	if opener, ok := comp.(backends.SessionOpener); ok {
 		if err := opener.OpenSession(openOpts); err != nil {
@@ -439,19 +785,37 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		}
 	}
 
+	if rc.AppContextID != "" {
+		providerID := contextID(comp)
+		if providerID != "" && providerID != rc.ProviderContextID && ctx != nil && ctx.AppDB() != nil {
+			updated, err := dbUpdateContext(ctx.AppDB(), rc.AppContextID, map[string]any{"provider_context_id": providerID})
+			if err != nil {
+				_ = comp.Close()
+				return nil, fmt.Errorf("update context provider id: %w", err)
+			}
+			rc.ProviderContextID = updated.ProviderContextID
+		}
+		if ctx != nil {
+			dbTouchContext(ctx.AppDB(), rc.AppContextID)
+		}
+	}
+
 	id := newSessionID()
 	now := time.Now()
 	a.reg.put(id, &session{
-		comp:     comp,
-		backend:  backend,
-		openedAt: now,
-		lastUsed: now,
+		comp:         comp,
+		backend:      backend,
+		appContextID: rc.AppContextID,
+		contextName:  rc.ContextName,
+		persist:      rc.Persist,
+		openedAt:     now,
+		lastUsed:     now,
 	})
 
 	if ctx != nil {
 		ctx.Logger().Info("browser_open", "session_id", id, "backend", backend)
 	}
-	return a.sessionOutput(id, &session{comp: comp, backend: backend, openedAt: now, lastUsed: now}), nil
+	return a.sessionOutput(id, &session{comp: comp, backend: backend, appContextID: rc.AppContextID, contextName: rc.ContextName, persist: rc.Persist, openedAt: now, lastUsed: now}), nil
 }
 
 // sessionInfo is the shape each row in browser_list / /api/sessions
@@ -462,6 +826,9 @@ type sessionInfo struct {
 	BackendSessionID string `json:"backend_session_id,omitempty"`
 	Backend          string `json:"backend"`
 	ContextID        string `json:"context_id,omitempty"`
+	AppContextID     string `json:"app_context_id,omitempty"`
+	ContextName      string `json:"context_name,omitempty"`
+	Persist          bool   `json:"persist"`
 	CurrentURL       string `json:"current_url"`
 	DebugURL         string `json:"debug_url,omitempty"`
 	StreamURL        string `json:"stream_url,omitempty"`
@@ -482,22 +849,25 @@ func (a *App) toolBrowserList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 // on a slow getter.
 func (a *App) listSessions() []sessionInfo {
 	type frozen struct {
-		id      string
-		comp    backends.Computer
-		backend string
-		opened  time.Time
-		used    time.Time
+		id           string
+		comp         backends.Computer
+		backend      string
+		appContextID string
+		contextName  string
+		persist      bool
+		opened       time.Time
+		used         time.Time
 	}
 	a.reg.mu.Lock()
 	rows := make([]frozen, 0, len(a.reg.m))
 	for id, s := range a.reg.m {
-		rows = append(rows, frozen{id: id, comp: s.comp, backend: s.backend, opened: s.openedAt, used: s.lastUsed})
+		rows = append(rows, frozen{id: id, comp: s.comp, backend: s.backend, appContextID: s.appContextID, contextName: s.contextName, persist: s.persist, opened: s.openedAt, used: s.lastUsed})
 	}
 	a.reg.mu.Unlock()
 
 	out := make([]sessionInfo, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, a.sessionInfo(r.id, &session{comp: r.comp, backend: r.backend, openedAt: r.opened, lastUsed: r.used}))
+		out = append(out, a.sessionInfo(r.id, &session{comp: r.comp, backend: r.backend, appContextID: r.appContextID, contextName: r.contextName, persist: r.persist, openedAt: r.opened, lastUsed: r.used}))
 	}
 	return out
 }
@@ -509,6 +879,9 @@ func (a *App) sessionInfo(id string, s *session) sessionInfo {
 		BackendSessionID: backendSessionID(s.comp),
 		Backend:          s.backend,
 		ContextID:        contextID(s.comp),
+		AppContextID:     s.appContextID,
+		ContextName:      s.contextName,
+		Persist:          s.persist,
 		CurrentURL:       currentURL(s.comp),
 		DebugURL:         debugURL(s.comp),
 		StreamURL:        streamURL(s.comp),
@@ -526,6 +899,9 @@ func (a *App) sessionOutput(id string, s *session) map[string]any {
 		"backend_session_id": info.BackendSessionID,
 		"backend":            info.Backend,
 		"context_id":         info.ContextID,
+		"app_context_id":     info.AppContextID,
+		"context_name":       info.ContextName,
+		"persist":            info.Persist,
 		"current_url":        info.CurrentURL,
 		"debug_url":          info.DebugURL,
 		"stream_url":         info.StreamURL,
@@ -644,6 +1020,132 @@ func newSessionID() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
 	return "br_" + hex.EncodeToString(b[:])
+}
+
+func newContextID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return "ctx_" + hex.EncodeToString(b[:])
+}
+
+func appDB(ctx *sdk.AppCtx) *sql.DB {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.AppDB()
+}
+
+func normalizeBackend(backend string) string {
+	if backend == "" {
+		backend = "local"
+	}
+	return backend
+}
+
+func marshalMetadata(v any) (string, error) {
+	if v == nil {
+		return "{}", nil
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return "", fmt.Errorf("metadata: %w", err)
+	}
+	if string(raw) == "null" {
+		return "{}", nil
+	}
+	return string(raw), nil
+}
+
+func createProviderContext(ctx *sdk.AppCtx, backend string) (string, error) {
+	switch backend {
+	case "browserbase":
+		return createBrowserbaseContext(ctx)
+	case "local", "browser-engine":
+		return newContextID(), nil
+	case "steel":
+		// Steel creates a profile id from the first session opened with
+		// persistProfile=true. The app row is created now and updated
+		// with that provider id after browser_session(open) returns.
+		return "", nil
+	default:
+		return "", fmt.Errorf("backend %q does not support managed contexts", backend)
+	}
+}
+
+func deleteProviderContext(ctx *sdk.AppCtx, backend, providerID string) error {
+	switch backend {
+	case "browserbase":
+		return deleteBrowserbaseContext(ctx, providerID)
+	case "local", "browser-engine", "steel":
+		return fmt.Errorf("provider deletion is not implemented for backend %q; delete without delete_provider to unlink the app row", backend)
+	default:
+		return fmt.Errorf("backend %q does not support managed contexts", backend)
+	}
+}
+
+func createBrowserbaseContext(ctx *sdk.AppCtx) (string, error) {
+	fields := integrationFields(ctx, "browserbase")
+	apiKey := firstNonEmpty(fields["api_key"], fields["BROWSERBASE_API_KEY"], os.Getenv("BROWSERBASE_API_KEY"))
+	projectID := firstNonEmpty(fields["project_id"], fields["BROWSERBASE_PROJECT_ID"], os.Getenv("BROWSERBASE_PROJECT_ID"))
+	if apiKey == "" {
+		return "", fmt.Errorf("browserbase: api_key is required to create a context")
+	}
+	body := map[string]any{}
+	if projectID != "" {
+		body["projectId"] = projectID
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequest("POST", "https://api.browserbase.com/v1/contexts", bytes.NewReader(raw))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-BB-API-Key", apiKey)
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("browserbase create context: HTTP %d: %s", resp.StatusCode, string(b))
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("browserbase create context decode: %w", err)
+	}
+	if out.ID == "" {
+		return "", fmt.Errorf("browserbase create context: empty id")
+	}
+	return out.ID, nil
+}
+
+func deleteBrowserbaseContext(ctx *sdk.AppCtx, providerID string) error {
+	fields := integrationFields(ctx, "browserbase")
+	apiKey := firstNonEmpty(fields["api_key"], fields["BROWSERBASE_API_KEY"], os.Getenv("BROWSERBASE_API_KEY"))
+	if apiKey == "" {
+		return fmt.Errorf("browserbase: api_key is required to delete a context")
+	}
+	req, err := http.NewRequest("DELETE", "https://api.browserbase.com/v1/contexts/"+providerID, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-BB-API-Key", apiKey)
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("browserbase delete context: HTTP %d: %s", resp.StatusCode, string(b))
+	}
+	return nil
 }
 
 func backendConfig(ctx *sdk.AppCtx, args map[string]any, backend string, width, height int) backends.Config {
@@ -857,6 +1359,81 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 
 // ─── HTTP handlers ─────────────────────────────────────────────────
 
+func (a *App) handleContextsCollection(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		args := map[string]any{"backend": r.URL.Query().Get("backend")}
+		out, err := a.toolContextList(globalCtx, args)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, out)
+	case http.MethodPost:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
+			httpErr(w, http.StatusBadRequest, "bad JSON body: "+err.Error())
+			return
+		}
+		if body == nil {
+			body = map[string]any{}
+		}
+		out, err := a.toolContextCreate(globalCtx, body)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, out)
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (a *App) handleContextItem(w http.ResponseWriter, r *http.Request) {
+	id := pathContextID(r.URL.Path)
+	if id == "" {
+		httpErr(w, http.StatusBadRequest, "context id required")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		out, err := a.toolContextGet(globalCtx, map[string]any{"id": id})
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, out)
+	case http.MethodPatch:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
+			httpErr(w, http.StatusBadRequest, "bad JSON body: "+err.Error())
+			return
+		}
+		if body == nil {
+			body = map[string]any{}
+		}
+		body["id"] = id
+		out, err := a.toolContextUpdate(globalCtx, body)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, out)
+	case http.MethodDelete:
+		out, err := a.toolContextDelete(globalCtx, map[string]any{
+			"id":              id,
+			"delete_provider": r.URL.Query().Get("delete_provider"),
+		})
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, out)
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
 func (a *App) handleListSessions(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"sessions": a.listSessions()})
@@ -952,6 +1529,11 @@ func (a *App) handleSessionScreenshot(w http.ResponseWriter, r *http.Request) {
 func pathSessionID(path, suffix string) string {
 	rest := strings.TrimPrefix(path, "/sessions/")
 	rest = strings.TrimSuffix(rest, suffix)
+	return strings.Trim(rest, "/")
+}
+
+func pathContextID(path string) string {
+	rest := strings.TrimPrefix(path, "/contexts/")
 	return strings.Trim(rest, "/")
 }
 

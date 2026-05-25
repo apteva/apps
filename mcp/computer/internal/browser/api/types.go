@@ -77,6 +77,12 @@ type OpenOptions struct {
 	// ContextID binds the new session to a persistent context. Mutually
 	// exclusive with SessionID. Provider-scoped — see Context.
 	ContextID string
+	// CreateContext asks a backend that can materialize a context/profile
+	// during session creation to do so and expose the provider id via
+	// ContextInfo after OpenSession returns. Steel uses this for first-run
+	// profile creation; Browserbase contexts are created through its
+	// explicit REST API before OpenSession.
+	CreateContext bool
 	// Persist controls whether changes are saved back to the context
 	// at session close. Defaults true (matches Browserbase default).
 	Persist bool

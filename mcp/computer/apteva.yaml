@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.5.1
+version: 0.7.0
 description: |
-  Watch and steer browser sessions. v0.5.1 replaces browser-native
-  panel confirmations with app-rendered modals.
+  Watch and steer browser sessions. v0.7.0 adds app-managed browser
+  contexts linked to local, Browserbase, Steel, and Browser Engine.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -16,6 +16,7 @@ min_apteva_version: "0.10.0"
 
 requires:
   permissions:
+    - db.write.app
     - net.egress
     - platform.connections.read_credentials
   integrations:
@@ -47,6 +48,25 @@ provides:
         Drive an app-owned browser session. Args: session_id, action,
         coordinate?, label?, text?, key?, direction?, amount?, duration?.
         Returns screenshot bytes for visual actions.
+    - name: computer_context_create
+      description: |
+        Create or import an app-managed browser context. Args: name,
+        backend?, provider_context_id?, persist_default?, metadata?,
+        auto_create_provider?.
+    - name: computer_context_list
+      description: |
+        List app-managed browser contexts. Args: backend?.
+    - name: computer_context_get
+      description: |
+        Fetch one browser context by id or backend+name.
+    - name: computer_context_update
+      description: |
+        Update browser context metadata/defaults. Args: id, name?,
+        provider_context_id?, persist_default?, metadata?.
+    - name: computer_context_delete
+      description: |
+        Delete or unlink an app-managed browser context. Args: id,
+        delete_provider?.
     - name: browser_open
       description: |
         Compatibility alias for browser_session(action=open).
@@ -180,5 +200,10 @@ runtime:
     entry: mcp/computer
   port: 8080
   health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/computer.db
+  migrations: migrations/
 
 upgrade_policy: auto-patch

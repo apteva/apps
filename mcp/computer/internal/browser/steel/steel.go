@@ -123,6 +123,7 @@ type sessionCreateResponse struct {
 	WebsocketURL     string `json:"websocketUrl"`
 	SessionViewerURL string `json:"sessionViewerUrl"`
 	DebugURL         string `json:"debugUrl"`
+	ProfileID        string `json:"profileId"`
 }
 
 func (c *Computer) createSession(o computer.OpenOptions) (string, error) {
@@ -156,6 +157,8 @@ func (c *Computer) createSession(o computer.OpenOptions) (string, error) {
 	if o.ContextID != "" {
 		req.ProfileID = o.ContextID
 		req.PersistProfile = o.Persist
+	} else if o.CreateContext {
+		req.PersistProfile = true
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -185,6 +188,9 @@ func (c *Computer) createSession(o computer.OpenOptions) (string, error) {
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 	c.sessionID = result.ID
+	if result.ProfileID != "" {
+		c.contextID = result.ProfileID
+	}
 	if result.SessionViewerURL != "" {
 		c.viewerURL = result.SessionViewerURL
 	} else {

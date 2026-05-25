@@ -10,6 +10,9 @@ interface SessionRow {
   backend_session_id?: string;
   backend: "local" | "browserbase" | "steel" | string;
   context_id?: string;
+  app_context_id?: string;
+  context_name?: string;
+  persist?: boolean;
   current_url: string;
   debug_url?: string;
   stream_url?: string;
@@ -24,10 +27,29 @@ interface ListResponse {
   error?: string;
 }
 
-type OpenMode = "open" | "resume" | "context";
+interface ContextRow {
+  id: string;
+  name: string;
+  backend: "local" | "browserbase" | "steel" | "browser-engine" | string;
+  provider_context_id?: string;
+  persist_default: boolean;
+  auto_created: boolean;
+  metadata_json?: string;
+  created_at: string;
+  updated_at: string;
+  last_used_at?: string;
+}
+
+interface ContextListResponse {
+  contexts?: ContextRow[];
+  error?: string;
+}
+
+type OpenMode = "open" | "resume" | "context" | "create_context";
 type ProxyMode = "" | "true" | "false";
 
 const SESSIONS_URL = "/api/apps/computer/sessions";
+const CONTEXTS_URL = "/api/apps/computer/contexts";
 const POLL_MS = 4000;
 
 const BACKEND_LABEL: Record<string, string> = {
@@ -40,18 +62,27 @@ const BACKEND_LABEL: Record<string, string> = {
 
 export default function ComputerPanel() {
   const [rows, setRows] = useState<SessionRow[]>([]);
+  const [contexts, setContexts] = useState<ContextRow[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [showOpen, setShowOpen] = useState(false);
   const [pendingClose, setPendingClose] = useState<string | null>(null);
+  const [pendingContextDelete, setPendingContextDelete] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const r = await fetch(SESSIONS_URL, { credentials: "include" });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const body = (await r.json()) as ListResponse;
+      const [sessionsRes, contextsRes] = await Promise.all([
+        fetch(SESSIONS_URL, { credentials: "include" }),
+        fetch(CONTEXTS_URL, { credentials: "include" }),
+      ]);
+      if (!sessionsRes.ok) throw new Error(`sessions HTTP ${sessionsRes.status}`);
+      if (!contextsRes.ok) throw new Error(`contexts HTTP ${contextsRes.status}`);
+      const body = (await sessionsRes.json()) as ListResponse;
+      const contextBody = (await contextsRes.json()) as ContextListResponse;
       if (body.error) throw new Error(body.error);
+      if (contextBody.error) throw new Error(contextBody.error);
       setRows(body.sessions ?? []);
+      setContexts(contextBody.contexts ?? []);
       setErr(null);
     } catch (e: any) {
       setErr(String(e?.message ?? e));
@@ -88,6 +119,22 @@ export default function ComputerPanel() {
 
   const sel = rows.find((r) => r.session_id === selected) ?? null;
   const closeTarget = rows.find((r) => r.session_id === pendingClose) ?? null;
+  const contextDeleteTarget = contexts.find((c) => c.id === pendingContextDelete) ?? null;
+
+  const onDeleteContext = useCallback(
+    async (id: string) => {
+      const r = await fetch(`${CONTEXTS_URL}/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!r.ok) {
+        setErr(`delete context failed: HTTP ${r.status}`);
+        return;
+      }
+      void refresh();
+    },
+    [refresh],
+  );
 
   return (
     <div
@@ -107,11 +154,14 @@ export default function ComputerPanel() {
         onSelect={setSelected}
         onClose={setPendingClose}
         onOpen={() => setShowOpen(true)}
+        contexts={contexts}
+        onDeleteContext={setPendingContextDelete}
       />
       <SessionDetail session={sel} onClose={setPendingClose} onRefresh={refresh} />
       {showOpen && (
         <OpenSessionModal
           onClose={() => setShowOpen(false)}
+          contexts={contexts}
           onOpened={(newID) => {
             setShowOpen(false);
             setSelected(newID);
@@ -132,6 +182,19 @@ export default function ComputerPanel() {
           }}
         />
       )}
+      {contextDeleteTarget && (
+        <ConfirmModal
+          title="Delete Browser Context"
+          body={`Delete ${contextDeleteTarget.name} from the app catalog? Provider state is left intact.`}
+          confirmLabel="Delete context"
+          busyLabel="Deleting..."
+          onCancel={() => setPendingContextDelete(null)}
+          onConfirm={async () => {
+            await onDeleteContext(contextDeleteTarget.id);
+            setPendingContextDelete(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -143,6 +206,8 @@ function BrowsersList({
   onSelect,
   onClose,
   onOpen,
+  contexts,
+  onDeleteContext,
 }: {
   rows: SessionRow[];
   err: string | null;
@@ -150,6 +215,8 @@ function BrowsersList({
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onOpen: () => void;
+  contexts: ContextRow[];
+  onDeleteContext: (id: string) => void;
 }) {
   return (
     <Card className="overflow-hidden flex flex-col">
@@ -192,6 +259,56 @@ function BrowsersList({
             />
           ))}
         </ul>
+        <div className="border-t border-border" style={{ marginTop: "12px", paddingTop: "10px" }}>
+          <div
+            className="text-text-muted"
+            style={{ fontSize: "11px", fontWeight: 600, textTransform: "uppercase", marginBottom: "6px" }}
+          >
+            Contexts
+          </div>
+          {contexts.length === 0 ? (
+            <div className="text-text-muted" style={{ fontSize: "12px", padding: "4px" }}>
+              No saved contexts.
+            </div>
+          ) : (
+            <ul style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
+              {contexts.slice(0, 8).map((ctx) => (
+                <li key={ctx.id} className="border border-border bg-bg-subtle" style={{ borderRadius: "6px", padding: "7px 9px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: "8px" }}>
+                    <span style={{ fontSize: "12px", fontWeight: 500 }}>{ctx.name}</span>
+                    <span style={{ display: "inline-flex", gap: "6px", alignItems: "center" }}>
+                      <span className="text-text-muted" style={{ fontSize: "11px" }}>
+                        {BACKEND_LABEL[ctx.backend] ?? ctx.backend}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onDeleteContext(ctx.id)}
+                        title="Delete context"
+                        className="text-text-muted hover:text-text"
+                        style={{ background: "transparent", border: 0, padding: "1px", cursor: "pointer", display: "inline-flex" }}
+                      >
+                        <XIcon />
+                      </button>
+                    </span>
+                  </div>
+                  <div
+                    className="text-text-muted"
+                    style={{
+                      marginTop: "2px",
+                      fontSize: "11px",
+                      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {ctx.provider_context_id || "pending first persisted session"}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </div>
     </Card>
   );
@@ -502,7 +619,9 @@ function SessionDetail({
           items={[
             { label: "App session", value: session.session_id },
             { label: "Backend session", value: session.backend_session_id || "-" },
-            { label: "Context", value: session.context_id || "-" },
+            { label: "App context", value: session.context_name || session.app_context_id || "-" },
+            { label: "Provider context", value: session.context_id || "-" },
+            { label: "Persist changes", value: session.persist ? "yes" : "no" },
             { label: "Current URL", value: currentURL },
             { label: "Viewport", value: viewport },
             { label: "Opened", value: formatTime(session.opened_at) },
@@ -586,15 +705,19 @@ function InteractivePreview({
 
 function OpenSessionModal({
   onClose,
+  contexts,
   onOpened,
 }: {
   onClose: () => void;
+  contexts: ContextRow[];
   onOpened: (sessionID: string) => void;
 }) {
   const [mode, setMode] = useState<OpenMode>("open");
   const [url, setUrl] = useState("https://");
   const [backend, setBackend] = useState("");
   const [contextID, setContextID] = useState("");
+  const [contextName, setContextName] = useState("");
+  const [providerContextID, setProviderContextID] = useState("");
   const [persist, setPersist] = useState(true);
   const [backendSessionID, setBackendSessionID] = useState("");
   const [timeout, setTimeoutValue] = useState("");
@@ -614,7 +737,13 @@ function OpenSessionModal({
       };
       if (url && url !== "https://") body.url = url;
       if (backend) body.backend = backend;
-      if (contextID && mode !== "resume") body.context_id = contextID;
+      if (contextID && mode === "context") body.context_id = contextID;
+      if (contextID && mode === "open") body.provider_context_id = contextID;
+      if (contextName && mode === "create_context") {
+        body.context_name = contextName;
+        body.auto_create_context = true;
+      }
+      if (providerContextID && mode !== "resume") body.provider_context_id = providerContextID;
       if (mode === "resume" && backendSessionID) body.backend_session_id = backendSessionID;
       if (mode !== "resume") body.persist = persist;
       if (timeout) body.timeout = Number(timeout);
@@ -675,6 +804,7 @@ function OpenSessionModal({
         <div style={{ display: "flex", gap: "6px", marginBottom: "12px" }}>
           <ModeButton active={mode === "open"} onClick={() => setMode("open")}>Open</ModeButton>
           <ModeButton active={mode === "context"} onClick={() => setMode("context")}>Context</ModeButton>
+          <ModeButton active={mode === "create_context"} onClick={() => setMode("create_context")}>Save</ModeButton>
           <ModeButton active={mode === "resume"} onClick={() => setMode("resume")}>Resume</ModeButton>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
@@ -695,9 +825,42 @@ function OpenSessionModal({
             <Field label="Backend session ID">
               <input value={backendSessionID} onChange={(e) => setBackendSessionID(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle} />
             </Field>
+          ) : mode === "context" ? (
+            <Field label="Saved context">
+              <select
+                value={contextID}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  setContextID(id);
+                  const ctx = contexts.find((c) => c.id === id);
+                  if (ctx) {
+                    setBackend(ctx.backend);
+                    setPersist(ctx.persist_default);
+                  }
+                }}
+                className="border border-border bg-bg text-text"
+                style={inputStyle}
+              >
+                <option value="">Select context</option>
+                {contexts.map((ctx) => (
+                  <option key={ctx.id} value={ctx.id}>
+                    {ctx.name} - {BACKEND_LABEL[ctx.backend] ?? ctx.backend}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          ) : mode === "create_context" ? (
+            <Field label="Context name">
+              <input value={contextName} onChange={(e) => setContextName(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle} />
+            </Field>
           ) : (
-            <Field label="Context ID">
+            <Field label="Provider context ID">
               <input value={contextID} onChange={(e) => setContextID(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle} />
+            </Field>
+          )}
+          {mode === "create_context" && (
+            <Field label="Import provider context">
+              <input value={providerContextID} onChange={(e) => setProviderContextID(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle} />
             </Field>
           )}
           <Field label="Timeout seconds">
@@ -730,7 +893,7 @@ function OpenSessionModal({
         <div style={{ marginTop: "16px", display: "flex", justifyContent: "flex-end", gap: "8px" }}>
           <IconButton onClick={onClose} disabled={busy} title="Cancel">Cancel</IconButton>
           <IconButton onClick={submit} disabled={busy} title="Open session">
-            {busy ? "Opening..." : mode === "resume" ? "Resume" : "Open"}
+            {busy ? "Opening..." : mode === "resume" ? "Resume" : mode === "create_context" ? "Save and open" : "Open"}
           </IconButton>
         </div>
       </div>

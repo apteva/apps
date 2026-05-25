@@ -3,6 +3,9 @@ name: how-to-use-computer
 triggers:
   - browser_session
   - computer_use
+  - computer_context_create
+  - computer_context_list
+  - computer_context_get
   - dialog
   - modal
   - embed
@@ -52,6 +55,22 @@ is the full screencast — only when the view IS the message; multiple
 live tiles in one transcript get expensive.
 
 ## Web-browsing patterns
+
+## Persistent contexts
+
+Use app contexts when cookies/storage should survive across sessions.
+
+- Create or import with `computer_context_create(name, backend?,
+  provider_context_id?, persist_default?)`.
+- Reopen with `browser_session(action="open", context_name=..., backend=...)`
+  or `browser_session(action="open", context_id=<app_context_id>)`.
+- For a new saved context and immediate session, call
+  `browser_session(action="open", context_name=..., auto_create_context=true,
+  persist=true)`.
+- `provider_context_id` is the raw Browserbase context / Steel profile /
+  Browser Engine context id. Prefer app `context_id` or `context_name` unless
+  importing an existing provider context.
+- `persist=false` means load the context read-only for that session.
 
 **Cookie / consent banners.** Dismiss FIRST. Look for "Accept",
 "Accept all", "OK", "Agree", "Got it". Some live in closed shadow
