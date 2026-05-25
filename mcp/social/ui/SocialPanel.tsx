@@ -1853,6 +1853,7 @@ interface StorageFile {
 interface MediaDerivation {
   kind: "thumbnail" | "waveform" | "cover" | "keyframe" | string;
   storage_file_id: string;
+  position_ms?: number;
   status: "ok" | "failed" | "stale" | string;
 }
 
@@ -3143,16 +3144,18 @@ function RescheduleDialog({
 
 // MediaThumb renders a single attached-media tile. We don't get the
 // MIME from post_list (it'd cost a storage round-trip per id at list
-// time), so the component fetches metadata via files_get on mount —
-// images render with <img>, videos render with <video preload=
-// "metadata"> so the browser fetches just the moov atom + first
-// keyframe, not the whole file. Click expands to a full-screen
-// modal with playback controls / open-in-new-tab.
+// time), so the component fetches metadata via files_get on mount.
+// Images render directly from storage. Videos prefer Media's generated
+// thumbnail/keyframe images; browser-side canvas extraction is avoided
+// here because S3 redirects make the video drawable cross-origin even
+// though normal image/video display still works.
 //
 // Cache is process-wide: the same fileId rendered in five posts
 // only triggers one /files/<id> fetch, even before React Query.
 const mediaMetaCache = new Map<string, { mime: string; name: string } | "loading" | "error">();
 const mediaMetaWaiters = new Map<string, ((m: { mime: string; name: string } | null) => void)[]>();
+const mediaPosterCache = new Map<string, string | "loading" | "none" | "error">();
+const mediaPosterWaiters = new Map<string, ((url: string | null) => void)[]>();
 
 async function loadMediaMeta(fileId: number, projectId?: string | null): Promise<{ mime: string; name: string } | null> {
   const key = `${projectId || ""}:${fileId}`;
@@ -3183,6 +3186,51 @@ async function loadMediaMeta(fileId: number, projectId?: string | null): Promise
     mediaMetaCache.set(key, "error");
     const waiters = mediaMetaWaiters.get(key) ?? [];
     mediaMetaWaiters.delete(key);
+    for (const w of waiters) w(null);
+    return null;
+  }
+}
+
+async function loadMediaPosterURL(fileId: number, projectId?: string | null): Promise<string | null> {
+  const key = `${projectId || ""}:${fileId}`;
+  const cached = mediaPosterCache.get(key);
+  if (cached && cached !== "loading" && cached !== "none" && cached !== "error") return cached;
+  if (cached === "none" || cached === "error") return null;
+  if (cached === "loading") {
+    return new Promise((resolve) => {
+      const w = mediaPosterWaiters.get(key) ?? [];
+      w.push(resolve);
+      mediaPosterWaiters.set(key, w);
+    });
+  }
+  mediaPosterCache.set(key, "loading");
+  try {
+    const params = new URLSearchParams();
+    appendProjectScope(params, projectId);
+    const qs = params.toString();
+    const res = await fetch(`${MEDIA_API}/media/${fileId}${qs ? `?${qs}` : ""}`, {
+      credentials: "same-origin",
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = (await res.json()) as { derivations?: MediaDerivation[] };
+    const derivations = data.derivations || [];
+    const pick =
+      derivations.find((d) => d.kind === "thumbnail" && d.status === "ok" && d.storage_file_id) ||
+      derivations
+        .filter((d) => d.kind === "keyframe" && d.status === "ok" && d.storage_file_id)
+        .sort((a, b) => (a.position_ms || 0) - (b.position_ms || 0))[0];
+    const url = pick?.storage_file_id
+      ? storageURL(`/files/${pick.storage_file_id}/content`, projectId)
+      : null;
+    mediaPosterCache.set(key, url || "none");
+    const waiters = mediaPosterWaiters.get(key) ?? [];
+    mediaPosterWaiters.delete(key);
+    for (const w of waiters) w(url);
+    return url;
+  } catch {
+    mediaPosterCache.set(key, "error");
+    const waiters = mediaPosterWaiters.get(key) ?? [];
+    mediaPosterWaiters.delete(key);
     for (const w of waiters) w(null);
     return null;
   }
@@ -3739,36 +3787,25 @@ function formatNumber(n: number): string {
 function MediaThumb({ fileId, projectId }: { fileId: number; projectId?: string | null }) {
   const [meta, setMeta] = useState<{ mime: string; name: string } | null>(null);
   const [posterURL, setPosterURL] = useState<string | null>(null);
-  const [posterTried, setPosterTried] = useState(false);
   const [open, setOpen] = useState(false);
   const url = storageURL(`/files/${fileId}/content`, projectId);
   useEffect(() => {
     let alive = true;
     setMeta(null);
     setPosterURL(null);
-    setPosterTried(false);
     loadMediaMeta(fileId, projectId).then((m) => { if (alive) setMeta(m); });
     return () => { alive = false; };
   }, [fileId, projectId]);
   const isVideo = isVideoMime(meta?.mime || "", meta?.name || "");
   useEffect(() => {
-    if (!isVideo || posterURL || posterTried) return;
+    if (!isVideo || posterURL) return;
     let alive = true;
-    setPosterTried(true);
-    buildVideoPoster(url).then((poster) => {
-      if (!alive) {
-        if (poster) URL.revokeObjectURL(poster);
-        return;
-      }
+    loadMediaPosterURL(fileId, projectId).then((poster) => {
+      if (!alive) return;
       setPosterURL(poster);
     });
     return () => { alive = false; };
-  }, [isVideo, posterURL, posterTried, url]);
-  useEffect(() => {
-    return () => {
-      if (posterURL) URL.revokeObjectURL(posterURL);
-    };
-  }, [posterURL]);
+  }, [fileId, isVideo, posterURL, projectId]);
   return (
     <>
       <button
