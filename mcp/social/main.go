@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.12
+version: 0.14.13
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -604,7 +604,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Today: youtube accepts {title, body, visibility (public|unlisted|private), category, tags[]}. " +
 				"Other platforms (twitter, facebook, instagram, linkedin, tiktok) accept just {body}. " +
 				"Body resolution per target: target.body if set, else post-level body. " +
-				"Args: body, schedule_at? (RFC3339; omit = post now), media_storage_ids? (file ids).",
+				"Args: body, schedule_at? (RFC3339; omit = post now), media_storage_ids? (file ids), media_project_id? (Storage project scope for those ids).",
 			InputSchema: schemaObject(map[string]any{
 				"body":               map[string]any{"type": "string"},
 				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
@@ -615,6 +615,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 				"schedule_at":       map[string]any{"type": "string"},
 				"media_storage_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+				"media_project_id":  map[string]any{"type": "string"},
 			}, []string{"body"}),
 			Handler: a.toolPostCreate,
 		},
@@ -1332,6 +1333,7 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 	}
 	mediaJSON, _ := json.Marshal(mediaIDs)
+	mediaProjectID := strings.TrimSpace(stringArgAny(args, "media_project_id", "storage_project_id", "_project_id", "project_id"))
 
 	pid := os.Getenv("APTEVA_PROJECT_ID")
 	status := "publishing"
@@ -1374,9 +1376,9 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 	}
 	res, err := ctx.AppDB().Exec(
-		`INSERT INTO posts (project_id, body, media_storage_ids, schedule_at, status, profile_id)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		pid, body, string(mediaJSON), nullable(scheduleAt), status, profileID,
+		`INSERT INTO posts (project_id, body, media_storage_ids, media_project_id, schedule_at, status, profile_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		pid, body, string(mediaJSON), mediaProjectID, nullable(scheduleAt), status, profileID,
 	)
 	if err != nil {
 		return nil, err
@@ -1465,13 +1467,12 @@ type publishJob struct {
 // front via storage.files_get_url so each strategy gets a flat list.
 func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 	// Load the post's media ids once — every target gets the same media.
-	mediaIDs := a.loadPostMedia(ctx, postID)
-	media, mediaErr := a.resolveMedia(ctx, mediaIDs)
+	mediaIDs, mediaProjectID := a.loadPostMedia(ctx, postID)
+	media, mediaErr := a.resolveMedia(ctx, mediaIDs, mediaProjectID)
 	if mediaErr != nil {
 		ctx.Logger().Warn("resolve media urls", "post", postID, "err", mediaErr)
-		// Don't abort — text-only platforms can still publish; media-
-		// required platforms will fall through to the strategy's own
-		// "no media" branch and surface the error per-target.
+		// Surface this per-target below. If the user attached media,
+		// publishing text-only would create a misleading upstream post.
 	}
 
 	rows, err := ctx.AppDB().Query(
@@ -1521,6 +1522,15 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 		def, ok := platforms[j.platform]
 		if !ok {
 			a.markTargetFailed(ctx, j.targetID, "unsupported platform: "+j.platform)
+			failures++
+			continue
+		}
+		if len(mediaIDs) > 0 && (mediaErr != nil || len(j.media) == 0) {
+			msg := "attached media could not be resolved"
+			if mediaErr != nil {
+				msg += ": " + mediaErr.Error()
+			}
+			a.markTargetFailed(ctx, j.targetID, msg)
 			failures++
 			continue
 		}
@@ -2160,16 +2170,17 @@ func extractTikTokUploadInit(raw json.RawMessage) (uploadURL, publishID string) 
 	return "", ""
 }
 
-// loadPostMedia reads the post's media_storage_ids JSON column.
-func (a *App) loadPostMedia(ctx *sdk.AppCtx, postID int64) []int64 {
-	var raw string
+// loadPostMedia reads the post's media_storage_ids JSON column and
+// the Storage project scope that owns those file ids.
+func (a *App) loadPostMedia(ctx *sdk.AppCtx, postID int64) ([]int64, string) {
+	var raw, mediaProjectID string
 	_ = ctx.AppDB().QueryRow(
-		`SELECT COALESCE(media_storage_ids,'[]') FROM posts WHERE id=?`,
+		`SELECT COALESCE(media_storage_ids,'[]'), COALESCE(media_project_id,'') FROM posts WHERE id=?`,
 		postID,
-	).Scan(&raw)
+	).Scan(&raw, &mediaProjectID)
 	var out []int64
 	_ = json.Unmarshal([]byte(raw), &out)
-	return out
+	return out, strings.TrimSpace(mediaProjectID)
 }
 
 // mediaItem is a resolved media file — public URL + MIME + byte size
@@ -2192,7 +2203,7 @@ func (m mediaItem) IsVideo() bool { return strings.HasPrefix(m.Mime, "video/") }
 // for the metadata and storage.files_get_url for the signed URL.
 // The URL must be reachable from the social platform's servers — for
 // local dev, point APTEVA_PUBLIC_URL at an ngrok tunnel.
-func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64) ([]mediaItem, error) {
+func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]mediaItem, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -2204,6 +2215,10 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64) ([]mediaItem, error) {
 
 	out := make([]mediaItem, 0, len(ids))
 	for _, id := range ids {
+		storageArgs := map[string]any{"id": id}
+		if projectID != "" {
+			storageArgs["_project_id"] = projectID
+		}
 		// Metadata first — content_type drives the publish strategy
 		// (image → /feed; video → /videos for FB; REELS for IG).
 		var meta struct {
@@ -2214,9 +2229,7 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64) ([]mediaItem, error) {
 			ContentType string `json:"content_type"`
 			SizeBytes   int64  `json:"size_bytes"`
 		}
-		if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", map[string]any{
-			"id": id,
-		}, &meta); err != nil {
+		if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", storageArgs, &meta); err != nil {
 			return nil, fmt.Errorf("storage files_get(%d): %w", id, err)
 		}
 		mime := meta.ContentType
@@ -2233,10 +2246,14 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64) ([]mediaItem, error) {
 		var signed struct {
 			URL string `json:"url"`
 		}
-		if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_url", map[string]any{
+		urlArgs := map[string]any{
 			"id":          id,
 			"ttl_seconds": 3600,
-		}, &signed); err != nil {
+		}
+		if projectID != "" {
+			urlArgs["_project_id"] = projectID
+		}
+		if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_url", urlArgs, &signed); err != nil {
 			return nil, fmt.Errorf("storage files_get_url(%d): %w", id, err)
 		}
 		rel := signed.URL
@@ -5280,6 +5297,15 @@ func intArg(m map[string]any, key string, def int) int {
 		}
 	}
 	return def
+}
+
+func stringArgAny(m map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := m[key].(string); ok && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func platformKeys() []string {

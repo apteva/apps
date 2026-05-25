@@ -1536,6 +1536,7 @@ function ComposeDialog({
         body,
         schedule_at: scheduleAt || undefined,
         media_storage_ids: media.length > 0 ? media.map((m) => m.id) : undefined,
+        media_project_id: media.length > 0 ? projectId : undefined,
         // When the panel is scoped to one profile, tag the post
         // with that profile_id so post_list filtering keeps it
         // visible. Without this, mixed-profile sessions could

@@ -37,17 +37,17 @@ import (
 
 type recordingPlatform struct {
 	tk.BasePlatformClient
-	mu                sync.Mutex
-	executeCalls      []executeCall
-	callAppCalls      []callAppCall
-	startOAuthCalls   []sdk.OAuthStartRequest
-	disconnectCalls   []int64
-	nextStartOAuth    *sdk.OAuthStartResult
-	nextStartErr      error
-	executeResponses  map[string]*sdk.ExecuteResult // keyed by tool name
-	callAppResponses  map[string]json.RawMessage    // keyed by "app:tool"
-	executeErr        error
-	identity          *sdk.InstallIdentity
+	mu               sync.Mutex
+	executeCalls     []executeCall
+	callAppCalls     []callAppCall
+	startOAuthCalls  []sdk.OAuthStartRequest
+	disconnectCalls  []int64
+	nextStartOAuth   *sdk.OAuthStartResult
+	nextStartErr     error
+	executeResponses map[string]*sdk.ExecuteResult // keyed by tool name
+	callAppResponses map[string]json.RawMessage    // keyed by "app:tool"
+	executeErr       error
+	identity         *sdk.InstallIdentity
 }
 
 type executeCall struct {
@@ -319,7 +319,7 @@ func TestAccountFinalize_FacebookRequiresPageID(t *testing.T) {
 	pf := newRecordingPlatform()
 	pf.executeResponses["list_pages"] = &sdk.ExecuteResult{
 		Success: true,
-		Data: json.RawMessage(`{"data":[{"id":"100","name":"My Page"}]}`),
+		Data:    json.RawMessage(`{"data":[{"id":"100","name":"My Page"}]}`),
 	}
 	ctx := newSocialCtx(t, pf)
 	res, _ := ctx.AppDB().Exec(
@@ -516,6 +516,94 @@ func TestPostCreate_FacebookUsesMessageAndPageId(t *testing.T) {
 	}
 	if _, hasText := got.Input["text"]; hasText {
 		t.Errorf("'text' should NOT be sent to facebook (twitter-shaped key): %+v", got.Input)
+	}
+}
+
+func TestPostCreate_FacebookImageUsesPhotoToolAndStorageProject(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.callAppResponses["storage:files_get"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":296,\"content_type\":\"image/png\",\"size_bytes\":1308309}"}]}}`,
+	)
+	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"url\":\"https://agents.example.com/api/apps/storage/files/296/content/crop-294.png?sig=abc&exp=99&project_id=media-proj\"}"}]}}`,
+	)
+	pf.executeResponses["post_photo_to_page"] = &sdk.ExecuteResult{
+		Success: true,
+		Data:    json.RawMessage(`{"id":"100_501"}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, status)
+		 VALUES ('test-proj', 'facebook', 42, '100', 'My Page', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	if _, err := app.toolPostCreate(ctx, map[string]any{
+		"body":               "hello photo",
+		"social_account_ids": []any{acctID},
+		"media_storage_ids":  []any{int64(296)},
+		"media_project_id":   "media-proj",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(pf.executeCalls) != 1 {
+		t.Fatalf("expected 1 execute call, got %d", len(pf.executeCalls))
+	}
+	got := pf.executeCalls[0]
+	if got.Tool != "post_photo_to_page" {
+		t.Fatalf("tool = %q, want post_photo_to_page", got.Tool)
+	}
+	if got.Input["caption"] != "hello photo" {
+		t.Errorf("caption field not set: %+v", got.Input)
+	}
+	if got.Input["url"] == "" {
+		t.Errorf("photo url field not set: %+v", got.Input)
+	}
+	for _, c := range pf.callAppCalls {
+		if c.AppName == "storage" && (c.Tool == "files_get" || c.Tool == "files_get_url") {
+			if c.Input["_project_id"] != "media-proj" {
+				t.Errorf("%s _project_id = %v, want media-proj", c.Tool, c.Input["_project_id"])
+			}
+		}
+	}
+}
+
+func TestPostCreate_AttachedMediaResolutionFailureDoesNotPublishTextOnly(t *testing.T) {
+	pf := newRecordingPlatform()
+	// files_get_url falls back to an empty response, so resolveMedia
+	// fails after seeing that media was attached.
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, status)
+		 VALUES ('test-proj', 'facebook', 42, '100', 'My Page', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	out, err := app.toolPostCreate(ctx, map[string]any{
+		"body":               "hello missing photo",
+		"social_account_ids": []any{acctID},
+		"media_storage_ids":  []any{int64(296)},
+		"media_project_id":   "media-proj",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	postID := out.(map[string]any)["post_id"].(int64)
+
+	if len(pf.executeCalls) != 0 {
+		t.Fatalf("integration should not be called when attached media cannot resolve: %+v", pf.executeCalls)
+	}
+	var targetStatus, lastErr, postStatus string
+	ctx.AppDB().QueryRow(`SELECT status, COALESCE(last_error,'') FROM post_targets WHERE post_id=?`, postID).Scan(&targetStatus, &lastErr)
+	ctx.AppDB().QueryRow(`SELECT status FROM posts WHERE id=?`, postID).Scan(&postStatus)
+	if targetStatus != "failed" || postStatus != "failed" {
+		t.Fatalf("statuses = target %q post %q, want failed/failed; err=%q", targetStatus, postStatus, lastErr)
+	}
+	if !strings.Contains(lastErr, "attached media could not be resolved") {
+		t.Errorf("last_error = %q", lastErr)
 	}
 }
 
