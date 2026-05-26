@@ -5,13 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	sdk "github.com/apteva/app-sdk"
 )
 
-// Avatar (talking-head) generation. v0.6 wires Tavus; HeyGen returns
-// errKindStub until v0.7 (its create-video payload is shaped
-// differently — video_inputs with character + voice + background).
+// Avatar (talking-head) generation. Tavus and HeyGen are both adapted
+// behind the same media-studio kind. HeyGen uses its v3 video API for
+// both saved avatar looks and one-off image-to-video when source_image
+// is provided.
 //
 // Both providers are async: create returns a handle (Tavus video_id /
 // HeyGen video_id); the worker polls the provider's get-status tool and
@@ -19,15 +21,14 @@ import (
 // same video_jobs table + worker as the video kind (kind='avatar').
 
 // avatarToolForSlug maps the avatar.generate capability to the
-// provider's actual create tool — they diverge: Tavus names it
-// create_video, HeyGen generate_video. The dispatcher applies this
-// over the manifest's (single) tool mapping.
+// provider's actual create tool. The names now align for Tavus and
+// HeyGen, but keeping this resolver makes the dispatch rule explicit.
 func avatarToolForSlug(slug, capability string) string {
 	switch slug {
 	case "tavus":
 		return "create_video"
 	case "heygen":
-		return "generate_video"
+		return "create_video"
 	}
 	return ""
 }
@@ -46,74 +47,84 @@ func buildAvatarArgs(args map[string]any, providerSlug, capability string) (map[
 	return nil, fmt.Errorf("unsupported avatar provider slug: %q", providerSlug)
 }
 
-// buildHeyGenAvatarArgs → POST /v2/videos. HeyGen wants a nested
-// video_inputs array (character + voice) plus a dimension object —
-// quite different from Tavus's flat replica_id+script. voice_id is
-// required (the script needs a voice; HeyGen doesn't bake voice into
-// the avatar the way Tavus bakes it into the replica).
+// buildHeyGenAvatarArgs → POST /v3/videos. With avatar set it renders
+// an existing HeyGen avatar look; with source_image and no avatar it
+// renders a one-off image-to-video talking head. Provider-specific
+// controls ride in options while the public media-studio surface stays
+// provider-neutral.
 func buildHeyGenAvatarArgs(args map[string]any) (map[string]any, error) {
 	avatarID := strArg(args, "avatar", "")
-	if avatarID == "" {
-		return nil, errors.New("avatar (HeyGen avatar_id) required — pick one from /avatars")
-	}
+	sourceImage := strArg(args, "source_image", "")
 	script := strArg(args, "prompt", "")
 	if script == "" {
 		return nil, errors.New("prompt (the spoken script) required")
 	}
 	voiceID := strArg(args, "voice", "")
-	if voiceID == "" {
-		return nil, errors.New("voice (HeyGen voice_id) required — pick one from /voices")
-	}
+	opts, _ := args["options"].(map[string]any)
 
 	res := "1080p"
 	aspect := "16:9"
-	var background any
-	var title string
-	if opts, ok := args["options"].(map[string]any); ok {
+	if opts != nil {
 		if v := strArg(opts, "resolution", ""); v != "" {
 			res = v
 		}
 		if v := strArg(opts, "aspect", ""); v != "" {
 			aspect = v
 		}
-		if v, exists := opts["background"]; exists {
-			background = v
+		if v := strArg(opts, "aspect_ratio", ""); v != "" {
+			aspect = v
 		}
-		title = strArg(opts, "title", "")
 	}
-	w, h := heygenDimension(res, aspect)
 
-	character := map[string]any{
-		"type":         "avatar",
-		"avatar_id":    avatarID,
-		"avatar_style": "normal",
+	out := map[string]any{
+		"script":       script,
+		"resolution":   res,
+		"aspect_ratio": aspect,
 	}
-	voice := map[string]any{
-		"type":       "text",
-		"input_text": script,
-		"voice_id":   voiceID,
+	if avatarID != "" {
+		out["type"] = "avatar"
+		out["avatar_id"] = avatarID
+	} else if sourceImage != "" {
+		if voiceID == "" {
+			return nil, errors.New("voice (HeyGen voice_id) required for image-to-video — pick one from /voices")
+		}
+		out["type"] = "image"
+		out["image"] = heygenAssetInput(sourceImage)
+	} else {
+		return nil, errors.New("avatar (HeyGen avatar_id) or source_image required")
 	}
-	if opts, ok := args["options"].(map[string]any); ok {
-		if vs, exists := opts["voice_settings"]; exists {
-			// Merge tuning (speed/pitch/locale) onto the voice object.
-			if m, ok := vs.(map[string]any); ok {
-				for k, v := range m {
-					voice[k] = v
+	if voiceID != "" {
+		out["voice_id"] = voiceID
+	}
+
+	if opts != nil {
+		for _, k := range []string{
+			"title", "background", "remove_background", "callback_url",
+			"callback_id", "watermark", "caption", "output_format", "fit",
+			"voice_settings", "audio_url", "audio_asset_id",
+		} {
+			if v, exists := opts[k]; exists {
+				out[k] = v
+			}
+		}
+		if v, exists := opts["engine"]; exists {
+			if engine := heygenEngineConfig(v); engine != nil {
+				out["engine"] = engine
+			}
+		}
+		if !heygenIsAvatarV(out["engine"]) {
+			for _, k := range []string{"motion_prompt", "expressiveness"} {
+				if v, exists := opts[k]; exists {
+					out[k] = v
 				}
 			}
 		}
+		if out["audio_url"] != nil || out["audio_asset_id"] != nil {
+			delete(out, "script")
+			delete(out, "voice_id")
+		}
 	}
-	videoInput := map[string]any{"character": character, "voice": voice}
-	if background != nil {
-		videoInput["background"] = background
-	}
-	out := map[string]any{
-		"video_inputs": []any{videoInput},
-		"dimension":    map[string]any{"width": w, "height": h},
-	}
-	if title != "" {
-		out["title"] = title
-	}
+
 	return out, nil
 }
 
@@ -127,6 +138,74 @@ func heygenDimension(resolution, aspect string) (int, int) {
 		return short, long // portrait
 	}
 	return long, short // 16:9 landscape
+}
+
+func heygenAssetInput(ref string) map[string]any {
+	if len(ref) >= 5 && (ref[:5] == "http:" || ref[:5] == "https") {
+		return map[string]any{"type": "url", "url": ref}
+	}
+	if len(ref) >= 5 && ref[:5] == "data:" {
+		if idx := strings.Index(ref, ","); idx >= 0 {
+			ref = ref[idx+1:]
+		}
+	}
+	return map[string]any{"type": "base64", "data": ref}
+}
+
+func heygenEngineConfig(v any) map[string]any {
+	switch t := v.(type) {
+	case string:
+		if t == "" || t == "auto" {
+			return nil
+		}
+		return map[string]any{"type": t}
+	case map[string]any:
+		if strArg(t, "type", "") == "" || strArg(t, "type", "") == "auto" {
+			return nil
+		}
+		return t
+	}
+	return nil
+}
+
+func heygenIsAvatarV(v any) bool {
+	m, ok := v.(map[string]any)
+	return ok && strArg(m, "type", "") == "avatar_v"
+}
+
+func validateHeyGenAvatarEngine(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, args map[string]any) error {
+	opts, _ := args["options"].(map[string]any)
+	if opts == nil || !heygenIsAvatarV(heygenEngineConfig(opts["engine"])) {
+		return nil
+	}
+	avatarID := strArg(args, "avatar", "")
+	if avatarID == "" {
+		// Image-to-video with Avatar V is validated by HeyGen because
+		// there is no reusable look id to preflight.
+		return nil
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "get_avatar_look",
+		map[string]any{"look_id": avatarID})
+	if err != nil {
+		return err
+	}
+	if res == nil || !res.Success {
+		return errors.New("get_avatar_look non-2xx")
+	}
+	var body struct {
+		Data struct {
+			SupportedAPIEngines []string `json:"supported_api_engines"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(res.Data, &body); err != nil {
+		return err
+	}
+	for _, engine := range body.Data.SupportedAPIEngines {
+		if engine == "avatar_v" {
+			return nil
+		}
+	}
+	return errors.New("selected avatar look does not advertise supported_api_engines=[avatar_v]")
 }
 
 // buildTavusAvatarArgs → POST /v2/videos. replica_id + script required;
@@ -208,10 +287,13 @@ func normalizeAvatarResponse(slug, capability string, raw json.RawMessage) ([]ge
 // --- avatar resource discovery (the panel's replica/avatar picker) ---
 
 type avatarEntry struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Thumbnail string `json:"thumbnail,omitempty"`
-	Status    string `json:"status,omitempty"`
+	ID                  string   `json:"id"`
+	Name                string   `json:"name"`
+	Thumbnail           string   `json:"thumbnail,omitempty"`
+	Status              string   `json:"status,omitempty"`
+	DefaultVoiceID      string   `json:"default_voice_id,omitempty"`
+	SupportedAPIEngines []string `json:"supported_api_engines,omitempty"`
+	AvatarType          string   `json:"avatar_type,omitempty"`
 }
 
 // handleListAvatars → GET /avatars. Calls the bound avatar_provider's
@@ -255,10 +337,10 @@ func listAvatarsFor(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) ([]avatarEntry
 		}
 		var body struct {
 			Data []struct {
-				ReplicaID          string `json:"replica_id"`
-				ReplicaName        string `json:"replica_name"`
-				ThumbnailVideoURL  string `json:"thumbnail_video_url"`
-				Status             string `json:"status"`
+				ReplicaID         string `json:"replica_id"`
+				ReplicaName       string `json:"replica_name"`
+				ThumbnailVideoURL string `json:"thumbnail_video_url"`
+				Status            string `json:"status"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(res.Data, &body); err != nil {
@@ -278,43 +360,50 @@ func listAvatarsFor(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) ([]avatarEntry
 		}
 		return out, nil
 	case "heygen":
-		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_avatars", map[string]any{})
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_avatar_looks",
+			map[string]any{"limit": 50})
 		if err != nil {
 			return nil, err
 		}
 		if res == nil || !res.Success {
-			return nil, errors.New("heygen list_avatars non-2xx")
+			return nil, errors.New("heygen list_avatar_looks non-2xx")
 		}
 		var body struct {
-			Data struct {
-				Avatars []struct {
-					AvatarID        string `json:"avatar_id"`
-					AvatarName      string `json:"avatar_name"`
-					PreviewImageURL string `json:"preview_image_url"`
-					PreviewVideoURL string `json:"preview_video_url"`
-				} `json:"avatars"`
+			Data []struct {
+				ID                  string   `json:"id"`
+				Name                string   `json:"name"`
+				PreviewImageURL     string   `json:"preview_image_url"`
+				PreviewVideoURL     string   `json:"preview_video_url"`
+				Status              string   `json:"status"`
+				DefaultVoiceID      string   `json:"default_voice_id"`
+				SupportedAPIEngines []string `json:"supported_api_engines"`
+				AvatarType          string   `json:"avatar_type"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(res.Data, &body); err != nil {
 			return nil, err
 		}
-		out := make([]avatarEntry, 0, len(body.Data.Avatars))
-		for _, av := range body.Data.Avatars {
-			if av.AvatarID == "" {
+		out := make([]avatarEntry, 0, len(body.Data))
+		for _, av := range body.Data {
+			if av.ID == "" {
 				continue
 			}
 			thumb := av.PreviewVideoURL
 			if thumb == "" {
 				thumb = av.PreviewImageURL
 			}
-			out = append(out, avatarEntry{ID: av.AvatarID, Name: av.AvatarName, Thumbnail: thumb})
+			out = append(out, avatarEntry{
+				ID: av.ID, Name: av.Name, Thumbnail: thumb, Status: av.Status,
+				DefaultVoiceID: av.DefaultVoiceID, SupportedAPIEngines: av.SupportedAPIEngines,
+				AvatarType: av.AvatarType,
+			})
 		}
 		return out, nil
 	}
 	return nil, fmt.Errorf("unsupported avatar provider: %s", bound.AppSlug)
 }
 
-// --- voices (HeyGen only — Tavus bakes voice into the replica) ----
+// --- voices (avatar + audio providers) -----------------------------
 
 type voiceEntry struct {
 	ID       string `json:"id"`
@@ -324,8 +413,9 @@ type voiceEntry struct {
 	Preview  string `json:"preview,omitempty"`
 }
 
-// handleListVoices → GET /voices. Returns the bound avatar provider's
-// voice catalog. Empty for Tavus (voice is part of the replica).
+// handleListVoices → GET /voices. Returns the bound provider's voice
+// catalog. ?kind=audio_tts reads audio_provider; default/avatar reads
+// avatar_provider. Empty for Tavus (voice is part of the replica).
 func (a *App) handleListVoices(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
@@ -336,7 +426,11 @@ func (a *App) handleListVoices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := map[string]any{"voices": []voiceEntry{}}
-	bound := globalCtx.IntegrationFor("avatar_provider")
+	role := "avatar_provider"
+	if r.URL.Query().Get("kind") == KindAudioTTS {
+		role = "audio_provider"
+	}
+	bound := globalCtx.IntegrationFor(role)
 	if bound != nil {
 		resp["provider"] = bound.AppSlug
 		voices, err := listVoicesFor(globalCtx, bound)
@@ -353,7 +447,8 @@ func (a *App) handleListVoices(w http.ResponseWriter, r *http.Request) {
 func listVoicesFor(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) ([]voiceEntry, error) {
 	switch bound.AppSlug {
 	case "heygen":
-		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_voices", map[string]any{})
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_voices",
+			map[string]any{"limit": 100})
 		if err != nil {
 			return nil, err
 		}
@@ -361,27 +456,68 @@ func listVoicesFor(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) ([]voiceEntry, 
 			return nil, errors.New("heygen list_voices non-2xx")
 		}
 		var body struct {
-			Data struct {
-				Voices []struct {
-					VoiceID      string `json:"voice_id"`
-					Name         string `json:"name"`
-					Language     string `json:"language"`
-					Gender       string `json:"gender"`
-					PreviewAudio string `json:"preview_audio"`
-				} `json:"voices"`
+			Data []struct {
+				VoiceID         string `json:"voice_id"`
+				Name            string `json:"name"`
+				Language        string `json:"language"`
+				Gender          string `json:"gender"`
+				PreviewAudioURL string `json:"preview_audio_url"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(res.Data, &body); err != nil {
 			return nil, err
 		}
-		out := make([]voiceEntry, 0, len(body.Data.Voices))
-		for _, v := range body.Data.Voices {
+		out := make([]voiceEntry, 0, len(body.Data))
+		for _, v := range body.Data {
 			if v.VoiceID == "" {
 				continue
 			}
 			out = append(out, voiceEntry{
 				ID: v.VoiceID, Name: v.Name, Language: v.Language,
-				Gender: v.Gender, Preview: v.PreviewAudio,
+				Gender: v.Gender, Preview: v.PreviewAudioURL,
+			})
+		}
+		return out, nil
+	case "elevenlabs":
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_voices",
+			map[string]any{"page_size": 100, "include_total_count": true})
+		if err != nil {
+			return nil, err
+		}
+		if res == nil || !res.Success {
+			return nil, errors.New("elevenlabs list_voices non-2xx")
+		}
+		var body struct {
+			Voices []struct {
+				VoiceID    string         `json:"voice_id"`
+				Name       string         `json:"name"`
+				PreviewURL string         `json:"preview_url"`
+				Labels     map[string]any `json:"labels"`
+			} `json:"voices"`
+		}
+		if err := json.Unmarshal(res.Data, &body); err != nil {
+			return nil, err
+		}
+		out := make([]voiceEntry, 0, len(body.Voices))
+		for _, v := range body.Voices {
+			if v.VoiceID == "" {
+				continue
+			}
+			language := ""
+			gender := ""
+			if v.Labels != nil {
+				language = fmt.Sprint(v.Labels["language"])
+				if language == "<nil>" {
+					language = ""
+				}
+				gender = fmt.Sprint(v.Labels["gender"])
+				if gender == "<nil>" {
+					gender = ""
+				}
+			}
+			out = append(out, voiceEntry{
+				ID: v.VoiceID, Name: v.Name, Language: language,
+				Gender: gender, Preview: v.PreviewURL,
 			})
 		}
 		return out, nil

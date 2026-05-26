@@ -59,10 +59,7 @@ func (a *App) dbInsertGeneration(r generationRecord) int64 {
 
 // toolMediaHistory is the MCP read tool — kind-aware, paginated.
 func (a *App) toolMediaHistory(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
-	if v := strArg(args, "project_id", ""); v != "" {
-		pid = v
-	}
+	pid := projectScopeFromArgs(ctx, args)
 	limit := intArg(args, "limit", 50)
 	if limit > 200 {
 		limit = 200
@@ -72,7 +69,7 @@ func (a *App) toolMediaHistory(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 // queryHistory pages over generations rows, optionally filtered by
-// kind. The "kind='' OR kind=?" trick avoids two near-identical
+// kind. The SQL predicate avoids two near-identical
 // query branches; sqlite plans it identically to a bare equality.
 func queryHistory(ctx *sdk.AppCtx, pid, kindFilter string, limit int) (map[string]any, error) {
 	rows, err := ctx.AppDB().Query(
@@ -119,23 +116,23 @@ func queryHistory(ctx *sdk.AppCtx, pid, kindFilter string, limit int) (map[strin
 			localURL = localCacheURL(id)
 		}
 		out = append(out, map[string]any{
-			"id":               id,
-			"kind":             kind,
-			"prompt":           prompt,
-			"revised_prompt":   revised,
-			"provider":         provider,
-			"model":            model,
-			"size":             size,
-			"duration_ms":      durationMs,
-			"storage_ids":      storageIDs,
-			"storage_urls":     storageURLs,
-			"upstream_urls":    upstreamURLs,
-			"thumbnail_b64":    thumbB64,
-			"local_cache_url":  localURL,
-			"extra_json":       extraJSON,
-			"count":            count,
-			"cost_usd":         costUSD,
-			"created_at":       createdAt,
+			"id":              id,
+			"kind":            kind,
+			"prompt":          prompt,
+			"revised_prompt":  revised,
+			"provider":        provider,
+			"model":           model,
+			"size":            size,
+			"duration_ms":     durationMs,
+			"storage_ids":     storageIDs,
+			"storage_urls":    storageURLs,
+			"upstream_urls":   upstreamURLs,
+			"thumbnail_b64":   thumbB64,
+			"local_cache_url": localURL,
+			"extra_json":      extraJSON,
+			"count":           count,
+			"cost_usd":        costUSD,
+			"created_at":      createdAt,
 		})
 	}
 	return map[string]any{"generations": out}, nil

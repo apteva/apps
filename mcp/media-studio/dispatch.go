@@ -11,6 +11,39 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+func projectScope(ctx *sdk.AppCtx) string {
+	if ctx != nil {
+		if pid := strings.TrimSpace(ctx.CurrentProject()); pid != "" {
+			return pid
+		}
+	}
+	return strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
+}
+
+func projectArg(args map[string]any) string {
+	if v := strings.TrimSpace(strArg(args, "_project_id", "")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(strArg(args, "project_id", ""))
+}
+
+func projectScopeFromArgs(ctx *sdk.AppCtx, args map[string]any) string {
+	if pid := projectArg(args); pid != "" {
+		return pid
+	}
+	return projectScope(ctx)
+}
+
+func withProjectScope(ctx *sdk.AppCtx, args map[string]any) *sdk.AppCtx {
+	if ctx == nil {
+		return nil
+	}
+	if pid := projectScopeFromArgs(ctx, args); pid != "" {
+		return ctx.WithProject(pid)
+	}
+	return ctx
+}
+
 const (
 	KindImage    = "image"
 	KindVideo    = "video"
@@ -41,8 +74,7 @@ type kindHandler struct {
 	ResolveCapability func(args map[string]any) string
 	// ResolveTool optionally overrides the manifest's tool name per
 	// provider slug. Needed when compatible providers name the same
-	// capability's tool differently (avatar: tavus=create_video,
-	// heygen=generate_video). nil → use bound.ToolFor(capability).
+	// capability's tool differently. nil → use bound.ToolFor(capability).
 	ResolveTool func(slug, capability string) string
 	// BuildArgs assembles the provider request body. providerSlug is
 	// the bound integration's app_slug so per-provider quirks can be
@@ -125,6 +157,7 @@ var handlers = map[string]kindHandler{
 // normalizes the response, optionally persists to storage, and shapes
 // the MCP result per kind.
 func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = withProjectScope(ctx, args)
 	kind := strArg(args, "kind", "")
 	if kind == "" {
 		return nil, errors.New("kind required")
@@ -170,6 +203,12 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		args["source_image"] = resolved
 	}
 
+	if kind == KindAvatar && bound.AppSlug == "heygen" {
+		if err := validateHeyGenAvatarEngine(ctx, bound, args); err != nil {
+			return mcpError("heygen avatar: " + err.Error()), nil
+		}
+	}
+
 	providerArgs, err := h.BuildArgs(args, bound.AppSlug, capability)
 	if err != nil {
 		return mcpError("build args: " + err.Error()), nil
@@ -213,7 +252,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 
 	storage := ctx.IntegrationFor("storage")
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectScope(ctx)
 	storageIDs := make([]int64, 0, len(media))
 	upstreamURLs := make([]string, 0, len(media))
 	var firstThumbB64 string
@@ -379,7 +418,7 @@ func resolveSourceImage(ctx *sdk.AppCtx, raw string) (string, error) {
 			ContentBase64 string `json:"content_base64"`
 		}
 		if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_content",
-			map[string]any{"id": id}, &got); err != nil {
+			storageArgs(ctx, map[string]any{"id": id}), &got); err != nil {
 			return "", errors.New("storage fetch failed: " + err.Error())
 		}
 		if got.ContentBase64 == "" {
@@ -429,10 +468,16 @@ func (a *App) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "prompt required", http.StatusBadRequest)
 		return
 	}
-	// Project context is fixed by the sidecar's APTEVA_PROJECT_ID env —
-	// each install gets its own sidecar with its own project — so we
-	// ignore body.project_id rather than mutating env at request time.
-	out, err := a.toolMediaGenerate(globalCtx, body)
+	if pid := strings.TrimSpace(r.URL.Query().Get("project_id")); pid != "" && projectArg(body) == "" {
+		body["project_id"] = pid
+	}
+	pid := projectScopeFromArgs(globalCtx, body)
+	if pid == "" {
+		http.Error(w, "project_id required", http.StatusBadRequest)
+		return
+	}
+	body["_project_id"] = pid
+	out, err := a.toolMediaGenerate(globalCtx.WithProject(pid), body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

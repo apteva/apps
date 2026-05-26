@@ -292,6 +292,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   // Video model picker — live-loaded from /models?kind=video.
   // Auto-snaps to the first listed model when the dropdown lands.
   const [videoModel, setVideoModel] = useState<string>("");
+  const [audioModel, setAudioModel] = useState<string>("");
+  const [sfxModel, setSfxModel] = useState<string>("");
+  const [musicModel, setMusicModel] = useState<string>("");
   // safe_mode (image gen + edit) — Venice's own default is true (blurs
   // adult-classified output); sidecar defaults to false so the API
   // returns whatever the model produced. Panel flag mirrors that.
@@ -407,30 +410,32 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     };
   }, [activeKind, projectId, loadGenerations]);
 
-  // Load the avatar/replica list (and HeyGen voices) when the Avatar
-  // tab is active.
+  // Load the avatar/replica list and provider voice catalog when the
+  // active path needs voice selection. Avatar reads avatar_provider;
+  // audio_tts reads audio_provider (ElevenLabs).
   useEffect(() => {
-    if (activeKind !== "avatar") return;
+    if (activeKind !== "avatar" && activeKind !== "audio_tts") return;
     let cancelled = false;
-    fetch(`${API}/avatars`, { credentials: "same-origin" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (cancelled || !data) return;
-        const list: AvatarEntry[] = Array.isArray(data.avatars) ? data.avatars : [];
-        setAvatars(list);
-        if (list.length > 0 && !list.some((x) => x.id === selectedAvatar)) {
-          setSelectedAvatar(list[0].id);
-        }
-      })
-      .catch(() => {});
-    fetch(`${API}/voices`, { credentials: "same-origin" })
+    if (activeKind === "avatar") {
+      fetch(`${API}/avatars`, { credentials: "same-origin" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (cancelled || !data) return;
+          const list: AvatarEntry[] = Array.isArray(data.avatars) ? data.avatars : [];
+          setAvatars(list);
+          if (list.length > 0 && !list.some((x) => x.id === selectedAvatar)) {
+            setSelectedAvatar(list[0].id);
+          }
+        })
+        .catch(() => {});
+    }
+    fetch(`${API}/voices?kind=${encodeURIComponent(activeKind)}`, { credentials: "same-origin" })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (cancelled || !data) return;
         const list: VoiceEntry[] = Array.isArray(data.voices) ? data.voices : [];
         setVoices(list);
-        // Default the voice to the first one when the provider needs it
-        // (HeyGen) and none is chosen yet.
+        // Default the voice to the first one when the provider needs it.
         if (list.length > 0 && !list.some((x) => x.id === voice)) {
           setVoice(list[0].id);
         }
@@ -468,14 +473,29 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                 (m: { id: string }) => m.id === imageModel,
               );
               if (!have) setImageModel(data.models[0].id as ImageModel);
-            } else if (activeKind === "video") {
-              const have = data.models.some(
-                (m: { id: string }) => m.id === videoModel,
-              );
-              if (!have) setVideoModel(data.models[0].id);
-            }
-          }
-        }
+	            } else if (activeKind === "video") {
+	              const have = data.models.some(
+	                (m: { id: string }) => m.id === videoModel,
+	              );
+	              if (!have) setVideoModel(data.models[0].id);
+	            } else if (activeKind === "audio_tts") {
+	              const have = data.models.some(
+	                (m: { id: string }) => m.id === audioModel,
+	              );
+	              if (!have) setAudioModel(data.models[0].id);
+	            } else if (activeKind === "audio_sfx") {
+	              const have = data.models.some(
+	                (m: { id: string }) => m.id === sfxModel,
+	              );
+	              if (!have) setSfxModel(data.models[0].id);
+	            } else if (activeKind === "music") {
+	              const have = data.models.some(
+	                (m: { id: string }) => m.id === musicModel,
+	              );
+	              if (!have) setMusicModel(data.models[0].id);
+	            }
+	          }
+	        }
       })
       .catch(() => {
         if (!cancelled) setLiveModels(null);
@@ -503,11 +523,17 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   // and decide whether to show the reference-image input for
   // image-to-video models.
   const currentModelId =
-    activeKind === "image"
-      ? (isEditMode ? editModel : imageModel)
-      : activeKind === "video"
-        ? videoModel
-        : "";
+	    activeKind === "image"
+	      ? (isEditMode ? editModel : imageModel)
+	      : activeKind === "video"
+	        ? videoModel
+	        : activeKind === "audio_tts"
+	          ? audioModel
+	          : activeKind === "audio_sfx"
+	            ? sfxModel
+	            : activeKind === "music"
+	              ? musicModel
+	              : "";
   const currentModel: LiveModel | undefined =
     liveModels?.find((m) => m.id === currentModelId);
   // Video reference-image is allowed for both standard (text-to-video)
@@ -544,6 +570,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       const body: Record<string, unknown> = {
         kind: activeKind,
         prompt,
+        project_id: projectId,
       };
       if (activeKind === "image") {
         if (isEditMode) {
@@ -568,8 +595,13 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           body.source_image = sourceImage;
         }
       } else if (activeKind === "audio_tts") {
+        if (audioModel) body.model = audioModel;
         if (voice) body.voice = voice;
-      } else if (activeKind === "audio_sfx" || activeKind === "music") {
+      } else if (activeKind === "audio_sfx") {
+        if (sfxModel) body.model = sfxModel;
+        body.duration = duration;
+      } else if (activeKind === "music") {
+        if (musicModel) body.model = musicModel;
         body.duration = duration;
       } else if (activeKind === "avatar") {
         // prompt carries the spoken script; avatar = replica/avatar id.
@@ -717,6 +749,12 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             setEditModel={setEditModel}
             videoModel={videoModel}
             setVideoModel={setVideoModel}
+            audioModel={audioModel}
+            setAudioModel={setAudioModel}
+            sfxModel={sfxModel}
+            setSfxModel={setSfxModel}
+            musicModel={musicModel}
+            setMusicModel={setMusicModel}
             currentModel={currentModel}
             safeMode={safeMode}
             setSafeMode={setSafeMode}
@@ -878,6 +916,12 @@ interface ComposerProps {
   setEditModel: (v: EditModel) => void;
   videoModel: string;
   setVideoModel: (v: string) => void;
+  audioModel: string;
+  setAudioModel: (v: string) => void;
+  sfxModel: string;
+  setSfxModel: (v: string) => void;
+  musicModel: string;
+  setMusicModel: (v: string) => void;
   currentModel?: LiveModel;
   safeMode: boolean;
   setSafeMode: (v: boolean) => void;
@@ -946,7 +990,7 @@ function Composer(p: ComposerProps) {
       )}
       {p.kind === "video" && (
         <>
-          <VideoModelPicker
+          <MediaModelPicker
             model={p.videoModel}
             setModel={p.setVideoModel}
             liveModels={p.liveModels}
@@ -970,10 +1014,41 @@ function Composer(p: ComposerProps) {
         </>
       )}
       {p.kind === "audio_tts" && (
-        <TextField label="Voice" value={p.voice} onChange={p.setVoice} placeholder="default" />
+        <>
+          <MediaModelPicker
+            model={p.audioModel}
+            setModel={p.setAudioModel}
+            liveModels={p.liveModels}
+            liveProvider={p.liveProvider}
+          />
+          {p.voices.length > 0 ? (
+            <VoiceSelect voice={p.voice} setVoice={p.setVoice} voices={p.voices} />
+          ) : (
+            <TextField label="Voice" value={p.voice} onChange={p.setVoice} placeholder="voice_id" />
+          )}
+        </>
       )}
-      {(p.kind === "audio_sfx" || p.kind === "music") && (
-        <NumberField label="Duration (s)" value={p.duration} onChange={p.setDuration} min={1} max={300} />
+      {p.kind === "audio_sfx" && (
+        <>
+          <MediaModelPicker
+            model={p.sfxModel}
+            setModel={p.setSfxModel}
+            liveModels={p.liveModels}
+            liveProvider={p.liveProvider}
+          />
+          <NumberField label="Duration (s)" value={p.duration} onChange={p.setDuration} min={1} max={30} />
+        </>
+      )}
+      {p.kind === "music" && (
+        <>
+          <MediaModelPicker
+            model={p.musicModel}
+            setModel={p.setMusicModel}
+            liveModels={p.liveModels}
+            liveProvider={p.liveProvider}
+          />
+          <NumberField label="Duration (s)" value={p.duration} onChange={p.setDuration} min={3} max={300} />
+        </>
       )}
       {p.kind === "avatar" && (
         <AvatarPicker
@@ -983,23 +1058,7 @@ function Composer(p: ComposerProps) {
         />
       )}
       {p.kind === "avatar" && p.voices.length > 0 && (
-        <div>
-          <label className="text-text-muted text-xs block">Voice</label>
-          <select
-            value={p.voice}
-            onChange={(e) => p.setVoice(e.target.value)}
-            className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
-            style={{ maxWidth: 220 }}
-          >
-            {p.voices.map((v) => (
-              <option key={v.id} value={v.id}>
-                {v.name || v.id}
-                {v.language ? ` · ${v.language}` : ""}
-                {v.gender ? ` · ${v.gender}` : ""}
-              </option>
-            ))}
-          </select>
-        </div>
+        <VoiceSelect voice={p.voice} setVoice={p.setVoice} voices={p.voices} />
       )}
       {p.kind === "image" && (
         <SafeModeToggle value={p.safeMode} onChange={p.setSafeMode} />
@@ -1381,7 +1440,7 @@ function ImageOptions({
   );
 }
 
-function VideoModelPicker({
+function MediaModelPicker({
   model,
   setModel,
   liveModels,
@@ -1428,6 +1487,36 @@ function VideoModelPicker({
             </option>
           );
         })}
+      </select>
+    </div>
+  );
+}
+
+function VoiceSelect({
+  voice,
+  setVoice,
+  voices,
+}: {
+  voice: string;
+  setVoice: (v: string) => void;
+  voices: VoiceEntry[];
+}) {
+  return (
+    <div>
+      <label className="text-text-muted text-xs block">Voice</label>
+      <select
+        value={voice}
+        onChange={(e) => setVoice(e.target.value)}
+        className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+        style={{ maxWidth: 260 }}
+      >
+        {voices.map((v) => (
+          <option key={v.id} value={v.id}>
+            {v.name || v.id}
+            {v.language ? ` · ${v.language}` : ""}
+            {v.gender ? ` · ${v.gender}` : ""}
+          </option>
+        ))}
       </select>
     </div>
   );

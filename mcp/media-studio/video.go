@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -126,10 +125,7 @@ func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug
 	if globalCtx == nil {
 		return mcpError("app not mounted")
 	}
-	pid := strArg(args, "project_id", "")
-	if pid == "" {
-		pid = os.Getenv("APTEVA_PROJECT_ID")
-	}
+	pid := projectScopeFromArgs(ctx, args)
 	prompt := strArg(args, "prompt", "")
 	sourceRef := strArg(args, "_source_image_ref", "")
 	requestJSON, _ := json.Marshal(args)

@@ -21,6 +21,8 @@ import (
 //     (executor wraps as {_binary, base64}) or {status:"PROCESSING"}.
 //   - avatar (tavus): get_video → {status, download_url}. On
 //     status="ready" we fetch download_url's bytes ourselves.
+//   - avatar (heygen): get_video → {data:{status, video_url}}. On
+//     status="completed" we fetch video_url's bytes ourselves.
 //
 // Runs every 15s. Gives up after maxVideoPollAttempts (~20 min).
 
@@ -156,16 +158,16 @@ func (a *App) pollAvatarJob(app *sdk.AppCtx, bound *sdk.BoundIntegration, p pend
 	}
 }
 
-// pollHeyGenAvatarJob polls /v1/video_status.get. HeyGen wraps the
-// result in {code, data:{status, video_url}}. status flows
+// pollHeyGenAvatarJob polls /v3/videos/{video_id}. HeyGen wraps the
+// result in {data:{status, video_url, failure_message}}. status flows
 // pending → processing → completed (or failed). On completed we fetch
 // data.video_url's bytes ourselves.
 func (a *App) pollHeyGenAvatarJob(app *sdk.AppCtx, bound *sdk.BoundIntegration, p pendingJob, attempts int) {
-	res, err := app.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "get_video_status",
+	res, err := app.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "get_video",
 		map[string]any{"video_id": p.QueueID})
 	if err != nil {
 		bumpPolling(app, p.ID, attempts)
-		app.Logger().Warn("heygen get_video_status transient error", "id", p.ID, "err", err)
+		app.Logger().Warn("heygen get_video transient error", "id", p.ID, "err", err)
 		return
 	}
 	if res == nil || !res.Success {
@@ -178,9 +180,10 @@ func (a *App) pollHeyGenAvatarJob(app *sdk.AppCtx, bound *sdk.BoundIntegration, 
 	}
 	var body struct {
 		Data struct {
-			Status   string `json:"status"`    // pending | processing | completed | failed
-			VideoURL string `json:"video_url"` // direct mp4 when completed
-			Error    any    `json:"error"`
+			Status         string `json:"status"`    // pending | processing | completed | failed
+			VideoURL       string `json:"video_url"` // direct mp4 when completed
+			FailureMessage string `json:"failure_message"`
+			Error          any    `json:"error"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(res.Data, &body); err != nil {
@@ -202,7 +205,11 @@ func (a *App) pollHeyGenAvatarJob(app *sdk.AppCtx, bound *sdk.BoundIntegration, 
 		}
 		a.finalizeJob(app, p, base64.StdEncoding.EncodeToString(bytes), "video/mp4")
 	case "failed":
-		failJob(app, p, "heygen status=failed")
+		errMsg := "heygen status=failed"
+		if body.Data.FailureMessage != "" {
+			errMsg += ": " + body.Data.FailureMessage
+		}
+		failJob(app, p, errMsg)
 	default: // pending | processing
 		bumpPolling(app, p.ID, attempts)
 	}
@@ -275,6 +282,10 @@ func failJob(app *sdk.AppCtx, p pendingJob, errMsg string) {
 // generations row tagged with the job's kind, marks the video_jobs row
 // complete, and emits media.generated.
 func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime string) {
+	scopedApp := app
+	if p.ProjectID != "" {
+		scopedApp = app.WithProject(p.ProjectID)
+	}
 	ext := extFromMime(mime)
 	if ext == "bin" {
 		ext = "mp4"
@@ -291,7 +302,7 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 	storage := app.IntegrationFor("storage")
 	var storageIDs []int64
 	if storage != nil {
-		id, err := saveToStorage(app, media, storageDir, p.Provider, 0)
+		id, err := saveToStorage(scopedApp, media, storageDir, p.Provider, 0)
 		if err != nil {
 			app.Logger().Warn("save-to-storage failed", "job_id", p.ID, "err", err)
 		} else if id != 0 {

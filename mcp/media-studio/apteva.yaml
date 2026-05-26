@@ -2,12 +2,12 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.7.0
+version: 0.9.1
 description: |
-  Generate images, video, audio, and music via any compatible provider
-  (OpenAI for image + TTS today; Replicate / ElevenLabs / Suno / Runway
-  / Pika as the integration catalog learns them). Optionally saves
-  outputs to the Storage app for permanent, shareable references.
+  Generate images, video, audio, music, and avatars via compatible
+  providers. ElevenLabs powers audio TTS, sound effects, and music.
+  Optionally saves outputs to the Storage app for permanent, shareable
+  references.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media-studio
@@ -46,24 +46,24 @@ requires:
 
     - role: audio_provider
       kind: integration
-      compatible_slugs: [elevenlabs, openai-api, venice-ai]
+      compatible_slugs: [elevenlabs]
       capabilities: [audio.tts, audio.sfx]
       tools:
         audio.tts: text_to_speech
         audio.sfx: generate_sfx
       required: false
       label: "Audio provider"
-      hint: "Bind a TTS / SFX provider (ElevenLabs covers both; OpenAI + Venice AI are TTS only)."
+      hint: "Bind ElevenLabs to enable text-to-speech and sound-effect generation."
 
     - role: music_provider
       kind: integration
-      compatible_slugs: [suno, replicate]
+      compatible_slugs: [elevenlabs]
       capabilities: [music.generate]
       tools:
         music.generate: generate_music
       required: false
       label: "Music provider"
-      hint: "Bind a music generator (Suno, Replicate-MusicGen) to enable music generation."
+      hint: "Bind ElevenLabs to enable music generation."
 
     - role: avatar_provider
       kind: integration

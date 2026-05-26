@@ -167,6 +167,21 @@ func newMediaStudioCtx(t *testing.T, pf sdk.PlatformClient) *sdk.AppCtx {
 	return ctx
 }
 
+func newGlobalMediaStudioCtx(t *testing.T, pf sdk.PlatformClient) *sdk.AppCtx {
+	t.Helper()
+	t.Setenv("APTEVA_PROJECT_ID", "")
+	rec := tk.NewEmitRecorder()
+	opts := []tk.Option{
+		tk.WithEmitter(rec),
+	}
+	if pf != nil {
+		opts = append(opts, tk.WithPlatform(pf))
+	}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", opts...)
+	globalCtx = ctx
+	return ctx
+}
+
 func fakePNG() []byte {
 	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
 	var buf strings.Builder
@@ -656,6 +671,9 @@ func TestToolMediaGenerate_GPTImage_B64_StorageUpload(t *testing.T) {
 	if ct, _ := got.Input["content_type"].(string); ct != "image/png" {
 		t.Errorf("content_type = %q, want image/png", ct)
 	}
+	if got.Input["_project_id"] != "test-proj" {
+		t.Errorf("_project_id = %v, want test-proj", got.Input["_project_id"])
+	}
 
 	if pf.executeCalls[0].Input["model"] != "gpt-image-2" {
 		t.Errorf("model not forwarded: %+v", pf.executeCalls[0].Input)
@@ -743,6 +761,45 @@ func TestToolMediaGenerate_WithStorage_OmitsInlineImage_AddsURLs(t *testing.T) {
 	}
 	if !foundResource {
 		t.Errorf("expected resource block with fetchable URI; got %+v", content)
+	}
+}
+
+func TestHandleGenerate_GlobalInstallThreadsProjectToStorage(t *testing.T) {
+	pngB64 := base64.StdEncoding.EncodeToString(fakePNG())
+	pf := newRecordingPlatform()
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(fmt.Sprintf(
+			`{"data":[{"b64_json":%q,"mime_type":"image/png"}],"model":"gpt-image-2"}`,
+			pngB64,
+		)),
+	}
+	pf.nextCallResult = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":4321}"}]}}`,
+	)
+	newGlobalMediaStudioCtx(t, pf)
+	app := &App{}
+
+	body := strings.NewReader(`{"kind":"image","prompt":"x","project_id":"panel-proj"}`)
+	req := httptest.NewRequest(http.MethodPost, "/generate", body)
+	rec := httptest.NewRecorder()
+	app.handleGenerate(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(pf.callAppCalls) != 1 {
+		t.Fatalf("expected 1 storage call, got %d", len(pf.callAppCalls))
+	}
+	if got := pf.callAppCalls[0].Input["_project_id"]; got != "panel-proj" {
+		t.Fatalf("storage _project_id = %v, want panel-proj; input=%+v", got, pf.callAppCalls[0].Input)
+	}
+	var storedProject string
+	if err := globalCtx.AppDB().QueryRow(`SELECT project_id FROM generations ORDER BY id DESC LIMIT 1`).Scan(&storedProject); err != nil {
+		t.Fatal(err)
+	}
+	if storedProject != "panel-proj" {
+		t.Fatalf("generation project_id = %q, want panel-proj", storedProject)
 	}
 }
 
@@ -1222,6 +1279,9 @@ func TestVideoPollWorker_Completes_SavesToStorageAndInsertsGenerations(t *testin
 	if folder, _ := pf.callAppCalls[0].Input["folder"].(string); folder != "/.generated/videos/" {
 		t.Errorf("storage folder = %q, want /.generated/videos/", folder)
 	}
+	if got := pf.callAppCalls[0].Input["_project_id"]; got != "test-proj" {
+		t.Errorf("storage _project_id = %v, want test-proj", got)
+	}
 
 	// Generations row exists with kind=video.
 	var kind string
@@ -1265,39 +1325,59 @@ func TestBuildTavusAvatarArgs_RequiresReplica(t *testing.T) {
 	}
 }
 
-func TestBuildHeyGenAvatarArgs_NestedPayload(t *testing.T) {
+func TestBuildHeyGenAvatarArgs_V3AvatarPayload(t *testing.T) {
 	args := map[string]any{
 		"avatar": "av-1", "prompt": "hello world", "voice": "vo-9",
-		"options": map[string]any{"resolution": "720p", "aspect": "9:16", "title": "Promo"},
+		"options": map[string]any{
+			"resolution": "720p", "aspect": "9:16", "title": "Promo",
+			"engine": "avatar_v", "motion_prompt": "wave a lot",
+		},
 	}
 	got, err := buildAvatarArgs(args, "heygen", "avatar.generate")
 	if err != nil {
 		t.Fatal(err)
 	}
-	vis, ok := got["video_inputs"].([]any)
-	if !ok || len(vis) != 1 {
-		t.Fatalf("video_inputs missing/wrong: %+v", got["video_inputs"])
+	if got["type"] != "avatar" || got["avatar_id"] != "av-1" {
+		t.Errorf("avatar fields wrong: %+v", got)
 	}
-	vi := vis[0].(map[string]any)
-	char := vi["character"].(map[string]any)
-	if char["avatar_id"] != "av-1" || char["type"] != "avatar" {
-		t.Errorf("character wrong: %+v", char)
+	if got["script"] != "hello world" || got["voice_id"] != "vo-9" {
+		t.Errorf("script/voice wrong: %+v", got)
 	}
-	voice := vi["voice"].(map[string]any)
-	if voice["voice_id"] != "vo-9" || voice["input_text"] != "hello world" {
-		t.Errorf("voice wrong: %+v", voice)
+	if got["resolution"] != "720p" || got["aspect_ratio"] != "9:16" {
+		t.Errorf("format fields wrong: %+v", got)
 	}
-	dim := got["dimension"].(map[string]any)
-	if dim["width"] != 720 || dim["height"] != 1280 {
-		t.Errorf("dimension = %+v, want 720x1280", dim)
+	engine := got["engine"].(map[string]any)
+	if engine["type"] != "avatar_v" {
+		t.Errorf("engine wrong: %+v", got["engine"])
 	}
 	if got["title"] != "Promo" {
 		t.Errorf("title not set: %+v", got["title"])
 	}
+	if _, ok := got["motion_prompt"]; ok {
+		t.Errorf("motion_prompt must be stripped for avatar_v: %+v", got)
+	}
 }
 
-func TestBuildHeyGenAvatarArgs_RequiresVoice(t *testing.T) {
-	_, err := buildAvatarArgs(map[string]any{"avatar": "av-1", "prompt": "hi"}, "heygen", "avatar.generate")
+func TestBuildHeyGenAvatarArgs_ImageToVideoPayload(t *testing.T) {
+	got, err := buildAvatarArgs(map[string]any{
+		"source_image": "https://example.com/person.jpg",
+		"prompt":       "hello from this photo",
+		"voice":        "vo-9",
+	}, "heygen", "avatar.generate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["type"] != "image" {
+		t.Errorf("type = %v, want image", got["type"])
+	}
+	image := got["image"].(map[string]any)
+	if image["type"] != "url" || image["url"] != "https://example.com/person.jpg" {
+		t.Errorf("image ref wrong: %+v", image)
+	}
+}
+
+func TestBuildHeyGenAvatarArgs_ImageToVideoRequiresVoice(t *testing.T) {
+	_, err := buildAvatarArgs(map[string]any{"source_image": "abc", "prompt": "hi"}, "heygen", "avatar.generate")
 	if err == nil || !strings.Contains(err.Error(), "voice") {
 		t.Errorf("want voice-required error, got %v", err)
 	}
@@ -1307,8 +1387,8 @@ func TestAvatarToolForSlug(t *testing.T) {
 	if avatarToolForSlug("tavus", "avatar.generate") != "create_video" {
 		t.Error("tavus should map to create_video")
 	}
-	if avatarToolForSlug("heygen", "avatar.generate") != "generate_video" {
-		t.Error("heygen should map to generate_video")
+	if avatarToolForSlug("heygen", "avatar.generate") != "create_video" {
+		t.Error("heygen should map to create_video")
 	}
 }
 
@@ -1347,7 +1427,7 @@ func TestPollWorker_AvatarHeyGen_Completes(t *testing.T) {
 	pf.identity.Bindings["avatar_provider"] = float64(56)
 	pf.nextExecuteResult = &sdk.ExecuteResult{
 		Success: true, Status: 200,
-		Data: json.RawMessage(fmt.Sprintf(`{"code":100,"data":{"status":"completed","video_url":"%s/v.mp4"}}`, upstream.URL)),
+		Data: json.RawMessage(fmt.Sprintf(`{"data":{"status":"completed","video_url":"%s/v.mp4"}}`, upstream.URL)),
 	}
 	pf.nextCallResult = json.RawMessage(`{"result":{"content":[{"type":"text","text":"{\"id\":4321}"}]}}`)
 
@@ -1366,8 +1446,8 @@ func TestPollWorker_AvatarHeyGen_Completes(t *testing.T) {
 	if status != "complete" {
 		t.Errorf("status = %q, want complete", status)
 	}
-	if pf.executeCalls[0].Tool != "get_video_status" {
-		t.Errorf("retrieve tool = %q, want get_video_status", pf.executeCalls[0].Tool)
+	if pf.executeCalls[0].Tool != "get_video" {
+		t.Errorf("retrieve tool = %q, want get_video", pf.executeCalls[0].Tool)
 	}
 	var kind string
 	ctx.AppDB().QueryRow(`SELECT kind FROM generations WHERE id=?`, genID).Scan(&kind)

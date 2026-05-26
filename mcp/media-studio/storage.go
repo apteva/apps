@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -57,24 +58,24 @@ func saveToStorage(ctx *sdk.AppCtx, m generatedMedia, storageDir, providerSlug s
 		ID int64 `json:"id"`
 	}
 	if m.B64 != "" {
-		if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", map[string]any{
+		if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", storageArgs(ctx, map[string]any{
 			"name":           name,
 			"content_base64": m.B64,
 			"folder":         folder,
 			"content_type":   contentType,
 			"tags":           tags,
-		}, &got); err != nil {
+		}), &got); err != nil {
 			return 0, err
 		}
 		return got.ID, nil
 	}
 	if m.UpstreamURL != "" {
-		if err := ctx.PlatformAPI().CallAppResult("storage", "files_from_url", map[string]any{
+		if err := ctx.PlatformAPI().CallAppResult("storage", "files_from_url", storageArgs(ctx, map[string]any{
 			"url":    m.UpstreamURL,
 			"folder": folder,
 			"name":   name,
 			"tags":   tags,
-		}, &got); err != nil {
+		}), &got); err != nil {
 			return 0, err
 		}
 		return got.ID, nil
@@ -101,5 +102,20 @@ func pickExt(outputFormat string) string {
 // proxy at /api/apps/storage/* (auth via the host's session); media-studio
 // itself never needs to mint a signed URL for this path.
 func storageContentURL(id int64, projectID string) string {
-	return fmt.Sprintf("/api/apps/storage/files/%d/content?project_id=%s", id, projectID)
+	return fmt.Sprintf("/api/apps/storage/files/%d/content?project_id=%s", id, url.QueryEscape(projectID))
+}
+
+func storageArgs(ctx *sdk.AppCtx, args map[string]any) map[string]any {
+	pid := projectScope(ctx)
+	if pid == "" {
+		return args
+	}
+	cp := make(map[string]any, len(args)+1)
+	for k, v := range args {
+		cp[k] = v
+	}
+	if _, ok := cp["_project_id"]; !ok {
+		cp["_project_id"] = pid
+	}
+	return cp
 }

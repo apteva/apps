@@ -185,6 +185,115 @@ func parseModelList(providerSlug, kind string, raw json.RawMessage, connID int64
 			out = append(out, modelEntry{ID: m.ID, Label: m.ID})
 		}
 		return out
+	case "elevenlabs":
+		_ = connID
+		_ = veniceType
+		return parseElevenLabsModelList(kind, raw)
+	}
+	return nil
+}
+
+func parseElevenLabsModelList(kind string, raw json.RawMessage) []modelEntry {
+	type elevenModel struct {
+		ID                 string `json:"model_id"`
+		Name               string `json:"name"`
+		DisplayName        string `json:"display_name"`
+		CanDoTextToSpeech  bool   `json:"can_do_text_to_speech"`
+		CanDoSoundEffects  bool   `json:"can_do_sound_effects"`
+		CanDoMusic         bool   `json:"can_do_music"`
+		CanDoVoice         bool   `json:"can_be_used_for_voice_cloning"`
+		MaxCharacters      int    `json:"max_characters_request_free_user"`
+		MaxCharactersPaid  int    `json:"max_characters_request_subscribed_user"`
+		MaxCharactersTotal int    `json:"maximum_text_length_per_request"`
+	}
+	var list []elevenModel
+	if err := json.Unmarshal(raw, &list); err != nil {
+		var wrapped struct {
+			Data   []elevenModel `json:"data"`
+			Models []elevenModel `json:"models"`
+		}
+		if err := json.Unmarshal(raw, &wrapped); err != nil {
+			return elevenLabsDefaultModels(kind)
+		}
+		if len(wrapped.Data) > 0 {
+			list = wrapped.Data
+		} else {
+			list = wrapped.Models
+		}
+	}
+
+	out := make([]modelEntry, 0, len(list))
+	for _, m := range list {
+		id := m.ID
+		if id == "" {
+			continue
+		}
+		if !elevenLabsModelMatches(m, kind) {
+			continue
+		}
+		label := id
+		if m.Name != "" {
+			label = m.Name
+		} else if m.DisplayName != "" {
+			label = m.DisplayName
+		}
+		limit := m.MaxCharactersTotal
+		if limit == 0 {
+			limit = m.MaxCharactersPaid
+		}
+		if limit == 0 {
+			limit = m.MaxCharacters
+		}
+		out = append(out, modelEntry{
+			ID:              id,
+			Label:           label,
+			PromptCharLimit: limit,
+		})
+	}
+	if len(out) == 0 {
+		return elevenLabsDefaultModels(kind)
+	}
+	return out
+}
+
+func elevenLabsModelMatches(m struct {
+	ID                 string `json:"model_id"`
+	Name               string `json:"name"`
+	DisplayName        string `json:"display_name"`
+	CanDoTextToSpeech  bool   `json:"can_do_text_to_speech"`
+	CanDoSoundEffects  bool   `json:"can_do_sound_effects"`
+	CanDoMusic         bool   `json:"can_do_music"`
+	CanDoVoice         bool   `json:"can_be_used_for_voice_cloning"`
+	MaxCharacters      int    `json:"max_characters_request_free_user"`
+	MaxCharactersPaid  int    `json:"max_characters_request_subscribed_user"`
+	MaxCharactersTotal int    `json:"maximum_text_length_per_request"`
+}, kind string) bool {
+	id := strings.ToLower(m.ID)
+	switch kind {
+	case KindAudioTTS:
+		return m.CanDoTextToSpeech || (strings.HasPrefix(id, "eleven_") &&
+			!strings.Contains(id, "sound") && !strings.Contains(id, "music"))
+	case KindAudioSFX:
+		return m.CanDoSoundEffects || strings.Contains(id, "sound")
+	case KindMusic:
+		return m.CanDoMusic || strings.Contains(id, "music")
+	}
+	return false
+}
+
+func elevenLabsDefaultModels(kind string) []modelEntry {
+	switch kind {
+	case KindAudioTTS:
+		return []modelEntry{
+			{ID: "eleven_multilingual_v2", Label: "eleven_multilingual_v2"},
+			{ID: "eleven_flash_v2_5", Label: "eleven_flash_v2_5"},
+			{ID: "eleven_turbo_v2_5", Label: "eleven_turbo_v2_5"},
+			{ID: "eleven_v3", Label: "eleven_v3"},
+		}
+	case KindAudioSFX:
+		return []modelEntry{{ID: "eleven_text_to_sound_v2", Label: "eleven_text_to_sound_v2"}}
+	case KindMusic:
+		return []modelEntry{{ID: "music_v1", Label: "music_v1"}}
 	}
 	return nil
 }
@@ -216,8 +325,12 @@ func buildModelEntryFromVeniceSpec(id string, raw json.RawMessage) modelEntry {
 				} `json:"steps"`
 			} `json:"constraints"`
 			Pricing struct {
-				Generation  *struct{ USD float64 `json:"usd"` } `json:"generation,omitempty"`
-				Inpaint     *struct{ USD float64 `json:"usd"` } `json:"inpaint,omitempty"`
+				Generation *struct {
+					USD float64 `json:"usd"`
+				} `json:"generation,omitempty"`
+				Inpaint *struct {
+					USD float64 `json:"usd"`
+				} `json:"inpaint,omitempty"`
 				Resolutions map[string]struct {
 					USD float64 `json:"usd"`
 				} `json:"resolutions,omitempty"`
@@ -318,17 +431,22 @@ func getVeniceModelSpec(connID int64, veniceType, modelID string) (json.RawMessa
 // given capability + args. Cost = perVariant × variants.
 //
 // Pricing shapes seen in the wild:
-//   generate (pixel models):       {"pricing":{"generation":{"usd":0.01}}}
-//   generate (resolution tier):    {"pricing":{"resolutions":{"1K":{"usd":0.08}, "2K":{"usd":0.10}}}}
-//   edit (Venice's "inpaint"):     {"pricing":{"inpaint":{"usd":0.04}}}
+//
+//	generate (pixel models):       {"pricing":{"generation":{"usd":0.01}}}
+//	generate (resolution tier):    {"pricing":{"resolutions":{"1K":{"usd":0.08}, "2K":{"usd":0.10}}}}
+//	edit (Venice's "inpaint"):     {"pricing":{"inpaint":{"usd":0.04}}}
 //
 // Returns (0, false) when the spec lacks a price for the capability.
 func computeVeniceImageCost(specRaw json.RawMessage, capability string, args map[string]any) (float64, bool) {
 	var spec struct {
 		ModelSpec struct {
 			Pricing struct {
-				Generation  *struct{ USD float64 `json:"usd"` } `json:"generation,omitempty"`
-				Inpaint     *struct{ USD float64 `json:"usd"` } `json:"inpaint,omitempty"`
+				Generation *struct {
+					USD float64 `json:"usd"`
+				} `json:"generation,omitempty"`
+				Inpaint *struct {
+					USD float64 `json:"usd"`
+				} `json:"inpaint,omitempty"`
 				Resolutions map[string]struct {
 					USD float64 `json:"usd"`
 				} `json:"resolutions,omitempty"`

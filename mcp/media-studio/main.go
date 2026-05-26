@@ -3,7 +3,7 @@
 //
 // Architecture:
 //   - manifest declares 5 single-binding integration roles:
-//       image_provider, video_provider, audio_provider, music_provider, storage
+//     image_provider, video_provider, audio_provider, music_provider, storage
 //     each optional; tools enforce "is this role bound?" at call time.
 //   - one unified MCP tool (media_generate) discriminates on `kind` and
 //     routes to per-kind builders + normalizers (image.go, video.go, …).
@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.7.0
+version: 0.9.1
 description: |
   Generate images, video, audio, and music via any compatible provider.
   Optionally saves outputs to the Storage app for permanent references.
@@ -64,7 +64,7 @@ requires:
       label: "Video provider"
     - role: audio_provider
       kind: integration
-      compatible_slugs: [elevenlabs, openai-api, venice-ai]
+      compatible_slugs: [elevenlabs]
       capabilities: [audio.tts, audio.sfx]
       tools:
         audio.tts: text_to_speech
@@ -73,7 +73,7 @@ requires:
       label: "Audio provider"
     - role: music_provider
       kind: integration
-      compatible_slugs: [suno, replicate]
+      compatible_slugs: [elevenlabs]
       capabilities: [music.generate]
       tools: { music.generate: generate_music }
       required: false
