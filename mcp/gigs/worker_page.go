@@ -164,8 +164,8 @@ func workerPageHTML(token string) string {
 <body>
   <main id="app">Loading...</main>
   <script>
-    const TOKEN = ` + jsString(token) + `;
-    const API = "/api/apps/gigs/worker/" + TOKEN;
+	    const TOKEN = ` + jsString(token) + `;
+	    const API = "/api/apps/gigs/worker/" + TOKEN;
     const result = {};
     const instructionResponses = {};
     const allAttachmentIDs = new Set();
@@ -352,9 +352,14 @@ func workerPageHTML(token string) string {
       file.addEventListener("change", async () => {
         const files = Array.from(file.files || []);
         for (const f of files) {
-          setStatus("Uploading " + f.name + "...");
-          const id = await uploadFile(f);
-          if (!id) continue;
+	          setStatus("Uploading " + f.name + "...");
+	          let id = null;
+	          try {
+	            id = await uploadFile(f);
+	          } catch (e) {
+	            setStatus("Upload failed: " + e.message);
+	          }
+	          if (!id) continue;
           const entry = ensureInstructionResponse(key, it, index);
           entry.files.push({ storage_file_id: id, filename: f.name, mime: f.type });
           allAttachmentIDs.add(id);
@@ -470,12 +475,17 @@ func workerPageHTML(token string) string {
           if (k === "input_photo") el.accept = "image/*";
           if (k === "input_audio_recording") el.accept = "audio/*";
           if (k === "input_video_recording") el.accept = "video/*";
-          el.addEventListener("change", async () => {
-            const file = el.files && el.files[0];
-            if (!file) return;
-            setStatus("Uploading " + file.name + "...");
-            const id = await uploadFile(file);
-            if (id) {
+	        el.addEventListener("change", async () => {
+	          const file = el.files && el.files[0];
+	          if (!file) return;
+	          setStatus("Uploading " + file.name + "...");
+	          let id = null;
+	          try {
+	            id = await uploadFile(file);
+	          } catch (e) {
+	            setStatus("Upload failed: " + e.message);
+	          }
+	          if (id) {
               result[key] = { storage_file_id: id, filename: file.name, mime: file.type };
               allAttachmentIDs.add(id);
               setStatus("Uploaded.");
@@ -498,18 +508,18 @@ func workerPageHTML(token string) string {
       wrap.appendChild(el);
     }
 
-    async function uploadFile(file) {
-      const buf = await file.arrayBuffer();
-      const b64 = arrayBufferToBase64(buf);
-      const res = await fetch(API + "/upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: file.name, content_type: file.type, content_base64: b64 }),
-      });
-      const j = await res.json();
-      if (j.error) { setStatus("Upload failed: " + j.error); return null; }
-      return j.storage_file_id;
-    }
+	    async function uploadFile(file) {
+	      const buf = await file.arrayBuffer();
+	      const b64 = arrayBufferToBase64(buf);
+	      const res = await fetch(publicWorkerURL("/upload"), {
+	        method: "POST",
+	        headers: { "Content-Type": "application/json" },
+	        body: JSON.stringify({ name: file.name, content_type: file.type, content_base64: b64 }),
+	      });
+	      const j = await responseJSON(res);
+	      if (j.error) throw new Error(j.error);
+	      return j.storage_file_id;
+	    }
 
     async function submit() {
       const payload = Object.assign({}, result);
@@ -527,19 +537,26 @@ func workerPageHTML(token string) string {
       const button = document.getElementById("submit");
       button.disabled = true;
       setStatus("Submitting...");
-      const res = await fetch(API + "/submit", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ payload: payload, attachment_file_ids: Array.from(allAttachmentIDs) }),
-      });
-      const j = await res.json();
-      if (j.error) {
-        button.disabled = false;
-        setStatus("Submit failed: " + j.error);
-        return;
-      }
-      document.body.innerHTML = "<main><div class='done'>Submission received. Thank you.</div></main>";
-    }
+	      let j = null;
+	      try {
+	        const res = await fetch(publicWorkerURL("/submit"), {
+	          method: "POST",
+	          headers: { "Content-Type": "application/json" },
+	          body: JSON.stringify({ payload: payload, attachment_file_ids: Array.from(allAttachmentIDs) }),
+	        });
+	        j = await responseJSON(res);
+	      } catch (e) {
+	        button.disabled = false;
+	        setStatus("Submit failed: " + e.message);
+	        return;
+	      }
+	      if (j.error) {
+	        button.disabled = false;
+	        setStatus("Submit failed: " + j.error);
+	        return;
+	      }
+	      document.body.innerHTML = "<main><div class='done'>Submission received. Thank you.</div></main>";
+	    }
 
     function updateStatus() {
       const responses = Object.values(instructionResponses).length;
@@ -558,13 +575,32 @@ func workerPageHTML(token string) string {
     function instructionTitle(it, body, index) {
       return body.label || body.caption || body.display || body.title || body.text || kindLabel(it.instruction_kind) || ("Instruction " + (index + 1));
     }
-    function formatDeadline(s) {
+	    function formatDeadline(s) {
       if (!s) return "No deadline";
       const d = new Date(s);
       if (Number.isNaN(d.getTime())) return s;
-      return d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
-    }
-    function escapeHTML(s) { return String(s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+	      return d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+	    }
+	    function publicWorkerURL(path) {
+	      const exp = Math.floor(Date.now() / 1000) + 86400;
+	      return API + path + "?sig=" + encodeURIComponent(TOKEN) + "&exp=" + exp;
+	    }
+	    async function responseJSON(res) {
+	      const text = await res.text();
+	      let json = {};
+	      if (text) {
+	        try {
+	          json = JSON.parse(text);
+	        } catch (_) {
+	          json = { error: text };
+	        }
+	      }
+	      if (!res.ok) {
+	        throw new Error(json.error || ("HTTP " + res.status));
+	      }
+	      return json;
+	    }
+	    function escapeHTML(s) { return String(s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
     function escapeAttr(s) { return String(s||"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
     function arrayBufferToBase64(buf) {
       const bytes = new Uint8Array(buf);
