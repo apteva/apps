@@ -1018,6 +1018,19 @@ func loadGig(db *sql.DB, pid string, id int64) (*gig, error) {
 			g.Assignments = append(g.Assignments, v)
 		}
 	}
+	if g.Result == nil {
+		var payload sql.NullString
+		if err := db.QueryRow(
+			`SELECT s.payload_json
+			 FROM gig_submissions s
+			 JOIN gig_assignments a ON a.id = s.assignment_id
+			 WHERE a.gig_id=?
+			 ORDER BY s.id DESC LIMIT 1`,
+			id,
+		).Scan(&payload); err == nil && payload.Valid {
+			_ = parseJSON(payload.String, &g.Result)
+		}
+	}
 	return g, nil
 }
 

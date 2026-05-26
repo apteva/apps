@@ -1,4 +1,4 @@
-# Gigs (v0.1.4)
+# Gigs (v0.1.5)
 
 Agents delegate atomic work to human workers (CRM contacts) by composing
 reusable multi-modal instructions. Templates are saved instruction sets;
@@ -13,6 +13,10 @@ worker submits.
    with title + defaults + per-use overrides.
 3. **Gigs** — immutable snapshots, composed at dispatch from a template +
    vars (or from instructions directly, or fully inline).
+
+The dashboard supports the same core workflow: create instructions, build
+template compositions, dispatch gigs from templates or selected instructions,
+assign workers, and review submitted results.
 
 `result_schema`, `media_manifest`, `checklist`, and `variables` are
 **derived** from the composition — never hand-authored.

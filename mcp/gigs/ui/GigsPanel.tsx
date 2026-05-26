@@ -305,27 +305,49 @@ export default function GigsPanel(props: NativePanelProps) {
 function QueueTab({ projectId }: { projectId: string }) {
   const [gigs, setGigs] = useState<Gig[] | null>(null);
   const [selected, setSelected] = useState<Gig | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [status, setStatus] = useState("open,offered,accepted,submitted");
   const [err, setErr] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
-      const data = await api<{ gigs: Gig[] }>(`/gigs?status=open,offered,accepted,submitted`, projectId);
+      const data = await api<{ gigs: Gig[] }>(`/gigs?status=${encodeURIComponent(status)}`, projectId);
       setGigs(data.gigs || []);
     } catch (e) {
       setErr((e as Error).message);
     }
-  }, [projectId]);
+  }, [projectId, status]);
   useEffect(() => { reload(); }, [reload]);
 
   return (
     <div className="grid grid-cols-[minmax(280px,360px)_1fr] h-full">
       <aside className="border-r border-border overflow-auto">
+        <div className="sticky top-0 z-10 bg-bg border-b border-border p-3 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold">Gigs</h2>
+            <button
+              onClick={() => { setAdding(true); setSelected(null); }}
+              className="flex items-center gap-1 px-2 py-1 text-sm border border-border rounded"
+            >
+              <Icon name="plus" /> New gig
+            </button>
+          </div>
+          <select value={status} onChange={(e) => setStatus(e.target.value)} className="w-full text-sm border border-border rounded px-2 py-1 bg-bg">
+            <option value="open,offered,accepted,submitted">Active + submitted</option>
+            <option value="open">Open</option>
+            <option value="offered,accepted">Assigned</option>
+            <option value="submitted">Submitted</option>
+            <option value="reviewed">Reviewed</option>
+            <option value="rejected,cancelled,expired">Closed without acceptance</option>
+            <option value="open,offered,accepted,submitted,reviewed,rejected,cancelled,expired">All</option>
+          </select>
+        </div>
         {err && <div className="m-3 p-2 text-rose-600 text-sm">{err}</div>}
-        {gigs?.length === 0 && <div className="p-6 text-text-muted text-sm">No open gigs.</div>}
+        {gigs?.length === 0 && <div className="p-6 text-text-muted text-sm">No gigs in this view.</div>}
         {gigs?.map((g) => (
           <button
             key={g.id}
-            onClick={() => setSelected(g)}
+            onClick={() => { setSelected(g); setAdding(false); }}
             className={
               "w-full text-left px-3 py-3 border-b border-border hover:bg-bg-subtle " +
               (selected?.id === g.id ? "bg-bg-subtle" : "")
@@ -342,7 +364,17 @@ function QueueTab({ projectId }: { projectId: string }) {
         ))}
       </aside>
       <section className="p-4 overflow-auto">
-        {selected ? <GigDetail gig={selected} projectId={projectId} onChange={reload} /> : (
+        {adding ? (
+          <NewGigForm
+            projectId={projectId}
+            onDone={(gig) => {
+              setAdding(false);
+              setSelected(gig);
+              reload();
+            }}
+            onCancel={() => setAdding(false)}
+          />
+        ) : selected ? <GigDetail gig={selected} projectId={projectId} onChange={reload} /> : (
           <div className="text-text-muted text-sm">Pick a gig.</div>
         )}
       </section>
@@ -353,6 +385,7 @@ function QueueTab({ projectId }: { projectId: string }) {
 function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; onChange: () => void }) {
   const [full, setFull] = useState<Gig | null>(null);
   const [busy, setBusy] = useState(false);
+  const [assigning, setAssigning] = useState(false);
   useEffect(() => {
     api<{ gig: Gig }>(`/gigs/${gig.id}`, projectId).then((d) => setFull(d.gig)).catch(() => setFull(gig));
   }, [gig.id, projectId, gig]);
@@ -403,6 +436,22 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
           </div>
         ))}
       </div>
+      {(g.status === "open" || g.status === "offered") && (
+        <div className="mt-3">
+          {assigning ? (
+            <AssignGigForm
+              projectId={projectId}
+              busy={busy}
+              onCancel={() => setAssigning(false)}
+              onAssign={(workerId) => doAction("assign", { worker_id: workerId, mode: "direct" }).then(() => setAssigning(false))}
+            />
+          ) : (
+            <button onClick={() => setAssigning(true)} className="px-3 py-2 text-sm border border-border rounded">
+              Assign worker
+            </button>
+          )}
+        </div>
+      )}
 
       {g.result && (
         <>
@@ -432,6 +481,254 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
   );
 }
 
+function NewGigForm({
+  projectId, onDone, onCancel,
+}: { projectId: string; onDone: (gig: Gig) => void; onCancel: () => void }) {
+  const [mode, setMode] = useState<"template" | "instructions">("template");
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [instructions, setInstructions] = useState<Instruction[]>([]);
+  const [templateId, setTemplateId] = useState("");
+  const [title, setTitle] = useState("");
+  const [varsText, setVarsText] = useState("{}");
+  const [workerId, setWorkerId] = useState("");
+  const [deadlineLocal, setDeadlineLocal] = useState("");
+  const [priority, setPriority] = useState("");
+  const [selectedInstructionIds, setSelectedInstructionIds] = useState<number[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    api<{ templates: Template[] }>("/templates?include_archived=false", projectId)
+      .then((d) => {
+        const active = (d.templates || []).filter((t) => t.current_version?.status === "active");
+        setTemplates(active);
+        if (!templateId && active[0]) setTemplateId(String(active[0].id));
+      })
+      .catch(() => setTemplates([]));
+    api<{ instructions: Instruction[] }>("/instructions?include_archived=false", projectId)
+      .then((d) => setInstructions(d.instructions || []))
+      .catch(() => setInstructions([]));
+  }, [projectId, templateId]);
+
+  const selectedTemplate = templates.find((t) => String(t.id) === templateId);
+  const selectedInstructions = selectedInstructionIds
+    .map((id) => instructions.find((i) => i.id === id))
+    .filter(Boolean) as Instruction[];
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true); setErr(null);
+    try {
+      const vars = parseJSONMap(varsText, "Vars JSON");
+      const body: Record<string, unknown> = {
+        vars,
+        deadline_at: deadlineLocal ? new Date(deadlineLocal).toISOString() : undefined,
+        priority: priority || undefined,
+        worker_id: workerId ? Number(workerId) : undefined,
+      };
+      if (mode === "template") {
+        if (!templateId) throw new Error("Select a published template");
+        body.template_id = Number(templateId);
+      } else {
+        if (!title.trim()) throw new Error("Title required");
+        if (selectedInstructionIds.length === 0) throw new Error("Add at least one instruction");
+        body.title = title.trim();
+        body.instructions = selectedInstructionIds.map((id) => ({ instruction_id: id }));
+      }
+      const data = await api<{ gig: Gig }>("/gigs", projectId, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      onDone(data.gig);
+    } catch (e2) {
+      setErr((e2 as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className="space-y-4">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-lg font-semibold">Create gig</h2>
+        <button type="button" onClick={onCancel} className="px-3 py-1 text-sm border border-border rounded">Cancel</button>
+      </div>
+      <div className="inline-flex rounded border border-border overflow-hidden text-sm">
+        <button type="button" onClick={() => setMode("template")} className={"px-3 py-1 " + (mode === "template" ? "bg-sky-600 text-white" : "bg-bg text-text-muted")}>From template</button>
+        <button type="button" onClick={() => setMode("instructions")} className={"px-3 py-1 border-l border-border " + (mode === "instructions" ? "bg-sky-600 text-white" : "bg-bg text-text-muted")}>From instructions</button>
+      </div>
+
+      {mode === "template" ? (
+        <div className="space-y-2">
+          <select value={templateId} onChange={(e) => setTemplateId(e.target.value)} className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" required>
+            <option value="">Select published template</option>
+            {templates.map((t) => <option key={t.id} value={t.id}>{t.name} /{t.slug}</option>)}
+          </select>
+          {selectedTemplate?.current_version?.derived?.variables?.length ? (
+            <div className="text-xs text-text-muted">
+              Vars expected: {selectedTemplate.current_version.derived.variables.map((v) => v.name).join(", ")}
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Gig title" className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" required={mode === "instructions"} />
+          <InstructionOrderEditor
+            instructions={instructions}
+            selectedIds={selectedInstructionIds}
+            onChange={setSelectedInstructionIds}
+          />
+          {selectedInstructions.length > 0 && (
+            <div className="text-xs text-text-muted">
+              {selectedInstructions.length} instruction{selectedInstructions.length === 1 ? "" : "s"} selected
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+        <WorkerSelect projectId={projectId} value={workerId} onChange={setWorkerId} allowEmpty />
+        <input type="datetime-local" value={deadlineLocal} onChange={(e) => setDeadlineLocal(e.target.value)} className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+        <select value={priority} onChange={(e) => setPriority(e.target.value)} className="px-2 py-1 text-sm border border-border rounded bg-bg">
+          <option value="">Priority</option>
+          <option value="low">Low</option>
+          <option value="normal">Normal</option>
+          <option value="high">High</option>
+          <option value="urgent">Urgent</option>
+        </select>
+      </div>
+
+      <textarea
+        value={varsText}
+        onChange={(e) => setVarsText(e.target.value)}
+        rows={5}
+        className="w-full px-2 py-1 text-sm font-mono border border-border rounded bg-bg"
+        placeholder='{"customer_name":"Acme"}'
+      />
+      {err && <div className="text-rose-600 text-xs">{err}</div>}
+      <button disabled={busy} className="px-3 py-2 text-sm bg-sky-600 text-white rounded disabled:opacity-50">Create gig</button>
+    </form>
+  );
+}
+
+function AssignGigForm({
+  projectId, busy, onAssign, onCancel,
+}: { projectId: string; busy: boolean; onAssign: (workerId: number) => Promise<void>; onCancel: () => void }) {
+  const [workerId, setWorkerId] = useState("");
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (workerId) onAssign(Number(workerId));
+      }}
+      className="p-3 border border-border rounded bg-bg-subtle space-y-2"
+    >
+      <WorkerSelect projectId={projectId} value={workerId} onChange={setWorkerId} />
+      <div className="flex gap-2">
+        <button disabled={busy || !workerId} className="px-3 py-1 text-sm bg-sky-600 text-white rounded disabled:opacity-50">Assign</button>
+        <button type="button" onClick={onCancel} className="px-3 py-1 text-sm border border-border rounded">Cancel</button>
+      </div>
+    </form>
+  );
+}
+
+function WorkerSelect({
+  projectId, value, onChange, allowEmpty,
+}: { projectId: string; value: string; onChange: (v: string) => void; allowEmpty?: boolean }) {
+  const [workers, setWorkers] = useState<Worker[]>([]);
+  useEffect(() => {
+    api<{ workers: Worker[] }>("/workers?status=active&include_contact=true", projectId)
+      .then((d) => setWorkers(d.workers || []))
+      .catch(() => setWorkers([]));
+  }, [projectId]);
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)} className="px-2 py-1 text-sm border border-border rounded bg-bg">
+      {allowEmpty && <option value="">No worker yet</option>}
+      {!allowEmpty && <option value="">Select worker</option>}
+      {workers.map((w) => (
+        <option key={w.id} value={w.id}>
+          {w.contact ? contactName(w.contact) : `Worker #${w.id}`}{w.open_assignments != null ? ` (${w.open_assignments} open)` : ""}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function InstructionOrderEditor({
+  instructions, selectedIds, onChange,
+}: { instructions: Instruction[]; selectedIds: number[]; onChange: (ids: number[]) => void }) {
+  const [pickId, setPickId] = useState("");
+  const available = instructions.filter((i) => i.current_version_id || i.current_version);
+  const selected = selectedIds
+    .map((id) => instructions.find((i) => i.id === id))
+    .filter(Boolean) as Instruction[];
+
+  const move = (index: number, delta: number) => {
+    const next = selectedIds.slice();
+    const target = index + delta;
+    if (target < 0 || target >= next.length) return;
+    [next[index], next[target]] = [next[target], next[index]];
+    onChange(next);
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-[1fr_auto] gap-2">
+        <select value={pickId} onChange={(e) => setPickId(e.target.value)} className="px-2 py-1 text-sm border border-border rounded bg-bg">
+          <option value="">Add instruction</option>
+          {available.map((i) => (
+            <option key={i.id} value={i.id}>{i.name} /{i.slug} · {i.kind}</option>
+          ))}
+        </select>
+        <button
+          type="button"
+          disabled={!pickId}
+          onClick={() => {
+            onChange([...selectedIds, Number(pickId)]);
+            setPickId("");
+          }}
+          className="px-3 py-1 text-sm border border-border rounded disabled:opacity-50"
+        >
+          Add
+        </button>
+      </div>
+      <div className="border border-border rounded divide-y divide-border bg-bg">
+        {selected.length === 0 && <div className="p-3 text-xs text-text-muted">No instructions selected.</div>}
+        {selected.map((i, index) => (
+          <div key={`${i.id}-${index}`} className="p-2 flex items-start gap-2 text-sm">
+            <span className="text-text-muted mt-0.5">{index + 1}</span>
+            <span className="text-text-muted mt-0.5"><Icon name={kindIcon(i.kind)} /></span>
+            <div className="flex-1 min-w-0">
+              <div className="truncate">{i.name}</div>
+              <div className="text-xs text-text-muted truncate">/{i.slug} · {i.kind}</div>
+            </div>
+            <div className="flex gap-1">
+              <button type="button" onClick={() => move(index, -1)} disabled={index === 0} className="px-2 py-1 text-xs border border-border rounded disabled:opacity-50">Up</button>
+              <button type="button" onClick={() => move(index, 1)} disabled={index === selected.length - 1} className="px-2 py-1 text-xs border border-border rounded disabled:opacity-50">Down</button>
+              <button type="button" onClick={() => onChange(selectedIds.filter((_, i2) => i2 !== index))} className="px-2 py-1 text-xs border border-border rounded text-rose-600">Remove</button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function instructionLabelById(instructions: Instruction[], id: number): string {
+  const found = instructions.find((i) => i.id === id);
+  return found ? found.name : `Instruction #${id}`;
+}
+
+function parseJSONMap(raw: string, label: string): Record<string, unknown> {
+  const trimmed = raw.trim();
+  if (!trimmed) return {};
+  const parsed = JSON.parse(trimmed);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${label} must be a JSON object`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
 function summariseBody(kind: string, body: Record<string, unknown>): string {
   if (kind === "text") return String(body.markdown || "").slice(0, 80);
   if (kind === "warning" || kind === "checklist_item" || kind === "confirmation") return String(body.text || "");
@@ -447,11 +744,19 @@ function summariseBody(kind: string, body: Record<string, unknown>): string {
 function TemplatesTab({ projectId }: { projectId: string }) {
   const [items, setItems] = useState<Template[] | null>(null);
   const [adding, setAdding] = useState(false);
+  const [selected, setSelected] = useState<Template | null>(null);
+  const [instructions, setInstructions] = useState<Instruction[]>([]);
 
   const reload = useCallback(() => {
     api<{ templates: Template[] }>("/templates?include_archived=false", projectId)
-      .then((d) => setItems(d.templates || []))
+      .then((d) => {
+        setItems(d.templates || []);
+        setSelected((cur) => cur ? (d.templates || []).find((t) => t.id === cur.id) || cur : cur);
+      })
       .catch(() => setItems([]));
+    api<{ instructions: Instruction[] }>("/instructions?include_archived=false", projectId)
+      .then((d) => setInstructions(d.instructions || []))
+      .catch(() => setInstructions([]));
   }, [projectId]);
   useEffect(() => { reload(); }, [reload]);
 
@@ -464,6 +769,15 @@ function TemplatesTab({ projectId }: { projectId: string }) {
         </button>
       </div>
       {adding && <NewTemplateForm projectId={projectId} onDone={() => { setAdding(false); reload(); }} />}
+      {selected && (
+        <TemplateComposer
+          projectId={projectId}
+          template={selected}
+          instructions={instructions}
+          onDone={reload}
+          onClose={() => setSelected(null)}
+        />
+      )}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
         {items?.map((t) => (
           <div key={t.id} className="border border-border rounded p-3 bg-bg-subtle">
@@ -483,16 +797,93 @@ function TemplatesTab({ projectId }: { projectId: string }) {
                 {t.current_version.derived.media_manifest.length} media
               </div>
             )}
+            {t.current_version?.composition && t.current_version.composition.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {t.current_version.composition.slice(0, 3).map((c) => (
+                  <div key={`${c.sort_order}-${c.instruction_id}`} className="text-xs text-text-muted truncate">
+                    {c.sort_order + 1}. {instructionLabelById(instructions, c.instruction_id)} · {c.kind}
+                  </div>
+                ))}
+                {t.current_version.composition.length > 3 && (
+                  <div className="text-xs text-text-muted">+{t.current_version.composition.length - 3} more</div>
+                )}
+              </div>
+            )}
+            <div className="mt-3 flex gap-2">
+              <button onClick={() => setSelected(t)} className="px-2 py-1 text-xs border border-border rounded">Manage instructions</button>
             {t.current_version?.status === "draft" && (
               <button
                 onClick={() => api(`/templates/${t.id}/publish`, projectId, { method: "POST" }).then(reload)}
-                className="mt-3 px-2 py-1 text-xs border border-border rounded"
+                className="px-2 py-1 text-xs border border-border rounded"
               >
                 Publish v{t.current_version.version}
               </button>
             )}
+            </div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function TemplateComposer({
+  projectId, template, instructions, onDone, onClose,
+}: {
+  projectId: string;
+  template: Template;
+  instructions: Instruction[];
+  onDone: () => void;
+  onClose: () => void;
+}) {
+  const initial = (template.current_version?.composition || []).map((c) => c.instruction_id);
+  const [selectedIds, setSelectedIds] = useState<number[]>(initial);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSelectedIds((template.current_version?.composition || []).map((c) => c.instruction_id));
+  }, [template.id, template.current_version?.id]);
+
+  const save = async () => {
+    setBusy(true); setErr(null);
+    try {
+      await api(`/templates/${template.id}/instructions`, projectId, {
+        method: "PUT",
+        body: JSON.stringify({
+          instructions: selectedIds.map((id) => ({ instruction_id: id })),
+        }),
+      });
+      onDone();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="p-3 border border-border rounded bg-bg-subtle space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold">{template.name}</h3>
+          <div className="text-xs text-text-muted">/{template.slug} · v{template.current_version?.version || 1} · {template.current_version?.status || "draft"}</div>
+        </div>
+        <button onClick={onClose} className="px-2 py-1 text-xs border border-border rounded">Close</button>
+      </div>
+      <InstructionOrderEditor instructions={instructions} selectedIds={selectedIds} onChange={setSelectedIds} />
+      {err && <div className="text-rose-600 text-xs">{err}</div>}
+      <div className="flex gap-2">
+        <button disabled={busy} onClick={save} className="px-3 py-1 text-sm bg-sky-600 text-white rounded disabled:opacity-50">Save composition</button>
+        {template.current_version?.status === "draft" && (
+          <button
+            disabled={busy}
+            onClick={() => api(`/templates/${template.id}/publish`, projectId, { method: "POST" }).then(onDone)}
+            className="px-3 py-1 text-sm border border-border rounded"
+          >
+            Publish
+          </button>
+        )}
       </div>
     </div>
   );
