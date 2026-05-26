@@ -18,6 +18,9 @@ app uses to schedule work without reimplementing a scheduler.
   by other apps with `?owner_app=<slug>` to scope the list.
 - **At-least-once delivery** with idempotency keys forwarded to HTTP
   targets, exponential backoff, configurable `max_retries`.
+- **Configurable HTTP dispatch deadlines**: default `180s` via
+  `http_dispatch_timeout_seconds`, with per-job `target.timeout_seconds`
+  or `target.timeout_ms` overrides, capped at 300 seconds.
 - **Single-replica dispatcher** with a row-level lease so a crashed
   tick doesn't strand a job.
 - **Two install scopes**: `project` (one install per Apteva project)
@@ -50,6 +53,22 @@ POST /api/apps/jobs/jobs?project_id=proj-1
   "owner_app": "storage",
   "schedule": { "kind": "cron", "cron": "0 3 * * *" },
   "target":  { "kind": "http", "app": "storage", "path": "/cron/cleanup-orphans" }
+}
+```
+
+```bash
+# A long-running function/app route can opt into a longer dispatch wait.
+POST /api/apps/jobs/jobs?project_id=proj-1
+{
+  "name": "sync local google data",
+  "owner_app": "flexylead",
+  "schedule": { "kind": "cron", "cron": "0 * * * *" },
+  "target": {
+    "kind": "http",
+    "app": "functions",
+    "path": "/fn/flexylead-sync-local-google",
+    "timeout_seconds": 180
+  }
 }
 ```
 

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: jobs
 display_name: Jobs
-version: 0.1.8
+version: 0.1.9
 description: |
   Scheduled-job runner. Other apps (and agents) enqueue work to be
   delivered later — once at a future time, on an interval, or on a
@@ -76,5 +76,10 @@ config_schema:
     default: "20"
     label: Dispatch batch size
     description: Maximum jobs claimed per ticker tick. Tune up for very high schedule density.
+  - name: http_dispatch_timeout_seconds
+    type: text
+    default: "180"
+    label: HTTP dispatch timeout (seconds)
+    description: Default deadline for HTTP target calls. Per-job targets can override with timeout_seconds or timeout_ms. Max 300 seconds.
 
 upgrade_policy: auto-patch

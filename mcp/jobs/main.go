@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: jobs
 display_name: Jobs
-version: 0.1.8
+version: 0.1.9
 description: |
   Scheduled-job runner. Other apps and agents enqueue work; jobs
   delivers it later via HTTP or instance events.
@@ -88,6 +88,22 @@ db:
   driver: sqlite
   path: /data/jobs.db
   migrations: migrations/
+config_schema:
+  - name: history_retention_days
+    type: text
+    default: "30"
+    label: Run history retention (days)
+    description: How long to keep entries in job_runs before pruning. 0 disables pruning.
+  - name: dispatch_batch_size
+    type: text
+    default: "20"
+    label: Dispatch batch size
+    description: Maximum jobs claimed per ticker tick. Tune up for very high schedule density.
+  - name: http_dispatch_timeout_seconds
+    type: text
+    default: "180"
+    label: HTTP dispatch timeout (seconds)
+    description: Default deadline for HTTP target calls. Per-job targets can override with timeout_seconds or timeout_ms. Max 300 seconds.
 upgrade_policy: auto-patch
 `
 
@@ -343,7 +359,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "jobs_schedule",
-			Description: "Schedule a job to run later (once, on an interval, or on a cron expression). Use schedule.kind=once with run_at for one-shot, schedule.kind=every with every_seconds for intervals, schedule.kind=cron with cron='M H DOM MON DOW' for cron. Use target.kind=event with agent_id=<id> to wake an agent with a message, or target.kind=http with {app, path, body?} to call another app's HTTP route, or target.kind=http with url=<absolute> for an external webhook.",
+			Description: "Schedule a job to run later (once, on an interval, or on a cron expression). Use schedule.kind=once with run_at for one-shot, schedule.kind=every with every_seconds for intervals, schedule.kind=cron with cron='M H DOM MON DOW' for cron. Use target.kind=event with agent_id=<id> to wake an agent with a message, or target.kind=http with {app, path, body?, timeout_seconds?} to call another app's HTTP route, or target.kind=http with url=<absolute> for an external webhook.",
 			InputSchema: schemaObject(map[string]any{
 				"name": map[string]any{"type": "string", "description": "Human-readable job name."},
 				"schedule": map[string]any{
@@ -367,6 +383,14 @@ func (a *App) MCPTools() []sdk.Tool {
 						"path":     map[string]any{"type": "string", "description": "For kind=http: path on the target app (e.g. '/cron/foo')."},
 						"method":   map[string]any{"type": "string", "description": "For kind=http: HTTP method (default POST)."},
 						"body":     map[string]any{"description": "For kind=http: JSON body to POST."},
+						"timeout_seconds": map[string]any{
+							"type":        "integer",
+							"description": "For kind=http: request timeout in seconds. Default comes from app config, max 300.",
+						},
+						"timeout_ms": map[string]any{
+							"type":        "integer",
+							"description": "For kind=http: request timeout in milliseconds. Takes precedence over timeout_seconds, max 300000.",
+						},
 					},
 					"required": []any{"kind"},
 				},
@@ -964,17 +988,21 @@ func dbRecentRuns(db *sql.DB, pid string, limit int) ([]*JobRun, error) {
 // exhausted).
 //
 // Single-replica today; the lease column is there so we can scale to
-// N workers in the future without a migration. Lease TTL is short
-// (60s) so a crashed dispatch reschedules itself quickly.
+// N workers in the future without a migration. This dispatcher only
+// claims pending jobs, so the TTL is defensive metadata rather than
+// active reclaim logic; keep it at least as long as the max HTTP
+// dispatch timeout before adding running-job reclaim.
 
 const (
-	leaseTTL       = 60 * time.Second
-	httpDispatchTimeout = 30 * time.Second
+	leaseTTL                   = 5 * time.Minute
+	defaultHTTPDispatchTimeout = 180 * time.Second
+	minHTTPDispatchTimeout     = 1 * time.Millisecond
+	maxHTTPDispatchTimeout     = 300 * time.Second
 )
 
 // dispatchClient is the HTTP client used for HTTP-target dispatch.
 // Package-level so tests can substitute a stub via setDispatchClient.
-var dispatchClient = &http.Client{Timeout: httpDispatchTimeout}
+var dispatchClient = &http.Client{}
 var dispatchClientMu sync.RWMutex
 
 func setDispatchClient(c *http.Client) {
@@ -1164,7 +1192,7 @@ func dispatchOne(ctx context.Context, app *sdk.AppCtx, j *Job) {
 func runTarget(ctx context.Context, app *sdk.AppCtx, j *Job) (string, int, string, error) {
 	switch strings.ToLower(strKey(j.Target, "kind")) {
 	case "http":
-		return runHTTPTarget(ctx, j)
+		return runHTTPTarget(ctx, j, app.Config())
 	case "event":
 		return runEventTarget(app, j)
 	default:
@@ -1176,7 +1204,7 @@ func runTarget(ctx context.Context, app *sdk.AppCtx, j *Job) (string, int, strin
 // supported: an absolute URL (gated by net.egress at the platform
 // level) or app-relative {"app":"crm","path":"/cron/..."} which the
 // platform routes through its own gateway.
-func runHTTPTarget(ctx context.Context, j *Job) (string, int, string, error) {
+func runHTTPTarget(ctx context.Context, j *Job, cfg sdk.Config) (string, int, string, error) {
 	method := strings.ToUpper(strKey(j.Target, "method"))
 	if method == "" {
 		method = "POST"
@@ -1195,7 +1223,11 @@ func runHTTPTarget(ctx context.Context, j *Job) (string, int, string, error) {
 		body = bytes.NewReader(buf)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	timeout := httpTargetTimeout(j.Target, cfg)
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, method, url, body)
 	if err != nil {
 		return "error", 0, "", err
 	}
@@ -1232,6 +1264,26 @@ func runHTTPTarget(ctx context.Context, j *Job) (string, int, string, error) {
 			fmt.Errorf("non-2xx: %d", resp.StatusCode)
 	}
 	return "ok", resp.StatusCode, string(respBytes), nil
+}
+
+func httpTargetTimeout(target map[string]any, cfg sdk.Config) time.Duration {
+	timeout := defaultHTTPDispatchTimeout
+	if sec := atoiDefault(cfg.Get("http_dispatch_timeout_seconds"), int(defaultHTTPDispatchTimeout/time.Second), int(maxHTTPDispatchTimeout/time.Second)); sec > 0 {
+		timeout = time.Duration(sec) * time.Second
+	}
+	if sec := intArg(target, "timeout_seconds", 0); sec > 0 {
+		timeout = time.Duration(sec) * time.Second
+	}
+	if ms := intArg(target, "timeout_ms", 0); ms > 0 {
+		timeout = time.Duration(ms) * time.Millisecond
+	}
+	if timeout < minHTTPDispatchTimeout {
+		return minHTTPDispatchTimeout
+	}
+	if timeout > maxHTTPDispatchTimeout {
+		return maxHTTPDispatchTimeout
+	}
+	return timeout
 }
 
 // runEventTarget calls PlatformAPI.SendEvent. For unit tests where

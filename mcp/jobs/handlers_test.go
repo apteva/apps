@@ -370,6 +370,104 @@ func TestDispatcher_HTTPTarget_Error_RetriesThenFails(t *testing.T) {
 	}
 }
 
+func TestDispatcher_HTTPTarget_PerTargetTimeout_RecordsTimeout(t *testing.T) {
+	ctx := newTestCtx(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(200 * time.Millisecond):
+			w.WriteHeader(200)
+		case <-r.Context().Done():
+			return
+		}
+	}))
+	defer srv.Close()
+
+	j := mustSchedule(t, ctx, map[string]any{
+		"name":        "slow-timeout",
+		"schedule":    map[string]any{"kind": "once", "run_at": time.Now().Add(-1 * time.Minute).UTC().Format(time.RFC3339)},
+		"target":      map[string]any{"kind": "http", "url": srv.URL, "timeout_ms": float64(25)},
+		"max_retries": float64(0),
+	})
+
+	if err := dispatchTick(context.Background(), ctx); err != nil {
+		t.Fatalf("dispatchTick: %v", err)
+	}
+
+	app := &App{}
+	out, _ := app.toolRuns(ctx, map[string]any{"id": j.ID})
+	runs := out.(map[string]any)["runs"].([]*JobRun)
+	if len(runs) != 1 {
+		t.Fatalf("runs=%d, want 1", len(runs))
+	}
+	if runs[0].Status != "timeout" {
+		t.Fatalf("run status=%q, want timeout; err=%s", runs[0].Status, runs[0].Error)
+	}
+
+	all, _ := app.toolList(ctx, map[string]any{})
+	got := all.(map[string]any)["jobs"].([]*Job)[0]
+	if got.Status != "failed" {
+		t.Errorf("job status=%q, want failed after timeout with no retries", got.Status)
+	}
+}
+
+func TestDispatcher_HTTPTarget_PerTargetTimeout_AllowsSlowSuccess(t *testing.T) {
+	ctx := newTestCtx(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(60 * time.Millisecond)
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	j := mustSchedule(t, ctx, map[string]any{
+		"name":     "slow-success",
+		"schedule": map[string]any{"kind": "once", "run_at": time.Now().Add(-1 * time.Minute).UTC().Format(time.RFC3339)},
+		"target":   map[string]any{"kind": "http", "url": srv.URL, "timeout_ms": float64(500)},
+	})
+
+	if err := dispatchTick(context.Background(), ctx); err != nil {
+		t.Fatalf("dispatchTick: %v", err)
+	}
+
+	app := &App{}
+	out, _ := app.toolRuns(ctx, map[string]any{"id": j.ID})
+	runs := out.(map[string]any)["runs"].([]*JobRun)
+	if len(runs) != 1 {
+		t.Fatalf("runs=%d, want 1", len(runs))
+	}
+	if runs[0].Status != "ok" {
+		t.Fatalf("run status=%q, want ok; err=%s", runs[0].Status, runs[0].Error)
+	}
+
+	all, _ := app.toolList(ctx, map[string]any{})
+	got := all.(map[string]any)["jobs"].([]*Job)[0]
+	if got.Status != "done" {
+		t.Errorf("job status=%q, want done after successful once-job", got.Status)
+	}
+}
+
+func TestHTTPTargetTimeout_Resolution(t *testing.T) {
+	cfg := sdk.Config{"http_dispatch_timeout_seconds": "120"}
+
+	if got := httpTargetTimeout(map[string]any{}, cfg); got != 120*time.Second {
+		t.Fatalf("config timeout=%s, want 120s", got)
+	}
+	if got := httpTargetTimeout(map[string]any{"timeout_seconds": float64(240)}, cfg); got != 240*time.Second {
+		t.Fatalf("target seconds timeout=%s, want 240s", got)
+	}
+	if got := httpTargetTimeout(map[string]any{"timeout_seconds": float64(240), "timeout_ms": float64(1500)}, cfg); got != 1500*time.Millisecond {
+		t.Fatalf("target milliseconds timeout=%s, want 1500ms", got)
+	}
+	if got := httpTargetTimeout(map[string]any{"timeout_seconds": float64(999)}, cfg); got != maxHTTPDispatchTimeout {
+		t.Fatalf("clamped timeout=%s, want %s", got, maxHTTPDispatchTimeout)
+	}
+	if got := httpTargetTimeout(map[string]any{"timeout_ms": float64(1)}, cfg); got != minHTTPDispatchTimeout {
+		t.Fatalf("minimum timeout=%s, want %s", got, minHTTPDispatchTimeout)
+	}
+}
+
 func TestDispatcher_EventTarget_NoPlatformClient_TestModeOK(t *testing.T) {
 	ctx := newTestCtx(t)
 	mustSchedule(t, ctx, map[string]any{
