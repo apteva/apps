@@ -493,6 +493,7 @@ function NewTemplateForm({ projectId, onDone }: { projectId: string; onDone: () 
 function InstructionsTab({ projectId }: { projectId: string }) {
   const [items, setItems] = useState<Instruction[] | null>(null);
   const [kind, setKind] = useState<string>("");
+  const [adding, setAdding] = useState(false);
 
   const reload = useCallback(() => {
     const k = kind ? `&kind=${encodeURIComponent(kind)}` : "";
@@ -517,11 +518,18 @@ function InstructionsTab({ projectId }: { projectId: string }) {
     <div className="p-4 space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold">Instruction library</h2>
-        <select value={kind} onChange={(e) => setKind(e.target.value)} className="text-sm border border-border rounded px-2 py-1 bg-bg">
-          <option value="">All kinds</option>
-          {ALL_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
-        </select>
+        <div className="flex items-center gap-2">
+          <select value={kind} onChange={(e) => setKind(e.target.value)} className="text-sm border border-border rounded px-2 py-1 bg-bg">
+            <option value="">All kinds</option>
+            {ALL_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
+          </select>
+          <button onClick={() => setAdding(true)} className="flex items-center gap-1 px-2 py-1 text-sm border border-border rounded">
+            <Icon name="plus" /> New
+          </button>
+        </div>
       </div>
+      {adding && <NewInstructionForm projectId={projectId} onDone={() => { setAdding(false); reload(); }} onCancel={() => setAdding(false)} />}
+      {items?.length === 0 && <div className="p-4 border border-border rounded text-sm text-text-muted">No instructions yet.</div>}
       {Object.entries(groups).map(([fam, list]) => (
         <div key={fam}>
           <h3 className="text-xs uppercase tracking-wide text-text-muted mb-2">{fam}</h3>
@@ -539,6 +547,19 @@ function InstructionsTab({ projectId }: { projectId: string }) {
                       </Pill>
                     </div>
                   )}
+                  {i.current_version?.body && (
+                    <div className="mt-1 text-xs text-text-muted line-clamp-2">
+                      {summariseBody(i.kind, i.current_version.body)}
+                    </div>
+                  )}
+                  {i.current_version?.status === "draft" && (
+                    <button
+                      onClick={() => api(`/instructions/${i.id}/publish`, projectId, { method: "POST" }).then(reload)}
+                      className="mt-2 px-2 py-1 text-xs border border-border rounded"
+                    >
+                      Publish
+                    </button>
+                  )}
                 </div>
               </div>
             ))}
@@ -547,6 +568,218 @@ function InstructionsTab({ projectId }: { projectId: string }) {
       ))}
     </div>
   );
+}
+
+function NewInstructionForm({
+  projectId, onDone, onCancel,
+}: { projectId: string; onDone: () => void; onCancel: () => void }) {
+  const [name, setName] = useState("");
+  const [kind, setKind] = useState("text");
+  const [slug, setSlug] = useState("");
+  const [defaultResultKey, setDefaultResultKey] = useState("");
+  const [primaryText, setPrimaryText] = useState("");
+  const [secondaryText, setSecondaryText] = useState("");
+  const [url, setURL] = useState("");
+  const [storageFileId, setStorageFileId] = useState("");
+  const [posterFileId, setPosterFileId] = useState("");
+  const [seconds, setSeconds] = useState("300");
+  const [min, setMin] = useState("");
+  const [max, setMax] = useState("");
+  const [scale, setScale] = useState("5");
+  const [options, setOptions] = useState("");
+  const [required, setRequired] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true); setErr(null);
+    try {
+      const body = buildInstructionBody(kind, {
+        primaryText, secondaryText, url, storageFileId, posterFileId,
+        seconds, min, max, scale, options, required,
+      });
+      await api("/instructions", projectId, {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          kind,
+          body,
+          slug: slug || undefined,
+          default_result_key: defaultResultKey || undefined,
+        }),
+      });
+      onDone();
+    } catch (e2) {
+      setErr((e2 as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className="p-3 border border-border rounded space-y-2 bg-bg-subtle">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Instruction name" required className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+        <select value={kind} onChange={(e) => setKind(e.target.value)} className="px-2 py-1 text-sm border border-border rounded bg-bg">
+          {ALL_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
+        </select>
+        <input value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="Slug (optional)" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+      </div>
+
+      {renderInstructionBodyFields(kind, {
+        primaryText, setPrimaryText, secondaryText, setSecondaryText, url, setURL,
+        storageFileId, setStorageFileId, posterFileId, setPosterFileId,
+        seconds, setSeconds, min, setMin, max, setMax, scale, setScale,
+        options, setOptions, required, setRequired,
+      })}
+
+      {(kind.startsWith("input_") || kind === "checklist_item" || kind === "confirmation") && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          <input value={defaultResultKey} onChange={(e) => setDefaultResultKey(e.target.value)} placeholder="Result key (optional)" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+          <label className="flex items-center gap-2 text-sm text-text-muted">
+            <input type="checkbox" checked={required} onChange={(e) => setRequired(e.target.checked)} />
+            Required result
+          </label>
+        </div>
+      )}
+
+      {err && <div className="text-rose-600 text-xs">{err}</div>}
+      <div className="flex gap-2">
+        <button disabled={busy} className="px-3 py-1 text-sm bg-sky-600 text-white rounded disabled:opacity-50">Create draft</button>
+        <button type="button" onClick={onCancel} className="px-3 py-1 text-sm border border-border rounded">Cancel</button>
+      </div>
+    </form>
+  );
+}
+
+type InstructionFieldState = {
+  primaryText: string; setPrimaryText: (v: string) => void;
+  secondaryText: string; setSecondaryText: (v: string) => void;
+  url: string; setURL: (v: string) => void;
+  storageFileId: string; setStorageFileId: (v: string) => void;
+  posterFileId: string; setPosterFileId: (v: string) => void;
+  seconds: string; setSeconds: (v: string) => void;
+  min: string; setMin: (v: string) => void;
+  max: string; setMax: (v: string) => void;
+  scale: string; setScale: (v: string) => void;
+  options: string; setOptions: (v: string) => void;
+  required: boolean; setRequired: (v: boolean) => void;
+};
+
+function renderInstructionBodyFields(kind: string, s: InstructionFieldState) {
+  const textInput = (placeholder: string) => (
+    <textarea value={s.primaryText} onChange={(e) => s.setPrimaryText(e.target.value)} placeholder={placeholder} rows={3} required className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" />
+  );
+  if (kind === "text") return textInput("Markdown");
+  if (kind === "warning" || kind === "checklist_item" || kind === "confirmation") return textInput("Text");
+  if (kind === "script") return textInput("One line per script step");
+  if (kind === "link") return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+      <input value={s.url} onChange={(e) => s.setURL(e.target.value)} placeholder="URL" required className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+      <input value={s.primaryText} onChange={(e) => s.setPrimaryText(e.target.value)} placeholder="Label (optional)" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+    </div>
+  );
+  if (kind === "example") return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+      <textarea value={s.primaryText} onChange={(e) => s.setPrimaryText(e.target.value)} placeholder="Good example text" rows={3} className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+      <textarea value={s.secondaryText} onChange={(e) => s.setSecondaryText(e.target.value)} placeholder="Bad example text" rows={3} className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+    </div>
+  );
+  if (kind === "timer_hint") return (
+    <input value={s.seconds} onChange={(e) => s.setSeconds(e.target.value)} placeholder="Suggested seconds" type="number" min="1" required className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+  );
+  if (["audio", "video", "image", "document"].includes(kind)) return (
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+      <input value={s.storageFileId} onChange={(e) => s.setStorageFileId(e.target.value)} placeholder="Storage file ID" type="number" min="1" required className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+      <input value={s.primaryText} onChange={(e) => s.setPrimaryText(e.target.value)} placeholder="Caption (optional)" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+      <input value={s.posterFileId} onChange={(e) => s.setPosterFileId(e.target.value)} placeholder="Poster file ID (optional)" type="number" min="1" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+    </div>
+  );
+  if (kind === "input_choice" || kind === "input_multi_choice") return (
+    <div className="space-y-2">
+      <input value={s.primaryText} onChange={(e) => s.setPrimaryText(e.target.value)} placeholder="Question label" required className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" />
+      <textarea value={s.options} onChange={(e) => s.setOptions(e.target.value)} placeholder="Options, one per line" rows={3} required className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" />
+    </div>
+  );
+  if (kind === "input_number") return (
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+      <input value={s.primaryText} onChange={(e) => s.setPrimaryText(e.target.value)} placeholder="Question label" required className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+      <input value={s.min} onChange={(e) => s.setMin(e.target.value)} placeholder="Min (optional)" type="number" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+      <input value={s.max} onChange={(e) => s.setMax(e.target.value)} placeholder="Max (optional)" type="number" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+    </div>
+  );
+  if (kind === "input_rating") return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+      <input value={s.primaryText} onChange={(e) => s.setPrimaryText(e.target.value)} placeholder="Question label" required className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+      <input value={s.scale} onChange={(e) => s.setScale(e.target.value)} placeholder="Scale" type="number" min="2" required className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+    </div>
+  );
+  if (kind.startsWith("input_")) return (
+    <input value={s.primaryText} onChange={(e) => s.setPrimaryText(e.target.value)} placeholder="Question label" required className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" />
+  );
+  return textInput("Body");
+}
+
+function buildInstructionBody(kind: string, s: {
+  primaryText: string; secondaryText: string; url: string; storageFileId: string; posterFileId: string;
+  seconds: string; min: string; max: string; scale: string; options: string; required: boolean;
+}): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  const num = (v: string) => {
+    const n = Number(v);
+    return Number.isFinite(n) && v.trim() !== "" ? n : undefined;
+  };
+  const addRequired = () => {
+    if (kind.startsWith("input_") || kind === "checklist_item" || kind === "confirmation") body.required = s.required;
+  };
+  switch (kind) {
+    case "text":
+      body.markdown = s.primaryText;
+      break;
+    case "warning":
+    case "checklist_item":
+    case "confirmation":
+      body.text = s.primaryText;
+      addRequired();
+      break;
+    case "script":
+      body.lines = s.primaryText.split("\n").map((line) => line.trim()).filter(Boolean);
+      break;
+    case "link":
+      body.url = s.url;
+      if (s.primaryText) body.label = s.primaryText;
+      break;
+    case "example":
+      if (s.primaryText) body.good_text = s.primaryText;
+      if (s.secondaryText) body.bad_text = s.secondaryText;
+      break;
+    case "timer_hint":
+      body.seconds_suggested = num(s.seconds) || 0;
+      break;
+    case "audio":
+    case "video":
+    case "image":
+    case "document":
+      body.storage_file_id = num(s.storageFileId);
+      if (s.primaryText) body.caption = s.primaryText;
+      if (num(s.posterFileId)) body.poster_file_id = num(s.posterFileId);
+      break;
+    default:
+      if (kind.startsWith("input_")) {
+        body.label = s.primaryText;
+        addRequired();
+        if (kind === "input_choice" || kind === "input_multi_choice") {
+          body.options = s.options.split("\n").map((line) => line.trim()).filter(Boolean);
+        }
+        if (kind === "input_number") {
+          if (num(s.min) !== undefined) body.min = num(s.min);
+          if (num(s.max) !== undefined) body.max = num(s.max);
+        }
+        if (kind === "input_rating") body.scale = num(s.scale) || 5;
+      }
+  }
+  return body;
 }
 
 const ALL_KINDS = [
