@@ -130,6 +130,15 @@ func workerPageHTML(token string) string {
   textarea { min-height: 92px; resize: vertical; font-family: inherit; }
   .file-row { display: grid; gap: 8px; }
   input[type=file] { width: 100%; border: 1px dashed var(--line); border-radius: 8px; background: var(--surface); padding: 12px; color: var(--muted); }
+  .previews { display: grid; gap: 10px; }
+  .preview-card { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; }
+  .preview-media { background: #050505; }
+  .preview-media video, .preview-media audio, .preview-media img { width: 100%; border-radius: 0; }
+  .preview-media audio { padding: 10px; background: var(--surface); }
+  .preview-file { padding: 14px; color: var(--fg); background: var(--surface-2); word-break: break-word; }
+  .preview-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 8px 10px; color: var(--muted); font-size: 13px; }
+  .preview-status.error { color: var(--crit); }
+  .single-input { display: grid; gap: 8px; }
   .uploaded { margin: 0; padding: 0; list-style: none; display: grid; gap: 5px; color: var(--muted); font-size: 13px; }
   .uploaded li { display: flex; justify-content: space-between; gap: 10px; border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; background: var(--surface); }
   .options label { display: flex; align-items: center; gap: 8px; padding: 6px 0; cursor: pointer; }
@@ -338,10 +347,11 @@ func workerPageHTML(token string) string {
         "<div class='response-title'>Response for step " + (index + 1) + "</div>" +
         "<div class='response-grid'>" +
           "<textarea data-note placeholder='Notes for this instruction'></textarea>" +
-          "<div class='file-row'><input data-files type='file' multiple /><ul class='uploaded'></ul></div>" +
+          "<div class='file-row'><input data-files type='file' multiple /><div class='previews' data-previews></div><ul class='uploaded'></ul></div>" +
         "</div>";
       const note = box.querySelector("[data-note]");
       const file = box.querySelector("[data-files]");
+      const previews = box.querySelector("[data-previews]");
       const uploaded = box.querySelector(".uploaded");
       note.addEventListener("input", () => {
         const entry = ensureInstructionResponse(key, it, index);
@@ -352,17 +362,21 @@ func workerPageHTML(token string) string {
       file.addEventListener("change", async () => {
         const files = Array.from(file.files || []);
         for (const f of files) {
-	          setStatus("Uploading " + f.name + "...");
-	          let id = null;
-	          try {
-	            id = await uploadFile(f);
-	          } catch (e) {
-	            setStatus("Upload failed: " + e.message);
-	          }
-	          if (!id) continue;
+          const preview = renderFilePreview(f, "Uploading...");
+          previews.appendChild(preview.card);
+          setStatus("Uploading " + f.name + "...");
+          let id = null;
+          try {
+            id = await uploadFile(f);
+          } catch (e) {
+            preview.setStatus("Upload failed", true);
+            setStatus("Upload failed: " + e.message);
+          }
+          if (!id) continue;
           const entry = ensureInstructionResponse(key, it, index);
           entry.files.push({ storage_file_id: id, filename: f.name, mime: f.type });
           allAttachmentIDs.add(id);
+          preview.setStatus("Uploaded");
           const li = document.createElement("li");
           li.innerHTML = "<span>" + escapeHTML(f.name) + "</span><span>uploaded</span>";
           uploaded.appendChild(li);
@@ -471,26 +485,35 @@ func workerPageHTML(token string) string {
         case "input_video_recording":
         case "input_file":
         case "input_signature":
-          el = document.createElement("input"); el.type = "file";
-          if (k === "input_photo") el.accept = "image/*";
-          if (k === "input_audio_recording") el.accept = "audio/*";
-          if (k === "input_video_recording") el.accept = "video/*";
-	        el.addEventListener("change", async () => {
-	          const file = el.files && el.files[0];
-	          if (!file) return;
-	          setStatus("Uploading " + file.name + "...");
-	          let id = null;
-	          try {
-	            id = await uploadFile(file);
-	          } catch (e) {
-	            setStatus("Upload failed: " + e.message);
-	          }
-	          if (id) {
+          el = document.createElement("div"); el.className = "single-input";
+          const fileInput = document.createElement("input"); fileInput.type = "file";
+          const previews = document.createElement("div"); previews.className = "previews";
+          if (k === "input_photo") fileInput.accept = "image/*";
+          if (k === "input_audio_recording") fileInput.accept = "audio/*";
+          if (k === "input_video_recording") fileInput.accept = "video/*";
+          fileInput.addEventListener("change", async () => {
+            const file = fileInput.files && fileInput.files[0];
+            if (!file) return;
+            previews.innerHTML = "";
+            const preview = renderFilePreview(file, "Uploading...");
+            previews.appendChild(preview.card);
+            setStatus("Uploading " + file.name + "...");
+            let id = null;
+            try {
+              id = await uploadFile(file);
+            } catch (e) {
+              preview.setStatus("Upload failed", true);
+              setStatus("Upload failed: " + e.message);
+            }
+            if (id) {
               result[key] = { storage_file_id: id, filename: file.name, mime: file.type };
               allAttachmentIDs.add(id);
+              preview.setStatus("Uploaded");
               setStatus("Uploaded.");
             }
           });
+          el.appendChild(fileInput);
+          el.appendChild(previews);
           break;
         case "input_location":
           el = document.createElement("button"); el.type = "button"; el.className = "primary"; el.textContent = "Use my location";
@@ -584,6 +607,53 @@ func workerPageHTML(token string) string {
 	    function publicWorkerURL(path) {
 	      const exp = Math.floor(Date.now() / 1000) + 86400;
 	      return API + path + "?sig=" + encodeURIComponent(TOKEN) + "&exp=" + exp;
+	    }
+	    function renderFilePreview(file, status) {
+	      const card = document.createElement("article");
+	      card.className = "preview-card";
+	      const media = document.createElement("div");
+	      media.className = "preview-media";
+	      const url = URL.createObjectURL(file);
+	      let node = null;
+	      if (file.type.startsWith("video/")) {
+	        node = document.createElement("video");
+	        node.controls = true;
+	        node.preload = "metadata";
+	        node.playsInline = true;
+	        node.src = url;
+	      } else if (file.type.startsWith("audio/")) {
+	        node = document.createElement("audio");
+	        node.controls = true;
+	        node.preload = "metadata";
+	        node.src = url;
+	      } else if (file.type.startsWith("image/")) {
+	        node = document.createElement("img");
+	        node.alt = file.name;
+	        node.src = url;
+	      } else {
+	        node = document.createElement("div");
+	        node.className = "preview-file";
+	        node.textContent = file.name;
+	      }
+	      media.appendChild(node);
+	      const meta = document.createElement("div");
+	      meta.className = "preview-meta";
+	      const name = document.createElement("span");
+	      name.textContent = file.name;
+	      const state = document.createElement("span");
+	      state.className = "preview-status";
+	      state.textContent = status || "Selected";
+	      meta.appendChild(name);
+	      meta.appendChild(state);
+	      card.appendChild(media);
+	      card.appendChild(meta);
+	      return {
+	        card,
+	        setStatus(text, isError) {
+	          state.textContent = text;
+	          state.classList.toggle("error", Boolean(isError));
+	        },
+	      };
 	    }
 	    async function responseJSON(res) {
 	      const text = await res.text();
