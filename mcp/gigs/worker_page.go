@@ -175,10 +175,10 @@ func workerPageHTML(token string) string {
   <script>
 	    const TOKEN = ` + jsString(token) + `;
 	    const API = "/api/apps/gigs/worker/" + TOKEN;
-    const result = {};
-    const instructionResponses = {};
-    const allAttachmentIDs = new Set();
-    let gig = null;
+	    const result = {};
+	    const instructionResponses = {};
+	    const allAttachmentIDs = new Set();
+	    let gig = null;
 
     fetch(API + "/api/gig")
       .then(r => r.json())
@@ -187,12 +187,9 @@ func workerPageHTML(token string) string {
           document.getElementById("app").innerHTML = "<div class='done error'>" + escapeHTML(data.error) + "</div>";
           return;
         }
-        gig = data.gig;
-        if (gig.assignment_status === "submitted") {
-          document.getElementById("app").innerHTML = "<div class='done'>Submission received. Thank you.</div>";
-          return;
-        }
-        render();
+	        gig = data.gig;
+	        hydrateExistingSubmission(gig.submission);
+	        render();
       })
       .catch(e => {
         document.getElementById("app").innerHTML = "<div class='done error'>Could not load this gig: " + escapeHTML(e.message) + "</div>";
@@ -210,7 +207,9 @@ func workerPageHTML(token string) string {
           "<span class='pill'>Deadline: " + escapeHTML(formatDeadline(gig.deadline_at)) + "</span>" +
           "<span class='pill'>" + (gig.composition || []).length + " instruction" + ((gig.composition || []).length === 1 ? "" : "s") + "</span>" +
         "</div>" +
-        "<div class='summary'>Review each numbered instruction. Add notes and upload files for any step, then submit once at the bottom.</div>";
+	        "<div class='summary'>" + (gig.assignment_status === "submitted"
+	          ? "Your submission is saved. You can still adjust notes or upload replacement files, then submit again."
+	          : "Review each numbered instruction. Add notes and upload files for any step, then submit once at the bottom.") + "</div>";
       shell.appendChild(hero);
 
       const title = document.createElement("div");
@@ -228,7 +227,7 @@ func workerPageHTML(token string) string {
 
       const bar = document.createElement("div");
       bar.className = "submit-bar";
-      bar.innerHTML = '<div class="row"><span class="status" id="status">Add notes or files if needed.</span><button class="primary" id="submit">Submit work</button></div>';
+	      bar.innerHTML = '<div class="row"><span class="status" id="status">' + (gig.assignment_status === "submitted" ? "Submission saved. Edit anything and resubmit when ready." : "Add notes or files if needed.") + '</span><button class="primary" id="submit">' + (gig.assignment_status === "submitted" ? "Update submission" : "Submit work") + '</button></div>';
       document.body.appendChild(bar);
       document.getElementById("submit").addEventListener("click", submit);
     }
@@ -353,6 +352,14 @@ func workerPageHTML(token string) string {
       const file = box.querySelector("[data-files]");
       const previews = box.querySelector("[data-previews]");
       const uploaded = box.querySelector(".uploaded");
+      const existing = instructionResponses[key];
+      if (existing) {
+        note.value = existing.note || "";
+        for (const f of existing.files || []) {
+          const preview = renderSubmittedFilePreview(f, "Submitted");
+          previews.appendChild(preview.card);
+        }
+      }
       note.addEventListener("input", () => {
         const entry = ensureInstructionResponse(key, it, index);
         entry.note = note.value;
@@ -387,7 +394,7 @@ func workerPageHTML(token string) string {
       return box;
     }
 
-    function ensureInstructionResponse(key, it, index) {
+	    function ensureInstructionResponse(key, it, index) {
       if (!instructionResponses[key]) {
         instructionResponses[key] = {
           key: key,
@@ -398,8 +405,8 @@ func workerPageHTML(token string) string {
           files: [],
         };
       }
-      return instructionResponses[key];
-    }
+	      return instructionResponses[key];
+	    }
 
     function pruneInstructionResponse(key) {
       const entry = instructionResponses[key];
@@ -407,41 +414,47 @@ func workerPageHTML(token string) string {
       if (!entry.note && entry.files.length === 0) delete instructionResponses[key];
     }
 
-    function renderInput(wrap, it, body) {
-      const k = it.instruction_kind;
-      const key = it.result_key;
-      const lbl = document.createElement("div");
+	    function renderInput(wrap, it, body) {
+	      const k = it.instruction_kind;
+	      const key = it.result_key;
+	      const existingValue = result[key];
+	      const lbl = document.createElement("div");
       lbl.className = "label";
       lbl.textContent = body.label || key;
       wrap.appendChild(lbl);
       let el;
       switch (k) {
-        case "input_short_text":
-          el = document.createElement("input"); el.type = "text"; el.placeholder = body.placeholder || "";
-          el.addEventListener("input", () => result[key] = el.value);
-          break;
-        case "input_long_text":
-          el = document.createElement("textarea"); el.placeholder = body.placeholder || "";
-          el.addEventListener("input", () => result[key] = el.value);
-          break;
-        case "input_number":
-          el = document.createElement("input"); el.type = "number";
-          if (body.min !== undefined) el.min = body.min; if (body.max !== undefined) el.max = body.max;
-          el.addEventListener("input", () => result[key] = parseFloat(el.value));
-          break;
-        case "input_date":
-          el = document.createElement("input"); el.type = "date";
-          el.addEventListener("input", () => result[key] = el.value);
-          break;
+	        case "input_short_text":
+	          el = document.createElement("input"); el.type = "text"; el.placeholder = body.placeholder || "";
+	          if (existingValue != null) el.value = String(existingValue);
+	          el.addEventListener("input", () => result[key] = el.value);
+	          break;
+	        case "input_long_text":
+	          el = document.createElement("textarea"); el.placeholder = body.placeholder || "";
+	          if (existingValue != null) el.value = String(existingValue);
+	          el.addEventListener("input", () => result[key] = el.value);
+	          break;
+	        case "input_number":
+	          el = document.createElement("input"); el.type = "number";
+	          if (body.min !== undefined) el.min = body.min; if (body.max !== undefined) el.max = body.max;
+	          if (existingValue != null) el.value = String(existingValue);
+	          el.addEventListener("input", () => result[key] = parseFloat(el.value));
+	          break;
+	        case "input_date":
+	          el = document.createElement("input"); el.type = "date";
+	          if (existingValue != null) el.value = String(existingValue);
+	          el.addEventListener("input", () => result[key] = el.value);
+	          break;
         case "input_choice":
           el = document.createElement("select");
-          el.innerHTML = '<option value="">—</option>' + (body.options || []).map(o => {
+	          el.innerHTML = '<option value="">—</option>' + (body.options || []).map(o => {
             const v = typeof o === "string" ? o : o.value;
             const lab = typeof o === "string" ? o : (o.label || o.value);
-            return '<option value="' + escapeAttr(v) + '">' + escapeHTML(lab) + '</option>';
-          }).join("");
-          el.addEventListener("change", () => result[key] = el.value);
-          break;
+	            return '<option value="' + escapeAttr(v) + '">' + escapeHTML(lab) + '</option>';
+	          }).join("");
+	          if (existingValue != null) el.value = String(existingValue);
+	          el.addEventListener("change", () => result[key] = el.value);
+	          break;
         case "input_multi_choice":
           el = document.createElement("div"); el.className = "options";
           (body.options || []).forEach(o => {
@@ -449,10 +462,12 @@ func workerPageHTML(token string) string {
             const lab = typeof o === "string" ? o : (o.label || o.value);
             const id = key + "-" + v;
             const wrap2 = document.createElement("label");
-            wrap2.innerHTML = '<input type="checkbox" value="' + escapeAttr(v) + '" id="' + escapeAttr(id) + '" /> ' + escapeHTML(lab);
-            wrap2.querySelector("input").addEventListener("change", () => {
-              const ckd = Array.from(el.querySelectorAll("input:checked")).map(i => i.value);
-              result[key] = ckd;
+	            wrap2.innerHTML = '<input type="checkbox" value="' + escapeAttr(v) + '" id="' + escapeAttr(id) + '" /> ' + escapeHTML(lab);
+	            const input = wrap2.querySelector("input");
+	            if (Array.isArray(existingValue) && existingValue.includes(v)) input.checked = true;
+	            input.addEventListener("change", () => {
+	              const ckd = Array.from(el.querySelectorAll("input:checked")).map(i => i.value);
+	              result[key] = ckd;
             });
             el.appendChild(wrap2);
           });
@@ -460,9 +475,10 @@ func workerPageHTML(token string) string {
         case "input_rating":
           el = document.createElement("div"); el.className = "rating";
           const scale = body.scale || 5;
-          for (let i = 1; i <= scale; i++) {
-            const b = document.createElement("button"); b.type = "button"; b.textContent = "★";
-            b.addEventListener("click", () => {
+	          for (let i = 1; i <= scale; i++) {
+	            const b = document.createElement("button"); b.type = "button"; b.textContent = "★";
+	            if (Number(existingValue) >= i) b.classList.add("on");
+	            b.addEventListener("click", () => {
               result[key] = i;
               Array.from(el.children).forEach((c, idx) => c.classList.toggle("on", idx < i));
             });
@@ -471,8 +487,9 @@ func workerPageHTML(token string) string {
           break;
         case "input_yes_no":
           el = document.createElement("div"); el.className = "yn";
-          ["yes","no"].forEach(v => {
-            const b = document.createElement("button"); b.type = "button"; b.textContent = v.toUpperCase();
+	          ["yes","no"].forEach(v => {
+	            const b = document.createElement("button"); b.type = "button"; b.textContent = v.toUpperCase();
+	            if (typeof existingValue === "boolean" && existingValue === (v === "yes")) b.classList.add("on");
             b.addEventListener("click", () => {
               result[key] = (v === "yes");
               Array.from(el.children).forEach(c => c.classList.toggle("on", c.textContent === v.toUpperCase()));
@@ -488,9 +505,13 @@ func workerPageHTML(token string) string {
           el = document.createElement("div"); el.className = "single-input";
           const fileInput = document.createElement("input"); fileInput.type = "file";
           const previews = document.createElement("div"); previews.className = "previews";
-          if (k === "input_photo") fileInput.accept = "image/*";
-          if (k === "input_audio_recording") fileInput.accept = "audio/*";
-          if (k === "input_video_recording") fileInput.accept = "video/*";
+	          if (k === "input_photo") fileInput.accept = "image/*";
+	          if (k === "input_audio_recording") fileInput.accept = "audio/*";
+	          if (k === "input_video_recording") fileInput.accept = "video/*";
+	          if (existingValue && typeof existingValue === "object") {
+	            const preview = renderSubmittedFilePreview(existingValue, "Submitted");
+	            previews.appendChild(preview.card);
+	          }
           fileInput.addEventListener("change", async () => {
             const file = fileInput.files && fileInput.files[0];
             if (!file) return;
@@ -578,7 +599,10 @@ func workerPageHTML(token string) string {
 	        setStatus("Submit failed: " + j.error);
 	        return;
 	      }
-	      document.body.innerHTML = "<main><div class='done'>Submission received. Thank you.</div></main>";
+	      gig.assignment_status = "submitted";
+	      button.disabled = false;
+	      button.textContent = "Update submission";
+	      setStatus("Submission saved. You can keep editing and submit again.");
 	    }
 
     function updateStatus() {
@@ -589,10 +613,32 @@ func workerPageHTML(token string) string {
       if (files) parts.push(files + " file" + (files === 1 ? "" : "s"));
       setStatus(parts.length ? parts.join(", ") + " ready." : "Add notes or files if needed.");
     }
-    function setStatus(s) {
-      const el = document.getElementById("status");
-      if (el) el.textContent = s;
-    }
+	    function setStatus(s) {
+	      const el = document.getElementById("status");
+	      if (el) el.textContent = s;
+	    }
+	    function hydrateExistingSubmission(submission) {
+	      if (!submission || !submission.payload) return;
+	      Object.keys(submission.payload).forEach(key => {
+	        if (key !== "instruction_responses") result[key] = submission.payload[key];
+	      });
+	      (submission.attachment_file_ids || []).forEach(id => allAttachmentIDs.add(id));
+	      const responses = Array.isArray(submission.payload.instruction_responses) ? submission.payload.instruction_responses : [];
+	      responses.forEach((r, idx) => {
+	        const key = String(r.key || ("step_" + (r.step || idx + 1)));
+	        instructionResponses[key] = {
+	          key: key,
+	          step: r.step || idx + 1,
+	          sort_order: r.sort_order,
+	          instruction_kind: r.instruction_kind || "",
+	          note: r.note || "",
+	          files: Array.isArray(r.files) ? r.files : [],
+	        };
+	        instructionResponses[key].files.forEach(f => {
+	          if (f.storage_file_id) allAttachmentIDs.add(f.storage_file_id);
+	        });
+	      });
+	    }
     function instructionKey(it, index) { return String(it.result_key || "step_" + (index + 1)); }
     function kindLabel(kind) { return String(kind || "").replace(/^input_/, "input: ").replace(/_/g, " "); }
     function instructionTitle(it, body, index) {
@@ -655,6 +701,53 @@ func workerPageHTML(token string) string {
 	        },
 	      };
 	    }
+	    function renderSubmittedFilePreview(file, status) {
+	      const card = document.createElement("article");
+	      card.className = "preview-card";
+	      const media = document.createElement("div");
+	      media.className = "preview-media";
+	      const url = file.signed_url || "";
+	      const mime = file.mime || file.content_type || "";
+	      let node = null;
+	      if (url && mime.startsWith("video/")) {
+	        node = document.createElement("video");
+	        node.controls = true;
+	        node.preload = "metadata";
+	        node.playsInline = true;
+	        node.src = url;
+	      } else if (url && mime.startsWith("audio/")) {
+	        node = document.createElement("audio");
+	        node.controls = true;
+	        node.preload = "metadata";
+	        node.src = url;
+	      } else if (url && mime.startsWith("image/")) {
+	        node = document.createElement("img");
+	        node.alt = file.filename || "Submitted file";
+	        node.src = url;
+	      } else {
+	        node = document.createElement(url ? "a" : "div");
+	        node.className = "preview-file";
+	        node.textContent = file.filename || ("Storage file #" + (file.storage_file_id || ""));
+	        if (url) {
+	          node.href = url;
+	          node.target = "_blank";
+	          node.rel = "noreferrer";
+	        }
+	      }
+	      media.appendChild(node);
+	      const meta = document.createElement("div");
+	      meta.className = "preview-meta";
+	      const name = document.createElement("span");
+	      name.textContent = file.filename || ("Storage file #" + (file.storage_file_id || ""));
+	      const state = document.createElement("span");
+	      state.className = "preview-status";
+	      state.textContent = status || "Submitted";
+	      meta.appendChild(name);
+	      meta.appendChild(state);
+	      card.appendChild(media);
+	      card.appendChild(meta);
+	      return { card, setStatus(text) { state.textContent = text; } };
+	    }
 	    async function responseJSON(res) {
 	      const text = await res.text();
 	      let json = {};
@@ -696,6 +789,7 @@ type workerGigPayload struct {
 	AssignmentStatus string           `json:"assignment_status"`
 	ProjectID        string           `json:"project_id"`
 	Composition      []map[string]any `json:"composition"`
+	Submission       *submission      `json:"submission,omitempty"`
 }
 
 func (a *App) handleWorkerGigJSON(w http.ResponseWriter, _ *http.Request, token string) {
@@ -705,7 +799,6 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, _ *http.Request, token 
 		httpErr(w, http.StatusNotFound, "invalid token")
 		return
 	}
-	_ = assignID
 
 	g, err := loadGig(ctx, pid, gigID)
 	if err != nil || g == nil {
@@ -735,6 +828,14 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, _ *http.Request, token 
 		}
 		rendered = append(rendered, m)
 	}
+	submission, err := loadLatestSubmissionForAssignment(ctx.AppDB(), assignID)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if submission != nil {
+		enrichSubmissionFileURLs(ctx, pid, submission.Payload, ttl)
+	}
 
 	httpJSON(w, map[string]any{
 		"gig": workerGigPayload{
@@ -744,8 +845,54 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, _ *http.Request, token 
 			AssignmentStatus: status,
 			ProjectID:        pid,
 			Composition:      rendered,
+			Submission:       submission,
 		},
 	})
+}
+
+func loadLatestSubmissionForAssignment(db *sql.DB, assignmentID int64) (*submission, error) {
+	var payloadJSON, attachmentIDsJSON string
+	sub := &submission{}
+	err := db.QueryRow(
+		`SELECT id, assignment_id, payload_json,
+		        COALESCE(attachment_file_ids_json, '[]'),
+		        COALESCE(channel, ''), COALESCE(submitted_at, '')
+		   FROM gig_submissions
+		  WHERE assignment_id = ?
+		  ORDER BY id DESC
+		  LIMIT 1`,
+		assignmentID,
+	).Scan(&sub.ID, &sub.AssignmentID, &payloadJSON, &attachmentIDsJSON, &sub.Channel, &sub.SubmittedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	_ = parseJSON(payloadJSON, &sub.Payload)
+	_ = parseJSON(attachmentIDsJSON, &sub.AttachmentFileIDs)
+	if sub.Payload == nil {
+		sub.Payload = map[string]any{}
+	}
+	return sub, nil
+}
+
+func enrichSubmissionFileURLs(ctx *sdk.AppCtx, pid string, value any, ttl int) {
+	switch v := value.(type) {
+	case map[string]any:
+		if fid := int64Cast(v["storage_file_id"]); fid > 0 {
+			if url, err := storageSignedURL(ctx, pid, fid, ttl); err == nil {
+				v["signed_url"] = url
+			}
+		}
+		for _, child := range v {
+			enrichSubmissionFileURLs(ctx, pid, child, ttl)
+		}
+	case []any:
+		for _, child := range v {
+			enrichSubmissionFileURLs(ctx, pid, child, ttl)
+		}
+	}
 }
 
 func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token string) {
@@ -759,7 +906,7 @@ func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token s
 		httpErr(w, http.StatusNotFound, "invalid token")
 		return
 	}
-	if status == "submitted" || status == "withdrawn" {
+	if status == "withdrawn" {
 		httpErr(w, http.StatusGone, "already "+status)
 		return
 	}
