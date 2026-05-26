@@ -152,9 +152,9 @@ type attachDomainSpec struct {
 	// ManageDNS=true (default): the Domains app writes/owns the DNS
 	// record for fqdn. Used when the apex sits in our Domains catalog.
 	// ManageDNS=false: client already pointed fqdn at our parent
-	// machine; fleet skips the DNS write and still does cert + route.
-	// Fleet forces certs to use HTTP-01 in that case, so issuance
-	// never tries DNS-01 against a zone we do not control.
+	// machine; fleet skips both the registrar write and Certs-app
+	// issuance. The parent edge proxy owns automatic HTTPS for this
+	// hostname, while Fleet only registers the route.
 	ManageDNS bool
 }
 
@@ -272,8 +272,9 @@ func (a *App) writeDomainRecord(ctx *sdk.AppCtx, projectID, fqdn, target, rtype 
 
 // ─── attach orchestration ─────────────────────────────────────────
 
-// attachDomain runs the three-step orchestration: domain_records_set →
-// cert_issue (fire-and-forget) → routes_register. Persists
+// attachDomain runs the attach orchestration: optional
+// domain_records_set → optional cert_issue (managed DNS only,
+// fire-and-forget) → routes_register. Persists
 // (domain, record_id, attached_at) on the tenant. Idempotent on
 // re-attach: domains 0.2.3 upserts, certs treats existing live cert
 // as a no-op, routes_register replaces same-owner routes in place.
@@ -335,8 +336,8 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec at
 	} else {
 		// Client-managed DNS: we don't touch the registrar. We just
 		// trust the operator that fqdn resolves to this machine and
-		// continue with cert + route. detach() keys off record_id ==
-		// "" to skip the corresponding domain_records_delete call.
+		// continue with route registration. detach() keys off
+		// record_id == "" to skip registrar and Certs-app cleanup.
 		_ = a.store.recordEvent(t.ID, "domain.attached", "tool:attach_domain", map[string]any{
 			"fqdn": fqdn, "manage_dns": false,
 		})
@@ -346,12 +347,12 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec at
 		return err
 	}
 
-	// Fire-and-forget cert issuance; async on the certs side. The
-	// panel polls cert_get for status. Partial-failure mirror of
-	// deploy: a failed kickoff does NOT roll back DNS — operator
-	// retries cert_issue via the certs panel.
-	if a.certsAvailable(ctx) {
-		if cErr := callCertsTool(ctx, projectID, "cert_issue", certIssueArgs(fqdn, spec.ManageDNS), nil); cErr != nil {
+	// Fire-and-forget cert issuance for managed DNS only; async on the
+	// certs side. Client-managed DNS relies on the parent edge proxy's
+	// automatic HTTPS instead of creating a second, competing Certs-app
+	// ACME flow for the same hostname.
+	if shouldIssueTenantCert(spec) && a.certsAvailable(ctx) {
+		if cErr := callCertsTool(ctx, projectID, "cert_issue", map[string]any{"fqdn": fqdn}, nil); cErr != nil {
 			_ = a.store.recordEvent(t.ID, "domain.cert_kickoff_failed", "tool:attach_domain", map[string]any{
 				"fqdn": fqdn, "error": cErr.Error(),
 			})
@@ -365,12 +366,8 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec at
 	return nil
 }
 
-func certIssueArgs(fqdn string, manageDNS bool) map[string]any {
-	args := map[string]any{"fqdn": fqdn}
-	if !manageDNS {
-		args["challenge_type"] = "http-01"
-	}
-	return args
+func shouldIssueTenantCert(spec attachDomainSpec) bool {
+	return spec.ManageDNS
 }
 
 // detachDomain best-effort deletes the DNS record, revokes the cert,
@@ -400,7 +397,7 @@ func (a *App) detachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant) error {
 			}, nil)
 		}
 	}
-	if a.certsAvailable(ctx) && t.Domain != "" {
+	if t.DomainRecordID != "" && a.certsAvailable(ctx) && t.Domain != "" {
 		_ = callCertsTool(ctx, projectID, "cert_revoke", map[string]any{"fqdn": t.Domain}, nil)
 	}
 	a.unregisterRouteForTenant(ctx, t.Domain)

@@ -1814,7 +1814,8 @@ function DomainBlock({
       </div>
     );
   }
-  const cert = meta?.certs?.[tenant.domain];
+  const clientManagedDNS = !tenant.domain_record_id;
+  const cert = clientManagedDNS ? undefined : meta?.certs?.[tenant.domain];
   const certVariant: PillVariant = !cert
     ? "neutral"
     : cert.status === "live"
@@ -1842,7 +1843,10 @@ function DomainBlock({
           <StatusPill variant={certVariant}>{`cert · ${cert.status}`}</StatusPill>
         </span>
       )}
-      {!cert && tenant.domain && (
+      {clientManagedDNS && (
+        <StatusPill variant="success">edge HTTPS</StatusPill>
+      )}
+      {!cert && tenant.domain && !clientManagedDNS && (
         <StatusPill variant="neutral">no cert</StatusPill>
       )}
       {meta?.routes_available && (
@@ -1942,8 +1946,8 @@ function AttachDomainDialog({
   //   "managed"  — apex is in our Domains catalog; Domains app writes
   //                the DNS record. Original 0.6.x behavior.
   //   "external" — client already pointed their DNS at this machine;
-  //                we skip the registrar write and just do cert (HTTP-01)
-  //                + route. Useful when we don't run the client's DNS.
+  //                we skip registrar + Certs-app issuance and only
+  //                register the route. The parent edge proxy handles HTTPS.
   type Mode = "managed" | "external";
   const noDomains = meta.domains.length === 0;
   const [mode, setMode] = useState<Mode>(noDomains ? "external" : "managed");
@@ -1966,7 +1970,7 @@ function AttachDomainDialog({
 
   const helpText =
     mode === "external"
-      ? `The client already pointed DNS at this machine (${meta.public_host || "the parent host"}). Fleet skips the DNS write — Let's Encrypt validates over HTTP-01 against the parent's Caddy. Routes still proxies to the tenant's port.`
+      ? `The client already pointed DNS at this machine (${meta.public_host || "the parent host"}). Fleet skips DNS and Certs-app issuance; Routes proxies to the tenant and the parent edge proxy handles HTTPS.`
       : noDomains
         ? "No domains registered in the Domains app yet. Add one there first, or switch to “Client-managed DNS”."
         : "Pick the apex you've registered with the Domains app, then a subdomain (leave empty to attach the apex itself). target defaults to the parent host's public IP.";
@@ -2058,7 +2062,7 @@ function AttachDomainDialog({
                 {meta.public_host || "this machine"}
               </span>
             </div>
-            <div>· port 80 is reachable (Let's Encrypt HTTP-01)</div>
+            <div>· HTTPS traffic is served by the parent edge proxy</div>
           </div>
         </>
       )}

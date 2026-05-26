@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.8.4
+version: 0.8.5
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -94,7 +94,7 @@ provides:
     - name: tenant_run_remote
       description: "Proxy an MCP tool call to a tenant's gateway using its api_key. Args: tenant_id, app, tool, input."
     - name: tenant_attach_domain
-      description: "Attach a public hostname to a tenant. Orchestrates Domains (DNS record, when manage_dns=true) → Certs (managed DNS uses the configured challenge flow; client-managed DNS forces HTTP-01) → Routes (register fqdn → tenant apteva-server port on the parent's routes table). Idempotent; partial-failure tolerant. Args: tenant_id, fqdn, manage_dns? (default true), target?, type?, ttl?."
+      description: "Attach a public hostname to a tenant. Orchestrates Domains + Certs + Routes for manage_dns=true. For manage_dns=false, Fleet assumes the client already pointed DNS at this machine, skips Certs-app issuance, registers the route, and lets the parent edge proxy handle automatic HTTPS. Idempotent; partial-failure tolerant. Args: tenant_id, fqdn, manage_dns? (default true), target?, type?, ttl?."
     - name: tenant_detach_domain
       description: "Clear a tenant's domain link — DNS delete, cert revoke, route unregister, local clear. Local clear runs even on remote failure. Args: tenant_id."
     - name: tenant_domain_grant
