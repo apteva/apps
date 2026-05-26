@@ -39,10 +39,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.6
+version: 0.7.7
 description: |
-  Watch and steer browser sessions. v0.7.6 adds app-managed default
-  provider settings and optional provider enforcement.
+  Watch and steer browser sessions. v0.7.7 waits for Browserbase
+  persisted contexts to synchronize before reopening.
 scopes: [project, global]
 requires:
   permissions:

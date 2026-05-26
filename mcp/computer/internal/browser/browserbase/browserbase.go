@@ -58,17 +58,18 @@ type Options struct {
 }
 
 type Computer struct {
-	apiKey      string
-	projectID   string
-	opts        Options
-	sessionID   string
-	contextID   string
-	debugURL    string
-	display     computer.DisplaySize
-	ctx         context.Context
-	cancel      context.CancelFunc
-	allocCancel context.CancelFunc
-	http        *http.Client
+	apiKey         string
+	projectID      string
+	opts           Options
+	sessionID      string
+	contextID      string
+	contextPersist bool
+	debugURL       string
+	display        computer.DisplaySize
+	ctx            context.Context
+	cancel         context.CancelFunc
+	allocCancel    context.CancelFunc
+	http           *http.Client
 
 	// SoM: same wiring as local.Computer. See local.go for rationale.
 	labelMu    sync.RWMutex
@@ -536,6 +537,9 @@ func (c *Computer) OpenSession(o computer.OpenOptions) error {
 		sameSession := o.SessionID != "" && o.SessionID == c.sessionID
 		sameContext := o.SessionID == "" && o.ContextID != "" && o.ContextID == c.contextID
 		if sameSession || sameContext {
+			if sameContext {
+				c.contextPersist = o.Persist
+			}
 			if o.URL != "" {
 				return c.navigate(o.URL)
 			}
@@ -546,6 +550,7 @@ func (c *Computer) OpenSession(o computer.OpenOptions) error {
 		c.releaseCDP()
 		c.sessionID = ""
 		c.contextID = ""
+		c.contextPersist = false
 		c.debugURL = ""
 	}
 
@@ -557,6 +562,7 @@ func (c *Computer) OpenSession(o computer.OpenOptions) error {
 		}
 		connectURL = u
 		c.sessionID = o.SessionID
+		c.contextPersist = false
 	} else {
 		u, err := c.createSession(o)
 		if err != nil {
@@ -566,6 +572,7 @@ func (c *Computer) OpenSession(o computer.OpenOptions) error {
 		// c.sessionID is set inside createSession.
 		if o.ContextID != "" {
 			c.contextID = o.ContextID
+			c.contextPersist = o.Persist
 		}
 	}
 	if err := c.establishCDP(connectURL); err != nil {
@@ -667,19 +674,29 @@ func (c *Computer) fetchSessionConnectURL(sessionID string) (string, error) {
 }
 
 func (c *Computer) Close() error {
+	// Officially release the session so Browserbase stops billing minutes
+	// and has a clean close point for persisting context state. Keep the
+	// CDP connection open until after the release request so the session
+	// is still active when Browserbase receives REQUEST_RELEASE.
+	if err := c.requestRelease(); err != nil {
+		fmt.Fprintf(os.Stderr, "[BROWSERBASE] release failed id=%s: %v\n", c.sessionID, err)
+	} else if c.sessionID != "" {
+		fmt.Fprintf(os.Stderr, "[BROWSERBASE] session released id=%s\n", c.sessionID)
+	}
+	if c.contextID != "" && c.contextPersist {
+		// Browserbase documents that context writes are synchronized a
+		// few seconds after a persisted session closes. Holding Close
+		// until then prevents immediate reopen from racing the sync.
+		time.Sleep(5 * time.Second)
+	}
 	if c.cancel != nil {
 		c.cancel()
 	}
 	if c.allocCancel != nil {
 		c.allocCancel()
 	}
-
-	// Officially release the session so Browserbase stops billing minutes.
-	if err := c.requestRelease(); err != nil {
-		fmt.Fprintf(os.Stderr, "[BROWSERBASE] release failed id=%s: %v\n", c.sessionID, err)
-	} else if c.sessionID != "" {
-		fmt.Fprintf(os.Stderr, "[BROWSERBASE] session released id=%s\n", c.sessionID)
-	}
 	c.sessionID = ""
+	c.contextID = ""
+	c.contextPersist = false
 	return nil
 }
