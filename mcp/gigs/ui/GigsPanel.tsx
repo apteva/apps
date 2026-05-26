@@ -1,8 +1,8 @@
 // GigsPanel — dashboard surface for the gigs app. Four tabs:
 //   Queue, Templates, Instructions, Workers
 // All API calls go through /api/apps/gigs/* (the platform's reverse
-// proxy). Worker creation lives on the Workers tab and dispatches in
-// one shot through workers_create (CRM upsert + promote).
+// proxy). Worker creation lives on the Workers tab and can either
+// promote an existing CRM contact or create/match one by channel.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -14,6 +14,7 @@ interface NativePanelProps {
 }
 
 const API = "/api/apps/gigs";
+const CRM_API = "/api/apps/crm";
 
 type WorkerStatus = "active" | "paused" | "retired";
 type GigStatus =
@@ -146,6 +147,24 @@ async function api<T>(
   return j as T;
 }
 
+async function crmApi<T>(
+  path: string,
+  projectId: string,
+  init?: RequestInit,
+): Promise<T> {
+  const sep = path.includes("?") ? "&" : "?";
+  const res = await fetch(`${CRM_API}${path}${sep}project_id=${encodeURIComponent(projectId)}`, {
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    ...init,
+  });
+  const j = await res.json();
+  if (!res.ok || (j && typeof j === "object" && "error" in j && (j as any).error)) {
+    throw new Error((j as any)?.error || res.statusText);
+  }
+  return j as T;
+}
+
 // ─── small UI primitives ─────────────────────────────────────────
 
 function Pill({ children, tone }: { children: React.ReactNode; tone?: string }) {
@@ -203,6 +222,14 @@ function kindIcon(kind: string): string {
   if (kind === "checklist_item" || kind === "confirmation") return "check";
   if (["text","audio","video","image","document","link","script","warning","example"].includes(kind)) return kind;
   return "clipboard";
+}
+
+function contactName(c: CrmContact): string {
+  return c.display_name || c.primary_email || c.primary_phone || `Contact #${c.id}`;
+}
+
+function contactLine(c: CrmContact): string {
+  return [c.primary_email || c.primary_phone, c.company].filter(Boolean).join(" · ");
 }
 
 // ─── shell ───────────────────────────────────────────────────────
@@ -537,6 +564,10 @@ function WorkersTab({ projectId }: { projectId: string }) {
   const [items, setItems] = useState<Worker[] | null>(null);
   const [adding, setAdding] = useState(false);
   const [skills, setSkills] = useState<Skill[]>([]);
+  const existingContactIds = useMemo(
+    () => new Set((items || []).map((wk) => wk.contact_id)),
+    [items],
+  );
 
   const reload = useCallback(() => {
     api<{ workers: Worker[] }>("/workers?status=&include_contact=true", projectId)
@@ -558,20 +589,20 @@ function WorkersTab({ projectId }: { projectId: string }) {
         <NewWorkerForm
           projectId={projectId}
           skills={skills}
+          existingContactIds={existingContactIds}
           onDone={() => { setAdding(false); reload(); }}
           onCancel={() => setAdding(false)}
         />
       )}
       <div className="border border-border rounded divide-y divide-border">
-        {items?.length === 0 && <div className="p-4 text-text-muted text-sm">No workers yet. Add one to get started — they'll be created in CRM in the same step.</div>}
+        {items?.length === 0 && <div className="p-4 text-text-muted text-sm">No workers yet.</div>}
         {items?.map((wk) => (
           <div key={wk.id} className="p-3 flex items-start gap-3">
             <span className="text-text-muted mt-1"><Icon name="user" /></span>
             <div className="flex-1 min-w-0">
-              <div className="text-sm font-medium">{wk.contact?.display_name || `Worker #${wk.id}`}</div>
+              <div className="text-sm font-medium">{wk.contact ? contactName(wk.contact) : `Worker #${wk.id}`}</div>
               <div className="text-xs text-text-muted">
-                {wk.contact?.primary_email || wk.contact?.primary_phone || "—"}
-                {wk.contact?.company ? ` · ${wk.contact.company}` : ""}
+                {wk.contact ? contactLine(wk.contact) || "—" : "—"}
               </div>
               {wk.skills && wk.skills.length > 0 && (
                 <div className="flex flex-wrap gap-1 mt-1">
@@ -594,54 +625,176 @@ function WorkersTab({ projectId }: { projectId: string }) {
 }
 
 function NewWorkerForm({
-  projectId, skills, onDone, onCancel,
-}: { projectId: string; skills: Skill[]; onDone: () => void; onCancel: () => void }) {
+  projectId, skills, existingContactIds, onDone, onCancel,
+}: {
+  projectId: string;
+  skills: Skill[];
+  existingContactIds: Set<number>;
+  onDone: () => void;
+  onCancel: () => void;
+}) {
+  const [mode, setMode] = useState<"crm" | "new">("crm");
+  const [crmQuery, setCrmQuery] = useState("");
+  const [crmResults, setCrmResults] = useState<CrmContact[]>([]);
+  const [crmBusy, setCrmBusy] = useState(false);
+  const [crmErr, setCrmErr] = useState<string | null>(null);
+  const [selectedContact, setSelectedContact] = useState<CrmContact | null>(null);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const [company, setCompany] = useState("");
   const [channel, setChannel] = useState("");
+  const [notes, setNotes] = useState("");
   const [skillIds, setSkillIds] = useState<number[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (mode !== "crm") return;
+    const controller = new AbortController();
+    const query = crmQuery.trim();
+    const timer = window.setTimeout(async () => {
+      setCrmBusy(true);
+      setCrmErr(null);
+      try {
+        const path = `/contacts?limit=12${query ? `&q=${encodeURIComponent(query)}` : ""}`;
+        const data = await crmApi<{ contacts: CrmContact[] }>(path, projectId, { signal: controller.signal });
+        setCrmResults(data.contacts || []);
+      } catch (e) {
+        if ((e as Error).name !== "AbortError") {
+          setCrmErr((e as Error).message);
+          setCrmResults([]);
+        }
+      } finally {
+        if (!controller.signal.aborted) setCrmBusy(false);
+      }
+    }, query ? 250 : 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [crmQuery, mode, projectId]);
 
   return (
     <form
       onSubmit={async (e) => {
         e.preventDefault();
-        if (!email && !phone) { setErr("Email or phone required"); return; }
+        if (mode === "crm" && !selectedContact) { setErr("Select a CRM contact"); return; }
+        if (mode === "crm" && selectedContact && existingContactIds.has(selectedContact.id)) {
+          setErr("That contact is already a worker");
+          return;
+        }
+        if (mode === "new" && !email && !phone) { setErr("Email or phone required"); return; }
         setBusy(true); setErr(null);
         try {
-          await api("/workers", projectId, {
-            method: "POST",
-            body: JSON.stringify({
-              name, email: email || undefined, phone: phone || undefined,
-              company: company || undefined,
-              default_channel: channel || undefined,
-              skill_ids: skillIds.length ? skillIds : undefined,
-            }),
-          });
+          if (mode === "crm" && selectedContact) {
+            await api("/workers/promote", projectId, {
+              method: "POST",
+              body: JSON.stringify({
+                contact_id: selectedContact.id,
+                default_channel: channel || undefined,
+                notes: notes || undefined,
+                skill_ids: skillIds.length ? skillIds : undefined,
+              }),
+            });
+          } else {
+            await api("/workers", projectId, {
+              method: "POST",
+              body: JSON.stringify({
+                name, email: email || undefined, phone: phone || undefined,
+                company: company || undefined,
+                default_channel: channel || undefined,
+                notes: notes || undefined,
+                skill_ids: skillIds.length ? skillIds : undefined,
+              }),
+            });
+          }
           onDone();
         } catch (e2) { setErr((e2 as Error).message); }
         finally { setBusy(false); }
       }}
       className="p-3 border border-border rounded space-y-2 bg-bg-subtle"
     >
-      <div className="text-xs text-text-muted">
-        Name + at least one of email/phone. We upsert the CRM contact and promote it to a worker in one step.
+      <div className="inline-flex rounded border border-border overflow-hidden text-sm">
+        <button
+          type="button"
+          onClick={() => { setMode("crm"); setErr(null); }}
+          className={"px-3 py-1 " + (mode === "crm" ? "bg-sky-600 text-white" : "bg-bg text-text-muted")}
+        >
+          From CRM
+        </button>
+        <button
+          type="button"
+          onClick={() => { setMode("new"); setErr(null); }}
+          className={"px-3 py-1 border-l border-border " + (mode === "new" ? "bg-sky-600 text-white" : "bg-bg text-text-muted")}
+        >
+          New contact
+        </button>
       </div>
-      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Display name" required className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" />
-      <div className="grid grid-cols-2 gap-2">
-        <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" type="email" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-        <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Phone (E.164)" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-      </div>
-      <input value={company} onChange={(e) => setCompany(e.target.value)} placeholder="Company (optional)" className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" />
+
+      {mode === "crm" ? (
+        <div className="space-y-2">
+          <input
+            value={crmQuery}
+            onChange={(e) => setCrmQuery(e.target.value)}
+            placeholder="Search CRM contacts"
+            className="w-full px-2 py-1 text-sm border border-border rounded bg-bg"
+          />
+          <div className="border border-border rounded divide-y divide-border bg-bg max-h-52 overflow-auto">
+            {crmBusy && <div className="p-2 text-xs text-text-muted">Searching…</div>}
+            {!crmBusy && crmErr && <div className="p-2 text-xs text-rose-600">{crmErr}</div>}
+            {!crmBusy && !crmErr && crmResults.length === 0 && (
+              <div className="p-2 text-xs text-text-muted">No contacts found</div>
+            )}
+            {!crmBusy && crmResults.map((c) => {
+              const alreadyWorker = existingContactIds.has(c.id);
+              const selected = selectedContact?.id === c.id;
+              return (
+                <button
+                  type="button"
+                  key={c.id}
+                  disabled={alreadyWorker}
+                  onClick={() => { setSelectedContact(c); setErr(null); }}
+                  className={
+                    "w-full text-left p-2 flex items-center justify-between gap-3 " +
+                    (selected ? "bg-sky-500/10" : "hover:bg-bg-subtle ") +
+                    (alreadyWorker ? "opacity-60 cursor-not-allowed" : "")
+                  }
+                >
+                  <span className="min-w-0">
+                    <span className="block text-sm font-medium truncate">{contactName(c)}</span>
+                    <span className="block text-xs text-text-muted truncate">{contactLine(c) || "—"}</span>
+                  </span>
+                  {alreadyWorker ? <Pill>Already worker</Pill> : selected ? <Pill tone="info">Selected</Pill> : null}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : (
+        <>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Display name" required={mode === "new"} className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" />
+          <div className="grid grid-cols-2 gap-2">
+            <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" type="email" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+            <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Phone (E.164)" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+          </div>
+          <input value={company} onChange={(e) => setCompany(e.target.value)} placeholder="Company (optional)" className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" />
+        </>
+      )}
+
       <select value={channel} onChange={(e) => setChannel(e.target.value)} className="px-2 py-1 text-sm border border-border rounded bg-bg">
         <option value="">Default channel — let CRM pick</option>
         <option value="email">Email</option>
         <option value="sms">SMS</option>
         <option value="whatsapp">WhatsApp</option>
       </select>
+      <textarea
+        value={notes}
+        onChange={(e) => setNotes(e.target.value)}
+        placeholder="Notes (optional)"
+        rows={2}
+        className="w-full px-2 py-1 text-sm border border-border rounded bg-bg"
+      />
       {skills.length > 0 && (
         <div>
           <div className="text-xs text-text-muted mb-1">Skills</div>
@@ -664,7 +817,7 @@ function NewWorkerForm({
       )}
       {err && <div className="text-rose-600 text-xs">{err}</div>}
       <div className="flex gap-2">
-        <button disabled={busy} className="px-3 py-1 text-sm bg-sky-600 text-white rounded">Add worker</button>
+        <button disabled={busy || (mode === "crm" && !selectedContact)} className="px-3 py-1 text-sm bg-sky-600 text-white rounded disabled:opacity-50">Add worker</button>
         <button type="button" onClick={onCancel} className="px-3 py-1 text-sm border border-border rounded">Cancel</button>
       </div>
     </form>

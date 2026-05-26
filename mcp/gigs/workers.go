@@ -14,18 +14,18 @@ import (
 // ─── Types ──────────────────────────────────────────────────────────
 
 type worker struct {
-	ID             int64       `json:"id"`
-	ProjectID      string      `json:"project_id"`
-	ContactID      int64       `json:"contact_id"`
-	Status         string      `json:"status"`
-	DefaultChannel string      `json:"default_channel,omitempty"`
-	Notes          string      `json:"notes,omitempty"`
-	RatingAvg      float64     `json:"rating_avg"`
-	AcceptedCount  int64       `json:"accepted_count"`
-	RejectedCount  int64       `json:"rejected_count"`
-	CreatedAt      string      `json:"created_at"`
-	UpdatedAt      string      `json:"updated_at"`
-	ArchivedAt     string      `json:"archived_at,omitempty"`
+	ID             int64   `json:"id"`
+	ProjectID      string  `json:"project_id"`
+	ContactID      int64   `json:"contact_id"`
+	Status         string  `json:"status"`
+	DefaultChannel string  `json:"default_channel,omitempty"`
+	Notes          string  `json:"notes,omitempty"`
+	RatingAvg      float64 `json:"rating_avg"`
+	AcceptedCount  int64   `json:"accepted_count"`
+	RejectedCount  int64   `json:"rejected_count"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
+	ArchivedAt     string  `json:"archived_at,omitempty"`
 	// Hydrated from CRM at read time.
 	Contact *crmContact `json:"contact,omitempty"`
 	// Hydrated from worker_skills.
@@ -83,10 +83,10 @@ func (a *App) workerTools() []sdk.Tool {
 			Name:        "workers_list",
 			Description: "List workers in the project. Args: status? (active|paused|retired), skill_id?, include_contact? (default true), limit? (default 100). Returns {workers}.",
 			InputSchema: schemaObject(map[string]any{
-				"status":           map[string]any{"type": "string"},
-				"skill_id":         map[string]any{"type": "integer"},
-				"include_contact":  map[string]any{"type": "boolean"},
-				"limit":            map[string]any{"type": "integer"},
+				"status":          map[string]any{"type": "string"},
+				"skill_id":        map[string]any{"type": "integer"},
+				"include_contact": map[string]any{"type": "boolean"},
+				"limit":           map[string]any{"type": "integer"},
 			}, []string{}),
 			Handler: a.toolWorkersList,
 		},
@@ -227,10 +227,10 @@ func (a *App) toolWorkersCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		"was_promoted": wasPromoted,
 	})
 	return map[string]any{
-		"worker":        w,
-		"contact":       contact,
-		"was_created":   wasCreated,
-		"was_promoted":  wasPromoted,
+		"worker":       w,
+		"contact":      contact,
+		"was_created":  wasCreated,
+		"was_promoted": wasPromoted,
 	}, nil
 }
 
@@ -776,6 +776,28 @@ func (a *App) handleHTTPWorkerItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/workers/")
+	if rest == "promote" {
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var body map[string]any
+		if err := httpDecode(r, &body); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		if body == nil {
+			body = map[string]any{}
+		}
+		body["_project_id"] = pid
+		out, err := a.toolWorkersPromote(ctx, body)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, out)
+		return
+	}
 	parts := strings.SplitN(rest, "/", 2)
 	id, _ := strconv.ParseInt(parts[0], 10, 64)
 	if id == 0 {
