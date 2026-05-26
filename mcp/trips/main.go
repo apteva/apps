@@ -149,7 +149,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "trips_get", Description: "Read one trip (no children; use dashboard for the full payload).",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			Handler:     a.toolTripsGet},
-		{Name: "trips_create", Description: "Create a trip. Attaches the shared \"Trips\" calendar and mirrors the trip as an all-day block spanning start_at→end_at. Args: name, start_at, end_at, home_currency?, color?, purpose?, notes?, sync_calendar? (default true).",
+		{Name: "trips_create", Description: "Create a trip or trip idea. Args: name, start_at?, end_at?, home_currency?, color?, purpose?, notes?, sync_calendar? (default true). When dates are omitted the trip is an idea and no calendar block is created.",
 			InputSchema: schemaObject(map[string]any{
 				"name":          map[string]any{"type": "string"},
 				"start_at":      map[string]any{"type": "string"},
@@ -157,9 +157,10 @@ func (a *App) MCPTools() []sdk.Tool {
 				"home_currency": map[string]any{"type": "string"},
 				"color":         map[string]any{"type": "string"},
 				"purpose":       map[string]any{"type": "string"},
+				"status":        map[string]any{"type": "string", "enum": tripStatuses()},
 				"notes":         map[string]any{"type": "string"},
 				"sync_calendar": map[string]any{"type": "boolean"},
-			}, []string{"name", "start_at", "end_at"}),
+			}, []string{"name"}),
 			Handler: a.toolTripsCreate},
 		{Name: "trips_update", Description: "Update a trip. Renames the linked calendar when name changes; toggling sync_calendar on/off retroactively adds/removes calendar events.",
 			InputSchema: schemaObject(map[string]any{
@@ -167,7 +168,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"name":          map[string]any{"type": "string"},
 				"start_at":      map[string]any{"type": "string"},
 				"end_at":        map[string]any{"type": "string"},
-				"status":        map[string]any{"type": "string", "enum": []string{"planning", "booked", "in_progress", "done", "cancelled"}},
+				"status":        map[string]any{"type": "string", "enum": []string{"idea", "planning", "booked", "in_progress", "done", "cancelled"}},
 				"color":         map[string]any{"type": "string"},
 				"notes":         map[string]any{"type": "string"},
 				"total_budget":  map[string]any{"type": "integer"},
@@ -180,7 +181,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler:     a.toolTripsDelete},
 
 		// Destinations
-		{Name: "destinations_add", Description: "Add a destination. Mirrors into the trip's calendar as an all-day arrive→depart block. Args: trip_id, place_name, arrive_at, depart_at, country?, lat?, lng?, notes?.",
+		{Name: "destinations_add", Description: "Add a destination or destination idea. Args: trip_id, place_name, arrive_at?, depart_at?, country?, lat?, lng?, notes?. Calendar block is created only when both dates are set.",
 			InputSchema: schemaObject(map[string]any{
 				"trip_id":    map[string]any{"type": "integer"},
 				"place_name": map[string]any{"type": "string"},
@@ -190,7 +191,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"arrive_at":  map[string]any{"type": "string"},
 				"depart_at":  map[string]any{"type": "string"},
 				"notes":      map[string]any{"type": "string"},
-			}, []string{"trip_id", "place_name", "arrive_at", "depart_at"}),
+			}, []string{"trip_id", "place_name"}),
 			Handler: a.toolDestinationsAdd},
 		{Name: "destinations_update", Description: "Update a destination; upserts its calendar block.",
 			InputSchema: schemaObject(map[string]any{
@@ -215,8 +216,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolDestinationsReorder},
 
 		// Transport
-		{Name: "transport_legs_add", Description: "Add a transport leg. Mirrors into the trip's calendar.",
-			InputSchema: schemaObject(transportSchemaProps(true), []string{"trip_id", "kind", "depart_at", "arrive_at"}),
+		{Name: "transport_legs_add", Description: "Add a transport leg or route idea. Calendar event is created only when depart_at and arrive_at are set.",
+			InputSchema: schemaObject(transportSchemaProps(true), []string{"trip_id", "kind"}),
 			Handler:     a.toolTransportLegsAdd},
 		{Name: "transport_legs_update", Description: "Update a transport leg; upserts its calendar event.",
 			InputSchema: schemaObject(transportSchemaProps(false), []string{"id"}),
@@ -233,8 +234,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolTransportLegsMarkBooked},
 
 		// Accommodations
-		{Name: "accommodations_add", Description: "Add an accommodation. Mirrors as an all-day event from check_in_at to check_out_at.",
-			InputSchema: schemaObject(accommodationSchemaProps(true), []string{"trip_id", "name", "check_in_at", "check_out_at"}),
+		{Name: "accommodations_add", Description: "Add an accommodation or stay idea. Calendar event is created only when check_in_at and check_out_at are set.",
+			InputSchema: schemaObject(accommodationSchemaProps(true), []string{"trip_id", "name"}),
 			Handler:     a.toolAccommodationsAdd},
 		{Name: "accommodations_update", Description: "Update an accommodation; upserts its calendar event.",
 			InputSchema: schemaObject(accommodationSchemaProps(false), []string{"id"}),
@@ -387,6 +388,9 @@ func main() { sdk.Run(&App{}) }
 
 func transportKinds() []string {
 	return []string{"flight", "train", "car", "bus", "ferry", "other"}
+}
+func tripStatuses() []string {
+	return []string{"idea", "planning", "booked", "in_progress", "done", "cancelled"}
 }
 func accommodationKinds() []string {
 	return []string{"hotel", "airbnb", "hostel", "rental", "friend", "other"}
@@ -646,7 +650,7 @@ func (a *App) toolTripsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if !includeArchived {
 		q += " AND archived=0"
 	}
-	q += " ORDER BY start_at DESC"
+	q += " ORDER BY CASE WHEN start_at IS NULL OR start_at='' THEN 1 ELSE 0 END, start_at DESC, updated_at DESC"
 	rows, err := ctx.AppDB().Query(q, pid)
 	if err != nil {
 		return nil, err
@@ -688,34 +692,54 @@ func (a *App) toolTripsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	name := strings.TrimSpace(strArg(args, "name", ""))
 	startAt := strArg(args, "start_at", "")
 	endAt := strArg(args, "end_at", "")
-	if name == "" || startAt == "" || endAt == "" {
-		return nil, errors.New("name, start_at, end_at required")
+	if name == "" {
+		return nil, errors.New("name required")
 	}
-	startT, err := parseFlexibleTime(startAt)
-	if err != nil {
-		return nil, fmt.Errorf("start_at: %w", err)
-	}
-	endT, err := parseFlexibleTime(endAt)
-	if err != nil {
-		return nil, fmt.Errorf("end_at: %w", err)
-	}
-	if !endT.After(startT) {
-		return nil, errors.New("end_at must be after start_at")
+	var startValue, endValue any
+	hasDates := startAt != "" || endAt != ""
+	if hasDates {
+		if startAt == "" || endAt == "" {
+			return nil, errors.New("start_at and end_at must be supplied together")
+		}
+		startT, err := parseFlexibleTime(startAt)
+		if err != nil {
+			return nil, fmt.Errorf("start_at: %w", err)
+		}
+		endT, err := parseFlexibleTime(endAt)
+		if err != nil {
+			return nil, fmt.Errorf("end_at: %w", err)
+		}
+		if !endT.After(startT) {
+			return nil, errors.New("end_at must be after start_at")
+		}
+		startValue = startT.UTC().Format(time.RFC3339)
+		endValue = endT.UTC().Format(time.RFC3339)
 	}
 	homeCcy := strings.ToUpper(strArg(args, "home_currency", "EUR"))
 	color := strArg(args, "color", "#3b82f6")
 	purpose := strArg(args, "purpose", "")
 	notes := strArg(args, "notes", "")
+	status := strArg(args, "status", "")
+	if status == "" {
+		if hasDates {
+			status = "planning"
+		} else {
+			status = "idea"
+		}
+	}
+	if !contains(tripStatuses(), status) {
+		return nil, fmt.Errorf("status must be one of %v", tripStatuses())
+	}
 	sync := true
 	if v, ok := args["sync_calendar"].(bool); ok {
 		sync = v
 	}
 	pid := projectID()
 	res, err := ctx.AppDB().Exec(
-		`INSERT INTO trips (project_id, name, purpose, start_at, end_at, home_currency,
+		`INSERT INTO trips (project_id, name, purpose, status, start_at, end_at, home_currency,
 		                    color, notes, sync_calendar)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, name, purpose, startT.UTC().Format(time.RFC3339), endT.UTC().Format(time.RFC3339),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pid, name, purpose, status, startValue, endValue,
 		homeCcy, color, notes, boolToInt(sync),
 	)
 	if err != nil {
@@ -727,7 +751,7 @@ func (a *App) toolTripsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	// "Trips" calendar (created on first use). Best-effort — failure
 	// leaves trip with calendar_id=NULL; a future write retries via
 	// the same ensureSharedCalendar path.
-	if sync {
+	if sync && hasDates {
 		newTrip, _ := readTrip(ctx, id)
 		if err := ensureSharedCalendar(ctx, &newTrip); err != nil {
 			ctx.Logger().Warn("shared calendar attach failed; trip created without calendar", "err", err)
@@ -751,10 +775,68 @@ func (a *App) toolTripsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	cols, vals := []string{}, []any{}
-	for _, k := range []string{"name", "start_at", "end_at", "status", "color", "notes", "purpose"} {
+	for _, k := range []string{"name", "color", "notes", "purpose"} {
 		if v, ok := args[k].(string); ok && v != "" {
 			cols = append(cols, k+"=?")
 			vals = append(vals, v)
+		}
+	}
+	statusProvided := false
+	if v, ok := args["status"].(string); ok && v != "" {
+		if !contains(tripStatuses(), v) {
+			return nil, fmt.Errorf("status must be one of %v", tripStatuses())
+		}
+		statusProvided = true
+		cols = append(cols, "status=?")
+		vals = append(vals, v)
+	}
+	newStart, newEnd := old.StartAt, old.EndAt
+	datesTouched := false
+	if v, ok := args["start_at"]; ok {
+		datesTouched = true
+		s, err := nullableDateString(v, "start_at")
+		if err != nil {
+			return nil, err
+		}
+		newStart = s
+	}
+	if v, ok := args["end_at"]; ok {
+		datesTouched = true
+		s, err := nullableDateString(v, "end_at")
+		if err != nil {
+			return nil, err
+		}
+		newEnd = s
+	}
+	if datesTouched {
+		if (newStart == "") != (newEnd == "") {
+			return nil, errors.New("start_at and end_at must be supplied or cleared together")
+		}
+		if newStart != "" {
+			startT, err := parseFlexibleTime(newStart)
+			if err != nil {
+				return nil, fmt.Errorf("start_at: %w", err)
+			}
+			endT, err := parseFlexibleTime(newEnd)
+			if err != nil {
+				return nil, fmt.Errorf("end_at: %w", err)
+			}
+			if !endT.After(startT) {
+				return nil, errors.New("end_at must be after start_at")
+			}
+			newStart = startT.UTC().Format(time.RFC3339)
+			newEnd = endT.UTC().Format(time.RFC3339)
+		}
+		cols = append(cols, "start_at=?", "end_at=?")
+		vals = append(vals, nullIfEmpty(newStart), nullIfEmpty(newEnd))
+		if !statusProvided {
+			if newStart == "" && old.Status != "idea" {
+				cols = append(cols, "status=?")
+				vals = append(vals, "idea")
+			} else if newStart != "" && old.Status == "idea" {
+				cols = append(cols, "status=?")
+				vals = append(vals, "planning")
+			}
 		}
 	}
 	if v, ok := args["archived"].(bool); ok {
@@ -809,14 +891,7 @@ func (a *App) toolTripsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	// Date edits that didn't toggle sync move the trip's all-day block.
 	// (The off→on path already (re)creates it via rehydrate.)
 	if !syncChanged && updated.SyncCalendar {
-		datesChanged := false
-		if v, ok := args["start_at"].(string); ok && v != "" && v != old.StartAt {
-			datesChanged = true
-		}
-		if v, ok := args["end_at"].(string); ok && v != "" && v != old.EndAt {
-			datesChanged = true
-		}
-		if datesChanged {
+		if datesTouched {
 			// Make sure there's a calendar to write to (covers trips whose
 			// calendar attach failed at create time), then upsert the block:
 			// mirrorTripEvent moves the existing event or creates it if the
@@ -863,13 +938,16 @@ func scanTrip(r rowScanner) (Trip, error) {
 	var totalBudget sql.NullInt64
 	var calendarID sql.NullInt64
 	var calendarEventID sql.NullInt64
+	var startAt, endAt sql.NullString
 	var participants string
 	if err := r.Scan(&t.ID, &t.ProjectID, &t.Name, &t.Purpose, &t.Status,
-		&t.StartAt, &t.EndAt, &t.HomeCurrency, &totalBudget, &participants,
+		&startAt, &endAt, &t.HomeCurrency, &totalBudget, &participants,
 		&t.Notes, &t.Color, &calendarID, &calendarEventID, &sync, &arch,
 		&t.CreatedAt, &t.UpdatedAt); err != nil {
 		return t, err
 	}
+	t.StartAt = startAt.String
+	t.EndAt = endAt.String
 	if totalBudget.Valid {
 		v := totalBudget.Int64
 		t.TotalBudget = &v
@@ -907,8 +985,11 @@ func (a *App) toolDestinationsAdd(ctx *sdk.AppCtx, args map[string]any) (any, er
 	name := strings.TrimSpace(strArg(args, "place_name", ""))
 	arriveAt := strArg(args, "arrive_at", "")
 	departAt := strArg(args, "depart_at", "")
-	if tripID == 0 || name == "" || arriveAt == "" || departAt == "" {
-		return nil, errors.New("trip_id, place_name, arrive_at, depart_at required")
+	if tripID == 0 || name == "" {
+		return nil, errors.New("trip_id and place_name required")
+	}
+	if (arriveAt == "") != (departAt == "") {
+		return nil, errors.New("arrive_at and depart_at must be supplied together")
 	}
 	trip, err := readTrip(ctx, tripID)
 	if err != nil {
@@ -933,7 +1014,7 @@ func (a *App) toolDestinationsAdd(ctx *sdk.AppCtx, args map[string]any) (any, er
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO destinations (trip_id, place_name, country, lat, lng, arrive_at, depart_at, order_idx, notes)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		tripID, name, country, latV, lngV, arriveAt, departAt, nextIdx, notes,
+		tripID, name, country, latV, lngV, nullIfEmpty(arriveAt), nullIfEmpty(departAt), nextIdx, notes,
 	)
 	if err != nil {
 		return nil, err
@@ -952,12 +1033,38 @@ func (a *App) toolDestinationsUpdate(ctx *sdk.AppCtx, args map[string]any) (any,
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
+	old, err := readDestination(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	cols, vals := []string{}, []any{}
-	for _, k := range []string{"place_name", "country", "arrive_at", "depart_at", "notes"} {
+	newArrive, newDepart := old.ArriveAt, old.DepartAt
+	for _, k := range []string{"place_name", "country", "notes"} {
 		if v, ok := args[k].(string); ok && v != "" {
 			cols = append(cols, k+"=?")
 			vals = append(vals, v)
 		}
+	}
+	if _, ok := args["arrive_at"]; ok {
+		v, err := nullableDateString(args["arrive_at"], "arrive_at")
+		if err != nil {
+			return nil, err
+		}
+		newArrive = v
+		cols = append(cols, "arrive_at=?")
+		vals = append(vals, nullIfEmpty(v))
+	}
+	if _, ok := args["depart_at"]; ok {
+		v, err := nullableDateString(args["depart_at"], "depart_at")
+		if err != nil {
+			return nil, err
+		}
+		newDepart = v
+		cols = append(cols, "depart_at=?")
+		vals = append(vals, nullIfEmpty(v))
+	}
+	if (newArrive == "") != (newDepart == "") {
+		return nil, errors.New("arrive_at and depart_at must be supplied or cleared together")
 	}
 	if v, ok := args["lat"].(float64); ok {
 		cols = append(cols, "lat=?")
@@ -1039,10 +1146,13 @@ func scanDestination(r rowScanner) (Destination, error) {
 	var d Destination
 	var lat, lng sql.NullFloat64
 	var calendarEventID sql.NullInt64
+	var arriveAt, departAt sql.NullString
 	if err := r.Scan(&d.ID, &d.TripID, &d.PlaceName, &d.Country, &lat, &lng,
-		&d.ArriveAt, &d.DepartAt, &d.OrderIdx, &d.Notes, &calendarEventID, &d.CreatedAt); err != nil {
+		&arriveAt, &departAt, &d.OrderIdx, &d.Notes, &calendarEventID, &d.CreatedAt); err != nil {
 		return d, err
 	}
+	d.ArriveAt = arriveAt.String
+	d.DepartAt = departAt.String
 	if lat.Valid {
 		v := lat.Float64
 		d.Lat = &v
@@ -1095,8 +1205,8 @@ func (a *App) toolTransportLegsAdd(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}
 	depart := strArg(args, "depart_at", "")
 	arrive := strArg(args, "arrive_at", "")
-	if depart == "" || arrive == "" {
-		return nil, errors.New("depart_at and arrive_at required")
+	if (depart == "") != (arrive == "") {
+		return nil, errors.New("depart_at and arrive_at must be supplied together")
 	}
 	currency := strings.ToUpper(strArg(args, "currency", trip.HomeCurrency))
 	provider := strArg(args, "provider", "")
@@ -1113,7 +1223,7 @@ func (a *App) toolTransportLegsAdd(ctx *sdk.AppCtx, args map[string]any) (any, e
 		tripID,
 		nullableInt64(args, "from_destination_id"),
 		nullableInt64(args, "to_destination_id"),
-		kind, provider, reference, depart, arrive, departLoc, arriveLoc,
+		kind, provider, reference, nullIfEmpty(depart), nullIfEmpty(arrive), departLoc, arriveLoc,
 		nullableInt64(args, "cost_estimated"),
 		nullableInt64(args, "cost_actual"),
 		currency, confirm, notes,
@@ -1125,7 +1235,7 @@ func (a *App) toolTransportLegsAdd(ctx *sdk.AppCtx, args map[string]any) (any, e
 	leg, _ := readTransport(ctx, id)
 	// Calendar mirror.
 	_ = ensureSharedCalendar(ctx, &trip)
-	if trip.SyncCalendar && trip.CalendarID != nil {
+	if trip.SyncCalendar && trip.CalendarID != nil && leg.DepartAt != "" && leg.ArriveAt != "" {
 		if evtID, err := callCreateEvent(ctx, *trip.CalendarID,
 			transportEventTitle(trip, leg), leg.DepartAt, leg.ArriveAt, false,
 			leg.DepartLocation, transportEventDescription(trip, leg)); err == nil {
@@ -1149,12 +1259,31 @@ func (a *App) toolTransportLegsUpdate(ctx *sdk.AppCtx, args map[string]any) (any
 		return nil, err
 	}
 	cols, vals := []string{}, []any{}
-	for _, k := range []string{"kind", "provider", "reference", "depart_at", "arrive_at",
+	newDepart, newArrive := old.DepartAt, old.ArriveAt
+	for _, k := range []string{"kind", "provider", "reference",
 		"depart_location", "arrive_location", "currency", "confirmation_number", "notes"} {
 		if v, ok := args[k].(string); ok && v != "" {
 			cols = append(cols, k+"=?")
 			vals = append(vals, v)
 		}
+	}
+	for _, k := range []string{"depart_at", "arrive_at"} {
+		if _, ok := args[k]; ok {
+			v, err := nullableDateString(args[k], k)
+			if err != nil {
+				return nil, err
+			}
+			if k == "depart_at" {
+				newDepart = v
+			} else {
+				newArrive = v
+			}
+			cols = append(cols, k+"=?")
+			vals = append(vals, nullIfEmpty(v))
+		}
+	}
+	if (newDepart == "") != (newArrive == "") {
+		return nil, errors.New("depart_at and arrive_at must be supplied or cleared together")
 	}
 	for _, k := range []string{"from_destination_id", "to_destination_id", "cost_estimated", "cost_actual"} {
 		if v, ok := args[k]; ok && v != nil {
@@ -1177,15 +1306,22 @@ func (a *App) toolTransportLegsUpdate(ctx *sdk.AppCtx, args map[string]any) (any
 	// Calendar upsert.
 	_ = ensureSharedCalendar(ctx, &trip)
 	if trip.SyncCalendar && trip.CalendarID != nil {
-		if old.CalendarEventID != nil {
+		hasDates := leg.DepartAt != "" && leg.ArriveAt != ""
+		if old.CalendarEventID != nil && !hasDates {
+			_ = callDeleteEvent(ctx, *old.CalendarEventID)
+			_, _ = ctx.AppDB().Exec(`UPDATE transport_legs SET calendar_event_id=NULL WHERE id=?`, id)
+			leg.CalendarEventID = nil
+		} else if old.CalendarEventID != nil && hasDates {
 			_ = callUpdateEvent(ctx, *old.CalendarEventID,
 				transportEventTitle(trip, leg), leg.DepartAt, leg.ArriveAt, false,
 				leg.DepartLocation, transportEventDescription(trip, leg))
-		} else if evtID, err := callCreateEvent(ctx, *trip.CalendarID,
-			transportEventTitle(trip, leg), leg.DepartAt, leg.ArriveAt, false,
-			leg.DepartLocation, transportEventDescription(trip, leg)); err == nil {
-			_, _ = ctx.AppDB().Exec(`UPDATE transport_legs SET calendar_event_id=? WHERE id=?`, evtID, id)
-			leg.CalendarEventID = &evtID
+		} else if hasDates {
+			if evtID, err := callCreateEvent(ctx, *trip.CalendarID,
+				transportEventTitle(trip, leg), leg.DepartAt, leg.ArriveAt, false,
+				leg.DepartLocation, transportEventDescription(trip, leg)); err == nil {
+				_, _ = ctx.AppDB().Exec(`UPDATE transport_legs SET calendar_event_id=? WHERE id=?`, evtID, id)
+				leg.CalendarEventID = &evtID
+			}
 		}
 	}
 	return leg, nil
@@ -1249,13 +1385,16 @@ func scanTransport(r rowScanner) (TransportLeg, error) {
 	var l TransportLeg
 	var booked int
 	var estCost, actCost, evtID sql.NullInt64
+	var departAt, arriveAt sql.NullString
 	if err := r.Scan(&l.ID, &l.TripID, &l.FromDestinationID, &l.ToDestinationID,
-		&l.Kind, &l.Provider, &l.Reference, &l.DepartAt, &l.ArriveAt,
+		&l.Kind, &l.Provider, &l.Reference, &departAt, &arriveAt,
 		&l.DepartLocation, &l.ArriveLocation, &estCost, &actCost,
 		&l.Currency, &l.ConfirmationNumber, &booked, &l.Notes,
 		&evtID, &l.CreatedAt, &l.UpdatedAt); err != nil {
 		return l, err
 	}
+	l.DepartAt = departAt.String
+	l.ArriveAt = arriveAt.String
 	if estCost.Valid {
 		v := estCost.Int64
 		l.CostEstimated = &v
@@ -1278,7 +1417,7 @@ func listTransportByTrip(ctx *sdk.AppCtx, tripID int64) ([]TransportLeg, error) 
 		        kind, provider, reference, depart_at, arrive_at, depart_location, arrive_location,
 		        cost_estimated, cost_actual, currency, confirmation_number, booked, notes,
 		        calendar_event_id, created_at, updated_at
-		 FROM transport_legs WHERE trip_id=? ORDER BY depart_at, id`, tripID,
+		 FROM transport_legs WHERE trip_id=? ORDER BY CASE WHEN depart_at IS NULL OR depart_at='' THEN 1 ELSE 0 END, depart_at, id`, tripID,
 	)
 	if err != nil {
 		return nil, err
@@ -1358,14 +1497,14 @@ func activityEventDescription(t Trip, a Activity) string {
 // has to ripple. Best-effort; failed events stay with the old prefix.
 func updateEventTitlesForTrip(ctx *sdk.AppCtx, trip Trip) {
 	// Trip-level block: title is just the (renamed) trip name.
-	if trip.CalendarEventID != nil {
+	if trip.CalendarEventID != nil && trip.StartAt != "" && trip.EndAt != "" {
 		_ = callUpdateEvent(ctx, *trip.CalendarEventID,
 			tripEventTitle(trip), trip.StartAt, trip.EndAt, true,
 			"", tripEventDescription(trip))
 	}
 	dests, _ := listDestinationsByTrip(ctx, trip.ID)
 	for _, d := range dests {
-		if d.CalendarEventID == nil {
+		if d.CalendarEventID == nil || d.ArriveAt == "" || d.DepartAt == "" {
 			continue
 		}
 		_ = callUpdateEvent(ctx, *d.CalendarEventID,
@@ -1374,7 +1513,7 @@ func updateEventTitlesForTrip(ctx *sdk.AppCtx, trip Trip) {
 	}
 	legs, _ := listTransportByTrip(ctx, trip.ID)
 	for _, l := range legs {
-		if l.CalendarEventID == nil {
+		if l.CalendarEventID == nil || l.DepartAt == "" || l.ArriveAt == "" {
 			continue
 		}
 		_ = callUpdateEvent(ctx, *l.CalendarEventID,
@@ -1383,7 +1522,7 @@ func updateEventTitlesForTrip(ctx *sdk.AppCtx, trip Trip) {
 	}
 	accs, _ := listAccommodationsByTrip(ctx, trip.ID)
 	for _, ac := range accs {
-		if ac.CalendarEventID == nil {
+		if ac.CalendarEventID == nil || ac.CheckInAt == "" || ac.CheckOutAt == "" {
 			continue
 		}
 		_ = callUpdateEvent(ctx, *ac.CalendarEventID,
@@ -1419,8 +1558,11 @@ func (a *App) toolAccommodationsAdd(ctx *sdk.AppCtx, args map[string]any) (any, 
 	name := strings.TrimSpace(strArg(args, "name", ""))
 	checkIn := strArg(args, "check_in_at", "")
 	checkOut := strArg(args, "check_out_at", "")
-	if name == "" || checkIn == "" || checkOut == "" {
-		return nil, errors.New("name, check_in_at, check_out_at required")
+	if name == "" {
+		return nil, errors.New("name required")
+	}
+	if (checkIn == "") != (checkOut == "") {
+		return nil, errors.New("check_in_at and check_out_at must be supplied together")
 	}
 	kind := strArg(args, "kind", "hotel")
 	if !contains(accommodationKinds(), kind) {
@@ -1436,7 +1578,7 @@ func (a *App) toolAccommodationsAdd(ctx *sdk.AppCtx, args map[string]any) (any, 
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		tripID,
 		nullableInt64(args, "destination_id"),
-		name, kind, address, checkIn, checkOut,
+		name, kind, address, nullIfEmpty(checkIn), nullIfEmpty(checkOut),
 		nullableInt64(args, "cost_estimated"),
 		nullableInt64(args, "cost_actual"),
 		currency, confirm, notes,
@@ -1447,7 +1589,7 @@ func (a *App) toolAccommodationsAdd(ctx *sdk.AppCtx, args map[string]any) (any, 
 	id, _ := res.LastInsertId()
 	acc, _ := readAccommodation(ctx, id)
 	_ = ensureSharedCalendar(ctx, &trip)
-	if trip.SyncCalendar && trip.CalendarID != nil {
+	if trip.SyncCalendar && trip.CalendarID != nil && acc.CheckInAt != "" && acc.CheckOutAt != "" {
 		if evtID, err := callCreateEvent(ctx, *trip.CalendarID,
 			accommodationEventTitle(trip, acc), acc.CheckInAt, acc.CheckOutAt, true,
 			acc.Address, accommodationEventDescription(trip, acc)); err == nil {
@@ -1471,12 +1613,31 @@ func (a *App) toolAccommodationsUpdate(ctx *sdk.AppCtx, args map[string]any) (an
 		return nil, err
 	}
 	cols, vals := []string{}, []any{}
-	for _, k := range []string{"name", "kind", "address", "check_in_at", "check_out_at",
+	newCheckIn, newCheckOut := old.CheckInAt, old.CheckOutAt
+	for _, k := range []string{"name", "kind", "address",
 		"currency", "confirmation_number", "notes"} {
 		if v, ok := args[k].(string); ok && v != "" {
 			cols = append(cols, k+"=?")
 			vals = append(vals, v)
 		}
+	}
+	for _, k := range []string{"check_in_at", "check_out_at"} {
+		if _, ok := args[k]; ok {
+			v, err := nullableDateString(args[k], k)
+			if err != nil {
+				return nil, err
+			}
+			if k == "check_in_at" {
+				newCheckIn = v
+			} else {
+				newCheckOut = v
+			}
+			cols = append(cols, k+"=?")
+			vals = append(vals, nullIfEmpty(v))
+		}
+	}
+	if (newCheckIn == "") != (newCheckOut == "") {
+		return nil, errors.New("check_in_at and check_out_at must be supplied or cleared together")
 	}
 	for _, k := range []string{"destination_id", "cost_estimated", "cost_actual"} {
 		if v, ok := args[k]; ok && v != nil {
@@ -1498,15 +1659,22 @@ func (a *App) toolAccommodationsUpdate(ctx *sdk.AppCtx, args map[string]any) (an
 	trip, _ := readTrip(ctx, acc.TripID)
 	_ = ensureSharedCalendar(ctx, &trip)
 	if trip.SyncCalendar && trip.CalendarID != nil {
-		if old.CalendarEventID != nil {
+		hasDates := acc.CheckInAt != "" && acc.CheckOutAt != ""
+		if old.CalendarEventID != nil && !hasDates {
+			_ = callDeleteEvent(ctx, *old.CalendarEventID)
+			_, _ = ctx.AppDB().Exec(`UPDATE accommodations SET calendar_event_id=NULL WHERE id=?`, id)
+			acc.CalendarEventID = nil
+		} else if old.CalendarEventID != nil && hasDates {
 			_ = callUpdateEvent(ctx, *old.CalendarEventID,
 				accommodationEventTitle(trip, acc), acc.CheckInAt, acc.CheckOutAt, true,
 				acc.Address, accommodationEventDescription(trip, acc))
-		} else if evtID, err := callCreateEvent(ctx, *trip.CalendarID,
-			accommodationEventTitle(trip, acc), acc.CheckInAt, acc.CheckOutAt, true,
-			acc.Address, accommodationEventDescription(trip, acc)); err == nil {
-			_, _ = ctx.AppDB().Exec(`UPDATE accommodations SET calendar_event_id=? WHERE id=?`, evtID, id)
-			acc.CalendarEventID = &evtID
+		} else if hasDates {
+			if evtID, err := callCreateEvent(ctx, *trip.CalendarID,
+				accommodationEventTitle(trip, acc), acc.CheckInAt, acc.CheckOutAt, true,
+				acc.Address, accommodationEventDescription(trip, acc)); err == nil {
+				_, _ = ctx.AppDB().Exec(`UPDATE accommodations SET calendar_event_id=? WHERE id=?`, evtID, id)
+				acc.CalendarEventID = &evtID
+			}
 		}
 	}
 	return acc, nil
@@ -1569,12 +1737,15 @@ func scanAccommodation(r rowScanner) (Accommodation, error) {
 	var a Accommodation
 	var booked int
 	var estCost, actCost, evtID sql.NullInt64
+	var checkIn, checkOut sql.NullString
 	if err := r.Scan(&a.ID, &a.TripID, &a.DestinationID, &a.Name, &a.Kind, &a.Address,
-		&a.CheckInAt, &a.CheckOutAt, &estCost, &actCost, &a.Currency,
+		&checkIn, &checkOut, &estCost, &actCost, &a.Currency,
 		&a.ConfirmationNumber, &booked, &a.Notes, &evtID,
 		&a.CreatedAt, &a.UpdatedAt); err != nil {
 		return a, err
 	}
+	a.CheckInAt = checkIn.String
+	a.CheckOutAt = checkOut.String
 	if estCost.Valid {
 		v := estCost.Int64
 		a.CostEstimated = &v
@@ -1596,7 +1767,7 @@ func listAccommodationsByTrip(ctx *sdk.AppCtx, tripID int64) ([]Accommodation, e
 		`SELECT id, trip_id, COALESCE(destination_id,0), name, kind, address, check_in_at,
 		        check_out_at, cost_estimated, cost_actual, currency, confirmation_number,
 		        booked, notes, calendar_event_id, created_at, updated_at
-		 FROM accommodations WHERE trip_id=? ORDER BY check_in_at, id`, tripID,
+		 FROM accommodations WHERE trip_id=? ORDER BY CASE WHEN check_in_at IS NULL OR check_in_at='' THEN 1 ELSE 0 END, check_in_at, id`, tripID,
 	)
 	if err != nil {
 		return nil, err
@@ -1682,10 +1853,20 @@ func (a *App) toolActivitiesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, e
 		return nil, err
 	}
 	cols, vals := []string{}, []any{}
-	for _, k := range []string{"name", "category", "start_at", "end_at", "location", "currency", "notes"} {
+	for _, k := range []string{"name", "category", "location", "currency", "notes"} {
 		if v, ok := args[k].(string); ok && v != "" {
 			cols = append(cols, k+"=?")
 			vals = append(vals, v)
+		}
+	}
+	for _, k := range []string{"start_at", "end_at"} {
+		if _, ok := args[k]; ok {
+			v, err := nullableDateString(args[k], k)
+			if err != nil {
+				return nil, err
+			}
+			cols = append(cols, k+"=?")
+			vals = append(vals, nullIfEmpty(v))
 		}
 	}
 	for _, k := range []string{"destination_id", "cost_estimated", "cost_actual"} {
@@ -2253,6 +2434,14 @@ func mirrorTripEvent(ctx *sdk.AppCtx, trip *Trip) {
 	if trip == nil || !trip.SyncCalendar || trip.CalendarID == nil {
 		return
 	}
+	if trip.StartAt == "" || trip.EndAt == "" {
+		if trip.CalendarEventID != nil {
+			_ = callDeleteEvent(ctx, *trip.CalendarEventID)
+			_, _ = ctx.AppDB().Exec(`UPDATE trips SET calendar_event_id=NULL WHERE id=?`, trip.ID)
+			trip.CalendarEventID = nil
+		}
+		return
+	}
 	if trip.CalendarEventID == nil {
 		evtID, err := callCreateEvent(ctx, *trip.CalendarID,
 			tripEventTitle(*trip), trip.StartAt, trip.EndAt, true,
@@ -2280,6 +2469,11 @@ func mirrorDestinationEvent(ctx *sdk.AppCtx, trip Trip, d *Destination) {
 		return
 	}
 	if d.ArriveAt == "" || d.DepartAt == "" {
+		if d.CalendarEventID != nil {
+			_ = callDeleteEvent(ctx, *d.CalendarEventID)
+			_, _ = ctx.AppDB().Exec(`UPDATE destinations SET calendar_event_id=NULL WHERE id=?`, d.ID)
+			d.CalendarEventID = nil
+		}
 		return
 	}
 	if d.CalendarEventID == nil {
@@ -2310,7 +2504,7 @@ func rehydrateCalendarForTrip(ctx *sdk.AppCtx, trip Trip) {
 	}
 	calID := *trip.CalendarID
 	// Trip-level all-day block.
-	if trip.CalendarEventID == nil {
+	if trip.CalendarEventID == nil && trip.StartAt != "" && trip.EndAt != "" {
 		mirrorTripEvent(ctx, &trip)
 	}
 	// Destination all-day blocks.
@@ -2323,7 +2517,7 @@ func rehydrateCalendarForTrip(ctx *sdk.AppCtx, trip Trip) {
 	}
 	legs, _ := listTransportByTrip(ctx, trip.ID)
 	for _, l := range legs {
-		if l.CalendarEventID != nil {
+		if l.CalendarEventID != nil || l.DepartAt == "" || l.ArriveAt == "" {
 			continue
 		}
 		if evtID, err := callCreateEvent(ctx, calID,
@@ -2334,7 +2528,7 @@ func rehydrateCalendarForTrip(ctx *sdk.AppCtx, trip Trip) {
 	}
 	accs, _ := listAccommodationsByTrip(ctx, trip.ID)
 	for _, ac := range accs {
-		if ac.CalendarEventID != nil {
+		if ac.CalendarEventID != nil || ac.CheckInAt == "" || ac.CheckOutAt == "" {
 			continue
 		}
 		if evtID, err := callCreateEvent(ctx, calID,
@@ -4367,6 +4561,21 @@ func nullIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+func nullableDateString(v any, field string) (string, error) {
+	if v == nil {
+		return "", nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("%s must be a string or null", field)
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	return s, nil
 }
 
 func pathID(path, prefix string) (int64, bool) {

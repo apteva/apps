@@ -23,7 +23,7 @@ interface Trip {
   id: number;
   name: string;
   purpose: string;
-  status: "planning" | "booked" | "in_progress" | "done" | "cancelled";
+  status: "idea" | "planning" | "booked" | "in_progress" | "done" | "cancelled";
   start_at: string;
   end_at: string;
   home_currency: string;
@@ -357,6 +357,7 @@ function todayPlus(days: number): string {
 }
 
 function daysUntil(startAt: string, endAt: string): { label: string; tone: "future" | "active" | "past" } {
+  if (!startAt || !endAt) return { label: "Idea", tone: "future" };
   const now = Date.now();
   const start = new Date(startAt).getTime();
   const end = new Date(endAt).getTime();
@@ -374,12 +375,27 @@ function daysUntil(startAt: string, endAt: string): { label: string; tone: "futu
 }
 
 const STATUS_LABEL: Record<Trip["status"], string> = {
+  idea: "Idea",
   planning: "Planning",
   booked: "Booked",
   in_progress: "In progress",
   done: "Done",
   cancelled: "Cancelled",
 };
+
+function hasDateRange(start?: string, end?: string): boolean {
+  return Boolean(start && end);
+}
+
+function tripDateLabel(trip: Trip): string {
+  if (!hasDateRange(trip.start_at, trip.end_at)) return "Dates not set";
+  return `${fmtDate(trip.start_at)} – ${fmtDate(trip.end_at)}`;
+}
+
+function tripShortDateLabel(trip: Trip): string {
+  if (!hasDateRange(trip.start_at, trip.end_at)) return "Idea";
+  return `${fmtDateShort(trip.start_at)} – ${fmtDateShort(trip.end_at)}`;
+}
 
 const BUDGET_LABEL: Record<string, string> = {
   transport: "Transport",
@@ -728,7 +744,7 @@ function TripCard({ trip, onOpen }: { trip: Trip; onOpen: () => void }) {
         </div>
         <h3 className="text-base font-semibold">{trip.name}</h3>
         <p className="text-xs text-text-muted">
-          {fmtDateShort(trip.start_at)} – {fmtDateShort(trip.end_at)}
+          {tripShortDateLabel(trip)}
         </p>
 
         {hasAnyMoney && (
@@ -1080,6 +1096,20 @@ function TripDetail({ tripID, onBack, onChanged }: { tripID: number; onBack: () 
 
   const trip = data.trip;
   const days = daysUntil(trip.start_at, trip.end_at);
+  const isIdea = trip.status === "idea" || !hasDateRange(trip.start_at, trip.end_at);
+
+  const makeIdea = async () => {
+    try {
+      await api<Trip>(`/trips/${trip.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ start_at: null, end_at: null, status: "idea" }),
+      });
+      await refresh();
+      onChanged();
+    } catch (e: unknown) {
+      ui.notify(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   return (
     <div className="flex h-full flex-col gap-3 p-4">
@@ -1088,6 +1118,12 @@ function TripDetail({ tripID, onBack, onChanged }: { tripID: number; onBack: () 
           <Icon name="chevron-left" size={14} /> Trips
         </button>
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => isIdea ? setShowEdit(true) : makeIdea()}
+            className="rounded-md border border-border px-2.5 py-1 text-sm text-text-muted hover:border-accent hover:text-text"
+          >
+            {isIdea ? "Schedule" : "Make idea"}
+          </button>
           <button onClick={() => setShowEdit(true)} title="Edit trip" className="p-1 text-text-muted hover:text-text">
             <Icon name="edit" size={14} />
           </button>
@@ -1112,7 +1148,7 @@ function TripDetail({ tripID, onBack, onChanged }: { tripID: number; onBack: () 
           <div>
             <h2 className="text-xl font-semibold">{trip.name}</h2>
             <p className="text-sm text-text-muted">
-              {fmtDate(trip.start_at)} – {fmtDate(trip.end_at)} • {days.label}
+              {tripDateLabel(trip)} • {days.label}
               {!trip.sync_calendar && <span className="ml-2 rounded-full bg-warn/20 px-2 py-0.5 text-xs text-warn">calendar sync off</span>}
             </p>
           </div>
@@ -1177,6 +1213,7 @@ function UpcomingList({ data }: { data: TripDashboard }) {
   type Item = { kind: "transport" | "accommodation" | "activity"; when: string; title: string; subtitle: string };
   const items: Item[] = [];
   for (const l of data.transport_legs) {
+    if (!l.depart_at) continue;
     items.push({
       kind: "transport",
       when: l.depart_at,
@@ -1185,6 +1222,7 @@ function UpcomingList({ data }: { data: TripDashboard }) {
     });
   }
   for (const a of data.accommodations) {
+    if (!a.check_in_at) continue;
     items.push({ kind: "accommodation", when: a.check_in_at, title: a.name, subtitle: a.address });
   }
   for (const a of data.activities) {
@@ -1387,16 +1425,17 @@ function ItineraryTab({ data, onChanged }: { data: TripDashboard; onChanged: () 
   const [showAdd, setShowAdd] = useState<ItemKind | null>(null);
   const [editItem, setEditItem] = useState<{ kind: ItemKind; data: ItemData } | null>(null);
 
-  // Build a flat timeline of every dated item, sorted.
+  // Build scheduled timeline plus an idea list for undated candidates.
   type Item =
     | { kind: "transport"; data: TransportLeg; when: string }
     | { kind: "accommodation"; data: Accommodation; when: string }
     | { kind: "activity"; data: Activity; when: string };
-  const items: Item[] = [];
-  for (const l of data.transport_legs) items.push({ kind: "transport", data: l, when: l.depart_at });
-  for (const a of data.accommodations) items.push({ kind: "accommodation", data: a, when: a.check_in_at });
-  for (const a of data.activities) if (a.start_at) items.push({ kind: "activity", data: a, when: a.start_at });
-  items.sort((a, b) => a.when.localeCompare(b.when));
+  const scheduled: Item[] = [];
+  const ideas: Item[] = [];
+  for (const l of data.transport_legs) (l.depart_at && l.arrive_at ? scheduled : ideas).push({ kind: "transport", data: l, when: l.depart_at });
+  for (const a of data.accommodations) (a.check_in_at && a.check_out_at ? scheduled : ideas).push({ kind: "accommodation", data: a, when: a.check_in_at });
+  for (const a of data.activities) (a.start_at ? scheduled : ideas).push({ kind: "activity", data: a, when: a.start_at || "" });
+  scheduled.sort((a, b) => a.when.localeCompare(b.when));
 
   return (
     <div className="space-y-3">
@@ -1407,20 +1446,43 @@ function ItineraryTab({ data, onChanged }: { data: TripDashboard; onChanged: () 
         <button onClick={() => setShowAdd("accommodation")} className="btn-secondary"><Icon name="bed" size={14} /> Stay</button>
         <button onClick={() => setShowAdd("activity")} className="btn-secondary"><Icon name="compass" size={14} /> Activity</button>
       </div>
-      {items.length === 0 ? (
+      {scheduled.length === 0 && ideas.length === 0 ? (
         <EmptyState message="Empty itinerary — add transport, stays, or activities above." />
       ) : (
-        <ol className="space-y-2">
-          {items.map((it) => (
-            <ItineraryRow
-              key={`${it.kind}-${it.data.id}`}
-              item={it}
-              trip={data.trip}
-              onEdit={() => setEditItem({ kind: it.kind, data: it.data })}
-              onChanged={onChanged}
-            />
-          ))}
-        </ol>
+        <div className="space-y-4">
+          {scheduled.length > 0 && (
+            <section>
+              <div className="mb-2 text-xs uppercase tracking-wide text-text-muted">Scheduled</div>
+              <ol className="space-y-2">
+                {scheduled.map((it) => (
+                  <ItineraryRow
+                    key={`${it.kind}-${it.data.id}`}
+                    item={it}
+                    trip={data.trip}
+                    onEdit={() => setEditItem({ kind: it.kind, data: it.data })}
+                    onChanged={onChanged}
+                  />
+                ))}
+              </ol>
+            </section>
+          )}
+          {ideas.length > 0 && (
+            <section>
+              <div className="mb-2 text-xs uppercase tracking-wide text-text-muted">Ideas</div>
+              <ol className="space-y-2">
+                {ideas.map((it) => (
+                  <ItineraryRow
+                    key={`${it.kind}-${it.data.id}`}
+                    item={it}
+                    trip={data.trip}
+                    onEdit={() => setEditItem({ kind: it.kind, data: it.data })}
+                    onChanged={onChanged}
+                  />
+                ))}
+              </ol>
+            </section>
+          )}
+        </div>
       )}
       {showAdd && (
         <ItemDialog
@@ -1504,13 +1566,13 @@ function ItineraryRow({
     icon = transportIcon(l.kind);
     title = `${l.provider} ${l.reference}`.trim() || l.kind;
     subtitle = `${l.depart_location || "—"} → ${l.arrive_location || "—"}`;
-    when2 = `${fmtDateShort(l.depart_at)} ${fmtTime(l.depart_at)} – ${fmtTime(l.arrive_at)}`;
+    when2 = l.depart_at && l.arrive_at ? `${fmtDateShort(l.depart_at)} ${fmtTime(l.depart_at)} – ${fmtTime(l.arrive_at)}` : "Idea";
   } else if (item.kind === "accommodation") {
     const a = item.data as Accommodation;
     icon = "bed";
     title = a.name;
     subtitle = a.address;
-    when2 = `${fmtDateShort(a.check_in_at)} – ${fmtDateShort(a.check_out_at)}`;
+    when2 = a.check_in_at && a.check_out_at ? `${fmtDateShort(a.check_in_at)} – ${fmtDateShort(a.check_out_at)}` : "Idea";
   } else {
     const a = item.data as Activity;
     icon = "compass";
@@ -1624,7 +1686,7 @@ function DestinationsSection({ data, onChanged }: { data: TripDashboard; onChang
                   {d.country && <span className="ml-1.5 text-xs text-text-dim">{d.country}</span>}
                 </div>
                 <div className="text-xs text-text-muted">
-                  {fmtDateShort(d.arrive_at)} – {fmtDateShort(d.depart_at)}
+                  {d.arrive_at && d.depart_at ? `${fmtDateShort(d.arrive_at)} – ${fmtDateShort(d.depart_at)}` : "Idea"}
                 </div>
               </div>
               <button onClick={() => move(d, -1)} disabled={busy || i === 0} className="p-1 text-text-dim hover:text-text disabled:opacity-30" title="Move up"><Icon name="chevron-left" size={12} /></button>
@@ -1812,6 +1874,7 @@ function TodosTab({ data, onChanged }: { data: TripDashboard; onChanged: () => v
 
 function NewTripDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (id: number) => void }) {
   const [name, setName] = useState("");
+  const [datesKnown, setDatesKnown] = useState(true);
   const [startAt, setStartAt] = useState(() => new Date().toISOString().slice(0, 10));
   const [endAt, setEndAt] = useState(() => {
     const d = new Date();
@@ -1827,7 +1890,10 @@ function NewTripDialog({ onClose, onCreated }: { onClose: () => void; onCreated:
       const trip = await api<Trip>("/trips", {
         method: "POST",
         body: JSON.stringify({
-          name, start_at: startAt + "T00:00:00Z", end_at: endAt + "T23:59:59Z",
+          name,
+          start_at: datesKnown ? startAt + "T00:00:00Z" : undefined,
+          end_at: datesKnown ? endAt + "T23:59:59Z" : undefined,
+          status: datesKnown ? "planning" : "idea",
           home_currency: currency,
         }),
       });
@@ -1840,11 +1906,17 @@ function NewTripDialog({ onClose, onCreated }: { onClose: () => void; onCreated:
   return (
     <Dialog title="New trip" onClose={onClose}>
       <Field label="Name"><input value={name} onChange={e => setName(e.target.value)} className="input" autoFocus placeholder="Paris weekend" /></Field>
-      <DateRangeField
-        start={startAt}
-        end={endAt}
-        onChange={(s, e) => { setStartAt(s); setEndAt(e); }}
-      />
+      <label className="flex items-center gap-2 text-sm">
+        <input type="checkbox" checked={datesKnown} onChange={e => setDatesKnown(e.target.checked)} />
+        Dates known
+      </label>
+      {datesKnown && (
+        <DateRangeField
+          start={startAt}
+          end={endAt}
+          onChange={(s, e) => { setStartAt(s); setEndAt(e); }}
+        />
+      )}
       <Field label="Home currency"><input value={currency} onChange={e => setCurrency(e.target.value.toUpperCase())} className="input uppercase" maxLength={3} /></Field>
       {err && <p className="text-sm text-error">{err}</p>}
       <DialogActions>
@@ -1887,15 +1959,17 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
   const [tKind, setTKind] = useState<TransportLeg["kind"]>(t?.kind ?? "flight");
   const [provider, setProvider] = useState(t?.provider ?? "");
   const [reference, setReference] = useState(t?.reference ?? "");
-  const [departAt, setDepartAt] = useState(t?.depart_at.slice(0, 16) ?? trip.start_at.slice(0, 16));
-  const [arriveAt, setArriveAt] = useState(t?.arrive_at.slice(0, 16) ?? trip.start_at.slice(0, 16));
+  const [transportDatesKnown, setTransportDatesKnown] = useState(t ? hasDateRange(t.depart_at, t.arrive_at) : hasDateRange(trip.start_at, trip.end_at));
+  const [departAt, setDepartAt] = useState(t?.depart_at ? t.depart_at.slice(0, 16) : (trip.start_at ? trip.start_at.slice(0, 16) : `${todayPlus(0)}T09:00`));
+  const [arriveAt, setArriveAt] = useState(t?.arrive_at ? t.arrive_at.slice(0, 16) : (trip.start_at ? trip.start_at.slice(0, 16) : `${todayPlus(0)}T11:00`));
   const [departLoc, setDepartLoc] = useState(t?.depart_location ?? "");
   const [arriveLoc, setArriveLoc] = useState(t?.arrive_location ?? "");
 
   const [aKind, setAKind] = useState<Accommodation["kind"]>(a?.kind ?? "hotel");
   const [address, setAddress] = useState(a?.address ?? "");
-  const [checkIn, setCheckIn] = useState(a?.check_in_at.slice(0, 10) ?? trip.start_at.slice(0, 10));
-  const [checkOut, setCheckOut] = useState(a?.check_out_at.slice(0, 10) ?? trip.end_at.slice(0, 10));
+  const [stayDatesKnown, setStayDatesKnown] = useState(a ? hasDateRange(a.check_in_at, a.check_out_at) : hasDateRange(trip.start_at, trip.end_at));
+  const [checkIn, setCheckIn] = useState(a?.check_in_at ? a.check_in_at.slice(0, 10) : (trip.start_at ? trip.start_at.slice(0, 10) : todayPlus(0)));
+  const [checkOut, setCheckOut] = useState(a?.check_out_at ? a.check_out_at.slice(0, 10) : (trip.end_at ? trip.end_at.slice(0, 10) : todayPlus(1)));
 
   const [actCategory, setActCategory] = useState<Activity["category"]>(c?.category ?? "activity");
   const [actStart, setActStart] = useState(c?.start_at?.slice(0, 16) ?? "");
@@ -1913,7 +1987,8 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
       if (kind === "transport") {
         const body = {
           trip_id: trip.id, kind: tKind,
-          depart_at: ensureRfc3339(departAt), arrive_at: ensureRfc3339(arriveAt),
+          depart_at: transportDatesKnown && departAt ? ensureRfc3339(departAt) : null,
+          arrive_at: transportDatesKnown && arriveAt ? ensureRfc3339(arriveAt) : null,
           provider, reference, depart_location: departLoc, arrive_location: arriveLoc,
           [costField]: cents, currency, notes,
         };
@@ -1925,7 +2000,8 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
       } else if (kind === "accommodation") {
         const body = {
           trip_id: trip.id, name, kind: aKind, address,
-          check_in_at: checkIn + "T15:00:00Z", check_out_at: checkOut + "T11:00:00Z",
+          check_in_at: stayDatesKnown && checkIn ? checkIn + "T15:00:00Z" : null,
+          check_out_at: stayDatesKnown && checkOut ? checkOut + "T11:00:00Z" : null,
           [costField]: cents, currency, notes,
         };
         if (isEdit) {
@@ -1959,6 +2035,7 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
     setTKind("flight");
     setProvider(offer.carrier);
     setReference(`${offer.carrier_code}${offer.number}`);
+    setTransportDatesKnown(true);
     setDepartAt(offer.depart_at.slice(0, 16));
     setArriveAt(offer.arrive_at.slice(0, 16));
     setDepartLoc(offer.depart_location);
@@ -2022,10 +2099,16 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
             <Field label="Provider"><input value={provider} onChange={e => setProvider(e.target.value)} className="input" placeholder="Air France" /></Field>
             <Field label="Reference"><input value={reference} onChange={e => setReference(e.target.value)} className="input" placeholder="AF1234" /></Field>
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Depart"><input type="datetime-local" value={departAt} onChange={e => setDepartAt(e.target.value)} className="input" /></Field>
-            <Field label="Arrive"><input type="datetime-local" value={arriveAt} onChange={e => setArriveAt(e.target.value)} className="input" /></Field>
-          </div>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={transportDatesKnown} onChange={e => setTransportDatesKnown(e.target.checked)} />
+            Dates known
+          </label>
+          {transportDatesKnown && (
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Depart"><input type="datetime-local" value={departAt} onChange={e => setDepartAt(e.target.value)} className="input" /></Field>
+              <Field label="Arrive"><input type="datetime-local" value={arriveAt} onChange={e => setArriveAt(e.target.value)} className="input" /></Field>
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-3">
             <Field label="From"><input value={departLoc} onChange={e => setDepartLoc(e.target.value)} className="input" placeholder="CDG" /></Field>
             <Field label="To"><input value={arriveLoc} onChange={e => setArriveLoc(e.target.value)} className="input" placeholder="LIN" /></Field>
@@ -2043,13 +2126,19 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
             </select>
           </Field>
           <Field label="Address"><input value={address} onChange={e => setAddress(e.target.value)} className="input" /></Field>
-          <DateRangeField
-            startLabel="Check-in"
-            endLabel="Check-out"
-            start={checkIn}
-            end={checkOut}
-            onChange={(s, e) => { setCheckIn(s); setCheckOut(e); }}
-          />
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={stayDatesKnown} onChange={e => setStayDatesKnown(e.target.checked)} />
+            Dates known
+          </label>
+          {stayDatesKnown && (
+            <DateRangeField
+              startLabel="Check-in"
+              endLabel="Check-out"
+              start={checkIn}
+              end={checkOut}
+              onChange={(s, e) => { setCheckIn(s); setCheckOut(e); }}
+            />
+          )}
         </>
       )}
       {kind === "activity" && (
@@ -2109,8 +2198,9 @@ function DestinationDialog({ trip, existing, onClose, onSaved }: {
   const isEdit = existing != null;
   const [placeName, setPlaceName] = useState(existing?.place_name ?? "");
   const [country, setCountry] = useState(existing?.country ?? "");
-  const [arriveAt, setArriveAt] = useState(existing?.arrive_at.slice(0, 10) ?? trip.start_at.slice(0, 10));
-  const [departAt, setDepartAt] = useState(existing?.depart_at.slice(0, 10) ?? trip.end_at.slice(0, 10));
+  const [datesKnown, setDatesKnown] = useState(existing ? hasDateRange(existing.arrive_at, existing.depart_at) : hasDateRange(trip.start_at, trip.end_at));
+  const [arriveAt, setArriveAt] = useState(existing?.arrive_at ? existing.arrive_at.slice(0, 10) : (trip.start_at ? trip.start_at.slice(0, 10) : todayPlus(0)));
+  const [departAt, setDepartAt] = useState(existing?.depart_at ? existing.depart_at.slice(0, 10) : (trip.end_at ? trip.end_at.slice(0, 10) : todayPlus(1)));
   const [notes, setNotes] = useState(existing?.notes ?? "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -2122,8 +2212,8 @@ function DestinationDialog({ trip, existing, onClose, onSaved }: {
         trip_id: trip.id,
         place_name: placeName,
         country,
-        arrive_at: arriveAt + "T00:00:00Z",
-        depart_at: departAt + "T23:59:59Z",
+        arrive_at: datesKnown ? arriveAt + "T00:00:00Z" : null,
+        depart_at: datesKnown ? departAt + "T23:59:59Z" : null,
         notes,
       };
       if (isEdit) {
@@ -2156,13 +2246,19 @@ function DestinationDialog({ trip, existing, onClose, onSaved }: {
         />
       </Field>
       <Field label="Country (ISO-2)"><input value={country} onChange={e => setCountry(e.target.value.toUpperCase())} className="input uppercase" maxLength={2} placeholder="FR" /></Field>
-      <DateRangeField
-        startLabel="Arrive"
-        endLabel="Depart"
-        start={arriveAt}
-        end={departAt}
-        onChange={(s, e) => { setArriveAt(s); setDepartAt(e); }}
-      />
+      <label className="flex items-center gap-2 text-sm">
+        <input type="checkbox" checked={datesKnown} onChange={e => setDatesKnown(e.target.checked)} />
+        Dates known
+      </label>
+      {datesKnown && (
+        <DateRangeField
+          startLabel="Arrive"
+          endLabel="Depart"
+          start={arriveAt}
+          end={departAt}
+          onChange={(s, e) => { setArriveAt(s); setDepartAt(e); }}
+        />
+      )}
       <Field label="Notes"><input value={notes} onChange={e => setNotes(e.target.value)} className="input" /></Field>
       {err && <p className="text-sm text-error">{err}</p>}
       <DialogActions>
@@ -2175,8 +2271,9 @@ function DestinationDialog({ trip, existing, onClose, onSaved }: {
 
 function TripEditDialog({ trip, onClose, onSaved }: { trip: Trip; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState(trip.name);
-  const [startAt, setStartAt] = useState(trip.start_at.slice(0, 10));
-  const [endAt, setEndAt] = useState(trip.end_at.slice(0, 10));
+  const [datesKnown, setDatesKnown] = useState(hasDateRange(trip.start_at, trip.end_at));
+  const [startAt, setStartAt] = useState(trip.start_at ? trip.start_at.slice(0, 10) : new Date().toISOString().slice(0, 10));
+  const [endAt, setEndAt] = useState(trip.end_at ? trip.end_at.slice(0, 10) : todayPlus(7));
   const [status, setStatus] = useState<Trip["status"]>(trip.status);
   const [color, setColor] = useState(trip.color);
   const [syncCalendar, setSyncCalendar] = useState(trip.sync_calendar);
@@ -2191,9 +2288,9 @@ function TripEditDialog({ trip, onClose, onSaved }: { trip: Trip; onClose: () =>
         method: "PATCH",
         body: JSON.stringify({
           name,
-          start_at: startAt + "T00:00:00Z",
-          end_at: endAt + "T23:59:59Z",
-          status,
+          start_at: datesKnown ? startAt + "T00:00:00Z" : null,
+          end_at: datesKnown ? endAt + "T23:59:59Z" : null,
+          status: datesKnown && status === "idea" ? "planning" : !datesKnown ? "idea" : status,
           color,
           sync_calendar: syncCalendar,
           notes,
@@ -2209,14 +2306,21 @@ function TripEditDialog({ trip, onClose, onSaved }: { trip: Trip; onClose: () =>
   return (
     <Dialog title="Edit trip" onClose={onClose}>
       <Field label="Name"><input value={name} onChange={e => setName(e.target.value)} className="input" autoFocus /></Field>
-      <DateRangeField
-        start={startAt}
-        end={endAt}
-        onChange={(s, e) => { setStartAt(s); setEndAt(e); }}
-      />
+      <label className="flex items-center gap-2 text-sm">
+        <input type="checkbox" checked={datesKnown} onChange={e => setDatesKnown(e.target.checked)} />
+        Dates known
+      </label>
+      {datesKnown && (
+        <DateRangeField
+          start={startAt}
+          end={endAt}
+          onChange={(s, e) => { setStartAt(s); setEndAt(e); }}
+        />
+      )}
       <div className="grid grid-cols-2 gap-3">
         <Field label="Status">
           <select value={status} onChange={e => setStatus(e.target.value as Trip["status"])} className="input">
+            <option value="idea">Idea</option>
             <option value="planning">Planning</option>
             <option value="booked">Booked</option>
             <option value="in_progress">In progress</option>
@@ -2408,7 +2512,7 @@ function SearchFlightsModal({ trip, defaultTo, defaultDepartAt, onPick, onClose 
   const ui = useUI();
   const [from, setFrom] = useState("");
   const [to, setTo] = useState(defaultTo);
-  const [departDate, setDepartDate] = useState(() => (defaultDepartAt || trip.start_at).slice(0, 10));
+  const [departDate, setDepartDate] = useState(() => (defaultDepartAt || trip.start_at || todayPlus(14)).slice(0, 10));
   const [returnDate, setReturnDate] = useState("");
   const [passengers, setPassengers] = useState(1);
   const [cabin, setCabin] = useState("economy");

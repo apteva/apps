@@ -174,11 +174,24 @@ func TestUnit_TripsCreate_CreatesLinkedCalendar(t *testing.T) {
 	}
 }
 
-func TestUnit_TripsCreate_RequiresDates(t *testing.T) {
+func TestUnit_TripsCreate_AllowsIdeaWithoutDates(t *testing.T) {
 	ctx, _ := newCtx(t)
 	app := &App{}
-	if _, err := app.toolTripsCreate(ctx, map[string]any{"name": "x"}); err == nil {
-		t.Error("expected error for missing dates")
+	r, err := app.toolTripsCreate(ctx, map[string]any{"name": "Trieste someday"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trip := r.(Trip)
+	if trip.Status != "idea" || trip.StartAt != "" || trip.EndAt != "" {
+		t.Fatalf("expected undated idea trip, got %+v", trip)
+	}
+}
+
+func TestUnit_TripsCreate_RequiresName(t *testing.T) {
+	ctx, _ := newCtx(t)
+	app := &App{}
+	if _, err := app.toolTripsCreate(ctx, map[string]any{}); err == nil {
+		t.Error("expected error for missing name")
 	}
 }
 
@@ -189,6 +202,46 @@ func TestUnit_TripsCreate_RejectsBackwardsDates(t *testing.T) {
 		"name": "x", "start_at": "2026-06-10T00:00:00Z", "end_at": "2026-06-05T00:00:00Z",
 	}); err == nil {
 		t.Error("expected error when end_at <= start_at")
+	}
+}
+
+func TestUnit_TripIdea_SchedulesAndUnschedulesCalendarBlock(t *testing.T) {
+	ctx, fake := newCtx(t)
+	app := &App{}
+	r, err := app.toolTripsCreate(ctx, map[string]any{"name": "Japan maybe"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trip := r.(Trip)
+	if fake.countCalls("events_create") != 0 {
+		t.Fatalf("idea should not create calendar events, got %d", fake.countCalls("events_create"))
+	}
+	r, err = app.toolTripsUpdate(ctx, map[string]any{
+		"id":       float64(trip.ID),
+		"start_at": "2026-10-01T00:00:00Z",
+		"end_at":   "2026-10-12T23:59:59Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduled := r.(Trip)
+	if scheduled.Status != "planning" || scheduled.CalendarEventID == nil {
+		t.Fatalf("expected scheduled planning trip with calendar block, got %+v", scheduled)
+	}
+	r, err = app.toolTripsUpdate(ctx, map[string]any{
+		"id":       float64(trip.ID),
+		"start_at": nil,
+		"end_at":   nil,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idea := r.(Trip)
+	if idea.Status != "idea" || idea.StartAt != "" || idea.EndAt != "" || idea.CalendarEventID != nil {
+		t.Fatalf("expected trip back to idea, got %+v", idea)
+	}
+	if fake.countCalls("events_delete") != 1 {
+		t.Fatalf("expected calendar block deletion, got %d", fake.countCalls("events_delete"))
 	}
 }
 
@@ -451,6 +504,35 @@ func TestUnit_TransportLeg_NoMirrorWhenSyncOff(t *testing.T) {
 	}
 	if fake.countCalls("events_create") != 0 {
 		t.Error("no events_create should fire when sync off")
+	}
+}
+
+func TestUnit_AccommodationIdea_CountsBudgetWithoutCalendar(t *testing.T) {
+	ctx, fake := newCtx(t)
+	app := &App{}
+	trip := mustCreateTrip(t, app, ctx, "Hotel ideas", true)
+	beforeEvents := fake.countCalls("events_create")
+	accRaw, err := app.toolAccommodationsAdd(ctx, map[string]any{
+		"trip_id":        float64(trip.ID),
+		"name":           "Savoia Excelsior Palace",
+		"cost_estimated": float64(25000),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acc := accRaw.(Accommodation)
+	if acc.CheckInAt != "" || acc.CheckOutAt != "" || acc.CalendarEventID != nil {
+		t.Fatalf("expected undated stay idea, got %+v", acc)
+	}
+	if fake.countCalls("events_create") != beforeEvents {
+		t.Fatalf("stay idea should not create calendar event")
+	}
+	summary, err := app.toolBudgetSummary(ctx, map[string]any{"trip_id": float64(trip.ID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.(BudgetSummary).TotalPlanned != 25000 {
+		t.Fatalf("expected stay idea to count planned budget, got %+v", summary)
 	}
 }
 
