@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: gigs
 display_name: Gigs
-version: 0.1.3
+version: 0.1.4
 description: |
   Agents delegate atomic work to human workers (CRM contacts) by
   composing reusable multi-modal instructions. Templates are saved
@@ -36,7 +36,7 @@ requires:
       capabilities: [file.read, file.write]
       required: true
       label: "Storage"
-      hint: "Instruction media (audio/video/images/docs) and worker submissions are stored here under /.gigs/."
+      hint: "Instruction media (audio/video) and worker submissions are stored here under /.gigs/."
 
 provides:
   http_routes:

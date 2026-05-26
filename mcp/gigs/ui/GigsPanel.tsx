@@ -15,6 +15,7 @@ interface NativePanelProps {
 
 const API = "/api/apps/gigs";
 const CRM_API = "/api/apps/crm";
+const STORAGE_API = "/api/apps/storage";
 
 type WorkerStatus = "active" | "paused" | "retired";
 type GigStatus =
@@ -126,6 +127,20 @@ interface Gig {
   result?: Record<string, unknown>;
   rejection_reason?: string;
 }
+interface StorageFile {
+  id: number;
+  name: string;
+  folder: string;
+  content_type?: string;
+  size_bytes?: number;
+  url?: string;
+}
+interface StorageFolder {
+  name: string;
+  path: string;
+  file_count?: number;
+  size_bytes?: number;
+}
 
 // ─── api ──────────────────────────────────────────────────────────
 
@@ -154,6 +169,24 @@ async function crmApi<T>(
 ): Promise<T> {
   const sep = path.includes("?") ? "&" : "?";
   const res = await fetch(`${CRM_API}${path}${sep}project_id=${encodeURIComponent(projectId)}`, {
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    ...init,
+  });
+  const j = await res.json();
+  if (!res.ok || (j && typeof j === "object" && "error" in j && (j as any).error)) {
+    throw new Error((j as any)?.error || res.statusText);
+  }
+  return j as T;
+}
+
+async function storageApi<T>(
+  path: string,
+  projectId: string,
+  init?: RequestInit,
+): Promise<T> {
+  const sep = path.includes("?") ? "&" : "?";
+  const res = await fetch(`${STORAGE_API}${path}${sep}project_id=${encodeURIComponent(projectId)}`, {
     credentials: "include",
     headers: { "Content-Type": "application/json" },
     ...init,
@@ -576,29 +609,20 @@ function NewInstructionForm({
   const [name, setName] = useState("");
   const [kind, setKind] = useState("text");
   const [slug, setSlug] = useState("");
-  const [defaultResultKey, setDefaultResultKey] = useState("");
-  const [primaryText, setPrimaryText] = useState("");
-  const [secondaryText, setSecondaryText] = useState("");
-  const [url, setURL] = useState("");
-  const [storageFileId, setStorageFileId] = useState("");
-  const [posterFileId, setPosterFileId] = useState("");
-  const [seconds, setSeconds] = useState("300");
-  const [min, setMin] = useState("");
-  const [max, setMax] = useState("");
-  const [scale, setScale] = useState("5");
-  const [options, setOptions] = useState("");
-  const [required, setRequired] = useState(true);
+  const [text, setText] = useState("");
+  const [selectedFile, setSelectedFile] = useState<StorageFile | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSelectedFile(null);
+  }, [kind]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true); setErr(null);
     try {
-      const body = buildInstructionBody(kind, {
-        primaryText, secondaryText, url, storageFileId, posterFileId,
-        seconds, min, max, scale, options, required,
-      });
+      const body = buildInstructionBody(kind, text, selectedFile);
       await api("/instructions", projectId, {
         method: "POST",
         body: JSON.stringify({
@@ -606,7 +630,6 @@ function NewInstructionForm({
           kind,
           body,
           slug: slug || undefined,
-          default_result_key: defaultResultKey || undefined,
         }),
       });
       onDone();
@@ -627,169 +650,204 @@ function NewInstructionForm({
         <input value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="Slug (optional)" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
       </div>
 
-      {renderInstructionBodyFields(kind, {
-        primaryText, setPrimaryText, secondaryText, setSecondaryText, url, setURL,
-        storageFileId, setStorageFileId, posterFileId, setPosterFileId,
-        seconds, setSeconds, min, setMin, max, setMax, scale, setScale,
-        options, setOptions, required, setRequired,
-      })}
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder={kind === "text" ? "Instruction text" : "Text shown with this media"}
+        rows={4}
+        required
+        className="w-full px-2 py-1 text-sm border border-border rounded bg-bg"
+      />
 
-      {(kind.startsWith("input_") || kind === "checklist_item" || kind === "confirmation") && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-          <input value={defaultResultKey} onChange={(e) => setDefaultResultKey(e.target.value)} placeholder="Result key (optional)" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-          <label className="flex items-center gap-2 text-sm text-text-muted">
-            <input type="checkbox" checked={required} onChange={(e) => setRequired(e.target.checked)} />
-            Required result
-          </label>
-        </div>
+      {(kind === "audio" || kind === "video") && (
+        <StorageFilePicker
+          projectId={projectId}
+          kind={kind}
+          selected={selectedFile}
+          onSelect={setSelectedFile}
+        />
       )}
 
       {err && <div className="text-rose-600 text-xs">{err}</div>}
       <div className="flex gap-2">
-        <button disabled={busy} className="px-3 py-1 text-sm bg-sky-600 text-white rounded disabled:opacity-50">Create draft</button>
+        <button disabled={busy || ((kind === "audio" || kind === "video") && !selectedFile)} className="px-3 py-1 text-sm bg-sky-600 text-white rounded disabled:opacity-50">Create draft</button>
         <button type="button" onClick={onCancel} className="px-3 py-1 text-sm border border-border rounded">Cancel</button>
       </div>
     </form>
   );
 }
 
-type InstructionFieldState = {
-  primaryText: string; setPrimaryText: (v: string) => void;
-  secondaryText: string; setSecondaryText: (v: string) => void;
-  url: string; setURL: (v: string) => void;
-  storageFileId: string; setStorageFileId: (v: string) => void;
-  posterFileId: string; setPosterFileId: (v: string) => void;
-  seconds: string; setSeconds: (v: string) => void;
-  min: string; setMin: (v: string) => void;
-  max: string; setMax: (v: string) => void;
-  scale: string; setScale: (v: string) => void;
-  options: string; setOptions: (v: string) => void;
-  required: boolean; setRequired: (v: boolean) => void;
-};
+function StorageFilePicker({
+  projectId, kind, selected, onSelect,
+}: { projectId: string; kind: "audio" | "video"; selected: StorageFile | null; onSelect: (file: StorageFile | null) => void }) {
+  const [query, setQuery] = useState("");
+  const [folder, setFolder] = useState("");
+  const [folders, setFolders] = useState<StorageFolder[]>([]);
+  const [files, setFiles] = useState<StorageFile[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [folderBusy, setFolderBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
-function renderInstructionBodyFields(kind: string, s: InstructionFieldState) {
-  const textInput = (placeholder: string) => (
-    <textarea value={s.primaryText} onChange={(e) => s.setPrimaryText(e.target.value)} placeholder={placeholder} rows={3} required className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" />
-  );
-  if (kind === "text") return textInput("Markdown");
-  if (kind === "warning" || kind === "checklist_item" || kind === "confirmation") return textInput("Text");
-  if (kind === "script") return textInput("One line per script step");
-  if (kind === "link") return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-      <input value={s.url} onChange={(e) => s.setURL(e.target.value)} placeholder="URL" required className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-      <input value={s.primaryText} onChange={(e) => s.setPrimaryText(e.target.value)} placeholder="Label (optional)" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-    </div>
-  );
-  if (kind === "example") return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-      <textarea value={s.primaryText} onChange={(e) => s.setPrimaryText(e.target.value)} placeholder="Good example text" rows={3} className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-      <textarea value={s.secondaryText} onChange={(e) => s.setSecondaryText(e.target.value)} placeholder="Bad example text" rows={3} className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-    </div>
-  );
-  if (kind === "timer_hint") return (
-    <input value={s.seconds} onChange={(e) => s.setSeconds(e.target.value)} placeholder="Suggested seconds" type="number" min="1" required className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-  );
-  if (["audio", "video", "image", "document"].includes(kind)) return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-      <input value={s.storageFileId} onChange={(e) => s.setStorageFileId(e.target.value)} placeholder="Storage file ID" type="number" min="1" required className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-      <input value={s.primaryText} onChange={(e) => s.setPrimaryText(e.target.value)} placeholder="Caption (optional)" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-      <input value={s.posterFileId} onChange={(e) => s.setPosterFileId(e.target.value)} placeholder="Poster file ID (optional)" type="number" min="1" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-    </div>
-  );
-  if (kind === "input_choice" || kind === "input_multi_choice") return (
-    <div className="space-y-2">
-      <input value={s.primaryText} onChange={(e) => s.setPrimaryText(e.target.value)} placeholder="Question label" required className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" />
-      <textarea value={s.options} onChange={(e) => s.setOptions(e.target.value)} placeholder="Options, one per line" rows={3} required className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" />
-    </div>
-  );
-  if (kind === "input_number") return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-      <input value={s.primaryText} onChange={(e) => s.setPrimaryText(e.target.value)} placeholder="Question label" required className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-      <input value={s.min} onChange={(e) => s.setMin(e.target.value)} placeholder="Min (optional)" type="number" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-      <input value={s.max} onChange={(e) => s.setMax(e.target.value)} placeholder="Max (optional)" type="number" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-    </div>
-  );
-  if (kind === "input_rating") return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-      <input value={s.primaryText} onChange={(e) => s.setPrimaryText(e.target.value)} placeholder="Question label" required className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-      <input value={s.scale} onChange={(e) => s.setScale(e.target.value)} placeholder="Scale" type="number" min="2" required className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-    </div>
-  );
-  if (kind.startsWith("input_")) return (
-    <input value={s.primaryText} onChange={(e) => s.setPrimaryText(e.target.value)} placeholder="Question label" required className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" />
-  );
-  return textInput("Body");
-}
-
-function buildInstructionBody(kind: string, s: {
-  primaryText: string; secondaryText: string; url: string; storageFileId: string; posterFileId: string;
-  seconds: string; min: string; max: string; scale: string; options: string; required: boolean;
-}): Record<string, unknown> {
-  const body: Record<string, unknown> = {};
-  const num = (v: string) => {
-    const n = Number(v);
-    return Number.isFinite(n) && v.trim() !== "" ? n : undefined;
-  };
-  const addRequired = () => {
-    if (kind.startsWith("input_") || kind === "checklist_item" || kind === "confirmation") body.required = s.required;
-  };
-  switch (kind) {
-    case "text":
-      body.markdown = s.primaryText;
-      break;
-    case "warning":
-    case "checklist_item":
-    case "confirmation":
-      body.text = s.primaryText;
-      addRequired();
-      break;
-    case "script":
-      body.lines = s.primaryText.split("\n").map((line) => line.trim()).filter(Boolean);
-      break;
-    case "link":
-      body.url = s.url;
-      if (s.primaryText) body.label = s.primaryText;
-      break;
-    case "example":
-      if (s.primaryText) body.good_text = s.primaryText;
-      if (s.secondaryText) body.bad_text = s.secondaryText;
-      break;
-    case "timer_hint":
-      body.seconds_suggested = num(s.seconds) || 0;
-      break;
-    case "audio":
-    case "video":
-    case "image":
-    case "document":
-      body.storage_file_id = num(s.storageFileId);
-      if (s.primaryText) body.caption = s.primaryText;
-      if (num(s.posterFileId)) body.poster_file_id = num(s.posterFileId);
-      break;
-    default:
-      if (kind.startsWith("input_")) {
-        body.label = s.primaryText;
-        addRequired();
-        if (kind === "input_choice" || kind === "input_multi_choice") {
-          body.options = s.options.split("\n").map((line) => line.trim()).filter(Boolean);
-        }
-        if (kind === "input_number") {
-          if (num(s.min) !== undefined) body.min = num(s.min);
-          if (num(s.max) !== undefined) body.max = num(s.max);
-        }
-        if (kind === "input_rating") body.scale = num(s.scale) || 5;
+  useEffect(() => {
+    const controller = new AbortController();
+    const loadFolders = async () => {
+      setFolderBusy(true);
+      try {
+        const params = new URLSearchParams();
+        if (folder.trim()) params.set("parent", folder.trim());
+        const data = await storageApi<{ folder_details?: StorageFolder[]; folders?: string[] }>(
+          `/folders${params.toString() ? `?${params.toString()}` : ""}`,
+          projectId,
+          { signal: controller.signal },
+        );
+        const details = data.folder_details || (data.folders || []).map((name) => ({
+          name,
+          path: joinStorageFolder(folder, name),
+        }));
+        setFolders(details);
+      } catch {
+        if (!controller.signal.aborted) setFolders([]);
+      } finally {
+        if (!controller.signal.aborted) setFolderBusy(false);
       }
-  }
-  return body;
+    };
+    loadFolders();
+    return () => controller.abort();
+  }, [folder, projectId]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setBusy(true);
+      setErr(null);
+      try {
+        const params = new URLSearchParams({ limit: "40", content_type: kind + "/" });
+        if (query.trim()) params.set("q", query.trim());
+        if (folder.trim()) params.set("folder", folder.trim());
+        const data = await storageApi<{ files: StorageFile[] }>(`/files?${params.toString()}`, projectId, { signal: controller.signal });
+        const wantedPrefix = kind + "/";
+        const byKind = (data.files || []).filter((file) => {
+          const ct = (file.content_type || "").toLowerCase();
+          const name = file.name.toLowerCase();
+          return ct.startsWith(wantedPrefix) || fileExtensionMatchesKind(name, kind);
+        });
+        setFiles(byKind);
+      } catch (e) {
+        if ((e as Error).name !== "AbortError") {
+          setErr((e as Error).message);
+          setFiles([]);
+        }
+      } finally {
+        if (!controller.signal.aborted) setBusy(false);
+      }
+    }, query ? 250 : 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [folder, kind, projectId, query]);
+
+  const parentFolder = storageParentFolder(folder);
+
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`Search ${kind} files`} className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+        <input value={folder} onChange={(e) => setFolder(e.target.value)} placeholder="Current folder, e.g. /recordings/" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+      </div>
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <button type="button" onClick={() => setFolder("")} className="px-2 py-1 border border-border rounded">Root</button>
+        <button type="button" disabled={!folder} onClick={() => setFolder(parentFolder)} className="px-2 py-1 border border-border rounded disabled:opacity-50">Up</button>
+        <span className="text-text-muted truncate">/{folder.replace(/^\/|\/$/g, "")}</span>
+      </div>
+      <div className="border border-border rounded bg-bg p-2">
+        {folderBusy && <div className="text-xs text-text-muted">Loading folders…</div>}
+        {!folderBusy && folders.length === 0 && <div className="text-xs text-text-muted">No child folders.</div>}
+        {!folderBusy && folders.length > 0 && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-1">
+            {folders.map((f) => (
+              <button
+                type="button"
+                key={f.path}
+                onClick={() => setFolder(f.path)}
+                className="p-2 text-left border border-border rounded hover:bg-bg-subtle"
+              >
+                <div className="text-sm truncate">{f.name}</div>
+                <div className="text-xs text-text-muted">{f.file_count || 0} files · {formatBytes(f.size_bytes || 0)}</div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      {selected && (
+        <div className="flex items-center justify-between gap-3 p-2 border border-sky-500/30 rounded bg-sky-500/10">
+          <div className="min-w-0">
+            <div className="text-sm truncate">{selected.name}</div>
+            <div className="text-xs text-text-muted truncate">{selected.folder} · {formatBytes(selected.size_bytes || 0)}</div>
+          </div>
+          <button type="button" onClick={() => onSelect(null)} className="text-xs px-2 py-1 border border-border rounded">Clear</button>
+        </div>
+      )}
+      <div className="border border-border rounded divide-y divide-border bg-bg max-h-56 overflow-auto">
+        {busy && <div className="p-2 text-xs text-text-muted">Loading files…</div>}
+        {!busy && err && <div className="p-2 text-xs text-rose-600">{err}</div>}
+        {!busy && !err && files.length === 0 && <div className="p-2 text-xs text-text-muted">No {kind} files found.</div>}
+        {!busy && files.map((file) => (
+          <button
+            type="button"
+            key={file.id}
+            onClick={() => onSelect(file)}
+            className={"w-full p-2 text-left hover:bg-bg-subtle " + (selected?.id === file.id ? "bg-sky-500/10" : "")}
+          >
+            <div className="text-sm truncate">{file.name}</div>
+            <div className="text-xs text-text-muted truncate">{file.folder} · {file.content_type || "unknown"} · {formatBytes(file.size_bytes || 0)}</div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 }
 
-const ALL_KINDS = [
-  "text","audio","video","image","document","link","script","warning","example",
-  "checklist_item","confirmation","timer_hint",
-  "input_short_text","input_long_text","input_number","input_date",
-  "input_choice","input_multi_choice","input_rating","input_yes_no",
-  "input_photo","input_audio_recording","input_video_recording",
-  "input_file","input_signature","input_location",
-];
+function buildInstructionBody(kind: string, text: string, selectedFile: StorageFile | null): Record<string, unknown> {
+  if (kind === "text") return { markdown: text };
+  return {
+    storage_file_id: selectedFile?.id,
+    caption: text,
+  };
+}
+
+function fileExtensionMatchesKind(name: string, kind: "audio" | "video"): boolean {
+  const audio = [".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac"];
+  const video = [".mp4", ".mov", ".webm", ".m4v", ".ogv"];
+  return (kind === "audio" ? audio : video).some((ext) => name.endsWith(ext));
+}
+
+function joinStorageFolder(parent: string, name: string): string {
+  const cleanParent = parent && parent !== "/" ? parent.replace(/\/?$/, "/") : "/";
+  return `${cleanParent}${name.replace(/^\/|\/$/g, "")}/`;
+}
+
+function storageParentFolder(folder: string): string {
+  const clean = folder.replace(/^\/|\/$/g, "");
+  if (!clean) return "";
+  const parts = clean.split("/");
+  parts.pop();
+  return parts.length ? `/${parts.join("/")}/` : "";
+}
+
+function formatBytes(n: number): string {
+  if (!n) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = n;
+  let i = 0;
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i++;
+  }
+  return `${value.toFixed(value >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+const ALL_KINDS = ["text", "audio", "video"];
 
 // ─── Workers ────────────────────────────────────────────────────
 

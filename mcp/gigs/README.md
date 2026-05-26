@@ -1,4 +1,4 @@
-# Gigs (v0.1.3)
+# Gigs (v0.1.4)
 
 Agents delegate atomic work to human workers (CRM contacts) by composing
 reusable multi-modal instructions. Templates are saved instruction sets;
@@ -7,9 +7,8 @@ worker submits.
 
 ## Three layers
 
-1. **Instruction library** — atomic, versioned, multi-modal units (text,
-   audio, video, image, document, link, script, warning, example,
-   checklist_item, confirmation, timer_hint, input_*).
+1. **Instruction library** — atomic, versioned units. The dashboard creation
+   flow currently exposes text, audio, and video instructions.
 2. **Templates** — ordered compositions of pinned instruction versions
    with title + defaults + per-use overrides.
 3. **Gigs** — immutable snapshots, composed at dispatch from a template +
@@ -22,7 +21,7 @@ worker submits.
 
 - `crm` (required) — workers are CRM contacts; notifications and timeline
   logging go through `crm.contacts_send_message` / `contacts_log_activity`.
-- `storage` (required) — instruction media and worker submissions live
+- `storage` (required) — audio/video instruction media and worker submissions live
   under `/.gigs/` (configurable).
 
 ## Worker flow
