@@ -19,6 +19,11 @@ package main
 //                                  → {file, was_existing}
 //   DELETE /uploads/{id}           abort, rm session dir
 //
+// Agent MCP wrappers expose the same session model via
+// storage_upload_init / storage_upload_part / storage_upload_status /
+// storage_upload_complete. MCP parts are intentionally capped smaller
+// than HTTP parts because base64-in-JSON is transport-expensive.
+//
 // On disk:
 //   <data>/uploads/<ulid>/
 //     meta.json   {user_id, project_id, filename, content_type, folder,
@@ -66,11 +71,11 @@ const (
 	// when idle TTL drops to 1h. Operators override via
 	// upload_sweep_interval_minutes.
 	defaultSweepInterval = 15 * time.Minute
-	uploadIDChars   = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-	maxPartNumber   = 10000             // S3-compatible upper bound
-	maxPartSize     = 100 * 1024 * 1024 // sanity cap per part
-	defaultPartSize = 5 * 1024 * 1024
-	defaultParallel = 4
+	uploadIDChars        = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+	maxPartNumber        = 10000             // S3-compatible upper bound
+	maxPartSize          = 100 * 1024 * 1024 // sanity cap per part
+	defaultPartSize      = 5 * 1024 * 1024
+	defaultParallel      = 4
 )
 
 // configuredUploadIdleTTL reads upload_idle_ttl_hours from install
@@ -129,6 +134,7 @@ type uploadMeta struct {
 	Folder         string   `json:"folder,omitempty"`
 	Tags           []string `json:"tags,omitempty"`
 	Visibility     string   `json:"visibility,omitempty"`
+	Source         string   `json:"source,omitempty"`
 	DeclaredSize   int64    `json:"declared_size"`
 	DeclaredSHA256 string   `json:"declared_sha256,omitempty"`
 	CreatedAt      string   `json:"created_at"`
@@ -265,13 +271,14 @@ func (a *App) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 	uid, _ := strconv.ParseInt(r.Header.Get("X-User-ID"), 10, 64)
 
 	var body struct {
-		Filename       string   `json:"filename"`
-		Size           int64    `json:"size"`
-		ContentType    string   `json:"content_type"`
-		Folder         string   `json:"folder"`
-		Tags           []string `json:"tags"`
-		Visibility     string   `json:"visibility"`
-		SHA256         string   `json:"sha256"`
+		Filename    string   `json:"filename"`
+		Size        int64    `json:"size"`
+		ContentType string   `json:"content_type"`
+		Folder      string   `json:"folder"`
+		Tags        []string `json:"tags"`
+		Visibility  string   `json:"visibility"`
+		Source      string   `json:"source"`
+		SHA256      string   `json:"sha256"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 32*1024)).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -307,18 +314,19 @@ func (a *App) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	meta := uploadMeta{
-		UserID:         uid,
-		ProjectID:      pid,
-		Filename:       body.Filename,
-		ContentType:    body.ContentType,
-		Folder:         body.Folder,
-		Tags:           body.Tags,
+		UserID:      uid,
+		ProjectID:   pid,
+		Filename:    body.Filename,
+		ContentType: body.ContentType,
+		Folder:      body.Folder,
+		Tags:        body.Tags,
 		// effectiveVisibility falls back to the install's configured
 		// default when the client doesn't pass an explicit value.
 		// visibilityOrDefault alone returns "" on miss, which lands
 		// in the DB as empty string and renders as "undefined" in the
 		// dashboard. Match the single-shot upload path.
 		Visibility:     effectiveVisibility(ctx, body.Visibility),
+		Source:         strings.TrimSpace(body.Source),
 		DeclaredSize:   body.Size,
 		DeclaredSHA256: strings.ToLower(body.SHA256),
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
@@ -603,13 +611,17 @@ func (a *App) handleUploadComplete(w http.ResponseWriter, r *http.Request, id st
 	}
 
 	tagsJSON, _ := json.Marshal(meta.Tags)
+	source := strings.TrimSpace(meta.Source)
+	if source == "" {
+		source = "human"
+	}
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO files
 			(project_id, name, folder, storage_key, content_type, size_bytes,
 			 sha256, uploaded_by, source, tags, visibility)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		meta.ProjectID, meta.Filename, meta.Folder, tmpKey, meta.ContentType, meta.DeclaredSize,
-		finalSHA, callerLabel(), "human", string(tagsJSON), meta.Visibility,
+		finalSHA, callerLabel(), source, string(tagsJSON), meta.Visibility,
 	)
 	if err != nil {
 		_ = backend().Delete(r.Context(), finalKey)

@@ -296,6 +296,48 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolFromURL,
 		},
 		{
+			Name:        "storage_upload_init",
+			Description: "Start an agent multipart upload. Args: name, size_bytes, folder?, content_type?, sha256?, tags?, visibility?, source?. Returns upload_id/part_size or was_existing=true when sha256 dedup hits.",
+			InputSchema: schemaObject(map[string]any{
+				"name":         map[string]any{"type": "string"},
+				"size_bytes":   map[string]any{"type": "integer"},
+				"folder":       map[string]any{"type": "string"},
+				"content_type": map[string]any{"type": "string"},
+				"sha256":       map[string]any{"type": "string"},
+				"tags":         map[string]any{"type": "array"},
+				"visibility":   map[string]any{"type": "string"},
+				"source":       map[string]any{"type": "string"},
+			}, []string{"name", "size_bytes"}),
+			HandlerCtx: a.toolUploadInitCtx,
+		},
+		{
+			Name:        "storage_upload_status",
+			Description: "Inspect an agent multipart upload session. Args: upload_id. Returns uploaded parts, bytes_uploaded, declared_size, and status.",
+			InputSchema: schemaObject(map[string]any{
+				"upload_id": map[string]any{"type": "string"},
+			}, []string{"upload_id"}),
+			HandlerCtx: a.toolUploadStatusCtx,
+		},
+		{
+			Name:        "storage_upload_part",
+			Description: "Upload one small base64 chunk to an agent multipart upload session. Args: upload_id, part_number, content_base64. Decoded chunks are capped at 1 MiB; use HTTP uploads for large browser files.",
+			InputSchema: schemaObject(map[string]any{
+				"upload_id":      map[string]any{"type": "string"},
+				"part_number":    map[string]any{"type": "integer"},
+				"content_base64": map[string]any{"type": "string"},
+			}, []string{"upload_id", "part_number", "content_base64"}),
+			HandlerCtx: a.toolUploadPartCtx,
+		},
+		{
+			Name:        "storage_upload_complete",
+			Description: "Complete an agent multipart upload after all parts are present. Args: upload_id, sha256?. Validates contiguous parts and final hash, then creates the file row.",
+			InputSchema: schemaObject(map[string]any{
+				"upload_id": map[string]any{"type": "string"},
+				"sha256":    map[string]any{"type": "string"},
+			}, []string{"upload_id"}),
+			HandlerCtx: a.toolUploadCompleteCtx,
+		},
+		{
 			Name:        "storage_abort_upload",
 			Description: "Abort an in-progress multipart upload session. Removes the partial bytes on disk and emits upload.aborted. Idempotent: aborting an already-removed session returns found=false. Args: id (the upload session id from /uploads init), reason? (free-text label for the audit log). Use this when a client cancels a large upload — without it, partial bytes sit on disk until the sweeper TTL fires.",
 			InputSchema: schemaObject(map[string]any{

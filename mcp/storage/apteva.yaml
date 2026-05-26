@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: storage
 display_name: Storage
-version: 0.10.12
+version: 0.10.13
 description: |
   File storage for Apteva agents and human teams. Upload bytes,
   organise into folders, share via signed URLs. Pluggable backend:
@@ -124,6 +124,16 @@ provides:
       description: Look up an existing file by sha256 — the agent's "have I seen this already?" primitive.
     - name: files_delete
       description: Delete a file. Default is hard delete — row removed AND bytes removed from disk. Pass keep_record=true for soft-delete (audit history; bytes stay).
+    - name: storage_upload_init
+      description: Start an agent multipart upload session. Args - name, size_bytes, folder?, content_type?, sha256?, tags?, visibility?, source?. Returns upload_id/part_size or was_existing=true when sha256 dedup hits.
+      requires: files.write
+      resource_from: "folder/{arg.folder?}"
+    - name: storage_upload_status
+      description: Inspect an agent multipart upload session and list uploaded parts. Args - upload_id.
+    - name: storage_upload_part
+      description: Upload one small base64 chunk to an agent multipart upload session. Args - upload_id, part_number, content_base64. Chunks are capped for MCP transport; use HTTP uploads for large browser files.
+    - name: storage_upload_complete
+      description: Complete an agent multipart upload after all parts are present. Args - upload_id, sha256?. Validates contiguous parts and final hash, then creates the file row.
     # List/search tools filter their return values via FilterTree /
     # Filter — same handler-side enforcement, just at result time.
     - name: files_search

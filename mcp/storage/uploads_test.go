@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -103,6 +105,89 @@ func TestUploads_HappyPath(t *testing.T) {
 	}
 	if _, err := os.Stat(uploadSessionDir(ctx, id)); !os.IsNotExist(err) {
 		t.Error("session dir lingered after complete")
+	}
+}
+
+func TestMCPMultipartUpload_HappyPath(t *testing.T) {
+	ctx := newTestCtx(t, tk.WithEnv("STORAGE_UPLOADS_DIR", t.TempDir()))
+	app := &App{}
+
+	body := []byte("hello from an agent multipart upload")
+	wantSHA := hex.EncodeToString(sha256SumOf(body))
+	initOut, err := app.toolUploadInitCtx(context.Background(), ctx, map[string]any{
+		"name":         "agent.txt",
+		"folder":       "/agents/",
+		"size_bytes":   int64(len(body)),
+		"content_type": "text/plain",
+		"sha256":       wantSHA,
+	})
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	uploadID := initOut.(map[string]any)["upload_id"].(string)
+	if uploadID == "" {
+		t.Fatal("missing upload_id")
+	}
+
+	if _, err := app.toolUploadPartCtx(context.Background(), ctx, map[string]any{
+		"upload_id":      uploadID,
+		"part_number":    1,
+		"content_base64": b64(string(body[:12])),
+	}); err != nil {
+		t.Fatalf("part 1: %v", err)
+	}
+	statusOut, err := app.toolUploadStatusCtx(context.Background(), ctx, map[string]any{"upload_id": uploadID})
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if got := statusOut.(map[string]any)["bytes_uploaded"].(int64); got != 12 {
+		t.Fatalf("bytes_uploaded after part 1 = %d, want 12", got)
+	}
+	if _, err := app.toolUploadPartCtx(context.Background(), ctx, map[string]any{
+		"upload_id":      uploadID,
+		"part_number":    2,
+		"content_base64": b64(string(body[12:])),
+	}); err != nil {
+		t.Fatalf("part 2: %v", err)
+	}
+
+	done, err := app.toolUploadCompleteCtx(context.Background(), ctx, map[string]any{
+		"upload_id": uploadID,
+		"sha256":    wantSHA,
+	})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	file := done.(map[string]any)["file"].(*File)
+	if file.Name != "agent.txt" || file.Folder != "/agents/" || file.SHA256 != wantSHA {
+		t.Fatalf("unexpected file: %+v", file)
+	}
+	if file.Source != "agent" {
+		t.Fatalf("source = %q, want agent", file.Source)
+	}
+	if _, err := os.Stat(uploadSessionDir(ctx, uploadID)); !os.IsNotExist(err) {
+		t.Fatalf("upload session still exists after complete: %v", err)
+	}
+}
+
+func TestMCPMultipartUpload_RejectsOversizedChunk(t *testing.T) {
+	ctx := newTestCtx(t, tk.WithEnv("STORAGE_UPLOADS_DIR", t.TempDir()))
+	app := &App{}
+	initOut, err := app.toolUploadInitCtx(context.Background(), ctx, map[string]any{
+		"name":       "large.bin",
+		"size_bytes": mcpUploadPartSize + 1,
+	})
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	uploadID := initOut.(map[string]any)["upload_id"].(string)
+	_, err = app.toolUploadPartCtx(context.Background(), ctx, map[string]any{
+		"upload_id":      uploadID,
+		"part_number":    1,
+		"content_base64": base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("x"), int(mcpUploadPartSize)+1)),
+	})
+	if err == nil || !strings.Contains(err.Error(), "MCP chunk limit") {
+		t.Fatalf("expected MCP chunk limit error, got %v", err)
 	}
 }
 
@@ -446,11 +531,11 @@ func TestConfiguredUploadIdleTTL(t *testing.T) {
 		minHours float64
 		maxHours float64
 	}{
-		{"", 5.9, 6.1},                             // default 6h
-		{"abc", 5.9, 6.1},                          // garbage → default
-		{"-1", 5.9, 6.1},                           // negative → default
-		{"3", 2.9, 3.1},                            // 3h
-		{"0", 99 * 365 * 24, 101 * 365 * 24},       // disabled = 100y
+		{"", 5.9, 6.1},                       // default 6h
+		{"abc", 5.9, 6.1},                    // garbage → default
+		{"-1", 5.9, 6.1},                     // negative → default
+		{"3", 2.9, 3.1},                      // 3h
+		{"0", 99 * 365 * 24, 101 * 365 * 24}, // disabled = 100y
 	}
 	for _, c := range cases {
 		ctx := newTestCtx(t, tk.WithConfig(map[string]string{"upload_idle_ttl_hours": c.raw}))
