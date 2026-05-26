@@ -162,10 +162,10 @@ func TestResolveAptevaBin_ErrorMentionsCandidates(t *testing.T) {
 
 func TestPortFromBaseURL(t *testing.T) {
 	cases := map[string]int{
-		"http://localhost:53217":     53217,
-		"http://127.0.0.1:8080":      8080,
-		"https://example.com":        0,
-		"https://example.com:8443":   8443,
+		"http://localhost:53217":   53217,
+		"http://127.0.0.1:8080":    8080,
+		"https://example.com":      0,
+		"https://example.com:8443": 8443,
 	}
 	for url, want := range cases {
 		got, err := portFromBaseURL(url)
@@ -178,6 +178,75 @@ func TestPortFromBaseURL(t *testing.T) {
 	}
 }
 
+func TestStoreDomainGrants_RoundTrip(t *testing.T) {
+	app, _ := newTestApp(t)
+	tenantID := seedTenant(t, app, "acme", StatusActive)
+
+	g := &DomainGrant{
+		TenantID:         tenantID,
+		Domain:           "acme.example.com",
+		Wildcard:         true,
+		Status:           "active",
+		DomainRecordID:   "example.com|acme|A",
+		WildcardRecordID: "example.com|*.acme|A",
+	}
+	if err := app.store.upsertDomainGrant(g); err != nil {
+		t.Fatalf("upsertDomainGrant: %v", err)
+	}
+	if g.ID == 0 {
+		t.Fatal("grant ID was not populated")
+	}
+
+	list, err := app.store.listDomainGrants(tenantID)
+	if err != nil {
+		t.Fatalf("listDomainGrants: %v", err)
+	}
+	if len(list) != 1 || list[0].Domain != "acme.example.com" || !list[0].Wildcard {
+		t.Fatalf("unexpected grants: %+v", list)
+	}
+
+	got, err := app.store.getDomainGrant(tenantID, "acme.example.com")
+	if err != nil {
+		t.Fatalf("getDomainGrant: %v", err)
+	}
+	if got == nil || got.WildcardRecordID != "example.com|*.acme|A" {
+		t.Fatalf("unexpected grant: %+v", got)
+	}
+
+	if err := app.store.deleteDomainGrant(tenantID, "acme.example.com"); err != nil {
+		t.Fatalf("deleteDomainGrant: %v", err)
+	}
+	got, err = app.store.getDomainGrant(tenantID, "acme.example.com")
+	if err != nil {
+		t.Fatalf("get after delete: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("grant still present after delete: %+v", got)
+	}
+}
+
+func TestDomainGrantHelpers(t *testing.T) {
+	domain, err := normaliseGrantDomain("*.Acme.Example.com.")
+	if err != nil {
+		t.Fatalf("normaliseGrantDomain: %v", err)
+	}
+	if domain != "acme.example.com" {
+		t.Fatalf("domain = %q", domain)
+	}
+	if got := wildcardSubArg("example.com", domain); got != "*.acme" {
+		t.Fatalf("wildcardSubArg = %q, want *.acme", got)
+	}
+	if got := composeRecordFQDN(domain, "_abc._domainkey"); got != "_abc._domainkey.acme.example.com" {
+		t.Fatalf("composeRecordFQDN = %q", got)
+	}
+	if !grantCoversFQDN(domain, "app.acme.example.com", true) {
+		t.Fatal("wildcard grant should cover subdomain")
+	}
+	if grantCoversFQDN(domain, "app.other.example.com", true) {
+		t.Fatal("grant should not cover sibling domain")
+	}
+}
+
 func TestSlugDataDir_Validation(t *testing.T) {
 	cases := []struct {
 		slug    string
@@ -186,12 +255,12 @@ func TestSlugDataDir_Validation(t *testing.T) {
 		{"acme", false},
 		{"acme-corp", false},
 		{"a1_b2", false},
-		{"ACME", true},        // uppercase
-		{"acme.com", true},    // dot
-		{"acme/etc", true},    // slash — path-traversal risk
-		{"-acme", true},       // leading dash
-		{"_acme", true},       // leading underscore
-		{"", true},            // empty
+		{"ACME", true},     // uppercase
+		{"acme.com", true}, // dot
+		{"acme/etc", true}, // slash — path-traversal risk
+		{"-acme", true},    // leading dash
+		{"_acme", true},    // leading underscore
+		{"", true},         // empty
 	}
 	for _, c := range cases {
 		_, err := slugDataDir(c.slug)
@@ -475,8 +544,8 @@ func TestToolCreate_RequiresSlugAndOwner(t *testing.T) {
 	app, ctx := newTestApp(t)
 	cases := []map[string]any{
 		{},
-		{"slug": "acme"},                          // missing owner_email
-		{"owner_email": "ops@acme.com"},           // missing slug
+		{"slug": "acme"},                // missing owner_email
+		{"owner_email": "ops@acme.com"}, // missing slug
 	}
 	for _, args := range cases {
 		if _, err := app.toolCreate(ctx, args); err == nil {

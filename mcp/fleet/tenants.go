@@ -72,6 +72,21 @@ type Tenant struct {
 // (managed via the Instances app), not on the parent.
 func (t *Tenant) IsHosted() bool { return t.InstanceID > 0 }
 
+// DomainGrant delegates a base domain to a tenant. It is separate
+// from Tenant.Domain, which is the public hostname of the tenant's own
+// dashboard.
+type DomainGrant struct {
+	ID               int64     `json:"id"`
+	TenantID         string    `json:"tenant_id"`
+	Domain           string    `json:"domain"`
+	Wildcard         bool      `json:"wildcard"`
+	Status           string    `json:"status"`
+	DomainRecordID   string    `json:"domain_record_id,omitempty"`
+	WildcardRecordID string    `json:"wildcard_record_id,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
 type Event struct {
 	ID        int64     `json:"id"`
 	TenantID  string    `json:"tenant_id"`
@@ -373,6 +388,133 @@ func (s *store) setLocation(id string, instanceID int64, baseURL, configDir stri
 	_, err := s.db.Exec(
 		`UPDATE fleet_tenants SET instance_id = ?, base_url = ?, config_dir = ?, updated_at = ? WHERE id = ?`,
 		instanceID, baseURL, configDir, time.Now().UTC(), id,
+	)
+	return err
+}
+
+func (s *store) upsertDomainGrant(g *DomainGrant) error {
+	if g == nil {
+		return errors.New("domain grant required")
+	}
+	now := time.Now().UTC()
+	status := strings.TrimSpace(g.Status)
+	if status == "" {
+		status = "active"
+	}
+	wildcard := 0
+	if g.Wildcard {
+		wildcard = 1
+	}
+	res, err := s.db.Exec(
+		`INSERT INTO fleet_domain_grants
+			(tenant_id, domain, wildcard, status, domain_record_id, wildcard_record_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(tenant_id, domain) DO UPDATE SET
+		   wildcard = excluded.wildcard,
+		   status = excluded.status,
+		   domain_record_id = excluded.domain_record_id,
+		   wildcard_record_id = excluded.wildcard_record_id,
+		   updated_at = excluded.updated_at`,
+		g.TenantID, g.Domain, wildcard, status, nullStr(g.DomainRecordID), nullStr(g.WildcardRecordID), now, now,
+	)
+	if err != nil {
+		return err
+	}
+	if g.ID == 0 {
+		if id, _ := res.LastInsertId(); id != 0 {
+			g.ID = id
+		}
+		if g.ID == 0 {
+			_ = s.db.QueryRow(
+				`SELECT id FROM fleet_domain_grants WHERE tenant_id = ? AND domain = ?`,
+				g.TenantID, g.Domain,
+			).Scan(&g.ID)
+		}
+	}
+	g.Status = status
+	g.CreatedAt = now
+	g.UpdatedAt = now
+	return nil
+}
+
+const domainGrantCols = `id, tenant_id, domain, wildcard, status,
+	domain_record_id, wildcard_record_id, created_at, updated_at`
+
+func scanDomainGrant(s interface{ Scan(...any) error }) (*DomainGrant, error) {
+	var (
+		g             DomainGrant
+		wildcard      int
+		recordID      sql.NullString
+		wildcardRecID sql.NullString
+	)
+	err := s.Scan(&g.ID, &g.TenantID, &g.Domain, &wildcard, &g.Status,
+		&recordID, &wildcardRecID, &g.CreatedAt, &g.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	g.Wildcard = wildcard != 0
+	if recordID.Valid {
+		g.DomainRecordID = recordID.String
+	}
+	if wildcardRecID.Valid {
+		g.WildcardRecordID = wildcardRecID.String
+	}
+	return &g, nil
+}
+
+func (s *store) listDomainGrants(tenantID string) ([]*DomainGrant, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if tenantID != "" {
+		rows, err = s.db.Query(
+			`SELECT `+domainGrantCols+`
+			   FROM fleet_domain_grants
+			  WHERE tenant_id = ?
+			  ORDER BY domain`,
+			tenantID,
+		)
+	} else {
+		rows, err = s.db.Query(
+			`SELECT ` + domainGrantCols + `
+			   FROM fleet_domain_grants
+			  ORDER BY tenant_id, domain`,
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*DomainGrant{}
+	for rows.Next() {
+		g, err := scanDomainGrant(rows)
+		if err != nil {
+			return nil, err
+		}
+		if g != nil {
+			out = append(out, g)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (s *store) getDomainGrant(tenantID, domain string) (*DomainGrant, error) {
+	return scanDomainGrant(s.db.QueryRow(
+		`SELECT `+domainGrantCols+`
+		   FROM fleet_domain_grants
+		  WHERE tenant_id = ? AND domain = ?`,
+		tenantID, domain,
+	))
+}
+
+func (s *store) deleteDomainGrant(tenantID, domain string) error {
+	_, err := s.db.Exec(
+		`DELETE FROM fleet_domain_grants WHERE tenant_id = ? AND domain = ?`,
+		tenantID, domain,
 	)
 	return err
 }

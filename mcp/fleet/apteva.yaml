@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.8.0
+version: 0.8.2
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -91,6 +91,16 @@ provides:
       description: "Attach a public hostname to a tenant. Orchestrates Domains (DNS record) → Certs (Let's Encrypt DNS-01) → Routes (register fqdn → tenant apteva-server port on the parent's routes table). Idempotent; partial-failure tolerant. Args: tenant_id, fqdn, target?, type?, ttl?."
     - name: tenant_detach_domain
       description: "Clear a tenant's domain link — DNS delete, cert revoke, route unregister, local clear. Local clear runs even on remote failure. Args: tenant_id."
+    - name: tenant_domain_grant
+      description: "Delegate a base domain to a tenant for tenant-local apps. Fleet writes base + wildcard DNS, kicks off certs, and registers parent routes to the tenant server. Args: tenant_id, domain, target?, type? (A|CNAME), ttl?."
+    - name: tenant_domain_list
+      description: "List Fleet domain grants. Args: tenant_id? (optional filter)."
+    - name: tenant_domain_revoke
+      description: "Revoke a Fleet domain grant: unregister parent routes, revoke certs, delete DNS records, and remove the grant. Args: tenant_id, domain."
+    - name: tenant_domain_record_set
+      description: "Proxy a DNS upsert for a tenant-owned inherited domain. Intended for the tenant Domains facade. Args: tenant_id, domain, name, type, value, ttl?."
+    - name: tenant_domain_record_delete
+      description: "Proxy a DNS delete for a tenant-owned inherited domain. Intended for the tenant Domains facade. Args: tenant_id, domain, name, type."
     - name: tenant_migrate
       description: "Move a local tenant onto a remote instance (VPS managed by the Instances app). Cold migration: stop local, tar + upload + extract the data dir, boot apteva-server on the instance against the moved DB, re-point the route, remove the local copy. Brief downtime; auto-rollback restarts the local process on failure. local→instance only. Args: tenant_id, instance_id (>0), port?."
     - name: tenant_update

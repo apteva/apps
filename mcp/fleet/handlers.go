@@ -194,14 +194,14 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		_ = a.store.recordEvent(t.ID, "auto_setup_failed", "user", map[string]any{"error": err.Error()})
 		publicURL := a.publicBaseURL(t.BaseURL)
 		return map[string]any{
-			"tenant_id":         t.ID,
-			"slug":              slug,
-			"base_url":          publicURL,
-			"status":            StatusSetupPending,
-			"setup_url":         publicURL + "/?setup=1",
-			"setup_token":       setupToken,
-			"auto_setup_error":  err.Error(),
-			"next_steps":        "Auto-setup failed (see auto_setup_error). Manual recovery: open setup_url, register admin with the setup_token, generate an api_key, call tenant_attach_key.",
+			"tenant_id":        t.ID,
+			"slug":             slug,
+			"base_url":         publicURL,
+			"status":           StatusSetupPending,
+			"setup_url":        publicURL + "/?setup=1",
+			"setup_token":      setupToken,
+			"auto_setup_error": err.Error(),
+			"next_steps":       "Auto-setup failed (see auto_setup_error). Manual recovery: open setup_url, register admin with the setup_token, generate an api_key, call tenant_attach_key.",
 		}, nil
 	}
 
@@ -1039,6 +1039,124 @@ func (a *App) toolDetachDomain(_ *sdk.AppCtx, args map[string]any) (any, error) 
 		res["registrar_error"] = derr.Error()
 	}
 	return res, nil
+}
+
+func (a *App) toolDomainGrant(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	id := strings.TrimSpace(getStr(args, "tenant_id"))
+	if id == "" {
+		return nil, errors.New("tenant_id required")
+	}
+	projectID, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	t, _, err := a.store.get(id)
+	if err != nil {
+		return nil, err
+	}
+	spec := attachDomainSpec{
+		FQDN:      getStr(args, "domain"),
+		Target:    getStr(args, "target"),
+		Type:      getStr(args, "type"),
+		TTL:       intArg(args, "ttl", 0),
+		ManageDNS: true,
+	}
+	g, err := a.grantDomain(globalCtx, projectID, t, spec)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"grant": g, "tenant": a.publicTenantView(t)}, nil
+}
+
+func (a *App) toolDomainGrantList(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	tenantID := strings.TrimSpace(getStr(args, "tenant_id"))
+	if tenantID != "" {
+		if _, _, err := a.store.get(tenantID); err != nil {
+			return nil, err
+		}
+	}
+	grants, err := a.store.listDomainGrants(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"grants": grants, "count": len(grants)}, nil
+}
+
+func (a *App) toolDomainGrantRevoke(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	id := strings.TrimSpace(getStr(args, "tenant_id"))
+	if id == "" {
+		return nil, errors.New("tenant_id required")
+	}
+	projectID, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	t, _, err := a.store.get(id)
+	if err != nil {
+		return nil, err
+	}
+	g, err := a.revokeDomainGrant(globalCtx, projectID, t, getStr(args, "domain"))
+	res := map[string]any{"revoked": err == nil, "grant": g}
+	if err != nil {
+		res["error"] = err.Error()
+		// DNS cleanup failures are intentionally non-fatal after local
+		// deletion in revokeDomainGrant. Surface them to the caller.
+		if g != nil {
+			return res, nil
+		}
+		return nil, err
+	}
+	return res, nil
+}
+
+func (a *App) toolDomainRecordSet(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	id := strings.TrimSpace(getStr(args, "tenant_id"))
+	if id == "" {
+		return nil, errors.New("tenant_id required")
+	}
+	projectID, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	t, _, err := a.store.get(id)
+	if err != nil {
+		return nil, err
+	}
+	spec := domainRecordSpec{
+		Domain: getStr(args, "domain"),
+		Name:   getStr(args, "name"),
+		Type:   getStr(args, "type"),
+		Value:  getStr(args, "value"),
+		TTL:    intArg(args, "ttl", 0),
+	}
+	if err := a.proxyTenantDomainRecordSet(globalCtx, projectID, t, spec); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "domain": spec.Domain, "name": spec.Name, "type": spec.Type}, nil
+}
+
+func (a *App) toolDomainRecordDelete(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	id := strings.TrimSpace(getStr(args, "tenant_id"))
+	if id == "" {
+		return nil, errors.New("tenant_id required")
+	}
+	projectID, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	t, _, err := a.store.get(id)
+	if err != nil {
+		return nil, err
+	}
+	spec := domainRecordSpec{
+		Domain: getStr(args, "domain"),
+		Name:   getStr(args, "name"),
+		Type:   getStr(args, "type"),
+	}
+	if err := a.proxyTenantDomainRecordDelete(globalCtx, projectID, t, spec); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "deleted": true, "domain": spec.Domain, "name": spec.Name, "type": spec.Type}, nil
 }
 
 // toolSetTargetVersion just records desired version without applying.

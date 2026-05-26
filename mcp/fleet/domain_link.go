@@ -158,6 +158,14 @@ type attachDomainSpec struct {
 	ManageDNS bool
 }
 
+type domainRecordSpec struct {
+	Domain string
+	Name   string
+	Type   string
+	Value  string
+	TTL    int
+}
+
 // resolveTarget picks the DNS record value: explicit > publicHost.
 // publicHost is set at OnMount via detectPublicHost; on a cloud box
 // that's the outbound interface IP, perfect for an A record pointing
@@ -179,6 +187,87 @@ func inferRecordType(target string) string {
 		return "A"
 	}
 	return "CNAME"
+}
+
+func normaliseGrantDomain(s string) (string, error) {
+	d := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(s, ".")))
+	d = strings.TrimPrefix(d, "*.")
+	if d == "" {
+		return "", errors.New("domain required")
+	}
+	if strings.ContainsAny(d, " \t\r\n/?:#") {
+		return "", fmt.Errorf("invalid domain %q", s)
+	}
+	if !strings.Contains(d, ".") {
+		return "", fmt.Errorf("domain %q must contain a dot", s)
+	}
+	return d, nil
+}
+
+func wildcardHost(domain string) string {
+	if domain == "" {
+		return ""
+	}
+	return "*." + strings.TrimPrefix(domain, "*.")
+}
+
+func recordID(apex, name, rtype string) string {
+	return apex + "|" + name + "|" + strings.ToUpper(rtype)
+}
+
+func splitGrantRecordID(s string) (apex, name, rtype string, ok bool) {
+	parts := strings.Split(s, "|")
+	if len(parts) == 3 {
+		return parts[0], parts[1], parts[2], true
+	}
+	// Backward compatibility with tenant_attach_domain's older
+	// "<apex>|<type>" shape. Grant records always use three parts.
+	if len(parts) == 2 {
+		return parts[0], "@", parts[1], true
+	}
+	return "", "", "", false
+}
+
+func composeRecordFQDN(domain, name string) string {
+	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	name = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(name)), ".")
+	if name == "" || name == "@" {
+		return domain
+	}
+	return name + "." + domain
+}
+
+func grantCoversFQDN(grantDomain, fqdn string, wildcard bool) bool {
+	grantDomain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(grantDomain)), ".")
+	fqdn = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(fqdn)), ".")
+	return fqdn == grantDomain || (wildcard && strings.HasSuffix(fqdn, "."+grantDomain))
+}
+
+func wildcardSubArg(apex, domain string) string {
+	if domain == apex {
+		return "*"
+	}
+	return "*." + strings.TrimSuffix(domain, "."+apex)
+}
+
+func (a *App) writeDomainRecord(ctx *sdk.AppCtx, projectID, fqdn, target, rtype string, ttl int) (string, error) {
+	apex, sub, err := resolveApex(ctx, projectID, fqdn)
+	if err != nil {
+		return "", err
+	}
+	subArg := sub
+	if subArg == "" {
+		subArg = "@"
+	}
+	if rtype == "CNAME" && sub == "" {
+		return "", errors.New("apex CNAME isn't allowed by DNS; use type=A with an IP, or attach a subdomain")
+	}
+	if err := callDomainsTool(ctx, projectID, "domain_records_set", map[string]any{
+		"domain": apex, "name": subArg, "type": rtype, "value": target, "ttl": ttl,
+	}, nil); err != nil {
+		return "", err
+	}
+	return recordID(apex, subArg, rtype), nil
 }
 
 // ─── attach orchestration ─────────────────────────────────────────
@@ -322,6 +411,242 @@ func splitRecordID(s string) (apex, rtype string, ok bool) {
 	return s[:i], s[i+1:], true
 }
 
+// ─── domain grants ─────────────────────────────────────────────────
+
+// grantDomain delegates domain to a tenant. Unlike attachDomain, this
+// is not just the tenant dashboard hostname; it is the base zone that
+// tenant-local apps can use through the Domains facade.
+func (a *App) grantDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec attachDomainSpec) (*DomainGrant, error) {
+	if t == nil {
+		return nil, errors.New("tenant required")
+	}
+	domain, err := normaliseGrantDomain(spec.FQDN)
+	if err != nil {
+		return nil, err
+	}
+	if !spec.ManageDNS {
+		return nil, errors.New("domain grants require managed DNS so Fleet can maintain the delegation boundary")
+	}
+	if !a.domainsAvailable(ctx) {
+		return nil, errors.New("domains app not installed — install + bind it as fleet's domains integration")
+	}
+	target := a.resolveTarget(spec)
+	if target == "" {
+		return nil, errors.New("target required — pass target explicitly or ensure APTEVA_PUBLIC_URL / detectPublicHost yields a usable IP")
+	}
+	rtype := strings.ToUpper(strings.TrimSpace(spec.Type))
+	if rtype == "" {
+		rtype = inferRecordType(target)
+	}
+	if rtype != "A" && rtype != "CNAME" {
+		return nil, fmt.Errorf("unsupported record type %q (A or CNAME)", rtype)
+	}
+	if rtype == "CNAME" {
+		target = strings.TrimSuffix(target, ".")
+	}
+	ttl := spec.TTL
+	if ttl <= 0 {
+		ttl = 600
+	}
+
+	record, err := a.writeDomainRecord(ctx, projectID, domain, target, rtype, ttl)
+	if err != nil {
+		return nil, err
+	}
+	wildcardRecord := ""
+	if spec.ManageDNS {
+		apex, _, err := resolveApex(ctx, projectID, domain)
+		if err != nil {
+			return nil, err
+		}
+		wildcardName := wildcardSubArg(apex, domain)
+		if err := callDomainsTool(ctx, projectID, "domain_records_set", map[string]any{
+			"domain": apex, "name": wildcardName, "type": rtype, "value": target, "ttl": ttl,
+		}, nil); err != nil {
+			return nil, err
+		}
+		wildcardRecord = recordID(apex, wildcardName, rtype)
+	}
+
+	g := &DomainGrant{
+		TenantID:         t.ID,
+		Domain:           domain,
+		Wildcard:         true,
+		Status:           "active",
+		DomainRecordID:   record,
+		WildcardRecordID: wildcardRecord,
+	}
+	if err := a.store.upsertDomainGrant(g); err != nil {
+		return nil, err
+	}
+	_ = a.store.recordEvent(t.ID, "domain_grant.granted", "tool:tenant_domain_grant", map[string]any{
+		"domain": domain, "wildcard": true, "target": target, "type": rtype,
+	})
+
+	if a.certsAvailable(ctx) {
+		a.issueGrantCert(ctx, projectID, t.ID, domain)
+		a.issueGrantCert(ctx, projectID, t.ID, wildcardHost(domain))
+	}
+	a.registerRouteForTenantHost(ctx, t, domain, domain, "tool:tenant_domain_grant")
+	a.registerRouteForTenantHost(ctx, t, wildcardHost(domain), wildcardHost(domain), "tool:tenant_domain_grant")
+	return g, nil
+}
+
+func (a *App) issueGrantCert(ctx *sdk.AppCtx, projectID, tenantID, fqdn string) {
+	if fqdn == "" || !a.certsAvailable(ctx) {
+		return
+	}
+	if cErr := callCertsTool(ctx, projectID, "cert_issue", map[string]any{"fqdn": fqdn}, nil); cErr != nil {
+		_ = a.store.recordEvent(tenantID, "domain_grant.cert_kickoff_failed", "tool:tenant_domain_grant", map[string]any{
+			"fqdn": fqdn, "error": cErr.Error(),
+		})
+	}
+}
+
+func (a *App) revokeDomainGrant(ctx *sdk.AppCtx, projectID string, t *Tenant, domain string) (*DomainGrant, error) {
+	if t == nil {
+		return nil, errors.New("tenant required")
+	}
+	domain, err := normaliseGrantDomain(domain)
+	if err != nil {
+		return nil, err
+	}
+	g, err := a.store.getDomainGrant(t.ID, domain)
+	if err != nil {
+		return nil, err
+	}
+	if g == nil {
+		return nil, fmt.Errorf("domain grant not found: %s", domain)
+	}
+	var deleteErr error
+	if a.domainsAvailable(ctx) {
+		for _, rec := range []string{g.WildcardRecordID, g.DomainRecordID} {
+			if rec == "" {
+				continue
+			}
+			apex, name, rtype, ok := splitGrantRecordID(rec)
+			if !ok {
+				continue
+			}
+			if err := callDomainsTool(ctx, projectID, "domain_records_delete", map[string]any{
+				"domain": apex, "name": name, "type": rtype,
+			}, nil); err != nil && deleteErr == nil {
+				deleteErr = err
+			}
+		}
+	}
+	if a.certsAvailable(ctx) {
+		_ = callCertsTool(ctx, projectID, "cert_revoke", map[string]any{"fqdn": domain}, nil)
+		if g.Wildcard {
+			_ = callCertsTool(ctx, projectID, "cert_revoke", map[string]any{"fqdn": wildcardHost(domain)}, nil)
+		}
+	}
+	a.unregisterRouteForTenant(ctx, domain)
+	if g.Wildcard {
+		a.unregisterRouteForTenant(ctx, wildcardHost(domain))
+	}
+	if err := a.store.deleteDomainGrant(t.ID, domain); err != nil {
+		return nil, err
+	}
+	_ = a.store.recordEvent(t.ID, "domain_grant.revoked", "tool:tenant_domain_revoke", map[string]any{"domain": domain})
+	return g, deleteErr
+}
+
+// proxyTenantDomainRecordSet is the Fleet-side endpoint the tenant
+// Domains facade will call. It validates that the requested FQDN sits
+// under a grant for the tenant, then writes the real DNS record via
+// the parent Domains app.
+func (a *App) proxyTenantDomainRecordSet(ctx *sdk.AppCtx, projectID string, t *Tenant, rec domainRecordSpec) error {
+	if t == nil {
+		return errors.New("tenant required")
+	}
+	domain, err := normaliseGrantDomain(rec.Domain)
+	if err != nil {
+		return err
+	}
+	g, err := a.store.getDomainGrant(t.ID, domain)
+	if err != nil {
+		return err
+	}
+	if g == nil || g.Status != "active" {
+		return fmt.Errorf("domain %q is not granted to tenant %s", domain, t.ID)
+	}
+	fqdn := composeRecordFQDN(domain, rec.Name)
+	if !grantCoversFQDN(domain, fqdn, g.Wildcard) {
+		return fmt.Errorf("record %q is outside granted domain %q", fqdn, domain)
+	}
+	rtype := strings.ToUpper(strings.TrimSpace(rec.Type))
+	if rtype == "" {
+		return errors.New("record type required")
+	}
+	if strings.TrimSpace(rec.Value) == "" {
+		return errors.New("record value required")
+	}
+	ttl := rec.TTL
+	if ttl <= 0 {
+		ttl = 600
+	}
+	apex, sub, err := resolveApex(ctx, projectID, fqdn)
+	if err != nil {
+		return err
+	}
+	subArg := sub
+	if subArg == "" {
+		subArg = "@"
+	}
+	if err := callDomainsTool(ctx, projectID, "domain_records_set", map[string]any{
+		"domain": apex, "name": subArg, "type": rtype, "value": rec.Value, "ttl": ttl,
+	}, nil); err != nil {
+		return err
+	}
+	_ = a.store.recordEvent(t.ID, "domain_grant.record_set", "tool:tenant_domain_record_set", map[string]any{
+		"domain": domain, "fqdn": fqdn, "type": rtype,
+	})
+	return nil
+}
+
+func (a *App) proxyTenantDomainRecordDelete(ctx *sdk.AppCtx, projectID string, t *Tenant, rec domainRecordSpec) error {
+	if t == nil {
+		return errors.New("tenant required")
+	}
+	domain, err := normaliseGrantDomain(rec.Domain)
+	if err != nil {
+		return err
+	}
+	g, err := a.store.getDomainGrant(t.ID, domain)
+	if err != nil {
+		return err
+	}
+	if g == nil || g.Status != "active" {
+		return fmt.Errorf("domain %q is not granted to tenant %s", domain, t.ID)
+	}
+	fqdn := composeRecordFQDN(domain, rec.Name)
+	if !grantCoversFQDN(domain, fqdn, g.Wildcard) {
+		return fmt.Errorf("record %q is outside granted domain %q", fqdn, domain)
+	}
+	rtype := strings.ToUpper(strings.TrimSpace(rec.Type))
+	if rtype == "" {
+		return errors.New("record type required")
+	}
+	apex, sub, err := resolveApex(ctx, projectID, fqdn)
+	if err != nil {
+		return err
+	}
+	subArg := sub
+	if subArg == "" {
+		subArg = "@"
+	}
+	if err := callDomainsTool(ctx, projectID, "domain_records_delete", map[string]any{
+		"domain": apex, "name": subArg, "type": rtype,
+	}, nil); err != nil {
+		return err
+	}
+	_ = a.store.recordEvent(t.ID, "domain_grant.record_deleted", "tool:tenant_domain_record_delete", map[string]any{
+		"domain": domain, "fqdn": fqdn, "type": rtype,
+	})
+	return nil
+}
+
 // ─── route integration ────────────────────────────────────────────
 
 // registerRouteForTenant publishes (fqdn → tenant apteva-server port)
@@ -335,9 +660,16 @@ func (a *App) registerRouteForTenant(ctx *sdk.AppCtx, tenantID, fqdn string) {
 	if err != nil || t == nil {
 		return
 	}
+	a.registerRouteForTenantHost(ctx, t, fqdn, fqdn, "tool:attach_domain")
+}
+
+func (a *App) registerRouteForTenantHost(ctx *sdk.AppCtx, t *Tenant, hostname, certFQDN, actor string) {
+	if t == nil || hostname == "" || !a.routesAvailable(ctx) {
+		return
+	}
 	port, _ := portFromBaseURL(t.BaseURL)
 	if port == 0 {
-		_ = a.store.recordEvent(tenantID, "route.register_skipped", "tool:attach_domain",
+		_ = a.store.recordEvent(t.ID, "route.register_skipped", actor,
 			map[string]any{"reason": "no_port_in_base_url"})
 		return
 	}
@@ -350,18 +682,18 @@ func (a *App) registerRouteForTenant(ctx *sdk.AppCtx, tenantID, fqdn string) {
 		target = t.BaseURL // already http://<vps-ip>:<port>
 	}
 	if err := callRoutesTool(ctx, "routes_register", map[string]any{
-		"hostname":         fqdn,
+		"hostname":         hostname,
 		"target":           target,
 		"owner_install_id": myInstallID(),
 		"owner_kind":       "fleet",
-		"cert_fqdn":        fqdn,
+		"cert_fqdn":        certFQDN,
 	}, nil); err != nil {
-		_ = a.store.recordEvent(tenantID, "route.register_failed", "tool:attach_domain",
-			map[string]any{"fqdn": fqdn, "error": err.Error()})
+		_ = a.store.recordEvent(t.ID, "route.register_failed", actor,
+			map[string]any{"fqdn": hostname, "error": err.Error()})
 		return
 	}
-	_ = a.store.recordEvent(tenantID, "route.registered", "tool:attach_domain",
-		map[string]any{"fqdn": fqdn, "port": port})
+	_ = a.store.recordEvent(t.ID, "route.registered", actor,
+		map[string]any{"fqdn": hostname, "port": port})
 }
 
 // unregisterRouteForTenant — cleanup half. Safe when routes isn't

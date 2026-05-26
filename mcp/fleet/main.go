@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.8.0
+version: 0.8.2
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -79,6 +79,16 @@ provides:
       description: Attach a public hostname to a tenant via the Domains/Certs/Routes apps.
     - name: tenant_detach_domain
       description: Clear a tenant's domain link (DNS delete, cert revoke, route unregister).
+    - name: tenant_domain_grant
+      description: Delegate a base domain to a tenant for tenant-local apps.
+    - name: tenant_domain_list
+      description: List Fleet domain grants.
+    - name: tenant_domain_revoke
+      description: Revoke a Fleet domain grant.
+    - name: tenant_domain_record_set
+      description: Proxy a DNS upsert for a tenant inherited domain.
+    - name: tenant_domain_record_delete
+      description: Proxy a DNS delete for a tenant inherited domain.
     - name: tenant_migrate
       description: Move a local tenant onto a remote instance (VPS) — cold transfer of the data dir, re-spawn there, re-point the route.
     - name: tenant_update
@@ -223,19 +233,19 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"slug":            map[string]any{"type": "string"},
-					"owner_email":     map[string]any{"type": "string"},
-					"instance_id":     map[string]any{"type": "integer"},
-					"port":            map[string]any{"type": "integer"},
-					"apteva_version":  map[string]any{"type": "string"},
-					"apteva_bin":      map[string]any{"type": "string"},
+					"slug":           map[string]any{"type": "string"},
+					"owner_email":    map[string]any{"type": "string"},
+					"instance_id":    map[string]any{"type": "integer"},
+					"port":           map[string]any{"type": "integer"},
+					"apteva_version": map[string]any{"type": "string"},
+					"apteva_bin":     map[string]any{"type": "string"},
 				},
 				"required": []string{"slug", "owner_email"},
 			},
 			Handler: a.toolCreate,
 		},
 		{
-			Name: "tenant_attach_key",
+			Name:        "tenant_attach_key",
 			Description: "Finish admin-driven setup. After tenant_create returns status=setup_pending and the operator has (1) opened the setup URL, (2) registered an admin email + password using the setup_token, and (3) generated an api_key on the tenant dashboard — call this with the api_key to flip the tenant to active. Validates by GETing /api/auth/status with the key. Args: tenant_id, api_key.",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -355,6 +365,78 @@ func (a *App) MCPTools() []sdk.Tool {
 				"required": []string{"tenant_id", "fqdn"},
 			},
 			Handler: a.toolAttachDomain,
+		},
+		{
+			Name:        "tenant_domain_grant",
+			Description: "Delegate a base domain to a tenant for tenant-local apps. Fleet writes the base + wildcard DNS records, kicks off base + wildcard cert issuance, and registers parent routes to the tenant server. Args: tenant_id, domain, target?, type? (A|CNAME), ttl?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id": map[string]any{"type": "string"},
+					"domain":    map[string]any{"type": "string"},
+					"target":    map[string]any{"type": "string"},
+					"type":      map[string]any{"type": "string"},
+					"ttl":       map[string]any{"type": "integer"},
+				},
+				"required": []string{"tenant_id", "domain"},
+			},
+			Handler: a.toolDomainGrant,
+		},
+		{
+			Name:        "tenant_domain_list",
+			Description: "List Fleet domain grants. Args: tenant_id? (optional filter).",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id": map[string]any{"type": "string"},
+				},
+			},
+			Handler: a.toolDomainGrantList,
+		},
+		{
+			Name:        "tenant_domain_revoke",
+			Description: "Revoke a Fleet domain grant: unregister parent routes, revoke certs, delete DNS records, and remove the grant. Args: tenant_id, domain.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id": map[string]any{"type": "string"},
+					"domain":    map[string]any{"type": "string"},
+				},
+				"required": []string{"tenant_id", "domain"},
+			},
+			Handler: a.toolDomainGrantRevoke,
+		},
+		{
+			Name:        "tenant_domain_record_set",
+			Description: "Proxy a DNS upsert for a tenant-owned inherited domain. Intended for the tenant Domains facade. Validates the record is under a Fleet grant, then writes through the parent Domains app. Args: tenant_id, domain, name, type, value, ttl?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id": map[string]any{"type": "string"},
+					"domain":    map[string]any{"type": "string"},
+					"name":      map[string]any{"type": "string"},
+					"type":      map[string]any{"type": "string"},
+					"value":     map[string]any{"type": "string"},
+					"ttl":       map[string]any{"type": "integer"},
+				},
+				"required": []string{"tenant_id", "domain", "name", "type", "value"},
+			},
+			Handler: a.toolDomainRecordSet,
+		},
+		{
+			Name:        "tenant_domain_record_delete",
+			Description: "Proxy a DNS delete for a tenant-owned inherited domain. Intended for the tenant Domains facade. Validates the record is under a Fleet grant, then deletes through the parent Domains app. Args: tenant_id, domain, name, type.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id": map[string]any{"type": "string"},
+					"domain":    map[string]any{"type": "string"},
+					"name":      map[string]any{"type": "string"},
+					"type":      map[string]any{"type": "string"},
+				},
+				"required": []string{"tenant_id", "domain", "name", "type"},
+			},
+			Handler: a.toolDomainRecordDelete,
 		},
 		{
 			Name:        "tenant_migrate",
