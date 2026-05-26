@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.25
+version: 0.13.26
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -269,6 +269,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/folders", Handler: a.handleFolders},
 		{Pattern: "/status", Handler: a.handleStatus},
 		{Pattern: "/reindex", Handler: a.handleReindex},
+		{Pattern: "/smartcrop", Handler: a.handleSmartCropPreview},
 		// Renders. /renders accepts POST {operation, ...} for
 		// jobs-app-style scheduled triggers; GET lists. /renders/{id}
 		// supports GET (status) + DELETE (cancel).
@@ -1881,6 +1882,91 @@ func coerceNumeric(v any) any {
 // firing HTTP at media. Same shape as the MCP tools but speaking
 // HTTP. Dashboard panels also use them (the panel's Renders tab
 // hits GET /renders to populate).
+
+func (a *App) handleSmartCropPreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST", http.StatusMethodNotAllowed)
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		FileID      string `json:"file_id"`
+		Operation   string `json:"operation"`
+		TargetRatio string `json:"target_ratio"`
+		CropMode    string `json:"crop_mode"`
+		StartMs     int64  `json:"start_ms"`
+		AtMs        int64  `json:"at_ms"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(body.FileID) == "" {
+		http.Error(w, "file_id required", http.StatusBadRequest)
+		return
+	}
+	op := strings.TrimSpace(body.Operation)
+	if op == "" {
+		op = "extract_reel"
+	}
+	ratio := strings.TrimSpace(body.TargetRatio)
+	if ratio == "" {
+		ratio = "9:16"
+	}
+	rw, rh, err := parseAspectRatio(ratio)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(body.CropMode))
+	if mode == "" {
+		mode = "smart"
+	}
+	if mode != "smart" && mode != "center" {
+		http.Error(w, "crop_mode must be smart or center", http.StatusBadRequest)
+		return
+	}
+	row, err := getMedia(globalCtx.AppDB(), pid, body.FileID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	focusMs := body.StartMs
+	preferKeyframe := op == "extract_reel" || op == "extract_frame"
+	if op == "extract_frame" {
+		focusMs = body.AtMs
+	}
+	win, err := computeSmartCrop(r.Context(), globalCtx, newStorageClient(), pid, body.FileID, rw, rh, mode, focusMs, preferKeyframe)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	out := map[string]any{
+		"crop": map[string]any{
+			"crop_w": win.W,
+			"crop_h": win.H,
+			"crop_x": win.X,
+			"crop_y": win.Y,
+		},
+		"source_width":  row.Width,
+		"source_height": row.Height,
+		"mode":          mode,
+	}
+	if mode == "smart" {
+		if d := pickSmartCropDerivation(row.Derivations, focusMs, preferKeyframe); d.StorageFileID != "" {
+			out["derivation"] = map[string]any{
+				"kind":            d.Kind,
+				"storage_file_id": d.StorageFileID,
+				"position_ms":     d.PositionMs,
+			}
+		}
+	}
+	writeJSON(w, out)
+}
 
 func (a *App) handleRendersCollection(w http.ResponseWriter, r *http.Request) {
 	pid, err := resolveProjectFromRequest(r)

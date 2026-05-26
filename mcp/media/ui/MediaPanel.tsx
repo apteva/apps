@@ -1327,6 +1327,7 @@ function OperationModal({
               setField={set}
               sourceURL={sourceURL}
               posterURL={poster}
+              apiBase={apiBase}
               previewBase={previewBase}
               storageQuery={storageQuery}
             />
@@ -1573,7 +1574,7 @@ function OperationField({
 }
 
 function OperationPreview({
-  op, row, fields, setField, sourceURL, posterURL, previewBase, storageQuery,
+  op, row, fields, setField, sourceURL, posterURL, apiBase, previewBase, storageQuery,
 }: {
   op: OpName;
   row: MediaRow;
@@ -1581,6 +1582,7 @@ function OperationPreview({
   setField: (key: string, value: string) => void;
   sourceURL: string;
   posterURL?: string;
+  apiBase: string;
   previewBase: string;
   storageQuery: string;
 }) {
@@ -1593,6 +1595,7 @@ function OperationPreview({
         setField={setField}
         sourceURL={sourceURL}
         posterURL={posterURL}
+        apiBase={apiBase}
         previewBase={previewBase}
         storageQuery={storageQuery}
       />
@@ -1635,7 +1638,7 @@ function SourcePreview({ row, sourceURL, posterURL }: { row: MediaRow; sourceURL
 }
 
 function TimelinePreview({
-  op, row, fields, setField, sourceURL, posterURL, previewBase, storageQuery,
+  op, row, fields, setField, sourceURL, posterURL, apiBase, previewBase, storageQuery,
 }: {
   op: OpName;
   row: MediaRow;
@@ -1643,6 +1646,7 @@ function TimelinePreview({
   setField: (key: string, value: string) => void;
   sourceURL: string;
   posterURL?: string;
+  apiBase: string;
   previewBase: string;
   storageQuery: string;
 }) {
@@ -1748,6 +1752,7 @@ function TimelinePreview({
           row={row}
           startMs={safeStart}
           ratio={fields.target_ratio || "9:16"}
+          apiBase={apiBase}
           previewBase={previewBase}
           storageQuery={storageQuery}
           onUseSmart={() => setField("crop_mode", "smart")}
@@ -1928,14 +1933,15 @@ function ReelGuide({ ratio }: { ratio: string }) {
 
 interface SmartCropPreviewResult {
   crop: { x: number; y: number; width: number; height: number };
-  imageWidth: number;
-  imageHeight: number;
+  sourceWidth: number;
+  sourceHeight: number;
 }
 
 function SmartCropCheck({
   row,
   startMs,
   ratio,
+  apiBase,
   previewBase,
   storageQuery,
   onUseSmart,
@@ -1943,6 +1949,7 @@ function SmartCropCheck({
   row: MediaRow;
   startMs: number;
   ratio: string;
+  apiBase: string;
   previewBase: string;
   storageQuery: string;
   onUseSmart: () => void;
@@ -1979,7 +1986,7 @@ function SmartCropCheck({
     setBusy(true);
     setError("");
     try {
-      setResult(await estimateSmartCropPreview(src, ratio));
+      setResult(await fetchSmartCropPreview(apiBase, row, startMs, ratio));
     } catch (e) {
       setResult(null);
       setError(e instanceof Error ? e.message : String(e));
@@ -2016,7 +2023,7 @@ function SmartCropCheck({
             <div className="text-[10px] text-red-400">{error}</div>
           ) : (
             <div className="text-[10px] text-text-dim">
-              UI estimate on {label}; render uses the server smart-crop pass.
+              Server smart-crop result on {label}.
             </div>
           )}
         </div>
@@ -2179,106 +2186,52 @@ function posterDerivation(row: MediaRow): Derivation | null {
   ) ?? null;
 }
 
-async function estimateSmartCropPreview(src: string, ratio: string): Promise<SmartCropPreviewResult> {
-  const img = await loadImage(src);
-  const maxSide = 360;
-  const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
-  const width = Math.max(1, Math.round(img.naturalWidth * scale));
-  const height = Math.max(1, Math.round(img.naturalHeight * scale));
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  if (!ctx) throw new Error("Canvas unavailable");
-  ctx.drawImage(img, 0, 0, width, height);
-  const data = ctx.getImageData(0, 0, width, height).data;
-  const crop = estimateSaliencyCrop(data, width, height, ratio);
-  return { crop, imageWidth: width, imageHeight: height };
-}
-
-function loadImage(src: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("Could not load preview frame"));
-    img.src = src;
-  });
-}
-
-function estimateSaliencyCrop(
-  data: Uint8ClampedArray,
-  width: number,
-  height: number,
+async function fetchSmartCropPreview(
+  apiBase: string,
+  row: MediaRow,
+  startMs: number,
   ratio: string,
-): { x: number; y: number; width: number; height: number } {
-  const [rw, rh] = ratio.split(":").map((n) => Number(n));
-  const target = rw > 0 && rh > 0 ? rw / rh : 9 / 16;
-  const source = width / height;
-  let cropW = width;
-  let cropH = height;
-  if (source > target) cropW = Math.max(1, Math.round(height * target));
-  else cropH = Math.max(1, Math.round(width / target));
-  const maxX = Math.max(0, width - cropW);
-  const maxY = Math.max(0, height - cropH);
-  if (maxX === 0 && maxY === 0) return { x: 0, y: 0, width: cropW, height: cropH };
-
-  const steps = 32;
-  let best = { x: Math.round(maxX / 2), y: Math.round(maxY / 2), score: Number.NEGATIVE_INFINITY };
-  for (let i = 0; i <= steps; i++) {
-    const x = maxX > 0 ? Math.round((maxX * i) / steps) : 0;
-    const y = maxY > 0 ? Math.round((maxY * i) / steps) : 0;
-    const score = scoreCrop(data, width, height, x, y, cropW, cropH);
-    const centerPenalty = maxX > 0
-      ? Math.abs((x + cropW / 2) / width - 0.5) * 0.12
-      : Math.abs((y + cropH / 2) / height - 0.5) * 0.12;
-    const adjusted = score - centerPenalty;
-    if (adjusted > best.score) best = { x, y, score: adjusted };
-  }
-  return { x: best.x, y: best.y, width: cropW, height: cropH };
-}
-
-function scoreCrop(
-  data: Uint8ClampedArray,
-  imageW: number,
-  imageH: number,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-): number {
-  const sample = Math.max(3, Math.floor(Math.max(w, h) / 48));
-  let score = 0;
-  let count = 0;
-  for (let py = y; py < y + h - sample && py < imageH - sample; py += sample) {
-    for (let px = x; px < x + w - sample && px < imageW - sample; px += sample) {
-      const i = (py * imageW + px) * 4;
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      const right = (py * imageW + Math.min(imageW - 1, px + sample)) * 4;
-      const down = (Math.min(imageH - 1, py + sample) * imageW + px) * 4;
-      const luma = 0.299 * r + 0.587 * g + 0.114 * b;
-      const lumaRight = 0.299 * data[right] + 0.587 * data[right + 1] + 0.114 * data[right + 2];
-      const lumaDown = 0.299 * data[down] + 0.587 * data[down + 1] + 0.114 * data[down + 2];
-      const edge = (Math.abs(luma - lumaRight) + Math.abs(luma - lumaDown)) / 510;
-      const max = Math.max(r, g, b);
-      const min = Math.min(r, g, b);
-      const saturation = max > 0 ? (max - min) / max : 0;
-      const skin = r > 95 && g > 40 && b > 20 && r > g && r > b && Math.abs(r - g) > 12 ? 0.08 : 0;
-      score += edge * 0.62 + saturation * 0.3 + skin;
-      count++;
-    }
-  }
-  return count > 0 ? score / count : 0;
+): Promise<SmartCropPreviewResult> {
+  const r = await fetch(`${apiBase}/smartcrop?project_id=${encodeURIComponent(row.project_id)}`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      operation: "extract_reel",
+      file_id: row.file_id,
+      start_ms: Math.round(startMs),
+      target_ratio: ratio || "9:16",
+      crop_mode: "smart",
+    }),
+  });
+  if (!r.ok) throw new Error(await r.text().catch(() => `HTTP ${r.status}`));
+  const data = (await r.json()) as {
+    crop?: { crop_x?: number; crop_y?: number; crop_w?: number; crop_h?: number };
+    source_width?: number;
+    source_height?: number;
+  };
+  const sourceWidth = Math.max(1, Number(data.source_width || row.width || 1));
+  const sourceHeight = Math.max(1, Number(data.source_height || row.height || 1));
+  const crop = data.crop ?? {};
+  return {
+    crop: {
+      x: Math.max(0, Number(crop.crop_x ?? 0)),
+      y: Math.max(0, Number(crop.crop_y ?? 0)),
+      width: Math.max(1, Number(crop.crop_w ?? sourceWidth)),
+      height: Math.max(1, Number(crop.crop_h ?? sourceHeight)),
+    },
+    sourceWidth,
+    sourceHeight,
+  };
 }
 
 function smartCropPreviewOverlay(result: SmartCropPreviewResult): React.CSSProperties {
-  const { crop, imageWidth, imageHeight } = result;
+  const { crop, sourceWidth, sourceHeight } = result;
   return {
-    left: `${(crop.x / imageWidth) * 100}%`,
-    top: `${(crop.y / imageHeight) * 100}%`,
-    width: `${(crop.width / imageWidth) * 100}%`,
-    height: `${(crop.height / imageHeight) * 100}%`,
+    left: `${(crop.x / sourceWidth) * 100}%`,
+    top: `${(crop.y / sourceHeight) * 100}%`,
+    width: `${(crop.width / sourceWidth) * 100}%`,
+    height: `${(crop.height / sourceHeight) * 100}%`,
   };
 }
 
