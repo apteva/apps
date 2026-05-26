@@ -514,7 +514,7 @@ func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentV
 		"template_version_id": o.TemplateVersionID,
 	})
 
-	g, err := loadGig(ctx.AppDB(), pid, gigID)
+	g, err := loadGig(ctx, pid, gigID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -568,8 +568,8 @@ func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string) 
 	}
 
 	// Notify via CRM. Body includes the magic-link URL.
-	g, _ := loadGig(ctx.AppDB(), pid, gigID)
-	workerURL := buildWorkerURL(token)
+	g, _ := loadGig(ctx, pid, gigID)
+	workerURL := buildWorkerURL(ctx, token)
 	body := fmt.Sprintf("%s\n\nOpen: %s", g.Title, workerURL)
 	subject := g.Title
 	convoID, sendErr := crmSendMessage(ctx, pid, wk.ContactID, body, wk.DefaultChannel, subject)
@@ -599,8 +599,16 @@ func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string) 
 	return view, nil
 }
 
-func buildWorkerURL(token string) string {
-	base := strings.TrimRight(os.Getenv("APTEVA_PUBLIC_URL"), "/")
+func buildWorkerURL(ctx *sdk.AppCtx, token string) string {
+	base := ""
+	if ctx != nil {
+		if info, err := ctx.PlatformInfo(); err == nil && info != nil {
+			base = strings.TrimRight(strings.TrimSpace(info.PublicURL), "/")
+		}
+	}
+	if base == "" {
+		base = strings.TrimRight(os.Getenv("APTEVA_PUBLIC_URL"), "/")
+	}
 	if base == "" {
 		base = "http://localhost:5280"
 	}
@@ -639,7 +647,7 @@ func (a *App) toolGigsStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	g, err := loadGig(ctx.AppDB(), pid, id)
+	g, err := loadGig(ctx, pid, id)
 	if err != nil {
 		return nil, err
 	}
@@ -692,7 +700,7 @@ func (a *App) toolGigsListOpen(ctx *sdk.AppCtx, args map[string]any) (any, error
 		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
-		g, err := loadGig(ctx.AppDB(), pid, id)
+		g, err := loadGig(ctx, pid, id)
 		if err != nil {
 			return nil, err
 		}
@@ -712,7 +720,7 @@ func (a *App) toolGigsCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	reason := strArg(args, "reason")
 
-	g, err := loadGig(ctx.AppDB(), pid, id)
+	g, err := loadGig(ctx, pid, id)
 	if err != nil {
 		return nil, err
 	}
@@ -750,7 +758,7 @@ func (a *App) toolGigsCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		pid, id, reason,
 	)
 	ctx.Emit("gig.cancelled", map[string]any{"gig_id": id, "reason": reason})
-	g, _ = loadGig(ctx.AppDB(), pid, id)
+	g, _ = loadGig(ctx, pid, id)
 	return map[string]any{"gig": g}, nil
 }
 
@@ -770,7 +778,7 @@ func (a *App) toolGigsExtendDeadline(ctx *sdk.AppCtx, args map[string]any) (any,
 	); err != nil {
 		return nil, err
 	}
-	g, _ := loadGig(ctx.AppDB(), pid, id)
+	g, _ := loadGig(ctx, pid, id)
 	return map[string]any{"gig": g}, nil
 }
 
@@ -783,7 +791,7 @@ func (a *App) toolGigsAccept(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	g, err := loadGig(ctx.AppDB(), pid, id)
+	g, err := loadGig(ctx, pid, id)
 	if err != nil {
 		return nil, err
 	}
@@ -846,7 +854,7 @@ func (a *App) toolGigsAccept(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		"gig_id":    id,
 		"worker_id": workerID,
 	})
-	g, _ = loadGig(ctx.AppDB(), pid, id)
+	g, _ = loadGig(ctx, pid, id)
 	return map[string]any{"gig": g}, nil
 }
 
@@ -861,7 +869,7 @@ func (a *App) toolGigsReject(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, errors.New("id and reason required")
 	}
 	reopen := boolArg(args, "reopen", true)
-	g, err := loadGig(ctx.AppDB(), pid, id)
+	g, err := loadGig(ctx, pid, id)
 	if err != nil {
 		return nil, err
 	}
@@ -915,7 +923,7 @@ func (a *App) toolGigsReject(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	ctx.Emit("gig.rejected", map[string]any{
 		"gig_id": id, "worker_id": workerID, "reason": reason,
 	})
-	g, _ = loadGig(ctx.AppDB(), pid, id)
+	g, _ = loadGig(ctx, pid, id)
 	return map[string]any{"gig": g}, nil
 }
 
@@ -934,7 +942,8 @@ func resolveActiveTemplateVersion(db *sql.DB, templateID int64) (int64, error) {
 	return id, err
 }
 
-func loadGig(db *sql.DB, pid string, id int64) (*gig, error) {
+func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
+	db := ctx.AppDB()
 	g := &gig{ProjectID: pid}
 	var tplVID sql.NullInt64
 	var vars, schema, media, checklist, vars2, result, priority, deadlineAt, completedAt, rejection sql.NullString
@@ -1014,7 +1023,7 @@ func loadGig(db *sql.DB, pid string, id int64) (*gig, error) {
 			v.RespondedAt = responded.String
 			v.SubmittedAt = submitted.String
 			v.CRMConversationID = convID.Int64
-			v.WorkerURL = buildWorkerURL(token)
+			v.WorkerURL = buildWorkerURL(ctx, token)
 			g.Assignments = append(g.Assignments, v)
 		}
 	}
@@ -1049,7 +1058,7 @@ func loadAssignmentView(ctx *sdk.AppCtx, pid string, assignID int64) (*gigAssign
 	v.RespondedAt = responded.String
 	v.SubmittedAt = submitted.String
 	v.CRMConversationID = convID.Int64
-	v.WorkerURL = buildWorkerURL(token)
+	v.WorkerURL = buildWorkerURL(ctx, token)
 	if wk, err := getWorker(ctx.AppDB(), pid, v.WorkerID); err == nil {
 		if c, _ := crmGetContact(ctx, pid, wk.ContactID); c != nil {
 			wk.Contact = c

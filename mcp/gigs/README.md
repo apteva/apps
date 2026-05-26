@@ -1,4 +1,4 @@
-# Gigs (v0.1.5)
+# Gigs (v0.1.6)
 
 Agents delegate atomic work to human workers (CRM contacts) by composing
 reusable multi-modal instructions. Templates are saved instruction sets;

@@ -403,7 +403,7 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, _ *http.Request, token 
 	}
 	_ = assignID
 
-	g, err := loadGig(ctx.AppDB(), pid, gigID)
+	g, err := loadGig(ctx, pid, gigID)
 	if err != nil || g == nil {
 		httpErr(w, http.StatusNotFound, "gig not found")
 		return
@@ -615,7 +615,7 @@ func (a *App) handleContactMessageReceived(ctx *sdk.AppCtx, evt sdk.Event) error
 		_ = ctx.AppDB().QueryRow(
 			`SELECT magic_token FROM gig_assignments WHERE id=?`, assignID,
 		).Scan(&token)
-		nudge := "Thanks — to submit this, please open: " + buildWorkerURL(token)
+		nudge := "Thanks — to submit this, please open: " + buildWorkerURL(ctx, token)
 		_, _ = crmSendMessage(ctx, pid, contactID, nudge, "", "")
 		return nil
 	}
