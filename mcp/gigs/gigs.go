@@ -16,37 +16,37 @@ import (
 // ─── Types ──────────────────────────────────────────────────────────
 
 type gig struct {
-	ID                       int64                  `json:"id"`
-	ProjectID                string                 `json:"project_id"`
-	TemplateVersionID        int64                  `json:"template_version_id,omitempty"`
-	CreatedBy                string                 `json:"created_by"`
-	Title                    string                 `json:"title"`
-	Vars                     map[string]any         `json:"vars,omitempty"`
-	DerivedResultSchema      map[string]any         `json:"derived_result_schema"`
-	DerivedMediaManifest     []map[string]any       `json:"derived_media_manifest,omitempty"`
-	DerivedChecklist         []map[string]any       `json:"derived_checklist,omitempty"`
-	DerivedVariables         []map[string]any       `json:"derived_variables,omitempty"`
-	BudgetCents              int64                  `json:"budget_cents,omitempty"`
-	DeadlineAt               string                 `json:"deadline_at,omitempty"`
-	Priority                 string                 `json:"priority,omitempty"`
-	Status                   string                 `json:"status"`
-	Result                   map[string]any         `json:"result,omitempty"`
-	RejectionReason          string                 `json:"rejection_reason,omitempty"`
-	CreatedAt                string                 `json:"created_at"`
-	UpdatedAt                string                 `json:"updated_at"`
-	CompletedAt              string                 `json:"completed_at,omitempty"`
-	Composition              []gigInstructionRow    `json:"composition,omitempty"`
-	Assignments              []gigAssignmentView    `json:"assignments,omitempty"`
+	ID                   int64               `json:"id"`
+	ProjectID            string              `json:"project_id"`
+	TemplateVersionID    int64               `json:"template_version_id,omitempty"`
+	CreatedBy            string              `json:"created_by"`
+	Title                string              `json:"title"`
+	Vars                 map[string]any      `json:"vars,omitempty"`
+	DerivedResultSchema  map[string]any      `json:"derived_result_schema"`
+	DerivedMediaManifest []map[string]any    `json:"derived_media_manifest,omitempty"`
+	DerivedChecklist     []map[string]any    `json:"derived_checklist,omitempty"`
+	DerivedVariables     []map[string]any    `json:"derived_variables,omitempty"`
+	BudgetCents          int64               `json:"budget_cents,omitempty"`
+	DeadlineAt           string              `json:"deadline_at,omitempty"`
+	Priority             string              `json:"priority,omitempty"`
+	Status               string              `json:"status"`
+	Result               map[string]any      `json:"result,omitempty"`
+	RejectionReason      string              `json:"rejection_reason,omitempty"`
+	CreatedAt            string              `json:"created_at"`
+	UpdatedAt            string              `json:"updated_at"`
+	CompletedAt          string              `json:"completed_at,omitempty"`
+	Composition          []gigInstructionRow `json:"composition,omitempty"`
+	Assignments          []gigAssignmentView `json:"assignments,omitempty"`
 }
 
 type gigInstructionRow struct {
-	ID                          int64          `json:"id"`
-	SortOrder                   int            `json:"sort_order"`
-	InstructionKind             string         `json:"instruction_kind"`
-	RenderedBody                map[string]any `json:"rendered_body"`
-	ResultKey                   string         `json:"result_key,omitempty"`
-	SourceInstructionID         int64          `json:"source_instruction_id,omitempty"`
-	SourceInstructionVersionID  int64          `json:"source_instruction_version_id,omitempty"`
+	ID                         int64          `json:"id"`
+	SortOrder                  int            `json:"sort_order"`
+	InstructionKind            string         `json:"instruction_kind"`
+	RenderedBody               map[string]any `json:"rendered_body"`
+	ResultKey                  string         `json:"result_key,omitempty"`
+	SourceInstructionID        int64          `json:"source_instruction_id,omitempty"`
+	SourceInstructionVersionID int64          `json:"source_instruction_version_id,omitempty"`
 }
 
 type gigAssignmentView struct {
@@ -64,12 +64,12 @@ type gigAssignmentView struct {
 }
 
 type submission struct {
-	ID                 int64          `json:"id"`
-	AssignmentID       int64          `json:"assignment_id"`
-	Payload            map[string]any `json:"payload"`
-	AttachmentFileIDs  []int64        `json:"attachment_file_ids,omitempty"`
-	Channel            string         `json:"channel,omitempty"`
-	SubmittedAt        string         `json:"submitted_at"`
+	ID                int64          `json:"id"`
+	AssignmentID      int64          `json:"assignment_id"`
+	Payload           map[string]any `json:"payload"`
+	AttachmentFileIDs []int64        `json:"attachment_file_ids,omitempty"`
+	Channel           string         `json:"channel,omitempty"`
+	SubmittedAt       string         `json:"submitted_at"`
 }
 
 // ─── Tool registry ──────────────────────────────────────────────────
@@ -255,15 +255,15 @@ func (a *App) toolGigsCreateFromTemplate(ctx *sdk.AppCtx, args map[string]any) (
 	title := interpolate(tplv.TitleTemplate, vars)
 
 	g, ass, err := createGig(ctx, pid, createOpts{
-		TemplateVersionID: activeVID,
-		Title:             title,
-		Vars:              vars,
-		Rendered:          rendered,
-		Derived:           derived,
-		DeadlineAt:        strArg(args, "deadline_at"),
-		Priority:          strArg(args, "priority"),
-		BudgetCents:       int64Arg(args, "budget_cents"),
-		WorkerID:          int64Arg(args, "worker_id"),
+		TemplateVersionID:  activeVID,
+		Title:              title,
+		Vars:               vars,
+		Rendered:           rendered,
+		Derived:            derived,
+		DeadlineAt:         strArg(args, "deadline_at"),
+		Priority:           strArg(args, "priority"),
+		BudgetCents:        int64Arg(args, "budget_cents"),
+		WorkerID:           int64Arg(args, "worker_id"),
 		DefaultDeadlineHrs: tplv.DefaultDeadlineHours,
 	})
 	if err != nil {
@@ -430,16 +430,16 @@ func (a *App) toolGigsCreateInline(ctx *sdk.AppCtx, args map[string]any) (any, e
 // createGig is the shared write path: insert the snapshot rows, mint
 // an assignment if a worker was named, and notify via CRM.
 type createOpts struct {
-	TemplateVersionID   int64
-	Title               string
-	Vars                map[string]any
-	Rendered            []compositionItem
-	Derived             derivedComposition
-	DeadlineAt          string
-	Priority            string
-	BudgetCents         int64
-	WorkerID            int64
-	DefaultDeadlineHrs  int
+	TemplateVersionID  int64
+	Title              string
+	Vars               map[string]any
+	Rendered           []compositionItem
+	Derived            derivedComposition
+	DeadlineAt         string
+	Priority           string
+	BudgetCents        int64
+	WorkerID           int64
+	DefaultDeadlineHrs int
 }
 
 func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentView, error) {
@@ -693,13 +693,24 @@ func (a *App) toolGigsListOpen(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []*gig{}
+	ids := []int64{}
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	out := []*gig{}
+	for _, id := range ids {
 		g, err := loadGig(ctx, pid, id)
 		if err != nil {
 			return nil, err
@@ -988,7 +999,6 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 		id,
 	)
 	if err == nil {
-		defer rows.Close()
 		for rows.Next() {
 			row := gigInstructionRow{}
 			var rk sql.NullString
@@ -1003,6 +1013,13 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 			row.SourceInstructionVersionID = svid.Int64
 			g.Composition = append(g.Composition, row)
 		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
 	}
 	// Assignments.
 	aRows, err := db.Query(
@@ -1011,7 +1028,6 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 		id,
 	)
 	if err == nil {
-		defer aRows.Close()
 		for aRows.Next() {
 			v := gigAssignmentView{GigID: id}
 			var responded, submitted sql.NullString
@@ -1025,6 +1041,13 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 			v.CRMConversationID = convID.Int64
 			v.WorkerURL = buildWorkerURL(ctx, token)
 			g.Assignments = append(g.Assignments, v)
+		}
+		if err := aRows.Err(); err != nil {
+			_ = aRows.Close()
+			return nil, err
+		}
+		if err := aRows.Close(); err != nil {
+			return nil, err
 		}
 	}
 	if g.Result == nil {

@@ -14,29 +14,29 @@ import (
 // ─── Types ──────────────────────────────────────────────────────────
 
 type instruction struct {
-	ID                int64               `json:"id"`
-	ProjectID         string              `json:"project_id"`
-	Slug              string              `json:"slug"`
-	Name              string              `json:"name"`
-	Kind              string              `json:"kind"`
-	CurrentVersionID  int64               `json:"current_version_id,omitempty"`
-	ArchivedAt        string              `json:"archived_at,omitempty"`
-	CreatedAt         string              `json:"created_at"`
-	UpdatedAt         string              `json:"updated_at"`
-	CurrentVersion    *instructionVersion `json:"current_version,omitempty"`
+	ID               int64               `json:"id"`
+	ProjectID        string              `json:"project_id"`
+	Slug             string              `json:"slug"`
+	Name             string              `json:"name"`
+	Kind             string              `json:"kind"`
+	CurrentVersionID int64               `json:"current_version_id,omitempty"`
+	ArchivedAt       string              `json:"archived_at,omitempty"`
+	CreatedAt        string              `json:"created_at"`
+	UpdatedAt        string              `json:"updated_at"`
+	CurrentVersion   *instructionVersion `json:"current_version,omitempty"`
 }
 
 type instructionVersion struct {
-	ID                    int64          `json:"id"`
-	InstructionID         int64          `json:"instruction_id"`
-	Version               int            `json:"version"`
-	Status                string         `json:"status"`
-	Body                  map[string]any `json:"body"`
-	DeclaredVariables     []string       `json:"declared_variables"`
-	DefaultResultKey      string         `json:"default_result_key,omitempty"`
-	ResultField           map[string]any `json:"result_field,omitempty"`
-	CreatedBy             string         `json:"created_by,omitempty"`
-	CreatedAt             string         `json:"created_at"`
+	ID                int64          `json:"id"`
+	InstructionID     int64          `json:"instruction_id"`
+	Version           int            `json:"version"`
+	Status            string         `json:"status"`
+	Body              map[string]any `json:"body"`
+	DeclaredVariables []string       `json:"declared_variables"`
+	DefaultResultKey  string         `json:"default_result_key,omitempty"`
+	ResultField       map[string]any `json:"result_field,omitempty"`
+	CreatedBy         string         `json:"created_by,omitempty"`
+	CreatedAt         string         `json:"created_at"`
 }
 
 // ─── Tool registry ──────────────────────────────────────────────────
@@ -302,8 +302,8 @@ func (a *App) toolInstructionsUpdate(ctx *sdk.AppCtx, args map[string]any) (any,
 		"new_version":    newVer,
 	})
 	return map[string]any{
-		"instruction":  updated,
-		"new_version":  updated.CurrentVersion,
+		"instruction": updated,
+		"new_version": updated.CurrentVersion,
 	}, nil
 }
 
@@ -385,12 +385,12 @@ func (a *App) toolInstructionsUsedIn(ctx *sdk.AppCtx, args map[string]any) (any,
 			return nil, err
 		}
 		out = append(out, map[string]any{
-			"template_id":     tid,
-			"name":            tname,
-			"slug":            tslug,
+			"template_id":       tid,
+			"name":              tname,
+			"slug":              tslug,
 			"pinned_version_id": pinned,
 			"latest_version_id": latest,
-			"stale":           pinned != latest,
+			"stale":             pinned != latest,
 		})
 	}
 	return map[string]any{"templates": out}, nil
@@ -484,7 +484,6 @@ func listInstructions(db *sql.DB, pid string, f listInstructionsFilter) ([]*inst
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := []*instruction{}
 	for rows.Next() {
 		ins := &instruction{ProjectID: pid}
@@ -499,6 +498,13 @@ func listInstructions(db *sql.DB, pid string, f listInstructionsFilter) ([]*inst
 		ins.CurrentVersionID = currentVID.Int64
 		ins.ArchivedAt = archivedAt.String
 		out = append(out, ins)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
 	}
 	// Hydrate current versions in a second pass to keep the loop tight.
 	for _, ins := range out {

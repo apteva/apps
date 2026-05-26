@@ -14,32 +14,32 @@ import (
 // ─── Types ──────────────────────────────────────────────────────────
 
 type template struct {
-	ID                int64            `json:"id"`
-	ProjectID         string           `json:"project_id"`
-	Slug              string           `json:"slug"`
-	Name              string           `json:"name"`
-	Kind              string           `json:"kind"`
-	CurrentVersionID  int64            `json:"current_version_id,omitempty"`
-	ArchivedAt        string           `json:"archived_at,omitempty"`
-	CreatedAt         string           `json:"created_at"`
-	UpdatedAt         string           `json:"updated_at"`
-	CurrentVersion    *templateVersion `json:"current_version,omitempty"`
+	ID               int64            `json:"id"`
+	ProjectID        string           `json:"project_id"`
+	Slug             string           `json:"slug"`
+	Name             string           `json:"name"`
+	Kind             string           `json:"kind"`
+	CurrentVersionID int64            `json:"current_version_id,omitempty"`
+	ArchivedAt       string           `json:"archived_at,omitempty"`
+	CreatedAt        string           `json:"created_at"`
+	UpdatedAt        string           `json:"updated_at"`
+	CurrentVersion   *templateVersion `json:"current_version,omitempty"`
 }
 
 type templateVersion struct {
-	ID                     int64                `json:"id"`
-	TemplateID             int64                `json:"template_id"`
-	Version                int                  `json:"version"`
-	Status                 string               `json:"status"`
-	TitleTemplate          string               `json:"title_template"`
-	DefaultDeadlineHours   int                  `json:"default_deadline_hours,omitempty"`
-	DefaultSkillIDs        []int64              `json:"default_skill_ids,omitempty"`
-	DefaultPriority        string               `json:"default_priority,omitempty"`
-	VariableOverrides      map[string]any       `json:"variable_overrides,omitempty"`
-	CreatedBy              string               `json:"created_by,omitempty"`
-	CreatedAt              string               `json:"created_at"`
-	Composition            []compositionItem    `json:"composition,omitempty"`
-	Derived                *derivedComposition  `json:"derived,omitempty"`
+	ID                   int64               `json:"id"`
+	TemplateID           int64               `json:"template_id"`
+	Version              int                 `json:"version"`
+	Status               string              `json:"status"`
+	TitleTemplate        string              `json:"title_template"`
+	DefaultDeadlineHours int                 `json:"default_deadline_hours,omitempty"`
+	DefaultSkillIDs      []int64             `json:"default_skill_ids,omitempty"`
+	DefaultPriority      string              `json:"default_priority,omitempty"`
+	VariableOverrides    map[string]any      `json:"variable_overrides,omitempty"`
+	CreatedBy            string              `json:"created_by,omitempty"`
+	CreatedAt            string              `json:"created_at"`
+	Composition          []compositionItem   `json:"composition,omitempty"`
+	Derived              *derivedComposition `json:"derived,omitempty"`
 }
 
 // ─── Tool registry ──────────────────────────────────────────────────
@@ -831,13 +831,24 @@ func listTemplates(db *sql.DB, pid string, f listTemplatesFilter) ([]*template, 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []*template{}
+	ids := []int64{}
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	out := []*template{}
+	for _, id := range ids {
 		t, err := getTemplate(db, pid, id)
 		if err != nil {
 			return nil, err
