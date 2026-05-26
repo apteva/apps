@@ -48,34 +48,65 @@ func TestRoundEven(t *testing.T) {
 	}
 }
 
-func TestPickThumbnailDerivation(t *testing.T) {
+func TestPickSmartCropDerivation(t *testing.T) {
 	// Empty list → empty string (caller falls back to center).
-	if got := pickThumbnailDerivation(nil); got != "" {
-		t.Errorf("nil derivations: got %q, want \"\"", got)
+	if got := pickSmartCropDerivation(nil, 0, true); got.StorageFileID != "" {
+		t.Errorf("nil derivations: got %q, want \"\"", got.StorageFileID)
 	}
-	// Thumbnail wins over waveform when both present.
+	// Timed renders prefer the nearest keyframe to the requested timestamp.
 	derivs := []DerivationRow{
+		{Kind: "keyframe", Status: "ok", StorageFileID: "10", PositionMs: 1_000},
+		{Kind: "keyframe", Status: "ok", StorageFileID: "20", PositionMs: 31_000},
+		{Kind: "keyframe", Status: "ok", StorageFileID: "30", PositionMs: 61_000},
 		{Kind: "waveform", Status: "ok", StorageFileID: "11"},
 		{Kind: "thumbnail", Status: "ok", StorageFileID: "22"},
 	}
-	if got := pickThumbnailDerivation(derivs); got != "22" {
-		t.Errorf("thumbnail+waveform: got %q, want \"22\"", got)
+	if got := pickSmartCropDerivation(derivs, 40_000, true); got.StorageFileID != "20" {
+		t.Errorf("nearest keyframe: got %q, want \"20\"", got.StorageFileID)
 	}
-	// Pending status is rejected; falls through to waveform.
+	// If keyframes are not preferred, thumbnail wins over waveform.
+	if got := pickSmartCropDerivation(derivs, 40_000, false); got.StorageFileID != "22" {
+		t.Errorf("thumbnail+waveform: got %q, want \"22\"", got.StorageFileID)
+	}
+	// Pending keyframes/thumbnails are rejected; falls through to waveform.
 	derivs = []DerivationRow{
+		{Kind: "keyframe", Status: "pending", StorageFileID: "12", PositionMs: 30_000},
 		{Kind: "thumbnail", Status: "pending", StorageFileID: "33"},
 		{Kind: "waveform", Status: "ok", StorageFileID: "44"},
 	}
-	if got := pickThumbnailDerivation(derivs); got != "44" {
-		t.Errorf("pending thumbnail + ok waveform: got %q, want \"44\"", got)
+	if got := pickSmartCropDerivation(derivs, 30_000, true); got.StorageFileID != "44" {
+		t.Errorf("pending keyframe/thumbnail + ok waveform: got %q, want \"44\"", got.StorageFileID)
 	}
 	// Both failed → "" (caller must fall back to center).
 	derivs = []DerivationRow{
+		{Kind: "keyframe", Status: "failed", StorageFileID: "54", PositionMs: 30_000},
 		{Kind: "thumbnail", Status: "failed", StorageFileID: "55"},
 		{Kind: "waveform", Status: "failed", StorageFileID: "66"},
 	}
-	if got := pickThumbnailDerivation(derivs); got != "" {
-		t.Errorf("both failed: got %q, want \"\"", got)
+	if got := pickSmartCropDerivation(derivs, 30_000, true); got.StorageFileID != "" {
+		t.Errorf("all failed: got %q, want \"\"", got.StorageFileID)
+	}
+}
+
+func TestPickSmartCropDerivation_TieChoosesEarlierKeyframe(t *testing.T) {
+	derivs := []DerivationRow{
+		{Kind: "keyframe", Status: "ok", StorageFileID: "later", PositionMs: 50_000},
+		{Kind: "keyframe", Status: "ok", StorageFileID: "earlier", PositionMs: 30_000},
+	}
+	if got := pickSmartCropDerivation(derivs, 40_000, true); got.StorageFileID != "earlier" {
+		t.Errorf("tie should choose earlier keyframe: got %q", got.StorageFileID)
+	}
+}
+
+func TestSmartCropFocus(t *testing.T) {
+	if got, prefer := smartCropFocus("extract_reel", map[string]any{"start_ms": float64(12_345)}); got != 12_345 || !prefer {
+		t.Errorf("extract_reel focus = (%d,%v), want (12345,true)", got, prefer)
+	}
+	if got, prefer := smartCropFocus("extract_frame", map[string]any{"at_ms": float64(6_789)}); got != 6_789 || !prefer {
+		t.Errorf("extract_frame focus = (%d,%v), want (6789,true)", got, prefer)
+	}
+	if got, prefer := smartCropFocus("crop", map[string]any{}); got != 0 || prefer {
+		t.Errorf("crop focus = (%d,%v), want (0,false)", got, prefer)
 	}
 }
 

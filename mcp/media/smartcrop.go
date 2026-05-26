@@ -8,22 +8,22 @@ package main
 //   "center" — geometric center of the source. Same as the
 //              filter-expression-based crop the planners used pre-v0.12.7.
 //
-//   "smart"  — runs muesli/smartcrop against the source's cached
-//              thumbnail derivation. Saliency-based (edge density,
+//   "smart"  — runs muesli/smartcrop against the nearest cached
+//              keyframe for timed operations, then falls back to the
+//              canonical thumbnail. Saliency-based (edge density,
 //              saturation, skin-tone proxy), no ML model, no GPU,
-//              <100 ms per call. Falls back to center if the thumbnail
-//              isn't available yet, has zero dimensions, or smartcrop
-//              errors — so the render always proceeds, even on a
-//              freshly-uploaded file the indexer hasn't derived from
-//              yet.
+//              <100 ms per call. Falls back to center if no usable
+//              derivation exists, decode fails, or smartcrop errors —
+//              so the render always proceeds, even on a freshly-
+//              uploaded file the indexer hasn't derived from yet.
 //
-// Why the cached thumbnail and not a fresh ffmpeg pass: we already
-// have a representative frame (the local + remote indexers run their
-// own seek-and-luma-check pipeline to pick one). Reusing it avoids a
+// Why cached keyframes/thumbnails and not a fresh ffmpeg pass: we
+// already have representative frames (the local + remote indexers run
+// their own seek-and-luma-check pipeline). Reusing them avoids a
 // second download + ffmpeg invocation for what's just a hint to the
-// saliency analyzer. The crop result is mapped from thumbnail-pixel
-// space back to source-pixel space using the known
-// thumbnail-vs-source dimensions.
+// saliency analyzer. The crop result is mapped from derivation-pixel
+// space back to source-pixel space using the known derivation-vs-
+// source dimensions.
 
 import (
 	"context"
@@ -52,10 +52,10 @@ type cropWindow struct {
 // computeSmartCrop returns the best crop rectangle for the given
 // source file at the target aspect ratio.
 //
-//   targetW, targetH — ratio numerator/denominator (e.g. 9, 16). The
-//                      returned W:H is normalised so cropW/cropH ==
-//                      targetW/targetH within rounding.
-//   mode             — "smart" (recommended default) | "center".
+//	targetW, targetH — ratio numerator/denominator (e.g. 9, 16). The
+//	                   returned W:H is normalised so cropW/cropH ==
+//	                   targetW/targetH within rounding.
+//	mode             — "smart" (recommended default) | "center".
 //
 // Falls back to a centered crop on any failure of the smart path
 // (missing thumbnail, decode error, smartcrop analyzer error). The
@@ -73,6 +73,8 @@ func computeSmartCrop(
 	projectID, sourceFileID string,
 	targetW, targetH int,
 	mode string,
+	focusMs int64,
+	preferKeyframe bool,
 ) (*cropWindow, error) {
 	if targetW <= 0 || targetH <= 0 {
 		return nil, fmt.Errorf("invalid target ratio %d:%d", targetW, targetH)
@@ -109,28 +111,30 @@ func computeSmartCrop(
 		return center, nil
 	}
 
-	// Smart mode — needs the source's cached thumbnail derivation. If
-	// it's missing, fall back to center rather than failing the
-	// render (the next re-render after the indexer catches up will
-	// re-evaluate).
-	thumbID := pickThumbnailDerivation(row.Derivations)
-	if thumbID == "" {
-		app.Logger().Info("smartcrop fallback to center: no thumbnail derivation yet",
+	// Smart mode — prefer the nearest cached keyframe for timed
+	// renders. If keyframes are missing, fall back to the canonical
+	// thumbnail rather than failing the render (the next re-render
+	// after the indexer catches up will re-evaluate).
+	cropSource := pickSmartCropDerivation(row.Derivations, focusMs, preferKeyframe)
+	if cropSource.StorageFileID == "" {
+		app.Logger().Info("smartcrop fallback to center: no usable frame derivation yet",
 			"file_id", sourceFileID)
 		return center, nil
 	}
-	thumb, err := downloadAndDecodeImage(ctx, sc, projectID, thumbID)
+	thumb, err := downloadAndDecodeImage(ctx, sc, projectID, cropSource.StorageFileID)
 	if err != nil {
-		app.Logger().Warn("smartcrop fallback to center: thumbnail download/decode failed",
-			"file_id", sourceFileID, "thumb_id", thumbID, "err", err.Error())
+		app.Logger().Warn("smartcrop fallback to center: frame derivation download/decode failed",
+			"file_id", sourceFileID, "derivation_kind", cropSource.Kind,
+			"derivation_file_id", cropSource.StorageFileID, "err", err.Error())
 		return center, nil
 	}
 	tBounds := thumb.Bounds()
 	tW := tBounds.Dx()
 	tH := tBounds.Dy()
 	if tW <= 0 || tH <= 0 {
-		app.Logger().Warn("smartcrop fallback to center: zero-sized thumbnail",
-			"file_id", sourceFileID, "thumb_id", thumbID)
+		app.Logger().Warn("smartcrop fallback to center: zero-sized frame derivation",
+			"file_id", sourceFileID, "derivation_kind", cropSource.Kind,
+			"derivation_file_id", cropSource.StorageFileID)
 		return center, nil
 	}
 
@@ -199,23 +203,48 @@ func roundEven(n int) int {
 	return n - (n % 2)
 }
 
-// pickThumbnailDerivation returns the storage_file_id of the most
-// recent ok-status thumbnail derivation, or "" if none exist. Audio-
-// only sources fall back to the waveform derivation as a second-best
-// saliency input (waveforms still have edges + saturation that
-// smartcrop can score).
-func pickThumbnailDerivation(derivs []DerivationRow) string {
+// pickSmartCropDerivation returns the best cached image to feed to
+// the saliency analyzer. Timed operations prefer the nearest ok
+// keyframe to the requested timestamp, then fall back to thumbnail.
+// Audio-only sources fall back to waveform as a second-best saliency
+// input (waveforms still have edges + saturation that smartcrop can
+// score).
+func pickSmartCropDerivation(derivs []DerivationRow, focusMs int64, preferKeyframe bool) DerivationRow {
+	if preferKeyframe {
+		var best DerivationRow
+		var bestDist int64
+		for _, d := range derivs {
+			if d.Kind != "keyframe" || d.Status != "ok" || d.StorageFileID == "" {
+				continue
+			}
+			dist := absInt64(d.PositionMs - focusMs)
+			if best.StorageFileID == "" || dist < bestDist || (dist == bestDist && d.PositionMs < best.PositionMs) {
+				best = d
+				bestDist = dist
+			}
+		}
+		if best.StorageFileID != "" {
+			return best
+		}
+	}
 	for _, d := range derivs {
 		if d.Kind == "thumbnail" && d.Status == "ok" && d.StorageFileID != "" {
-			return d.StorageFileID
+			return d
 		}
 	}
 	for _, d := range derivs {
 		if d.Kind == "waveform" && d.Status == "ok" && d.StorageFileID != "" {
-			return d.StorageFileID
+			return d
 		}
 	}
-	return ""
+	return DerivationRow{}
+}
+
+func absInt64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // downloadAndDecodeImage pulls a storage file's bytes via the
@@ -282,8 +311,8 @@ func (b *imageBuffer) reset() { b.pos = 0 }
 // filter instead of the symbolic `iw/ih`-based expression.
 //
 // No-op for operations that don't support cropping (trim, concat,
-// audio_extract, …) or for params that explicitly opt into
-// "crop_mode: center" (which the symbolic filter already handles).
+// audio_extract, …). "crop_mode: center" still runs this pre-pass so
+// the planner receives explicit, display-space crop coordinates.
 
 // preprocessSmartCrop returns the (possibly rewritten) params bytes.
 // Original bytes are returned unchanged on any error or no-op path —
@@ -332,7 +361,8 @@ func preprocessSmartCrop(
 	if mode != "smart" && mode != "center" {
 		return params
 	}
-	win, err := computeSmartCrop(ctx, app, sc, projectID, sources[0], rw, rh, mode)
+	focusMs, preferKeyframe := smartCropFocus(op, parsed)
+	win, err := computeSmartCrop(ctx, app, sc, projectID, sources[0], rw, rh, mode, focusMs, preferKeyframe)
 	if err != nil {
 		// Symbolic filter is fine — log + skip.
 		app.Logger().Info("smartcrop preprocess skipped",
@@ -351,4 +381,31 @@ func preprocessSmartCrop(
 		return params
 	}
 	return out
+}
+
+func smartCropFocus(op string, parsed map[string]any) (int64, bool) {
+	switch op {
+	case "extract_reel":
+		return int64FromJSONValue(parsed["start_ms"]), true
+	case "extract_frame":
+		return int64FromJSONValue(parsed["at_ms"]), true
+	default:
+		return 0, false
+	}
+}
+
+func int64FromJSONValue(v any) int64 {
+	switch x := v.(type) {
+	case int64:
+		return x
+	case int:
+		return int64(x)
+	case float64:
+		return int64(x)
+	case json.Number:
+		n, _ := x.Int64()
+		return n
+	default:
+		return 0
+	}
 }
