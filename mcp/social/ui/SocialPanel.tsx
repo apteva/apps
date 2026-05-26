@@ -386,6 +386,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
             platforms={platforms}
             oauthLanding={oauthLanding}
             projectId={projectId}
+            activeProfileId={activeProfileId}
             onClearLanding={() => setOauthLanding(null)}
             onSetLanding={(pendingId, connId) =>
               setOauthLanding({ pendingId, connectionId: connId })
@@ -522,6 +523,7 @@ function ProfileManageModal({
 }) {
   const [newName, setNewName] = useState("");
   const [newColor, setNewColor] = useState("#3b82f6");
+  const [nameDrafts, setNameDrafts] = useState<Record<number, string>>({});
   const [busy, setBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState<Profile | null>(null);
 
@@ -562,11 +564,19 @@ function ProfileManageModal({
 
   const rename = async (id: number, name: string) => {
     try {
-      await fetch(socialURL(`/profiles/${id}`, projectId), {
+      const nextName = name.trim();
+      if (!nextName) return;
+      const res = await fetch(socialURL(`/profiles/${id}`, projectId), {
         method: "PATCH",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name: nextName }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setNameDrafts((drafts) => {
+        const next = { ...drafts };
+        delete next[id];
+        return next;
       });
       onChanged();
     } catch (e) {
@@ -662,6 +672,12 @@ function ProfileManageModal({
             {profiles.map((p) => (
               <div key={p.id} className="border border-border rounded p-3 flex flex-col gap-2">
                 <div className="flex items-center gap-2">
+                  {(() => {
+                    const draftName = nameDrafts[p.id] ?? p.name;
+                    const trimmedDraft = draftName.trim();
+                    const nameChanged = trimmedDraft !== "" && trimmedDraft !== p.name;
+                    return (
+                      <>
                   <input
                     type="color"
                     value={p.color || "#94a3b8"}
@@ -670,13 +686,23 @@ function ProfileManageModal({
                   />
                   <input
                     type="text"
-                    defaultValue={p.name}
-                    onBlur={(e) => {
-                      const v = e.target.value.trim();
-                      if (v && v !== p.name) rename(p.id, v);
+                    value={draftName}
+                    onChange={(e) => setNameDrafts((drafts) => ({ ...drafts, [p.id]: e.target.value }))}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && nameChanged) rename(p.id, trimmedDraft);
                     }}
                     className="flex-1 bg-transparent border-b border-transparent hover:border-border focus:border-accent outline-none text-text font-medium"
                   />
+                  <button
+                    onClick={() => rename(p.id, trimmedDraft)}
+                    disabled={!nameChanged}
+                    className="text-xs text-accent hover:underline disabled:text-text-dim disabled:no-underline disabled:cursor-not-allowed"
+                  >
+                    Rename
+                  </button>
+                      </>
+                    );
+                  })()}
                   <span className="text-text-dim text-xs">{p.account_count ?? 0} accounts</span>
                   {!p.is_default && (
                     <button
@@ -792,11 +818,12 @@ function Tab({
 // --- AccountsView -------------------------------------------------
 
 function AccountsView({
-  accounts, platforms, oauthLanding, projectId, onClearLanding, onSetLanding, onChange, setStatus,
+  accounts, platforms, oauthLanding, projectId, activeProfileId, onClearLanding, onSetLanding, onChange, setStatus,
 }: {
   accounts: SocialAccount[]; platforms: PlatformInfo[];
   oauthLanding: { pendingId: number; connectionId: number } | null;
   projectId?: string | null;
+  activeProfileId?: number | null;
   onClearLanding: () => void;
   onSetLanding: (pendingId: number, connectionId: number) => void;
   onChange: () => void; setStatus: (s: string) => void;
@@ -862,6 +889,7 @@ function AccountsView({
           onClose={() => setAdding(false)}
           setStatus={setStatus}
           projectId={projectId}
+          activeProfileId={activeProfileId}
           onReuseExisting={(pendingId, connId) => {
             // Backend returned 'reusing existing connection' — skip the
             // OAuth popup entirely, jump straight into the page picker.
@@ -982,13 +1010,14 @@ function AccountCard({
 }
 
 function AddAccountDialog({
-  platforms, onClose, setStatus, onReuseExisting, projectId,
+  platforms, onClose, setStatus, onReuseExisting, projectId, activeProfileId,
 }: {
   platforms: PlatformInfo[];
   onClose: () => void;
   setStatus: (s: string) => void;
   onReuseExisting: (pendingId: number, connectionId: number) => void;
   projectId?: string | null;
+  activeProfileId?: number | null;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   // Inline error inside the modal. The panel-header status used to
@@ -1031,11 +1060,12 @@ function AddAccountDialog({
         try { popup.close(); } catch {}
       };
       try {
-        const res = await fetch(socialURL("/accounts/start", projectId), {
+        const profileId = activeProfileId ?? undefined;
+        const res = await fetch(socialURL("/accounts/start", projectId, { profile_id: profileId }), {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ platform: p.platform }),
+          body: JSON.stringify({ platform: p.platform, profile_id: profileId }),
         });
         if (!res.ok) {
           fail(`Start failed (HTTP ${res.status}): ${await res.text()}`);

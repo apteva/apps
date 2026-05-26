@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.20
+version: 0.14.21
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -4508,8 +4508,9 @@ func (a *App) handleAccountsStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Platform string `json:"platform"`
-		ReturnTo string `json:"return_to"`
+		Platform  string `json:"platform"`
+		ReturnTo  string `json:"return_to"`
+		ProfileID any    `json:"profile_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -4519,6 +4520,9 @@ func (a *App) handleAccountsStart(w http.ResponseWriter, r *http.Request) {
 	args := queryToolArgs(r)
 	args["platform"] = body.Platform
 	args["return_to"] = body.ReturnTo
+	if toInt64Loose(body.ProfileID) > 0 {
+		args["profile_id"] = body.ProfileID
+	}
 	out, err := a.toolAccountAdd(ctx, args)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

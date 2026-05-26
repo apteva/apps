@@ -218,6 +218,42 @@ func TestAccountAdd_HappyPath(t *testing.T) {
 	}
 }
 
+func TestAccountAdd_UsesSelectedProfile(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newSocialCtx(t, pf)
+	app := &App{}
+
+	firstOut, _ := app.toolProfileCreate(ctx, map[string]any{"name": "First"})
+	secondOut, _ := app.toolProfileCreate(ctx, map[string]any{"name": "Second"})
+	first := firstOut.(map[string]any)["profile"].(*Profile)
+	second := secondOut.(map[string]any)["profile"].(*Profile)
+	if first.ID == second.ID {
+		t.Fatal("test setup created duplicate profile ids")
+	}
+
+	out, err := app.toolAccountAdd(ctx, map[string]any{
+		"platform":   "twitter",
+		"profile_id": second.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingID := out.(map[string]any)["pending_account_id"].(int64)
+	var storedProfileID int64
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COALESCE(profile_id,0) FROM pending_accounts WHERE id=?`,
+		pendingID,
+	).Scan(&storedProfileID); err != nil {
+		t.Fatal(err)
+	}
+	if storedProfileID != second.ID {
+		t.Fatalf("pending profile_id = %d, want selected profile %d", storedProfileID, second.ID)
+	}
+	if storedProfileID == first.ID {
+		t.Fatalf("pending account was assigned to first/default profile %d", first.ID)
+	}
+}
+
 func TestAccountAdd_UnsupportedPlatform(t *testing.T) {
 	ctx := newSocialCtx(t, newRecordingPlatform())
 	app := &App{}
