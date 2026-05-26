@@ -133,11 +133,15 @@ func workerPageHTML(token string) string {
   .previews { display: grid; gap: 10px; }
   .preview-card { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; }
   .preview-media { background: #050505; }
+  .preview-media.collapsed { display: none; }
+  .preview-card.video-preview { max-width: 360px; }
+  .preview-card.video-preview .preview-media video { max-height: 220px; object-fit: contain; background: #050505; }
   .preview-media video, .preview-media audio, .preview-media img { width: 100%; border-radius: 0; }
   .preview-media audio { padding: 10px; background: var(--surface); }
   .preview-file { padding: 14px; color: var(--fg); background: var(--surface-2); word-break: break-word; }
   .preview-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 8px 10px; color: var(--muted); font-size: 13px; }
   .preview-status.error { color: var(--crit); }
+  .preview-toggle { margin: 0 10px 10px; justify-self: start; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--fg); padding: 7px 10px; font: inherit; font-size: 13px; cursor: pointer; }
   .single-input { display: grid; gap: 8px; }
   .uploaded { margin: 0; padding: 0; list-style: none; display: grid; gap: 5px; color: var(--muted); font-size: 13px; }
   .uploaded li { display: flex; justify-content: space-between; gap: 10px; border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; background: var(--surface); }
@@ -662,6 +666,8 @@ func workerPageHTML(token string) string {
 	      const url = URL.createObjectURL(file);
 	      let node = null;
 	      if (file.type.startsWith("video/")) {
+	        card.classList.add("video-preview");
+	        media.classList.add("collapsed");
 	        node = document.createElement("video");
 	        node.controls = true;
 	        node.preload = "metadata";
@@ -693,6 +699,9 @@ func workerPageHTML(token string) string {
 	      meta.appendChild(state);
 	      card.appendChild(media);
 	      card.appendChild(meta);
+	      if (file.type.startsWith("video/")) {
+	        card.appendChild(videoPreviewToggle(media));
+	      }
 	      return {
 	        card,
 	        setStatus(text, isError) {
@@ -710,6 +719,8 @@ func workerPageHTML(token string) string {
 	      const mime = file.mime || file.content_type || "";
 	      let node = null;
 	      if (url && mime.startsWith("video/")) {
+	        card.classList.add("video-preview");
+	        media.classList.add("collapsed");
 	        node = document.createElement("video");
 	        node.controls = true;
 	        node.preload = "metadata";
@@ -746,7 +757,21 @@ func workerPageHTML(token string) string {
 	      meta.appendChild(state);
 	      card.appendChild(media);
 	      card.appendChild(meta);
+	      if (url && mime.startsWith("video/")) {
+	        card.appendChild(videoPreviewToggle(media));
+	      }
 	      return { card, setStatus(text) { state.textContent = text; } };
+	    }
+	    function videoPreviewToggle(media) {
+	      const button = document.createElement("button");
+	      button.type = "button";
+	      button.className = "preview-toggle";
+	      button.textContent = "Show video preview";
+	      button.addEventListener("click", () => {
+	        const hidden = media.classList.toggle("collapsed");
+	        button.textContent = hidden ? "Show video preview" : "Hide video preview";
+	      });
+	      return button;
 	    }
 	    async function responseJSON(res) {
 	      const text = await res.text();
