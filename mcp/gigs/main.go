@@ -64,9 +64,6 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 // is served from /worker/<token> (the dashboard never sees it).
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
-		// Health.
-		{Pattern: "/health", Handler: a.handleHealth},
-
 		// Worker magic-link page + submission. NoAuth: the magic_token
 		// in the path is the auth. Reachable directly so workers don't
 		// need an Apteva login.
@@ -89,10 +86,6 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/gigs", Handler: a.handleHTTPGigsCollection},
 		{Pattern: "/gigs/", Handler: a.handleHTTPGigItem},
 	}
-}
-
-func (a *App) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	httpJSON(w, map[string]any{"ok": true, "app": "gigs", "version": "0.1.0"})
 }
 
 // MCPTools aggregates every tool defined across the surface files.
