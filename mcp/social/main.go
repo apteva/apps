@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.21
+version: 0.14.22
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -1775,14 +1775,9 @@ func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (
 	if pageToken != "" {
 		publishInput["access_token"] = pageToken
 	}
-	ctx.Logger().Info("publishInstagram: publish container",
-		"container_id", containerID, "ig_account", j.extID)
-	out2, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PublishTool, publishInput)
+	out2, err := a.publishInstagramContainer(ctx, j.connID, def.PublishTool, publishInput, containerID, j.extID, pageToken, first.IsVideo())
 	if err != nil {
-		return "", "", fmt.Errorf("publish_media_container: %w", err)
-	}
-	if out2 == nil || !out2.Success {
-		return "", "", upstreamError(out2)
+		return "", "", err
 	}
 	id, _ := extractPostIdentity("instagram", out2.Data)
 	url := ""
@@ -1790,6 +1785,45 @@ func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (
 		url = "https://www.instagram.com/p/" + id // best-effort; real shortcode may differ
 	}
 	return id, url, nil
+}
+
+var instagramPublishRetryDelays = []time.Duration{
+	3 * time.Second,
+	5 * time.Second,
+	8 * time.Second,
+	13 * time.Second,
+	21 * time.Second,
+}
+
+func (a *App) publishInstagramContainer(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any, containerID, igAccountID, pageToken string, isVideo bool) (*sdk.ExecuteResult, error) {
+	var lastErr error
+	for attempt := 1; attempt <= len(instagramPublishRetryDelays)+1; attempt++ {
+		ctx.Logger().Info("publishInstagram: publish container",
+			"container_id", containerID, "ig_account", igAccountID, "attempt", attempt)
+		out, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, input)
+		if err == nil && out != nil && out.Success {
+			return out, nil
+		}
+		if err != nil {
+			lastErr = fmt.Errorf("publish_media_container: %w", err)
+		} else {
+			lastErr = fmt.Errorf("publish_media_container: %w", upstreamError(out))
+		}
+		if attempt > len(instagramPublishRetryDelays) || !isTransientInstagramPublishError(lastErr) {
+			return nil, lastErr
+		}
+		delay := instagramPublishRetryDelays[attempt-1]
+		ctx.Logger().Warn("publishInstagram: transient publish failure; retrying",
+			"container_id", containerID, "ig_account", igAccountID, "attempt", attempt, "delay", delay.String(), "err", lastErr)
+		if isVideo {
+			if err := a.waitContainerReady(ctx, connID, containerID, pageToken); err != nil {
+				ctx.Logger().Warn("publishInstagram: container readiness check before retry failed",
+					"container_id", containerID, "attempt", attempt, "err", err)
+			}
+		}
+		time.Sleep(delay)
+	}
+	return nil, lastErr
 }
 
 // publishYoutube drives YouTube's resumable upload protocol.
@@ -1963,28 +1997,77 @@ func (a *App) waitContainerReady(ctx *sdk.AppCtx, connID int64, containerID, pag
 		if out == nil || !out.Success {
 			return upstreamError(out)
 		}
-		var resp struct {
-			StatusCode string `json:"status_code"`
-			Status     string `json:"status"`
-		}
-		_ = json.Unmarshal(out.Data, &resp)
+		statusCode, status := instagramContainerStatus(out.Data)
 		ctx.Logger().Info("publishInstagram: container status",
-			"container_id", containerID, "status_code", resp.StatusCode)
-		switch resp.StatusCode {
+			"container_id", containerID, "status_code", statusCode)
+		switch statusCode {
 		case "FINISHED":
 			return nil
 		case "ERROR":
-			return fmt.Errorf("container processing failed: %s", resp.Status)
+			return fmt.Errorf("container processing failed: %s", status)
 		case "EXPIRED":
 			return fmt.Errorf("container expired (>24h old) before publish")
 		}
 		// IN_PROGRESS or empty — keep polling.
 		if time.Now().After(deadline) {
 			return fmt.Errorf("container still %q after %s — giving up",
-				resp.StatusCode, maxWait)
+				statusCode, maxWait)
 		}
 		time.Sleep(interval)
 	}
+}
+
+func instagramContainerStatus(raw json.RawMessage) (string, string) {
+	var obj map[string]any
+	if json.Unmarshal(raw, &obj) != nil {
+		return "", ""
+	}
+	if data, ok := obj["data"].(map[string]any); ok {
+		obj = data
+	}
+	code := strings.ToUpper(strings.TrimSpace(toString(obj["status_code"])))
+	status := strings.TrimSpace(toString(obj["status"]))
+	if code == "" {
+		code = strings.ToUpper(status)
+	}
+	return code, status
+}
+
+func isTransientInstagramPublishError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	transientTerms := []string{
+		"9007",
+		"media id is not available",
+		"media is not ready",
+		"media is still processing",
+		"not ready",
+		"please wait",
+		"temporarily",
+		"timeout",
+		"deadline exceeded",
+		"connection reset",
+		"eof",
+		"unexpected eof",
+		"service unavailable",
+		"bad gateway",
+		"gateway timeout",
+		"too many calls",
+		"rate limit",
+		"\"code\":2",
+		"\"code\":4",
+		"\"code\":17",
+		"\"code\":32",
+		"\"code\":613",
+	}
+	for _, term := range transientTerms {
+		if strings.Contains(msg, term) {
+			return true
+		}
+	}
+	return false
 }
 
 // publishTikTok drives TikTok's video publish flow.

@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -45,7 +46,8 @@ type recordingPlatform struct {
 	nextStartOAuth   *sdk.OAuthStartResult
 	nextStartErr     error
 	executeResponses map[string]*sdk.ExecuteResult // keyed by tool name
-	callAppResponses map[string]json.RawMessage    // keyed by "app:tool"
+	executeSequences map[string][]*sdk.ExecuteResult
+	callAppResponses map[string]json.RawMessage // keyed by "app:tool"
 	executeErr       error
 	identity         *sdk.InstallIdentity
 }
@@ -64,6 +66,7 @@ func newRecordingPlatform() *recordingPlatform {
 			ProjectID: "test-proj",
 		},
 		executeResponses: map[string]*sdk.ExecuteResult{},
+		executeSequences: map[string][]*sdk.ExecuteResult{},
 		callAppResponses: map[string]json.RawMessage{},
 	}
 }
@@ -89,6 +92,11 @@ func (p *recordingPlatform) ExecuteIntegrationTool(connID int64, tool string, in
 	p.mu.Unlock()
 	if p.executeErr != nil {
 		return nil, p.executeErr
+	}
+	if seq := p.executeSequences[tool]; len(seq) > 0 {
+		r := seq[0]
+		p.executeSequences[tool] = seq[1:]
+		return r, nil
 	}
 	if r, ok := p.executeResponses[tool]; ok {
 		return r, nil
@@ -787,6 +795,77 @@ func TestPublishInstagram_TwoStepWithStorageMedia(t *testing.T) {
 	ctx.AppDB().QueryRow(`SELECT status FROM post_targets WHERE post_id=?`, postID).Scan(&status)
 	if status != "published" {
 		t.Errorf("target status = %q", status)
+	}
+}
+
+func TestPublishInstagram_RetriesTransientPublishRace(t *testing.T) {
+	oldDelays := instagramPublishRetryDelays
+	instagramPublishRetryDelays = []time.Duration{0}
+	defer func() { instagramPublishRetryDelays = oldDelays }()
+
+	pf := newRecordingPlatform()
+	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"url\":\"/files/88/content?sig=abc&exp=99\",\"file_id\":88}"}]}}`,
+	)
+	pf.executeResponses["create_media_container"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"id":"container_retry"}`),
+	}
+	pf.executeSequences["publish_media_container"] = []*sdk.ExecuteResult{
+		{
+			Success: false,
+			Status:  400,
+			Data:    json.RawMessage(`{"error":{"code":9007,"message":"Media ID is not available"}}`),
+		},
+		{
+			Success: true,
+			Status:  200,
+			Data:    json.RawMessage(`{"id":"ig_retry_ok"}`),
+		},
+	}
+
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, status)
+		 VALUES ('test-proj', 'instagram', 42, 'ig-acct-1', 'My Brand', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	out, err := app.toolPostCreate(ctx, map[string]any{
+		"body":               "hello insta retry",
+		"social_account_ids": []any{acctID},
+		"media_storage_ids":  []any{int64(88)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	postID := out.(map[string]any)["post_id"].(int64)
+
+	publishCalls := 0
+	for _, c := range pf.executeCalls {
+		if c.Tool == "publish_media_container" {
+			publishCalls++
+		}
+	}
+	if publishCalls != 2 {
+		t.Fatalf("expected publish_media_container to be retried once, got %d calls: %+v", publishCalls, pf.executeCalls)
+	}
+
+	var status, platformPostID, lastErr string
+	ctx.AppDB().QueryRow(
+		`SELECT status, COALESCE(platform_post_id,''), COALESCE(last_error,'') FROM post_targets WHERE post_id=?`,
+		postID,
+	).Scan(&status, &platformPostID, &lastErr)
+	if status != "published" {
+		t.Fatalf("target status = %q, last_error=%q", status, lastErr)
+	}
+	if platformPostID != "ig_retry_ok" {
+		t.Errorf("platform_post_id = %q", platformPostID)
+	}
+	if lastErr != "" {
+		t.Errorf("last_error should be cleared after retry success, got %q", lastErr)
 	}
 }
 
