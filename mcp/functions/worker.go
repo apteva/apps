@@ -24,9 +24,11 @@ import (
 // worker to import its handler module and send the ready frame.
 const coldStartTimeout = 15 * time.Second
 
-// maxFrame caps a single protocol frame — generous for an event
-// payload or a handler result, small enough to reject a runaway.
-const maxFrame = 8 << 20 // 8 MiB
+// maxFrame caps a single protocol frame between the sidecar and a warm
+// function worker. Keep this high enough for integration/app-call results
+// that legitimately carry binary envelopes (for example Google Drive audio
+// download -> storage upload), while still rejecting truly runaway payloads.
+const maxFrame = 128 << 20 // 128 MiB
 
 // worker is one warm runtime process. It imports the function's
 // handler once at boot, then serves invocations one at a time over a

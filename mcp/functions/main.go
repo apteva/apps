@@ -10,7 +10,7 @@
 // Triggers:
 //   - HTTP   — POST /fn/<name> (auto-routed, gateway-reachable).
 //   - Cron   — pair with the Jobs app: jobs_schedule with
-//              target={kind:http, app:"functions", path:"/fn/<name>"}.
+//     target={kind:http, app:"functions", path:"/fn/<name>"}.
 //   - Manual — functions_invoke MCP tool.
 //
 // Deferred post-v1.0: the python runtime, max_memory_mb enforcement,
@@ -53,7 +53,7 @@ var examplesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: functions
 display_name: Functions
-version: 1.4.0
+version: 1.4.1
 description: |
   Lambda-style serverless functions in node or Go. Each function is
   an immutable, built version served by a pool of warm worker
