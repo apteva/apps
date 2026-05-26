@@ -580,7 +580,7 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
             <thead className="text-text-dim text-xs uppercase tracking-wide bg-bg-input/50">
               <tr>
                 <th className="text-left px-4 py-2 font-normal">Name</th>
-                <th className="text-left px-4 py-2 font-normal w-24">Size</th>
+                <th className="text-left px-4 py-2 font-normal w-32 whitespace-nowrap">Size</th>
                 <th className="text-left px-4 py-2 font-normal w-44">Modified</th>
                 <th className="text-left px-4 py-2 font-normal w-24">Visibility</th>
                 <th className="text-right px-4 py-2 font-normal w-32">Actions</th>
@@ -599,7 +599,7 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
                       <span>{f.name}</span>
                     </button>
                   </td>
-                  <td className="px-4 py-2 text-text-dim">{formatFolderCount(f.file_count)}</td>
+                  <td className="px-4 py-2 text-text-dim whitespace-nowrap">{formatFolderCount(f.file_count)}</td>
                   <td className="px-4 py-2 text-text-dim whitespace-nowrap">{formatDate(f.updated_at || f.created_at)}</td>
                   <td className="px-4 py-2 text-text-dim">folder</td>
                   <td className="px-4 py-2 text-right">
@@ -622,7 +622,7 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
                     <td className="px-4 py-2">
                       <span className="text-text truncate max-w-md inline-block align-middle" title={f.name}>{f.name}</span>
                     </td>
-                    <td className="px-4 py-2 text-text-muted">{formatSize(f.size_bytes)}</td>
+                    <td className="px-4 py-2 text-text-muted whitespace-nowrap">{formatSize(f.size_bytes)}</td>
                     <td className="px-4 py-2 text-text-muted whitespace-nowrap">{formatDate(f.updated_at || f.created_at)}</td>
                     <td className="px-4 py-2">
                       <VisibilityBadge value={f.visibility} />
