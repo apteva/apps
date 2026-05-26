@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: certs
 display_name: Certs
-version: 0.5.1
+version: 0.5.2
 description: |
   TLS certificate issuance for Apteva projects. Talks to Let's
   Encrypt (or any RFC 8555 ACME directory) using DNS-01 or HTTP-01
@@ -44,7 +44,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: cert_issue,    description: "Issue a TLS cert for an FQDN. Async — returns a cert_id with status=pending; poll cert_get for completion. Args: fqdn." }
+    - { name: cert_issue,    description: "Issue a TLS cert for an FQDN. Async — returns a cert_id with status=pending; poll cert_get for completion. Args: fqdn, challenge_type? (dns-01|http-01; overrides app default and is remembered for renewal)." }
     - { name: cert_get,      description: "Fetch one cert by id or fqdn. Args: id OR fqdn." }
     - { name: cert_list,     description: "List certs in this project. Args: include_revoked? (default false)." }
     - { name: cert_material, description: "Return PEM cert + key for an FQDN. PRIVILEGED — only the server (TLS cache) and the certs app itself may call this. Args: fqdn." }

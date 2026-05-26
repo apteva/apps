@@ -153,8 +153,8 @@ type attachDomainSpec struct {
 	// record for fqdn. Used when the apex sits in our Domains catalog.
 	// ManageDNS=false: client already pointed fqdn at our parent
 	// machine; fleet skips the DNS write and still does cert + route.
-	// The certs app auto-falls back to HTTP-01 in that case, so the
-	// cert still gets issued without us touching the client's DNS.
+	// Fleet forces certs to use HTTP-01 in that case, so issuance
+	// never tries DNS-01 against a zone we do not control.
 	ManageDNS bool
 }
 
@@ -351,7 +351,7 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec at
 	// deploy: a failed kickoff does NOT roll back DNS — operator
 	// retries cert_issue via the certs panel.
 	if a.certsAvailable(ctx) {
-		if cErr := callCertsTool(ctx, projectID, "cert_issue", map[string]any{"fqdn": fqdn}, nil); cErr != nil {
+		if cErr := callCertsTool(ctx, projectID, "cert_issue", certIssueArgs(fqdn, spec.ManageDNS), nil); cErr != nil {
 			_ = a.store.recordEvent(t.ID, "domain.cert_kickoff_failed", "tool:attach_domain", map[string]any{
 				"fqdn": fqdn, "error": cErr.Error(),
 			})
@@ -363,6 +363,14 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec at
 	// tenant's apteva-server port. No-op when routes isn't bound.
 	a.registerRouteForTenant(ctx, t.ID, fqdn)
 	return nil
+}
+
+func certIssueArgs(fqdn string, manageDNS bool) map[string]any {
+	args := map[string]any{"fqdn": fqdn}
+	if !manageDNS {
+		args["challenge_type"] = "http-01"
+	}
+	return args
 }
 
 // detachDomain best-effort deletes the DNS record, revokes the cert,

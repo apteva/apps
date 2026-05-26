@@ -116,7 +116,8 @@ func (a *App) httpIssueCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		FQDN string `json:"fqdn"`
+		FQDN          string `json:"fqdn"`
+		ChallengeType string `json:"challenge_type"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid JSON")
@@ -126,13 +127,22 @@ func (a *App) httpIssueCert(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "fqdn required")
 		return
 	}
-	c, err := dbInsertOrTouchCert(globalCtx.AppDB(), pid, body.FQDN)
+	challengeType, err := normaliseChallengeTypeOverride(body.ChallengeType)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	c, err := dbInsertOrTouchCertWithChallenge(globalCtx.AppDB(), pid, body.FQDN, challengeType)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	emit("certs.issuance.requested", map[string]any{"cert_id": c.ID, "fqdn": c.FQDN})
-	a.kickIssuance(globalCtx, pid, body.FQDN)
+	payload := map[string]any{"cert_id": c.ID, "fqdn": c.FQDN}
+	if challengeType != "" {
+		payload["challenge_type"] = challengeType
+	}
+	emit("certs.issuance.requested", payload)
+	a.kickIssuance(globalCtx, pid, body.FQDN, challengeType)
 	httpJSON(w, map[string]any{"cert": c})
 }
 
@@ -204,8 +214,8 @@ func lookupCertByKey(projectID, key string) (*Cert, error) {
 
 type notFoundErr struct{ kind, key string }
 
-func (e *notFoundErr) Error() string      { return e.kind + " " + e.key + " not found" }
-func errNotFound(kind, key string) error  { return &notFoundErr{kind: kind, key: key} }
+func (e *notFoundErr) Error() string     { return e.kind + " " + e.key + " not found" }
+func errNotFound(kind, key string) error { return &notFoundErr{kind: kind, key: key} }
 
 func httpJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")

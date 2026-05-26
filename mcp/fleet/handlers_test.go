@@ -247,6 +247,17 @@ func TestDomainGrantHelpers(t *testing.T) {
 	}
 }
 
+func TestCertIssueArgs_ForcesHTTP01ForClientManagedDNS(t *testing.T) {
+	managed := certIssueArgs("managed.example.com", true)
+	if _, ok := managed["challenge_type"]; ok {
+		t.Fatalf("managed DNS should not force challenge_type: %+v", managed)
+	}
+	external := certIssueArgs("agents.flexylead.com", false)
+	if external["challenge_type"] != "http-01" {
+		t.Fatalf("client-managed DNS challenge_type = %v, want http-01", external["challenge_type"])
+	}
+}
+
 func TestSlugDataDir_Validation(t *testing.T) {
 	cases := []struct {
 		slug    string

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -15,9 +16,10 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "cert_issue", Handler: a.toolIssue,
-			Description: "Issue a TLS cert for an FQDN. Async — returns the cert row with status=issuing or pending; poll cert_get for completion. Args: fqdn.",
+			Description: "Issue a TLS cert for an FQDN. Async — returns the cert row with status=issuing or pending; poll cert_get for completion. Args: fqdn, challenge_type? (dns-01|http-01; overrides app default and is remembered for renewal).",
 			InputSchema: schemaObject(map[string]any{
-				"fqdn": map[string]any{"type": "string"},
+				"fqdn":           map[string]any{"type": "string"},
+				"challenge_type": map[string]any{"type": "string", "enum": []string{"dns-01", "http-01"}},
 			}, []string{"fqdn"}),
 		},
 		{
@@ -72,12 +74,20 @@ func (a *App) toolIssue(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if fqdn == "" {
 		return nil, errors.New("fqdn required")
 	}
-	row, err := dbInsertOrTouchCert(ctx.AppDB(), pid, fqdn)
+	challengeType, err := normaliseChallengeTypeOverride(strArg(args, "challenge_type"))
 	if err != nil {
 		return nil, err
 	}
-	emit("certs.issuance.requested", map[string]any{"cert_id": row.ID, "fqdn": row.FQDN})
-	a.kickIssuance(ctx, pid, fqdn)
+	row, err := dbInsertOrTouchCertWithChallenge(ctx.AppDB(), pid, fqdn, challengeType)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{"cert_id": row.ID, "fqdn": row.FQDN}
+	if challengeType != "" {
+		payload["challenge_type"] = challengeType
+	}
+	emit("certs.issuance.requested", payload)
+	a.kickIssuance(ctx, pid, fqdn, challengeType)
 	return map[string]any{"cert": row}, nil
 }
 
@@ -195,14 +205,18 @@ func (a *App) lookupCert(ctx *sdk.AppCtx, pid string, args map[string]any) (*Cer
 // kickIssuance starts an async issuance goroutine for fqdn unless one
 // is already in flight. The user-facing tool always returns
 // immediately — completion lands via cert_get / events.
-func (a *App) kickIssuance(ctx *sdk.AppCtx, projectID, fqdn string) {
+func (a *App) kickIssuance(ctx *sdk.AppCtx, projectID, fqdn string, challengeOverride ...string) {
 	release, held := a.withIssuanceLock(fqdn)
 	if !held {
 		return
 	}
+	override := ""
+	if len(challengeOverride) > 0 {
+		override = strings.TrimSpace(challengeOverride[0])
+	}
 	go func() {
 		defer release()
-		if err := a.issueCert(ctx, projectID, fqdn); err != nil {
+		if err := a.issueCert(ctx, projectID, fqdn, override); err != nil {
 			emit("certs.issuance.failed", map[string]any{
 				"fqdn": fqdn, "error": err.Error(),
 			})
@@ -225,6 +239,18 @@ func (a *App) renewalPass() {
 	for _, c := range rows {
 		globalCtx.Logger().Info("renewing cert", "fqdn", c.FQDN, "expires_at", c.ExpiresAt)
 		a.kickIssuance(globalCtx, c.ProjectID, c.FQDN)
+	}
+}
+
+func normaliseChallengeTypeOverride(s string) (string, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "":
+		return "", nil
+	case "dns-01", "http-01":
+		return s, nil
+	default:
+		return "", fmt.Errorf("unsupported challenge_type %q (dns-01 or http-01)", s)
 	}
 }
 

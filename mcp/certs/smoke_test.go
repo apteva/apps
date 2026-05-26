@@ -21,7 +21,10 @@ func openSchemaDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		t.Fatal(err)
 	}
-	for _, mig := range []string{"migrations/001_init.sql"} {
+	for _, mig := range []string{
+		"migrations/001_init.sql",
+		"migrations/002_challenge_type.sql",
+	} {
 		body, err := os.ReadFile(mig)
 		if err != nil {
 			t.Fatal(err)
@@ -94,6 +97,38 @@ func TestStoreSmoke(t *testing.T) {
 	}
 	if mat.FQDN != "app.acme.com" || len(mat.CertPEM) == 0 {
 		t.Fatalf("material content: %+v", mat)
+	}
+}
+
+func TestStoreChallengeType_PersistsForRenewal(t *testing.T) {
+	db := openSchemaDB(t)
+	defer db.Close()
+
+	c, err := dbInsertOrTouchCertWithChallenge(db, "p1", "agents.flexylead.com", "http-01")
+	if err != nil {
+		t.Fatalf("insert with challenge: %v", err)
+	}
+	if c.ChallengeType != "http-01" {
+		t.Fatalf("challenge_type = %q, want http-01", c.ChallengeType)
+	}
+
+	c, err = dbInsertOrTouchCert(db, "p1", "agents.flexylead.com")
+	if err != nil {
+		t.Fatalf("touch without challenge: %v", err)
+	}
+	if c.ChallengeType != "http-01" {
+		t.Fatalf("touch without override cleared challenge_type: %q", c.ChallengeType)
+	}
+}
+
+func TestNormaliseChallengeTypeOverride(t *testing.T) {
+	for _, ok := range []string{"", "dns-01", "http-01", " HTTP-01 "} {
+		if _, err := normaliseChallengeTypeOverride(ok); err != nil {
+			t.Fatalf("normaliseChallengeTypeOverride(%q): %v", ok, err)
+		}
+	}
+	if _, err := normaliseChallengeTypeOverride("tls-alpn-01"); err == nil {
+		t.Fatal("expected unsupported challenge type to fail")
 	}
 }
 

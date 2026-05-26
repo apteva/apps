@@ -18,6 +18,7 @@ type Cert struct {
 	ProjectID     string `json:"project_id,omitempty"`
 	FQDN          string `json:"fqdn"`
 	Status        string `json:"status"`
+	ChallengeType string `json:"challenge_type,omitempty"`
 	Serial        string `json:"serial,omitempty"`
 	IssuedAt      string `json:"issued_at,omitempty"`
 	ExpiresAt     string `json:"expires_at,omitempty"`
@@ -29,32 +30,46 @@ type Cert struct {
 }
 
 type CertMaterial struct {
-	FQDN     string
-	CertPEM  []byte
-	KeyPEM   []byte
-	Issued   time.Time
-	Expires  time.Time
-	Status   string
+	FQDN    string
+	CertPEM []byte
+	KeyPEM  []byte
+	Issued  time.Time
+	Expires time.Time
+	Status  string
 }
 
 // ─── Cert CRUD ─────────────────────────────────────────────────────
 
 func dbInsertOrTouchCert(db *sql.DB, projectID, fqdn string) (*Cert, error) {
+	return dbInsertOrTouchCertWithChallenge(db, projectID, fqdn, "")
+}
+
+func dbInsertOrTouchCertWithChallenge(db *sql.DB, projectID, fqdn, challengeType string) (*Cert, error) {
 	if strings.TrimSpace(fqdn) == "" {
 		return nil, errors.New("fqdn required")
 	}
+	challengeType = strings.TrimSpace(challengeType)
 	_, err := db.Exec(
-		`INSERT INTO certs (project_id, fqdn, status, last_attempt_at)
-		 VALUES (?, ?, 'pending', ?)
+		`INSERT INTO certs (project_id, fqdn, status, challenge_type, last_attempt_at)
+		 VALUES (?, ?, 'pending', NULLIF(?, ''), ?)
 		 ON CONFLICT(project_id, fqdn) DO UPDATE SET
+		   challenge_type  = COALESCE(NULLIF(excluded.challenge_type, ''), certs.challenge_type),
 		   last_attempt_at = excluded.last_attempt_at,
 		   updated_at      = CURRENT_TIMESTAMP`,
-		projectID, fqdn, nowUTC(),
+		projectID, fqdn, challengeType, nowUTC(),
 	)
 	if err != nil {
 		return nil, err
 	}
 	return dbGetCertByFQDN(db, projectID, fqdn)
+}
+
+func dbSetCertChallengeType(db *sql.DB, id int64, challengeType string) error {
+	_, err := db.Exec(
+		`UPDATE certs SET challenge_type = NULLIF(?, ''), updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		strings.TrimSpace(challengeType), id,
+	)
+	return err
 }
 
 func dbSetCertStatus(db *sql.DB, id int64, status, errMsg string) error {
@@ -168,6 +183,7 @@ func dbDueForRenewal(db *sql.DB, window time.Duration) ([]Cert, error) {
 }
 
 const certColumns = `id, project_id, fqdn, status, serial,
+		COALESCE(challenge_type,''),
 		COALESCE(issued_at,''), COALESCE(expires_at,''),
 		COALESCE(last_renewed_at,''), COALESCE(last_attempt_at,''),
 		error, created_at, updated_at`
@@ -178,6 +194,7 @@ func scanCert(r rowScanner) (*Cert, error) {
 	var c Cert
 	if err := r.Scan(
 		&c.ID, &c.ProjectID, &c.FQDN, &c.Status, &c.Serial,
+		&c.ChallengeType,
 		&c.IssuedAt, &c.ExpiresAt,
 		&c.LastRenewedAt, &c.LastAttemptAt,
 		&c.Error, &c.CreatedAt, &c.UpdatedAt,

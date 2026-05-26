@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.8.3
+version: 0.8.4
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -82,7 +82,7 @@ provides:
     - name: tenant_run_remote
       description: Proxy an MCP tool call to a tenant.
     - name: tenant_attach_domain
-      description: Attach a public hostname to a tenant via the Domains/Certs/Routes apps.
+      description: Attach a public hostname to a tenant via the Domains/Certs/Routes apps. Client-managed DNS attachments force HTTP-01 cert issuance.
     - name: tenant_detach_domain
       description: Clear a tenant's domain link (DNS delete, cert revoke, route unregister).
     - name: tenant_domain_grant
@@ -363,7 +363,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tenant_attach_domain",
-			Description: "Attach a public hostname to a tenant. Two modes: (1) manage_dns=true (default) — Domains app writes the DNS record, Certs app issues via DNS-01, Routes app proxies; needs the apex registered in the Domains catalog. (2) manage_dns=false — client already pointed DNS at this machine; fleet skips the registrar write, Certs auto-falls back to HTTP-01 (LE validates against the parent's Caddy on this IP), Routes still proxies. Idempotent; partial-failure tolerant. Args: tenant_id, fqdn, manage_dns? (default true), target? (DNS-mode only; defaults to fleet's public_host), type? (DNS-mode only; A or CNAME; inferred from target), ttl?.",
+			Description: "Attach a public hostname to a tenant. Two modes: (1) manage_dns=true (default) — Domains app writes the DNS record, Certs app uses its configured challenge flow, Routes app proxies; needs the apex registered in the Domains catalog. (2) manage_dns=false — client already pointed DNS at this machine; fleet skips the registrar write, forces Certs challenge_type=http-01 (LE validates against the parent's Caddy on this IP), and Routes still proxies. Idempotent; partial-failure tolerant. Args: tenant_id, fqdn, manage_dns? (default true), target? (DNS-mode only; defaults to fleet's public_host), type? (DNS-mode only; A or CNAME; inferred from target), ttl?.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

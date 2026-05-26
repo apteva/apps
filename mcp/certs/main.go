@@ -27,7 +27,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: certs
 display_name: Certs
-version: 0.5.1
+version: 0.5.2
 description: TLS certificate issuance via ACME DNS-01 (through Domains app) or HTTP-01 (webroot).
 author: Apteva
 scopes: [project, global]
@@ -47,7 +47,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: cert_issue,    description: "Issue a TLS cert for an FQDN (async)." }
+    - { name: cert_issue,    description: "Issue a TLS cert for an FQDN (async). Optional challenge_type overrides the app default and is remembered for renewal." }
     - { name: cert_get,      description: "Fetch one cert by id or fqdn." }
     - { name: cert_list,     description: "List certs in this project." }
     - { name: cert_material, description: "PEM cert + key (PRIVILEGED — server only)." }
@@ -260,8 +260,14 @@ func fmtErr(stage string, err error) string {
 // issuance time with a clear error). "auto" picks dns-01 when the
 // Domains app is installed AND has at least one registered domain —
 // the existing, proven path; otherwise falls back to http-01.
-func (a *App) selectChallengeType(ctx *sdk.AppCtx, projectID string) string {
-	switch a.challengeType {
+func (a *App) selectChallengeType(ctx *sdk.AppCtx, projectID string, overrides ...string) string {
+	for _, override := range overrides {
+		switch strings.ToLower(strings.TrimSpace(override)) {
+		case "dns-01", "http-01":
+			return strings.ToLower(strings.TrimSpace(override))
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(a.challengeType)) {
 	case "dns-01", "http-01":
 		return a.challengeType
 	case "", "auto":

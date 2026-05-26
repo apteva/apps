@@ -26,14 +26,20 @@ import (
 //
 // Concurrency: caller must hold withIssuanceLock(fqdn) so two
 // goroutines don't race on the same _acme-challenge slot.
-func (a *App) issueCert(ctx *sdk.AppCtx, projectID, fqdn string) error {
+func (a *App) issueCert(ctx *sdk.AppCtx, projectID, fqdn, challengeOverride string) error {
 	row, err := dbGetCertByFQDN(ctx.AppDB(), projectID, fqdn)
 	if err != nil {
 		return err
 	}
 	if row == nil {
-		row, err = dbInsertOrTouchCert(ctx.AppDB(), projectID, fqdn)
+		row, err = dbInsertOrTouchCertWithChallenge(ctx.AppDB(), projectID, fqdn, challengeOverride)
 		if err != nil {
+			return err
+		}
+	}
+	challengeType := a.selectChallengeType(ctx, projectID, challengeOverride, row.ChallengeType)
+	if challengeOverride != "" && challengeOverride != row.ChallengeType {
+		if err := dbSetCertChallengeType(ctx.AppDB(), row.ID, challengeOverride); err != nil {
 			return err
 		}
 	}
@@ -43,9 +49,7 @@ func (a *App) issueCert(ctx *sdk.AppCtx, projectID, fqdn string) error {
 		return errors.New("acme_email not configured")
 	}
 	_ = dbSetCertStatus(ctx.AppDB(), row.ID, "issuing", "")
-	emit("certs.issuance.started", map[string]any{"cert_id": row.ID, "fqdn": fqdn})
-
-	challengeType := a.selectChallengeType(ctx, projectID)
+	emit("certs.issuance.started", map[string]any{"cert_id": row.ID, "fqdn": fqdn, "challenge_type": challengeType})
 
 	// resolveApex talks to the Domains app to find the apex under
 	// which fqdn lives. Only dns-01 needs it (TXT-write target);
