@@ -1743,6 +1743,16 @@ function TimelinePreview({
           seek(nextStart);
         }}
       />
+      {isReel ? (
+        <SmartCropCheck
+          row={row}
+          startMs={safeStart}
+          ratio={fields.target_ratio || "9:16"}
+          previewBase={previewBase}
+          storageQuery={storageQuery}
+          onUseSmart={() => setField("crop_mode", "smart")}
+        />
+      ) : null}
     </div>
   );
 }
@@ -1916,6 +1926,105 @@ function ReelGuide({ ratio }: { ratio: string }) {
   );
 }
 
+interface SmartCropPreviewResult {
+  crop: { x: number; y: number; width: number; height: number };
+  imageWidth: number;
+  imageHeight: number;
+}
+
+function SmartCropCheck({
+  row,
+  startMs,
+  ratio,
+  previewBase,
+  storageQuery,
+  onUseSmart,
+}: {
+  row: MediaRow;
+  startMs: number;
+  ratio: string;
+  previewBase: string;
+  storageQuery: string;
+  onUseSmart: () => void;
+}) {
+  const frames = keyframesFor(row);
+  const frame = nearestKeyframe(frames, startMs) ?? posterDerivation(row);
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<SmartCropPreviewResult | null>(null);
+
+  const src = frame ? `${previewBase}/${frame.storage_file_id}/content?${storageQuery}` : "";
+  useEffect(() => {
+    setResult(null);
+    setError("");
+    setOpen(false);
+  }, [frame?.id, ratio]);
+
+  if (!frame) {
+    return (
+      <div className="border border-border rounded px-3 py-2 text-xs text-text-dim">
+        Smart crop check needs a thumbnail or keyframe.
+      </div>
+    );
+  }
+
+  const label = frame.kind === "keyframe"
+    ? `nearest keyframe ${formatDuration(frame.position_ms ?? 0)}`
+    : "thumbnail fallback";
+
+  const run = async () => {
+    onUseSmart();
+    setOpen(true);
+    setBusy(true);
+    setError("");
+    try {
+      setResult(await estimateSmartCropPreview(src, ratio));
+    } catch (e) {
+      setResult(null);
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="border border-border rounded p-2 space-y-2">
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={run}
+          disabled={busy}
+          className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input disabled:opacity-50"
+        >
+          {busy ? "Checking…" : "Check smart crop"}
+        </button>
+        <span className="text-[10px] text-text-dim truncate">{label}</span>
+      </div>
+      {open ? (
+        <div className="space-y-1">
+          <div className="relative overflow-hidden rounded border border-border bg-black">
+            <img src={src} alt="" className="block w-full" />
+            {result ? (
+              <div
+                className="absolute border-2 border-accent bg-accent/10 shadow-[0_0_0_999px_rgba(0,0,0,0.32)] pointer-events-none"
+                style={smartCropPreviewOverlay(result)}
+              />
+            ) : null}
+          </div>
+          {error ? (
+            <div className="text-[10px] text-red-400">{error}</div>
+          ) : (
+            <div className="text-[10px] text-text-dim">
+              UI estimate on {label}; render uses the server smart-crop pass.
+            </div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div className="border border-border rounded px-2 py-1 min-w-0">
@@ -2048,6 +2157,129 @@ function keyframesFor(row: MediaRow): Derivation[] {
   return (row.derivations ?? [])
     .filter((d) => d.kind === "keyframe" && d.status === "ok")
     .sort((a, b) => (a.position_ms ?? 0) - (b.position_ms ?? 0));
+}
+
+function nearestKeyframe(frames: Derivation[], ms: number): Derivation | null {
+  let best: Derivation | null = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const f of frames) {
+    const pos = f.position_ms ?? 0;
+    const dist = Math.abs(pos - ms);
+    if (!best || dist < bestDist || (dist === bestDist && pos < (best.position_ms ?? 0))) {
+      best = f;
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
+function posterDerivation(row: MediaRow): Derivation | null {
+  return (row.derivations ?? []).find((d) =>
+    (d.kind === "thumbnail" || d.kind === "cover") && d.status === "ok" && d.storage_file_id,
+  ) ?? null;
+}
+
+async function estimateSmartCropPreview(src: string, ratio: string): Promise<SmartCropPreviewResult> {
+  const img = await loadImage(src);
+  const maxSide = 360;
+  const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+  const width = Math.max(1, Math.round(img.naturalWidth * scale));
+  const height = Math.max(1, Math.round(img.naturalHeight * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("Canvas unavailable");
+  ctx.drawImage(img, 0, 0, width, height);
+  const data = ctx.getImageData(0, 0, width, height).data;
+  const crop = estimateSaliencyCrop(data, width, height, ratio);
+  return { crop, imageWidth: width, imageHeight: height };
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Could not load preview frame"));
+    img.src = src;
+  });
+}
+
+function estimateSaliencyCrop(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  ratio: string,
+): { x: number; y: number; width: number; height: number } {
+  const [rw, rh] = ratio.split(":").map((n) => Number(n));
+  const target = rw > 0 && rh > 0 ? rw / rh : 9 / 16;
+  const source = width / height;
+  let cropW = width;
+  let cropH = height;
+  if (source > target) cropW = Math.max(1, Math.round(height * target));
+  else cropH = Math.max(1, Math.round(width / target));
+  const maxX = Math.max(0, width - cropW);
+  const maxY = Math.max(0, height - cropH);
+  if (maxX === 0 && maxY === 0) return { x: 0, y: 0, width: cropW, height: cropH };
+
+  const steps = 32;
+  let best = { x: Math.round(maxX / 2), y: Math.round(maxY / 2), score: Number.NEGATIVE_INFINITY };
+  for (let i = 0; i <= steps; i++) {
+    const x = maxX > 0 ? Math.round((maxX * i) / steps) : 0;
+    const y = maxY > 0 ? Math.round((maxY * i) / steps) : 0;
+    const score = scoreCrop(data, width, height, x, y, cropW, cropH);
+    const centerPenalty = maxX > 0
+      ? Math.abs((x + cropW / 2) / width - 0.5) * 0.12
+      : Math.abs((y + cropH / 2) / height - 0.5) * 0.12;
+    const adjusted = score - centerPenalty;
+    if (adjusted > best.score) best = { x, y, score: adjusted };
+  }
+  return { x: best.x, y: best.y, width: cropW, height: cropH };
+}
+
+function scoreCrop(
+  data: Uint8ClampedArray,
+  imageW: number,
+  imageH: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): number {
+  const sample = Math.max(3, Math.floor(Math.max(w, h) / 48));
+  let score = 0;
+  let count = 0;
+  for (let py = y; py < y + h - sample && py < imageH - sample; py += sample) {
+    for (let px = x; px < x + w - sample && px < imageW - sample; px += sample) {
+      const i = (py * imageW + px) * 4;
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      const right = (py * imageW + Math.min(imageW - 1, px + sample)) * 4;
+      const down = (Math.min(imageH - 1, py + sample) * imageW + px) * 4;
+      const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+      const lumaRight = 0.299 * data[right] + 0.587 * data[right + 1] + 0.114 * data[right + 2];
+      const lumaDown = 0.299 * data[down] + 0.587 * data[down + 1] + 0.114 * data[down + 2];
+      const edge = (Math.abs(luma - lumaRight) + Math.abs(luma - lumaDown)) / 510;
+      const max = Math.max(r, g, b);
+      const min = Math.min(r, g, b);
+      const saturation = max > 0 ? (max - min) / max : 0;
+      const skin = r > 95 && g > 40 && b > 20 && r > g && r > b && Math.abs(r - g) > 12 ? 0.08 : 0;
+      score += edge * 0.62 + saturation * 0.3 + skin;
+      count++;
+    }
+  }
+  return count > 0 ? score / count : 0;
+}
+
+function smartCropPreviewOverlay(result: SmartCropPreviewResult): React.CSSProperties {
+  const { crop, imageWidth, imageHeight } = result;
+  return {
+    left: `${(crop.x / imageWidth) * 100}%`,
+    top: `${(crop.y / imageHeight) * 100}%`,
+    width: `${(crop.width / imageWidth) * 100}%`,
+    height: `${(crop.height / imageHeight) * 100}%`,
+  };
 }
 
 function numField(fields: Record<string, string>, key: string, fallback: number): number {
