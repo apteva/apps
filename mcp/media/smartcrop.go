@@ -34,6 +34,7 @@ import (
 	"image/jpeg"
 	_ "image/png" // accept PNGs (waveform falls back here for audio-only sources)
 	"io"
+	"math"
 	"strconv"
 	"strings"
 
@@ -171,6 +172,7 @@ func computeSmartCrop(
 	if srcY+ch > row.Height {
 		srcY = row.Height - ch
 	}
+	srcX, srcY = stabilizeNarrowSmartCrop(srcX, srcY, row.Width, row.Height, cw, ch)
 	return &cropWindow{
 		W: cw, H: ch,
 		X: roundEven(srcX),
@@ -201,6 +203,56 @@ func roundEven(n int) int {
 		return 0
 	}
 	return n - (n % 2)
+}
+
+// stabilizeNarrowSmartCrop keeps very narrow social crops from being
+// hijacked by textured backgrounds. muesli/smartcrop is good at
+// finding saliency, but on 16:9 → 9:16 reels it can overvalue brick,
+// cushions, shelves, etc. and park the crop too far from the natural
+// phone-frame center. For those narrow crops, blend the saliency
+// answer back toward the geometric center. Wider crops are left alone.
+func stabilizeNarrowSmartCrop(srcX, srcY, srcW, srcH, cropW, cropH int) (int, int) {
+	if srcW <= 0 || srcH <= 0 || cropW <= 0 || cropH <= 0 || srcW <= cropW {
+		return srcX, srcY
+	}
+	widthRatio := float64(srcW) / float64(cropW)
+	if widthRatio < 1.8 {
+		return srcX, srcY
+	}
+	maxX := srcW - cropW
+	centerX := maxX / 2
+	if absInt(srcX-centerX) < cropW/5 {
+		return srcX, srcY
+	}
+	weight := (widthRatio - 1.6) / 3.0
+	if weight < 0.25 {
+		weight = 0.25
+	}
+	if weight > 0.60 {
+		weight = 0.60
+	}
+	x := int(math.Round(float64(srcX)*(1-weight) + float64(centerX)*weight))
+	return clampInt(roundEven(x), 0, maxX), clampInt(roundEven(srcY), 0, srcH-cropH)
+}
+
+func clampInt(v, minV, maxV int) int {
+	if maxV < minV {
+		return minV
+	}
+	if v < minV {
+		return minV
+	}
+	if v > maxV {
+		return maxV
+	}
+	return v
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // pickSmartCropDerivation returns the best cached image to feed to

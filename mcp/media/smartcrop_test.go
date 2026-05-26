@@ -48,6 +48,23 @@ func TestRoundEven(t *testing.T) {
 	}
 }
 
+func TestStabilizeNarrowSmartCrop_BlendsReelTowardCenter(t *testing.T) {
+	// Regression for a 874x478 keyframe where generic saliency chose
+	// x=124 because the couch/brick texture was strong. For a 9:16
+	// reel, the stabilized result keeps the seated subject in frame.
+	x, y := stabilizeNarrowSmartCrop(124, 0, 874, 478, 268, 478)
+	if x != 222 || y != 0 {
+		t.Fatalf("stabilizeNarrowSmartCrop = (%d,%d), want (222,0)", x, y)
+	}
+}
+
+func TestStabilizeNarrowSmartCrop_WiderCropNoOp(t *testing.T) {
+	x, y := stabilizeNarrowSmartCrop(80, 0, 1280, 720, 960, 720)
+	if x != 80 || y != 0 {
+		t.Fatalf("wide crop should be unchanged, got (%d,%d)", x, y)
+	}
+}
+
 func TestPickSmartCropDerivation(t *testing.T) {
 	// Empty list → empty string (caller falls back to center).
 	if got := pickSmartCropDerivation(nil, 0, true); got.StorageFileID != "" {
