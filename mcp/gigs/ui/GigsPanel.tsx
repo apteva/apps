@@ -106,6 +106,27 @@ interface Template {
   current_version?: TemplateVersion;
   archived_at?: string;
 }
+interface SubmissionFileRef {
+  storage_file_id?: number;
+  filename?: string;
+  mime?: string;
+}
+interface InstructionResponse {
+  key?: string;
+  step?: number;
+  sort_order?: number;
+  instruction_kind?: string;
+  note?: string;
+  files?: SubmissionFileRef[];
+}
+interface Submission {
+  id: number;
+  assignment_id: number;
+  payload: Record<string, unknown>;
+  attachment_file_ids?: number[];
+  channel?: string;
+  submitted_at?: string;
+}
 interface Gig {
   id: number;
   title: string;
@@ -122,9 +143,12 @@ interface Gig {
     id: number;
     worker_id: number;
     status: string;
+    submitted_at?: string;
     worker_url?: string;
+    submission?: Submission;
   }>;
   result?: Record<string, unknown>;
+  submission?: Submission;
   rejection_reason?: string;
 }
 interface StorageFile {
@@ -429,6 +453,7 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
           <div key={a.id} className="p-3 text-sm flex items-center justify-between gap-3">
             <div>
               Worker #{a.worker_id} <Pill tone={a.status === "submitted" ? "info" : "default"}>{a.status}</Pill>
+              {a.submitted_at && <span className="ml-2 text-xs text-text-muted">submitted {formatDate(a.submitted_at)}</span>}
             </div>
             {a.worker_url && (
               <a className="text-sky-600 text-xs underline" target="_blank" rel="noreferrer" href={a.worker_url}>worker link</a>
@@ -453,23 +478,9 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
         </div>
       )}
 
-      {g.result && (
-        <>
-          <h3 className="mt-6 text-sm font-semibold text-text-muted uppercase tracking-wide">Submission</h3>
-          <pre className="mt-2 p-3 text-xs bg-bg-subtle rounded border border-border whitespace-pre-wrap">{JSON.stringify(g.result, null, 2)}</pre>
-        </>
-      )}
+      <SubmissionReview gig={g} projectId={projectId} busy={busy} onAction={doAction} />
 
       <div className="mt-6 flex gap-2">
-        {g.status === "submitted" && (
-          <>
-            <button disabled={busy} onClick={() => doAction("accept", {})} className="px-3 py-2 text-sm bg-emerald-600 text-white rounded">Accept</button>
-            <button disabled={busy} onClick={() => {
-              const reason = prompt("Rejection reason:") || "";
-              if (reason) doAction("reject", { reason, reopen: true });
-            }} className="px-3 py-2 text-sm border border-border rounded">Reject + reopen</button>
-          </>
-        )}
         {(g.status === "open" || g.status === "offered" || g.status === "accepted") && (
           <button disabled={busy} onClick={() => {
             const reason = prompt("Cancel reason:") || "";
@@ -478,6 +489,220 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
         )}
       </div>
     </div>
+  );
+}
+
+function SubmissionReview({
+  gig, projectId, busy, onAction,
+}: {
+  gig: Gig;
+  projectId: string;
+  busy: boolean;
+  onAction: (path: string, body: unknown) => Promise<void>;
+}) {
+  const submission = gig.submission;
+  const payload = submission?.payload || gig.result || {};
+  const responses = useMemo(() => instructionResponsesFromPayload(payload), [payload]);
+  const extraEntries = useMemo(
+    () => Object.entries(payload).filter(([key]) => key !== "instruction_responses"),
+    [payload],
+  );
+  const fileIDs = useMemo(() => collectSubmissionFileIds(submission, payload), [submission, payload]);
+  const fileKey = fileIDs.join(",");
+  const [files, setFiles] = useState<Record<number, StorageFile>>({});
+  const [fileErr, setFileErr] = useState<string | null>(null);
+  const [acceptNotes, setAcceptNotes] = useState("");
+  const [rejectReason, setRejectReason] = useState("");
+  const [reopen, setReopen] = useState(true);
+
+  useEffect(() => {
+    if (!fileKey) {
+      setFiles({});
+      setFileErr(null);
+      return;
+    }
+    let cancelled = false;
+    storageApi<{ files: StorageFile[] }>(`/files?ids=${encodeURIComponent(fileKey)}`, projectId)
+      .then((data) => {
+        if (cancelled) return;
+        const next: Record<number, StorageFile> = {};
+        for (const file of data.files || []) next[file.id] = file;
+        setFiles(next);
+        setFileErr(null);
+      })
+      .catch((e) => {
+        if (!cancelled) setFileErr((e as Error).message);
+      });
+    return () => { cancelled = true; };
+  }, [fileKey, projectId]);
+
+  if (!submission && !gig.result && gig.status !== "submitted") return null;
+
+  return (
+    <section className="mt-6 border border-border rounded overflow-hidden">
+      <div className="p-3 bg-bg-subtle border-b border-border flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold text-text-muted uppercase tracking-wide">
+            {gig.status === "reviewed" ? "Accepted submission" : "Submission"}
+          </h3>
+          <div className="mt-1 text-xs text-text-muted">
+            {submission ? (
+              <>
+                #{submission.id} from assignment #{submission.assignment_id}
+                {submission.channel ? ` via ${submission.channel}` : ""}
+                {submission.submitted_at ? ` · ${formatDate(submission.submitted_at)}` : ""}
+              </>
+            ) : (
+              "No submission row was returned for this gig."
+            )}
+          </div>
+        </div>
+        {gig.status === "submitted" && <Pill tone="info">awaiting review</Pill>}
+        {gig.status === "reviewed" && <Pill tone="success">accepted</Pill>}
+      </div>
+
+      {submission || gig.result ? (
+        <div className="p-3 space-y-4">
+          {responses.length > 0 && (
+            <div>
+              <h4 className="text-xs font-semibold text-text-muted uppercase tracking-wide">Instruction responses</h4>
+              <div className="mt-2 divide-y divide-border border border-border rounded">
+                {responses.map((response, index) => (
+                  <div key={response.key || `${response.step || index}-${index}`} className="p-3 text-sm space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="font-medium">
+                        Step {response.step || index + 1}
+                        {response.instruction_kind ? <span className="ml-2 text-xs text-text-muted">{response.instruction_kind}</span> : null}
+                      </div>
+                      {response.key ? <span className="text-xs text-text-muted">{response.key}</span> : null}
+                    </div>
+                    {response.note ? (
+                      <div className="whitespace-pre-wrap text-sm">{response.note}</div>
+                    ) : (
+                      <div className="text-xs text-text-muted">No notes for this step.</div>
+                    )}
+                    {(response.files || []).length > 0 && (
+                      <div className="flex flex-wrap gap-2">
+                        {(response.files || []).map((file, fileIndex) => (
+                          <SubmissionFileLink
+                            key={`${file.storage_file_id || file.filename || "file"}-${fileIndex}`}
+                            id={file.storage_file_id}
+                            label={file.filename}
+                            mime={file.mime}
+                            meta={file.storage_file_id ? files[file.storage_file_id] : undefined}
+                            projectId={projectId}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {submission?.attachment_file_ids?.length ? (
+            <div>
+              <h4 className="text-xs font-semibold text-text-muted uppercase tracking-wide">All submitted files</h4>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {submission.attachment_file_ids.map((id) => (
+                  <SubmissionFileLink key={id} id={id} meta={files[id]} projectId={projectId} />
+                ))}
+              </div>
+              {fileErr && <div className="mt-2 text-xs text-amber-600">Could not load file metadata: {fileErr}</div>}
+            </div>
+          ) : null}
+
+          {extraEntries.length > 0 && (
+            <div>
+              <h4 className="text-xs font-semibold text-text-muted uppercase tracking-wide">Result fields</h4>
+              <div className="mt-2 border border-border rounded divide-y divide-border">
+                {extraEntries.map(([key, value]) => (
+                  <div key={key} className="p-3 grid grid-cols-1 md:grid-cols-[160px_1fr] gap-2 text-sm">
+                    <div className="text-text-muted">{key}</div>
+                    <div className="min-w-0">{renderPayloadValue(value, files, projectId)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {responses.length === 0 && extraEntries.length === 0 && (
+            <div className="text-sm text-text-muted">The worker submitted without notes, result fields, or files.</div>
+          )}
+
+          {gig.status === "submitted" && (
+            <div className="pt-3 border-t border-border space-y-3">
+              <textarea
+                value={acceptNotes}
+                onChange={(e) => setAcceptNotes(e.target.value)}
+                rows={2}
+                className="w-full px-2 py-1 text-sm border border-border rounded bg-bg"
+                placeholder="Acceptance notes for CRM timeline"
+              />
+              <div className="flex flex-wrap gap-2">
+                <button
+                  disabled={busy}
+                  onClick={() => onAction("accept", { notes: acceptNotes })}
+                  className="px-3 py-2 text-sm bg-emerald-600 text-white rounded disabled:opacity-50"
+                >
+                  Accept submission
+                </button>
+                <input
+                  value={rejectReason}
+                  onChange={(e) => setRejectReason(e.target.value)}
+                  placeholder="Rejection reason"
+                  className="min-w-[220px] flex-1 px-2 py-1 text-sm border border-border rounded bg-bg"
+                />
+                <label className="flex items-center gap-2 text-sm text-text-muted">
+                  <input type="checkbox" checked={reopen} onChange={(e) => setReopen(e.target.checked)} />
+                  Reopen gig
+                </label>
+                <button
+                  disabled={busy || !rejectReason.trim()}
+                  onClick={() => onAction("reject", { reason: rejectReason.trim(), reopen })}
+                  className="px-3 py-2 text-sm border border-border rounded text-rose-600 disabled:opacity-50"
+                >
+                  Reject submission
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="p-3 text-sm text-amber-600">
+          This gig is marked submitted, but the latest submission was not returned by the backend.
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SubmissionFileLink({
+  id, label, mime, meta, projectId,
+}: {
+  id?: number;
+  label?: string;
+  mime?: string;
+  meta?: StorageFile;
+  projectId: string;
+}) {
+  if (!id) {
+    return <span className="px-2 py-1 text-xs border border-border rounded text-text-muted">{label || "File"}</span>;
+  }
+  const href = meta?.url || `/api/apps/storage/files/${id}/content?project_id=${encodeURIComponent(projectId)}`;
+  const name = label || meta?.name || `File #${id}`;
+  const detail = meta ? [meta.content_type, formatBytes(meta.size_bytes)].filter(Boolean).join(" · ") : mime || `Storage #${id}`;
+  return (
+    <a
+      className="inline-flex flex-col px-2 py-1 text-xs border border-border rounded hover:bg-bg-subtle"
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+    >
+      <span className="font-medium text-sky-600">{name}</span>
+      <span className="text-text-muted">{detail}</span>
+    </a>
   );
 }
 
@@ -727,6 +952,103 @@ function parseJSONMap(raw: string, label: string): Record<string, unknown> {
     throw new Error(`${label} must be a JSON object`);
   }
   return parsed as Record<string, unknown>;
+}
+
+function asRecord(v: unknown): Record<string, unknown> | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  return v as Record<string, unknown>;
+}
+
+function numberValue(v: unknown): number | undefined {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && /^\d+$/.test(v)) return Number(v);
+  return undefined;
+}
+
+function instructionResponsesFromPayload(payload: Record<string, unknown>): InstructionResponse[] {
+  const raw = payload.instruction_responses;
+  if (!Array.isArray(raw)) return [];
+  return raw.map((item) => {
+    const record = asRecord(item);
+    if (!record) return null;
+    const files = Array.isArray(record.files)
+      ? record.files.map((file) => {
+          const f = asRecord(file);
+          if (!f) return null;
+          return {
+            storage_file_id: numberValue(f.storage_file_id),
+            filename: typeof f.filename === "string" ? f.filename : undefined,
+            mime: typeof f.mime === "string" ? f.mime : undefined,
+          };
+        }).filter(Boolean) as SubmissionFileRef[]
+      : [];
+    return {
+      key: typeof record.key === "string" ? record.key : undefined,
+      step: numberValue(record.step),
+      sort_order: numberValue(record.sort_order),
+      instruction_kind: typeof record.instruction_kind === "string" ? record.instruction_kind : undefined,
+      note: typeof record.note === "string" ? record.note : undefined,
+      files,
+    };
+  }).filter(Boolean) as InstructionResponse[];
+}
+
+function collectSubmissionFileIds(submission: Submission | undefined, payload: Record<string, unknown>): number[] {
+  const ids = new Set<number>();
+  for (const id of submission?.attachment_file_ids || []) {
+    if (Number.isFinite(id)) ids.add(id);
+  }
+  collectFileIdsFromValue(payload, ids);
+  return Array.from(ids).sort((a, b) => a - b);
+}
+
+function collectFileIdsFromValue(value: unknown, ids: Set<number>) {
+  if (Array.isArray(value)) {
+    for (const item of value) collectFileIdsFromValue(item, ids);
+    return;
+  }
+  const record = asRecord(value);
+  if (!record) return;
+  const id = numberValue(record.storage_file_id);
+  if (id) ids.add(id);
+  for (const child of Object.values(record)) collectFileIdsFromValue(child, ids);
+}
+
+function renderPayloadValue(value: unknown, files: Record<number, StorageFile>, projectId: string): React.ReactNode {
+  const record = asRecord(value);
+  const fileID = record ? numberValue(record.storage_file_id) : undefined;
+  if (fileID) {
+    return (
+      <SubmissionFileLink
+        id={fileID}
+        label={typeof record?.filename === "string" ? record.filename : undefined}
+        mime={typeof record?.mime === "string" ? record.mime : undefined}
+        meta={files[fileID]}
+        projectId={projectId}
+      />
+    );
+  }
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return <span className="whitespace-pre-wrap break-words">{String(value)}</span>;
+  }
+  if (value == null) return <span className="text-text-muted">empty</span>;
+  return (
+    <pre className="text-xs bg-bg-subtle border border-border rounded p-2 overflow-auto whitespace-pre-wrap">
+      {JSON.stringify(value, null, 2)}
+    </pre>
+  );
+}
+
+function formatBytes(bytes?: number): string {
+  if (!bytes || bytes <= 0) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
 function summariseBody(kind: string, body: Record<string, unknown>): string {

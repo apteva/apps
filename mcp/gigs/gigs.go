@@ -37,6 +37,7 @@ type gig struct {
 	CompletedAt          string              `json:"completed_at,omitempty"`
 	Composition          []gigInstructionRow `json:"composition,omitempty"`
 	Assignments          []gigAssignmentView `json:"assignments,omitempty"`
+	Submission           *submission         `json:"submission,omitempty"`
 }
 
 type gigInstructionRow struct {
@@ -1063,7 +1064,46 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 			_ = parseJSON(payload.String, &g.Result)
 		}
 	}
+	if sub, err := loadLatestSubmission(db, id); err != nil {
+		return nil, err
+	} else if sub != nil {
+		g.Submission = sub
+		for i := range g.Assignments {
+			if g.Assignments[i].ID == sub.AssignmentID {
+				g.Assignments[i].Submission = sub
+				break
+			}
+		}
+	}
 	return g, nil
+}
+
+func loadLatestSubmission(db *sql.DB, gigID int64) (*submission, error) {
+	var payloadJSON, attachmentIDsJSON string
+	sub := &submission{}
+	err := db.QueryRow(
+		`SELECT s.id, s.assignment_id, s.payload_json,
+		        COALESCE(s.attachment_file_ids_json, '[]'),
+		        COALESCE(s.channel, ''), COALESCE(s.submitted_at, '')
+		   FROM gig_submissions s
+		   JOIN gig_assignments a ON a.id = s.assignment_id
+		  WHERE a.gig_id = ?
+		  ORDER BY s.id DESC
+		  LIMIT 1`,
+		gigID,
+	).Scan(&sub.ID, &sub.AssignmentID, &payloadJSON, &attachmentIDsJSON, &sub.Channel, &sub.SubmittedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	_ = parseJSON(payloadJSON, &sub.Payload)
+	_ = parseJSON(attachmentIDsJSON, &sub.AttachmentFileIDs)
+	if sub.Payload == nil {
+		sub.Payload = map[string]any{}
+	}
+	return sub, nil
 }
 
 func loadAssignmentView(ctx *sdk.AppCtx, pid string, assignID int64) (*gigAssignmentView, error) {
