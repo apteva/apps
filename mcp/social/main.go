@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.19
+version: 0.14.20
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -2581,9 +2581,13 @@ func (a *App) toolPostRetry(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if postID <= 0 {
 		return nil, errors.New("post_id required")
 	}
+	pid := projectIDForTool(ctx, args)
 	res, err := ctx.AppDB().Exec(
-		`UPDATE post_targets SET status='pending', last_error=NULL WHERE post_id=? AND status='failed'`,
-		postID,
+		`UPDATE post_targets
+		    SET status='pending', last_error=NULL
+		  WHERE post_id=? AND status='failed'
+		    AND EXISTS (SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=?)`,
+		postID, pid,
 	)
 	if err != nil {
 		return nil, err
@@ -4512,10 +4516,10 @@ func (a *App) handleAccountsStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := requestCtx(r)
-	out, err := a.toolAccountAdd(ctx, map[string]any{
-		"platform":  body.Platform,
-		"return_to": body.ReturnTo,
-	})
+	args := queryToolArgs(r)
+	args["platform"] = body.Platform
+	args["return_to"] = body.ReturnTo
+	out, err := a.toolAccountAdd(ctx, args)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -4637,7 +4641,9 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete {
-		out, err := a.toolAccountDisconnect(ctx, map[string]any{"id": id})
+		args := queryToolArgs(r)
+		args["id"] = id
+		out, err := a.toolAccountDisconnect(ctx, args)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -4669,6 +4675,9 @@ func (a *App) handlePostsAPI(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
+		for k, v := range queryToolArgs(r) {
+			raw[k] = v
+		}
 		out, err := a.toolPostCreate(ctx, raw)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -4694,7 +4703,9 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 		// post; post_list is granular enough).
 		switch r.Method {
 		case http.MethodDelete:
-			out, err := a.toolPostDelete(ctx, map[string]any{"post_id": id})
+			args := queryToolArgs(r)
+			args["post_id"] = id
+			out, err := a.toolPostDelete(ctx, args)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -4707,7 +4718,9 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(parts) == 2 && parts[1] == "retry" && r.Method == http.MethodPost {
-		out, err := a.toolPostRetry(ctx, map[string]any{"post_id": id})
+		args := queryToolArgs(r)
+		args["post_id"] = id
+		out, err := a.toolPostRetry(ctx, args)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -4724,11 +4737,13 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		out, err := a.toolPostReschedule(ctx, map[string]any{
-			"post_id":     id,
-			"schedule_at": body.ScheduleAt,
-			"_project_id": body.ProjectID,
-		})
+		args := queryToolArgs(r)
+		args["post_id"] = id
+		args["schedule_at"] = body.ScheduleAt
+		if body.ProjectID != "" {
+			args["_project_id"] = body.ProjectID
+		}
+		out, err := a.toolPostReschedule(ctx, args)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -4737,7 +4752,9 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 && parts[1] == "metrics" && r.Method == http.MethodGet {
-		out, err := a.toolPostMetrics(ctx, map[string]any{"post_id": id})
+		args := queryToolArgs(r)
+		args["post_id"] = id
+		out, err := a.toolPostMetrics(ctx, args)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -4755,6 +4772,9 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		raw["post_id"] = id
+		for k, v := range queryToolArgs(r) {
+			raw[k] = v
+		}
 		out, err := a.toolPostEdit(ctx, raw)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)

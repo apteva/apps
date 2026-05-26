@@ -506,11 +506,10 @@ func (a *App) handleProfilesCollection(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		args := map[string]any{
-			"name":        body.Name,
-			"description": body.Description,
-			"color":       body.Color,
-		}
+		args := queryToolArgs(r)
+		args["name"] = body.Name
+		args["description"] = body.Description
+		args["color"] = body.Color
 		if body.IsDefault != nil {
 			args["is_default"] = *body.IsDefault
 		}
@@ -549,7 +548,9 @@ func (a *App) handleProfilesItem(w http.ResponseWriter, r *http.Request) {
 	case "":
 		switch r.Method {
 		case http.MethodGet:
-			out, err := a.toolProfileGet(ctx, map[string]any{"id": id})
+			args := queryToolArgs(r)
+			args["id"] = id
+			out, err := a.toolProfileGet(ctx, args)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -562,6 +563,9 @@ func (a *App) handleProfilesItem(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			body["id"] = id
+			for k, v := range queryToolArgs(r) {
+				body[k] = v
+			}
 			out, err := a.toolProfileUpdate(ctx, body)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -569,7 +573,8 @@ func (a *App) handleProfilesItem(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, out)
 		case http.MethodDelete:
-			args := map[string]any{"id": id}
+			args := queryToolArgs(r)
+			args["id"] = id
 			if v := r.URL.Query().Get("reassign_to"); v != "" {
 				if rt, err := strconv.ParseInt(v, 10, 64); err == nil {
 					args["reassign_to"] = rt

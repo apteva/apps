@@ -40,6 +40,38 @@ func TestProfileCreate_FirstAutoDefaults(t *testing.T) {
 	}
 }
 
+func TestProfileCreate_UsesInjectedProjectScope(t *testing.T) {
+	ctx := newSocialCtx(t, newRecordingPlatform())
+	app := &App{}
+	t.Setenv("APTEVA_PROJECT_ID", "")
+
+	out, err := app.toolProfileCreate(ctx, map[string]any{"name": "Scoped", "_project_id": "global-panel-project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := out.(map[string]any)["profile"].(*Profile)
+	if p.ProjectID != "global-panel-project" {
+		t.Fatalf("project_id = %q, want injected project", p.ProjectID)
+	}
+
+	listOut, err := app.toolProfileList(ctx, map[string]any{"_project_id": "global-panel-project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := listOut.(map[string]any)["profiles"].([]Profile)
+	if len(rows) != 1 || rows[0].ID != p.ID {
+		t.Fatalf("injected list returned %+v, want only profile %d", rows, p.ID)
+	}
+
+	otherOut, err := app.toolProfileList(ctx, map[string]any{"_project_id": "other-project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows := otherOut.(map[string]any)["profiles"].([]Profile); len(rows) != 0 {
+		t.Fatalf("other project should not see profile, got %+v", rows)
+	}
+}
+
 func TestProfileCreate_SlugCollisionGetsSuffix(t *testing.T) {
 	ctx := newSocialCtx(t, newRecordingPlatform())
 	app := &App{}
