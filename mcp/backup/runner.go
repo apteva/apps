@@ -20,7 +20,9 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,10 +40,14 @@ import (
 // (only policy-driven runs prune, since ad-hoc runs typically share
 // destinations with policies and we don't want a one-off button click
 // to silently delete scheduled backups).
-func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy) (*Run, error) {
+func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) (*Run, error) {
+	if scope.Kind == "" {
+		scope = defaultScope()
+	}
 	run := &Run{
 		DestinationID:   dest.ID,
 		DestinationName: dest.Name,
+		Scope:           scope,
 	}
 	if policy != nil {
 		run.PolicyID = policy.ID
@@ -74,7 +80,7 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy) (*Run, error)
 	defer os.Remove(tmpPath)
 
 	hash := sha256.New()
-	written, err := streamSnapshot(io.MultiWriter(tmp, hash))
+	written, providerManifest, err := writeSnapshot(ctx, io.MultiWriter(tmp, hash), scope)
 	if errClose := tmp.Close(); err == nil {
 		err = errClose
 	}
@@ -86,6 +92,9 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy) (*Run, error)
 	// 3) Crack the tar to extract manifest.json — useful for forensic
 	// diffs across runs ("which install was added between these two?").
 	manifestJSON, _ := extractManifestJSON(tmpPath)
+	if manifestJSON == "" && providerManifest != "" {
+		manifestJSON = providerManifest
+	}
 
 	// 4) Upload.
 	key := buildRemoteKey(dest, run.StartedAt)
@@ -147,6 +156,80 @@ func streamSnapshot(dst io.Writer) (int64, error) {
 		return 0, fmt.Errorf("snapshot endpoint returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return io.Copy(dst, resp.Body)
+}
+
+func writeSnapshot(ctx *sdk.AppCtx, dst io.Writer, scope Scope) (int64, string, error) {
+	if scope.Kind == "" || scope.Kind == "platform" {
+		n, err := streamSnapshot(dst)
+		return n, "", err
+	}
+	return streamProviderSnapshot(ctx, dst, scope)
+}
+
+type providerSnapshotResponse struct {
+	ArchiveB64 string          `json:"archive_b64"`
+	Manifest   json.RawMessage `json:"manifest"`
+}
+
+func streamProviderSnapshot(ctx *sdk.AppCtx, dst io.Writer, scope Scope) (int64, string, error) {
+	if ctx == nil {
+		return 0, "", fmt.Errorf("app context required for %s backup", scope.Kind)
+	}
+	tool, err := providerSnapshotTool(scope)
+	if err != nil {
+		return 0, "", err
+	}
+	args := map[string]any{
+		"scope_kind": scope.Kind,
+		"scope_id":   scope.ID,
+	}
+	if scope.Kind == "fleet_tenant" {
+		args["tenant_id"] = scope.ID
+	}
+	var resp providerSnapshotResponse
+	if err := ctx.PlatformAPI().CallAppResult(scope.SourceApp, tool, args, &resp); err != nil {
+		return 0, "", fmt.Errorf("%s.%s: %w", scope.SourceApp, tool, err)
+	}
+	if resp.ArchiveB64 == "" {
+		return 0, "", fmt.Errorf("%s.%s returned no archive_b64", scope.SourceApp, tool)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(resp.ArchiveB64)
+	if err != nil {
+		return 0, "", fmt.Errorf("decode archive_b64: %w", err)
+	}
+	n, err := dst.Write(decoded)
+	if err != nil {
+		return int64(n), "", err
+	}
+	manifest := ""
+	if len(resp.Manifest) > 0 && string(resp.Manifest) != "null" {
+		manifest = string(resp.Manifest)
+	}
+	return int64(n), manifest, nil
+}
+
+func providerSnapshotTool(scope Scope) (string, error) {
+	switch scope.Kind {
+	case "fleet_tenant":
+		if scope.SourceApp != "fleet" {
+			return "", fmt.Errorf("fleet_tenant source_app must be fleet, got %q", scope.SourceApp)
+		}
+		return "fleet_tenant_snapshot", nil
+	default:
+		return "", fmt.Errorf("unsupported backup scope %q", scope.Kind)
+	}
+}
+
+func providerRestoreTool(scope Scope) (string, error) {
+	switch scope.Kind {
+	case "fleet_tenant":
+		if scope.SourceApp != "fleet" {
+			return "", fmt.Errorf("fleet_tenant source_app must be fleet, got %q", scope.SourceApp)
+		}
+		return "fleet_tenant_restore", nil
+	default:
+		return "", fmt.Errorf("unsupported restore scope %q", scope.Kind)
+	}
 }
 
 // extractManifestJSON decompresses the tar.gz at path and returns the
@@ -337,4 +420,3 @@ func cancelViaJobs(ctx *sdk.AppCtx, jobsID, callerProjectID string) error {
 	})
 	return err
 }
-

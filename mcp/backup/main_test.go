@@ -28,6 +28,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -45,12 +46,19 @@ func openTestDB(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	migration, err := os.ReadFile("migrations/001_init.sql")
+	files, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(string(migration)); err != nil {
-		t.Fatalf("migration: %v", err)
+	sort.Strings(files)
+	for _, file := range files {
+		migration, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(migration)); err != nil {
+			t.Fatalf("migration %s: %v", file, err)
+		}
 	}
 	return db
 }
@@ -78,10 +86,10 @@ func TestManifest_Parses(t *testing.T) {
 	if m.Version == "" {
 		t.Errorf("version is empty")
 	}
-	if len(m.Provides.MCPTools) != 3 {
-		t.Errorf("expected 3 MCP tools, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 4 {
+		t.Errorf("expected 4 MCP tools, got %d", len(m.Provides.MCPTools))
 	}
-	wantTools := map[string]bool{"backup_now": false, "backup_list": false, "backup_restore": false}
+	wantTools := map[string]bool{"backup_now": false, "backup_schedule": false, "backup_list": false, "backup_restore": false}
 	for _, tool := range m.Provides.MCPTools {
 		wantTools[tool.Name] = true
 	}

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: backup
 display_name: Backup
-version: 0.2.10
+version: 0.3.0
 description: |
   Periodic backups of your Apteva instance — server DB plus every
   installed app's data. Captured via the platform snapshot endpoint
@@ -41,9 +41,10 @@ requires:
     - role: cloud_storage
       kind: integration
       compatible_slugs: [aws-s3, cloudflare-r2]
-      capabilities: [object.put, object.list, object.delete]
+      capabilities: [object.put, object.get, object.list, object.delete]
       tools:
         object.put:    put_object
+        object.get:    get_object
         object.list:   list_objects
         object.delete: delete_object
       required: false
@@ -56,6 +57,8 @@ provides:
   mcp_tools:
     - name: backup_now
       description: Run a backup immediately against a chosen destination.
+    - name: backup_schedule
+      description: Create a scheduled backup policy for platform or app-provided scopes.
     - name: backup_list
       description: List past backup runs with size, destination, status.
     - name: backup_restore

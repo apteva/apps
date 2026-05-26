@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.8.2
+version: 0.8.3
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -51,6 +51,12 @@ requires:
       compatible_app_names: [instances]
       label: Instances app
       hint: Install the Instances app to host tenants on remote VPSes; without it, all tenants live on the parent host.
+    - role: backup
+      kind: app
+      required: false
+      compatible_app_names: [backup]
+      label: Backup app
+      hint: Install the Backup app to schedule and retain per-tenant snapshots.
 provides:
   http_routes:
     - prefix: /
@@ -101,6 +107,12 @@ provides:
       description: Return the tenant's api_key (unsealed from fleet's keyring).
     - name: tenant_reset_admin_password
       description: Rotate the tenant admin user's password to a fresh random one. Revokes all existing sessions for that user. Returns the new password.
+    - name: fleet_tenant_backup_plan
+      description: Report backup coverage and Backup-app scope arguments for a tenant.
+    - name: fleet_tenant_snapshot
+      description: Provider hook used by Backup to snapshot one local Fleet tenant.
+    - name: fleet_tenant_restore
+      description: Provider hook used by Backup to restore one local Fleet tenant.
   ui_panels:
     - slot: project.page
       label: Fleet
@@ -501,6 +513,40 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Rotate the tenant admin user's password to a fresh random value via PATCH /api/users/<id>/password on the tenant (auth'd with the stored api_key). Revokes every existing session for that user. Returns admin_email + admin_password. Use this when the operator needs admin credentials again — fleet does not persist the original password. Args: tenant_id.",
 			InputSchema: idOnlySchema(),
 			Handler:     a.toolResetAdminPassword,
+		},
+		{
+			Name:        "fleet_tenant_backup_plan",
+			Description: "Report backup coverage and Backup-app scope arguments for one tenant. Args: tenant_id.",
+			InputSchema: idOnlySchema(),
+			Handler:     a.toolTenantBackupPlan,
+		},
+		{
+			Name:        "fleet_tenant_snapshot",
+			Description: "Provider hook used by Backup. Stops a local tenant if needed, archives its full data dir plus metadata, restarts it, and returns archive_b64. Args: tenant_id or scope_id.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id":  map[string]any{"type": "string"},
+					"scope_id":   map[string]any{"type": "string"},
+					"scope_kind": map[string]any{"type": "string"},
+				},
+			},
+			Handler: a.toolFleetTenantSnapshot,
+		},
+		{
+			Name:        "fleet_tenant_restore",
+			Description: "Provider hook used by Backup. Replaces a local tenant's data dir from archive_b64 and restarts it if it was running. Args: tenant_id or scope_id, archive_b64.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id":   map[string]any{"type": "string"},
+					"scope_id":    map[string]any{"type": "string"},
+					"scope_kind":  map[string]any{"type": "string"},
+					"archive_b64": map[string]any{"type": "string"},
+				},
+				"required": []string{"archive_b64"},
+			},
+			Handler: a.toolFleetTenantRestore,
 		},
 	}
 }

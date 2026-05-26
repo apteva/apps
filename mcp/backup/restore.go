@@ -8,6 +8,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -57,9 +58,32 @@ func restoreFromRun(ctx *sdk.AppCtx, runID int64) (map[string]any, error) {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 
+	if run.Scope.Kind != "" && run.Scope.Kind != "platform" {
+		return restoreProviderRun(ctx, run, buf)
+	}
 	report, err := postRestore(buf)
 	if err != nil {
 		return nil, err
+	}
+	return report, nil
+}
+
+func restoreProviderRun(ctx *sdk.AppCtx, run *Run, body []byte) (map[string]any, error) {
+	tool, err := providerRestoreTool(run.Scope)
+	if err != nil {
+		return nil, err
+	}
+	args := map[string]any{
+		"scope_kind":  run.Scope.Kind,
+		"scope_id":    run.Scope.ID,
+		"archive_b64": base64.StdEncoding.EncodeToString(body),
+	}
+	if run.Scope.Kind == "fleet_tenant" {
+		args["tenant_id"] = run.Scope.ID
+	}
+	var report map[string]any
+	if err := ctx.PlatformAPI().CallAppResult(run.Scope.SourceApp, tool, args, &report); err != nil {
+		return nil, fmt.Errorf("%s.%s: %w", run.Scope.SourceApp, tool, err)
 	}
 	return report, nil
 }

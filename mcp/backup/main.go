@@ -2,25 +2,25 @@
 //
 // Architecture sketch:
 //
-//   ┌──────────────────────┐  cron tick   ┌──────────────────────┐
-//   │  jobs app            │ ───────────► │  backup app          │
-//   │  (jobs_schedule)     │   POST /run  │  (this binary)       │
-//   └──────────────────────┘              └──────┬───────────────┘
-//                                                │
-//                                                │  GET /api/platform/snapshot
-//                                                ▼
-//                                         ┌──────────────────────┐
-//                                         │  apteva-server       │
-//                                         │   • VACUUM INTO each │
-//                                         │     SQLite DB        │
-//                                         │   • streams tar.gz   │
-//                                         └──────┬───────────────┘
-//                                                │
-//                                                ▼
-//                                         ┌──────────────────────┐
-//                                         │  destination         │
-//                                         │  local | s3 | r2     │
-//                                         └──────────────────────┘
+//	┌──────────────────────┐  cron tick   ┌──────────────────────┐
+//	│  jobs app            │ ───────────► │  backup app          │
+//	│  (jobs_schedule)     │   POST /run  │  (this binary)       │
+//	└──────────────────────┘              └──────┬───────────────┘
+//	                                             │
+//	                                             │  GET /api/platform/snapshot
+//	                                             ▼
+//	                                      ┌──────────────────────┐
+//	                                      │  apteva-server       │
+//	                                      │   • VACUUM INTO each │
+//	                                      │     SQLite DB        │
+//	                                      │   • streams tar.gz   │
+//	                                      └──────┬───────────────┘
+//	                                             │
+//	                                             ▼
+//	                                      ┌──────────────────────┐
+//	                                      │  destination         │
+//	                                      │  local | s3 | r2     │
+//	                                      └──────────────────────┘
 //
 // The platform owns the privileged primitive (read every install's
 // data dir + the server DB). This app owns scheduling, destinations,
@@ -49,7 +49,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: backup
 display_name: Backup
-version: 0.2.10
+version: 0.3.0
 description: |
   Periodic backups of your Apteva instance — server DB plus every
   installed app's data — driven by the platform snapshot endpoint
@@ -70,9 +70,10 @@ requires:
     - role: cloud_storage
       kind: integration
       compatible_slugs: [aws-s3, cloudflare-r2]
-      capabilities: [object.put, object.list, object.delete]
+      capabilities: [object.put, object.get, object.list, object.delete]
       tools:
         object.put:    put_object
+        object.get:    get_object
         object.list:   list_objects
         object.delete: delete_object
       required: false
@@ -82,9 +83,10 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: backup_now,     description: "Run a backup immediately." }
+    - { name: backup_now,     description: "Run a backup immediately. Defaults to platform scope; can target app-provided scopes such as fleet_tenant." }
+    - { name: backup_schedule, description: "Create a scheduled backup policy for platform or app-provided scopes." }
     - { name: backup_list,    description: "List past backup runs." }
-    - { name: backup_restore, description: "Restore a past backup. App DBs swap live; the platform DB is staged for the next server boot." }
+    - { name: backup_restore, description: "Restore a past backup. Platform runs restore through /api/platform/restore; app-scoped runs call the source app's restore provider." }
   ui_panels:
     - slot: project.page
       label: Backup
@@ -140,7 +142,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/policies/", Handler: a.handlePolicyItem},
 		{Pattern: "/runs", Handler: a.handleRunsCollection},
 		{Pattern: "/runs/", Handler: a.handleRunItem},
-		{Pattern: "/run", Handler: a.handleRunNow},     // cron + UI entry
+		{Pattern: "/run", Handler: a.handleRunNow},      // cron + UI entry
 		{Pattern: "/restore", Handler: a.handleRestore}, // POST {run_id}
 	}
 }
@@ -151,9 +153,12 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "backup_now",
-			Description: "Run a backup immediately. Args: destination_id (default: only enabled destination, or error if multiple).",
+			Description: "Run a backup immediately. Args: destination_id (default: only enabled destination), scope_kind? (default platform), scope_id?, source_app?. For Fleet tenant backups use scope_kind=fleet_tenant, source_app=fleet, scope_id=<tenant_id>.",
 			InputSchema: schemaObject(map[string]any{
 				"destination_id": map[string]any{"type": "integer"},
+				"scope_kind":     map[string]any{"type": "string"},
+				"scope_id":       map[string]any{"type": "string"},
+				"source_app":     map[string]any{"type": "string"},
 			}, nil),
 			Handler: a.toolBackupNow,
 		},
@@ -165,6 +170,21 @@ func (a *App) MCPTools() []sdk.Tool {
 				"limit":          map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolBackupList,
+		},
+		{
+			Name:        "backup_schedule",
+			Description: "Create a scheduled backup policy through the Jobs app. Args: name, schedule (cron), destination_id? (defaults to only enabled destination), retention_keep? (default 14), scope_kind? (default platform), scope_id?, source_app?, project_id?. For Fleet tenant backups use scope_kind=fleet_tenant, source_app=fleet, scope_id=<tenant_id>.",
+			InputSchema: schemaObject(map[string]any{
+				"name":           map[string]any{"type": "string"},
+				"schedule":       map[string]any{"type": "string"},
+				"destination_id": map[string]any{"type": "integer"},
+				"retention_keep": map[string]any{"type": "integer"},
+				"scope_kind":     map[string]any{"type": "string"},
+				"scope_id":       map[string]any{"type": "string"},
+				"source_app":     map[string]any{"type": "string"},
+				"project_id":     map[string]any{"type": "string"},
+			}, []string{"name", "schedule"}),
+			Handler: a.toolBackupSchedule,
 		},
 		{
 			Name:        "backup_restore",
@@ -187,7 +207,11 @@ func (a *App) toolBackupNow(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	run, err := runBackup(ctx, dest, nil)
+	scope := scopeFromArgs(args)
+	if err := validateScope(scope); err != nil {
+		return nil, err
+	}
+	run, err := runBackup(ctx, dest, nil, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -205,6 +229,43 @@ func (a *App) toolBackupList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	return map[string]any{"runs": runs, "count": len(runs)}, nil
+}
+
+func (a *App) toolBackupSchedule(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	name := strings.TrimSpace(getStringArg(args, "name"))
+	schedule := strings.TrimSpace(getStringArg(args, "schedule"))
+	if name == "" || schedule == "" {
+		return nil, errors.New("name and schedule required")
+	}
+	dest, err := pickDestination(ctx.AppDB(), int64Arg(args, "destination_id"))
+	if err != nil {
+		return nil, err
+	}
+	scope := scopeFromArgs(args)
+	if err := validateScope(scope); err != nil {
+		return nil, err
+	}
+	keep := intArg(args, "retention_keep", 14)
+	if keep < 0 {
+		keep = 14
+	}
+	p, err := dbCreatePolicy(ctx.AppDB(), &Policy{
+		Name:          name,
+		Schedule:      schedule,
+		DestinationID: dest.ID,
+		RetentionKeep: keep,
+		Scope:         scope,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{"policy": p}
+	if err := scheduleViaJobs(ctx, p, getStringArg(args, "project_id")); err != nil {
+		out["jobs_warning"] = err.Error()
+	} else {
+		out["policy"] = p
+	}
+	return out, nil
 }
 
 func (a *App) toolBackupRestore(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -302,6 +363,13 @@ func (a *App) handlePoliciesCollection(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.RetentionKeep == 0 {
 			body.RetentionKeep = 14
+		}
+		if body.Scope.Kind == "" {
+			body.Scope = defaultScope()
+		}
+		if err := validateScope(body.Scope); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
 		}
 		p, err := dbCreatePolicy(ctx.AppDB(), &body)
 		if err != nil {
@@ -414,13 +482,17 @@ func (a *App) handleRunNow(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := getAppCtx(r)
 	var body struct {
-		PolicyID      int64 `json:"policy_id"`
-		DestinationID int64 `json:"destination_id"`
+		PolicyID      int64  `json:"policy_id"`
+		DestinationID int64  `json:"destination_id"`
+		ScopeKind     string `json:"scope_kind"`
+		ScopeID       string `json:"scope_id"`
+		SourceApp     string `json:"source_app"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
 	var dest *Destination
 	var policy *Policy
+	scope := defaultScope()
 	if body.PolicyID != 0 {
 		p, err := dbGetPolicy(ctx.AppDB(), body.PolicyID)
 		if err != nil {
@@ -436,6 +508,7 @@ func (a *App) handleRunNow(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		dest = d
+		scope = p.Scope
 	} else {
 		d, err := pickDestination(ctx.AppDB(), body.DestinationID)
 		if err != nil {
@@ -443,8 +516,16 @@ func (a *App) handleRunNow(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		dest = d
+		scope = Scope{Kind: body.ScopeKind, ID: body.ScopeID, SourceApp: body.SourceApp}
+		if scope.Kind == "" {
+			scope = defaultScope()
+		}
 	}
-	run, err := runBackup(ctx, dest, policy)
+	if err := validateScope(scope); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	run, err := runBackup(ctx, dest, policy, scope)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -479,8 +560,8 @@ func (a *App) handleRestore(w http.ResponseWriter, r *http.Request) {
 type Destination struct {
 	ID           int64           `json:"id,omitempty"`
 	Name         string          `json:"name"`
-	Kind         string          `json:"kind"`         // "local" | "s3" | "storage_app"
-	Config       json.RawMessage `json:"config"`        // shape depends on kind
+	Kind         string          `json:"kind"`   // "local" | "s3" | "storage_app"
+	Config       json.RawMessage `json:"config"` // shape depends on kind
 	ConnectionID int64           `json:"connection_id,omitempty"`
 	Enabled      bool            `json:"enabled"`
 	CreatedAt    string          `json:"created_at,omitempty"`
@@ -494,6 +575,7 @@ type Policy struct {
 	RetentionKeep int    `json:"retention_keep"`
 	Enabled       bool   `json:"enabled"`
 	JobsID        string `json:"jobs_id,omitempty"`
+	Scope         Scope  `json:"scope"`
 	CreatedAt     string `json:"created_at,omitempty"`
 	UpdatedAt     string `json:"updated_at,omitempty"`
 }
@@ -510,6 +592,13 @@ type Run struct {
 	SHA256          string `json:"sha256,omitempty"`
 	RemoteKey       string `json:"remote_key,omitempty"`
 	Error           string `json:"error,omitempty"`
+	Scope           Scope  `json:"scope"`
+}
+
+type Scope struct {
+	Kind      string `json:"kind"`
+	ID        string `json:"id,omitempty"`
+	SourceApp string `json:"source_app,omitempty"`
 }
 
 // ─── DB helpers ────────────────────────────────────────────────────
@@ -571,10 +660,14 @@ func dbGetDestination(db *sql.DB, id int64) (*Destination, error) {
 
 func dbCreatePolicy(db *sql.DB, p *Policy) (*Policy, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
+	if p.Scope.Kind == "" {
+		p.Scope = defaultScope()
+	}
 	res, err := db.Exec(
-		`INSERT INTO policies (name, schedule, destination_id, retention_keep, enabled, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		p.Name, p.Schedule, p.DestinationID, p.RetentionKeep, boolToInt(true), now, now)
+		`INSERT INTO policies (name, schedule, destination_id, retention_keep, enabled, jobs_id, scope_kind, scope_id, source_app, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)`,
+		p.Name, p.Schedule, p.DestinationID, p.RetentionKeep, boolToInt(true),
+		p.Scope.Kind, p.Scope.ID, p.Scope.SourceApp, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -587,7 +680,8 @@ func dbCreatePolicy(db *sql.DB, p *Policy) (*Policy, error) {
 
 func dbListPolicies(db *sql.DB) ([]*Policy, error) {
 	rows, err := db.Query(
-		`SELECT id, name, schedule, destination_id, retention_keep, enabled, jobs_id, created_at, updated_at
+		`SELECT id, name, schedule, destination_id, retention_keep, enabled, jobs_id,
+		        scope_kind, scope_id, source_app, created_at, updated_at
 		 FROM policies ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -597,7 +691,8 @@ func dbListPolicies(db *sql.DB) ([]*Policy, error) {
 	for rows.Next() {
 		p := &Policy{}
 		var enabled int
-		if err := rows.Scan(&p.ID, &p.Name, &p.Schedule, &p.DestinationID, &p.RetentionKeep, &enabled, &p.JobsID, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Schedule, &p.DestinationID, &p.RetentionKeep, &enabled, &p.JobsID,
+			&p.Scope.Kind, &p.Scope.ID, &p.Scope.SourceApp, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			continue
 		}
 		p.Enabled = enabled != 0
@@ -610,9 +705,11 @@ func dbGetPolicy(db *sql.DB, id int64) (*Policy, error) {
 	p := &Policy{}
 	var enabled int
 	err := db.QueryRow(
-		`SELECT id, name, schedule, destination_id, retention_keep, enabled, jobs_id, created_at, updated_at
+		`SELECT id, name, schedule, destination_id, retention_keep, enabled, jobs_id,
+		        scope_kind, scope_id, source_app, created_at, updated_at
 		 FROM policies WHERE id = ?`, id).
-		Scan(&p.ID, &p.Name, &p.Schedule, &p.DestinationID, &p.RetentionKeep, &enabled, &p.JobsID, &p.CreatedAt, &p.UpdatedAt)
+		Scan(&p.ID, &p.Name, &p.Schedule, &p.DestinationID, &p.RetentionKeep, &enabled, &p.JobsID,
+			&p.Scope.Kind, &p.Scope.ID, &p.Scope.SourceApp, &p.CreatedAt, &p.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("policy %d not found", id)
 	}
@@ -624,10 +721,14 @@ func dbGetPolicy(db *sql.DB, id int64) (*Policy, error) {
 }
 
 func dbInsertRun(db *sql.DB, r *Run) (int64, error) {
+	if r.Scope.Kind == "" {
+		r.Scope = defaultScope()
+	}
 	res, err := db.Exec(
-		`INSERT INTO runs (policy_id, destination_id, destination_name, status)
-		 VALUES (?, ?, ?, 'running')`,
-		nullInt(r.PolicyID), r.DestinationID, r.DestinationName)
+		`INSERT INTO runs (policy_id, destination_id, destination_name, status, scope_kind, scope_id, source_app)
+		 VALUES (?, ?, ?, 'running', ?, ?, ?)`,
+		nullInt(r.PolicyID), r.DestinationID, r.DestinationName,
+		r.Scope.Kind, r.Scope.ID, r.Scope.SourceApp)
 	if err != nil {
 		return 0, err
 	}
@@ -647,7 +748,7 @@ func dbFinishRun(db *sql.DB, id int64, status string, bytes int64, sha, remoteKe
 func dbListRuns(db *sql.DB, destID int64, limit int) ([]*Run, error) {
 	q := `SELECT id, COALESCE(policy_id,0), destination_id, destination_name,
 	             started_at, COALESCE(finished_at,''), status, bytes_compressed,
-	             sha256, remote_key, error
+	             sha256, remote_key, error, scope_kind, scope_id, source_app
 	      FROM runs`
 	args := []any{}
 	if destID > 0 {
@@ -666,7 +767,7 @@ func dbListRuns(db *sql.DB, destID int64, limit int) ([]*Run, error) {
 		r := &Run{}
 		if err := rows.Scan(&r.ID, &r.PolicyID, &r.DestinationID, &r.DestinationName,
 			&r.StartedAt, &r.FinishedAt, &r.Status, &r.BytesCompressed,
-			&r.SHA256, &r.RemoteKey, &r.Error); err != nil {
+			&r.SHA256, &r.RemoteKey, &r.Error, &r.Scope.Kind, &r.Scope.ID, &r.Scope.SourceApp); err != nil {
 			continue
 		}
 		out = append(out, r)
@@ -679,11 +780,11 @@ func dbGetRun(db *sql.DB, id int64) (*Run, error) {
 	err := db.QueryRow(
 		`SELECT id, COALESCE(policy_id,0), destination_id, destination_name,
 		        started_at, COALESCE(finished_at,''), status, bytes_compressed,
-		        sha256, remote_key, error
+		        sha256, remote_key, error, scope_kind, scope_id, source_app
 		 FROM runs WHERE id = ?`, id).
 		Scan(&r.ID, &r.PolicyID, &r.DestinationID, &r.DestinationName,
 			&r.StartedAt, &r.FinishedAt, &r.Status, &r.BytesCompressed,
-			&r.SHA256, &r.RemoteKey, &r.Error)
+			&r.SHA256, &r.RemoteKey, &r.Error, &r.Scope.Kind, &r.Scope.ID, &r.Scope.SourceApp)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("run %d not found", id)
 	}
@@ -717,6 +818,48 @@ func pickDestination(db *sql.DB, id int64) (*Destination, error) {
 		return nil, errors.New("multiple destinations exist — pass destination_id explicitly")
 	}
 	return enabled[0], nil
+}
+
+func defaultScope() Scope {
+	return Scope{Kind: "platform"}
+}
+
+func scopeFromArgs(args map[string]any) Scope {
+	s := Scope{
+		Kind:      strings.TrimSpace(getStringArg(args, "scope_kind")),
+		ID:        strings.TrimSpace(getStringArg(args, "scope_id")),
+		SourceApp: strings.TrimSpace(getStringArg(args, "source_app")),
+	}
+	if s.Kind == "" {
+		return defaultScope()
+	}
+	return s
+}
+
+func validateScope(s Scope) error {
+	switch s.Kind {
+	case "", "platform":
+		if s.ID != "" || s.SourceApp != "" {
+			return errors.New("platform backups must not set scope_id or source_app")
+		}
+		return nil
+	case "fleet_tenant":
+		if s.ID == "" {
+			return errors.New("fleet_tenant backups require scope_id")
+		}
+		if s.SourceApp == "" {
+			return errors.New("fleet_tenant backups require source_app=fleet")
+		}
+		if s.SourceApp != "fleet" {
+			return fmt.Errorf("fleet_tenant backups must use source_app=fleet, got %q", s.SourceApp)
+		}
+		return nil
+	default:
+		if s.ID == "" || s.SourceApp == "" {
+			return fmt.Errorf("%s backups require scope_id and source_app", s.Kind)
+		}
+		return nil
+	}
 }
 
 // ─── Tiny utils + globalCtx + http helpers ──────────────────────────
@@ -759,6 +902,13 @@ func int64Arg(args map[string]any, key string) int64 {
 		return n
 	}
 	return 0
+}
+
+func getStringArg(args map[string]any, key string) string {
+	if v, ok := args[key].(string); ok {
+		return v
+	}
+	return ""
 }
 
 func boolToInt(b bool) int {
