@@ -1412,6 +1412,66 @@ func TestInboxSyncFacebookComments(t *testing.T) {
 	}
 }
 
+func TestInboxSyncFacebookDMsMentionsReviews(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_page_posts"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"data":[]}`),
+	}
+	pf.executeResponses["facebook_list_conversations"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"data":[{"id":"thread_1"}]}`),
+	}
+	pf.executeResponses["list_conversation_messages"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data: json.RawMessage(`{"data":[
+			{"id":"msg_1","message":"hello dm","created_time":"2026-05-27T10:00:00+0000","from":{"id":"psid_1","name":"Ada"}}
+		]}`),
+	}
+	pf.executeResponses["facebook_list_tagged"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data: json.RawMessage(`{"data":[
+			{"id":"tag_1","message":"mentioned you","created_time":"2026-05-27T10:01:00+0000","from":{"id":"u1","name":"Ada"},"permalink_url":"https://facebook.test/tag_1"}
+		]}`),
+	}
+	pf.executeResponses["facebook_list_reviews"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data: json.RawMessage(`{"data":[
+			{"id":"review_1","review_text":"great","recommendation_type":"positive","rating":5,"created_time":"2026-05-27T10:02:00+0000","reviewer":{"id":"u2","name":"Ben"}}
+		]}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	app := &App{}
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, status, page_credentials)
+		 VALUES ('test-proj', 'facebook', 42, '100', 'My Page', 'active', '{"access_token":"PAGE_TOKEN"}')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	out := app.syncInbox(ctx, inboxSyncOptions{ProjectID: "test-proj", AccountIDs: []int64{acctID}, Limit: 10})
+	if out.Count != 1 || out.Results[0].Status != "ok" {
+		t.Fatalf("sync result = %+v", out)
+	}
+	res := out.Results[0]
+	if res.DMs != 1 || res.Mentions != 1 || res.Reviews != 1 {
+		t.Fatalf("counts = %+v", res)
+	}
+	for kind, want := range map[string]int{inboxKindDM: 1, inboxKindMention: 1, inboxKindReview: 1} {
+		var got int
+		if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM inbox_items WHERE social_account_id=? AND kind=?`, acctID, kind).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("kind %s count = %d", kind, got)
+		}
+	}
+}
+
 func TestInboxReplyCommentCallsMetaTool(t *testing.T) {
 	pf := newRecordingPlatform()
 	pf.executeResponses["reply_to_comment"] = &sdk.ExecuteResult{
@@ -1461,6 +1521,53 @@ func TestInboxReplyCommentCallsMetaTool(t *testing.T) {
 	}
 	if status != inboxStatusReplied {
 		t.Fatalf("parent status = %q", status)
+	}
+}
+
+func TestInboxReplyFacebookDMCallsMessengerTool(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["facebook_send_message"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"message_id":"msg_reply_1","recipient_id":"psid_1"}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, status, page_credentials)
+		 VALUES ('test-proj', 'facebook', 42, '100', 'My Page', 'active', '{"access_token":"PAGE_TOKEN"}')`,
+	)
+	acctID, _ := r.LastInsertId()
+	itemID, _, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+		ProjectID:        "test-proj",
+		SocialAccountID:  acctID,
+		Platform:         "facebook",
+		Kind:             inboxKindDM,
+		ExternalID:       "msg_1",
+		ThreadExternalID: "thread_1",
+		AuthorExternalID: "psid_1",
+		AuthorName:       "Ada",
+		Body:             "hello",
+		OccurredAt:       time.Date(2026, 5, 27, 10, 0, 0, 0, time.UTC),
+		Direction:        "inbound",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+	resAny, err := app.toolInboxReply(ctx, map[string]any{"id": itemID, "body": "thanks"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := resAny.(inboxOutcome)
+	if res.Status != "ok" || res.ExternalID != "msg_reply_1" {
+		t.Fatalf("reply result = %+v", res)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "facebook_send_message" {
+		t.Fatalf("execute calls = %+v", pf.executeCalls)
+	}
+	call := pf.executeCalls[0]
+	if call.Input["pageId"] != "100" || call.Input["messaging_type"] != "RESPONSE" || call.Input["access_token"] != "PAGE_TOKEN" {
+		t.Fatalf("bad messenger args: %+v", call.Input)
 	}
 }
 

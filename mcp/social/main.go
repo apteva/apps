@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.25
+version: 0.14.26
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -91,7 +91,7 @@ provides:
     - { name: inbox_mark_unread,          description: "Mark inbox items unread (local-only)." }
     - { name: inbox_archive,              description: "Archive inbox items (local-only)." }
     - { name: inbox_reply,                description: "Reply to a comment or DM (routes by kind)." }
-    - { name: inbox_private_reply,        description: "Reply to an Instagram comment as a DM (IG-only)." }
+    - { name: inbox_private_reply,        description: "Reply to a Facebook or Instagram comment as a private message." }
     - { name: inbox_hide,                 description: "Hide a comment on the platform side." }
     - { name: inbox_unhide,               description: "Reverse inbox_hide." }
     - { name: inbox_delete,               description: "Delete a comment where the platform permits." }
@@ -327,6 +327,11 @@ var platforms = map[string]platformDef{
 			CommentsWrite:  true,
 			CommentsHide:   true,
 			CommentsDelete: true,
+			DMsRead:        true,
+			DMsWrite:       true,
+			MentionsRead:   true,
+			ReviewsRead:    true,
+			PrivateReply:   true,
 		},
 	},
 	"instagram": {
@@ -774,7 +779,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "inbox_private_reply",
-			Description: "Reply to an Instagram comment by sending the author a DM. IG-only — returns `unsupported` for every other platform. Args: id (must be a comment kind), body.",
+			Description: "Reply to a Facebook or Instagram comment by sending the author a private message. Returns `unsupported` for every other platform. Args: id (must be a comment kind), body.",
 			InputSchema: schemaObject(map[string]any{
 				"id":   map[string]any{"type": "integer"},
 				"body": map[string]any{"type": "string"},

@@ -32,6 +32,48 @@ type metaComment struct {
 	} `json:"replies"`
 }
 
+type metaMessage struct {
+	ID          string `json:"id"`
+	Message     string `json:"message"`
+	CreatedTime string `json:"created_time"`
+	From        struct {
+		ID       string `json:"id"`
+		Username string `json:"username"`
+		Name     string `json:"name"`
+	} `json:"from"`
+	Attachments any `json:"attachments"`
+}
+
+type metaReview struct {
+	ID                 string `json:"id"`
+	CreatedTime        string `json:"created_time"`
+	ReviewText         string `json:"review_text"`
+	RecommendationType string `json:"recommendation_type"`
+	Rating             int    `json:"rating"`
+	Reviewer           struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"reviewer"`
+	OpenGraphStory struct {
+		ID        string `json:"id"`
+		Permalink string `json:"permalink_url"`
+	} `json:"open_graph_story"`
+}
+
+type metaTaggedItem struct {
+	ID           string `json:"id"`
+	Message      string `json:"message"`
+	Story        string `json:"story"`
+	CreatedTime  string `json:"created_time"`
+	PermalinkURL string `json:"permalink_url"`
+	FullPicture  string `json:"full_picture"`
+	From         struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"from"`
+	Attachments any `json:"attachments"`
+}
+
 func syncFacebookInbox(ctx *sdk.AppCtx, acct inboxAccount, opts inboxSyncOptions, out *inboxSyncResult) {
 	if acct.ExtID == "" {
 		out.Status, out.Error = "failed", "facebook page id missing"
@@ -47,7 +89,24 @@ func syncFacebookInbox(ctx *sdk.AppCtx, acct inboxAccount, opts inboxSyncOptions
 		out.Comments += n
 		out.Warnings = append(out.Warnings, warns...)
 	}
-	out.Warnings = append(out.Warnings, "Facebook DMs, mentions and reviews need integration tools/permissions that are not exposed yet")
+	if n, warns := syncFacebookDMs(ctx, acct, opts.Limit); n >= 0 {
+		out.DMs += n
+		out.Warnings = append(out.Warnings, warns...)
+	} else {
+		out.Warnings = append(out.Warnings, warns...)
+	}
+	if n, warns := syncFacebookMentions(ctx, acct, opts.Limit); n >= 0 {
+		out.Mentions += n
+		out.Warnings = append(out.Warnings, warns...)
+	} else {
+		out.Warnings = append(out.Warnings, warns...)
+	}
+	if n, warns := syncFacebookReviews(ctx, acct, opts.Limit); n >= 0 {
+		out.Reviews += n
+		out.Warnings = append(out.Warnings, warns...)
+	} else {
+		out.Warnings = append(out.Warnings, warns...)
+	}
 }
 
 type inboxPostRef struct {
@@ -89,6 +148,127 @@ func fetchFacebookPagePostsForInbox(ctx *sdk.AppCtx, acct inboxAccount, limit in
 		out = append(out, inboxPostRef{ID: p.ID, Permalink: p.PermalinkURL, LocalPostID: findLocalPostID(ctx, acct.ID, p.ID)})
 	}
 	return out, nil
+}
+
+func syncFacebookDMs(ctx *sdk.AppCtx, acct inboxAccount, limit int) (int, []string) {
+	args := map[string]any{
+		"pageId":       acct.ExtID,
+		"limit":        minInt(limit, 50),
+		"fields":       "id,updated_time,participants{id,name,email},senders{id,name,email},snippet,unread_count,can_reply,link",
+		"access_token": acct.PageToken,
+	}
+	inserted := 0
+	for page := 0; page < 5; page++ {
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(acct.ConnID, "facebook_list_conversations", args)
+		if err != nil {
+			return -1, []string{"facebook dms: " + err.Error()}
+		}
+		if res == nil || !res.Success {
+			return -1, []string{"facebook dms: " + upstreamError(res).Error()}
+		}
+		var resp struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+			Paging metaPaging `json:"paging"`
+		}
+		if err := json.Unmarshal(res.Data, &resp); err != nil {
+			return -1, []string{"decode facebook conversations: " + err.Error()}
+		}
+		for _, conv := range resp.Data {
+			if conv.ID == "" {
+				continue
+			}
+			n, warn := syncMetaConversationMessages(ctx, acct, "facebook", conv.ID, limit)
+			inserted += n
+			if warn != "" {
+				return inserted, []string{warn}
+			}
+		}
+		if resp.Paging.Cursors.After == "" || len(resp.Data) == 0 {
+			break
+		}
+		args["after"] = resp.Paging.Cursors.After
+	}
+	return inserted, nil
+}
+
+func syncFacebookMentions(ctx *sdk.AppCtx, acct inboxAccount, limit int) (int, []string) {
+	args := map[string]any{
+		"pageId":       acct.ExtID,
+		"limit":        minInt(limit, 50),
+		"fields":       "id,message,story,created_time,from,permalink_url,full_picture,attachments",
+		"access_token": acct.PageToken,
+	}
+	inserted := 0
+	for page := 0; page < 5; page++ {
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(acct.ConnID, "facebook_list_tagged", args)
+		if err != nil {
+			return -1, []string{"facebook mentions: " + err.Error()}
+		}
+		if res == nil || !res.Success {
+			return -1, []string{"facebook mentions: " + upstreamError(res).Error()}
+		}
+		var resp struct {
+			Data   []metaTaggedItem `json:"data"`
+			Paging metaPaging       `json:"paging"`
+		}
+		if err := json.Unmarshal(res.Data, &resp); err != nil {
+			return -1, []string{"decode facebook mentions: " + err.Error()}
+		}
+		for _, tag := range resp.Data {
+			if tag.ID == "" {
+				continue
+			}
+			if upsertFacebookMention(ctx, acct, tag) {
+				inserted++
+			}
+		}
+		if resp.Paging.Cursors.After == "" || len(resp.Data) == 0 {
+			break
+		}
+		args["after"] = resp.Paging.Cursors.After
+	}
+	return inserted, nil
+}
+
+func syncFacebookReviews(ctx *sdk.AppCtx, acct inboxAccount, limit int) (int, []string) {
+	args := map[string]any{
+		"pageId":       acct.ExtID,
+		"limit":        minInt(limit, 50),
+		"fields":       "id,created_time,review_text,recommendation_type,rating,reviewer{id,name},open_graph_story{id,permalink_url}",
+		"access_token": acct.PageToken,
+	}
+	inserted := 0
+	for page := 0; page < 5; page++ {
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(acct.ConnID, "facebook_list_reviews", args)
+		if err != nil {
+			return -1, []string{"facebook reviews: " + err.Error()}
+		}
+		if res == nil || !res.Success {
+			return -1, []string{"facebook reviews: " + upstreamError(res).Error()}
+		}
+		var resp struct {
+			Data   []metaReview `json:"data"`
+			Paging metaPaging   `json:"paging"`
+		}
+		if err := json.Unmarshal(res.Data, &resp); err != nil {
+			return -1, []string{"decode facebook reviews: " + err.Error()}
+		}
+		for _, review := range resp.Data {
+			if review.ID == "" {
+				continue
+			}
+			if upsertFacebookReview(ctx, acct, review) {
+				inserted++
+			}
+		}
+		if resp.Paging.Cursors.After == "" || len(resp.Data) == 0 {
+			break
+		}
+		args["after"] = resp.Paging.Cursors.After
+	}
+	return inserted, nil
 }
 
 func syncInstagramInbox(ctx *sdk.AppCtx, acct inboxAccount, opts inboxSyncOptions, out *inboxSyncResult) {
@@ -272,7 +452,7 @@ func syncInstagramDMs(ctx *sdk.AppCtx, acct inboxAccount, limit int) (int, []str
 		if conv.ID == "" {
 			continue
 		}
-		n, warn := syncInstagramConversation(ctx, acct, conv.ID)
+		n, warn := syncInstagramConversation(ctx, acct, conv.ID, limit)
 		inserted += n
 		if warn != "" {
 			return inserted, []string{warn}
@@ -281,78 +461,84 @@ func syncInstagramDMs(ctx *sdk.AppCtx, acct inboxAccount, limit int) (int, []str
 	return inserted, nil
 }
 
-func syncInstagramConversation(ctx *sdk.AppCtx, acct inboxAccount, conversationID string) (int, string) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(acct.ConnID, "get_conversation", map[string]any{
+func syncInstagramConversation(ctx *sdk.AppCtx, acct inboxAccount, conversationID string, limit int) (int, string) {
+	return syncMetaConversationMessages(ctx, acct, "instagram", conversationID, limit)
+}
+
+func syncMetaConversationMessages(ctx *sdk.AppCtx, acct inboxAccount, platform, conversationID string, limit int) (int, string) {
+	args := map[string]any{
 		"conversationId": conversationID,
-		"fields":         "id,updated_time,participants{id,username},messages{id,from,to,message,created_time,attachments}",
+		"limit":          minInt(limit, 50),
+		"fields":         "id,from,to,message,created_time,attachments",
 		"access_token":   acct.PageToken,
-	})
-	if err != nil {
-		return 0, fmt.Sprintf("conversation %s: %v", conversationID, err)
-	}
-	if res == nil || !res.Success {
-		return 0, fmt.Sprintf("conversation %s: %v", conversationID, upstreamError(res))
-	}
-	var conv struct {
-		ID       string `json:"id"`
-		Messages struct {
-			Data []struct {
-				ID          string `json:"id"`
-				Message     string `json:"message"`
-				CreatedTime string `json:"created_time"`
-				From        struct {
-					ID       string `json:"id"`
-					Username string `json:"username"`
-					Name     string `json:"name"`
-				} `json:"from"`
-				Attachments any `json:"attachments"`
-			} `json:"data"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal(res.Data, &conv); err != nil {
-		return 0, fmt.Sprintf("decode conversation %s: %v", conversationID, err)
 	}
 	inserted := 0
-	for _, m := range conv.Messages.Data {
-		if m.ID == "" {
-			continue
-		}
-		occurred := time.Now().UTC()
-		if t, err := parsePlatformTime(m.CreatedTime); err == nil {
-			occurred = t
-		}
-		media := ""
-		if m.Attachments != nil {
-			media = rawJSON(m.Attachments)
-		}
-		author := firstNonEmpty(m.From.Username, m.From.Name)
-		_, didInsert, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
-			ProjectID:        acct.ProjectID,
-			SocialAccountID:  acct.ID,
-			Platform:         "instagram",
-			Kind:             inboxKindDM,
-			ExternalID:       m.ID,
-			ThreadExternalID: conversationID,
-			ParentExternalID: conversationID,
-			AuthorExternalID: m.From.ID,
-			AuthorName:       author,
-			AuthorHandle:     m.From.Username,
-			Body:             m.Message,
-			MediaJSON:        media,
-			OccurredAt:       occurred,
-			RawJSON:          rawJSON(m),
-			Direction:        directionForAuthor(acct, m.From.ID, m.From.Username),
-		})
+	for page := 0; page < 5; page++ {
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(acct.ConnID, "list_conversation_messages", args)
 		if err != nil {
-			ctx.Logger().Warn("inbox: upsert dm failed", "account", acct.ID, "message", m.ID, "err", err)
-			continue
+			return inserted, fmt.Sprintf("%s conversation %s: %v", platform, conversationID, err)
 		}
-		if didInsert {
-			inserted++
-			ctx.Emit("inbox.item.created", map[string]any{"social_account_id": acct.ID, "kind": inboxKindDM, "id": m.ID})
+		if res == nil || !res.Success {
+			return inserted, fmt.Sprintf("%s conversation %s: %v", platform, conversationID, upstreamError(res))
 		}
+		var resp struct {
+			Data   []metaMessage `json:"data"`
+			Paging metaPaging    `json:"paging"`
+		}
+		if err := json.Unmarshal(res.Data, &resp); err != nil {
+			return inserted, fmt.Sprintf("decode %s conversation %s: %v", platform, conversationID, err)
+		}
+		for _, m := range resp.Data {
+			if upsertMetaMessage(ctx, acct, platform, conversationID, m) {
+				inserted++
+			}
+		}
+		if resp.Paging.Cursors.After == "" || len(resp.Data) == 0 {
+			break
+		}
+		args["after"] = resp.Paging.Cursors.After
 	}
 	return inserted, ""
+}
+
+func upsertMetaMessage(ctx *sdk.AppCtx, acct inboxAccount, platform, conversationID string, m metaMessage) bool {
+	if m.ID == "" {
+		return false
+	}
+	occurred := time.Now().UTC()
+	if t, err := parsePlatformTime(m.CreatedTime); err == nil {
+		occurred = t
+	}
+	media := ""
+	if m.Attachments != nil {
+		media = rawJSON(m.Attachments)
+	}
+	author := firstNonEmpty(m.From.Username, m.From.Name)
+	_, didInsert, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+		ProjectID:        acct.ProjectID,
+		SocialAccountID:  acct.ID,
+		Platform:         platform,
+		Kind:             inboxKindDM,
+		ExternalID:       m.ID,
+		ThreadExternalID: conversationID,
+		ParentExternalID: conversationID,
+		AuthorExternalID: m.From.ID,
+		AuthorName:       author,
+		AuthorHandle:     m.From.Username,
+		Body:             m.Message,
+		MediaJSON:        media,
+		OccurredAt:       occurred,
+		RawJSON:          rawJSON(m),
+		Direction:        directionForAuthor(acct, m.From.ID, m.From.Username),
+	})
+	if err != nil {
+		ctx.Logger().Warn("inbox: upsert dm failed", "account", acct.ID, "message", m.ID, "err", err)
+		return false
+	}
+	if didInsert {
+		ctx.Emit("inbox.item.created", map[string]any{"social_account_id": acct.ID, "kind": inboxKindDM, "id": m.ID})
+	}
+	return didInsert
 }
 
 func syncInstagramMentions(ctx *sdk.AppCtx, acct inboxAccount, limit int) (int, []string) {
@@ -422,6 +608,78 @@ func syncInstagramMentions(ctx *sdk.AppCtx, acct inboxAccount, limit int) (int, 
 		}
 	}
 	return inserted, nil
+}
+
+func upsertFacebookMention(ctx *sdk.AppCtx, acct inboxAccount, tag metaTaggedItem) bool {
+	occurred := time.Now().UTC()
+	if t, err := parsePlatformTime(tag.CreatedTime); err == nil {
+		occurred = t
+	}
+	mediaJSON := ""
+	if tag.FullPicture != "" {
+		mediaJSON = rawJSON([]map[string]string{{"type": "image", "url": tag.FullPicture}})
+	} else if tag.Attachments != nil {
+		mediaJSON = rawJSON(tag.Attachments)
+	}
+	body := firstNonEmpty(tag.Message, tag.Story)
+	_, didInsert, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+		ProjectID:        acct.ProjectID,
+		SocialAccountID:  acct.ID,
+		Platform:         "facebook",
+		Kind:             inboxKindMention,
+		ExternalID:       tag.ID,
+		ThreadExternalID: tag.ID,
+		ExternalPostID:   tag.ID,
+		AuthorExternalID: tag.From.ID,
+		AuthorName:       tag.From.Name,
+		Body:             body,
+		MediaJSON:        mediaJSON,
+		Permalink:        tag.PermalinkURL,
+		OccurredAt:       occurred,
+		RawJSON:          rawJSON(tag),
+		Direction:        directionForAuthor(acct, tag.From.ID, tag.From.Name),
+	})
+	if err != nil {
+		ctx.Logger().Warn("inbox: upsert facebook mention failed", "account", acct.ID, "tag", tag.ID, "err", err)
+		return false
+	}
+	if didInsert {
+		ctx.Emit("inbox.item.created", map[string]any{"social_account_id": acct.ID, "kind": inboxKindMention, "id": tag.ID})
+	}
+	return didInsert
+}
+
+func upsertFacebookReview(ctx *sdk.AppCtx, acct inboxAccount, review metaReview) bool {
+	occurred := time.Now().UTC()
+	if t, err := parsePlatformTime(review.CreatedTime); err == nil {
+		occurred = t
+	}
+	body := firstNonEmpty(review.ReviewText, review.RecommendationType)
+	_, didInsert, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+		ProjectID:        acct.ProjectID,
+		SocialAccountID:  acct.ID,
+		Platform:         "facebook",
+		Kind:             inboxKindReview,
+		ExternalID:       review.ID,
+		ThreadExternalID: review.ID,
+		ExternalPostID:   firstNonEmpty(review.OpenGraphStory.ID, review.ID),
+		AuthorExternalID: review.Reviewer.ID,
+		AuthorName:       review.Reviewer.Name,
+		Body:             body,
+		Permalink:        review.OpenGraphStory.Permalink,
+		Rating:           review.Rating,
+		OccurredAt:       occurred,
+		RawJSON:          rawJSON(review),
+		Direction:        "inbound",
+	})
+	if err != nil {
+		ctx.Logger().Warn("inbox: upsert facebook review failed", "account", acct.ID, "review", review.ID, "err", err)
+		return false
+	}
+	if didInsert {
+		ctx.Emit("inbox.item.created", map[string]any{"social_account_id": acct.ID, "kind": inboxKindReview, "id": review.ID})
+	}
+	return didInsert
 }
 
 func findLocalPostID(ctx *sdk.AppCtx, accountID int64, platformPostID string) int64 {

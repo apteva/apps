@@ -97,9 +97,9 @@ func replyInboxItem(ctx *sdk.AppCtx, item *inboxItem, creds *inboxAccountCreds, 
 		out.Status = "ok"
 		return out
 	case inboxKindDM:
-		if item.Platform != "instagram" {
+		if item.Platform != "instagram" && item.Platform != "facebook" {
 			out.Status = "unsupported"
-			out.Reason = "DM replies are currently wired for Instagram only"
+			out.Reason = "DM replies are currently wired for Instagram and Facebook only"
 			return out
 		}
 		if item.AuthorExternalID == "" {
@@ -107,12 +107,20 @@ func replyInboxItem(ctx *sdk.AppCtx, item *inboxItem, creds *inboxAccountCreds, 
 			out.Error = "inbox item has no recipient id"
 			return out
 		}
-		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "send_message", map[string]any{
-			"instagramAccountId": creds.ExtID,
-			"recipient":          map[string]any{"id": item.AuthorExternalID},
-			"message":            map[string]any{"text": body},
-			"access_token":       creds.Token,
-		})
+		tool := "send_message"
+		args := map[string]any{
+			"recipient":    map[string]any{"id": item.AuthorExternalID},
+			"message":      map[string]any{"text": body},
+			"access_token": creds.Token,
+		}
+		if item.Platform == "instagram" {
+			args["instagramAccountId"] = creds.ExtID
+		} else {
+			tool = "facebook_send_message"
+			args["pageId"] = creds.ExtID
+			args["messaging_type"] = "RESPONSE"
+		}
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, tool, args)
 		if err != nil {
 			out.Status, out.Error = "failed", err.Error()
 			return out
@@ -134,9 +142,9 @@ func replyInboxItem(ctx *sdk.AppCtx, item *inboxItem, creds *inboxAccountCreds, 
 }
 
 func privateReplyInboxItem(ctx *sdk.AppCtx, item *inboxItem, creds *inboxAccountCreds, out inboxOutcome, body string) inboxOutcome {
-	if item.Platform != "instagram" || item.Kind != inboxKindComment {
+	if (item.Platform != "instagram" && item.Platform != "facebook") || item.Kind != inboxKindComment {
 		out.Status = "unsupported"
-		out.Reason = "private replies are Instagram comment-only"
+		out.Reason = "private replies are Facebook/Instagram comment-only"
 		return out
 	}
 	if body == "" {
@@ -144,12 +152,20 @@ func privateReplyInboxItem(ctx *sdk.AppCtx, item *inboxItem, creds *inboxAccount
 		out.Error = "body required"
 		return out
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "send_message", map[string]any{
-		"instagramAccountId": creds.ExtID,
-		"recipient":          map[string]any{"comment_id": item.ExternalID},
-		"message":            map[string]any{"text": body},
-		"access_token":       creds.Token,
-	})
+	tool := "send_message"
+	args := map[string]any{
+		"message":      map[string]any{"text": body},
+		"access_token": creds.Token,
+	}
+	if item.Platform == "instagram" {
+		args["instagramAccountId"] = creds.ExtID
+		args["recipient"] = map[string]any{"comment_id": item.ExternalID}
+	} else {
+		tool = "facebook_private_reply_to_comment"
+		args["commentId"] = item.ExternalID
+		args["message"] = body
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, tool, args)
 	if err != nil {
 		out.Status, out.Error = "failed", err.Error()
 		return out
