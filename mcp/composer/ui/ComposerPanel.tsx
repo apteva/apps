@@ -1,4 +1,4 @@
-// ComposerPanel v0.2 - structured timeline editor with approximate preview.
+// ComposerPanel v0.2.1 - structured timeline editor with storage browsing.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -79,28 +79,21 @@ interface ResolvedAsset {
   kind: "video" | "image" | "audio";
 }
 
+interface StorageFile {
+  id: number;
+  name: string;
+  folder?: string;
+  content_type?: string;
+  size_bytes?: number;
+}
+
 type Tab = "timeline" | "json";
+type AssetPickerTarget = { kind: "clip"; clipId: string } | { kind: "soundtrack" };
 
 const DEFAULT_DRAFT: DraftState = {
   name: "",
   background: "#000000",
-  clips: [
-    {
-      id: "clip-1",
-      asset: { type: "video", src: "storage:1" },
-      start: 0,
-      length: 4,
-      transition: { in: "fade", out: "none" },
-      text: { body: "Intro", position: "bottom", font_size: 32, color: "#ffffff" },
-    },
-    {
-      id: "clip-2",
-      asset: { type: "video", src: "storage:2" },
-      start: 4,
-      length: 6,
-      transition: { in: "none", out: "none" },
-    },
-  ],
+  clips: [],
   soundtrack: null,
   output: { format: "mp4", resolution: "hd", aspect: "16:9", fps: 30 },
 };
@@ -256,6 +249,7 @@ function outputJSONFromDraft(draft: DraftState): string {
 
 function activeClipAt(clips: ClipDraft[], seconds: number): ClipDraft | null {
   const normalized = normalizeClips(clips);
+  if (normalized.length === 0) return null;
   return normalized.find((clip) => seconds >= clip.start && seconds < clip.start + clip.length) || normalized[normalized.length - 1] || null;
 }
 
@@ -266,6 +260,24 @@ function aspectRatio(aspect: Aspect): string {
     case "4:3": return "4 / 3";
     default: return "16 / 9";
   }
+}
+
+function assetTypeFromFile(file: StorageFile): AssetType {
+  return storageFileKind(file) === "image" ? "image" : "video";
+}
+
+function storageFileKind(file: StorageFile): "video" | "image" | "audio" {
+  const ct = (file.content_type || "").toLowerCase();
+  const name = (file.name || "").toLowerCase();
+  if (ct.startsWith("image/") || /\.(png|jpe?g|webp|gif|avif)$/.test(name)) return "image";
+  if (ct.startsWith("audio/") || /\.(mp3|wav|m4a|aac|flac)$/.test(name)) return "audio";
+  return "video";
+}
+
+function fileSize(bytes?: number): string {
+  if (!bytes || bytes <= 0) return "";
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 export default function ComposerPanel({ projectId }: NativePanelProps) {
@@ -284,6 +296,10 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
   const [resolved, setResolved] = useState<Record<string, ResolvedAsset>>({});
   const [jsonEdit, setJsonEdit] = useState("");
   const [jsonOutput, setJsonOutput] = useState("");
+  const [pickerTarget, setPickerTarget] = useState<AssetPickerTarget | null>(null);
+  const [storageFiles, setStorageFiles] = useState<StorageFile[]>([]);
+  const [storageLoading, setStorageLoading] = useState(false);
+  const [storageError, setStorageError] = useState("");
 
   const selected = selectedId != null ? compositions.find((c) => c.id === selectedId) || null : null;
   const clips = useMemo(() => normalizeClips(draft.clips), [draft.clips]);
@@ -395,6 +411,26 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
     setSelectedClipId(id);
   };
 
+  const addClipFromFile = (file: StorageFile) => {
+    const id = `clip-${Date.now()}`;
+    const type = assetTypeFromFile(file);
+    updateDraft((cur) => ({
+      ...cur,
+      clips: [
+        ...cur.clips,
+        {
+          id,
+          asset: { type, src: `storage:${file.id}` },
+          start: durationOf(cur.clips),
+          length: type === "image" ? 4 : 6,
+          transition: { in: "none", out: "none" },
+        },
+      ],
+    }));
+    setSelectedClipId(id);
+    setPickerTarget(null);
+  };
+
   const deleteClip = (id: string) => {
     updateDraft((cur) => {
       const next = cur.clips.filter((clip) => clip.id !== id);
@@ -417,6 +453,10 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
   const save = async () => {
     setStatus("Saving...");
     try {
+      if (draft.clips.length === 0) {
+        setStatus("Add at least one clip before saving.");
+        return;
+      }
       const body = draftToBody(draft);
       const url = selectedId == null ? `${API}/composition/new` : `${API}/composition/${selectedId}`;
       const method = selectedId == null ? "POST" : "PUT";
@@ -461,6 +501,10 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
   };
 
   const render = async () => {
+    if (draft.clips.length === 0) {
+      setStatus("Add at least one clip before rendering.");
+      return;
+    }
     if (selectedId == null) {
       await save();
       setStatus("Saved. Render after selecting the new composition.");
@@ -499,6 +543,40 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
     await fetch(`${API}/composition/${selectedId}`, { method: "DELETE", credentials: "same-origin" });
     setSelectedId(null);
     await load();
+  };
+
+  const openPicker = (target: AssetPickerTarget) => {
+    setPickerTarget(target);
+    setStorageLoading(true);
+    setStorageError("");
+    fetch(`${API}/assets/storage?folder=/&recursive=true&limit=200`, { credentials: "same-origin" })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+        return res.json();
+      })
+      .then((data) => setStorageFiles(data.files || []))
+      .catch((e) => {
+        setStorageFiles([]);
+        setStorageError((e as Error).message);
+      })
+      .finally(() => setStorageLoading(false));
+  };
+
+  const chooseStorageFile = (file: StorageFile) => {
+    if (!pickerTarget) return;
+    if (pickerTarget.kind === "soundtrack") {
+      updateDraft((cur) => ({ ...cur, soundtrack: { src: `storage:${file.id}`, volume: cur.soundtrack?.volume ?? 1 } }));
+      setPickerTarget(null);
+      return;
+    }
+    const clip = clips.find((c) => c.id === pickerTarget.clipId);
+    if (!clip) {
+      addClipFromFile(file);
+      return;
+    }
+    updateClip(clip.id, { asset: { type: assetTypeFromFile(file), src: `storage:${file.id}` } });
+    setSelectedClipId(clip.id);
+    setPickerTarget(null);
   };
 
   return (
@@ -560,6 +638,8 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
                   duration={totalDuration}
                   onToggle={() => setPlaying((v) => !v)}
                   onSeek={setPlayhead}
+                  onAdd={addClip}
+                  onBrowse={() => openPicker(clips.length ? { kind: "clip", clipId: clips[0].id } : { kind: "clip", clipId: "" })}
                 />
                 <Timeline
                   clips={clips}
@@ -569,6 +649,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
                   onSelect={setSelectedClipId}
                   onSeek={setPlayhead}
                   onAdd={addClip}
+                  onBrowse={() => openPicker(clips.length ? { kind: "clip", clipId: clips[0].id } : { kind: "clip", clipId: "" })}
                 />
                 <RenderPreview render={selected?.latest_render || null} onOpen={setLightbox} />
               </section>
@@ -581,6 +662,9 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
                 onMove={moveClip}
                 onDeleteComposition={deleteSelected}
                 canDeleteComposition={selectedId != null}
+                onBrowseClip={(clipId) => openPicker({ kind: "clip", clipId })}
+                onBrowseSoundtrack={() => openPicker({ kind: "soundtrack" })}
+                onAddClip={addClip}
               />
             </div>
           ) : (
@@ -598,6 +682,16 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
       </div>
 
       {lightbox && <Lightbox render={lightbox} onClose={() => setLightbox(null)} />}
+      {pickerTarget && (
+        <StoragePicker
+          files={storageFiles}
+          loading={storageLoading}
+          error={storageError}
+          target={pickerTarget.kind}
+          onClose={() => setPickerTarget(null)}
+          onChoose={chooseStorageFile}
+        />
+      )}
     </div>
   );
 }
@@ -691,6 +785,8 @@ function PreviewStage({
   duration,
   onToggle,
   onSeek,
+  onAdd,
+  onBrowse,
 }: {
   clip: ClipDraft | null;
   asset?: ResolvedAsset;
@@ -701,6 +797,8 @@ function PreviewStage({
   duration: number;
   onToggle: () => void;
   onSeek: (t: number) => void;
+  onAdd: () => void;
+  onBrowse: () => void;
 }) {
   const mediaRef = useRef<HTMLVideoElement | null>(null);
   useEffect(() => {
@@ -733,7 +831,7 @@ function PreviewStage({
         <span className="text-xs text-text-dim tabular-nums">{formatTime(playhead)} / {formatTime(duration)}</span>
       </div>
       <div className="p-4 flex items-center justify-center bg-bg">
-        <div className="relative w-full max-w-4xl border border-border overflow-hidden" style={{ background, aspectRatio: aspectRatio(aspect) }}>
+        <div className="relative w-full max-w-4xl min-h-72 border border-border overflow-hidden" style={{ background, aspectRatio: aspectRatio(aspect) }}>
           {url && clip?.asset.type === "image" && (
             <img src={url} alt="" className="absolute inset-0 w-full h-full object-cover" />
           )}
@@ -741,8 +839,18 @@ function PreviewStage({
             <video ref={mediaRef} src={url} muted className="absolute inset-0 w-full h-full object-cover" />
           )}
           {!url && (
-            <div className="absolute inset-0 flex items-center justify-center text-text-dim text-sm">
-              {clip?.asset.src || "No clip source"}
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
+              <div className="text-text-muted text-sm">{clip ? (clip.asset.src || "No clip source") : "No clips yet"}</div>
+              {!clip && (
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={onBrowse} className="px-3 py-1.5 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg">
+                    Browse storage
+                  </button>
+                  <button type="button" onClick={onAdd} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">
+                    Add empty clip
+                  </button>
+                </div>
+              )}
             </div>
           )}
           {clip?.text?.body && (
@@ -771,6 +879,7 @@ function Timeline({
   onSelect,
   onSeek,
   onAdd,
+  onBrowse,
 }: {
   clips: ClipDraft[];
   selectedClipId: string;
@@ -779,50 +888,63 @@ function Timeline({
   onSelect: (id: string) => void;
   onSeek: (t: number) => void;
   onAdd: () => void;
+  onBrowse: () => void;
 }) {
   return (
     <section className="border border-border rounded bg-bg-card overflow-hidden">
       <header className="px-3 py-2 border-b border-border flex items-center gap-2">
         <h2 className="text-xs uppercase tracking-wide text-text-dim flex-1">Timeline</h2>
-        <button onClick={onAdd} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Add clip</button>
+        <button onClick={onBrowse} className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg">Browse storage</button>
+        <button onClick={onAdd} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Add empty clip</button>
       </header>
       <div className="p-3">
-        <button
-          type="button"
-          onClick={(e) => {
-            const rect = e.currentTarget.getBoundingClientRect();
-            onSeek(((e.clientX - rect.left) / rect.width) * duration);
-          }}
-          className="relative w-full h-24 border border-border rounded bg-bg text-left overflow-hidden"
-        >
-          <div
-            className="absolute top-0 bottom-0 w-px bg-accent"
-            style={{ left: `${duration ? Math.min(100, (playhead / duration) * 100) : 0}%` }}
-          />
-          <div className="absolute inset-x-2 top-8 h-10 flex">
-            {clips.map((clip) => {
-              const width = duration ? (clip.length / duration) * 100 : 100;
-              const selected = clip.id === selectedClipId;
-              return (
-                <div
-                  key={clip.id}
-                  role="button"
-                  tabIndex={0}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onSelect(clip.id);
-                    onSeek(clip.start);
-                  }}
-                  className={`h-10 border text-xs flex flex-col justify-center px-2 overflow-hidden ${selected ? "border-accent bg-accent/10" : "border-border bg-bg-input hover:border-accent"}`}
-                  style={{ width: `${Math.max(6, width)}%` }}
-                >
-                  <span className="text-text truncate">{clip.asset.src || "empty source"}</span>
-                  <span className="text-text-dim">{clip.asset.type} - {clip.length.toFixed(1)}s</span>
-                </div>
-              );
-            })}
+        {clips.length === 0 ? (
+          <div className="border border-dashed border-border rounded bg-bg px-4 py-8 text-center">
+            <div className="text-text-muted text-sm">Start with a file from Storage or add a blank clip.</div>
+            <div className="mt-3 flex items-center justify-center gap-2">
+              <button type="button" onClick={onBrowse} className="px-3 py-1.5 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg">Browse storage</button>
+              <button type="button" onClick={onAdd} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">Add empty clip</button>
+            </div>
           </div>
-        </button>
+        ) : (
+          <button
+            type="button"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              onSeek(((e.clientX - rect.left) / rect.width) * duration);
+            }}
+            className="relative w-full h-32 border border-border rounded bg-bg text-left overflow-hidden"
+          >
+            <div
+              className="absolute top-0 bottom-0 w-px bg-accent"
+              style={{ left: `${duration ? Math.min(100, (playhead / duration) * 100) : 0}%` }}
+            />
+            <div className="absolute inset-x-3 top-10 h-16 flex">
+              {clips.map((clip) => {
+                const width = duration ? (clip.length / duration) * 100 : 100;
+                const selected = clip.id === selectedClipId;
+                return (
+                  <div
+                    key={clip.id}
+                    role="button"
+                    tabIndex={0}
+                    title={clip.asset.src || "empty source"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSelect(clip.id);
+                      onSeek(clip.start);
+                    }}
+                    className={`h-16 min-w-24 border text-xs flex flex-col justify-center px-2 overflow-hidden ${selected ? "border-accent bg-accent/10" : "border-border bg-bg-input hover:border-accent"}`}
+                    style={{ width: `${Math.max(10, width)}%` }}
+                  >
+                    <span className="block text-text truncate leading-5">{clip.asset.src || "empty source"}</span>
+                    <span className="block text-text-dim truncate leading-5">{clip.asset.type} - {clip.length.toFixed(1)}s</span>
+                  </div>
+                );
+              })}
+            </div>
+          </button>
+        )}
       </div>
     </section>
   );
@@ -837,6 +959,9 @@ function Inspector({
   onMove,
   onDeleteComposition,
   canDeleteComposition,
+  onBrowseClip,
+  onBrowseSoundtrack,
+  onAddClip,
 }: {
   draft: DraftState;
   clip: ClipDraft | null;
@@ -846,6 +971,9 @@ function Inspector({
   onMove: (id: string, dir: -1 | 1) => void;
   onDeleteComposition: () => void;
   canDeleteComposition: boolean;
+  onBrowseClip: (clipId: string) => void;
+  onBrowseSoundtrack: () => void;
+  onAddClip: () => void;
 }) {
   const field = "bg-bg-input border border-border rounded px-2 py-1.5 text-sm w-full";
   return (
@@ -888,12 +1016,17 @@ function Inspector({
             </Field>
           </div>
           <Field label="Soundtrack">
-            <input
-              value={draft.soundtrack?.src || ""}
-              onChange={(e) => onDraft((cur) => ({ ...cur, soundtrack: e.target.value ? { src: e.target.value, volume: cur.soundtrack?.volume ?? 1 } : null }))}
-              placeholder="storage:99 or https://..."
-              className={field}
-            />
+            <div className="flex gap-2">
+              <input
+                value={draft.soundtrack?.src || ""}
+                onChange={(e) => onDraft((cur) => ({ ...cur, soundtrack: e.target.value ? { src: e.target.value, volume: cur.soundtrack?.volume ?? 1 } : null }))}
+                placeholder="storage:99 or https://..."
+                className={field}
+              />
+              <button type="button" onClick={onBrowseSoundtrack} className="px-2 py-1.5 text-xs border border-border rounded hover:bg-bg-input">
+                Browse
+              </button>
+            </div>
           </Field>
           {draft.soundtrack && (
             <Field label={`Volume ${draft.soundtrack.volume.toFixed(2)}`}>
@@ -911,6 +1044,21 @@ function Inspector({
           )}
         </section>
 
+        {!clip && (
+          <section className="space-y-2">
+            <h2 className="text-xs uppercase tracking-wide text-text-dim">Selected clip</h2>
+            <div className="border border-dashed border-border rounded p-3 text-sm text-text-muted">
+              No clip selected.
+            </div>
+            <button onClick={() => onBrowseClip("")} className="w-full text-sm px-3 py-1.5 border border-accent text-accent rounded hover:bg-accent hover:text-bg">
+              Browse storage
+            </button>
+            <button onClick={onAddClip} className="w-full text-sm px-3 py-1.5 border border-border rounded hover:bg-bg-input">
+              Add empty clip
+            </button>
+          </section>
+        )}
+
         {clip && (
           <section className="space-y-2">
             <div className="flex items-center gap-2">
@@ -919,12 +1067,17 @@ function Inspector({
               <button onClick={() => onMove(clip.id, 1)} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Right</button>
             </div>
             <Field label="Source">
-              <input
-                value={clip.asset.src}
-                onChange={(e) => onClip(clip.id, { asset: { ...clip.asset, src: e.target.value } })}
-                placeholder="storage:1, mediastudio:4, or https://..."
-                className={field}
-              />
+              <div className="flex gap-2">
+                <input
+                  value={clip.asset.src}
+                  onChange={(e) => onClip(clip.id, { asset: { ...clip.asset, src: e.target.value } })}
+                  placeholder="storage:1, mediastudio:4, or https://..."
+                  className={field}
+                />
+                <button type="button" onClick={() => onBrowseClip(clip.id)} className="px-2 py-1.5 text-xs border border-border rounded hover:bg-bg-input">
+                  Browse
+                </button>
+              </div>
             </Field>
             <div className="grid grid-cols-2 gap-2">
               <Field label="Type">
@@ -1048,6 +1201,68 @@ function StatusPill({ status }: { status: RenderRow["status"] }) {
         ? "bg-red/15 text-red"
         : "bg-border text-text-muted";
   return <span className={`text-[10px] px-1.5 py-0.5 rounded ${cls}`}>{status}</span>;
+}
+
+function StoragePicker({
+  files,
+  loading,
+  error,
+  target,
+  onClose,
+  onChoose,
+}: {
+  files: StorageFile[];
+  loading: boolean;
+  error: string;
+  target: AssetPickerTarget["kind"];
+  onClose: () => void;
+  onChoose: (file: StorageFile) => void;
+}) {
+  const mediaFiles = files.filter((file) => {
+    const kind = storageFileKind(file);
+    if (target === "soundtrack") return kind === "audio" || kind === "video";
+    return kind === "video" || kind === "image";
+  });
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-6" style={{ zIndex: 9998 }}>
+      <div className="bg-bg border border-border rounded shadow-xl w-full max-w-3xl max-h-[82vh] flex flex-col">
+        <header className="px-4 py-3 border-b border-border flex items-center gap-2">
+          <div className="text-sm text-text font-medium flex-1">Browse storage</div>
+          <button onClick={onClose} className="text-text-dim hover:text-text px-2 text-lg leading-none">x</button>
+        </header>
+        <div className="flex-1 overflow-auto">
+          {loading && <div className="p-4 text-text-muted text-sm">Loading storage...</div>}
+          {error && <div className="p-4 text-red text-sm whitespace-pre-wrap">{error}</div>}
+          {!loading && !error && mediaFiles.length === 0 && (
+            <div className="p-4 text-text-muted text-sm">No media files found in storage.</div>
+          )}
+          {!loading && !error && mediaFiles.length > 0 && (
+            <ul className="divide-y divide-border">
+              {mediaFiles.map((file) => (
+                <li key={file.id}>
+                  <button
+                    type="button"
+                    onClick={() => onChoose(file)}
+                    className="w-full text-left px-4 py-3 hover:bg-bg-input flex items-center gap-3"
+                  >
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted uppercase">
+                      {storageFileKind(file)}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm text-text truncate">{file.name || `file #${file.id}`}</span>
+                      <span className="block text-xs text-text-dim truncate">
+                        {file.folder || "/"} · storage:{file.id}{file.content_type ? ` · ${file.content_type}` : ""}{fileSize(file.size_bytes) ? ` · ${fileSize(file.size_bytes)}` : ""}
+                      </span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function RenderPreview({ render, onOpen }: { render: RenderRow | null; onOpen: (r: RenderRow) => void }) {

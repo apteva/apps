@@ -11,6 +11,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/cache/", Handler: a.handleCacheGet},
 		{Pattern: "/bindings", Handler: a.handleBindings},
 		{Pattern: "/assets/resolve", Handler: a.handleAssetResolve},
+		{Pattern: "/assets/storage", Handler: a.handleStorageAssets},
 	}
 }
 

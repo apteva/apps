@@ -484,6 +484,40 @@ func (a *App) handleAssetResolve(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (a *App) handleStorageAssets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	if globalCtx == nil {
+		http.Error(w, "app not mounted", http.StatusServiceUnavailable)
+		return
+	}
+	folder := strings.TrimSpace(r.URL.Query().Get("folder"))
+	if folder == "" {
+		folder = "/"
+	}
+	recursive := r.URL.Query().Get("recursive") != "false"
+	limit := 200
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+	args := map[string]any{
+		"folder":      folder,
+		"recursive":   recursive,
+		"limit":       limit,
+		"_project_id": projectScope(globalCtx),
+	}
+	var got map[string]any
+	if err := globalCtx.PlatformAPI().CallAppResult("storage", "files_list", args, &got); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	jsonResp(w, got)
+}
+
 func assetKindHint(src string) string {
 	s := strings.ToLower(src)
 	switch {

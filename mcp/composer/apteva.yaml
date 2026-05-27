@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.2.0
+version: 0.2.1
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — clips on a track, optional soundtrack, text
@@ -11,9 +11,9 @@ description: |
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
 
-  v0.2 adds a structured timeline panel with live preview, clip
-  inspector controls, asset URL resolution, and storage-aware render
-  saves.
+  v0.2.1 adds an empty first-run state, storage browsing for clip
+  sources, safer timeline labels, asset URL resolution, and
+  storage-aware render saves.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/composer
