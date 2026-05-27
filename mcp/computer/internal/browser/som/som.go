@@ -1,6 +1,6 @@
 // Package som implements Set-of-Mark annotation for screenshots.
 //
-// SoM is an opt-in grounding aid for vision-language models that aren't
+// SoM is a grounding aid for vision-language models that aren't
 // trained for pixel-precise GUI understanding. Instead of asking the
 // model "what are the x,y coordinates of the login button?", we:
 //
@@ -14,8 +14,8 @@
 // The model reads labels (text) instead of estimating pixels. No
 // coordinate guessing, no positional priors biting us.
 //
-// Activated per screenshot via APTEVA_SOM=1. Zero effect when off —
-// behaviour is byte-identical to the pre-SoM pipeline.
+// The Computer app keeps SoM enabled by default so agents can click
+// visible labels instead of guessing pixel coordinates.
 package som
 
 import (
@@ -439,7 +439,7 @@ func ColorFor(e Element) color.RGBA {
 // Annotate composites SoM badges onto a raw screenshot. Accepts JPEG
 // or PNG; returns the same format, same dimensions. Badges are small
 // filled rects at each element's top-left corner with the label
-// number in white. If APTEVA_SOM_BOX is set, a 1-px outline is also
+// number in white. If APTEVA_COMPUTER_SOM_BOX is set, a 1-px outline is also
 // drawn around each element's full bbox (helps the model associate
 // label with region, at the cost of visual noise).
 func Annotate(raw []byte, elements []Element) ([]byte, error) {
@@ -451,7 +451,7 @@ func Annotate(raw []byte, elements []Element) ([]byte, error) {
 	dst := image.NewRGBA(b)
 	draw.Draw(dst, b, src, b.Min, draw.Src)
 
-	drawBox := os.Getenv("APTEVA_SOM_BOX") != ""
+	drawBox := os.Getenv("APTEVA_COMPUTER_SOM_BOX") != ""
 
 	for _, e := range elements {
 		col := ColorFor(e)
@@ -520,7 +520,7 @@ func drawBadge(dst *image.RGBA, e Element, col color.RGBA) {
 }
 
 // drawOutline strokes a 1-px rectangle around the element's full bbox.
-// Helps the model associate label with region. Opt-in via APTEVA_SOM_BOX.
+// Helps the model associate label with region. Opt-in via APTEVA_COMPUTER_SOM_BOX.
 func drawOutline(dst *image.RGBA, e Element, col color.RGBA) {
 	x0, y0 := e.X, e.Y
 	x1, y1 := e.X+e.W, e.Y+e.H
@@ -554,9 +554,8 @@ func UnmarshalElements(data []byte) ([]Element, error) {
 	return els, nil
 }
 
-// Enabled reads the APTEVA_SOM env gate. Single source of truth so
-// every caller can't disagree about on/off.
+// Enabled is the app-level SoM gate. The Computer app always annotates
+// screenshots so every agent sees the same label-first interaction surface.
 func Enabled() bool {
-	v := os.Getenv("APTEVA_SOM")
-	return v != "" && v != "0" && v != "false" && v != "off"
+	return true
 }

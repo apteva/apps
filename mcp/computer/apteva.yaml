@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.9
+version: 0.7.10
 description: |
-  Watch and steer browser sessions. v0.7.9 makes provider lock coerce
-  agent backend hints to the app default instead of failing.
+  Watch and steer browser sessions. v0.7.10 enables label-badged
+  screenshots by default so agents click visible targets reliably.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -45,9 +45,15 @@ provides:
         context_id?, persist?, timeout?, proxy?, proxy_country?, viewport?.
     - name: computer_use
       description: |
-        Drive an app-owned browser session. Args: session_id, action,
-        coordinate?, label?, text?, key?, direction?, amount?, duration?.
-        Returns screenshot bytes for visual actions.
+        Drive an app-owned browser session. Default workflow: call
+        action=screenshot first; screenshots contain Set-of-Mark numeric
+        badges on interactive elements. To click, use action=click with
+        label=N from the latest screenshot. Prefer label over coordinate;
+        use coordinate only for targets with no badge such as canvas or
+        custom rendered widgets. After scrolling or navigation, take a
+        fresh screenshot because labels are re-enumerated. Args:
+        session_id, action, coordinate?, label?, text?, key?, direction?,
+        amount?, duration?. Returns screenshot bytes for visual actions.
     - name: computer_context_create
       description: |
         Create or import an app-managed browser context. Args: name,
@@ -109,8 +115,8 @@ provides:
         url: "https://example.com"
         status: "active"
 
-    # Annotated screenshot — agent attaches after computer_use(screenshot)
-    # when SoM is on. Renders the image with SoM badges as an SVG
+    # Annotated screenshot — agent attaches after computer_use(screenshot).
+    # Renders the image with SoM badges as an SVG
     # overlay so the operator sees what the agent sees AND what it's
     # about to act on.
     - name: screenshot-with-som

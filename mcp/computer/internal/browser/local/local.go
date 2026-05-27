@@ -67,10 +67,9 @@ type Computer struct {
 	// relaunchIfProxyChanged does.
 	activeContextID string
 
-	// SoM (Set-of-Mark) state. Populated on every Screenshot() when
-	// APTEVA_SOM is set, consumed by Execute for click/double_click
+	// SoM (Set-of-Mark) state. Populated on every Screenshot(),
+	// consumed by Execute for click/double_click
 	// when the action carries a label= instead of coordinate=x,y.
-	// Unused (nil map) when SoM is off — zero cost on that path.
 	labelMu    sync.RWMutex
 	lastLabels map[int]som.Element
 
@@ -696,8 +695,8 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		}
 		// SoM: resolve label to bbox center if the action carries
 		// a label= (takes precedence over X/Y). Falls back to raw
-		// coordinates when the label is unknown or SoM is off —
-		// never a hard error, the agent can always use X,Y.
+		// coordinates when the label is unknown; the agent can always
+		// use X,Y for custom rendered targets with no badge.
 		x, y := action.X, action.Y
 		labelNote := ""
 		if action.Label != 0 {
@@ -931,8 +930,7 @@ func (c *Computer) Screenshot() ([]byte, error) {
 	// is logged and returned as-is so a future debugger can notice.
 	buf, _ = c.scaleToDisplay(buf)
 
-	// SoM annotation — off by default, enabled via APTEVA_SOM=1. On
-	// the happy path (SoM on, enumeration returns N elements), this
+	// SoM annotation. On the happy path (enumeration returns N elements), this
 	// adds a read-only DOM query, stores the resulting label→bbox
 	// map, and composites numeric badges onto the image bytes. On
 	// any failure we log and return the raw screenshot — SoM never
@@ -977,7 +975,7 @@ func (c *Computer) Screenshot() ([]byte, error) {
 // One file per Screenshot() call:
 //
 //	<dir>/screenshot_<unix_ms>.jpg   the EXACT pixels the LLM received,
-//	                                 SoM badges baked in if SoM is on
+//	                                 with SoM badges baked in
 //	<dir>/screenshot_<unix_ms>.json  the Element list (label → bbox/tag/text)
 //	                                 that powered click(label=N) resolution
 //

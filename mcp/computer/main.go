@@ -39,10 +39,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.9
+version: 0.7.10
 description: |
-  Watch and steer browser sessions. v0.7.9 makes provider lock coerce
-  agent backend hints to the app default instead of failing.
+  Watch and steer browser sessions. v0.7.10 enables label-badged
+  screenshots by default so agents click visible targets reliably.
 scopes: [project, global]
 requires:
   permissions:
@@ -69,7 +69,7 @@ provides:
     - name: browser_session
       description: "Open, resume, list, inspect, or close app-owned browser sessions. Args: action, session_id?, backend?, backend_session_id?, url?, context_id?, persist?, timeout?, proxy?, proxy_country?, viewport?."
     - name: computer_use
-      description: "Drive an app-owned browser session. Args: session_id, action, coordinate?, label?, text?, key?, direction?, amount?, duration?. Returns screenshot bytes for visual actions."
+      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. After scrolling or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, coordinate?, label?, text?, key?, direction?, amount?, duration?. Returns screenshot bytes for visual actions."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -314,14 +314,16 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "computer_use",
-			Description: "Drive a browser session opened by browser_session. Actions: screenshot, click, double_click, type, key, scroll, wait. " +
-				"Args: session_id, action, coordinate? (\"x,y\"), label? (SoM label), text?, key?, direction?, amount?, duration?. " +
+			Description: "Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
+				"To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. " +
+				"After scrolling or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, click, double_click, type, key, scroll, wait. " +
+				"Args: session_id, action, coordinate? (\"x,y\"), label? (Set-of-Mark label), text?, key?, direction?, amount?, duration?. " +
 				"Returns a binary screenshot envelope plus current_url, width, height.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
 				"action":     map[string]any{"type": "string", "enum": []string{"screenshot", "click", "double_click", "type", "key", "scroll", "wait"}},
 				"coordinate": map[string]any{"type": "string"},
-				"label":      map[string]any{"type": "integer"},
+				"label":      map[string]any{"type": "integer", "description": "Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click."},
 				"text":       map[string]any{"type": "string"},
 				"key":        map[string]any{"type": "string"},
 				"direction":  map[string]any{"type": "string"},
@@ -989,6 +991,9 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if action == "navigate" {
 		return nil, fmt.Errorf("use browser_session(action=open, url=...) to navigate")
 	}
+	if (action == "click" || action == "double_click") && !hasClickTargetArg(args) {
+		return nil, fmt.Errorf("%s requires label=N from the latest screenshot, or coordinate=\"x,y\" for targets without a badge", action)
+	}
 	sess, ok := a.reg.get(id)
 	if !ok {
 		return nil, fmt.Errorf("session %s not found (may have been reaped or never opened by this sidecar)", id)
@@ -1320,6 +1325,9 @@ func intArg(args map[string]any, k string) int {
 		return int(v)
 	case float64:
 		return int(v)
+	case string:
+		n, _ := strconv.Atoi(strings.TrimSpace(v))
+		return n
 	}
 	return 0
 }
@@ -1363,6 +1371,22 @@ func coordinateArg(args map[string]any) (int, int) {
 		}
 	}
 	return intArg(args, "x"), intArg(args, "y")
+}
+
+func hasClickTargetArg(args map[string]any) bool {
+	if intArg(args, "label") > 0 {
+		return true
+	}
+	if strings.TrimSpace(stringArg(args, "coordinate")) != "" {
+		return true
+	}
+	if _, ok := args["x"]; ok {
+		return true
+	}
+	if _, ok := args["y"]; ok {
+		return true
+	}
+	return false
 }
 
 func mapWithDefault(args map[string]any, k string, v any) map[string]any {

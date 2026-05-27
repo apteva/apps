@@ -40,7 +40,7 @@ to ask the operator a question.
 | When | Component | Key props |
 |---|---|---|
 | After `browser_session(open)` succeeds | `browser-card` | `instance_id`, `backend`, `url`, `status` |
-| After `screenshot` with SoM on | `screenshot-with-som` | `screenshot_url`, `som: [{label,x,y,w,h,kind}]`, `caption` |
+| After `screenshot` | `screenshot-with-som` | `screenshot_url`, `som: [{label,x,y,w,h,kind}]`, `caption` |
 | After traversing several pages | `navigation-timeline` | `steps: [{url,title,thumbnail,ts}]` |
 | Mid-flow "watch me work" tile | `live-view` | `instance_id`, `height`, `mode` |
 

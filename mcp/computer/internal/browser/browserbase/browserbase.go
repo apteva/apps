@@ -462,8 +462,8 @@ func (c *Computer) Screenshot() ([]byte, error) {
 		return nil, fmt.Errorf("screenshot: %w", err)
 	}
 
-	// SoM annotation — same pipeline as local.Screenshot. Off unless
-	// APTEVA_SOM=1; any failure returns the raw screenshot.
+	// SoM annotation — same pipeline as local.Screenshot. Any failure
+	// returns the raw screenshot.
 	if som.Enabled() {
 		var raw json.RawMessage
 		if err := chromedp.Run(c.ctx, chromedp.Evaluate(som.EnumScript, &raw)); err != nil {

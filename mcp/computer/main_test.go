@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -178,6 +179,28 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	}
 	if fake.screenshotCalls != 1 {
 		t.Errorf("screenshot calls: want 1, got %d", fake.screenshotCalls)
+	}
+
+	if _, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "click",
+	}); err == nil || !strings.Contains(err.Error(), "requires label") {
+		t.Fatalf("computer_use click without label/coordinate: want target error, got %v", err)
+	}
+
+	clickOut, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "click",
+		"label":      "7",
+	})
+	if err != nil {
+		t.Fatalf("computer_use click with string label: %v", err)
+	}
+	if clickOut.(map[string]any)["current_url"] != "https://example.com" {
+		t.Errorf("click current_url: want example.com, got %v", clickOut.(map[string]any)["current_url"])
+	}
+	if fake.lastAction.Type != "click" || fake.lastAction.Label != 7 {
+		t.Errorf("click action: want label 7, got %+v", fake.lastAction)
 	}
 
 	// close
@@ -390,6 +413,43 @@ func TestComputerSettingsLockOverridesExplicitBackend(t *testing.T) {
 	if out.(map[string]any)["backend"] != "browserbase" {
 		t.Errorf("output backend: want browserbase, got %v", out.(map[string]any)["backend"])
 	}
+}
+
+func TestComputerUseDescriptionTeachesLabelWorkflow(t *testing.T) {
+	app := &App{}
+	var desc string
+	for _, tool := range app.MCPTools() {
+		if tool.Name == "computer_use" {
+			desc = tool.Description
+			break
+		}
+	}
+	if desc == "" {
+		t.Fatal("computer_use tool missing")
+	}
+	for _, want := range []string{"action=screenshot first", "Set-of-Mark", "label=N", "Prefer label over coordinate"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("computer_use description missing %q:\n%s", want, desc)
+		}
+	}
+
+	yamlBytes, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatalf("read apteva.yaml: %v", err)
+	}
+	manifest, err := sdk.ParseManifest(yamlBytes)
+	if err != nil {
+		t.Fatalf("parse apteva.yaml: %v", err)
+	}
+	for _, tool := range manifest.Provides.MCPTools {
+		if tool.Name == "computer_use" {
+			if !strings.Contains(tool.Description, "label=N") {
+				t.Fatalf("manifest computer_use description does not teach label workflow:\n%s", tool.Description)
+			}
+			return
+		}
+	}
+	t.Fatal("manifest computer_use tool missing")
 }
 
 // ─── fake Computer ─────────────────────────────────────────────────
