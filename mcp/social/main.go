@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.22
+version: 0.14.23
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -1735,6 +1735,7 @@ func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (
 	if first.IsVideo() {
 		containerInput["video_url"] = first.URL
 		containerInput["media_type"] = "REELS"
+		containerInput["sync"] = true
 	} else {
 		containerInput["image_url"] = first.URL
 		containerInput["media_type"] = "IMAGE"
@@ -1761,7 +1762,11 @@ func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (
 	// Images are processed inline so no wait is needed.
 	if first.IsVideo() {
 		if err := a.waitContainerReady(ctx, j.connID, containerID, pageToken); err != nil {
-			return "", "", fmt.Errorf("container not ready: %w", err)
+			if !isInstagramStatusProbeAuthError(err) {
+				return "", "", fmt.Errorf("container not ready: %w", err)
+			}
+			ctx.Logger().Warn("publishInstagram: container status probe not authorized; continuing to publish with retry",
+				"container_id", containerID, "ig_account", j.extID, "err", err)
 		}
 	}
 	// Step 2: publish_media_container. Graph API expects
@@ -2068,6 +2073,16 @@ func isTransientInstagramPublishError(err error) bool {
 		}
 	}
 	return false
+}
+
+func isInstagramStatusProbeAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "authorization error") ||
+		strings.Contains(msg, "\"error_subcode\":33") ||
+		strings.Contains(msg, "\"code\":100")
 }
 
 // publishTikTok drives TikTok's video publish flow.

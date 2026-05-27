@@ -869,6 +869,62 @@ func TestPublishInstagram_RetriesTransientPublishRace(t *testing.T) {
 	}
 }
 
+func TestPublishInstagram_VideoContinuesWhenStatusProbeAuthFails(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["create_media_container"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"id":"container_video"}`),
+	}
+	pf.executeResponses["get_container_status"] = &sdk.ExecuteResult{
+		Success: false,
+		Status:  400,
+		Data:    json.RawMessage(`{"error":{"code":100,"error_subcode":33,"message":"Authorization Error","type":"GraphMethodException"}}`),
+	}
+	pf.executeResponses["publish_media_container"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"id":"ig_video_ok"}`),
+	}
+
+	ctx := newSocialCtx(t, pf)
+	app := &App{}
+	id, _, err := app.publishInstagram(ctx, platforms["instagram"], publishJob{
+		connID:    42,
+		extID:     "ig-acct-1",
+		body:      "video post",
+		pageCreds: `{"access_token":"page-token"}`,
+		media:     []mediaItem{{URL: "https://example.com/reel.mp4", Mime: "video/mp4", Bytes: 1234}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "ig_video_ok" {
+		t.Fatalf("published id = %q", id)
+	}
+
+	var sawCreate, sawStatus, sawPublish bool
+	for _, c := range pf.executeCalls {
+		switch c.Tool {
+		case "create_media_container":
+			sawCreate = true
+			if c.Input["media_type"] != "REELS" {
+				t.Errorf("media_type = %v", c.Input["media_type"])
+			}
+			if c.Input["sync"] != true {
+				t.Errorf("sync should be true for video container creation: %+v", c.Input)
+			}
+		case "get_container_status":
+			sawStatus = true
+		case "publish_media_container":
+			sawPublish = true
+		}
+	}
+	if !sawCreate || !sawStatus || !sawPublish {
+		t.Fatalf("expected create, status probe, and publish calls; got %+v", pf.executeCalls)
+	}
+}
+
 func TestPublishInstagram_NoMediaFails(t *testing.T) {
 	pf := newRecordingPlatform()
 	ctx := newSocialCtx(t, pf)
