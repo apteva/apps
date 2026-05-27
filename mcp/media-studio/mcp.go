@@ -15,6 +15,7 @@ type buildResultArgs struct {
 	Count         int
 	MimeType      string
 	CostUSD       float64
+	GenerationID  int64
 }
 
 // buildMCPResult shapes the MCP content blocks per kind. Image kind
@@ -94,6 +95,7 @@ func buildMCPResult(a buildResultArgs) map[string]any {
 		"storage_urls":   storageURLs,
 		"upstream_urls":  a.UpstreamURLs,
 		"cost_usd":       a.CostUSD,
+		"generation_id":  a.GenerationID,
 	}
 	return map[string]any{
 		"content": content,

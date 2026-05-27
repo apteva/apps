@@ -33,10 +33,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.9.1
+version: 0.10.0
 description: |
-  Generate images, video, audio, and music via any compatible provider.
-  Optionally saves outputs to the Storage app for permanent references.
+  Generate images, video, audio, music, and avatars via compatible
+  providers. Optionally saves outputs to Storage and supports stable
+  cache keys for app-to-app generation reuse.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -95,8 +96,9 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: media_generate, description: "Generate media (image/video/audio/music). Args: kind, prompt, model?, size?, duration?, voice?, aspect?, n?, options?." }
+    - { name: media_generate, description: "Generate media (image/video/audio/music/avatar). Args: kind, prompt, model?, size?, duration?, voice?, aspect?, avatar?, n?, options?, cache_key?, cache_policy?." }
     - { name: media_history,  description: "List recent generations. Args: kind?, limit?, since?." }
+    - { name: media_get,      description: "Fetch one generation by id. Args: id." }
   ui_panels:
     - slot: project.page
       label: Studio
@@ -196,6 +198,16 @@ func (a *App) MCPTools() []sdk.Tool {
 				"aspect":   map[string]any{"type": "string", "description": "Aspect ratio (video only). e.g. 16:9."},
 				"avatar":   map[string]any{"type": "string", "description": "Replica/avatar id (avatar kind). From the /avatars list or the provider."},
 				"n":        map[string]any{"type": "integer", "default": 1, "minimum": 1, "maximum": 10},
+				"cache_key": map[string]any{
+					"type":        "string",
+					"description": "Stable caller-provided key. When present, cache_policy=reuse returns an existing completed generation instead of regenerating.",
+				},
+				"cache_policy": map[string]any{
+					"type":        "string",
+					"enum":        []string{"reuse", "refresh"},
+					"default":     "reuse",
+					"description": "reuse checks completed/pending rows by cache_key; refresh bypasses cache.",
+				},
 				"options": map[string]any{
 					"type":        "object",
 					"description": "Per-provider extras passed through (background, output_format, lyrics, style, seed, image_storage_id, background_url, fast, …).",
@@ -212,6 +224,14 @@ func (a *App) MCPTools() []sdk.Tool {
 				"since": map[string]any{"type": "string"},
 			}, nil),
 			Handler: a.toolMediaHistory,
+		},
+		{
+			Name:        "media_get",
+			Description: "Fetch one generation for this project. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolMediaGet,
 		},
 	}
 }
@@ -246,6 +266,18 @@ func intArg(m map[string]any, key string, def int) int {
 		return v
 	case int64:
 		return int(v)
+	}
+	return def
+}
+
+func int64Arg(m map[string]any, key string, def int64) int64 {
+	switch v := m[key].(type) {
+	case float64:
+		return int64(v)
+	case int:
+		return int64(v)
+	case int64:
+		return v
 	}
 	return def
 }

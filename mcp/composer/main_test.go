@@ -56,6 +56,23 @@ func TestValidateEdit_RejectsZeroLength(t *testing.T) {
 	}
 }
 
+func TestValidateEdit_AcceptsAIClipWithoutMaterializedSource(t *testing.T) {
+	body := `{"timeline":{"tracks":[{"clips":[{
+		"uid":"clip-ai",
+		"asset":{"type":"video","src":""},
+		"ai":{"media_kind":"video","prompt":"cinematic product reveal","duration":5},
+		"start":0,
+		"length":5
+	}]}]}}`
+	e, err := parseEditJSON(body)
+	if err != nil {
+		t.Fatalf("expected AI clip to save before materialization, got %v", err)
+	}
+	if e.Timeline.Tracks[0].Clips[0].AI == nil || e.Timeline.Tracks[0].Clips[0].UID != "clip-ai" {
+		t.Fatalf("AI metadata did not survive parse: %+v", e.Timeline.Tracks[0].Clips[0])
+	}
+}
+
 func TestValidateEdit_AcceptsSoundtrack(t *testing.T) {
 	body := `{"timeline":{
 		"soundtrack":{"src":"storage:99","volume":0.5},

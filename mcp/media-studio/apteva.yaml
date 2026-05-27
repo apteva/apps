@@ -2,12 +2,13 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.9.1
+version: 0.10.0
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs powers audio TTS, sound effects, and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references.
+  references. v0.10.0 adds cache_key reuse for app-to-app generation
+  and a direct media_get lookup for generated assets.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media-studio
@@ -87,8 +88,9 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: media_generate, description: "Generate media (image / video / audio / music / avatar). Args: kind (required: image|video|audio_tts|audio_sfx|music|avatar), prompt (required — for avatar this is the spoken script), model?, size?, duration?, voice?, aspect?, avatar? (replica/avatar id, avatar kind), n?, options?. Video + avatar are async (queued; delivered via media.generated). Returns thumbnail + storage URL when storage is bound, else inline (small media) or expiring upstream URL." }
+    - { name: media_generate, description: "Generate media (image / video / audio / music / avatar). Args: kind (required: image|video|audio_tts|audio_sfx|music|avatar), prompt (required — for avatar this is the spoken script), model?, size?, duration?, voice?, aspect?, avatar? (replica/avatar id, avatar kind), n?, options?, cache_key?, cache_policy? ('reuse'|'refresh'). Video + avatar are async (queued; delivered via media.generated). Returns thumbnail + storage URL when storage is bound, else inline (small media) or expiring upstream URL." }
     - { name: media_history,  description: "List recent generations for this project. Args: kind?, limit?, since?." }
+    - { name: media_get,      description: "Fetch one generation for this project. Args: id." }
   ui_panels:
     - slot: project.page
       label: Studio

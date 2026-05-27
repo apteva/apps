@@ -28,8 +28,9 @@ type Timeline struct {
 }
 
 type Soundtrack struct {
-	Src    string  `json:"src"`              // storage:N | https://… | mediastudio:N
-	Volume float64 `json:"volume,omitempty"` // 0..1, default 1.0
+	Src    string   `json:"src"`              // storage:N | https://… | mediastudio:N
+	Volume float64  `json:"volume,omitempty"` // 0..1, default 1.0
+	AI     *AIAsset `json:"ai,omitempty"`
 }
 
 type Track struct {
@@ -37,16 +38,37 @@ type Track struct {
 }
 
 type Clip struct {
+	UID        string      `json:"uid,omitempty"`
 	Asset      Asset       `json:"asset"`
-	Start      float64     `json:"start"`             // seconds from composition start
-	Length     float64     `json:"length"`            // seconds
+	Start      float64     `json:"start"`  // seconds from composition start
+	Length     float64     `json:"length"` // seconds
 	Transition *Transition `json:"transition,omitempty"`
 	Text       *TextOver   `json:"text,omitempty"`
+	AI         *AIAsset    `json:"ai,omitempty"`
 }
 
 type Asset struct {
 	Type string `json:"type"` // "video" | "image" | "audio"
 	Src  string `json:"src"`  // storage:N | https://… | mediastudio:N
+}
+
+type AIAsset struct {
+	MediaKind    string         `json:"media_kind"` // image | video | audio_tts | audio_sfx | music | avatar
+	Prompt       string         `json:"prompt"`
+	Model        string         `json:"model,omitempty"`
+	Duration     int            `json:"duration,omitempty"`
+	Aspect       string         `json:"aspect,omitempty"`
+	Voice        string         `json:"voice,omitempty"`
+	Avatar       string         `json:"avatar,omitempty"`
+	SourceImage  string         `json:"source_image,omitempty"`
+	Options      map[string]any `json:"options,omitempty"`
+	CacheKey     string         `json:"cache_key,omitempty"`
+	CachePolicy  string         `json:"cache_policy,omitempty"`
+	Status       string         `json:"status,omitempty"` // draft | generating | ready | failed
+	GenerationID int64          `json:"generation_id,omitempty"`
+	StorageID    int64          `json:"storage_id,omitempty"`
+	JobID        int64          `json:"job_id,omitempty"`
+	Error        string         `json:"error,omitempty"`
 }
 
 type Transition struct {
@@ -84,7 +106,7 @@ func validateEdit(e *Edit) error {
 		return errors.New("track must have at least one clip")
 	}
 	for i, c := range track.Clips {
-		if c.Asset.Src == "" {
+		if c.Asset.Src == "" && c.AI == nil {
 			return fmt.Errorf("clip[%d]: asset.src required", i)
 		}
 		switch c.Asset.Type {
@@ -113,7 +135,7 @@ func validateEdit(e *Edit) error {
 		}
 	}
 	if s := e.Timeline.Soundtrack; s != nil {
-		if s.Src == "" {
+		if s.Src == "" && s.AI == nil {
 			return errors.New("soundtrack.src required when soundtrack is set")
 		}
 		if s.Volume < 0 || s.Volume > 1 {

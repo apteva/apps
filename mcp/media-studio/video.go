@@ -128,6 +128,7 @@ func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug
 	pid := projectScopeFromArgs(ctx, args)
 	prompt := strArg(args, "prompt", "")
 	sourceRef := strArg(args, "_source_image_ref", "")
+	cacheKey := strArg(args, "cache_key", "")
 	requestJSON, _ := json.Marshal(args)
 
 	// Cost: video has a quote endpoint (Venice); avatar providers bill
@@ -140,9 +141,9 @@ func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug
 	result, err := globalCtx.AppDB().Exec(
 		`INSERT INTO video_jobs
 			(project_id, kind, role, queue_id, provider, model, prompt,
-			 source_image_ref, request_json, status, cost_usd)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`,
-		pid, kind, role, queueID, providerSlug, model, prompt, sourceRef, string(requestJSON), costUSD,
+			 source_image_ref, request_json, status, cost_usd, cache_key)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+		pid, kind, role, queueID, providerSlug, model, prompt, sourceRef, string(requestJSON), costUSD, cacheKey,
 	)
 	if err != nil {
 		ctx.Logger().Warn("video_jobs insert failed", "err", err)
@@ -176,13 +177,14 @@ func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug
 			{"type": "text", "text": summary},
 		},
 		"_meta": map[string]any{
-			"kind":     kind,
-			"status":   "queued",
-			"job_id":   jobID,
-			"queue_id": queueID,
-			"model":    model,
-			"provider": providerSlug,
-			"cost_usd": costUSD,
+			"kind":      kind,
+			"status":    "queued",
+			"job_id":    jobID,
+			"queue_id":  queueID,
+			"model":     model,
+			"provider":  providerSlug,
+			"cost_usd":  costUSD,
+			"cache_key": cacheKey,
 		},
 	}
 }

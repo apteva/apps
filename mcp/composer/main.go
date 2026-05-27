@@ -1,7 +1,8 @@
-// Composer v0.2.1 - multi-clip video compositions rendered locally (or
+// Composer v0.3.0 - multi-clip video compositions rendered locally (or
 // on a render host via instances). Asset sources accept storage:N /
-// mediastudio:N / https URLs; output lands back in storage (or the
-// sidecar's local cache when storage is unbound).
+// mediastudio:N / https URLs, plus AI asset specs materialized via
+// Media Studio; output lands back in storage (or the sidecar's local
+// cache when storage is unbound).
 //
 // Architecture:
 //   - compositions.go     canonical Edit JSON + validator
@@ -26,11 +27,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.2.1
+version: 0.3.0
 description: |
-  Multi-clip video compositions with a structured timeline panel.
-  Renders locally via ffmpeg, on a render host via instances, or
-  against a bound render_executor integration.
+  Multi-clip video compositions with a structured timeline panel,
+  Storage browsing, and AI-backed clip/soundtrack sources generated
+  through Media Studio. Renders locally via ffmpeg, on a render host
+  via instances, or against a bound render_executor integration.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -42,7 +44,7 @@ requires:
   apps:
     - { name: storage, version: ">=0.9.0" }
     - { name: instances, version: ">=0.2.0", optional: true }
-    - { name: media-studio, version: ">=0.5.0", optional: true }
+    - { name: media-studio, version: ">=0.10.0", optional: true }
   integrations:
     - role: render_executor
       kind: integration

@@ -16,11 +16,11 @@ import (
 
 // localFFmpegExecutor shells out to ffmpeg on the sidecar's host.
 // Each Render call:
-//   1. resolves every asset.src to a URL ffmpeg can fetch over HTTPS
-//      (signed if storage gates it).
-//   2. assembles a filter_complex from the canonical Edit.
-//   3. spawns ffmpeg in a per-render scratch dir.
-//   4. returns the absolute path to the output file; caller stores it.
+//  1. resolves every asset.src to a URL ffmpeg can fetch over HTTPS
+//     (signed if storage gates it).
+//  2. assembles a filter_complex from the canonical Edit.
+//  3. spawns ffmpeg in a per-render scratch dir.
+//  4. returns the absolute path to the output file; caller stores it.
 //
 // Cancellation: uses the passed context — `exec.CommandContext`
 // SIGKILLs ffmpeg on ctx-cancel.

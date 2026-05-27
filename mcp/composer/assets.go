@@ -11,11 +11,11 @@ import (
 // resolveAssetURL turns the canonical Edit's `asset.src` strings
 // into URLs ffmpeg can fetch. Accepts three shapes:
 //
-//   "storage:<id>"     → mint a signed URL via storage.files_get_url
-//   "mediastudio:<id>" → look up the media-studio generations row,
-//                        return its first storage URL (delegates to
-//                        media-studio which already wraps storage)
-//   "http(s)://…"      → pass-through
+//	"storage:<id>"     → mint a signed URL via storage.files_get_url
+//	"mediastudio:<id>" → look up the media-studio generations row,
+//	                     return its first storage URL (delegates to
+//	                     media-studio which already wraps storage)
+//	"http(s)://…"      → pass-through
 //
 // Any other shape is rejected — the validator should already have
 // caught it but defending here avoids ffmpeg's opaque "unable to open
