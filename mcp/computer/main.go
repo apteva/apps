@@ -39,10 +39,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.8
+version: 0.7.9
 description: |
-  Watch and steer browser sessions. v0.7.8 keeps provider settings
-  panel-only while agents use browser and context tools.
+  Watch and steer browser sessions. v0.7.9 makes provider lock coerce
+  agent backend hints to the app default instead of failing.
 scopes: [project, global]
 requires:
   permissions:
@@ -858,7 +858,12 @@ func (a *App) resolveBackend(ctx *sdk.AppCtx, args map[string]any) (string, erro
 		return "", fmt.Errorf("backend %q is not supported", requested)
 	}
 	if settings.LockBackend && requested != settings.DefaultBackend {
-		return "", fmt.Errorf("backend %q is disabled by Computer app settings; default provider is locked to %q", requested, settings.DefaultBackend)
+		if ctx != nil {
+			ctx.Logger().Warn("computer provider override ignored",
+				"requested_backend", requested,
+				"default_backend", settings.DefaultBackend)
+		}
+		return settings.DefaultBackend, nil
 	}
 	return requested, nil
 }
