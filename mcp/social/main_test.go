@@ -1363,6 +1363,107 @@ func TestHandleAvatar_RejectsTraversal(t *testing.T) {
 	}
 }
 
+func TestInboxSyncFacebookComments(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_page_posts"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data: json.RawMessage(`{"data":[
+			{"id":"100_200","permalink_url":"https://facebook.test/100_200"}
+		]}`),
+	}
+	pf.executeResponses["list_media_comments"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data: json.RawMessage(`{"data":[
+			{"id":"c1","message":"hello","created_time":"2026-05-27T10:00:00+0000","from":{"id":"u1","name":"Ada"},"replies":{"data":[
+				{"id":"c2","message":"reply","created_time":"2026-05-27T10:01:00+0000","from":{"id":"u2","name":"Ben"}}
+			]}}
+		]}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	app := &App{}
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, status, page_credentials)
+		 VALUES ('test-proj', 'facebook', 42, '100', 'My Page', 'active', '{"access_token":"PAGE_TOKEN"}')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	out := app.syncInbox(ctx, inboxSyncOptions{ProjectID: "test-proj", AccountIDs: []int64{acctID}, Limit: 10})
+	if out.Count != 1 || out.Results[0].Status != "ok" {
+		t.Fatalf("sync result = %+v", out)
+	}
+	if out.Results[0].Comments != 2 {
+		t.Fatalf("comments inserted = %d", out.Results[0].Comments)
+	}
+	var count int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM inbox_items WHERE social_account_id=?`, acctID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("inbox item count = %d", count)
+	}
+	var parent, thread string
+	if err := ctx.AppDB().QueryRow(`SELECT COALESCE(parent_external_id,''), COALESCE(thread_external_id,'') FROM inbox_items WHERE external_id='c2'`).Scan(&parent, &thread); err != nil {
+		t.Fatal(err)
+	}
+	if parent != "c1" || thread != "c1" {
+		t.Fatalf("reply threading parent=%q thread=%q", parent, thread)
+	}
+}
+
+func TestInboxReplyCommentCallsMetaTool(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["reply_to_comment"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"id":"reply_1"}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, status, page_credentials)
+		 VALUES ('test-proj', 'facebook', 42, '100', 'My Page', 'active', '{"access_token":"PAGE_TOKEN"}')`,
+	)
+	acctID, _ := r.LastInsertId()
+	itemID, _, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+		ProjectID:        "test-proj",
+		SocialAccountID:  acctID,
+		Platform:         "facebook",
+		Kind:             inboxKindComment,
+		ExternalID:       "comment_1",
+		ThreadExternalID: "comment_1",
+		AuthorName:       "Ada",
+		Body:             "hello",
+		OccurredAt:       time.Date(2026, 5, 27, 10, 0, 0, 0, time.UTC),
+		Direction:        "inbound",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+	resAny, err := app.toolInboxReply(ctx, map[string]any{"id": itemID, "body": "thanks"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := resAny.(inboxOutcome)
+	if res.Status != "ok" || res.ExternalID != "reply_1" {
+		t.Fatalf("reply result = %+v", res)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "reply_to_comment" {
+		t.Fatalf("execute calls = %+v", pf.executeCalls)
+	}
+	if pf.executeCalls[0].Input["access_token"] != "PAGE_TOKEN" {
+		t.Fatalf("missing page token: %+v", pf.executeCalls[0].Input)
+	}
+	var status string
+	if err := ctx.AppDB().QueryRow(`SELECT status FROM inbox_items WHERE id=?`, itemID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != inboxStatusReplied {
+		t.Fatalf("parent status = %q", status)
+	}
+}
+
 func TestNormaliseScheduleAt(t *testing.T) {
 	cases := []struct {
 		name, in     string

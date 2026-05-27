@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.14.23
+version: 0.14.24
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -73,9 +73,7 @@ provides:
     - { name: inbox_private_reply,         description: "Instagram-only: reply to a comment by sending the author a DM." }
     - { name: inbox_hide,                  description: "Hide a comment on the platform side (Facebook, Instagram). Unsupported elsewhere." }
     - { name: inbox_unhide,                description: "Reverse inbox_hide." }
-    - { name: inbox_like,                  description: "Like a comment on the platform side (Facebook, Instagram)." }
     - { name: inbox_delete,                description: "Delete a comment where the platform permits it." }
-    - { name: inbox_sync,                  description: "Trigger an out-of-cycle inbox poll for one or more accounts (or all active accounts when omitted)." }
   ui_panels:
     - slot: project.page
       label: Social

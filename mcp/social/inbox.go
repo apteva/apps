@@ -17,26 +17,28 @@ import (
 // inboxItem mirrors one inbox_items row. JSON tags double as the
 // shape returned by inbox_list / inbox_get tools — keep them stable.
 type inboxItem struct {
-	ID                int64           `json:"id"`
-	ProjectID         string          `json:"project_id"`
-	SocialAccountID   int64           `json:"social_account_id"`
-	Platform          string          `json:"platform"`
-	Kind              string          `json:"kind"` // comment | dm | mention | review
-	ExternalID        string          `json:"external_id"`
-	ParentExternalID  string          `json:"parent_external_id,omitempty"`
-	PostID            int64           `json:"post_id,omitempty"`
-	ExternalPostID    string          `json:"external_post_id,omitempty"`
-	AuthorExternalID  string          `json:"author_external_id,omitempty"`
-	AuthorName        string          `json:"author_name,omitempty"`
-	AuthorHandle      string          `json:"author_handle,omitempty"`
-	AuthorAvatarURL   string          `json:"author_avatar_url,omitempty"`
-	Body              string          `json:"body,omitempty"`
-	Media             json.RawMessage `json:"media,omitempty"`
-	Permalink         string          `json:"permalink,omitempty"`
-	Rating            int             `json:"rating,omitempty"`
-	OccurredAt        string          `json:"occurred_at"`
-	FetchedAt         string          `json:"fetched_at"`
-	Status            string          `json:"status"`
+	ID               int64           `json:"id"`
+	ProjectID        string          `json:"project_id"`
+	SocialAccountID  int64           `json:"social_account_id"`
+	Platform         string          `json:"platform"`
+	Kind             string          `json:"kind"` // comment | dm | mention | review
+	ExternalID       string          `json:"external_id"`
+	ThreadExternalID string          `json:"thread_external_id,omitempty"`
+	ParentExternalID string          `json:"parent_external_id,omitempty"`
+	PostID           int64           `json:"post_id,omitempty"`
+	ExternalPostID   string          `json:"external_post_id,omitempty"`
+	AuthorExternalID string          `json:"author_external_id,omitempty"`
+	AuthorName       string          `json:"author_name,omitempty"`
+	AuthorHandle     string          `json:"author_handle,omitempty"`
+	AuthorAvatarURL  string          `json:"author_avatar_url,omitempty"`
+	Body             string          `json:"body,omitempty"`
+	Media            json.RawMessage `json:"media,omitempty"`
+	Permalink        string          `json:"permalink,omitempty"`
+	Rating           int             `json:"rating,omitempty"`
+	OccurredAt       string          `json:"occurred_at"`
+	FetchedAt        string          `json:"fetched_at"`
+	Status           string          `json:"status"`
+	Direction        string          `json:"direction"`
 }
 
 // Inbox item kinds.
@@ -133,6 +135,7 @@ type inboxUpsertInput struct {
 	Platform         string
 	Kind             string
 	ExternalID       string
+	ThreadExternalID string
 	ParentExternalID string
 	PostID           int64  // 0 when not a reply to our post
 	ExternalPostID   string // populated for mentions or replies to foreign posts
@@ -146,6 +149,7 @@ type inboxUpsertInput struct {
 	Rating           int       // 0 = N/A
 	OccurredAt       time.Time // platform-reported event time
 	RawJSON          string    // raw upstream payload; "" allowed
+	Direction        string    // inbound | outbound
 }
 
 // upsertInboxItem inserts a new inbox row or updates the body/status
@@ -167,6 +171,9 @@ func upsertInboxItem(db *sql.DB, in inboxUpsertInput) (int64, bool, error) {
 	if in.OccurredAt.IsZero() {
 		in.OccurredAt = time.Now().UTC()
 	}
+	if in.Direction == "" {
+		in.Direction = "inbound"
+	}
 
 	var existingID int64
 	err := db.QueryRow(
@@ -181,10 +188,12 @@ func upsertInboxItem(db *sql.DB, in inboxUpsertInput) (int64, bool, error) {
 		_, uerr := db.Exec(
 			`UPDATE inbox_items
 			   SET body=?, author_name=?, author_handle=?, author_avatar_url=?,
-			       permalink=?, media_json=?, raw_json=?, fetched_at=CURRENT_TIMESTAMP
+			       permalink=?, media_json=?, raw_json=?, thread_external_id=?,
+			       direction=?, fetched_at=CURRENT_TIMESTAMP
 			 WHERE id=?`,
 			in.Body, in.AuthorName, in.AuthorHandle, in.AuthorAvatarURL,
 			in.Permalink, nullableStr(in.MediaJSON), nullableStr(in.RawJSON),
+			nullableStr(in.ThreadExternalID), in.Direction,
 			existingID,
 		)
 		return existingID, false, uerr
@@ -196,15 +205,15 @@ func upsertInboxItem(db *sql.DB, in inboxUpsertInput) (int64, bool, error) {
 	res, ierr := db.Exec(
 		`INSERT INTO inbox_items
 		   (project_id, social_account_id, platform, kind, external_id,
-		    parent_external_id, post_id, external_post_id,
+		    thread_external_id, parent_external_id, post_id, external_post_id,
 		    author_external_id, author_name, author_handle, author_avatar_url,
-		    body, media_json, permalink, rating, occurred_at, raw_json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		    body, media_json, permalink, rating, occurred_at, raw_json, direction)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.ProjectID, in.SocialAccountID, in.Platform, in.Kind, in.ExternalID,
-		nullableStr(in.ParentExternalID), nullableInt(in.PostID), nullableStr(in.ExternalPostID),
+		nullableStr(in.ThreadExternalID), nullableStr(in.ParentExternalID), nullableInt(in.PostID), nullableStr(in.ExternalPostID),
 		nullableStr(in.AuthorExternalID), in.AuthorName, in.AuthorHandle, in.AuthorAvatarURL,
 		in.Body, nullableStr(in.MediaJSON), in.Permalink, nullableInt(int64(in.Rating)),
-		in.OccurredAt.UTC().Format(time.RFC3339), nullableStr(in.RawJSON),
+		in.OccurredAt.UTC().Format(time.RFC3339), nullableStr(in.RawJSON), in.Direction,
 	)
 	if ierr != nil {
 		return 0, false, ierr
@@ -233,11 +242,12 @@ func listInboxItems(db *sql.DB, f inboxListFilter) ([]inboxItem, error) {
 		return nil, errors.New("project_id required")
 	}
 	q := `SELECT id, project_id, social_account_id, platform, kind, external_id,
+	             COALESCE(thread_external_id,''),
 	             COALESCE(parent_external_id,''), COALESCE(post_id,0), COALESCE(external_post_id,''),
 	             COALESCE(author_external_id,''), COALESCE(author_name,''),
 	             COALESCE(author_handle,''), COALESCE(author_avatar_url,''),
 	             COALESCE(body,''), COALESCE(media_json,''), COALESCE(permalink,''),
-	             COALESCE(rating,0), occurred_at, fetched_at, status
+	             COALESCE(rating,0), occurred_at, fetched_at, status, COALESCE(direction,'inbound')
 	      FROM inbox_items
 	      WHERE project_id=?`
 	args := []any{f.ProjectID}
@@ -290,10 +300,11 @@ func listInboxItems(db *sql.DB, f inboxListFilter) ([]inboxItem, error) {
 		var mediaJSON string
 		if err := rows.Scan(
 			&it.ID, &it.ProjectID, &it.SocialAccountID, &it.Platform, &it.Kind, &it.ExternalID,
+			&it.ThreadExternalID,
 			&it.ParentExternalID, &it.PostID, &it.ExternalPostID,
 			&it.AuthorExternalID, &it.AuthorName, &it.AuthorHandle, &it.AuthorAvatarURL,
 			&it.Body, &mediaJSON, &it.Permalink, &it.Rating,
-			&it.OccurredAt, &it.FetchedAt, &it.Status,
+			&it.OccurredAt, &it.FetchedAt, &it.Status, &it.Direction,
 		); err != nil {
 			return nil, err
 		}
@@ -314,11 +325,12 @@ func getInboxItem(db *sql.DB, projectID string, id int64) (*inboxItem, error) {
 	}
 	row := db.QueryRow(
 		`SELECT id, project_id, social_account_id, platform, kind, external_id,
+		        COALESCE(thread_external_id,''),
 		        COALESCE(parent_external_id,''), COALESCE(post_id,0), COALESCE(external_post_id,''),
 		        COALESCE(author_external_id,''), COALESCE(author_name,''),
 		        COALESCE(author_handle,''), COALESCE(author_avatar_url,''),
 		        COALESCE(body,''), COALESCE(media_json,''), COALESCE(permalink,''),
-		        COALESCE(rating,0), occurred_at, fetched_at, status
+		        COALESCE(rating,0), occurred_at, fetched_at, status, COALESCE(direction,'inbound')
 		 FROM inbox_items
 		 WHERE id=? AND project_id=?`,
 		id, projectID,
@@ -327,10 +339,11 @@ func getInboxItem(db *sql.DB, projectID string, id int64) (*inboxItem, error) {
 	var mediaJSON string
 	err := row.Scan(
 		&it.ID, &it.ProjectID, &it.SocialAccountID, &it.Platform, &it.Kind, &it.ExternalID,
+		&it.ThreadExternalID,
 		&it.ParentExternalID, &it.PostID, &it.ExternalPostID,
 		&it.AuthorExternalID, &it.AuthorName, &it.AuthorHandle, &it.AuthorAvatarURL,
 		&it.Body, &mediaJSON, &it.Permalink, &it.Rating,
-		&it.OccurredAt, &it.FetchedAt, &it.Status,
+		&it.OccurredAt, &it.FetchedAt, &it.Status, &it.Direction,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -356,6 +369,7 @@ func getInboxThread(db *sql.DB, projectID string, item *inboxItem) ([]inboxItem,
 	// Walk up to the root. Cap depth to avoid pathological cycles in
 	// data we don't fully trust.
 	rootExternal := item.ExternalID
+	threadExternal := item.ThreadExternalID
 	if item.ParentExternalID != "" {
 		rootExternal = item.ParentExternalID
 		for hops := 0; hops < 32; hops++ {
@@ -371,18 +385,22 @@ func getInboxThread(db *sql.DB, projectID string, item *inboxItem) ([]inboxItem,
 			rootExternal = parent
 		}
 	}
+	if threadExternal == "" {
+		threadExternal = rootExternal
+	}
 	rows, err := db.Query(
 		`SELECT id, project_id, social_account_id, platform, kind, external_id,
+		        COALESCE(thread_external_id,''),
 		        COALESCE(parent_external_id,''), COALESCE(post_id,0), COALESCE(external_post_id,''),
 		        COALESCE(author_external_id,''), COALESCE(author_name,''),
 		        COALESCE(author_handle,''), COALESCE(author_avatar_url,''),
 		        COALESCE(body,''), COALESCE(media_json,''), COALESCE(permalink,''),
-		        COALESCE(rating,0), occurred_at, fetched_at, status
+		        COALESCE(rating,0), occurred_at, fetched_at, status, COALESCE(direction,'inbound')
 		 FROM inbox_items
 		 WHERE project_id=? AND social_account_id=? AND kind=?
-		   AND (external_id=? OR parent_external_id=?)
+		   AND (external_id=? OR parent_external_id=? OR thread_external_id=?)
 		 ORDER BY occurred_at ASC`,
-		projectID, item.SocialAccountID, item.Kind, rootExternal, rootExternal,
+		projectID, item.SocialAccountID, item.Kind, rootExternal, rootExternal, threadExternal,
 	)
 	if err != nil {
 		return nil, err
@@ -395,10 +413,11 @@ func getInboxThread(db *sql.DB, projectID string, item *inboxItem) ([]inboxItem,
 		var mediaJSON string
 		if err := rows.Scan(
 			&it.ID, &it.ProjectID, &it.SocialAccountID, &it.Platform, &it.Kind, &it.ExternalID,
+			&it.ThreadExternalID,
 			&it.ParentExternalID, &it.PostID, &it.ExternalPostID,
 			&it.AuthorExternalID, &it.AuthorName, &it.AuthorHandle, &it.AuthorAvatarURL,
 			&it.Body, &mediaJSON, &it.Permalink, &it.Rating,
-			&it.OccurredAt, &it.FetchedAt, &it.Status,
+			&it.OccurredAt, &it.FetchedAt, &it.Status, &it.Direction,
 		); err != nil {
 			return nil, err
 		}

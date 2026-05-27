@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.23
+version: 0.14.24
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -94,9 +94,7 @@ provides:
     - { name: inbox_private_reply,        description: "Reply to an Instagram comment as a DM (IG-only)." }
     - { name: inbox_hide,                 description: "Hide a comment on the platform side." }
     - { name: inbox_unhide,               description: "Reverse inbox_hide." }
-    - { name: inbox_like,                 description: "Like a comment on the platform side." }
     - { name: inbox_delete,               description: "Delete a comment where the platform permits." }
-    - { name: inbox_sync,                 description: "Trigger an out-of-cycle inbox poll for one or more accounts." }
   ui_panels:
     - slot: project.page
       label: Social
@@ -328,11 +326,7 @@ var platforms = map[string]platformDef{
 			CommentsRead:   true,
 			CommentsWrite:  true,
 			CommentsHide:   true,
-			CommentsLike:   true,
 			CommentsDelete: true,
-			MentionsRead:   true,
-			ReviewsRead:    true,
-			ReviewsReply:   true,
 		},
 	},
 	"instagram": {
@@ -379,7 +373,6 @@ var platforms = map[string]platformDef{
 			CommentsRead:   true,
 			CommentsWrite:  true,
 			CommentsHide:   true,
-			CommentsLike:   true,
 			CommentsDelete: true,
 			DMsRead:        true,
 			DMsWrite:       true,
@@ -530,7 +523,6 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 
 func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 // ─── HTTP routes (panel) ───────────────────────────────────────────
@@ -548,6 +540,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/posts/", Handler: a.handlePostsItem}, // /posts/:id and /posts/:id/retry
 		// Static info
 		{Pattern: "/platforms", Handler: a.handlePlatforms},
+		// Unified inbox — UI/internal sync plus item actions.
+		{Pattern: "/inbox", Handler: a.handleInboxCollection},
+		{Pattern: "/inbox/sync", Handler: a.handleInboxSync},
+		{Pattern: "/inbox/", Handler: a.handleInboxItem},
 		// Profiles (brand/client/site containers — see profiles.go)
 		{Pattern: "/profiles", Handler: a.handleProfilesCollection},
 		{Pattern: "/profiles/", Handler: a.handleProfilesItem},
@@ -769,11 +765,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "inbox_reply",
 			Description: "Reply to an inbox item. Routes by kind — a `comment` produces a child comment, a `dm` produces an outbound message in the same thread. Returns {status: ok|unsupported|skipped|failed, reason?, error?, external_id?, permalink?}. " +
-				"v1 status: every platform currently returns `unsupported` with reason `platform handler not yet wired`; Instagram + Twitter implementations land first. Args: id, body, media_storage_ids?.",
+				"Args: id, body.",
 			InputSchema: schemaObject(map[string]any{
-				"id":                map[string]any{"type": "integer"},
-				"body":              map[string]any{"type": "string"},
-				"media_storage_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+				"id":   map[string]any{"type": "integer"},
+				"body": map[string]any{"type": "string"},
 			}, []string{"id", "body"}),
 			Handler: a.toolInboxReply,
 		},
@@ -803,28 +798,12 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolInboxUnhide,
 		},
 		{
-			Name:        "inbox_like",
-			Description: "Like a comment on the platform side (Facebook, Instagram). Returns `unsupported` elsewhere. Args: id.",
-			InputSchema: schemaObject(map[string]any{
-				"id": map[string]any{"type": "integer"},
-			}, []string{"id"}),
-			Handler: a.toolInboxLike,
-		},
-		{
 			Name:        "inbox_delete",
 			Description: "Delete a comment we authored (or, where the platform permits, any comment on our content). Args: id.",
 			InputSchema: schemaObject(map[string]any{
 				"id": map[string]any{"type": "integer"},
 			}, []string{"id"}),
 			Handler: a.toolInboxDelete,
-		},
-		{
-			Name:        "inbox_sync",
-			Description: "Trigger an out-of-cycle poll of the named social accounts (or all active accounts when omitted). Returns one {status, reason?, error?} per account. v1 status: poll worker not yet wired, so every account returns `unsupported`. Args: social_account_ids?.",
-			InputSchema: schemaObject(map[string]any{
-				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
-			}, nil),
-			Handler: a.toolInboxSync,
 		},
 	}
 	tools = append(tools, a.profileTools()...)
@@ -1144,6 +1123,9 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 		"platform":          def.Platform,
 		"display_name":      displayName,
 	})
+	if pageCredsJSON != "" && (def.Platform == "facebook" || def.Platform == "instagram") {
+		a.triggerInitialInboxSync(ctx, id)
+	}
 
 	return map[string]any{
 		"social_account_id":   id,
@@ -4679,11 +4661,11 @@ func (a *App) handleAccountsFinalize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := requestCtx(r)
-	out, err := a.toolAccountFinalize(ctx, map[string]any{
-		"pending_account_id": body.PendingAccountID,
-		"page_id":            body.PageID,
-		"name":               body.Name,
-	})
+	args := queryToolArgs(r)
+	args["pending_account_id"] = body.PendingAccountID
+	args["page_id"] = body.PageID
+	args["name"] = body.Name
+	out, err := a.toolAccountFinalize(ctx, args)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

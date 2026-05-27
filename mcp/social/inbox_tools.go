@@ -1,15 +1,11 @@
 // inbox_tools — MCP handlers for the inbox_* surface. Reads go
 // straight at the local DB via inbox.go; replies / moderation
-// dispatch into per-platform code (not yet wired — every platform
-// returns status='unsupported' with a clear reason until handlers
-// land).
+// dispatch into per-platform code. Sync/backfill is intentionally
+// app-owned and not exposed as an MCP tool.
 package main
 
 import (
-	"errors"
 	"fmt"
-	"os"
-	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -18,7 +14,7 @@ import (
 // ─── inbox_list ────────────────────────────────────────────────────
 
 func (a *App) toolInboxList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
 	filter := inboxListFilter{ProjectID: pid}
 
 	if v, ok := args["social_account_ids"]; ok {
@@ -67,7 +63,7 @@ func (a *App) toolInboxList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // ─── inbox_get ─────────────────────────────────────────────────────
 
 func (a *App) toolInboxGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
 	id := int64(intArg(args, "id", 0))
 	if id <= 0 {
 		return mcpError("id required"), nil
@@ -109,7 +105,7 @@ func (a *App) toolInboxArchive(ctx *sdk.AppCtx, args map[string]any) (any, error
 // setInboxStatusTool accepts either {id} or {ids: [...]} so callers
 // can mark a whole thread read in one call.
 func setInboxStatusTool(ctx *sdk.AppCtx, args map[string]any, status string) (any, error) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
 	ids := collectIDs(args)
 	if len(ids) == 0 {
 		return mcpError("id or ids required"), nil
@@ -185,11 +181,9 @@ func (a *App) toolInboxDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 
 // dispatchInboxAction is the shared body for every platform-touching
 // inbox tool. It loads the item, gates on the capability matrix, then
-// (until per-platform handlers land) returns status='unsupported'
-// with a "not yet implemented" reason. Replacing the trailing switch
-// with real platform code is how each platform's inbox lights up.
+// dispatches to the platform-specific handler.
 func dispatchInboxAction(ctx *sdk.AppCtx, args map[string]any, action string, capCheck func(*inboxItem) bool) (any, error) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectIDForTool(ctx, args)
 	id := int64(intArg(args, "id", 0))
 	if id <= 0 {
 		return mcpError("id required"), nil
@@ -214,72 +208,8 @@ func dispatchInboxAction(ctx *sdk.AppCtx, args map[string]any, action string, ca
 		return out, nil
 	}
 
-	// Capability matrix says the platform CAN handle it, but no
-	// per-platform implementation is wired yet. Honest stub: callers
-	// can branch on Status=="unsupported" + Reason==pendingImpl.
-	out.Status = "unsupported"
-	out.Reason = "platform handler not yet wired — Instagram + Twitter are the first to land"
-	return out, nil
-}
-
-// ─── inbox_sync (stub — poll worker lands later) ───────────────────
-
-func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
-	// Resolve which accounts to (eventually) sync — if caller passed
-	// none we'd cover all active accounts. For now we still return the
-	// list so callers can see what WILL be synced once the worker
-	// lands.
-	var ids []int64
-	if v, ok := args["social_account_ids"]; ok {
-		for _, raw := range toAnySlice(v) {
-			if id := toInt64Loose(raw); id > 0 {
-				ids = append(ids, id)
-			}
-		}
-	}
-	if len(ids) == 0 {
-		rows, err := ctx.AppDB().Query(
-			`SELECT id FROM social_accounts WHERE project_id=? AND status='active' ORDER BY id`,
-			pid,
-		)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var id int64
-			if err := rows.Scan(&id); err == nil {
-				ids = append(ids, id)
-			}
-		}
-	}
-
-	results := make([]inboxOutcome, 0, len(ids))
-	for _, id := range ids {
-		var platform string
-		if err := ctx.AppDB().QueryRow(
-			`SELECT platform FROM social_accounts WHERE id=? AND project_id=?`,
-			id, pid,
-		).Scan(&platform); err != nil {
-			results = append(results, inboxOutcome{
-				SocialAccountID: id,
-				Status:          "failed",
-				Error:           err.Error(),
-			})
-			continue
-		}
-		results = append(results, inboxOutcome{
-			SocialAccountID: id,
-			Platform:        platform,
-			Status:          "unsupported",
-			Reason:          "poll worker not yet wired",
-		})
-	}
-	return map[string]any{
-		"results": results,
-		"count":   len(results),
-	}, nil
+	body, _ := args["body"].(string)
+	return performInboxAction(ctx, item, action, body), nil
 }
 
 // ─── helpers ───────────────────────────────────────────────────────
@@ -341,11 +271,3 @@ func diffIDs(have, kept []int64) []int64 {
 	}
 	return miss
 }
-
-// Silence "imported and not used" for stdlib pkgs only referenced in
-// some branches we'll grow into. errors + strings stay so wiring new
-// per-platform handlers doesn't churn the import block on first edit.
-var (
-	_ = errors.New
-	_ = strings.TrimSpace
-)

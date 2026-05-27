@@ -7,6 +7,8 @@
 //     (storage app, when bound) + Schedule/Now → post_create.
 //   - Tab "Posts": list of recent posts with per-target status pills,
 //     retry button on failed/partial.
+//   - Tab "Inbox": unified comments/messages/mentions/reviews pulled
+//     automatically from supported connected accounts.
 //
 // Lives in the social app's sidecar at /api/apps/social/ui/SocialPanel.mjs.
 // The host React (19) + react-dom come from the dashboard's importmap;
@@ -96,6 +98,41 @@ interface Post {
   published_at: string;
   targets: PostTarget[];
   profile_id?: number;
+}
+
+interface InboxItem {
+  id: number;
+  project_id: string;
+  social_account_id: number;
+  platform: string;
+  kind: "comment" | "dm" | "mention" | "review";
+  external_id: string;
+  thread_external_id?: string;
+  parent_external_id?: string;
+  author_external_id?: string;
+  author_name?: string;
+  author_handle?: string;
+  author_avatar_url?: string;
+  body?: string;
+  permalink?: string;
+  occurred_at: string;
+  status: "unread" | "read" | "replied" | "hidden" | "archived";
+  direction?: "inbound" | "outbound";
+}
+
+interface InboxSyncResult {
+  social_account_id: number;
+  platform: string;
+  display_name?: string;
+  status: "ok" | "unsupported" | "failed";
+  new_items: number;
+  comments?: number;
+  dms?: number;
+  mentions?: number;
+  reviews?: number;
+  warnings?: string[];
+  error?: string;
+  last_sync_at?: string;
 }
 
 // Profile = brand/client/site container (see profiles.go). One
@@ -238,7 +275,7 @@ function useAppEvents<T = unknown>(
 // --- Panel ---------------------------------------------------------
 
 export default function SocialPanel({ projectId }: NativePanelProps) {
-  const [tab, setTab] = useState<"accounts" | "posts" | "metrics">("posts");
+  const [tab, setTab] = useState<"accounts" | "posts" | "inbox" | "metrics">("posts");
   const [accounts, setAccounts] = useState<SocialAccount[]>([]);
   const [posts, setPosts] = useState<Post[]>([]);
   const [platforms, setPlatforms] = useState<PlatformInfo[]>([]);
@@ -366,6 +403,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
         />
         <span className="w-px h-5 bg-border mx-2" />
         <Tab label="Posts" value="posts" current={tab} onClick={setTab} count={posts.length} />
+        <Tab label="Inbox" value="inbox" current={tab} onClick={setTab} />
         <Tab label="Accounts" value="accounts" current={tab} onClick={setTab} count={accounts.length} />
         <Tab label="Metrics" value="metrics" current={tab} onClick={setTab} />
         <button
@@ -397,6 +435,14 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
         )}
         {tab === "posts" && (
           <PostsView posts={posts} onChange={loadPosts} setStatus={setStatus} projectId={projectId} />
+        )}
+        {tab === "inbox" && (
+          <InboxView
+            accounts={accounts}
+            projectId={projectId}
+            activeProfileId={activeProfileId}
+            setStatus={setStatus}
+          />
         )}
         {tab === "metrics" && (
           <MetricsView posts={posts} accounts={accounts} setStatus={setStatus} onPostsChanged={loadPosts} projectId={projectId} />
@@ -795,7 +841,7 @@ function ProfileManageModal({
 function Tab({
   label, value, current, onClick, count,
 }: {
-  label: string; value: "accounts" | "posts" | "metrics";
+  label: string; value: "accounts" | "posts" | "inbox" | "metrics";
   current: string; onClick: (v: any) => void; count?: number;
 }) {
   const active = value === current;
@@ -2540,6 +2586,251 @@ function StoragePickerDialog({
 }
 
 // --- PostsView ----------------------------------------------------
+
+function InboxView({
+  accounts, projectId, activeProfileId, setStatus,
+}: {
+  accounts: SocialAccount[];
+  projectId?: string | null;
+  activeProfileId: number | null;
+  setStatus: (s: string) => void;
+}) {
+  const [items, setItems] = useState<InboxItem[]>([]);
+  const [selectedID, setSelectedID] = useState<number | null>(null);
+  const [selected, setSelected] = useState<InboxItem | null>(null);
+  const [thread, setThread] = useState<InboxItem[]>([]);
+  const [accountID, setAccountID] = useState<number | "all">("all");
+  const [kind, setKind] = useState<string>("all");
+  const [status, setLocalStatus] = useState<string>("all");
+  const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [replyBody, setReplyBody] = useState("");
+  const [syncResults, setSyncResults] = useState<InboxSyncResult[]>([]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const extra: Record<string, string | number | undefined> = {
+        profile_id: activeProfileId ?? undefined,
+        account_id: accountID === "all" ? undefined : accountID,
+        kind: kind === "all" ? undefined : kind,
+        status: status === "all" ? undefined : status,
+        limit: 100,
+      };
+      const res = await fetch(socialURL("/inbox", projectId, extra), { credentials: "same-origin" });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      const next = data.items || [];
+      setItems(next);
+      if (!selectedID && next.length > 0) setSelectedID(next[0].id);
+    } catch (e) {
+      setStatus("Inbox load failed: " + (e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, [accountID, activeProfileId, kind, projectId, selectedID, setStatus, status]);
+
+  const loadSelected = useCallback(async (id: number | null) => {
+    if (!id) {
+      setSelected(null);
+      setThread([]);
+      return;
+    }
+    try {
+      const res = await fetch(socialURL(`/inbox/${id}`, projectId), { credentials: "same-origin" });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setSelected(data.item || null);
+      setThread(data.thread && data.thread.length > 0 ? data.thread : (data.item ? [data.item] : []));
+    } catch (e) {
+      setStatus("Inbox item failed: " + (e as Error).message);
+    }
+  }, [projectId, setStatus]);
+
+  const sync = useCallback(async (initial = false) => {
+    setSyncing(true);
+    try {
+      const extra: Record<string, string | number | undefined> = {
+        profile_id: activeProfileId ?? undefined,
+        account_id: accountID === "all" ? undefined : accountID,
+        limit: initial ? 100 : 50,
+      };
+      const res = await fetch(socialURL("/inbox/sync", projectId, extra), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initial }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setSyncResults(data.results || []);
+      await load();
+      setStatus("Inbox synced.");
+    } catch (e) {
+      setStatus("Inbox sync failed: " + (e as Error).message);
+    } finally {
+      setSyncing(false);
+    }
+  }, [accountID, activeProfileId, load, projectId, setStatus]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => { loadSelected(selectedID); }, [loadSelected, selectedID]);
+  useEffect(() => {
+    if (items.length === 0 && accounts.length > 0 && !syncing) {
+      sync(true);
+    }
+  // run only when the current filter first resolves empty
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items.length, accounts.length]);
+
+  useAppEvents("social", projectId, (ev) => {
+    if (ev.topic === "inbox.synced" || ev.topic === "inbox.item.created") load();
+  });
+
+  const act = async (action: string, body?: Record<string, unknown>) => {
+    if (!selected) return;
+    try {
+      const res = await fetch(socialURL(`/inbox/${selected.id}/${action}`, projectId), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json().catch(() => ({}));
+      if (data.status === "failed") throw new Error(data.error || "failed");
+      if (data.status === "unsupported") {
+        setStatus(data.reason || "Unsupported action.");
+      } else {
+        setStatus("Inbox updated.");
+      }
+      setReplyBody("");
+      await load();
+      await loadSelected(selected.id);
+    } catch (e) {
+      setStatus("Inbox action failed: " + (e as Error).message);
+    }
+  };
+
+  const accountName = (id: number) => accounts.find((a) => a.id === id)?.display_name || `#${id}`;
+
+  return (
+    <div className="h-full flex flex-col">
+      <div className="border-b border-border px-4 py-3 flex flex-wrap items-center gap-2">
+        <select
+          value={accountID}
+          onChange={(e) => setAccountID(e.target.value === "all" ? "all" : Number(e.target.value))}
+          className="bg-bg-input border border-border rounded px-2 py-1 text-sm text-text"
+        >
+          <option value="all">All accounts</option>
+          {accounts.map((a) => (
+            <option key={a.id} value={a.id}>{a.display_name} · {a.platform}</option>
+          ))}
+        </select>
+        <select value={kind} onChange={(e) => setKind(e.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm text-text">
+          <option value="all">All kinds</option>
+          <option value="comment">Comments</option>
+          <option value="dm">Messages</option>
+          <option value="mention">Mentions</option>
+          <option value="review">Reviews</option>
+        </select>
+        <select value={status} onChange={(e) => setLocalStatus(e.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm text-text">
+          <option value="all">Open</option>
+          <option value="unread">Unread</option>
+          <option value="read">Read</option>
+          <option value="replied">Replied</option>
+          <option value="hidden">Hidden</option>
+          <option value="archived">Archived</option>
+        </select>
+        <button onClick={() => sync(false)} disabled={syncing} className="ml-auto px-3 py-1 text-sm border border-border rounded text-accent disabled:opacity-50">
+          {syncing ? "Syncing..." : "Refresh"}
+        </button>
+      </div>
+      {syncResults.some((r) => r.status === "failed" || (r.warnings && r.warnings.length > 0)) && (
+        <div className="px-4 py-2 border-b border-border text-xs text-text-dim">
+          {syncResults.map((r) => (
+            <div key={r.social_account_id}>
+              {r.display_name || accountName(r.social_account_id)}: {r.status === "failed" ? r.error : (r.warnings || []).join("; ")}
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex-1 min-h-0 grid grid-cols-[360px_1fr]">
+        <div className="border-r border-border overflow-y-auto">
+          {loading ? (
+            <div className="p-6 text-sm text-text-dim">Loading...</div>
+          ) : items.length === 0 ? (
+            <div className="p-6 text-sm text-text-dim">No inbox items yet.</div>
+          ) : items.map((it) => (
+            <button
+              key={it.id}
+              onClick={() => setSelectedID(it.id)}
+              className={
+                "w-full text-left px-4 py-3 border-b border-border hover:bg-bg-card " +
+                (selectedID === it.id ? "bg-bg-card" : "")
+              }
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-xs uppercase text-accent">{it.kind}</span>
+                <span className="text-xs text-text-dim">{it.platform}</span>
+                {it.status === "unread" && <span className="ml-auto w-2 h-2 rounded-full bg-accent" />}
+              </div>
+              <div className="text-sm text-text truncate mt-1">{it.author_name || it.author_handle || "Unknown"}</div>
+              <div className="text-xs text-text-dim truncate mt-1">{it.body || "(no text)"}</div>
+              <div className="text-[11px] text-text-muted mt-1">{new Date(it.occurred_at).toLocaleString()}</div>
+            </button>
+          ))}
+        </div>
+        <div className="min-w-0 flex flex-col">
+          {!selected ? (
+            <div className="m-auto text-sm text-text-dim">Select an item</div>
+          ) : (
+            <>
+              <div className="border-b border-border px-5 py-4">
+                <div className="text-text font-medium">{selected.author_name || selected.author_handle || "Unknown"}</div>
+                <div className="text-xs text-text-dim">{accountName(selected.social_account_id)} · {selected.platform} · {selected.kind}</div>
+              </div>
+              <div className="flex-1 overflow-y-auto p-5 flex flex-col gap-3">
+                {thread.map((m) => (
+                  <div key={m.id} className={"max-w-[78%] border border-border rounded p-3 " + (m.direction === "outbound" ? "self-end bg-bg-card" : "self-start bg-bg-input/40")}>
+                    <div className="text-xs text-text-dim mb-1">{m.author_name || m.author_handle || (m.direction === "outbound" ? "You" : "Unknown")}</div>
+                    <div className="text-sm text-text whitespace-pre-wrap">{m.body || "(no text)"}</div>
+                    <div className="text-[11px] text-text-muted mt-2">{new Date(m.occurred_at).toLocaleString()}</div>
+                  </div>
+                ))}
+              </div>
+              <div className="border-t border-border p-4 flex flex-col gap-2">
+                <textarea
+                  value={replyBody}
+                  onChange={(e) => setReplyBody(e.target.value)}
+                  placeholder="Reply..."
+                  className="w-full min-h-[72px] bg-bg-input border border-border rounded px-3 py-2 text-sm text-text resize-y"
+                />
+                <div className="flex flex-wrap gap-2">
+                  <button onClick={() => act("reply", { body: replyBody })} disabled={!replyBody.trim()} className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50">Reply</button>
+                  {selected.platform === "instagram" && selected.kind === "comment" && (
+                    <button onClick={() => act("private_reply", { body: replyBody })} disabled={!replyBody.trim()} className="px-3 py-1.5 text-sm border border-border rounded text-accent disabled:opacity-50">Private reply</button>
+                  )}
+                  <button onClick={() => act(selected.status === "unread" ? "read" : "unread")} className="px-3 py-1.5 text-sm border border-border rounded text-text-dim">{selected.status === "unread" ? "Mark read" : "Mark unread"}</button>
+                  <button onClick={() => act("archive")} className="px-3 py-1.5 text-sm border border-border rounded text-text-dim">Archive</button>
+                  {selected.kind === "comment" && (
+                    <>
+                      <button onClick={() => act(selected.status === "hidden" ? "unhide" : "hide")} className="px-3 py-1.5 text-sm border border-border rounded text-text-dim">{selected.status === "hidden" ? "Unhide" : "Hide"}</button>
+                      <button onClick={() => act("delete")} className="px-3 py-1.5 text-sm border border-red text-red rounded">Delete</button>
+                    </>
+                  )}
+                  {selected.permalink && (
+                    <a href={selected.permalink} target="_blank" rel="noopener" className="ml-auto px-3 py-1.5 text-sm text-accent hover:underline">Open</a>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function PostsView({
   posts, onChange, setStatus, projectId,
