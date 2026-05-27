@@ -10,6 +10,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/render-status/", Handler: a.handleRenderStatus},
 		{Pattern: "/cache/", Handler: a.handleCacheGet},
 		{Pattern: "/bindings", Handler: a.handleBindings},
+		{Pattern: "/assets/resolve", Handler: a.handleAssetResolve},
 	}
 }
 

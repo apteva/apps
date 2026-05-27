@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.1.0
+version: 0.2.0
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — clips on a track, optional soundtrack, text
@@ -11,7 +11,9 @@ description: |
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
 
-  v0.1 ships local + remote ffmpeg. SaaS executors land in 0.2.
+  v0.2 adds a structured timeline panel with live preview, clip
+  inspector controls, asset URL resolution, and storage-aware render
+  saves.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/composer
@@ -47,7 +49,7 @@ requires:
         video.compose: queue_render
       required: false
       label: "Render backend (optional)"
-      hint: "When unbound, renders run locally via the sidecar's bundled ffmpeg (or remote via instances if render_host_id is set). v0.1 ignores this role — SaaS executors land in v0.2."
+      hint: "When unbound, renders run locally via the sidecar's bundled ffmpeg (or remote via instances if render_host_id is set). SaaS executors are reserved for a later release."
 
 provides:
   http_routes:

@@ -16,6 +16,15 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+func projectScope(ctx *sdk.AppCtx) string {
+	if ctx != nil {
+		if pid := strings.TrimSpace(ctx.CurrentProject()); pid != "" {
+			return pid
+		}
+	}
+	return strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
+}
+
 // --- composition CRUD ---------------------------------------------
 
 func (a *App) toolCompositionCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -26,7 +35,7 @@ func (a *App) toolCompositionCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	output := outputFromArgs(args)
 	editJSON, _ := json.Marshal(edit)
 	outputJSON, _ := json.Marshal(output)
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectScope(ctx)
 	dur := editDurationSeconds(edit)
 	name := strArg(args, "name", "")
 
@@ -145,7 +154,7 @@ func (a *App) toolCompositionGet(ctx *sdk.AppCtx, args map[string]any) (any, err
 }
 
 func (a *App) toolCompositionList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectScope(ctx)
 	limit := intArg(args, "limit", 50)
 	if limit > 200 {
 		limit = 200
@@ -161,10 +170,10 @@ func (a *App) toolCompositionList(ctx *sdk.AppCtx, args map[string]any) (any, er
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id                          int64
-			name, editJSON, outputJSON  string
-			dur                         float64
-			createdAt, updatedAt        string
+			id                         int64
+			name, editJSON, outputJSON string
+			dur                        float64
+			createdAt, updatedAt       string
 		)
 		if err := rows.Scan(&id, &name, &editJSON, &outputJSON, &dur, &createdAt, &updatedAt); err != nil {
 			continue
@@ -354,8 +363,7 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 // Reads the file into memory via base64 — fine for v0.1 video sizes;
 // streaming upload is a follow-up if outputs grow past ~50 MB.
 func saveRenderOutput(ctx *sdk.AppCtx, path, format, projectID string, compID int64) int64 {
-	storage := ctx.IntegrationFor("storage")
-	if storage == nil {
+	if ctx == nil || ctx.PlatformAPI() == nil {
 		return 0
 	}
 	bytes, err := os.ReadFile(path)
@@ -373,6 +381,7 @@ func saveRenderOutput(ctx *sdk.AppCtx, path, format, projectID string, compID in
 		"folder":         "/.composer/",
 		"content_type":   "video/" + format,
 		"tags":           []string{"composer", "render"},
+		"_project_id":    projectID,
 	}, &got)
 	if err != nil {
 		ctx.Logger().Warn("storage upload failed", "err", err)
@@ -449,6 +458,46 @@ func (a *App) toolAssetInspect(ctx *sdk.AppCtx, args map[string]any) (any, error
 	return probe, nil
 }
 
+func (a *App) handleAssetResolve(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	if globalCtx == nil {
+		http.Error(w, "app not mounted", http.StatusServiceUnavailable)
+		return
+	}
+	src := strings.TrimSpace(r.URL.Query().Get("src"))
+	if src == "" {
+		http.Error(w, "src required", http.StatusBadRequest)
+		return
+	}
+	url, err := resolveAssetURL(globalCtx, src)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	jsonResp(w, map[string]any{
+		"src":  src,
+		"url":  url,
+		"kind": assetKindHint(src),
+	})
+}
+
+func assetKindHint(src string) string {
+	s := strings.ToLower(src)
+	switch {
+	case strings.Contains(s, ".png"), strings.Contains(s, ".jpg"), strings.Contains(s, ".jpeg"),
+		strings.Contains(s, ".webp"), strings.Contains(s, ".gif"):
+		return "image"
+	case strings.Contains(s, ".mp3"), strings.Contains(s, ".wav"), strings.Contains(s, ".m4a"),
+		strings.Contains(s, ".aac"), strings.Contains(s, ".flac"):
+		return "audio"
+	default:
+		return "video"
+	}
+}
+
 // --- HTTP handlers (panel) ---------------------------------------
 
 func (a *App) handleListCompositions(w http.ResponseWriter, r *http.Request) {
@@ -475,6 +524,20 @@ func (a *App) handleCompositionByID(w http.ResponseWriter, r *http.Request) {
 	}
 	idStr := strings.TrimPrefix(r.URL.Path, "/composition/")
 	idStr = strings.SplitN(idStr, "/", 2)[0]
+	if r.Method == http.MethodPost && (idStr == "" || idStr == "new") {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		out, err := a.toolCompositionCreate(globalCtx, body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		jsonResp(w, out)
+		return
+	}
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil || id <= 0 {
 		http.Error(w, "bad id", http.StatusBadRequest)
@@ -495,19 +558,6 @@ func (a *App) handleCompositionByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		out, err := a.toolCompositionUpdate(globalCtx, map[string]any{"id": id, "patch": body})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		jsonResp(w, out)
-	case http.MethodPost:
-		// POST /composition/ creates a new composition from the body
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		out, err := a.toolCompositionCreate(globalCtx, body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -581,9 +631,9 @@ func (a *App) handleBindings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := map[string]any{
-		"storage_bound":     globalCtx.IntegrationFor("storage") != nil,
+		"storage_bound":     appToolAvailable(globalCtx, "storage", "files_list", map[string]any{"limit": 1, "_project_id": projectScope(globalCtx)}),
 		"instances_bound":   globalCtx.IntegrationFor("instances") != nil,
-		"mediastudio_bound": globalCtx.IntegrationFor("media-studio") != nil,
+		"mediastudio_bound": appToolAvailable(globalCtx, "media-studio", "media_history", map[string]any{"limit": 1, "_project_id": projectScope(globalCtx)}),
 		"render_host_id":    renderHostID(),
 		"ffmpeg_path":       ffmpegPath(),
 	}
@@ -591,6 +641,14 @@ func (a *App) handleBindings(w http.ResponseWriter, r *http.Request) {
 		out["render_executor"] = bound.AppSlug
 	}
 	jsonResp(w, out)
+}
+
+func appToolAvailable(ctx *sdk.AppCtx, appName, tool string, args map[string]any) bool {
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return false
+	}
+	var got map[string]any
+	return ctx.PlatformAPI().CallAppResult(appName, tool, args, &got) == nil
 }
 
 func jsonResp(w http.ResponseWriter, v any) {

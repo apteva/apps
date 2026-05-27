@@ -204,11 +204,11 @@ func TestEditFromArgs_ReconstructsTimeline(t *testing.T) {
 
 func TestEscDrawText(t *testing.T) {
 	cases := map[string]string{
-		"hello":         "hello",
-		"a:b":           `a\:b`,
-		"it's":          `it\'s`,
-		`a\b`:           `a\\b`,
-		"line1\nline2":  "line1 line2",
+		"hello":        "hello",
+		"a:b":          `a\:b`,
+		"it's":         `it\'s`,
+		`a\b`:          `a\\b`,
+		"line1\nline2": "line1 line2",
 	}
 	for in, want := range cases {
 		if got := escDrawText(in); got != want {
@@ -231,5 +231,19 @@ func TestResolutionWH(t *testing.T) {
 	w, h = resolutionWH("4k", "16:9")
 	if w != 3840 || h != 2160 {
 		t.Errorf("4k 16:9 = %dx%d, want 3840x2160", w, h)
+	}
+}
+
+func TestAssetKindHint(t *testing.T) {
+	cases := map[string]string{
+		"https://cdn.example.com/clip.mp4":   "video",
+		"storage:42":                         "video",
+		"https://cdn.example.com/still.webp": "image",
+		"https://cdn.example.com/music.wav":  "audio",
+	}
+	for in, want := range cases {
+		if got := assetKindHint(in); got != want {
+			t.Errorf("assetKindHint(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

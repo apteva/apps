@@ -1,4 +1,4 @@
-// Composer v0.1 — multi-clip video compositions rendered locally (or
+// Composer v0.2 - multi-clip video compositions rendered locally (or
 // on a render host via instances). Asset sources accept storage:N /
 // mediastudio:N / https URLs; output lands back in storage (or the
 // sidecar's local cache when storage is unbound).
@@ -26,11 +26,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.1.0
+version: 0.2.0
 description: |
-  Multi-clip video compositions. Renders locally via ffmpeg, on a
-  render host via instances, or against a bound render_executor
-  integration.
+  Multi-clip video compositions with a structured timeline panel.
+  Renders locally via ffmpeg, on a render host via instances, or
+  against a bound render_executor integration.
 author: Apteva
 scopes: [project, global]
 requires:
