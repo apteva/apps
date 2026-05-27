@@ -31,6 +31,10 @@ Every interactive element on a screenshot has a colored numeric badge:
 Lower label number = higher priority. When two labels match your
 goal, pick the lowest.
 
+`browser_screenshot` is for clean capture/export screenshots and defaults to
+no Set-of-Mark labels. Use `computer_use(action="screenshot")` for navigation,
+or pass `annotate=true` to `browser_screenshot` only when labels are desired.
+
 ## Chat attachments
 
 When you do something visible to the browser, attach a component
@@ -67,6 +71,9 @@ Use app contexts when cookies/storage should survive across sessions.
 - For a new saved context and immediate session, call
   `browser_session(action="open", context_name=..., auto_create_context=true,
   persist=true)`.
+- Always provide a meaningful `context_name` when creating a reusable saved
+  context. If omitted with `auto_create_context=true`, the app creates a
+  generated fallback name for recovery, but agents should not rely on it.
 - `provider_context_id` is the raw Browserbase context / Steel profile /
   Browser Engine context id. Prefer app `context_id` or `context_name` unless
   importing an existing provider context.

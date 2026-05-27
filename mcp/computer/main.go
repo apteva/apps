@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -39,10 +40,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.10
+version: 0.7.11
 description: |
-  Watch and steer browser sessions. v0.7.10 enables label-badged
-  screenshots by default so agents click visible targets reliably.
+  Watch and steer browser sessions. v0.7.11 keeps label-badged
+  agent screenshots by default and lets capture callers request clean
+  viewport pixels.
 scopes: [project, global]
 requires:
   permissions:
@@ -67,9 +69,9 @@ provides:
     - prefix: /
   mcp_tools:
     - name: browser_session
-      description: "Open, resume, list, inspect, or close app-owned browser sessions. Args: action, session_id?, backend?, backend_session_id?, url?, context_id?, persist?, timeout?, proxy?, proxy_country?, viewport?."
+      description: "Open, resume, list, inspect, or close app-owned browser sessions. Args: action, session_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated."
     - name: computer_use
-      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. After scrolling or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, coordinate?, label?, text?, key?, direction?, amount?, duration?. Returns screenshot bytes for visual actions."
+      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. After scrolling or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, coordinate?, label?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -85,7 +87,7 @@ provides:
     - name: browser_list
       description: "Compatibility alias for browser_session(action=list)."
     - name: browser_screenshot
-      description: "Compatibility alias for computer_use(action=screenshot)."
+      description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels)."
     - name: browser_close
       description: "Compatibility alias for browser_session(action=close)."
   ui_panels:
@@ -284,7 +286,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "browser_session",
 			Description: "Session lifecycle for app-owned browsers. Actions: open, resume, status, close, list. " +
 				"Open/resume args: backend? (local|browserbase|steel|browser-engine|service), url?, context_id?, persist?, " +
-				"backend_session_id? (provider attach), timeout?, proxy?, proxy_country?, viewport?. " +
+				"context_name?, auto_create_context?, backend_session_id? (provider attach), timeout?, proxy?, proxy_country?, viewport?. " +
+				"For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. " +
 				"Returns {session_id, backend_session_id, backend, current_url, context_id, debug_url, width, height}.",
 			InputSchema: schemaObject(map[string]any{
 				"action":             map[string]any{"type": "string", "enum": []string{"open", "resume", "status", "close", "list"}},
@@ -293,11 +296,11 @@ func (a *App) MCPTools() []sdk.Tool {
 				"backend":            map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
 				"url":                map[string]any{"type": "string"},
 				"context_id":         map[string]any{"type": "string", "description": "App context id preferred; legacy raw provider context ids still work."},
-				"context_name":       map[string]any{"type": "string"},
+				"context_name":       map[string]any{"type": "string", "description": "App-managed context name. Pass this when creating or reopening a reusable saved context."},
 				"provider_context_id": map[string]any{
 					"type": "string",
 				},
-				"auto_create_context": map[string]any{"type": "boolean"},
+				"auto_create_context": map[string]any{"type": "boolean", "description": "Create an app-managed context if no context_id/name/provider_context_id matches. For reusable contexts, also pass context_name; omitted names are auto-generated fallback names."},
 				"persist":             map[string]any{"type": "boolean"},
 				"timeout":             map[string]any{"type": "integer"},
 				"proxy":               map[string]any{"type": "boolean"},
@@ -317,7 +320,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
 				"To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. " +
 				"After scrolling or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, click, double_click, type, key, scroll, wait. " +
-				"Args: session_id, action, coordinate? (\"x,y\"), label? (Set-of-Mark label), text?, key?, direction?, amount?, duration?. " +
+				"Args: session_id, action, coordinate? (\"x,y\"), label? (Set-of-Mark label), text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). " +
 				"Returns a binary screenshot envelope plus current_url, width, height.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
@@ -329,6 +332,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"direction":  map[string]any{"type": "string"},
 				"amount":     map[string]any{"type": "integer"},
 				"duration":   map[string]any{"type": "integer"},
+				"annotate":   map[string]any{"type": "boolean", "description": "For action=screenshot, include Set-of-Mark labels in the returned image. Defaults true for computer_use so agent click flow remains label-based."},
+				"som":        map[string]any{"type": "boolean", "description": "Alias for annotate."},
 			}, []string{"session_id", "action"}),
 			Handler: a.toolComputerUse,
 		},
@@ -387,18 +392,19 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "browser_open",
 			Description: "Compatibility alias for browser_session(action=open). Args: backend? (local|browserbase|steel|browser-engine, default from Computer app settings), " +
-				"url? (navigate after open), viewport? ({width:int, height:int}, default 1600x800). " +
+				"url? (navigate after open), context_name?, auto_create_context?, viewport? ({width:int, height:int}, default 1600x800). " +
+				"For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. " +
 				"Returns {session_id, backend, current_url, width, height}. " +
 				"Session owned by this sidecar until browser_close or 30-minute idle reaper.",
 			InputSchema: schemaObject(map[string]any{
 				"backend":      map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
 				"url":          map[string]any{"type": "string"},
 				"context_id":   map[string]any{"type": "string"},
-				"context_name": map[string]any{"type": "string"},
+				"context_name": map[string]any{"type": "string", "description": "App-managed context name. Pass this when creating or reopening a reusable saved context."},
 				"provider_context_id": map[string]any{
 					"type": "string",
 				},
-				"auto_create_context": map[string]any{"type": "boolean"},
+				"auto_create_context": map[string]any{"type": "boolean", "description": "Create an app-managed context if no context_id/name/provider_context_id matches. For reusable contexts, also pass context_name; omitted names are auto-generated fallback names."},
 				"persist":             map[string]any{"type": "boolean"},
 				"timeout":             map[string]any{"type": "integer"},
 				"proxy":               map[string]any{"type": "boolean"},
@@ -421,10 +427,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "browser_screenshot",
-			Description: "Capture a PNG of the session's current viewport. Args: session_id. " +
+			Description: "Capture a clean PNG of the session's current viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels). " +
 				"Returns {png_b64, current_url, width, height}.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
+				"annotate":   map[string]any{"type": "boolean", "description": "Include Set-of-Mark labels in the image. Defaults false for clean capture/export screenshots."},
+				"som":        map[string]any{"type": "boolean", "description": "Alias for annotate."},
 			}, []string{"session_id"}),
 			Handler: a.toolBrowserScreenshot,
 		},
@@ -713,10 +721,7 @@ func (a *App) resolveSessionContext(ctx *sdk.AppCtx, backend string, args map[st
 		}
 	}
 	if rec == nil && autoCreate {
-		name := firstNonEmpty(contextName, contextIDArg)
-		if name == "" {
-			return out, fmt.Errorf("context_name required when auto_create_context=true")
-		}
+		name := firstNonEmpty(contextName, contextIDArg, generatedContextName(backend, stringArg(args, "url")))
 		rec, err = a.createContextRecord(ctx, map[string]any{
 			"name":                 name,
 			"backend":              backend,
@@ -743,6 +748,37 @@ func (a *App) resolveSessionContext(ctx *sdk.AppCtx, backend string, args map[st
 
 	out.ProviderContextID = firstNonEmpty(rawProviderID, contextIDArg)
 	return out, nil
+}
+
+func generatedContextName(backend, rawURL string) string {
+	host := "session"
+	if u, err := url.Parse(strings.TrimSpace(rawURL)); err == nil && u.Hostname() != "" {
+		host = u.Hostname()
+	}
+	host = strings.Trim(host, ".")
+	host = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		case r >= '0' && r <= '9':
+			return r
+		case r == '-' || r == '_':
+			return r
+		default:
+			return '-'
+		}
+	}, host)
+	host = strings.Trim(host, "-_")
+	if host == "" {
+		host = "session"
+	}
+	suffix := strings.TrimPrefix(newContextID(), "ctx_")
+	if len(suffix) > 8 {
+		suffix = suffix[:8]
+	}
+	return fmt.Sprintf("auto-%s-%s-%s", normalizeBackend(backend), host, suffix)
 }
 
 func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bool) (any, error) {
@@ -965,7 +1001,13 @@ func (a *App) sessionOutput(id string, s *session) map[string]any {
 }
 
 func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	out, err := a.toolComputerUse(ctx, mapWithDefault(args, "action", "screenshot"))
+	shotArgs := mapWithDefault(args, "action", "screenshot")
+	if _, ok := shotArgs["annotate"]; !ok {
+		if _, ok := shotArgs["som"]; !ok {
+			shotArgs["annotate"] = false
+		}
+	}
+	out, err := a.toolComputerUse(ctx, shotArgs)
 	if err != nil {
 		return nil, err
 	}
@@ -1013,7 +1055,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	var shot []byte
 	var err error
 	if action == "screenshot" {
-		shot, err = sess.comp.Screenshot()
+		shot, err = screenshotWithOptions(sess.comp, annotateArg(args, true))
 	} else {
 		shot, err = sess.comp.Execute(act)
 	}
@@ -1346,6 +1388,16 @@ func boolPtrArg(args map[string]any, k string) *bool {
 	return nil
 }
 
+func annotateArg(args map[string]any, def bool) bool {
+	if v, ok := boolArg(args, "annotate"); ok {
+		return v
+	}
+	if v, ok := boolArg(args, "som"); ok {
+		return v
+	}
+	return def
+}
+
 func boolArg(args map[string]any, k string) (bool, bool) {
 	switch v := args[k].(type) {
 	case bool:
@@ -1398,6 +1450,13 @@ func mapWithDefault(args map[string]any, k string, v any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+func screenshotWithOptions(comp backends.Computer, annotate bool) ([]byte, error) {
+	if c, ok := comp.(backends.ScreenshotWithOptions); ok {
+		return c.ScreenshotWithOptions(backends.ScreenshotOptions{Annotate: annotate})
+	}
+	return comp.Screenshot()
 }
 
 func firstNonEmpty(vals ...string) string {
@@ -1624,7 +1683,14 @@ func (a *App) handleSessionScreenshot(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "session not found")
 		return
 	}
-	shot, err := sess.comp.Screenshot()
+	annotate := boolArgDefault(map[string]any{
+		"annotate": r.URL.Query().Get("annotate"),
+		"som":      r.URL.Query().Get("som"),
+	}, "annotate", false)
+	if r.URL.Query().Get("annotate") == "" && r.URL.Query().Get("som") != "" {
+		annotate = boolArgDefault(map[string]any{"som": r.URL.Query().Get("som")}, "som", false)
+	}
+	shot, err := screenshotWithOptions(sess.comp, annotate)
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, "screenshot: "+err.Error())
 		return

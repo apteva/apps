@@ -876,6 +876,10 @@ func (c *Computer) scroll(a computer.Action) error {
 }
 
 func (c *Computer) Screenshot() ([]byte, error) {
+	return c.ScreenshotWithOptions(computer.ScreenshotOptions{Annotate: true})
+}
+
+func (c *Computer) ScreenshotWithOptions(options computer.ScreenshotOptions) ([]byte, error) {
 	if c.ctx == nil {
 		return nil, fmt.Errorf("screenshot: browser not open — call browser_session(action=open, ...) first")
 	}
@@ -935,7 +939,7 @@ func (c *Computer) Screenshot() ([]byte, error) {
 	// map, and composites numeric badges onto the image bytes. On
 	// any failure we log and return the raw screenshot — SoM never
 	// blocks a successful screenshot round-trip.
-	if som.Enabled() {
+	if options.Annotate && som.Enabled() {
 		elements, err := c.enumerate()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[BROWSER] som enum failed: %v (returning un-annotated screenshot)\n", err)

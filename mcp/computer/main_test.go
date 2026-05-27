@@ -180,6 +180,9 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	if fake.screenshotCalls != 1 {
 		t.Errorf("screenshot calls: want 1, got %d", fake.screenshotCalls)
 	}
+	if got := fake.lastScreenshotAnnotate(); got == nil || *got != true {
+		t.Errorf("computer_use screenshot annotate default: want true, got %v", got)
+	}
 
 	if _, err := app.toolComputerUse(ctx, map[string]any{
 		"session_id": sessionID,
@@ -345,6 +348,100 @@ func TestContextCatalogResolvesBrowserSessionContextName(t *testing.T) {
 	}
 }
 
+func TestBrowserScreenshotDefaultsClean(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+		url:     "https://example.com",
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		return fake, nil
+	}
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":  "open",
+		"backend": "local",
+		"url":     "https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("browser_session open: %v", err)
+	}
+	sessionID := openOut.(map[string]any)["session_id"].(string)
+
+	if _, err := app.toolBrowserScreenshot(ctx, map[string]any{"session_id": sessionID}); err != nil {
+		t.Fatalf("browser_screenshot: %v", err)
+	}
+	if got := fake.lastScreenshotAnnotate(); got == nil || *got != false {
+		t.Errorf("browser_screenshot annotate default: want false, got %v", got)
+	}
+
+	if _, err := app.toolBrowserScreenshot(ctx, map[string]any{"session_id": sessionID, "annotate": true}); err != nil {
+		t.Fatalf("browser_screenshot annotate=true: %v", err)
+	}
+	if got := fake.lastScreenshotAnnotate(); got == nil || *got != true {
+		t.Errorf("browser_screenshot annotate=true: want true, got %v", got)
+	}
+}
+
+func TestBrowserSessionAutoCreateContextGeneratesName(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+		url:     "https://example.com",
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		return fake, nil
+	}
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	if ctx.AppDB() == nil {
+		t.Fatal("test context has no AppDB")
+	}
+
+	out, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":              "open",
+		"backend":             "local",
+		"url":                 "https://example.com/login",
+		"auto_create_context": true,
+		"persist":             true,
+	})
+	if err != nil {
+		t.Fatalf("browser_session open with generated context: %v", err)
+	}
+	openMap := out.(map[string]any)
+	contextID, _ := openMap["app_context_id"].(string)
+	if contextID == "" {
+		t.Fatalf("app_context_id missing: %#v", openMap)
+	}
+	contextName, _ := openMap["context_name"].(string)
+	if !strings.HasPrefix(contextName, "auto-local-example-com-") {
+		t.Fatalf("generated context_name = %q", contextName)
+	}
+	rec, err := dbGetContext(ctx.AppDB(), contextID)
+	if err != nil {
+		t.Fatalf("get generated context: %v", err)
+	}
+	if !rec.AutoCreated || rec.Name != contextName {
+		t.Fatalf("generated context row = %+v, name from output = %q", rec, contextName)
+	}
+	if fake.openContextID != rec.ProviderContextID {
+		t.Errorf("OpenSession context id: want %q, got %q", rec.ProviderContextID, fake.openContextID)
+	}
+	if !fake.openPersist {
+		t.Errorf("persist should be true")
+	}
+}
+
 func TestComputerSettingsDriveDefaultBackend(t *testing.T) {
 	prev := newBackend
 	t.Cleanup(func() { newBackend = prev })
@@ -466,6 +563,7 @@ type fakeComp struct {
 	openProxy       *bool
 	lastAction      backends.Action
 	screenshotCalls int
+	annotateCalls   []bool
 	closeCalls      int
 	mu              sync.Mutex // for the unlikely concurrent test
 }
@@ -478,10 +576,25 @@ func (f *fakeComp) Execute(action backends.Action) ([]byte, error) {
 }
 
 func (f *fakeComp) Screenshot() ([]byte, error) {
+	return f.ScreenshotWithOptions(backends.ScreenshotOptions{Annotate: true})
+}
+
+func (f *fakeComp) ScreenshotWithOptions(options backends.ScreenshotOptions) ([]byte, error) {
 	f.mu.Lock()
 	f.screenshotCalls++
+	f.annotateCalls = append(f.annotateCalls, options.Annotate)
 	f.mu.Unlock()
 	return f.png, nil
+}
+
+func (f *fakeComp) lastScreenshotAnnotate() *bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.annotateCalls) == 0 {
+		return nil
+	}
+	v := f.annotateCalls[len(f.annotateCalls)-1]
+	return &v
 }
 
 func (f *fakeComp) DisplaySize() backends.DisplaySize { return f.display }

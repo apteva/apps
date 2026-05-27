@@ -834,6 +834,10 @@ func (c *Computer) dispatchClick(x, y, clickCount int) error {
 }
 
 func (c *Computer) Screenshot() ([]byte, error) {
+	return c.ScreenshotWithOptions(computer.ScreenshotOptions{Annotate: true})
+}
+
+func (c *Computer) ScreenshotWithOptions(options computer.ScreenshotOptions) ([]byte, error) {
 	if c.ctx == nil {
 		return nil, fmt.Errorf("browserengine: no active session — call browser_session open first")
 	}
@@ -855,7 +859,7 @@ func (c *Computer) Screenshot() ([]byte, error) {
 		return nil, fmt.Errorf("screenshot: %w", err)
 	}
 
-	if som.Enabled() {
+	if options.Annotate && som.Enabled() {
 		var raw json.RawMessage
 		if err := chromedp.Run(c.ctx, chromedp.Evaluate(som.EnumScript, &raw)); err != nil {
 			fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] som enum failed: %v\n", err)

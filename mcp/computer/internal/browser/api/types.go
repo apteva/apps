@@ -27,6 +27,14 @@ type DisplaySize struct {
 	Height int `json:"height"`
 }
 
+// ScreenshotOptions controls optional post-processing for a screenshot.
+type ScreenshotOptions struct {
+	// Annotate composites Set-of-Mark labels onto the returned pixels and
+	// refreshes the label map used by click(label=N). Clean capture/export
+	// callers should set this false.
+	Annotate bool
+}
+
 // Context binds a session to a persistent state bundle (cookies,
 // localStorage, IndexedDB, ServiceWorkers, Cache) that survives across
 // sessions. Per-provider mapping:
@@ -62,6 +70,12 @@ type Computer interface {
 
 	// Close terminates the session and releases resources.
 	Close() error
+}
+
+// ScreenshotWithOptions is implemented by backends that support clean
+// screenshots without Set-of-Mark annotation on a per-call basis.
+type ScreenshotWithOptions interface {
+	ScreenshotWithOptions(options ScreenshotOptions) ([]byte, error)
 }
 
 // OpenOptions describes a session-open intent: which url to land on,
