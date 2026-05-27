@@ -13,15 +13,15 @@ import (
 // remoteFFmpegExecutor runs the same ffmpeg command on a host managed
 // by the `instances` app. Strategy lifted from media's remote_exec.go:
 //
-//   1. Pre-flight: ffmpeg + ffprobe installed on the remote (cached
-//      after first success).
-//   2. Resolve every asset.src to a URL the remote can curl (storage's
-//      signed URLs cover the storage:N case; https:// pass-through).
-//   3. SSH a single bash script via instances.instance_run_command
-//      that downloads the inputs, runs ffmpeg with the same filter
-//      graph the local executor builds, then multipart-POSTs the
-//      output back to storage's /files endpoint and echoes a result
-//      marker the sidecar parses.
+//  1. Pre-flight: ffmpeg + ffprobe installed on the remote (cached
+//     after first success).
+//  2. Resolve every asset.src to a URL the remote can curl (storage's
+//     signed URLs cover the storage:N case; https:// pass-through).
+//  3. SSH a single bash script via instances.instance_run_command
+//     that downloads the inputs, runs ffmpeg with the same filter
+//     graph the local executor builds, then multipart-POSTs the
+//     output back to storage's /files endpoint and echoes a result
+//     marker the sidecar parses.
 //
 // v0.1 is best-effort — the install probe + storage upload paths from
 // media's remote executor aren't fully ported. When called and

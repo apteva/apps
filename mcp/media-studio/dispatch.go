@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	sdk "github.com/apteva/app-sdk"
@@ -170,6 +171,17 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if strings.TrimSpace(prompt) == "" {
 		return nil, errors.New("prompt required")
 	}
+	pid := projectScope(ctx)
+	cacheKey := strings.TrimSpace(strArg(args, "cache_key", ""))
+	cachePolicy := strings.TrimSpace(strArg(args, "cache_policy", "reuse"))
+	if cacheKey != "" && cachePolicy != "refresh" {
+		if row, err := queryGenerationByCacheKey(ctx, pid, kind, cacheKey); err == nil {
+			return cachedGenerationResult(row), nil
+		}
+		if job, ok := queryPendingJobByCacheKey(ctx, pid, kind, cacheKey); ok {
+			return job, nil
+		}
+	}
 
 	bound := ctx.IntegrationFor(h.Role)
 	if bound == nil {
@@ -252,7 +264,6 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 
 	storage := ctx.IntegrationFor("storage")
-	pid := projectScope(ctx)
 	storageIDs := make([]int64, 0, len(media))
 	upstreamURLs := make([]string, 0, len(media))
 	var firstThumbB64 string
@@ -303,6 +314,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		ExtraJSON:    extraJSON,
 		Count:        len(media),
 		CostUSD:      costUSD,
+		CacheKey:     cacheKey,
 	})
 
 	// When storage is unbound, persist the full first-item bytes to
@@ -333,7 +345,130 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		Count:         len(media),
 		MimeType:      media[0].MimeType,
 		CostUSD:       costUSD,
+		GenerationID:  genID,
 	}), nil
+}
+
+func cachedGenerationResult(row map[string]any) map[string]any {
+	storageIDs, _ := row["storage_ids"].([]int64)
+	storageURLs, _ := row["storage_urls"].([]string)
+	upstreamURLs, _ := row["upstream_urls"].([]string)
+	kind := strAny(row["kind"])
+	prompt := strAny(row["prompt"])
+	model := strAny(row["model"])
+	provider := strAny(row["provider"])
+	costUSD := floatAny(row["cost_usd"])
+	count := int(int64Any(row["count"]))
+	if count <= 0 {
+		count = 1
+	}
+	content := []map[string]any{{
+		"type": "text",
+		"text": "Reused cached " + kind + " generation #" + strconvFormatInt(int64Any(row["id"])) + ".",
+	}}
+	for i, url := range storageURLs {
+		name := "storage"
+		if i < len(storageIDs) {
+			name = "storage:" + strconvFormatInt(storageIDs[i])
+		}
+		content = append(content, map[string]any{
+			"type": "resource",
+			"resource": map[string]any{
+				"uri":      url,
+				"mimeType": defaultMime(kind),
+				"name":     name,
+			},
+		})
+	}
+	return map[string]any{
+		"content": content,
+		"_meta": map[string]any{
+			"kind":           kind,
+			"prompt":         prompt,
+			"revised_prompt": strAny(row["revised_prompt"]),
+			"model":          model,
+			"provider":       provider,
+			"storage_ids":    storageIDs,
+			"storage_urls":   storageURLs,
+			"upstream_urls":  upstreamURLs,
+			"cost_usd":       costUSD,
+			"count":          count,
+			"generation_id":  int64Any(row["id"]),
+			"cache_hit":      true,
+			"cache_key":      strAny(row["cache_key"]),
+		},
+	}
+}
+
+func queryPendingJobByCacheKey(ctx *sdk.AppCtx, pid, kind, cacheKey string) (map[string]any, bool) {
+	var (
+		id                     int64
+		queueID, model, prompt string
+		costUSD                float64
+	)
+	err := ctx.AppDB().QueryRow(
+		`SELECT id, queue_id, model, prompt, cost_usd
+		 FROM video_jobs
+		 WHERE project_id = ? AND kind = ? AND cache_key = ?
+		   AND status IN ('queued', 'polling')
+		 ORDER BY id DESC LIMIT 1`,
+		pid, kind, cacheKey,
+	).Scan(&id, &queueID, &model, &prompt, &costUSD)
+	if err != nil {
+		return nil, false
+	}
+	return map[string]any{
+		"content": []map[string]any{{
+			"type": "text",
+			"text": kind + " generation already queued as job #" + strconvFormatInt(id) + ".",
+		}},
+		"_meta": map[string]any{
+			"kind":      kind,
+			"status":    "queued",
+			"job_id":    id,
+			"queue_id":  queueID,
+			"model":     model,
+			"prompt":    prompt,
+			"cost_usd":  costUSD,
+			"cache_hit": true,
+			"cache_key": cacheKey,
+		},
+	}, true
+}
+
+func strAny(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func int64Any(v any) int64 {
+	switch n := v.(type) {
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case float64:
+		return int64(n)
+	}
+	return 0
+}
+
+func floatAny(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int64:
+		return float64(n)
+	case int:
+		return float64(n)
+	}
+	return 0
+}
+
+func strconvFormatInt(n int64) string {
+	return strconv.FormatInt(n, 10)
 }
 
 // encodeExtras stashes per-kind args that aren't first-class columns

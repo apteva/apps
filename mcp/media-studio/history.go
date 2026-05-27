@@ -28,6 +28,7 @@ type generationRecord struct {
 	ExtraJSON    string
 	Count        int
 	CostUSD      float64
+	CacheKey     string
 }
 
 func (a *App) dbInsertGeneration(r generationRecord) int64 {
@@ -43,11 +44,11 @@ func (a *App) dbInsertGeneration(r generationRecord) int64 {
 		`INSERT INTO generations
 			(project_id, kind, prompt, revised_prompt, provider, model,
 			 size, duration_ms, storage_ids, upstream_urls, thumbnail_b64,
-			 extra_json, count, cost_usd)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 extra_json, count, cost_usd, cache_key)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ProjectID, r.Kind, r.Prompt, r.Revised, r.Provider, r.Model,
 		r.Size, r.DurationMs, string(sj), string(uj), r.ThumbnailB64,
-		r.ExtraJSON, r.Count, r.CostUSD,
+		r.ExtraJSON, r.Count, r.CostUSD, r.CacheKey,
 	)
 	if err != nil {
 		globalCtx.Logger().Warn("dbInsertGeneration failed", "err", err)
@@ -68,6 +69,19 @@ func (a *App) toolMediaHistory(ctx *sdk.AppCtx, args map[string]any) (any, error
 	return queryHistory(ctx, pid, kindFilter, limit)
 }
 
+func (a *App) toolMediaGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = withProjectScope(ctx, args)
+	id := int64Arg(args, "id", 0)
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	row, err := queryGenerationByID(ctx, projectScope(ctx), id)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"generation": row}, nil
+}
+
 // queryHistory pages over generations rows, optionally filtered by
 // kind. The SQL predicate avoids two near-identical
 // query branches; sqlite plans it identically to a bare equality.
@@ -75,7 +89,7 @@ func queryHistory(ctx *sdk.AppCtx, pid, kindFilter string, limit int) (map[strin
 	rows, err := ctx.AppDB().Query(
 		`SELECT id, kind, prompt, revised_prompt, provider, model, size,
 		        duration_ms, storage_ids, upstream_urls, thumbnail_b64,
-		        extra_json, count, cost_usd, created_at
+		        extra_json, count, cost_usd, cache_key, created_at
 		 FROM generations
 		 WHERE project_id = ? AND (? = '' OR kind = ?)
 		 ORDER BY id DESC LIMIT ?`,
@@ -92,50 +106,97 @@ func queryHistory(ctx *sdk.AppCtx, pid, kindFilter string, limit int) (map[strin
 			id, count, durationMs                                 int64
 			kind, prompt, revised, provider, model, size          string
 			storageIDsJSON, upstreamURLsJSON, thumbB64, extraJSON string
-			createdAt                                             string
+			cacheKey, createdAt                                   string
 			costUSD                                               float64
 		)
 		if err := rows.Scan(&id, &kind, &prompt, &revised, &provider, &model, &size,
 			&durationMs, &storageIDsJSON, &upstreamURLsJSON, &thumbB64,
-			&extraJSON, &count, &costUSD, &createdAt); err != nil {
+			&extraJSON, &count, &costUSD, &cacheKey, &createdAt); err != nil {
 			continue
 		}
-		var storageIDs []int64
-		_ = json.Unmarshal([]byte(storageIDsJSON), &storageIDs)
-		var upstreamURLs []string
-		_ = json.Unmarshal([]byte(upstreamURLsJSON), &upstreamURLs)
-		storageURLs := make([]string, 0, len(storageIDs))
-		for _, sid := range storageIDs {
-			storageURLs = append(storageURLs, storageContentURL(sid, pid))
-		}
-		// When storage isn't bound, the sidecar may have cached the full
-		// bytes locally (cache.go writeLocalCache). Surface that URL so
-		// the panel can render the original instead of the thumbnail.
-		localURL := ""
-		if len(storageIDs) == 0 {
-			localURL = localCacheURL(id)
-		}
-		out = append(out, map[string]any{
-			"id":              id,
-			"kind":            kind,
-			"prompt":          prompt,
-			"revised_prompt":  revised,
-			"provider":        provider,
-			"model":           model,
-			"size":            size,
-			"duration_ms":     durationMs,
-			"storage_ids":     storageIDs,
-			"storage_urls":    storageURLs,
-			"upstream_urls":   upstreamURLs,
-			"thumbnail_b64":   thumbB64,
-			"local_cache_url": localURL,
-			"extra_json":      extraJSON,
-			"count":           count,
-			"cost_usd":        costUSD,
-			"created_at":      createdAt,
-		})
+		out = append(out, generationMap(pid, id, count, durationMs, kind, prompt, revised,
+			provider, model, size, storageIDsJSON, upstreamURLsJSON, thumbB64,
+			extraJSON, cacheKey, createdAt, costUSD))
 	}
 	return map[string]any{"generations": out}, nil
+}
+
+func queryGenerationByID(ctx *sdk.AppCtx, pid string, id int64) (map[string]any, error) {
+	var (
+		count, durationMs                                     int64
+		kind, prompt, revised, provider, model, size          string
+		storageIDsJSON, upstreamURLsJSON, thumbB64, extraJSON string
+		cacheKey, createdAt                                   string
+		costUSD                                               float64
+	)
+	err := ctx.AppDB().QueryRow(
+		`SELECT kind, prompt, revised_prompt, provider, model, size,
+		        duration_ms, storage_ids, upstream_urls, thumbnail_b64,
+		        extra_json, count, cost_usd, cache_key, created_at
+		 FROM generations
+		 WHERE project_id = ? AND id = ?`,
+		pid, id,
+	).Scan(&kind, &prompt, &revised, &provider, &model, &size,
+		&durationMs, &storageIDsJSON, &upstreamURLsJSON, &thumbB64,
+		&extraJSON, &count, &costUSD, &cacheKey, &createdAt)
+	if err != nil {
+		return nil, err
+	}
+	return generationMap(pid, id, count, durationMs, kind, prompt, revised,
+		provider, model, size, storageIDsJSON, upstreamURLsJSON, thumbB64,
+		extraJSON, cacheKey, createdAt, costUSD), nil
+}
+
+func queryGenerationByCacheKey(ctx *sdk.AppCtx, pid, kind, cacheKey string) (map[string]any, error) {
+	if cacheKey == "" {
+		return nil, errors.New("cache_key required")
+	}
+	var id int64
+	err := ctx.AppDB().QueryRow(
+		`SELECT id FROM generations
+		 WHERE project_id = ? AND kind = ? AND cache_key = ?
+		 ORDER BY id DESC LIMIT 1`,
+		pid, kind, cacheKey,
+	).Scan(&id)
+	if err != nil {
+		return nil, err
+	}
+	return queryGenerationByID(ctx, pid, id)
+}
+
+func generationMap(pid string, id, count, durationMs int64, kind, prompt, revised, provider, model, size, storageIDsJSON, upstreamURLsJSON, thumbB64, extraJSON, cacheKey, createdAt string, costUSD float64) map[string]any {
+	var storageIDs []int64
+	_ = json.Unmarshal([]byte(storageIDsJSON), &storageIDs)
+	var upstreamURLs []string
+	_ = json.Unmarshal([]byte(upstreamURLsJSON), &upstreamURLs)
+	storageURLs := make([]string, 0, len(storageIDs))
+	for _, sid := range storageIDs {
+		storageURLs = append(storageURLs, storageContentURL(sid, pid))
+	}
+	localURL := ""
+	if len(storageIDs) == 0 {
+		localURL = localCacheURL(id)
+	}
+	return map[string]any{
+		"id":              id,
+		"kind":            kind,
+		"prompt":          prompt,
+		"revised_prompt":  revised,
+		"provider":        provider,
+		"model":           model,
+		"size":            size,
+		"duration_ms":     durationMs,
+		"storage_ids":     storageIDs,
+		"storage_urls":    storageURLs,
+		"upstream_urls":   upstreamURLs,
+		"thumbnail_b64":   thumbB64,
+		"local_cache_url": localURL,
+		"extra_json":      extraJSON,
+		"cache_key":       cacheKey,
+		"count":           count,
+		"cost_usd":        costUSD,
+		"created_at":      createdAt,
+	}
 }
 
 // ─── HTTP /generations — panel gallery ─────────────────────────────

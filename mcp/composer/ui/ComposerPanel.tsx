@@ -1,4 +1,4 @@
-// ComposerPanel v0.2.1 - structured timeline editor with storage browsing.
+// ComposerPanel v0.3.0 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -47,7 +47,27 @@ interface Bindings {
 }
 
 type AssetType = "video" | "image";
+type MediaKind = "image" | "video" | "audio_tts" | "audio_sfx" | "music" | "avatar";
 type Aspect = "16:9" | "9:16" | "1:1" | "4:3";
+
+interface AIAsset {
+  media_kind: MediaKind;
+  prompt: string;
+  model?: string;
+  duration?: number;
+  aspect?: string;
+  voice?: string;
+  avatar?: string;
+  source_image?: string;
+  options?: Record<string, unknown>;
+  cache_key?: string;
+  cache_policy?: "reuse" | "refresh";
+  status?: "draft" | "generating" | "ready" | "failed";
+  generation_id?: number;
+  storage_id?: number;
+  job_id?: number;
+  error?: string;
+}
 
 interface ClipDraft {
   id: string;
@@ -56,6 +76,7 @@ interface ClipDraft {
   length: number;
   transition?: { in?: string; out?: string };
   text?: { body: string; position?: "top" | "center" | "bottom"; font_size?: number; color?: string };
+  ai?: AIAsset;
 }
 
 interface OutputDraft {
@@ -68,7 +89,7 @@ interface OutputDraft {
 interface DraftState {
   name: string;
   clips: ClipDraft[];
-  soundtrack: { src: string; volume: number } | null;
+  soundtrack: { src: string; volume: number; ai?: AIAsset } | null;
   background: string;
   output: OutputDraft;
 }
@@ -132,14 +153,15 @@ function normalizeClips(clips: ClipDraft[]): ClipDraft[] {
     const length = Math.max(0.1, Number(clip.length) || 1);
     const next = {
       ...clip,
-      id: clip.id || `clip-${i + 1}-${Date.now()}`,
+        id: clip.id || `clip-${i + 1}-${Date.now()}`,
       start: Number(t.toFixed(3)),
       length,
-      asset: {
-        type: clip.asset?.type === "image" ? "image" : "video",
-        src: clip.asset?.src || "",
-      },
-    };
+        asset: {
+          type: clip.asset?.type === "image" ? "image" : "video",
+          src: clip.asset?.src || "",
+        },
+        ai: clip.ai,
+      };
     t += length;
     return next;
   });
@@ -156,7 +178,7 @@ function parseComposition(c: Composition | null): DraftState {
     const clips = Array.isArray(timeline.tracks?.[0]?.clips) ? timeline.tracks[0].clips : [];
     if (clips.length) {
       draft.clips = normalizeClips(clips.map((clip: any, i: number) => ({
-        id: `clip-${i + 1}`,
+        id: String(clip.uid || `clip-${i + 1}`),
         asset: {
           type: clip.asset?.type === "image" ? "image" : "video",
           src: String(clip.asset?.src || ""),
@@ -173,12 +195,20 @@ function parseComposition(c: Composition | null): DraftState {
           font_size: Number(clip.text.font_size) || 32,
           color: clip.text.color || "#ffffff",
         } : undefined,
+        ai: clip.ai,
       })));
     }
     if (timeline.soundtrack?.src) {
       draft.soundtrack = {
         src: String(timeline.soundtrack.src),
         volume: Number(timeline.soundtrack.volume) || 1,
+        ai: timeline.soundtrack.ai,
+      };
+    } else if (timeline.soundtrack?.ai) {
+      draft.soundtrack = {
+        src: String(timeline.soundtrack.src || ""),
+        volume: Number(timeline.soundtrack.volume) || 1,
+        ai: timeline.soundtrack.ai,
       };
     }
   } catch {}
@@ -197,10 +227,12 @@ function parseComposition(c: Composition | null): DraftState {
 function draftToBody(draft: DraftState): Record<string, unknown> {
   const clips = normalizeClips(draft.clips).map((clip) => {
     const out: any = {
+      uid: clip.id,
       asset: { type: clip.asset.type, src: clip.asset.src.trim() },
       start: clip.start,
       length: clip.length,
     };
+    if (clip.ai) out.ai = clip.ai;
     if ((clip.transition?.in && clip.transition.in !== "none") || (clip.transition?.out && clip.transition.out !== "none")) {
       out.transition = {
         in: clip.transition?.in || "none",
@@ -223,10 +255,11 @@ function draftToBody(draft: DraftState): Record<string, unknown> {
     background: draft.background || "#000000",
     output: draft.output,
   };
-  if (draft.soundtrack?.src?.trim()) {
+  if (draft.soundtrack?.src?.trim() || draft.soundtrack?.ai) {
     body.soundtrack = {
       src: draft.soundtrack.src.trim(),
       volume: Math.max(0, Math.min(1, Number(draft.soundtrack.volume) || 1)),
+      ai: draft.soundtrack.ai,
     };
   }
   return body;
@@ -280,6 +313,48 @@ function fileSize(bytes?: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function defaultAI(kind: MediaKind, aspect: Aspect): AIAsset {
+  return {
+    media_kind: kind,
+    prompt: "",
+    duration: kind === "image" ? undefined : kind === "music" ? 30 : 5,
+    aspect: kind === "video" || kind === "avatar" ? aspect : undefined,
+    cache_policy: "reuse",
+    status: "draft",
+  };
+}
+
+function cacheKeyForAI(ai: AIAsset): string {
+  const stable = JSON.stringify({
+    media_kind: ai.media_kind,
+    prompt: ai.prompt,
+    model: ai.model || "",
+    duration: ai.duration || 0,
+    aspect: ai.aspect || "",
+    voice: ai.voice || "",
+    avatar: ai.avatar || "",
+    source_image: ai.source_image || "",
+    options: ai.options || {},
+  });
+  let h = 2166136261;
+  for (let i = 0; i < stable.length; i += 1) {
+    h ^= stable.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return `composer:${(h >>> 0).toString(16)}`;
+}
+
+function storageIDFromMeta(meta: any): number {
+  const ids = Array.isArray(meta?.storage_ids) ? meta.storage_ids : [];
+  const n = Number(ids[0] || 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function generationIDFromMeta(meta: any): number {
+  const n = Number(meta?.generation_id || 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
 export default function ComposerPanel({ projectId }: NativePanelProps) {
   const [compositions, setCompositions] = useState<Composition[]>([]);
   const [bindings, setBindings] = useState<Bindings | null>(null);
@@ -300,6 +375,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
   const [storageFiles, setStorageFiles] = useState<StorageFile[]>([]);
   const [storageLoading, setStorageLoading] = useState(false);
   const [storageError, setStorageError] = useState("");
+  const [aiBusy, setAIBusy] = useState("");
 
   const selected = selectedId != null ? compositions.find((c) => c.id === selectedId) || null : null;
   const clips = useMemo(() => normalizeClips(draft.clips), [draft.clips]);
@@ -579,6 +655,103 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
     setPickerTarget(null);
   };
 
+  const callMediaStudioGenerate = async (ai: AIAsset) => {
+    const cache_key = ai.cache_key || cacheKeyForAI(ai);
+    const body: Record<string, unknown> = {
+      kind: ai.media_kind,
+      prompt: ai.prompt,
+      cache_key,
+      cache_policy: ai.cache_policy || "reuse",
+    };
+    if (ai.model) body.model = ai.model;
+    if (ai.duration) body.duration = ai.duration;
+    if (ai.aspect) body.aspect = ai.aspect;
+    if (ai.voice) body.voice = ai.voice;
+    if (ai.avatar) body.avatar = ai.avatar;
+    if (ai.source_image) body.source_image = ai.source_image;
+    if (ai.options && Object.keys(ai.options).length > 0) body.options = ai.options;
+    const res = await fetch(`/api/apps/media-studio/generate?project_id=${encodeURIComponent(projectId)}`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`${res.status}: ${text.slice(0, 400)}`);
+    const data = JSON.parse(text || "{}");
+    return { data, meta: data._meta || {}, cache_key };
+  };
+
+  const generateClipAI = async (clip: ClipDraft) => {
+    if (!clip.ai) return;
+    if (!clip.ai.prompt.trim()) {
+      setStatus("AI prompt required.");
+      return;
+    }
+    setAIBusy(clip.id);
+    setStatus("Generating AI clip...");
+    try {
+      const { meta, cache_key } = await callMediaStudioGenerate(clip.ai);
+      if (meta.status === "queued" || meta.status === "polling") {
+        updateClip(clip.id, { ai: { ...clip.ai, cache_key, status: "generating", job_id: Number(meta.job_id || 0), error: "" } });
+        setStatus(`AI clip queued as job #${meta.job_id}.`);
+        return;
+      }
+      const storageId = storageIDFromMeta(meta);
+      if (!storageId) throw new Error("Media Studio returned no storage id. Make sure Storage is linked to Media Studio.");
+      updateClip(clip.id, {
+        asset: { type: clip.ai.media_kind === "image" ? "image" : "video", src: `storage:${storageId}` },
+        ai: {
+          ...clip.ai,
+          cache_key,
+          status: "ready",
+          storage_id: storageId,
+          generation_id: generationIDFromMeta(meta),
+          error: "",
+        },
+      });
+      setStatus(`AI clip ready as storage:${storageId}.`);
+    } catch (e) {
+      updateClip(clip.id, { ai: { ...clip.ai, status: "failed", error: (e as Error).message } });
+      setStatus("AI generation failed: " + (e as Error).message);
+    } finally {
+      setAIBusy("");
+    }
+  };
+
+  const generateSoundtrackAI = async () => {
+    const ai = draft.soundtrack?.ai;
+    if (!ai) return;
+    if (!ai.prompt.trim()) {
+      setStatus("AI prompt required.");
+      return;
+    }
+    setAIBusy("soundtrack");
+    setStatus("Generating AI soundtrack...");
+    try {
+      const { meta, cache_key } = await callMediaStudioGenerate(ai);
+      const storageId = storageIDFromMeta(meta);
+      if (!storageId) throw new Error("Media Studio returned no storage id. Make sure Storage is linked to Media Studio.");
+      updateDraft((cur) => ({
+        ...cur,
+        soundtrack: {
+          src: `storage:${storageId}`,
+          volume: cur.soundtrack?.volume ?? 1,
+          ai: { ...ai, cache_key, status: "ready", storage_id: storageId, generation_id: generationIDFromMeta(meta), error: "" },
+        },
+      }));
+      setStatus(`AI soundtrack ready as storage:${storageId}.`);
+    } catch (e) {
+      updateDraft((cur) => ({
+        ...cur,
+        soundtrack: cur.soundtrack ? { ...cur.soundtrack, ai: { ...ai, status: "failed", error: (e as Error).message } } : cur.soundtrack,
+      }));
+      setStatus("AI generation failed: " + (e as Error).message);
+    } finally {
+      setAIBusy("");
+    }
+  };
+
   return (
     <div className="h-full flex flex-col bg-bg text-text">
       <header className="border-b border-border px-4 py-2 flex items-center gap-3">
@@ -665,6 +838,9 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
                 onBrowseClip={(clipId) => openPicker({ kind: "clip", clipId })}
                 onBrowseSoundtrack={() => openPicker({ kind: "soundtrack" })}
                 onAddClip={addClip}
+                onGenerateClipAI={generateClipAI}
+                onGenerateSoundtrackAI={generateSoundtrackAI}
+                aiBusy={aiBusy}
               />
             </div>
           ) : (
@@ -937,8 +1113,8 @@ function Timeline({
                     className={`h-16 min-w-24 border text-xs flex flex-col justify-center px-2 overflow-hidden ${selected ? "border-accent bg-accent/10" : "border-border bg-bg-input hover:border-accent"}`}
                     style={{ width: `${Math.max(10, width)}%` }}
                   >
-                    <span className="block text-text truncate leading-5">{clip.asset.src || "empty source"}</span>
-                    <span className="block text-text-dim truncate leading-5">{clip.asset.type} - {clip.length.toFixed(1)}s</span>
+                    <span className="block text-text truncate leading-5">{clip.asset.src || (clip.ai ? `AI ${clip.ai.media_kind}` : "empty source")}</span>
+                    <span className="block text-text-dim truncate leading-5">{clip.ai?.status || clip.asset.type} - {clip.length.toFixed(1)}s</span>
                   </div>
                 );
               })}
@@ -962,6 +1138,9 @@ function Inspector({
   onBrowseClip,
   onBrowseSoundtrack,
   onAddClip,
+  onGenerateClipAI,
+  onGenerateSoundtrackAI,
+  aiBusy,
 }: {
   draft: DraftState;
   clip: ClipDraft | null;
@@ -974,6 +1153,9 @@ function Inspector({
   onBrowseClip: (clipId: string) => void;
   onBrowseSoundtrack: () => void;
   onAddClip: () => void;
+  onGenerateClipAI: (clip: ClipDraft) => void;
+  onGenerateSoundtrackAI: () => void;
+  aiBusy: string;
 }) {
   const field = "bg-bg-input border border-border rounded px-2 py-1.5 text-sm w-full";
   return (
@@ -1019,7 +1201,12 @@ function Inspector({
             <div className="flex gap-2">
               <input
                 value={draft.soundtrack?.src || ""}
-                onChange={(e) => onDraft((cur) => ({ ...cur, soundtrack: e.target.value ? { src: e.target.value, volume: cur.soundtrack?.volume ?? 1 } : null }))}
+                onChange={(e) => onDraft((cur) => ({
+                  ...cur,
+                  soundtrack: e.target.value || cur.soundtrack?.ai
+                    ? { src: e.target.value, volume: cur.soundtrack?.volume ?? 1, ai: cur.soundtrack?.ai }
+                    : null,
+                }))}
                 placeholder="storage:99 or https://..."
                 className={field}
               />
@@ -1028,6 +1215,37 @@ function Inspector({
               </button>
             </div>
           </Field>
+          <button
+            type="button"
+            onClick={() => onDraft((cur) => ({
+              ...cur,
+              soundtrack: {
+                src: cur.soundtrack?.src || "",
+                volume: cur.soundtrack?.volume ?? 1,
+                ai: cur.soundtrack?.ai || defaultAI("music", cur.output.aspect),
+              },
+            }))}
+            className="w-full text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input"
+          >
+            Add AI soundtrack
+          </button>
+          {draft.soundtrack?.ai && (
+            <AIAssetEditor
+              title="AI soundtrack"
+              ai={draft.soundtrack.ai}
+              allowedKinds={["music", "audio_tts", "audio_sfx"]}
+              busy={aiBusy === "soundtrack"}
+              onChange={(ai) => onDraft((cur) => ({
+                ...cur,
+                soundtrack: { src: cur.soundtrack?.src || "", volume: cur.soundtrack?.volume ?? 1, ai },
+              }))}
+              onGenerate={onGenerateSoundtrackAI}
+              onClear={() => onDraft((cur) => ({
+                ...cur,
+                soundtrack: cur.soundtrack ? { src: cur.soundtrack.src, volume: cur.soundtrack.volume } : null,
+              }))}
+            />
+          )}
           {draft.soundtrack && (
             <Field label={`Volume ${draft.soundtrack.volume.toFixed(2)}`}>
               <input
@@ -1079,6 +1297,24 @@ function Inspector({
                 </button>
               </div>
             </Field>
+            <button
+              type="button"
+              onClick={() => onClip(clip.id, { ai: clip.ai || defaultAI(clip.asset.type === "image" ? "image" : "video", draft.output.aspect) })}
+              className="w-full text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input"
+            >
+              Add AI source
+            </button>
+            {clip.ai && (
+              <AIAssetEditor
+                title="AI source"
+                ai={clip.ai}
+                allowedKinds={["video", "image", "avatar"]}
+                busy={aiBusy === clip.id}
+                onChange={(ai) => onClip(clip.id, { ai })}
+                onGenerate={() => onGenerateClipAI(clip)}
+                onClear={() => onClip(clip.id, { ai: undefined })}
+              />
+            )}
             <div className="grid grid-cols-2 gap-2">
               <Field label="Type">
                 <select value={clip.asset.type} onChange={(e) => onClip(clip.id, { asset: { ...clip.asset, type: e.target.value as AssetType } })} className={field}>
@@ -1149,6 +1385,184 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="text-text-muted text-xs block mb-1">{label}</span>
       {children}
     </label>
+  );
+}
+
+function AIAssetEditor({
+  title,
+  ai,
+  allowedKinds,
+  busy,
+  onChange,
+  onGenerate,
+  onClear,
+}: {
+  title: string;
+  ai: AIAsset;
+  allowedKinds: MediaKind[];
+  busy: boolean;
+  onChange: (ai: AIAsset) => void;
+  onGenerate: () => void;
+  onClear: () => void;
+}) {
+  const field = "bg-bg-input border border-border rounded px-2 py-1.5 text-sm w-full";
+  const update = (patch: Partial<AIAsset>) => onChange({ ...ai, ...patch, status: patch.status || ai.status || "draft" });
+  const [models, setModels] = useState<{ id: string; name?: string }[]>([]);
+  const [voices, setVoices] = useState<{ id: string; name?: string; language?: string }[]>([]);
+  const [avatars, setAvatars] = useState<{ id: string; name?: string }[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/apps/media-studio/models?kind=${encodeURIComponent(ai.media_kind)}`, { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!cancelled) setModels(Array.isArray(data?.models) ? data.models : []);
+      })
+      .catch(() => !cancelled && setModels([]));
+    if (ai.media_kind === "audio_tts" || ai.media_kind === "avatar") {
+      fetch(`/api/apps/media-studio/voices?kind=${encodeURIComponent(ai.media_kind)}`, { credentials: "same-origin" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (!cancelled) setVoices(Array.isArray(data?.voices) ? data.voices : []);
+        })
+        .catch(() => !cancelled && setVoices([]));
+    } else {
+      setVoices([]);
+    }
+    if (ai.media_kind === "avatar") {
+      fetch(`/api/apps/media-studio/avatars`, { credentials: "same-origin" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (!cancelled) setAvatars(Array.isArray(data?.avatars) ? data.avatars : []);
+        })
+        .catch(() => !cancelled && setAvatars([]));
+    } else {
+      setAvatars([]);
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [ai.media_kind]);
+
+  return (
+    <div className="border border-border rounded p-3 space-y-2 bg-bg">
+      <div className="flex items-center gap-2">
+        <span className="text-xs uppercase tracking-wide text-text-dim flex-1">{title}</span>
+        {ai.status && <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted">{ai.status}</span>}
+        <button type="button" onClick={onClear} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">
+          Clear
+        </button>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Kind">
+          <select
+            value={ai.media_kind}
+            onChange={(e) => update({ media_kind: e.target.value as MediaKind })}
+            className={field}
+          >
+            {allowedKinds.map((kind) => <option key={kind} value={kind}>{kind}</option>)}
+          </select>
+        </Field>
+        <Field label="Duration">
+          <input
+            type="number"
+            min={1}
+            step={1}
+            value={ai.duration || ""}
+            onChange={(e) => update({ duration: Number(e.target.value) || undefined })}
+            className={field}
+            disabled={ai.media_kind === "image"}
+          />
+        </Field>
+      </div>
+      <Field label={ai.media_kind === "audio_tts" || ai.media_kind === "avatar" ? "Script" : "Prompt"}>
+        <textarea
+          value={ai.prompt}
+          onChange={(e) => update({ prompt: e.target.value })}
+          className={`${field} resize-y`}
+          rows={3}
+          placeholder={ai.media_kind === "music" ? "minimal upbeat electronic background music" : "Describe the asset to generate"}
+        />
+      </Field>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Model">
+          {models.length > 0 ? (
+            <select value={ai.model || ""} onChange={(e) => update({ model: e.target.value })} className={field}>
+              <option value="">auto</option>
+              {models.map((m) => <option key={m.id} value={m.id}>{m.name || m.id}</option>)}
+            </select>
+          ) : (
+            <input value={ai.model || ""} onChange={(e) => update({ model: e.target.value })} placeholder="auto" className={field} />
+          )}
+        </Field>
+        <Field label="Aspect">
+          <input
+            value={ai.aspect || ""}
+            onChange={(e) => update({ aspect: e.target.value })}
+            placeholder="16:9"
+            className={field}
+            disabled={ai.media_kind !== "video" && ai.media_kind !== "avatar"}
+          />
+        </Field>
+        <Field label="Voice">
+          {voices.length > 0 ? (
+            <select value={ai.voice || ""} onChange={(e) => update({ voice: e.target.value })} className={field}>
+              <option value="">auto</option>
+              {voices.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.name || v.id}{v.language ? ` - ${v.language}` : ""}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              value={ai.voice || ""}
+              onChange={(e) => update({ voice: e.target.value })}
+              placeholder="voice_id"
+              className={field}
+              disabled={ai.media_kind !== "audio_tts" && ai.media_kind !== "avatar"}
+            />
+          )}
+        </Field>
+        <Field label="Avatar">
+          {avatars.length > 0 ? (
+            <select value={ai.avatar || ""} onChange={(e) => update({ avatar: e.target.value })} className={field}>
+              <option value="">select</option>
+              {avatars.map((a) => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
+            </select>
+          ) : (
+            <input
+              value={ai.avatar || ""}
+              onChange={(e) => update({ avatar: e.target.value })}
+              placeholder="avatar_id"
+              className={field}
+              disabled={ai.media_kind !== "avatar"}
+            />
+          )}
+        </Field>
+      </div>
+      {(ai.media_kind === "image" || ai.media_kind === "video" || ai.media_kind === "avatar") && (
+        <Field label="Reference image">
+          <input
+            value={ai.source_image || ""}
+            onChange={(e) => update({ source_image: e.target.value })}
+            placeholder="storage:1 or URL"
+            className={field}
+          />
+        </Field>
+      )}
+      {ai.error && <div className="text-xs text-red whitespace-pre-wrap">{ai.error}</div>}
+      {ai.storage_id && <div className="text-xs text-text-dim">storage:{ai.storage_id}</div>}
+      {ai.job_id && ai.status === "generating" && <div className="text-xs text-text-dim">media-studio job #{ai.job_id}</div>}
+      <button
+        type="button"
+        onClick={onGenerate}
+        disabled={busy || !ai.prompt.trim()}
+        className="w-full text-sm px-3 py-1.5 border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+      >
+        {busy ? "Generating..." : "Generate in place"}
+      </button>
+    </div>
   );
 }
 

@@ -287,13 +287,20 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 	var output Output
 	_ = json.Unmarshal([]byte(row["output_json"].(string)), &output)
 	validateOutput(&output)
+	pid := row["project_id"].(string)
+	mat, err := materializeAIAssets(ctx.WithProject(pid), edit, id, pid)
+	if err != nil {
+		return nil, err
+	}
+	if len(mat.Pending) > 0 {
+		return nil, errors.New("AI assets are still generating: " + strings.Join(mat.Pending, "; "))
+	}
 
 	exec, err := chooseExecutor(ctx, executorOverride)
 	if err != nil {
 		return nil, err
 	}
 
-	pid := row["project_id"].(string)
 	editSnapshot, _ := json.Marshal(edit)
 
 	insertRes, err := ctx.AppDB().Exec(

@@ -41,13 +41,14 @@ type pendingJob struct {
 	Model          string
 	Prompt         string
 	SourceImageRef string
+	CacheKey       string
 	Attempts       int
 }
 
 func (a *App) videoPollWorker(ctx context.Context, app *sdk.AppCtx) error {
 	rows, err := app.AppDB().Query(
 		`SELECT id, kind, role, project_id, queue_id, provider, model, prompt,
-		        source_image_ref, attempts
+		        source_image_ref, cache_key, attempts
 		 FROM video_jobs
 		 WHERE status IN ('queued', 'polling')
 		 ORDER BY id ASC`,
@@ -59,7 +60,7 @@ func (a *App) videoPollWorker(ctx context.Context, app *sdk.AppCtx) error {
 	for rows.Next() {
 		var p pendingJob
 		if err := rows.Scan(&p.ID, &p.Kind, &p.Role, &p.ProjectID, &p.QueueID,
-			&p.Provider, &p.Model, &p.Prompt, &p.SourceImageRef, &p.Attempts); err != nil {
+			&p.Provider, &p.Model, &p.Prompt, &p.SourceImageRef, &p.CacheKey, &p.Attempts); err != nil {
 			continue
 		}
 		jobs = append(jobs, p)
@@ -311,6 +312,9 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 	}
 
 	extras := map[string]any{"queue_id": p.QueueID, "capability": capability}
+	if p.CacheKey != "" {
+		extras["cache_key"] = p.CacheKey
+	}
 	if p.SourceImageRef != "" {
 		extras["source_image_ref"] = p.SourceImageRef
 	}
@@ -330,6 +334,7 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 		ExtraJSON:    string(extraJSON),
 		Count:        1,
 		CostUSD:      costUSD,
+		CacheKey:     p.CacheKey,
 	})
 	if storage == nil && generationID > 0 {
 		if err := writeLocalCache(generationID, base64Bytes, ext); err != nil {
