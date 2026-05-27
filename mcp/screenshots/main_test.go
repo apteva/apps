@@ -75,7 +75,7 @@ func TestCapture(t *testing.T) {
 	}
 
 	calls := plat.callLog()
-	wantOrder := []string{"computer.browser_open", "computer.browser_screenshot", "storage.files_upload", "computer.browser_close"}
+	wantOrder := []string{"computer.browser_open", "computer.browser_screenshot", "storage.files_upload", "storage.files_get_url", "computer.browser_close"}
 	if !sameOrderedPrefix(calls, wantOrder) {
 		t.Fatalf("call order:\n got %v\nwant prefix %v", calls, wantOrder)
 	}
@@ -136,8 +136,8 @@ func TestCaptureIdempotency(t *testing.T) {
 			t.Errorf("idempotency replay opened a new browser; calls=%v", plat.callLog())
 		}
 	}
-	if !containsCall(plat.callLog(), "storage.files_get") {
-		t.Errorf("replay should resolve URL via files_get; calls=%v", plat.callLog())
+	if !containsCall(plat.callLog(), "storage.files_get_url") {
+		t.Errorf("replay should resolve URL via files_get_url; calls=%v", plat.callLog())
 	}
 }
 
@@ -229,6 +229,38 @@ func TestProjectIDInjection(t *testing.T) {
 		if got, ok := c.args["_project_id"]; !ok || got != "proj-X" {
 			t.Errorf("call %s.%s missing _project_id: args=%v", c.app, c.tool, c.args)
 		}
+	}
+}
+
+func TestGetUsesStoredProjectIDForStorageURL(t *testing.T) {
+	plat := newFakePlatform()
+	plat.storageID = 123
+	plat.storageURL = "https://storage.test/signed/123"
+
+	ctx, app := newTestCtx(t, plat)
+	id, err := insertScreenshot(ctx, &screenshot{
+		StorageID: 123,
+		URL:       "https://example.com",
+		FinalURL:  "https://example.com/",
+		Width:     1024,
+		Height:    768,
+		Backend:   "local",
+		Label:     "stored project",
+		ProjectID: "proj-row",
+	})
+	if err != nil {
+		t.Fatalf("insert screenshot: %v", err)
+	}
+
+	if _, err := app.toolGet(ctx, map[string]any{"screenshot_id": int(id)}); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	call := plat.lastCall("storage", "files_get_url")
+	if call == nil {
+		t.Fatalf("expected storage.files_get_url call; calls=%v", plat.callLog())
+	}
+	if got := call["_project_id"]; got != "proj-row" {
+		t.Fatalf("storage call _project_id = %v, want proj-row; args=%v", got, call)
 	}
 }
 

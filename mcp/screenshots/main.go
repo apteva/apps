@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: screenshots
 display_name: Screenshots
-version: 0.1.2
+version: 0.1.3
 description: |
   Capture browser screenshots from a URL, save them to storage, and
   browse them in a gallery. v0.1: URL-driven capture only.
@@ -134,6 +134,7 @@ func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+
 // HTTPRoutes — small JSON API the GalleryPanel calls. We deliberately
 // keep it thin: each handler builds the args map and delegates to the
 // matching MCP tool function. That keeps the contract single-sourced.
@@ -317,13 +318,7 @@ func (a *App) toolCapture(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	row.ID = id
 
 	ctx.Logger().Info("screenshot captured", "screenshot_id", id, "storage_id", row.StorageID, "backend", row.Backend)
-	return map[string]any{
-		"screenshot_id": id,
-		"storage_id":    row.StorageID,
-		"url":           upRes.URL,
-		"captured_at":   row.CapturedAt.Format(time.RFC3339),
-		"label":         label,
-	}, nil
+	return captureResult(ctx, row)
 }
 
 func (a *App) toolList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -393,7 +388,7 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// the row — the storage row is the bytes-of-record, but a dangling
 	// registry row is worse UX than a leaked blob (the gallery would
 	// keep showing it with a broken thumbnail).
-	delArgs := withProjectID(ctx, map[string]any{"id": row.StorageID})
+	delArgs := storageArgsForRow(ctx, row, map[string]any{"id": row.StorageID})
 	var delRes struct{}
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_delete", delArgs, &delRes); err != nil {
 		ctx.Logger().Warn("storage.files_delete failed; soft-deleting registry row anyway",
@@ -406,37 +401,30 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{"deleted": true}, nil
 }
 
-// captureResult mints the response shape both toolCapture (cache hit)
-// and toolGet return: the registry fields plus the storage-routed
-// URL.
+// captureResult mints the response shape both toolCapture (fresh row
+// and cache hit) and toolGet return: the registry fields plus a
+// browser-usable URL.
 //
-// We deliberately call storage.files_get (NOT files_get_url) because
-// files_get_url returns a presigned S3 URL on S3-backed storage
-// installs, which leaks the bucket origin to anyone who sees the
-// URL. files_get returns the abstracted /api/apps/storage/files/{id}/content
-// route via absoluteContentURL — backend-agnostic and auth-gated
-// through the platform. The matching files_upload response shape
-// already returns this same abstracted URL, so the freshly-captured
-// path (toolCapture happy path) and the replay/get paths are
-// consistent.
+// Use storage.files_get_url rather than files_get's canonical content
+// route. Screenshots are private storage files; gallery <img> loads
+// and chat cards cannot reliably carry the dashboard's auth headers,
+// and global storage installs still partition rows by project_id.
+// files_get_url gives us the correct project-aware, signed URL.
 func captureResult(ctx *sdk.AppCtx, row *screenshot) (any, error) {
 	var getRes struct {
-		File *struct {
-			URL string `json:"url"`
-		} `json:"file"`
-		Found bool `json:"found"`
+		URL string `json:"url"`
 	}
-	getArgs := withProjectID(ctx, map[string]any{"id": row.StorageID})
-	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", getArgs, &getRes); err != nil {
-		return nil, fmt.Errorf("storage.files_get: %w", err)
+	getArgs := storageArgsForRow(ctx, row, map[string]any{"id": row.StorageID})
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_url", getArgs, &getRes); err != nil {
+		return nil, fmt.Errorf("storage.files_get_url: %w", err)
 	}
-	if getRes.File == nil {
-		return nil, fmt.Errorf("storage file %d not found", row.StorageID)
+	if getRes.URL == "" {
+		return nil, fmt.Errorf("storage file %d returned empty url", row.StorageID)
 	}
 	return map[string]any{
 		"screenshot_id": row.ID,
 		"storage_id":    row.StorageID,
-		"url":           getRes.File.URL,
+		"url":           getRes.URL,
 		"captured_at":   row.CapturedAt.Format(time.RFC3339),
 		"label":         row.Label,
 		"final_url":     row.FinalURL,
@@ -577,6 +565,28 @@ func scanScreenshotRows(rows *sql.Rows) (*screenshot, error) {
 // to the single-install default — same shape image-studio uses.
 func withProjectID(ctx *sdk.AppCtx, args map[string]any) map[string]any {
 	pid := ctx.CurrentProject()
+	if pid == "" {
+		return args
+	}
+	if _, present := args["_project_id"]; present {
+		return args
+	}
+	out := make(map[string]any, len(args)+1)
+	for k, v := range args {
+		out[k] = v
+	}
+	out["_project_id"] = pid
+	return out
+}
+
+func storageArgsForRow(ctx *sdk.AppCtx, row *screenshot, args map[string]any) map[string]any {
+	pid := ""
+	if row != nil {
+		pid = row.ProjectID
+	}
+	if pid == "" && ctx != nil {
+		pid = ctx.CurrentProject()
+	}
 	if pid == "" {
 		return args
 	}

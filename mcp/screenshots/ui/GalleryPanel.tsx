@@ -203,19 +203,31 @@ function ScreenshotTile({
   onDelete: (id: number) => void;
 }) {
   const [imgURL, setImgURL] = useState<string | null>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
   const [hover, setHover] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
+    setImgURL(null);
+    setLoadErr(null);
     void (async () => {
       try {
         const res = await fetch(`${API_LIST}/${row.id}`, {
           credentials: "include",
         });
         const body = (await res.json()) as GetResponse;
-        if (!cancelled && res.ok && body.url) setImgURL(body.url);
-      } catch {
-        // ignore — tile renders without thumbnail
+        if (cancelled) return;
+        if (!res.ok || body.error) {
+          setLoadErr(body.error ?? `HTTP ${res.status}`);
+          return;
+        }
+        if (body.url) {
+          setImgURL(body.url);
+        } else {
+          setLoadErr("No image URL returned");
+        }
+      } catch (e: any) {
+        if (!cancelled) setLoadErr(String(e?.message ?? e));
       }
     })();
     return () => {
@@ -253,13 +265,23 @@ function ScreenshotTile({
           </a>
         ) : (
           <div
-            className="bg-bg-subtle"
+            className="bg-bg-subtle text-text-muted"
             style={{
               width: "100%",
               aspectRatio: `${row.width} / ${row.height}`,
               borderRadius: "4px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: "12px",
+              textAlign: "center",
+              fontSize: "12px",
+              lineHeight: 1.4,
             }}
-          />
+            title={loadErr ?? undefined}
+          >
+            {loadErr ? "Image unavailable" : "Loading image..."}
+          </div>
         )}
         {hover && (
           <div
