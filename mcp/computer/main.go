@@ -39,10 +39,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.7
+version: 0.7.8
 description: |
-  Watch and steer browser sessions. v0.7.7 waits for Browserbase
-  persisted contexts to synchronize before reopening.
+  Watch and steer browser sessions. v0.7.8 keeps provider settings
+  panel-only while agents use browser and context tools.
 scopes: [project, global]
 requires:
   permissions:
@@ -80,10 +80,6 @@ provides:
       description: "Update browser context metadata/defaults. Args: id, name?, provider_context_id?, persist_default?, metadata?."
     - name: computer_context_delete
       description: "Delete or unlink an app-managed browser context. Args: id, delete_provider?."
-    - name: computer_settings_get
-      description: "Get Computer app runtime settings, including the default browser provider and provider lock."
-    - name: computer_settings_update
-      description: "Update Computer app runtime settings. Args: default_backend?, lock_backend?."
     - name: browser_open
       description: "Compatibility alias for browser_session(action=open)."
     - name: browser_list
@@ -385,21 +381,6 @@ func (a *App) MCPTools() []sdk.Tool {
 				"delete_provider": map[string]any{"type": "boolean"},
 			}, []string{"id"}),
 			Handler: a.toolContextDelete,
-		},
-		{
-			Name:        "computer_settings_get",
-			Description: "Get Computer app runtime settings. The default_backend is used whenever browser_session/browser_open omit backend.",
-			InputSchema: schemaObject(map[string]any{}, nil),
-			Handler:     a.toolSettingsGet,
-		},
-		{
-			Name:        "computer_settings_update",
-			Description: "Update Computer app runtime settings. Set lock_backend=true to reject browser_session/browser_open calls that explicitly request another backend.",
-			InputSchema: schemaObject(map[string]any{
-				"default_backend": map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
-				"lock_backend":    map[string]any{"type": "boolean"},
-			}, nil),
-			Handler: a.toolSettingsUpdate,
 		},
 		{
 			Name: "browser_open",
