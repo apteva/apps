@@ -80,6 +80,14 @@ func TestCapture(t *testing.T) {
 		t.Fatalf("call order:\n got %v\nwant prefix %v", calls, wantOrder)
 	}
 
+	shot := plat.lastCall("computer", "browser_screenshot")
+	if shot == nil {
+		t.Fatalf("no browser_screenshot call recorded")
+	}
+	if got := shot["annotate"]; got != false {
+		t.Fatalf("browser_screenshot annotate = %v, want false; args=%v", got, shot)
+	}
+
 	upload := plat.lastCall("storage", "files_upload")
 	if upload == nil {
 		t.Fatalf("no files_upload call recorded")

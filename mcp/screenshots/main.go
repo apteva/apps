@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: screenshots
 display_name: Screenshots
-version: 0.1.3
+version: 0.1.4
 description: |
   Capture browser screenshots from a URL, save them to storage, and
   browse them in a gallery. v0.1: URL-driven capture only.
@@ -51,7 +51,7 @@ requires:
     - platform.apps.call
   apps:
     - name: computer
-      version: ">=0.3.0"
+      version: ">=0.7.11"
     - name: storage
 provides:
   http_routes:
@@ -274,7 +274,10 @@ func (a *App) toolCapture(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		Width      int    `json:"width"`
 		Height     int    `json:"height"`
 	}
-	shotArgs := withProjectID(ctx, map[string]any{"session_id": openRes.SessionID})
+	shotArgs := withProjectID(ctx, map[string]any{
+		"session_id": openRes.SessionID,
+		"annotate":   false,
+	})
 	if err := ctx.PlatformAPI().CallAppResult("computer", "browser_screenshot", shotArgs, &shotRes); err != nil {
 		return nil, fmt.Errorf("computer.browser_screenshot: %w", err)
 	}

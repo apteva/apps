@@ -94,8 +94,8 @@ the operator owns retention policy.
 
 ## What this app does NOT do (yet)
 
-- **No Set-of-Mark overlay.** When `computer` adds SoM in a later
-  release, this app will too. Today: viewport PNG only.
+- **No Set-of-Mark overlay.** This app asks `computer.browser_screenshot`
+  for clean viewport pixels (`annotate:false`) before storing the PNG.
 - **No "screenshot the agent's live browser".** Captures always
   open a fresh, throwaway session. If the user wants a screenshot of
   the page the agent currently has open, that flow lands when
