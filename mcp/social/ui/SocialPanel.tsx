@@ -2799,8 +2799,8 @@ function InboxView({
           ))}
         </div>
       )}
-      <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[minmax(320px,44%)_minmax(0,1fr)]">
-        <div className="border-r border-border min-h-0 flex flex-col bg-bg-card/20">
+      <div className="flex-1 min-h-0 overflow-hidden grid grid-cols-1 sm:grid-cols-[minmax(280px,42%)_minmax(0,1fr)]">
+        <div className="border-b sm:border-b-0 sm:border-r border-border min-h-0 overflow-hidden flex flex-col bg-bg-card/20">
           <div className="p-3 border-b border-border flex flex-col gap-2">
             <input
               value={search}
@@ -2853,7 +2853,7 @@ function InboxView({
           ))}
           </div>
         </div>
-        <div className="min-w-0 min-h-0 flex flex-col bg-bg">
+        <div className="min-w-0 min-h-0 overflow-hidden flex flex-col bg-bg">
           {!selected ? (
             <div className="m-auto text-sm text-text-dim">Select an item</div>
           ) : (
@@ -2866,7 +2866,7 @@ function InboxView({
                     {accountName(selected.social_account_id)} · {selected.platform} · {kindLabel(selected.kind)} {statusText && `· ${statusText}`}
                   </div>
                 </div>
-                <div className="ml-auto flex items-center gap-2">
+                <div className="ml-auto flex flex-wrap justify-end items-center gap-2">
                   {selected.permalink && (
                     <a href={selected.permalink} target="_blank" rel="noopener" className="px-3 py-1.5 text-sm border border-border rounded text-accent hover:bg-bg-card">Open</a>
                   )}
