@@ -35,13 +35,16 @@ func TestStoreSmoke(t *testing.T) {
 	defer db.Close()
 
 	d, err := dbCreateDeployment(db, "p1", CreateDeploymentInput{
-		Name: "api", SourceKind: "local", SourceRef: "/tmp/src", Framework: "go",
+		Name: "api", SourceKind: "local", SourceRef: "/tmp/src", Framework: "go", PublicPort: true,
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if d.Name != "api" {
 		t.Fatalf("name = %q", d.Name)
+	}
+	if !d.PublicPort {
+		t.Fatalf("public_port = false, want true")
 	}
 
 	// Duplicate name is rejected by UNIQUE.
@@ -92,6 +95,13 @@ func TestStoreSmoke(t *testing.T) {
 	if err := dbReleasePortLease(db, 7000); err != nil {
 		t.Fatalf("release lease: %v", err)
 	}
+	if err := dbUpdateDeployment(db, "p1", d.ID, map[string]any{"public_port": 0}); err != nil {
+		t.Fatalf("update public_port: %v", err)
+	}
+	again, _ = dbGetDeployment(db, "p1", d.ID)
+	if again.PublicPort {
+		t.Fatalf("public_port should update to false")
+	}
 
 	// Cascade: deleting the deployment wipes builds + releases.
 	if err := dbDeleteDeployment(db, "p1", d.ID); err != nil {
@@ -141,12 +151,12 @@ func TestDeploymentDomainLink(t *testing.T) {
 
 func TestValidateName(t *testing.T) {
 	cases := map[string]bool{
-		"":         false,
-		"ok":       true,
-		"a-b_c123": true,
-		"BAD":      false, // uppercase rejected
+		"":          false,
+		"ok":        true,
+		"a-b_c123":  true,
+		"BAD":       false, // uppercase rejected
 		"has space": false,
-		"slash/x":  false,
+		"slash/x":   false,
 	}
 	for in, want := range cases {
 		err := validateName(in)
@@ -176,6 +186,22 @@ func TestDetectFramework(t *testing.T) {
 	}
 	if got := detectFramework(tmp); got != "go" {
 		t.Fatalf("detectFramework after go.mod = %q", got)
+	}
+}
+
+func TestPublicPortRuntimeConfig(t *testing.T) {
+	if got := bindHost(false); got != "127.0.0.1" {
+		t.Fatalf("bindHost(false) = %q", got)
+	}
+	if got := bindHost(true); got != "0.0.0.0" {
+		t.Fatalf("bindHost(true) = %q", got)
+	}
+	env := mergeEnv(map[string]string{"APP_ENV": "test"}, 7345, true)
+	joined := "\n" + strings.Join(env, "\n") + "\n"
+	for _, want := range []string{"\nPORT=7345\n", "\nHOST=0.0.0.0\n", "\nHOSTNAME=0.0.0.0\n", "\nBUN_HOST=0.0.0.0\n", "\nAPP_ENV=test\n"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("mergeEnv missing %q in %q", want, joined)
+		}
 	}
 }
 
@@ -474,7 +500,7 @@ func openSchemaDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		t.Fatal(err)
 	}
-	for _, mig := range []string{"migrations/001_init.sql", "migrations/002_domain_link.sql"} {
+	for _, mig := range []string{"migrations/001_init.sql", "migrations/002_domain_link.sql", "migrations/003_public_port.sql"} {
 		body, err := os.ReadFile(mig)
 		if err != nil {
 			t.Fatal(err)
@@ -706,10 +732,10 @@ func TestParseLoopbackPort(t *testing.T) {
 		{"http://localhost:7100", 7100, true},
 		{"http://[::1]:7100", 7100, true},
 		{"https://127.0.0.1:8443/", 8443, true},
-		{"http://10.0.0.1:7100", 0, false},     // non-loopback host
-		{"http://example.com:7100", 0, false},  // public hostname
-		{"http://127.0.0.1", 0, false},         // no port
-		{"unix:///run/app.sock", 0, false},     // unix socket
+		{"http://10.0.0.1:7100", 0, false},    // non-loopback host
+		{"http://example.com:7100", 0, false}, // public hostname
+		{"http://127.0.0.1", 0, false},        // no port
+		{"unix:///run/app.sock", 0, false},    // unix socket
 		{"", 0, false},
 		{"not a url", 0, false},
 	}

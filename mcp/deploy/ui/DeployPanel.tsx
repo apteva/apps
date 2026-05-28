@@ -97,6 +97,7 @@ interface Deployment {
   build_cmd: string;
   start_cmd: string;
   port_hint: number;
+  public_port: boolean;
   env_json: string;
   domain: string;
   domain_record_id?: string;
@@ -645,7 +646,11 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                       <span className={statusColor(detail.current_release.status) + " font-medium"}>
                         {detail.current_release.status}
                       </span>
-                      <span className="text-text-dim"> · port {detail.current_release.port} · pid {detail.current_release.pid}</span>
+                      <span className="text-text-dim">
+                        {" · port "}{detail.current_release.port}
+                        {detail.deployment.public_port && " · public"}
+                        {" · pid "}{detail.current_release.pid}
+                      </span>
                     </div>
                     <div className="text-text-dim">
                       build #{detail.current_release.build_id}
@@ -920,6 +925,7 @@ function CreateDeploymentDialog({
   const [buildCmd, setBuildCmd] = useState("");
   const [startCmd, setStartCmd] = useState("");
   const [env, setEnv] = useState("");
+  const [publicPort, setPublicPort] = useState(false);
   const [domainApex, setDomainApex] = useState("");
   const [domainSub, setDomainSub] = useState("");
   const [domainText, setDomainText] = useState("");
@@ -973,6 +979,7 @@ function CreateDeploymentDialog({
         framework,
         build_cmd: buildCmd.trim(),
         start_cmd: startCmd.trim(),
+        public_port: publicPort,
         env_json: env.trim() || "{}",
         domain,
       });
@@ -1107,6 +1114,18 @@ function CreateDeploymentDialog({
               className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
             />
           </div>
+          <label className="col-span-2 flex items-start gap-2 rounded border border-border bg-bg-input/40 px-2 py-2 text-xs text-text-muted">
+            <input
+              type="checkbox"
+              checked={publicPort}
+              onChange={(e) => setPublicPort(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              <span className="block text-text">Expose by public IP:port</span>
+              <span className="block text-text-dim">Off keeps this release on loopback for routes/domains only.</span>
+            </span>
+          </label>
           <div className="col-span-2">
             <label className="text-xs text-text-muted block mb-1">
               Domain (optional)
@@ -1428,6 +1447,7 @@ function EditConfigDialog({
   const [portHint, setPortHint] = useState(
     deployment.port_hint ? String(deployment.port_hint) : "",
   );
+  const [publicPort, setPublicPort] = useState(Boolean(deployment.public_port));
   const [envJSON, setEnvJSON] = useState(deployment.env_json ?? "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -1464,12 +1484,13 @@ function EditConfigDialog({
       // Diff against current values — sending only-changed keys keeps
       // the deploy.updated event payload accurate (which downstream
       // observers may key off).
-      const body: Record<string, string | number> = {};
+      const body: Record<string, string | number | boolean> = {};
       if (description !== (deployment.description ?? "")) body.description = description;
       if (framework !== deployment.framework) body.framework = framework;
       if (buildCmd !== (deployment.build_cmd ?? "")) body.build_cmd = buildCmd;
       if (startCmd !== (deployment.start_cmd ?? "")) body.start_cmd = startCmd;
       if (portN !== deployment.port_hint) body.port_hint = portN;
+      if (publicPort !== Boolean(deployment.public_port)) body.public_port = publicPort;
       if (env !== (deployment.env_json ?? "")) body.env_json = env;
 
       if (Object.keys(body).length > 0) {
@@ -1534,6 +1555,18 @@ function EditConfigDialog({
               className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
             />
           </div>
+          <label className="col-span-2 flex items-start gap-2 rounded border border-border bg-bg-input/40 px-2 py-2 text-xs text-text-muted">
+            <input
+              type="checkbox"
+              checked={publicPort}
+              onChange={(e) => setPublicPort(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              <span className="block text-text">Expose by public IP:port</span>
+              <span className="block text-text-dim">Restart the release for this bind change to take effect.</span>
+            </span>
+          </label>
           <div className="col-span-2">
             <label className="text-xs text-text-muted block mb-1">Build cmd</label>
             <input

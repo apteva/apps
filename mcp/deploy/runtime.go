@@ -39,12 +39,13 @@ type Runtime interface {
 type ReleaseSpec struct {
 	ReleaseID    int64
 	DeploymentID int64
-	Name         string  // for log/process labels
-	Framework    string  // 'go' | 'node' | 'bun' | 'static' | 'blank'
-	ArtifactDir  string  // /data/builds/<id>/dist/
-	Entrypoint   string  // relative path within ArtifactDir; "" = static FileServer
-	StartCmd     string  // override; if non-empty wins over framework default
-	Port         int     // assigned port
+	Name         string // for log/process labels
+	Framework    string // 'go' | 'node' | 'bun' | 'static' | 'blank'
+	ArtifactDir  string // /data/builds/<id>/dist/
+	Entrypoint   string // relative path within ArtifactDir; "" = static FileServer
+	StartCmd     string // override; if non-empty wins over framework default
+	Port         int    // assigned port
+	PublicPort   bool   // true = bind to public interfaces instead of loopback
 	Env          map[string]string
 }
 
@@ -55,11 +56,11 @@ type RunningRelease struct {
 	ReleaseID int64
 	Port      int
 	PID       int
-	cmd     *exec.Cmd // nil for adopted releases (we didn't spawn them);
-	                  // set for every spawn including static-server subprocess (v0.11)
+	cmd       *exec.Cmd // nil for adopted releases (we didn't spawn them);
+	// set for every spawn including static-server subprocess (v0.11)
 	cancel  context.CancelFunc
-	logFile   *os.File
-	stopCh    chan struct{} // closed when supervisor exits
+	logFile *os.File
+	stopCh  chan struct{} // closed when supervisor exits
 
 	// adopted marks a release we re-attached to on boot rather than
 	// spawned ourselves — no cmd handle, so Stop signals by pid.
@@ -138,6 +139,7 @@ func (r *LocalRuntime) startStatic(spec ReleaseSpec, root string, logF *os.File,
 	}
 	args := []string{
 		"--static-server",
+		"--host", bindHost(spec.PublicPort),
 		"--port", strconv.Itoa(spec.Port),
 		"--root", root,
 		"--log-path", logPath,
@@ -147,11 +149,11 @@ func (r *LocalRuntime) startStatic(spec ReleaseSpec, root string, logF *os.File,
 	cmd.Dir = root
 	cmd.Stdout = logF
 	cmd.Stderr = logF
-	cmd.Env = mergeEnv(spec.Env, spec.Port)
+	cmd.Env = mergeEnv(spec.Env, spec.Port, spec.PublicPort)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	fmt.Fprintf(logF, "+ %s %s (static-server, root=%s, port=%d)\n",
-		self, strings.Join(args, " "), root, spec.Port)
+	fmt.Fprintf(logF, "+ %s %s (static-server, root=%s, bind=%s, port=%d)\n",
+		self, strings.Join(args, " "), root, bindHost(spec.PublicPort), spec.Port)
 	if err := cmd.Start(); err != nil {
 		cancel()
 		logF.Close()
@@ -192,12 +194,12 @@ func (r *LocalRuntime) startProcess(spec ReleaseSpec, logF *os.File, logPath str
 	cmd.Dir = spec.ArtifactDir
 	cmd.Stdout = logF
 	cmd.Stderr = logF
-	cmd.Env = mergeEnv(spec.Env, spec.Port)
+	cmd.Env = mergeEnv(spec.Env, spec.Port, spec.PublicPort)
 	// New process group so we can kill children if the entrypoint
 	// spawned any (next/python tend to).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	fmt.Fprintf(logF, "+ %s %s (cwd=%s, port=%d)\n", bin, strings.Join(args, " "), spec.ArtifactDir, spec.Port)
+	fmt.Fprintf(logF, "+ %s %s (cwd=%s, bind=%s, port=%d)\n", bin, strings.Join(args, " "), spec.ArtifactDir, bindHost(spec.PublicPort), spec.Port)
 	if err := cmd.Start(); err != nil {
 		cancel()
 		logF.Close()
@@ -437,13 +439,23 @@ func fileExists(path string) bool {
 	return err == nil && !info.IsDir()
 }
 
-func mergeEnv(extra map[string]string, port int) []string {
+func mergeEnv(extra map[string]string, port int, publicPort bool) []string {
 	out := append([]string{}, os.Environ()...)
 	out = append(out, "PORT="+strconv.Itoa(port))
+	if publicPort {
+		out = append(out, "HOST=0.0.0.0", "HOSTNAME=0.0.0.0", "BUN_HOST=0.0.0.0")
+	}
 	for k, v := range extra {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+func bindHost(publicPort bool) string {
+	if publicPort {
+		return "0.0.0.0"
+	}
+	return "127.0.0.1"
 }
 
 // ─── supervisor registry ──────────────────────────────────────────

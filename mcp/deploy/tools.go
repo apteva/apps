@@ -19,7 +19,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "deploy_init", Handler: a.toolInit,
-			Description: "Bind a source to a new deployment. Args: name (slug), source_kind (code|local), source_ref (slug or path), framework? (go|node|bun|static|blank|''), build_cmd?, start_cmd?, port_hint?, env_json?, domain?, description?",
+			Description: "Bind a source to a new deployment. Args: name (slug), source_kind (code|local), source_ref (slug or path), framework? (go|node|bun|static|blank|''), build_cmd?, start_cmd?, port_hint?, public_port?, env_json?, domain?, description?",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -30,6 +30,7 @@ func (a *App) MCPTools() []sdk.Tool {
 					"build_cmd":   map[string]any{"type": "string"},
 					"start_cmd":   map[string]any{"type": "string"},
 					"port_hint":   map[string]any{"type": "integer"},
+					"public_port": map[string]any{"type": "boolean"},
 					"env_json":    map[string]any{"type": "string"},
 					"domain":      map[string]any{"type": "string"},
 					"description": map[string]any{"type": "string"},
@@ -171,7 +172,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_update", Handler: a.toolUpdate,
-			Description: "Mutate deployment config (env_json, build_cmd, start_cmd, port_hint, description, framework, source_extra_json) without delete+recreate. New values take effect on the next build/release; call deploy_restart to apply immediately without rebuilding. Unknown fields are silently ignored — pass only what you want to change. Args: name OR id, plus any subset of the mutable fields.",
+			Description: "Mutate deployment config (env_json, build_cmd, start_cmd, port_hint, public_port, description, framework, source_extra_json) without delete+recreate. New values take effect on the next build/release; call deploy_restart to apply immediately without rebuilding. Unknown fields are silently ignored — pass only what you want to change. Args: name OR id, plus any subset of the mutable fields.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -182,6 +183,7 @@ func (a *App) MCPTools() []sdk.Tool {
 					"build_cmd":         map[string]any{"type": "string"},
 					"start_cmd":         map[string]any{"type": "string"},
 					"port_hint":         map[string]any{"type": "integer"},
+					"public_port":       map[string]any{"type": "boolean"},
 					"env_json":          map[string]any{"type": "string"},
 					"source_extra_json": map[string]any{"type": "string"},
 				},
@@ -236,6 +238,7 @@ func (a *App) toolInit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		BuildCmd:    strArg(args, "build_cmd"),
 		StartCmd:    strArg(args, "start_cmd"),
 		PortHint:    intArg(args, "port_hint"),
+		PublicPort:  boolArg(args, "public_port"),
 		EnvJSON:     strArg(args, "env_json"),
 	}
 	if !domainsOn {
@@ -535,14 +538,14 @@ func (a *App) toolHealth(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	type unhealthyEntry struct {
-		DeploymentID   int64  `json:"deployment_id"`
-		Name           string `json:"name"`
-		Domain         string `json:"domain,omitempty"`
-		Status         string `json:"status"`          // crashed | failed | starting_stuck | auto_restart_paused
-		ReleaseID      int64  `json:"release_id,omitempty"`
-		Reason         string `json:"reason,omitempty"`
-		UnhealthyForS  int    `json:"unhealthy_for_s"` // seconds since the bad state began
-		AutoRestart    autoRestartInfo `json:"auto_restart"`
+		DeploymentID  int64           `json:"deployment_id"`
+		Name          string          `json:"name"`
+		Domain        string          `json:"domain,omitempty"`
+		Status        string          `json:"status"` // crashed | failed | starting_stuck | auto_restart_paused
+		ReleaseID     int64           `json:"release_id,omitempty"`
+		Reason        string          `json:"reason,omitempty"`
+		UnhealthyForS int             `json:"unhealthy_for_s"` // seconds since the bad state began
+		AutoRestart   autoRestartInfo `json:"auto_restart"`
 	}
 	out := []unhealthyEntry{}
 	now := time.Now().UTC()
@@ -626,8 +629,13 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			fields["port_hint"] = n
 		}
 	}
+	if v, ok := args["public_port"]; ok {
+		if b, ok := v.(bool); ok {
+			fields["public_port"] = boolToInt(b)
+		}
+	}
 	if len(fields) == 0 {
-		return nil, errors.New("no mutable fields supplied (allowed: description, framework, build_cmd, start_cmd, port_hint, env_json, source_extra_json)")
+		return nil, errors.New("no mutable fields supplied (allowed: description, framework, build_cmd, start_cmd, port_hint, public_port, env_json, source_extra_json)")
 	}
 	if err := dbUpdateDeployment(ctx.AppDB(), d.ProjectID, d.ID, fields); err != nil {
 		return nil, err
@@ -785,7 +793,35 @@ func (a *App) deploymentURL(d *Deployment, current *Release) string {
 	if current == nil || current.Status != "live" {
 		return ""
 	}
+	if d.PublicPort {
+		return fmt.Sprintf("http://%s:%d/", publicReleaseHost(), current.Port)
+	}
 	return fmt.Sprintf("http://localhost:%d/", current.Port)
+}
+
+func publicReleaseHost() string {
+	host := strings.TrimSpace(configOr(globalCtx, "public_host", ""))
+	if host == "" {
+		host = deriveHostIP()
+	}
+	host = stripURLHost(host)
+	if host == "" {
+		return "localhost"
+	}
+	return host
+}
+
+func stripURLHost(raw string) string {
+	host := strings.TrimSpace(raw)
+	host = strings.TrimPrefix(host, "http://")
+	host = strings.TrimPrefix(host, "https://")
+	if i := strings.Index(host, "/"); i >= 0 {
+		host = host[:i]
+	}
+	if strings.Count(host, ":") == 1 {
+		host = strings.Split(host, ":")[0]
+	}
+	return strings.TrimSuffix(host, "/")
 }
 
 // tailFile returns the last n lines of a log file. Cheap O(file

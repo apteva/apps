@@ -1,11 +1,12 @@
 // Apteva Deploy v0.1 — local-first builds and runtime supervision.
 //
 // Disk layout:
-//   /data/deploy.db                       metadata (deployments, builds, releases)
-//   /data/builds/<build_id>/src/          unpacked source for the build
-//   /data/builds/<build_id>/dist/         build output (binary or static files)
-//   /data/builds/<build_id>/build.log     captured build stdout/stderr
-//   /data/releases/<release_id>/runtime.log  child-process stdout/stderr
+//
+//	/data/deploy.db                       metadata (deployments, builds, releases)
+//	/data/builds/<build_id>/src/          unpacked source for the build
+//	/data/builds/<build_id>/dist/         build output (binary or static files)
+//	/data/builds/<build_id>/build.log     captured build stdout/stderr
+//	/data/releases/<release_id>/runtime.log  child-process stdout/stderr
 //
 // Architecture:
 //   - SourceFetcher  → unpacks Deployment.Source into /data/builds/<id>/src/
@@ -40,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.14.1
+version: 0.14.2
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
@@ -109,11 +110,11 @@ upgrade_policy: auto-patch
 // ─── App ───────────────────────────────────────────────────────────
 
 type App struct {
-	dataDir   string
-	runtime   Runtime
-	registry  *SupervisorRegistry
+	dataDir  string
+	runtime  Runtime
+	registry *SupervisorRegistry
 
-	cfg       sourceConfig
+	cfg sourceConfig
 
 	portRangeStart int
 	portRangeEnd   int
@@ -404,14 +405,14 @@ func main() {
 
 type wrapApp struct{ app *App }
 
-func (w *wrapApp) Manifest() sdk.Manifest             { return w.app.Manifest() }
-func (w *wrapApp) OnMount(ctx *sdk.AppCtx) error      { globalCtx = ctx; return w.app.OnMount(ctx) }
-func (w *wrapApp) OnUnmount(c *sdk.AppCtx) error      { return w.app.OnUnmount(c) }
-func (w *wrapApp) HTTPRoutes() []sdk.Route            { return w.app.HTTPRoutes() }
-func (w *wrapApp) MCPTools() []sdk.Tool               { return w.app.MCPTools() }
-func (w *wrapApp) Channels() []sdk.ChannelFactory     { return w.app.Channels() }
-func (w *wrapApp) Workers() []sdk.Worker              { return w.app.Workers() }
-func (w *wrapApp) EventHandlers() []sdk.EventHandler  { return w.app.EventHandlers() }
+func (w *wrapApp) Manifest() sdk.Manifest            { return w.app.Manifest() }
+func (w *wrapApp) OnMount(ctx *sdk.AppCtx) error     { globalCtx = ctx; return w.app.OnMount(ctx) }
+func (w *wrapApp) OnUnmount(c *sdk.AppCtx) error     { return w.app.OnUnmount(c) }
+func (w *wrapApp) HTTPRoutes() []sdk.Route           { return w.app.HTTPRoutes() }
+func (w *wrapApp) MCPTools() []sdk.Tool              { return w.app.MCPTools() }
+func (w *wrapApp) Channels() []sdk.ChannelFactory    { return w.app.Channels() }
+func (w *wrapApp) Workers() []sdk.Worker             { return w.app.Workers() }
+func (w *wrapApp) EventHandlers() []sdk.EventHandler { return w.app.EventHandlers() }
 
 // ─── Project resolution (mirrors code/storage pattern) ────────────
 
@@ -647,6 +648,7 @@ func (a *App) runRelease(d *Deployment, b *Build) (*Release, error) {
 		Entrypoint:   entrypoint,
 		StartCmd:     d.StartCmd,
 		Port:         port,
+		PublicPort:   d.PublicPort,
 		Env:          envMap,
 	}
 
@@ -732,13 +734,13 @@ func (a *App) markCrashed(releaseID int64, cause error) {
 // listening, both releases drifting from reality.
 //
 // Sequence:
-//   1. runtime.Stop on the in-memory handle if present (graceful
-//      cmd.Wait path with cancel + SIGTERM/SIGKILL escalation).
-//   2. Probe the port. If still held, find the pid that owns it
-//      (pid-tree-aware now), SIGTERM the whole pgrp, poll until
-//      free, escalate to SIGKILL.
-//   3. Return only when the port is genuinely free, or after the
-//      hard fallback (with an error so the operator sees it).
+//  1. runtime.Stop on the in-memory handle if present (graceful
+//     cmd.Wait path with cancel + SIGTERM/SIGKILL escalation).
+//  2. Probe the port. If still held, find the pid that owns it
+//     (pid-tree-aware now), SIGTERM the whole pgrp, poll until
+//     free, escalate to SIGKILL.
+//  3. Return only when the port is genuinely free, or after the
+//     hard fallback (with an error so the operator sees it).
 //
 // Stop is now synchronous from the operator's POV.
 func (a *App) stopReleaseAuthoritative(rel *Release, grace time.Duration) error {
