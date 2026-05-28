@@ -145,6 +145,48 @@ func TestGet_EnrichesURL(t *testing.T) {
 	}
 }
 
+func TestGet_HidesRawRotationMetadataByDefault(t *testing.T) {
+	ctx := newTestCtx(t)
+	probe := sampleVideoProbe()
+	probe.Width = 1920
+	probe.Height = 1080
+	probe.Rotation = 90
+	probe.Raw = `{"streams":[{"codec_type":"video","width":1080,"height":1920,"side_data_list":[{"side_data_type":"Display Matrix","rotation":90}]}]}`
+	if err := upsertMedia(ctx.AppDB(), testProj, "42", probe, "abc", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	_, cleanup := newFakeStorage(t, []StorageFile{
+		{ID: 42, Name: "content.MOV", Visibility: "private",
+			URL: "https://agents.example.com/api/apps/storage/files/42/content"},
+	})
+	defer cleanup()
+
+	app := &App{}
+	out, err := app.toolGet(ctx, map[string]any{"_project_id": testProj, "file_id": "42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := out.(map[string]any)["media"].(MediaResponseRow)
+	if row.Width != 1920 || row.Height != 1080 || row.DisplayOrientation != "landscape" {
+		t.Fatalf("display fields wrong: %+v", row)
+	}
+	if row.Rotation != 0 {
+		t.Fatalf("rotation should be hidden by default, got %d", row.Rotation)
+	}
+	if len(row.RawProbe) != 0 {
+		t.Fatalf("raw_probe should be hidden by default, got %s", string(row.RawProbe))
+	}
+
+	rawOut, err := app.toolGet(ctx, map[string]any{"_project_id": testProj, "file_id": "42", "include_raw_probe": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawRow := rawOut.(map[string]any)["media"].(MediaResponseRow)
+	if rawRow.Rotation != 90 || len(rawRow.RawProbe) == 0 {
+		t.Fatalf("include_raw_probe should return rotation/raw probe, got rotation=%d raw=%q", rawRow.Rotation, string(rawRow.RawProbe))
+	}
+}
+
 // Storage unreachable → graceful degrade, flag set, probe data
 // still ships. Important so the agent can tell "no URL because
 // broken" from "no URL because file deleted".

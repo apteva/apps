@@ -23,6 +23,7 @@ package main
 
 import (
 	"context"
+	"math"
 	"strconv"
 )
 
@@ -32,12 +33,14 @@ import (
 // replaced with their enriched counterparts.
 type MediaResponseRow struct {
 	MediaRow
-	URL         string `json:"url,omitempty"`
-	Name        string `json:"name,omitempty"`
-	Folder      string `json:"folder,omitempty"`
-	Visibility  string `json:"visibility,omitempty"`
-	SizeBytes   int64  `json:"size_bytes,omitempty"`
-	ContentType string `json:"content_type,omitempty"`
+	DisplayOrientation string  `json:"display_orientation,omitempty"`
+	DisplayAspectRatio float64 `json:"display_aspect_ratio,omitempty"`
+	URL                string  `json:"url,omitempty"`
+	Name               string  `json:"name,omitempty"`
+	Folder             string  `json:"folder,omitempty"`
+	Visibility         string  `json:"visibility,omitempty"`
+	SizeBytes          int64   `json:"size_bytes,omitempty"`
+	ContentType        string  `json:"content_type,omitempty"`
 	// Derivations carries enriched DerivationRows. Re-tagged with
 	// the same JSON name as MediaRow.Derivations so it overrides
 	// the embedded field's serialization.
@@ -107,6 +110,8 @@ func enrichRows(ctx context.Context, projectID string, rows []MediaRow) ([]Media
 // still ships with everything else.
 func mergeRow(r MediaRow, files map[string]*StorageFile) MediaResponseRow {
 	out := MediaResponseRow{MediaRow: r}
+	out.DisplayOrientation = displayOrientation(r.Width, r.Height)
+	out.DisplayAspectRatio = displayAspectRatio(r.Width, r.Height)
 	if f := files[r.FileID]; f != nil {
 		out.URL = f.URL
 		out.Name = f.Name
@@ -122,6 +127,41 @@ func mergeRow(r MediaRow, files map[string]*StorageFile) MediaResponseRow {
 		}
 	}
 	return out
+}
+
+func sanitizeMediaToolRows(rows []MediaRow, includeRawProbe bool) []MediaRow {
+	out := make([]MediaRow, len(rows))
+	copy(out, rows)
+	if includeRawProbe {
+		return out
+	}
+	for i := range out {
+		out[i].RawProbe = nil
+		out[i].Rotation = 0
+	}
+	return out
+}
+
+func displayOrientation(width, height int) string {
+	if width <= 0 || height <= 0 {
+		return ""
+	}
+	ratio := float64(width) / float64(height)
+	switch {
+	case ratio > 1.05:
+		return "landscape"
+	case ratio < 0.95:
+		return "portrait"
+	default:
+		return "square"
+	}
+}
+
+func displayAspectRatio(width, height int) float64 {
+	if width <= 0 || height <= 0 {
+		return 0
+	}
+	return math.Round((float64(width)/float64(height))*1000) / 1000
 }
 
 func enrichDerivation(d DerivationRow, files map[string]*StorageFile) EnrichedDerivation {

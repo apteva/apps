@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.27
+version: 0.13.28
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -319,13 +319,16 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "media_get",
-			Description: "Fetch one media record by storage file_id. Returns probe data + derivation pointers.",
-			InputSchema: schemaObject(map[string]any{"file_id": map[string]any{"type": "string"}}, []string{"file_id"}),
-			Handler:     a.toolGet,
+			Description: "Fetch one media record by storage file_id. Returns display-space width/height/orientation + derivation pointers. Raw ffprobe JSON and renderer-only rotation metadata are hidden unless include_raw_probe=true.",
+			InputSchema: schemaObject(map[string]any{
+				"file_id":           map[string]any{"type": "string"},
+				"include_raw_probe": map[string]any{"type": "boolean"},
+			}, []string{"file_id"}),
+			Handler: a.toolGet,
 		},
 		{
 			Name:        "media_search",
-			Description: "Filter the catalog. Prefer media_type ('image'|'video'|'audio'), aspect ('portrait'|'landscape'|'square'|'reel'|'wide'), and duration ('short'|'medium'|'long'|'extended') over raw probe flags. Args: folder, recursive, media_type, aspect, duration, duration_min_ms, duration_max_ms, width_min, width_max, video_codec, audio_codec, limit, offset, order_by ('duration_ms'|'created_at'|'updated_at').",
+			Description: "Filter the catalog. Prefer media_type ('image'|'video'|'audio'), aspect ('portrait'|'landscape'|'square'|'reel'|'wide'), and duration ('short'|'medium'|'long'|'extended') over raw probe flags. Returned width/height/orientation are display-space. Raw ffprobe JSON and renderer-only rotation metadata are hidden unless include_raw_probe=true. Args: folder, recursive, media_type, aspect, duration, duration_min_ms, duration_max_ms, width_min, width_max, video_codec, audio_codec, limit, offset, order_by ('duration_ms'|'created_at'|'updated_at').",
 			InputSchema: schemaObject(map[string]any{
 				"folder":          map[string]any{"type": "string"},
 				"recursive":       map[string]any{"type": "boolean"},
@@ -355,9 +358,10 @@ func (a *App) MCPTools() []sdk.Tool {
 						{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"general", "mature", "adult", "unrated"}}},
 					},
 				},
-				"limit":    map[string]any{"type": "integer"},
-				"offset":   map[string]any{"type": "integer"},
-				"order_by": map[string]any{"type": "string"},
+				"limit":             map[string]any{"type": "integer"},
+				"offset":            map[string]any{"type": "integer"},
+				"order_by":          map[string]any{"type": "string"},
+				"include_raw_probe": map[string]any{"type": "boolean"},
 			}, nil),
 			Handler: a.toolSearch,
 		},
@@ -658,11 +662,13 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		return nil, err
 	}
-	enriched, _, eerr := enrichRows(context.Background(), pid, []MediaRow{*m})
+	includeRawProbe, _ := args["include_raw_probe"].(bool)
+	rows := sanitizeMediaToolRows([]MediaRow{*m}, includeRawProbe)
+	enriched, _, eerr := enrichRows(context.Background(), pid, rows)
 	if eerr != nil {
 		// Storage roundtrip failed — surface unenriched row with a
 		// flag so agents can tell it apart from a deleted file.
-		return map[string]any{"found": true, "media": m, "storage_unavailable": true}, nil
+		return map[string]any{"found": true, "media": &rows[0], "storage_unavailable": true}, nil
 	}
 	return map[string]any{"found": true, "media": enriched[0]}, nil
 }
@@ -1069,6 +1075,8 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	includeRawProbe, _ := args["include_raw_probe"].(bool)
+	rows = sanitizeMediaToolRows(rows, includeRawProbe)
 	enriched, _, eerr := enrichRows(context.Background(), pid, rows)
 	if eerr != nil {
 		// Storage temporarily unreachable — return un-enriched rows
