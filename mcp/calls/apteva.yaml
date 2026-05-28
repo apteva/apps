@@ -1,0 +1,76 @@
+schema: apteva-app/v1
+
+name: calls
+display_name: Calls
+version: 0.1.0
+description: |
+  Standalone realtime audio/video calls with WebRTC-ready rooms,
+  join tokens, unified human/agent/service participants, chat,
+  transcripts, and app-bus lifecycle events.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/calls
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/calls/icon.png
+tags: [calls, video, audio, webrtc, rooms, agents]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: calls_create_room,          description: "Create a call room. Args: title, slug?, metadata?. Returns room, host_join_token, host_join_url." }
+    - { name: calls_get_room,             description: "Get a room with participants, tracks, and active participant count. Args: id." }
+    - { name: calls_list_rooms,           description: "List rooms by status. Args: status?, limit?." }
+    - { name: calls_end_room,             description: "End a room, close sessions, mark participants left, and emit calls.room.ended. Args: id." }
+    - { name: calls_create_join_token,    description: "Create a join token. Args: room_id, participant_kind?, role?, display_name?, capabilities?, expires_at?, max_uses?." }
+    - { name: calls_join_room,            description: "Join a room using a token. Args: token, display_name?, client_info?. Returns participant, session, rtc_config." }
+    - { name: calls_leave_room,           description: "Leave a room. Args: room_id, participant_id." }
+    - { name: calls_list_participants,    description: "List room participants. Args: room_id, status?, kind?." }
+    - { name: calls_update_participant,   description: "Patch participant fields/capabilities/mute state. Args: room_id, participant_id, patch." }
+    - { name: calls_remove_participant,   description: "Remove a participant and close their sessions. Args: room_id, participant_id, reason?." }
+    - { name: calls_send_message,         description: "Send a room message. Args: room_id, participant_id, body, kind?, visibility?." }
+    - { name: calls_get_messages,         description: "Get room messages. Args: room_id, since_id?, limit?." }
+    - { name: calls_get_transcript,       description: "Get room transcript items. Args: room_id, since_id?, participant_id?, limit?." }
+    - { name: calls_append_transcript,    description: "Append a transcript item. Args: room_id, participant_id, text, started_at_ms?, ended_at_ms?, confidence?, source?." }
+  ui_panels: []
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/calls
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/calls.db
+  migrations: migrations/
+
+config_schema:
+  - name: rtc_udp_port_range
+    type: text
+    default: "50000-50100"
+    label: WebRTC UDP port range
+  - name: max_participants_per_room
+    type: number
+    default: 16
+    label: Max participants per room
+  - name: max_rooms
+    type: number
+    default: 50
+    label: Max open rooms
+  - name: idle_room_timeout_seconds
+    type: number
+    default: 300
+    label: Idle room timeout
+
+upgrade_policy: auto-patch
