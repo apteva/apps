@@ -16,6 +16,7 @@ type platformStub struct {
 	file      StorageFile
 	signedURL string
 	calls     []string
+	bareFile  bool
 }
 
 func (p *platformStub) PlatformInfo() (*sdk.PlatformInfo, error) {
@@ -27,7 +28,11 @@ func (p *platformStub) CallAppResult(app, tool string, args map[string]any, out 
 	var payload any
 	switch app + ":" + tool {
 	case "storage:files_get":
-		payload = map[string]any{"found": true, "file": p.file}
+		if p.bareFile {
+			payload = p.file
+		} else {
+			payload = map[string]any{"found": true, "file": p.file}
+		}
 	case "storage:files_get_url":
 		payload = map[string]any{"url": p.signedURL}
 	default:
@@ -108,6 +113,31 @@ func TestCreateReturnsShareableViewerAndOEmbed(t *testing.T) {
 	}
 	if strings.Join(pf.calls, ",") != "storage:files_get" {
 		t.Fatalf("calls=%v", pf.calls)
+	}
+}
+
+func TestCreateAcceptsBareStorageGetResponse(t *testing.T) {
+	pf := &platformStub{
+		file: StorageFile{
+			ID:          42,
+			ProjectID:   "media-proj",
+			Name:        "content.MOV",
+			ContentType: "video/quicktime",
+			SizeBytes:   959100000,
+		},
+		bareFile: true,
+	}
+	ctx := newEmbedCtx(t, pf)
+	out, err := (&App{}).toolCreate(ctx, map[string]any{
+		"storage_file_id": 42,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(map[string]any)
+	embed := res["embed"].(*Embed)
+	if embed.StorageFileID != 42 || embed.Name != "content.MOV" {
+		t.Fatalf("unexpected embed: %+v", embed)
 	}
 }
 

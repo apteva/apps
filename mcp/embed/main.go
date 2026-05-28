@@ -69,7 +69,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("embed requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("embed mounted", "version", "0.1.1")
+	ctx.Logger().Info("embed mounted", "version", "0.1.2")
 	return nil
 }
 
@@ -375,19 +375,41 @@ func fetchStorageFile(ctx *sdk.AppCtx, id int64, projectID string) (*StorageFile
 		args["_project_id"] = projectID
 	}
 	var out struct {
-		File  *StorageFile `json:"file"`
-		Found bool         `json:"found"`
+		File        *StorageFile `json:"file"`
+		Found       *bool        `json:"found"`
+		ID          int64        `json:"id"`
+		ProjectID   string       `json:"project_id"`
+		Name        string       `json:"name"`
+		ContentType string       `json:"content_type"`
+		SizeBytes   int64        `json:"size_bytes"`
+		Visibility  string       `json:"visibility"`
+		URL         string       `json:"url"`
 	}
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", args, &out); err != nil {
 		return nil, fmt.Errorf("storage.files_get: %w", err)
 	}
-	if out.File == nil || !out.Found {
+	if out.Found != nil && !*out.Found {
 		return nil, fmt.Errorf("storage file %d not found", id)
 	}
-	if out.File.ID == 0 {
-		out.File.ID = id
+	file := out.File
+	if file == nil && out.ID != 0 {
+		file = &StorageFile{
+			ID:          out.ID,
+			ProjectID:   out.ProjectID,
+			Name:        out.Name,
+			ContentType: out.ContentType,
+			SizeBytes:   out.SizeBytes,
+			Visibility:  out.Visibility,
+			URL:         out.URL,
+		}
 	}
-	return out.File, nil
+	if file == nil {
+		return nil, fmt.Errorf("storage file %d not found", id)
+	}
+	if file.ID == 0 {
+		file.ID = id
+	}
+	return file, nil
 }
 
 func storageSignedURL(ctx *sdk.AppCtx, id int64, projectID string) (string, error) {
