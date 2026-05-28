@@ -7,7 +7,7 @@
 // Self-contained. No data fetch — everything is in props.
 
 import { useState } from "react";
-import { Card, CardHeader } from "@apteva/ui-kit";
+import { Card, CardHeader, DataList, type CardVendor } from "@apteva/ui-kit";
 
 interface SoMItem {
   label: number;
@@ -34,6 +34,20 @@ const KIND_COLORS: Record<string, string> = {
   default: "#ef4444",
 };
 
+const computerLogo = (
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+    <rect x="3" y="4" width="18" height="12" rx="2" />
+    <path d="M8 20h8" />
+    <path d="M12 16v4" />
+  </svg>
+);
+
+const computerVendor: CardVendor = {
+  name: "Computer",
+  logo: computerLogo,
+  color: { light: "#2563eb", dark: "#93c5fd" },
+};
+
 function badgeColor(kind?: string) {
   return KIND_COLORS[kind ?? "default"] ?? KIND_COLORS.default;
 }
@@ -49,76 +63,91 @@ export default function ScreenshotCard(props: Props) {
   // 1:1 once we know it. Until first load, fall back to 1280x800
   // (the local backend's default DisplaySize).
   const [dims, setDims] = useState<{ w: number; h: number }>({ w: 1280, h: 800 });
+  const labelText =
+    som.length === 0
+      ? "clean screenshot"
+      : `${som.length} marked element${som.length === 1 ? "" : "s"}`;
 
   return (
     <Card>
-      {props.caption && <CardHeader title={props.caption} />}
-      <div className="relative inline-block w-full">
-        <img
-          src={src}
-          alt={props.caption ?? "screenshot"}
-          className="block w-full h-auto rounded border border-zinc-200 dark:border-zinc-700"
-          onLoad={(e) => {
-            const img = e.currentTarget;
-            setDims({ w: img.naturalWidth, h: img.naturalHeight });
-          }}
-        />
-        {som.length > 0 && (
-          <svg
-            viewBox={`0 0 ${dims.w} ${dims.h}`}
-            preserveAspectRatio="none"
-            className="absolute inset-0 w-full h-full pointer-events-auto"
-          >
-            {som.map((m) => {
-              const fill = badgeColor(m.kind);
-              const isHover = hovered === m.label;
-              return (
-                <g
-                  key={m.label}
-                  onMouseEnter={() => setHovered(m.label)}
-                  onMouseLeave={() => setHovered(null)}
-                  style={{ cursor: "pointer" }}
-                >
-                  <rect
-                    x={m.x}
-                    y={m.y}
-                    width={m.w}
-                    height={m.h}
-                    fill={isHover ? fill : "none"}
-                    fillOpacity={isHover ? 0.18 : 0}
-                    stroke={fill}
-                    strokeWidth={isHover ? 3 : 2}
-                  />
-                  <circle
-                    cx={m.x + 12}
-                    cy={m.y + 12}
-                    r={11}
-                    fill={fill}
-                    stroke="white"
-                    strokeWidth={2}
-                  />
-                  <text
-                    x={m.x + 12}
-                    y={m.y + 16}
-                    textAnchor="middle"
-                    fontSize={13}
-                    fontWeight={700}
-                    fill="white"
-                    style={{ userSelect: "none" }}
+      <CardHeader
+        vendor={computerVendor}
+        title={props.caption ?? "Browser screenshot"}
+        subtitle={labelText}
+        action={props.preview ? undefined : { label: "Open", href: src }}
+      />
+      <div className="bg-bg-input border-t border-border flex items-center justify-center">
+        <div className="relative w-full">
+          <img
+            src={src}
+            alt={props.caption ?? "Browser screenshot"}
+            className="block w-full object-contain"
+            style={{ maxHeight: 320 }}
+            onLoad={(e) => {
+              const img = e.currentTarget;
+              setDims({ w: img.naturalWidth, h: img.naturalHeight });
+            }}
+          />
+          {som.length > 0 && (
+            <svg
+              viewBox={`0 0 ${dims.w} ${dims.h}`}
+              preserveAspectRatio="none"
+              className="absolute inset-0 w-full h-full pointer-events-auto"
+            >
+              {som.map((m) => {
+                const fill = badgeColor(m.kind);
+                const isHover = hovered === m.label;
+                return (
+                  <g
+                    key={m.label}
+                    onMouseEnter={() => setHovered(m.label)}
+                    onMouseLeave={() => setHovered(null)}
+                    style={{ cursor: "pointer" }}
                   >
-                    {m.label}
-                  </text>
-                </g>
-              );
-            })}
-          </svg>
-        )}
+                    <rect
+                      x={m.x}
+                      y={m.y}
+                      width={m.w}
+                      height={m.h}
+                      fill={isHover ? fill : "none"}
+                      fillOpacity={isHover ? 0.18 : 0}
+                      stroke={fill}
+                      strokeWidth={isHover ? 3 : 2}
+                    />
+                    <circle
+                      cx={m.x + 12}
+                      cy={m.y + 12}
+                      r={11}
+                      fill={fill}
+                      stroke="white"
+                      strokeWidth={2}
+                    />
+                    <text
+                      x={m.x + 12}
+                      y={m.y + 16}
+                      textAnchor="middle"
+                      fontSize={13}
+                      fontWeight={700}
+                      fill="white"
+                      style={{ userSelect: "none" }}
+                    >
+                      {m.label}
+                    </text>
+                  </g>
+                );
+              })}
+            </svg>
+          )}
+        </div>
       </div>
-      {som.length > 0 && (
-        <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
-          {som.length} marked element{som.length === 1 ? "" : "s"} · hover a badge to highlight
-        </p>
-      )}
+      <div className="px-4 py-3 border-t border-border">
+        <DataList
+          items={[
+            { label: "Mode", value: som.length > 0 ? "Set-of-Mark" : "Clean" },
+            { label: "Size", value: `${dims.w} × ${dims.h}` },
+          ]}
+        />
+      </div>
     </Card>
   );
 }

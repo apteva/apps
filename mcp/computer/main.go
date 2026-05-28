@@ -40,11 +40,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.11
+version: 0.7.12
 description: |
-  Watch and steer browser sessions. v0.7.11 keeps label-badged
-  agent screenshots by default and lets capture callers request clean
-  viewport pixels.
+  Watch and steer browser sessions. v0.7.12 refreshes the chat
+  cards to match the platform card system while keeping label-badged
+  agent screenshots by default.
 scopes: [project, global]
 requires:
   permissions:

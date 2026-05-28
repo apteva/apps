@@ -7,7 +7,7 @@
 // Pure render from props — no fetch. The "watch live" button deep-links
 // to the operator panel where the live view + chat are composed together.
 
-import { Card, CardHeader, StatusPill, DataList } from "@apteva/ui-kit";
+import { Card, CardHeader, DataList, type CardVendor } from "@apteva/ui-kit";
 
 interface Props {
   instance_id: string;
@@ -27,6 +27,20 @@ const BACKEND_LABEL: Record<string, string> = {
   service: "Browser Service",
 };
 
+const computerLogo = (
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+    <rect x="3" y="4" width="18" height="12" rx="2" />
+    <path d="M8 20h8" />
+    <path d="M12 16v4" />
+  </svg>
+);
+
+const computerVendor: CardVendor = {
+  name: "Computer",
+  logo: computerLogo,
+  color: { light: "#2563eb", dark: "#93c5fd" },
+};
+
 export default function BrowserCard(props: Props) {
   const status = props.status ?? "active";
   const watchURL = `/apps/computer/?instance=${encodeURIComponent(
@@ -43,31 +57,20 @@ export default function BrowserCard(props: Props) {
   return (
     <Card>
       <CardHeader
+        vendor={computerVendor}
         title={host || "Browser session"}
-        right={
-          <StatusPill
-            variant={status === "active" ? "success" : "neutral"}
-            label={status}
-          />
-        }
+        subtitle={BACKEND_LABEL[props.backend] ?? props.backend}
+        status={{ label: status, variant: status === "active" ? "active" : "muted" }}
+        action={props.preview ? undefined : { label: "Open", href: watchURL }}
       />
-      <DataList
-        items={[
-          { label: "Backend", value: BACKEND_LABEL[props.backend] ?? props.backend },
-          { label: "URL", value: props.url },
-          { label: "Agent", value: props.instance_id },
-        ]}
-      />
-      {!props.preview && (
-        <a
-          href={watchURL}
-          target="_blank"
-          rel="noreferrer"
-          className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors"
-        >
-          <span aria-hidden>▶</span> Watch live
-        </a>
-      )}
+      <div className="px-4 py-3 border-t border-border">
+        <DataList
+          items={[
+            { label: "URL", value: props.url },
+            { label: "Session", value: props.instance_id },
+          ]}
+        />
+      </div>
     </Card>
   );
 }

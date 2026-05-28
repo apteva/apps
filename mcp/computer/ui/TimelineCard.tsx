@@ -4,7 +4,7 @@
 // Pure render. The agent passes the steps; we render thumbnails
 // + titles + URLs in a scrollable row.
 
-import { Card, CardHeader } from "@apteva/ui-kit";
+import { Card, CardHeader, DataList, type CardVendor } from "@apteva/ui-kit";
 
 interface Step {
   url: string;
@@ -18,20 +18,43 @@ interface Props {
   preview?: boolean;
 }
 
+const computerLogo = (
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+    <rect x="3" y="4" width="18" height="12" rx="2" />
+    <path d="M8 20h8" />
+    <path d="M12 16v4" />
+  </svg>
+);
+
+const computerVendor: CardVendor = {
+  name: "Computer",
+  logo: computerLogo,
+  color: { light: "#2563eb", dark: "#93c5fd" },
+};
+
 export default function TimelineCard(props: Props) {
   const steps = props.preview ? PREVIEW_STEPS : props.steps ?? [];
   if (steps.length === 0) {
     return (
       <Card>
-        <p className="text-xs text-zinc-500">No navigation steps to show.</p>
+        <CardHeader
+          vendor={computerVendor}
+          title="Navigation timeline"
+          subtitle="No pages visited"
+          status={{ label: "empty", variant: "muted" }}
+        />
       </Card>
     );
   }
 
   return (
     <Card>
-      <CardHeader title={`Navigated through ${steps.length} page${steps.length === 1 ? "" : "s"}`} />
-      <div className="overflow-x-auto -mx-2 px-2 pb-1">
+      <CardHeader
+        vendor={computerVendor}
+        title="Navigation timeline"
+        subtitle={`${steps.length} page${steps.length === 1 ? "" : "s"} visited`}
+      />
+      <div className="overflow-x-auto border-t border-border bg-bg-input/30 px-4 py-3">
         <ol className="flex gap-3 min-w-max">
           {steps.map((s, i) => {
             let host = "";
@@ -48,7 +71,7 @@ export default function TimelineCard(props: Props) {
                   rel="noreferrer"
                   className="block group"
                 >
-                  <div className="aspect-[4/3] rounded-md border border-zinc-200 dark:border-zinc-700 bg-zinc-100 dark:bg-zinc-900 overflow-hidden group-hover:border-zinc-400 transition-colors">
+                  <div className="aspect-[4/3] rounded border border-border bg-bg overflow-hidden group-hover:border-accent transition-colors">
                     {s.thumbnail ? (
                       <img
                         src={s.thumbnail}
@@ -56,18 +79,18 @@ export default function TimelineCard(props: Props) {
                         className="w-full h-full object-cover"
                       />
                     ) : (
-                      <div className="w-full h-full flex items-center justify-center text-3xl text-zinc-300 dark:text-zinc-700">
+                      <div className="w-full h-full flex items-center justify-center text-2xl text-text-dim">
                         {i + 1}
                       </div>
                     )}
                   </div>
                   <div className="mt-1.5">
-                    <p className="text-xs font-medium text-zinc-800 dark:text-zinc-200 truncate">
+                    <p className="text-xs font-medium text-text truncate">
                       {s.title ?? host}
                     </p>
-                    <p className="text-[11px] text-zinc-500 truncate">
+                    <p className="text-[11px] text-text-muted truncate">
                       {host}
-                      {s.ts && <span className="ml-1.5 text-zinc-400">· {s.ts}</span>}
+                      {s.ts && <span className="ml-1.5 text-text-dim">· {s.ts}</span>}
                     </p>
                   </div>
                 </a>
@@ -76,8 +99,24 @@ export default function TimelineCard(props: Props) {
           })}
         </ol>
       </div>
+      <div className="px-4 py-3 border-t border-border">
+        <DataList
+          items={[
+            { label: "First", value: hostFor(steps[0]?.url ?? "") },
+            { label: "Last", value: hostFor(steps[steps.length - 1]?.url ?? "") },
+          ]}
+        />
+      </div>
     </Card>
   );
+}
+
+function hostFor(raw: string): string {
+  try {
+    return new URL(raw).host;
+  } catch {
+    return raw || "-";
+  }
 }
 
 const PREVIEW_STEPS: Step[] = [

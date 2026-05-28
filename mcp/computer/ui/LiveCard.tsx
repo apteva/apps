@@ -17,7 +17,7 @@
 // boundaries — apps are independently installable.
 
 import { useEffect, useRef, useState } from "react";
-import { Card, CardHeader, StatusPill } from "@apteva/ui-kit";
+import { Card, CardHeader, DataList, type CardVendor } from "@apteva/ui-kit";
 
 interface Props {
   instance_id: string;
@@ -30,42 +30,37 @@ type Descriptor =
   | { kind: "cdp-ws"; wsURL: string; display: { w: number; h: number }; backend: string }
   | { kind: "iframe"; url: string; backend: string };
 
+const computerLogo = (
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+    <rect x="3" y="4" width="18" height="12" rx="2" />
+    <path d="M8 20h8" />
+    <path d="M12 16v4" />
+  </svg>
+);
+
+const computerVendor: CardVendor = {
+  name: "Computer",
+  logo: computerLogo,
+  color: { light: "#2563eb", dark: "#93c5fd" },
+};
+
 export default function LiveCard(props: Props) {
   const initialMode = props.mode ?? "thumb";
   const [mode, setMode] = useState<"thumb" | "live">(initialMode);
   const height = props.height ?? 360;
+  const panelURL = `/apps/computer/?instance=${encodeURIComponent(props.instance_id)}`;
 
   return (
     <Card>
       <CardHeader
-        title={props.preview ? "Live view (preview)" : "Live view"}
-        right={
-          <div className="flex items-center gap-2">
-            <StatusPill
-              variant={mode === "live" ? "success" : "neutral"}
-              label={mode === "live" ? "live" : "snapshot"}
-            />
-            {!props.preview && mode === "thumb" && (
-              <button
-                onClick={() => setMode("live")}
-                className="text-xs px-2 py-1 rounded border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800"
-              >
-                Go live
-              </button>
-            )}
-            {!props.preview && mode === "live" && (
-              <button
-                onClick={() => setMode("thumb")}
-                className="text-xs px-2 py-1 rounded border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800"
-              >
-                Pause
-              </button>
-            )}
-          </div>
-        }
+        vendor={computerVendor}
+        title={props.preview ? "Live browser preview" : "Live browser"}
+        subtitle={props.instance_id}
+        status={{ label: mode === "live" ? "live" : "snapshot", variant: mode === "live" ? "live" : "muted" }}
+        action={props.preview ? undefined : { label: "Open", href: panelURL }}
       />
       <div
-        className="relative w-full bg-black rounded overflow-hidden"
+        className="relative w-full bg-black border-t border-border overflow-hidden"
         style={{ height }}
       >
         {props.preview ? (
@@ -75,6 +70,33 @@ export default function LiveCard(props: Props) {
         ) : (
           <LiveStream instanceId={props.instance_id} />
         )}
+      </div>
+      <div className="px-4 py-3 border-t border-border">
+        {!props.preview && (
+          <div className="flex justify-end mb-3">
+            {mode === "thumb" ? (
+              <button
+                onClick={() => setMode("live")}
+                className="text-xs px-2 py-1 rounded border border-border hover:bg-bg-input"
+              >
+                Go live
+              </button>
+            ) : (
+              <button
+                onClick={() => setMode("thumb")}
+                className="text-xs px-2 py-1 rounded border border-border hover:bg-bg-input"
+              >
+                Pause
+              </button>
+            )}
+          </div>
+        )}
+        <DataList
+          items={[
+            { label: "Mode", value: mode === "live" ? "Live stream" : "Snapshot" },
+            { label: "Agent", value: props.instance_id },
+          ]}
+        />
       </div>
     </Card>
   );
@@ -263,12 +285,12 @@ function CenterMsg({ children }: { children: React.ReactNode }) {
 
 function PreviewFrame() {
   return (
-    <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-zinc-900 to-zinc-800 text-zinc-400 text-sm">
+    <div className="w-full h-full flex items-center justify-center bg-black text-zinc-400 text-sm">
       <div className="text-center">
-        <div className="text-3xl mb-2">▶</div>
-        <p>Live preview placeholder</p>
+        <div className="text-3xl mb-2">▣</div>
+        <p>Live browser</p>
         <p className="text-xs text-zinc-500 mt-1">
-          Renders agent's browser when wired to a real instance
+          Connects when an agent session is active
         </p>
       </div>
     </div>
