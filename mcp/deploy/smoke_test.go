@@ -1,10 +1,12 @@
 package main
 
 import (
+	"archive/zip"
 	"database/sql"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -186,6 +188,52 @@ func TestDetectFramework(t *testing.T) {
 	}
 	if got := detectFramework(tmp); got != "go" {
 		t.Fatalf("detectFramework after go.mod = %q", got)
+	}
+}
+
+func TestCodeFetcherStreamsHTTPExport(t *testing.T) {
+	var sawAuth, sawProject, sawInstall bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/apps/code/api/repos/site/export" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		sawAuth = r.Header.Get("Authorization") == "Bearer dev-7"
+		sawProject = r.URL.Query().Get("project_id") == "p1"
+		sawInstall = r.URL.Query().Get("install_id") == "42"
+		w.Header().Set("Content-Type", "application/zip")
+		zw := zip.NewWriter(w)
+		fw, err := zw.Create("src/index.html")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fw.Write([]byte("<h1>ok</h1>")); err != nil {
+			t.Fatal(err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer ts.Close()
+
+	dest := t.TempDir()
+	f := &codeFetcher{
+		httpClient:    ts.Client(),
+		gatewayURL:    ts.URL,
+		appToken:      "dev-7",
+		codeInstallID: 42,
+	}
+	if err := f.Fetch(&Deployment{ProjectID: "p1", SourceKind: "code", SourceRef: "site"}, dest); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if !sawAuth || !sawProject || !sawInstall {
+		t.Fatalf("request did not carry expected auth/project/install: auth=%v project=%v install=%v", sawAuth, sawProject, sawInstall)
+	}
+	body, err := os.ReadFile(filepath.Join(dest, "src", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "<h1>ok</h1>" {
+		t.Fatalf("unpacked body = %q", body)
 	}
 }
 
