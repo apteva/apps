@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -23,8 +25,9 @@ type metaComment struct {
 	Timestamp   string `json:"timestamp"`
 	Permalink   string `json:"permalink_url"`
 	From        struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+		ID      string          `json:"id"`
+		Name    string          `json:"name"`
+		Picture metaPictureNode `json:"picture"`
 	} `json:"from"`
 	Username string `json:"username"`
 	Replies  struct {
@@ -37,9 +40,10 @@ type metaMessage struct {
 	Message     string `json:"message"`
 	CreatedTime string `json:"created_time"`
 	From        struct {
-		ID       string `json:"id"`
-		Username string `json:"username"`
-		Name     string `json:"name"`
+		ID         string `json:"id"`
+		Username   string `json:"username"`
+		Name       string `json:"name"`
+		ProfilePic string `json:"profile_pic"`
 	} `json:"from"`
 	Attachments any `json:"attachments"`
 }
@@ -51,8 +55,9 @@ type metaReview struct {
 	RecommendationType string `json:"recommendation_type"`
 	Rating             int    `json:"rating"`
 	Reviewer           struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+		ID      string          `json:"id"`
+		Name    string          `json:"name"`
+		Picture metaPictureNode `json:"picture"`
 	} `json:"reviewer"`
 	OpenGraphStory struct {
 		ID        string `json:"id"`
@@ -68,10 +73,25 @@ type metaTaggedItem struct {
 	PermalinkURL string `json:"permalink_url"`
 	FullPicture  string `json:"full_picture"`
 	From         struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+		ID      string          `json:"id"`
+		Name    string          `json:"name"`
+		Picture metaPictureNode `json:"picture"`
 	} `json:"from"`
 	Attachments any `json:"attachments"`
+}
+
+type metaPictureNode struct {
+	Data struct {
+		URL string `json:"url"`
+	} `json:"data"`
+	URL string `json:"url"`
+}
+
+type metaAuthorProfile struct {
+	ID        string
+	Name      string
+	Handle    string
+	AvatarURL string
 }
 
 func syncFacebookInbox(ctx *sdk.AppCtx, acct inboxAccount, opts inboxSyncOptions, out *inboxSyncResult) {
@@ -197,7 +217,7 @@ func syncFacebookMentions(ctx *sdk.AppCtx, acct inboxAccount, limit int) (int, [
 	args := map[string]any{
 		"pageId":       acct.ExtID,
 		"limit":        minInt(limit, 50),
-		"fields":       "id,message,story,created_time,from,permalink_url,full_picture,attachments",
+		"fields":       "id,message,story,created_time,from{id,name,picture.width(80).height(80)},permalink_url,full_picture,attachments",
 		"access_token": acct.PageToken,
 	}
 	inserted := 0
@@ -236,7 +256,7 @@ func syncFacebookReviews(ctx *sdk.AppCtx, acct inboxAccount, limit int) (int, []
 	args := map[string]any{
 		"pageId":       acct.ExtID,
 		"limit":        minInt(limit, 50),
-		"fields":       "id,created_time,review_text,recommendation_type,rating,reviewer{id,name},open_graph_story{id,permalink_url}",
+		"fields":       "id,created_time,review_text,recommendation_type,rating,reviewer{id,name,picture.width(80).height(80)},open_graph_story{id,permalink_url}",
 		"access_token": acct.PageToken,
 	}
 	inserted := 0
@@ -342,7 +362,7 @@ func syncMetaPostComments(ctx *sdk.AppCtx, acct inboxAccount, platform, external
 	args := map[string]any{
 		"mediaId":      externalPostID,
 		"limit":        limit,
-		"fields":       "id,message,text,from,username,created_time,timestamp,permalink_url,replies{id,message,text,from,username,created_time,timestamp,permalink_url}",
+		"fields":       metaCommentFields(platform),
 		"access_token": acct.PageToken,
 	}
 	inserted := 0
@@ -394,9 +414,11 @@ func upsertMetaComment(ctx *sdk.AppCtx, acct inboxAccount, platform string, c me
 	authorID := c.From.ID
 	authorName := c.From.Name
 	authorHandle := c.Username
+	authorAvatar := metaPictureURL(c.From.Picture)
 	if authorName == "" {
 		authorName = authorHandle
 	}
+	profile := hydrateMetaAuthor(ctx, acct, platform, authorID, authorName, authorHandle, authorAvatar)
 	_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
 		ProjectID:        acct.ProjectID,
 		SocialAccountID:  acct.ID,
@@ -408,8 +430,9 @@ func upsertMetaComment(ctx *sdk.AppCtx, acct inboxAccount, platform string, c me
 		PostID:           localPostID,
 		ExternalPostID:   externalPostID,
 		AuthorExternalID: authorID,
-		AuthorName:       authorName,
-		AuthorHandle:     authorHandle,
+		AuthorName:       firstNonEmpty(profile.Name, authorName),
+		AuthorHandle:     firstNonEmpty(profile.Handle, authorHandle),
+		AuthorAvatarURL:  firstNonEmpty(profile.AvatarURL, authorAvatar),
 		Body:             body,
 		Permalink:        firstNonEmpty(c.Permalink, permalink),
 		OccurredAt:       occurred,
@@ -514,6 +537,7 @@ func upsertMetaMessage(ctx *sdk.AppCtx, acct inboxAccount, platform, conversatio
 		media = rawJSON(m.Attachments)
 	}
 	author := firstNonEmpty(m.From.Username, m.From.Name)
+	profile := hydrateMetaAuthor(ctx, acct, platform, m.From.ID, m.From.Name, m.From.Username, m.From.ProfilePic)
 	_, didInsert, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
 		ProjectID:        acct.ProjectID,
 		SocialAccountID:  acct.ID,
@@ -523,8 +547,9 @@ func upsertMetaMessage(ctx *sdk.AppCtx, acct inboxAccount, platform, conversatio
 		ThreadExternalID: conversationID,
 		ParentExternalID: conversationID,
 		AuthorExternalID: m.From.ID,
-		AuthorName:       author,
-		AuthorHandle:     m.From.Username,
+		AuthorName:       firstNonEmpty(profile.Name, author),
+		AuthorHandle:     firstNonEmpty(profile.Handle, m.From.Username),
+		AuthorAvatarURL:  firstNonEmpty(profile.AvatarURL, m.From.ProfilePic),
 		Body:             m.Message,
 		MediaJSON:        media,
 		OccurredAt:       occurred,
@@ -632,6 +657,7 @@ func upsertFacebookMention(ctx *sdk.AppCtx, acct inboxAccount, tag metaTaggedIte
 		ExternalPostID:   tag.ID,
 		AuthorExternalID: tag.From.ID,
 		AuthorName:       tag.From.Name,
+		AuthorAvatarURL:  metaPictureURL(tag.From.Picture),
 		Body:             body,
 		MediaJSON:        mediaJSON,
 		Permalink:        tag.PermalinkURL,
@@ -665,6 +691,7 @@ func upsertFacebookReview(ctx *sdk.AppCtx, acct inboxAccount, review metaReview)
 		ExternalPostID:   firstNonEmpty(review.OpenGraphStory.ID, review.ID),
 		AuthorExternalID: review.Reviewer.ID,
 		AuthorName:       review.Reviewer.Name,
+		AuthorAvatarURL:  metaPictureURL(review.Reviewer.Picture),
 		Body:             body,
 		Permalink:        review.OpenGraphStory.Permalink,
 		Rating:           review.Rating,
@@ -699,6 +726,101 @@ func directionForAuthor(acct inboxAccount, authorID, authorHandle string) string
 		return "outbound"
 	}
 	return "inbound"
+}
+
+func metaCommentFields(platform string) string {
+	if platform == "facebook" {
+		pic := "from{id,name,picture.width(80).height(80)}"
+		return "id,message,text," + pic + ",username,created_time,timestamp,permalink_url,replies{id,message,text," + pic + ",username,created_time,timestamp,permalink_url}"
+	}
+	return "id,message,text,from,username,created_time,timestamp,permalink_url,replies{id,message,text,from,username,created_time,timestamp,permalink_url}"
+}
+
+func metaPictureURL(p metaPictureNode) string {
+	return firstNonEmpty(p.Data.URL, p.URL)
+}
+
+func hydrateMetaAuthor(ctx *sdk.AppCtx, acct inboxAccount, platform, authorID, name, handle, avatar string) metaAuthorProfile {
+	profile := metaAuthorProfile{ID: authorID, Name: name, Handle: handle, AvatarURL: avatar}
+	if authorID == "" || directionForAuthor(acct, authorID, handle) == "outbound" {
+		return profile
+	}
+	if acct.AuthorProfiles != nil {
+		if cached, ok := acct.AuthorProfiles[platform+":"+authorID]; ok {
+			return mergeMetaAuthorProfile(profile, cached)
+		}
+	}
+	if !looksLikeMetaAccessToken(acct.PageToken) {
+		return profile
+	}
+	fetched, ok := fetchMetaAuthorProfile(ctx, platform, authorID, acct.PageToken)
+	if !ok {
+		return profile
+	}
+	if acct.AuthorProfiles != nil {
+		acct.AuthorProfiles[platform+":"+authorID] = fetched
+	}
+	return mergeMetaAuthorProfile(profile, fetched)
+}
+
+func mergeMetaAuthorProfile(base, fetched metaAuthorProfile) metaAuthorProfile {
+	return metaAuthorProfile{
+		ID:        firstNonEmpty(base.ID, fetched.ID),
+		Name:      firstNonEmpty(base.Name, fetched.Name),
+		Handle:    firstNonEmpty(base.Handle, fetched.Handle),
+		AvatarURL: firstNonEmpty(base.AvatarURL, fetched.AvatarURL),
+	}
+}
+
+func looksLikeMetaAccessToken(token string) bool {
+	token = strings.TrimSpace(token)
+	return len(token) > 40 && strings.HasPrefix(token, "EA")
+}
+
+func fetchMetaAuthorProfile(ctx *sdk.AppCtx, platform, authorID, token string) (metaAuthorProfile, bool) {
+	fields := "first_name,last_name,name,profile_pic,picture.width(80).height(80)"
+	if platform == "instagram" {
+		fields = "name,username,profile_pic"
+	}
+	endpoint := "https://graph.facebook.com/v23.0/" + url.PathEscape(authorID)
+	q := url.Values{}
+	q.Set("fields", fields)
+	q.Set("access_token", token)
+	req, err := http.NewRequest(http.MethodGet, endpoint+"?"+q.Encode(), nil)
+	if err != nil {
+		return metaAuthorProfile{}, false
+	}
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return metaAuthorProfile{}, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return metaAuthorProfile{}, false
+	}
+	var out struct {
+		ID         string          `json:"id"`
+		FirstName  string          `json:"first_name"`
+		LastName   string          `json:"last_name"`
+		Name       string          `json:"name"`
+		Username   string          `json:"username"`
+		ProfilePic string          `json:"profile_pic"`
+		Picture    metaPictureNode `json:"picture"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return metaAuthorProfile{}, false
+	}
+	name := out.Name
+	if name == "" {
+		name = strings.TrimSpace(strings.TrimSpace(out.FirstName + " " + out.LastName))
+	}
+	return metaAuthorProfile{
+		ID:        firstNonEmpty(out.ID, authorID),
+		Name:      name,
+		Handle:    out.Username,
+		AvatarURL: firstNonEmpty(out.ProfilePic, metaPictureURL(out.Picture)),
+	}, true
 }
 
 func firstNonEmpty(vals ...string) string {

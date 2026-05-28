@@ -16,16 +16,17 @@ import (
 )
 
 type inboxAccount struct {
-	ID         int64
-	ProjectID  string
-	Platform   string
-	ConnID     int64
-	ExtID      string
-	Name       string
-	PageCreds  string
-	ProfileID  int64
-	PageToken  string
-	LastSynced string
+	ID             int64
+	ProjectID      string
+	Platform       string
+	ConnID         int64
+	ExtID          string
+	Name           string
+	PageCreds      string
+	ProfileID      int64
+	PageToken      string
+	LastSynced     string
+	AuthorProfiles map[string]metaAuthorProfile
 }
 
 type inboxSyncOptions struct {
@@ -181,6 +182,9 @@ func (a *App) syncInboxAccount(ctx *sdk.AppCtx, acct inboxAccount, opts inboxSyn
 		res.Error = "page access_token missing — reconnect the account"
 		setInboxCursorError(ctx.AppDB(), acct.ID, "all", res.Error)
 		return res
+	}
+	if acct.AuthorProfiles == nil {
+		acct.AuthorProfiles = map[string]metaAuthorProfile{}
 	}
 	switch acct.Platform {
 	case "facebook":

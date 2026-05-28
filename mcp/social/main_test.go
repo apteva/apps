@@ -1376,7 +1376,7 @@ func TestInboxSyncFacebookComments(t *testing.T) {
 		Success: true,
 		Status:  200,
 		Data: json.RawMessage(`{"data":[
-			{"id":"c1","message":"hello","created_time":"2026-05-27T10:00:00+0000","from":{"id":"u1","name":"Ada"},"replies":{"data":[
+			{"id":"c1","message":"hello","created_time":"2026-05-27T10:00:00+0000","from":{"id":"u1","name":"Ada","picture":{"data":{"url":"https://example.test/ada.jpg"}}},"replies":{"data":[
 				{"id":"c2","message":"reply","created_time":"2026-05-27T10:01:00+0000","from":{"id":"u2","name":"Ben"}}
 			]}}
 		]}`),
@@ -1409,6 +1409,13 @@ func TestInboxSyncFacebookComments(t *testing.T) {
 	}
 	if parent != "c1" || thread != "c1" {
 		t.Fatalf("reply threading parent=%q thread=%q", parent, thread)
+	}
+	var avatar string
+	if err := ctx.AppDB().QueryRow(`SELECT COALESCE(author_avatar_url,'') FROM inbox_items WHERE external_id='c1'`).Scan(&avatar); err != nil {
+		t.Fatal(err)
+	}
+	if avatar != "https://example.test/ada.jpg" {
+		t.Fatalf("comment avatar = %q", avatar)
 	}
 }
 

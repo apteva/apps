@@ -2606,6 +2606,7 @@ function InboxView({
   const [syncing, setSyncing] = useState(false);
   const [replyBody, setReplyBody] = useState("");
   const [syncResults, setSyncResults] = useState<InboxSyncResult[]>([]);
+  const [search, setSearch] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -2613,7 +2614,6 @@ function InboxView({
       const extra: Record<string, string | number | undefined> = {
         profile_id: activeProfileId ?? undefined,
         account_id: accountID === "all" ? undefined : accountID,
-        kind: kind === "all" ? undefined : kind,
         status: status === "all" ? undefined : status,
         limit: 100,
       };
@@ -2628,7 +2628,7 @@ function InboxView({
     } finally {
       setLoading(false);
     }
-  }, [accountID, activeProfileId, kind, projectId, selectedID, setStatus, status]);
+  }, [accountID, activeProfileId, projectId, selectedID, setStatus, status]);
 
   const loadSelected = useCallback(async (id: number | null) => {
     if (!id) {
@@ -2713,6 +2713,7 @@ function InboxView({
   };
 
   const accountName = (id: number) => accounts.find((a) => a.id === id)?.display_name || `#${id}`;
+  const accountFor = (id: number) => accounts.find((a) => a.id === id);
   const inboxAuthor = (item: InboxItem) => {
     if (item.author_name) return item.author_name;
     if (item.author_handle) return item.author_handle;
@@ -2720,28 +2721,64 @@ function InboxView({
     if (item.platform === "facebook" && item.kind === "comment") return "Facebook commenter";
     return "Author unavailable";
   };
+  const itemAvatar = (item: InboxItem) => item.author_avatar_url || (item.direction === "outbound" ? accountFor(item.social_account_id)?.avatar_url : "");
+  const initials = (label: string) => {
+    const words = label.trim().split(/\s+/).filter(Boolean);
+    if (words.length === 0) return "?";
+    return (words[0][0] + (words[1]?.[0] || "")).toUpperCase();
+  };
+  const kindLabel = (k: string) => k === "dm" ? "Message" : k.charAt(0).toUpperCase() + k.slice(1);
+  const counts = items.reduce((acc, item) => {
+    acc.all++;
+    acc[item.kind] = (acc[item.kind] || 0) + 1;
+    return acc;
+  }, { all: 0 } as Record<string, number>);
+  const filteredItems = items.filter((item) => {
+    if (kind !== "all" && item.kind !== kind) return false;
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    return [
+      inboxAuthor(item),
+      item.body || "",
+      item.platform,
+      item.kind,
+      accountName(item.social_account_id),
+    ].join(" ").toLowerCase().includes(q);
+  });
+  const statusText = selected?.status === "unread" ? "Unread" : selected?.status ? selected.status.charAt(0).toUpperCase() + selected.status.slice(1) : "";
+  const Avatar = ({ item, size = "md" }: { item: InboxItem; size?: "sm" | "md" | "lg" }) => {
+    const label = inboxAuthor(item);
+    const src = itemAvatar(item);
+    const cls = size === "lg" ? "w-10 h-10 text-sm" : size === "sm" ? "w-7 h-7 text-[10px]" : "w-9 h-9 text-xs";
+    if (src) {
+      return <img src={src} alt="" className={`${cls} rounded-full object-cover flex-shrink-0 border border-border`} />;
+    }
+    return (
+      <div className={`${cls} rounded-full flex-shrink-0 grid place-items-center border border-border bg-bg-input text-text-dim font-bold`}>
+        {initials(label)}
+      </div>
+    );
+  };
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full min-h-0 flex flex-col bg-bg">
       <div className="border-b border-border px-4 py-3 flex flex-wrap items-center gap-2">
-        <select
-          value={accountID}
-          onChange={(e) => setAccountID(e.target.value === "all" ? "all" : Number(e.target.value))}
-          className="bg-bg-input border border-border rounded px-2 py-1 text-sm text-text"
-        >
-          <option value="all">All accounts</option>
-          {accounts.map((a) => (
-            <option key={a.id} value={a.id}>{a.display_name} · {a.platform}</option>
-          ))}
-        </select>
-        <select value={kind} onChange={(e) => setKind(e.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm text-text">
-          <option value="all">All kinds</option>
-          <option value="comment">Comments</option>
-          <option value="dm">Messages</option>
-          <option value="mention">Mentions</option>
-          <option value="review">Reviews</option>
-        </select>
-        <select value={status} onChange={(e) => setLocalStatus(e.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm text-text">
+        <button onClick={() => setKind("all")} className={"px-3 py-1.5 rounded text-sm border " + (kind === "all" ? "bg-accent/15 border-accent text-accent" : "bg-bg-card border-border text-text-dim hover:text-text")}>
+          All <span className="ml-1 text-xs">{counts.all || 0}</span>
+        </button>
+        <button onClick={() => setKind("dm")} className={"px-3 py-1.5 rounded text-sm border " + (kind === "dm" ? "bg-accent/15 border-accent text-accent" : "bg-bg-card border-border text-text-dim hover:text-text")}>
+          Messages <span className="ml-1 text-xs">{counts.dm || 0}</span>
+        </button>
+        <button onClick={() => setKind("comment")} className={"px-3 py-1.5 rounded text-sm border " + (kind === "comment" ? "bg-accent/15 border-accent text-accent" : "bg-bg-card border-border text-text-dim hover:text-text")}>
+          Comments <span className="ml-1 text-xs">{counts.comment || 0}</span>
+        </button>
+        <button onClick={() => setKind("mention")} className={"px-3 py-1.5 rounded text-sm border " + (kind === "mention" ? "bg-accent/15 border-accent text-accent" : "bg-bg-card border-border text-text-dim hover:text-text")}>
+          Mentions <span className="ml-1 text-xs">{counts.mention || 0}</span>
+        </button>
+        <button onClick={() => setKind("review")} className={"px-3 py-1.5 rounded text-sm border " + (kind === "review" ? "bg-accent/15 border-accent text-accent" : "bg-bg-card border-border text-text-dim hover:text-text")}>
+          Reviews <span className="ml-1 text-xs">{counts.review || 0}</span>
+        </button>
+        <select value={status} onChange={(e) => setLocalStatus(e.target.value)} className="ml-auto bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text">
           <option value="all">Open</option>
           <option value="unread">Unread</option>
           <option value="read">Read</option>
@@ -2749,7 +2786,7 @@ function InboxView({
           <option value="hidden">Hidden</option>
           <option value="archived">Archived</option>
         </select>
-        <button onClick={() => sync(false)} disabled={syncing} className="ml-auto px-3 py-1 text-sm border border-border rounded text-accent disabled:opacity-50">
+        <button onClick={() => sync(false)} disabled={syncing} className="px-3 py-1.5 text-sm border border-border rounded text-accent disabled:opacity-50">
           {syncing ? "Syncing..." : "Refresh"}
         </button>
       </div>
@@ -2762,72 +2799,111 @@ function InboxView({
           ))}
         </div>
       )}
-      <div className="flex-1 min-h-0 grid grid-cols-[360px_1fr]">
-        <div className="border-r border-border overflow-y-auto">
+      <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[minmax(320px,44%)_minmax(0,1fr)]">
+        <div className="border-r border-border min-h-0 flex flex-col bg-bg-card/20">
+          <div className="p-3 border-b border-border flex flex-col gap-2">
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search inbox..."
+              className="w-full bg-bg-input border border-border rounded px-3 py-2 text-sm text-text"
+            />
+            <select
+              value={accountID}
+              onChange={(e) => setAccountID(e.target.value === "all" ? "all" : Number(e.target.value))}
+              className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
+            >
+              <option value="all">All accounts</option>
+              {accounts.map((a) => (
+                <option key={a.id} value={a.id}>{a.display_name} · {a.platform}</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex-1 min-h-0 overflow-y-auto">
           {loading ? (
             <div className="p-6 text-sm text-text-dim">Loading...</div>
-          ) : items.length === 0 ? (
+          ) : filteredItems.length === 0 ? (
             <div className="p-6 text-sm text-text-dim">No inbox items yet.</div>
-          ) : items.map((it) => (
+          ) : filteredItems.map((it) => (
             <button
               key={it.id}
               onClick={() => setSelectedID(it.id)}
               className={
-                "w-full text-left px-4 py-3 border-b border-border hover:bg-bg-card " +
-                (selectedID === it.id ? "bg-bg-card" : "")
+                "w-full text-left px-3 py-3 border-b border-border hover:bg-bg-card transition-colors " +
+                (selectedID === it.id ? "bg-bg-card border-l-2 border-l-accent" : "border-l-2 border-l-transparent")
               }
             >
-              <div className="flex items-center gap-2">
-                <span className="text-xs uppercase text-accent">{it.kind}</span>
-                <span className="text-xs text-text-dim">{it.platform}</span>
-                {it.status === "unread" && <span className="ml-auto w-2 h-2 rounded-full bg-accent" />}
+              <div className="flex items-start gap-3">
+                <Avatar item={it} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="text-sm text-text truncate font-medium">{inboxAuthor(it)}</div>
+                    {it.status === "unread" && <span className="w-2 h-2 rounded-full bg-accent flex-shrink-0" />}
+                    <div className="ml-auto text-[11px] text-text-muted flex-shrink-0">{new Date(it.occurred_at).toLocaleDateString()}</div>
+                  </div>
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="text-[10px] uppercase text-accent">{kindLabel(it.kind)}</span>
+                    <span className="text-[10px] uppercase text-text-dim">{it.platform}</span>
+                    <span className="text-[10px] text-text-muted truncate">{accountName(it.social_account_id)}</span>
+                  </div>
+                  <div className="text-xs text-text-dim truncate mt-1">{it.body || "(no text)"}</div>
+                </div>
               </div>
-              <div className="text-sm text-text truncate mt-1">{inboxAuthor(it)}</div>
-              <div className="text-xs text-text-dim truncate mt-1">{it.body || "(no text)"}</div>
-              <div className="text-[11px] text-text-muted mt-1">{new Date(it.occurred_at).toLocaleString()}</div>
             </button>
           ))}
+          </div>
         </div>
-        <div className="min-w-0 flex flex-col">
+        <div className="min-w-0 min-h-0 flex flex-col bg-bg">
           {!selected ? (
             <div className="m-auto text-sm text-text-dim">Select an item</div>
           ) : (
             <>
-              <div className="border-b border-border px-5 py-4">
-                <div className="text-text font-medium">{inboxAuthor(selected)}</div>
-                <div className="text-xs text-text-dim">{accountName(selected.social_account_id)} · {selected.platform} · {selected.kind}</div>
+              <div className="border-b border-border px-5 py-4 flex items-center gap-3 bg-bg-card/30">
+                <Avatar item={selected} size="lg" />
+                <div className="min-w-0">
+                  <div className="text-text font-medium truncate">{inboxAuthor(selected)}</div>
+                  <div className="text-xs text-text-dim truncate">
+                    {accountName(selected.social_account_id)} · {selected.platform} · {kindLabel(selected.kind)} {statusText && `· ${statusText}`}
+                  </div>
+                </div>
+                <div className="ml-auto flex items-center gap-2">
+                  {selected.permalink && (
+                    <a href={selected.permalink} target="_blank" rel="noopener" className="px-3 py-1.5 text-sm border border-border rounded text-accent hover:bg-bg-card">Open</a>
+                  )}
+                  <button onClick={() => act(selected.status === "unread" ? "read" : "unread")} className="px-3 py-1.5 text-sm border border-border rounded text-text-dim hover:text-text">{selected.status === "unread" ? "Read" : "Unread"}</button>
+                  <button onClick={() => act("archive")} className="px-3 py-1.5 text-sm border border-border rounded text-text-dim hover:text-text">Archive</button>
+                </div>
               </div>
-              <div className="flex-1 overflow-y-auto p-5 flex flex-col gap-3">
+              <div className="flex-1 min-h-0 overflow-y-auto p-5 flex flex-col gap-3">
                 {thread.map((m) => (
-                  <div key={m.id} className={"max-w-[78%] border border-border rounded p-3 " + (m.direction === "outbound" ? "self-end bg-bg-card" : "self-start bg-bg-input/40")}>
-                    <div className="text-xs text-text-dim mb-1">{inboxAuthor(m)}</div>
-                    <div className="text-sm text-text whitespace-pre-wrap">{m.body || "(no text)"}</div>
-                    <div className="text-[11px] text-text-muted mt-2">{new Date(m.occurred_at).toLocaleString()}</div>
+                  <div key={m.id} className={"flex gap-2 " + (m.direction === "outbound" ? "justify-end" : "justify-start")}>
+                    {m.direction !== "outbound" && <Avatar item={m} size="sm" />}
+                    <div className={"max-w-[78%] rounded px-3 py-2 border " + (m.direction === "outbound" ? "bg-accent/15 border-accent/40 text-text" : "bg-bg-card border-border text-text")}>
+                      <div className="text-xs text-text-dim mb-1">{inboxAuthor(m)}</div>
+                      <div className="text-sm whitespace-pre-wrap">{m.body || "(no text)"}</div>
+                      <div className="text-[11px] text-text-muted mt-2">{new Date(m.occurred_at).toLocaleString()}</div>
+                    </div>
                   </div>
                 ))}
               </div>
-              <div className="border-t border-border p-4 flex flex-col gap-2">
+              <div className="border-t border-border p-4 flex flex-col gap-2 bg-bg-card/20">
                 <textarea
                   value={replyBody}
                   onChange={(e) => setReplyBody(e.target.value)}
                   placeholder="Reply..."
-                  className="w-full min-h-[72px] bg-bg-input border border-border rounded px-3 py-2 text-sm text-text resize-y"
+                  className="w-full min-h-[88px] bg-bg-input border border-border rounded px-3 py-2 text-sm text-text resize-y"
                 />
                 <div className="flex flex-wrap gap-2">
                   <button onClick={() => act("reply", { body: replyBody })} disabled={!replyBody.trim()} className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50">Reply</button>
-                  {selected.platform === "instagram" && selected.kind === "comment" && (
+                  {(selected.platform === "instagram" || selected.platform === "facebook") && selected.kind === "comment" && (
                     <button onClick={() => act("private_reply", { body: replyBody })} disabled={!replyBody.trim()} className="px-3 py-1.5 text-sm border border-border rounded text-accent disabled:opacity-50">Private reply</button>
                   )}
-                  <button onClick={() => act(selected.status === "unread" ? "read" : "unread")} className="px-3 py-1.5 text-sm border border-border rounded text-text-dim">{selected.status === "unread" ? "Mark read" : "Mark unread"}</button>
-                  <button onClick={() => act("archive")} className="px-3 py-1.5 text-sm border border-border rounded text-text-dim">Archive</button>
                   {selected.kind === "comment" && (
                     <>
-                      <button onClick={() => act(selected.status === "hidden" ? "unhide" : "hide")} className="px-3 py-1.5 text-sm border border-border rounded text-text-dim">{selected.status === "hidden" ? "Unhide" : "Hide"}</button>
+                      <button onClick={() => act("like")} className="px-3 py-1.5 text-sm border border-border rounded text-text-dim hover:text-text">Like</button>
+                      <button onClick={() => act(selected.status === "hidden" ? "unhide" : "hide")} className="px-3 py-1.5 text-sm border border-border rounded text-text-dim hover:text-text">{selected.status === "hidden" ? "Unhide" : "Hide"}</button>
                       <button onClick={() => act("delete")} className="px-3 py-1.5 text-sm border border-red text-red rounded">Delete</button>
                     </>
-                  )}
-                  {selected.permalink && (
-                    <a href={selected.permalink} target="_blank" rel="noopener" className="ml-auto px-3 py-1.5 text-sm text-accent hover:underline">Open</a>
                   )}
                 </div>
               </div>
