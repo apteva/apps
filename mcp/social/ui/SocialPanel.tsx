@@ -2690,11 +2690,15 @@ function InboxView({
   const act = async (action: string, body?: Record<string, unknown>) => {
     if (!selected) return;
     try {
+      const actionBody = { ...(body || {}) };
+      if ((action === "read" || action === "unread" || action === "archive") && thread.length > 0) {
+        actionBody.ids = thread.map((item) => item.id);
+      }
       const res = await fetch(socialURL(`/inbox/${selected.id}/${action}`, projectId), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body || {}),
+        body: JSON.stringify(actionBody),
       });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json().catch(() => ({}));

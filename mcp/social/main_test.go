@@ -1419,6 +1419,69 @@ func TestInboxSyncFacebookComments(t *testing.T) {
 	}
 }
 
+func TestInboxListGroupsThreadsByLatestActivity(t *testing.T) {
+	ctx := newSocialCtx(t, newRecordingPlatform())
+	base := time.Date(2026, 5, 27, 10, 0, 0, 0, time.UTC)
+	for _, row := range []inboxUpsertInput{
+		{
+			ProjectID:        "test-proj",
+			SocialAccountID:  1,
+			Platform:         "facebook",
+			Kind:             inboxKindComment,
+			ExternalID:       "c1",
+			ThreadExternalID: "c1",
+			AuthorName:       "Ada",
+			Body:             "root",
+			OccurredAt:       base,
+		},
+		{
+			ProjectID:        "test-proj",
+			SocialAccountID:  1,
+			Platform:         "facebook",
+			Kind:             inboxKindComment,
+			ExternalID:       "c2",
+			ThreadExternalID: "c1",
+			ParentExternalID: "c1",
+			AuthorName:       "Ben",
+			Body:             "latest reply",
+			OccurredAt:       base.Add(2 * time.Minute),
+		},
+		{
+			ProjectID:        "test-proj",
+			SocialAccountID:  1,
+			Platform:         "facebook",
+			Kind:             inboxKindComment,
+			ExternalID:       "c3",
+			ThreadExternalID: "c3",
+			AuthorName:       "Cy",
+			Body:             "other thread",
+			OccurredAt:       base.Add(time.Minute),
+		},
+	} {
+		if _, _, err := upsertInboxItem(ctx.AppDB(), row); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	items, err := listInboxItems(ctx.AppDB(), inboxListFilter{ProjectID: "test-proj", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("items = %d, want 2 grouped threads: %+v", len(items), items)
+	}
+	if items[0].ExternalID != "c2" || items[1].ExternalID != "c3" {
+		t.Fatalf("thread order = [%s, %s], want latest reply c2 then c3", items[0].ExternalID, items[1].ExternalID)
+	}
+	thread, err := getInboxThread(ctx.AppDB(), "test-proj", &items[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(thread) != 2 || thread[0].ExternalID != "c1" || thread[1].ExternalID != "c2" {
+		t.Fatalf("thread = %+v, want c1 then c2", thread)
+	}
+}
+
 func TestInboxSyncFacebookDMsMentionsReviews(t *testing.T) {
 	pf := newRecordingPlatform()
 	pf.executeResponses["get_page_posts"] = &sdk.ExecuteResult{

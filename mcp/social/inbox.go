@@ -234,47 +234,42 @@ type inboxListFilter struct {
 	Limit            int       // capped at 200; default 50
 }
 
-// listInboxItems returns inbox rows matching the filter, newest first
-// by occurred_at. Caller-friendly defaults: limit 50, max 200, status
-// defaults to all non-archived if Statuses is empty.
+// listInboxItems returns one representative row per inbox thread,
+// newest activity first. The representative is the newest matching row
+// in that thread, so the left rail behaves like Facebook/Instagram:
+// one conversation/comment thread row ordered by last message/comment
+// date. Caller-friendly defaults: limit 50, max 200, status defaults
+// to all non-archived if Statuses is empty.
 func listInboxItems(db *sql.DB, f inboxListFilter) ([]inboxItem, error) {
 	if f.ProjectID == "" {
 		return nil, errors.New("project_id required")
 	}
-	q := `SELECT id, project_id, social_account_id, platform, kind, external_id,
-	             COALESCE(thread_external_id,''),
-	             COALESCE(parent_external_id,''), COALESCE(post_id,0), COALESCE(external_post_id,''),
-	             COALESCE(author_external_id,''), COALESCE(author_name,''),
-	             COALESCE(author_handle,''), COALESCE(author_avatar_url,''),
-	             COALESCE(body,''), COALESCE(media_json,''), COALESCE(permalink,''),
-	             COALESCE(rating,0), occurred_at, fetched_at, status, COALESCE(direction,'inbound')
-	      FROM inbox_items
-	      WHERE project_id=?`
+	where := `WHERE project_id=?`
 	args := []any{f.ProjectID}
 
 	if len(f.SocialAccountIDs) > 0 {
-		q += " AND social_account_id IN (" + placeholders(len(f.SocialAccountIDs)) + ")"
+		where += " AND social_account_id IN (" + placeholders(len(f.SocialAccountIDs)) + ")"
 		for _, id := range f.SocialAccountIDs {
 			args = append(args, id)
 		}
 	}
 	if len(f.Kinds) > 0 {
-		q += " AND kind IN (" + placeholders(len(f.Kinds)) + ")"
+		where += " AND kind IN (" + placeholders(len(f.Kinds)) + ")"
 		for _, k := range f.Kinds {
 			args = append(args, k)
 		}
 	}
 	if len(f.Statuses) > 0 {
-		q += " AND status IN (" + placeholders(len(f.Statuses)) + ")"
+		where += " AND status IN (" + placeholders(len(f.Statuses)) + ")"
 		for _, s := range f.Statuses {
 			args = append(args, s)
 		}
 	} else {
 		// Default: hide archived items from the noisy default view.
-		q += " AND status != 'archived'"
+		where += " AND status != 'archived'"
 	}
 	if !f.Since.IsZero() {
-		q += " AND occurred_at >= ?"
+		where += " AND occurred_at >= ?"
 		args = append(args, f.Since.UTC().Format(time.RFC3339))
 	}
 
@@ -285,7 +280,31 @@ func listInboxItems(db *sql.DB, f inboxListFilter) ([]inboxItem, error) {
 	if limit > 200 {
 		limit = 200
 	}
-	q += " ORDER BY occurred_at DESC LIMIT ?"
+	q := `WITH filtered AS (
+	        SELECT *,
+	               COALESCE(NULLIF(thread_external_id,''), NULLIF(parent_external_id,''), external_id) AS inbox_thread_key
+	          FROM inbox_items
+	          ` + where + `
+	      ),
+	      ranked AS (
+	        SELECT *,
+	               ROW_NUMBER() OVER (
+	                 PARTITION BY social_account_id, kind, inbox_thread_key
+	                 ORDER BY occurred_at DESC, id DESC
+	               ) AS inbox_thread_rank
+	          FROM filtered
+	      )
+	      SELECT id, project_id, social_account_id, platform, kind, external_id,
+	             COALESCE(thread_external_id,''),
+	             COALESCE(parent_external_id,''), COALESCE(post_id,0), COALESCE(external_post_id,''),
+	             COALESCE(author_external_id,''), COALESCE(author_name,''),
+	             COALESCE(author_handle,''), COALESCE(author_avatar_url,''),
+	             COALESCE(body,''), COALESCE(media_json,''), COALESCE(permalink,''),
+	             COALESCE(rating,0), occurred_at, fetched_at, status, COALESCE(direction,'inbound')
+	        FROM ranked
+	       WHERE inbox_thread_rank=1
+	       ORDER BY occurred_at DESC, id DESC
+	       LIMIT ?`
 	args = append(args, limit)
 
 	rows, err := db.Query(q, args...)
