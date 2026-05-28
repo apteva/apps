@@ -2053,6 +2053,43 @@ func TestIdentitiesList_ReturnsAnchors(t *testing.T) {
 	}
 }
 
+func TestIdentityUpsert_PreservesInboundWiringOnRefresh(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+
+	preseedIdentity(t, ctx, identityUpsert{
+		Kind: "email_domain", Address: "acme.com",
+		Provider: "aws-ses", ProviderIdentityID: "acme.com",
+		Verified: true, VerificationStatus: "verified", DkimStatus: "SUCCESS",
+		InboundBootstrapped: true,
+		InboundConfig:       `{"bucket":"apteva-ses-inbound-47","topic_arn":"arn:aws:sns:eu-west-1:111:apteva"}`,
+	})
+
+	if _, err := dbUpsertIdentity(ctx.AppDB(), &identityUpsert{
+		ProjectID:          "test-proj",
+		Kind:               "email_domain",
+		Address:            "acme.com",
+		Provider:           "aws-ses",
+		ProviderIdentityID: "acme.com",
+		Verified:           true,
+		VerificationStatus: "verified",
+		DkimStatus:         "SUCCESS",
+		MarkSyncedNow:      true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	row, _ := dbFindIdentity(ctx.AppDB(), "test-proj", "email_domain", "acme.com")
+	if row == nil {
+		t.Fatal("identity not found")
+	}
+	if !row.InboundBootstrapped {
+		t.Fatalf("provider refresh cleared inbound_bootstrapped: %+v", row)
+	}
+	if row.InboundConfig == "" || !strings.Contains(row.InboundConfig, "apteva-ses-inbound-47") {
+		t.Fatalf("provider refresh cleared inbound_config: %+v", row)
+	}
+}
+
 // senders_create on a bare domain should now write to identities, not
 // senders. Confirms the v0.12 storage split actually happens through
 // the normal create path (not just through pre-seeding).

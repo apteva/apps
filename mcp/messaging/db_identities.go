@@ -122,7 +122,10 @@ func dbUpsertIdentity(db *sql.DB, u *identityUpsert) (int64, error) {
 			verified = excluded.verified,
 			verification_status = excluded.verification_status,
 			dkim_status = excluded.dkim_status,
-			inbound_bootstrapped = excluded.inbound_bootstrapped,
+			inbound_bootstrapped = CASE
+				WHEN excluded.inbound_bootstrapped = 1 THEN 1
+				ELSE identities.inbound_bootstrapped
+			END,
 			inbound_config = COALESCE(NULLIF(excluded.inbound_config,''), inbound_config),
 			metadata = COALESCE(NULLIF(excluded.metadata,''), metadata),
 			last_synced_at = excluded.last_synced_at,
