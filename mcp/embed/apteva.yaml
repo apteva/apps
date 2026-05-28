@@ -1,0 +1,74 @@
+schema: apteva-app/v1
+
+name: embed
+display_name: Embed
+version: 0.1.0
+description: |
+  Create shareable viewer links and oEmbed-compatible responses for
+  storage-backed files and media. Embed keeps publishing concerns out
+  of storage: storage owns bytes and signed URLs; media can enrich
+  thumbnails and dimensions; Embed owns the public viewer, iframe HTML,
+  and oEmbed JSON.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/embed
+tags: [embed, oembed, media, storage, sharing]
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: storage
+      version: ">=0.10.0"
+      reason: embed resolves file metadata and signed content URLs through storage.
+    - name: media
+      optional: true
+      reason: future enrichment for video duration, dimensions, thumbnails, and poster images.
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: embed_create
+      description: Create a shareable viewer and oEmbed record for a storage file. Args - storage_file_id, title?, width?, height?, storage_project_id?.
+    - name: embed_get
+      description: Fetch one embed by id, token, or viewer URL. Returns viewer_url, oembed_url, and iframe HTML.
+    - name: embed_list
+      description: List recent embeds in the current project.
+    - name: embed_delete
+      description: Delete one embed record. Args - id or token.
+    - name: embed_refresh
+      description: Re-resolve storage metadata for an embed. Args - id or token.
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/embed
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/embed.db
+  migrations: migrations/
+
+config_schema:
+  - name: signed_url_ttl_seconds
+    type: text
+    default: "86400"
+    label: Signed storage URL TTL
+    description: How long storage URLs minted inside viewer pages should last.
+  - name: default_width
+    type: text
+    default: "640"
+    label: Default embed width
+  - name: default_height
+    type: text
+    default: "360"
+    label: Default embed height
+
+upgrade_policy: auto-patch
