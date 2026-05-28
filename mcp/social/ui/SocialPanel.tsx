@@ -2713,6 +2713,13 @@ function InboxView({
   };
 
   const accountName = (id: number) => accounts.find((a) => a.id === id)?.display_name || `#${id}`;
+  const inboxAuthor = (item: InboxItem) => {
+    if (item.author_name) return item.author_name;
+    if (item.author_handle) return item.author_handle;
+    if (item.direction === "outbound") return "You";
+    if (item.platform === "facebook" && item.kind === "comment") return "Facebook commenter";
+    return "Author unavailable";
+  };
 
   return (
     <div className="h-full flex flex-col">
@@ -2775,7 +2782,7 @@ function InboxView({
                 <span className="text-xs text-text-dim">{it.platform}</span>
                 {it.status === "unread" && <span className="ml-auto w-2 h-2 rounded-full bg-accent" />}
               </div>
-              <div className="text-sm text-text truncate mt-1">{it.author_name || it.author_handle || "Unknown"}</div>
+              <div className="text-sm text-text truncate mt-1">{inboxAuthor(it)}</div>
               <div className="text-xs text-text-dim truncate mt-1">{it.body || "(no text)"}</div>
               <div className="text-[11px] text-text-muted mt-1">{new Date(it.occurred_at).toLocaleString()}</div>
             </button>
@@ -2787,13 +2794,13 @@ function InboxView({
           ) : (
             <>
               <div className="border-b border-border px-5 py-4">
-                <div className="text-text font-medium">{selected.author_name || selected.author_handle || "Unknown"}</div>
+                <div className="text-text font-medium">{inboxAuthor(selected)}</div>
                 <div className="text-xs text-text-dim">{accountName(selected.social_account_id)} · {selected.platform} · {selected.kind}</div>
               </div>
               <div className="flex-1 overflow-y-auto p-5 flex flex-col gap-3">
                 {thread.map((m) => (
                   <div key={m.id} className={"max-w-[78%] border border-border rounded p-3 " + (m.direction === "outbound" ? "self-end bg-bg-card" : "self-start bg-bg-input/40")}>
-                    <div className="text-xs text-text-dim mb-1">{m.author_name || m.author_handle || (m.direction === "outbound" ? "You" : "Unknown")}</div>
+                    <div className="text-xs text-text-dim mb-1">{inboxAuthor(m)}</div>
                     <div className="text-sm text-text whitespace-pre-wrap">{m.body || "(no text)"}</div>
                     <div className="text-[11px] text-text-muted mt-2">{new Date(m.occurred_at).toLocaleString()}</div>
                   </div>
