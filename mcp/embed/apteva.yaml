@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: embed
 display_name: Embed
-version: 0.1.0
+version: 0.1.1
 description: |
   Create shareable viewer links and oEmbed-compatible responses for
   storage-backed files and media. Embed keeps publishing concerns out
@@ -41,6 +41,11 @@ provides:
       description: Delete one embed record. Args - id or token.
     - name: embed_refresh
       description: Re-resolve storage metadata for an embed. Args - id or token.
+  ui_panels:
+    - slot: project.page
+      label: Embed
+      icon: code
+      entry: /ui/EmbedPanel.mjs
 
 runtime:
   kind: source

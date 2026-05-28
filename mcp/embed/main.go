@@ -69,7 +69,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("embed requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("embed mounted", "version", "0.1.0")
+	ctx.Logger().Info("embed mounted", "version", "0.1.1")
 	return nil
 }
 
@@ -297,11 +297,14 @@ func (a *App) handleEmbedsItem(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		out, err := a.toolGet(globalCtx, args)
 		writeToolResult(w, out, err)
+	case http.MethodPatch:
+		out, err := a.toolRefresh(globalCtx, args)
+		writeToolResult(w, out, err)
 	case http.MethodDelete:
 		out, err := a.toolDelete(globalCtx, args)
 		writeToolResult(w, out, err)
 	default:
-		httpErr(w, http.StatusMethodNotAllowed, "GET or DELETE")
+		httpErr(w, http.StatusMethodNotAllowed, "GET, PATCH or DELETE")
 	}
 }
 
