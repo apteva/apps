@@ -417,7 +417,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
         <span className="text-text-dim text-xs ml-2">{status}</span>
       </header>
 
-      <div className="flex-1 overflow-auto">
+      <div className={"flex-1 min-h-0 " + (tab === "inbox" ? "overflow-hidden" : "overflow-auto")}>
         {tab === "accounts" && (
           <AccountsView
             accounts={accounts}
@@ -2799,8 +2799,11 @@ function InboxView({
           ))}
         </div>
       )}
-      <div className="flex-1 min-h-0 overflow-hidden grid grid-cols-1 sm:grid-cols-[minmax(280px,42%)_minmax(0,1fr)]">
-        <div className="border-b sm:border-b-0 sm:border-r border-border min-h-0 overflow-hidden flex flex-col bg-bg-card/20">
+      <div className="flex-1 min-h-0 overflow-hidden flex">
+        <aside
+          className="border-r border-border min-h-0 overflow-hidden flex flex-col bg-bg-card/20 shrink-0"
+          style={{ width: "42%", minWidth: 300, maxWidth: 460 }}
+        >
           <div className="p-3 border-b border-border flex flex-col gap-2">
             <input
               value={search}
@@ -2852,8 +2855,8 @@ function InboxView({
             </button>
           ))}
           </div>
-        </div>
-        <div className="min-w-0 min-h-0 overflow-hidden flex flex-col bg-bg">
+        </aside>
+        <main className="min-w-0 min-h-0 overflow-hidden flex flex-col bg-bg flex-1">
           {!selected ? (
             <div className="m-auto text-sm text-text-dim">Select an item</div>
           ) : (
@@ -2909,7 +2912,7 @@ function InboxView({
               </div>
             </>
           )}
-        </div>
+        </main>
       </div>
     </div>
   );
