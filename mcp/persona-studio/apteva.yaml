@@ -2,15 +2,16 @@ schema: apteva-app/v1
 
 name: persona-studio
 display_name: Persona Studio
-version: 0.1.2
+version: 0.1.3
 description: |
   Virtual influencer and reusable persona workspace. Persona Studio owns
   consistent identities, reference sets, reusable items/products, style
   profiles, campaigns, generated assets, and Composer handoffs while Media
   Studio remains the provider-neutral generator.
 
-  v0.1.2 improves the panel Storage browser by hiding app-owned dot
-  folders such as /.generated/ and /.composer/.
+  v0.1.3 adds live Storage previews for linked persona references,
+  reusable item reference files, and generate-level Media Studio model
+  and format controls.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/persona-studio
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/persona-studio/icon.svg
@@ -60,7 +61,7 @@ provides:
     - name: persona_item_list
       description: List reusable items for a persona.
     - name: persona_generate_asset
-      description: Generate one persona-consistent asset through Media Studio, using style profiles, references, items, and cache.
+      description: Generate one persona-consistent asset through Media Studio, using style profiles, references, items, cache, and optional settings such as model, size, aspect, duration, quality, and provider options.
     - name: persona_generate_pack
       description: Generate a small starter pack of persona assets using Media Studio.
     - name: persona_campaign_create
