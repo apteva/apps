@@ -585,8 +585,16 @@ func sourceImageRefs(args map[string]any) []string {
 func maxSourceImagesFor(providerSlug, capability, model string) int {
 	switch capability {
 	case "image.edit":
-		if providerSlug == "venice-ai" {
+		switch providerSlug {
+		case "venice-ai":
 			return 3
+		case "openai-api":
+			if strings.EqualFold(model, "dall-e-2") {
+				return 1
+			}
+			return 16
+		case "gemini":
+			return 5
 		}
 		return 1
 	case "video.generate":

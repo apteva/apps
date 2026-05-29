@@ -172,15 +172,9 @@ const TAB_LABELS: Record<Exclude<Kind, "audio_sfx">, string> = {
 };
 
 // Image-specific option matrices, lifted from the old StudioPanel.
-type ImageModel =
-  | "gpt-image-2"
-  | "gpt-image-1.5"
-  | "gpt-image-1"
-  | "gpt-image-1-mini"
-  | "dall-e-3"
-  | "dall-e-2";
+type ImageModel = string;
 
-const IMAGE_MODEL_LABELS: Record<ImageModel, string> = {
+const IMAGE_MODEL_LABELS: Record<string, string> = {
   "gpt-image-2": "GPT Image 2 (current)",
   "gpt-image-1.5": "GPT Image 1.5",
   "gpt-image-1": "GPT Image 1",
@@ -196,7 +190,7 @@ const IMAGE_MODELS: ImageModel[] = [
   "dall-e-3",
   "dall-e-2",
 ];
-const IMAGE_SIZES: Record<ImageModel, string[]> = {
+const IMAGE_SIZES: Record<string, string[]> = {
   "gpt-image-2": ["1024x1024", "1024x1536", "1536x1024", "2048x2048", "3840x2160"],
   "gpt-image-1.5": ["1024x1024", "1024x1536", "1536x1024"],
   "gpt-image-1": ["1024x1024", "1024x1536", "1536x1024"],
@@ -221,8 +215,8 @@ const EDIT_MODELS = [
   "flux-2-max-edit",
   "gpt-image-2-edit",
 ] as const;
-type EditModel = typeof EDIT_MODELS[number];
-const EDIT_MODEL_SOURCE_LIMITS: Record<EditModel, number> = {
+type EditModel = string;
+const EDIT_MODEL_SOURCE_LIMITS: Record<string, number> = {
   "firered-image-edit": 3,
   "qwen-edit": 3,
   "grok-imagine-edit": 3,
@@ -487,7 +481,11 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                 (m: { id: string }) => m.id === imageModel,
               );
               if (!have) setImageModel(data.models[0].id as ImageModel);
-	            } else if (activeKind === "video") {
+              const editModels = data.models.filter((m: LiveModel) => m.supports_image_edit);
+              if (editModels.length > 0 && !editModels.some((m: LiveModel) => m.id === editModel)) {
+                setEditModel(editModels[0].id);
+              }
+		            } else if (activeKind === "video") {
 	              const have = data.models.some(
 	                (m: { id: string }) => m.id === videoModel,
 	              );
@@ -782,6 +780,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             editModel={editModel}
             setEditModel={setEditModel}
             editSourceLimit={editSourceLimit}
+            editModels={liveModels?.filter((m) => m.supports_image_edit) || []}
             videoModel={videoModel}
             setVideoModel={setVideoModel}
             audioModel={audioModel}
@@ -948,6 +947,7 @@ interface ComposerProps {
   editModel: EditModel;
   setEditModel: (v: EditModel) => void;
   editSourceLimit: number;
+  editModels: LiveModel[];
   videoModel: string;
   setVideoModel: (v: string) => void;
   audioModel: string;
@@ -1007,6 +1007,8 @@ function Composer(p: ComposerProps) {
           format={p.imageFormat}
           setFormat={p.setImageFormat}
           maxSources={p.editSourceLimit}
+          liveModels={p.editModels}
+          liveProvider={p.liveProvider}
         />
       )}
       {p.kind === "image" && !p.isEditMode && (
@@ -1205,25 +1207,37 @@ function EditOptions({
   format,
   setFormat,
   maxSources,
+  liveModels,
+  liveProvider,
 }: {
   model: EditModel;
   setModel: (v: EditModel) => void;
   format: string;
   setFormat: (v: string) => void;
   maxSources: number;
+  liveModels: LiveModel[];
+  liveProvider: string;
 }) {
+  const modelOptions = liveModels.length > 0 ? liveModels : EDIT_MODELS.map((id) => ({ id, label: id }));
   return (
     <>
       <div>
-        <label className="text-text-muted text-xs block">Edit model</label>
+        <label className="text-text-muted text-xs block">
+          Edit model
+          {liveModels.length > 0 && (
+            <span className="text-text-dim ml-1" style={{ fontSize: 10 }}>
+              · {liveProvider} ({liveModels.length})
+            </span>
+          )}
+        </label>
         <select
           value={model}
-          onChange={(e) => setModel(e.target.value as EditModel)}
+          onChange={(e) => setModel(e.target.value)}
           className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
         >
-          {EDIT_MODELS.map((m) => (
-            <option key={m} value={m}>
-              {m}
+          {modelOptions.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.label}
             </option>
           ))}
         </select>

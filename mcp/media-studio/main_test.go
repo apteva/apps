@@ -1015,10 +1015,59 @@ func TestBuildVeniceImageEditArgs_DefaultModel(t *testing.T) {
 	}
 }
 
-func TestBuildImageArgs_OpenAIEdit_NotWired(t *testing.T) {
-	_, err := buildImageArgs(map[string]any{"prompt": "x", "source_image": "AAAA"}, "openai-api", "image.edit")
-	if err == nil || !strings.Contains(err.Error(), "not wired") {
-		t.Errorf("expected 'not wired' error for openai edit, got %v", err)
+func TestBuildImageArgs_OpenAIEdit_JSONImages(t *testing.T) {
+	got, err := buildImageArgs(map[string]any{
+		"prompt":        "make a party scene",
+		"model":         "gpt-image-1.5",
+		"source_images": []string{"AAAA", "https://example.com/ref.png"},
+		"options": map[string]any{
+			"quality":       "high",
+			"output_format": "webp",
+		},
+	}, "openai-api", "image.edit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["model"] != "gpt-image-1.5" || got["prompt"] != "make a party scene" {
+		t.Errorf("base fields: %+v", got)
+	}
+	images, ok := got["images"].([]map[string]any)
+	if !ok || len(images) != 2 {
+		t.Fatalf("images = %#v", got["images"])
+	}
+	if images[0]["image_url"] != "data:image/png;base64,AAAA" || images[1]["image_url"] != "https://example.com/ref.png" {
+		t.Errorf("image refs = %#v", images)
+	}
+	if got["quality"] != "high" || got["output_format"] != "webp" {
+		t.Errorf("options not passed through: %+v", got)
+	}
+}
+
+func TestBuildImageArgs_GeminiEdit_InlineImages(t *testing.T) {
+	got, err := buildImageArgs(map[string]any{
+		"prompt":        "use these references",
+		"model":         "gemini-2.5-flash-image",
+		"source_images": []string{"AAAA", "data:image/jpeg;base64,BBBB"},
+		"options": map[string]any{
+			"aspect_ratio": "16:9",
+		},
+	}, "gemini", "image.edit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["model"] != "gemini-2.5-flash-image" {
+		t.Errorf("model = %v", got["model"])
+	}
+	contents := got["contents"].([]map[string]any)
+	parts := contents[0]["parts"].([]map[string]any)
+	if len(parts) != 3 {
+		t.Fatalf("parts = %#v", parts)
+	}
+	cfg := got["generationConfig"].(map[string]any)
+	rf := cfg["responseFormat"].(map[string]any)
+	img := rf["image"].(map[string]any)
+	if img["aspectRatio"] != "16:9" {
+		t.Errorf("aspect = %v", img["aspectRatio"])
 	}
 }
 

@@ -22,6 +22,8 @@ func buildImageArgs(args map[string]any, providerSlug, capability string) (map[s
 			return buildOpenAIImageArgs(args), nil
 		case "openai-codex":
 			return buildOpenAICodexImageArgs(args), nil
+		case "gemini":
+			return buildGeminiImageArgs(args), nil
 		case "venice-ai":
 			return buildVeniceImageArgs(args), nil
 		}
@@ -30,7 +32,9 @@ func buildImageArgs(args map[string]any, providerSlug, capability string) (map[s
 		case "venice-ai":
 			return buildVeniceImageEditArgs(args), nil
 		case "openai-api":
-			return nil, fmt.Errorf("openai-api image edit not wired (multipart body — pending executor support)")
+			return buildOpenAIImageEditArgs(args), nil
+		case "gemini":
+			return buildGeminiImageEditArgs(args), nil
 		case "openai-codex":
 			return nil, fmt.Errorf("openai-codex image edit not wired (text-to-image only)")
 		}
@@ -61,6 +65,151 @@ func buildOpenAIImageArgs(args map[string]any) map[string]any {
 		}
 	}
 	return buildProviderArgs(model, prompt, size, quality, outputFormat, background, n)
+}
+
+func buildOpenAIImageEditArgs(args map[string]any) map[string]any {
+	model := strArg(args, "model", "gpt-image-1.5")
+	if model == "" || model == "gpt-image-2" || model == "dall-e-3" {
+		model = "gpt-image-1.5"
+	}
+	out := map[string]any{
+		"model":  model,
+		"prompt": strArg(args, "prompt", ""),
+		"images": openAIImageRefs(resolvedSourceImages(args)),
+		"n":      intArg(args, "n", 1),
+	}
+	if size := strArg(args, "size", ""); size != "" {
+		out["size"] = size
+	} else {
+		out["size"] = "auto"
+	}
+	if opts, ok := args["options"].(map[string]any); ok {
+		for _, key := range []string{"quality", "output_format", "background", "input_fidelity"} {
+			if v, exists := opts[key]; exists {
+				out[key] = v
+			}
+		}
+	}
+	for _, key := range []string{"quality", "output_format", "background", "input_fidelity"} {
+		if v, exists := args[key]; exists {
+			out[key] = v
+		}
+	}
+	return out
+}
+
+func openAIImageRefs(sources []string) []map[string]any {
+	out := make([]map[string]any, 0, len(sources))
+	for _, src := range sources {
+		src = strings.TrimSpace(src)
+		if src == "" {
+			continue
+		}
+		if strings.HasPrefix(src, "file-") {
+			out = append(out, map[string]any{"file_id": src})
+			continue
+		}
+		out = append(out, map[string]any{"image_url": imageURLRef(src)})
+	}
+	return out
+}
+
+func imageURLRef(src string) string {
+	if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") || strings.HasPrefix(src, "data:") {
+		return src
+	}
+	return "data:image/png;base64," + src
+}
+
+func buildGeminiImageArgs(args map[string]any) map[string]any {
+	return buildGeminiImageRequest(args, resolvedSourceImages(args))
+}
+
+func buildGeminiImageEditArgs(args map[string]any) map[string]any {
+	return buildGeminiImageRequest(args, resolvedSourceImages(args))
+}
+
+func buildGeminiImageRequest(args map[string]any, sources []string) map[string]any {
+	model := strArg(args, "model", "gemini-2.5-flash-image")
+	if model == "" {
+		model = "gemini-2.5-flash-image"
+	}
+	parts := []map[string]any{{"text": strArg(args, "prompt", "")}}
+	for _, src := range sources {
+		if part := geminiImagePart(src); part != nil {
+			parts = append(parts, part)
+		}
+	}
+	out := map[string]any{
+		"model":    model,
+		"contents": []map[string]any{{"parts": parts}},
+		"generationConfig": map[string]any{
+			"responseModalities": []string{"Image"},
+		},
+	}
+	aspect := strArg(args, "aspect", "")
+	if opts, ok := args["options"].(map[string]any); ok {
+		if v := strArg(opts, "aspect_ratio", ""); v != "" {
+			aspect = v
+		}
+		if v := strArg(opts, "resolution", ""); v != "" {
+			ensureGeminiResponseFormat(out)["imageSize"] = v
+		}
+	}
+	if aspect == "" {
+		aspect = aspectFromSize(strArg(args, "size", ""))
+	}
+	if aspect != "" {
+		ensureGeminiResponseFormat(out)["aspectRatio"] = aspect
+	}
+	return out
+}
+
+func ensureGeminiResponseFormat(out map[string]any) map[string]any {
+	cfg, _ := out["generationConfig"].(map[string]any)
+	rf, _ := cfg["responseFormat"].(map[string]any)
+	if rf == nil {
+		rf = map[string]any{}
+		cfg["responseFormat"] = rf
+	}
+	img, _ := rf["image"].(map[string]any)
+	if img == nil {
+		img = map[string]any{}
+		rf["image"] = img
+	}
+	return img
+}
+
+func aspectFromSize(size string) string {
+	switch size {
+	case "1024x1536", "1080x1920", "9:16":
+		return "9:16"
+	case "1536x1024", "1920x1080", "16:9":
+		return "16:9"
+	case "1024x1024", "1:1":
+		return "1:1"
+	}
+	return ""
+}
+
+func geminiImagePart(src string) map[string]any {
+	src = strings.TrimSpace(src)
+	if src == "" {
+		return nil
+	}
+	if strings.HasPrefix(src, "data:") {
+		mime := "image/png"
+		data := src
+		if semi := strings.Index(src, ";base64,"); semi > len("data:") {
+			mime = src[len("data:"):semi]
+			data = src[semi+len(";base64,"):]
+		}
+		return map[string]any{"inlineData": map[string]any{"mimeType": mime, "data": data}}
+	}
+	if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") {
+		return map[string]any{"fileData": map[string]any{"mimeType": "image/png", "fileUri": src}}
+	}
+	return map[string]any{"inlineData": map[string]any{"mimeType": "image/png", "data": src}}
 }
 
 func buildOpenAICodexImageArgs(args map[string]any) map[string]any {
@@ -230,32 +379,9 @@ func normalizeImageResponse(slug, capability string, raw json.RawMessage) ([]gen
 	}
 	switch slug {
 	case "openai-api", "openai-codex":
-		var body struct {
-			Data []struct {
-				URL           string `json:"url"`
-				B64JSON       string `json:"b64_json"`
-				RevisedPrompt string `json:"revised_prompt"`
-			} `json:"data"`
-			Created int64  `json:"created"`
-			Model   string `json:"model"` // gpt-image-2 echoes this; DALL·E doesn't
-		}
-		if err := json.Unmarshal(raw, &body); err != nil {
-			return nil, "", "", err
-		}
-		media := make([]generatedMedia, 0, len(body.Data))
-		var revised string
-		for i, d := range body.Data {
-			media = append(media, generatedMedia{
-				UpstreamURL: d.URL,
-				B64:         d.B64JSON,
-				MimeType:    "image/png", // overridden by storage path when output_format requests jpeg/webp
-				Ext:         "png",
-			})
-			if i == 0 {
-				revised = d.RevisedPrompt
-			}
-		}
-		return media, revised, body.Model, nil
+		return normalizeOpenAIImageResponse(raw)
+	case "gemini":
+		return normalizeGeminiImageResponse(raw)
 	case "venice-ai":
 		// Venice native shape: { id, images:[<b64>,...], request:{success,data:{...}}, timing }.
 		// request.data echoes back the canonical format + model so we
@@ -375,6 +501,10 @@ func resolvedSourceImages(args map[string]any) []string {
 // + ext fall through to whichever output_format was requested.
 func normalizeImageEditResponse(slug string, raw json.RawMessage) ([]generatedMedia, string, string, error) {
 	switch slug {
+	case "openai-api":
+		return normalizeOpenAIImageResponse(raw)
+	case "gemini":
+		return normalizeGeminiImageResponse(raw)
 	case "venice-ai":
 		var env struct {
 			Binary   bool   `json:"_binary"`
@@ -398,6 +528,82 @@ func normalizeImageEditResponse(slug string, raw json.RawMessage) ([]generatedMe
 		}}, "", "", nil
 	}
 	return nil, "", "", fmt.Errorf("unsupported edit provider slug: %q", slug)
+}
+
+func normalizeOpenAIImageResponse(raw json.RawMessage) ([]generatedMedia, string, string, error) {
+	var body struct {
+		Data []struct {
+			URL           string `json:"url"`
+			B64JSON       string `json:"b64_json"`
+			RevisedPrompt string `json:"revised_prompt"`
+		} `json:"data"`
+		Created int64  `json:"created"`
+		Model   string `json:"model"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, "", "", err
+	}
+	media := make([]generatedMedia, 0, len(body.Data))
+	var revised string
+	for i, d := range body.Data {
+		media = append(media, generatedMedia{
+			UpstreamURL: d.URL,
+			B64:         d.B64JSON,
+			MimeType:    "image/png",
+			Ext:         "png",
+		})
+		if i == 0 {
+			revised = d.RevisedPrompt
+		}
+	}
+	return media, revised, body.Model, nil
+}
+
+func normalizeGeminiImageResponse(raw json.RawMessage) ([]generatedMedia, string, string, error) {
+	var body struct {
+		ModelVersion string `json:"modelVersion"`
+		Candidates   []struct {
+			Content struct {
+				Parts []struct {
+					Text       string `json:"text"`
+					InlineData *struct {
+						MimeType string `json:"mimeType"`
+						Data     string `json:"data"`
+					} `json:"inlineData"`
+					InlineDataSnake *struct {
+						MimeType string `json:"mime_type"`
+						Data     string `json:"data"`
+					} `json:"inline_data"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, "", "", err
+	}
+	media := []generatedMedia{}
+	var revised string
+	for _, c := range body.Candidates {
+		for _, p := range c.Content.Parts {
+			if revised == "" && strings.TrimSpace(p.Text) != "" {
+				revised = p.Text
+			}
+			mime, data := "", ""
+			if p.InlineData != nil {
+				mime, data = p.InlineData.MimeType, p.InlineData.Data
+			} else if p.InlineDataSnake != nil {
+				mime, data = p.InlineDataSnake.MimeType, p.InlineDataSnake.Data
+			}
+			if data == "" {
+				continue
+			}
+			if mime == "" {
+				mime = "image/png"
+			}
+			media = append(media, generatedMedia{B64: data, MimeType: mime, Ext: extFromMime(mime)})
+		}
+	}
+	return media, revised, body.ModelVersion, nil
 }
 
 // imageFormatToMime maps Venice's `format` string ("png" / "jpeg" / "webp")

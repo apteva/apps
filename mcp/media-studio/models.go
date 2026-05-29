@@ -190,15 +190,115 @@ func parseModelList(providerSlug, kind string, raw json.RawMessage, connID int64
 			if !openaiModelMatches(m.ID, kind) {
 				continue
 			}
-			out = append(out, modelEntry{ID: m.ID, Label: m.ID})
+			entry := modelEntry{ID: m.ID, Label: m.ID}
+			if kind == KindImage {
+				id := strings.ToLower(m.ID)
+				switch {
+				case strings.HasPrefix(id, "gpt-image"):
+					entry.SupportsImageEdit = true
+					entry.MaxSourceImages = 16
+				case id == "dall-e-2":
+					entry.SupportsImageEdit = true
+					entry.MaxSourceImages = 1
+				}
+			}
+			out = append(out, entry)
 		}
 		return out
+	case "gemini":
+		_ = connID
+		_ = veniceType
+		return parseGeminiModelList(kind, raw)
 	case "elevenlabs":
 		_ = connID
 		_ = veniceType
 		return parseElevenLabsModelList(kind, raw)
 	}
 	return nil
+}
+
+func parseGeminiModelList(kind string, raw json.RawMessage) []modelEntry {
+	if kind != KindImage {
+		return nil
+	}
+	type geminiModel struct {
+		Name                       string   `json:"name"`
+		DisplayName                string   `json:"displayName"`
+		SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
+	}
+	var body struct {
+		Models []geminiModel `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return geminiDefaultImageModels()
+	}
+	out := []modelEntry{}
+	for _, m := range body.Models {
+		id := strings.TrimPrefix(m.Name, "models/")
+		if !geminiImageModelMatches(id, m.SupportedGenerationMethods) {
+			continue
+		}
+		label := m.DisplayName
+		if label == "" {
+			label = id
+		}
+		out = append(out, modelEntry{
+			ID:                 id,
+			Label:              label,
+			AspectRatios:       []string{"1:1", "9:16", "16:9", "3:4", "4:3"},
+			DefaultAspectRatio: "1:1",
+			SupportsImageEdit:  true,
+			MaxSourceImages:    5,
+			DefaultResolution:  "1K",
+			Resolutions:        []string{"1K", "2K", "4K"},
+			PromptCharLimit:    32000,
+		})
+	}
+	if len(out) == 0 {
+		return geminiDefaultImageModels()
+	}
+	return out
+}
+
+func geminiImageModelMatches(id string, methods []string) bool {
+	id = strings.ToLower(id)
+	if !strings.Contains(id, "image") {
+		return false
+	}
+	if len(methods) == 0 {
+		return true
+	}
+	for _, m := range methods {
+		if strings.EqualFold(m, "generateContent") {
+			return true
+		}
+	}
+	return false
+}
+
+func geminiDefaultImageModels() []modelEntry {
+	return []modelEntry{
+		{
+			ID:                 "gemini-2.5-flash-image",
+			Label:              "Gemini 2.5 Flash Image",
+			AspectRatios:       []string{"1:1", "9:16", "16:9", "3:4", "4:3"},
+			DefaultAspectRatio: "1:1",
+			SupportsImageEdit:  true,
+			MaxSourceImages:    5,
+			PromptCharLimit:    32000,
+		},
+		{
+			ID:                 "gemini-3-pro-image-preview",
+			Label:              "Gemini 3 Pro Image Preview",
+			AspectRatios:       []string{"1:1", "9:16", "16:9", "3:4", "4:3"},
+			DefaultAspectRatio: "1:1",
+			Resolutions:        []string{"1K", "2K", "4K"},
+			DefaultResolution:  "1K",
+			SupportsImageEdit:  true,
+			MaxSourceImages:    5,
+			PromptCharLimit:    32000,
+		},
+	}
 }
 
 func parseElevenLabsModelList(kind string, raw json.RawMessage) []modelEntry {

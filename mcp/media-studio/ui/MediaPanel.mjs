@@ -1,3 +1,2030 @@
-import{useCallback as CW,useEffect as K,useRef as IW,useState as B}from"react";import{jsx as X,jsxs as Z,Fragment as h}from"react/jsx-runtime";function tW(W,J,H){let Y=IW(H);Y.current=H,K(()=>{if(!W||!J)return;let z=(q)=>Y.current(q),$=window.__aptevaAppEvents;if($)return $.subscribe(W,J,z);let T=0,Q=null,U=!1,R=null,k=()=>{if(U)return;let q=`/api/app-events/${encodeURIComponent(W)}?project_id=${encodeURIComponent(J)}`+(T>0?`&since=${T}`:"");Q=new EventSource(q,{withCredentials:!0}),Q.onmessage=(V)=>{try{let w=JSON.parse(V.data);if(w.seq<=T)return;T=w.seq,Y.current(w)}catch{}},Q.onerror=()=>{if(Q&&Q.readyState===EventSource.CLOSED){if(R)window.clearTimeout(R);R=window.setTimeout(k,2000)}}};return k(),()=>{if(U=!0,R)window.clearTimeout(R);if(Q)Q.close()}},[W,J])}function f(W){if(!W||W<=0)return"";if(W>=0.01)return"$"+W.toFixed(2);if(W>=0.001)return"$"+W.toFixed(4);return"$"+W.toFixed(6)}var A="/api/apps/media-studio",KW={image:"Images",video:"Videos",audio_tts:"Audio",music:"Music",avatar:"Avatar"},sW={"gpt-image-2":"GPT Image 2 (current)","gpt-image-1.5":"GPT Image 1.5","gpt-image-1":"GPT Image 1","gpt-image-1-mini":"GPT Image 1 Mini","dall-e-3":"DALL·E 3 (legacy)","dall-e-2":"DALL·E 2 (legacy)"},eW=["gpt-image-2","gpt-image-1.5","gpt-image-1","gpt-image-1-mini","dall-e-3","dall-e-2"],MW={"gpt-image-2":["1024x1024","1024x1536","1536x1024","2048x2048","3840x2160"],"gpt-image-1.5":["1024x1024","1024x1536","1536x1024"],"gpt-image-1":["1024x1024","1024x1536","1536x1024"],"gpt-image-1-mini":["1024x1024","1024x1536","1536x1024"],"dall-e-3":["1024x1024","1792x1024","1024x1792"],"dall-e-2":["256x256","512x512","1024x1024"]},SW=["auto","low","medium","high"],gW=["standard","hd"];function t(W){return W.startsWith("gpt-image")}var WX=["firered-image-edit","qwen-edit","grok-imagine-edit","flux-2-max-edit","gpt-image-2-edit"],XX={"firered-image-edit":3,"qwen-edit":3,"grok-imagine-edit":3,"flux-2-max-edit":3,"gpt-image-2-edit":3};function YX(){return Z("svg",{width:"14",height:"14",viewBox:"0 0 16 16",fill:"none",stroke:"currentColor",strokeWidth:"1.5",children:[X("rect",{x:"1.5",y:"2.5",width:"13",height:"11",rx:"1"}),X("circle",{cx:"5.5",cy:"6",r:"1"}),X("path",{d:"M2 12l3.5-3.5 3 3L11 7l3 3"})]})}function $X(){return Z("svg",{width:"14",height:"14",viewBox:"0 0 16 16",fill:"none",stroke:"currentColor",strokeWidth:"1.5",children:[X("rect",{x:"1.5",y:"3.5",width:"10",height:"9",rx:"1"}),X("path",{d:"M11.5 7l3-2v6l-3-2z"})]})}function ZX(){return Z("svg",{width:"14",height:"14",viewBox:"0 0 16 16",fill:"none",stroke:"currentColor",strokeWidth:"1.5",children:[X("path",{d:"M3 6v4h2l3 2.5v-9L5 6H3z"}),X("path",{d:"M10 5.5a3 3 0 010 5"}),X("path",{d:"M12 3.5a6 6 0 010 9"})]})}function JX(){return Z("svg",{width:"14",height:"14",viewBox:"0 0 16 16",fill:"none",stroke:"currentColor",strokeWidth:"1.5",children:[X("path",{d:"M6 12V3l7-1.5v9"}),X("circle",{cx:"4.5",cy:"12",r:"1.5"}),X("circle",{cx:"11.5",cy:"10.5",r:"1.5"})]})}function vW(W){if(W.storage_urls&&W.storage_urls.length>0)return W.storage_urls[0];if(W.local_cache_url)return W.local_cache_url;if(W.thumbnail_b64)return`data:image/jpeg;base64,${W.thumbnail_b64}`;return""}function NX({projectId:W}){let[J,H]=B("image"),[Y,z]=B("audio_tts"),$=J==="audio"?Y:J,[T,Q]=B([]),[U,R]=B(null),[k,q]=B(""),[V,w]=B(!1),[F,g]=B(null),[v,s]=B(null),[n,e]=B(""),[L,zW]=B("gpt-image-2"),[l,qW]=B("1024x1024"),[u,WW]=B("auto"),[XW,pW]=B("png"),[m,DW]=B(5),[YW,QW]=B("16:9"),[b,UW]=B(""),[p,BW]=B(""),[j,VW]=B(""),[x,_W]=B(""),[c,wW]=B(""),[$W,jW]=B(!1),[xW,cW]=B([]),[ZW,GW]=B(""),[rW,nW]=B([]),[C,JW]=B([]),[I,lW]=B("firered-image-edit"),o=$==="image"&&C.length>0,[TW,NW]=B(null),[oW,RW]=B(""),[FW,iW]=B([]);K(()=>{let N=MW[L]||["1024x1024"];if(!N.includes(l))qW(N[0]);if(t(L)){if(!SW.includes(u))WW("auto")}else if(L==="dall-e-3"){if(!gW.includes(u))WW("standard")}},[L,l,u]);let PW=CW(async()=>{try{let N=await fetch(`${A}/bindings`,{credentials:"same-origin"});if(!N.ok)return;let D=await N.json();R(D)}catch{}},[]),M=CW(async()=>{try{let N=await fetch(`${A}/generations?project_id=${encodeURIComponent(W)}&kind=${$}`,{credentials:"same-origin"});if(!N.ok){q(`Error: ${N.status}`);return}let D=await N.json();Q(D.generations||[]);let O=(D.generations||[]).length;q(`${O} generation${O===1?"":"s"}`)}catch(N){q("Error: "+N.message)}},[W,$]);K(()=>{PW()},[PW]),K(()=>{M()},[M]),K(()=>{if($!=="video"&&$!=="avatar")return;let N=!1,D=new Set,O=()=>{fetch(`${A}/video-jobs?project_id=${encodeURIComponent(W)}`,{credentials:"same-origin"}).then((_)=>_.ok?_.json():null).then((_)=>{if(N||!_)return;let P=Array.isArray(_.jobs)?_.jobs:[];iW(P);let d=new Set(P.filter((S)=>S.status==="queued"||S.status==="polling").map((S)=>S.id)),EW=!1;for(let S of D)if(!d.has(S))EW=!0;if(EW)M();D=d}).catch(()=>{})};O();let G=window.setInterval(O,5000);return()=>{N=!0,window.clearInterval(G)}},[$,W,M]),K(()=>{if($!=="avatar"&&$!=="audio_tts")return;let N=!1;if($==="avatar")fetch(`${A}/avatars`,{credentials:"same-origin"}).then((D)=>D.ok?D.json():null).then((D)=>{if(N||!D)return;let O=Array.isArray(D.avatars)?D.avatars:[];if(cW(O),O.length>0&&!O.some((G)=>G.id===ZW))GW(O[0].id)}).catch(()=>{});return fetch(`${A}/voices?kind=${encodeURIComponent($)}`,{credentials:"same-origin"}).then((D)=>D.ok?D.json():null).then((D)=>{if(N||!D)return;let O=Array.isArray(D.voices)?D.voices:[];if(nW(O),O.length>0&&!O.some((G)=>G.id===b))UW(O[0].id)}).catch(()=>{}),()=>{N=!0}},[$,U]),K(()=>{if(!U?.[$]?.slug){NW(null),RW("");return}let D=!1;return fetch(`${A}/models?kind=${$}`,{credentials:"same-origin"}).then((O)=>O.ok?O.json():null).then((O)=>{if(D||!O)return;if(Array.isArray(O.models)){if(NW(O.models),RW(String(O.provider||"")),O.models.length>0){if($==="image"){if(!O.models.some((_)=>_.id===L))zW(O.models[0].id)}else if($==="video"){if(!O.models.some((_)=>_.id===p))BW(O.models[0].id)}else if($==="audio_tts"){if(!O.models.some((_)=>_.id===j))VW(O.models[0].id)}else if($==="audio_sfx"){if(!O.models.some((_)=>_.id===x))_W(O.models[0].id)}else if($==="music"){if(!O.models.some((_)=>_.id===c))wW(O.models[0].id)}}}}).catch(()=>{if(!D)NW(null)}),()=>{D=!0}},[$,U]),tW("media-studio",W,(N)=>{if(N.topic==="media.generated"){if(N.data?.kind===$)M()}});let yW=!!(U?U[$]:null)?.bound,kW=$==="image"?o?I:L:$==="video"?p:$==="audio_tts"?j:$==="audio_sfx"?x:$==="music"?c:"",y=TW?.find((N)=>N.id===kW),i=$==="video"&&!!y?.supports_image_to_video,r=$==="image"?y?.max_source_images||XX[I]||1:1,LW=$==="image"?r:1,HW=(N,D)=>{let O=N.trim();if(!O)return;JW((G)=>{return[...G.filter((P)=>P.value!==O),{value:O,label:D}].slice(0,LW)})},dW=(N)=>{JW((D)=>D.filter((O,G)=>G!==N))};K(()=>{if(!y)return;if(y.aspect_ratios&&y.aspect_ratios.length>0&&!y.aspect_ratios.includes(YW))QW(y.default_aspect_ratio||y.aspect_ratios[0]);if(y.durations&&y.durations.length>0){let N=`${m}s`;if(!y.durations.includes(N)){let D=y.durations[0],O=parseInt(D.replace(/[^\d]/g,""),10);if(!isNaN(O))DW(O)}}},[kW]);let aW=async()=>{if(!n.trim()||V)return;w(!0),q("Generating…");try{let N={kind:$,prompt:n,project_id:W};if($==="image")if(o){if(C.length>r){q(`Error: ${I} supports at most ${r} source image${r===1?"":"s"}.`);return}if(N.model=I,C.length===1)N.source_image=C[0].value;else N.source_images=C.map((P)=>P.value);N.options={output_format:XW,safe_mode:$W}}else{N.model=L,N.size=l;let P={safe_mode:$W};if(L!=="dall-e-2")P.quality=u;if(t(L))P.output_format=XW;N.options=P}else if($==="video"){if(p)N.model=p;if(N.duration=m,N.aspect=YW,i&&C[0]?.value)N.source_image=C[0].value}else if($==="audio_tts"){if(j)N.model=j;if(b)N.voice=b}else if($==="audio_sfx"){if(x)N.model=x;N.duration=m}else if($==="music"){if(c)N.model=c;N.duration=m}else if($==="avatar"){if(N.avatar=ZW,b)N.voice=b}let D=await fetch(`${A}/generate`,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify(N)}),O=await D.text();if(!D.ok){q(`Error ${D.status}: ${O.slice(0,300)}`);return}let G={};try{G=JSON.parse(O)}catch{}if(G.isError){let P=G.content?.find((d)=>d.type==="text")?.text||"generation failed";q(`Error: ${P}`);return}let _=G._meta;if(_?.status==="queued"){e("");let P=_.cost_usd?` · est. ${f(_.cost_usd)}`:"";q(`Queued — job #${_.job_id}${P}, polling for completion…`);return}e(""),q("Done."),M()}catch(N){q("Error: "+N.message)}finally{w(!1)}};return Z("div",{className:"h-full flex flex-col",children:[X("nav",{className:"flex items-center border-b border-border px-4",children:Object.keys(KW).map((N)=>{let D=N==="audio_tts"?"audio":N,O=J===D,_=U?U[N]?.bound:!1;return Z("button",{onClick:()=>H(D),className:"flex items-center gap-1.5 px-3 py-2.5 text-sm border-b-2 transition-colors "+(O?"border-accent text-text":"border-transparent text-text-muted hover:text-text"),children:[X(HX,{kind:N}),KW[N],X(uW,{bound:_})]},D)})}),J==="audio"&&Z("div",{className:"flex items-center gap-1 px-4 py-1.5 border-b border-border bg-bg-card",children:[X(hW,{label:"TTS",active:Y==="audio_tts",onClick:()=>z("audio_tts"),bound:!!U?.audio_tts.bound}),X(hW,{label:"SFX",active:Y==="audio_sfx",onClick:()=>z("audio_sfx"),bound:!!U?.audio_sfx.bound})]}),U&&!yW&&Z("div",{className:"px-4 py-2 text-xs text-text-muted bg-bg-card border-b border-border",children:["No provider bound for ",X("strong",{className:"text-text",children:$}),". Open the app settings to pick one."]}),Z("div",{className:"flex-1 flex min-h-0",children:[Z("div",{className:"flex-1 flex flex-col p-6 gap-4 min-w-0",children:[($==="image"||i)&&X(UX,{sources:i?C.slice(0,1):C,maxSources:LW,onAdd:HW,onRemove:dW,onClear:()=>JW([]),hint:i?"Source image for the image-to-video model (required)":void 0}),X(zX,{kind:$,prompt:n,setPrompt:e,generate:aW,generating:V,disabled:!yW,isEditMode:o,liveModels:TW,liveProvider:oW,imageModel:L,setImageModel:zW,imageSize:l,setImageSize:qW,imageQuality:u,setImageQuality:WW,imageFormat:XW,setImageFormat:pW,editModel:I,setEditModel:lW,editSourceLimit:r,videoModel:p,setVideoModel:BW,audioModel:j,setAudioModel:VW,sfxModel:x,setSfxModel:_W,musicModel:c,setMusicModel:wW,currentModel:y,safeMode:$W,setSafeMode:jW,duration:m,setDuration:DW,aspect:YW,setAspect:QW,voice:b,setVoice:UW,avatars:xW,selectedAvatar:ZW,setSelectedAvatar:GW,voices:rW}),($==="video"||$==="avatar")&&FW.length>0&&X(RX,{jobs:FW}),X("div",{className:"flex-1 overflow-auto border border-border rounded",children:T.length===0&&!V?X("div",{className:"py-12 px-6 text-center text-text-muted text-sm",children:k||"No generations yet for this kind."}):X(wX,{kind:$,items:T,onSelect:g,onOpenLightbox:s,generating:V,generatingPrompt:n,generatingModel:o?I:L})}),X("div",{className:"text-xs text-text-dim",children:k})]}),F&&X(TX,{selected:F,onClose:()=>g(null),onUseAsReference:F.kind==="image"&&F.storage_ids.length>0?()=>{let N=F.storage_ids[0];HW(`storage:${N}`,`Storage #${N}`),g(null),H("image")}:void 0})]}),v&&X(PX,{item:v,onClose:()=>s(null),onUseAsReference:v.kind==="image"&&v.storage_ids.length>0?()=>{let N=v.storage_ids[0];HW(`storage:${N}`,`Storage #${N}`),s(null),H("image")}:void 0})]})}function HX({kind:W}){if(W==="image")return X(YX,{});if(W==="video")return X($X,{});if(W==="music")return X(JX,{});if(W==="avatar")return X(OX,{});return X(ZX,{})}function OX(){return Z("svg",{width:"14",height:"14",viewBox:"0 0 16 16",fill:"none",stroke:"currentColor",strokeWidth:"1.5",children:[X("circle",{cx:"8",cy:"5.5",r:"2.5"}),X("path",{d:"M3 13.5c0-2.8 2.2-4.5 5-4.5s5 1.7 5 4.5"})]})}function uW({bound:W}){return X("span",{className:"rounded-full ml-1",style:{width:6,height:6,background:W?"var(--apteva-accent, #4ade80)":"var(--apteva-text-dim, #555)"}})}function hW({label:W,active:J,bound:H,onClick:Y}){return Z("button",{onClick:Y,className:"flex items-center gap-1.5 px-2.5 py-1 text-xs rounded transition-colors "+(J?"bg-bg-input text-text":"text-text-muted hover:text-text"),children:[W,X(uW,{bound:H})]})}function zX(W){let J=W.isEditMode?"Edit instruction — 'remove the tree', 'change sky to sunset'":W.kind==="avatar"?"Script the avatar will speak…":W.kind==="audio_tts"?"Text to speak":W.kind==="music"?"A jazzy lo-fi loop with piano":W.kind==="video"?"A cat walking through a sunlit garden":W.kind==="audio_sfx"?"A door creaking open":"a cat in a hat";return Z("div",{className:"flex items-end gap-3 flex-wrap",children:[Z("div",{className:"flex-1",style:{minWidth:240},children:[X("label",{className:"text-text-muted text-xs",children:"Prompt"}),X("input",{type:"text",value:W.prompt,onChange:(H)=>W.setPrompt(H.target.value),onKeyDown:(H)=>{if(H.key==="Enter")W.generate()},placeholder:J,className:"w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"})]}),W.kind==="image"&&W.isEditMode&&X(QX,{model:W.editModel,setModel:W.setEditModel,format:W.imageFormat,setFormat:W.setImageFormat,maxSources:W.editSourceLimit}),W.kind==="image"&&!W.isEditMode&&X(BX,{model:W.imageModel,setModel:W.setImageModel,size:W.imageSize,setSize:W.setImageSize,quality:W.imageQuality,setQuality:W.setImageQuality,format:W.imageFormat,setFormat:W.setImageFormat,liveModels:W.liveModels,liveProvider:W.liveProvider}),W.kind==="video"&&Z(h,{children:[X(a,{model:W.videoModel,setModel:W.setVideoModel,liveModels:W.liveModels,liveProvider:W.liveProvider}),X(VX,{durations:W.currentModel?.durations,value:W.duration,onChange:W.setDuration}),X(_X,{aspects:W.currentModel?.aspect_ratios,value:W.aspect,onChange:W.setAspect,disabledHint:W.currentModel?.model_type==="image-to-video"?"Inherited from source image":void 0})]}),W.kind==="audio_tts"&&Z(h,{children:[X(a,{model:W.audioModel,setModel:W.setAudioModel,liveModels:W.liveModels,liveProvider:W.liveProvider}),W.voices.length>0?X(AW,{voice:W.voice,setVoice:W.setVoice,voices:W.voices}):X(mW,{label:"Voice",value:W.voice,onChange:W.setVoice,placeholder:"voice_id"})]}),W.kind==="audio_sfx"&&Z(h,{children:[X(a,{model:W.sfxModel,setModel:W.setSfxModel,liveModels:W.liveModels,liveProvider:W.liveProvider}),X(OW,{label:"Duration (s)",value:W.duration,onChange:W.setDuration,min:1,max:30})]}),W.kind==="music"&&Z(h,{children:[X(a,{model:W.musicModel,setModel:W.setMusicModel,liveModels:W.liveModels,liveProvider:W.liveProvider}),X(OW,{label:"Duration (s)",value:W.duration,onChange:W.setDuration,min:3,max:300})]}),W.kind==="avatar"&&X(qX,{avatars:W.avatars,selected:W.selectedAvatar,setSelected:W.setSelectedAvatar}),W.kind==="avatar"&&W.voices.length>0&&X(AW,{voice:W.voice,setVoice:W.setVoice,voices:W.voices}),W.kind==="image"&&X(DX,{value:W.safeMode,onChange:W.setSafeMode}),X("button",{onClick:W.generate,disabled:!W.prompt.trim()||W.generating||W.disabled,className:"px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50",children:W.generating?"…":W.isEditMode?"Edit":W.kind==="avatar"?"Generate avatar":"Generate"})]})}function qX({avatars:W,selected:J,setSelected:H}){if(W.length===0)return Z("div",{children:[X("label",{className:"text-text-muted text-xs block",children:"Avatar"}),X("div",{className:"bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text-dim",style:{minWidth:200},children:"no replicas — train one in your provider"})]});return Z("div",{style:{flexBasis:"100%"},children:[X("label",{className:"text-text-muted text-xs block mb-1",children:"Avatar / replica"}),X("div",{className:"flex gap-2 flex-wrap",children:W.map((Y)=>{let z=Y.id===J;return Z("button",{onClick:()=>H(Y.id),title:`${Y.name||Y.id}${Y.status?` (${Y.status})`:""}`,className:"border rounded overflow-hidden text-left "+(z?"border-accent":"border-border hover:border-accent"),style:{width:96},children:[Y.thumbnail?X("video",{src:Y.thumbnail,muted:!0,loop:!0,onMouseEnter:($)=>$.currentTarget.play(),onMouseLeave:($)=>$.currentTarget.pause(),style:{width:96,height:96,objectFit:"cover",display:"block"}}):X("div",{className:"flex items-center justify-center text-text-dim",style:{width:96,height:96,background:"var(--apteva-bg-input, #222)",fontSize:10},children:Y.name||Y.id}),X("div",{className:"text-text truncate px-1 py-0.5",style:{fontSize:10},children:Y.name||Y.id})]},Y.id)})})]})}function DX({value:W,onChange:J}){return Z("label",{className:"flex items-center gap-1.5 text-xs text-text-muted cursor-pointer select-none",title:"When on, Venice blurs adult-classified output. Off = pass-through (default).",children:[X("input",{type:"checkbox",checked:W,onChange:(H)=>J(H.target.checked),style:{accentColor:"var(--apteva-accent, #4ade80)"}}),"Safe mode"]})}function QX({model:W,setModel:J,format:H,setFormat:Y,maxSources:z}){return Z(h,{children:[Z("div",{children:[X("label",{className:"text-text-muted text-xs block",children:"Edit model"}),X("select",{value:W,onChange:($)=>J($.target.value),className:"bg-bg-input border border-border rounded px-2 py-1.5 text-sm",children:WX.map(($)=>X("option",{value:$,children:$},$))}),Z("div",{className:"text-text-dim mt-0.5",style:{fontSize:10},children:["max ",z," reference",z===1?"":"s"]})]}),Z("div",{children:[X("label",{className:"text-text-muted text-xs block",children:"Format"}),Z("select",{value:H,onChange:($)=>Y($.target.value),className:"bg-bg-input border border-border rounded px-2 py-1.5 text-sm",children:[X("option",{value:"png",children:"PNG"}),X("option",{value:"jpeg",children:"JPEG"}),X("option",{value:"webp",children:"WebP"})]})]})]})}function UX({sources:W,maxSources:J,onAdd:H,onRemove:Y,onClear:z,hint:$}){let[T,Q]=B(""),U=IW(null),R=W.length>=J,k=(V)=>{let w=new FileReader;w.onload=()=>{let F=String(w.result||""),g=F.includes(",")?F.split(",",2)[1]:F;H(g,`Upload (${V.name})`)},w.readAsDataURL(V)};return Z("div",{onDrop:(V)=>{V.preventDefault(),Array.from(V.dataTransfer.files||[]).filter((F)=>F.type.startsWith("image/")).slice(0,Math.max(0,J-W.length)).forEach(k)},onDragOver:(V)=>V.preventDefault(),className:"flex flex-col gap-2 p-2 rounded bg-bg-card "+(W.length>0?"border border-accent":"border border-dashed border-border"),children:[W.length>0&&X("div",{className:"flex gap-2 overflow-x-auto pb-1",children:W.map((V,w)=>{let F=FX(V.value);return Z("div",{className:"flex items-center gap-2 border border-border rounded p-1.5 bg-bg",style:{minWidth:180,maxWidth:240},children:[F?X("img",{src:F,alt:"",style:{width:44,height:44,objectFit:"cover",borderRadius:4,flexShrink:0}}):X("div",{style:{width:44,height:44,borderRadius:4,background:"var(--apteva-bg-input, #222)",flexShrink:0},className:"flex items-center justify-center text-text-dim text-xs",children:"ref"}),Z("div",{className:"min-w-0 flex-1",children:[Z("div",{className:"text-text-dim",style:{fontSize:10},children:["Reference ",w+1]}),X("div",{className:"text-xs text-text truncate",title:V.label,children:V.label||"(set)"})]}),X("button",{onClick:()=>Y(w),className:"text-text-muted hover:text-text text-xs px-1.5 py-0.5 border border-border rounded",title:"Remove reference",children:"x"})]},`${V.value}-${w}`)})}),Z("div",{className:"flex items-center gap-3 flex-wrap",children:[Z("span",{className:"text-text-muted text-xs",children:[$||"Reference images",Z("span",{className:"text-text-dim",children:[" · ",W.length,"/",J]})]}),X("button",{disabled:R,onClick:()=>U.current?.click(),className:"text-xs px-2 py-1 border border-border rounded text-text hover:border-accent disabled:opacity-50",children:"Upload"}),X("input",{ref:U,type:"file",accept:"image/*",multiple:!0,onChange:(V)=>{Array.from(V.target.files||[]).slice(0,Math.max(0,J-W.length)).forEach(k),V.target.value=""},style:{display:"none"}}),X("span",{className:"text-text-dim text-xs",children:"or paste URL:"}),X("input",{type:"text",value:T,disabled:R,onChange:(V)=>Q(V.target.value),onKeyDown:(V)=>{if(V.key==="Enter"&&T.trim()&&!R){let w=T.trim();H(w,w.length>40?w.slice(0,37)+"...":w),Q("")}},placeholder:R?"reference limit reached":"https://...",className:"flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50",style:{minWidth:180}}),W.length>0&&X("button",{onClick:z,className:"text-text-muted hover:text-text text-xs px-2 py-1 border border-border rounded",children:"Clear"}),X("span",{className:"text-text-dim text-xs",children:"pick from history with Use as reference"})]})]})}function BX({model:W,setModel:J,size:H,setSize:Y,quality:z,setQuality:$,format:T,setFormat:Q,liveModels:U,liveProvider:R}){let k=U&&U.length>0;return Z(h,{children:[Z("div",{children:[Z("label",{className:"text-text-muted text-xs block",children:["Model",k&&Z("span",{className:"text-text-dim ml-1",style:{fontSize:10},children:["· ",R," (",U.length,")"]})]}),X("select",{value:W,onChange:(q)=>J(q.target.value),className:"bg-bg-input border border-border rounded px-2 py-1.5 text-sm",children:k?U.map((q)=>X("option",{value:q.id,children:q.label},q.id)):eW.map((q)=>X("option",{value:q,children:sW[q]},q))})]}),Z("div",{children:[X("label",{className:"text-text-muted text-xs block",children:"Size"}),X("select",{value:H,onChange:(q)=>Y(q.target.value),className:"bg-bg-input border border-border rounded px-2 py-1.5 text-sm",children:(MW[W]||["1024x1024"]).map((q)=>X("option",{value:q,children:q},q))})]}),W!=="dall-e-2"&&Z("div",{children:[X("label",{className:"text-text-muted text-xs block",children:"Quality"}),X("select",{value:z,onChange:(q)=>$(q.target.value),className:"bg-bg-input border border-border rounded px-2 py-1.5 text-sm",children:(t(W)?SW:gW).map((q)=>X("option",{value:q,children:q},q))})]}),t(W)&&Z("div",{children:[X("label",{className:"text-text-muted text-xs block",children:"Format"}),Z("select",{value:T,onChange:(q)=>Q(q.target.value),className:"bg-bg-input border border-border rounded px-2 py-1.5 text-sm",children:[X("option",{value:"png",children:"PNG"}),X("option",{value:"jpeg",children:"JPEG"}),X("option",{value:"webp",children:"WebP"})]})]})]})}function a({model:W,setModel:J,liveModels:H,liveProvider:Y}){let z=H||[];if(z.length===0)return Z("div",{children:[X("label",{className:"text-text-muted text-xs block",children:"Model"}),X("div",{className:"bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text-dim",style:{minWidth:200},children:Y?`loading ${Y}…`:"no provider bound"})]});return Z("div",{children:[Z("label",{className:"text-text-muted text-xs block",children:["Model",Z("span",{className:"text-text-dim ml-1",style:{fontSize:10},children:["· ",Y," (",z.length,")"]})]}),X("select",{value:W,onChange:($)=>J($.target.value),className:"bg-bg-input border border-border rounded px-2 py-1.5 text-sm",style:{maxWidth:280},children:z.map(($)=>{let T=$.model_type==="image-to-video"?" · img→vid":"",Q=f($.price_usd||0),U=[T,Q?` ${Q}`:""].filter(Boolean).join("");return Z("option",{value:$.id,children:[$.id,U]},$.id)})})]})}function AW({voice:W,setVoice:J,voices:H}){return Z("div",{children:[X("label",{className:"text-text-muted text-xs block",children:"Voice"}),X("select",{value:W,onChange:(Y)=>J(Y.target.value),className:"bg-bg-input border border-border rounded px-2 py-1.5 text-sm",style:{maxWidth:260},children:H.map((Y)=>Z("option",{value:Y.id,children:[Y.name||Y.id,Y.language?` · ${Y.language}`:"",Y.gender?` · ${Y.gender}`:""]},Y.id))})]})}function VX({durations:W,value:J,onChange:H}){if(!W||W.length===0)return X(OW,{label:"Duration (s)",value:J,onChange:H,min:1,max:60});return Z("div",{children:[X("label",{className:"text-text-muted text-xs block",children:"Duration"}),X("select",{value:`${J}s`,onChange:(Y)=>{let z=parseInt(Y.target.value.replace(/[^\d]/g,""),10);if(!isNaN(z))H(z)},className:"bg-bg-input border border-border rounded px-2 py-1.5 text-sm",children:W.map((Y)=>X("option",{value:Y,children:Y},Y))})]})}function _X({aspects:W,value:J,onChange:H,disabledHint:Y}){if(Y)return Z("div",{children:[X("label",{className:"text-text-muted text-xs block",children:"Aspect"}),X("div",{className:"bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text-dim",style:{minWidth:160},title:Y,children:Y})]});if(!W||W.length===0)return X(mW,{label:"Aspect",value:J,onChange:H});return Z("div",{children:[X("label",{className:"text-text-muted text-xs block",children:"Aspect"}),X("select",{value:J,onChange:(z)=>H(z.target.value),className:"bg-bg-input border border-border rounded px-2 py-1.5 text-sm",children:W.map((z)=>X("option",{value:z,children:z},z))})]})}function OW({label:W,value:J,onChange:H,min:Y,max:z}){return Z("div",{children:[X("label",{className:"text-text-muted text-xs block",children:W}),X("input",{type:"number",value:J,min:Y,max:z,onChange:($)=>H(Number($.target.value)||0),className:"bg-bg-input border border-border rounded px-2 py-1.5 text-sm",style:{width:96}})]})}function mW({label:W,value:J,onChange:H,placeholder:Y}){return Z("div",{children:[X("label",{className:"text-text-muted text-xs block",children:W}),X("input",{type:"text",value:J,onChange:(z)=>H(z.target.value),placeholder:Y,className:"bg-bg-input border border-border rounded px-2 py-1.5 text-sm",style:{width:140}})]})}function wX({kind:W,items:J,onSelect:H,onOpenLightbox:Y,generating:z,generatingPrompt:$,generatingModel:T}){if(W==="image")return Z("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill, minmax(280px, 1fr))",gap:8,padding:8},children:[z&&X(fW,{prompt:$,model:T}),J.map((Q)=>{let U=vW(Q);return Z("div",{className:"border border-border rounded overflow-hidden hover:border-accent transition-colors",children:[U?X("button",{onClick:()=>Y(Q),className:"block w-full",title:"Click to open",children:X("img",{src:U,alt:"",className:"w-full",loading:"lazy",style:{display:"block"}})}):X("div",{className:"bg-bg-input py-12 text-center text-text-muted text-xs",children:"no preview"}),X("button",{onClick:()=>H(Q),className:"block w-full text-left",title:"Show details",children:X(bW,{g:Q})})]},Q.id)})]});return Z("div",{style:{display:"grid",gridTemplateColumns:W==="video"||W==="avatar"?"repeat(auto-fill, minmax(360px, 1fr))":"repeat(auto-fill, minmax(280px, 1fr))",gap:8,padding:8},children:[z&&(W==="video"||W==="avatar")&&X(fW,{prompt:$,model:T}),J.map((Q)=>{let U=Q.storage_urls?.[0]||Q.local_cache_url||Q.upstream_urls?.[0]||"";return Z("div",{className:"border border-border rounded overflow-hidden bg-bg-card",onClick:()=>H(Q),children:[U?W==="video"||W==="avatar"?X("video",{controls:!0,src:U,className:"w-full"}):X("audio",{controls:!0,src:U,className:"w-full"}):X("div",{className:"bg-bg-input py-6 text-center text-text-muted text-xs",children:"no source"}),X(bW,{g:Q})]},Q.id)})]})}function fW({prompt:W,model:J}){return Z("div",{className:"border border-accent rounded overflow-hidden bg-bg-card flex flex-col items-center justify-center",style:{minHeight:220},children:[X(GX,{}),X("div",{className:"mt-3 text-sm text-text",children:"Generating…"}),W&&X("div",{className:"mt-1 px-3 text-xs text-text-muted text-center",style:{maxWidth:260},title:W,children:W.length>80?W.slice(0,77)+"…":W}),J&&X("div",{className:"mt-1 text-text-dim",style:{fontSize:10},children:J})]})}function GX(){return Z("svg",{width:"28",height:"28",viewBox:"0 0 24 24",children:[X("circle",{cx:"12",cy:"12",r:"9",fill:"none",stroke:"currentColor",strokeWidth:"2",strokeLinecap:"round",strokeDasharray:"44",strokeDashoffset:"22",style:{animation:"ms-spin 0.9s linear infinite"}}),X("style",{children:"@keyframes ms-spin { to { transform: rotate(360deg); transform-origin: 12px 12px; } }"})]})}function bW({g:W}){let J=f(W.cost_usd);return Z("div",{className:"p-2",children:[X("div",{className:"text-text text-xs truncate",children:W.prompt}),Z("div",{className:"text-text-dim mt-0.5 flex items-center gap-1.5",style:{fontSize:10},children:[X("span",{children:W.provider}),X("span",{children:"·"}),X("span",{children:W.model||W.size||"—"}),X("span",{children:"·"}),X("span",{children:new Date(W.created_at).toLocaleString()}),J&&Z(h,{children:[X("span",{children:"·"}),X("span",{className:"text-accent",children:J})]})]})]})}function TX({selected:W,onClose:J,onUseAsReference:H}){let Y=W.storage_urls?.[0]||W.upstream_urls?.[0]||"";return Z("aside",{className:"border-l border-border bg-bg-card flex flex-col",style:{width:384},children:[Z("header",{className:"flex items-center gap-2 px-4 py-3 border-b border-border",children:[X("span",{className:"text-text font-medium truncate flex-1",children:W.prompt}),H&&X("button",{onClick:H,className:"text-xs px-2 py-1 border border-border rounded text-accent hover:border-accent",title:"Use this image as the reference for an edit",children:"Use as reference"}),X("button",{onClick:J,className:"text-text-muted hover:text-text leading-none px-1",style:{fontSize:18},children:"×"})]}),Z("div",{className:"flex-1 overflow-auto",children:[Y&&W.kind==="image"&&X("img",{src:Y,alt:"",className:"w-full"}),Y&&(W.kind==="video"||W.kind==="avatar")&&X("video",{controls:!0,src:Y,className:"w-full"}),Y&&(W.kind==="audio_tts"||W.kind==="audio_sfx"||W.kind==="music")&&X("audio",{controls:!0,src:Y,className:"w-full p-3"}),Z("dl",{className:"px-4 py-3 text-xs flex flex-col gap-2",children:[X(E,{label:"Kind",value:W.kind}),X(E,{label:"Provider",value:W.provider}),X(E,{label:"Model",value:W.model||"—"}),W.size&&X(E,{label:"Size",value:W.size}),W.duration_ms>0&&X(E,{label:"Duration",value:`${(W.duration_ms/1000).toFixed(1)}s`}),X(E,{label:"Count",value:String(W.count)}),f(W.cost_usd)&&X(E,{label:"Cost",value:f(W.cost_usd)}),X(E,{label:"Created",value:new Date(W.created_at).toLocaleString()}),W.revised_prompt&&X(E,{label:"Revised",value:W.revised_prompt}),W.storage_ids.length>0&&X(E,{label:"Storage IDs",value:W.storage_ids.map((z)=>`#${z}`).join(", ")})]}),W.storage_urls&&W.storage_urls.length>0&&X("div",{className:"px-4 pb-3 flex flex-col gap-1",children:W.storage_urls.map((z,$)=>Z("a",{href:z,target:"_blank",rel:"noopener",className:"text-accent text-xs hover:underline",children:["Open #",W.storage_ids[$]," →"]},$))})]})]})}function RX({jobs:W}){let J=W.filter((Y)=>Y.status==="queued"||Y.status==="polling"),H=W.filter((Y)=>Y.status==="failed");if(J.length===0&&H.length===0)return null;return Z("div",{className:"flex flex-col gap-1 p-2 rounded border border-border bg-bg-card",children:[J.length>0&&Z("div",{className:"flex items-center gap-2 text-xs",children:[Z("span",{className:"text-text",children:[X("strong",{children:J.length})," video",J.length===1?"":"s"," processing"]}),Z("span",{className:"text-text-dim",children:[J.slice(0,3).map((Y)=>`#${Y.id} (${Y.model})`).join(", "),J.length>3&&`, +${J.length-3} more`]})]}),H.map((Y)=>Z("div",{className:"flex items-start gap-2 text-xs",children:[Z("span",{className:"text-text",style:{color:"var(--apteva-danger, #ef4444)"},children:["Failed #",Y.id," (",Y.model,")"]}),X("span",{className:"text-text-dim flex-1 truncate",title:Y.error,children:Y.error||"(no detail)"})]},Y.id))]})}function FX(W){let J=W.trim();if(!J)return"";if(J.startsWith("storage:"))return`/api/apps/storage/files/${J.slice(8)}/content`;if(J.startsWith("http://")||J.startsWith("https://")||J.startsWith("data:"))return J;return`data:image/png;base64,${J}`}function PX({item:W,onClose:J,onUseAsReference:H}){let Y=W.storage_urls?.[0]||W.local_cache_url||W.upstream_urls?.[0]||vW(W);return K(()=>{let z=($)=>{if($.key==="Escape")J()};return window.addEventListener("keydown",z),()=>window.removeEventListener("keydown",z)},[J]),X("div",{onClick:J,style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.85)",zIndex:9999,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24},children:Z("div",{onClick:(z)=>z.stopPropagation(),style:{display:"flex",flexDirection:"column",alignItems:"center",maxWidth:"100%",maxHeight:"100%",gap:12},children:[Y&&W.kind==="image"&&X("img",{src:Y,alt:"",style:{maxWidth:"92vw",maxHeight:"82vh",objectFit:"contain",borderRadius:4}}),Y&&(W.kind==="video"||W.kind==="avatar")&&X("video",{controls:!0,src:Y,style:{maxWidth:"92vw",maxHeight:"82vh"}}),Y&&(W.kind==="audio_tts"||W.kind==="audio_sfx"||W.kind==="music")&&X("audio",{controls:!0,src:Y,style:{width:480}}),X("div",{className:"text-text text-sm text-center",style:{maxWidth:700},children:W.prompt}),Z("div",{className:"text-text-dim",style:{fontSize:11},children:[W.provider," · ",W.model||W.size||"—"," ·"," ",new Date(W.created_at).toLocaleString(),f(W.cost_usd)&&Z(h,{children:[" · ",X("span",{className:"text-accent",children:f(W.cost_usd)})]})]}),Z("div",{className:"flex items-center gap-2",children:[H&&X("button",{onClick:H,className:"text-xs px-3 py-1.5 border border-border rounded text-accent hover:border-accent",children:"Use as reference"}),Y&&X("a",{href:Y,target:"_blank",rel:"noopener",className:"text-xs px-3 py-1.5 border border-border rounded text-text",children:"Open original"}),X("button",{onClick:J,className:"text-xs px-3 py-1.5 border border-border rounded text-text-muted",children:"Close (Esc)"})]})]})})}function E({label:W,value:J}){return Z("div",{className:"flex gap-2",children:[X("span",{className:"text-text-dim flex-shrink-0",style:{width:80},children:W}),X("span",{className:"flex-1 min-w-0 text-text break-all",title:J,children:J})]})}export{NX as default};
-
-//# debugId=DA22FBBE6DF7195564756E2164756E21
+// ui/MediaPanel.tsx
+import { useCallback, useEffect, useRef, useState } from "react";
+import { jsxDEV, Fragment } from "react/jsx-dev-runtime";
+function useAppEvents(app, projectId, onEvent) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+  useEffect(() => {
+    if (!app || !projectId)
+      return;
+    const handler = (ev) => handlerRef.current(ev);
+    const bridge = window.__aptevaAppEvents;
+    if (bridge) {
+      return bridge.subscribe(app, projectId, handler);
+    }
+    let lastSeq = 0;
+    let es = null;
+    let cancelled = false;
+    let reconnectTimer = null;
+    const connect = () => {
+      if (cancelled)
+        return;
+      const url = `/api/app-events/${encodeURIComponent(app)}` + `?project_id=${encodeURIComponent(projectId)}` + (lastSeq > 0 ? `&since=${lastSeq}` : "");
+      es = new EventSource(url, { withCredentials: true });
+      es.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data);
+          if (ev.seq <= lastSeq)
+            return;
+          lastSeq = ev.seq;
+          handlerRef.current(ev);
+        } catch {}
+      };
+      es.onerror = () => {
+        if (es && es.readyState === EventSource.CLOSED) {
+          if (reconnectTimer)
+            window.clearTimeout(reconnectTimer);
+          reconnectTimer = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (reconnectTimer)
+        window.clearTimeout(reconnectTimer);
+      if (es)
+        es.close();
+    };
+  }, [app, projectId]);
+}
+function formatCost(n) {
+  if (!n || n <= 0)
+    return "";
+  if (n >= 0.01)
+    return "$" + n.toFixed(2);
+  if (n >= 0.001)
+    return "$" + n.toFixed(4);
+  return "$" + n.toFixed(6);
+}
+var API = "/api/apps/media-studio";
+var TAB_LABELS = {
+  image: "Images",
+  video: "Videos",
+  audio_tts: "Audio",
+  music: "Music",
+  avatar: "Avatar"
+};
+var IMAGE_MODEL_LABELS = {
+  "gpt-image-2": "GPT Image 2 (current)",
+  "gpt-image-1.5": "GPT Image 1.5",
+  "gpt-image-1": "GPT Image 1",
+  "gpt-image-1-mini": "GPT Image 1 Mini",
+  "dall-e-3": "DALL·E 3 (legacy)",
+  "dall-e-2": "DALL·E 2 (legacy)"
+};
+var IMAGE_MODELS = [
+  "gpt-image-2",
+  "gpt-image-1.5",
+  "gpt-image-1",
+  "gpt-image-1-mini",
+  "dall-e-3",
+  "dall-e-2"
+];
+var IMAGE_SIZES = {
+  "gpt-image-2": ["1024x1024", "1024x1536", "1536x1024", "2048x2048", "3840x2160"],
+  "gpt-image-1.5": ["1024x1024", "1024x1536", "1536x1024"],
+  "gpt-image-1": ["1024x1024", "1024x1536", "1536x1024"],
+  "gpt-image-1-mini": ["1024x1024", "1024x1536", "1536x1024"],
+  "dall-e-3": ["1024x1024", "1792x1024", "1024x1792"],
+  "dall-e-2": ["256x256", "512x512", "1024x1024"]
+};
+var GPT_IMAGE_QUALITIES = ["auto", "low", "medium", "high"];
+var DALLE3_QUALITIES = ["standard", "hd"];
+function isGptImage(m) {
+  return m.startsWith("gpt-image");
+}
+var EDIT_MODELS = [
+  "firered-image-edit",
+  "qwen-edit",
+  "grok-imagine-edit",
+  "flux-2-max-edit",
+  "gpt-image-2-edit"
+];
+var EDIT_MODEL_SOURCE_LIMITS = {
+  "firered-image-edit": 3,
+  "qwen-edit": 3,
+  "grok-imagine-edit": 3,
+  "flux-2-max-edit": 3,
+  "gpt-image-2-edit": 3
+};
+function IconImage() {
+  return /* @__PURE__ */ jsxDEV("svg", {
+    width: "14",
+    height: "14",
+    viewBox: "0 0 16 16",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.5",
+    children: [
+      /* @__PURE__ */ jsxDEV("rect", {
+        x: "1.5",
+        y: "2.5",
+        width: "13",
+        height: "11",
+        rx: "1"
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("circle", {
+        cx: "5.5",
+        cy: "6",
+        r: "1"
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("path", {
+        d: "M2 12l3.5-3.5 3 3L11 7l3 3"
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function IconVideo() {
+  return /* @__PURE__ */ jsxDEV("svg", {
+    width: "14",
+    height: "14",
+    viewBox: "0 0 16 16",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.5",
+    children: [
+      /* @__PURE__ */ jsxDEV("rect", {
+        x: "1.5",
+        y: "3.5",
+        width: "10",
+        height: "9",
+        rx: "1"
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("path", {
+        d: "M11.5 7l3-2v6l-3-2z"
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function IconAudio() {
+  return /* @__PURE__ */ jsxDEV("svg", {
+    width: "14",
+    height: "14",
+    viewBox: "0 0 16 16",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.5",
+    children: [
+      /* @__PURE__ */ jsxDEV("path", {
+        d: "M3 6v4h2l3 2.5v-9L5 6H3z"
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("path", {
+        d: "M10 5.5a3 3 0 010 5"
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("path", {
+        d: "M12 3.5a6 6 0 010 9"
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function IconMusic() {
+  return /* @__PURE__ */ jsxDEV("svg", {
+    width: "14",
+    height: "14",
+    viewBox: "0 0 16 16",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.5",
+    children: [
+      /* @__PURE__ */ jsxDEV("path", {
+        d: "M6 12V3l7-1.5v9"
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("circle", {
+        cx: "4.5",
+        cy: "12",
+        r: "1.5"
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("circle", {
+        cx: "11.5",
+        cy: "10.5",
+        r: "1.5"
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function imageSrc(g) {
+  if (g.storage_urls && g.storage_urls.length > 0)
+    return g.storage_urls[0];
+  if (g.local_cache_url)
+    return g.local_cache_url;
+  if (g.thumbnail_b64)
+    return `data:image/jpeg;base64,${g.thumbnail_b64}`;
+  return "";
+}
+function MediaPanel({ projectId }) {
+  const [tab, setTab] = useState("image");
+  const [audioSubKind, setAudioSubKind] = useState("audio_tts");
+  const activeKind = tab === "audio" ? audioSubKind : tab;
+  const [items, setItems] = useState([]);
+  const [bindings, setBindings] = useState(null);
+  const [status, setStatus] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [selected, setSelected] = useState(null);
+  const [lightbox, setLightbox] = useState(null);
+  const [prompt, setPrompt] = useState("");
+  const [imageModel, setImageModel] = useState("gpt-image-2");
+  const [imageSize, setImageSize] = useState("1024x1024");
+  const [imageQuality, setImageQuality] = useState("auto");
+  const [imageFormat, setImageFormat] = useState("png");
+  const [duration, setDuration] = useState(5);
+  const [aspect, setAspect] = useState("16:9");
+  const [voice, setVoice] = useState("");
+  const [videoModel, setVideoModel] = useState("");
+  const [audioModel, setAudioModel] = useState("");
+  const [sfxModel, setSfxModel] = useState("");
+  const [musicModel, setMusicModel] = useState("");
+  const [safeMode, setSafeMode] = useState(false);
+  const [avatars, setAvatars] = useState([]);
+  const [selectedAvatar, setSelectedAvatar] = useState("");
+  const [voices, setVoices] = useState([]);
+  const [sourceImages, setSourceImages] = useState([]);
+  const [editModel, setEditModel] = useState("firered-image-edit");
+  const isEditMode = activeKind === "image" && sourceImages.length > 0;
+  const [liveModels, setLiveModels] = useState(null);
+  const [liveProvider, setLiveProvider] = useState("");
+  const [videoJobs, setVideoJobs] = useState([]);
+  useEffect(() => {
+    const allowed = IMAGE_SIZES[imageModel] || ["1024x1024"];
+    if (!allowed.includes(imageSize))
+      setImageSize(allowed[0]);
+    if (isGptImage(imageModel)) {
+      if (!GPT_IMAGE_QUALITIES.includes(imageQuality))
+        setImageQuality("auto");
+    } else if (imageModel === "dall-e-3") {
+      if (!DALLE3_QUALITIES.includes(imageQuality))
+        setImageQuality("standard");
+    }
+  }, [imageModel, imageSize, imageQuality]);
+  const loadBindings = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/bindings`, { credentials: "same-origin" });
+      if (!res.ok)
+        return;
+      const data = await res.json();
+      setBindings(data);
+    } catch {}
+  }, []);
+  const loadGenerations = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/generations?project_id=${encodeURIComponent(projectId)}&kind=${activeKind}`, { credentials: "same-origin" });
+      if (!res.ok) {
+        setStatus(`Error: ${res.status}`);
+        return;
+      }
+      const data = await res.json();
+      setItems(data.generations || []);
+      const n = (data.generations || []).length;
+      setStatus(`${n} generation${n === 1 ? "" : "s"}`);
+    } catch (e) {
+      setStatus("Error: " + e.message);
+    }
+  }, [projectId, activeKind]);
+  useEffect(() => {
+    loadBindings();
+  }, [loadBindings]);
+  useEffect(() => {
+    loadGenerations();
+  }, [loadGenerations]);
+  useEffect(() => {
+    if (activeKind !== "video" && activeKind !== "avatar")
+      return;
+    let cancelled = false;
+    let prevInFlight = new Set;
+    const load = () => {
+      fetch(`${API}/video-jobs?project_id=${encodeURIComponent(projectId)}`, {
+        credentials: "same-origin"
+      }).then((r) => r.ok ? r.json() : null).then((data) => {
+        if (cancelled || !data)
+          return;
+        const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+        setVideoJobs(jobs);
+        const nowInFlight = new Set(jobs.filter((j) => j.status === "queued" || j.status === "polling").map((j) => j.id));
+        let transitioned = false;
+        for (const id of prevInFlight)
+          if (!nowInFlight.has(id))
+            transitioned = true;
+        if (transitioned)
+          loadGenerations();
+        prevInFlight = nowInFlight;
+      }).catch(() => {});
+    };
+    load();
+    const t = window.setInterval(load, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(t);
+    };
+  }, [activeKind, projectId, loadGenerations]);
+  useEffect(() => {
+    if (activeKind !== "avatar" && activeKind !== "audio_tts")
+      return;
+    let cancelled = false;
+    if (activeKind === "avatar") {
+      fetch(`${API}/avatars`, { credentials: "same-origin" }).then((r) => r.ok ? r.json() : null).then((data) => {
+        if (cancelled || !data)
+          return;
+        const list = Array.isArray(data.avatars) ? data.avatars : [];
+        setAvatars(list);
+        if (list.length > 0 && !list.some((x) => x.id === selectedAvatar)) {
+          setSelectedAvatar(list[0].id);
+        }
+      }).catch(() => {});
+    }
+    fetch(`${API}/voices?kind=${encodeURIComponent(activeKind)}`, { credentials: "same-origin" }).then((r) => r.ok ? r.json() : null).then((data) => {
+      if (cancelled || !data)
+        return;
+      const list = Array.isArray(data.voices) ? data.voices : [];
+      setVoices(list);
+      if (list.length > 0 && !list.some((x) => x.id === voice)) {
+        setVoice(list[0].id);
+      }
+    }).catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [activeKind, bindings]);
+  useEffect(() => {
+    const currentBoundSlug = bindings?.[activeKind]?.slug || "";
+    if (!currentBoundSlug) {
+      setLiveModels(null);
+      setLiveProvider("");
+      return;
+    }
+    let cancelled = false;
+    fetch(`${API}/models?kind=${activeKind}`, { credentials: "same-origin" }).then((r) => r.ok ? r.json() : null).then((data) => {
+      if (cancelled || !data)
+        return;
+      if (Array.isArray(data.models)) {
+        setLiveModels(data.models);
+        setLiveProvider(String(data.provider || ""));
+        if (data.models.length > 0) {
+          if (activeKind === "image") {
+            const have = data.models.some((m) => m.id === imageModel);
+            if (!have)
+              setImageModel(data.models[0].id);
+            const editModels = data.models.filter((m) => m.supports_image_edit);
+            if (editModels.length > 0 && !editModels.some((m) => m.id === editModel)) {
+              setEditModel(editModels[0].id);
+            }
+          } else if (activeKind === "video") {
+            const have = data.models.some((m) => m.id === videoModel);
+            if (!have)
+              setVideoModel(data.models[0].id);
+          } else if (activeKind === "audio_tts") {
+            const have = data.models.some((m) => m.id === audioModel);
+            if (!have)
+              setAudioModel(data.models[0].id);
+          } else if (activeKind === "audio_sfx") {
+            const have = data.models.some((m) => m.id === sfxModel);
+            if (!have)
+              setSfxModel(data.models[0].id);
+          } else if (activeKind === "music") {
+            const have = data.models.some((m) => m.id === musicModel);
+            if (!have)
+              setMusicModel(data.models[0].id);
+          }
+        }
+      }
+    }).catch(() => {
+      if (!cancelled)
+        setLiveModels(null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeKind, bindings]);
+  useAppEvents("media-studio", projectId, (ev) => {
+    if (ev.topic === "media.generated") {
+      if (ev.data?.kind === activeKind)
+        loadGenerations();
+    }
+  });
+  const currentBinding = bindings ? bindings[activeKind] : null;
+  const isBound = !!currentBinding?.bound;
+  const currentModelId = activeKind === "image" ? isEditMode ? editModel : imageModel : activeKind === "video" ? videoModel : activeKind === "audio_tts" ? audioModel : activeKind === "audio_sfx" ? sfxModel : activeKind === "music" ? musicModel : "";
+  const currentModel = liveModels?.find((m) => m.id === currentModelId);
+  const showVideoRefInput = activeKind === "video" && !!currentModel?.supports_image_to_video;
+  const editSourceLimit = activeKind === "image" ? currentModel?.max_source_images || EDIT_MODEL_SOURCE_LIMITS[editModel] || 1 : 1;
+  const referenceInputMax = activeKind === "image" ? editSourceLimit : 1;
+  const addSourceImage = (value, label) => {
+    const trimmed = value.trim();
+    if (!trimmed)
+      return;
+    setSourceImages((cur) => {
+      const withoutExisting = cur.filter((x) => x.value !== trimmed);
+      return [...withoutExisting, { value: trimmed, label }].slice(0, referenceInputMax);
+    });
+  };
+  const removeSourceImage = (index) => {
+    setSourceImages((cur) => cur.filter((_, i) => i !== index));
+  };
+  useEffect(() => {
+    if (!currentModel)
+      return;
+    if (currentModel.aspect_ratios && currentModel.aspect_ratios.length > 0 && !currentModel.aspect_ratios.includes(aspect)) {
+      setAspect(currentModel.default_aspect_ratio || currentModel.aspect_ratios[0]);
+    }
+    if (currentModel.durations && currentModel.durations.length > 0) {
+      const want = `${duration}s`;
+      if (!currentModel.durations.includes(want)) {
+        const first = currentModel.durations[0];
+        const n = parseInt(first.replace(/[^\d]/g, ""), 10);
+        if (!isNaN(n))
+          setDuration(n);
+      }
+    }
+  }, [currentModelId]);
+  const generate = async () => {
+    if (!prompt.trim() || generating)
+      return;
+    setGenerating(true);
+    setStatus("Generating…");
+    try {
+      const body = {
+        kind: activeKind,
+        prompt,
+        project_id: projectId
+      };
+      if (activeKind === "image") {
+        if (isEditMode) {
+          if (sourceImages.length > editSourceLimit) {
+            setStatus(`Error: ${editModel} supports at most ${editSourceLimit} source image${editSourceLimit === 1 ? "" : "s"}.`);
+            return;
+          }
+          body.model = editModel;
+          if (sourceImages.length === 1) {
+            body.source_image = sourceImages[0].value;
+          } else {
+            body.source_images = sourceImages.map((x) => x.value);
+          }
+          body.options = { output_format: imageFormat, safe_mode: safeMode };
+        } else {
+          body.model = imageModel;
+          body.size = imageSize;
+          const options = { safe_mode: safeMode };
+          if (imageModel !== "dall-e-2")
+            options.quality = imageQuality;
+          if (isGptImage(imageModel))
+            options.output_format = imageFormat;
+          body.options = options;
+        }
+      } else if (activeKind === "video") {
+        if (videoModel)
+          body.model = videoModel;
+        body.duration = duration;
+        body.aspect = aspect;
+        if (showVideoRefInput && sourceImages[0]?.value) {
+          body.source_image = sourceImages[0].value;
+        }
+      } else if (activeKind === "audio_tts") {
+        if (audioModel)
+          body.model = audioModel;
+        if (voice)
+          body.voice = voice;
+      } else if (activeKind === "audio_sfx") {
+        if (sfxModel)
+          body.model = sfxModel;
+        body.duration = duration;
+      } else if (activeKind === "music") {
+        if (musicModel)
+          body.model = musicModel;
+        body.duration = duration;
+      } else if (activeKind === "avatar") {
+        body.avatar = selectedAvatar;
+        if (voice)
+          body.voice = voice;
+      }
+      const res = await fetch(`${API}/generate`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        setStatus(`Error ${res.status}: ${text.slice(0, 300)}`);
+        return;
+      }
+      let result = {};
+      try {
+        result = JSON.parse(text);
+      } catch {}
+      if (result.isError) {
+        const msg = result.content?.find((c) => c.type === "text")?.text || "generation failed";
+        setStatus(`Error: ${msg}`);
+        return;
+      }
+      const meta = result._meta;
+      if (meta?.status === "queued") {
+        setPrompt("");
+        const costStr = meta.cost_usd ? ` · est. ${formatCost(meta.cost_usd)}` : "";
+        setStatus(`Queued — job #${meta.job_id}${costStr}, polling for completion…`);
+        return;
+      }
+      setPrompt("");
+      setStatus("Done.");
+      loadGenerations();
+    } catch (e) {
+      setStatus("Error: " + e.message);
+    } finally {
+      setGenerating(false);
+    }
+  };
+  return /* @__PURE__ */ jsxDEV("div", {
+    className: "h-full flex flex-col",
+    children: [
+      /* @__PURE__ */ jsxDEV("nav", {
+        className: "flex items-center border-b border-border px-4",
+        children: Object.keys(TAB_LABELS).map((k) => {
+          const t = k === "audio_tts" ? "audio" : k;
+          const active = tab === t;
+          const bindingKey = k;
+          const bound = bindings ? bindings[bindingKey]?.bound : false;
+          return /* @__PURE__ */ jsxDEV("button", {
+            onClick: () => setTab(t),
+            className: "flex items-center gap-1.5 px-3 py-2.5 text-sm border-b-2 transition-colors " + (active ? "border-accent text-text" : "border-transparent text-text-muted hover:text-text"),
+            children: [
+              /* @__PURE__ */ jsxDEV(KindIcon, {
+                kind: k
+              }, undefined, false, undefined, this),
+              TAB_LABELS[k],
+              /* @__PURE__ */ jsxDEV(BoundDot, {
+                bound
+              }, undefined, false, undefined, this)
+            ]
+          }, t, true, undefined, this);
+        })
+      }, undefined, false, undefined, this),
+      tab === "audio" && /* @__PURE__ */ jsxDEV("div", {
+        className: "flex items-center gap-1 px-4 py-1.5 border-b border-border bg-bg-card",
+        children: [
+          /* @__PURE__ */ jsxDEV(SubTabButton, {
+            label: "TTS",
+            active: audioSubKind === "audio_tts",
+            onClick: () => setAudioSubKind("audio_tts"),
+            bound: !!bindings?.audio_tts.bound
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV(SubTabButton, {
+            label: "SFX",
+            active: audioSubKind === "audio_sfx",
+            onClick: () => setAudioSubKind("audio_sfx"),
+            bound: !!bindings?.audio_sfx.bound
+          }, undefined, false, undefined, this)
+        ]
+      }, undefined, true, undefined, this),
+      bindings && !isBound && /* @__PURE__ */ jsxDEV("div", {
+        className: "px-4 py-2 text-xs text-text-muted bg-bg-card border-b border-border",
+        children: [
+          "No provider bound for ",
+          /* @__PURE__ */ jsxDEV("strong", {
+            className: "text-text",
+            children: activeKind
+          }, undefined, false, undefined, this),
+          ". Open the app settings to pick one."
+        ]
+      }, undefined, true, undefined, this),
+      /* @__PURE__ */ jsxDEV("div", {
+        className: "flex-1 flex min-h-0",
+        children: [
+          /* @__PURE__ */ jsxDEV("div", {
+            className: "flex-1 flex flex-col p-6 gap-4 min-w-0",
+            children: [
+              (activeKind === "image" || showVideoRefInput) && /* @__PURE__ */ jsxDEV(ReferenceImageInput, {
+                sources: showVideoRefInput ? sourceImages.slice(0, 1) : sourceImages,
+                maxSources: referenceInputMax,
+                onAdd: addSourceImage,
+                onRemove: removeSourceImage,
+                onClear: () => setSourceImages([]),
+                hint: showVideoRefInput ? "Source image for the image-to-video model (required)" : undefined
+              }, undefined, false, undefined, this),
+              /* @__PURE__ */ jsxDEV(Composer, {
+                kind: activeKind,
+                prompt,
+                setPrompt,
+                generate,
+                generating,
+                disabled: !isBound,
+                isEditMode,
+                liveModels,
+                liveProvider,
+                imageModel,
+                setImageModel,
+                imageSize,
+                setImageSize,
+                imageQuality,
+                setImageQuality,
+                imageFormat,
+                setImageFormat,
+                editModel,
+                setEditModel,
+                editSourceLimit,
+                editModels: liveModels?.filter((m) => m.supports_image_edit) || [],
+                videoModel,
+                setVideoModel,
+                audioModel,
+                setAudioModel,
+                sfxModel,
+                setSfxModel,
+                musicModel,
+                setMusicModel,
+                currentModel,
+                safeMode,
+                setSafeMode,
+                duration,
+                setDuration,
+                aspect,
+                setAspect,
+                voice,
+                setVoice,
+                avatars,
+                selectedAvatar,
+                setSelectedAvatar,
+                voices
+              }, undefined, false, undefined, this),
+              (activeKind === "video" || activeKind === "avatar") && videoJobs.length > 0 && /* @__PURE__ */ jsxDEV(VideoJobsBanner, {
+                jobs: videoJobs
+              }, undefined, false, undefined, this),
+              /* @__PURE__ */ jsxDEV("div", {
+                className: "flex-1 overflow-auto border border-border rounded",
+                children: items.length === 0 && !generating ? /* @__PURE__ */ jsxDEV("div", {
+                  className: "py-12 px-6 text-center text-text-muted text-sm",
+                  children: status || "No generations yet for this kind."
+                }, undefined, false, undefined, this) : /* @__PURE__ */ jsxDEV(Gallery, {
+                  kind: activeKind,
+                  items,
+                  onSelect: setSelected,
+                  onOpenLightbox: setLightbox,
+                  generating,
+                  generatingPrompt: prompt,
+                  generatingModel: isEditMode ? editModel : imageModel
+                }, undefined, false, undefined, this)
+              }, undefined, false, undefined, this),
+              /* @__PURE__ */ jsxDEV("div", {
+                className: "text-xs text-text-dim",
+                children: status
+              }, undefined, false, undefined, this)
+            ]
+          }, undefined, true, undefined, this),
+          selected && /* @__PURE__ */ jsxDEV(DetailAside, {
+            selected,
+            onClose: () => setSelected(null),
+            onUseAsReference: selected.kind === "image" && selected.storage_ids.length > 0 ? () => {
+              const id = selected.storage_ids[0];
+              addSourceImage(`storage:${id}`, `Storage #${id}`);
+              setSelected(null);
+              setTab("image");
+            } : undefined
+          }, undefined, false, undefined, this)
+        ]
+      }, undefined, true, undefined, this),
+      lightbox && /* @__PURE__ */ jsxDEV(Lightbox, {
+        item: lightbox,
+        onClose: () => setLightbox(null),
+        onUseAsReference: lightbox.kind === "image" && lightbox.storage_ids.length > 0 ? () => {
+          const id = lightbox.storage_ids[0];
+          addSourceImage(`storage:${id}`, `Storage #${id}`);
+          setLightbox(null);
+          setTab("image");
+        } : undefined
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function KindIcon({ kind }) {
+  if (kind === "image")
+    return /* @__PURE__ */ jsxDEV(IconImage, {}, undefined, false, undefined, this);
+  if (kind === "video")
+    return /* @__PURE__ */ jsxDEV(IconVideo, {}, undefined, false, undefined, this);
+  if (kind === "music")
+    return /* @__PURE__ */ jsxDEV(IconMusic, {}, undefined, false, undefined, this);
+  if (kind === "avatar")
+    return /* @__PURE__ */ jsxDEV(IconAvatar, {}, undefined, false, undefined, this);
+  return /* @__PURE__ */ jsxDEV(IconAudio, {}, undefined, false, undefined, this);
+}
+function IconAvatar() {
+  return /* @__PURE__ */ jsxDEV("svg", {
+    width: "14",
+    height: "14",
+    viewBox: "0 0 16 16",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.5",
+    children: [
+      /* @__PURE__ */ jsxDEV("circle", {
+        cx: "8",
+        cy: "5.5",
+        r: "2.5"
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("path", {
+        d: "M3 13.5c0-2.8 2.2-4.5 5-4.5s5 1.7 5 4.5"
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function BoundDot({ bound }) {
+  return /* @__PURE__ */ jsxDEV("span", {
+    className: "rounded-full ml-1",
+    style: {
+      width: 6,
+      height: 6,
+      background: bound ? "var(--apteva-accent, #4ade80)" : "var(--apteva-text-dim, #555)"
+    }
+  }, undefined, false, undefined, this);
+}
+function SubTabButton({
+  label,
+  active,
+  bound,
+  onClick
+}) {
+  return /* @__PURE__ */ jsxDEV("button", {
+    onClick,
+    className: "flex items-center gap-1.5 px-2.5 py-1 text-xs rounded transition-colors " + (active ? "bg-bg-input text-text" : "text-text-muted hover:text-text"),
+    children: [
+      label,
+      /* @__PURE__ */ jsxDEV(BoundDot, {
+        bound
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function Composer(p) {
+  const promptPlaceholder = p.isEditMode ? "Edit instruction — 'remove the tree', 'change sky to sunset'" : p.kind === "avatar" ? "Script the avatar will speak…" : p.kind === "audio_tts" ? "Text to speak" : p.kind === "music" ? "A jazzy lo-fi loop with piano" : p.kind === "video" ? "A cat walking through a sunlit garden" : p.kind === "audio_sfx" ? "A door creaking open" : "a cat in a hat";
+  return /* @__PURE__ */ jsxDEV("div", {
+    className: "flex items-end gap-3 flex-wrap",
+    children: [
+      /* @__PURE__ */ jsxDEV("div", {
+        className: "flex-1",
+        style: { minWidth: 240 },
+        children: [
+          /* @__PURE__ */ jsxDEV("label", {
+            className: "text-text-muted text-xs",
+            children: "Prompt"
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV("input", {
+            type: "text",
+            value: p.prompt,
+            onChange: (e) => p.setPrompt(e.target.value),
+            onKeyDown: (e) => {
+              if (e.key === "Enter")
+                p.generate();
+            },
+            placeholder: promptPlaceholder,
+            className: "w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+          }, undefined, false, undefined, this)
+        ]
+      }, undefined, true, undefined, this),
+      p.kind === "image" && p.isEditMode && /* @__PURE__ */ jsxDEV(EditOptions, {
+        model: p.editModel,
+        setModel: p.setEditModel,
+        format: p.imageFormat,
+        setFormat: p.setImageFormat,
+        maxSources: p.editSourceLimit,
+        liveModels: p.editModels,
+        liveProvider: p.liveProvider
+      }, undefined, false, undefined, this),
+      p.kind === "image" && !p.isEditMode && /* @__PURE__ */ jsxDEV(ImageOptions, {
+        model: p.imageModel,
+        setModel: p.setImageModel,
+        size: p.imageSize,
+        setSize: p.setImageSize,
+        quality: p.imageQuality,
+        setQuality: p.setImageQuality,
+        format: p.imageFormat,
+        setFormat: p.setImageFormat,
+        liveModels: p.liveModels,
+        liveProvider: p.liveProvider
+      }, undefined, false, undefined, this),
+      p.kind === "video" && /* @__PURE__ */ jsxDEV(Fragment, {
+        children: [
+          /* @__PURE__ */ jsxDEV(MediaModelPicker, {
+            model: p.videoModel,
+            setModel: p.setVideoModel,
+            liveModels: p.liveModels,
+            liveProvider: p.liveProvider
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV(ConstrainedDuration, {
+            durations: p.currentModel?.durations,
+            value: p.duration,
+            onChange: p.setDuration
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV(ConstrainedAspect, {
+            aspects: p.currentModel?.aspect_ratios,
+            value: p.aspect,
+            onChange: p.setAspect,
+            disabledHint: p.currentModel?.model_type === "image-to-video" ? "Inherited from source image" : undefined
+          }, undefined, false, undefined, this)
+        ]
+      }, undefined, true, undefined, this),
+      p.kind === "audio_tts" && /* @__PURE__ */ jsxDEV(Fragment, {
+        children: [
+          /* @__PURE__ */ jsxDEV(MediaModelPicker, {
+            model: p.audioModel,
+            setModel: p.setAudioModel,
+            liveModels: p.liveModels,
+            liveProvider: p.liveProvider
+          }, undefined, false, undefined, this),
+          p.voices.length > 0 ? /* @__PURE__ */ jsxDEV(VoiceSelect, {
+            voice: p.voice,
+            setVoice: p.setVoice,
+            voices: p.voices
+          }, undefined, false, undefined, this) : /* @__PURE__ */ jsxDEV(TextField, {
+            label: "Voice",
+            value: p.voice,
+            onChange: p.setVoice,
+            placeholder: "voice_id"
+          }, undefined, false, undefined, this)
+        ]
+      }, undefined, true, undefined, this),
+      p.kind === "audio_sfx" && /* @__PURE__ */ jsxDEV(Fragment, {
+        children: [
+          /* @__PURE__ */ jsxDEV(MediaModelPicker, {
+            model: p.sfxModel,
+            setModel: p.setSfxModel,
+            liveModels: p.liveModels,
+            liveProvider: p.liveProvider
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV(NumberField, {
+            label: "Duration (s)",
+            value: p.duration,
+            onChange: p.setDuration,
+            min: 1,
+            max: 30
+          }, undefined, false, undefined, this)
+        ]
+      }, undefined, true, undefined, this),
+      p.kind === "music" && /* @__PURE__ */ jsxDEV(Fragment, {
+        children: [
+          /* @__PURE__ */ jsxDEV(MediaModelPicker, {
+            model: p.musicModel,
+            setModel: p.setMusicModel,
+            liveModels: p.liveModels,
+            liveProvider: p.liveProvider
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV(NumberField, {
+            label: "Duration (s)",
+            value: p.duration,
+            onChange: p.setDuration,
+            min: 3,
+            max: 300
+          }, undefined, false, undefined, this)
+        ]
+      }, undefined, true, undefined, this),
+      p.kind === "avatar" && /* @__PURE__ */ jsxDEV(AvatarPicker, {
+        avatars: p.avatars,
+        selected: p.selectedAvatar,
+        setSelected: p.setSelectedAvatar
+      }, undefined, false, undefined, this),
+      p.kind === "avatar" && p.voices.length > 0 && /* @__PURE__ */ jsxDEV(VoiceSelect, {
+        voice: p.voice,
+        setVoice: p.setVoice,
+        voices: p.voices
+      }, undefined, false, undefined, this),
+      p.kind === "image" && /* @__PURE__ */ jsxDEV(SafeModeToggle, {
+        value: p.safeMode,
+        onChange: p.setSafeMode
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("button", {
+        onClick: p.generate,
+        disabled: !p.prompt.trim() || p.generating || p.disabled,
+        className: "px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50",
+        children: p.generating ? "…" : p.isEditMode ? "Edit" : p.kind === "avatar" ? "Generate avatar" : "Generate"
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function AvatarPicker({
+  avatars,
+  selected,
+  setSelected
+}) {
+  if (avatars.length === 0) {
+    return /* @__PURE__ */ jsxDEV("div", {
+      children: [
+        /* @__PURE__ */ jsxDEV("label", {
+          className: "text-text-muted text-xs block",
+          children: "Avatar"
+        }, undefined, false, undefined, this),
+        /* @__PURE__ */ jsxDEV("div", {
+          className: "bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text-dim",
+          style: { minWidth: 200 },
+          children: "no replicas — train one in your provider"
+        }, undefined, false, undefined, this)
+      ]
+    }, undefined, true, undefined, this);
+  }
+  return /* @__PURE__ */ jsxDEV("div", {
+    style: { flexBasis: "100%" },
+    children: [
+      /* @__PURE__ */ jsxDEV("label", {
+        className: "text-text-muted text-xs block mb-1",
+        children: "Avatar / replica"
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("div", {
+        className: "flex gap-2 flex-wrap",
+        children: avatars.map((av) => {
+          const isSel = av.id === selected;
+          return /* @__PURE__ */ jsxDEV("button", {
+            onClick: () => setSelected(av.id),
+            title: `${av.name || av.id}${av.status ? ` (${av.status})` : ""}`,
+            className: "border rounded overflow-hidden text-left " + (isSel ? "border-accent" : "border-border hover:border-accent"),
+            style: { width: 96 },
+            children: [
+              av.thumbnail ? /* @__PURE__ */ jsxDEV("video", {
+                src: av.thumbnail,
+                muted: true,
+                loop: true,
+                onMouseEnter: (e) => e.currentTarget.play(),
+                onMouseLeave: (e) => e.currentTarget.pause(),
+                style: { width: 96, height: 96, objectFit: "cover", display: "block" }
+              }, undefined, false, undefined, this) : /* @__PURE__ */ jsxDEV("div", {
+                className: "flex items-center justify-center text-text-dim",
+                style: { width: 96, height: 96, background: "var(--apteva-bg-input, #222)", fontSize: 10 },
+                children: av.name || av.id
+              }, undefined, false, undefined, this),
+              /* @__PURE__ */ jsxDEV("div", {
+                className: "text-text truncate px-1 py-0.5",
+                style: { fontSize: 10 },
+                children: av.name || av.id
+              }, undefined, false, undefined, this)
+            ]
+          }, av.id, true, undefined, this);
+        })
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function SafeModeToggle({
+  value,
+  onChange
+}) {
+  return /* @__PURE__ */ jsxDEV("label", {
+    className: "flex items-center gap-1.5 text-xs text-text-muted cursor-pointer select-none",
+    title: "When on, Venice blurs adult-classified output. Off = pass-through (default).",
+    children: [
+      /* @__PURE__ */ jsxDEV("input", {
+        type: "checkbox",
+        checked: value,
+        onChange: (e) => onChange(e.target.checked),
+        style: { accentColor: "var(--apteva-accent, #4ade80)" }
+      }, undefined, false, undefined, this),
+      "Safe mode"
+    ]
+  }, undefined, true, undefined, this);
+}
+function EditOptions({
+  model,
+  setModel,
+  format,
+  setFormat,
+  maxSources,
+  liveModels,
+  liveProvider
+}) {
+  const modelOptions = liveModels.length > 0 ? liveModels : EDIT_MODELS.map((id) => ({ id, label: id }));
+  return /* @__PURE__ */ jsxDEV(Fragment, {
+    children: [
+      /* @__PURE__ */ jsxDEV("div", {
+        children: [
+          /* @__PURE__ */ jsxDEV("label", {
+            className: "text-text-muted text-xs block",
+            children: [
+              "Edit model",
+              liveModels.length > 0 && /* @__PURE__ */ jsxDEV("span", {
+                className: "text-text-dim ml-1",
+                style: { fontSize: 10 },
+                children: [
+                  "· ",
+                  liveProvider,
+                  " (",
+                  liveModels.length,
+                  ")"
+                ]
+              }, undefined, true, undefined, this)
+            ]
+          }, undefined, true, undefined, this),
+          /* @__PURE__ */ jsxDEV("select", {
+            value: model,
+            onChange: (e) => setModel(e.target.value),
+            className: "bg-bg-input border border-border rounded px-2 py-1.5 text-sm",
+            children: modelOptions.map((m) => /* @__PURE__ */ jsxDEV("option", {
+              value: m.id,
+              children: m.label
+            }, m.id, false, undefined, this))
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV("div", {
+            className: "text-text-dim mt-0.5",
+            style: { fontSize: 10 },
+            children: [
+              "max ",
+              maxSources,
+              " reference",
+              maxSources === 1 ? "" : "s"
+            ]
+          }, undefined, true, undefined, this)
+        ]
+      }, undefined, true, undefined, this),
+      /* @__PURE__ */ jsxDEV("div", {
+        children: [
+          /* @__PURE__ */ jsxDEV("label", {
+            className: "text-text-muted text-xs block",
+            children: "Format"
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV("select", {
+            value: format,
+            onChange: (e) => setFormat(e.target.value),
+            className: "bg-bg-input border border-border rounded px-2 py-1.5 text-sm",
+            children: [
+              /* @__PURE__ */ jsxDEV("option", {
+                value: "png",
+                children: "PNG"
+              }, undefined, false, undefined, this),
+              /* @__PURE__ */ jsxDEV("option", {
+                value: "jpeg",
+                children: "JPEG"
+              }, undefined, false, undefined, this),
+              /* @__PURE__ */ jsxDEV("option", {
+                value: "webp",
+                children: "WebP"
+              }, undefined, false, undefined, this)
+            ]
+          }, undefined, true, undefined, this)
+        ]
+      }, undefined, true, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function ReferenceImageInput({
+  sources,
+  maxSources,
+  onAdd,
+  onRemove,
+  onClear,
+  hint
+}) {
+  const [urlInput, setUrlInput] = useState("");
+  const fileInputRef = useRef(null);
+  const atLimit = sources.length >= maxSources;
+  const handleFile = (file) => {
+    const reader = new FileReader;
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const b64 = result.includes(",") ? result.split(",", 2)[1] : result;
+      onAdd(b64, `Upload (${file.name})`);
+    };
+    reader.readAsDataURL(file);
+  };
+  const handleDrop = (e) => {
+    e.preventDefault();
+    const files = Array.from(e.dataTransfer.files || []).filter((file) => file.type.startsWith("image/")).slice(0, Math.max(0, maxSources - sources.length));
+    files.forEach(handleFile);
+  };
+  return /* @__PURE__ */ jsxDEV("div", {
+    onDrop: handleDrop,
+    onDragOver: (e) => e.preventDefault(),
+    className: "flex flex-col gap-2 p-2 rounded bg-bg-card " + (sources.length > 0 ? "border border-accent" : "border border-dashed border-border"),
+    children: [
+      sources.length > 0 && /* @__PURE__ */ jsxDEV("div", {
+        className: "flex gap-2 overflow-x-auto pb-1",
+        children: sources.map((src, index) => {
+          const previewSrc = sourceImagePreviewSrc(src.value);
+          return /* @__PURE__ */ jsxDEV("div", {
+            className: "flex items-center gap-2 border border-border rounded p-1.5 bg-bg",
+            style: { minWidth: 180, maxWidth: 240 },
+            children: [
+              previewSrc ? /* @__PURE__ */ jsxDEV("img", {
+                src: previewSrc,
+                alt: "",
+                style: { width: 44, height: 44, objectFit: "cover", borderRadius: 4, flexShrink: 0 }
+              }, undefined, false, undefined, this) : /* @__PURE__ */ jsxDEV("div", {
+                style: { width: 44, height: 44, borderRadius: 4, background: "var(--apteva-bg-input, #222)", flexShrink: 0 },
+                className: "flex items-center justify-center text-text-dim text-xs",
+                children: "ref"
+              }, undefined, false, undefined, this),
+              /* @__PURE__ */ jsxDEV("div", {
+                className: "min-w-0 flex-1",
+                children: [
+                  /* @__PURE__ */ jsxDEV("div", {
+                    className: "text-text-dim",
+                    style: { fontSize: 10 },
+                    children: [
+                      "Reference ",
+                      index + 1
+                    ]
+                  }, undefined, true, undefined, this),
+                  /* @__PURE__ */ jsxDEV("div", {
+                    className: "text-xs text-text truncate",
+                    title: src.label,
+                    children: src.label || "(set)"
+                  }, undefined, false, undefined, this)
+                ]
+              }, undefined, true, undefined, this),
+              /* @__PURE__ */ jsxDEV("button", {
+                onClick: () => onRemove(index),
+                className: "text-text-muted hover:text-text text-xs px-1.5 py-0.5 border border-border rounded",
+                title: "Remove reference",
+                children: "x"
+              }, undefined, false, undefined, this)
+            ]
+          }, `${src.value}-${index}`, true, undefined, this);
+        })
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("div", {
+        className: "flex items-center gap-3 flex-wrap",
+        children: [
+          /* @__PURE__ */ jsxDEV("span", {
+            className: "text-text-muted text-xs",
+            children: [
+              hint || "Reference images",
+              /* @__PURE__ */ jsxDEV("span", {
+                className: "text-text-dim",
+                children: [
+                  " · ",
+                  sources.length,
+                  "/",
+                  maxSources
+                ]
+              }, undefined, true, undefined, this)
+            ]
+          }, undefined, true, undefined, this),
+          /* @__PURE__ */ jsxDEV("button", {
+            disabled: atLimit,
+            onClick: () => fileInputRef.current?.click(),
+            className: "text-xs px-2 py-1 border border-border rounded text-text hover:border-accent disabled:opacity-50",
+            children: "Upload"
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV("input", {
+            ref: fileInputRef,
+            type: "file",
+            accept: "image/*",
+            multiple: true,
+            onChange: (e) => {
+              const files = Array.from(e.target.files || []).slice(0, Math.max(0, maxSources - sources.length));
+              files.forEach(handleFile);
+              e.target.value = "";
+            },
+            style: { display: "none" }
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV("span", {
+            className: "text-text-dim text-xs",
+            children: "or paste URL:"
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV("input", {
+            type: "text",
+            value: urlInput,
+            disabled: atLimit,
+            onChange: (e) => setUrlInput(e.target.value),
+            onKeyDown: (e) => {
+              if (e.key === "Enter" && urlInput.trim() && !atLimit) {
+                const trimmed = urlInput.trim();
+                onAdd(trimmed, trimmed.length > 40 ? trimmed.slice(0, 37) + "..." : trimmed);
+                setUrlInput("");
+              }
+            },
+            placeholder: atLimit ? "reference limit reached" : "https://...",
+            className: "flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50",
+            style: { minWidth: 180 }
+          }, undefined, false, undefined, this),
+          sources.length > 0 && /* @__PURE__ */ jsxDEV("button", {
+            onClick: onClear,
+            className: "text-text-muted hover:text-text text-xs px-2 py-1 border border-border rounded",
+            children: "Clear"
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV("span", {
+            className: "text-text-dim text-xs",
+            children: "pick from history with Use as reference"
+          }, undefined, false, undefined, this)
+        ]
+      }, undefined, true, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function ImageOptions({
+  model,
+  setModel,
+  size,
+  setSize,
+  quality,
+  setQuality,
+  format,
+  setFormat,
+  liveModels,
+  liveProvider
+}) {
+  const usingLive = liveModels && liveModels.length > 0;
+  return /* @__PURE__ */ jsxDEV(Fragment, {
+    children: [
+      /* @__PURE__ */ jsxDEV("div", {
+        children: [
+          /* @__PURE__ */ jsxDEV("label", {
+            className: "text-text-muted text-xs block",
+            children: [
+              "Model",
+              usingLive && /* @__PURE__ */ jsxDEV("span", {
+                className: "text-text-dim ml-1",
+                style: { fontSize: 10 },
+                children: [
+                  "· ",
+                  liveProvider,
+                  " (",
+                  liveModels.length,
+                  ")"
+                ]
+              }, undefined, true, undefined, this)
+            ]
+          }, undefined, true, undefined, this),
+          /* @__PURE__ */ jsxDEV("select", {
+            value: model,
+            onChange: (e) => setModel(e.target.value),
+            className: "bg-bg-input border border-border rounded px-2 py-1.5 text-sm",
+            children: usingLive ? liveModels.map((m) => /* @__PURE__ */ jsxDEV("option", {
+              value: m.id,
+              children: m.label
+            }, m.id, false, undefined, this)) : IMAGE_MODELS.map((m) => /* @__PURE__ */ jsxDEV("option", {
+              value: m,
+              children: IMAGE_MODEL_LABELS[m]
+            }, m, false, undefined, this))
+          }, undefined, false, undefined, this)
+        ]
+      }, undefined, true, undefined, this),
+      /* @__PURE__ */ jsxDEV("div", {
+        children: [
+          /* @__PURE__ */ jsxDEV("label", {
+            className: "text-text-muted text-xs block",
+            children: "Size"
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV("select", {
+            value: size,
+            onChange: (e) => setSize(e.target.value),
+            className: "bg-bg-input border border-border rounded px-2 py-1.5 text-sm",
+            children: (IMAGE_SIZES[model] || ["1024x1024"]).map((s) => /* @__PURE__ */ jsxDEV("option", {
+              value: s,
+              children: s
+            }, s, false, undefined, this))
+          }, undefined, false, undefined, this)
+        ]
+      }, undefined, true, undefined, this),
+      model !== "dall-e-2" && /* @__PURE__ */ jsxDEV("div", {
+        children: [
+          /* @__PURE__ */ jsxDEV("label", {
+            className: "text-text-muted text-xs block",
+            children: "Quality"
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV("select", {
+            value: quality,
+            onChange: (e) => setQuality(e.target.value),
+            className: "bg-bg-input border border-border rounded px-2 py-1.5 text-sm",
+            children: (isGptImage(model) ? GPT_IMAGE_QUALITIES : DALLE3_QUALITIES).map((q) => /* @__PURE__ */ jsxDEV("option", {
+              value: q,
+              children: q
+            }, q, false, undefined, this))
+          }, undefined, false, undefined, this)
+        ]
+      }, undefined, true, undefined, this),
+      isGptImage(model) && /* @__PURE__ */ jsxDEV("div", {
+        children: [
+          /* @__PURE__ */ jsxDEV("label", {
+            className: "text-text-muted text-xs block",
+            children: "Format"
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV("select", {
+            value: format,
+            onChange: (e) => setFormat(e.target.value),
+            className: "bg-bg-input border border-border rounded px-2 py-1.5 text-sm",
+            children: [
+              /* @__PURE__ */ jsxDEV("option", {
+                value: "png",
+                children: "PNG"
+              }, undefined, false, undefined, this),
+              /* @__PURE__ */ jsxDEV("option", {
+                value: "jpeg",
+                children: "JPEG"
+              }, undefined, false, undefined, this),
+              /* @__PURE__ */ jsxDEV("option", {
+                value: "webp",
+                children: "WebP"
+              }, undefined, false, undefined, this)
+            ]
+          }, undefined, true, undefined, this)
+        ]
+      }, undefined, true, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function MediaModelPicker({
+  model,
+  setModel,
+  liveModels,
+  liveProvider
+}) {
+  const models = liveModels || [];
+  if (models.length === 0) {
+    return /* @__PURE__ */ jsxDEV("div", {
+      children: [
+        /* @__PURE__ */ jsxDEV("label", {
+          className: "text-text-muted text-xs block",
+          children: "Model"
+        }, undefined, false, undefined, this),
+        /* @__PURE__ */ jsxDEV("div", {
+          className: "bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text-dim",
+          style: { minWidth: 200 },
+          children: liveProvider ? `loading ${liveProvider}…` : "no provider bound"
+        }, undefined, false, undefined, this)
+      ]
+    }, undefined, true, undefined, this);
+  }
+  return /* @__PURE__ */ jsxDEV("div", {
+    children: [
+      /* @__PURE__ */ jsxDEV("label", {
+        className: "text-text-muted text-xs block",
+        children: [
+          "Model",
+          /* @__PURE__ */ jsxDEV("span", {
+            className: "text-text-dim ml-1",
+            style: { fontSize: 10 },
+            children: [
+              "· ",
+              liveProvider,
+              " (",
+              models.length,
+              ")"
+            ]
+          }, undefined, true, undefined, this)
+        ]
+      }, undefined, true, undefined, this),
+      /* @__PURE__ */ jsxDEV("select", {
+        value: model,
+        onChange: (e) => setModel(e.target.value),
+        className: "bg-bg-input border border-border rounded px-2 py-1.5 text-sm",
+        style: { maxWidth: 280 },
+        children: models.map((m) => {
+          const tag = m.model_type === "image-to-video" ? " · img→vid" : "";
+          const price = formatCost(m.price_usd || 0);
+          const suffix = [tag, price ? ` ${price}` : ""].filter(Boolean).join("");
+          return /* @__PURE__ */ jsxDEV("option", {
+            value: m.id,
+            children: [
+              m.id,
+              suffix
+            ]
+          }, m.id, true, undefined, this);
+        })
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function VoiceSelect({
+  voice,
+  setVoice,
+  voices
+}) {
+  return /* @__PURE__ */ jsxDEV("div", {
+    children: [
+      /* @__PURE__ */ jsxDEV("label", {
+        className: "text-text-muted text-xs block",
+        children: "Voice"
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("select", {
+        value: voice,
+        onChange: (e) => setVoice(e.target.value),
+        className: "bg-bg-input border border-border rounded px-2 py-1.5 text-sm",
+        style: { maxWidth: 260 },
+        children: voices.map((v) => /* @__PURE__ */ jsxDEV("option", {
+          value: v.id,
+          children: [
+            v.name || v.id,
+            v.language ? ` · ${v.language}` : "",
+            v.gender ? ` · ${v.gender}` : ""
+          ]
+        }, v.id, true, undefined, this))
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function ConstrainedDuration({
+  durations,
+  value,
+  onChange
+}) {
+  if (!durations || durations.length === 0) {
+    return /* @__PURE__ */ jsxDEV(NumberField, {
+      label: "Duration (s)",
+      value,
+      onChange,
+      min: 1,
+      max: 60
+    }, undefined, false, undefined, this);
+  }
+  return /* @__PURE__ */ jsxDEV("div", {
+    children: [
+      /* @__PURE__ */ jsxDEV("label", {
+        className: "text-text-muted text-xs block",
+        children: "Duration"
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("select", {
+        value: `${value}s`,
+        onChange: (e) => {
+          const n = parseInt(e.target.value.replace(/[^\d]/g, ""), 10);
+          if (!isNaN(n))
+            onChange(n);
+        },
+        className: "bg-bg-input border border-border rounded px-2 py-1.5 text-sm",
+        children: durations.map((d) => /* @__PURE__ */ jsxDEV("option", {
+          value: d,
+          children: d
+        }, d, false, undefined, this))
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function ConstrainedAspect({
+  aspects,
+  value,
+  onChange,
+  disabledHint
+}) {
+  if (disabledHint) {
+    return /* @__PURE__ */ jsxDEV("div", {
+      children: [
+        /* @__PURE__ */ jsxDEV("label", {
+          className: "text-text-muted text-xs block",
+          children: "Aspect"
+        }, undefined, false, undefined, this),
+        /* @__PURE__ */ jsxDEV("div", {
+          className: "bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text-dim",
+          style: { minWidth: 160 },
+          title: disabledHint,
+          children: disabledHint
+        }, undefined, false, undefined, this)
+      ]
+    }, undefined, true, undefined, this);
+  }
+  if (!aspects || aspects.length === 0) {
+    return /* @__PURE__ */ jsxDEV(TextField, {
+      label: "Aspect",
+      value,
+      onChange
+    }, undefined, false, undefined, this);
+  }
+  return /* @__PURE__ */ jsxDEV("div", {
+    children: [
+      /* @__PURE__ */ jsxDEV("label", {
+        className: "text-text-muted text-xs block",
+        children: "Aspect"
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("select", {
+        value,
+        onChange: (e) => onChange(e.target.value),
+        className: "bg-bg-input border border-border rounded px-2 py-1.5 text-sm",
+        children: aspects.map((a) => /* @__PURE__ */ jsxDEV("option", {
+          value: a,
+          children: a
+        }, a, false, undefined, this))
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function NumberField({
+  label,
+  value,
+  onChange,
+  min,
+  max
+}) {
+  return /* @__PURE__ */ jsxDEV("div", {
+    children: [
+      /* @__PURE__ */ jsxDEV("label", {
+        className: "text-text-muted text-xs block",
+        children: label
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("input", {
+        type: "number",
+        value,
+        min,
+        max,
+        onChange: (e) => onChange(Number(e.target.value) || 0),
+        className: "bg-bg-input border border-border rounded px-2 py-1.5 text-sm",
+        style: { width: 96 }
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function TextField({
+  label,
+  value,
+  onChange,
+  placeholder
+}) {
+  return /* @__PURE__ */ jsxDEV("div", {
+    children: [
+      /* @__PURE__ */ jsxDEV("label", {
+        className: "text-text-muted text-xs block",
+        children: label
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("input", {
+        type: "text",
+        value,
+        onChange: (e) => onChange(e.target.value),
+        placeholder,
+        className: "bg-bg-input border border-border rounded px-2 py-1.5 text-sm",
+        style: { width: 140 }
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function Gallery({
+  kind,
+  items,
+  onSelect,
+  onOpenLightbox,
+  generating,
+  generatingPrompt,
+  generatingModel
+}) {
+  if (kind === "image") {
+    return /* @__PURE__ */ jsxDEV("div", {
+      style: {
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+        gap: 8,
+        padding: 8
+      },
+      children: [
+        generating && /* @__PURE__ */ jsxDEV(GeneratingCard, {
+          prompt: generatingPrompt,
+          model: generatingModel
+        }, undefined, false, undefined, this),
+        items.map((g) => {
+          const src = imageSrc(g);
+          return /* @__PURE__ */ jsxDEV("div", {
+            className: "border border-border rounded overflow-hidden hover:border-accent transition-colors",
+            children: [
+              src ? /* @__PURE__ */ jsxDEV("button", {
+                onClick: () => onOpenLightbox(g),
+                className: "block w-full",
+                title: "Click to open",
+                children: /* @__PURE__ */ jsxDEV("img", {
+                  src,
+                  alt: "",
+                  className: "w-full",
+                  loading: "lazy",
+                  style: { display: "block" }
+                }, undefined, false, undefined, this)
+              }, undefined, false, undefined, this) : /* @__PURE__ */ jsxDEV("div", {
+                className: "bg-bg-input py-12 text-center text-text-muted text-xs",
+                children: "no preview"
+              }, undefined, false, undefined, this),
+              /* @__PURE__ */ jsxDEV("button", {
+                onClick: () => onSelect(g),
+                className: "block w-full text-left",
+                title: "Show details",
+                children: /* @__PURE__ */ jsxDEV(CardMeta, {
+                  g
+                }, undefined, false, undefined, this)
+              }, undefined, false, undefined, this)
+            ]
+          }, g.id, true, undefined, this);
+        })
+      ]
+    }, undefined, true, undefined, this);
+  }
+  return /* @__PURE__ */ jsxDEV("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: kind === "video" || kind === "avatar" ? "repeat(auto-fill, minmax(360px, 1fr))" : "repeat(auto-fill, minmax(280px, 1fr))",
+      gap: 8,
+      padding: 8
+    },
+    children: [
+      generating && (kind === "video" || kind === "avatar") && /* @__PURE__ */ jsxDEV(GeneratingCard, {
+        prompt: generatingPrompt,
+        model: generatingModel
+      }, undefined, false, undefined, this),
+      items.map((g) => {
+        const url = g.storage_urls?.[0] || g.local_cache_url || g.upstream_urls?.[0] || "";
+        return /* @__PURE__ */ jsxDEV("div", {
+          className: "border border-border rounded overflow-hidden bg-bg-card",
+          onClick: () => onSelect(g),
+          children: [
+            url ? kind === "video" || kind === "avatar" ? /* @__PURE__ */ jsxDEV("video", {
+              controls: true,
+              src: url,
+              className: "w-full"
+            }, undefined, false, undefined, this) : /* @__PURE__ */ jsxDEV("audio", {
+              controls: true,
+              src: url,
+              className: "w-full"
+            }, undefined, false, undefined, this) : /* @__PURE__ */ jsxDEV("div", {
+              className: "bg-bg-input py-6 text-center text-text-muted text-xs",
+              children: "no source"
+            }, undefined, false, undefined, this),
+            /* @__PURE__ */ jsxDEV(CardMeta, {
+              g
+            }, undefined, false, undefined, this)
+          ]
+        }, g.id, true, undefined, this);
+      })
+    ]
+  }, undefined, true, undefined, this);
+}
+function GeneratingCard({ prompt, model }) {
+  return /* @__PURE__ */ jsxDEV("div", {
+    className: "border border-accent rounded overflow-hidden bg-bg-card flex flex-col items-center justify-center",
+    style: { minHeight: 220 },
+    children: [
+      /* @__PURE__ */ jsxDEV(Spinner, {}, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("div", {
+        className: "mt-3 text-sm text-text",
+        children: "Generating…"
+      }, undefined, false, undefined, this),
+      prompt && /* @__PURE__ */ jsxDEV("div", {
+        className: "mt-1 px-3 text-xs text-text-muted text-center",
+        style: { maxWidth: 260 },
+        title: prompt,
+        children: prompt.length > 80 ? prompt.slice(0, 77) + "…" : prompt
+      }, undefined, false, undefined, this),
+      model && /* @__PURE__ */ jsxDEV("div", {
+        className: "mt-1 text-text-dim",
+        style: { fontSize: 10 },
+        children: model
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function Spinner() {
+  return /* @__PURE__ */ jsxDEV("svg", {
+    width: "28",
+    height: "28",
+    viewBox: "0 0 24 24",
+    children: [
+      /* @__PURE__ */ jsxDEV("circle", {
+        cx: "12",
+        cy: "12",
+        r: "9",
+        fill: "none",
+        stroke: "currentColor",
+        strokeWidth: "2",
+        strokeLinecap: "round",
+        strokeDasharray: "44",
+        strokeDashoffset: "22",
+        style: { animation: "ms-spin 0.9s linear infinite" }
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("style", {
+        children: `@keyframes ms-spin { to { transform: rotate(360deg); transform-origin: 12px 12px; } }`
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function CardMeta({ g }) {
+  const cost = formatCost(g.cost_usd);
+  return /* @__PURE__ */ jsxDEV("div", {
+    className: "p-2",
+    children: [
+      /* @__PURE__ */ jsxDEV("div", {
+        className: "text-text text-xs truncate",
+        children: g.prompt
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("div", {
+        className: "text-text-dim mt-0.5 flex items-center gap-1.5",
+        style: { fontSize: 10 },
+        children: [
+          /* @__PURE__ */ jsxDEV("span", {
+            children: g.provider
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV("span", {
+            children: "·"
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV("span", {
+            children: g.model || g.size || "—"
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV("span", {
+            children: "·"
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV("span", {
+            children: new Date(g.created_at).toLocaleString()
+          }, undefined, false, undefined, this),
+          cost && /* @__PURE__ */ jsxDEV(Fragment, {
+            children: [
+              /* @__PURE__ */ jsxDEV("span", {
+                children: "·"
+              }, undefined, false, undefined, this),
+              /* @__PURE__ */ jsxDEV("span", {
+                className: "text-accent",
+                children: cost
+              }, undefined, false, undefined, this)
+            ]
+          }, undefined, true, undefined, this)
+        ]
+      }, undefined, true, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function DetailAside({
+  selected,
+  onClose,
+  onUseAsReference
+}) {
+  const url = selected.storage_urls?.[0] || selected.upstream_urls?.[0] || "";
+  return /* @__PURE__ */ jsxDEV("aside", {
+    className: "border-l border-border bg-bg-card flex flex-col",
+    style: { width: 384 },
+    children: [
+      /* @__PURE__ */ jsxDEV("header", {
+        className: "flex items-center gap-2 px-4 py-3 border-b border-border",
+        children: [
+          /* @__PURE__ */ jsxDEV("span", {
+            className: "text-text font-medium truncate flex-1",
+            children: selected.prompt
+          }, undefined, false, undefined, this),
+          onUseAsReference && /* @__PURE__ */ jsxDEV("button", {
+            onClick: onUseAsReference,
+            className: "text-xs px-2 py-1 border border-border rounded text-accent hover:border-accent",
+            title: "Use this image as the reference for an edit",
+            children: "Use as reference"
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV("button", {
+            onClick: onClose,
+            className: "text-text-muted hover:text-text leading-none px-1",
+            style: { fontSize: 18 },
+            children: "×"
+          }, undefined, false, undefined, this)
+        ]
+      }, undefined, true, undefined, this),
+      /* @__PURE__ */ jsxDEV("div", {
+        className: "flex-1 overflow-auto",
+        children: [
+          url && selected.kind === "image" && /* @__PURE__ */ jsxDEV("img", {
+            src: url,
+            alt: "",
+            className: "w-full"
+          }, undefined, false, undefined, this),
+          url && (selected.kind === "video" || selected.kind === "avatar") && /* @__PURE__ */ jsxDEV("video", {
+            controls: true,
+            src: url,
+            className: "w-full"
+          }, undefined, false, undefined, this),
+          url && (selected.kind === "audio_tts" || selected.kind === "audio_sfx" || selected.kind === "music") && /* @__PURE__ */ jsxDEV("audio", {
+            controls: true,
+            src: url,
+            className: "w-full p-3"
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV("dl", {
+            className: "px-4 py-3 text-xs flex flex-col gap-2",
+            children: [
+              /* @__PURE__ */ jsxDEV(Row, {
+                label: "Kind",
+                value: selected.kind
+              }, undefined, false, undefined, this),
+              /* @__PURE__ */ jsxDEV(Row, {
+                label: "Provider",
+                value: selected.provider
+              }, undefined, false, undefined, this),
+              /* @__PURE__ */ jsxDEV(Row, {
+                label: "Model",
+                value: selected.model || "—"
+              }, undefined, false, undefined, this),
+              selected.size && /* @__PURE__ */ jsxDEV(Row, {
+                label: "Size",
+                value: selected.size
+              }, undefined, false, undefined, this),
+              selected.duration_ms > 0 && /* @__PURE__ */ jsxDEV(Row, {
+                label: "Duration",
+                value: `${(selected.duration_ms / 1000).toFixed(1)}s`
+              }, undefined, false, undefined, this),
+              /* @__PURE__ */ jsxDEV(Row, {
+                label: "Count",
+                value: String(selected.count)
+              }, undefined, false, undefined, this),
+              formatCost(selected.cost_usd) && /* @__PURE__ */ jsxDEV(Row, {
+                label: "Cost",
+                value: formatCost(selected.cost_usd)
+              }, undefined, false, undefined, this),
+              /* @__PURE__ */ jsxDEV(Row, {
+                label: "Created",
+                value: new Date(selected.created_at).toLocaleString()
+              }, undefined, false, undefined, this),
+              selected.revised_prompt && /* @__PURE__ */ jsxDEV(Row, {
+                label: "Revised",
+                value: selected.revised_prompt
+              }, undefined, false, undefined, this),
+              selected.storage_ids.length > 0 && /* @__PURE__ */ jsxDEV(Row, {
+                label: "Storage IDs",
+                value: selected.storage_ids.map((id) => `#${id}`).join(", ")
+              }, undefined, false, undefined, this)
+            ]
+          }, undefined, true, undefined, this),
+          selected.storage_urls && selected.storage_urls.length > 0 && /* @__PURE__ */ jsxDEV("div", {
+            className: "px-4 pb-3 flex flex-col gap-1",
+            children: selected.storage_urls.map((u, i) => /* @__PURE__ */ jsxDEV("a", {
+              href: u,
+              target: "_blank",
+              rel: "noopener",
+              className: "text-accent text-xs hover:underline",
+              children: [
+                "Open #",
+                selected.storage_ids[i],
+                " →"
+              ]
+            }, i, true, undefined, this))
+          }, undefined, false, undefined, this)
+        ]
+      }, undefined, true, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+function VideoJobsBanner({
+  jobs
+}) {
+  const inFlight = jobs.filter((j) => j.status === "queued" || j.status === "polling");
+  const failed = jobs.filter((j) => j.status === "failed");
+  if (inFlight.length === 0 && failed.length === 0)
+    return null;
+  return /* @__PURE__ */ jsxDEV("div", {
+    className: "flex flex-col gap-1 p-2 rounded border border-border bg-bg-card",
+    children: [
+      inFlight.length > 0 && /* @__PURE__ */ jsxDEV("div", {
+        className: "flex items-center gap-2 text-xs",
+        children: [
+          /* @__PURE__ */ jsxDEV("span", {
+            className: "text-text",
+            children: [
+              /* @__PURE__ */ jsxDEV("strong", {
+                children: inFlight.length
+              }, undefined, false, undefined, this),
+              " video",
+              inFlight.length === 1 ? "" : "s",
+              " processing"
+            ]
+          }, undefined, true, undefined, this),
+          /* @__PURE__ */ jsxDEV("span", {
+            className: "text-text-dim",
+            children: [
+              inFlight.slice(0, 3).map((j) => `#${j.id} (${j.model})`).join(", "),
+              inFlight.length > 3 && `, +${inFlight.length - 3} more`
+            ]
+          }, undefined, true, undefined, this)
+        ]
+      }, undefined, true, undefined, this),
+      failed.map((j) => /* @__PURE__ */ jsxDEV("div", {
+        className: "flex items-start gap-2 text-xs",
+        children: [
+          /* @__PURE__ */ jsxDEV("span", {
+            className: "text-text",
+            style: { color: "var(--apteva-danger, #ef4444)" },
+            children: [
+              "Failed #",
+              j.id,
+              " (",
+              j.model,
+              ")"
+            ]
+          }, undefined, true, undefined, this),
+          /* @__PURE__ */ jsxDEV("span", {
+            className: "text-text-dim flex-1 truncate",
+            title: j.error,
+            children: j.error || "(no detail)"
+          }, undefined, false, undefined, this)
+        ]
+      }, j.id, true, undefined, this))
+    ]
+  }, undefined, true, undefined, this);
+}
+function sourceImagePreviewSrc(value) {
+  const v = value.trim();
+  if (!v)
+    return "";
+  if (v.startsWith("storage:")) {
+    const id = v.slice("storage:".length);
+    return `/api/apps/storage/files/${id}/content`;
+  }
+  if (v.startsWith("http://") || v.startsWith("https://") || v.startsWith("data:")) {
+    return v;
+  }
+  return `data:image/png;base64,${v}`;
+}
+function Lightbox({
+  item,
+  onClose,
+  onUseAsReference
+}) {
+  const url = item.storage_urls?.[0] || item.local_cache_url || item.upstream_urls?.[0] || imageSrc(item);
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape")
+        onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return /* @__PURE__ */ jsxDEV("div", {
+    onClick: onClose,
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.85)",
+      zIndex: 9999,
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 24
+    },
+    children: /* @__PURE__ */ jsxDEV("div", {
+      onClick: (e) => e.stopPropagation(),
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        maxWidth: "100%",
+        maxHeight: "100%",
+        gap: 12
+      },
+      children: [
+        url && item.kind === "image" && /* @__PURE__ */ jsxDEV("img", {
+          src: url,
+          alt: "",
+          style: { maxWidth: "92vw", maxHeight: "82vh", objectFit: "contain", borderRadius: 4 }
+        }, undefined, false, undefined, this),
+        url && (item.kind === "video" || item.kind === "avatar") && /* @__PURE__ */ jsxDEV("video", {
+          controls: true,
+          src: url,
+          style: { maxWidth: "92vw", maxHeight: "82vh" }
+        }, undefined, false, undefined, this),
+        url && (item.kind === "audio_tts" || item.kind === "audio_sfx" || item.kind === "music") && /* @__PURE__ */ jsxDEV("audio", {
+          controls: true,
+          src: url,
+          style: { width: 480 }
+        }, undefined, false, undefined, this),
+        /* @__PURE__ */ jsxDEV("div", {
+          className: "text-text text-sm text-center",
+          style: { maxWidth: 700 },
+          children: item.prompt
+        }, undefined, false, undefined, this),
+        /* @__PURE__ */ jsxDEV("div", {
+          className: "text-text-dim",
+          style: { fontSize: 11 },
+          children: [
+            item.provider,
+            " · ",
+            item.model || item.size || "—",
+            " ·",
+            " ",
+            new Date(item.created_at).toLocaleString(),
+            formatCost(item.cost_usd) && /* @__PURE__ */ jsxDEV(Fragment, {
+              children: [
+                " · ",
+                /* @__PURE__ */ jsxDEV("span", {
+                  className: "text-accent",
+                  children: formatCost(item.cost_usd)
+                }, undefined, false, undefined, this)
+              ]
+            }, undefined, true, undefined, this)
+          ]
+        }, undefined, true, undefined, this),
+        /* @__PURE__ */ jsxDEV("div", {
+          className: "flex items-center gap-2",
+          children: [
+            onUseAsReference && /* @__PURE__ */ jsxDEV("button", {
+              onClick: onUseAsReference,
+              className: "text-xs px-3 py-1.5 border border-border rounded text-accent hover:border-accent",
+              children: "Use as reference"
+            }, undefined, false, undefined, this),
+            url && /* @__PURE__ */ jsxDEV("a", {
+              href: url,
+              target: "_blank",
+              rel: "noopener",
+              className: "text-xs px-3 py-1.5 border border-border rounded text-text",
+              children: "Open original"
+            }, undefined, false, undefined, this),
+            /* @__PURE__ */ jsxDEV("button", {
+              onClick: onClose,
+              className: "text-xs px-3 py-1.5 border border-border rounded text-text-muted",
+              children: "Close (Esc)"
+            }, undefined, false, undefined, this)
+          ]
+        }, undefined, true, undefined, this)
+      ]
+    }, undefined, true, undefined, this)
+  }, undefined, false, undefined, this);
+}
+function Row({ label, value }) {
+  return /* @__PURE__ */ jsxDEV("div", {
+    className: "flex gap-2",
+    children: [
+      /* @__PURE__ */ jsxDEV("span", {
+        className: "text-text-dim flex-shrink-0",
+        style: { width: 80 },
+        children: label
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV("span", {
+        className: "flex-1 min-w-0 text-text break-all",
+        title: value,
+        children: value
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+export {
+  MediaPanel as default
+};
