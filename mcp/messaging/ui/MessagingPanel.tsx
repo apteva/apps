@@ -209,6 +209,16 @@ type Tab = "outbox" | "inbox" | "templates" | "routes" | "suppressions" | "sende
 
 type Notice = { kind: "error" | "info"; text: string };
 type Notify = (kind: Notice["kind"], text: string) => void;
+interface ComposeDraft {
+  key: number;
+  channel: string;
+  from: string;
+  to: string;
+  subject: string;
+  body: string;
+  in_reply_to?: string;
+  references?: string[];
+}
 
 // ─── Component ────────────────────────────────────────────────────
 export default function MessagingPanel({ projectId, installId }: NativePanelProps) {
@@ -243,6 +253,7 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
 
   const [selected, setSelected] = useState<MessageRow | null>(null);
   const [selectedEvents, setSelectedEvents] = useState<DeliveryEvent[]>([]);
+  const [composeDraft, setComposeDraft] = useState<ComposeDraft | null>(null);
   const selectedRef = useRef<MessageRow | null>(null);
   useEffect(() => { selectedRef.current = selected; }, [selected]);
 
@@ -369,6 +380,17 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
 
   const verifiedSenders = useMemo(() => senders.filter((s) => s.verified), [senders]);
 
+  const replyToMessage = useCallback((m: MessageRow) => {
+    const draft = composeDraftFromMessage(m, verifiedSenders);
+    if (!draft) {
+      notify("error", "Cannot reply to this message because no matching sender was found.");
+      return;
+    }
+    setComposeDraft(draft);
+    setSelected(null);
+    setTab("compose");
+  }, [notify, verifiedSenders]);
+
   return (
     <div className="h-full flex flex-col">
       {notice && <Toast notice={notice} onDismiss={() => setNotice(null)} />}
@@ -396,7 +418,7 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
               key={id}
               type="button"
               className={`px-3 py-1.5 rounded ${tab === id ? "bg-surface-2 text-text" : "text-text-dim hover:text-text"}`}
-              onClick={() => { setTab(id); setSelected(null); }}
+              onClick={() => { if (id === "compose") setComposeDraft(null); setTab(id); setSelected(null); }}
             >{label}</button>
           ))}
         </div>
@@ -422,7 +444,8 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
               api={api}
               senders={verifiedSenders}
               quota={quota}
-              onSent={() => { reload(); setTab("outbox"); }}
+              draft={composeDraft}
+              onSent={() => { setComposeDraft(null); reload(); setTab("outbox"); }}
               gotoSenders={() => setTab("senders")}
             />
           )}
@@ -437,6 +460,7 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
           <MessageDetail
             m={selected}
             events={selectedEvents}
+            onReply={replyToMessage}
             onClose={() => setSelected(null)}
           />
         )}
@@ -486,12 +510,21 @@ function MessageList({ rows, onSelect, selectedId }: { rows: MessageRow[]; onSel
   );
 }
 
-function MessageDetail({ m, events, onClose }: { m: MessageRow; events: DeliveryEvent[]; onClose: () => void }) {
+function MessageDetail({ m, events, onReply, onClose }: { m: MessageRow; events: DeliveryEvent[]; onReply: (m: MessageRow) => void; onClose: () => void }) {
   return (
     <div className="w-[28rem] border-l border-border overflow-auto p-5 text-sm">
       <div className="flex items-center justify-between mb-3">
         <h3 className="font-semibold">Message #{m.id}</h3>
-        <button type="button" className="text-text-dim hover:text-text" onClick={onClose}>×</button>
+        <div className="flex items-center gap-2">
+          {m.direction === "in" && (
+            <button
+              type="button"
+              className="px-2 py-1 rounded border border-border text-xs text-text-dim hover:text-text hover:bg-surface-2"
+              onClick={() => onReply(m)}
+            >Reply</button>
+          )}
+          <button type="button" className="text-text-dim hover:text-text" onClick={onClose}>×</button>
+        </div>
       </div>
       <DL label="From" value={stripScheme(m.from)} />
       <DL label="To" value={m.to.map(stripScheme).join(", ")} />
@@ -598,12 +631,66 @@ function stringMeta(meta: Record<string, unknown>, key: string): string {
   return typeof v === "string" ? v : "";
 }
 
+function composeDraftFromMessage(m: MessageRow, senders: SenderRow[]): ComposeDraft | null {
+  const from = replyFromAddress(m, senders);
+  if (!from) return null;
+  const inReplyTo = m.message_id_header || "";
+  const refs = uniqueStrings([...(m.references || []), ...(inReplyTo ? [inReplyTo] : [])]);
+  return {
+    key: m.id,
+    channel: m.channel || "email",
+    from,
+    to: stripScheme(m.from),
+    subject: replySubject(m.subject || ""),
+    body: "",
+    in_reply_to: inReplyTo,
+    references: refs,
+  };
+}
+
+function replyFromAddress(m: MessageRow, senders: SenderRow[]): string {
+  const candidates = uniqueStrings([
+    m.matched_recipient || "",
+    ...(m.to || []),
+  ].map(stripScheme));
+  for (const candidate of candidates) {
+    if (senders.some((s) => senderCanSendAddress(s, candidate))) {
+      return candidate;
+    }
+  }
+  return candidates[0] || "";
+}
+
+function senderCanSendAddress(sender: SenderRow, address: string): boolean {
+  const clean = stripScheme(address);
+  const senderAddr = stripScheme(sender.address);
+  if (senderAddr === clean) return true;
+  const at = clean.indexOf("@");
+  return sender.kind === "domain" && at > 0 && senderAddr === clean.slice(at + 1);
+}
+
+function replySubject(subject: string): string {
+  const s = subject.trim();
+  if (!s) return "Re: (no subject)";
+  return /^re:/i.test(s) ? s : `Re: ${s}`;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const out: string[] = [];
+  for (const value of values) {
+    const s = value.trim();
+    if (s && !out.includes(s)) out.push(s);
+  }
+  return out;
+}
+
 function ComposeView({
-  api, senders, quota, onSent, gotoSenders,
+  api, senders, quota, draft, onSent, gotoSenders,
 }: {
   api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
   senders: SenderRow[];
   quota: QuotaInfo | null;
+  draft: ComposeDraft | null;
   onSent: () => void;
   gotoSenders: () => void;
 }) {
@@ -621,6 +708,8 @@ function ComposeView({
   const [to, setTo] = useState("");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
+  const [inReplyTo, setInReplyTo] = useState("");
+  const [references, setReferences] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -638,6 +727,32 @@ function ComposeView({
       setLocalPart("noreply");
     }
   }, [verified, selectedAddress]);
+
+  useEffect(() => {
+    if (!draft) return;
+    const from = stripScheme(draft.from);
+    const at = from.indexOf("@");
+    const exact = verified.find((s) => stripScheme(s.address) === from);
+    const domain = at > 0
+      ? verified.find((s) => s.kind === "domain" && stripScheme(s.address) === from.slice(at + 1))
+      : undefined;
+    if (exact) {
+      setSelectedAddress(stripScheme(exact.address));
+      setLocalPart("");
+    } else if (domain) {
+      setSelectedAddress(stripScheme(domain.address));
+      setLocalPart(from.slice(0, at));
+    } else {
+      setSelectedAddress(from);
+      setLocalPart("");
+    }
+    setTo(draft.to);
+    setSubject(draft.subject);
+    setBody(draft.body);
+    setInReplyTo(draft.in_reply_to || "");
+    setReferences(draft.references || []);
+    setErr("");
+  }, [draft, verified]);
 
   const selectedSender = useMemo(
     () => verified.find((s) => stripScheme(s.address) === selectedAddress),
@@ -679,9 +794,11 @@ function ComposeView({
       // doesn't fire on every SMS send.
       if (channel === "email") {
         if (subject) args.subject = subject;
+        if (inReplyTo) args.in_reply_to = inReplyTo;
+        if (references.length > 0) args.references = references;
       }
       await api("POST", "/tools/call", {}, { tool: "send_message", args });
-      setTo(""); setSubject(""); setBody("");
+      setTo(""); setSubject(""); setBody(""); setInReplyTo(""); setReferences([]);
       onSent();
     } catch (e) {
       setErr((e as Error).message);
@@ -693,7 +810,11 @@ function ComposeView({
   return (
     <form onSubmit={send} className="p-6 max-w-2xl space-y-3">
       <h2 className="text-lg font-semibold mb-1">Compose message</h2>
-      <p className="text-xs text-text-dim mb-3">Pick a verified sender; the channel comes from the sender. Comma-separate recipients.</p>
+      {draft ? (
+        <p className="text-xs text-text-dim mb-3">Replying to message #{draft.key}</p>
+      ) : (
+        <p className="text-xs text-text-dim mb-3">Pick a verified sender; the channel comes from the sender. Comma-separate recipients.</p>
+      )}
 
       {noVerifiedSenders ? (
         <div className="rounded border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm text-yellow-300">
@@ -707,7 +828,7 @@ function ComposeView({
               value={selectedAddress}
               onChange={(e) => {
                 setSelectedAddress(e.target.value);
-                const next = verified.find((s) => s.address === e.target.value);
+                const next = verified.find((s) => stripScheme(s.address) === e.target.value);
                 if (next?.kind === "domain" && !localPart) setLocalPart("noreply");
               }}
               required
@@ -719,13 +840,16 @@ function ComposeView({
                 return (
                   <optgroup key={ch} label={groupLabel}>
                     {inCh.map((s) => (
-                      <option key={s.address} value={s.address}>
-                        {s.kind === "domain" ? `@${s.address} (any local-part)` : s.address}
+                      <option key={s.address} value={stripScheme(s.address)}>
+                        {s.kind === "domain" ? `@${stripScheme(s.address)} (any local-part)` : stripScheme(s.address)}
                       </option>
                     ))}
                   </optgroup>
                 );
               })}
+              {selectedAddress && !verified.some((s) => stripScheme(s.address) === selectedAddress) && (
+                <option value={selectedAddress}>{selectedAddress}</option>
+              )}
             </select>
             {isDomain && (
               <>

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.12
+version: 0.13.13
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES; SMS and push are reserved channel namespaces. Tracks
@@ -91,7 +91,7 @@ provides:
     - prefix: /
   mcp_tools:
     # outbound
-    - { name: send_message,           description: "Send a message. Args: to (URI or URI[]), body, subject?, body_html?, from?, reply_to?, headers?, attachment_storage_ids?, template_id?, vars?, prefer_channel?, idempotency_key?. URI scheme picks the channel (mailto:, tel:, apteva://contact/N). Bare email strings are coerced to mailto:." }
+    - { name: send_message,           description: "Send a message. Args: to (URI or URI[]), body, subject?, body_html?, from?, reply_to?, in_reply_to?, references?, headers?, attachment_storage_ids?, template_id?, vars?, prefer_channel?, idempotency_key?. URI scheme picks the channel (mailto:, tel:, apteva://contact/N). Bare email strings are coerced to mailto:." }
     - { name: send_message_template,  description: "Render a saved template + send. Args: template_id, to, vars?, attachment_storage_ids?, idempotency_key?. Convenience over send_message with template_id." }
     - { name: message_get,            description: "Fetch one message by id — headers, status, channel, direction, delivery events." }
     - { name: message_list,           description: "List messages. Filters: direction? (in|out), channel?, status?, since?, address? (canonical URI), limit?." }

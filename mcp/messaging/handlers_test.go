@@ -91,6 +91,8 @@ func (s *stubPlatform) ExecuteIntegrationTool(connID int64, tool string, input m
 	switch tool {
 	case "send_email":
 		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"MessageId":"ses-msg-123"}`)}, nil
+	case "send_raw_email":
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"MessageId":"ses-raw-123"}`)}, nil
 	case "list_identities":
 		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"EmailIdentities":[],"NextToken":""}`)}, nil
 	case "get_quota":
@@ -256,6 +258,63 @@ func TestTextBodyToTrackingHTML_EscapesText(t *testing.T) {
 	want := "<!doctype html><html><body>hi &lt;there&gt;<br>\nnext &amp; last</body></html>"
 	if got != want {
 		t.Fatalf("html=%q, want %q", got, want)
+	}
+}
+
+func TestSendMessage_EmailReplyUsesRawMIMEHeaders(t *testing.T) {
+	plat := &stubPlatform{}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolSendMessage(ctx, map[string]any{
+		"channel":     "email",
+		"from":        fromAcme,
+		"to":          "alice@example.com",
+		"subject":     "Re: hello",
+		"body":        "reply body",
+		"in_reply_to": "<orig@example.com>",
+		"references":  []any{"<parent@example.com>", "<orig@example.com>"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := out.(map[string]any)
+	if r["provider_message_id"] != "ses-raw-123" {
+		t.Fatalf("provider_message_id=%v, want ses-raw-123", r["provider_message_id"])
+	}
+	if len(plat.executeCalls) != 1 {
+		t.Fatalf("expected 1 provider call, got %d", len(plat.executeCalls))
+	}
+	call := plat.executeCalls[0]
+	if call.Tool != "send_raw_email" {
+		t.Fatalf("tool=%q, want send_raw_email", call.Tool)
+	}
+	content := call.Input["Content"].(map[string]any)
+	raw := content["Raw"].(map[string]any)
+	data, err := base64.StdEncoding.DecodeString(raw["Data"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mimeBody := string(data)
+	for _, want := range []string{
+		"In-Reply-To: <orig@example.com>",
+		"References: <parent@example.com> <orig@example.com>",
+		"Subject: Re: hello",
+	} {
+		if !strings.Contains(mimeBody, want) {
+			t.Fatalf("raw MIME missing %q:\n%s", want, mimeBody)
+		}
+	}
+
+	msg, err := dbMessageGet(ctx.AppDB(), "test-proj", r["id"].(int64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.InReplyTo != "<orig@example.com>" {
+		t.Errorf("InReplyTo=%q", msg.InReplyTo)
+	}
+	if len(msg.References) != 2 || msg.References[0] != "<parent@example.com>" || msg.References[1] != "<orig@example.com>" {
+		t.Errorf("References=%v", msg.References)
 	}
 }
 

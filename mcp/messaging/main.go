@@ -19,6 +19,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha1"
@@ -31,6 +32,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"mime"
 	"mime/quotedprintable"
 	"net/http"
 	"net/mail"
@@ -52,7 +54,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.12
+version: 0.13.13
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -117,7 +119,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: send_message,           description: "Send a message. Channel is an explicit arg (email|sms|whatsapp)." }
+    - { name: send_message,           description: "Send a message. Channel is an explicit arg (email|sms|whatsapp). Email replies may include in_reply_to + references for threading." }
     - { name: send_message_template,  description: "Render a saved template + send." }
     - { name: message_get,            description: "Fetch one message by id." }
     - { name: message_list,           description: "List messages with filters." }
@@ -280,7 +282,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "send_message",
 			Description: "Send a message. Args: channel (email|sms|whatsapp), from, to (string|string[]), body. " +
-				"Email-only fields: subject, body_html, cc, bcc, reply_to, headers, attachment_storage_ids. " +
+				"Email-only fields: subject, body_html, cc, bcc, reply_to, in_reply_to, references, headers, attachment_storage_ids. " +
 				"SMS/WhatsApp-only fields: media_url, content_sid, content_variables. " +
 				"Common: template_id, vars, idempotency_key. " +
 				"Addresses are plain — emails (alice@x.com) and E.164 phone numbers (+15551234567), no scheme prefix. " +
@@ -294,6 +296,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"subject":                map[string]any{"type": "string"},
 				"body_html":              map[string]any{"type": "string"},
 				"reply_to":               map[string]any{"type": "string"},
+				"in_reply_to":            map[string]any{"type": "string"},
+				"references":             map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 				"cc":                     map[string]any{},
 				"bcc":                    map[string]any{},
 				"headers":                map[string]any{"type": "object"},
@@ -1009,6 +1013,9 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if len(headersJSON) == 0 {
 		headersJSON = []byte("{}")
 	}
+	inReplyTo := strings.TrimSpace(strArg(args, "in_reply_to"))
+	references := stringArrayArg(args, "references")
+	referencesJSON, _ := json.Marshal(references)
 
 	attachIDs := int64ArrayArg(args, "attachment_storage_ids")
 	attachJSON, _ := json.Marshal(attachIDs)
@@ -1040,8 +1047,8 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		pid, channel, from, string(toJSON), string(ccJSON), string(bccJSON),
 		subject, body, bodyHTML, string(headersJSON), string(attachJSON),
 		strArg(args, "message_id_header"),
-		strArg(args, "in_reply_to"),
-		`[]`,
+		inReplyTo,
+		string(referencesJSON),
 		idemNullable, nullableInt64(templateID),
 	)
 	if err != nil {
@@ -1056,7 +1063,7 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		Channel: channel,
 		From:    from, To: allowedTo, CC: allowedCC, BCC: allowedBCC,
 		Subject: subject, BodyText: body, BodyHTML: bodyHTML,
-		ReplyTo: replyTo, Headers: headers,
+		ReplyTo: replyTo, InReplyTo: inReplyTo, References: references, Headers: headers,
 		MediaURL:         mediaURL,
 		ContentSid:       contentSid,
 		ContentVariables: contentVars,
@@ -1134,6 +1141,8 @@ type providerSendInput struct {
 	Subject       string
 	BodyText      string
 	BodyHTML      string
+	InReplyTo     string
+	References    []string
 	Headers       map[string]any
 	MessageID     int64
 	ProjectID     string
@@ -1145,14 +1154,10 @@ type providerSendInput struct {
 
 const sesEventConfigurationSetName = "apteva-messaging"
 
-// sendViaSES maps our flat input to AWS SES v2's nested SendEmail
-// payload (FromEmailAddress / Destination / Content.Simple). All
-// addresses are already plain (no scheme prefix) — that's the v0.3
-// contract — so we hand them straight to SES.
-//
-// Custom headers are silently dropped: SES Simple content doesn't
-// accept arbitrary headers. Setting them requires send_raw_email
-// with a fully-built MIME blob (v0.4+).
+// sendViaSES maps our flat input to AWS SES v2. Normal sends use
+// SendEmail Content.Simple. Threaded replies switch to send_raw_email
+// so RFC 5322 In-Reply-To / References headers actually reach mail
+// clients instead of only being stored locally.
 func sendViaSES(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 	bound := ctx.IntegrationFor("email_provider")
 	if bound == nil {
@@ -1172,6 +1177,9 @@ func sendViaSES(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 	}
 	if len(in.BCC) > 0 {
 		dest["BccAddresses"] = in.BCC
+	}
+	if in.InReplyTo != "" || len(in.References) > 0 {
+		return sendViaSESRaw(ctx, bound.ConnectionID, dest, in)
 	}
 
 	body := map[string]any{}
@@ -1252,6 +1260,169 @@ parseResult:
 		}
 	}
 	return "", nil
+}
+
+func sendViaSESRaw(ctx *sdk.AppCtx, connID int64, dest map[string]any, in providerSendInput) (string, error) {
+	raw, err := buildRawEmail(in)
+	if err != nil {
+		return "", err
+	}
+	payload := map[string]any{
+		"FromEmailAddress": sesEnvelopeFrom(in.From),
+		"Destination":      dest,
+		"Content": map[string]any{
+			"Raw": map[string]any{
+				"Data": base64.StdEncoding.EncodeToString(raw),
+			},
+		},
+	}
+	trackingEnabled := in.MessageID > 0
+	if trackingEnabled {
+		payload["ConfigurationSetName"] = sesEventConfigurationSetName
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "send_raw_email", payload)
+	if err != nil {
+		return "", err
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		if trackingEnabled && looksLikeSESConfigSetMissing(body) {
+			delete(payload, "ConfigurationSetName")
+			ctx.Logger().Warn("messaging: SES event config set missing; retrying raw send without event tracking",
+				"config_set", sesEventConfigurationSetName)
+			res, err = ctx.PlatformAPI().ExecuteIntegrationTool(connID, "send_raw_email", payload)
+			if err != nil {
+				return "", err
+			}
+			if res != nil && res.Success {
+				body = ""
+			} else if res != nil {
+				body = string(res.Data)
+			}
+		}
+		if res == nil || !res.Success {
+			return "", fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
+		}
+	}
+	var probe map[string]any
+	_ = json.Unmarshal(res.Data, &probe)
+	for _, key := range []string{"MessageId", "message_id", "messageId", "id"} {
+		if v, ok := probe[key].(string); ok && v != "" {
+			return v, nil
+		}
+	}
+	return "", nil
+}
+
+func buildRawEmail(in providerSendInput) ([]byte, error) {
+	subj := in.Subject
+	if subj == "" {
+		subj = "(no subject)"
+	}
+	bodyHTML := in.BodyHTML
+	if bodyHTML == "" && in.BodyText != "" {
+		bodyHTML = textBodyToTrackingHTML(in.BodyText)
+	}
+	var b bytes.Buffer
+	writeHeader(&b, "From", in.From)
+	writeHeader(&b, "To", strings.Join(in.To, ", "))
+	if len(in.CC) > 0 {
+		writeHeader(&b, "Cc", strings.Join(in.CC, ", "))
+	}
+	if in.ReplyTo != "" {
+		writeHeader(&b, "Reply-To", in.ReplyTo)
+	}
+	writeHeader(&b, "Subject", mime.QEncoding.Encode("UTF-8", subj))
+	writeHeader(&b, "Date", time.Now().UTC().Format(time.RFC1123Z))
+	if in.MessageID > 0 {
+		writeHeader(&b, "Message-ID", fmt.Sprintf("<apteva-message-%d@apteva.local>", in.MessageID))
+	}
+	if in.InReplyTo != "" {
+		writeHeader(&b, "In-Reply-To", in.InReplyTo)
+	}
+	if len(in.References) > 0 {
+		writeHeader(&b, "References", strings.Join(in.References, " "))
+	}
+	writeHeader(&b, "MIME-Version", "1.0")
+	for k, v := range in.Headers {
+		if !rawCustomHeaderAllowed(k) {
+			continue
+		}
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			writeHeader(&b, k, s)
+		}
+	}
+
+	switch {
+	case in.BodyText != "" && bodyHTML != "":
+		boundary := fmt.Sprintf("apteva-alt-%d", in.MessageID)
+		writeHeader(&b, "Content-Type", fmt.Sprintf(`multipart/alternative; boundary="%s"`, boundary))
+		b.WriteString("\r\n")
+		writeMIMEPart(&b, boundary, "text/plain; charset=UTF-8", in.BodyText)
+		writeMIMEPart(&b, boundary, "text/html; charset=UTF-8", bodyHTML)
+		fmt.Fprintf(&b, "--%s--\r\n", boundary)
+	case bodyHTML != "":
+		writeHeader(&b, "Content-Type", "text/html; charset=UTF-8")
+		writeHeader(&b, "Content-Transfer-Encoding", "base64")
+		b.WriteString("\r\n")
+		b.WriteString(wrapBase64(bodyHTML))
+	case in.BodyText != "":
+		writeHeader(&b, "Content-Type", "text/plain; charset=UTF-8")
+		writeHeader(&b, "Content-Transfer-Encoding", "base64")
+		b.WriteString("\r\n")
+		b.WriteString(wrapBase64(in.BodyText))
+	default:
+		return nil, errors.New("raw email body is empty")
+	}
+	return b.Bytes(), nil
+}
+
+func writeMIMEPart(b *bytes.Buffer, boundary, contentType, body string) {
+	fmt.Fprintf(b, "--%s\r\n", boundary)
+	writeHeader(b, "Content-Type", contentType)
+	writeHeader(b, "Content-Transfer-Encoding", "base64")
+	b.WriteString("\r\n")
+	b.WriteString(wrapBase64(body))
+}
+
+func writeHeader(b *bytes.Buffer, name, value string) {
+	value = strings.TrimSpace(strings.NewReplacer("\r", " ", "\n", " ").Replace(value))
+	if value == "" {
+		return
+	}
+	fmt.Fprintf(b, "%s: %s\r\n", name, value)
+}
+
+func wrapBase64(s string) string {
+	enc := base64.StdEncoding.EncodeToString([]byte(s))
+	var b strings.Builder
+	for len(enc) > 76 {
+		b.WriteString(enc[:76])
+		b.WriteString("\r\n")
+		enc = enc[76:]
+	}
+	b.WriteString(enc)
+	b.WriteString("\r\n")
+	return b.String()
+}
+
+func rawCustomHeaderAllowed(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "from", "to", "cc", "bcc", "subject", "date", "message-id", "in-reply-to", "references", "mime-version", "content-type", "content-transfer-encoding":
+		return false
+	default:
+		return !strings.ContainsAny(name, ":\r\n")
+	}
+}
+
+func sesEnvelopeFrom(from string) string {
+	if addr, err := mail.ParseAddress(from); err == nil && addr.Address != "" {
+		return addr.Address
+	}
+	return from
 }
 
 func textBodyToTrackingHTML(s string) string {
@@ -5547,6 +5718,39 @@ func int64ArrayArg(args map[string]any, key string) []int64 {
 				out = append(out, x)
 			case int:
 				out = append(out, int64(x))
+			}
+		}
+	}
+	return out
+}
+
+func stringArrayArg(args map[string]any, key string) []string {
+	out := []string{}
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return
+		}
+		for _, existing := range out {
+			if existing == s {
+				return
+			}
+		}
+		out = append(out, s)
+	}
+	switch v := args[key].(type) {
+	case string:
+		for _, s := range strings.Fields(v) {
+			add(s)
+		}
+	case []string:
+		for _, s := range v {
+			add(s)
+		}
+	case []any:
+		for _, it := range v {
+			if s, ok := it.(string); ok {
+				add(s)
 			}
 		}
 	}
