@@ -27,6 +27,45 @@ interface Blueprint {
 
 const API = "/api/apps/containers/api";
 
+const TEST_IMAGES = [
+  {
+    slug: "nginx",
+    label: "Nginx",
+    image: "nginx:alpine",
+    containerPort: "80",
+    healthPath: "/",
+    memoryMB: "256",
+    cpu: "0.5",
+  },
+  {
+    slug: "whoami",
+    label: "Whoami",
+    image: "traefik/whoami:v1.10",
+    containerPort: "80",
+    healthPath: "/",
+    memoryMB: "128",
+    cpu: "0.25",
+  },
+  {
+    slug: "httpd",
+    label: "Apache",
+    image: "httpd:alpine",
+    containerPort: "80",
+    healthPath: "/",
+    memoryMB: "256",
+    cpu: "0.5",
+  },
+  {
+    slug: "adminer",
+    label: "Adminer",
+    image: "adminer:latest",
+    containerPort: "8080",
+    healthPath: "/",
+    memoryMB: "256",
+    cpu: "0.5",
+  },
+] as const;
+
 const inputCls =
   "bg-surface-2 text-text border border-border rounded px-3 py-2 text-sm " +
   "placeholder:text-text-dim focus:outline-none focus:ring-1 focus:ring-accent";
@@ -85,13 +124,13 @@ export default function ContainersPanel(_props: NativePanelProps) {
     return () => window.clearInterval(t);
   }, [load]);
 
-  const run = useCallback(async () => {
+  const runSpec = useCallback(async (nextForm: typeof form) => {
     setBusy("run");
     try {
-      const ports = form.containerPort
+      const ports = nextForm.containerPort
         ? [{
-            container_port: Number(form.containerPort),
-            host_port: form.hostPort ? Number(form.hostPort) : 0,
+            container_port: Number(nextForm.containerPort),
+            host_port: nextForm.hostPort ? Number(nextForm.hostPort) : 0,
             bind_addr: "127.0.0.1",
             protocol: "tcp",
           }]
@@ -99,13 +138,13 @@ export default function ContainersPanel(_props: NativePanelProps) {
       await api("/workloads", {
         method: "POST",
         body: JSON.stringify({
-          name: form.name,
-          image: form.image,
+          name: nextForm.name,
+          image: nextForm.image,
           ports,
-          health_path: form.healthPath || "/",
+          health_path: nextForm.healthPath || "/",
           resources: {
-            memory_mb: Number(form.memoryMB || 0),
-            cpu: Number(form.cpu || 0),
+            memory_mb: Number(nextForm.memoryMB || 0),
+            cpu: Number(nextForm.cpu || 0),
           },
         }),
       });
@@ -116,7 +155,36 @@ export default function ContainersPanel(_props: NativePanelProps) {
     } finally {
       setBusy("");
     }
-  }, [form, load]);
+  }, [load]);
+
+  const run = useCallback(async () => {
+    await runSpec(form);
+  }, [form, runSpec]);
+
+  const fillTestImage = useCallback((preset: typeof TEST_IMAGES[number]) => {
+    setForm({
+      name: `test-${preset.slug}`,
+      image: preset.image,
+      containerPort: preset.containerPort,
+      hostPort: "",
+      healthPath: preset.healthPath,
+      memoryMB: preset.memoryMB,
+      cpu: preset.cpu,
+    });
+  }, []);
+
+  const runTestImage = useCallback(async (preset: typeof TEST_IMAGES[number]) => {
+    const suffix = Math.floor(Date.now() / 1000).toString(36);
+    await runSpec({
+      name: `test-${preset.slug}-${suffix}`,
+      image: preset.image,
+      containerPort: preset.containerPort,
+      hostPort: "",
+      healthPath: preset.healthPath,
+      memoryMB: preset.memoryMB,
+      cpu: preset.cpu,
+    });
+  }, [runSpec]);
 
   const action = useCallback(async (id: string, act: "start" | "stop" | "restart" | "health") => {
     setBusy(`${act}:${id}`);
@@ -169,6 +237,27 @@ export default function ContainersPanel(_props: NativePanelProps) {
 
       <div className="p-6 grid gap-5 lg:grid-cols-[360px_1fr] overflow-auto">
         <section className="space-y-4">
+          <div className="border border-border rounded bg-surface p-4 space-y-3">
+            <h2 className="text-sm font-semibold">Quick Tests</h2>
+            <div className="grid gap-2">
+              {TEST_IMAGES.map((preset) => (
+                <div key={preset.slug} className="rounded border border-border/60 p-3 space-y-2">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-medium">{preset.label}</div>
+                      <div className="text-xs text-text-dim font-mono mt-1">{preset.image}</div>
+                    </div>
+                    <div className="text-xs text-text-dim shrink-0">{preset.containerPort}/tcp</div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button className="btn btn-xs" onClick={() => fillTestImage(preset)} disabled={!!busy}>Fill</button>
+                    <button className="btn btn-xs btn-primary" onClick={() => runTestImage(preset)} disabled={!!busy}>Run</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
           <div className="border border-border rounded bg-surface p-4 space-y-3">
             <h2 className="text-sm font-semibold">Run Image</h2>
             <input className={inputCls} placeholder="name, e.g. demo-nginx" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
