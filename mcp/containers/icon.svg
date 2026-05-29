@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Containers">
+  <rect width="256" height="256" rx="48" fill="#101827"/>
+  <path d="M58 86h56v56H58zM128 86h56v56h-56zM93 156h70v42H93z" fill="#38bdf8"/>
+  <path d="M58 86h56v56H58zM128 86h56v56h-56zM93 156h70v42H93z" fill="none" stroke="#e0f2fe" stroke-width="10" stroke-linejoin="round"/>
+  <path d="M58 70h56M128 70h56M93 140h70" stroke="#f8fafc" stroke-width="10" stroke-linecap="round"/>
+</svg>
