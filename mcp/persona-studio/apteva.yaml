@@ -1,0 +1,89 @@
+schema: apteva-app/v1
+
+name: persona-studio
+display_name: Persona Studio
+version: 0.1.0
+description: |
+  Virtual influencer and reusable persona workspace. Persona Studio owns
+  consistent identities, reference sets, reusable items/products, style
+  profiles, campaigns, generated assets, and Composer handoffs while Media
+  Studio remains the provider-neutral generator.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/persona-studio
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/persona-studio/icon.svg
+tags: [ai, persona, virtual-influencer, ugc, media, content]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: storage
+      version: ">=0.10.0"
+      reason: Store persona references, item packshots, generated assets, and final exports.
+    - name: media-studio
+      version: ">=0.10.0"
+      reason: Generate images, videos, audio, music, and avatar clips through bound providers.
+    - name: composer
+      version: ">=0.3.0"
+      optional: true
+      reason: Assemble generated or uploaded assets into timeline compositions and renders.
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: persona_create
+      description: Create a virtual persona with identity, audience, tone, visual style, and provider defaults.
+    - name: persona_update
+      description: Update a persona's identity, style, voice/avatar ids, provider defaults, or brand rules.
+    - name: persona_get
+      description: Fetch one persona with style profiles, references, items, campaigns, and recent assets.
+    - name: persona_list
+      description: List personas in this project.
+    - name: persona_style_profile_upsert
+      description: Create or update an asset-type-specific style profile for consistent generation.
+    - name: persona_reference_add
+      description: Link a Storage file as a persona reference such as face, pose, outfit, voice, product, or style.
+    - name: persona_reference_list
+      description: List references for a persona.
+    - name: persona_item_create
+      description: Create a reusable item/product/prop/location/brand asset the persona can use in media.
+    - name: persona_item_update
+      description: Update an item, usage rules, visual rules, active flag, or linked Storage references.
+    - name: persona_item_list
+      description: List reusable items for a persona.
+    - name: persona_generate_asset
+      description: Generate one persona-consistent asset through Media Studio, using style profiles, references, items, and cache.
+    - name: persona_generate_pack
+      description: Generate a small starter pack of persona assets using Media Studio.
+    - name: persona_campaign_create
+      description: Create a campaign brief for a persona.
+    - name: persona_create_clip_plan
+      description: Create a structured clip plan from a campaign or brief.
+    - name: persona_create_composition
+      description: Create a Composer composition from selected persona assets or a clip plan.
+  ui_panels:
+    - slot: project.page
+      label: Personas
+      icon: sparkle
+      entry: /ui/PersonaPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/persona-studio
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/persona-studio.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
