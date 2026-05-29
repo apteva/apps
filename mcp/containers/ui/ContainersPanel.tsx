@@ -70,6 +70,18 @@ const inputCls =
   "bg-surface-2 text-text border border-border rounded px-3 py-2 text-sm " +
   "placeholder:text-text-dim focus:outline-none focus:ring-1 focus:ring-accent";
 
+function imageName(image: string): string {
+  const withoutTag = image.split("@")[0].split(":")[0] || "container";
+  const base = withoutTag.split("/").pop() || "container";
+  const clean = base.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  return clean || "container";
+}
+
+function autoName(image: string): string {
+  const suffix = Math.floor(Date.now() / 1000).toString(36);
+  return `test-${imageName(image)}-${suffix}`;
+}
+
 function statusClass(status: string): string {
   if (status === "running") return "text-green";
   if (status === "creating") return "text-blue";
@@ -92,10 +104,11 @@ export default function ContainersPanel(_props: NativePanelProps) {
   const [workloads, setWorkloads] = useState<Workload[]>([]);
   const [blueprints, setBlueprints] = useState<Blueprint[]>([]);
   const [err, setErr] = useState("");
+  const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState("");
   const [logs, setLogs] = useState<{ name: string; body: string } | null>(null);
   const [form, setForm] = useState({
-    name: "",
+    name: "test-nginx",
     image: "nginx:alpine",
     containerPort: "80",
     hostPort: "",
@@ -126,7 +139,9 @@ export default function ContainersPanel(_props: NativePanelProps) {
 
   const runSpec = useCallback(async (nextForm: typeof form) => {
     setBusy("run");
+    setNotice("Pulling the image and starting the container. First run can take a minute.");
     try {
+      const name = nextForm.name.trim() || autoName(nextForm.image);
       const ports = nextForm.containerPort
         ? [{
             container_port: Number(nextForm.containerPort),
@@ -138,7 +153,7 @@ export default function ContainersPanel(_props: NativePanelProps) {
       await api("/workloads", {
         method: "POST",
         body: JSON.stringify({
-          name: nextForm.name,
+          name,
           image: nextForm.image,
           ports,
           health_path: nextForm.healthPath || "/",
@@ -148,10 +163,12 @@ export default function ContainersPanel(_props: NativePanelProps) {
           },
         }),
       });
-      setForm((f) => ({ ...f, name: "" }));
+      setNotice(`Started ${name}.`);
+      setForm((f) => ({ ...f, name: autoName(f.image) }));
       await load();
     } catch (e) {
       setErr((e as Error).message);
+      setNotice("");
     } finally {
       setBusy("");
     }
@@ -163,7 +180,7 @@ export default function ContainersPanel(_props: NativePanelProps) {
 
   const fillTestImage = useCallback((preset: typeof TEST_IMAGES[number]) => {
     setForm({
-      name: `test-${preset.slug}`,
+      name: autoName(preset.image),
       image: preset.image,
       containerPort: preset.containerPort,
       hostPort: "",
@@ -174,9 +191,8 @@ export default function ContainersPanel(_props: NativePanelProps) {
   }, []);
 
   const runTestImage = useCallback(async (preset: typeof TEST_IMAGES[number]) => {
-    const suffix = Math.floor(Date.now() / 1000).toString(36);
     await runSpec({
-      name: `test-${preset.slug}-${suffix}`,
+      name: autoName(preset.image),
       image: preset.image,
       containerPort: preset.containerPort,
       hostPort: "",
@@ -234,6 +250,7 @@ export default function ContainersPanel(_props: NativePanelProps) {
       </div>
 
       {err && <div className="mx-6 mt-4 rounded border border-red/40 bg-red/10 text-red px-3 py-2 text-sm">{err}</div>}
+      {notice && <div className="mx-6 mt-4 rounded border border-border bg-surface-2 text-text px-3 py-2 text-sm">{notice}</div>}
 
       <div className="p-6 grid gap-5 lg:grid-cols-[360px_1fr] overflow-auto">
         <section className="space-y-4">
@@ -271,8 +288,8 @@ export default function ContainersPanel(_props: NativePanelProps) {
               <input className={inputCls} placeholder="MB" value={form.memoryMB} onChange={(e) => setForm({ ...form, memoryMB: e.target.value })} />
               <input className={inputCls} placeholder="CPU" value={form.cpu} onChange={(e) => setForm({ ...form, cpu: e.target.value })} />
             </div>
-            <button className="btn btn-primary w-full" onClick={run} disabled={busy === "run" || !form.name || !form.image}>
-              Run container
+            <button className="btn btn-primary w-full" onClick={run} disabled={busy === "run" || !form.image}>
+              {busy === "run" ? "Starting container..." : "Run container"}
             </button>
           </div>
 

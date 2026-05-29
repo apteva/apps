@@ -19,7 +19,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: containers
 display_name: Containers
-version: 0.1.1
+version: 0.1.2
 description: Generic Docker workload runtime for Apteva. Runs container images on the local host, manages volumes, ports, health checks, logs, and lifecycle actions.
 author: Apteva
 scopes: [global]
