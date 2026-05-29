@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: calls
 display_name: Calls
-version: 0.1.1
+version: 0.1.2
 description: |
   Standalone realtime audio/video calls with WebRTC-ready rooms,
   join tokens, unified human/agent/service participants, chat,
@@ -39,7 +39,11 @@ provides:
     - { name: calls_get_messages,         description: "Get room messages. Args: room_id, since_id?, limit?." }
     - { name: calls_get_transcript,       description: "Get room transcript items. Args: room_id, since_id?, participant_id?, limit?." }
     - { name: calls_append_transcript,    description: "Append a transcript item. Args: room_id, participant_id, text, started_at_ms?, ended_at_ms?, confidence?, source?." }
-  ui_panels: []
+  ui_panels:
+    - slot: project.page
+      label: Calls
+      icon: video
+      entry: /ui/CallsPanel.mjs
 
 runtime:
   kind: source

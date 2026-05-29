@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: calls
 display_name: Calls
-version: 0.1.1
+version: 0.1.2
 description: Standalone realtime audio/video calls with unified participants.
 author: Apteva
 scopes: [project, global]
@@ -48,6 +48,11 @@ provides:
     - { name: calls_get_messages,       description: "Get room messages." }
     - { name: calls_get_transcript,     description: "Get room transcript items." }
     - { name: calls_append_transcript,  description: "Append a transcript item." }
+  ui_panels:
+    - slot: project.page
+      label: Calls
+      icon: video
+      entry: /ui/CallsPanel.mjs
 runtime:
   kind: source
   source: { repo: github.com/apteva/apps, ref: main, entry: mcp/calls }
