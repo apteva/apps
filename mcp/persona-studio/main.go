@@ -788,14 +788,19 @@ func (a *App) toolGenerateAsset(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		}
 		return map[string]any{"asset": asset, "error": err.Error()}, nil
 	}
+	if msg := mcpResultError(mediaOut); msg != "" {
+		asset, err := a.insertAsset(ctx, pid, personaID, int64Arg(args, "campaign_id"), assetType, "failed", prompt, resolved, "", "", settings, refIDs(refs), itemIDs, cacheKey, msg, 0, 0)
+		return map[string]any{"asset": asset, "error": msg}, err
+	}
+	mediaMeta := mediaStudioResultMeta(mediaOut)
 	status := "ready"
-	if s := strFromMap(mediaOut, "status"); s == "queued" || s == "polling" {
+	if s := strFromMap(mediaMeta, "status"); s == "queued" || s == "polling" {
 		status = s
 	}
-	storageID := firstInt(mediaOut["storage_ids"])
-	genID := firstNonZero(int64FromMap(mediaOut, "generation_id"), int64FromMap(mediaOut, "id"))
-	provider := strFromMap(mediaOut, "provider")
-	model := strFromMap(mediaOut, "model")
+	storageID := firstInt(mediaMeta["storage_ids"])
+	genID := firstNonZero(int64FromMap(mediaMeta, "generation_id"), int64FromMap(mediaMeta, "id"))
+	provider := strFromMap(mediaMeta, "provider")
+	model := strFromMap(mediaMeta, "model")
 	asset, err := a.insertAsset(ctx, pid, personaID, int64Arg(args, "campaign_id"), assetType, status, prompt, resolved, provider, model, settings, refIDs(refs), itemIDs, cacheKey, "", storageID, genID)
 	if err != nil {
 		return nil, err
@@ -1374,6 +1379,34 @@ func cachedAsset(db *sql.DB, pid, cacheKey string) (*Asset, bool) {
 	}
 	asset, err := getAsset(db, pid, assetID)
 	return asset, err == nil
+}
+
+func mediaStudioResultMeta(out map[string]any) map[string]any {
+	if out == nil {
+		return map[string]any{}
+	}
+	if meta, ok := out["_meta"].(map[string]any); ok {
+		return meta
+	}
+	return out
+}
+
+func mcpResultError(out map[string]any) string {
+	if out == nil || !boolArg(out, "isError") {
+		return ""
+	}
+	if blocks, ok := out["content"].([]any); ok {
+		for _, block := range blocks {
+			m, ok := block.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text := cleanString(m["text"]); text != "" {
+				return text
+			}
+		}
+	}
+	return "media-studio returned an error"
 }
 
 // Prompt/composition helpers

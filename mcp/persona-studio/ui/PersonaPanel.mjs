@@ -15,6 +15,13 @@ const IMAGE_FORMAT_PRESETS = [
 const VIDEO_ASPECTS = ["9:16", "16:9", "1:1", "4:3"];
 const IMAGE_QUALITIES = ["auto", "low", "medium", "high"];
 const OUTPUT_FORMATS = ["png", "jpeg", "webp"];
+const EDIT_MODELS = [
+  "firered-image-edit",
+  "qwen-edit",
+  "grok-imagine-edit",
+  "flux-2-max-edit",
+  "gpt-image-2-edit",
+];
 
 export default function PersonaPanel({ projectId }) {
   const [personas, setPersonas] = useState([]);
@@ -37,6 +44,7 @@ export default function PersonaPanel({ projectId }) {
     prompt: "",
     item_ids: [],
     model: "",
+    source_image: "",
     format_preset: "portrait",
     aspect: "9:16",
     size: "1024x1536",
@@ -115,6 +123,18 @@ export default function PersonaPanel({ projectId }) {
       cancelled = true;
     };
   }, [projectId, generation.asset_type]);
+  useEffect(() => {
+    if (generation.asset_type !== "image") return;
+    if (generation.source_image) {
+      if (!EDIT_MODELS.includes(generation.model)) {
+        setGeneration((cur) => ({ ...cur, model: EDIT_MODELS[0] }));
+      }
+      return;
+    }
+    if (mediaModels.length > 0 && !mediaModels.some((m) => m.id === generation.model)) {
+      setGeneration((cur) => ({ ...cur, model: mediaModels[0].id }));
+    }
+  }, [generation.asset_type, generation.source_image, generation.model, mediaModels]);
 
   async function createPersona(e) {
     e.preventDefault();
@@ -174,9 +194,10 @@ export default function PersonaPanel({ projectId }) {
     const settings = {};
     if (generation.model) settings.model = generation.model;
     if (generation.asset_type === "image") {
+      if (generation.source_image) settings.source_image = generation.source_image;
       if (generation.size) settings.size = generation.size;
       const options = {};
-      if (generation.quality) {
+      if (!generation.source_image && generation.quality) {
         settings.quality = generation.quality;
         options.quality = generation.quality;
       }
@@ -187,6 +208,9 @@ export default function PersonaPanel({ projectId }) {
       if (generation.aspect) {
         settings.aspect = generation.aspect;
         options.aspect_ratio = generation.aspect;
+      }
+      if (generation.source_image && generation.size) {
+        options.resolution = generation.size;
       }
       if (Object.keys(options).length > 0) settings.options = options;
     } else {
@@ -262,7 +286,12 @@ export default function PersonaPanel({ projectId }) {
   const items = bundle?.items || [];
   const refs = bundle?.references || [];
   const assets = bundle?.assets || [];
-  const selectedModel = mediaModels.find((m) => m.id === generation.model);
+  const sourceOptions = imageSourceOptions(refs, items);
+  const imageEditMode = generation.asset_type === "image" && generation.source_image;
+  const modelOptions = imageEditMode
+    ? EDIT_MODELS.map((id) => ({ id, model_type: "image-edit" }))
+    : mediaModels;
+  const selectedModel = modelOptions.find((m) => m.id === generation.model);
   const modelAspects = selectedModel?.aspect_ratios || [];
   const modelDurations = selectedModel?.durations || [];
 
@@ -393,15 +422,29 @@ export default function PersonaPanel({ projectId }) {
                     ["image", "video", "audio_tts", "audio_sfx", "music", "avatar"].map((k) => h("option", { key: k, value: k }, k))
                   ),
                   h(ModelSelect, {
-                    models: mediaModels,
-                    provider: mediaProvider,
+                    models: modelOptions,
+                    provider: imageEditMode ? "venice-ai edit" : mediaProvider,
                     loading: modelsLoading,
                     value: generation.model,
                     onChange: (model) => setGeneration({ ...generation, model }),
                   })
                 ),
                 generation.asset_type === "image"
-                  ? h("div", { className: "grid grid-cols-2 lg:grid-cols-5 gap-2" },
+                  ? h("div", { className: "grid gap-2" },
+                    h("select", {
+                      value: generation.source_image,
+                      onChange: (e) => setGeneration({ ...generation, source_image: e.target.value }),
+                      className: fieldClass(),
+                      title: "Use a linked reference image as Media Studio source_image. This switches to image edit models.",
+                    },
+                      [h("option", { key: "", value: "" }, "Text-to-image (no source image)")].concat(
+                        sourceOptions.map((opt) => h("option", { key: opt.value, value: opt.value }, opt.label))
+                      )
+                    ),
+                    imageEditMode && h("div", { className: "text-xs text-text-muted" },
+                      "Reference image selected: using Media Studio image edit mode. Edit currently requires a Venice image provider."
+                    ),
+                    h("div", { className: "grid grid-cols-2 lg:grid-cols-5 gap-2" },
                       h("select", {
                         value: generation.format_preset,
                         onChange: (e) => {
@@ -428,6 +471,7 @@ export default function PersonaPanel({ projectId }) {
                       h("select", { value: generation.output_format, onChange: (e) => setGeneration({ ...generation, output_format: e.target.value }), className: fieldClass(), title: "File format" },
                         OUTPUT_FORMATS.map((f) => h("option", { key: f, value: f }, f.toUpperCase()))
                       )
+                    )
                     )
                   : (generation.asset_type === "video" || generation.asset_type === "avatar")
                     ? h("div", { className: "grid grid-cols-2 gap-2" },
@@ -501,6 +545,32 @@ function parseIDs(value) {
     .split(/[,\s]+/)
     .map((x) => Number(x))
     .filter((x) => Number.isFinite(x) && x > 0);
+}
+
+function imageSourceOptions(refs, items) {
+  const out = [];
+  const seen = new Set();
+  for (const ref of refs || []) {
+    const id = Number(ref.storage_file_id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      value: `storage:${id}`,
+      label: `Reference: ${ref.kind}${ref.label ? ` - ${ref.label}` : ""} - storage:${id}`,
+    });
+  }
+  for (const item of items || []) {
+    for (const raw of item.storage_file_ids || []) {
+      const id = Number(raw);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      out.push({
+        value: `storage:${id}`,
+        label: `Item: ${item.name || item.kind} - storage:${id}`,
+      });
+    }
+  }
+  return out;
 }
 
 function fieldClass() {

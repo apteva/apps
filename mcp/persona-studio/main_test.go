@@ -105,6 +105,35 @@ func TestFilterStorageBrowserOutputHidesDotFolders(t *testing.T) {
 	}
 }
 
+func TestMediaStudioResultMetaExtractsMCPMeta(t *testing.T) {
+	meta := mediaStudioResultMeta(map[string]any{
+		"content": []any{map[string]any{"type": "text", "text": "ok"}},
+		"_meta": map[string]any{
+			"provider":    "venice-ai",
+			"model":       "firered-image-edit",
+			"storage_ids": []any{float64(192)},
+		},
+	})
+	if strFromMap(meta, "provider") != "venice-ai" {
+		t.Fatalf("provider not extracted from _meta: %#v", meta)
+	}
+	if firstInt(meta["storage_ids"]) != 192 {
+		t.Fatalf("storage_ids not extracted from _meta: %#v", meta)
+	}
+}
+
+func TestMCPResultErrorExtractsText(t *testing.T) {
+	msg := mcpResultError(map[string]any{
+		"isError": true,
+		"content": []any{
+			map[string]any{"type": "text", "text": "provider returned zero items"},
+		},
+	})
+	if msg != "provider returned zero items" {
+		t.Fatalf("unexpected error message: %q", msg)
+	}
+}
+
 func mustPersona(t *testing.T, app *App, ctx *sdk.AppCtx) *Persona {
 	t.Helper()
 	out, err := app.toolPersonaCreate(ctx, map[string]any{
