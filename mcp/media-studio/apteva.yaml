@@ -2,13 +2,13 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.1
+version: 0.10.2
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs powers audio TTS, sound effects, and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references. v0.10.1 adds OpenAI Codex as a subscription-backed
-  image provider option.
+  references. v0.10.2 fixes OpenAI Codex image generation by sending
+  the required Responses instructions alongside the image prompt.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media-studio

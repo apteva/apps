@@ -641,6 +641,9 @@ func TestBuildOpenAICodexImageArgs(t *testing.T) {
 	if args["model"] != "gpt-5.5" || args["prompt"] != "draw a door" || args["size"] != "1024x1536" {
 		t.Fatalf("base args wrong: %+v", args)
 	}
+	if strings.TrimSpace(fmt.Sprint(args["instructions"])) == "" {
+		t.Fatalf("instructions missing: %+v", args)
+	}
 	if args["quality"] != "high" || args["output_format"] != "webp" || args["background"] != "transparent" {
 		t.Fatalf("image_generation options missing: %+v", args)
 	}

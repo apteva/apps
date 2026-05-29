@@ -68,9 +68,18 @@ func buildOpenAICodexImageArgs(args map[string]any) map[string]any {
 	if model == "" || strings.HasPrefix(model, "gpt-image") || strings.HasPrefix(model, "dall-e") {
 		model = "gpt-5.5"
 	}
+	prompt := strArg(args, "prompt", "")
+	instructions := strArg(args, "instructions", "")
+	if opts, ok := args["options"].(map[string]any); ok && instructions == "" {
+		instructions = strArg(opts, "instructions", "")
+	}
+	if strings.TrimSpace(instructions) == "" {
+		instructions = "Generate the requested image using the hosted image_generation tool. Return the completed image result."
+	}
 	out := map[string]any{
-		"model":  model,
-		"prompt": strArg(args, "prompt", ""),
+		"model":        model,
+		"prompt":       prompt,
+		"instructions": instructions,
 	}
 	if size := strArg(args, "size", ""); size != "" {
 		out["size"] = size
