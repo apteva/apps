@@ -2,16 +2,15 @@ schema: apteva-app/v1
 
 name: persona-studio
 display_name: Persona Studio
-version: 0.1.4
+version: 0.1.5
 description: |
   Virtual influencer and reusable persona workspace. Persona Studio owns
   consistent identities, reference sets, reusable items/products, style
   profiles, campaigns, generated assets, and Composer handoffs while Media
   Studio remains the provider-neutral generator.
 
-  v0.1.4 uses Media Studio image edit models when a linked reference is
-  selected as source_image and records returned storage ids from MCP
-  metadata.
+  v0.1.5 auto-selects linked image references for image generation so
+  Persona Studio opens Media Studio edit mode by default when references exist.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/persona-studio
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/persona-studio/icon.svg

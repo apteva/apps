@@ -52,6 +52,7 @@ export default function PersonaPanel({ projectId }) {
     quality: "auto",
     output_format: "png",
   });
+  const [sourceChoiceTouched, setSourceChoiceTouched] = useState(false);
   const [mediaModels, setMediaModels] = useState([]);
   const [mediaProvider, setMediaProvider] = useState("");
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -62,6 +63,11 @@ export default function PersonaPanel({ projectId }) {
   const [pickerTarget, setPickerTarget] = useState(null);
 
   const qs = useMemo(() => `project_id=${encodeURIComponent(projectId || "")}`, [projectId]);
+  const persona = bundle?.persona;
+  const items = bundle?.items || [];
+  const refs = bundle?.references || [];
+  const assets = bundle?.assets || [];
+  const sourceOptions = useMemo(() => imageSourceOptions(refs, items), [refs, items]);
 
   const loadPersonas = useCallback(async () => {
     if (!projectId) return;
@@ -123,6 +129,19 @@ export default function PersonaPanel({ projectId }) {
       cancelled = true;
     };
   }, [projectId, generation.asset_type]);
+  useEffect(() => {
+    if (generation.asset_type !== "image") return;
+    const validSources = new Set(sourceOptions.map((opt) => opt.value));
+    if (generation.source_image && !validSources.has(generation.source_image)) {
+      setSourceChoiceTouched(false);
+      setGeneration((cur) => ({ ...cur, source_image: sourceOptions[0]?.value || "" }));
+      return;
+    }
+    if (!sourceChoiceTouched && !generation.source_image && sourceOptions.length > 0) {
+      setGeneration((cur) => ({ ...cur, source_image: sourceOptions[0].value }));
+      return;
+    }
+  }, [generation.asset_type, generation.source_image, sourceOptions, sourceChoiceTouched]);
   useEffect(() => {
     if (generation.asset_type !== "image") return;
     if (generation.source_image) {
@@ -282,11 +301,6 @@ export default function PersonaPanel({ projectId }) {
     setPickerTarget(null);
   }
 
-  const persona = bundle?.persona;
-  const items = bundle?.items || [];
-  const refs = bundle?.references || [];
-  const assets = bundle?.assets || [];
-  const sourceOptions = imageSourceOptions(refs, items);
   const imageEditMode = generation.asset_type === "image" && generation.source_image;
   const modelOptions = imageEditMode
     ? EDIT_MODELS.map((id) => ({ id, model_type: "image-edit" }))
@@ -433,7 +447,10 @@ export default function PersonaPanel({ projectId }) {
                   ? h("div", { className: "grid gap-2" },
                     h("select", {
                       value: generation.source_image,
-                      onChange: (e) => setGeneration({ ...generation, source_image: e.target.value }),
+                      onChange: (e) => {
+                        setSourceChoiceTouched(true);
+                        setGeneration({ ...generation, source_image: e.target.value });
+                      },
                       className: fieldClass(),
                       title: "Use a linked reference image as Media Studio source_image. This switches to image edit models.",
                     },
@@ -443,6 +460,9 @@ export default function PersonaPanel({ projectId }) {
                     ),
                     imageEditMode && h("div", { className: "text-xs text-text-muted" },
                       "Reference image selected: using Media Studio image edit mode. Edit currently requires a Venice image provider."
+                    ),
+                    !imageEditMode && sourceOptions.length > 0 && h("div", { className: "text-xs text-text-muted" },
+                      "Linked references are available. Choose one here to use Media Studio image edit models."
                     ),
                     h("div", { className: "grid grid-cols-2 lg:grid-cols-5 gap-2" },
                       h("select", {
@@ -550,7 +570,14 @@ function parseIDs(value) {
 function imageSourceOptions(refs, items) {
   const out = [];
   const seen = new Set();
-  for (const ref of refs || []) {
+  const refPriority = { face: 0, style: 1, pose: 2, outfit: 3, product: 4, location: 5, brand: 6 };
+  const sortedRefs = [...(refs || [])].sort((a, b) => {
+    const ap = refPriority[a.kind] ?? 99;
+    const bp = refPriority[b.kind] ?? 99;
+    return ap - bp || Number(a.id || 0) - Number(b.id || 0);
+  });
+  for (const ref of sortedRefs) {
+    if (ref.kind === "voice") continue;
     const id = Number(ref.storage_file_id);
     if (!id || seen.has(id)) continue;
     seen.add(id);
