@@ -2382,6 +2382,86 @@ func TestTemplatesSyncProvider_IdempotentOnRerun(t *testing.T) {
 	}
 }
 
+func TestTemplatesImportHTTP_SelectedTwilioContent(t *testing.T) {
+	twilioReply := &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+		"contents": [
+			{
+				"sid": "HXaaa",
+				"friendly_name": "approved_one",
+				"language": "en",
+				"variables": {"1":"name"},
+				"types": {"twilio/text": {"body": "Hi {{1}}"}},
+				"approval_requests": [{"status": "approved", "category": "UTILITY"}]
+			},
+			{
+				"sid": "HXbbb",
+				"friendly_name": "pending_one",
+				"types": {"twilio/text": {"body": "Pending"}},
+				"approval_requests": [{"status": "pending"}]
+			}
+		]
+	}`)}
+	plat := newPhoneStub(twilioReply)
+	newTestCtx(t, plat)
+	app := &App{}
+
+	r := httptest.NewRequest("GET", "/templates/provider-preview?project_id=test-proj&channel=whatsapp", nil)
+	w := httptest.NewRecorder()
+	app.handleTemplatesProviderPreview(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("preview status=%d body=%s", w.Code, w.Body.String())
+	}
+	var preview struct {
+		Templates []providerTemplateInfo `json:"templates"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Templates) != 2 || preview.Templates[0].LocalState != "new" {
+		t.Fatalf("unexpected preview: %+v", preview)
+	}
+
+	body := strings.NewReader(`{"channel":"whatsapp","sids":["HXaaa"],"update_existing":true}`)
+	r = httptest.NewRequest("POST", "/templates/import?project_id=test-proj", body)
+	w = httptest.NewRecorder()
+	app.handleTemplatesImport(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("import status=%d body=%s", w.Code, w.Body.String())
+	}
+	var imported map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &imported)
+	if imported["imported"] != float64(1) || imported["updated"] != float64(0) {
+		t.Fatalf("unexpected import result: %+v", imported)
+	}
+
+	listed, err := app.toolTemplateList(globalCtx, map[string]any{"channel": "whatsapp", "_project_id": "test-proj"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tpls := listed.(map[string]any)["templates"].([]*Template)
+	if len(tpls) != 1 || tpls[0].ProviderTemplateID != "HXaaa" || tpls[0].ProviderStatus != "approved" {
+		t.Fatalf("unexpected templates: %+v", tpls)
+	}
+
+	r = httptest.NewRequest("GET", "/templates/provider-preview?project_id=test-proj&channel=whatsapp", nil)
+	w = httptest.NewRecorder()
+	app.handleTemplatesProviderPreview(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("preview after import status=%d body=%s", w.Code, w.Body.String())
+	}
+	preview = struct {
+		Templates []providerTemplateInfo `json:"templates"`
+	}{}
+	_ = json.Unmarshal(w.Body.Bytes(), &preview)
+	stateBySID := map[string]string{}
+	for _, tpl := range preview.Templates {
+		stateBySID[tpl.Sid] = tpl.LocalState
+	}
+	if stateBySID["HXaaa"] != "imported" || stateBySID["HXbbb"] != "new" {
+		t.Fatalf("unexpected local states: %+v", stateBySID)
+	}
+}
+
 func TestTemplatesSyncProvider_NoOpForEmail(t *testing.T) {
 	plat := newPhoneStub(nil)
 	ctx := newTestCtx(t, plat)

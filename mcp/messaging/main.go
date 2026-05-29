@@ -54,7 +54,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.17
+version: 0.13.18
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -263,6 +263,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// the panel hits these from a button + per-row action; agents
 		// don't trigger Twilio list calls.
 		{Pattern: "/templates/sync", Handler: a.handleTemplatesSync},
+		{Pattern: "/templates/provider-preview", Handler: a.handleTemplatesProviderPreview},
+		{Pattern: "/templates/import", Handler: a.handleTemplatesImport},
 		// Unified sender registration. Email → SES verify_email. Domain
 		// → verify_domain + DNS publish + (auto if aws-s3 + aws-sns
 		// bound) full inbound bootstrap (S3 + SNS + receipt rule + MX
@@ -4742,12 +4744,123 @@ func (a *App) handleTemplatesSync(w http.ResponseWriter, r *http.Request) {
 	if channel == "" {
 		channel = channelWhatsApp
 	}
-	out, err := a.toolTemplatesSyncProvider(globalCtx, map[string]any{"channel": channel})
+	args := map[string]any{"channel": channel}
+	if pid := strings.TrimSpace(r.URL.Query().Get("project_id")); pid != "" {
+		args["_project_id"] = pid
+	}
+	out, err := a.toolTemplatesSyncProvider(globalCtx, args)
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	httpJSON(w, out)
+}
+
+func (a *App) handleTemplatesProviderPreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	channel := r.URL.Query().Get("channel")
+	if channel == "" {
+		channel = channelWhatsApp
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	items, err := listProviderTemplates(globalCtx, pid, channel)
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{
+		"channel":   channel,
+		"templates": items,
+		"count":     len(items),
+	})
+}
+
+func (a *App) handleTemplatesImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	var req struct {
+		Channel        string   `json:"channel"`
+		SIDs           []string `json:"sids"`
+		ApprovedOnly   bool     `json:"approved_only"`
+		UpdateExisting bool     `json:"update_existing"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.Channel == "" {
+		req.Channel = channelWhatsApp
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	items, err := listProviderTemplates(globalCtx, pid, req.Channel)
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	want := map[string]bool{}
+	for _, sid := range req.SIDs {
+		sid = strings.TrimSpace(sid)
+		if sid != "" {
+			want[sid] = true
+		}
+	}
+	importAllApproved := len(want) == 0 && req.ApprovedOnly
+	imported := 0
+	updated := 0
+	skipped := 0
+	for _, item := range items {
+		if importAllApproved {
+			if item.Status != "approved" {
+				skipped++
+				continue
+			}
+		} else if !want[item.Sid] {
+			skipped++
+			continue
+		}
+		existing, err := dbTemplateGetByProviderID(globalCtx.AppDB(), pid, item.Sid)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if existing != nil && !req.UpdateExisting {
+			skipped++
+			continue
+		}
+		created, err := upsertProviderTemplate(globalCtx, pid, item)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if created {
+			imported++
+		} else {
+			updated++
+		}
+	}
+	if imported > 0 || updated > 0 {
+		globalCtx.Emit("templates.synced", map[string]any{
+			"channel":  req.Channel,
+			"imported": imported,
+			"updated":  updated,
+		})
+	}
+	httpJSON(w, map[string]any{
+		"channel":  req.Channel,
+		"imported": imported,
+		"updated":  updated,
+		"skipped":  skipped,
+	})
 }
 
 // isAppDepBound checks whether a kind=app dependency is currently
@@ -5225,6 +5338,18 @@ var (
 	syncInFlight = map[string]bool{}
 )
 
+type providerTemplateInfo struct {
+	Sid        string         `json:"sid"`
+	Name       string         `json:"name"`
+	Language   string         `json:"language,omitempty"`
+	Category   string         `json:"category,omitempty"`
+	Status     string         `json:"status"`
+	BodyText   string         `json:"body_text,omitempty"`
+	Variables  map[string]any `json:"variables,omitempty"`
+	LocalID    int64          `json:"local_id,omitempty"`
+	LocalState string         `json:"local_state"` // new | imported | changed
+}
+
 func tryStartSync(pid, channel string) bool {
 	key := pid + ":" + channel
 	syncMu.Lock()
@@ -5256,27 +5381,49 @@ func syncProviderTemplates(ctx *sdk.AppCtx, pid, channel string) (int, error) {
 		_ = dbSyncStateMark(ctx.AppDB(), pid, channel, 0, "")
 		return 0, nil
 	}
-	bound := ctx.IntegrationFor("phone_provider")
-	if bound == nil {
-		err := errors.New("no phone_provider bound — install/select a Twilio connection")
+	items, err := listProviderTemplates(ctx, pid, channel)
+	if err != nil {
 		_ = dbSyncStateMark(ctx.AppDB(), pid, channel, 0, err.Error())
 		return 0, err
+	}
+
+	count := 0
+	for _, item := range items {
+		if _, err := upsertProviderTemplate(ctx, pid, item); err != nil {
+			ctx.Logger().Warn("template sync upsert failed", "sid", item.Sid, "err", err)
+			continue
+		}
+		count++
+	}
+	markMissingProviderTemplatesDeleted(ctx, pid, items)
+	_ = dbSyncStateMark(ctx.AppDB(), pid, channel, count, "")
+	ctx.Emit("templates.synced", map[string]any{
+		"channel": channel,
+		"count":   count,
+	})
+	return count, nil
+}
+
+func listProviderTemplates(ctx *sdk.AppCtx, pid, channel string) ([]providerTemplateInfo, error) {
+	if channel != channelWhatsApp {
+		return nil, fmt.Errorf("no provider import for channel %q (local templates only)", channel)
+	}
+	bound := ctx.IntegrationFor("phone_provider")
+	if bound == nil {
+		return nil, errors.New("no phone_provider bound — install/select a Twilio connection")
 	}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_content_templates", map[string]any{
 		"PageSize": 100,
 	})
 	if err != nil {
-		_ = dbSyncStateMark(ctx.AppDB(), pid, channel, 0, err.Error())
-		return 0, fmt.Errorf("list_content_templates: %w", err)
+		return nil, fmt.Errorf("list_content_templates: %w", err)
 	}
 	if res == nil || !res.Success {
 		body := ""
 		if res != nil {
 			body = string(res.Data)
 		}
-		msg := fmt.Sprintf("provider non-2xx: %s", truncate(body, 400))
-		_ = dbSyncStateMark(ctx.AppDB(), pid, channel, 0, msg)
-		return 0, errors.New(msg)
+		return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
 	}
 	// Twilio /v2/ContentAndApprovals response:
 	//   { contents: [{ sid, friendly_name, language, variables, types,
@@ -5290,75 +5437,128 @@ func syncProviderTemplates(ctx *sdk.AppCtx, pid, channel string) (int, error) {
 			Variables    map[string]any `json:"variables"`
 			Types        map[string]any `json:"types"`
 			Approval     []struct {
-				Status string `json:"status"`
+				Status   string `json:"status"`
+				Category string `json:"category"`
 			} `json:"approval_requests"`
 		} `json:"contents"`
 	}
 	_ = json.Unmarshal(res.Data, &raw)
 
-	count := 0
+	out := make([]providerTemplateInfo, 0, len(raw.Contents))
 	for _, c := range raw.Contents {
 		if c.Sid == "" {
 			continue
 		}
 		status := "pending"
+		category := ""
 		if len(c.Approval) > 0 {
 			status = strings.ToLower(c.Approval[0].Status)
+			category = c.Approval[0].Category
 		}
-		// Build a preview body from the template's first text type
-		// (best-effort — Twilio's `types` is a map keyed by content
-		// type like "twilio/text"). We keep it informational only;
-		// the real send goes via ContentSid.
-		preview := ""
-		if t, ok := c.Types["twilio/text"].(map[string]any); ok {
-			if b, ok := t["body"].(string); ok {
-				preview = b
-			}
+		variables := c.Variables
+		if variables == nil {
+			variables = map[string]any{}
 		}
-		varsJSON, _ := json.Marshal(c.Variables)
-		if len(varsJSON) == 0 {
-			varsJSON = []byte("{}")
+		item := providerTemplateInfo{
+			Sid:        c.Sid,
+			Name:       c.FriendlyName,
+			Language:   c.Language,
+			Category:   category,
+			Status:     status,
+			BodyText:   providerTemplatePreviewBody(c.Types),
+			Variables:  variables,
+			LocalState: "new",
 		}
-		// Upsert by provider_template_id. New rows get inserted; the
-		// friendly_name + body preview + status update on existing rows.
 		existing, _ := dbTemplateGetByProviderID(ctx.AppDB(), pid, c.Sid)
-		if existing == nil {
-			_, err := ctx.AppDB().Exec(
-				`INSERT INTO templates
-					(project_id, channel, name, subject, body_text, body_html,
-					 vars_schema, provider_template_id, provider_status,
-					 var_style, last_synced_at)
-				 VALUES (?, 'whatsapp', ?, '', ?, '', ?, ?, ?, 'numbered', CURRENT_TIMESTAMP)`,
-				pid, c.FriendlyName, preview, string(varsJSON), c.Sid, status,
-			)
-			if err != nil {
-				ctx.Logger().Warn("template sync insert failed", "sid", c.Sid, "err", err)
-				continue
-			}
-		} else {
-			_, err := ctx.AppDB().Exec(
-				`UPDATE templates SET
-					name = ?, body_text = ?, vars_schema = ?,
-					provider_status = ?, var_style = 'numbered',
-					last_synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-				 WHERE id = ?`,
-				c.FriendlyName, preview, string(varsJSON), status, existing.ID,
-			)
-			if err != nil {
-				ctx.Logger().Warn("template sync update failed", "sid", c.Sid, "err", err)
-				continue
+		if existing != nil {
+			item.LocalID = existing.ID
+			if providerTemplateChanged(existing, item) {
+				item.LocalState = "changed"
+			} else {
+				item.LocalState = "imported"
 			}
 		}
-		count++
+		out = append(out, item)
 	}
+	return out, nil
+}
+
+func providerTemplatePreviewBody(types map[string]any) string {
+	if t, ok := types["twilio/text"].(map[string]any); ok {
+		if b, ok := t["body"].(string); ok {
+			return b
+		}
+	}
+	for _, v := range types {
+		if t, ok := v.(map[string]any); ok {
+			if b, ok := t["body"].(string); ok {
+				return b
+			}
+		}
+	}
+	return ""
+}
+
+func providerTemplateChanged(existing *Template, item providerTemplateInfo) bool {
+	if existing.Name != item.Name || existing.BodyText != item.BodyText || existing.ProviderStatus != item.Status {
+		return true
+	}
+	varsJSON, _ := json.Marshal(item.Variables)
+	return compactJSON(string(existing.VarsSchema)) != compactJSON(string(varsJSON))
+}
+
+func compactJSON(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "{}"
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, []byte(s)); err != nil {
+		return s
+	}
+	return buf.String()
+}
+
+func upsertProviderTemplate(ctx *sdk.AppCtx, pid string, item providerTemplateInfo) (bool, error) {
+	varsJSON, _ := json.Marshal(item.Variables)
+	if len(varsJSON) == 0 {
+		varsJSON = []byte("{}")
+	}
+	existing, err := dbTemplateGetByProviderID(ctx.AppDB(), pid, item.Sid)
+	if err != nil {
+		return false, err
+	}
+	if existing == nil {
+		_, err := ctx.AppDB().Exec(
+			`INSERT INTO templates
+				(project_id, channel, name, subject, body_text, body_html,
+				 vars_schema, provider_template_id, provider_status,
+				 var_style, last_synced_at)
+			 VALUES (?, 'whatsapp', ?, '', ?, '', ?, ?, ?, 'numbered', CURRENT_TIMESTAMP)`,
+			pid, item.Name, item.BodyText, string(varsJSON), item.Sid, item.Status,
+		)
+		return true, err
+	}
+	_, err = ctx.AppDB().Exec(
+		`UPDATE templates SET
+			name = ?, body_text = ?, vars_schema = ?,
+			provider_status = ?, var_style = 'numbered',
+			last_synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`,
+		item.Name, item.BodyText, string(varsJSON), item.Status, existing.ID,
+	)
+	return false, err
+}
+
+func markMissingProviderTemplatesDeleted(ctx *sdk.AppCtx, pid string, items []providerTemplateInfo) {
 	// Mark rows that disappeared upstream as deleted. Soft — we keep
 	// them around so audit/history queries still resolve. Sends fail-
 	// fast against status='deleted'.
-	if len(raw.Contents) > 0 {
-		seen := make([]string, 0, len(raw.Contents))
-		for _, c := range raw.Contents {
-			if c.Sid != "" {
-				seen = append(seen, c.Sid)
+	if len(items) > 0 {
+		seen := make([]string, 0, len(items))
+		for _, item := range items {
+			if item.Sid != "" {
+				seen = append(seen, item.Sid)
 			}
 		}
 		placeholders := strings.Repeat(",?", len(seen))[1:]
@@ -5375,12 +5575,6 @@ func syncProviderTemplates(ctx *sdk.AppCtx, pid, channel string) (int, error) {
 			args...,
 		)
 	}
-	_ = dbSyncStateMark(ctx.AppDB(), pid, channel, count, "")
-	ctx.Emit("templates.synced", map[string]any{
-		"channel": channel,
-		"count":   count,
-	})
-	return count, nil
 }
 
 var templatePlaceholderRE = regexp.MustCompile(`\{\{\s*([A-Za-z0-9_]+)\s*\}\}`)
