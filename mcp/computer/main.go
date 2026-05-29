@@ -40,11 +40,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.12
+version: 0.7.13
 description: |
-  Watch and steer browser sessions. v0.7.12 refreshes the chat
-  cards to match the platform card system while keeping label-badged
-  agent screenshots by default.
+  Watch and steer browser sessions. v0.7.13 emits AppBus lifecycle
+  events for sessions, actions, contexts, and settings.
 scopes: [project, global]
 requires:
   permissions:
@@ -108,6 +107,77 @@ provides:
     - name: navigation-timeline
       entry: /ui/TimelineCard.mjs
       slots: [chat.message_attachment]
+  publishes:
+    - name: session.opened
+      description: A browser session was opened or resumed by the Computer app.
+      payload:
+        session_id: string
+        backend: string
+        backend_session_id: string
+        app_context_id: string
+        context_name: string
+        context_id: string
+        persist: boolean
+        current_url: string
+    - name: session.closed
+      description: A browser session was explicitly closed.
+      payload:
+        session_id: string
+        backend: string
+        app_context_id: string
+        context_name: string
+        persist: boolean
+    - name: session.reaped
+      description: A browser session was closed by the idle reaper.
+      payload:
+        session_id: string
+        backend: string
+        idle_seconds: integer
+        app_context_id: string
+        context_name: string
+        persist: boolean
+    - name: session.action
+      description: A computer_use action completed successfully in a browser session.
+      payload:
+        session_id: string
+        backend: string
+        action: string
+        label: integer
+        coordinate: string
+        text_length: integer
+        key: string
+        current_url: string
+    - name: context.created
+      description: An app-managed browser context was created or imported.
+      payload:
+        id: string
+        name: string
+        backend: string
+        provider_context_id: string
+        persist_default: boolean
+        auto_created: boolean
+    - name: context.updated
+      description: An app-managed browser context was updated.
+      payload:
+        id: string
+        name: string
+        backend: string
+        provider_context_id: string
+        persist_default: boolean
+        auto_created: boolean
+    - name: context.deleted
+      description: An app-managed browser context was deleted or unlinked.
+      payload:
+        id: string
+        name: string
+        backend: string
+        provider_context_id: string
+        provider_deleted: boolean
+    - name: settings.updated
+      description: Computer app provider settings were updated.
+      payload:
+        default_backend: string
+        lock_backend: boolean
 runtime:
   kind: source
   source:
@@ -144,6 +214,22 @@ type session struct {
 	persist      bool
 	openedAt     time.Time
 	lastUsed     time.Time
+}
+
+type reapedSession struct {
+	ID               string
+	Backend          string
+	BackendSessionID string
+	ContextID        string
+	AppContextID     string
+	ContextName      string
+	Persist          bool
+	CurrentURL       string
+	Width            int
+	Height           int
+	OpenedAt         time.Time
+	LastUsedAt       time.Time
+	Idle             time.Duration
 }
 
 // registry holds open sessions across all callers in this sidecar
@@ -186,22 +272,52 @@ func (r *registry) remove(id string) (*session, bool) {
 // reapIdle closes and removes any session not touched within ttl.
 // Returns the ids it reaped so the caller can log them.
 func (r *registry) reapIdle(ttl time.Duration) []string {
+	reaped := r.reapIdleDetails(ttl)
+	ids := make([]string, 0, len(reaped))
+	for _, row := range reaped {
+		ids = append(ids, row.ID)
+	}
+	return ids
+}
+
+func (r *registry) reapIdleDetails(ttl time.Duration) []reapedSession {
+	type staleEntry struct {
+		id string
+		s  *session
+	}
 	r.mu.Lock()
-	cutoff := time.Now().Add(-ttl)
-	var stale []*session
-	var ids []string
+	now := time.Now()
+	cutoff := now.Add(-ttl)
+	var stale []staleEntry
 	for id, s := range r.m {
 		if s.lastUsed.Before(cutoff) {
-			stale = append(stale, s)
-			ids = append(ids, id)
+			stale = append(stale, staleEntry{id: id, s: s})
 			delete(r.m, id)
 		}
 	}
 	r.mu.Unlock()
-	for _, s := range stale {
+	reaped := make([]reapedSession, 0, len(stale))
+	for _, entry := range stale {
+		s := entry.s
+		disp := s.comp.DisplaySize()
+		reaped = append(reaped, reapedSession{
+			ID:               entry.id,
+			Backend:          s.backend,
+			BackendSessionID: backendSessionID(s.comp),
+			ContextID:        contextID(s.comp),
+			AppContextID:     s.appContextID,
+			ContextName:      s.contextName,
+			Persist:          s.persist,
+			CurrentURL:       currentURL(s.comp),
+			Width:            disp.Width,
+			Height:           disp.Height,
+			OpenedAt:         s.openedAt,
+			LastUsedAt:       s.lastUsed,
+			Idle:             now.Sub(s.lastUsed),
+		})
 		_ = s.comp.Close()
 	}
-	return ids
+	return reaped
 }
 
 // ─── App ───────────────────────────────────────────────────────────
@@ -528,6 +644,7 @@ func (a *App) toolContextUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
+	emitEvent(ctx, "context.updated", contextEventPayload(rec))
 	return map[string]any{"context": rec}, nil
 }
 
@@ -557,6 +674,9 @@ func (a *App) toolContextDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err := dbDeleteContext(db, id); err != nil {
 		return nil, err
 	}
+	payload := contextEventPayload(rec)
+	payload["provider_deleted"] = providerDeleted
+	emitEvent(ctx, "context.deleted", payload)
 	return map[string]any{"deleted": true, "provider_deleted": providerDeleted}, nil
 }
 
@@ -577,6 +697,7 @@ func (a *App) toolSettingsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
+	emitEvent(ctx, "settings.updated", settingsEventPayload(settings))
 	return map[string]any{"settings": settings}, nil
 }
 
@@ -621,7 +742,7 @@ func (a *App) createContextRecord(ctx *sdk.AppCtx, args map[string]any) (*Comput
 		return nil, err
 	}
 	autoCreated := boolArgDefault(args, "auto_created", false)
-	return dbCreateContext(db, contextCreateInput{
+	rec, err := dbCreateContext(db, contextCreateInput{
 		Name:              name,
 		Backend:           backend,
 		ProviderContextID: providerID,
@@ -629,6 +750,11 @@ func (a *App) createContextRecord(ctx *sdk.AppCtx, args map[string]any) (*Comput
 		AutoCreated:       autoCreated,
 		MetadataJSON:      metadataJSON,
 	})
+	if err != nil {
+		return nil, err
+	}
+	emitEvent(ctx, "context.created", contextEventPayload(rec))
+	return rec, nil
 }
 
 func (a *App) toolBrowserSession(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -866,7 +992,7 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 
 	id := newSessionID()
 	now := time.Now()
-	a.reg.put(id, &session{
+	sess := &session{
 		comp:         comp,
 		backend:      backend,
 		appContextID: rc.AppContextID,
@@ -874,12 +1000,16 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		persist:      rc.Persist,
 		openedAt:     now,
 		lastUsed:     now,
-	})
+	}
+	a.reg.put(id, sess)
 
 	if ctx != nil {
 		ctx.Logger().Info("browser_open", "session_id", id, "backend", backend)
 	}
-	return a.sessionOutput(id, &session{comp: comp, backend: backend, appContextID: rc.AppContextID, contextName: rc.ContextName, persist: rc.Persist, openedAt: now, lastUsed: now}), nil
+	payload := a.sessionEventPayload(id, sess)
+	payload["resume"] = resume
+	emitEvent(ctx, "session.opened", payload)
+	return a.sessionOutput(id, sess), nil
 }
 
 func (a *App) resolveBackend(ctx *sdk.AppCtx, args map[string]any) (string, error) {
@@ -1064,6 +1194,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	disp := sess.comp.DisplaySize()
 	mime := imageMIME(shot)
+	emitEvent(ctx, "session.action", a.sessionActionPayload(id, sess, act, args))
 	return map[string]any{
 		"text":           fmt.Sprintf("Success: %s action completed. Screenshot attached.", action),
 		"screenshot":     binaryEnvelope(shot, mime),
@@ -1085,11 +1216,13 @@ func (a *App) toolBrowserClose(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if !ok {
 		return map[string]any{"closed": false}, nil
 	}
+	payload := a.sessionEventPayload(id, sess)
 	if err := sess.comp.Close(); err != nil {
 		if ctx != nil {
 			ctx.Logger().Warn("browser_close underlying Close error", "session_id", id, "err", err.Error())
 		}
 	}
+	emitEvent(ctx, "session.closed", payload)
 	return map[string]any{"closed": true}, nil
 }
 
@@ -1103,15 +1236,124 @@ func (a *App) reaper(ctx *sdk.AppCtx) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			ids := a.reg.reapIdle(idleTTL)
-			for _, id := range ids {
-				ctx.Logger().Info("reaped idle session", "session_id", id, "idle_ttl", idleTTL.String())
+			rows := a.reapIdleSessions(ctx, idleTTL)
+			for _, row := range rows {
+				ctx.Logger().Info("reaped idle session", "session_id", row.ID, "idle_ttl", idleTTL.String())
 			}
 		}
 	}
 }
 
+func (a *App) reapIdleSessions(ctx *sdk.AppCtx, ttl time.Duration) []reapedSession {
+	rows := a.reg.reapIdleDetails(ttl)
+	for _, row := range rows {
+		emitEvent(ctx, "session.reaped", reapedSessionEventPayload(row))
+	}
+	return rows
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────
+
+func emitEvent(ctx *sdk.AppCtx, topic string, data map[string]any) {
+	if ctx == nil {
+		return
+	}
+	ctx.Emit(topic, data)
+}
+
+func (a *App) sessionEventPayload(id string, s *session) map[string]any {
+	info := a.sessionInfo(id, s)
+	return map[string]any{
+		"session_id":         info.SessionID,
+		"backend_session_id": info.BackendSessionID,
+		"backend":            info.Backend,
+		"context_id":         info.ContextID,
+		"app_context_id":     info.AppContextID,
+		"context_name":       info.ContextName,
+		"persist":            info.Persist,
+		"current_url":        info.CurrentURL,
+		"width":              info.Width,
+		"height":             info.Height,
+		"opened_at":          info.OpenedAt,
+		"last_used_at":       info.LastUsedAt,
+	}
+}
+
+func (a *App) sessionActionPayload(id string, s *session, act backends.Action, args map[string]any) map[string]any {
+	payload := a.sessionEventPayload(id, s)
+	payload["action"] = act.Type
+	switch act.Type {
+	case "click", "double_click":
+		if act.Label > 0 {
+			payload["label"] = act.Label
+		}
+		if hasCoordinateArg(args) {
+			payload["coordinate"] = fmt.Sprintf("%d,%d", act.X, act.Y)
+		}
+	case "type":
+		payload["text_length"] = len([]rune(act.Text))
+	case "key":
+		if act.Key != "" {
+			payload["key"] = act.Key
+		}
+	case "scroll":
+		if act.Direction != "" {
+			payload["direction"] = act.Direction
+		}
+		if act.Amount != 0 {
+			payload["amount"] = act.Amount
+		}
+	case "wait":
+		if act.Duration != 0 {
+			payload["duration"] = act.Duration
+		}
+	case "screenshot":
+		payload["annotate"] = annotateArg(args, true)
+	}
+	return payload
+}
+
+func reapedSessionEventPayload(row reapedSession) map[string]any {
+	return map[string]any{
+		"session_id":         row.ID,
+		"backend_session_id": row.BackendSessionID,
+		"backend":            row.Backend,
+		"context_id":         row.ContextID,
+		"app_context_id":     row.AppContextID,
+		"context_name":       row.ContextName,
+		"persist":            row.Persist,
+		"current_url":        row.CurrentURL,
+		"width":              row.Width,
+		"height":             row.Height,
+		"opened_at":          row.OpenedAt.UTC().Format(time.RFC3339),
+		"last_used_at":       row.LastUsedAt.UTC().Format(time.RFC3339),
+		"idle_seconds":       int(row.Idle.Seconds()),
+	}
+}
+
+func contextEventPayload(rec *ComputerContext) map[string]any {
+	if rec == nil {
+		return map[string]any{}
+	}
+	return map[string]any{
+		"id":                  rec.ID,
+		"name":                rec.Name,
+		"backend":             rec.Backend,
+		"provider_context_id": rec.ProviderContextID,
+		"persist_default":     rec.PersistDefault,
+		"auto_created":        rec.AutoCreated,
+		"created_at":          rec.CreatedAt,
+		"updated_at":          rec.UpdatedAt,
+		"last_used_at":        rec.LastUsedAt,
+	}
+}
+
+func settingsEventPayload(settings ComputerSettings) map[string]any {
+	return map[string]any{
+		"default_backend": settings.DefaultBackend,
+		"lock_backend":    settings.LockBackend,
+	}
+}
 
 func newSessionID() string {
 	var b [8]byte
@@ -1429,6 +1671,10 @@ func hasClickTargetArg(args map[string]any) bool {
 	if intArg(args, "label") > 0 {
 		return true
 	}
+	return hasCoordinateArg(args)
+}
+
+func hasCoordinateArg(args map[string]any) bool {
 	if strings.TrimSpace(stringArg(args, "coordinate")) != "" {
 		return true
 	}

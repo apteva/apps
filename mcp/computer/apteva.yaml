@@ -2,11 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.12
+version: 0.7.13
 description: |
-  Watch and steer browser sessions. v0.7.12 refreshes the chat
-  cards to match the platform card system while keeping label-badged
-  agent screenshots by default.
+  Watch and steer browser sessions. v0.7.13 emits AppBus lifecycle
+  events for sessions, actions, contexts, and settings.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -189,6 +188,78 @@ provides:
                 ts:        { type: string }
       preview_props:
         preview: true
+
+  publishes:
+    - name: session.opened
+      description: A browser session was opened or resumed by the Computer app.
+      payload:
+        session_id: string
+        backend: string
+        backend_session_id: string
+        app_context_id: string
+        context_name: string
+        context_id: string
+        persist: boolean
+        current_url: string
+    - name: session.closed
+      description: A browser session was explicitly closed.
+      payload:
+        session_id: string
+        backend: string
+        app_context_id: string
+        context_name: string
+        persist: boolean
+    - name: session.reaped
+      description: A browser session was closed by the idle reaper.
+      payload:
+        session_id: string
+        backend: string
+        idle_seconds: integer
+        app_context_id: string
+        context_name: string
+        persist: boolean
+    - name: session.action
+      description: A computer_use action completed successfully in a browser session.
+      payload:
+        session_id: string
+        backend: string
+        action: string
+        label: integer
+        coordinate: string
+        text_length: integer
+        key: string
+        current_url: string
+    - name: context.created
+      description: An app-managed browser context was created or imported.
+      payload:
+        id: string
+        name: string
+        backend: string
+        provider_context_id: string
+        persist_default: boolean
+        auto_created: boolean
+    - name: context.updated
+      description: An app-managed browser context was updated.
+      payload:
+        id: string
+        name: string
+        backend: string
+        provider_context_id: string
+        persist_default: boolean
+        auto_created: boolean
+    - name: context.deleted
+      description: An app-managed browser context was deleted or unlinked.
+      payload:
+        id: string
+        name: string
+        backend: string
+        provider_context_id: string
+        provider_deleted: boolean
+    - name: settings.updated
+      description: Computer app provider settings were updated.
+      payload:
+        default_backend: string
+        lock_backend: boolean
 
   skills:
     - name: how-to-use-computer

@@ -64,6 +64,11 @@ func TestEmbeddedManifestMatchesYAML(t *testing.T) {
 			break
 		}
 	}
+	yamlEvents := eventNames(fromFile.Provides.Publishes)
+	embedEvents := eventNames(fromEmbed.Provides.Publishes)
+	if !sameStringSlices(yamlEvents, embedEvents) {
+		t.Errorf("publish-event drift: yaml=%v embed=%v", yamlEvents, embedEvents)
+	}
 }
 
 // TestRegistry covers the registry's contract: put adds, get refreshes
@@ -549,6 +554,143 @@ func TestComputerUseDescriptionTeachesLabelWorkflow(t *testing.T) {
 	t.Fatal("manifest computer_use tool missing")
 }
 
+func TestAppBusEventsForComputerLifecycle(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+		url:     "https://example.test",
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		return fake, nil
+	}
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithEmitter(rec))
+
+	created, err := app.toolContextCreate(ctx, map[string]any{
+		"name":            "login",
+		"backend":         "local",
+		"persist_default": true,
+	})
+	if err != nil {
+		t.Fatalf("context create: %v", err)
+	}
+	contextRow := created.(map[string]any)["context"].(*ComputerContext)
+	contextCreated := lastEventData(t, rec, "context.created")
+	if contextCreated["id"] != contextRow.ID || contextCreated["backend"] != "local" {
+		t.Fatalf("context.created payload = %#v", contextCreated)
+	}
+
+	if _, err := app.toolSettingsUpdate(ctx, map[string]any{
+		"default_backend": "local",
+		"lock_backend":    true,
+	}); err != nil {
+		t.Fatalf("settings update: %v", err)
+	}
+	settingsUpdated := lastEventData(t, rec, "settings.updated")
+	if settingsUpdated["default_backend"] != "local" || settingsUpdated["lock_backend"] != true {
+		t.Fatalf("settings.updated payload = %#v", settingsUpdated)
+	}
+
+	if _, err := app.toolContextUpdate(ctx, map[string]any{
+		"id":              contextRow.ID,
+		"persist_default": false,
+	}); err != nil {
+		t.Fatalf("context update: %v", err)
+	}
+	contextUpdated := lastEventData(t, rec, "context.updated")
+	if contextUpdated["id"] != contextRow.ID || contextUpdated["persist_default"] != false {
+		t.Fatalf("context.updated payload = %#v", contextUpdated)
+	}
+
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":     "open",
+		"backend":    "local",
+		"context_id": contextRow.ID,
+		"url":        "https://example.test",
+	})
+	if err != nil {
+		t.Fatalf("browser_session open: %v", err)
+	}
+	sessionID := openOut.(map[string]any)["session_id"].(string)
+	sessionOpened := lastEventData(t, rec, "session.opened")
+	if sessionOpened["session_id"] != sessionID || sessionOpened["app_context_id"] != contextRow.ID {
+		t.Fatalf("session.opened payload = %#v", sessionOpened)
+	}
+
+	if _, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "type",
+		"text":       "secret-value",
+	}); err != nil {
+		t.Fatalf("computer_use type: %v", err)
+	}
+	sessionAction := lastEventData(t, rec, "session.action")
+	if sessionAction["action"] != "type" || sessionAction["text_length"] != len([]rune("secret-value")) {
+		t.Fatalf("session.action payload = %#v", sessionAction)
+	}
+	if _, ok := sessionAction["text"]; ok {
+		t.Fatalf("session.action leaked typed text: %#v", sessionAction)
+	}
+
+	if _, err := app.toolBrowserClose(ctx, map[string]any{"session_id": sessionID}); err != nil {
+		t.Fatalf("browser close: %v", err)
+	}
+	sessionClosed := lastEventData(t, rec, "session.closed")
+	if sessionClosed["session_id"] != sessionID || sessionClosed["backend"] != "local" {
+		t.Fatalf("session.closed payload = %#v", sessionClosed)
+	}
+
+	if _, err := app.toolContextDelete(ctx, map[string]any{"id": contextRow.ID}); err != nil {
+		t.Fatalf("context delete: %v", err)
+	}
+	contextDeleted := lastEventData(t, rec, "context.deleted")
+	if contextDeleted["id"] != contextRow.ID || contextDeleted["provider_deleted"] != false {
+		t.Fatalf("context.deleted payload = %#v", contextDeleted)
+	}
+}
+
+func TestAppBusEventForReapedSession(t *testing.T) {
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithEmitter(rec))
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 800, Height: 600},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+		url:     "https://idle.example",
+	}
+	lastUsed := time.Now().Add(-2 * time.Hour)
+	app.reg.put("br_stale", &session{
+		comp:         fake,
+		backend:      "local",
+		appContextID: "ctx_login",
+		contextName:  "login",
+		persist:      true,
+		openedAt:     lastUsed.Add(-time.Minute),
+		lastUsed:     lastUsed,
+	})
+
+	rows := app.reapIdleSessions(ctx, 30*time.Minute)
+	if len(rows) != 1 || rows[0].ID != "br_stale" {
+		t.Fatalf("reaped rows = %+v", rows)
+	}
+	if fake.closeCalls != 1 {
+		t.Fatalf("stale session Close calls: want 1, got %d", fake.closeCalls)
+	}
+	payload := lastEventData(t, rec, "session.reaped")
+	if payload["session_id"] != "br_stale" || payload["app_context_id"] != "ctx_login" {
+		t.Fatalf("session.reaped payload = %#v", payload)
+	}
+	if idle, ok := payload["idle_seconds"].(int); !ok || idle < 3600 {
+		t.Fatalf("session.reaped idle_seconds = %#v", payload["idle_seconds"])
+	}
+}
+
 // ─── fake Computer ─────────────────────────────────────────────────
 
 // fakeComp implements backends.Computer + SessionOpener + SessionInfo
@@ -630,6 +772,27 @@ func toolNames(tools []sdk.MCPToolSpec) []string {
 	return out
 }
 
+func eventNames(events []sdk.EventDecl) []string {
+	out := make([]string, 0, len(events))
+	for _, e := range events {
+		out = append(out, e.Name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sameStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func sameScopes(a, b []sdk.Scope) bool {
 	if len(a) != len(b) {
 		return false
@@ -660,6 +823,19 @@ func samePermissions(a, b []sdk.Permission) bool {
 		}
 	}
 	return true
+}
+
+func lastEventData(t *testing.T, rec *tk.EmitRecorder, topic string) map[string]any {
+	t.Helper()
+	events := rec.EventsByTopic(topic)
+	if len(events) == 0 {
+		t.Fatalf("expected event %q, got events %#v", topic, rec.Events())
+	}
+	data, ok := events[len(events)-1].Data.(map[string]any)
+	if !ok {
+		t.Fatalf("event %q data type = %T, want map[string]any", topic, events[len(events)-1].Data)
+	}
+	return data
 }
 
 func postJSON(t *testing.T, handler http.HandlerFunc, path string, body any) map[string]any {
