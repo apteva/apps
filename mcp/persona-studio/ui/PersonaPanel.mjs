@@ -490,8 +490,9 @@ export default function PersonaPanel({ projectId }) {
                     h("div", { className: "flex gap-2 text-sm" },
                       h("span", { className: "font-medium" }, a.asset_type),
                       h("span", { className: "text-text-dim" }, a.status),
-                      a.storage_file_id ? h("span", { className: "ml-auto text-accent" }, `storage:${a.storage_file_id}`) : null
+                      a.storage_file_id ? h("a", { href: `/api/apps/storage/files/${a.storage_file_id}/content`, target: "_blank", rel: "noopener", className: "ml-auto text-accent hover:underline" }, `storage:${a.storage_file_id}`) : null
                     ),
+                    h(AssetStoragePreview, { asset: a }),
                     h("div", { className: "text-xs text-text-muted mt-1 line-clamp-2" }, a.prompt),
                     h("div", { className: "text-[11px] text-text-dim mt-1" }, [a.provider_slug, a.provider_model, new Date(a.created_at).toLocaleString()].filter(Boolean).join(" · "))
                   )
@@ -702,6 +703,48 @@ function StorageThumb({ id, size }) {
         e.currentTarget.style.display = "none";
       },
     })
+  );
+}
+
+function AssetStoragePreview({ asset }) {
+  const id = Number(asset?.storage_file_id || 0);
+  if (!id || !Number.isFinite(id) || asset.status !== "ready") return null;
+  const src = `/api/apps/storage/files/${id}/content`;
+  const type = asset.asset_type || "";
+  if (type === "image") {
+    return h("a", {
+      href: src,
+      target: "_blank",
+      rel: "noopener",
+      className: "mt-3 block rounded border border-border bg-bg-input overflow-hidden",
+      title: `Open storage:${id}`,
+    },
+      h("img", {
+        src,
+        alt: asset.prompt || `storage:${id}`,
+        loading: "lazy",
+        className: "block w-full max-h-72 object-contain bg-black",
+      })
+    );
+  }
+  if (type === "video" || type === "avatar") {
+    return h("video", {
+      src,
+      controls: true,
+      preload: "metadata",
+      className: "mt-3 block w-full max-h-72 rounded border border-border bg-black",
+    });
+  }
+  if (type === "audio_tts" || type === "audio_sfx" || type === "music") {
+    return h("audio", {
+      src,
+      controls: true,
+      preload: "metadata",
+      className: "mt-3 block w-full",
+    });
+  }
+  return h("div", { className: "mt-3" },
+    h(StoragePreviewCard, { id, title: `storage:${id}`, meta: asset.prompt || asset.asset_type })
   );
 }
 
