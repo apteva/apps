@@ -449,6 +449,9 @@ func buildVeniceImageEditArgs(args map[string]any) map[string]any {
 		}
 		for _, k := range passThrough {
 			if v, exists := opts[k]; exists {
+				if k == "resolution" && !validVeniceEditResolution(v) {
+					continue
+				}
 				out[k] = v
 			}
 		}
@@ -469,11 +472,37 @@ func buildVeniceImageMultiEditArgs(args map[string]any, model, prompt string, so
 		}
 		for _, k := range passThrough {
 			if v, exists := opts[k]; exists {
+				if k == "quality" && !validVeniceEditQuality(v) {
+					continue
+				}
+				if k == "resolution" && !validVeniceEditResolution(v) {
+					continue
+				}
 				out[k] = v
 			}
 		}
 	}
 	return out
+}
+
+func validVeniceEditQuality(v any) bool {
+	switch strings.ToLower(strings.TrimSpace(fmt.Sprint(v))) {
+	case "low", "medium", "high":
+		return true
+	default:
+		return false
+	}
+}
+
+func validVeniceEditResolution(v any) bool {
+	s := strings.TrimSpace(fmt.Sprint(v))
+	if s == "" {
+		return false
+	}
+	if _, _, ok := parseWxH(s); ok {
+		return false
+	}
+	return true
 }
 
 func resolvedSourceImages(args map[string]any) []string {

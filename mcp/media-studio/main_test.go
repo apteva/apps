@@ -1034,6 +1034,34 @@ func TestBuildVeniceImageMultiEditArgs(t *testing.T) {
 	}
 }
 
+func TestBuildVeniceImageMultiEditArgs_DropsUnsupportedAutoQualityAndPixelResolution(t *testing.T) {
+	args := map[string]any{
+		"prompt":        "blend the two images",
+		"source_images": []string{"AAAA", "BBBB"},
+		"model":         "firered-image-edit",
+		"options": map[string]any{
+			"aspect_ratio":  "9:16",
+			"resolution":    "1024x1536",
+			"output_format": "png",
+			"quality":       "auto",
+			"safe_mode":     false,
+		},
+	}
+	got, err := buildImageArgs(args, "venice-ai", "image.edit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["quality"]; ok {
+		t.Fatalf("quality=auto must not be sent to Venice multi-edit: %+v", got)
+	}
+	if _, ok := got["resolution"]; ok {
+		t.Fatalf("pixel resolution must not be sent as Venice edit resolution: %+v", got)
+	}
+	if got["aspect_ratio"] != "9:16" || got["output_format"] != "png" || got["safe_mode"] != false {
+		t.Fatalf("valid options not preserved: %+v", got)
+	}
+}
+
 func TestBuildVeniceImageEditArgs_DefaultModel(t *testing.T) {
 	got, err := buildImageArgs(map[string]any{
 		"prompt":       "x",
