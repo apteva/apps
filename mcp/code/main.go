@@ -34,11 +34,12 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.5.6
+version: 0.5.7
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code. Optionally
   imports repositories from GitHub when a github connection is bound,
+  imports ZIP archives through the UI,
   and optionally publishes dev runs at <slug>.<dev_base_hostname>
   when the Routes app is bound.
 author: Apteva

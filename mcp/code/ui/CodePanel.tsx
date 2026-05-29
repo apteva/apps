@@ -335,6 +335,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [loadingFile, setLoadingFile] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [showImportGithub, setShowImportGithub] = useState(false);
+  const [zipImportTarget, setZipImportTarget] = useState<"new" | string | null>(null);
   const [showNewFile, setShowNewFile] = useState(false);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [showDevLogs, setShowDevLogs] = useState(false);
@@ -390,6 +391,21 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
       });
       if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
       return res.json() as Promise<{ file: FileMeta }>;
+    },
+    [withParams],
+  );
+
+  const importZip = useCallback(
+    async (slug: string, file: File) => {
+      const url = `${API}/repos/${slug}/import?${withParams()}`;
+      const res = await fetch(url, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": file.type || "application/zip" },
+        body: await file.arrayBuffer(),
+      });
+      if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+      return res.json() as Promise<{ files_imported: number }>;
     },
     [withParams],
   );
@@ -739,6 +755,12 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
             >GitHub</button>
             <button
               type="button"
+              onClick={() => setZipImportTarget("new")}
+              title="Import a repository from ZIP"
+              className="px-2 py-0.5 text-xs border border-border text-text-muted rounded hover:text-text hover:border-text"
+            >ZIP</button>
+            <button
+              type="button"
               onClick={() => setShowCreate(true)}
               className="px-2 py-0.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg"
             >+ New</button>
@@ -814,6 +836,12 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
                 className="px-1 py-0.5 text-xs text-accent hover:text-accent/80"
                 title="Upload files"
               >↑</button>
+              <button
+                type="button"
+                onClick={() => setZipImportTarget(selectedSlug)}
+                className="px-1 py-0.5 text-xs text-accent hover:text-accent/80"
+                title="Import ZIP"
+              >ZIP</button>
               <input
                 ref={uploadRef}
                 type="file"
@@ -1016,6 +1044,24 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
           }}
           api={api}
           withParams={withParams}
+        />
+      )}
+
+      {zipImportTarget && (
+        <ImportZipDialog
+          targetSlug={zipImportTarget === "new" ? undefined : zipImportTarget}
+          onClose={() => setZipImportTarget(null)}
+          onImported={(slug) => {
+            setZipImportTarget(null);
+            if (selectedSlug === slug) {
+              loadRepos();
+              loadTree(slug);
+            } else {
+              loadRepos().then(() => selectRepo(slug));
+            }
+          }}
+          api={api}
+          importZip={importZip}
         />
       )}
 
@@ -1257,6 +1303,140 @@ function ForkRepoDialog({
           >{busy ? "Forking…" : "Fork"}</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function ImportZipDialog({
+  targetSlug,
+  onClose,
+  onImported,
+  api,
+  importZip,
+}: {
+  targetSlug?: string;
+  onClose: () => void;
+  onImported: (slug: string) => void;
+  api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
+  importZip: (slug: string, file: File) => Promise<{ files_imported: number }>;
+}) {
+  const importingIntoExisting = Boolean(targetSlug);
+  const [name, setName] = useState("");
+  const [slug, setSlug] = useState("");
+  const [description, setDescription] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!file) {
+      setErr("zip required");
+      return;
+    }
+    if (!file.name.toLowerCase().endsWith(".zip")) {
+      setErr("file must be a zip");
+      return;
+    }
+    if (!importingIntoExisting && !name.trim()) {
+      setErr("name required");
+      return;
+    }
+    setBusy(true);
+    setErr("");
+    try {
+      let importSlug = targetSlug || "";
+      if (!importSlug) {
+        const created = await api<{ repository: Repo }>("POST", "/repos", {
+          name: name.trim(),
+          slug: slug.trim(),
+          framework: "blank",
+          description: description.trim(),
+        });
+        importSlug = created.repository.slug;
+      }
+      await importZip(importSlug, file);
+      onImported(importSlug);
+    } catch (e2) {
+      setErr((e2 as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <form
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={submit}
+        className="w-[460px] bg-bg border border-border rounded p-5 space-y-4"
+      >
+        <h2 className="text-text font-semibold">
+          {targetSlug ? `Import ZIP into ${targetSlug}` : "Import ZIP"}
+        </h2>
+        {!targetSlug && (
+          <div className="space-y-3">
+            <div>
+              <label className="text-xs text-text-muted block mb-1">Name</label>
+              <input
+                autoFocus
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                placeholder="my-app"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-text-muted block mb-1">Slug (optional)</label>
+              <input
+                type="text"
+                value={slug}
+                onChange={(e) => setSlug(e.target.value)}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+                placeholder="my-app"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-text-muted block mb-1">Description (optional)</label>
+              <input
+                type="text"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              />
+            </div>
+          </div>
+        )}
+        <div>
+          <label className="text-xs text-text-muted block mb-1">ZIP file</label>
+          <input
+            type="file"
+            accept=".zip,application/zip,application/x-zip-compressed"
+            onChange={(e) => setFile(e.target.files?.[0] || null)}
+            className="w-full text-sm text-text file:mr-3 file:px-3 file:py-1 file:rounded file:border file:border-border file:bg-bg-input file:text-text-muted hover:file:text-text"
+          />
+          {targetSlug && (
+            <div className="text-[11px] text-text-dim mt-1">
+              Matching paths are overwritten. Other files stay.
+            </div>
+          )}
+        </div>
+        {err && <div className="text-red text-xs">{err}</div>}
+        <div className="flex items-center justify-end gap-2 pt-2">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input disabled:opacity-50"
+          >Cancel</button>
+          <button
+            type="submit"
+            disabled={busy}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+          >{busy ? "Importing…" : "Import"}</button>
+        </div>
+      </form>
     </div>
   );
 }
