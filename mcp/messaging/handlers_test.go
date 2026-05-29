@@ -2751,6 +2751,7 @@ func TestSendersCreateWhatsApp_AdoptsApprovedSender(t *testing.T) {
 			Success: true, Status: 200,
 			Data: json.RawMessage(`{"senders":[{"sid":"WAsender","sender_id":"whatsapp:+15551112222","status":"approved"}]}`),
 		},
+		"update_whatsapp_sender": {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
 	}
 	ctx := newTestCtx(t, plat)
 	app := &App{}
@@ -2774,6 +2775,26 @@ func TestSendersCreateWhatsApp_AdoptsApprovedSender(t *testing.T) {
 	}
 	if !row.Verified || row.VerificationStatus != "verified" || row.ProviderIdentityID != "WAsender" {
 		t.Fatalf("row=%+v", row)
+	}
+	var updateCall *executeCall
+	for i := range plat.executeCalls {
+		if plat.executeCalls[i].Tool == "update_whatsapp_sender" {
+			updateCall = &plat.executeCalls[i]
+			break
+		}
+	}
+	if updateCall == nil {
+		t.Fatal("update_whatsapp_sender was not called")
+	}
+	if updateCall.Input["SenderSid"] != "WAsender" {
+		t.Errorf("SenderSid=%v", updateCall.Input["SenderSid"])
+	}
+	webhook, _ := updateCall.Input["webhook"].(map[string]any)
+	if webhook["callback_method"] != "POST" {
+		t.Errorf("callback_method=%v, want POST", webhook["callback_method"])
+	}
+	if !strings.Contains(fmt.Sprint(webhook["callback_url"]), "/api/apps/messaging/webhooks/twilio-inbound") {
+		t.Errorf("callback_url=%v", webhook["callback_url"])
 	}
 }
 

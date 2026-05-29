@@ -938,20 +938,60 @@ func (a *App) sendersCreateWhatsApp(ctx *sdk.AppCtx, pid, addr string, req sende
 
 	inboundCfg := ""
 	id, _ := ctx.PlatformAPI().WhoAmI()
-	if id != nil && strings.TrimSpace(id.PublicURL) != "" {
-		webhookURL := strings.TrimSuffix(strings.TrimSpace(id.PublicURL), "/") +
-			"/api/apps/messaging/webhooks/twilio-inbound?api_key=" + url.QueryEscape(os.Getenv("APTEVA_APP_TOKEN"))
+	publicURL := ""
+	if id != nil {
+		publicURL = strings.TrimSuffix(strings.TrimSpace(id.PublicURL), "/")
+	}
+	mode := strings.ToLower(strings.TrimSpace(req.Inbound))
+	doInbound := false
+	skipReason := ""
+	switch mode {
+	case "", "auto":
+		if publicURL == "" {
+			skipReason = "auto: platform PublicURL is unset"
+		} else {
+			doInbound = true
+		}
+	case "true", "yes", "1":
+		if publicURL == "" {
+			return nil, errors.New("inbound=true but platform PublicURL is unset — set Settings → Server → Public URL")
+		}
+		doInbound = true
+	case "false", "no", "0":
+		skipReason = "inbound=false"
+	default:
+		return nil, fmt.Errorf("invalid inbound value %q (use auto|true|false)", req.Inbound)
+	}
+	resp.Inbound = &sendersCreateInbound{Bootstrapped: false, SkippedReason: skipReason}
+
+	if doInbound {
+		webhookURL := publicURL + "/api/apps/messaging/webhooks/twilio-inbound?api_key=" + url.QueryEscape(os.Getenv("APTEVA_APP_TOKEN"))
+		updRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "update_whatsapp_sender", map[string]any{
+			"SenderSid": sender.SID,
+			"webhook": map[string]any{
+				"callback_url":    webhookURL,
+				"callback_method": "POST",
+			},
+		})
+		if err != nil {
+			resp.Steps = append(resp.Steps, bootstrapStep{Step: "twilio_update_whatsapp_sender", OK: false, Error: err.Error()})
+			return resp, nil
+		}
+		if updRes == nil || !updRes.Success {
+			resp.Steps = append(resp.Steps, bootstrapStep{Step: "twilio_update_whatsapp_sender", OK: false, Error: truncateResData(updRes)})
+			return resp, nil
+		}
+		resp.Steps = append(resp.Steps, bootstrapStep{Step: "twilio_update_whatsapp_sender", OK: true, Detail: "callback_url=" + webhookURL})
 		cfg := map[string]any{
-			"webhook_url": webhookURL,
-			"note":        "Configure this URL on the Twilio WhatsApp sender if it is not already set.",
+			"callback_url":    webhookURL,
+			"callback_method": "POST",
 		}
 		if b, err := json.Marshal(cfg); err == nil {
 			inboundCfg = string(b)
 		}
 		resp.Inbound = &sendersCreateInbound{
-			Bootstrapped:  false,
-			SkippedReason: "Twilio WhatsApp sender webhook update is not exposed; configure the webhook URL in Twilio if needed.",
-			WebhookURL:    webhookURL,
+			Bootstrapped: true,
+			WebhookURL:   webhookURL,
 		}
 	}
 
@@ -966,12 +1006,16 @@ func (a *App) sendersCreateWhatsApp(ctx *sdk.AppCtx, pid, addr string, req sende
 		Verified:            verified,
 		VerificationStatus:  twilioWhatsAppVerificationStatus(sender.Status),
 		SendingEnabled:      verified,
-		InboundBootstrapped: false,
+		InboundBootstrapped: resp.Inbound != nil && resp.Inbound.Bootstrapped,
 		InboundConfig:       inboundCfg,
 		MarkSyncedNow:       true,
 	}, resp)
 	if verified {
-		resp.NextStep = "WhatsApp sender " + addr + " is approved and ready for outbound WhatsApp via messaging."
+		if doInbound {
+			resp.NextStep = "WhatsApp sender " + addr + " is approved and ready to send + receive WhatsApp via messaging."
+		} else {
+			resp.NextStep = "WhatsApp sender " + addr + " is approved for outbound. Inbound webhook not wired — set inbound=true once PublicURL is configured."
+		}
 	} else {
 		resp.NextStep = "WhatsApp sender " + addr + " is tracked but not approved yet — refresh after Twilio/Meta approval."
 	}

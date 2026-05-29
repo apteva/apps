@@ -54,7 +54,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.14
+version: 0.13.15
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -140,7 +140,7 @@ provides:
     - { name: senders_get,            description: "Get one identity's verification + DKIM state." }
     - { name: senders_delete,         description: "Remove a sending identity from the provider." }
     - { name: senders_get_quota,      description: "Provider sandbox + send-quota status." }
-    - { name: senders_create,         description: "Register a sender across email (SES) + SMS (Twilio). Domain → DKIM + DNS + optional inbound bootstrap. Phone → adopt + optional SmsUrl wiring." }
+    - { name: senders_create,         description: "Register a sender across email (SES) + SMS/WhatsApp (Twilio). Domain → DKIM + DNS + optional inbound bootstrap. Phone → adopt + optional Twilio inbound webhook wiring." }
     - { name: senders_refresh,        description: "Reconcile local senders with bound providers." }
     - { name: senders_set_default,    description: "Flip the per-(project, channel) default sender." }
     - { name: senders_update,         description: "Patch local-mutable fields on a sender (display_name, notes)." }
@@ -495,7 +495,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "senders_create",
 			Description: "Register a sender end-to-end across email + SMS providers. The address shape picks the path: " +
-				"\"foo@x.com\" → SES verify_email; \"x.com\" → SES verify_domain + DKIM/SPF DNS + (auto when aws-s3+aws-sns bound) full inbound bootstrap; \"+15551234567\" → adopt the Twilio phone for SMS or the approved WhatsApp sender for WhatsApp; SMS inbound auto-wires SmsUrl to /webhooks/twilio-inbound. " +
+				"\"foo@x.com\" → SES verify_email; \"x.com\" → SES verify_domain + DKIM/SPF DNS + (auto when aws-s3+aws-sns bound) full inbound bootstrap; \"+15551234567\" → adopt the Twilio phone for SMS or the approved WhatsApp sender for WhatsApp; SMS auto-wires SmsUrl and WhatsApp auto-wires sender callback_url to /webhooks/twilio-inbound. " +
 				"Args: address (required), channel? (email|sms|whatsapp; auto-detected if blank), inbound? (auto|true|false; default auto), publish_dns? (default true), spf? (default true), region? (email/SES inbound, default eu-west-1), bucket_name?, topic_name?, rule_set_name?, rule_name?, display_name?, set_default? (bool). " +
 				"Idempotent. Writes a row in the local senders table. Returns {address, kind, dkim_tokens?, dns_records?, inbound:{bootstrapped, …}, steps[]}.",
 			InputSchema: schemaObject(map[string]any{
