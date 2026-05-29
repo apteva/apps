@@ -416,11 +416,19 @@ func (a *App) handleStorageFiles(w http.ResponseWriter, r *http.Request) {
 		folder = "/"
 	}
 	args := map[string]any{"folder": folder, "recursive": boolQuery(r, "recursive", false), "_project_id": pid}
+	if limit := intQuery(r, "limit", 200); limit > 0 {
+		if limit > 500 {
+			limit = 500
+		}
+		args["limit"] = limit
+	}
+	tool := "files_list"
 	if q := strings.TrimSpace(r.URL.Query().Get("q")); q != "" {
 		args["q"] = q
+		tool = "files_search"
 	}
 	var out map[string]any
-	err := ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", "files_list", args, &out)
+	err := ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", tool, args, &out)
 	writeOrErr(w, out, err)
 }
 

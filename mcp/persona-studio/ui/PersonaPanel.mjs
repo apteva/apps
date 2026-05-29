@@ -27,6 +27,11 @@ export default function PersonaPanel({ projectId }) {
     size: "",
     duration: "",
   });
+  const [storageFiles, setStorageFiles] = useState([]);
+  const [storageLoading, setStorageLoading] = useState(false);
+  const [storageError, setStorageError] = useState("");
+  const [storageQuery, setStorageQuery] = useState("");
+  const [pickerTarget, setPickerTarget] = useState(null);
 
   const qs = useMemo(() => `project_id=${encodeURIComponent(projectId || "")}`, [projectId]);
 
@@ -140,6 +145,49 @@ export default function PersonaPanel({ projectId }) {
     }
   }
 
+  async function loadStorageFiles(query = storageQuery) {
+    if (!projectId) return;
+    setStorageLoading(true);
+    setStorageError("");
+    try {
+      const params = new URLSearchParams({ project_id: projectId, folder: "/", recursive: "true", limit: "240" });
+      if (query.trim()) params.set("q", query.trim());
+      const res = await fetch(`${API}/storage-files?${params.toString()}`, { credentials: "same-origin" });
+      const text = await res.text();
+      const data = text ? JSON.parse(text) : {};
+      if (!res.ok) throw new Error(data.error || text || `HTTP ${res.status}`);
+      setStorageFiles(data.files || []);
+    } catch (e) {
+      setStorageFiles([]);
+      setStorageError(e.message);
+    } finally {
+      setStorageLoading(false);
+    }
+  }
+
+  function openStoragePicker(target) {
+    setPickerTarget(target);
+    loadStorageFiles("").catch((e) => setStorageError(e.message));
+  }
+
+  function chooseStorageFile(file) {
+    if (pickerTarget === "reference") {
+      setReference((cur) => ({
+        ...cur,
+        storage_file_id: String(file.id),
+        label: cur.label || file.name || `storage:${file.id}`,
+      }));
+    }
+    if (pickerTarget === "item") {
+      setItem((cur) => {
+        const ids = parseIDs(cur.storage_file_ids);
+        if (!ids.includes(file.id)) ids.push(file.id);
+        return { ...cur, storage_file_ids: ids.join(", ") };
+      });
+    }
+    setPickerTarget(null);
+  }
+
   const persona = bundle?.persona;
   const items = bundle?.items || [];
   const refs = bundle?.references || [];
@@ -197,13 +245,18 @@ export default function PersonaPanel({ projectId }) {
                 persona.bio || persona.visual_style || "Add bio, audience, tone, and style through the tools or API."
               )),
               panel("References", h("div", null,
-                h("form", { onSubmit: addReference, className: "grid grid-cols-[1fr_120px] gap-2 mb-3" },
-                  h("input", { value: reference.storage_file_id, onChange: (e) => setReference({ ...reference, storage_file_id: e.target.value }), placeholder: "Storage file id", className: fieldClass() }),
-                  h("select", { value: reference.kind, onChange: (e) => setReference({ ...reference, kind: e.target.value }), className: fieldClass() },
-                    ["face", "style", "outfit", "pose", "voice", "product", "location", "brand"].map((k) => h("option", { key: k, value: k }, k))
+                h("form", { onSubmit: addReference, className: "grid gap-2 mb-3" },
+                  h("div", { className: "grid grid-cols-[1fr_96px] gap-2" },
+                    h("input", { value: reference.storage_file_id, onChange: (e) => setReference({ ...reference, storage_file_id: e.target.value }), placeholder: "Storage file id", className: fieldClass() }),
+                    h("button", { type: "button", onClick: () => openStoragePicker("reference"), className: secondaryButtonClass() }, "Browse")
                   ),
-                  h("input", { value: reference.label, onChange: (e) => setReference({ ...reference, label: e.target.value }), placeholder: "Label", className: fieldClass() }),
-                  h("button", { className: buttonClass() }, "Link")
+                  h("div", { className: "grid grid-cols-[120px_1fr_76px] gap-2" },
+                    h("select", { value: reference.kind, onChange: (e) => setReference({ ...reference, kind: e.target.value }), className: fieldClass() },
+                      ["face", "style", "outfit", "pose", "voice", "product", "location", "brand"].map((k) => h("option", { key: k, value: k }, k))
+                    ),
+                    h("input", { value: reference.label, onChange: (e) => setReference({ ...reference, label: e.target.value }), placeholder: "Label", className: fieldClass() }),
+                    h("button", { className: buttonClass() }, "Link")
+                  )
                 ),
                 refs.length === 0 ? empty("No references yet.") : refs.map((r) => chip(`#${r.storage_file_id} · ${r.kind}${r.label ? " · " + r.label : ""}`, r.id))
               )),
@@ -215,7 +268,10 @@ export default function PersonaPanel({ projectId }) {
                       ["product", "wardrobe", "prop", "location", "brand_asset", "screen_asset", "set", "offer"].map((k) => h("option", { key: k, value: k }, k))
                     )
                   ),
-                  h("input", { value: item.storage_file_ids, onChange: (e) => setItem({ ...item, storage_file_ids: e.target.value }), placeholder: "Storage ids, comma-separated", className: fieldClass() }),
+                  h("div", { className: "grid grid-cols-[1fr_96px] gap-2" },
+                    h("input", { value: item.storage_file_ids, onChange: (e) => setItem({ ...item, storage_file_ids: e.target.value }), placeholder: "Storage ids, comma-separated", className: fieldClass() }),
+                    h("button", { type: "button", onClick: () => openStoragePicker("item"), className: secondaryButtonClass() }, "Browse")
+                  ),
                   h("textarea", { value: item.visual_rules, onChange: (e) => setItem({ ...item, visual_rules: e.target.value }), placeholder: "Visual rules", className: `${fieldClass()} min-h-[56px]` }),
                   h("button", { className: buttonClass() }, "Add item")
                 ),
@@ -236,7 +292,8 @@ export default function PersonaPanel({ projectId }) {
               ))
             ),
             h("section", { className: "flex flex-col gap-4 min-w-0" },
-              panel("Generate In Place", h("form", { onSubmit: generateAsset, className: "grid gap-3" },
+              panel("Generate With Persona", h("form", { onSubmit: generateAsset, className: "grid gap-3" },
+                h("div", { className: "text-xs text-text-muted" }, "Creates a new Media Studio asset using this persona's identity, references, selected items, style profile, and cache key."),
                 h("div", { className: "grid grid-cols-4 gap-2" },
                   h("select", { value: generation.asset_type, onChange: (e) => setGeneration({ ...generation, asset_type: e.target.value }), className: fieldClass() },
                     ["image", "video", "audio_tts", "audio_sfx", "music", "avatar"].map((k) => h("option", { key: k, value: k }, k))
@@ -264,7 +321,18 @@ export default function PersonaPanel({ projectId }) {
             )
           )
         : h("div", { className: "flex-1 grid place-items-center text-text-muted" }, "Create or select a persona.")
-    )
+    ),
+    pickerTarget && h(StoragePicker, {
+      files: storageFiles,
+      loading: storageLoading,
+      error: storageError,
+      query: storageQuery,
+      target: pickerTarget,
+      onQuery: setStorageQuery,
+      onSearch: () => loadStorageFiles(storageQuery),
+      onClose: () => setPickerTarget(null),
+      onChoose: chooseStorageFile,
+    })
   );
 }
 
@@ -296,6 +364,10 @@ function buttonClass() {
   return "bg-accent text-bg rounded px-3 py-1.5 text-sm font-semibold disabled:opacity-50";
 }
 
+function secondaryButtonClass() {
+  return "border border-border rounded px-2 py-1.5 text-sm text-text-muted hover:text-text hover:bg-bg-input";
+}
+
 function input(label, value, onChange) {
   return h("input", {
     value,
@@ -318,4 +390,80 @@ function chip(text, key) {
 
 function empty(text) {
   return h("div", { className: "text-sm text-text-muted py-3" }, text);
+}
+
+function StoragePicker({ files, loading, error, query, target, onQuery, onSearch, onClose, onChoose }) {
+  const title = target === "item" ? "Choose item reference file" : "Choose persona reference file";
+  const hint = target === "item"
+    ? "Pick packshots, product photos, logos, screen captures, or set references."
+    : "Pick face, style, outfit, voice, product, or location references.";
+  return h("div", { className: "fixed inset-0 bg-black/60 flex items-center justify-center p-6", style: { zIndex: 9998 } },
+    h("div", { className: "bg-bg border border-border rounded shadow-xl w-full max-w-4xl max-h-[84vh] flex flex-col" },
+      h("header", { className: "px-4 py-3 border-b border-border flex items-center gap-3" },
+        h("div", { className: "min-w-0 flex-1" },
+          h("div", { className: "text-sm text-text font-medium" }, title),
+          h("div", { className: "text-xs text-text-dim truncate" }, hint)
+        ),
+        h("button", { onClick: onClose, className: "text-text-dim hover:text-text px-2 text-lg leading-none" }, "x")
+      ),
+      h("form", {
+        onSubmit: (e) => {
+          e.preventDefault();
+          onSearch();
+        },
+        className: "px-4 py-3 border-b border-border grid grid-cols-[1fr_88px] gap-2"
+      },
+        h("input", { value: query, onChange: (e) => onQuery(e.target.value), placeholder: "Search storage...", className: fieldClass() }),
+        h("button", { className: secondaryButtonClass() }, "Search")
+      ),
+      h("div", { className: "flex-1 overflow-auto" },
+        loading && h("div", { className: "p-4 text-text-muted text-sm" }, "Loading storage..."),
+        error && h("div", { className: "p-4 text-red text-sm whitespace-pre-wrap" }, error),
+        !loading && !error && files.length === 0 && h("div", { className: "p-4 text-text-muted text-sm" }, "No files found in linked Storage."),
+        !loading && !error && files.length > 0 && h("ul", { className: "divide-y divide-border" },
+          files.map((file) => h("li", { key: file.id },
+            h("button", {
+              type: "button",
+              onClick: () => onChoose(file),
+              className: "w-full text-left px-4 py-3 hover:bg-bg-input flex items-center gap-3"
+            },
+              h(FileThumb, { file }),
+              h("span", { className: "min-w-0 flex-1" },
+                h("span", { className: "block text-sm text-text truncate" }, file.name || `file #${file.id}`),
+                h("span", { className: "block text-xs text-text-dim truncate" },
+                  `${file.folder || "/"} · storage:${file.id}${file.content_type ? ` · ${file.content_type}` : ""}${fileSize(file.size_bytes) ? ` · ${fileSize(file.size_bytes)}` : ""}`
+                )
+              ),
+              h("span", { className: "text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted uppercase" }, storageFileKind(file))
+            )
+          ))
+        )
+      )
+    )
+  );
+}
+
+function FileThumb({ file }) {
+  const kind = storageFileKind(file);
+  if (kind === "image") {
+    return h("span", { className: "w-12 h-12 rounded border border-border bg-bg-input overflow-hidden shrink-0" },
+      h("img", { src: `/api/apps/storage/files/${file.id}/content`, alt: "", className: "w-full h-full object-cover", loading: "lazy" })
+    );
+  }
+  return h("span", { className: "w-12 h-12 rounded border border-border bg-bg-input text-text-dim shrink-0 grid place-items-center text-[10px] uppercase" }, kind);
+}
+
+function storageFileKind(file) {
+  const ct = (file.content_type || "").toLowerCase();
+  const name = (file.name || "").toLowerCase();
+  if (ct.startsWith("image/") || /\.(png|jpe?g|webp|gif|avif)$/.test(name)) return "image";
+  if (ct.startsWith("audio/") || /\.(mp3|wav|m4a|aac|flac|ogg)$/.test(name)) return "audio";
+  if (ct.startsWith("video/") || /\.(mp4|mov|webm|mkv)$/.test(name)) return "video";
+  return "file";
+}
+
+function fileSize(bytes) {
+  if (!bytes || bytes <= 0) return "";
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
