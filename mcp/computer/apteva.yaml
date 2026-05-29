@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.13
+version: 0.7.14
 description: |
-  Watch and steer browser sessions. v0.7.13 emits AppBus lifecycle
-  events for sessions, actions, contexts, and settings.
+  Watch and steer browser sessions. v0.7.14 refreshes the panel from
+  AppBus session, action, context, and settings events.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer

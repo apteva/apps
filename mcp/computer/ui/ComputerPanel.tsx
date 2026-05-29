@@ -5,6 +5,76 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, CardHeader, StatusDot, StatusPill, DataList } from "@apteva/ui-kit";
 
+interface AppEventEnvelope<T = unknown> {
+  topic: string;
+  app: string;
+  project_id: string;
+  install_id: number;
+  seq: number;
+  time: string;
+  data: T;
+}
+
+function useAppEvents<T = unknown>(
+  app: string,
+  projectId: string | undefined | null,
+  onEvent: (ev: AppEventEnvelope<T>) => void,
+) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+  useEffect(() => {
+    if (!app || !projectId) return;
+    const handler = (ev: AppEventEnvelope<T>) => handlerRef.current(ev);
+    const bridge = (window as unknown as {
+      __aptevaAppEvents?: {
+        subscribe(app: string, projectId: string, fn: (ev: AppEventEnvelope<T>) => void): () => void;
+      };
+    }).__aptevaAppEvents;
+    if (bridge) {
+      return bridge.subscribe(app, projectId, handler);
+    }
+    let lastSeq = 0;
+    let es: EventSource | null = null;
+    let cancelled = false;
+    let reconnectTimer: number | null = null;
+    const connect = () => {
+      if (cancelled) return;
+      const url =
+        `/api/app-events/${encodeURIComponent(app)}` +
+        `?project_id=${encodeURIComponent(projectId)}` +
+        (lastSeq > 0 ? `&since=${lastSeq}` : "");
+      es = new EventSource(url, { withCredentials: true });
+      es.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data) as AppEventEnvelope<T>;
+          if (ev.seq <= lastSeq) return;
+          lastSeq = ev.seq;
+          handlerRef.current(ev);
+        } catch {}
+      };
+      es.onerror = () => {
+        if (es && es.readyState === EventSource.CLOSED) {
+          if (reconnectTimer) window.clearTimeout(reconnectTimer);
+          reconnectTimer = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (es) es.close();
+    };
+  }, [app, projectId]);
+}
+
+interface NativePanelProps {
+  appName?: string;
+  installId?: number;
+  projectId?: string;
+  instanceId?: number;
+}
+
 interface SessionRow {
   session_id: string;
   backend_session_id?: string;
@@ -55,6 +125,13 @@ interface SettingsResponse {
   error?: string;
 }
 
+interface ComputerEventData {
+  session_id?: string;
+  id?: string;
+  default_backend?: string;
+  lock_backend?: boolean;
+}
+
 type OpenMode = "open" | "resume" | "context" | "create_context";
 type ProxyMode = "" | "true" | "false";
 
@@ -79,12 +156,13 @@ const backendOptions = [
   { value: "service", label: "Browser Service" },
 ] as const;
 
-export default function ComputerPanel() {
+export default function ComputerPanel({ projectId }: NativePanelProps) {
   const [rows, setRows] = useState<SessionRow[]>([]);
   const [contexts, setContexts] = useState<ContextRow[]>([]);
   const [settings, setSettings] = useState<ComputerSettings>({ default_backend: "local", lock_backend: false });
   const [err, setErr] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [eventPreviewTick, setEventPreviewTick] = useState(0);
   const [showOpen, setShowOpen] = useState(false);
   const [pendingClose, setPendingClose] = useState<string | null>(null);
   const [pendingContextDelete, setPendingContextDelete] = useState<string | null>(null);
@@ -119,6 +197,27 @@ export default function ComputerPanel() {
     const t = setInterval(refresh, POLL_MS);
     return () => clearInterval(t);
   }, [refresh]);
+
+  useAppEvents<ComputerEventData>("computer", projectId, (ev) => {
+    switch (ev.topic) {
+      case "session.opened":
+        if (!selected && ev.data?.session_id) setSelected(ev.data.session_id);
+        void refresh();
+        break;
+      case "session.action":
+        if (ev.data?.session_id === selected) setEventPreviewTick((n) => n + 1);
+        void refresh();
+        break;
+      case "session.closed":
+      case "session.reaped":
+      case "context.created":
+      case "context.updated":
+      case "context.deleted":
+      case "settings.updated":
+        void refresh();
+        break;
+    }
+  });
 
   useEffect(() => {
     if (!selected && rows.length > 0) setSelected(rows[0].session_id);
@@ -212,7 +311,7 @@ export default function ComputerPanel() {
         settings={settings}
         onUpdateSettings={updateSettings}
       />
-      <SessionDetail session={sel} onClose={setPendingClose} onRefresh={refresh} />
+      <SessionDetail session={sel} onClose={setPendingClose} onRefresh={refresh} externalRefreshKey={eventPreviewTick} />
       {showOpen && (
         <OpenSessionModal
           onClose={() => setShowOpen(false)}
@@ -510,10 +609,12 @@ function SessionDetail({
   session,
   onClose,
   onRefresh,
+  externalRefreshKey,
 }: {
   session: SessionRow | null;
   onClose: (id: string) => void;
   onRefresh: () => Promise<void>;
+  externalRefreshKey: number;
 }) {
   const [tick, setTick] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
@@ -529,6 +630,11 @@ function SessionDetail({
     setBusy(null);
     setTick((n) => n + 1);
   }, [session?.session_id]);
+
+  useEffect(() => {
+    if (!session) return;
+    setTick((n) => n + 1);
+  }, [externalRefreshKey, session?.session_id]);
 
   if (!session) {
     return (
