@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -22,7 +23,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: calls
 display_name: Calls
-version: 0.1.3
+version: 0.1.4
 description: Standalone realtime audio/video calls with unified participants.
 author: Apteva
 scopes: [project, global]
@@ -304,8 +305,12 @@ func (a *App) publicBase(ctx *sdk.AppCtx) string {
 	return strings.TrimRight(id.PublicURL, "/") + "/api/apps/calls"
 }
 
-func (a *App) joinURL(ctx *sdk.AppCtx, token string) string {
-	return a.publicBase(ctx) + "/join/" + token
+func (a *App) joinURL(ctx *sdk.AppCtx, token, projectID string) string {
+	out := a.publicBase(ctx) + "/join/" + token
+	if projectID != "" {
+		out += "?project_id=" + url.QueryEscape(projectID)
+	}
+	return out
 }
 
 func (a *App) emit(ctx *sdk.AppCtx, projectID, topic string, payload map[string]any) {

@@ -214,7 +214,7 @@ func (a *App) toolCreateJoinToken(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
-	jt.JoinURL = a.joinURL(ctx, jt.Token)
+	jt.JoinURL = a.joinURL(ctx, jt.Token, jt.ProjectID)
 	return map[string]any{"join_token": jt, "token": jt.Token, "join_url": jt.JoinURL}, nil
 }
 

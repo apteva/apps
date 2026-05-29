@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -50,6 +51,9 @@ func TestCreateRoom_ReturnsHostTokenAndEmits(t *testing.T) {
 	if out.(map[string]any)["host_join_url"] == "" {
 		t.Fatal("host_join_url should be returned")
 	}
+	if !strings.Contains(out.(map[string]any)["host_join_url"].(string), "?project_id=test-proj") {
+		t.Fatalf("host_join_url should include project routing query, got %q", out.(map[string]any)["host_join_url"])
+	}
 	events := rec.EventsByTopic("calls.room.created")
 	if len(events) != 1 {
 		t.Fatalf("room.created events=%d, want 1", len(events))
@@ -57,6 +61,18 @@ func TestCreateRoom_ReturnsHostTokenAndEmits(t *testing.T) {
 	payload := events[0].Data.(map[string]any)
 	if payload["project_id"] != "test-proj" {
 		t.Fatalf("event project_id=%v", payload["project_id"])
+	}
+}
+
+func TestJoinURLCarriesProjectID(t *testing.T) {
+	app, ctx, _ := newTestApp(t)
+	got := app.joinURL(ctx, "tok_123", "project a/b")
+	want := "/api/apps/calls/join/tok_123?project_id=project+a%2Fb"
+	if got != want {
+		t.Fatalf("joinURL=%q, want %q", got, want)
+	}
+	if got := app.joinURL(ctx, "tok_123", ""); got != "/api/apps/calls/join/tok_123" {
+		t.Fatalf("global joinURL=%q", got)
 	}
 }
 

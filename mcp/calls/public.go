@@ -315,6 +315,7 @@ const joinPageHTML = `<!doctype html>
     const ROLE = __ROLE_JSON__;
     const KIND = __KIND_JSON__;
     const base = location.pathname.split("/join/")[0];
+    const routeQuery = location.search || "";
     const nameInput = document.getElementById("display-name");
     const avatar = document.getElementById("avatar");
     const tileLabel = document.getElementById("tile-label");
@@ -337,7 +338,7 @@ const joinPageHTML = `<!doctype html>
       button.disabled = true;
       button.textContent = "Joining...";
       try {
-        const res = await fetch(base + "/api/join", {
+        const res = await fetch(base + "/api/join" + routeQuery, {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
