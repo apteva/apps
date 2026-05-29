@@ -82,7 +82,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "persona_item_create", Description: "Create a reusable item/product/prop/location/brand asset. Args: persona_id, name, kind?, description?, usage_rules?, visual_rules?, storage_file_ids?, metadata?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "name": sString(), "kind": sString(), "description": sString(), "usage_rules": sString(), "visual_rules": sString(), "storage_file_ids": sArray("integer"), "metadata": sObject()}, []string{"persona_id", "name"}), Handler: a.toolItemCreate},
 		{Name: "persona_item_update", Description: "Update a reusable item. Args: id, patch object.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "patch": sObject()}, []string{"id", "patch"}), Handler: a.toolItemUpdate},
 		{Name: "persona_item_list", Description: "List items. Args: persona_id, kind?, active?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "kind": sString(), "active": sBool()}, []string{"persona_id"}), Handler: a.toolItemList},
-		{Name: "persona_generate_asset", Description: "Generate one asset via Media Studio. Args: persona_id, asset_type (image|video|audio_tts|audio_sfx|music|avatar), prompt, style_profile_id?, item_ids?, reference_kinds?, campaign_id?, use_cache?, settings? ({model, size, aspect, duration, quality, source_image, voice, avatar, options}).", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "asset_type": sString(), "prompt": sString(), "style_profile_id": sInteger(), "item_ids": sArray("integer"), "reference_kinds": sArray("string"), "campaign_id": sInteger(), "use_cache": sBool(), "settings": sObject()}, []string{"persona_id", "asset_type", "prompt"}), Handler: a.toolGenerateAsset},
+		{Name: "persona_generate_asset", Description: "Generate one asset via Media Studio. Args: persona_id, asset_type (image|video|audio_tts|audio_sfx|music|avatar), prompt, style_profile_id?, item_ids?, reference_kinds?, campaign_id?, use_cache?, settings? ({model, size, aspect, duration, quality, source_images, voice, avatar, options}). Image generation automatically sends linked persona/item references via source_images up to the selected model's limit.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "asset_type": sString(), "prompt": sString(), "style_profile_id": sInteger(), "item_ids": sArray("integer"), "reference_kinds": sArray("string"), "campaign_id": sInteger(), "use_cache": sBool(), "settings": sObject()}, []string{"persona_id", "asset_type", "prompt"}), Handler: a.toolGenerateAsset},
 		{Name: "persona_generate_pack", Description: "Generate a starter pack. Args: persona_id, campaign_id?, prompts? object, use_cache?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "campaign_id": sInteger(), "prompts": sObject(), "use_cache": sBool()}, []string{"persona_id"}), Handler: a.toolGeneratePack},
 		{Name: "persona_campaign_create", Description: "Create a campaign. Args: persona_id, name, brief?, platforms?, content_pillars?, status?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "name": sString(), "brief": sString(), "platforms": sArray("string"), "content_pillars": sArray("string"), "status": sString()}, []string{"persona_id", "name"}), Handler: a.toolCampaignCreate},
 		{Name: "persona_create_clip_plan", Description: "Create a structured clip plan. Args: persona_id, brief, campaign_id?, asset_ids?, aspect?, duration_ms?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "brief": sString(), "campaign_id": sInteger(), "asset_ids": sArray("integer"), "aspect": sString(), "duration_ms": sInteger()}, []string{"persona_id", "brief"}), Handler: a.toolCreateClipPlan},
@@ -736,7 +736,17 @@ func (a *App) toolGenerateAsset(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	refs, _ := listReferencesForKinds(ctx.AppDB(), pid, personaID, referenceKinds)
 	itemIDs := int64SliceArg(args, "item_ids")
 	items, _ := listItemsByIDs(ctx.AppDB(), pid, personaID, itemIDs)
-	settings := mapArg(args, "settings")
+	settings := cloneMap(mapArg(args, "settings"))
+	if assetType == "image" {
+		sourceImages := defaultImageSourceRefs(refs, items, settings)
+		if len(sourceImages) > 0 {
+			// Always use Media Studio's provider-neutral multi-reference path,
+			// even for one source. This avoids the old single-source UI path and
+			// lets Media Studio choose the correct edit tool per provider.
+			delete(settings, "source_image")
+			settings["source_images"] = sourceImages
+		}
+	}
 	resolved := buildResolvedPrompt(persona, style, refs, items, prompt, assetType)
 	cacheKey := generationCacheKey(personaID, assetType, resolved, settings, refIDs(refs), itemIDs)
 
@@ -1514,6 +1524,57 @@ func generationCacheKey(personaID int64, assetType, resolved string, settings ma
 	return hex.EncodeToString(sum[:])
 }
 
+func defaultImageSourceRefs(refs []Reference, items []Item, settings map[string]any) []string {
+	limit := imageSourceLimit(settings)
+	if limit <= 0 {
+		return nil
+	}
+	out := []string{}
+	seen := map[string]bool{}
+	add := func(ref string) {
+		ref = strings.TrimSpace(ref)
+		if ref == "" || seen[ref] || len(out) >= limit {
+			return
+		}
+		seen[ref] = true
+		out = append(out, ref)
+	}
+	for _, ref := range stringSliceArg(settings, "source_images") {
+		add(ref)
+	}
+	add(strArg(settings, "source_image"))
+	for _, ref := range refs {
+		if ref.StorageFileID > 0 {
+			add(fmt.Sprintf("storage:%d", ref.StorageFileID))
+		}
+	}
+	for _, item := range items {
+		for _, id := range item.StorageFileIDs {
+			if id > 0 {
+				add(fmt.Sprintf("storage:%d", id))
+			}
+		}
+	}
+	return out
+}
+
+func imageSourceLimit(settings map[string]any) int {
+	model := strings.ToLower(strArg(settings, "model"))
+	if model == "dall-e-2" {
+		return 1
+	}
+	if strings.HasPrefix(model, "gemini-") {
+		return 5
+	}
+	if strings.HasPrefix(model, "gpt-image") && !strings.HasSuffix(model, "-edit") {
+		return 16
+	}
+	if strings.HasSuffix(model, "-edit") || model == "" {
+		return 3
+	}
+	return 3
+}
+
 func refIDs(refs []Reference) []int64 {
 	out := make([]int64, 0, len(refs))
 	for _, r := range refs {
@@ -1759,6 +1820,14 @@ func mapArg(m map[string]any, key string) map[string]any {
 		return v
 	}
 	return map[string]any{}
+}
+
+func cloneMap(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func jsonArg(m map[string]any, key, def string) string {

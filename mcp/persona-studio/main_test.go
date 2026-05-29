@@ -85,6 +85,32 @@ func TestGenerationCacheKeyChangesWithItems(t *testing.T) {
 	}
 }
 
+func TestDefaultImageSourceRefsUsesSourceImagesArrayForOneReference(t *testing.T) {
+	refs := []Reference{{ID: 1, StorageFileID: 42, Kind: "face", Active: true}}
+	got := defaultImageSourceRefs(refs, nil, map[string]any{"model": "firered-image-edit"})
+	if len(got) != 1 || got[0] != "storage:42" {
+		t.Fatalf("unexpected source refs: %#v", got)
+	}
+}
+
+func TestDefaultImageSourceRefsIncludesItemsAndHonorsLimit(t *testing.T) {
+	refs := []Reference{
+		{ID: 1, StorageFileID: 10, Kind: "face", Active: true},
+		{ID: 2, StorageFileID: 11, Kind: "style", Active: true},
+		{ID: 3, StorageFileID: 12, Kind: "outfit", Active: true},
+	}
+	items := []Item{{ID: 7, StorageFileIDs: []int64{20, 21}}}
+	got := defaultImageSourceRefs(refs, items, map[string]any{"model": "firered-image-edit"})
+	want := []string{"storage:10", "storage:11", "storage:12"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+	got = defaultImageSourceRefs(refs, items, map[string]any{"model": "gemini-2.5-flash-image"})
+	if len(got) != 5 || got[3] != "storage:20" || got[4] != "storage:21" {
+		t.Fatalf("gemini refs should include item images up to 5, got %#v", got)
+	}
+}
+
 func TestFilterStorageBrowserOutputHidesDotFolders(t *testing.T) {
 	out := map[string]any{
 		"files": []any{
