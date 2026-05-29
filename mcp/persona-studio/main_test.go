@@ -112,13 +112,13 @@ func TestDefaultImageSourceRefsIncludesItemsAndHonorsLimit(t *testing.T) {
 }
 
 func TestIsImageEditModelKeepsEditCapableModels(t *testing.T) {
-	yes := []string{"", "firered-image-edit", "qwen-edit", "gpt-image-1.5", "dall-e-2", "gemini-2.5-flash-image"}
+	yes := []string{"", "firered-image-edit", "qwen-edit", "gemini-2.5-flash-image"}
 	for _, model := range yes {
 		if !isImageEditModel(model) {
 			t.Fatalf("%q should be accepted as image-edit capable", model)
 		}
 	}
-	no := []string{"dall-e-3", "flux-dev", "stable-diffusion-3.5", "qwen-image-2"}
+	no := []string{"gpt-image-2", "gpt-image-1.5", "dall-e-2", "dall-e-3", "flux-dev", "stable-diffusion-3.5", "qwen-image-2"}
 	for _, model := range no {
 		if isImageEditModel(model) {
 			t.Fatalf("%q should not be accepted as image-edit capable", model)

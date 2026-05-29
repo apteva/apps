@@ -1584,8 +1584,6 @@ func isImageEditModel(model string) bool {
 		return true
 	}
 	return strings.HasSuffix(model, "-edit") ||
-		strings.HasPrefix(model, "gpt-image") ||
-		model == "dall-e-2" ||
 		strings.HasPrefix(model, "gemini-") ||
 		strings.Contains(model, "image-edit")
 }

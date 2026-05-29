@@ -66,8 +66,8 @@ export default function PersonaPanel({ projectId }) {
   const requiresImageEditModel = generation.asset_type === "image" && imageReferenceCount > 0;
   const modelOptions = useMemo(() => {
     if (!requiresImageEditModel) return mediaModels;
-    return mediaModels.filter(modelSupportsImageEdit);
-  }, [mediaModels, requiresImageEditModel]);
+    return mediaModels.filter((model) => modelSupportsImageEdit(model, mediaProvider));
+  }, [mediaModels, mediaProvider, requiresImageEditModel]);
   const selectedModel = modelOptions.find((m) => m.id === generation.model);
 
   const loadPersonas = useCallback(async () => {
@@ -195,8 +195,8 @@ export default function PersonaPanel({ projectId }) {
     if (!selectedId || !generation.prompt.trim()) return;
     const settings = {};
     const selectedModelSupportsEdit = selectedModel
-      ? modelSupportsImageEdit(selectedModel)
-      : modelSupportsImageEdit({ id: generation.model });
+      ? modelSupportsImageEdit(selectedModel, mediaProvider)
+      : modelSupportsImageEdit({ id: generation.model }, mediaProvider);
     if (generation.model && (!requiresImageEditModel || selectedModelSupportsEdit)) {
       settings.model = generation.model;
     }
@@ -564,10 +564,13 @@ function imageSourceOptions(refs, items) {
   return out;
 }
 
-function modelSupportsImageEdit(model) {
+function modelSupportsImageEdit(model, provider) {
   if (!model) return false;
   if (model.supports_image_edit) return true;
   const id = String(model.id || "").toLowerCase();
+  if (String(provider || "").toLowerCase() === "venice-ai") {
+    return id.endsWith("-edit") || id.includes("image-edit");
+  }
   return id.endsWith("-edit") ||
     id.startsWith("gpt-image") ||
     id === "dall-e-2" ||
