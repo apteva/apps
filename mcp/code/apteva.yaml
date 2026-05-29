@@ -2,13 +2,14 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.5.7
+version: 0.5.8
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
   partial reads with line numbers, exact-match string edits with
   uniqueness checks, atomic multi-edit, repo-wide grep + glob, and
   ZIP import for repository initialization or overlay updates.
+  v0.5.8 refreshes the source tree with editor-style SVG icons.
   v0.1 backs files on local disk; v0.2 delegates to the Storage app
   via the cross-app RPC the SDK is gaining.
 

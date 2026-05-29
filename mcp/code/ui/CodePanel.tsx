@@ -215,38 +215,52 @@ function initialExpansion(tree: TreeNode[], openPath: string | null): Set<string
   return out;
 }
 
-// File-type glyphs. Single-letter monospace tags coloured by category
-// — cheap, dependency-free, and readable at the small font sizes the
-// tree uses. Real file-icons SVGs would be nicer but pull in either
-// a library or a couple of KB of inline paths per icon; this is the
-// pragmatic middle ground.
-function fileGlyph(name: string): { letter: string; cls: string } {
+type TreeIconName =
+  | "file"
+  | "folder"
+  | "folderOpen"
+  | "code"
+  | "image"
+  | "lock"
+  | "box"
+  | "config"
+  | "text"
+  | "key"
+  | "pencil"
+  | "trash";
+
+// File-type icons. Small SVG strokes keep the source tree looking
+// like an editor sidebar without adding another dependency to the
+// standalone panel bundle.
+function fileGlyph(name: string): { icon: TreeIconName; cls: string } {
   const ext = name.toLowerCase().split(".").pop() || "";
   switch (ext) {
     case "ts":
     case "tsx":
-      return { letter: "TS", cls: "text-blue" };
     case "js":
     case "mjs":
     case "cjs":
     case "jsx":
-      return { letter: "JS", cls: "text-yellow" };
-    case "json":
-      return { letter: "{}", cls: "text-yellow/80" };
-    case "md":
-    case "mdx":
-      return { letter: "M↓", cls: "text-text-muted" };
-    case "css":
-    case "scss":
-    case "sass":
-      return { letter: "#", cls: "text-blue/80" };
+    case "go":
+    case "py":
+    case "sh":
+    case "bash":
+    case "zsh":
     case "html":
     case "htm":
-      return { letter: "<>", cls: "text-orange" };
+      return { icon: "code", cls: "text-blue/80" };
+    case "json":
     case "yaml":
     case "yml":
     case "toml":
-      return { letter: "≡", cls: "text-text-muted" };
+      return { icon: "config", cls: "text-yellow/80" };
+    case "md":
+    case "mdx":
+      return { icon: "text", cls: "text-text-muted" };
+    case "css":
+    case "scss":
+    case "sass":
+      return { icon: "config", cls: "text-blue/80" };
     case "svg":
     case "png":
     case "jpg":
@@ -254,27 +268,19 @@ function fileGlyph(name: string): { letter: string; cls: string } {
     case "gif":
     case "webp":
     case "ico":
-      return { letter: "🖼", cls: "text-green/80" };
-    case "go":
-      return { letter: "Go", cls: "text-blue/80" };
-    case "py":
-      return { letter: "Py", cls: "text-blue/80" };
-    case "sh":
-    case "bash":
-    case "zsh":
-      return { letter: "$_", cls: "text-text-muted" };
+      return { icon: "image", cls: "text-green/80" };
     case "lock":
-      return { letter: "🔒", cls: "text-text-dim" };
+      return { icon: "lock", cls: "text-text-dim" };
     case "env":
-      return { letter: "ENV", cls: "text-yellow/70" };
+      return { icon: "key", cls: "text-yellow/70" };
     case "dockerfile":
-      return { letter: "🐳", cls: "text-blue/80" };
+      return { icon: "box", cls: "text-blue/80" };
   }
   // Special-case some no-extension files (Dockerfile, README, etc.)
-  if (name === "Dockerfile") return { letter: "🐳", cls: "text-blue/80" };
-  if (name.toLowerCase().startsWith("readme")) return { letter: "M↓", cls: "text-text-muted" };
-  if (name.startsWith(".")) return { letter: "·", cls: "text-text-dim" };
-  return { letter: "•", cls: "text-text-dim" };
+  if (name === "Dockerfile") return { icon: "box", cls: "text-blue/80" };
+  if (name.toLowerCase().startsWith("readme")) return { icon: "text", cls: "text-text-muted" };
+  if (name.startsWith(".")) return { icon: "config", cls: "text-text-dim" };
+  return { icon: "file", cls: "text-text-dim" };
 }
 
 interface FileEventData {
@@ -2198,7 +2204,7 @@ function DevLogsView({
 // ─── FileTree ──────────────────────────────────────────────────────
 //
 // Classic IDE folder tree. Folders expand/collapse with a chevron;
-// files render with an ext-typed glyph. Indentation by depth, hover
+// files render with compact SVG icons. Indentation by depth, hover
 // reveals rename/delete actions on file rows.
 
 interface FileTreeProps {
@@ -2249,7 +2255,7 @@ function FileTreeRow({
           style={{ paddingLeft: `${indent}px` }}
         >
           <span className="w-3 text-text-dim">{open ? "▾" : "▸"}</span>
-          <span className={open ? "text-yellow/80" : "text-yellow/60"}>📁</span>
+          <TreeIcon name={open ? "folderOpen" : "folder"} className={open ? "text-yellow/80" : "text-yellow/60"} />
           <span className="truncate">{node.name}</span>
         </button>
       </li>
@@ -2277,7 +2283,7 @@ function FileTreeRow({
         </form>
       ) : (
         <div className="flex items-center gap-2 pr-2" style={{ paddingLeft: `${indent + 16}px` }}>
-          <span className={`w-5 text-[10px] font-mono ${glyph.cls}`}>{glyph.letter}</span>
+          <TreeIcon name={glyph.icon} className={glyph.cls} />
           <button
             type="button"
             onClick={() => onSelect(node.path)}
@@ -2293,16 +2299,130 @@ function FileTreeRow({
               onClick={(e) => { e.stopPropagation(); onStartRename(node.path); }}
               className="text-text-dim hover:text-text px-1"
               title="Rename"
-            >✎</button>
+            ><TreeIcon name="pencil" className="w-3.5 h-3.5" /></button>
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); onDelete(node.path); }}
               className="text-red/70 hover:text-red px-1"
               title="Delete"
-            >🗑</button>
+            ><TreeIcon name="trash" className="w-3.5 h-3.5" /></button>
           </span>
         </div>
       )}
     </li>
   );
+}
+
+function TreeIcon({ name, className = "" }: { name: TreeIconName; className?: string }) {
+  const common = {
+    width: 16,
+    height: 16,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.8,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+    className: `w-4 h-4 shrink-0 ${className}`,
+  };
+  switch (name) {
+    case "folder":
+      return (
+        <svg {...common}>
+          <path d="M3.5 6.5h6l2 2h9v9.5a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2v-9.5a2 2 0 0 1 2-2Z" />
+        </svg>
+      );
+    case "folderOpen":
+      return (
+        <svg {...common}>
+          <path d="M3.5 7h5.8l2 2h8.2a2 2 0 0 1 2 2v1.2" />
+          <path d="M3 11.5h18.5l-2 6.5a2.4 2.4 0 0 1-2.3 1.7h-13a2 2 0 0 1-2-2.4l1.2-5.8Z" />
+        </svg>
+      );
+    case "code":
+      return (
+        <svg {...common}>
+          <path d="m9 8-4 4 4 4" />
+          <path d="m15 8 4 4-4 4" />
+        </svg>
+      );
+    case "image":
+      return (
+        <svg {...common}>
+          <rect x="4" y="5" width="16" height="14" rx="2" />
+          <path d="m7 16 4-4 3 3 2-2 3 3" />
+          <circle cx="8.5" cy="9" r="1" />
+        </svg>
+      );
+    case "lock":
+      return (
+        <svg {...common}>
+          <rect x="5" y="10" width="14" height="10" rx="2" />
+          <path d="M8 10V8a4 4 0 0 1 8 0v2" />
+        </svg>
+      );
+    case "box":
+      return (
+        <svg {...common}>
+          <path d="M12 3.5 20 8l-8 4.5L4 8l8-4.5Z" />
+          <path d="M4 8v8l8 4.5 8-4.5V8" />
+          <path d="M12 12.5v8" />
+        </svg>
+      );
+    case "config":
+      return (
+        <svg {...common}>
+          <path d="M5 7h14" />
+          <path d="M5 12h14" />
+          <path d="M5 17h14" />
+          <circle cx="9" cy="7" r="1.5" />
+          <circle cx="15" cy="12" r="1.5" />
+          <circle cx="11" cy="17" r="1.5" />
+        </svg>
+      );
+    case "text":
+      return (
+        <svg {...common}>
+          <path d="M6 4.5h8l4 4V19a1.5 1.5 0 0 1-1.5 1.5h-10A1.5 1.5 0 0 1 5 19V6a1.5 1.5 0 0 1 1-1.5Z" />
+          <path d="M14 4.5V9h4" />
+          <path d="M8 13h8" />
+          <path d="M8 16h6" />
+        </svg>
+      );
+    case "key":
+      return (
+        <svg {...common}>
+          <circle cx="8" cy="12" r="3" />
+          <path d="M11 12h9" />
+          <path d="M16 12v3" />
+          <path d="M19 12v2" />
+        </svg>
+      );
+    case "pencil":
+      return (
+        <svg {...common}>
+          <path d="M5 19.5 6.2 15 16.8 4.4a2 2 0 0 1 2.8 2.8L9 17.8 5 19.5Z" />
+          <path d="m14.5 6.5 3 3" />
+        </svg>
+      );
+    case "trash":
+      return (
+        <svg {...common}>
+          <path d="M5 7h14" />
+          <path d="M10 11v6" />
+          <path d="M14 11v6" />
+          <path d="M8 7l1-3h6l1 3" />
+          <path d="M7 7l1 13h8l1-13" />
+        </svg>
+      );
+    case "file":
+    default:
+      return (
+        <svg {...common}>
+          <path d="M6.5 4.5h7l4 4V19a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 5.5 19V6A1.5 1.5 0 0 1 6.5 4.5Z" />
+          <path d="M13.5 4.5V9h4" />
+        </svg>
+      );
+  }
 }
