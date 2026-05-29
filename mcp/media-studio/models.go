@@ -99,6 +99,12 @@ func loadModelsFor(ctx *sdk.AppCtx, kind string) ([]modelEntry, error) {
 	if bound == nil {
 		return nil, nil
 	}
+	if bound.AppSlug == "openai-codex" {
+		return []modelEntry{{
+			ID:    "gpt-5.5",
+			Label: "GPT-5.5 (Codex image generation)",
+		}}, nil
+	}
 	key := modelCacheKey{ConnectionID: bound.ConnectionID, Kind: kind}
 	modelCacheMu.RLock()
 	if v, hit := modelCache[key]; hit && time.Since(v.FetchedAt) < modelCacheTTL {

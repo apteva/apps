@@ -2,13 +2,13 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.0
+version: 0.10.1
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs powers audio TTS, sound effects, and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references. v0.10.0 adds cache_key reuse for app-to-app generation
-  and a direct media_get lookup for generated assets.
+  references. v0.10.1 adds OpenAI Codex as a subscription-backed
+  image provider option.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media-studio
@@ -26,14 +26,14 @@ requires:
   integrations:
     - role: image_provider
       kind: integration
-      compatible_slugs: [openai-api, venice-ai]
+      compatible_slugs: [openai-api, openai-codex, venice-ai]
       capabilities: [image.generate, image.edit]
       tools:
         image.generate: generate_image
         image.edit: edit_image
       required: false
       label: "Image provider"
-      hint: "Bind any compatible integration (OpenAI, Venice AI; Replicate / Stability soon) to enable image generation. image.edit (reference-image edits) currently requires Venice AI."
+      hint: "Bind any compatible integration (OpenAI API, OpenAI Codex, Venice AI; Replicate / Stability soon) to enable image generation. image.edit (reference-image edits) currently requires Venice AI."
 
     - role: video_provider
       kind: integration

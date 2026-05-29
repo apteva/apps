@@ -231,6 +231,23 @@ func TestNormalizeImageResponse_OpenAI_GPTImage_B64(t *testing.T) {
 	}
 }
 
+func TestNormalizeImageResponse_OpenAICodex_B64(t *testing.T) {
+	body := `{"data":[{"b64_json":"AAECAwQ=","revised_prompt":"a precise red door"}],"model":"gpt-5.5"}`
+	imgs, revised, model, err := normalizeImageResponse("openai-codex", "image.generate", json.RawMessage(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imgs) != 1 || imgs[0].B64 != "AAECAwQ=" {
+		t.Errorf("imgs = %+v", imgs)
+	}
+	if revised != "a precise red door" {
+		t.Errorf("revised = %q", revised)
+	}
+	if model != "gpt-5.5" {
+		t.Errorf("model = %q, want gpt-5.5", model)
+	}
+}
+
 func TestNormalizeImageResponse_OpenAI_MultipleImages(t *testing.T) {
 	body := `{"data":[{"url":"u1"},{"url":"u2"},{"url":"u3"}]}`
 	imgs, _, _, err := normalizeImageResponse("openai-api", "image.generate", json.RawMessage(body))
@@ -603,6 +620,32 @@ func TestBuildProviderArgs_DallE2_StripsAllExtras(t *testing.T) {
 	}
 	if _, ok := args["background"]; ok {
 		t.Error("dall-e-2 doesn't accept background")
+	}
+}
+
+func TestBuildOpenAICodexImageArgs(t *testing.T) {
+	args, err := buildImageArgs(map[string]any{
+		"prompt": "draw a door",
+		"model":  "gpt-image-2",
+		"size":   "1024x1536",
+		"options": map[string]any{
+			"quality":            "high",
+			"output_format":      "webp",
+			"background":         "transparent",
+			"output_compression": 80,
+		},
+	}, "openai-codex", "image.generate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args["model"] != "gpt-5.5" || args["prompt"] != "draw a door" || args["size"] != "1024x1536" {
+		t.Fatalf("base args wrong: %+v", args)
+	}
+	if args["quality"] != "high" || args["output_format"] != "webp" || args["background"] != "transparent" {
+		t.Fatalf("image_generation options missing: %+v", args)
+	}
+	if args["output_compression"] != 80 {
+		t.Fatalf("output_compression = %v, want 80", args["output_compression"])
 	}
 }
 

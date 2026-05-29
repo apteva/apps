@@ -20,6 +20,8 @@ func buildImageArgs(args map[string]any, providerSlug, capability string) (map[s
 		switch providerSlug {
 		case "openai-api":
 			return buildOpenAIImageArgs(args), nil
+		case "openai-codex":
+			return buildOpenAICodexImageArgs(args), nil
 		case "venice-ai":
 			return buildVeniceImageArgs(args), nil
 		}
@@ -29,6 +31,8 @@ func buildImageArgs(args map[string]any, providerSlug, capability string) (map[s
 			return buildVeniceImageEditArgs(args), nil
 		case "openai-api":
 			return nil, fmt.Errorf("openai-api image edit not wired (multipart body — pending executor support)")
+		case "openai-codex":
+			return nil, fmt.Errorf("openai-codex image edit not wired (text-to-image only)")
 		}
 	}
 	return nil, fmt.Errorf("unsupported (slug=%q, capability=%q)", providerSlug, capability)
@@ -57,6 +61,39 @@ func buildOpenAIImageArgs(args map[string]any) map[string]any {
 		}
 	}
 	return buildProviderArgs(model, prompt, size, quality, outputFormat, background, n)
+}
+
+func buildOpenAICodexImageArgs(args map[string]any) map[string]any {
+	model := strArg(args, "model", "gpt-5.5")
+	if model == "" || strings.HasPrefix(model, "gpt-image") || strings.HasPrefix(model, "dall-e") {
+		model = "gpt-5.5"
+	}
+	out := map[string]any{
+		"model":  model,
+		"prompt": strArg(args, "prompt", ""),
+	}
+	if size := strArg(args, "size", ""); size != "" {
+		out["size"] = size
+	}
+	if n := intArg(args, "n", 1); n > 1 {
+		// The Responses image_generation tool currently returns one final
+		// image per call; keep n for metadata compatibility but the Codex
+		// executor intentionally ignores it upstream.
+		out["n"] = n
+	}
+	for _, key := range []string{"quality", "output_format", "background", "output_compression"} {
+		if v := strArg(args, key, ""); v != "" {
+			out[key] = v
+		}
+	}
+	if opts, ok := args["options"].(map[string]any); ok {
+		for _, key := range []string{"quality", "output_format", "background", "output_compression"} {
+			if v, exists := opts[key]; exists {
+				out[key] = v
+			}
+		}
+	}
+	return out
 }
 
 // buildVeniceImageArgs assembles Venice's POST /images/generations body.
@@ -183,7 +220,7 @@ func normalizeImageResponse(slug, capability string, raw json.RawMessage) ([]gen
 		return normalizeImageEditResponse(slug, raw)
 	}
 	switch slug {
-	case "openai-api":
+	case "openai-api", "openai-codex":
 		var body struct {
 			Data []struct {
 				URL           string `json:"url"`

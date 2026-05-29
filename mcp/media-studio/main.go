@@ -33,11 +33,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.0
+version: 0.10.1
 description: |
   Generate images, video, audio, music, and avatars via compatible
-  providers. Optionally saves outputs to Storage and supports stable
-  cache keys for app-to-app generation reuse.
+  providers. Optionally saves outputs to Storage, supports stable
+  cache keys for app-to-app generation reuse, and can use OpenAI Codex
+  as a subscription-backed image provider.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -49,7 +50,7 @@ requires:
   integrations:
     - role: image_provider
       kind: integration
-      compatible_slugs: [openai-api, venice-ai]
+      compatible_slugs: [openai-api, openai-codex, venice-ai]
       capabilities: [image.generate, image.edit]
       tools:
         image.generate: generate_image
