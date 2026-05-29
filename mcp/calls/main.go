@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: calls
 display_name: Calls
-version: 0.1.0
+version: 0.1.1
 description: Standalone realtime audio/video calls with unified participants.
 author: Apteva
 scopes: [project, global]
@@ -308,7 +308,7 @@ func (a *App) emit(ctx *sdk.AppCtx, projectID, topic string, payload map[string]
 		payload = map[string]any{}
 	}
 	payload["project_id"] = projectID
-	ctx.EmitWithProject("calls."+topic, projectID, payload)
+	ctx.Emit("calls."+topic, payload)
 }
 
 func schemaObject(props map[string]any, required []string) map[string]any {

@@ -54,8 +54,9 @@ func TestCreateRoom_ReturnsHostTokenAndEmits(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("room.created events=%d, want 1", len(events))
 	}
-	if events[0].ProjectID != "test-proj" {
-		t.Fatalf("event project=%q", events[0].ProjectID)
+	payload := events[0].Data.(map[string]any)
+	if payload["project_id"] != "test-proj" {
+		t.Fatalf("event project_id=%v", payload["project_id"])
 	}
 }
 
