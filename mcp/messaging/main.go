@@ -54,7 +54,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.18
+version: 0.13.19
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -265,6 +265,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/templates/sync", Handler: a.handleTemplatesSync},
 		{Pattern: "/templates/provider-preview", Handler: a.handleTemplatesProviderPreview},
 		{Pattern: "/templates/import", Handler: a.handleTemplatesImport},
+		{Pattern: "/templates/refresh-statuses", Handler: a.handleTemplatesRefreshStatuses},
 		// Unified sender registration. Email → SES verify_email. Domain
 		// → verify_domain + DNS publish + (auto if aws-s3 + aws-sns
 		// bound) full inbound bootstrap (S3 + SNS + receipt rule + MX
@@ -380,7 +381,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "template_create",
 			Description: "Create a template. Args: name, channel? (default 'email'), subject?, body_text?, body_html?, vars_schema?. " +
-				"Body fields use {{var}} placeholders. WhatsApp creates provider-backed content via the bound phone provider and submits for approval by default.",
+				"Body fields use {{var}} placeholders. Phone templates can set provider_create=true to create Twilio Content; WhatsApp submits for approval by default.",
 			InputSchema: schemaObject(map[string]any{
 				"name":                map[string]any{"type": "string"},
 				"channel":             map[string]any{"type": "string"},
@@ -390,6 +391,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"vars_schema":         map[string]any{"type": "object"},
 				"language":            map[string]any{"type": "string"},
 				"category":            map[string]any{"type": "string", "enum": []string{"UTILITY", "MARKETING", "AUTHENTICATION"}},
+				"provider_create":     map[string]any{"type": "boolean"},
 				"submit_for_approval": map[string]any{"type": "boolean"},
 			}, []string{"name"}),
 			Handler: a.toolTemplateCreate,
@@ -940,9 +942,12 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			// Provider-mirrored route. Refuse to send through a
 			// non-approved template — that's a hard Meta error and
 			// surfacing it pre-flight is far clearer.
-			if tpl.ProviderStatus != "" && tpl.ProviderStatus != "approved" {
+			if channel == channelWhatsApp && tpl.ProviderStatus != "" && tpl.ProviderStatus != "approved" {
 				return nil, fmt.Errorf("template_id %d has provider_status=%q (need 'approved'); call templates_refresh_status to refresh",
 					templateID, tpl.ProviderStatus)
+			}
+			if tpl.ProviderStatus == "deleted" || tpl.ProviderStatus == "rejected" {
+				return nil, fmt.Errorf("template_id %d has provider_status=%q", templateID, tpl.ProviderStatus)
 			}
 			contentSid = tpl.ProviderTemplateID
 			vars := mapArg(args, "vars")
@@ -1735,8 +1740,9 @@ func (a *App) toolTemplateCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	varStyle := "named"
 	var lastSynced any
 	providerMeta := map[string]any{}
-	if channel == channelWhatsApp {
-		created, err := createProviderTemplate(ctx, name, bodyText, varsSchema, args)
+	providerCreate := boolArg(args, "provider_create", channel == channelWhatsApp)
+	if (channel == channelSMS || channel == channelWhatsApp) && providerCreate {
+		created, err := createProviderTemplate(ctx, channel, name, bodyText, varsSchema, args)
 		if err != nil {
 			return nil, err
 		}
@@ -1772,16 +1778,16 @@ type providerTemplateCreate struct {
 	Meta               map[string]any
 }
 
-func createProviderTemplate(ctx *sdk.AppCtx, name, bodyText string, varsSchema map[string]any, args map[string]any) (*providerTemplateCreate, error) {
+func createProviderTemplate(ctx *sdk.AppCtx, channel, name, bodyText string, varsSchema map[string]any, args map[string]any) (*providerTemplateCreate, error) {
 	if bodyText == "" {
-		return nil, errors.New("body_text required for whatsapp provider-backed templates")
+		return nil, errors.New("body_text required for Twilio provider-backed templates")
 	}
 	if err := validateWhatsAppTemplatePlaceholders(bodyText); err != nil {
 		return nil, err
 	}
 	bound := ctx.IntegrationFor("phone_provider")
 	if bound == nil {
-		return nil, errors.New("no phone_provider bound — install/select a Twilio connection for WhatsApp templates")
+		return nil, errors.New("no phone_provider bound — install/select a Twilio connection for phone templates")
 	}
 	language := strings.TrimSpace(strArg(args, "language"))
 	if language == "" {
@@ -1811,9 +1817,12 @@ func createProviderTemplate(ctx *sdk.AppCtx, name, bodyText string, varsSchema m
 	if providerID == "" {
 		return nil, fmt.Errorf("create provider template: provider response missing template id: %s", truncate(string(createRes.Data), 400))
 	}
-	status := "draft"
+	status := "created"
 	submitted := false
-	if boolArg(args, "submit_for_approval", true) {
+	if channel == channelWhatsApp {
+		status = "draft"
+	}
+	if channel == channelWhatsApp && boolArg(args, "submit_for_approval", true) {
 		submitStatus, err := submitProviderTemplate(ctx, bound.ConnectionID, providerID, name, category)
 		if err != nil {
 			return nil, err
@@ -1933,7 +1942,7 @@ func (a *App) toolTemplateSubmit(ctx *sdk.AppCtx, args map[string]any) (any, err
 		if len(t.VarsSchema) > 0 {
 			_ = json.Unmarshal(t.VarsSchema, &vars)
 		}
-		created, err := createProviderTemplate(ctx, t.Name, t.BodyText, vars, map[string]any{
+		created, err := createProviderTemplate(ctx, t.Channel, t.Name, t.BodyText, vars, map[string]any{
 			"language":            strArg(args, "language"),
 			"category":            strArg(args, "category"),
 			"submit_for_approval": false,
@@ -1967,6 +1976,57 @@ func (a *App) toolTemplateSubmit(ctx *sdk.AppCtx, args map[string]any) (any, err
 	}
 	updated, _ := dbTemplateGet(ctx.AppDB(), pid, id)
 	return map[string]any{"template": updated, "status": status, "submitted": true}, nil
+}
+
+func (a *App) templateCreateProvider(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	t, err := dbTemplateGet(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if t == nil {
+		return nil, fmt.Errorf("template_id %d not found", id)
+	}
+	if t.Channel != channelSMS && t.Channel != channelWhatsApp {
+		return map[string]any{
+			"template": t,
+			"skipped":  true,
+			"reason":   fmt.Sprintf("no provider template flow for channel %q", t.Channel),
+		}, nil
+	}
+	if t.ProviderTemplateID != "" {
+		return map[string]any{"template": t, "skipped": true, "reason": "already provider-backed"}, nil
+	}
+	vars := map[string]any{}
+	if len(t.VarsSchema) > 0 {
+		_ = json.Unmarshal(t.VarsSchema, &vars)
+	}
+	created, err := createProviderTemplate(ctx, t.Channel, t.Name, t.BodyText, vars, map[string]any{
+		"language":            strArg(args, "language"),
+		"category":            strArg(args, "category"),
+		"submit_for_approval": false,
+	})
+	if err != nil {
+		return nil, err
+	}
+	_, err = ctx.AppDB().Exec(
+		`UPDATE templates SET provider_template_id = ?, provider_status = ?, var_style = 'numbered',
+		       last_synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND project_id = ?`,
+		created.ProviderTemplateID, created.ProviderStatus, id, pid,
+	)
+	if err != nil {
+		return nil, err
+	}
+	updated, _ := dbTemplateGet(ctx.AppDB(), pid, id)
+	return map[string]any{"template": updated, "provider": created.Meta}, nil
 }
 
 func (a *App) toolTemplateGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -4863,6 +4923,37 @@ func (a *App) handleTemplatesImport(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (a *App) handleTemplatesRefreshStatuses(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	channel := r.URL.Query().Get("channel")
+	if channel == "" {
+		channel = channelWhatsApp
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if channel != channelWhatsApp {
+		httpJSON(w, map[string]any{
+			"channel":   channel,
+			"refreshed": 0,
+			"skipped":   true,
+			"reason":    fmt.Sprintf("no provider approval status for channel %q", channel),
+		})
+		return
+	}
+	count, err := syncProviderTemplates(globalCtx, pid, channel)
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"channel": channel, "refreshed": count})
+}
+
 // isAppDepBound checks whether a kind=app dependency is currently
 // bound on this install. We don't have a clean SDK helper for "is app
 // X reachable?", so we attempt the lightest possible CallApp probe.
@@ -4901,7 +4992,11 @@ func (a *App) handleTemplateItem(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusMethodNotAllowed, "POST only")
 			return
 		}
-		out, err := a.toolTemplatesRefreshStatus(globalCtx, map[string]any{"id": id})
+		args := map[string]any{"id": id}
+		if pid := strings.TrimSpace(r.URL.Query().Get("project_id")); pid != "" {
+			args["_project_id"] = pid
+		}
+		out, err := a.toolTemplatesRefreshStatus(globalCtx, args)
 		if err != nil {
 			httpErr(w, http.StatusBadGateway, err.Error())
 			return
@@ -4918,7 +5013,30 @@ func (a *App) handleTemplateItem(w http.ResponseWriter, r *http.Request) {
 			body = map[string]any{}
 		}
 		body["id"] = id
+		if pid := strings.TrimSpace(r.URL.Query().Get("project_id")); pid != "" {
+			body["_project_id"] = pid
+		}
 		out, err := a.toolTemplateSubmit(globalCtx, body)
+		if err != nil {
+			httpErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		httpJSON(w, out)
+	case "provider-create":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body == nil {
+			body = map[string]any{}
+		}
+		body["id"] = id
+		if pid := strings.TrimSpace(r.URL.Query().Get("project_id")); pid != "" {
+			body["_project_id"] = pid
+		}
+		out, err := a.templateCreateProvider(globalCtx, body)
 		if err != nil {
 			httpErr(w, http.StatusBadGateway, err.Error())
 			return
@@ -5471,6 +5589,9 @@ func listProviderTemplates(ctx *sdk.AppCtx, pid, channel string) ([]providerTemp
 		}
 		existing, _ := dbTemplateGetByProviderID(ctx.AppDB(), pid, c.Sid)
 		if existing != nil {
+			if existing.Channel == channelSMS && len(c.Approval) == 0 && existing.ProviderStatus != "" {
+				item.Status = existing.ProviderStatus
+			}
 			item.LocalID = existing.ID
 			if providerTemplateChanged(existing, item) {
 				item.LocalState = "changed"

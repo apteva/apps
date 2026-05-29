@@ -1571,6 +1571,7 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
   const [bodyText, setBodyText] = useState("");
   const [language, setLanguage] = useState("en");
   const [category, setCategory] = useState("UTILITY");
+  const [providerCreate, setProviderCreate] = useState(true);
   const [submitForApproval, setSubmitForApproval] = useState(true);
   const [busy, setBusy] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
@@ -1578,12 +1579,17 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
   const [providerLoading, setProviderLoading] = useState(false);
   const [selectedSids, setSelectedSids] = useState<string[]>([]);
   const [updateExisting, setUpdateExisting] = useState(true);
+  const providerCapable = channel === "sms" || channel === "whatsapp";
+
+  useEffect(() => {
+    setProviderCreate(channel === "sms" || channel === "whatsapp");
+  }, [channel]);
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
     try {
-      await api("POST", "/tools/call", {}, {
+      const out = await api<{ template?: TemplateRow; provider?: { provider_template_id?: string; provider_status?: string; submitted?: boolean } }>("POST", "/tools/call", {}, {
         tool: "template_create",
         args: {
           channel,
@@ -1591,13 +1597,18 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
           body_text: bodyText,
           language,
           category,
-          submit_for_approval: submitForApproval,
+          provider_create: providerCapable ? providerCreate : false,
+          submit_for_approval: channel === "whatsapp" && providerCreate ? submitForApproval : false,
         },
       });
       setName("");
       setBodyText("");
       reload();
-      notify("info", "Template added.");
+      if (out.provider?.provider_template_id) {
+        notify("info", `Template added on Twilio: ${out.provider.provider_status || "created"}.`);
+      } else {
+        notify("info", "Template added.");
+      }
     } catch (e) {
       notify("error", `Add failed: ${parseSendersError((e as Error).message)}`);
     } finally {
@@ -1643,6 +1654,19 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
     }
   };
 
+  const refreshAllStatuses = async () => {
+    setBusy(true);
+    try {
+      const out = await api<{ refreshed?: number }>("POST", "/templates/refresh-statuses", { channel: "whatsapp" });
+      reload();
+      notify("info", `Refreshed ${out.refreshed ?? 0} WhatsApp template${out.refreshed === 1 ? "" : "s"}.`);
+    } catch (e) {
+      notify("error", `Refresh failed: ${parseSendersError((e as Error).message)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleDelete = async (id: number) => {
     const tpl = rows.find((t) => t.id === id);
     confirmAction({
@@ -1681,6 +1705,15 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
       notify("error", `Submit failed: ${parseSendersError((e as Error).message)}`);
     }
   };
+  const handleProviderCreate = async (t: TemplateRow) => {
+    try {
+      await api("POST", `/templates/${t.id}/provider-create`, {}, { category, language });
+      reload();
+      notify("info", "Template synced to Twilio.");
+    } catch (e) {
+      notify("error", `Sync failed: ${parseSendersError((e as Error).message)}`);
+    }
+  };
   return (
     <div>
       <form onSubmit={handleCreate} className="p-4 flex gap-2 items-end border-b border-border flex-wrap">
@@ -1706,11 +1739,19 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
             <Field label="Language">
               <input className={inputCls + " w-24"} value={language} onChange={(e) => setLanguage(e.target.value)} />
             </Field>
-            <label className="flex items-center gap-2 text-xs text-text-dim pb-2">
-              <input type="checkbox" checked={submitForApproval} onChange={(e) => setSubmitForApproval(e.target.checked)} />
-              Submit
-            </label>
           </>
+        )}
+        {providerCapable && (
+          <label className="flex items-center gap-2 text-xs text-text-dim pb-2">
+            <input type="checkbox" checked={providerCreate} onChange={(e) => setProviderCreate(e.target.checked)} />
+            Sync to Twilio
+          </label>
+        )}
+        {channel === "whatsapp" && providerCreate && (
+          <label className="flex items-center gap-2 text-xs text-text-dim pb-2">
+            <input type="checkbox" checked={submitForApproval} onChange={(e) => setSubmitForApproval(e.target.checked)} />
+            Submit for approval
+          </label>
         )}
         <Field label="Body">
           <input className={inputCls + " w-[28rem]"} value={bodyText} onChange={(e) => setBodyText(e.target.value)} required placeholder="Hi {{1}}, your appointment is {{2}}." />
@@ -1718,6 +1759,9 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
         <button type="submit" className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50" disabled={busy}>Add</button>
         <button type="button" className="px-3 py-1.5 rounded border border-border text-text-dim hover:text-text hover:bg-surface-2 disabled:opacity-50" onClick={loadProviderTemplates} disabled={busy || providerLoading}>
           {providerLoading ? "Loading…" : "Import from Twilio"}
+        </button>
+        <button type="button" className="px-3 py-1.5 rounded border border-border text-text-dim hover:text-text hover:bg-surface-2 disabled:opacity-50" onClick={refreshAllStatuses} disabled={busy || providerLoading}>
+          Refresh WhatsApp statuses
         </button>
       </form>
       {rows.length === 0 ? (
@@ -1750,11 +1794,16 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
                 <td className="px-4 py-2 text-right">
                   {t.channel === "whatsapp" && (
                     <>
-                      <button type="button" className="text-accent hover:underline text-xs mr-3" onClick={() => handleRefreshStatus(t.id)}>Refresh</button>
+                      {t.provider_template_id && (
+                        <button type="button" className="text-accent hover:underline text-xs mr-3" onClick={() => handleRefreshStatus(t.id)}>Refresh</button>
+                      )}
                       {t.provider_status !== "approved" && (
                         <button type="button" className="text-accent hover:underline text-xs mr-3" onClick={() => handleSubmit(t.id)}>Submit</button>
                       )}
                     </>
+                  )}
+                  {t.channel === "sms" && !t.provider_template_id && (
+                    <button type="button" className="text-accent hover:underline text-xs mr-3" onClick={() => handleProviderCreate(t)}>Sync to Twilio</button>
                   )}
                   <button type="button" className="text-text-dim hover:text-red-500 text-xs" onClick={() => handleDelete(t.id)}>Delete</button>
                 </td>
@@ -2162,6 +2211,7 @@ function statusPillClass(status: string): string {
     case "verified":
     case "approved":
     case "SUCCESS":
+    case "created":
       return "bg-green-500/20 text-green-400 border-green-500/30";
     case "opened":
       return "bg-blue-500/20 text-blue-300 border-blue-500/30";

@@ -2608,6 +2608,71 @@ func TestTemplateCreate_WhatsAppCreatesAndSubmitsProviderTemplate(t *testing.T) 
 	}
 }
 
+func TestTemplateCreate_SMSCanCreateProviderTemplateWithoutApproval(t *testing.T) {
+	plat := newPhoneStub(nil)
+	plat.replyByTool = map[string]*sdk.ExecuteResult{
+		"create_content_template": {
+			Success: true,
+			Status:  201,
+			Data:    json.RawMessage(`{"sid":"HXsms"}`),
+		},
+		"send_sms": {
+			Success: true,
+			Status:  201,
+			Data:    json.RawMessage(`{"sid":"SMsms"}`),
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolTemplateCreate(ctx, map[string]any{
+		"channel":         "sms",
+		"name":            "SMS Alert",
+		"body_text":       "Hi {{1}}",
+		"vars_schema":     map[string]any{"1": "Alice"},
+		"provider_create": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tpl := out.(map[string]any)["template"].(*Template)
+	if tpl.ProviderTemplateID != "HXsms" || tpl.ProviderStatus != "created" {
+		t.Fatalf("provider fields: %+v", tpl)
+	}
+	for _, call := range plat.executeCalls {
+		if call.Tool == "submit_content_template_approval" {
+			t.Fatalf("sms template should not be submitted for approval: %+v", call)
+		}
+	}
+
+	_, err = app.toolSendMessage(ctx, map[string]any{
+		"channel":     "sms",
+		"from":        "+15551112222",
+		"to":          "+15553334444",
+		"template_id": tpl.ID,
+		"vars":        map[string]any{"1": "Alice"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sendCall *executeCall
+	for i := range plat.executeCalls {
+		if plat.executeCalls[i].Tool == "send_sms" {
+			sendCall = &plat.executeCalls[i]
+			break
+		}
+	}
+	if sendCall == nil {
+		t.Fatal("send_sms was not called")
+	}
+	if sendCall.Input["ContentSid"] != "HXsms" {
+		t.Errorf("ContentSid=%v, want HXsms", sendCall.Input["ContentSid"])
+	}
+	if _, hasBody := sendCall.Input["Body"]; hasBody {
+		t.Errorf("Body should be omitted on ContentSid sends, got %v", sendCall.Input["Body"])
+	}
+}
+
 func TestSendMessageTemplate_UsesContentSidWhenProviderTemplate(t *testing.T) {
 	twilioListReply := &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
 		"contents": [{
