@@ -332,6 +332,18 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [videoJobs, setVideoJobs] = useState<
     { id: number; queue_id: string; model: string; prompt: string; status: string; error: string }[]
   >([]);
+  const [storageFolders, setStorageFolders] = useState<Record<Kind, string>>({
+    image: "",
+    video: "",
+    audio_tts: "",
+    audio_sfx: "",
+    music: "",
+    avatar: "",
+  });
+  const [folderSuggestions, setFolderSuggestions] = useState<string[]>([]);
+  const storageFolder = storageFolders[activeKind] || "";
+  const setStorageFolder = (v: string) =>
+    setStorageFolders((cur) => ({ ...cur, [activeKind]: v }));
 
   useEffect(() => {
     const allowed = IMAGE_SIZES[imageModel] || ["1024x1024"];
@@ -377,6 +389,36 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   useEffect(() => {
     loadGenerations();
   }, [loadGenerations]);
+
+  useEffect(() => {
+    if (!bindings?.storage?.bound) {
+      setFolderSuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      const params = new URLSearchParams({
+        project_id: projectId,
+        folder: "/",
+        recursive: "true",
+        limit: "240",
+      });
+      if (storageFolder.trim()) params.set("q", storageFolder.trim());
+      fetch(`${API}/storage-files?${params.toString()}`, { credentials: "same-origin" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (cancelled || !data) return;
+          setFolderSuggestions(storageFoldersFromFiles(data.files || []));
+        })
+        .catch(() => {
+          if (!cancelled) setFolderSuggestions([]);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [bindings?.storage?.bound, projectId, storageFolder]);
 
   // Poll in-flight video jobs every 5s while the Videos tab is active.
   // 5s is finer than the sidecar's 15s worker tick so the user sees the
@@ -617,6 +659,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         prompt,
         project_id: projectId,
       };
+      if (storageFolder.trim()) body.storage_folder = storageFolder.trim();
       if (activeKind === "image") {
         if (isEditMode) {
           if (sourceImages.length > editSourceLimit) {
@@ -818,6 +861,11 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             selectedAvatar={selectedAvatar}
             setSelectedAvatar={setSelectedAvatar}
             voices={voices}
+            storageBound={!!bindings?.storage?.bound}
+            storageFolder={storageFolder}
+            setStorageFolder={setStorageFolder}
+            storageFolderDefault={defaultOutputFolder(activeKind)}
+            folderSuggestions={folderSuggestions}
           />
 
           {(activeKind === "video" || activeKind === "avatar") && videoJobs.length > 0 && (
@@ -985,6 +1033,11 @@ interface ComposerProps {
   selectedAvatar: string;
   setSelectedAvatar: (v: string) => void;
   voices: VoiceEntry[];
+  storageBound: boolean;
+  storageFolder: string;
+  setStorageFolder: (v: string) => void;
+  storageFolderDefault: string;
+  folderSuggestions: string[];
 }
 
 function Composer(p: ComposerProps) {
@@ -1115,6 +1168,14 @@ function Composer(p: ComposerProps) {
       )}
       {p.kind === "image" && (
         <SafeModeToggle value={p.safeMode} onChange={p.setSafeMode} />
+      )}
+      {p.storageBound && (
+        <StorageFolderField
+          value={p.storageFolder}
+          onChange={p.setStorageFolder}
+          placeholder={p.storageFolderDefault}
+          suggestions={p.folderSuggestions}
+        />
       )}
       <button
         onClick={p.generate}
@@ -1745,6 +1806,67 @@ function TextField({
       />
     </div>
   );
+}
+
+function StorageFolderField({
+  value,
+  onChange,
+  placeholder,
+  suggestions,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder: string;
+  suggestions: string[];
+}) {
+  return (
+    <div>
+      <label className="text-text-muted text-xs block">Output folder</label>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        list="media-storage-folder-suggestions"
+        className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+        style={{ width: 220 }}
+        title="Storage folder for generated output. Leave empty for the default."
+      />
+      <datalist id="media-storage-folder-suggestions">
+        {suggestions.map((folder) => (
+          <option key={folder} value={folder} />
+        ))}
+      </datalist>
+    </div>
+  );
+}
+
+function defaultOutputFolder(kind: Kind): string {
+  if (kind === "image") return "/.generated/images/";
+  if (kind === "video") return "/.generated/videos/";
+  if (kind === "music") return "/.generated/music/";
+  if (kind === "avatar") return "/.generated/avatars/";
+  return "/.generated/audio/";
+}
+
+function storageFoldersFromFiles(files: { folder?: string }[]): string[] {
+  const set = new Set<string>();
+  for (const file of files || []) {
+    const folder = normalizeFolderInput(file.folder || "");
+    if (folder && !folderHasDotSegment(folder)) set.add(folder);
+  }
+  return Array.from(set).sort().slice(0, 40);
+}
+
+function normalizeFolderInput(raw: string): string {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  const prefixed = s.startsWith("/") ? s : `/${s}`;
+  return prefixed.endsWith("/") ? prefixed : `${prefixed}/`;
+}
+
+function folderHasDotSegment(folder: string): boolean {
+  return folder.split("/").some((part) => part.startsWith("."));
 }
 
 function Gallery({

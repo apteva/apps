@@ -24,6 +24,7 @@ import (
 	_ "image/png"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -33,13 +34,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.4
+version: 0.10.8
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.4 supports
-  multi-reference image edits for OpenAI API, Gemini, and Venice.
+  as a subscription-backed image provider. v0.10.8 adds storage_folder
+  output targeting with Storage-backed folder suggestions.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -98,7 +99,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: media_generate, description: "Generate media (image/video/audio/music/avatar). Args: kind, prompt, model?, size?, duration?, voice?, aspect?, avatar?, n?, options?, cache_key?, cache_policy?." }
+    - { name: media_generate, description: "Generate media (image/video/audio/music/avatar). Args: kind, prompt, model?, size?, duration?, voice?, aspect?, avatar?, storage_folder?, n?, options?, cache_key?, cache_policy?." }
     - { name: media_history,  description: "List recent generations. Args: kind?, limit?, since?." }
     - { name: media_get,      description: "Fetch one generation by id. Args: id." }
   ui_panels:
@@ -166,6 +167,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/avatars", Handler: a.handleListAvatars},
 		{Pattern: "/voices", Handler: a.handleListVoices},
 		{Pattern: "/video-jobs", Handler: a.handleListVideoJobs},
+		{Pattern: "/storage-files", Handler: a.handleStorageFiles},
 		{Pattern: "/cache/", Handler: a.handleCacheGet},
 	}
 }
@@ -199,6 +201,10 @@ func (a *App) MCPTools() []sdk.Tool {
 				"voice":    map[string]any{"type": "string", "description": "Voice id (audio_tts; avatar voice override on HeyGen)."},
 				"aspect":   map[string]any{"type": "string", "description": "Aspect ratio (video only). e.g. 16:9."},
 				"avatar":   map[string]any{"type": "string", "description": "Replica/avatar id (avatar kind). From the /avatars list or the provider."},
+				"storage_folder": map[string]any{
+					"type":        "string",
+					"description": "Optional Storage output folder. Defaults to /.generated/<kind>/ when omitted. Examples: /campaigns/launch/ or personas/mira/images.",
+				},
 				"source_image": map[string]any{
 					"type":        "string",
 					"description": "Single source image reference for image.edit or image-to-video. Accepts storage:N, URL, or base64. Kept for backward compatibility.",
@@ -248,6 +254,34 @@ func (a *App) MCPTools() []sdk.Tool {
 }
 
 func main() { sdk.Run(&App{}) }
+
+func (a *App) handleStorageFiles(w http.ResponseWriter, r *http.Request) {
+	ctx := withProjectScope(globalCtx, map[string]any{"_project_id": r.URL.Query().Get("project_id")})
+	if ctx == nil {
+		http.Error(w, "app not mounted", http.StatusInternalServerError)
+		return
+	}
+	folder := r.URL.Query().Get("folder")
+	if folder == "" {
+		folder = "/"
+	}
+	args := map[string]any{"folder": folder, "recursive": boolQuery(r, "recursive", false), "_project_id": projectScope(ctx)}
+	if limit := intQuery(r, "limit", 200); limit > 0 {
+		if limit > 500 {
+			limit = 500
+		}
+		args["limit"] = limit
+	}
+	tool := "files_list"
+	if q := strings.TrimSpace(r.URL.Query().Get("q")); q != "" {
+		args["q"] = q
+		tool = "files_search"
+	}
+	var out map[string]any
+	err := ctx.PlatformAPI().CallAppResult("storage", tool, args, &out)
+	filterStorageBrowserOutput(out)
+	writeJSON(w, out, err)
+}
 
 // ─── generic helpers ───────────────────────────────────────────────
 

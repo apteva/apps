@@ -431,6 +431,61 @@ func TestToolMediaGenerate_Image_HappyPath_WithStorage(t *testing.T) {
 	}
 }
 
+func TestToolMediaGenerate_Image_CustomStorageFolder(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(fakePNG())
+	}))
+	defer upstream.Close()
+
+	pf := newRecordingPlatform()
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(fmt.Sprintf(`{"data":[{"url":"%s/img.png"}]}`, upstream.URL)),
+	}
+	pf.nextCallResult = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":4321}"}]}}`,
+	)
+
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":           "image",
+		"prompt":         "folder test",
+		"storage_folder": "campaigns/launch",
+	})
+	if err != nil {
+		t.Fatalf("toolMediaGenerate: %v", err)
+	}
+	if len(pf.callAppCalls) != 1 {
+		t.Fatalf("expected 1 storage call, got %d", len(pf.callAppCalls))
+	}
+	if folder, _ := pf.callAppCalls[0].Input["folder"].(string); folder != "/campaigns/launch/" {
+		t.Fatalf("storage folder = %q, want /campaigns/launch/", folder)
+	}
+	meta := out.(map[string]any)["_meta"].(map[string]any)
+	if meta["storage_folder"] != "/campaigns/launch/" {
+		t.Fatalf("storage_folder meta = %#v", meta["storage_folder"])
+	}
+	var extraJSON string
+	if err := ctx.AppDB().QueryRow(`SELECT extra_json FROM generations LIMIT 1`).Scan(&extraJSON); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(extraJSON, "/campaigns/launch/") {
+		t.Fatalf("extra_json missing storage folder: %s", extraJSON)
+	}
+}
+
+func TestNormalizeStorageFolderRejectsParentTraversal(t *testing.T) {
+	if got, err := normalizeStorageFolder("campaigns/launch"); err != nil || got != "/campaigns/launch/" {
+		t.Fatalf("normalize = %q, %v", got, err)
+	}
+	if _, err := normalizeStorageFolder("/campaigns/../private"); err == nil {
+		t.Fatal("expected parent traversal to be rejected")
+	}
+}
+
 func TestToolMediaGenerate_Image_NoStorageBound(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(fakePNG())
@@ -1554,6 +1609,45 @@ func TestVideoPollWorker_Completes_SavesToStorageAndInsertsGenerations(t *testin
 	ctx.AppDB().QueryRow(`SELECT kind FROM generations WHERE id=?`, generationID).Scan(&kind)
 	if kind != "video" {
 		t.Errorf("generations.kind = %q, want video", kind)
+	}
+}
+
+func TestVideoPollWorker_UsesCustomStorageFolderFromRequestJSON(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	pf.identity.Bindings["video_provider"] = float64(77)
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"_binary":true,"base64":"VklERU8=","mimeType":"video/mp4","size":5}`),
+	}
+	pf.nextCallResult = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":7777}"}]}}`,
+	)
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	_, err := ctx.AppDB().Exec(
+		`INSERT INTO video_jobs (project_id, queue_id, provider, model, prompt, request_json, status)
+		 VALUES ('test-proj', 'q-folder', 'venice-ai', 'kling-2', 'custom folder clip', '{"storage_folder":"campaigns/video"}', 'queued')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.videoPollWorker(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.callAppCalls) == 0 || pf.callAppCalls[0].Tool != "files_upload" {
+		t.Fatalf("expected files_upload, got %+v", pf.callAppCalls)
+	}
+	if folder, _ := pf.callAppCalls[0].Input["folder"].(string); folder != "/campaigns/video/" {
+		t.Fatalf("storage folder = %q, want /campaigns/video/", folder)
+	}
+	var extraJSON string
+	if err := ctx.AppDB().QueryRow(`SELECT extra_json FROM generations LIMIT 1`).Scan(&extraJSON); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(extraJSON, "/campaigns/video/") {
+		t.Fatalf("extra_json missing custom folder: %s", extraJSON)
 	}
 }
 

@@ -2,10 +2,16 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
+	"path"
+	"strconv"
+	"strings"
 	"time"
+	"unicode"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -39,9 +45,10 @@ func mediaBytes(m generatedMedia) ([]byte, error) {
 // (cheaper, no double-buffering); for inline base64 we use files_upload
 // and pass the b64 string through unchanged.
 //
-// All media lands under /.generated/<storageDir>/ — the dotted-folder
-// convention so storage panels hide app-internal output by default.
-func saveToStorage(ctx *sdk.AppCtx, m generatedMedia, storageDir, providerSlug string, idx int) (int64, error) {
+// By default, media lands under /.generated/<storageDir>/ — the
+// dotted-folder convention so storage panels hide app-internal output by
+// default. Callers may override this with storage_folder.
+func saveToStorage(ctx *sdk.AppCtx, m generatedMedia, folder, providerSlug string, idx int) (int64, error) {
 	ext := m.Ext
 	if ext == "" {
 		ext = "bin"
@@ -50,7 +57,6 @@ func saveToStorage(ctx *sdk.AppCtx, m generatedMedia, storageDir, providerSlug s
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	folder := "/.generated/" + storageDir + "/"
 	name := fmt.Sprintf("media-%d-%d.%s", time.Now().Unix(), idx, ext)
 	tags := []string{"ai", "generated", providerSlug}
 
@@ -81,6 +87,47 @@ func saveToStorage(ctx *sdk.AppCtx, m generatedMedia, storageDir, providerSlug s
 		return got.ID, nil
 	}
 	return 0, errors.New("no media source")
+}
+
+func defaultStorageFolder(storageDir string) string {
+	return "/.generated/" + strings.Trim(strings.TrimSpace(storageDir), "/") + "/"
+}
+
+func storageFolderArg(args map[string]any, storageDir string) (string, error) {
+	raw := strings.TrimSpace(strArg(args, "storage_folder", ""))
+	if raw == "" {
+		return defaultStorageFolder(storageDir), nil
+	}
+	return normalizeStorageFolder(raw)
+}
+
+func normalizeStorageFolder(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", errors.New("storage_folder is empty")
+	}
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			return "", errors.New("storage_folder contains control characters")
+		}
+	}
+	parts := strings.Split(s, "/")
+	for _, part := range parts {
+		if part == ".." {
+			return "", errors.New("storage_folder must not contain ..")
+		}
+	}
+	if !strings.HasPrefix(s, "/") {
+		s = "/" + s
+	}
+	clean := path.Clean(s)
+	if clean == "." || clean == "/" {
+		return "/", nil
+	}
+	if !strings.HasPrefix(clean, "/") {
+		clean = "/" + clean
+	}
+	return clean + "/", nil
 }
 
 // pickExt maps a requested output_format to a file extension. PNG is
@@ -118,4 +165,68 @@ func storageArgs(ctx *sdk.AppCtx, args map[string]any) map[string]any {
 		cp["_project_id"] = pid
 	}
 	return cp
+}
+
+func writeJSON(w http.ResponseWriter, v any, err error) {
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func intQuery(r *http.Request, key string, def int) int {
+	if s := strings.TrimSpace(r.URL.Query().Get(key)); s != "" {
+		if n, err := strconv.Atoi(s); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func boolQuery(r *http.Request, key string, def bool) bool {
+	if s := strings.TrimSpace(r.URL.Query().Get(key)); s != "" {
+		return s == "1" || strings.EqualFold(s, "true") || strings.EqualFold(s, "yes")
+	}
+	return def
+}
+
+func filterStorageBrowserOutput(out map[string]any) {
+	if out == nil {
+		return
+	}
+	raw, ok := out["files"].([]any)
+	if !ok {
+		return
+	}
+	filtered := make([]any, 0, len(raw))
+	for _, item := range raw {
+		m, ok := item.(map[string]any)
+		if !ok || storageBrowserHidden(m) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	out["files"] = filtered
+	if _, ok := out["count"]; ok {
+		out["count"] = len(filtered)
+	}
+}
+
+func storageBrowserHidden(m map[string]any) bool {
+	folder := strings.TrimSpace(fmt.Sprint(m["folder"]))
+	name := strings.TrimSpace(fmt.Sprint(m["name"]))
+	return pathHasDotSegment(folder) || strings.HasPrefix(name, ".")
+}
+
+func pathHasDotSegment(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if strings.HasPrefix(seg, ".") {
+			return true
+		}
+	}
+	return false
 }

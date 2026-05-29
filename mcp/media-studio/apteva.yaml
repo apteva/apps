@@ -2,15 +2,15 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.7
+version: 0.10.8
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs powers audio TTS, sound effects, and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references. v0.10.7 normalizes Venice edit/multi-edit options so
-  provider-generic UI defaults like quality=auto and pixel sizes are not
-  sent as invalid Venice edit fields, while keeping capability-aware model
-  discovery and the provider-neutral source_images path.
+  references. v0.10.8 adds a provider-neutral storage_folder option for
+  MCP tools and the panel, including Storage-backed folder suggestions,
+  while keeping capability-aware model discovery, source_images edits, and
+  Venice edit/multi-edit option normalization.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media-studio

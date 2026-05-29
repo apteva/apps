@@ -199,6 +199,11 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if tool == "" {
 		return mcpError("bound " + h.Role + " (" + bound.AppSlug + ") doesn't support " + capability), nil
 	}
+	storageFolder, err := storageFolderArg(args, h.StorageDir)
+	if err != nil {
+		return mcpError("storage_folder: " + err.Error()), nil
+	}
+	args["_storage_folder"] = storageFolder
 
 	// Source images — resolve "storage:N" / URL / base64 into the
 	// bytes-or-URL values the per-provider builder will pass through.
@@ -297,7 +302,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		}
 
 		if storage != nil {
-			id, err := saveToStorage(ctx, item, h.StorageDir, bound.AppSlug, i)
+			id, err := saveToStorage(ctx, item, storageFolder, bound.AppSlug, i)
 			if err != nil {
 				ctx.Logger().Warn("storage save failed", "err", err)
 				continue
@@ -341,7 +346,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 
 	ctx.Emit("media.generated", map[string]any{
-		"kind": kind, "prompt": prompt, "model": model, "count": len(media),
+		"kind": kind, "prompt": prompt, "model": model, "count": len(media), "storage_folder": storageFolder,
 	})
 
 	return buildMCPResult(buildResultArgs{
@@ -358,6 +363,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		MimeType:      media[0].MimeType,
 		CostUSD:       costUSD,
 		GenerationID:  genID,
+		StorageFolder: storageFolder,
 	}), nil
 }
 
@@ -488,10 +494,13 @@ func strconvFormatInt(n int64) string {
 // blob. Best-effort; failure to encode just drops the metadata.
 func encodeExtras(kind string, args map[string]any) string {
 	extras := map[string]any{}
-	for _, k := range []string{"voice", "aspect", "duration", "n"} {
+	for _, k := range []string{"voice", "aspect", "duration", "n", "storage_folder"} {
 		if v, ok := args[k]; ok {
 			extras[k] = v
 		}
+	}
+	if v, ok := args["_storage_folder"]; ok {
+		extras["storage_folder"] = v
 	}
 	if opts, ok := args["options"].(map[string]any); ok && len(opts) > 0 {
 		extras["options"] = opts

@@ -16,6 +16,7 @@ type buildResultArgs struct {
 	MimeType      string
 	CostUSD       float64
 	GenerationID  int64
+	StorageFolder string
 }
 
 // buildMCPResult shapes the MCP content blocks per kind. Image kind
@@ -55,6 +56,9 @@ func buildMCPResult(a buildResultArgs) map[string]any {
 		summary += "\nSaved to storage:"
 		for i, id := range a.StorageIDs {
 			summary += fmt.Sprintf("\n  - id=%d url=%s", id, storageURLs[i])
+		}
+		if a.StorageFolder != "" {
+			summary += "\nFolder: " + a.StorageFolder
 		}
 	} else if len(a.UpstreamURLs) > 0 {
 		// Without storage, surface the upstream URLs so the caller can
@@ -96,6 +100,7 @@ func buildMCPResult(a buildResultArgs) map[string]any {
 		"upstream_urls":  a.UpstreamURLs,
 		"cost_usd":       a.CostUSD,
 		"generation_id":  a.GenerationID,
+		"storage_folder": a.StorageFolder,
 	}
 	return map[string]any{
 		"content": content,

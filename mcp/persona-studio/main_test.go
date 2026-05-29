@@ -85,6 +85,14 @@ func TestGenerationCacheKeyChangesWithItems(t *testing.T) {
 	}
 }
 
+func TestGenerationCacheKeyChangesWithStorageFolder(t *testing.T) {
+	a := generationCacheKey(1, "image", "prompt", map[string]any{"storage_folder": "/a/"}, []int64{1}, nil)
+	b := generationCacheKey(1, "image", "prompt", map[string]any{"storage_folder": "/b/"}, []int64{1}, nil)
+	if a == b {
+		t.Fatal("cache key must include storage_folder")
+	}
+}
+
 func TestDefaultImageSourceRefsUsesSourceImagesArrayForOneReference(t *testing.T) {
 	refs := []Reference{{ID: 1, StorageFileID: 42, Kind: "face", Active: true}}
 	got := defaultImageSourceRefs(refs, nil, map[string]any{"model": "firered-image-edit"})

@@ -129,6 +129,7 @@ func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug
 	prompt := strArg(args, "prompt", "")
 	sourceRef := strArg(args, "_source_image_ref", "")
 	cacheKey := strArg(args, "cache_key", "")
+	storageFolder := strArg(args, "_storage_folder", "")
 	requestJSON, _ := json.Marshal(args)
 
 	// Cost: video has a quote endpoint (Venice); avatar providers bill
@@ -177,14 +178,15 @@ func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug
 			{"type": "text", "text": summary},
 		},
 		"_meta": map[string]any{
-			"kind":      kind,
-			"status":    "queued",
-			"job_id":    jobID,
-			"queue_id":  queueID,
-			"model":     model,
-			"provider":  providerSlug,
-			"cost_usd":  costUSD,
-			"cache_key": cacheKey,
+			"kind":           kind,
+			"status":         "queued",
+			"job_id":         jobID,
+			"queue_id":       queueID,
+			"model":          model,
+			"provider":       providerSlug,
+			"cost_usd":       costUSD,
+			"cache_key":      cacheKey,
+			"storage_folder": storageFolder,
 		},
 	}
 }

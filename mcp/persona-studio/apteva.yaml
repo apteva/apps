@@ -2,18 +2,19 @@ schema: apteva-app/v1
 
 name: persona-studio
 display_name: Persona Studio
-version: 0.1.11
+version: 0.1.12
 description: |
   Virtual influencer and reusable persona workspace. Persona Studio owns
   consistent identities, reference sets, reusable items/products, style
   profiles, campaigns, generated assets, and Composer handoffs while Media
   Studio remains the provider-neutral generator.
 
-  v0.1.11 sends all linked persona/item image references through Media
+  v0.1.12 sends all linked persona/item image references through Media
   Studio's source_images path by default, asks Media Studio for
   provider-specific image.edit model lists when references exist, requires
-  Media Studio v0.10.7+ for normalized multi-reference edit payloads, and
-  previews ready generated Storage outputs directly in Recent Assets.
+  Media Studio v0.10.8+ for output folder support, previews ready
+  generated Storage outputs directly in Recent Assets, and exposes
+  Storage-backed output folder selection during generation.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/persona-studio
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/persona-studio/icon.svg
@@ -31,7 +32,7 @@ requires:
       version: ">=0.10.0"
       reason: Store persona references, item packshots, generated assets, and final exports.
     - name: media-studio
-      version: ">=0.10.7"
+      version: ">=0.10.8"
       reason: Generate images, videos, audio, music, and avatar clips through bound providers.
     - name: composer
       version: ">=0.3.0"

@@ -43,6 +43,7 @@ export default function PersonaPanel({ projectId }) {
     duration: "",
     quality: "auto",
     output_format: "png",
+    storage_folder: "",
   });
   const [mediaModels, setMediaModels] = useState([]);
   const [mediaProvider, setMediaProvider] = useState("");
@@ -52,6 +53,7 @@ export default function PersonaPanel({ projectId }) {
   const [storageError, setStorageError] = useState("");
   const [storageQuery, setStorageQuery] = useState("");
   const [pickerTarget, setPickerTarget] = useState(null);
+  const [outputFolderSuggestions, setOutputFolderSuggestions] = useState([]);
 
   const qs = useMemo(() => `project_id=${encodeURIComponent(projectId || "")}`, [projectId]);
   const persona = bundle?.persona;
@@ -102,6 +104,26 @@ export default function PersonaPanel({ projectId }) {
   useEffect(() => {
     loadBundle().catch((e) => setStatus(e.message));
   }, [loadBundle]);
+  useEffect(() => {
+    if (!projectId) return;
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ project_id: projectId, folder: "/", recursive: "true", limit: "240" });
+        if (generation.storage_folder.trim()) params.set("q", generation.storage_folder.trim());
+        const res = await fetch(`${API}/storage-files?${params.toString()}`, { credentials: "same-origin" });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setOutputFolderSuggestions(storageFoldersFromFiles(data.files || []));
+      } catch {
+        if (!cancelled) setOutputFolderSuggestions([]);
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [projectId, generation.storage_folder]);
   useEffect(() => {
     if (!projectId || !generation.asset_type) return;
     let cancelled = false;
@@ -203,6 +225,9 @@ export default function PersonaPanel({ projectId }) {
       : modelSupportsImageEdit({ id: generation.model }, mediaProvider);
     if (generation.model && (!requiresImageEditModel || selectedModelSupportsEdit)) {
       settings.model = generation.model;
+    }
+    if (generation.storage_folder.trim()) {
+      settings.storage_folder = generation.storage_folder.trim();
     }
     if (generation.asset_type === "image") {
       if (generation.size) settings.size = generation.size;
@@ -481,6 +506,20 @@ export default function PersonaPanel({ projectId }) {
                             : h("input", { value: generation.duration, onChange: (e) => setGeneration({ ...generation, duration: e.target.value }), placeholder: "Duration seconds", className: fieldClass() })
                         )
                       : null,
+                h("div", { className: "grid gap-1" },
+                  h("label", { className: "text-xs text-text-muted" }, "Output folder"),
+                  h("input", {
+                    value: generation.storage_folder,
+                    onChange: (e) => setGeneration({ ...generation, storage_folder: e.target.value }),
+                    placeholder: personaOutputFolderDefault(persona, generation.asset_type),
+                    list: "persona-output-folder-suggestions",
+                    className: fieldClass(),
+                    title: "Storage folder for generated output. Leave empty for Media Studio default.",
+                  }),
+                  h("datalist", { id: "persona-output-folder-suggestions" },
+                    outputFolderSuggestions.map((folder) => h("option", { key: folder, value: folder }))
+                  )
+                ),
                 h("textarea", { value: generation.prompt, onChange: (e) => setGeneration({ ...generation, prompt: e.target.value }), placeholder: "Prompt for this persona...", className: `${fieldClass()} min-h-[86px]` }),
                 h("button", { className: buttonClass(), disabled: !generation.prompt.trim() }, "Generate")
               )),
@@ -822,4 +861,45 @@ function fileSize(bytes) {
   if (!bytes || bytes <= 0) return "";
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function personaOutputFolderDefault(persona, kind) {
+  const slug = slugify(persona?.name || persona?.handle || "persona");
+  const dir = kind === "image"
+    ? "images"
+    : kind === "video"
+      ? "videos"
+      : kind === "avatar"
+        ? "avatars"
+        : kind === "music"
+          ? "music"
+          : "audio";
+  return `/personas/${slug}/${dir}/`;
+}
+
+function slugify(value) {
+  return String(value || "persona")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "persona";
+}
+
+function storageFoldersFromFiles(files) {
+  const set = new Set();
+  for (const file of files || []) {
+    const folder = normalizeFolderInput(file.folder || "");
+    if (folder && !folderHasDotSegment(folder)) set.add(folder);
+  }
+  return Array.from(set).sort().slice(0, 40);
+}
+
+function normalizeFolderInput(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  const prefixed = s.startsWith("/") ? s : `/${s}`;
+  return prefixed.endsWith("/") ? prefixed : `${prefixed}/`;
+}
+
+function folderHasDotSegment(folder) {
+  return folder.split("/").some((part) => part.startsWith("."));
 }

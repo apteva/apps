@@ -42,13 +42,14 @@ type pendingJob struct {
 	Prompt         string
 	SourceImageRef string
 	CacheKey       string
+	RequestJSON    string
 	Attempts       int
 }
 
 func (a *App) videoPollWorker(ctx context.Context, app *sdk.AppCtx) error {
 	rows, err := app.AppDB().Query(
 		`SELECT id, kind, role, project_id, queue_id, provider, model, prompt,
-		        source_image_ref, cache_key, attempts
+		        source_image_ref, cache_key, request_json, attempts
 		 FROM video_jobs
 		 WHERE status IN ('queued', 'polling')
 		 ORDER BY id ASC`,
@@ -60,7 +61,7 @@ func (a *App) videoPollWorker(ctx context.Context, app *sdk.AppCtx) error {
 	for rows.Next() {
 		var p pendingJob
 		if err := rows.Scan(&p.ID, &p.Kind, &p.Role, &p.ProjectID, &p.QueueID,
-			&p.Provider, &p.Model, &p.Prompt, &p.SourceImageRef, &p.CacheKey, &p.Attempts); err != nil {
+			&p.Provider, &p.Model, &p.Prompt, &p.SourceImageRef, &p.CacheKey, &p.RequestJSON, &p.Attempts); err != nil {
 			continue
 		}
 		jobs = append(jobs, p)
@@ -299,11 +300,20 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 		storageDir = "avatars"
 		capability = "avatar.generate"
 	}
+	storageFolder := defaultStorageFolder(storageDir)
+	if p.RequestJSON != "" {
+		var req map[string]any
+		if json.Unmarshal([]byte(p.RequestJSON), &req) == nil {
+			if folder, err := storageFolderArg(req, storageDir); err == nil {
+				storageFolder = folder
+			}
+		}
+	}
 
 	storage := app.IntegrationFor("storage")
 	var storageIDs []int64
 	if storage != nil {
-		id, err := saveToStorage(scopedApp, media, storageDir, p.Provider, 0)
+		id, err := saveToStorage(scopedApp, media, storageFolder, p.Provider, 0)
 		if err != nil {
 			app.Logger().Warn("save-to-storage failed", "job_id", p.ID, "err", err)
 		} else if id != 0 {
@@ -312,6 +322,7 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 	}
 
 	extras := map[string]any{"queue_id": p.QueueID, "capability": capability}
+	extras["storage_folder"] = storageFolder
 	if p.CacheKey != "" {
 		extras["cache_key"] = p.CacheKey
 	}
@@ -349,10 +360,11 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 	videoJobMarkComplete(app, p.ID, storageID, generationID)
 
 	app.EmitWithProject("media.generated", p.ProjectID, map[string]any{
-		"kind":     p.Kind,
-		"job_id":   p.ID,
-		"queue_id": p.QueueID,
-		"model":    p.Model,
-		"prompt":   p.Prompt,
+		"kind":           p.Kind,
+		"job_id":         p.ID,
+		"queue_id":       p.QueueID,
+		"model":          p.Model,
+		"prompt":         p.Prompt,
+		"storage_folder": storageFolder,
 	})
 }
