@@ -1,0 +1,103 @@
+schema: apteva-app/v1
+
+name: containers
+display_name: Containers
+version: 0.1.0
+description: |
+  Generic Docker workload runtime for Apteva. Runs container images on
+  the local host, manages isolated networks, Docker volumes, ports,
+  health checks, logs, and lifecycle actions. Remote hosts, routes,
+  backups, and multi-container blueprints build on the same surface.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/containers
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/containers/icon.png
+tags: [containers, docker, runtime, workloads, infrastructure]
+
+scopes: [global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.apps.call
+  integrations:
+    - role: hosts
+      kind: app
+      required: false
+      compatible_app_names: [instances]
+      label: Instances app
+      hint: Install Instances to run containers on remote VPS hosts. Without it, Containers manages only the local Docker host.
+    - role: routes
+      kind: app
+      required: false
+      compatible_app_names: [routes]
+      label: Routes app
+      hint: Install Routes to publish container workloads at hostnames.
+    - role: domains
+      kind: app
+      required: false
+      compatible_app_names: [domains]
+      label: Domains app
+      hint: Install Domains to write DNS records when exposing workloads.
+    - role: certs
+      kind: app
+      required: false
+      compatible_app_names: [certs]
+      label: Certs app
+      hint: Install Certs to issue TLS certificates for workload hostnames.
+    - role: backup
+      kind: app
+      required: false
+      compatible_app_names: [backup]
+      label: Backup app
+      hint: Install Backup to schedule and retain container volume snapshots.
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: containers_run
+      description: "Run a Docker image as a managed workload on the local Docker host. Args: name, image, ports?, env?, volumes?, health_path?, resources?, restart_policy?."
+    - name: containers_create
+      description: Alias of containers_run.
+    - name: containers_get
+      description: "Fetch one managed workload. Args: workload_id."
+    - name: containers_list
+      description: "List managed workloads. Args: status? optional."
+    - name: containers_start
+      description: "Start a stopped workload container. Args: workload_id."
+    - name: containers_stop
+      description: "Stop a running workload container. Args: workload_id."
+    - name: containers_restart
+      description: "Restart a workload container. Args: workload_id."
+    - name: containers_destroy
+      description: "Stop and remove a workload container and network. Volumes are preserved unless delete_volumes=true. Args: workload_id, delete_volumes?."
+    - name: containers_logs
+      description: "Tail workload logs. Args: workload_id, tail?."
+    - name: containers_health
+      description: "Probe a workload health URL and update health_status. Args: workload_id."
+    - name: containers_blueprints_list
+      description: List built-in and custom container blueprints.
+  ui_panels:
+    - slot: project.page
+      label: Containers
+      icon: boxes
+      entry: /ui/ContainersPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/containers
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/containers.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
