@@ -429,6 +429,7 @@ func (a *App) handleStorageFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	var out map[string]any
 	err := ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", tool, args, &out)
+	filterStorageBrowserOutput(out)
 	writeOrErr(w, out, err)
 }
 
@@ -1321,6 +1322,48 @@ func listAssetsWhere(db *sql.DB, where string, vals ...any) ([]Asset, error) {
 		}
 	}
 	return out, rows.Err()
+}
+
+func filterStorageBrowserOutput(out map[string]any) {
+	if out == nil {
+		return
+	}
+	files, ok := out["files"].([]any)
+	if !ok {
+		return
+	}
+	filtered := make([]any, 0, len(files))
+	for _, file := range files {
+		if storageBrowserFileHidden(file) {
+			continue
+		}
+		filtered = append(filtered, file)
+	}
+	out["files"] = filtered
+	out["count"] = len(filtered)
+}
+
+func storageBrowserFileHidden(file any) bool {
+	m, ok := file.(map[string]any)
+	if !ok {
+		return false
+	}
+	folder := cleanString(m["folder"])
+	name := cleanString(m["name"])
+	return pathHasDotSegment(folder) || strings.HasPrefix(name, ".")
+}
+
+func pathHasDotSegment(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	for _, part := range strings.Split(path, "/") {
+		if strings.HasPrefix(part, ".") {
+			return true
+		}
+	}
+	return false
 }
 
 func cachedAsset(db *sql.DB, pid, cacheKey string) (*Asset, bool) {

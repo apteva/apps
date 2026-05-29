@@ -85,6 +85,26 @@ func TestGenerationCacheKeyChangesWithItems(t *testing.T) {
 	}
 }
 
+func TestFilterStorageBrowserOutputHidesDotFolders(t *testing.T) {
+	out := map[string]any{
+		"files": []any{
+			map[string]any{"id": float64(1), "folder": "/", "name": "face.png"},
+			map[string]any{"id": float64(2), "folder": "/.generated/images/", "name": "render.png"},
+			map[string]any{"id": float64(3), "folder": "/campaign/.composer/", "name": "clip.mp4"},
+			map[string]any{"id": float64(4), "folder": "/refs/", "name": ".placeholder"},
+		},
+		"count": 4,
+	}
+	filterStorageBrowserOutput(out)
+	files := out["files"].([]any)
+	if len(files) != 1 {
+		t.Fatalf("expected only user-facing file, got %#v", files)
+	}
+	if out["count"] != 1 {
+		t.Fatalf("expected count to be updated, got %#v", out["count"])
+	}
+}
+
 func mustPersona(t *testing.T, app *App, ctx *sdk.AppCtx) *Persona {
 	t.Helper()
 	out, err := app.toolPersonaCreate(ctx, map[string]any{
