@@ -23,7 +23,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: calls
 display_name: Calls
-version: 0.1.4
+version: 0.1.5
 description: Standalone realtime audio/video calls with unified participants.
 author: Apteva
 scopes: [project, global]

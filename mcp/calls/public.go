@@ -26,6 +26,7 @@ func (a *App) handleJoinPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	titleJSON, _ := json.Marshal(room.Title)
+	roomIDJSON, _ := json.Marshal(room.ID)
 	tokenJSON, _ := json.Marshal(token)
 	nameJSON, _ := json.Marshal(jt.DisplayName)
 	roleJSON, _ := json.Marshal(jt.Role)
@@ -35,6 +36,7 @@ func (a *App) handleJoinPage(w http.ResponseWriter, r *http.Request) {
 		"__TITLE__", html.EscapeString(room.Title),
 		"__ROOM_STATUS__", html.EscapeString(room.Status),
 		"__DISPLAY_NAME__", html.EscapeString(jt.DisplayName),
+		"__ROOM_ID_JSON__", string(roomIDJSON),
 		"__TOKEN_JSON__", string(tokenJSON),
 		"__TITLE_JSON__", string(titleJSON),
 		"__NAME_JSON__", string(nameJSON),
@@ -130,7 +132,7 @@ const joinPageHTML = `<!doctype html>
     .video-grid {
       padding: 18px;
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: minmax(0, 1fr);
       gap: 14px;
     }
     .tile {
@@ -145,7 +147,15 @@ const joinPageHTML = `<!doctype html>
       position: relative;
       overflow: hidden;
     }
-    .tile.primary { grid-column: span 2; min-height: 300px; }
+    .tile.primary { min-height: 520px; }
+    .tile video {
+      display: none;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .tile.video-on video { display: block; }
+    .tile.video-on .avatar { display: none; }
     .avatar {
       width: 88px;
       height: 88px;
@@ -186,6 +196,8 @@ const joinPageHTML = `<!doctype html>
       background: var(--panel-2);
       font-size: 15px;
     }
+    .round.active { border-color: rgba(122,215,196,.65); background: rgba(122,215,196,.16); }
+    .round:disabled { opacity: .45; }
     .round.end { background: var(--danger); border-color: transparent; color: white; }
     .side {
       border: 1px solid var(--line);
@@ -193,6 +205,8 @@ const joinPageHTML = `<!doctype html>
       background: rgba(23,27,36,.88);
       box-shadow: 0 24px 70px rgba(0,0,0,.24);
       overflow: hidden;
+      display: grid;
+      grid-template-rows: auto auto auto auto minmax(180px, 1fr);
     }
     .side-head { padding: 18px; border-bottom: 1px solid var(--line); }
     h1 { margin: 0; font-size: 24px; line-height: 1.2; letter-spacing: 0; }
@@ -249,12 +263,41 @@ const joinPageHTML = `<!doctype html>
     }
     .row { display: flex; justify-content: space-between; gap: 16px; }
     .row strong { color: var(--text); font-weight: 600; }
+    .chat {
+      display: none;
+      border-top: 1px solid var(--line);
+      min-height: 0;
+      grid-template-rows: 1fr auto;
+    }
+    .chat.open { display: grid; }
+    .messages {
+      min-height: 0;
+      overflow-y: auto;
+      padding: 14px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .message {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 9px 10px;
+      background: rgba(255,255,255,.04);
+    }
+    .message .by { color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+    .message .body { color: var(--text); font-size: 13px; line-height: 1.4; white-space: pre-wrap; }
+    .chat-form {
+      padding: 12px 18px 18px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+    }
+    .chat-form input { min-width: 0; }
     @media (max-width: 860px) {
       header { padding: 0 18px; }
       main { grid-template-columns: 1fr; padding: 18px; }
       .stage { min-height: 420px; }
-      .video-grid { grid-template-columns: 1fr; }
-      .tile.primary { grid-column: span 1; }
+      .tile.primary { min-height: 340px; }
     }
   </style>
 </head>
@@ -267,24 +310,17 @@ const joinPageHTML = `<!doctype html>
     <main>
       <section class="stage" aria-label="Call room">
         <div class="video-grid">
-          <div class="tile primary">
+          <div class="tile primary" id="local-tile">
+            <video id="local-video" autoplay playsinline muted></video>
             <div class="avatar" id="avatar">?</div>
             <div class="tile-label" id="tile-label">Preview</div>
           </div>
-          <div class="tile">
-            <div class="avatar">+</div>
-            <div class="tile-label">Waiting</div>
-          </div>
-          <div class="tile">
-            <div class="avatar">A</div>
-            <div class="tile-label">Agent ready</div>
-          </div>
         </div>
         <div class="controls">
-          <button class="round" type="button" title="Microphone">Mic</button>
-          <button class="round" type="button" title="Camera">Cam</button>
-          <button class="round" type="button" title="Screen">Share</button>
-          <button class="round end" type="button" title="Leave">End</button>
+          <button class="round" id="mic-button" type="button" title="Microphone">Mic</button>
+          <button class="round" id="cam-button" type="button" title="Camera">Cam</button>
+          <button class="round" id="share-button" type="button" title="Screen">Share</button>
+          <button class="round end" id="leave-button" type="button" title="Leave">End</button>
         </div>
       </section>
       <aside class="side">
@@ -305,10 +341,18 @@ const joinPageHTML = `<!doctype html>
           <div class="row"><span>Kind</span><strong id="kind"></strong></div>
           <div class="row"><span>Role</span><strong id="role"></strong></div>
         </div>
+        <section class="chat" id="chat">
+          <div class="messages" id="messages"></div>
+          <form class="chat-form" id="chat-form">
+            <input id="message-input" autocomplete="off" placeholder="Message the room">
+            <button class="join" id="send-button" type="submit">Send</button>
+          </form>
+        </section>
       </aside>
     </main>
   </div>
   <script>
+    const ROOM_ID = __ROOM_ID_JSON__;
     const TOKEN = __TOKEN_JSON__;
     const ROOM_TITLE = __TITLE_JSON__;
     const DEFAULT_NAME = __NAME_JSON__;
@@ -317,11 +361,26 @@ const joinPageHTML = `<!doctype html>
     const base = location.pathname.split("/join/")[0];
     const routeQuery = location.search || "";
     const nameInput = document.getElementById("display-name");
+    const localTile = document.getElementById("local-tile");
+    const localVideo = document.getElementById("local-video");
     const avatar = document.getElementById("avatar");
     const tileLabel = document.getElementById("tile-label");
     const joined = document.getElementById("joined");
     const error = document.getElementById("error");
     const button = document.getElementById("join-button");
+    const micButton = document.getElementById("mic-button");
+    const camButton = document.getElementById("cam-button");
+    const shareButton = document.getElementById("share-button");
+    const leaveButton = document.getElementById("leave-button");
+    const chat = document.getElementById("chat");
+    const messages = document.getElementById("messages");
+    const chatForm = document.getElementById("chat-form");
+    const messageInput = document.getElementById("message-input");
+    let localStream = null;
+    let screenStream = null;
+    let participant = null;
+    let lastMessageId = 0;
+    let messageTimer = null;
     document.getElementById("kind").textContent = KIND;
     document.getElementById("role").textContent = ROLE;
     function syncName() {
@@ -329,7 +388,139 @@ const joinPageHTML = `<!doctype html>
       avatar.textContent = name.slice(0, 1).toUpperCase();
       tileLabel.textContent = name;
     }
+    function showError(message) {
+      error.textContent = message;
+      error.style.display = "block";
+    }
+    function setButtonState(el, active, onLabel, offLabel) {
+      el.classList.toggle("active", active);
+      el.textContent = active ? onLabel : offLabel;
+    }
+    async function ensureLocalStream(wantsAudio, wantsVideo) {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("Browser media devices are not available on this page.");
+      }
+      const hasAudio = localStream?.getAudioTracks().length > 0;
+      const hasVideo = localStream?.getVideoTracks().length > 0;
+      if (!localStream || (wantsAudio && !hasAudio) || (wantsVideo && !hasVideo)) {
+        localStream?.getTracks().forEach((track) => track.stop());
+        localStream = await navigator.mediaDevices.getUserMedia({
+          audio: wantsAudio || hasAudio,
+          video: wantsVideo || hasVideo
+        });
+        localVideo.srcObject = localStream;
+      }
+      localTile.classList.toggle("video-on", localStream.getVideoTracks().some((track) => track.enabled));
+      return localStream;
+    }
+    async function toggleMic() {
+      error.style.display = "none";
+      try {
+        const stream = await ensureLocalStream(true, false);
+        const track = stream.getAudioTracks()[0];
+        track.enabled = !micButton.classList.contains("active");
+        setButtonState(micButton, track.enabled, "Mic on", "Mic off");
+      } catch (e) {
+        showError(e.message);
+      }
+    }
+    async function toggleCamera() {
+      error.style.display = "none";
+      try {
+        const stream = await ensureLocalStream(false, true);
+        const track = stream.getVideoTracks()[0];
+        track.enabled = !camButton.classList.contains("active");
+        localTile.classList.toggle("video-on", track.enabled);
+        setButtonState(camButton, track.enabled, "Cam on", "Cam off");
+      } catch (e) {
+        showError(e.message);
+      }
+    }
+    async function toggleShare() {
+      error.style.display = "none";
+      try {
+        if (screenStream) {
+          screenStream.getTracks().forEach((track) => track.stop());
+          screenStream = null;
+          localVideo.srcObject = localStream;
+          localTile.classList.toggle("video-on", localStream?.getVideoTracks().some((track) => track.enabled));
+          setButtonState(shareButton, false, "Sharing", "Share");
+          return;
+        }
+        if (!navigator.mediaDevices?.getDisplayMedia) {
+          throw new Error("Screen sharing is not available in this browser.");
+        }
+        screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        screenStream.getVideoTracks()[0].addEventListener("ended", () => {
+          screenStream = null;
+          localVideo.srcObject = localStream;
+          setButtonState(shareButton, false, "Sharing", "Share");
+        });
+        localVideo.srcObject = screenStream;
+        localTile.classList.add("video-on");
+        setButtonState(shareButton, true, "Sharing", "Share");
+      } catch (e) {
+        showError(e.message);
+      }
+    }
+    function stopMedia() {
+      localStream?.getTracks().forEach((track) => track.stop());
+      screenStream?.getTracks().forEach((track) => track.stop());
+      localStream = null;
+      screenStream = null;
+      localVideo.srcObject = null;
+      localTile.classList.remove("video-on");
+      setButtonState(micButton, false, "Mic on", "Mic");
+      setButtonState(camButton, false, "Cam on", "Cam");
+      setButtonState(shareButton, false, "Sharing", "Share");
+    }
+    function renderMessage(item) {
+      if (!item || item.id <= lastMessageId) return;
+      lastMessageId = item.id;
+      const wrap = document.createElement("div");
+      wrap.className = "message";
+      const by = document.createElement("div");
+      by.className = "by";
+      by.textContent = item.participant_id === participant?.id ? "You" : "Participant " + (item.participant_id || "-");
+      const body = document.createElement("div");
+      body.className = "body";
+      body.textContent = item.body || "";
+      wrap.append(by, body);
+      messages.append(wrap);
+      messages.scrollTop = messages.scrollHeight;
+    }
+    async function loadMessages() {
+      if (!participant) return;
+      const sep = routeQuery ? routeQuery + "&" : "?";
+      const res = await fetch(base + "/api/rooms/" + ROOM_ID + "/messages" + sep + "since_id=" + lastMessageId, {
+        credentials: "same-origin"
+      });
+      if (!res.ok) return;
+      const data = await res.json().catch(() => ({}));
+      (data.messages || []).forEach(renderMessage);
+    }
+    async function leaveRoom() {
+      if (messageTimer) clearInterval(messageTimer);
+      if (participant) {
+        await fetch(base + "/api/rooms/" + ROOM_ID + "/leave" + routeQuery, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ participant_id: participant.id })
+        }).catch(() => {});
+      }
+      participant = null;
+      stopMedia();
+      chat.classList.remove("open");
+      joined.style.display = "none";
+      button.disabled = false;
+      button.textContent = "Join room";
+    }
     nameInput.addEventListener("input", syncName);
+    micButton.addEventListener("click", toggleMic);
+    camButton.addEventListener("click", toggleCamera);
+    shareButton.addEventListener("click", toggleShare);
+    leaveButton.addEventListener("click", leaveRoom);
     syncName();
     document.getElementById("join-form").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -347,15 +538,38 @@ const joinPageHTML = `<!doctype html>
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || "Join failed");
         const p = data.participant || {};
+        participant = p;
         joined.textContent = "Joined " + ROOM_TITLE + " as " + (p.display_name || nameInput.value || "Guest") + ".";
         joined.style.display = "block";
         button.textContent = "Joined";
+        chat.classList.add("open");
+        await loadMessages();
+        messageTimer = setInterval(loadMessages, 2500);
       } catch (e) {
-        error.textContent = e.message;
-        error.style.display = "block";
+        showError(e.message);
         button.disabled = false;
         button.textContent = "Join room";
       }
+    });
+    chatForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!participant) return showError("Join the room before sending messages.");
+      const body = messageInput.value.trim();
+      if (!body) return;
+      messageInput.value = "";
+      const res = await fetch(base + "/api/rooms/" + ROOM_ID + "/messages" + routeQuery, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ participant_id: participant.id, body })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showError(data.error || "Message failed");
+        messageInput.value = body;
+        return;
+      }
+      renderMessage(data.message);
     });
   </script>
 </body>
