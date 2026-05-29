@@ -198,6 +198,17 @@ export default function PersonaPanel({ projectId }) {
     }
   }
 
+  async function removeReference(id) {
+    if (!id) return;
+    try {
+      await requestJSON(`${API}/references?${qs}&id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      setStatus("Reference removed");
+      loadBundle();
+    } catch (e) {
+      setStatus(e.message);
+    }
+  }
+
   async function addItem(e) {
     e.preventDefault();
     if (!selectedId || !item.name.trim()) return;
@@ -210,6 +221,41 @@ export default function PersonaPanel({ projectId }) {
         storage_file_ids: parseIDs(item.storage_file_ids),
       });
       setItem({ name: "", kind: "product", storage_file_ids: "", visual_rules: "" });
+      loadBundle();
+    } catch (e) {
+      setStatus(e.message);
+    }
+  }
+
+  async function updateItemFiles(itemRow, ids) {
+    if (!itemRow?.id) return;
+    try {
+      await requestJSON(`${API}/items/${itemRow.id}?${qs}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ storage_file_ids: ids }),
+      });
+      loadBundle();
+    } catch (e) {
+      setStatus(e.message);
+    }
+  }
+
+  async function removeItemFile(itemRow, fileID) {
+    const next = (itemRow.storage_file_ids || []).filter((id) => Number(id) !== Number(fileID));
+    await updateItemFiles(itemRow, next);
+  }
+
+  async function removeItem(itemRow) {
+    if (!itemRow?.id) return;
+    try {
+      await requestJSON(`${API}/items/${itemRow.id}?${qs}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ active: false }),
+      });
+      setGeneration((g) => ({ ...g, item_ids: g.item_ids.filter((id) => id !== itemRow.id) }));
+      setStatus("Item removed");
       loadBundle();
     } catch (e) {
       setStatus(e.message);
@@ -390,12 +436,19 @@ export default function PersonaPanel({ projectId }) {
                   )
                 ),
                 refs.length === 0 ? empty("No references yet.") : h("div", { className: "grid gap-2" },
-                  refs.map((r) => h(StoragePreviewCard, {
-                    key: r.id,
-                    id: r.storage_file_id,
-                    title: r.label || `${r.kind} reference`,
-                    meta: `${r.kind} · storage:${r.storage_file_id}`,
-                  }))
+                  refs.map((r) => h("div", { key: r.id, className: "grid grid-cols-[1fr_auto] gap-2 items-center" },
+                    h(StoragePreviewCard, {
+                      id: r.storage_file_id,
+                      title: r.label || `${r.kind} reference`,
+                      meta: `${r.kind} · storage:${r.storage_file_id}`,
+                    }),
+                    h("button", {
+                      type: "button",
+                      onClick: () => removeReference(r.id),
+                      className: dangerButtonClass(),
+                      title: "Unlink this reference from the persona",
+                    }, "Remove")
+                  ))
                 )
               )),
               panel("Items", h("div", null,
@@ -418,7 +471,7 @@ export default function PersonaPanel({ projectId }) {
                   h("button", { className: buttonClass() }, "Add item")
                 ),
                 items.length === 0 ? empty("No items yet.") : items.map((it) =>
-                  h("label", { key: it.id, className: "flex items-start gap-2 border border-border rounded p-2 mb-2" },
+                  h("div", { key: it.id, className: "flex items-start gap-2 border border-border rounded p-2 mb-2" },
                     h("input", {
                       type: "checkbox",
                       checked: generation.item_ids.includes(it.id),
@@ -429,9 +482,15 @@ export default function PersonaPanel({ projectId }) {
                       h("span", { className: "block text-sm font-medium truncate" }, it.name),
                       h("span", { className: "block text-xs text-text-dim truncate" }, `${it.kind}${it.storage_file_ids?.length ? " · storage " + it.storage_file_ids.join(", ") : ""}`),
                       it.storage_file_ids?.length ? h("span", { className: "block mt-2" },
-                        h(StoragePreviewStrip, { ids: it.storage_file_ids, titlePrefix: it.name })
+                        h(StoragePreviewStrip, { ids: it.storage_file_ids, titlePrefix: it.name, onRemove: (id) => removeItemFile(it, id) })
                       ) : null
-                    )
+                    ),
+                    h("button", {
+                      type: "button",
+                      onClick: () => removeItem(it),
+                      className: `${dangerButtonClass()} ml-auto`,
+                      title: "Remove this item from the persona",
+                    }, "Remove")
                   )
                 )
               ))
@@ -556,11 +615,17 @@ export default function PersonaPanel({ projectId }) {
 }
 
 async function post(url, body) {
-  const res = await fetch(url, {
+  return requestJSON(url, {
     method: "POST",
-    credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+  });
+}
+
+async function requestJSON(url, init = {}) {
+  const res = await fetch(url, {
+    credentials: "same-origin",
+    ...init,
   });
   const text = await res.text();
   const data = text ? JSON.parse(text) : {};
@@ -632,6 +697,10 @@ function buttonClass() {
 
 function secondaryButtonClass() {
   return "border border-border rounded px-2 py-1.5 text-sm text-text-muted hover:text-text hover:bg-bg-input";
+}
+
+function dangerButtonClass() {
+  return "border border-border rounded px-2 py-1.5 text-xs text-text-muted hover:text-text hover:bg-bg-input";
 }
 
 function ModelSelect({ models, provider, loading, editRequired, value, onChange }) {
@@ -709,20 +778,27 @@ function StoragePreviewCard({ id, title, meta }) {
   );
 }
 
-function StoragePreviewStrip({ ids, titlePrefix }) {
+function StoragePreviewStrip({ ids, titlePrefix, onRemove }) {
   const clean = (ids || []).filter((id) => id && Number.isFinite(Number(id)));
   if (clean.length === 0) return null;
   return h("span", { className: "flex flex-wrap gap-2" },
-    clean.map((id) => h("a", {
-      key: id,
-      href: `/api/apps/storage/files/${id}/content`,
-      target: "_blank",
-      rel: "noopener",
-      title: `${titlePrefix || "Storage file"} · storage:${id}`,
-      className: "inline-flex items-center gap-2 border border-border rounded p-1.5 hover:bg-bg-input max-w-[160px]",
-    },
-      h(StorageThumb, { id, size: 38 }),
-      h("span", { className: "text-[11px] text-text-dim truncate min-w-0" }, `storage:${id}`)
+    clean.map((id) => h("span", { key: id, className: "inline-flex items-center gap-1 border border-border rounded p-1.5 max-w-[190px]" },
+      h("a", {
+        href: `/api/apps/storage/files/${id}/content`,
+        target: "_blank",
+        rel: "noopener",
+        title: `${titlePrefix || "Storage file"} · storage:${id}`,
+        className: "inline-flex items-center gap-2 hover:bg-bg-input min-w-0",
+      },
+        h(StorageThumb, { id, size: 38 }),
+        h("span", { className: "text-[11px] text-text-dim truncate min-w-0" }, `storage:${id}`)
+      ),
+      onRemove && h("button", {
+        type: "button",
+        onClick: () => onRemove(id),
+        className: "text-text-dim hover:text-text px-1",
+        title: `Unlink storage:${id}`,
+      }, "x")
     ))
   );
 }

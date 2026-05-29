@@ -101,6 +101,31 @@ func TestDefaultImageSourceRefsUsesSourceImagesArrayForOneReference(t *testing.T
 	}
 }
 
+func TestReferenceRemoveUnlinksActiveReference(t *testing.T) {
+	ctx := newPersonaCtx(t)
+	app := &App{}
+	p := mustPersona(t, app, ctx)
+	out, err := app.toolReferenceAdd(ctx, map[string]any{
+		"persona_id":      p.ID,
+		"storage_file_id": 42,
+		"kind":            "face",
+	})
+	if err != nil {
+		t.Fatalf("add reference: %v", err)
+	}
+	ref := out.(map[string]any)["reference"].(*Reference)
+	if _, err := app.toolReferenceRemove(ctx, map[string]any{"id": ref.ID}); err != nil {
+		t.Fatalf("remove reference: %v", err)
+	}
+	refs, err := listReferences(ctx.AppDB(), "test-proj", p.ID, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 0 {
+		t.Fatalf("expected active references to be empty, got %#v", refs)
+	}
+}
+
 func TestDefaultImageSourceRefsIncludesItemsAndHonorsLimit(t *testing.T) {
 	refs := []Reference{
 		{ID: 1, StorageFileID: 10, Kind: "face", Active: true},

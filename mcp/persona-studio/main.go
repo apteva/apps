@@ -79,6 +79,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "persona_style_profile_upsert", Description: "Create or update a style profile. Args: persona_id, id?, name, asset_type, prompt_prefix?, prompt_suffix?, negative_prompt?, provider_settings?, composition_settings?, is_default?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "id": sInteger(), "name": sString(), "asset_type": sString(), "prompt_prefix": sString(), "prompt_suffix": sString(), "negative_prompt": sString(), "provider_settings": sObject(), "composition_settings": sObject(), "is_default": sBool()}, []string{"persona_id", "name", "asset_type"}), Handler: a.toolStyleProfileUpsert},
 		{Name: "persona_reference_add", Description: "Link a Storage file as a persona reference. Args: persona_id, storage_file_id, kind?, label?, weight?, notes?, active?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "storage_file_id": sInteger(), "kind": sString(), "label": sString(), "weight": map[string]any{"type": "number"}, "notes": sString(), "active": sBool()}, []string{"persona_id", "storage_file_id"}), Handler: a.toolReferenceAdd},
 		{Name: "persona_reference_list", Description: "List references. Args: persona_id, kind?, active?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "kind": sString(), "active": sBool()}, []string{"persona_id"}), Handler: a.toolReferenceList},
+		{Name: "persona_reference_remove", Description: "Unlink a persona reference without deleting the Storage file. Args: id.", InputSchema: schemaObject(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolReferenceRemove},
 		{Name: "persona_item_create", Description: "Create a reusable item/product/prop/location/brand asset. Args: persona_id, name, kind?, description?, usage_rules?, visual_rules?, storage_file_ids?, metadata?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "name": sString(), "kind": sString(), "description": sString(), "usage_rules": sString(), "visual_rules": sString(), "storage_file_ids": sArray("integer"), "metadata": sObject()}, []string{"persona_id", "name"}), Handler: a.toolItemCreate},
 		{Name: "persona_item_update", Description: "Update a reusable item. Args: id, patch object.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "patch": sObject()}, []string{"id", "patch"}), Handler: a.toolItemUpdate},
 		{Name: "persona_item_list", Description: "List items. Args: persona_id, kind?, active?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "kind": sString(), "active": sBool()}, []string{"persona_id"}), Handler: a.toolItemList},
@@ -281,6 +282,14 @@ func (a *App) handleReferences(w http.ResponseWriter, r *http.Request) {
 		args["_project_id"] = pid
 		v, err := a.toolReferenceAdd(ctx, args)
 		writeOrErr(w, v, err)
+	case http.MethodDelete:
+		id := int64Query(r, "id", 0)
+		if id == 0 {
+			httpErr(w, 400, "id required")
+			return
+		}
+		v, err := a.toolReferenceRemove(ctx, map[string]any{"_project_id": pid, "id": id})
+		writeOrErr(w, v, err)
 	default:
 		httpErr(w, 405, "method not allowed")
 	}
@@ -313,6 +322,10 @@ func (a *App) handleItems(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleItemByID(w http.ResponseWriter, r *http.Request) {
 	ctx, pid, ok := requestCtx(w, r)
 	if !ok {
+		return
+	}
+	if r.Method != http.MethodPatch && r.Method != http.MethodPut && r.Method != http.MethodPost {
+		httpErr(w, 405, "method not allowed")
 		return
 	}
 	id, err := idFromPath(r.URL.Path, "/items/")
@@ -611,6 +624,29 @@ func (a *App) toolReferenceList(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	out, err := listReferences(ctx.AppDB(), pid, personaID, strArg(args, "kind"), true)
 	return map[string]any{"references": out}, err
+}
+
+func (a *App) toolReferenceRemove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := projectFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	res, err := ctx.AppDB().Exec(
+		`UPDATE persona_references SET active=0, updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`,
+		id, pid,
+	)
+	if err != nil {
+		return nil, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return nil, sql.ErrNoRows
+	}
+	return map[string]any{"removed": true, "id": id}, nil
 }
 
 func (a *App) toolItemCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
