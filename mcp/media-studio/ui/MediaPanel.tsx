@@ -319,11 +319,12 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [sourceImages, setSourceImages] = useState<SourceImageRef[]>([]);
   const [editModel, setEditModel] = useState<EditModel>("firered-image-edit");
   const isEditMode = activeKind === "image" && sourceImages.length > 0;
-  // Live-loaded model list for the bound provider, refreshed on tab
-  // switch and binding change. Falls back to the hardcoded
-  // OpenAI-flavour list (IMAGE_MODELS) when the fetch fails so the
-  // dropdown is never empty.
+  // Live-loaded model lists for the bound provider, refreshed on tab
+  // switch and binding change. Image generation and image edit can be
+  // different provider-side buckets (Venice image vs inpaint), so keep
+  // edit models separate.
   const [liveModels, setLiveModels] = useState<LiveModel[] | null>(null);
+  const [editLiveModels, setEditLiveModels] = useState<LiveModel[] | null>(null);
   const [liveProvider, setLiveProvider] = useState<string>("");
   // In-flight video jobs (queued / polling). Shown as a small badge
   // above the video gallery so the user knows something is cooking
@@ -461,6 +462,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     const currentBoundSlug = bindings?.[activeKind]?.slug || "";
     if (!currentBoundSlug) {
       setLiveModels(null);
+      setEditLiveModels(null);
       setLiveProvider("");
       return;
     }
@@ -481,37 +483,50 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                 (m: { id: string }) => m.id === imageModel,
               );
               if (!have) setImageModel(data.models[0].id as ImageModel);
-              const editModels = data.models.filter((m: LiveModel) => m.supports_image_edit);
-              if (editModels.length > 0 && !editModels.some((m: LiveModel) => m.id === editModel)) {
-                setEditModel(editModels[0].id);
-              }
-		            } else if (activeKind === "video") {
-	              const have = data.models.some(
-	                (m: { id: string }) => m.id === videoModel,
-	              );
-	              if (!have) setVideoModel(data.models[0].id);
-	            } else if (activeKind === "audio_tts") {
-	              const have = data.models.some(
-	                (m: { id: string }) => m.id === audioModel,
-	              );
-	              if (!have) setAudioModel(data.models[0].id);
-	            } else if (activeKind === "audio_sfx") {
-	              const have = data.models.some(
-	                (m: { id: string }) => m.id === sfxModel,
-	              );
-	              if (!have) setSfxModel(data.models[0].id);
-	            } else if (activeKind === "music") {
-	              const have = data.models.some(
-	                (m: { id: string }) => m.id === musicModel,
-	              );
-	              if (!have) setMusicModel(data.models[0].id);
-	            }
-	          }
-	        }
+            } else if (activeKind === "video") {
+              const have = data.models.some(
+                (m: { id: string }) => m.id === videoModel,
+              );
+              if (!have) setVideoModel(data.models[0].id);
+            } else if (activeKind === "audio_tts") {
+              const have = data.models.some(
+                (m: { id: string }) => m.id === audioModel,
+              );
+              if (!have) setAudioModel(data.models[0].id);
+            } else if (activeKind === "audio_sfx") {
+              const have = data.models.some(
+                (m: { id: string }) => m.id === sfxModel,
+              );
+              if (!have) setSfxModel(data.models[0].id);
+            } else if (activeKind === "music") {
+              const have = data.models.some(
+                (m: { id: string }) => m.id === musicModel,
+              );
+              if (!have) setMusicModel(data.models[0].id);
+            }
+          }
+        }
       })
       .catch(() => {
         if (!cancelled) setLiveModels(null);
       });
+    if (activeKind === "image") {
+      fetch(`${API}/models?kind=image&capability=image.edit`, { credentials: "same-origin" })
+        .then((r) => r.ok ? r.json() : null)
+        .then((data) => {
+          if (cancelled || !data) return;
+          const models = Array.isArray(data.models) ? data.models : [];
+          setEditLiveModels(models);
+          if (models.length > 0 && !models.some((m: LiveModel) => m.id === editModel)) {
+            setEditModel(models[0].id);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setEditLiveModels(null);
+        });
+    } else {
+      setEditLiveModels(null);
+    }
     return () => {
       cancelled = true;
     };
@@ -535,19 +550,20 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   // and decide whether to show the reference-image input for
   // image-to-video models.
   const currentModelId =
-	    activeKind === "image"
-	      ? (isEditMode ? editModel : imageModel)
-	      : activeKind === "video"
-	        ? videoModel
-	        : activeKind === "audio_tts"
-	          ? audioModel
-	          : activeKind === "audio_sfx"
-	            ? sfxModel
-	            : activeKind === "music"
-	              ? musicModel
-	              : "";
+    activeKind === "image"
+      ? (isEditMode ? editModel : imageModel)
+      : activeKind === "video"
+        ? videoModel
+        : activeKind === "audio_tts"
+          ? audioModel
+          : activeKind === "audio_sfx"
+            ? sfxModel
+            : activeKind === "music"
+              ? musicModel
+              : "";
+  const currentModelList = activeKind === "image" && isEditMode ? editLiveModels : liveModels;
   const currentModel: LiveModel | undefined =
-    liveModels?.find((m) => m.id === currentModelId);
+    currentModelList?.find((m) => m.id === currentModelId);
   // Video reference-image is allowed for both standard (text-to-video)
   // and image-to-video models — required for the latter, optional
   // hint for the former (Venice's queue accepts image_url on most).
@@ -780,7 +796,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             editModel={editModel}
             setEditModel={setEditModel}
             editSourceLimit={editSourceLimit}
-            editModels={liveModels?.filter((m) => m.supports_image_edit) || []}
+            editModels={editLiveModels || liveModels?.filter((m) => m.supports_image_edit) || []}
             videoModel={videoModel}
             setVideoModel={setVideoModel}
             audioModel={audioModel}

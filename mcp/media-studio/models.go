@@ -89,10 +89,21 @@ func kindToVeniceType(kind string) string {
 	return ""
 }
 
+func veniceTypeForCapability(kind, capability string) string {
+	if kind == KindImage && capability == "image.edit" {
+		return "inpaint"
+	}
+	return kindToVeniceType(kind)
+}
+
 // loadModelsFor returns the (live or cached) model list for the
 // currently-bound provider of `kind`. nil + nil error when no
 // provider is bound.
 func loadModelsFor(ctx *sdk.AppCtx, kind string) ([]modelEntry, error) {
+	return loadModelsForCapability(ctx, kind, "")
+}
+
+func loadModelsForCapability(ctx *sdk.AppCtx, kind, capability string) ([]modelEntry, error) {
 	h, ok := handlers[kind]
 	if !ok {
 		return nil, nil
@@ -102,12 +113,19 @@ func loadModelsFor(ctx *sdk.AppCtx, kind string) ([]modelEntry, error) {
 		return nil, nil
 	}
 	if bound.AppSlug == "openai-codex" {
+		if capability == "image.edit" {
+			return []modelEntry{}, nil
+		}
 		return []modelEntry{{
 			ID:    "gpt-5.5",
 			Label: "GPT-5.5 (Codex image generation)",
 		}}, nil
 	}
-	key := modelCacheKey{ConnectionID: bound.ConnectionID, Kind: kind}
+	cacheKind := kind
+	if capability != "" {
+		cacheKind = kind + ":" + capability
+	}
+	key := modelCacheKey{ConnectionID: bound.ConnectionID, Kind: cacheKind}
 	modelCacheMu.RLock()
 	if v, hit := modelCache[key]; hit && time.Since(v.FetchedAt) < modelCacheTTL {
 		modelCacheMu.RUnlock()
@@ -117,7 +135,7 @@ func loadModelsFor(ctx *sdk.AppCtx, kind string) ([]modelEntry, error) {
 
 	args := map[string]any{}
 	if bound.AppSlug == "venice-ai" {
-		if t := kindToVeniceType(kind); t != "" {
+		if t := veniceTypeForCapability(kind, capability); t != "" {
 			args["type"] = t
 		}
 	}
@@ -130,14 +148,28 @@ func loadModelsFor(ctx *sdk.AppCtx, kind string) ([]modelEntry, error) {
 	}
 	veniceType := ""
 	if bound.AppSlug == "venice-ai" {
-		veniceType = kindToVeniceType(kind)
+		veniceType = veniceTypeForCapability(kind, capability)
 	}
 	models := parseModelList(bound.AppSlug, kind, res.Data, bound.ConnectionID, veniceType)
+	models = filterModelsForCapability(models, capability)
 
 	modelCacheMu.Lock()
 	modelCache[key] = modelCacheValue{Models: models, FetchedAt: time.Now()}
 	modelCacheMu.Unlock()
 	return models, nil
+}
+
+func filterModelsForCapability(models []modelEntry, capability string) []modelEntry {
+	if capability != "image.edit" {
+		return models
+	}
+	out := make([]modelEntry, 0, len(models))
+	for _, model := range models {
+		if model.SupportsImageEdit {
+			out = append(out, model)
+		}
+	}
+	return out
 }
 
 // parseModelList normalizes per-provider response shapes into a
@@ -661,9 +693,14 @@ func (a *App) handleListModels(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "kind required", http.StatusBadRequest)
 		return
 	}
+	capability := r.URL.Query().Get("capability")
 	h, ok := handlers[kind]
 	if !ok {
 		http.Error(w, "unknown kind", http.StatusBadRequest)
+		return
+	}
+	if capability != "" && !(kind == KindImage && capability == "image.edit") {
+		http.Error(w, "unsupported capability", http.StatusBadRequest)
 		return
 	}
 	bound := globalCtx.IntegrationFor(h.Role)
@@ -672,13 +709,16 @@ func (a *App) handleListModels(w http.ResponseWriter, r *http.Request) {
 		"bound":  bound != nil,
 		"models": []modelEntry{},
 	}
+	if capability != "" {
+		resp["capability"] = capability
+	}
 	if bound != nil {
 		resp["provider"] = bound.AppSlug
 		// ?refresh=1 forces a re-fetch even if the cached entry is fresh.
 		if r.URL.Query().Get("refresh") == "1" {
 			invalidateModelCacheForConnection(bound.ConnectionID)
 		}
-		models, err := loadModelsFor(globalCtx, kind)
+		models, err := loadModelsForCapability(globalCtx, kind, capability)
 		if err != nil {
 			resp["error"] = err.Error()
 		} else {

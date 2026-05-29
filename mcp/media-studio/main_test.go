@@ -946,6 +946,38 @@ func TestResolveImageCapability(t *testing.T) {
 	}
 }
 
+func TestVeniceTypeForCapability(t *testing.T) {
+	if got := veniceTypeForCapability(KindImage, ""); got != "image" {
+		t.Errorf("image generate type = %q, want image", got)
+	}
+	if got := veniceTypeForCapability(KindImage, "image.edit"); got != "inpaint" {
+		t.Errorf("image.edit type = %q, want inpaint", got)
+	}
+	if got := veniceTypeForCapability(KindVideo, "image.edit"); got != "video" {
+		t.Errorf("video type = %q, want video", got)
+	}
+}
+
+func TestFilterModelsForImageEditCapability(t *testing.T) {
+	models := []modelEntry{
+		{ID: "gpt-image-2", SupportsImageEdit: true},
+		{ID: "dall-e-3"},
+		{ID: "firered-image-edit", SupportsImageEdit: true},
+	}
+	got := filterModelsForCapability(models, "image.edit")
+	if len(got) != 2 {
+		t.Fatalf("got %d edit models, want 2: %+v", len(got), got)
+	}
+	for _, model := range got {
+		if !model.SupportsImageEdit {
+			t.Fatalf("non-edit model leaked into image.edit list: %+v", got)
+		}
+	}
+	if got := filterModelsForCapability(models, ""); len(got) != len(models) {
+		t.Fatalf("plain model list was filtered: %+v", got)
+	}
+}
+
 func TestBuildVeniceImageEditArgs(t *testing.T) {
 	args := map[string]any{
 		"prompt":       "remove the tree",

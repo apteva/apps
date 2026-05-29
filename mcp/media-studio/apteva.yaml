@@ -2,13 +2,14 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.5
+version: 0.10.6
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs powers audio TTS, sound effects, and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references. v0.10.5 fixes the project panel bundle to use the production
-  React JSX runtime while keeping OpenAI API, Gemini, and Venice
+  references. v0.10.6 makes model discovery capability-aware so reference
+  image workflows request edit-capable model lists, including Venice's
+  inpaint/edit model bucket, while keeping OpenAI API, Gemini, and Venice
   multi-reference image editing/generation on the provider-neutral
   source_images path.
 

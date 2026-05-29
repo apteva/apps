@@ -105,8 +105,12 @@ export default function PersonaPanel({ projectId }) {
   useEffect(() => {
     if (!projectId || !generation.asset_type) return;
     let cancelled = false;
+    const params = new URLSearchParams({ kind: generation.asset_type });
+    if (generation.asset_type === "image" && requiresImageEditModel) {
+      params.set("capability", "image.edit");
+    }
     setModelsLoading(true);
-    fetch(`${MEDIA_API}/models?kind=${encodeURIComponent(generation.asset_type)}`, { credentials: "same-origin" })
+    fetch(`${MEDIA_API}/models?${params.toString()}`, { credentials: "same-origin" })
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (cancelled) return;
@@ -126,7 +130,7 @@ export default function PersonaPanel({ projectId }) {
     return () => {
       cancelled = true;
     };
-  }, [projectId, generation.asset_type]);
+  }, [projectId, generation.asset_type, requiresImageEditModel]);
   useEffect(() => {
     if (!generation.asset_type) return;
     if (modelOptions.length > 0 && !modelOptions.some((m) => m.id === generation.model)) {
