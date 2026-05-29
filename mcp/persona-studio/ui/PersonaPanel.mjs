@@ -58,7 +58,17 @@ export default function PersonaPanel({ projectId }) {
   const items = bundle?.items || [];
   const refs = bundle?.references || [];
   const assets = bundle?.assets || [];
-  const imageReferenceCount = useMemo(() => imageSourceOptions(refs, items).length, [refs, items]);
+  const selectedItems = useMemo(
+    () => items.filter((it) => generation.item_ids.includes(it.id)),
+    [items, generation.item_ids]
+  );
+  const imageReferenceCount = useMemo(() => imageSourceOptions(refs, selectedItems).length, [refs, selectedItems]);
+  const requiresImageEditModel = generation.asset_type === "image" && imageReferenceCount > 0;
+  const modelOptions = useMemo(() => {
+    if (!requiresImageEditModel) return mediaModels;
+    return mediaModels.filter(modelSupportsImageEdit);
+  }, [mediaModels, requiresImageEditModel]);
+  const selectedModel = modelOptions.find((m) => m.id === generation.model);
 
   const loadPersonas = useCallback(async () => {
     if (!projectId) return;
@@ -103,9 +113,6 @@ export default function PersonaPanel({ projectId }) {
         const models = Array.isArray(data?.models) ? data.models : [];
         setMediaModels(models);
         setMediaProvider(String(data?.provider || ""));
-        if (models.length > 0 && !models.some((m) => m.id === generation.model)) {
-          setGeneration((cur) => ({ ...cur, model: models[0].id }));
-        }
       })
       .catch(() => {
         if (!cancelled) {
@@ -121,11 +128,15 @@ export default function PersonaPanel({ projectId }) {
     };
   }, [projectId, generation.asset_type]);
   useEffect(() => {
-    if (generation.asset_type !== "image") return;
-    if (mediaModels.length > 0 && !mediaModels.some((m) => m.id === generation.model)) {
-      setGeneration((cur) => ({ ...cur, model: mediaModels[0].id }));
+    if (!generation.asset_type) return;
+    if (modelOptions.length > 0 && !modelOptions.some((m) => m.id === generation.model)) {
+      setGeneration((cur) => ({ ...cur, model: modelOptions[0].id }));
+      return;
     }
-  }, [generation.asset_type, generation.model, mediaModels]);
+    if (requiresImageEditModel && modelOptions.length === 0 && generation.model) {
+      setGeneration((cur) => ({ ...cur, model: "" }));
+    }
+  }, [generation.asset_type, generation.model, modelOptions, requiresImageEditModel]);
 
   async function createPersona(e) {
     e.preventDefault();
@@ -183,7 +194,12 @@ export default function PersonaPanel({ projectId }) {
     e.preventDefault();
     if (!selectedId || !generation.prompt.trim()) return;
     const settings = {};
-    if (generation.model) settings.model = generation.model;
+    const selectedModelSupportsEdit = selectedModel
+      ? modelSupportsImageEdit(selectedModel)
+      : modelSupportsImageEdit({ id: generation.model });
+    if (generation.model && (!requiresImageEditModel || selectedModelSupportsEdit)) {
+      settings.model = generation.model;
+    }
     if (generation.asset_type === "image") {
       if (generation.size) settings.size = generation.size;
       const options = {};
@@ -269,8 +285,6 @@ export default function PersonaPanel({ projectId }) {
     setPickerTarget(null);
   }
 
-  const modelOptions = mediaModels;
-  const selectedModel = modelOptions.find((m) => m.id === generation.model);
   const modelAspects = selectedModel?.aspect_ratios || [];
   const modelDurations = selectedModel?.durations || [];
 
@@ -404,6 +418,7 @@ export default function PersonaPanel({ projectId }) {
                     models: modelOptions,
                     provider: mediaProvider,
                     loading: modelsLoading,
+                    editRequired: requiresImageEditModel,
                     value: generation.model,
                     onChange: (model) => setGeneration({ ...generation, model }),
                   })
@@ -549,6 +564,17 @@ function imageSourceOptions(refs, items) {
   return out;
 }
 
+function modelSupportsImageEdit(model) {
+  if (!model) return false;
+  if (model.supports_image_edit) return true;
+  const id = String(model.id || "").toLowerCase();
+  return id.endsWith("-edit") ||
+    id.startsWith("gpt-image") ||
+    id === "dall-e-2" ||
+    id.startsWith("gemini-") ||
+    id.includes("image-edit");
+}
+
 function fieldClass() {
   return "bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text min-w-0";
 }
@@ -561,7 +587,7 @@ function secondaryButtonClass() {
   return "border border-border rounded px-2 py-1.5 text-sm text-text-muted hover:text-text hover:bg-bg-input";
 }
 
-function ModelSelect({ models, provider, loading, value, onChange }) {
+function ModelSelect({ models, provider, loading, editRequired, value, onChange }) {
   if (loading && models.length === 0) {
     return h("div", { className: `${fieldClass()} text-text-dim` }, provider ? `Loading ${provider} models...` : "Loading models...");
   }
@@ -569,19 +595,21 @@ function ModelSelect({ models, provider, loading, value, onChange }) {
     return h("input", {
       value,
       onChange: (e) => onChange(e.target.value),
-      placeholder: "Model (provider default if empty)",
+      placeholder: editRequired ? "Edit model (provider default if empty)" : "Model (provider default if empty)",
       className: fieldClass(),
-      title: "No model list returned by Media Studio. Leave empty for provider default or type a model id.",
+      title: editRequired
+        ? "No edit-capable model list returned by Media Studio. Leave empty for the provider's edit default or type an edit model id."
+        : "No model list returned by Media Studio. Leave empty for provider default or type a model id.",
     });
   }
   return h("select", {
     value,
     onChange: (e) => onChange(e.target.value),
     className: fieldClass(),
-    title: provider ? `Models from ${provider}` : "Media Studio models",
+    title: provider ? `${editRequired ? "Edit models" : "Models"} from ${provider}` : "Media Studio models",
   },
     models.map((m) => h("option", { key: m.id, value: m.id },
-      `${m.id}${m.price_usd ? ` - ${formatCost(m.price_usd)}` : ""}${m.model_type ? ` - ${m.model_type}` : ""}`
+      `${m.id}${m.max_source_images ? ` - ${m.max_source_images} refs` : ""}${m.price_usd ? ` - ${formatCost(m.price_usd)}` : ""}${m.model_type ? ` - ${m.model_type}` : ""}`
     ))
   );
 }

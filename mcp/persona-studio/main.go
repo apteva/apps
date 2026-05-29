@@ -745,6 +745,9 @@ func (a *App) toolGenerateAsset(ctx *sdk.AppCtx, args map[string]any) (any, erro
 			// lets Media Studio choose the correct edit tool per provider.
 			delete(settings, "source_image")
 			settings["source_images"] = sourceImages
+			if !isImageEditModel(strArg(settings, "model")) {
+				delete(settings, "model")
+			}
 		}
 	}
 	resolved := buildResolvedPrompt(persona, style, refs, items, prompt, assetType)
@@ -1573,6 +1576,18 @@ func imageSourceLimit(settings map[string]any) int {
 		return 3
 	}
 	return 3
+}
+
+func isImageEditModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if model == "" {
+		return true
+	}
+	return strings.HasSuffix(model, "-edit") ||
+		strings.HasPrefix(model, "gpt-image") ||
+		model == "dall-e-2" ||
+		strings.HasPrefix(model, "gemini-") ||
+		strings.Contains(model, "image-edit")
 }
 
 func refIDs(refs []Reference) []int64 {
