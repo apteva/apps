@@ -209,6 +209,16 @@ type Tab = "outbox" | "inbox" | "templates" | "routes" | "suppressions" | "sende
 
 type Notice = { kind: "error" | "info"; text: string };
 type Notify = (kind: Notice["kind"], text: string) => void;
+type ConfirmTone = "danger" | "default";
+interface ConfirmDialogRequest {
+  title: string;
+  message: React.ReactNode;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  tone?: ConfirmTone;
+  onConfirm: () => void | Promise<void>;
+}
+type ConfirmFn = (request: ConfirmDialogRequest) => void;
 interface ComposeDraft {
   key: number;
   channel: string;
@@ -240,10 +250,12 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
   const [sendersError, setSendersError] = useState<string>("");
 
   // Panel-wide transient notice (errors from handlers + info messages
-  // like "copied!"). Replaces native alert(). Auto-dismisses; errors
+  // like "copied!"). Replaces native browser dialogs. Auto-dismisses; errors
   // get longer because the operator usually wants to read them.
   const [notice, setNotice] = useState<Notice | null>(null);
   const notify = useCallback<Notify>((kind, text) => setNotice({ kind, text }), []);
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogRequest | null>(null);
+  const confirmAction = useCallback<ConfirmFn>((request) => setConfirmDialog(request), []);
   useEffect(() => {
     if (!notice) return;
     const ms = notice.kind === "error" ? 8000 : 4000;
@@ -394,6 +406,12 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
   return (
     <div className="h-full flex flex-col">
       {notice && <Toast notice={notice} onDismiss={() => setNotice(null)} />}
+      {confirmDialog && (
+        <ConfirmDialog
+          request={confirmDialog}
+          onClose={() => setConfirmDialog(null)}
+        />
+      )}
 
       {/* Sandbox banner — only when SES reports we're sandboxed. */}
       {quota && quota.sandboxed && (
@@ -449,10 +467,10 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
               gotoSenders={() => setTab("senders")}
             />
           )}
-          {tab === "senders" && <SendersView rows={senders} identities={identities} quota={quota} api={api} reload={reload} error={sendersError} notify={notify} />}
-          {tab === "templates" && <TemplatesView rows={templates} api={api} reload={reload} notify={notify} />}
-          {tab === "routes" && <RoutesView rows={routes} api={api} reload={reload} notify={notify} />}
-          {tab === "suppressions" && <SuppressionsView rows={suppressions} api={api} reload={reload} notify={notify} />}
+          {tab === "senders" && <SendersView rows={senders} identities={identities} quota={quota} api={api} reload={reload} error={sendersError} notify={notify} confirmAction={confirmAction} />}
+          {tab === "templates" && <TemplatesView rows={templates} api={api} reload={reload} notify={notify} confirmAction={confirmAction} />}
+          {tab === "routes" && <RoutesView rows={routes} api={api} reload={reload} notify={notify} confirmAction={confirmAction} />}
+          {tab === "suppressions" && <SuppressionsView rows={suppressions} api={api} reload={reload} notify={notify} confirmAction={confirmAction} />}
         </div>
 
         {/* Detail pane (only meaningful for messages) */}
@@ -913,7 +931,7 @@ function ComposeView({
 }
 
 function SendersView({
-  rows, identities, quota, api, reload, error, notify,
+  rows, identities, quota, api, reload, error, notify, confirmAction,
 }: {
   rows: SenderRow[];
   identities: IdentityRow[];
@@ -922,6 +940,7 @@ function SendersView({
   reload: () => void;
   error: string;
   notify: Notify;
+  confirmAction: ConfirmFn;
 }) {
   const [addr, setAddr] = useState("");
   const [inbound, setInbound] = useState<"auto" | "true" | "false">("auto");
@@ -1093,11 +1112,24 @@ function SendersView({
   };
 
   const remove = async (address: string, channel: string) => {
-    if (!confirm(`Delete ${stripScheme(address)} from Messaging? Future sends from this sender will fail.`)) return;
-    try {
-      await api("POST", "/tools/call", {}, { tool: "senders_delete", args: { address, channel } });
-      reload();
-    } catch (e) { notify("error", `Delete failed: ${(e as Error).message}`); }
+    const label = stripScheme(address);
+    confirmAction({
+      title: "Delete sender",
+      tone: "danger",
+      confirmLabel: "Delete",
+      message: (
+        <>
+          <div>Delete <code>{label}</code> from Messaging?</div>
+          <div className="mt-2 text-text-dim">Future sends from this sender will fail.</div>
+        </>
+      ),
+      onConfirm: async () => {
+        try {
+          await api("POST", "/tools/call", {}, { tool: "senders_delete", args: { address, channel } });
+          reload();
+        } catch (e) { notify("error", `Delete failed: ${(e as Error).message}`); }
+      },
+    });
   };
 
   return (
@@ -1483,7 +1515,7 @@ function IdentitiesSection({ identities, onRecheckSetup }: { identities: Identit
   );
 }
 
-function TemplatesView({ rows, api, reload, notify }: { rows: TemplateRow[]; api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>; reload: () => void; notify: Notify }) {
+function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: TemplateRow[]; api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>; reload: () => void; notify: Notify; confirmAction: ConfirmFn }) {
   const [channel, setChannel] = useState("whatsapp");
   const [name, setName] = useState("");
   const [bodyText, setBodyText] = useState("");
@@ -1532,13 +1564,26 @@ function TemplatesView({ rows, api, reload, notify }: { rows: TemplateRow[]; api
   };
 
   const handleDelete = async (id: number) => {
-    if (!confirm("Delete this template?")) return;
-    try {
-      await api("POST", "/tools/call", {}, { tool: "template_delete", args: { id } });
-      reload();
-    } catch (e) {
-      notify("error", `Delete failed: ${(e as Error).message}`);
-    }
+    const tpl = rows.find((t) => t.id === id);
+    confirmAction({
+      title: "Delete template",
+      tone: "danger",
+      confirmLabel: "Delete",
+      message: (
+        <>
+          <div>Delete template <code>{tpl?.name || `#${id}`}</code>?</div>
+          <div className="mt-2 text-text-dim">Messages that reference this saved template will no longer be able to use it.</div>
+        </>
+      ),
+      onConfirm: async () => {
+        try {
+          await api("POST", "/tools/call", {}, { tool: "template_delete", args: { id } });
+          reload();
+        } catch (e) {
+          notify("error", `Delete failed: ${(e as Error).message}`);
+        }
+      },
+    });
   };
   const handleRefreshStatus = async (id: number) => {
     try {
@@ -1640,7 +1685,7 @@ function TemplatesView({ rows, api, reload, notify }: { rows: TemplateRow[]; api
   );
 }
 
-function RoutesView({ rows, api, reload, notify }: { rows: InboundRoute[]; api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>; reload: () => void; notify: Notify }) {
+function RoutesView({ rows, api, reload, notify, confirmAction }: { rows: InboundRoute[]; api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>; reload: () => void; notify: Notify; confirmAction: ConfirmFn }) {
   const [pattern, setPattern] = useState("");
   const [targetApp, setTargetApp] = useState("");
   const [targetRoute, setTargetRoute] = useState("/inbound");
@@ -1659,13 +1704,26 @@ function RoutesView({ rows, api, reload, notify }: { rows: InboundRoute[]; api: 
     }
   };
   const remove = async (id: number) => {
-    if (!confirm("Delete this route?")) return;
-    try {
-      await api("POST", "/tools/call", {}, { tool: "inbound_route_delete", args: { id } });
-      reload();
-    } catch (e) {
-      notify("error", `Delete failed: ${(e as Error).message}`);
-    }
+    const route = rows.find((r) => r.id === id);
+    confirmAction({
+      title: "Delete route",
+      tone: "danger",
+      confirmLabel: "Delete",
+      message: (
+        <>
+          <div>Delete this inbound route?</div>
+          {route && <div className="mt-2 text-text-dim"><code>{route.pattern}</code> → {route.target_app}{route.target_route}</div>}
+        </>
+      ),
+      onConfirm: async () => {
+        try {
+          await api("POST", "/tools/call", {}, { tool: "inbound_route_delete", args: { id } });
+          reload();
+        } catch (e) {
+          notify("error", `Delete failed: ${(e as Error).message}`);
+        }
+      },
+    });
   };
   return (
     <div>
@@ -1711,15 +1769,26 @@ function RoutesView({ rows, api, reload, notify }: { rows: InboundRoute[]; api: 
   );
 }
 
-function SuppressionsView({ rows, api, reload, notify }: { rows: SuppressionRow[]; api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>; reload: () => void; notify: Notify }) {
+function SuppressionsView({ rows, api, reload, notify, confirmAction }: { rows: SuppressionRow[]; api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>; reload: () => void; notify: Notify; confirmAction: ConfirmFn }) {
   const remove = async (addr: string) => {
-    if (!confirm(`Remove ${stripScheme(addr)} from suppression?`)) return;
-    try {
-      await api("POST", "/tools/call", {}, { tool: "suppression_remove", args: { address: addr } });
-      reload();
-    } catch (e) {
-      notify("error", `Remove failed: ${(e as Error).message}`);
-    }
+    confirmAction({
+      title: "Remove suppression",
+      confirmLabel: "Remove",
+      message: (
+        <>
+          <div>Remove <code>{stripScheme(addr)}</code> from suppressions?</div>
+          <div className="mt-2 text-text-dim">Messaging will allow future sends to this address again.</div>
+        </>
+      ),
+      onConfirm: async () => {
+        try {
+          await api("POST", "/tools/call", {}, { tool: "suppression_remove", args: { address: addr } });
+          reload();
+        } catch (e) {
+          notify("error", `Remove failed: ${(e as Error).message}`);
+        }
+      },
+    });
   };
   if (rows.length === 0) {
     return <div className="p-6 text-text-dim text-sm">No suppressions. Hard bounces and complaints land here automatically.</div>;
@@ -1997,7 +2066,69 @@ function shortTime(s?: string): string {
   }
 }
 
-// Panel-local toast. Replaces native alert() so a failed delete /
+function ConfirmDialog({ request, onClose }: { request: ConfirmDialogRequest; onClose: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const confirmLabel = request.confirmLabel || "Confirm";
+  const cancelLabel = request.cancelLabel || "Cancel";
+  const danger = request.tone === "danger";
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onClose]);
+
+  const onConfirm = async () => {
+    setBusy(true);
+    try {
+      await request.onConfirm();
+      onClose();
+    } catch {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="messaging-confirm-title"
+        className="w-full max-w-md rounded border border-border bg-surface text-text shadow-2xl"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="px-5 py-4 border-b border-border">
+          <div id="messaging-confirm-title" className="font-semibold">{request.title}</div>
+        </div>
+        <div className="px-5 py-4 text-sm leading-6">
+          {request.message}
+        </div>
+        <div className="px-5 py-4 border-t border-border flex justify-end gap-2">
+          <button
+            type="button"
+            className="px-3 py-1.5 rounded border border-border text-text-dim hover:text-text hover:bg-surface-2 disabled:opacity-50"
+            onClick={onClose}
+            disabled={busy}
+          >
+            {cancelLabel}
+          </button>
+          <button
+            type="button"
+            className={`px-3 py-1.5 rounded text-white disabled:opacity-50 ${danger ? "bg-red-600 hover:bg-red-500" : "bg-accent hover:opacity-90"}`}
+            onClick={onConfirm}
+            disabled={busy}
+          >
+            {busy ? "Working…" : confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Panel-local toast. Replaces native browser dialogs so a failed delete /
 // re-check / add doesn't yank focus into a modal that blocks the rest
 // of the UI. Auto-dismisses (see notice effect in MessagingPanel) and
 // can be cleared manually via the × button.
