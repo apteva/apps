@@ -50,7 +50,7 @@ function CreatorsPanel({ projectId }) {
         api("/tiers", projectId),
         api("/members", projectId),
         api("/posts", projectId),
-        api("/events", projectId),
+        api("/activity", projectId),
       ]);
       setSpace(s.space);
       setTiers(t || []);

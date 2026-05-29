@@ -72,7 +72,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/posts/", Handler: a.handlePostItem},
 		{Pattern: "/attachments", Handler: a.handleAttachments},
 		{Pattern: "/attachments/", Handler: a.handleAttachmentItem},
-		{Pattern: "/events", Handler: a.handleEvents},
+		{Pattern: "/activity", Handler: a.handleEvents},
 		{Pattern: "/public/", Handler: a.handlePublic, NoAuth: true},
 		{Pattern: "/member/", Handler: a.handleMemberPortal, NoAuth: true},
 	}
