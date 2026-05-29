@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.13
+version: 0.13.14
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES; SMS and push are reserved channel namespaces. Tracks
@@ -38,7 +38,7 @@ requires:
       capabilities: [email.send]
       tools:
         email.send: send_email
-      required: true
+      required: false
       label: "Email provider (AWS SES)"
       hint: "Verifies the sender domain and delivers outbound mail. Bounce/complaint webhook target lives in app config."
     - role: phone_provider
