@@ -1,0 +1,111 @@
+schema: apteva-app/v1
+
+name: creators
+display_name: Creators
+version: 0.1.0
+description: |
+  Patreon-like creator memberships for Apteva. Manage tiers, members,
+  gated posts, protected file drops, payment links, and supporter updates.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/creators
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/creators/icon.svg
+tags: [creators, memberships, paid-content, community]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: storage
+      reason: Store gated files, post attachments, creator media, and downloads.
+    - name: billing
+      reason: Manage customers, invoices, payments, and payment links for memberships.
+    - name: crm
+      optional: true
+      reason: Sync members as contacts and log creator-audience activity.
+    - name: messaging
+      optional: true
+      reason: Send post announcements, member digests, and renewal reminders.
+    - name: analytics
+      optional: true
+      reason: Track post views, downloads, and conversion events.
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: creators_space_get
+      description: Fetch the creator space settings for this project.
+    - name: creators_space_update
+      description: Update creator space branding, slug, and defaults.
+    - name: creators_tier_create
+      description: Create a membership tier with price, currency, interval, and benefits.
+    - name: creators_tier_list
+      description: List active or archived membership tiers.
+    - name: creators_tier_update
+      description: Update tier copy, price metadata, ordering, or archive state.
+    - name: creators_member_upsert
+      description: Find or create a member by email. Optionally syncs to CRM and billing.
+    - name: creators_member_list
+      description: List members by status, tier, or search query.
+    - name: creators_member_set_tier
+      description: Assign a member to a tier and update entitlement metadata.
+    - name: creators_member_set_status
+      description: Set member status such as active, past_due, cancelled, or comped.
+    - name: creators_post_create
+      description: Create a public, member-only, tier-gated, or private post.
+    - name: creators_post_update
+      description: Update post title, body, visibility, tier gates, or schedule.
+    - name: creators_post_publish
+      description: Publish a post now or schedule it for later.
+    - name: creators_post_list
+      description: List posts by status, visibility, or search query.
+    - name: creators_post_get
+      description: Fetch one post with attachments.
+    - name: creators_attachment_upload
+      description: Upload a gated attachment to storage and attach it to a post.
+    - name: creators_attachment_add_from_storage
+      description: Attach an existing storage file to a creator post.
+    - name: creators_file_get_download_link
+      description: Mint a short-lived storage URL after checking member/tier entitlement.
+    - name: creators_payment_link_create
+      description: Create a billing invoice and payment link for a member/tier period.
+    - name: creators_send_post_update
+      description: Send a post announcement to eligible members through messaging.
+    - name: creators_events_list
+      description: List recent creator app activity events.
+  ui_panels:
+    - slot: project.page
+      label: Creators
+      icon: badge-dollar-sign
+      entry: /ui/CreatorsPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/creators
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/creators.db
+  migrations: migrations/
+
+config_schema:
+  - name: default_currency
+    type: text
+    default: "USD"
+    label: Default currency
+    description: ISO 4217 currency used when creating tiers without an explicit currency.
+  - name: sender
+    type: text
+    label: Sender address
+    description: Optional verified sender for member announcements via messaging.
+
+upgrade_policy: auto-patch
