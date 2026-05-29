@@ -54,7 +54,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.19
+version: 0.13.20
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -2185,19 +2185,13 @@ func (a *App) toolTemplatesRefreshStatus(ctx *sdk.AppCtx, args map[string]any) (
 		}
 		return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
 	}
-	// Twilio's Content GET response carries approval_requests differently
-	// from the list endpoint; the per-template path returns the row
-	// shape with `approval_requests` array. We extract the first entry's
-	// status the same way as the sync path.
 	var raw struct {
-		ApprovalRequests []struct {
-			Status string `json:"status"`
-		} `json:"approval_requests"`
+		ApprovalRequests any `json:"approval_requests"`
 	}
 	_ = json.Unmarshal(res.Data, &raw)
 	status := t.ProviderStatus
-	if len(raw.ApprovalRequests) > 0 {
-		status = strings.ToLower(raw.ApprovalRequests[0].Status)
+	if info := approvalInfoFromAny(raw.ApprovalRequests); info.Status != "" {
+		status = info.Status
 	}
 	_, _ = ctx.AppDB().Exec(
 		`UPDATE templates SET provider_status = ?, last_synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
@@ -5545,8 +5539,10 @@ func listProviderTemplates(ctx *sdk.AppCtx, pid, channel string) ([]providerTemp
 	}
 	// Twilio /v2/ContentAndApprovals response:
 	//   { contents: [{ sid, friendly_name, language, variables, types,
-	//                  approval_requests: [{ status: "approved", … }] }],
+	//                  approval_requests: { status: "approved", … } }],
 	//     meta: { … } }
+	// Older fixtures and some endpoints use approval_requests as an
+	// array, so approvalInfoFromAny handles both shapes.
 	var raw struct {
 		Contents []struct {
 			Sid          string         `json:"sid"`
@@ -5554,10 +5550,7 @@ func listProviderTemplates(ctx *sdk.AppCtx, pid, channel string) ([]providerTemp
 			Language     string         `json:"language"`
 			Variables    map[string]any `json:"variables"`
 			Types        map[string]any `json:"types"`
-			Approval     []struct {
-				Status   string `json:"status"`
-				Category string `json:"category"`
-			} `json:"approval_requests"`
+			Approval     any            `json:"approval_requests"`
 		} `json:"contents"`
 	}
 	_ = json.Unmarshal(res.Data, &raw)
@@ -5569,9 +5562,10 @@ func listProviderTemplates(ctx *sdk.AppCtx, pid, channel string) ([]providerTemp
 		}
 		status := "pending"
 		category := ""
-		if len(c.Approval) > 0 {
-			status = strings.ToLower(c.Approval[0].Status)
-			category = c.Approval[0].Category
+		approval := approvalInfoFromAny(c.Approval)
+		if approval.Status != "" {
+			status = approval.Status
+			category = approval.Category
 		}
 		variables := c.Variables
 		if variables == nil {
@@ -5589,7 +5583,7 @@ func listProviderTemplates(ctx *sdk.AppCtx, pid, channel string) ([]providerTemp
 		}
 		existing, _ := dbTemplateGetByProviderID(ctx.AppDB(), pid, c.Sid)
 		if existing != nil {
-			if existing.Channel == channelSMS && len(c.Approval) == 0 && existing.ProviderStatus != "" {
+			if existing.Channel == channelSMS && approval.Status == "" && existing.ProviderStatus != "" {
 				item.Status = existing.ProviderStatus
 			}
 			item.LocalID = existing.ID
@@ -5782,18 +5776,36 @@ func extractApprovalStatus(raw json.RawMessage) string {
 		}
 	}
 	if req, ok := m["approval_request"].(map[string]any); ok {
-		if s, ok := req["status"].(string); ok && strings.TrimSpace(s) != "" {
-			return strings.ToLower(strings.TrimSpace(s))
+		if info := approvalInfoFromAny(req); info.Status != "" {
+			return info.Status
 		}
 	}
-	if arr, ok := m["approval_requests"].([]any); ok && len(arr) > 0 {
-		if req, ok := arr[0].(map[string]any); ok {
-			if s, ok := req["status"].(string); ok && strings.TrimSpace(s) != "" {
-				return strings.ToLower(strings.TrimSpace(s))
+	if info := approvalInfoFromAny(m["approval_requests"]); info.Status != "" {
+		return info.Status
+	}
+	return ""
+}
+
+type templateApprovalInfo struct {
+	Status   string
+	Category string
+}
+
+func approvalInfoFromAny(v any) templateApprovalInfo {
+	switch x := v.(type) {
+	case map[string]any:
+		return templateApprovalInfo{
+			Status:   strings.ToLower(strings.TrimSpace(strFromMap(x, "status", "Status", "approval_status"))),
+			Category: strings.TrimSpace(strFromMap(x, "category", "Category")),
+		}
+	case []any:
+		for _, item := range x {
+			if info := approvalInfoFromAny(item); info.Status != "" || info.Category != "" {
+				return info
 			}
 		}
 	}
-	return ""
+	return templateApprovalInfo{}
 }
 
 func normaliseTemplateCategory(s string) string {

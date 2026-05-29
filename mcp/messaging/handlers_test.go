@@ -2391,13 +2391,13 @@ func TestTemplatesImportHTTP_SelectedTwilioContent(t *testing.T) {
 				"language": "en",
 				"variables": {"1":"name"},
 				"types": {"twilio/text": {"body": "Hi {{1}}"}},
-				"approval_requests": [{"status": "approved", "category": "UTILITY"}]
+				"approval_requests": {"status": "approved", "category": "UTILITY"}
 			},
 			{
 				"sid": "HXbbb",
 				"friendly_name": "pending_one",
 				"types": {"twilio/text": {"body": "Pending"}},
-				"approval_requests": [{"status": "pending"}]
+				"approval_requests": {"status": "pending"}
 			}
 		]
 	}`)}
@@ -2417,7 +2417,7 @@ func TestTemplatesImportHTTP_SelectedTwilioContent(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &preview); err != nil {
 		t.Fatal(err)
 	}
-	if len(preview.Templates) != 2 || preview.Templates[0].LocalState != "new" {
+	if len(preview.Templates) != 2 || preview.Templates[0].LocalState != "new" || preview.Templates[0].Status != "approved" || preview.Templates[0].Category != "UTILITY" {
 		t.Fatalf("unexpected preview: %+v", preview)
 	}
 
