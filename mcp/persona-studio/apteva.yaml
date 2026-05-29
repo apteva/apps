@@ -2,12 +2,19 @@ schema: apteva-app/v1
 
 name: persona-studio
 display_name: Persona Studio
-version: 0.1.13
+version: 0.1.14
 description: |
   Virtual influencer and reusable persona workspace. Persona Studio owns
   consistent identities, reference sets, reusable items/products, style
   profiles, campaigns, generated assets, and Composer handoffs while Media
   Studio remains the provider-neutral generator.
+
+  v0.1.14 adds a Media Identity UI for persona voice and avatar
+  defaults, loads available voice/avatar catalogs from Media Studio when
+  present, previews linked voice/avatar references, and keeps
+  voice/avatar references out of image source_images while visual
+  references and selected item images continue through Media Studio's
+  multi-reference path.
 
   v0.1.13 sends all linked persona/item image references through Media
   Studio's source_images path by default, asks Media Studio for
@@ -55,7 +62,7 @@ provides:
     - name: persona_style_profile_upsert
       description: Create or update an asset-type-specific style profile for consistent generation.
     - name: persona_reference_add
-      description: Link a Storage file as a persona reference such as face, pose, outfit, voice, product, or style.
+      description: Link a Storage file as a persona reference such as face, pose, outfit, voice, avatar, product, or style.
     - name: persona_reference_list
       description: List references for a persona.
     - name: persona_item_create

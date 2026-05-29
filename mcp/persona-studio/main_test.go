@@ -76,6 +76,26 @@ func TestItemsReferencesAndPromptResolution(t *testing.T) {
 	}
 }
 
+func TestPersonaUpdateStoresVoiceAndAvatarDefaults(t *testing.T) {
+	ctx := newPersonaCtx(t)
+	app := &App{}
+	p := mustPersona(t, app, ctx)
+	out, err := app.toolPersonaUpdate(ctx, map[string]any{
+		"id": p.ID,
+		"patch": map[string]any{
+			"default_voice_id":  "voice_alpha",
+			"default_avatar_id": "avatar_mira",
+		},
+	})
+	if err != nil {
+		t.Fatalf("update persona: %v", err)
+	}
+	got := out.(map[string]any)["persona"].(*Persona)
+	if got.DefaultVoiceID != "voice_alpha" || got.DefaultAvatarID != "avatar_mira" {
+		t.Fatalf("defaults not stored: voice=%q avatar=%q", got.DefaultVoiceID, got.DefaultAvatarID)
+	}
+}
+
 func TestGenerationCacheKeyChangesWithItems(t *testing.T) {
 	settings := map[string]any{"aspect": "9:16"}
 	a := generationCacheKey(1, "image", "prompt", settings, []int64{1}, []int64{2})
@@ -131,6 +151,8 @@ func TestDefaultImageSourceRefsIncludesItemsAndHonorsLimit(t *testing.T) {
 		{ID: 1, StorageFileID: 10, Kind: "face", Active: true},
 		{ID: 2, StorageFileID: 11, Kind: "style", Active: true},
 		{ID: 3, StorageFileID: 12, Kind: "outfit", Active: true},
+		{ID: 4, StorageFileID: 13, Kind: "voice", Active: true},
+		{ID: 5, StorageFileID: 14, Kind: "avatar", Active: true},
 	}
 	items := []Item{{ID: 7, StorageFileIDs: []int64{20, 21}}}
 	got := defaultImageSourceRefs(refs, items, map[string]any{"model": "firered-image-edit"})

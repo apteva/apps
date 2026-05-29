@@ -54,11 +54,16 @@ export default function PersonaPanel({ projectId }) {
   const [storageQuery, setStorageQuery] = useState("");
   const [pickerTarget, setPickerTarget] = useState(null);
   const [outputFolderSuggestions, setOutputFolderSuggestions] = useState([]);
+  const [voiceOptions, setVoiceOptions] = useState([]);
+  const [avatarOptions, setAvatarOptions] = useState([]);
+  const [mediaIdentity, setMediaIdentity] = useState({ voice: "", avatar: "" });
 
   const qs = useMemo(() => `project_id=${encodeURIComponent(projectId || "")}`, [projectId]);
   const persona = bundle?.persona;
   const items = bundle?.items || [];
   const refs = bundle?.references || [];
+  const voiceRefs = refs.filter((r) => r.kind === "voice");
+  const avatarRefs = refs.filter((r) => r.kind === "avatar");
   const assets = bundle?.assets || [];
   const selectedItems = useMemo(
     () => items.filter((it) => generation.item_ids.includes(it.id)),
@@ -71,6 +76,13 @@ export default function PersonaPanel({ projectId }) {
     return mediaModels.filter((model) => modelSupportsImageEdit(model, mediaProvider));
   }, [mediaModels, mediaProvider, requiresImageEditModel]);
   const selectedModel = modelOptions.find((m) => m.id === generation.model);
+
+  useEffect(() => {
+    setMediaIdentity({
+      voice: persona?.default_voice_id || "",
+      avatar: persona?.default_avatar_id || "",
+    });
+  }, [persona?.id, persona?.default_voice_id, persona?.default_avatar_id]);
 
   const loadPersonas = useCallback(async () => {
     if (!projectId) return;
@@ -163,6 +175,29 @@ export default function PersonaPanel({ projectId }) {
       setGeneration((cur) => ({ ...cur, model: "" }));
     }
   }, [generation.asset_type, generation.model, modelOptions, requiresImageEditModel]);
+  useEffect(() => {
+    if (!projectId) return;
+    let cancelled = false;
+    fetch(`${MEDIA_API}/voices?kind=audio_tts`, { credentials: "same-origin" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled) setVoiceOptions(Array.isArray(data?.voices) ? data.voices : []);
+      })
+      .catch(() => {
+        if (!cancelled) setVoiceOptions([]);
+      });
+    fetch(`${MEDIA_API}/avatars`, { credentials: "same-origin" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled) setAvatarOptions(Array.isArray(data?.avatars) ? data.avatars : []);
+      })
+      .catch(() => {
+        if (!cancelled) setAvatarOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
 
   async function createPersona(e) {
     e.preventDefault();
@@ -256,6 +291,21 @@ export default function PersonaPanel({ projectId }) {
       });
       setGeneration((g) => ({ ...g, item_ids: g.item_ids.filter((id) => id !== itemRow.id) }));
       setStatus("Item removed");
+      loadBundle();
+    } catch (e) {
+      setStatus(e.message);
+    }
+  }
+
+  async function updatePersonaMediaIdentity(patch) {
+    if (!selectedId) return;
+    try {
+      await requestJSON(`${API}/personas/${selectedId}?${qs}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      setStatus("Media identity saved");
       loadBundle();
     } catch (e) {
       setStatus(e.message);
@@ -414,6 +464,64 @@ export default function PersonaPanel({ projectId }) {
               panel("Identity", h("div", { className: "text-sm text-text-muted whitespace-pre-wrap" },
                 persona.bio || persona.visual_style || "Add bio, audience, tone, and style through the tools or API."
               )),
+              panel("Media Identity", h("div", { className: "grid gap-4" },
+                h("div", { className: "grid gap-2" },
+                  h("label", { className: "text-xs uppercase text-text-dim" }, "Voice"),
+                  h("div", { className: "grid grid-cols-[1fr_76px] gap-2" },
+                    h(MediaIdentityChooser, {
+                      value: mediaIdentity.voice,
+                      options: voiceOptions,
+                      placeholder: "Voice id",
+                      title: "Default voice id for audio_tts generation",
+                      onChange: (voice) => setMediaIdentity((cur) => ({ ...cur, voice })),
+                    }),
+                    h("button", {
+                      type: "button",
+                      onClick: () => updatePersonaMediaIdentity({ default_voice_id: mediaIdentity.voice.trim() }),
+                      className: secondaryButtonClass(),
+                    }, "Save")
+                  ),
+                  voiceRefs.length > 0 && h("div", { className: "grid gap-2" },
+                    voiceRefs.map((r) => h(VoiceReferenceCard, {
+                      key: r.id,
+                      ref: r,
+                      onRemove: () => removeReference(r.id),
+                    }))
+                  )
+                ),
+                h("div", { className: "grid gap-2" },
+                  h("label", { className: "text-xs uppercase text-text-dim" }, "Avatar"),
+                  h("div", { className: "grid grid-cols-[1fr_76px] gap-2" },
+                    h(MediaIdentityChooser, {
+                      value: mediaIdentity.avatar,
+                      options: avatarOptions,
+                      placeholder: "Avatar id",
+                      title: "Default avatar id for avatar generation",
+                      onChange: (avatar) => setMediaIdentity((cur) => ({ ...cur, avatar })),
+                    }),
+                    h("button", {
+                      type: "button",
+                      onClick: () => updatePersonaMediaIdentity({ default_avatar_id: mediaIdentity.avatar.trim() }),
+                      className: secondaryButtonClass(),
+                    }, "Save")
+                  ),
+                  avatarRefs.length > 0 && h("div", { className: "grid gap-2" },
+                    avatarRefs.map((r) => h("div", { key: r.id, className: "grid grid-cols-[1fr_auto] gap-2 items-center" },
+                      h(StoragePreviewCard, {
+                        id: r.storage_file_id,
+                        title: r.label || "Avatar reference",
+                        meta: `avatar · storage:${r.storage_file_id}`,
+                      }),
+                      h("button", {
+                        type: "button",
+                        onClick: () => removeReference(r.id),
+                        className: dangerButtonClass(),
+                        title: "Unlink this avatar reference",
+                      }, "Remove")
+                    ))
+                  )
+                )
+              )),
               panel("References", h("div", null,
                 h("form", { onSubmit: addReference, className: "grid gap-2 mb-3" },
                   h("div", { className: "grid grid-cols-[1fr_96px] gap-2" },
@@ -422,7 +530,7 @@ export default function PersonaPanel({ projectId }) {
                   ),
                   h("div", { className: "grid grid-cols-[120px_1fr_76px] gap-2" },
                     h("select", { value: reference.kind, onChange: (e) => setReference({ ...reference, kind: e.target.value }), className: fieldClass() },
-                      ["face", "style", "outfit", "pose", "voice", "product", "location", "brand"].map((k) => h("option", { key: k, value: k }, k))
+                      ["face", "style", "outfit", "pose", "voice", "avatar", "product", "location", "brand"].map((k) => h("option", { key: k, value: k }, k))
                     ),
                     h("input", { value: reference.label, onChange: (e) => setReference({ ...reference, label: e.target.value }), placeholder: "Label", className: fieldClass() }),
                     h("button", { className: buttonClass() }, "Link")
@@ -650,7 +758,7 @@ function imageSourceOptions(refs, items) {
     return ap - bp || Number(a.id || 0) - Number(b.id || 0);
   });
   for (const ref of sortedRefs) {
-    if (ref.kind === "voice") continue;
+    if (ref.kind === "voice" || ref.kind === "avatar") continue;
     const id = Number(ref.storage_file_id);
     if (!id || seen.has(id)) continue;
     seen.add(id);
@@ -730,6 +838,56 @@ function ModelSelect({ models, provider, loading, editRequired, value, onChange 
   );
 }
 
+function MediaIdentityChooser({ value, options, placeholder, title, onChange }) {
+  const rows = normalizeCatalogOptions(options);
+  if (rows.length === 0) {
+    return h("input", {
+      value,
+      onChange: (e) => onChange(e.target.value),
+      placeholder,
+      className: fieldClass(),
+      title,
+    });
+  }
+  const hasCurrent = !value || rows.some((row) => row.value === value);
+  return h("select", {
+    value,
+    onChange: (e) => onChange(e.target.value),
+    className: fieldClass(),
+    title,
+  },
+    h("option", { value: "" }, "Provider default"),
+    !hasCurrent && h("option", { value }, `${value} (custom)`),
+    rows.map((row) => h("option", { key: row.value, value: row.value }, row.label))
+  );
+}
+
+function normalizeCatalogOptions(options) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of options || []) {
+    const value = catalogOptionValue(raw);
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push({ value, label: catalogOptionLabel(raw, value) });
+  }
+  return out;
+}
+
+function catalogOptionValue(raw) {
+  if (typeof raw === "string") return raw;
+  return String(raw?.id || raw?.voice_id || raw?.avatar_id || raw?.slug || "").trim();
+}
+
+function catalogOptionLabel(raw, value) {
+  if (typeof raw === "string") return raw;
+  const name = String(raw?.name || raw?.display_name || raw?.label || value);
+  const parts = [name];
+  const meta = [raw?.provider, raw?.language, raw?.gender, raw?.status].filter(Boolean).join(" · ");
+  if (meta) parts.push(meta);
+  return parts.join(" - ");
+}
+
 function input(label, value, onChange) {
   return h("input", {
     value,
@@ -775,6 +933,29 @@ function StoragePreviewCard({ id, title, meta }) {
       h("span", { className: "block text-sm text-text truncate" }, title || `storage:${id}`),
       h("span", { className: "block text-xs text-text-dim truncate" }, meta || `storage:${id}`)
     )
+  );
+}
+
+function VoiceReferenceCard({ ref, onRemove }) {
+  const id = Number(ref?.storage_file_id || 0);
+  if (!id || !Number.isFinite(id)) return null;
+  return h("div", { className: "border border-border rounded p-2 grid gap-2 min-w-0" },
+    h("div", { className: "flex items-center gap-2 min-w-0" },
+      h("span", { className: "text-sm text-text truncate min-w-0" }, ref.label || "Voice reference"),
+      h("span", { className: "text-xs text-text-dim shrink-0" }, `storage:${id}`),
+      h("button", {
+        type: "button",
+        onClick: onRemove,
+        className: `${dangerButtonClass()} ml-auto`,
+        title: "Unlink this voice reference",
+      }, "Remove")
+    ),
+    h("audio", {
+      src: `/api/apps/storage/files/${id}/content`,
+      controls: true,
+      preload: "metadata",
+      className: "w-full",
+    })
   );
 }
 
@@ -867,7 +1048,7 @@ function StoragePicker({ files, loading, error, query, target, onQuery, onSearch
   const title = target === "item" ? "Choose item reference file" : "Choose persona reference file";
   const hint = target === "item"
     ? "Pick packshots, product photos, logos, screen captures, or set references."
-    : "Pick face, style, outfit, voice, product, or location references.";
+    : "Pick face, style, outfit, voice, avatar, product, or location references.";
   return h("div", { className: "fixed inset-0 bg-black/60 flex items-center justify-center p-6", style: { zIndex: 9998 } },
     h("div", { className: "bg-bg border border-border rounded shadow-xl w-full max-w-4xl max-h-[84vh] flex flex-col" },
       h("header", { className: "px-4 py-3 border-b border-border flex items-center gap-3" },
