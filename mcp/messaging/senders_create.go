@@ -966,12 +966,18 @@ func (a *App) sendersCreateWhatsApp(ctx *sdk.AppCtx, pid, addr string, req sende
 
 	if doInbound {
 		webhookURL := publicURL + "/api/apps/messaging/webhooks/twilio-inbound?api_key=" + url.QueryEscape(os.Getenv("APTEVA_APP_TOKEN"))
+		statusWebhookURL := twilioWebhookURL(ctx, "/webhooks/twilio-status", pid)
+		webhook := map[string]any{
+			"callback_url":    webhookURL,
+			"callback_method": "POST",
+		}
+		if statusWebhookURL != "" {
+			webhook["status_callback_url"] = statusWebhookURL
+			webhook["status_callback_method"] = "POST"
+		}
 		updRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "update_whatsapp_sender", map[string]any{
 			"SenderSid": sender.SID,
-			"webhook": map[string]any{
-				"callback_url":    webhookURL,
-				"callback_method": "POST",
-			},
+			"webhook":   webhook,
 		})
 		if err != nil {
 			resp.Steps = append(resp.Steps, bootstrapStep{Step: "twilio_update_whatsapp_sender", OK: false, Error: err.Error()})
@@ -985,6 +991,10 @@ func (a *App) sendersCreateWhatsApp(ctx *sdk.AppCtx, pid, addr string, req sende
 		cfg := map[string]any{
 			"callback_url":    webhookURL,
 			"callback_method": "POST",
+		}
+		if statusWebhookURL != "" {
+			cfg["status_callback_url"] = statusWebhookURL
+			cfg["status_callback_method"] = "POST"
 		}
 		if b, err := json.Marshal(cfg); err == nil {
 			inboundCfg = string(b)

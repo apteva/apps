@@ -2796,6 +2796,12 @@ func TestSendersCreateWhatsApp_AdoptsApprovedSender(t *testing.T) {
 	if !strings.Contains(fmt.Sprint(webhook["callback_url"]), "/api/apps/messaging/webhooks/twilio-inbound") {
 		t.Errorf("callback_url=%v", webhook["callback_url"])
 	}
+	if webhook["status_callback_method"] != "POST" {
+		t.Errorf("status_callback_method=%v, want POST", webhook["status_callback_method"])
+	}
+	if !strings.Contains(fmt.Sprint(webhook["status_callback_url"]), "/api/apps/messaging/webhooks/twilio-status") {
+		t.Errorf("status_callback_url=%v", webhook["status_callback_url"])
+	}
 }
 
 // ─── v0.5 inbound: Twilio + STOP + verdicts ───────────────────────

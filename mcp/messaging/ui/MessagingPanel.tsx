@@ -1286,6 +1286,13 @@ function SendersView({
         {senderChannel !== "email" && providerOptionsError && (
           <div className="text-xs text-yellow-300">{providerOptionsError}</div>
         )}
+        {senderChannel !== "email" && !providerOptionsError && (
+          <div className="text-xs text-text-dim">
+            {senderChannel === "whatsapp"
+              ? "Inbound uses the Twilio WhatsApp sender callback URL; status events use the Messaging status webhook."
+              : "Inbound uses the Twilio phone SmsUrl; status events use the Messaging status webhook."}
+          </div>
+        )}
 
         {addressIsDomain && advanced && (
           <div className="ml-1 pl-3 border-l border-border space-y-2 text-sm">
@@ -1338,7 +1345,7 @@ function SendersView({
               <th className="text-left px-4 py-2">Channel</th>
               <th className="text-left px-4 py-2">Kind</th>
               <th className="text-left px-4 py-2">Verified</th>
-              <th className="text-left px-4 py-2">DKIM / Inbound</th>
+              <th className="text-left px-4 py-2">Setup</th>
               <th></th>
             </tr>
           </thead>
@@ -1359,10 +1366,8 @@ function SendersView({
                 <td className="px-4 py-2 text-text-dim">{s.channel}</td>
                 <td className="px-4 py-2 text-text-dim">{s.kind}</td>
                 <td className="px-4 py-2"><StatusPill status={s.verified ? "verified" : "pending"} /></td>
-                <td className="px-4 py-2 text-text-dim text-xs space-x-1">
-                  {s.dkim_status && <span>DKIM: {s.dkim_status}</span>}
-                  {s.inbound_bootstrapped && <span className="text-green-400">· inbound wired</span>}
-                  {!s.dkim_status && !s.inbound_bootstrapped && <span>—</span>}
+                <td className="px-4 py-2 text-text-dim text-xs">
+                  <SenderSetupCell sender={s} />
                 </td>
                 <td className="px-4 py-2 text-right space-x-3">
                   {!s.is_default && (
@@ -1454,6 +1459,40 @@ function DisplayNameCell({ value, onSave, placeholder }: {
       placeholder={placeholder}
       className="w-full bg-bg-input border border-accent/50 rounded px-1 py-0.5 text-sm"
     />
+  );
+}
+
+function SenderSetupCell({ sender }: { sender: SenderRow }) {
+  const parts: React.ReactNode[] = [];
+  if (sender.channel === "email") {
+    if (sender.dkim_status) {
+      parts.push(<span key="dkim">DKIM: {sender.dkim_status}</span>);
+    }
+    if (sender.inbound_bootstrapped) {
+      parts.push(<span key="inbound" className="text-green-400">inbound wired</span>);
+    }
+  } else {
+    parts.push(<span key="provider">{sender.provider || "twilio"}</span>);
+    if (sender.inbound_bootstrapped) {
+      parts.push(
+        <span key="inbound" className="text-green-400">
+          {sender.channel === "whatsapp" ? "callback wired" : "SmsUrl wired"}
+        </span>,
+      );
+    } else {
+      parts.push(<span key="inbound" className="text-yellow-400">inbound not wired</span>);
+    }
+  }
+  if (parts.length === 0) return <span>—</span>;
+  return (
+    <div className="flex flex-wrap gap-x-2 gap-y-1">
+      {parts.map((part, i) => (
+        <span key={i} className="inline-flex items-center gap-1">
+          {i > 0 && <span className="text-text-dim">·</span>}
+          {part}
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -1846,7 +1885,7 @@ interface SendersCreateInboundInfo {
 
 interface SendersCreateResp {
   address: string;
-  kind: "email" | "domain";
+  kind: "email" | "domain" | "phone";
   pending: boolean;
   next_step?: string;
   dkim_tokens?: string[];
@@ -1879,11 +1918,20 @@ function SendersCreateResult({ result, onDismiss }: { result: SendersCreateResp;
 
       {result.inbound && (result.inbound.bootstrapped || result.inbound.skipped_reason) && (
         <div className="rounded border border-border p-2 text-xs space-y-1">
-          <div className="uppercase tracking-wide text-text-dim text-[10px]">Inbound</div>
+          <div className="uppercase tracking-wide text-text-dim text-[10px]">
+            {result.kind === "phone" ? "Twilio inbound" : "Email inbound"}
+          </div>
           {result.inbound.bootstrapped ? (
             <>
-              <div>S3 bucket: <span className="font-mono">{result.inbound.bucket_name}</span></div>
-              <div>SNS topic: <span className="font-mono break-all">{result.inbound.topic_arn}</span></div>
+              {result.kind === "phone" && (
+                <div className="text-green-400">Webhook wired</div>
+              )}
+              {result.inbound.bucket_name && (
+                <div>S3 bucket: <span className="font-mono">{result.inbound.bucket_name}</span></div>
+              )}
+              {result.inbound.topic_arn && (
+                <div>SNS topic: <span className="font-mono break-all">{result.inbound.topic_arn}</span></div>
+              )}
               {result.inbound.webhook_url && (
                 <div>Webhook: <span className="font-mono break-all">{result.inbound.webhook_url}</span></div>
               )}
