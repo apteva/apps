@@ -938,6 +938,9 @@ func TestResolveImageCapability(t *testing.T) {
 	if got := resolveImageCapability(map[string]any{"source_image": "storage:1"}); got != "image.edit" {
 		t.Errorf("source_image set → got %q, want image.edit", got)
 	}
+	if got := resolveImageCapability(map[string]any{"source_images": []any{"storage:1", "storage:2"}}); got != "image.edit" {
+		t.Errorf("source_images set → got %q, want image.edit", got)
+	}
 	if got := resolveImageCapability(map[string]any{"source_image": "   "}); got != "image.generate" {
 		t.Errorf("whitespace-only source_image → got %q, want image.generate (treated as empty)", got)
 	}
@@ -967,6 +970,35 @@ func TestBuildVeniceImageEditArgs(t *testing.T) {
 	}
 	if got["safe_mode"] != false {
 		t.Errorf("safe_mode not passed through: %+v", got["safe_mode"])
+	}
+}
+
+func TestBuildVeniceImageMultiEditArgs(t *testing.T) {
+	args := map[string]any{
+		"prompt":        "blend the two images",
+		"source_images": []string{"AAAA", "BBBB"},
+		"model":         "gpt-image-2-edit",
+		"options": map[string]any{
+			"aspect_ratio":  "16:9",
+			"resolution":    "2K",
+			"output_format": "webp",
+			"quality":       "medium",
+			"safe_mode":     false,
+		},
+	}
+	got, err := buildImageArgs(args, "venice-ai", "image.edit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["modelId"] != "gpt-image-2-edit" || got["prompt"] != "blend the two images" {
+		t.Errorf("base fields: %+v", got)
+	}
+	images, ok := got["images"].([]string)
+	if !ok || len(images) != 2 || images[0] != "AAAA" || images[1] != "BBBB" {
+		t.Fatalf("images = %#v", got["images"])
+	}
+	if got["aspect_ratio"] != "16:9" || got["resolution"] != "2K" || got["output_format"] != "webp" || got["quality"] != "medium" {
+		t.Errorf("options not passed through: %+v", got)
 	}
 }
 
@@ -1149,6 +1181,85 @@ func TestToolMediaGenerate_Image_EditPath_VeniceStorageSource(t *testing.T) {
 	}
 	if !strings.Contains(extraJSON, `"capability":"image.edit"`) {
 		t.Errorf("extra_json missing capability marker: %s", extraJSON)
+	}
+}
+
+func TestToolMediaGenerate_Image_MultiEditPath_VeniceStorageSources(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	pf.perAppCallResults = map[string]json.RawMessage{
+		"storage:files_get_content": json.RawMessage(
+			`{"result":{"content":[{"type":"text","text":"{\"content_base64\":\"U09VUkNF\"}"}]}}`,
+		),
+	}
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"_binary":true,"base64":"RURJVA==","mimeType":"image/png","size":4}`),
+	}
+	pf.identity.Bindings = map[string]any{"image_provider": float64(42)}
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":          "image",
+		"prompt":        "combine the outfit and face",
+		"source_images": []any{"storage:1001", "https://example.com/outfit.png"},
+		"model":         "firered-image-edit",
+	})
+	if err != nil {
+		t.Fatalf("toolMediaGenerate: %v", err)
+	}
+	res := out.(map[string]any)
+	if res["isError"] == true {
+		t.Fatalf("unexpected error result: %+v", res)
+	}
+	var call executeCall
+	for _, c := range pf.executeCalls {
+		if c.Tool == "multi_edit_image" {
+			call = c
+			break
+		}
+	}
+	if call.Tool == "" {
+		t.Fatalf("expected multi_edit_image call, got %+v", pf.executeCalls)
+	}
+	images, ok := call.Input["images"].([]string)
+	if !ok || len(images) != 2 || images[0] != "U09VUkNF" || images[1] != "https://example.com/outfit.png" {
+		t.Fatalf("images not passed through: %#v", call.Input["images"])
+	}
+	if call.Input["image"] != nil {
+		t.Fatalf("multi-edit payload should not include single image field: %+v", call.Input)
+	}
+	var extraJSON string
+	if err := ctx.AppDB().QueryRow(`SELECT extra_json FROM generations LIMIT 1`).Scan(&extraJSON); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(extraJSON, "source_image_refs") ||
+		!strings.Contains(extraJSON, "storage:1001") ||
+		!strings.Contains(extraJSON, "https://example.com/outfit.png") {
+		t.Errorf("extra_json missing multi-source lineage: %s", extraJSON)
+	}
+}
+
+func TestToolMediaGenerate_Image_MultiEditRejectsTooManySources(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":          "image",
+		"prompt":        "combine",
+		"source_images": []any{"a", "b", "c", "d"},
+		"model":         "firered-image-edit",
+	})
+	if err != nil {
+		t.Fatalf("toolMediaGenerate: %v", err)
+	}
+	res := out.(map[string]any)
+	if res["isError"] != true {
+		t.Fatalf("expected isError, got %+v", res)
+	}
+	if len(pf.executeCalls) != 0 {
+		t.Fatalf("provider should not be called when source limit is exceeded")
 	}
 }
 

@@ -292,13 +292,21 @@ func normalizeImageResponse(slug, capability string, raw json.RawMessage) ([]gen
 	return nil, "", "", fmt.Errorf("unsupported provider slug: %q", slug)
 }
 
-// buildVeniceImageEditArgs assembles Venice's POST /image/edit body.
-// The dispatcher has already resolved args["source_image"] into either
-// a URL or a base64 string (storage:N handles get fetched upstream).
+// buildVeniceImageEditArgs assembles Venice's edit request. With one source
+// image it targets POST /image/edit via the edit_image tool. With multiple
+// sources it targets POST /image/multi-edit via the multi_edit_image tool.
+// The dispatcher has already resolved storage:N handles into base64.
 func buildVeniceImageEditArgs(args map[string]any) map[string]any {
 	model := strArg(args, "model", "firered-image-edit")
 	prompt := strArg(args, "prompt", "")
+	sources := resolvedSourceImages(args)
+	if len(sources) > 1 {
+		return buildVeniceImageMultiEditArgs(args, model, prompt, sources)
+	}
 	source := strArg(args, "source_image", "")
+	if source == "" && len(sources) == 1 {
+		source = sources[0]
+	}
 
 	out := map[string]any{
 		"model":  model,
@@ -320,6 +328,42 @@ func buildVeniceImageEditArgs(args map[string]any) map[string]any {
 		}
 	}
 	return out
+}
+
+func buildVeniceImageMultiEditArgs(args map[string]any, model, prompt string, sources []string) map[string]any {
+	out := map[string]any{
+		"modelId":   model,
+		"prompt":    prompt,
+		"images":    sources,
+		"safe_mode": false,
+	}
+	if opts, ok := args["options"].(map[string]any); ok {
+		passThrough := []string{
+			"aspect_ratio", "resolution", "output_format", "quality", "safe_mode",
+		}
+		for _, k := range passThrough {
+			if v, exists := opts[k]; exists {
+				out[k] = v
+			}
+		}
+	}
+	return out
+}
+
+func resolvedSourceImages(args map[string]any) []string {
+	switch v := args["source_images"].(type) {
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, raw := range v {
+			if s, ok := raw.(string); ok && strings.TrimSpace(s) != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // normalizeImageEditResponse parses the binary-envelope shape the

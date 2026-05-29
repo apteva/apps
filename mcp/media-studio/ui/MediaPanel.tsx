@@ -113,6 +113,8 @@ interface LiveModel {
   default_resolution?: string;
   durations?: string[];
   supports_image_to_video?: boolean;
+  supports_image_edit?: boolean;
+  max_source_images?: number;
   audio_configurable?: boolean;
   steps_default?: number;
   steps_max?: number;
@@ -152,6 +154,11 @@ interface VoiceEntry {
   language?: string;
   gender?: string;
   preview?: string;
+}
+
+interface SourceImageRef {
+  value: string;
+  label: string;
 }
 
 const API = "/api/apps/media-studio";
@@ -215,6 +222,13 @@ const EDIT_MODELS = [
   "gpt-image-2-edit",
 ] as const;
 type EditModel = typeof EDIT_MODELS[number];
+const EDIT_MODEL_SOURCE_LIMITS: Record<EditModel, number> = {
+  "firered-image-edit": 3,
+  "qwen-edit": 3,
+  "grok-imagine-edit": 3,
+  "flux-2-max-edit": 3,
+  "gpt-image-2-edit": 3,
+};
 
 // Small inline SVG icons — no emoji, no Tailwind color classes inside
 // the SVG (dashboard's JIT doesn't scan apps/mcp/*/ui/, so color
@@ -305,12 +319,12 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   // Voices — HeyGen needs an explicit voice_id (Tavus bakes voice into
   // the replica, so this stays empty there). Reuses the `voice` state.
   const [voices, setVoices] = useState<VoiceEntry[]>([]);
-  // Reference-image (edit mode) state. When sourceImage is non-empty,
-  // media_generate routes through image.edit instead of image.generate.
-  const [sourceImage, setSourceImage] = useState("");
-  const [sourceImageLabel, setSourceImageLabel] = useState("");
+  // Reference-image state. When one or more source images are present,
+  // image generation routes through image.edit. Models expose a max source
+  // image count; the panel enforces that before submit.
+  const [sourceImages, setSourceImages] = useState<SourceImageRef[]>([]);
   const [editModel, setEditModel] = useState<EditModel>("firered-image-edit");
-  const isEditMode = activeKind === "image" && sourceImage.trim() !== "";
+  const isEditMode = activeKind === "image" && sourceImages.length > 0;
   // Live-loaded model list for the bound provider, refreshed on tab
   // switch and binding change. Falls back to the hardcoded
   // OpenAI-flavour list (IMAGE_MODELS) when the fetch fails so the
@@ -541,6 +555,23 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   // hint for the former (Venice's queue accepts image_url on most).
   const showVideoRefInput =
     activeKind === "video" && !!currentModel?.supports_image_to_video;
+  const editSourceLimit =
+    activeKind === "image"
+      ? currentModel?.max_source_images || EDIT_MODEL_SOURCE_LIMITS[editModel] || 1
+      : 1;
+  const referenceInputMax = activeKind === "image" ? editSourceLimit : 1;
+
+  const addSourceImage = (value: string, label: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    setSourceImages((cur) => {
+      const withoutExisting = cur.filter((x) => x.value !== trimmed);
+      return [...withoutExisting, { value: trimmed, label }].slice(0, referenceInputMax);
+    });
+  };
+  const removeSourceImage = (index: number) => {
+    setSourceImages((cur) => cur.filter((_, i) => i !== index));
+  };
 
   // Auto-snap aspect / duration / resolution when the user picks a
   // different model whose constraint set doesn't include the current
@@ -574,8 +605,16 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       };
       if (activeKind === "image") {
         if (isEditMode) {
+          if (sourceImages.length > editSourceLimit) {
+            setStatus(`Error: ${editModel} supports at most ${editSourceLimit} source image${editSourceLimit === 1 ? "" : "s"}.`);
+            return;
+          }
           body.model = editModel;
-          body.source_image = sourceImage;
+          if (sourceImages.length === 1) {
+            body.source_image = sourceImages[0].value;
+          } else {
+            body.source_images = sourceImages.map((x) => x.value);
+          }
           body.options = { output_format: imageFormat, safe_mode: safeMode };
         } else {
           body.model = imageModel;
@@ -591,8 +630,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         body.aspect = aspect;
         // Image-to-video: pass the reference image through the same
         // source_image arg the dispatcher uses for image.edit.
-        if (showVideoRefInput && sourceImage) {
-          body.source_image = sourceImage;
+        if (showVideoRefInput && sourceImages[0]?.value) {
+          body.source_image = sourceImages[0].value;
         }
       } else if (activeKind === "audio_tts") {
         if (audioModel) body.model = audioModel;
@@ -709,16 +748,11 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         <div className="flex-1 flex flex-col p-6 gap-4 min-w-0">
           {(activeKind === "image" || showVideoRefInput) && (
             <ReferenceImageInput
-              sourceImage={sourceImage}
-              sourceImageLabel={sourceImageLabel}
-              onSet={(value, label) => {
-                setSourceImage(value);
-                setSourceImageLabel(label);
-              }}
-              onClear={() => {
-                setSourceImage("");
-                setSourceImageLabel("");
-              }}
+              sources={showVideoRefInput ? sourceImages.slice(0, 1) : sourceImages}
+              maxSources={referenceInputMax}
+              onAdd={addSourceImage}
+              onRemove={removeSourceImage}
+              onClear={() => setSourceImages([])}
               hint={
                 showVideoRefInput
                   ? "Source image for the image-to-video model (required)"
@@ -747,6 +781,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             setImageFormat={setImageFormat}
             editModel={editModel}
             setEditModel={setEditModel}
+            editSourceLimit={editSourceLimit}
             videoModel={videoModel}
             setVideoModel={setVideoModel}
             audioModel={audioModel}
@@ -802,8 +837,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
               selected.kind === "image" && selected.storage_ids.length > 0
                 ? () => {
                     const id = selected.storage_ids[0];
-                    setSourceImage(`storage:${id}`);
-                    setSourceImageLabel(`Storage #${id}`);
+                    addSourceImage(`storage:${id}`, `Storage #${id}`);
                     setSelected(null);
                     setTab("image");
                   }
@@ -821,8 +855,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             lightbox.kind === "image" && lightbox.storage_ids.length > 0
               ? () => {
                   const id = lightbox.storage_ids[0];
-                  setSourceImage(`storage:${id}`);
-                  setSourceImageLabel(`Storage #${id}`);
+                  addSourceImage(`storage:${id}`, `Storage #${id}`);
                   setLightbox(null);
                   setTab("image");
                 }
@@ -914,6 +947,7 @@ interface ComposerProps {
   setImageFormat: (v: string) => void;
   editModel: EditModel;
   setEditModel: (v: EditModel) => void;
+  editSourceLimit: number;
   videoModel: string;
   setVideoModel: (v: string) => void;
   audioModel: string;
@@ -972,6 +1006,7 @@ function Composer(p: ComposerProps) {
           setModel={p.setEditModel}
           format={p.imageFormat}
           setFormat={p.setImageFormat}
+          maxSources={p.editSourceLimit}
         />
       )}
       {p.kind === "image" && !p.isEditMode && (
@@ -1169,11 +1204,13 @@ function EditOptions({
   setModel,
   format,
   setFormat,
+  maxSources,
 }: {
   model: EditModel;
   setModel: (v: EditModel) => void;
   format: string;
   setFormat: (v: string) => void;
+  maxSources: number;
 }) {
   return (
     <>
@@ -1190,6 +1227,9 @@ function EditOptions({
             </option>
           ))}
         </select>
+        <div className="text-text-dim mt-0.5" style={{ fontSize: 10 }}>
+          max {maxSources} reference{maxSources === 1 ? "" : "s"}
+        </div>
       </div>
       <div>
         <label className="text-text-muted text-xs block">Format</label>
@@ -1207,24 +1247,27 @@ function EditOptions({
   );
 }
 
-// ReferenceImageInput — accepts upload (file → base64), URL paste, or
-// a "storage:N" handle (set from DetailAside's "Use as reference"). When
-// non-empty, the composer flips to edit mode (image.edit capability).
+// ReferenceImageInput — accepts uploads (file → base64), URL paste, or
+// "storage:N" handles (set from DetailAside's "Use as reference"). When
+// non-empty, image generation flips to edit mode (image.edit capability).
 function ReferenceImageInput({
-  sourceImage,
-  sourceImageLabel,
-  onSet,
+  sources,
+  maxSources,
+  onAdd,
+  onRemove,
   onClear,
   hint,
 }: {
-  sourceImage: string;
-  sourceImageLabel: string;
-  onSet: (value: string, label: string) => void;
+  sources: SourceImageRef[];
+  maxSources: number;
+  onAdd: (value: string, label: string) => void;
+  onRemove: (index: number) => void;
   onClear: () => void;
   hint?: string;
 }) {
   const [urlInput, setUrlInput] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const atLimit = sources.length >= maxSources;
 
   const handleFile = (file: File) => {
     const reader = new FileReader();
@@ -1232,107 +1275,123 @@ function ReferenceImageInput({
       const result = String(reader.result || "");
       // FileReader.readAsDataURL gives us "data:image/png;base64,..."; strip the prefix.
       const b64 = result.includes(",") ? result.split(",", 2)[1] : result;
-      onSet(b64, `Upload (${file.name})`);
+      onAdd(b64, `Upload (${file.name})`);
     };
     reader.readAsDataURL(file);
   };
 
   const handleDrop = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
-    const file = e.dataTransfer.files?.[0];
-    if (file && file.type.startsWith("image/")) handleFile(file);
+    const files = Array.from(e.dataTransfer.files || [])
+      .filter((file) => file.type.startsWith("image/"))
+      .slice(0, Math.max(0, maxSources - sources.length));
+    files.forEach(handleFile);
   };
-
-  if (sourceImage) {
-    // Compute a preview src from whatever shape sourceImage takes.
-    const previewSrc = sourceImagePreviewSrc(sourceImage);
-    return (
-      <div className="flex items-center gap-3 p-2 rounded border border-accent bg-bg-card">
-        {previewSrc ? (
-          <img
-            src={previewSrc}
-            alt=""
-            style={{
-              width: 56,
-              height: 56,
-              objectFit: "cover",
-              borderRadius: 4,
-              flexShrink: 0,
-            }}
-          />
-        ) : (
-          <div
-            style={{
-              width: 56,
-              height: 56,
-              borderRadius: 4,
-              background: "var(--apteva-bg-input, #222)",
-              flexShrink: 0,
-            }}
-            className="flex items-center justify-center text-text-dim text-xs"
-          >
-            ref
-          </div>
-        )}
-        <div className="flex-1 min-w-0">
-          <div className="text-xs text-text-muted">Reference image</div>
-          <div className="text-sm text-text font-medium truncate" title={sourceImageLabel}>
-            {sourceImageLabel || "(set)"}
-          </div>
-        </div>
-        <button
-          onClick={onClear}
-          className="text-text-muted hover:text-text text-sm px-2 py-0.5 border border-border rounded"
-        >
-          Clear
-        </button>
-      </div>
-    );
-  }
 
   return (
     <div
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
-      className="flex items-center gap-3 p-2 rounded border border-dashed border-border bg-bg-card"
+      className={
+        "flex flex-col gap-2 p-2 rounded bg-bg-card " +
+        (sources.length > 0 ? "border border-accent" : "border border-dashed border-border")
+      }
     >
-      <span className="text-text-muted text-xs">
-        {hint || "Reference image (optional):"}
-      </span>
-      <button
-        onClick={() => fileInputRef.current?.click()}
-        className="text-xs px-2 py-1 border border-border rounded text-text hover:border-accent"
-      >
-        Upload
-      </button>
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*"
-        onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (file) handleFile(file);
-          e.target.value = "";
-        }}
-        style={{ display: "none" }}
-      />
-      <span className="text-text-dim text-xs">or paste URL:</span>
-      <input
-        type="text"
-        value={urlInput}
-        onChange={(e) => setUrlInput(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && urlInput.trim()) {
-            const trimmed = urlInput.trim();
-            onSet(trimmed, trimmed.length > 40 ? trimmed.slice(0, 37) + "…" : trimmed);
-            setUrlInput("");
-          }
-        }}
-        placeholder="https://…"
-        className="flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm"
-        style={{ minWidth: 180 }}
-      />
-      <span className="text-text-dim text-xs">— or pick from history (click a generation → "Use as reference")</span>
+      {sources.length > 0 && (
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {sources.map((src, index) => {
+            const previewSrc = sourceImagePreviewSrc(src.value);
+            return (
+              <div
+                key={`${src.value}-${index}`}
+                className="flex items-center gap-2 border border-border rounded p-1.5 bg-bg"
+                style={{ minWidth: 180, maxWidth: 240 }}
+              >
+                {previewSrc ? (
+                  <img
+                    src={previewSrc}
+                    alt=""
+                    style={{ width: 44, height: 44, objectFit: "cover", borderRadius: 4, flexShrink: 0 }}
+                  />
+                ) : (
+                  <div
+                    style={{ width: 44, height: 44, borderRadius: 4, background: "var(--apteva-bg-input, #222)", flexShrink: 0 }}
+                    className="flex items-center justify-center text-text-dim text-xs"
+                  >
+                    ref
+                  </div>
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="text-text-dim" style={{ fontSize: 10 }}>
+                    Reference {index + 1}
+                  </div>
+                  <div className="text-xs text-text truncate" title={src.label}>
+                    {src.label || "(set)"}
+                  </div>
+                </div>
+                <button
+                  onClick={() => onRemove(index)}
+                  className="text-text-muted hover:text-text text-xs px-1.5 py-0.5 border border-border rounded"
+                  title="Remove reference"
+                >
+                  x
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div className="flex items-center gap-3 flex-wrap">
+        <span className="text-text-muted text-xs">
+          {hint || "Reference images"}
+          <span className="text-text-dim"> · {sources.length}/{maxSources}</span>
+        </span>
+        <button
+          disabled={atLimit}
+          onClick={() => fileInputRef.current?.click()}
+          className="text-xs px-2 py-1 border border-border rounded text-text hover:border-accent disabled:opacity-50"
+        >
+          Upload
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          onChange={(e) => {
+            const files = Array.from(e.target.files || []).slice(0, Math.max(0, maxSources - sources.length));
+            files.forEach(handleFile);
+            e.target.value = "";
+          }}
+          style={{ display: "none" }}
+        />
+        <span className="text-text-dim text-xs">or paste URL:</span>
+        <input
+          type="text"
+          value={urlInput}
+          disabled={atLimit}
+          onChange={(e) => setUrlInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && urlInput.trim() && !atLimit) {
+              const trimmed = urlInput.trim();
+              onAdd(trimmed, trimmed.length > 40 ? trimmed.slice(0, 37) + "..." : trimmed);
+              setUrlInput("");
+            }
+          }}
+          placeholder={atLimit ? "reference limit reached" : "https://..."}
+          className="flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
+          style={{ minWidth: 180 }}
+        />
+        {sources.length > 0 && (
+          <button
+            onClick={onClear}
+            className="text-text-muted hover:text-text text-xs px-2 py-1 border border-border rounded"
+          >
+            Clear
+          </button>
+        )}
+        <span className="text-text-dim text-xs">pick from history with Use as reference</span>
+      </div>
     </div>
   );
 }

@@ -2,13 +2,13 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.2
+version: 0.10.3
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs powers audio TTS, sound effects, and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references. v0.10.2 fixes OpenAI Codex image generation by sending
-  the required Responses instructions alongside the image prompt.
+  references. v0.10.3 adds provider-neutral source_images support for
+  multi-reference image editing and enforces model source-image limits.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media-studio
@@ -88,7 +88,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: media_generate, description: "Generate media (image / video / audio / music / avatar). Args: kind (required: image|video|audio_tts|audio_sfx|music|avatar), prompt (required — for avatar this is the spoken script), model?, size?, duration?, voice?, aspect?, avatar? (replica/avatar id, avatar kind), n?, options?, cache_key?, cache_policy? ('reuse'|'refresh'). Video + avatar are async (queued; delivered via media.generated). Returns thumbnail + storage URL when storage is bound, else inline (small media) or expiring upstream URL." }
+    - { name: media_generate, description: "Generate media (image / video / audio / music / avatar). Args: kind (required: image|video|audio_tts|audio_sfx|music|avatar), prompt (required — for avatar this is the spoken script), model?, size?, duration?, voice?, aspect?, avatar? (replica/avatar id, avatar kind), source_image?, source_images?, n?, options?, cache_key?, cache_policy? ('reuse'|'refresh'). Video + avatar are async (queued; delivered via media.generated). Returns thumbnail + storage URL when storage is bound, else inline (small media) or expiring upstream URL." }
     - { name: media_history,  description: "List recent generations for this project. Args: kind?, limit?, since?." }
     - { name: media_get,      description: "Fetch one generation for this project. Args: id." }
   ui_panels:

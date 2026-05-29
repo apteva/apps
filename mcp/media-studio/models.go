@@ -34,6 +34,8 @@ type modelEntry struct {
 	DefaultResolution    string   `json:"default_resolution,omitempty"`
 	Durations            []string `json:"durations,omitempty"`
 	SupportsImageToVideo bool     `json:"supports_image_to_video,omitempty"`
+	SupportsImageEdit    bool     `json:"supports_image_edit,omitempty"`
+	MaxSourceImages      int      `json:"max_source_images,omitempty"`
 	AudioConfigurable    bool     `json:"audio_configurable,omitempty"`
 	StepsDefault         int      `json:"steps_default,omitempty"`
 	StepsMax             int      `json:"steps_max,omitempty"`
@@ -378,6 +380,7 @@ func buildModelEntryFromVeniceSpec(id string, raw json.RawMessage) modelEntry {
 	}
 
 	supportsImg2Vid := c.ModelType == "image-to-video"
+	supportsEdit := isVeniceEditModel(id)
 
 	return modelEntry{
 		ID:                   id,
@@ -389,12 +392,25 @@ func buildModelEntryFromVeniceSpec(id string, raw json.RawMessage) modelEntry {
 		DefaultResolution:    c.DefaultResolution,
 		Durations:            c.Durations,
 		SupportsImageToVideo: supportsImg2Vid,
+		SupportsImageEdit:    supportsEdit,
+		MaxSourceImages:      veniceMaxSourceImages(id),
 		AudioConfigurable:    c.AudioConfigurable,
 		StepsDefault:         c.Steps.Default,
 		StepsMax:             c.Steps.Max,
 		PromptCharLimit:      c.PromptCharLimit,
 		PriceUSD:             price,
 	}
+}
+
+func isVeniceEditModel(id string) bool {
+	return strings.HasSuffix(strings.ToLower(id), "-edit")
+}
+
+func veniceMaxSourceImages(id string) int {
+	if isVeniceEditModel(id) {
+		return 3
+	}
+	return 0
 }
 
 // ensureVeniceSpecLoaded triggers a sync fetch+parse of Venice's

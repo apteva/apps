@@ -180,7 +180,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Args: kind (required: image|video|audio_tts|audio_sfx|music|avatar), prompt (required — " +
 				"for avatar this is the spoken script), model?, size? (image), duration? (video/audio/music, seconds), " +
 				"voice? (audio_tts / avatar voice override), aspect? (video), avatar? (replica/avatar id, avatar kind), " +
-				"n?, options? (provider-specific extras). Video + avatar are async (queued; delivered via the " +
+				"source_image? or source_images? (image edit / image-to-video references), n?, options? (provider-specific extras). Video + avatar are async (queued; delivered via the " +
 				"media.generated event). Returns MCP content blocks: image (thumbnail base64 for image kind only " +
 				"when no storage), text (summary), resource (fetchable URL per storage_id).",
 			InputSchema: schemaObject(map[string]any{
@@ -199,7 +199,16 @@ func (a *App) MCPTools() []sdk.Tool {
 				"voice":    map[string]any{"type": "string", "description": "Voice id (audio_tts; avatar voice override on HeyGen)."},
 				"aspect":   map[string]any{"type": "string", "description": "Aspect ratio (video only). e.g. 16:9."},
 				"avatar":   map[string]any{"type": "string", "description": "Replica/avatar id (avatar kind). From the /avatars list or the provider."},
-				"n":        map[string]any{"type": "integer", "default": 1, "minimum": 1, "maximum": 10},
+				"source_image": map[string]any{
+					"type":        "string",
+					"description": "Single source image reference for image.edit or image-to-video. Accepts storage:N, URL, or base64. Kept for backward compatibility.",
+				},
+				"source_images": map[string]any{
+					"type":        "array",
+					"description": "Multiple source image references for image.edit. Accepts storage:N, URL, or base64. Media Studio validates the selected provider/model limit before calling the provider.",
+					"items":       map[string]any{"type": "string"},
+				},
+				"n": map[string]any{"type": "integer", "default": 1, "minimum": 1, "maximum": 10},
 				"cache_key": map[string]any{
 					"type":        "string",
 					"description": "Stable caller-provided key. When present, cache_policy=reuse returns an existing completed generation instead of regenerating.",

@@ -97,10 +97,10 @@ func constCap(name string) func(map[string]any) string {
 	return func(map[string]any) string { return name }
 }
 
-// resolveImageCapability picks image.edit when the caller supplied a
-// source_image (any of "storage:N", URL, base64); image.generate otherwise.
+// resolveImageCapability picks image.edit when the caller supplied one or
+// more source images (source_image or source_images); image.generate otherwise.
 func resolveImageCapability(args map[string]any) string {
-	if v, ok := args["source_image"].(string); ok && strings.TrimSpace(v) != "" {
+	if len(sourceImageRefs(args)) > 0 {
 		return "image.edit"
 	}
 	return "image.generate"
@@ -200,19 +200,31 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return mcpError("bound " + h.Role + " (" + bound.AppSlug + ") doesn't support " + capability), nil
 	}
 
-	// Source-image — resolve "storage:N" / URL / base64 into the
-	// bytes-or-URL the per-provider builder will pass through.
-	// Used by both image.edit (Venice's /image/edit `image`) and
-	// video.generate image-to-video (Venice's `image_url`).
-	// Original ref preserved under _source_image_ref so the history
-	// row (and MCP _meta) can show "edit of #1234".
-	if orig := strArg(args, "source_image", ""); orig != "" {
-		resolved, err := resolveSourceImage(ctx, orig)
-		if err != nil {
-			return mcpError("source_image: " + err.Error()), nil
+	// Source images — resolve "storage:N" / URL / base64 into the
+	// bytes-or-URL values the per-provider builder will pass through.
+	// Used by image.edit (single-image /image/edit and Venice multi-edit)
+	// and video.generate image-to-video. Original refs are preserved for
+	// history and cache lineage.
+	if refs := sourceImageRefs(args); len(refs) > 0 {
+		maxRefs := maxSourceImagesFor(bound.AppSlug, capability, strArg(args, "model", ""))
+		if maxRefs > 0 && len(refs) > maxRefs {
+			return mcpError("model supports at most " + strconv.Itoa(maxRefs) + " source image(s), got " + strconv.Itoa(len(refs))), nil
 		}
-		args["_source_image_ref"] = orig
-		args["source_image"] = resolved
+		resolved := make([]string, 0, len(refs))
+		for _, orig := range refs {
+			one, err := resolveSourceImage(ctx, orig)
+			if err != nil {
+				return mcpError("source_images: " + err.Error()), nil
+			}
+			resolved = append(resolved, one)
+		}
+		args["_source_image_refs"] = refs
+		args["source_images"] = resolved
+		args["_source_image_ref"] = refs[0]
+		args["source_image"] = resolved[0]
+		if kind == KindImage && capability == "image.edit" && bound.AppSlug == "venice-ai" && len(resolved) > 1 {
+			tool = "multi_edit_image"
+		}
 	}
 
 	if kind == KindAvatar && bound.AppSlug == "heygen" {
@@ -484,11 +496,18 @@ func encodeExtras(kind string, args map[string]any) string {
 	if opts, ok := args["options"].(map[string]any); ok && len(opts) > 0 {
 		extras["options"] = opts
 	}
-	// Edit-flow lineage: the original source_image reference (e.g.
-	// "storage:1234") + the capability so history can render
-	// "edit of #1234" without re-deriving from the resolved bytes.
-	if ref, ok := args["_source_image_ref"].(string); ok && ref != "" {
+	// Edit-flow lineage: the original source image references (e.g.
+	// "storage:1234") + the capability so history can render edit
+	// provenance without re-deriving from the resolved bytes.
+	if refs, ok := args["_source_image_refs"].([]string); ok && len(refs) > 0 {
+		extras["source_image_refs"] = refs
+		if len(refs) == 1 {
+			extras["source_image_ref"] = refs[0]
+		}
+		extras["capability"] = "image.edit"
+	} else if ref, ok := args["_source_image_ref"].(string); ok && ref != "" {
 		extras["source_image_ref"] = ref
+		extras["source_image_refs"] = []string{ref}
 		extras["capability"] = "image.edit"
 	}
 	if len(extras) == 0 {
@@ -532,6 +551,48 @@ func computeGenerationCost(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, kind, c
 	}
 	cost, _ := computeVeniceImageCost(specRaw, capability, args)
 	return cost
+}
+
+func sourceImageRefs(args map[string]any) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" || seen[v] {
+			return
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	add(strArg(args, "source_image", ""))
+	switch v := args["source_images"].(type) {
+	case []string:
+		for _, s := range v {
+			add(s)
+		}
+	case []any:
+		for _, raw := range v {
+			if s, ok := raw.(string); ok {
+				add(s)
+			}
+		}
+	case string:
+		add(v)
+	}
+	return out
+}
+
+func maxSourceImagesFor(providerSlug, capability, model string) int {
+	switch capability {
+	case "image.edit":
+		if providerSlug == "venice-ai" {
+			return 3
+		}
+		return 1
+	case "video.generate":
+		return 1
+	}
+	return 0
 }
 
 // resolveSourceImage takes the raw source_image arg (one of: "storage:N",
