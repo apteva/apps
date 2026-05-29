@@ -63,6 +63,7 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 // only skips the SDK's sidecar token gate for direct/public delivery.
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Pattern: "/spaces", Handler: a.handleSpaces},
 		{Pattern: "/space", Handler: a.handleSpace},
 		{Pattern: "/tiers", Handler: a.handleTiers},
 		{Pattern: "/tiers/", Handler: a.handleTierItem},
@@ -80,8 +81,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
-		{Name: "creators_space_get", Description: "Fetch the creator space settings for this project.", InputSchema: schemaObject(nil, nil), Handler: a.toolSpaceGet},
-		{Name: "creators_space_update", Description: "Update creator space branding, slug, and defaults. Args: name?, slug?, description?, default_currency?, metadata?.", InputSchema: schemaObject(map[string]any{"name": sString(), "slug": sString(), "description": sString(), "default_currency": sString(), "metadata": sObject()}, nil), Handler: a.toolSpaceUpdate},
+		{Name: "creators_space_create", Description: "Create a creator space in this project. Args: name, slug?, description?, default_currency?, metadata?.", InputSchema: schemaObject(map[string]any{"name": sString(), "slug": sString(), "description": sString(), "default_currency": sString(), "metadata": sObject()}, []string{"name"}), Handler: a.toolSpaceCreate},
+		{Name: "creators_space_list", Description: "List creator spaces for this project.", InputSchema: schemaObject(nil, nil), Handler: a.toolSpaceList},
+		{Name: "creators_space_get", Description: "Fetch creator space settings. Args: space_id? or space_slug?; defaults to the project's first space.", InputSchema: schemaObject(map[string]any{"space_id": sInteger(), "space_slug": sString()}, nil), Handler: a.toolSpaceGet},
+		{Name: "creators_space_update", Description: "Update creator space branding, slug, and defaults. Args: space_id? or space_slug?, name?, slug?, description?, default_currency?, metadata?.", InputSchema: schemaObject(map[string]any{"space_id": sInteger(), "space_slug": sString(), "name": sString(), "slug": sString(), "description": sString(), "default_currency": sString(), "metadata": sObject()}, nil), Handler: a.toolSpaceUpdate},
 		{Name: "creators_tier_create", Description: "Create a membership tier. Args: name, price_cents?, currency?, interval? (month|year|one_time), description?, benefits? [string], sort_order?.", InputSchema: schemaObject(map[string]any{"name": sString(), "price_cents": sInteger(), "currency": sString(), "interval": sString(), "description": sString(), "benefits": sArray("string"), "sort_order": sInteger()}, []string{"name"}), Handler: a.toolTierCreate},
 		{Name: "creators_tier_list", Description: "List tiers. Args: archived? (default false).", InputSchema: schemaObject(map[string]any{"archived": sBool()}, nil), Handler: a.toolTierList},
 		{Name: "creators_tier_update", Description: "Update a tier. Args: id, patch {name, slug, description, price_cents, currency, interval, benefits, sort_order, archived}.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "patch": sObject()}, []string{"id", "patch"}), Handler: a.toolTierUpdate},
@@ -122,6 +125,7 @@ type Space struct {
 type Tier struct {
 	ID          int64           `json:"id"`
 	ProjectID   string          `json:"project_id"`
+	SpaceID     int64           `json:"space_id"`
 	Name        string          `json:"name"`
 	Slug        string          `json:"slug"`
 	Description string          `json:"description"`
@@ -138,6 +142,7 @@ type Tier struct {
 type Member struct {
 	ID                 int64           `json:"id"`
 	ProjectID          string          `json:"project_id"`
+	SpaceID            int64           `json:"space_id"`
 	Email              string          `json:"email"`
 	DisplayName        string          `json:"display_name"`
 	Status             string          `json:"status"`
@@ -155,6 +160,7 @@ type Member struct {
 type Post struct {
 	ID          int64           `json:"id"`
 	ProjectID   string          `json:"project_id"`
+	SpaceID     int64           `json:"space_id"`
 	Title       string          `json:"title"`
 	Slug        string          `json:"slug"`
 	Body        string          `json:"body"`
@@ -171,6 +177,7 @@ type Post struct {
 type Attachment struct {
 	ID            int64           `json:"id"`
 	ProjectID     string          `json:"project_id"`
+	SpaceID       int64           `json:"space_id"`
 	PostID        int64           `json:"post_id"`
 	StorageFileID int64           `json:"storage_file_id"`
 	Filename      string          `json:"filename"`
@@ -183,6 +190,30 @@ type Attachment struct {
 
 // ─── HTTP handlers ────────────────────────────────────────────────
 
+func (a *App) handleSpaces(w http.ResponseWriter, r *http.Request) {
+	ctx := contextForRequest(r)
+	pid, err := projectFromRequest(ctx, r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		spaces, err := listSpaces(ctx.AppDB(), pid)
+		writeOrErr(w, map[string]any{"spaces": spaces}, err)
+	case http.MethodPost:
+		var args map[string]any
+		if err := readJSON(r, &args); err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		space, err := createSpace(ctx, pid, args)
+		writeOrErr(w, map[string]any{"space": space}, err)
+	default:
+		httpErr(w, 405, "method not allowed")
+	}
+}
+
 func (a *App) handleSpace(w http.ResponseWriter, r *http.Request) {
 	ctx := contextForRequest(r)
 	pid, err := projectFromRequest(ctx, r)
@@ -192,13 +223,19 @@ func (a *App) handleSpace(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		space, err := ensureSpace(ctx, pid)
+		space, err := spaceFromRequest(ctx, pid, r)
 		writeOrErr(w, map[string]any{"space": space}, err)
 	case http.MethodPut, http.MethodPatch:
 		var patch map[string]any
 		if err := readJSON(r, &patch); err != nil {
 			httpErr(w, 400, err.Error())
 			return
+		}
+		if sid := parseInt64(r.URL.Query().Get("space_id")); sid > 0 {
+			patch["space_id"] = sid
+		}
+		if slug := strings.TrimSpace(r.URL.Query().Get("space_slug")); slug != "" {
+			patch["space_slug"] = slug
 		}
 		space, err := updateSpace(ctx, pid, patch)
 		writeOrErr(w, map[string]any{"space": space}, err)
@@ -214,9 +251,14 @@ func (a *App) handleTiers(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
+	space, err := spaceFromRequest(ctx, pid, r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		tiers, err := listTiers(ctx.AppDB(), pid, r.URL.Query().Get("archived") == "1")
+		tiers, err := listTiers(ctx.AppDB(), pid, space.ID, r.URL.Query().Get("archived") == "1")
 		writeOrErr(w, tiers, err)
 	case http.MethodPost:
 		var args map[string]any
@@ -224,7 +266,7 @@ func (a *App) handleTiers(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, 400, err.Error())
 			return
 		}
-		tier, err := createTier(ctx, pid, args)
+		tier, err := createTier(ctx, pid, space.ID, args)
 		writeOrErr(w, map[string]any{"tier": tier}, err)
 	default:
 		httpErr(w, 405, "method not allowed")
@@ -238,6 +280,11 @@ func (a *App) handleTierItem(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
+	space, err := spaceFromRequest(ctx, pid, r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
 	id, err := idFromPath(r.URL.Path, "/tiers/")
 	if err != nil {
 		httpErr(w, 400, err.Error())
@@ -245,7 +292,7 @@ func (a *App) handleTierItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		tier, err := getTier(ctx.AppDB(), pid, id)
+		tier, err := getTier(ctx.AppDB(), pid, space.ID, id)
 		writeOrErr(w, map[string]any{"tier": tier, "found": tier != nil}, err)
 	case http.MethodPut, http.MethodPatch:
 		var patch map[string]any
@@ -253,10 +300,10 @@ func (a *App) handleTierItem(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, 400, err.Error())
 			return
 		}
-		tier, err := updateTier(ctx, pid, id, patch)
+		tier, err := updateTier(ctx, pid, space.ID, id, patch)
 		writeOrErr(w, map[string]any{"tier": tier}, err)
 	case http.MethodDelete:
-		tier, err := updateTier(ctx, pid, id, map[string]any{"archived": true})
+		tier, err := updateTier(ctx, pid, space.ID, id, map[string]any{"archived": true})
 		writeOrErr(w, map[string]any{"tier": tier}, err)
 	default:
 		httpErr(w, 405, "method not allowed")
@@ -270,9 +317,14 @@ func (a *App) handleMembers(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
+	space, err := spaceFromRequest(ctx, pid, r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		members, err := listMembers(ctx.AppDB(), pid, memberFilters{
+		members, err := listMembers(ctx.AppDB(), pid, space.ID, memberFilters{
 			status: r.URL.Query().Get("status"),
 			q:      r.URL.Query().Get("q"),
 			tierID: parseInt64(r.URL.Query().Get("tier_id")),
@@ -285,7 +337,7 @@ func (a *App) handleMembers(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, 400, err.Error())
 			return
 		}
-		member, created, extras, err := upsertMember(ctx, pid, args)
+		member, created, extras, err := upsertMember(ctx, pid, space.ID, args)
 		out := map[string]any{"member": member, "was_created": created}
 		for k, v := range extras {
 			out[k] = v
@@ -303,6 +355,11 @@ func (a *App) handleMemberItem(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
+	space, err := spaceFromRequest(ctx, pid, r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
 	rest := strings.TrimPrefix(r.URL.Path, "/members/")
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	id, err := strconv.ParseInt(parts[0], 10, 64)
@@ -312,7 +369,7 @@ func (a *App) handleMemberItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case len(parts) == 1 && r.Method == http.MethodGet:
-		member, err := getMember(ctx.AppDB(), pid, id)
+		member, err := getMember(ctx.AppDB(), pid, space.ID, id)
 		writeOrErr(w, map[string]any{"member": member, "found": member != nil}, err)
 	case len(parts) == 1 && (r.Method == http.MethodPut || r.Method == http.MethodPatch):
 		var patch map[string]any
@@ -320,7 +377,7 @@ func (a *App) handleMemberItem(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, 400, err.Error())
 			return
 		}
-		member, err := updateMember(ctx, pid, id, patch)
+		member, err := updateMember(ctx, pid, space.ID, id, patch)
 		writeOrErr(w, map[string]any{"member": member}, err)
 	default:
 		httpErr(w, 405, "method not allowed")
@@ -334,9 +391,14 @@ func (a *App) handlePosts(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
+	space, err := spaceFromRequest(ctx, pid, r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		posts, err := listPosts(ctx.AppDB(), pid, postFilters{
+		posts, err := listPosts(ctx.AppDB(), pid, space.ID, postFilters{
 			status:     r.URL.Query().Get("status"),
 			visibility: r.URL.Query().Get("visibility"),
 			q:          r.URL.Query().Get("q"),
@@ -349,7 +411,7 @@ func (a *App) handlePosts(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, 400, err.Error())
 			return
 		}
-		post, err := createPost(ctx, pid, args)
+		post, err := createPost(ctx, pid, space.ID, args)
 		writeOrErr(w, map[string]any{"post": post}, err)
 	default:
 		httpErr(w, 405, "method not allowed")
@@ -363,6 +425,11 @@ func (a *App) handlePostItem(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
+	space, err := spaceFromRequest(ctx, pid, r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
 	rest := strings.TrimPrefix(r.URL.Path, "/posts/")
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	id, err := strconv.ParseInt(parts[0], 10, 64)
@@ -372,7 +439,7 @@ func (a *App) handlePostItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case len(parts) == 1 && r.Method == http.MethodGet:
-		post, err := getPost(ctx.AppDB(), pid, id, true)
+		post, err := getPost(ctx.AppDB(), pid, space.ID, id, true)
 		writeOrErr(w, map[string]any{"post": post, "found": post != nil}, err)
 	case len(parts) == 1 && (r.Method == http.MethodPut || r.Method == http.MethodPatch):
 		var patch map[string]any
@@ -380,12 +447,12 @@ func (a *App) handlePostItem(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, 400, err.Error())
 			return
 		}
-		post, err := updatePost(ctx, pid, id, patch)
+		post, err := updatePost(ctx, pid, space.ID, id, patch)
 		writeOrErr(w, map[string]any{"post": post}, err)
 	case len(parts) == 2 && parts[1] == "publish" && r.Method == http.MethodPost:
 		var body map[string]any
 		_ = readJSON(r, &body)
-		post, err := publishPost(ctx, pid, id, strArg(body, "scheduled_at"))
+		post, err := publishPost(ctx, pid, space.ID, id, strArg(body, "scheduled_at"))
 		writeOrErr(w, map[string]any{"post": post}, err)
 	default:
 		httpErr(w, 405, "method not allowed")
@@ -399,6 +466,11 @@ func (a *App) handleAttachments(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
+	space, err := spaceFromRequest(ctx, pid, r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
 	if r.Method != http.MethodPost {
 		httpErr(w, 405, "method not allowed")
 		return
@@ -408,13 +480,18 @@ func (a *App) handleAttachments(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
-	att, err := addAttachment(ctx, pid, args)
+	att, err := addAttachment(ctx, pid, space.ID, args)
 	writeOrErr(w, map[string]any{"attachment": att}, err)
 }
 
 func (a *App) handleAttachmentItem(w http.ResponseWriter, r *http.Request) {
 	ctx := contextForRequest(r)
 	pid, err := projectFromRequest(ctx, r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	space, err := spaceFromRequest(ctx, pid, r)
 	if err != nil {
 		httpErr(w, 400, err.Error())
 		return
@@ -430,7 +507,7 @@ func (a *App) handleAttachmentItem(w http.ResponseWriter, r *http.Request) {
 		var args map[string]any
 		_ = readJSON(r, &args)
 		args["attachment_id"] = id
-		link, err := getDownloadLink(ctx, pid, args)
+		link, err := getDownloadLink(ctx, pid, space.ID, args)
 		writeOrErr(w, link, err)
 		return
 	}
@@ -444,7 +521,12 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
-	events, err := listEvents(ctx.AppDB(), pid, parseInt(r.URL.Query().Get("limit"), 50))
+	space, err := spaceFromRequest(ctx, pid, r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	events, err := listEvents(ctx.AppDB(), pid, space.ID, parseInt(r.URL.Query().Get("limit"), 50))
 	writeOrErr(w, events, err)
 }
 
@@ -455,13 +537,13 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 404, "space not found")
 		return
 	}
-	space, err := getSpaceBySlug(ctx.AppDB(), parts[0])
+	space, err := getAnySpaceBySlug(ctx.AppDB(), parts[0])
 	if err != nil || space == nil {
 		httpErr(w, 404, "space not found")
 		return
 	}
 	if len(parts) >= 3 && parts[1] == "posts" {
-		post, err := getPostBySlug(ctx.AppDB(), space.ProjectID, parts[2], true)
+		post, err := getPostBySlug(ctx.AppDB(), space.ProjectID, space.ID, parts[2], true)
 		if err != nil || post == nil || post.Status != "published" || post.Visibility != "public" {
 			httpErr(w, 404, "post not found")
 			return
@@ -469,7 +551,7 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"space": space, "post": post})
 		return
 	}
-	posts, _ := listPosts(ctx.AppDB(), space.ProjectID, postFilters{status: "published", visibility: "public", limit: 20})
+	posts, _ := listPosts(ctx.AppDB(), space.ProjectID, space.ID, postFilters{status: "published", visibility: "public", limit: 20})
 	writeJSON(w, map[string]any{"space": space, "posts": posts})
 }
 
@@ -487,14 +569,14 @@ func (a *App) handleMemberPortal(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) >= 4 && parts[1] == "files" && parts[3] == "download" {
 		id, _ := strconv.ParseInt(parts[2], 10, 64)
-		link, err := getDownloadLink(ctx, member.ProjectID, map[string]any{
+		link, err := getDownloadLink(ctx, member.ProjectID, member.SpaceID, map[string]any{
 			"attachment_id": id,
 			"portal_token":  parts[0],
 		})
 		writeOrErr(w, link, err)
 		return
 	}
-	posts, _ := listPosts(ctx.AppDB(), member.ProjectID, postFilters{status: "published", limit: 50})
+	posts, _ := listPosts(ctx.AppDB(), member.ProjectID, member.SpaceID, postFilters{status: "published", limit: 50})
 	visible := make([]Post, 0, len(posts))
 	for _, p := range posts {
 		if memberCanAccessPost(member, &p) {
@@ -506,12 +588,30 @@ func (a *App) handleMemberPortal(w http.ResponseWriter, r *http.Request) {
 
 // ─── Tool handlers ────────────────────────────────────────────────
 
+func (a *App) toolSpaceCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := projectFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	space, err := createSpace(ctx, pid, args)
+	return map[string]any{"space": space}, err
+}
+
+func (a *App) toolSpaceList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := projectFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	spaces, err := listSpaces(ctx.AppDB(), pid)
+	return map[string]any{"spaces": spaces, "count": len(spaces)}, err
+}
+
 func (a *App) toolSpaceGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := projectFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	space, err := ensureSpace(ctx, pid)
+	space, err := spaceFromArgs(ctx, pid, args)
 	return map[string]any{"space": space}, err
 }
 
@@ -529,7 +629,11 @@ func (a *App) toolTierCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	tier, err := createTier(ctx, pid, args)
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	tier, err := createTier(ctx, pid, space.ID, args)
 	return map[string]any{"tier": tier}, err
 }
 
@@ -538,7 +642,11 @@ func (a *App) toolTierList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	tiers, err := listTiers(ctx.AppDB(), pid, boolArg(args, "archived"))
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	tiers, err := listTiers(ctx.AppDB(), pid, space.ID, boolArg(args, "archived"))
 	return map[string]any{"tiers": tiers, "count": len(tiers)}, err
 }
 
@@ -547,8 +655,12 @@ func (a *App) toolTierUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
 	patch, _ := args["patch"].(map[string]any)
-	tier, err := updateTier(ctx, pid, int64Arg(args, "id"), patch)
+	tier, err := updateTier(ctx, pid, space.ID, int64Arg(args, "id"), patch)
 	return map[string]any{"tier": tier}, err
 }
 
@@ -557,7 +669,11 @@ func (a *App) toolMemberUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
-	member, created, extras, err := upsertMember(ctx, pid, args)
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	member, created, extras, err := upsertMember(ctx, pid, space.ID, args)
 	out := map[string]any{"member": member, "was_created": created}
 	for k, v := range extras {
 		out[k] = v
@@ -570,7 +686,11 @@ func (a *App) toolMemberList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	members, err := listMembers(ctx.AppDB(), pid, memberFilters{
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	members, err := listMembers(ctx.AppDB(), pid, space.ID, memberFilters{
 		status: strArg(args, "status"),
 		q:      strArg(args, "q"),
 		tierID: int64Arg(args, "tier_id"),
@@ -584,11 +704,15 @@ func (a *App) toolMemberSetTier(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
 	status := strArg(args, "status")
 	if status == "" && int64Arg(args, "tier_id") > 0 {
 		status = "active"
 	}
-	member, err := updateMember(ctx, pid, int64Arg(args, "member_id"), map[string]any{
+	member, err := updateMember(ctx, pid, space.ID, int64Arg(args, "member_id"), map[string]any{
 		"tier_id": int64Arg(args, "tier_id"),
 		"status":  status,
 	})
@@ -600,7 +724,11 @@ func (a *App) toolMemberSetStatus(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
-	member, err := updateMember(ctx, pid, int64Arg(args, "member_id"), map[string]any{
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	member, err := updateMember(ctx, pid, space.ID, int64Arg(args, "member_id"), map[string]any{
 		"status":             strArg(args, "status"),
 		"current_period_end": strArg(args, "current_period_end"),
 	})
@@ -612,7 +740,11 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	post, err := createPost(ctx, pid, args)
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	post, err := createPost(ctx, pid, space.ID, args)
 	return map[string]any{"post": post}, err
 }
 
@@ -621,8 +753,12 @@ func (a *App) toolPostUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
 	patch, _ := args["patch"].(map[string]any)
-	post, err := updatePost(ctx, pid, int64Arg(args, "id"), patch)
+	post, err := updatePost(ctx, pid, space.ID, int64Arg(args, "id"), patch)
 	return map[string]any{"post": post}, err
 }
 
@@ -631,7 +767,11 @@ func (a *App) toolPostPublish(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	post, err := publishPost(ctx, pid, int64Arg(args, "id"), strArg(args, "scheduled_at"))
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	post, err := publishPost(ctx, pid, space.ID, int64Arg(args, "id"), strArg(args, "scheduled_at"))
 	return map[string]any{"post": post}, err
 }
 
@@ -640,7 +780,11 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	posts, err := listPosts(ctx.AppDB(), pid, postFilters{
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	posts, err := listPosts(ctx.AppDB(), pid, space.ID, postFilters{
 		status:     strArg(args, "status"),
 		visibility: strArg(args, "visibility"),
 		q:          strArg(args, "q"),
@@ -654,11 +798,15 @@ func (a *App) toolPostGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
 	var post *Post
 	if id := int64Arg(args, "id"); id > 0 {
-		post, err = getPost(ctx.AppDB(), pid, id, true)
+		post, err = getPost(ctx.AppDB(), pid, space.ID, id, true)
 	} else {
-		post, err = getPostBySlug(ctx.AppDB(), pid, strArg(args, "slug"), true)
+		post, err = getPostBySlug(ctx.AppDB(), pid, space.ID, strArg(args, "slug"), true)
 	}
 	return map[string]any{"post": post, "found": post != nil}, err
 }
@@ -668,7 +816,11 @@ func (a *App) toolAttachmentUpload(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if err != nil {
 		return nil, err
 	}
-	att, err := uploadAttachment(ctx, pid, args)
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	att, err := uploadAttachment(ctx, pid, space.ID, args)
 	return map[string]any{"attachment": att}, err
 }
 
@@ -677,7 +829,11 @@ func (a *App) toolAttachmentAddFromStorage(ctx *sdk.AppCtx, args map[string]any)
 	if err != nil {
 		return nil, err
 	}
-	att, err := addAttachment(ctx, pid, args)
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	att, err := addAttachment(ctx, pid, space.ID, args)
 	return map[string]any{"attachment": att}, err
 }
 
@@ -686,7 +842,11 @@ func (a *App) toolFileGetDownloadLink(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	return getDownloadLink(ctx, pid, args)
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	return getDownloadLink(ctx, pid, space.ID, args)
 }
 
 func (a *App) toolPaymentLinkCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -694,7 +854,11 @@ func (a *App) toolPaymentLinkCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err != nil {
 		return nil, err
 	}
-	return createPaymentLink(ctx, pid, args)
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	return createPaymentLink(ctx, pid, space.ID, args)
 }
 
 func (a *App) toolSendPostUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -702,7 +866,11 @@ func (a *App) toolSendPostUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	return sendPostUpdate(ctx, pid, args)
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	return sendPostUpdate(ctx, pid, space.ID, args)
 }
 
 func (a *App) toolEventsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -710,14 +878,18 @@ func (a *App) toolEventsList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	events, err := listEvents(ctx.AppDB(), pid, intArg(args, "limit", 50))
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	events, err := listEvents(ctx.AppDB(), pid, space.ID, intArg(args, "limit", 50))
 	return map[string]any{"events": events, "count": len(events)}, err
 }
 
 // ─── DB operations ────────────────────────────────────────────────
 
 func ensureSpace(ctx *sdk.AppCtx, pid string) (*Space, error) {
-	if s, err := getSpace(ctx.AppDB(), pid); err != nil || s != nil {
+	if s, err := getDefaultSpace(ctx.AppDB(), pid); err != nil || s != nil {
 		return s, err
 	}
 	currency := strings.ToUpper(configString(ctx, "default_currency", "USD"))
@@ -731,15 +903,77 @@ func ensureSpace(ctx *sdk.AppCtx, pid string) (*Space, error) {
 	if err != nil {
 		return nil, err
 	}
-	return getSpace(ctx.AppDB(), pid)
+	return getDefaultSpace(ctx.AppDB(), pid)
 }
 
-func getSpace(db *sql.DB, pid string) (*Space, error) {
-	row := db.QueryRow(`SELECT id, project_id, name, slug, description, avatar_file_id, banner_file_id, default_currency, metadata, created_at, updated_at FROM creator_spaces WHERE project_id=?`, pid)
+func createSpace(ctx *sdk.AppCtx, pid string, args map[string]any) (*Space, error) {
+	name := cleanString(args["name"])
+	if name == "" {
+		return nil, errors.New("name required")
+	}
+	slug := slugify(strArg(args, "slug"))
+	if slug == "" {
+		slug = slugify(name)
+	}
+	currency := strings.ToUpper(strArg(args, "default_currency"))
+	if currency == "" {
+		currency = strings.ToUpper(configString(ctx, "default_currency", "USD"))
+	}
+	if currency == "" {
+		currency = "USD"
+	}
+	meta := json.RawMessage("{}")
+	if md, ok := args["metadata"].(map[string]any); ok {
+		meta, _ = json.Marshal(md)
+	}
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO creator_spaces (project_id, name, slug, description, default_currency, metadata) VALUES (?, ?, ?, ?, ?, ?)`,
+		pid, name, slug, strArg(args, "description"), currency, string(meta),
+	)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	space, err := getSpace(ctx.AppDB(), pid, id)
+	if err == nil {
+		_ = logEvent(ctx, pid, id, "space.created", "agent", "space", id, map[string]any{"name": name})
+	}
+	return space, err
+}
+
+func listSpaces(db *sql.DB, pid string) ([]Space, error) {
+	rows, err := db.Query(`SELECT id, project_id, name, slug, description, avatar_file_id, banner_file_id, default_currency, metadata, created_at, updated_at FROM creator_spaces WHERE project_id=? ORDER BY id`, pid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Space
+	for rows.Next() {
+		s, err := scanSpace(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *s)
+	}
+	return out, rows.Err()
+}
+
+func getDefaultSpace(db *sql.DB, pid string) (*Space, error) {
+	row := db.QueryRow(`SELECT id, project_id, name, slug, description, avatar_file_id, banner_file_id, default_currency, metadata, created_at, updated_at FROM creator_spaces WHERE project_id=? ORDER BY id LIMIT 1`, pid)
 	return scanSpace(row)
 }
 
-func getSpaceBySlug(db *sql.DB, slug string) (*Space, error) {
+func getSpace(db *sql.DB, pid string, id int64) (*Space, error) {
+	row := db.QueryRow(`SELECT id, project_id, name, slug, description, avatar_file_id, banner_file_id, default_currency, metadata, created_at, updated_at FROM creator_spaces WHERE project_id=? AND id=?`, pid, id)
+	return scanSpace(row)
+}
+
+func getSpaceBySlug(db *sql.DB, pid, slug string) (*Space, error) {
+	row := db.QueryRow(`SELECT id, project_id, name, slug, description, avatar_file_id, banner_file_id, default_currency, metadata, created_at, updated_at FROM creator_spaces WHERE project_id=? AND slug=? LIMIT 1`, pid, slug)
+	return scanSpace(row)
+}
+
+func getAnySpaceBySlug(db *sql.DB, slug string) (*Space, error) {
 	row := db.QueryRow(`SELECT id, project_id, name, slug, description, avatar_file_id, banner_file_id, default_currency, metadata, created_at, updated_at FROM creator_spaces WHERE slug=? LIMIT 1`, slug)
 	return scanSpace(row)
 }
@@ -765,7 +999,8 @@ func scanSpace(row interface{ Scan(...any) error }) (*Space, error) {
 }
 
 func updateSpace(ctx *sdk.AppCtx, pid string, patch map[string]any) (*Space, error) {
-	if _, err := ensureSpace(ctx, pid); err != nil {
+	space, err := spaceFromArgs(ctx, pid, patch)
+	if err != nil {
 		return nil, err
 	}
 	sets := []string{}
@@ -788,26 +1023,26 @@ func updateSpace(ctx *sdk.AppCtx, pid string, patch map[string]any) (*Space, err
 	}
 	if len(sets) > 0 {
 		sets = append(sets, "updated_at=CURRENT_TIMESTAMP")
-		args = append(args, pid)
-		if _, err := ctx.AppDB().Exec(`UPDATE creator_spaces SET `+strings.Join(sets, ", ")+` WHERE project_id=?`, args...); err != nil {
+		args = append(args, pid, space.ID)
+		if _, err := ctx.AppDB().Exec(`UPDATE creator_spaces SET `+strings.Join(sets, ", ")+` WHERE project_id=? AND id=?`, args...); err != nil {
 			return nil, err
 		}
 	}
-	s, err := getSpace(ctx.AppDB(), pid)
+	s, err := getSpace(ctx.AppDB(), pid, space.ID)
 	if err == nil {
-		_ = logEvent(ctx, pid, "space.updated", "agent", "space", s.ID, patch)
+		_ = logEvent(ctx, pid, s.ID, "space.updated", "agent", "space", s.ID, patch)
 	}
 	return s, err
 }
 
-func createTier(ctx *sdk.AppCtx, pid string, args map[string]any) (*Tier, error) {
+func createTier(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]any) (*Tier, error) {
 	name := cleanString(args["name"])
 	if name == "" {
 		return nil, errors.New("name required")
 	}
 	currency := strings.ToUpper(strArg(args, "currency"))
 	if currency == "" {
-		space, _ := ensureSpace(ctx, pid)
+		space, _ := getSpace(ctx.AppDB(), pid, spaceID)
 		if space != nil {
 			currency = space.DefaultCurrency
 		}
@@ -828,28 +1063,28 @@ func createTier(ctx *sdk.AppCtx, pid string, args map[string]any) (*Tier, error)
 		slug = slugify(name)
 	}
 	res, err := ctx.AppDB().Exec(
-		`INSERT INTO tiers (project_id, name, slug, description, price_cents, currency, interval, benefits_json, sort_order)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, name, slug, strArg(args, "description"), int64Arg(args, "price_cents"), currency, interval, string(benefits), intArg(args, "sort_order", 0),
+		`INSERT INTO tiers (project_id, space_id, name, slug, description, price_cents, currency, interval, benefits_json, sort_order)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pid, spaceID, name, slug, strArg(args, "description"), int64Arg(args, "price_cents"), currency, interval, string(benefits), intArg(args, "sort_order", 0),
 	)
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	tier, err := getTier(ctx.AppDB(), pid, id)
+	tier, err := getTier(ctx.AppDB(), pid, spaceID, id)
 	if err == nil {
-		_ = logEvent(ctx, pid, "tier.created", "agent", "tier", id, map[string]any{"name": name})
+		_ = logEvent(ctx, pid, spaceID, "tier.created", "agent", "tier", id, map[string]any{"name": name})
 	}
 	return tier, err
 }
 
-func listTiers(db *sql.DB, pid string, archived bool) ([]Tier, error) {
-	q := `SELECT id, project_id, name, slug, description, price_cents, currency, interval, benefits_json, sort_order, COALESCE(archived_at,''), created_at, updated_at FROM tiers WHERE project_id=?`
+func listTiers(db *sql.DB, pid string, spaceID int64, archived bool) ([]Tier, error) {
+	q := `SELECT id, project_id, space_id, name, slug, description, price_cents, currency, interval, benefits_json, sort_order, COALESCE(archived_at,''), created_at, updated_at FROM tiers WHERE project_id=? AND space_id=?`
 	if !archived {
 		q += ` AND archived_at IS NULL`
 	}
 	q += ` ORDER BY sort_order, price_cents, id`
-	rows, err := db.Query(q, pid)
+	rows, err := db.Query(q, pid, spaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -865,15 +1100,15 @@ func listTiers(db *sql.DB, pid string, archived bool) ([]Tier, error) {
 	return out, rows.Err()
 }
 
-func getTier(db *sql.DB, pid string, id int64) (*Tier, error) {
-	row := db.QueryRow(`SELECT id, project_id, name, slug, description, price_cents, currency, interval, benefits_json, sort_order, COALESCE(archived_at,''), created_at, updated_at FROM tiers WHERE project_id=? AND id=?`, pid, id)
+func getTier(db *sql.DB, pid string, spaceID, id int64) (*Tier, error) {
+	row := db.QueryRow(`SELECT id, project_id, space_id, name, slug, description, price_cents, currency, interval, benefits_json, sort_order, COALESCE(archived_at,''), created_at, updated_at FROM tiers WHERE project_id=? AND space_id=? AND id=?`, pid, spaceID, id)
 	return scanTier(row)
 }
 
 func scanTier(row interface{ Scan(...any) error }) (*Tier, error) {
 	var t Tier
 	var benefits string
-	if err := row.Scan(&t.ID, &t.ProjectID, &t.Name, &t.Slug, &t.Description, &t.PriceCents, &t.Currency, &t.Interval, &benefits, &t.SortOrder, &t.ArchivedAt, &t.CreatedAt, &t.UpdatedAt); err != nil {
+	if err := row.Scan(&t.ID, &t.ProjectID, &t.SpaceID, &t.Name, &t.Slug, &t.Description, &t.PriceCents, &t.Currency, &t.Interval, &benefits, &t.SortOrder, &t.ArchivedAt, &t.CreatedAt, &t.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -883,7 +1118,7 @@ func scanTier(row interface{ Scan(...any) error }) (*Tier, error) {
 	return &t, nil
 }
 
-func updateTier(ctx *sdk.AppCtx, pid string, id int64, patch map[string]any) (*Tier, error) {
+func updateTier(ctx *sdk.AppCtx, pid string, spaceID, id int64, patch map[string]any) (*Tier, error) {
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
@@ -927,19 +1162,19 @@ func updateTier(ctx *sdk.AppCtx, pid string, id int64, patch map[string]any) (*T
 		}
 	}
 	if len(sets) == 0 {
-		return getTier(ctx.AppDB(), pid, id)
+		return getTier(ctx.AppDB(), pid, spaceID, id)
 	}
 	sets = append(sets, "updated_at=CURRENT_TIMESTAMP")
-	args = append(args, pid, id)
-	if _, err := ctx.AppDB().Exec(`UPDATE tiers SET `+strings.Join(sets, ", ")+` WHERE project_id=? AND id=?`, args...); err != nil {
+	args = append(args, pid, spaceID, id)
+	if _, err := ctx.AppDB().Exec(`UPDATE tiers SET `+strings.Join(sets, ", ")+` WHERE project_id=? AND space_id=? AND id=?`, args...); err != nil {
 		return nil, err
 	}
-	tier, err := getTier(ctx.AppDB(), pid, id)
+	tier, err := getTier(ctx.AppDB(), pid, spaceID, id)
 	if tier == nil && err == nil {
 		err = fmt.Errorf("tier %d not found", id)
 	}
 	if err == nil {
-		_ = logEvent(ctx, pid, "tier.updated", "agent", "tier", id, patch)
+		_ = logEvent(ctx, pid, spaceID, "tier.updated", "agent", "tier", id, patch)
 	}
 	return tier, err
 }
@@ -951,7 +1186,7 @@ type memberFilters struct {
 	limit  int
 }
 
-func upsertMember(ctx *sdk.AppCtx, pid string, args map[string]any) (*Member, bool, map[string]any, error) {
+func upsertMember(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]any) (*Member, bool, map[string]any, error) {
 	email := strings.ToLower(strings.TrimSpace(strArg(args, "email")))
 	if !strings.Contains(email, "@") {
 		return nil, false, nil, errors.New("valid email required")
@@ -967,9 +1202,9 @@ func upsertMember(ctx *sdk.AppCtx, pid string, args map[string]any) (*Member, bo
 	tierID := int64Arg(args, "tier_id")
 	token, _ := randomToken()
 	res, err := ctx.AppDB().Exec(
-		`INSERT OR IGNORE INTO members (project_id, email, display_name, status, tier_id, portal_token)
-		 VALUES (?, ?, ?, ?, NULLIF(?,0), ?)`,
-		pid, email, display, status, tierID, token,
+		`INSERT OR IGNORE INTO members (project_id, space_id, email, display_name, status, tier_id, portal_token)
+		 VALUES (?, ?, ?, ?, ?, NULLIF(?,0), ?)`,
+		pid, spaceID, email, display, status, tierID, token,
 	)
 	if err != nil {
 		return nil, false, nil, err
@@ -988,21 +1223,21 @@ func upsertMember(ctx *sdk.AppCtx, pid string, args map[string]any) (*Member, bo
 			patch["tier_id"] = tierID
 		}
 		if len(patch) > 0 {
-			existing, _ := getMemberByEmail(ctx.AppDB(), pid, email)
+			existing, _ := getMemberByEmail(ctx.AppDB(), pid, spaceID, email)
 			if existing != nil {
-				_, _ = updateMember(ctx, pid, existing.ID, patch)
+				_, _ = updateMember(ctx, pid, spaceID, existing.ID, patch)
 			}
 		}
 	}
-	member, err := getMemberByEmail(ctx.AppDB(), pid, email)
+	member, err := getMemberByEmail(ctx.AppDB(), pid, spaceID, email)
 	if err != nil {
 		return nil, false, nil, err
 	}
 	extras := map[string]any{}
 	if boolArg(args, "sync_billing") {
 		if id, err := syncBillingCustomer(ctx, pid, member); err == nil && id > 0 {
-			_ = setMemberExternalIDs(ctx.AppDB(), pid, member.ID, 0, id)
-			member, _ = getMember(ctx.AppDB(), pid, member.ID)
+			_ = setMemberExternalIDs(ctx.AppDB(), pid, spaceID, member.ID, 0, id)
+			member, _ = getMember(ctx.AppDB(), pid, spaceID, member.ID)
 			extras["billing_customer_synced"] = true
 		} else if err != nil {
 			extras["billing_sync_error"] = err.Error()
@@ -1010,25 +1245,25 @@ func upsertMember(ctx *sdk.AppCtx, pid string, args map[string]any) (*Member, bo
 	}
 	if boolArg(args, "sync_crm") {
 		if id, err := syncCRMContact(ctx, pid, member); err == nil && id > 0 {
-			_ = setMemberExternalIDs(ctx.AppDB(), pid, member.ID, id, 0)
-			member, _ = getMember(ctx.AppDB(), pid, member.ID)
+			_ = setMemberExternalIDs(ctx.AppDB(), pid, spaceID, member.ID, id, 0)
+			member, _ = getMember(ctx.AppDB(), pid, spaceID, member.ID)
 			extras["crm_contact_synced"] = true
 		} else if err != nil {
 			extras["crm_sync_error"] = err.Error()
 		}
 	}
 	if created {
-		_ = logEvent(ctx, pid, "member.created", "agent", "member", member.ID, map[string]any{"email": email})
+		_ = logEvent(ctx, pid, spaceID, "member.created", "agent", "member", member.ID, map[string]any{"email": email})
 	} else {
-		_ = logEvent(ctx, pid, "member.updated", "agent", "member", member.ID, map[string]any{"email": email})
+		_ = logEvent(ctx, pid, spaceID, "member.updated", "agent", "member", member.ID, map[string]any{"email": email})
 	}
 	return member, created, extras, nil
 }
 
-func listMembers(db *sql.DB, pid string, f memberFilters) ([]Member, error) {
+func listMembers(db *sql.DB, pid string, spaceID int64, f memberFilters) ([]Member, error) {
 	limit := clampLimit(f.limit, 100, 500)
-	where := []string{"project_id=?"}
-	args := []any{pid}
+	where := []string{"project_id=?", "space_id=?"}
+	args := []any{pid, spaceID}
 	if f.status != "" {
 		where, args = append(where, "status=?"), append(args, f.status)
 	}
@@ -1055,13 +1290,13 @@ func listMembers(db *sql.DB, pid string, f memberFilters) ([]Member, error) {
 	return out, rows.Err()
 }
 
-func getMember(db *sql.DB, pid string, id int64) (*Member, error) {
-	row := db.QueryRow(`SELECT `+memberColumns()+` FROM members WHERE project_id=? AND id=?`, pid, id)
+func getMember(db *sql.DB, pid string, spaceID, id int64) (*Member, error) {
+	row := db.QueryRow(`SELECT `+memberColumns()+` FROM members WHERE project_id=? AND space_id=? AND id=?`, pid, spaceID, id)
 	return scanMember(row)
 }
 
-func getMemberByEmail(db *sql.DB, pid, email string) (*Member, error) {
-	row := db.QueryRow(`SELECT `+memberColumns()+` FROM members WHERE project_id=? AND email=?`, pid, strings.ToLower(email))
+func getMemberByEmail(db *sql.DB, pid string, spaceID int64, email string) (*Member, error) {
+	row := db.QueryRow(`SELECT `+memberColumns()+` FROM members WHERE project_id=? AND space_id=? AND email=?`, pid, spaceID, strings.ToLower(email))
 	return scanMember(row)
 }
 
@@ -1071,14 +1306,14 @@ func getMemberByToken(db *sql.DB, token string) (*Member, error) {
 }
 
 func memberColumns() string {
-	return `id, project_id, email, display_name, status, tier_id, crm_contact_id, billing_customer_id, portal_token, COALESCE(current_period_start,''), COALESCE(current_period_end,''), metadata, created_at, updated_at`
+	return `id, project_id, space_id, email, display_name, status, tier_id, crm_contact_id, billing_customer_id, portal_token, COALESCE(current_period_start,''), COALESCE(current_period_end,''), metadata, created_at, updated_at`
 }
 
 func scanMember(row interface{ Scan(...any) error }) (*Member, error) {
 	var m Member
 	var tier, crm, billing sql.NullInt64
 	var meta string
-	if err := row.Scan(&m.ID, &m.ProjectID, &m.Email, &m.DisplayName, &m.Status, &tier, &crm, &billing, &m.PortalToken, &m.CurrentPeriodStart, &m.CurrentPeriodEnd, &meta, &m.CreatedAt, &m.UpdatedAt); err != nil {
+	if err := row.Scan(&m.ID, &m.ProjectID, &m.SpaceID, &m.Email, &m.DisplayName, &m.Status, &tier, &crm, &billing, &m.PortalToken, &m.CurrentPeriodStart, &m.CurrentPeriodEnd, &meta, &m.CreatedAt, &m.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -1097,7 +1332,7 @@ func scanMember(row interface{ Scan(...any) error }) (*Member, error) {
 	return &m, nil
 }
 
-func updateMember(ctx *sdk.AppCtx, pid string, id int64, patch map[string]any) (*Member, error) {
+func updateMember(ctx *sdk.AppCtx, pid string, spaceID, id int64, patch map[string]any) (*Member, error) {
 	if id == 0 {
 		return nil, errors.New("member id required")
 	}
@@ -1117,7 +1352,7 @@ func updateMember(ctx *sdk.AppCtx, pid string, id int64, patch map[string]any) (
 		if tid == 0 {
 			sets = append(sets, "tier_id=NULL")
 		} else {
-			if t, err := getTier(ctx.AppDB(), pid, tid); err != nil || t == nil {
+			if t, err := getTier(ctx.AppDB(), pid, spaceID, tid); err != nil || t == nil {
 				if err != nil {
 					return nil, err
 				}
@@ -1140,24 +1375,24 @@ func updateMember(ctx *sdk.AppCtx, pid string, id int64, patch map[string]any) (
 		sets, args = append(sets, "metadata=?"), append(args, string(raw))
 	}
 	if len(sets) == 0 {
-		return getMember(ctx.AppDB(), pid, id)
+		return getMember(ctx.AppDB(), pid, spaceID, id)
 	}
 	sets = append(sets, "updated_at=CURRENT_TIMESTAMP")
-	args = append(args, pid, id)
-	if _, err := ctx.AppDB().Exec(`UPDATE members SET `+strings.Join(sets, ", ")+` WHERE project_id=? AND id=?`, args...); err != nil {
+	args = append(args, pid, spaceID, id)
+	if _, err := ctx.AppDB().Exec(`UPDATE members SET `+strings.Join(sets, ", ")+` WHERE project_id=? AND space_id=? AND id=?`, args...); err != nil {
 		return nil, err
 	}
-	m, err := getMember(ctx.AppDB(), pid, id)
+	m, err := getMember(ctx.AppDB(), pid, spaceID, id)
 	if m == nil && err == nil {
 		err = fmt.Errorf("member %d not found", id)
 	}
 	if err == nil {
-		_ = logEvent(ctx, pid, "member.updated", "agent", "member", id, patch)
+		_ = logEvent(ctx, pid, spaceID, "member.updated", "agent", "member", id, patch)
 	}
 	return m, err
 }
 
-func setMemberExternalIDs(db *sql.DB, pid string, id, crmID, billingID int64) error {
+func setMemberExternalIDs(db *sql.DB, pid string, spaceID, id, crmID, billingID int64) error {
 	sets := []string{}
 	args := []any{}
 	if crmID > 0 {
@@ -1169,8 +1404,8 @@ func setMemberExternalIDs(db *sql.DB, pid string, id, crmID, billingID int64) er
 	if len(sets) == 0 {
 		return nil
 	}
-	args = append(args, pid, id)
-	_, err := db.Exec(`UPDATE members SET `+strings.Join(sets, ", ")+`, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, args...)
+	args = append(args, pid, spaceID, id)
+	_, err := db.Exec(`UPDATE members SET `+strings.Join(sets, ", ")+`, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND space_id=? AND id=?`, args...)
 	return err
 }
 
@@ -1181,7 +1416,7 @@ type postFilters struct {
 	limit      int
 }
 
-func createPost(ctx *sdk.AppCtx, pid string, args map[string]any) (*Post, error) {
+func createPost(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]any) (*Post, error) {
 	title := cleanString(args["title"])
 	if title == "" {
 		return nil, errors.New("title required")
@@ -1210,25 +1445,25 @@ func createPost(ctx *sdk.AppCtx, pid string, args map[string]any) (*Post, error)
 		publishedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	res, err := ctx.AppDB().Exec(
-		`INSERT INTO posts (project_id, title, slug, body, status, visibility, tier_ids_json, published_at, scheduled_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?,''))`,
-		pid, title, slug, strArg(args, "body"), status, visibility, string(tierIDs), publishedAt, strArg(args, "scheduled_at"),
+		`INSERT INTO posts (project_id, space_id, title, slug, body, status, visibility, tier_ids_json, published_at, scheduled_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?,''))`,
+		pid, spaceID, title, slug, strArg(args, "body"), status, visibility, string(tierIDs), publishedAt, strArg(args, "scheduled_at"),
 	)
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	post, err := getPost(ctx.AppDB(), pid, id, true)
+	post, err := getPost(ctx.AppDB(), pid, spaceID, id, true)
 	if err == nil {
-		_ = logEvent(ctx, pid, "post.created", "agent", "post", id, map[string]any{"title": title})
+		_ = logEvent(ctx, pid, spaceID, "post.created", "agent", "post", id, map[string]any{"title": title})
 	}
 	return post, err
 }
 
-func listPosts(db *sql.DB, pid string, f postFilters) ([]Post, error) {
+func listPosts(db *sql.DB, pid string, spaceID int64, f postFilters) ([]Post, error) {
 	limit := clampLimit(f.limit, 100, 500)
-	where := []string{"project_id=?"}
-	args := []any{pid}
+	where := []string{"project_id=?", "space_id=?"}
+	args := []any{pid, spaceID}
 	if f.status != "" {
 		where, args = append(where, "status=?"), append(args, f.status)
 	}
@@ -1255,34 +1490,34 @@ func listPosts(db *sql.DB, pid string, f postFilters) ([]Post, error) {
 	return out, rows.Err()
 }
 
-func getPost(db *sql.DB, pid string, id int64, withAttachments bool) (*Post, error) {
-	row := db.QueryRow(`SELECT `+postColumns()+` FROM posts WHERE project_id=? AND id=?`, pid, id)
+func getPost(db *sql.DB, pid string, spaceID, id int64, withAttachments bool) (*Post, error) {
+	row := db.QueryRow(`SELECT `+postColumns()+` FROM posts WHERE project_id=? AND space_id=? AND id=?`, pid, spaceID, id)
 	p, err := scanPost(row)
 	if err != nil || p == nil || !withAttachments {
 		return p, err
 	}
-	p.Attachments, err = listAttachments(db, pid, p.ID)
+	p.Attachments, err = listAttachments(db, pid, spaceID, p.ID)
 	return p, err
 }
 
-func getPostBySlug(db *sql.DB, pid, slug string, withAttachments bool) (*Post, error) {
-	row := db.QueryRow(`SELECT `+postColumns()+` FROM posts WHERE project_id=? AND slug=?`, pid, slug)
+func getPostBySlug(db *sql.DB, pid string, spaceID int64, slug string, withAttachments bool) (*Post, error) {
+	row := db.QueryRow(`SELECT `+postColumns()+` FROM posts WHERE project_id=? AND space_id=? AND slug=?`, pid, spaceID, slug)
 	p, err := scanPost(row)
 	if err != nil || p == nil || !withAttachments {
 		return p, err
 	}
-	p.Attachments, err = listAttachments(db, pid, p.ID)
+	p.Attachments, err = listAttachments(db, pid, spaceID, p.ID)
 	return p, err
 }
 
 func postColumns() string {
-	return `id, project_id, title, slug, body, status, visibility, tier_ids_json, COALESCE(published_at,''), COALESCE(scheduled_at,''), created_at, updated_at`
+	return `id, project_id, space_id, title, slug, body, status, visibility, tier_ids_json, COALESCE(published_at,''), COALESCE(scheduled_at,''), created_at, updated_at`
 }
 
 func scanPost(row interface{ Scan(...any) error }) (*Post, error) {
 	var p Post
 	var tiers string
-	if err := row.Scan(&p.ID, &p.ProjectID, &p.Title, &p.Slug, &p.Body, &p.Status, &p.Visibility, &tiers, &p.PublishedAt, &p.ScheduledAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	if err := row.Scan(&p.ID, &p.ProjectID, &p.SpaceID, &p.Title, &p.Slug, &p.Body, &p.Status, &p.Visibility, &tiers, &p.PublishedAt, &p.ScheduledAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -1292,7 +1527,7 @@ func scanPost(row interface{ Scan(...any) error }) (*Post, error) {
 	return &p, nil
 }
 
-func updatePost(ctx *sdk.AppCtx, pid string, id int64, patch map[string]any) (*Post, error) {
+func updatePost(ctx *sdk.AppCtx, pid string, spaceID, id int64, patch map[string]any) (*Post, error) {
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
@@ -1336,24 +1571,24 @@ func updatePost(ctx *sdk.AppCtx, pid string, id int64, patch map[string]any) (*P
 		}
 	}
 	if len(sets) == 0 {
-		return getPost(ctx.AppDB(), pid, id, true)
+		return getPost(ctx.AppDB(), pid, spaceID, id, true)
 	}
 	sets = append(sets, "updated_at=CURRENT_TIMESTAMP")
-	args = append(args, pid, id)
-	if _, err := ctx.AppDB().Exec(`UPDATE posts SET `+strings.Join(sets, ", ")+` WHERE project_id=? AND id=?`, args...); err != nil {
+	args = append(args, pid, spaceID, id)
+	if _, err := ctx.AppDB().Exec(`UPDATE posts SET `+strings.Join(sets, ", ")+` WHERE project_id=? AND space_id=? AND id=?`, args...); err != nil {
 		return nil, err
 	}
-	post, err := getPost(ctx.AppDB(), pid, id, true)
+	post, err := getPost(ctx.AppDB(), pid, spaceID, id, true)
 	if post == nil && err == nil {
 		err = fmt.Errorf("post %d not found", id)
 	}
 	if err == nil {
-		_ = logEvent(ctx, pid, "post.updated", "agent", "post", id, patch)
+		_ = logEvent(ctx, pid, spaceID, "post.updated", "agent", "post", id, patch)
 	}
 	return post, err
 }
 
-func publishPost(ctx *sdk.AppCtx, pid string, id int64, scheduledAt string) (*Post, error) {
+func publishPost(ctx *sdk.AppCtx, pid string, spaceID, id int64, scheduledAt string) (*Post, error) {
 	patch := map[string]any{}
 	if scheduledAt != "" {
 		patch["status"] = "scheduled"
@@ -1361,15 +1596,15 @@ func publishPost(ctx *sdk.AppCtx, pid string, id int64, scheduledAt string) (*Po
 	} else {
 		patch["status"] = "published"
 	}
-	post, err := updatePost(ctx, pid, id, patch)
+	post, err := updatePost(ctx, pid, spaceID, id, patch)
 	if err == nil {
-		_ = logEvent(ctx, pid, "post.published", "agent", "post", id, map[string]any{"scheduled_at": scheduledAt})
+		_ = logEvent(ctx, pid, spaceID, "post.published", "agent", "post", id, map[string]any{"scheduled_at": scheduledAt})
 	}
 	return post, err
 }
 
-func uploadAttachment(ctx *sdk.AppCtx, pid string, args map[string]any) (*Attachment, error) {
-	post, err := getPost(ctx.AppDB(), pid, int64Arg(args, "post_id"), false)
+func uploadAttachment(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]any) (*Attachment, error) {
+	post, err := getPost(ctx.AppDB(), pid, spaceID, int64Arg(args, "post_id"), false)
 	if err != nil || post == nil {
 		if err != nil {
 			return nil, err
@@ -1388,7 +1623,7 @@ func uploadAttachment(ctx *sdk.AppCtx, pid string, args map[string]any) (*Attach
 	if raw, err := base64.StdEncoding.DecodeString(content); err == nil {
 		size = int64(len(raw))
 	}
-	space, _ := ensureSpace(ctx, pid)
+	space, _ := getSpace(ctx.AppDB(), pid, spaceID)
 	folder := fmt.Sprintf("/creators/%s/posts/%s", space.Slug, post.Slug)
 	var out struct {
 		FileID int64  `json:"file_id"`
@@ -1414,16 +1649,16 @@ func uploadAttachment(ctx *sdk.AppCtx, pid string, args map[string]any) (*Attach
 	}
 	args["storage_file_id"] = fileID
 	args["size_bytes"] = size
-	return addAttachment(ctx, pid, args)
+	return addAttachment(ctx, pid, spaceID, args)
 }
 
-func addAttachment(ctx *sdk.AppCtx, pid string, args map[string]any) (*Attachment, error) {
+func addAttachment(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]any) (*Attachment, error) {
 	postID := int64Arg(args, "post_id")
 	fileID := int64Arg(args, "storage_file_id")
 	if postID == 0 || fileID == 0 {
 		return nil, errors.New("post_id and storage_file_id required")
 	}
-	if p, err := getPost(ctx.AppDB(), pid, postID, false); err != nil || p == nil {
+	if p, err := getPost(ctx.AppDB(), pid, spaceID, postID, false); err != nil || p == nil {
 		if err != nil {
 			return nil, err
 		}
@@ -1437,23 +1672,23 @@ func addAttachment(ctx *sdk.AppCtx, pid string, args map[string]any) (*Attachmen
 		return nil, fmt.Errorf("invalid attachment visibility %q", vis)
 	}
 	res, err := ctx.AppDB().Exec(
-		`INSERT INTO attachments (project_id, post_id, storage_file_id, filename, content_type, size_bytes, visibility, tier_ids_json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, postID, fileID, strArg(args, "filename"), strArg(args, "content_type"), int64Arg(args, "size_bytes"), vis, string(jsonIntArray(args["tier_ids"])),
+		`INSERT INTO attachments (project_id, space_id, post_id, storage_file_id, filename, content_type, size_bytes, visibility, tier_ids_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pid, spaceID, postID, fileID, strArg(args, "filename"), strArg(args, "content_type"), int64Arg(args, "size_bytes"), vis, string(jsonIntArray(args["tier_ids"])),
 	)
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	att, err := getAttachment(ctx.AppDB(), pid, id)
+	att, err := getAttachment(ctx.AppDB(), pid, spaceID, id)
 	if err == nil {
-		_ = logEvent(ctx, pid, "attachment.added", "agent", "attachment", id, map[string]any{"post_id": postID, "storage_file_id": fileID})
+		_ = logEvent(ctx, pid, spaceID, "attachment.added", "agent", "attachment", id, map[string]any{"post_id": postID, "storage_file_id": fileID})
 	}
 	return att, err
 }
 
-func listAttachments(db *sql.DB, pid string, postID int64) ([]Attachment, error) {
-	rows, err := db.Query(`SELECT `+attachmentColumns()+` FROM attachments WHERE project_id=? AND post_id=? ORDER BY id`, pid, postID)
+func listAttachments(db *sql.DB, pid string, spaceID, postID int64) ([]Attachment, error) {
+	rows, err := db.Query(`SELECT `+attachmentColumns()+` FROM attachments WHERE project_id=? AND space_id=? AND post_id=? ORDER BY id`, pid, spaceID, postID)
 	if err != nil {
 		return nil, err
 	}
@@ -1469,19 +1704,19 @@ func listAttachments(db *sql.DB, pid string, postID int64) ([]Attachment, error)
 	return out, rows.Err()
 }
 
-func getAttachment(db *sql.DB, pid string, id int64) (*Attachment, error) {
-	row := db.QueryRow(`SELECT `+attachmentColumns()+` FROM attachments WHERE project_id=? AND id=?`, pid, id)
+func getAttachment(db *sql.DB, pid string, spaceID, id int64) (*Attachment, error) {
+	row := db.QueryRow(`SELECT `+attachmentColumns()+` FROM attachments WHERE project_id=? AND space_id=? AND id=?`, pid, spaceID, id)
 	return scanAttachment(row)
 }
 
 func attachmentColumns() string {
-	return `id, project_id, post_id, storage_file_id, filename, content_type, size_bytes, visibility, tier_ids_json, created_at`
+	return `id, project_id, space_id, post_id, storage_file_id, filename, content_type, size_bytes, visibility, tier_ids_json, created_at`
 }
 
 func scanAttachment(row interface{ Scan(...any) error }) (*Attachment, error) {
 	var a Attachment
 	var tiers string
-	if err := row.Scan(&a.ID, &a.ProjectID, &a.PostID, &a.StorageFileID, &a.Filename, &a.ContentType, &a.SizeBytes, &a.Visibility, &tiers, &a.CreatedAt); err != nil {
+	if err := row.Scan(&a.ID, &a.ProjectID, &a.SpaceID, &a.PostID, &a.StorageFileID, &a.Filename, &a.ContentType, &a.SizeBytes, &a.Visibility, &tiers, &a.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -1491,15 +1726,15 @@ func scanAttachment(row interface{ Scan(...any) error }) (*Attachment, error) {
 	return &a, nil
 }
 
-func getDownloadLink(ctx *sdk.AppCtx, pid string, args map[string]any) (map[string]any, error) {
-	att, err := getAttachment(ctx.AppDB(), pid, int64Arg(args, "attachment_id"))
+func getDownloadLink(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]any) (map[string]any, error) {
+	att, err := getAttachment(ctx.AppDB(), pid, spaceID, int64Arg(args, "attachment_id"))
 	if err != nil || att == nil {
 		if err != nil {
 			return nil, err
 		}
 		return nil, errors.New("attachment not found")
 	}
-	post, err := getPost(ctx.AppDB(), pid, att.PostID, false)
+	post, err := getPost(ctx.AppDB(), pid, spaceID, att.PostID, false)
 	if err != nil || post == nil {
 		if err != nil {
 			return nil, err
@@ -1508,7 +1743,7 @@ func getDownloadLink(ctx *sdk.AppCtx, pid string, args map[string]any) (map[stri
 	}
 	var member *Member
 	if id := int64Arg(args, "member_id"); id > 0 {
-		member, err = getMember(ctx.AppDB(), pid, id)
+		member, err = getMember(ctx.AppDB(), pid, spaceID, id)
 	} else if tok := strArg(args, "portal_token"); tok != "" {
 		member, err = getMemberByToken(ctx.AppDB(), tok)
 	}
@@ -1530,7 +1765,7 @@ func getDownloadLink(ctx *sdk.AppCtx, pid string, args map[string]any) (map[stri
 	}, &out); err != nil {
 		return nil, fmt.Errorf("storage.files_get_url: %w", err)
 	}
-	_ = logEvent(ctx, pid, "attachment.download_link", "member", "attachment", att.ID, map[string]any{"member_id": int64Arg(args, "member_id")})
+	_ = logEvent(ctx, pid, spaceID, "attachment.download_link", "member", "attachment", att.ID, map[string]any{"member_id": int64Arg(args, "member_id")})
 	return map[string]any{"attachment": att, "download": out}, nil
 }
 
@@ -1599,8 +1834,8 @@ func memberTierIn(member *Member, raw json.RawMessage) bool {
 	return false
 }
 
-func createPaymentLink(ctx *sdk.AppCtx, pid string, args map[string]any) (map[string]any, error) {
-	member, err := getMember(ctx.AppDB(), pid, int64Arg(args, "member_id"))
+func createPaymentLink(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]any) (map[string]any, error) {
+	member, err := getMember(ctx.AppDB(), pid, spaceID, int64Arg(args, "member_id"))
 	if err != nil || member == nil {
 		if err != nil {
 			return nil, err
@@ -1611,7 +1846,7 @@ func createPaymentLink(ctx *sdk.AppCtx, pid string, args map[string]any) (map[st
 	if tierID == 0 && member.TierID != nil {
 		tierID = *member.TierID
 	}
-	tier, err := getTier(ctx.AppDB(), pid, tierID)
+	tier, err := getTier(ctx.AppDB(), pid, spaceID, tierID)
 	if err != nil || tier == nil {
 		if err != nil {
 			return nil, err
@@ -1627,7 +1862,7 @@ func createPaymentLink(ctx *sdk.AppCtx, pid string, args map[string]any) (map[st
 		if err != nil {
 			return nil, err
 		}
-		_ = setMemberExternalIDs(ctx.AppDB(), pid, member.ID, 0, customerID)
+		_ = setMemberExternalIDs(ctx.AppDB(), pid, spaceID, member.ID, 0, customerID)
 	}
 	months := intArg(args, "months", 1)
 	if months <= 0 {
@@ -1678,7 +1913,7 @@ func createPaymentLink(ctx *sdk.AppCtx, pid string, args map[string]any) (map[st
 	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("billing", "invoices_send_payment_link", linkArgs, &link); err != nil {
 		return nil, fmt.Errorf("billing.invoices_send_payment_link: %w", err)
 	}
-	_ = logEvent(ctx, pid, "payment_link.created", "agent", "member", member.ID, map[string]any{"invoice_id": finalResp.Invoice.ID, "tier_id": tier.ID})
+	_ = logEvent(ctx, pid, spaceID, "payment_link.created", "agent", "member", member.ID, map[string]any{"invoice_id": finalResp.Invoice.ID, "tier_id": tier.ID})
 	return map[string]any{"member": member, "tier": tier, "invoice": finalResp.Invoice, "payment_link": link}, nil
 }
 
@@ -1726,15 +1961,15 @@ func syncCRMContact(ctx *sdk.AppCtx, pid string, member *Member) (int64, error) 
 	return out.Contact.ID, nil
 }
 
-func sendPostUpdate(ctx *sdk.AppCtx, pid string, args map[string]any) (map[string]any, error) {
-	post, err := getPost(ctx.AppDB(), pid, int64Arg(args, "post_id"), false)
+func sendPostUpdate(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]any) (map[string]any, error) {
+	post, err := getPost(ctx.AppDB(), pid, spaceID, int64Arg(args, "post_id"), false)
 	if err != nil || post == nil {
 		if err != nil {
 			return nil, err
 		}
 		return nil, errors.New("post not found")
 	}
-	members, err := eligibleMembersForPost(ctx.AppDB(), pid, post)
+	members, err := eligibleMembersForPost(ctx.AppDB(), pid, spaceID, post)
 	if err != nil {
 		return nil, err
 	}
@@ -1768,16 +2003,16 @@ func sendPostUpdate(ctx *sdk.AppCtx, pid string, args map[string]any) (map[strin
 		}
 		sent++
 	}
-	_ = logEvent(ctx, pid, "post_update.sent", "agent", "post", post.ID, map[string]any{"sent": sent, "errors": len(errs)})
+	_ = logEvent(ctx, pid, spaceID, "post_update.sent", "agent", "post", post.ID, map[string]any{"sent": sent, "errors": len(errs)})
 	return map[string]any{"eligible": len(members), "sent": sent, "errors": errs}, nil
 }
 
-func eligibleMembersForPost(db *sql.DB, pid string, post *Post) ([]Member, error) {
-	members, err := listMembers(db, pid, memberFilters{status: "active", limit: 500})
+func eligibleMembersForPost(db *sql.DB, pid string, spaceID int64, post *Post) ([]Member, error) {
+	members, err := listMembers(db, pid, spaceID, memberFilters{status: "active", limit: 500})
 	if err != nil {
 		return nil, err
 	}
-	comped, err := listMembers(db, pid, memberFilters{status: "comped", limit: 500})
+	comped, err := listMembers(db, pid, spaceID, memberFilters{status: "comped", limit: 500})
 	if err != nil {
 		return nil, err
 	}
@@ -1791,12 +2026,12 @@ func eligibleMembersForPost(db *sql.DB, pid string, post *Post) ([]Member, error
 	return out, nil
 }
 
-func logEvent(ctx *sdk.AppCtx, pid, kind, actor, subjectType string, subjectID int64, data any) error {
+func logEvent(ctx *sdk.AppCtx, pid string, spaceID int64, kind, actor, subjectType string, subjectID int64, data any) error {
 	raw, _ := json.Marshal(data)
 	_, err := ctx.AppDB().Exec(
-		`INSERT INTO creator_events (project_id, kind, actor, subject_type, subject_id, data_json)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		pid, kind, actor, subjectType, subjectID, string(raw),
+		`INSERT INTO creator_events (project_id, space_id, kind, actor, subject_type, subject_id, data_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		pid, spaceID, kind, actor, subjectType, subjectID, string(raw),
 	)
 	if err == nil {
 		ctx.WithProject(pid).Emit(kind, map[string]any{"subject_type": subjectType, "subject_id": subjectID, "data": data})
@@ -1804,9 +2039,9 @@ func logEvent(ctx *sdk.AppCtx, pid, kind, actor, subjectType string, subjectID i
 	return err
 }
 
-func listEvents(db *sql.DB, pid string, limit int) ([]map[string]any, error) {
+func listEvents(db *sql.DB, pid string, spaceID int64, limit int) ([]map[string]any, error) {
 	limit = clampLimit(limit, 50, 200)
-	rows, err := db.Query(`SELECT id, kind, actor, subject_type, subject_id, data_json, created_at FROM creator_events WHERE project_id=? ORDER BY id DESC LIMIT ?`, pid, limit)
+	rows, err := db.Query(`SELECT id, kind, actor, subject_type, subject_id, data_json, created_at FROM creator_events WHERE project_id=? AND space_id=? ORDER BY id DESC LIMIT ?`, pid, spaceID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1859,6 +2094,42 @@ func projectFromArgs(ctx *sdk.AppCtx, args map[string]any) (string, error) {
 		return ctx.CurrentProject(), nil
 	}
 	return "", errors.New("_project_id required for global creators installs")
+}
+
+func spaceFromRequest(ctx *sdk.AppCtx, pid string, r *http.Request) (*Space, error) {
+	if sid := parseInt64(r.URL.Query().Get("space_id")); sid > 0 {
+		s, err := getSpace(ctx.AppDB(), pid, sid)
+		if err != nil || s != nil {
+			return s, err
+		}
+		return nil, fmt.Errorf("space %d not found", sid)
+	}
+	if slug := strings.TrimSpace(r.URL.Query().Get("space_slug")); slug != "" {
+		s, err := getSpaceBySlug(ctx.AppDB(), pid, slug)
+		if err != nil || s != nil {
+			return s, err
+		}
+		return nil, fmt.Errorf("space %q not found", slug)
+	}
+	return ensureSpace(ctx, pid)
+}
+
+func spaceFromArgs(ctx *sdk.AppCtx, pid string, args map[string]any) (*Space, error) {
+	if sid := int64Arg(args, "space_id"); sid > 0 {
+		s, err := getSpace(ctx.AppDB(), pid, sid)
+		if err != nil || s != nil {
+			return s, err
+		}
+		return nil, fmt.Errorf("space %d not found", sid)
+	}
+	if slug := strArg(args, "space_slug"); slug != "" {
+		s, err := getSpaceBySlug(ctx.AppDB(), pid, slug)
+		if err != nil || s != nil {
+			return s, err
+		}
+		return nil, fmt.Errorf("space %q not found", slug)
+	}
+	return ensureSpace(ctx, pid)
 }
 
 func readJSON(r *http.Request, out any) error {

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: creators
 display_name: Creators
-version: 0.1.1
+version: 0.1.2
 description: |
   Patreon-like creator memberships for Apteva. Manage tiers, members,
   gated posts, protected file drops, payment links, and supporter updates.
@@ -37,8 +37,12 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - name: creators_space_create
+      description: Create a creator space in this project.
+    - name: creators_space_list
+      description: List creator spaces for this project.
     - name: creators_space_get
-      description: Fetch the creator space settings for this project.
+      description: Fetch creator space settings.
     - name: creators_space_update
       description: Update creator space branding, slug, and defaults.
     - name: creators_tier_create

@@ -14,11 +14,14 @@ function qs(projectId, extra = {}) {
 }
 
 async function api(path, projectId, opts = {}) {
-  const res = await fetch(`${API}${path}${path.includes("?") ? "&" : qs(projectId)}`, {
+  const query = qs(projectId, opts.query || {});
+  const url = `${API}${path}${path.includes("?") && query ? query.replace("?", "&") : query}`;
+  const { query: _query, ...fetchOpts } = opts;
+  const res = await fetch(url, {
     credentials: "same-origin",
-    headers: opts.body ? { "Content-Type": "application/json" } : undefined,
-    ...opts,
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
+    headers: fetchOpts.body ? { "Content-Type": "application/json" } : undefined,
+    ...fetchOpts,
+    body: fetchOpts.body ? JSON.stringify(fetchOpts.body) : undefined,
   });
   if (!res.ok) {
     let msg = `${res.status}`;
@@ -33,6 +36,8 @@ async function api(path, projectId, opts = {}) {
 
 function CreatorsPanel({ projectId }) {
   const [tab, setTab] = useState("posts");
+  const [spaces, setSpaces] = useState([]);
+  const [selectedSpaceId, setSelectedSpaceId] = useState(null);
   const [space, setSpace] = useState(null);
   const [tiers, setTiers] = useState([]);
   const [members, setMembers] = useState([]);
@@ -42,17 +47,23 @@ function CreatorsPanel({ projectId }) {
   const [draft, setDraft] = useState({ title: "", body: "", visibility: "members" });
   const [tierDraft, setTierDraft] = useState({ name: "", price_cents: 500, currency: "USD", interval: "month" });
   const [memberDraft, setMemberDraft] = useState({ email: "", display_name: "", status: "lead" });
+  const [spaceDraft, setSpaceDraft] = useState({ name: "", slug: "" });
 
   const load = async () => {
     try {
-      const [s, t, m, p, e] = await Promise.all([
-        api("/space", projectId),
-        api("/tiers", projectId),
-        api("/members", projectId),
-        api("/posts", projectId),
-        api("/activity", projectId),
+      const s = await api("/space", projectId, { query: selectedSpaceId ? { space_id: selectedSpaceId } : {} });
+      const sid = s.space?.id;
+      if (sid && sid !== selectedSpaceId) setSelectedSpaceId(sid);
+      const query = sid ? { space_id: sid } : {};
+      const [allSpaces, t, m, p, e] = await Promise.all([
+        api("/spaces", projectId),
+        api("/tiers", projectId, { query }),
+        api("/members", projectId, { query }),
+        api("/posts", projectId, { query }),
+        api("/activity", projectId, { query }),
       ]);
       setSpace(s.space);
+      setSpaces(allSpaces.spaces || []);
       setTiers(t || []);
       setMembers(m || []);
       setPosts(p || []);
@@ -63,7 +74,7 @@ function CreatorsPanel({ projectId }) {
     }
   };
 
-  useEffect(() => { load(); }, [projectId]);
+  useEffect(() => { load(); }, [projectId, selectedSpaceId]);
 
   const metrics = useMemo(() => {
     const active = members.filter((m) => m.status === "active" || m.status === "comped").length;
@@ -80,7 +91,7 @@ function CreatorsPanel({ projectId }) {
     e.preventDefault();
     if (!draft.title.trim()) return;
     try {
-      await api("/posts", projectId, { method: "POST", body: draft });
+      await api("/posts", projectId, { method: "POST", query: selectedSpaceId ? { space_id: selectedSpaceId } : {}, body: draft });
       setDraft({ title: "", body: "", visibility: "members" });
       load();
     } catch (err) { setStatus(err.message); }
@@ -90,7 +101,7 @@ function CreatorsPanel({ projectId }) {
     e.preventDefault();
     if (!tierDraft.name.trim()) return;
     try {
-      await api("/tiers", projectId, { method: "POST", body: { ...tierDraft, price_cents: Number(tierDraft.price_cents || 0) } });
+      await api("/tiers", projectId, { method: "POST", query: selectedSpaceId ? { space_id: selectedSpaceId } : {}, body: { ...tierDraft, price_cents: Number(tierDraft.price_cents || 0) } });
       setTierDraft({ name: "", price_cents: 500, currency: space?.default_currency || "USD", interval: "month" });
       load();
     } catch (err) { setStatus(err.message); }
@@ -100,7 +111,7 @@ function CreatorsPanel({ projectId }) {
     e.preventDefault();
     if (!memberDraft.email.trim()) return;
     try {
-      await api("/members", projectId, { method: "POST", body: memberDraft });
+      await api("/members", projectId, { method: "POST", query: selectedSpaceId ? { space_id: selectedSpaceId } : {}, body: memberDraft });
       setMemberDraft({ email: "", display_name: "", status: "lead" });
       load();
     } catch (err) { setStatus(err.message); }
@@ -108,8 +119,18 @@ function CreatorsPanel({ projectId }) {
 
   const publish = async (id) => {
     try {
-      await api(`/posts/${id}/publish`, projectId, { method: "POST", body: {} });
+      await api(`/posts/${id}/publish`, projectId, { method: "POST", query: selectedSpaceId ? { space_id: selectedSpaceId } : {}, body: {} });
       load();
+    } catch (err) { setStatus(err.message); }
+  };
+
+  const createSpace = async (e) => {
+    e.preventDefault();
+    if (!spaceDraft.name.trim()) return;
+    try {
+      const res = await api("/spaces", projectId, { method: "POST", body: spaceDraft });
+      setSpaceDraft({ name: "", slug: "" });
+      if (res.space?.id) setSelectedSpaceId(res.space.id);
     } catch (err) { setStatus(err.message); }
   };
 
@@ -119,6 +140,13 @@ function CreatorsPanel({ projectId }) {
         jsx("h1", { className: "text-lg font-semibold", children: space?.name || "Creators" }),
         jsx("p", { className: "text-xs text-text-muted truncate", children: space?.description || "Memberships, gated posts, and supporter files." })
       ]}) }),
+      jsxs("div", { className: "flex items-center gap-2", children: [
+        jsx("select", { value: selectedSpaceId || "", onChange: (e) => setSelectedSpaceId(Number(e.target.value)), className: input, children: spaces.map((s) => jsx("option", { value: s.id, children: s.name }, s.id)) }),
+        jsxs("form", { onSubmit: createSpace, className: "flex items-center gap-2", children: [
+          jsx("input", { value: spaceDraft.name, onChange: (e) => setSpaceDraft({ ...spaceDraft, name: e.target.value }), placeholder: "New space", className: `${input} w-32` }),
+          jsx("button", { className: primary, children: "Add" })
+        ]})
+      ]}),
       jsx("div", { className: "ml-auto grid grid-cols-3 gap-2 text-right", children: [
         metric("Members", metrics.active),
         metric("Posts", metrics.published),

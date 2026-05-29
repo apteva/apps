@@ -4,7 +4,7 @@
 
 CREATE TABLE IF NOT EXISTS creator_spaces (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  project_id      TEXT NOT NULL UNIQUE,
+  project_id      TEXT NOT NULL,
   name            TEXT NOT NULL DEFAULT 'Creator Space',
   slug            TEXT NOT NULL DEFAULT 'creator',
   description     TEXT NOT NULL DEFAULT '',
@@ -22,6 +22,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_creator_spaces_slug
 CREATE TABLE IF NOT EXISTS tiers (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   project_id    TEXT NOT NULL,
+  space_id      INTEGER NOT NULL REFERENCES creator_spaces(id) ON DELETE CASCADE,
   name          TEXT NOT NULL,
   slug          TEXT NOT NULL,
   description   TEXT NOT NULL DEFAULT '',
@@ -33,14 +34,15 @@ CREATE TABLE IF NOT EXISTS tiers (
   archived_at   TEXT,
   created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(project_id, slug)
+  UNIQUE(space_id, slug)
 );
 
-CREATE INDEX IF NOT EXISTS ix_tiers_project ON tiers(project_id, archived_at, sort_order);
+CREATE INDEX IF NOT EXISTS ix_tiers_project ON tiers(project_id, space_id, archived_at, sort_order);
 
 CREATE TABLE IF NOT EXISTS members (
   id                   INTEGER PRIMARY KEY AUTOINCREMENT,
   project_id           TEXT NOT NULL,
+  space_id             INTEGER NOT NULL REFERENCES creator_spaces(id) ON DELETE CASCADE,
   email                TEXT NOT NULL,
   display_name         TEXT NOT NULL DEFAULT '',
   status               TEXT NOT NULL DEFAULT 'lead'
@@ -54,16 +56,17 @@ CREATE TABLE IF NOT EXISTS members (
   metadata             TEXT NOT NULL DEFAULT '{}',
   created_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(project_id, email)
+  UNIQUE(space_id, email)
 );
 
-CREATE INDEX IF NOT EXISTS ix_members_project_status ON members(project_id, status);
-CREATE INDEX IF NOT EXISTS ix_members_project_tier ON members(project_id, tier_id);
+CREATE INDEX IF NOT EXISTS ix_members_project_status ON members(project_id, space_id, status);
+CREATE INDEX IF NOT EXISTS ix_members_project_tier ON members(project_id, space_id, tier_id);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_members_portal_token ON members(portal_token);
 
 CREATE TABLE IF NOT EXISTS posts (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   project_id   TEXT NOT NULL,
+  space_id     INTEGER NOT NULL REFERENCES creator_spaces(id) ON DELETE CASCADE,
   title        TEXT NOT NULL,
   slug         TEXT NOT NULL,
   body         TEXT NOT NULL DEFAULT '',
@@ -76,15 +79,16 @@ CREATE TABLE IF NOT EXISTS posts (
   scheduled_at TEXT,
   created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(project_id, slug)
+  UNIQUE(space_id, slug)
 );
 
-CREATE INDEX IF NOT EXISTS ix_posts_project_status ON posts(project_id, status, published_at);
-CREATE INDEX IF NOT EXISTS ix_posts_project_visibility ON posts(project_id, visibility);
+CREATE INDEX IF NOT EXISTS ix_posts_project_status ON posts(project_id, space_id, status, published_at);
+CREATE INDEX IF NOT EXISTS ix_posts_project_visibility ON posts(project_id, space_id, visibility);
 
 CREATE TABLE IF NOT EXISTS attachments (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   project_id      TEXT NOT NULL,
+  space_id        INTEGER NOT NULL REFERENCES creator_spaces(id) ON DELETE CASCADE,
   post_id         INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
   storage_file_id INTEGER NOT NULL,
   filename        TEXT NOT NULL DEFAULT '',
@@ -102,6 +106,7 @@ CREATE INDEX IF NOT EXISTS ix_attachments_file ON attachments(storage_file_id);
 CREATE TABLE IF NOT EXISTS creator_events (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   project_id  TEXT NOT NULL,
+  space_id    INTEGER NOT NULL REFERENCES creator_spaces(id) ON DELETE CASCADE,
   kind        TEXT NOT NULL,
   actor       TEXT NOT NULL DEFAULT 'system',
   subject_type TEXT NOT NULL DEFAULT '',
@@ -110,4 +115,4 @@ CREATE TABLE IF NOT EXISTS creator_events (
   created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS ix_creator_events_project ON creator_events(project_id, id DESC);
+CREATE INDEX IF NOT EXISTS ix_creator_events_project ON creator_events(project_id, space_id, id DESC);
