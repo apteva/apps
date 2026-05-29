@@ -173,6 +173,7 @@ interface InboundRoute {
 
 const API = "/api/apps/crm";
 const MESSAGING_API = "/api/apps/messaging";
+type PanelApi = <T,>(method: string, path: string, body?: any, params?: Record<string, string>) => Promise<T>;
 
 // Activity-kind families. Used to pick icons + decide whether the
 // row gets a Reply button (received-only) and whether it groups into
@@ -396,6 +397,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     setFilters(next);
   }, []);
   const [lists, setLists] = useState<List[]>([]);
+  const [listFilterId, setListFilterId] = useState("");
   const [contactLists, setContactLists] = useState<List[]>([]);
   const [newListOpen, setNewListOpen] = useState(false);
   const [editListId, setEditListId] = useState<number | null>(null);
@@ -449,6 +451,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       if (q) params.q = q;
       if (offset) params.offset = String(offset);
       const ser = serializeFilters(filtersRef.current);
+      if (listFilterId) ser.push({ predicate: "in_list", list_id: Number(listFilterId) });
       if (ser.length) params.filters = JSON.stringify(ser);
       const r = await api<{ contacts?: Contact[]; total?: number }>("GET", "/contacts", undefined, params);
       const rows = r.contacts || [];
@@ -460,7 +463,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     } catch (e) {
       setStatus("Error: " + (e as Error).message);
     }
-  }, [api]);
+  }, [api, listFilterId]);
 
   const loadAttrDefs = useCallback(async () => {
     try {
@@ -503,6 +506,11 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   useEffect(() => { loadAttrDefs(); }, [loadAttrDefs]);
   useEffect(() => { loadLists(); }, [loadLists]);
   useEffect(() => { loadSegments(); }, [loadSegments]);
+  useEffect(() => {
+    if (listFilterId && !lists.some((l) => !l.archived_at && String(l.id) === listFilterId)) {
+      setListFilterId("");
+    }
+  }, [lists, listFilterId]);
 
   // Fetch the messaging app's verified senders so the composer can
   // offer a From picker. Soft-fail: if messaging isn't bound (or the
@@ -930,6 +938,18 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
                     className="px-2 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg"
                   >+ New</button>
                 </div>
+                <select
+                  value={listFilterId}
+                  onChange={(e) => setListFilterId(e.target.value)}
+                  className="w-full bg-bg-input border border-border rounded px-2 py-1 text-xs text-text"
+                >
+                  <option value="">All lists</option>
+                  {lists.filter((l) => !l.archived_at).map((l) => (
+                    <option key={l.id} value={String(l.id)}>
+                      {l.name}{typeof l.member_count === "number" ? ` (${l.member_count})` : ""}
+                    </option>
+                  ))}
+                </select>
                 <ContactFilterBar
                   attrDefs={attrDefs}
                   filters={filters}
@@ -1136,10 +1156,12 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
           />
         ) : tab === "lists" ? (
           <ListsTab
+            api={api}
             lists={lists}
             onCreate={() => setNewListOpen(true)}
             onEdit={(id) => setEditListId(id)}
             onArchive={handleArchiveList}
+            onOpenContact={(id) => { setTab("contacts"); selectContact(String(id)); }}
           />
         ) : tab === "segments" ? (
           <SegmentsTab
@@ -2636,19 +2658,55 @@ function ContactListChips({ lists, contactLists, onToggle }: {
   );
 }
 
-// ListsTab renders the main lists view: left column = list of lists,
-// right column = nothing for v0.4 (member view comes via the Contacts
-// tab once the agent picks a contact). Keeping it lean for v0.4 — a
-// dedicated list-detail pane with member browsing is a v0.5 polish.
-function ListsTab({ lists, onCreate, onEdit, onArchive }: {
+function ListsTab({ api, lists, onCreate, onEdit, onArchive, onOpenContact }: {
+  api: PanelApi;
   lists: List[];
   onCreate: () => void;
   onEdit: (id: number) => void;
   onArchive: (l: List) => void;
+  onOpenContact: (id: string | number) => void;
 }) {
-  const active = lists.filter((l) => !l.archived_at);
+  const active = useMemo(() => lists.filter((l) => !l.archived_at), [lists]);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [members, setMembers] = useState<Contact[]>([]);
+  const [loadingMembers, setLoadingMembers] = useState(false);
+  const [memberError, setMemberError] = useState("");
+  const selected = active.find((l) => l.id === selectedId) || null;
+
+  useEffect(() => {
+    if (active.length === 0) {
+      setSelectedId(null);
+      setMembers([]);
+      return;
+    }
+    if (!selectedId || !active.some((l) => l.id === selectedId)) {
+      setSelectedId(active[0].id);
+    }
+  }, [active, selectedId]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    let cancelled = false;
+    setLoadingMembers(true);
+    setMemberError("");
+    api<{ contacts?: Contact[] }>("GET", `/lists/${selectedId}/members`, undefined, { limit: "100" })
+      .then((r) => {
+        if (!cancelled) setMembers(r.contacts || []);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setMembers([]);
+          setMemberError((e as Error).message);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingMembers(false);
+      });
+    return () => { cancelled = true; };
+  }, [api, selectedId, lists]);
+
   return (
-    <div className="p-6 max-w-3xl space-y-4">
+    <div className="p-6 max-w-6xl space-y-4">
       <header className="flex items-center justify-between">
         <div>
           <h1 className="text-xl text-text font-semibold">Lists</h1>
@@ -2668,40 +2726,101 @@ function ListsTab({ lists, onCreate, onEdit, onArchive }: {
           No lists yet. Create one for each brand / product / audience that needs its own sender identity.
         </div>
       ) : (
-        <ul className="divide-y divide-border border border-border rounded">
-          {active.map((l) => (
-            <li key={l.id} className="px-3 py-2 flex items-center gap-3">
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="text-text font-medium truncate">{l.name}</span>
-                  <span className="text-[10px] uppercase text-text-dim font-mono">{l.slug}</span>
+        <div className="grid grid-cols-[minmax(280px,360px)_1fr] gap-4 min-h-0">
+          <ul className="divide-y divide-border border border-border rounded self-start">
+            {active.map((l) => (
+              <li key={l.id}>
+                <button
+                  type="button"
+                  onClick={() => setSelectedId(l.id)}
+                  className={`w-full px-3 py-2 text-left flex items-center gap-3 hover:bg-bg-input/60 ${selectedId === l.id ? "bg-bg-input" : ""}`}
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-text font-medium truncate">{l.name}</span>
+                      <span className="text-[10px] uppercase text-text-dim font-mono">{l.slug}</span>
+                    </div>
+                    <div className="text-xs text-text-muted truncate">
+                      {[
+                        l.default_sender_email && `from: ${l.default_sender_email}`,
+                        l.default_sender_phone && `phone: ${l.default_sender_phone}`,
+                        l.inbound_route_pattern && `inbound: ${l.inbound_route_pattern}`,
+                      ].filter(Boolean).join(" · ") || (l.description || "—")}
+                    </div>
+                  </div>
                   {typeof l.member_count === "number" && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted">
-                      {l.member_count} member{l.member_count === 1 ? "" : "s"}
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted shrink-0">
+                      {l.member_count}
                     </span>
                   )}
-                </div>
-                <div className="text-xs text-text-muted truncate">
-                  {[
-                    l.default_sender_email && `from: ${l.default_sender_email}`,
-                    l.default_sender_phone && `phone: ${l.default_sender_phone}`,
-                    l.inbound_route_pattern && `inbound: ${l.inbound_route_pattern}`,
-                  ].filter(Boolean).join(" · ") || (l.description || "—")}
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => onEdit(l.id)}
-                className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
-              >Edit</button>
-              <button
-                type="button"
-                onClick={() => onArchive(l)}
-                className="text-xs px-2 py-1 text-red border border-red/50 rounded hover:bg-red/10"
-              >Archive</button>
-            </li>
-          ))}
-        </ul>
+                </button>
+              </li>
+            ))}
+          </ul>
+
+          <section className="min-w-0 border border-border rounded">
+            {selected ? (
+              <>
+                <header className="flex items-center justify-between gap-3 border-b border-border px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-sm text-text font-medium truncate">{selected.name}</h2>
+                      {typeof selected.member_count === "number" && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted">
+                          {selected.member_count} member{selected.member_count === 1 ? "" : "s"}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-text-muted truncate">{selected.description || selected.slug}</div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => onEdit(selected.id)}
+                      className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
+                    >Edit</button>
+                    <button
+                      type="button"
+                      onClick={() => onArchive(selected)}
+                      className="text-xs px-2 py-1 text-red border border-red/50 rounded hover:bg-red/10"
+                    >Archive</button>
+                  </div>
+                </header>
+
+                {loadingMembers ? (
+                  <div className="p-4 text-text-muted text-xs">Loading members…</div>
+                ) : memberError ? (
+                  <div className="p-4 text-red text-xs">{memberError}</div>
+                ) : members.length === 0 ? (
+                  <div className="p-4 text-text-muted text-xs">No members in this list.</div>
+                ) : (
+                  <ul className="divide-y divide-border">
+                    {members.map((c) => (
+                      <li key={c.id} className="px-3 py-2 flex items-center gap-3">
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm text-text font-medium truncate">{displayName(c)}</div>
+                          <div className="text-xs text-text-muted truncate">{secondaryLine(c) || c.primary_email || c.primary_phone || "—"}</div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => onOpenContact(c.id)}
+                          className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input shrink-0"
+                        >Open</button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {members.length >= 100 && (
+                  <div className="border-t border-border px-3 py-2 text-xs text-text-dim">
+                    Showing first 100 members.
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="p-4 text-text-muted text-xs">Select a list.</div>
+            )}
+          </section>
+        </div>
       )}
     </div>
   );

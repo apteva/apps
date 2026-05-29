@@ -390,7 +390,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "contacts_search",
-			Description: "Filtered contact search. Args: q (free text over name/email/phone/company), filters [], limit (default 50, max 200), offset (for paging). Returns {contacts, count, total, offset} — use total + offset to page. Each filter is either a core-field filter {field, op, value} (field ∈ first_name,last_name,display_name,company,job_title,primary_email,primary_phone,status,owner_user_id,source) OR a custom-field filter {attribute: \"<key>\", op, value}. ops: eq,neq,gt,gte,lt,lte,contains,starts_with,is_null,in.",
+			Description: "Filtered contact search. Args: q (free text over name/email/phone/company), filters [], limit (default 50, max 200), offset (for paging). Returns {contacts, count, total, offset} — use total + offset to page. Each filter is either a core-field filter {field, op, value} (field ∈ first_name,last_name,display_name,company,job_title,primary_email,primary_phone,status,owner_user_id,source), a custom-field filter {attribute: \"<key>\", op, value}, or a list predicate {predicate: \"in_list\"|\"not_in_list\", list_id}. ops: eq,neq,gt,gte,lt,lte,contains,starts_with,is_null,in.",
 			InputSchema: schemaObject(map[string]any{
 				"filters": map[string]any{"type": "array"},
 				"q":       map[string]any{"type": "string"},
@@ -1685,6 +1685,15 @@ func buildSearchWhere(pid, q string, filters []any) ([]string, []any, error) {
 			args = append(args, params...)
 			continue
 		}
+		if pred, _ := m["predicate"].(string); pred == "in_list" || pred == "not_in_list" {
+			clause, params, err := buildListPredicateFilterClause(pid, pred, m["list_id"])
+			if err != nil {
+				return nil, nil, err
+			}
+			where = append(where, clause)
+			args = append(args, params...)
+			continue
+		}
 		field, _ := m["field"].(string)
 		clause, params, err := buildFilterClause(field, op, m["value"])
 		if err != nil {
@@ -1770,6 +1779,24 @@ func buildAttributeFilterClause(pid, key, op string, val any) (string, []any, er
 		WHERE ca.contact_id = contacts.id AND ca.project_id = ?
 		  AND cad.key = ? AND ` + opSQL + `)`
 	return clause, append([]any{pid, key}, opArgs...), nil
+}
+
+func buildListPredicateFilterClause(pid, pred string, val any) (string, []any, error) {
+	listID := int64FromAny(val)
+	if listID == 0 {
+		return "", nil, fmt.Errorf("%s: list_id required", pred)
+	}
+	switch pred {
+	case "in_list":
+		return `EXISTS (SELECT 1 FROM contact_list_members m
+			WHERE m.contact_id = contacts.id AND m.project_id = ? AND m.list_id = ?)`,
+			[]any{pid, listID}, nil
+	case "not_in_list":
+		return `NOT EXISTS (SELECT 1 FROM contact_list_members m
+			WHERE m.contact_id = contacts.id AND m.project_id = ? AND m.list_id = ?)`,
+			[]any{pid, listID}, nil
+	}
+	return "", nil, fmt.Errorf("unknown predicate %q", pred)
 }
 
 // buildFilterClause translates a single Pipedrive-style filter into a

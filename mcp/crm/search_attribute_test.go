@@ -101,6 +101,35 @@ func TestSearch_FilterByCustomAttribute(t *testing.T) {
 	}
 }
 
+func TestSearch_FilterByListMembership(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+
+	list, err := dbListCreate(ctx.AppDB(), "test-proj", &List{Name: "Newsletter"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := mustCreate(t, ctx, map[string]any{"display_name": "In List"})
+	out := mustCreate(t, ctx, map[string]any{"display_name": "Outside List"})
+	if err := dbListAddContact(ctx.AppDB(), "test-proj", list.ID, in.ID, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := searchIDs(t, ctx, app, map[string]any{
+		"filters": []any{map[string]any{"predicate": "in_list", "list_id": float64(list.ID)}},
+	})
+	if len(got) != 1 || !got[in.ID] {
+		t.Fatalf("in_list should return only member, got %v", got)
+	}
+
+	got = searchIDs(t, ctx, app, map[string]any{
+		"filters": []any{map[string]any{"predicate": "not_in_list", "list_id": float64(list.ID)}},
+	})
+	if len(got) != 1 || !got[out.ID] {
+		t.Fatalf("not_in_list should return only non-member, got %v", got)
+	}
+}
+
 func setAttr(t *testing.T, ctx *sdk.AppCtx, contactID int64, key string, value any) {
 	t.Helper()
 	if err := dbSetAttribute(ctx.AppDB(), "test-proj", contactID, key, value, "test"); err != nil {
