@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.4
+version: 0.8.5
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -83,6 +83,12 @@ provides:
       description: Reply on the contact's most-recent inbound conversation.
     - name: contacts_send_test
       description: Send a test message; logged as *_test_sent.
+    - name: messaging_senders_list
+      description: List verified senders from the bound Messaging app.
+    - name: messaging_templates_list
+      description: List templates from the bound Messaging app, especially approved WhatsApp templates.
+    - name: messaging_whatsapp_session_check
+      description: Check whether a WhatsApp contact is inside the 24-hour free-form reply window.
     - name: contacts_list_messageable
       description: List contacts reachable on a channel.
     - name: contacts_list_conversations
@@ -522,7 +528,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		// Calling without messaging installed returns a clear error.
 		{
 			Name:        "contacts_send_message",
-			Description: "Send a message to a contact via the bound messaging app. Auto-resolves channel + address (channel arg overrides). Logs the send to the activity timeline and links it to a conversation. Sender precedence: from > list.default_sender > install default. Args: id (contact id), body, channel? (email|sms|whatsapp), subject?, body_html?, from? (overrides defaults), list_id? (use this list's sender defaults), conversation_id? (attach to existing thread), template_vars?, idempotency_key?.",
+			Description: "Send a message to a contact via the bound messaging app. Auto-resolves channel + address (channel arg overrides). Logs the send to the activity timeline and links it to a conversation. Sender precedence: from > list.default_sender > install default. Args: id (contact id), body? (required unless template_id/content_sid), channel? (email|sms|whatsapp), subject?, body_html?, from? (verified sender override), list_id? (use this list's sender defaults), conversation_id? (attach to existing thread), template_id? (approved Messaging template, required for WhatsApp outside 24h), template_vars? or vars?, idempotency_key?. For WhatsApp: call messaging_whatsapp_session_check first; if active=false, call messaging_templates_list and send with template_id/template_vars.",
 			InputSchema: schemaObject(map[string]any{
 				"id":              map[string]any{"type": "integer"},
 				"body":            map[string]any{"type": "string"},
@@ -532,33 +538,71 @@ func (a *App) MCPTools() []sdk.Tool {
 				"from":            map[string]any{"type": "string"},
 				"list_id":         map[string]any{"type": "integer"},
 				"conversation_id": map[string]any{"type": "integer"},
+				"template_id":     map[string]any{"type": "integer"},
 				"template_vars":   map[string]any{"type": "object"},
+				"vars":            map[string]any{"type": "object"},
 				"idempotency_key": map[string]any{"type": "string"},
-			}, []string{"id", "body"}),
+			}, []string{"id"}),
 			Handler: a.toolSendMessage,
 		},
 		{
 			Name:        "contacts_reply",
-			Description: "Reply on the contact's most-recent inbound conversation (or the one given by conversation_id). Sets In-Reply-To/References for email so the thread keeps grouping. Args: id, body, conversation_id?, subject?.",
+			Description: "Reply on the contact's most-recent inbound conversation (or the one given by conversation_id). Sets In-Reply-To/References for email so the thread keeps grouping. Args: id, body? (required unless template_id), conversation_id?, subject?, from?, template_id?, template_vars?. For WhatsApp outside 24h, use messaging_templates_list and pass template_id/template_vars.",
 			InputSchema: schemaObject(map[string]any{
 				"id":              map[string]any{"type": "integer"},
 				"body":            map[string]any{"type": "string"},
 				"conversation_id": map[string]any{"type": "integer"},
 				"subject":         map[string]any{"type": "string"},
-			}, []string{"id", "body"}),
+				"from":            map[string]any{"type": "string"},
+				"template_id":     map[string]any{"type": "integer"},
+				"template_vars":   map[string]any{"type": "object"},
+				"vars":            map[string]any{"type": "object"},
+			}, []string{"id"}),
 			Handler: a.toolReply,
 		},
 		{
 			Name:        "contacts_send_test",
 			Description: "Send a test message — same wire path as contacts_send_message but logged as *_test_sent and not linked to a conversation. UI filters these out by default. Args: same as contacts_send_message.",
 			InputSchema: schemaObject(map[string]any{
-				"id":      map[string]any{"type": "integer"},
-				"body":    map[string]any{"type": "string"},
-				"channel": map[string]any{"type": "string"},
-				"subject": map[string]any{"type": "string"},
-				"from":    map[string]any{"type": "string"},
-			}, []string{"id", "body"}),
+				"id":            map[string]any{"type": "integer"},
+				"body":          map[string]any{"type": "string"},
+				"channel":       map[string]any{"type": "string"},
+				"subject":       map[string]any{"type": "string"},
+				"from":          map[string]any{"type": "string"},
+				"template_id":   map[string]any{"type": "integer"},
+				"template_vars": map[string]any{"type": "object"},
+			}, []string{"id"}),
 			Handler: a.toolSendTest,
+		},
+		{
+			Name:        "messaging_senders_list",
+			Description: "List senders from the bound Messaging app for this CRM project. Use before contacts_send_message to pick a verified From sender. Args: channel? (email|sms|whatsapp), verified_only? (default true).",
+			InputSchema: schemaObject(map[string]any{
+				"channel":       map[string]any{"type": "string"},
+				"verified_only": map[string]any{"type": "boolean"},
+			}, nil),
+			Handler: a.toolMessagingSendersList,
+		},
+		{
+			Name:        "messaging_templates_list",
+			Description: "List templates from the bound Messaging app. For WhatsApp outside the 24-hour window, pick an approved template and pass its id as template_id to contacts_send_message. Args: channel? (default whatsapp), approved_only? (default true for whatsapp), limit?.",
+			InputSchema: schemaObject(map[string]any{
+				"channel":       map[string]any{"type": "string"},
+				"approved_only": map[string]any{"type": "boolean"},
+				"limit":         map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolMessagingTemplatesList,
+		},
+		{
+			Name:        "messaging_whatsapp_session_check",
+			Description: "Check whether WhatsApp free-form sending is allowed. WhatsApp requires an inbound message from the contact within 24 hours; otherwise use an approved template. Args: id/contact_id? (uses contact phone as recipient), to? (E.164 recipient override), from? (verified WhatsApp sender; defaults to CRM/Messaging WhatsApp sender). Returns active, from, to, since, last_inbound.",
+			InputSchema: schemaObject(map[string]any{
+				"id":         map[string]any{"type": "integer"},
+				"contact_id": map[string]any{"type": "integer"},
+				"to":         map[string]any{"type": "string"},
+				"from":       map[string]any{"type": "string"},
+			}, nil),
+			Handler: a.toolMessagingWhatsAppSessionCheck,
 		},
 		{
 			Name:        "contacts_list_messageable",
@@ -2340,6 +2384,21 @@ func int64Arg(args map[string]any, key string) int64 {
 		return n
 	}
 	return 0
+}
+
+func boolArg(args map[string]any, key string, def bool) bool {
+	switch v := args[key].(type) {
+	case bool:
+		return v
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "true", "1", "yes", "y":
+			return true
+		case "false", "0", "no", "n":
+			return false
+		}
+	}
+	return def
 }
 
 func strArg(args map[string]any, key string) string {

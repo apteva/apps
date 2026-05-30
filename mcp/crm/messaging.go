@@ -518,6 +518,214 @@ func suppressionCheck(ctx *sdk.AppCtx, channel, address string) (bool, string) {
 	return out.Suppressed, out.Reason
 }
 
+func (a *App) toolMessagingSendersList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	call := map[string]any{
+		"_project_id":   pid,
+		"verified_only": boolArg(args, "verified_only", true),
+	}
+	if channel := strings.TrimSpace(strArg(args, "channel")); channel != "" {
+		call["channel"] = channel
+	}
+	var out map[string]any
+	if err := callMessagingTool(ctx, "senders_list", call, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (a *App) toolMessagingTemplatesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	channel := strings.TrimSpace(strArg(args, "channel"))
+	if channel == "" {
+		channel = channelWhatsApp
+	}
+	approvedOnly := boolArg(args, "approved_only", channel == channelWhatsApp)
+	call := map[string]any{
+		"_project_id": pid,
+		"channel":     channel,
+		"limit":       intArg(args, "limit", 200),
+	}
+	var out map[string]any
+	if err := callMessagingTool(ctx, "template_list", call, &out); err != nil {
+		return nil, err
+	}
+	if approvedOnly {
+		if rows, ok := out["templates"].([]any); ok {
+			filtered := make([]any, 0, len(rows))
+			for _, row := range rows {
+				m, _ := row.(map[string]any)
+				if m == nil {
+					continue
+				}
+				if !strings.EqualFold(anyString(m["channel"]), channel) {
+					continue
+				}
+				status := strings.ToLower(strings.TrimSpace(anyString(m["provider_status"])))
+				providerID := strings.TrimSpace(anyString(m["provider_template_id"]))
+				if channel == channelWhatsApp && (providerID == "" || status != "approved") {
+					continue
+				}
+				filtered = append(filtered, row)
+			}
+			out["templates"] = filtered
+			out["count"] = len(filtered)
+		}
+	}
+	return out, nil
+}
+
+func (a *App) toolMessagingWhatsAppSessionCheck(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	to, err := a.resolveWhatsAppSessionRecipient(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	from, err := a.resolveWhatsAppSessionSender(ctx, pid, strArg(args, "from"))
+	if err != nil {
+		return nil, err
+	}
+	return a.checkWhatsAppSession(ctx, pid, from, to)
+}
+
+func (a *App) resolveWhatsAppSessionRecipient(ctx *sdk.AppCtx, pid string, args map[string]any) (string, error) {
+	if to := cleanMessagingAddress(strArg(args, "to")); to != "" {
+		return to, nil
+	}
+	cid := int64Arg(args, "id")
+	if cid == 0 {
+		cid = int64Arg(args, "contact_id")
+	}
+	if cid == 0 {
+		return "", errors.New("to or id/contact_id required")
+	}
+	c, err := dbGetByID(ctx.AppDB(), pid, cid)
+	if err != nil {
+		return "", err
+	}
+	if c == nil {
+		return "", errors.New("contact not found")
+	}
+	addr, err := resolveContactAddress(ctx.AppDB(), pid, c, channelWhatsApp)
+	if err != nil {
+		return "", err
+	}
+	return cleanMessagingAddress(addr.Address), nil
+}
+
+func (a *App) resolveWhatsAppSessionSender(ctx *sdk.AppCtx, pid, raw string) (string, error) {
+	if from := cleanMessagingAddress(raw); from != "" {
+		return from, nil
+	}
+	if from := cleanMessagingAddress(defaultSenderForChannel(ctx, channelWhatsApp)); from != "" {
+		return from, nil
+	}
+	var out struct {
+		Senders []struct {
+			Channel   string `json:"channel"`
+			Address   string `json:"address"`
+			IsDefault bool   `json:"is_default"`
+		} `json:"senders"`
+	}
+	err := callMessagingTool(ctx, "senders_list", map[string]any{
+		"_project_id":   pid,
+		"channel":       channelWhatsApp,
+		"verified_only": true,
+	}, &out)
+	if err != nil {
+		return "", err
+	}
+	for _, s := range out.Senders {
+		if s.Channel == channelWhatsApp && s.IsDefault && cleanMessagingAddress(s.Address) != "" {
+			return cleanMessagingAddress(s.Address), nil
+		}
+	}
+	for _, s := range out.Senders {
+		if s.Channel == channelWhatsApp && cleanMessagingAddress(s.Address) != "" {
+			return cleanMessagingAddress(s.Address), nil
+		}
+	}
+	return "", errors.New("no verified WhatsApp sender found in bound Messaging app")
+}
+
+func (a *App) checkWhatsAppSession(ctx *sdk.AppCtx, pid, from, to string) (map[string]any, error) {
+	from = cleanMessagingAddress(from)
+	to = cleanMessagingAddress(to)
+	if from == "" || to == "" {
+		return nil, errors.New("from and to required")
+	}
+	since := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
+	var out struct {
+		Messages []struct {
+			From             string   `json:"from"`
+			To               []string `json:"to"`
+			MatchedRecipient string   `json:"matched_recipient"`
+			ReceivedAt       string   `json:"received_at"`
+			CreatedAt        string   `json:"created_at"`
+		} `json:"messages"`
+	}
+	err := callMessagingTool(ctx, "message_list", map[string]any{
+		"_project_id": pid,
+		"direction":   "in",
+		"channel":     channelWhatsApp,
+		"address":     to,
+		"since":       since,
+		"limit":       50,
+	}, &out)
+	if err != nil {
+		return nil, err
+	}
+	active := false
+	lastInbound := ""
+	for _, m := range out.Messages {
+		if cleanMessagingAddress(m.From) != to {
+			continue
+		}
+		matched := cleanMessagingAddress(m.MatchedRecipient) == from
+		for _, recipient := range m.To {
+			if cleanMessagingAddress(recipient) == from {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			active = true
+			if m.ReceivedAt != "" {
+				lastInbound = m.ReceivedAt
+			} else {
+				lastInbound = m.CreatedAt
+			}
+			break
+		}
+	}
+	return map[string]any{
+		"active":       active,
+		"from":         from,
+		"to":           to,
+		"since":        since,
+		"last_inbound": lastInbound,
+	}, nil
+}
+
+func anyString(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprint(v)
+}
+
 // ─── Tool: contacts_send_message ──────────────────────────────────
 
 func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error) {
