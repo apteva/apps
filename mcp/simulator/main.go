@@ -14,11 +14,11 @@
 //
 // Disk layout (per-install data dir):
 //
-//   /data/simulator.db              app DB
-//   /data/artifacts/<sha>.apk       built APKs (android)
-//   /data/artifacts/<sha>.app/      built .app bundles (ios)
-//   /data/sim-logs/<sim_run_id>.log per-run build/install/launch log
-//   /data/boot-logs/<sim_id>.log    per-sim boot log (emulator stdout)
+//	/data/simulator.db              app DB
+//	/data/artifacts/<sha>.apk       built APKs (android)
+//	/data/artifacts/<sha>.app/      built .app bundles (ios)
+//	/data/sim-logs/<sim_run_id>.log per-run build/install/launch log
+//	/data/boot-logs/<sim_id>.log    per-sim boot log (emulator stdout)
 package main
 
 import (
@@ -42,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: simulator
 display_name: Apteva Simulator
-version: 0.1.10
+version: 0.1.11
 description: |
   iOS and Android simulators on demand. Boot a device, build a repo's
   source into an artifact, install + launch on a headless emulator or
@@ -57,6 +57,19 @@ requires:
   permissions:
     - db.write.app
     - platform.apps.call
+  binaries:
+    - name: idb
+      version: "1.1.7"
+      executables: [idb]
+      required: false
+      hint: "Optional for iOS clicks, swipes, keyboard input, and high-FPS streaming. Install with pipx install fb-idb; native simctl screenshot streaming works without it."
+      sources: {}
+    - name: idb-companion
+      version: "1.1.8"
+      executables: [idb_companion]
+      required: false
+      hint: "Optional companion for idb input and high-FPS streaming. Install with brew install idb-companion; native simctl screenshot streaming works without it."
+      sources: {}
 provides:
   http_routes:
     - prefix: /

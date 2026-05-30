@@ -280,7 +280,7 @@ export function DeviceFrame({
       </div>
       {!inputAvailable && (
         <div className="max-w-[360px] text-center text-[11px] text-text-muted">
-          View-only. Install idb + idb_companion for iOS clicks and keyboard input.
+          View-only. idb + idb_companion are declared optional host dependencies for iOS clicks and keyboard input.
         </div>
       )}
       {inputNotice && (
