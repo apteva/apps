@@ -28,11 +28,13 @@ type InputKind = "tap" | "swipe" | "key" | "text";
 
 export function DeviceFrame({
   streamUrl,
+  inputUrl,
   platform,
   inputAvailable = true,
   inputUnavailableReason = "Input is unavailable for this device.",
 }: {
   streamUrl: string;
+  inputUrl?: string;
   platform?: string;
   inputAvailable?: boolean;
   inputUnavailableReason?: string;
@@ -201,16 +203,37 @@ export function DeviceFrame({
     };
   }, [streamUrl]);
 
-  const sendInput = (payload: Record<string, unknown>) => {
+  const sendInput = async (payload: Record<string, unknown>) => {
     if (!inputAvailable) {
       setInputNotice(inputUnavailableReason);
       return;
+    }
+    if (inputUrl) {
+      try {
+        const r = await fetch(inputUrl, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!r.ok) {
+          const msg = await r.json().catch(() => ({}));
+          throw new Error(msg.error || r.statusText);
+        }
+        setInputNotice("");
+        return;
+      } catch (e) {
+        setInputNotice("Input failed: " + (e as Error).message);
+        return;
+      }
     }
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       setInputNotice("");
       ws.send(JSON.stringify({ type: "input", ...payload }));
+      return;
     }
+    setInputNotice("Input failed: stream connection is not open.");
   };
 
   const normXY = (e: React.PointerEvent) => {
@@ -240,17 +263,17 @@ export function DeviceFrame({
     const dx = Math.abs(x - start.x);
     const dy = Math.abs(y - start.y);
     if (dx < 0.02 && dy < 0.02) {
-      sendInput({ kind: "tap", x, y });
+      void sendInput({ kind: "tap", x, y });
     } else {
-      sendInput({ kind: "swipe", x: start.x, y: start.y, x2: x, y2: y, ms: Math.max(50, Date.now() - start.t) });
+      void sendInput({ kind: "swipe", x: start.x, y: start.y, x2: x, y2: y, ms: Math.max(50, Date.now() - start.t) });
     }
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     e.preventDefault();
-    if (e.key === "Enter") sendInput({ kind: "key", key: "ENTER" });
-    else if (e.key === "Backspace") sendInput({ kind: "key", key: "DEL" });
-    else if (e.key.length === 1) sendInput({ kind: "text", text: e.key });
+    if (e.key === "Enter") void sendInput({ kind: "key", key: "ENTER" });
+    else if (e.key === "Backspace") void sendInput({ kind: "key", key: "DEL" });
+    else if (e.key.length === 1) void sendInput({ kind: "text", text: e.key });
   };
 
   return (
@@ -281,16 +304,16 @@ export function DeviceFrame({
       </div>
       {!inputAvailable && (
         <div className="max-w-[360px] text-center text-[11px] text-text-muted">
-          View-only. idb + idb_companion are declared optional host dependencies for iOS clicks and keyboard input.
+          View-only. idb is an optional host dependency for iOS clicks and keyboard input.
         </div>
       )}
       {inputNotice && (
         <div className="max-w-[360px] text-center text-[11px] text-accent">{inputNotice}</div>
       )}
       <div className="flex gap-2">
-        <DeviceKeyButton label="Back" onClick={() => sendInput({ kind: "key", key: "BACK" })} disabled={platform === "ios" || !inputAvailable} />
-        <DeviceKeyButton label="Home" onClick={() => sendInput({ kind: "key", key: "HOME" })} disabled={!inputAvailable} />
-        <DeviceKeyButton label="Recents" onClick={() => sendInput({ kind: "key", key: "APP_SWITCH" })} disabled={platform === "ios" || !inputAvailable} />
+        <DeviceKeyButton label="Back" onClick={() => void sendInput({ kind: "key", key: "BACK" })} disabled={platform === "ios" || !inputAvailable} />
+        <DeviceKeyButton label="Home" onClick={() => void sendInput({ kind: "key", key: "HOME" })} disabled={!inputAvailable} />
+        <DeviceKeyButton label="Recents" onClick={() => void sendInput({ kind: "key", key: "APP_SWITCH" })} disabled={platform === "ios" || !inputAvailable} />
       </div>
     </div>
   );

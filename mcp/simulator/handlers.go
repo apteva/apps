@@ -13,6 +13,7 @@ package main
 //   POST /api/sims/<id>/shutdown    → shutdown
 //   GET  /api/sims/<id>/screenshot  → PNG bytes
 //   POST /api/sims/<id>/stream-url  → mint a stream URL
+//   POST /api/sims/<id>/input       → send tap/swipe/key/text input
 //   GET  /api/sims/<id>/logs?lines= → device logs
 //   POST /api/run                   → multipart source archive build/install/launch
 
@@ -271,6 +272,26 @@ func (a *App) handleSimItem(w http.ResponseWriter, r *http.Request) {
 			"stream_url": a.streamURL(a.appCtx, simID, stream.WSToken),
 			"expires_at": stream.ExpiresAt,
 		})
+
+	case "input":
+		if sim.Status != "booted" {
+			writeErr(w, http.StatusConflict, errNotBooted)
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, errBadPath)
+			return
+		}
+		var ev inputEvent
+		if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := a.sendInput(sim, ev); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 
 	case "logs":
 		lines := 200

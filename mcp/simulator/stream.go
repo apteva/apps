@@ -185,12 +185,20 @@ func (a *App) handleInputMessage(sim *Sim, data []byte) {
 		Kind: msg.Kind, X: msg.X, Y: msg.Y, X2: msg.X2, Y2: msg.Y2,
 		DurationMS: msg.MS, Key: msg.Key, Text: msg.Text,
 	}
+	_ = a.sendInput(sim, ev)
+}
+
+func (a *App) sendInput(sim *Sim, ev inputEvent) error {
+	if sim == nil {
+		return errNotFound
+	}
 	switch sim.Platform {
 	case "android":
-		_ = androidSendInput(sim.Serial, ev)
+		return androidSendInput(sim.Serial, ev)
 	case "ios":
-		_ = a.iosSendInput(sim.ID, ev)
+		return a.iosSendInput(sim.ID, ev)
 	}
+	return errUnknownPlatform(sim.Platform)
 }
 
 type streamSource struct {

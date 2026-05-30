@@ -228,10 +228,10 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
   const canStreamSelected = selectedCaps?.streaming_available !== false;
   const canInputSelected =
     selectedSim?.platform !== "ios" ||
-    (!!selectedCaps?.tools?.idb?.found && !!selectedCaps?.tools?.idb_companion?.found);
+    !!selectedCaps?.tools?.idb?.found;
   const inputUnavailableReason =
     selectedSim?.platform === "ios"
-      ? "iOS clicks need idb and idb_companion. The current native simctl stream is view-only."
+      ? "iOS clicks need idb. Install with pipx install fb-idb."
       : "Input is unavailable for this device.";
 
   useEffect(() => {
@@ -341,6 +341,7 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
               {selectedSim.status === "booted" && streamUrl ? (
                 <DeviceFrame
                   streamUrl={streamUrl}
+                  inputUrl={`${API}/sims/${encodeURIComponent(selectedSim.id)}/input?${withParams()}`}
                   platform={selectedSim.platform}
                   inputAvailable={canInputSelected}
                   inputUnavailableReason={inputUnavailableReason}
