@@ -41,6 +41,7 @@ func (a *App) handleSimsList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
+	a.refreshListedSimStatuses(sims)
 	writeJSON(w, http.StatusOK, map[string]any{"sims": sims})
 }
 
@@ -98,6 +99,7 @@ func (a *App) handleSimItem(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, errNotFound)
 		return
 	}
+	sim = a.refreshSimStatus(sim)
 
 	switch action {
 	case "shutdown":
@@ -191,6 +193,43 @@ func resolveProjectFromRequest(r *http.Request) (string, error) {
 
 func orConfig(ctx *sdk.AppCtx, val, key string) string {
 	return valueOrConfigDefault(ctx, val, key)
+}
+
+func (a *App) refreshListedSimStatuses(sims []Sim) {
+	for i := range sims {
+		refreshed := a.refreshSimStatus(&sims[i])
+		if refreshed != nil {
+			sims[i] = *refreshed
+		}
+	}
+}
+
+func (a *App) refreshSimStatus(sim *Sim) *Sim {
+	if sim == nil || a == nil || a.appCtx == nil || a.appCtx.AppDB() == nil {
+		return sim
+	}
+	if sim.Platform != "ios" || (sim.Status != "booting" && sim.Status != "booted") {
+		return sim
+	}
+	state, err := simctlDeviceState(sim.ID)
+	if err != nil {
+		return sim
+	}
+	switch state {
+	case "Booted":
+		if sim.Status != "booted" {
+			_ = dbUpdateSim(a.appCtx.AppDB(), sim.ID, map[string]any{"status": "booted", "error": ""})
+			sim.Status = "booted"
+			sim.Error = ""
+		}
+	case "Shutdown":
+		if sim.Status != "shutdown" {
+			_ = dbUpdateSim(a.appCtx.AppDB(), sim.ID, map[string]any{"status": "shutdown", "error": ""})
+			sim.Status = "shutdown"
+			sim.Error = ""
+		}
+	}
+	return sim
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

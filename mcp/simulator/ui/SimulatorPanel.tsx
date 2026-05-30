@@ -75,7 +75,8 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
     try {
       const r = await fetch(`${API}/sims?${withParams()}`, { credentials: "same-origin" });
       const j = await r.json();
-      setSims(j.sims ?? []);
+      const next = j.sims ?? [];
+      setSims(next);
     } catch {
       /* background poll — ignore */
     }
@@ -136,9 +137,14 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
     }
   };
 
-  const openStream = async (id: string) => {
+  const openStream = useCallback(async (id: string) => {
     setSelected(id);
     setStreamUrl(null);
+    const sim = sims.find((s) => s.id === id);
+    if (sim && sim.status !== "booted") {
+      setError("");
+      return;
+    }
     try {
       const r = await fetch(`${API}/sims/${encodeURIComponent(id)}/stream-url?${withParams()}`, {
         method: "POST",
@@ -150,9 +156,15 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
     } catch (e) {
       setError("Stream failed: " + (e as Error).message);
     }
-  };
+  }, [sims, withParams]);
 
   const selectedSim = sims.find((s) => s.id === selected) ?? null;
+
+  useEffect(() => {
+    if (selectedSim?.status === "booted" && !streamUrl && !busy) {
+      void openStream(selectedSim.id);
+    }
+  }, [selectedSim?.id, selectedSim?.status, streamUrl, busy, openStream]);
 
   return (
     <div className="h-full flex flex-col bg-bg text-text">
