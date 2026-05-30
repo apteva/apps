@@ -126,6 +126,9 @@ func (a *App) toolSimsStreamURL() sdk.Tool {
 			if sim == nil || sim.Status != "booted" {
 				return nil, fmt.Errorf("sim %q not booted", simID)
 			}
+			if err := streamingCapabilityCheckFor(ctx, sim.Platform); err != nil {
+				return nil, err
+			}
 			stream, err := dbMintStreamToken(ctx.AppDB(), simID, 1*time.Hour)
 			if err != nil {
 				return nil, err

@@ -11,9 +11,9 @@ that produces a mobile artifact.
 
 ## Host requirements
 
-Per-platform, probed at runtime by `sims_capabilities`. Each platform is
-either fully usable or unavailable with an actionable hint — there are
-no half-working states.
+Per-platform, probed at runtime by `sims_capabilities`. Boot/build
+availability is reported separately from live streaming/input, because
+iOS can boot with Xcode alone while live view needs idb.
 
 | Platform | Host | Tools on PATH |
 |---|---|---|

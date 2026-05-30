@@ -38,9 +38,11 @@ type Capabilities struct {
 //	Tools:     map of tool-name → resolved info (path + version).
 //	           Missing tools show up as {Found: false}.
 type PlatformCapability struct {
-	Available bool                 `json:"available"`
-	Reasons   []string             `json:"reasons"`
-	Tools     map[string]ToolProbe `json:"tools"`
+	Available          bool                 `json:"available"`
+	Reasons            []string             `json:"reasons"`
+	StreamingAvailable bool                 `json:"streaming_available"`
+	StreamingReasons   []string             `json:"streaming_reasons"`
+	Tools              map[string]ToolProbe `json:"tools"`
 }
 
 // ToolProbe is the result of probing one external tool on PATH.
@@ -98,6 +100,8 @@ func probeAndroid(ctx *sdk.AppCtx) PlatformCapability {
 	// not strictly required; the emulator falls back to software
 	// rendering, which is slow but functional.)
 	out.Available = len(out.Reasons) == 0
+	out.StreamingAvailable = out.Available
+	out.StreamingReasons = append([]string{}, out.Reasons...)
 	return out
 }
 
@@ -105,8 +109,9 @@ func probeAndroid(ctx *sdk.AppCtx) PlatformCapability {
 
 func probeIOS(ctx *sdk.AppCtx) PlatformCapability {
 	out := PlatformCapability{
-		Reasons: []string{},
-		Tools:   map[string]ToolProbe{},
+		Reasons:          []string{},
+		StreamingReasons: []string{},
+		Tools:            map[string]ToolProbe{},
 	}
 	// Hard gate: iOS Simulator is macOS-only. No partial-functionality
 	// state — iOS either fully works or isn't available, per the v0.1
@@ -125,7 +130,6 @@ func probeIOS(ctx *sdk.AppCtx) PlatformCapability {
 		{"xcrun", "--version", "Install Xcode + Command Line Tools (`xcode-select --install`)."},
 		{"xcodebuild", "-version", "Install Xcode from the Mac App Store, then run `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`."},
 		{"simctl", "", "Bundled with Xcode CLI tools. If xcrun is present, this should be too."},
-		{"idb", "--help", "Install the idb CLI (`pipx install fb-idb` or `python3 -m pip install fb-idb`)."},
 	}
 	for _, p := range probes {
 		var tp ToolProbe
@@ -142,6 +146,17 @@ func probeIOS(ctx *sdk.AppCtx) PlatformCapability {
 			out.Reasons = append(out.Reasons, p.name+" not found. "+p.hint)
 		}
 	}
+	out.Available = len(out.Reasons) == 0
+	out.StreamingAvailable = out.Available
+
+	idb := lookupAndVersion("idb", "--help")
+	out.Tools["idb"] = idb
+	if !idb.Found {
+		out.StreamingAvailable = false
+		out.StreamingReasons = append(out.StreamingReasons,
+			"idb not found. Install the idb CLI with `pipx install fb-idb` or `python3 -m pip install fb-idb` "+
+				"(required for iOS live view and input).")
+	}
 
 	// idb_companion path can be overridden in install config. Empty =
 	// fall back to PATH lookup.
@@ -152,12 +167,12 @@ func probeIOS(ctx *sdk.AppCtx) PlatformCapability {
 	tp := probeIDBCompanion(idbPath)
 	out.Tools["idb_companion"] = tp
 	if !tp.Found {
-		out.Reasons = append(out.Reasons,
+		out.StreamingAvailable = false
+		out.StreamingReasons = append(out.StreamingReasons,
 			"idb_companion not found. Install via `brew install idb-companion` "+
 				"(required for iOS input + streaming).")
 	}
 
-	out.Available = len(out.Reasons) == 0
 	return out
 }
 
@@ -259,4 +274,21 @@ func capabilityCheckFor(ctx *sdk.AppCtx, platform string) error {
 		return nil
 	}
 	return errors.New("host_unsupported: " + strings.Join(pc.Reasons, "; "))
+}
+
+func streamingCapabilityCheckFor(ctx *sdk.AppCtx, platform string) error {
+	caps := probeCapabilities(ctx)
+	var pc PlatformCapability
+	switch platform {
+	case "android":
+		pc = caps.Android
+	case "ios":
+		pc = caps.IOS
+	default:
+		return errors.New("unknown platform: " + platform)
+	}
+	if pc.StreamingAvailable {
+		return nil
+	}
+	return errors.New("streaming_unsupported: " + strings.Join(pc.StreamingReasons, "; "))
 }

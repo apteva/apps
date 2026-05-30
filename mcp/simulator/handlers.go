@@ -144,6 +144,10 @@ func (a *App) handleSimItem(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusConflict, errNotBooted)
 			return
 		}
+		if err := streamingCapabilityCheckFor(a.appCtx, sim.Platform); err != nil {
+			writeErr(w, http.StatusConflict, err)
+			return
+		}
 		stream, err := dbMintStreamToken(a.appCtx.AppDB(), simID, 1*time.Hour)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)

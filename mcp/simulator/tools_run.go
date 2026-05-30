@@ -39,6 +39,9 @@ func (a *App) handleSimsRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := capabilityCheckFor(ctx, framework); err != nil {
 		return nil, err // host_unsupported: ...
 	}
+	if err := streamingCapabilityCheckFor(ctx, framework); err != nil {
+		return nil, err
+	}
 	proj, err := projectIDFor(ctx, args)
 	if err != nil {
 		return nil, err

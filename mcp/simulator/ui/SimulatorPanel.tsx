@@ -25,6 +25,8 @@ interface ToolProbe {
 interface PlatformCapability {
   available: boolean;
   reasons: string[];
+  streaming_available?: boolean;
+  streaming_reasons?: string[];
   tools: Record<string, ToolProbe>;
 }
 interface Capabilities {
@@ -145,6 +147,11 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
       setError("");
       return;
     }
+    const platformCaps = sim?.platform === "ios" ? caps?.ios : caps?.android;
+    if (platformCaps && platformCaps.streaming_available === false) {
+      setError("Live view unavailable: " + (platformCaps.streaming_reasons ?? []).join("; "));
+      return;
+    }
     try {
       const r = await fetch(`${API}/sims/${encodeURIComponent(id)}/stream-url?${withParams()}`, {
         method: "POST",
@@ -156,7 +163,7 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
     } catch (e) {
       setError("Stream failed: " + (e as Error).message);
     }
-  }, [sims, withParams]);
+  }, [caps, sims, withParams]);
 
   const selectedSim = sims.find((s) => s.id === selected) ?? null;
 
@@ -232,14 +239,25 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
                   {selectedSim.device_type} · {selectedSim.platform} · {selectedSim.status}
                 </span>
                 <span className="flex-1" />
-                <button
-                  type="button"
-                  onClick={() => shutdown(selectedSim.id)}
-                  disabled={busy}
-                  className="px-2 py-0.5 text-xs border border-red text-red rounded hover:bg-red hover:text-white disabled:opacity-50"
-                >
-                  Shut down
-                </button>
+                {selectedSim.status === "shutdown" ? (
+                  <button
+                    type="button"
+                    onClick={() => boot(selectedSim.platform)}
+                    disabled={busy}
+                    className="px-2 py-0.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+                  >
+                    Boot
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => shutdown(selectedSim.id)}
+                    disabled={busy}
+                    className="px-2 py-0.5 text-xs border border-red text-red rounded hover:bg-red hover:text-white disabled:opacity-50"
+                  >
+                    Shut down
+                  </button>
+                )}
               </div>
 
               {selectedSim.status === "booted" && streamUrl ? (
