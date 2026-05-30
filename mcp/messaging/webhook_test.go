@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	tk "github.com/apteva/app-sdk/testkit"
 )
 
 // ─── Bounce webhook ───────────────────────────────────────────────
@@ -185,6 +187,42 @@ func TestSESEventPublishing_ClickPersistsAndEmitsSpecificTopic(t *testing.T) {
 			}
 			return m.Status
 		}())
+	}
+}
+
+func TestProviderEvent_GlobalInstallEmitsForMessageProject(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithEmitter(rec))
+	globalCtx = ctx
+
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO messages (project_id, channel, direction, from_addr, to_addrs, status, provider_message_id)
+		 VALUES ('test-proj', 'whatsapp', 'out', '+15551112222', '["+15553334444"]', 'sent', 'SMglobal1')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgID, _ := res.LastInsertId()
+	msg, err := dbMessageGet(ctx.AppDB(), "test-proj", msgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persistAndEmitProviderEvent(ctx, msg, providerEvent{
+		Provider:          "twilio",
+		ProviderMessageID: "SMglobal1",
+		Kind:              "opened",
+		Recipient:         "+15553334444",
+		Raw:               json.RawMessage(`{"MessageStatus":"read"}`),
+	})
+
+	for _, topic := range []string{"message.opened", "message.event"} {
+		events := rec.EventsByTopic(topic)
+		if len(events) != 1 {
+			t.Fatalf("%s emits=%d, want 1", topic, len(events))
+		}
+		if events[0].ProjectID != "test-proj" {
+			t.Fatalf("%s project=%q, want test-proj", topic, events[0].ProjectID)
+		}
 	}
 }
 

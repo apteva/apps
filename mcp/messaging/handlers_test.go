@@ -2900,6 +2900,44 @@ func TestSendMessageSMS_UsesDefaultSenderAndStatusCallback(t *testing.T) {
 	}
 }
 
+func TestSendMessage_GlobalInstallEmitsProjectScopedEvent(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	plat := newPhoneStub(nil)
+	plat.replyByTool = map[string]*sdk.ExecuteResult{
+		"send_sms": {
+			Success: true, Status: 201,
+			Data: json.RawMessage(`{"sid":"SMglobal1"}`),
+		},
+	}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(plat), tk.WithEmitter(rec))
+	globalCtx = ctx
+	preseedSender(t, ctx, senderUpsert{
+		Channel: "sms", Address: "+15551112222", Kind: "phone",
+		Provider: "twilio", ProviderIdentityID: "PNsms",
+		Verified: true, VerificationStatus: "verified", SendingEnabled: true,
+	})
+	if err := dbSetDefaultSender(ctx.AppDB(), "test-proj", "sms", "+15551112222"); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+
+	if _, err := app.toolSendMessage(ctx, map[string]any{
+		"_project_id": "test-proj",
+		"channel":     "sms",
+		"to":          "+15553334444",
+		"body":        "hello sms",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events := rec.EventsByTopic("message.sent")
+	if len(events) != 1 {
+		t.Fatalf("message.sent emits=%d, want 1", len(events))
+	}
+	if events[0].ProjectID != "test-proj" {
+		t.Fatalf("message.sent project=%q, want test-proj", events[0].ProjectID)
+	}
+}
+
 func TestSendersCreateSMS_WiresSmsMethodPost(t *testing.T) {
 	plat := newPhoneStub(nil)
 	plat.whoAmIOverride = &sdk.InstallIdentity{
@@ -3391,7 +3429,7 @@ func TestTwilioStatusWebhook_VerifiesAppProxyPublicURL(t *testing.T) {
 		AppName:   "messaging",
 		ProjectID: "test-proj",
 		PublicURL: "https://public.example.com",
-		Bindings: map[string]any{"email_provider": float64(1), "phone_provider": float64(2)},
+		Bindings:  map[string]any{"email_provider": float64(1), "phone_provider": float64(2)},
 	}
 	ctx := newTestCtx(t, plat, tk.WithConfig(map[string]string{
 		"twilio_auth_token": "secret",

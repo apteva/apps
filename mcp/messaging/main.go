@@ -54,7 +54,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.25
+version: 0.13.26
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -577,6 +577,18 @@ func resolveProjectFromRequest(r *http.Request) (string, error) {
 		return v, nil
 	}
 	return "", errors.New("project_id required in query string when install scope=global")
+}
+
+func emitMessagingEvent(ctx *sdk.AppCtx, pid, topic string, payload map[string]any) {
+	if ctx == nil {
+		return
+	}
+	if strings.TrimSpace(pid) == "" {
+		ctx.Logger().Warn("messaging emit without project", "topic", topic)
+		ctx.Emit(topic, payload)
+		return
+	}
+	ctx.EmitWithProject(topic, pid, payload)
 }
 
 // ─── Address normalisation ────────────────────────────────────────
@@ -1105,7 +1117,7 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		`UPDATE messages SET status='sent', provider_message_id=?, sent_at=?, last_event_at=? WHERE id=?`,
 		providerMessageID, now, now, id,
 	)
-	ctx.Emit("message.sent", map[string]any{
+	emitMessagingEvent(ctx, pid, "message.sent", map[string]any{
 		"id":      id,
 		"channel": channel,
 		"to":      allowedTo,
@@ -3065,7 +3077,7 @@ func (a *App) handleInboundWebhook(w http.ResponseWriter, r *http.Request) {
 	if err := dispatchInbound(globalCtx, pid, m); err != nil {
 		globalCtx.Logger().Warn("dispatch failed", "id", id, "err", err)
 	}
-	globalCtx.Emit("message.received", map[string]any{
+	emitMessagingEvent(globalCtx, pid, "message.received", map[string]any{
 		"id":      id,
 		"channel": "email",
 		"from":    from,
@@ -3208,7 +3220,7 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 	if err := dispatchInbound(globalCtx, pid, m); err != nil {
 		globalCtx.Logger().Warn("dispatch failed", "id", id, "err", err)
 	}
-	globalCtx.Emit("message.received", map[string]any{
+	emitMessagingEvent(globalCtx, pid, "message.received", map[string]any{
 		"id":      id,
 		"channel": channel,
 		"from":    from,
@@ -3971,8 +3983,8 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 	if ev.Reason != "" {
 		payload["reason"] = ev.Reason
 	}
-	ctx.Emit("message."+ev.Kind, payload)
-	ctx.Emit("message.event", payload)
+	emitMessagingEvent(ctx, msg.ProjectID, "message."+ev.Kind, payload)
+	emitMessagingEvent(ctx, msg.ProjectID, "message.event", payload)
 }
 
 // ─── SES inbound parsing ───────────────────────────────────────────
@@ -4917,7 +4929,7 @@ func (a *App) handleTemplatesImport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if imported > 0 || updated > 0 {
-		globalCtx.Emit("templates.synced", map[string]any{
+		emitMessagingEvent(globalCtx, pid, "templates.synced", map[string]any{
 			"channel":  req.Channel,
 			"imported": imported,
 			"updated":  updated,
@@ -5557,7 +5569,7 @@ func syncProviderTemplates(ctx *sdk.AppCtx, pid, channel string) (int, error) {
 	}
 	markMissingProviderTemplatesDeleted(ctx, pid, items)
 	_ = dbSyncStateMark(ctx.AppDB(), pid, channel, count, "")
-	ctx.Emit("templates.synced", map[string]any{
+	emitMessagingEvent(ctx, pid, "templates.synced", map[string]any{
 		"channel": channel,
 		"count":   count,
 	})

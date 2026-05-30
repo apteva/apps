@@ -817,6 +817,7 @@ const messagingLiveTopics = new Set([
   "message.rendering_failed",
   "message.subscription_changed",
   "message.event",
+  "templates.synced",
 ]);
 
 function EventDetail({ event }: { event: DeliveryEvent }) {
