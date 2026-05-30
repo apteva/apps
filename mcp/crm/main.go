@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.2
+version: 0.8.4
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -177,10 +177,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error          { return nil }
-func (a *App) Channels() []sdk.ChannelFactory       { return nil }
-func (a *App) Workers() []sdk.Worker                { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler    { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) Channels() []sdk.ChannelFactory    { return nil }
+func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 // ─── HTTP routes (REST surface for the dashboard panel) ────────────
 //
@@ -200,6 +200,12 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/inbound", Handler: a.handleInbound},
 		// Cross-contact triage queue.
 		{Pattern: "/inbox", Handler: a.handleHTTPInbox},
+		// Messaging dependency read surface for the CRM panel. These
+		// route through CRM's bound messaging install instead of having
+		// the browser guess a messaging install_id.
+		{Pattern: "/messaging/senders", Handler: a.handleHTTPMessagingSenders},
+		{Pattern: "/messaging/templates", Handler: a.handleHTTPMessagingTemplates},
+		{Pattern: "/messaging/whatsapp-session", Handler: a.handleHTTPMessagingWhatsAppSession},
 		// Inbound routing rules CRUD.
 		{Pattern: "/routing-rules", Handler: a.handleHTTPRoutingRules},
 		{Pattern: "/routing-rules/", Handler: a.handleHTTPRoutingRuleItem},
@@ -389,7 +395,7 @@ func (a *App) handleHTTPPostActivity(w http.ResponseWriter, r *http.Request) {
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
-			Name: "contacts_search",
+			Name:        "contacts_search",
 			Description: "Filtered contact search. Args: q (free text over name/email/phone/company), filters [], limit (default 50, max 200), offset (for paging). Returns {contacts, count, total, offset} — use total + offset to page. Each filter is either a core-field filter {field, op, value} (field ∈ first_name,last_name,display_name,company,job_title,primary_email,primary_phone,status,owner_user_id,source), a custom-field filter {attribute: \"<key>\", op, value}, or a list predicate {predicate: \"in_list\"|\"not_in_list\", list_id}. ops: eq,neq,gt,gte,lt,lte,contains,starts_with,is_null,in.",
 			InputSchema: schemaObject(map[string]any{
 				"filters": map[string]any{"type": "array"},
@@ -838,26 +844,26 @@ func resolveProjectFromRequest(r *http.Request) (string, error) {
 // ─── Domain types ──────────────────────────────────────────────────
 
 type Contact struct {
-	ID              int64    `json:"id"`
-	ProjectID       string   `json:"project_id,omitempty"`
-	FirstName       string   `json:"first_name,omitempty"`
-	LastName        string   `json:"last_name,omitempty"`
-	DisplayName     string   `json:"display_name,omitempty"`
-	Pronouns        string   `json:"pronouns,omitempty"`
-	PrimaryEmail    string   `json:"primary_email,omitempty"`
-	PrimaryPhone    string   `json:"primary_phone,omitempty"`
-	Company         string   `json:"company,omitempty"`
-	JobTitle        string   `json:"job_title,omitempty"`
-	OwnerUserID     *int64   `json:"owner_user_id,omitempty"`
-	Status          string   `json:"status"`
-	Source          string   `json:"source,omitempty"`
-	FirstContactAt  string   `json:"first_contact_at,omitempty"`
-	LastContactAt   string   `json:"last_contact_at,omitempty"`
-	CreatedAt       string   `json:"created_at,omitempty"`
-	UpdatedAt       string   `json:"updated_at,omitempty"`
-	Channels        []Channel `json:"channels,omitempty"`
-	Tags            []string  `json:"tags,omitempty"`
-	Attributes      []Attribute `json:"attributes,omitempty"`
+	ID             int64       `json:"id"`
+	ProjectID      string      `json:"project_id,omitempty"`
+	FirstName      string      `json:"first_name,omitempty"`
+	LastName       string      `json:"last_name,omitempty"`
+	DisplayName    string      `json:"display_name,omitempty"`
+	Pronouns       string      `json:"pronouns,omitempty"`
+	PrimaryEmail   string      `json:"primary_email,omitempty"`
+	PrimaryPhone   string      `json:"primary_phone,omitempty"`
+	Company        string      `json:"company,omitempty"`
+	JobTitle       string      `json:"job_title,omitempty"`
+	OwnerUserID    *int64      `json:"owner_user_id,omitempty"`
+	Status         string      `json:"status"`
+	Source         string      `json:"source,omitempty"`
+	FirstContactAt string      `json:"first_contact_at,omitempty"`
+	LastContactAt  string      `json:"last_contact_at,omitempty"`
+	CreatedAt      string      `json:"created_at,omitempty"`
+	UpdatedAt      string      `json:"updated_at,omitempty"`
+	Channels       []Channel   `json:"channels,omitempty"`
+	Tags           []string    `json:"tags,omitempty"`
+	Attributes     []Attribute `json:"attributes,omitempty"`
 }
 
 type Channel struct {
@@ -871,13 +877,13 @@ type Channel struct {
 }
 
 type Attribute struct {
-	Key         string `json:"key"`
-	Label       string `json:"label,omitempty"`
-	Type        string `json:"type,omitempty"`
-	Value       any    `json:"value"`
-	Source      string `json:"source,omitempty"`
+	Key          string `json:"key"`
+	Label        string `json:"label,omitempty"`
+	Type         string `json:"type,omitempty"`
+	Value        any    `json:"value"`
+	Source       string `json:"source,omitempty"`
 	SourceDetail string `json:"source_detail,omitempty"`
-	SetAt       string `json:"set_at,omitempty"`
+	SetAt        string `json:"set_at,omitempty"`
 }
 
 type Activity struct {
@@ -908,10 +914,10 @@ const (
 	ActivityKindNote    = "note"
 	ActivityKindSystem  = "system"
 
-	ActivityKindEmailSent     = "email_sent"
-	ActivityKindEmailReceived = "email_received"
-	ActivityKindSMSSent       = "sms_sent"
-	ActivityKindSMSReceived   = "sms_received"
+	ActivityKindEmailSent        = "email_sent"
+	ActivityKindEmailReceived    = "email_received"
+	ActivityKindSMSSent          = "sms_sent"
+	ActivityKindSMSReceived      = "sms_received"
 	ActivityKindWhatsAppSent     = "whatsapp_sent"
 	ActivityKindWhatsAppReceived = "whatsapp_received"
 

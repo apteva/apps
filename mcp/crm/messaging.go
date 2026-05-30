@@ -38,8 +38,8 @@ type Conversation struct {
 	Channel         string `json:"channel"`
 	Subject         string `json:"subject,omitempty"`
 	RootMessageID   string `json:"root_message_id,omitempty"`
-	Status          string `json:"status"`             // open | pending | closed
-	Priority        string `json:"priority"`           // low | normal | high | urgent
+	Status          string `json:"status"`   // open | pending | closed
+	Priority        string `json:"priority"` // low | normal | high | urgent
 	StatusChangedAt string `json:"status_changed_at,omitempty"`
 	StartedAt       string `json:"started_at"`
 	LastActivityAt  string `json:"last_activity_at"`
@@ -494,6 +494,13 @@ func callMessagingSend(ctx *sdk.AppCtx, args map[string]any) (map[string]any, er
 	return out, nil
 }
 
+func callMessagingTool(ctx *sdk.AppCtx, tool string, args map[string]any, out any) error {
+	if messagingBound(ctx) == nil {
+		return errors.New("messaging app not bound to CRM")
+	}
+	return ctx.PlatformAPI().CallAppResult("messaging", tool, args, out)
+}
+
 // suppressionCheck calls messaging.suppression_check. Returns
 // (suppressed, reason). Older messaging versions without this tool
 // are treated as not-suppressed — messaging itself will still pre-flight
@@ -537,8 +544,10 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		return nil, errors.New("id (contact id) required")
 	}
 	body, _ := args["body"].(string)
-	if body == "" {
-		return nil, errors.New("body required")
+	templateID := int64Arg(args, "template_id")
+	contentSID := strArg(args, "content_sid")
+	if body == "" && templateID == 0 && contentSID == "" {
+		return nil, errors.New("body or template_id required")
 	}
 
 	c, err := dbGetByID(ctx.AppDB(), pid, cid)
@@ -602,10 +611,18 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	if bodyHTML := strArg(args, "body_html"); bodyHTML != "" {
 		sendArgs["body_html"] = bodyHTML
 	}
+	if templateID != 0 {
+		sendArgs["template_id"] = templateID
+	}
+	if contentSID != "" {
+		sendArgs["content_sid"] = contentSID
+	}
 	if idem := strArg(args, "idempotency_key"); idem != "" {
 		sendArgs["idempotency_key"] = idem
 	}
 	if vars, ok := args["template_vars"].(map[string]any); ok {
+		sendArgs["vars"] = vars
+	} else if vars, ok := args["vars"].(map[string]any); ok {
 		sendArgs["vars"] = vars
 	}
 
@@ -699,6 +716,9 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		kind = testSentKindForChannel(addr.Channel)
 	}
 	activityBody := body
+	if activityBody == "" && templateID != 0 {
+		activityBody = fmt.Sprintf("(template #%d)", templateID)
+	}
 	if subj := strArg(args, "subject"); subj != "" && addr.Channel == channelEmail {
 		activityBody = subj + "\n\n" + body
 	}
@@ -756,8 +776,8 @@ func (a *App) toolReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("id required")
 	}
 	body, _ := args["body"].(string)
-	if body == "" {
-		return nil, errors.New("body required")
+	if body == "" && int64Arg(args, "template_id") == 0 {
+		return nil, errors.New("body or template_id required")
 	}
 
 	convoID := int64Arg(args, "conversation_id")
@@ -797,6 +817,17 @@ func (a *App) toolReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"channel":         convo.Channel,
 		"body":            body,
 		"conversation_id": convo.ID,
+	}
+	if from := strArg(args, "from"); from != "" {
+		sendArgs["from"] = from
+	}
+	if templateID := int64Arg(args, "template_id"); templateID != 0 {
+		sendArgs["template_id"] = templateID
+	}
+	if vars, ok := args["template_vars"].(map[string]any); ok {
+		sendArgs["template_vars"] = vars
+	} else if vars, ok := args["vars"].(map[string]any); ok {
+		sendArgs["vars"] = vars
 	}
 	if subj := strArg(args, "subject"); subj != "" {
 		sendArgs["subject"] = subj
@@ -1606,6 +1637,140 @@ func (a *App) handleHTTPReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpJSON(w, out)
+}
+
+func (a *App) handleHTTPMessagingSenders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	args := map[string]any{
+		"_project_id":   pid,
+		"verified_only": true,
+	}
+	if channel := strings.TrimSpace(r.URL.Query().Get("channel")); channel != "" {
+		args["channel"] = channel
+	}
+	var out map[string]any
+	if err := callMessagingTool(globalCtx, "senders_list", args, &out); err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	httpJSON(w, out)
+}
+
+func (a *App) handleHTTPMessagingTemplates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	args := map[string]any{
+		"_project_id": pid,
+		"limit":       200,
+	}
+	if channel := strings.TrimSpace(r.URL.Query().Get("channel")); channel != "" {
+		args["channel"] = channel
+	}
+	var out map[string]any
+	if err := callMessagingTool(globalCtx, "template_list", args, &out); err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	httpJSON(w, out)
+}
+
+func (a *App) handleHTTPMessagingWhatsAppSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	from := cleanMessagingAddress(r.URL.Query().Get("from"))
+	to := cleanMessagingAddress(r.URL.Query().Get("to"))
+	if from == "" || to == "" {
+		httpErr(w, http.StatusBadRequest, "from and to required")
+		return
+	}
+	since := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
+	var out struct {
+		Messages []struct {
+			From             string   `json:"from"`
+			To               []string `json:"to"`
+			MatchedRecipient string   `json:"matched_recipient"`
+			ReceivedAt       string   `json:"received_at"`
+			CreatedAt        string   `json:"created_at"`
+		} `json:"messages"`
+	}
+	err = callMessagingTool(globalCtx, "message_list", map[string]any{
+		"_project_id": pid,
+		"direction":   "in",
+		"channel":     "whatsapp",
+		"address":     to,
+		"since":       since,
+		"limit":       50,
+	}, &out)
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	active := false
+	var lastInbound string
+	for _, m := range out.Messages {
+		if cleanMessagingAddress(m.From) != to {
+			continue
+		}
+		matched := cleanMessagingAddress(m.MatchedRecipient) == from
+		for _, recipient := range m.To {
+			if cleanMessagingAddress(recipient) == from {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			active = true
+			if m.ReceivedAt != "" {
+				lastInbound = m.ReceivedAt
+			} else {
+				lastInbound = m.CreatedAt
+			}
+			break
+		}
+	}
+	httpJSON(w, map[string]any{
+		"active":       active,
+		"from":         from,
+		"to":           to,
+		"since":        since,
+		"last_inbound": lastInbound,
+	})
+}
+
+func cleanMessagingAddress(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.Index(s, ":"); i > 0 {
+		prefix := strings.ToLower(strings.TrimSpace(s[:i]))
+		if prefix == "mailto" || prefix == "sms" || prefix == "whatsapp" || prefix == "tel" {
+			s = strings.TrimSpace(s[i+1:])
+		}
+	}
+	if strings.Contains(s, "@") {
+		return strings.ToLower(s)
+	}
+	return s
 }
 
 func (a *App) handleHTTPListConversations(w http.ResponseWriter, r *http.Request) {

@@ -382,6 +382,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const [edits, setEdits] = useState<Partial<Contact>>({});
   const [composer, setComposer] = useState<ComposerState | null>(null);
   const [verifiedSenders, setVerifiedSenders] = useState<SenderOption[]>([]);
+  const [messagingTemplates, setMessagingTemplates] = useState<TemplateOption[]>([]);
   const [errorToast, setErrorToast] = useState<string | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmState | null>(null);
   const [logActivityOpen, setLogActivityOpen] = useState(false);
@@ -431,7 +432,8 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   }, [withParams]);
 
   const messagingTool = useCallback(async <T,>(tool: string, args: Record<string, unknown> = {}): Promise<T> => {
-    const res = await fetch(`${MESSAGING_API}/tools/call?${withParams()}`, {
+    const params = new URLSearchParams({ project_id: projectId });
+    const res = await fetch(`${MESSAGING_API}/tools/call?${params.toString()}`, {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
@@ -439,7 +441,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     });
     if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
     return res.json();
-  }, [withParams, projectId]);
+  }, [projectId]);
 
   // loadList(q, offset): offset 0 replaces the list; offset > 0 appends
   // the next page (for "Load more"). total comes back from the backend
@@ -512,13 +514,11 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     }
   }, [lists, listFilterId]);
 
-  // Fetch the messaging app's verified senders so the composer can
-  // offer a From picker. Soft-fail: if messaging isn't bound (or the
-  // call errors), we keep an empty list and the composer just sends
-  // without an explicit `from`, letting the CRM backend fall back to
-  // the install default.
+  // Fetch the bound messaging app's verified senders/templates through
+  // CRM's backend. The browser only knows the CRM install_id; the
+  // backend knows which messaging install is bound to this CRM.
   useEffect(() => {
-    messagingTool<{ senders?: { channel: string; address: string; display_name?: string; is_default?: boolean }[] }>("senders_list", { verified_only: true })
+    api<{ senders?: { channel: string; address: string; display_name?: string; is_default?: boolean }[] }>("GET", "/messaging/senders")
       .then((r) => {
         const out = (r.senders || []).map((s) => ({
           channel: s.channel,
@@ -529,7 +529,17 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
         setVerifiedSenders(out);
       })
       .catch(() => setVerifiedSenders([]));
-  }, [messagingTool]);
+  }, [api]);
+
+  useEffect(() => {
+    api<{ templates?: TemplateOption[] }>("GET", "/messaging/templates", undefined, { channel: "whatsapp" })
+      .then((r) => setMessagingTemplates((r.templates || []).filter((t) =>
+        t.channel === "whatsapp" &&
+        !!t.provider_template_id &&
+        (t.provider_status || "").toLowerCase() === "approved"
+      )))
+      .catch(() => setMessagingTemplates([]));
+  }, [api]);
 
   // Debounced search — re-runs on query OR filter changes.
   useEffect(() => {
@@ -814,23 +824,66 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   // outbound stays in-thread.
   const openCompose = (preset: Partial<ComposerState> = {}) => {
     if (!detail) return;
-    const channel = preset.channel || preferredChannel(detail) || "email";
-    // Pre-fill From with the default sender for this channel (when
-    // there is one). Operator can override via the dropdown; "" sends
-    // no `from` and the backend uses the install default.
-    const defaultForChannel = verifiedSenders.find((s) => s.channel === channel && s.isDefault);
+    const channel = preset.channel || preferredChannel(detail, verifiedSenders) || "email";
+    const defaultForChannel = preferredSenderForChannel(verifiedSenders, channel);
     setComposer({
       mode: preset.mode || "new",
       channel,
       subject: preset.subject || "",
       body: "",
       from: defaultForChannel?.address || "",
+      templateId: "",
+      templateVars: {},
+      whatsAppSession: { state: "idle" },
       conversationId: preset.conversationId,
       replyToActivityId: preset.replyToActivityId,
       busy: false,
       error: null,
     });
   };
+
+  useEffect(() => {
+    if (!composer || !detail || composer.channel !== "whatsapp") return;
+    const to = addressForChannel(detail, "whatsapp");
+    const from = composer.from;
+    if (!from || !to || to.startsWith("(no ")) {
+      setComposer((prev) => prev ? { ...prev, whatsAppSession: { state: "idle" } } : prev);
+      return;
+    }
+    let cancelled = false;
+    setComposer((prev) => prev ? { ...prev, whatsAppSession: { state: "checking" } } : prev);
+    api<{ active: boolean; last_inbound?: string }>("GET", "/messaging/whatsapp-session", undefined, { from, to })
+      .then((r) => {
+        if (cancelled) return;
+        setComposer((prev) => prev ? {
+          ...prev,
+          whatsAppSession: { state: r.active ? "active" : "closed", lastInbound: r.last_inbound },
+        } : prev);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setComposer((prev) => prev ? {
+          ...prev,
+          whatsAppSession: { state: "error", error: (e as Error).message },
+        } : prev);
+      });
+    return () => { cancelled = true; };
+  }, [api, composer?.channel, composer?.from, detail?.id, detail?.primary_phone]);
+
+  useEffect(() => {
+    if (!composer || composer.from) return;
+    const sender = preferredSenderForChannel(verifiedSenders, composer.channel);
+    if (!sender) return;
+    setComposer((prev) => prev && !prev.from ? { ...prev, from: sender.address } : prev);
+  }, [composer?.channel, composer?.from, verifiedSenders]);
+
+  useEffect(() => {
+    if (!composer || composer.channel !== "whatsapp" || composer.templateId || messagingTemplates.length === 0) return;
+    const first = messagingTemplates[0];
+    const vars: Record<string, string> = {};
+    templateVarKeys(first).forEach((key) => { vars[key] = ""; });
+    setComposer((prev) => prev && !prev.templateId ? { ...prev, templateId: String(first.id), templateVars: vars } : prev);
+  }, [composer?.channel, composer?.templateId, messagingTemplates]);
 
   // Conversation status / priority. POSTs to the dedicated sub-route
   // and reloads so the lane reflects the new state (and any auto-reopen
@@ -858,14 +911,17 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     setComposer({ ...composer, busy: true, error: null });
     try {
       const path = composer.mode === "reply" ? `/contacts/${detail.id}/reply` : `/contacts/${detail.id}/messages`;
+      const useTemplate = composer.channel === "whatsapp" && whatsappSessionRequiresTemplate(composer.whatsAppSession);
       await api(
         "POST",
         path,
         {
           channel: composer.channel,
           subject: composer.subject || undefined,
-          body: composer.body,
+          body: useTemplate ? "" : composer.body,
           conversation_id: composer.conversationId,
+          template_id: useTemplate && composer.templateId ? Number(composer.templateId) : undefined,
+          template_vars: useTemplate && composer.templateId ? composer.templateVars : undefined,
           // Only include `from` when the operator picked something
           // specific. Empty string means "let the backend default
           // kick in" — pass nothing so we don't override.
@@ -1191,6 +1247,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
           composer={composer}
           contact={detail}
           senders={verifiedSenders}
+          templates={messagingTemplates}
           onCancel={() => setComposer(null)}
           onChange={(patch) => setComposer((prev) => prev ? { ...prev, ...patch } : prev)}
           onSend={handleSendFromComposer}
@@ -1450,6 +1507,9 @@ interface ComposerState {
   // the messaging-side default sender for the current channel when
   // the composer opens.
   from: string;
+  templateId: string;
+  templateVars: Record<string, string>;
+  whatsAppSession: WhatsAppSessionState;
   conversationId?: number | string;
   replyToActivityId?: string;
   busy: boolean;
@@ -1465,16 +1525,44 @@ interface SenderOption {
   isDefault: boolean;
 }
 
-function preferredChannel(c: Contact): string {
+interface TemplateOption {
+  id: number;
+  channel: string;
+  name: string;
+  body_text?: string;
+  body_html?: string;
+  vars_schema?: Record<string, unknown>;
+  provider_template_id?: string;
+  provider_status?: string;
+}
+
+type WhatsAppSessionState =
+  | { state: "idle" }
+  | { state: "checking" }
+  | { state: "active"; lastInbound?: string }
+  | { state: "closed"; lastInbound?: string }
+  | { state: "error"; error?: string };
+
+function preferredChannel(c: Contact, senders: SenderOption[] = []): string {
   if (c.primary_email) return "email";
-  if (c.primary_phone) return "sms";
+  if (c.primary_phone) return senders.some((s) => s.channel === "whatsapp") ? "whatsapp" : "sms";
   return "email";
+}
+
+function preferredSenderForChannel(senders: SenderOption[], channel: string): SenderOption | undefined {
+  return senders.find((s) => s.channel === channel && s.isDefault) ||
+    senders.find((s) => s.channel === channel);
+}
+
+function whatsappSessionRequiresTemplate(session: WhatsAppSessionState): boolean {
+  return session.state === "closed" || session.state === "error" || session.state === "idle";
 }
 
 function ComposerModal({
   composer,
   contact,
   senders,
+  templates,
   onCancel,
   onChange,
   onSend,
@@ -1482,16 +1570,28 @@ function ComposerModal({
   composer: ComposerState;
   contact: Contact;
   senders: SenderOption[];
+  templates: TemplateOption[];
   onCancel: () => void;
   onChange: (patch: Partial<ComposerState>) => void;
   onSend: () => void;
 }) {
   const channels = availableChannels(contact);
   const isEmail = composer.channel === "email";
+  const isWhatsApp = composer.channel === "whatsapp";
   const toAddr = addressForChannel(contact, composer.channel);
   // Filter senders to those that match the current channel — picking
   // an SMS sender for an email send is never what the operator wants.
   const sendersForChannel = senders.filter((s) => s.channel === composer.channel);
+  const selectedTemplate = templates.find((t) => String(t.id) === composer.templateId) || null;
+  const selectedTemplateVars = selectedTemplate ? templateVarKeys(selectedTemplate) : [];
+  const whatsappClosed = isWhatsApp && whatsappSessionRequiresTemplate(composer.whatsAppSession);
+  const whatsappChecking = isWhatsApp && composer.whatsAppSession.state === "checking";
+  const canSendTemplate = !whatsappClosed || (!!composer.templateId && selectedTemplateVars.every((key) => composer.templateVars[key]?.trim()));
+  const bodyRequired = !whatsappClosed;
+  const canSend = !composer.busy && !!toAddr && !toAddr.startsWith("(no ") &&
+    !whatsappChecking &&
+    sendersForChannel.length > 0 &&
+    (bodyRequired ? !!composer.body.trim() : canSendTemplate);
   const labelW = "w-20 shrink-0 text-text-muted text-xs uppercase tracking-wide";
   const fieldCls = "flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm";
 
@@ -1523,7 +1623,6 @@ function ComposerModal({
                 onChange={(e) => onChange({ from: e.target.value })}
                 className={fieldCls}
               >
-                <option value="">— install default —</option>
                 {sendersForChannel.map((s) => (
                   <option key={s.address} value={s.address}>
                     {s.label}{s.isDefault ? "  (default)" : ""}
@@ -1532,7 +1631,7 @@ function ComposerModal({
               </select>
             ) : (
               <span className="text-text-dim text-xs italic">
-                no verified {composer.channel} senders — backend will use install default
+                no verified {composer.channel} senders in Messaging
               </span>
             )}
           </div>
@@ -1546,8 +1645,14 @@ function ComposerModal({
                   value={composer.channel}
                   onChange={(e) => {
                     const newCh = e.target.value;
-                    const def = senders.find((s) => s.channel === newCh && s.isDefault);
-                    onChange({ channel: newCh, from: def?.address || "" });
+                    const def = preferredSenderForChannel(senders, newCh);
+                    onChange({
+                      channel: newCh,
+                      from: def?.address || "",
+                      templateId: "",
+                      templateVars: {},
+                      whatsAppSession: { state: "idle" },
+                    });
                   }}
                   disabled={composer.mode === "reply"}
                   className="bg-bg-input border border-border rounded px-2 py-0.5 text-xs disabled:opacity-50"
@@ -1572,6 +1677,72 @@ function ComposerModal({
             </div>
           )}
 
+          {isWhatsApp && (
+            <div className="rounded border border-border bg-bg-input/40 px-3 py-2 text-xs text-text-dim">
+              {composer.whatsAppSession.state === "checking" ? (
+                "Checking the WhatsApp 24-hour window..."
+              ) : composer.whatsAppSession.state === "active" ? (
+                "Recent inbound WhatsApp message found. Free-form reply is allowed."
+              ) : (
+                <>
+                  No recent inbound WhatsApp message was found. Use an approved template outside the 24-hour window.
+                  {composer.whatsAppSession.state === "error" && composer.whatsAppSession.error && (
+                    <div className="mt-1 text-red">{composer.whatsAppSession.error}</div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {whatsappClosed && (
+            <div className="space-y-3 rounded border border-border bg-bg-input/30 p-3">
+              <div className="flex items-center gap-3">
+                <label className={labelW}>Template</label>
+                {templates.length > 0 ? (
+                  <select
+                    value={composer.templateId}
+                    onChange={(e) => {
+                      const next = templates.find((t) => String(t.id) === e.target.value) || null;
+                      const vars: Record<string, string> = {};
+                      if (next) templateVarKeys(next).forEach((key) => { vars[key] = composer.templateVars[key] || ""; });
+                      onChange({ templateId: e.target.value, templateVars: vars, body: "" });
+                    }}
+                    className={fieldCls}
+                  >
+                    <option value="">Pick a template</option>
+                    {templates.map((t) => (
+                      <option key={t.id} value={String(t.id)}>{t.name}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className="text-text-dim text-xs italic">no approved WhatsApp templates in Messaging</span>
+                )}
+              </div>
+              {selectedTemplateVars.length > 0 && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {selectedTemplateVars.map((key) => (
+                    <label key={key} className="text-xs text-text-dim">
+                      {`{{${key}}}`}
+                      <input
+                        className={`${fieldCls} mt-1 w-full`}
+                        value={composer.templateVars[key] || ""}
+                        onChange={(e) => onChange({
+                          templateVars: { ...composer.templateVars, [key]: e.target.value },
+                        })}
+                      />
+                    </label>
+                  ))}
+                </div>
+              )}
+              {selectedTemplate && (
+                <pre className="whitespace-pre-wrap rounded border border-border bg-bg px-3 py-2 text-xs text-text">
+                  {renderTemplatePreview(selectedTemplate.body_text || selectedTemplate.body_html || "", composer.templateVars)}
+                </pre>
+              )}
+            </div>
+          )}
+
+          {!whatsappClosed && (
           <div className="pt-2">
             <textarea
               value={composer.body}
@@ -1582,6 +1753,7 @@ function ComposerModal({
               autoFocus
             />
           </div>
+          )}
 
           {composer.error && (
             <div className="rounded border border-red/40 bg-red/10 text-red text-xs px-3 py-2 whitespace-pre-wrap">
@@ -1594,7 +1766,7 @@ function ComposerModal({
           <button
             type="button"
             onClick={onSend}
-            disabled={composer.busy || !composer.body.trim() || !toAddr}
+            disabled={!canSend}
             className="px-4 py-1.5 text-sm bg-accent text-bg rounded hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
           >{composer.busy ? "Sending…" : "Send"}</button>
           <button
@@ -1605,7 +1777,7 @@ function ComposerModal({
           <span className="ml-auto text-text-dim text-xs">
             {composer.from
               ? <>from <span className="font-mono">{composer.from}</span></>
-              : <>using install default sender</>}
+              : <>pick a verified sender</>}
           </span>
         </footer>
       </div>
@@ -1616,14 +1788,14 @@ function ComposerModal({
 function availableChannels(c: Contact): string[] {
   const out: string[] = [];
   if (c.primary_email) out.push("email");
-  if (c.primary_phone) out.push("sms", "whatsapp");
+  if (c.primary_phone) out.push("whatsapp", "sms");
   // Fall back to any contact_channels entries.
   if (c.channels) {
     for (const ch of c.channels) {
       if (ch.kind === "email" && !out.includes("email")) out.push("email");
       if (ch.kind === "phone") {
-        if (!out.includes("sms")) out.push("sms");
         if (!out.includes("whatsapp")) out.push("whatsapp");
+        if (!out.includes("sms")) out.push("sms");
       }
     }
   }
@@ -1634,6 +1806,28 @@ function addressForChannel(c: Contact, channel: string): string {
   if (channel === "email") return c.primary_email || c.channels?.find((ch) => ch.kind === "email")?.value || "(no email)";
   if (channel === "sms" || channel === "whatsapp") return c.primary_phone || c.channels?.find((ch) => ch.kind === "phone")?.value || "(no phone)";
   return "—";
+}
+
+function templateVarKeys(template: TemplateOption): string[] {
+  const keys = new Set<string>();
+  if (template.vars_schema && typeof template.vars_schema === "object") {
+    Object.keys(template.vars_schema).forEach((key) => keys.add(key));
+  }
+  for (const source of [template.body_text || "", template.body_html || ""]) {
+    const re = /\{\{\s*([^{}\s]+)\s*\}\}/g;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(source))) keys.add(match[1]);
+  }
+  return Array.from(keys).sort((a, b) => {
+    const na = Number(a);
+    const nb = Number(b);
+    if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+    return a.localeCompare(b);
+  });
+}
+
+function renderTemplatePreview(body: string, vars: Record<string, string>): string {
+  return body.replace(/\{\{\s*([^{}\s]+)\s*\}\}/g, (_, key: string) => vars[key]?.trim() || `{{${key}}}`);
 }
 
 // ─── Settings tab ─────────────────────────────────────────────────
