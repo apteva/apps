@@ -24,7 +24,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 
@@ -43,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: simulator
 display_name: Apteva Simulator
-version: 0.1.0
+version: 0.1.1
 description: |
   iOS and Android simulators on demand. Boot a device, build a repo's
   source into an artifact, install + launch on a headless emulator or
@@ -183,7 +182,6 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 // artifact download path is a future hook, no handler yet).
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
-		{Pattern: "/health", Handler: a.handleHealth},
 		// Live screen stream. NoAuth because the ws_token query param
 		// minted by sims_stream_url is the bearer; handleStream
 		// validates it before upgrading. See stream.go.
@@ -199,10 +197,5 @@ func (a *App) HTTPRoutes() []sdk.Route {
 // MCPTools — registered in tools.go. The split keeps main.go focused
 // on boot/lifecycle and concentrates schema declarations next to the
 // handlers that use them.
-
-func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"ok":true,"app":"simulator","version":"0.1.0"}`))
-}
 
 func main() { sdk.Run(&App{}) }
