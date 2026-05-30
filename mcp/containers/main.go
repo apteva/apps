@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,62 +19,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const manifestYAML = `schema: apteva-app/v1
-name: containers
-display_name: Containers
-version: 0.1.6
-description: Generic Docker workload runtime for Apteva. Runs container images on the local host, manages volumes, ports, health checks, logs, and lifecycle actions.
-author: Apteva
-scopes: [global]
-requires:
-  permissions:
-    - db.write.app
-    - net.egress
-    - platform.apps.call
-  integrations:
-    - role: hosts
-      kind: app
-      required: false
-      compatible_app_names: [instances]
-      label: Instances app
-      hint: Install Instances to run containers on remote VPS hosts.
-    - role: routes
-      kind: app
-      required: false
-      compatible_app_names: [routes]
-      label: Routes app
-      hint: Install Routes to publish container workloads at hostnames.
-provides:
-  http_routes:
-    - prefix: /
-  mcp_tools:
-    - { name: containers_run, description: "Run a Docker image as a managed workload. Args: name, image, ports?, env?, volumes?, health_path?, resources?, restart_policy?." }
-    - { name: containers_create, description: "Alias of containers_run." }
-    - { name: containers_get, description: "Fetch one workload. Args: workload_id." }
-    - { name: containers_list, description: "List workloads. Args: status?." }
-    - { name: containers_start, description: "Start a stopped workload. Args: workload_id." }
-    - { name: containers_stop, description: "Stop a running workload. Args: workload_id." }
-    - { name: containers_restart, description: "Restart a workload. Args: workload_id." }
-    - { name: containers_destroy, description: "Remove a workload container and network. Volumes are preserved unless delete_volumes=true. Args: workload_id, delete_volumes?." }
-    - { name: containers_logs, description: "Tail workload logs. Args: workload_id, tail?." }
-    - { name: containers_health, description: "Probe and update workload health. Args: workload_id." }
-    - { name: containers_blueprints_list, description: "List built-in container blueprints." }
-  ui_panels:
-    - { slot: project.page, label: "Containers", icon: boxes, entry: /ui/ContainersPanel.mjs }
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/containers
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/containers.db
-  migrations: migrations/
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML string
 
 type App struct {
 	backend DockerBackend
