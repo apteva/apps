@@ -132,6 +132,7 @@ interface TemplateRow {
   subject?: string;
   body_text?: string;
   body_html?: string;
+  vars_schema?: Record<string, unknown>;
   provider_template_id?: string;
   provider_status?: string;
   var_style?: string;
@@ -472,10 +473,13 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
             <ComposeView
               api={api}
               senders={verifiedSenders}
+              templates={templates}
               quota={quota}
+              inbox={inbox}
               draft={composeDraft}
               onSent={() => { setComposeDraft(null); reload(); setTab("outbox"); }}
               gotoSenders={() => setTab("senders")}
+              gotoTemplates={() => setTab("templates")}
             />
           )}
           {tab === "senders" && <SendersView rows={senders} identities={identities} quota={quota} api={api} reload={reload} error={sendersError} notify={notify} confirmAction={confirmAction} />}
@@ -902,14 +906,17 @@ function uniqueStrings(values: string[]): string[] {
 }
 
 function ComposeView({
-  api, senders, quota, draft, onSent, gotoSenders,
+  api, senders, templates, quota, inbox, draft, onSent, gotoSenders, gotoTemplates,
 }: {
   api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
   senders: SenderRow[];
+  templates: TemplateRow[];
   quota: QuotaInfo | null;
+  inbox: MessageRow[];
   draft: ComposeDraft | null;
   onSent: () => void;
   gotoSenders: () => void;
+  gotoTemplates: () => void;
 }) {
   // Verified senders: a unified select with two kinds. Email rows
   // expose the full address as the value; domain rows expose just
@@ -921,6 +928,7 @@ function ComposeView({
   // email or a bare domain. selectedKind tracks which (drives the
   // local-part field).
   const [selectedAddress, setSelectedAddress] = useState<string>("");
+  const [selectedChannel, setSelectedChannel] = useState<string>("");
   const [localPart, setLocalPart] = useState("");
   const [to, setTo] = useState("");
   const [subject, setSubject] = useState("");
@@ -929,6 +937,9 @@ function ComposeView({
   const [references, setReferences] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [waSession, setWaSession] = useState<WhatsAppSessionState>({ state: "idle", checkedRecipients: [] });
+  const [templateID, setTemplateID] = useState("");
+  const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
 
   // Default selection: first verified email, otherwise first verified domain.
   useEffect(() => {
@@ -936,11 +947,13 @@ function ComposeView({
     const firstEmail = verified.find((s) => s.kind === "email");
     if (firstEmail) {
       setSelectedAddress(stripScheme(firstEmail.address));
+      setSelectedChannel(firstEmail.channel);
       return;
     }
     const firstDomain = verified.find((s) => s.kind === "domain");
     if (firstDomain) {
       setSelectedAddress(stripScheme(firstDomain.address));
+      setSelectedChannel(firstDomain.channel);
       setLocalPart("noreply");
     }
   }, [verified, selectedAddress]);
@@ -955,12 +968,15 @@ function ComposeView({
       : undefined;
     if (exact) {
       setSelectedAddress(stripScheme(exact.address));
+      setSelectedChannel(exact.channel);
       setLocalPart("");
     } else if (domain) {
       setSelectedAddress(stripScheme(domain.address));
+      setSelectedChannel(domain.channel);
       setLocalPart(from.slice(0, at));
     } else {
       setSelectedAddress(from);
+      setSelectedChannel(draft.channel || "");
       setLocalPart("");
     }
     setTo(draft.to);
@@ -972,10 +988,11 @@ function ComposeView({
   }, [draft, verified]);
 
   const selectedSender = useMemo(
-    () => verified.find((s) => stripScheme(s.address) === selectedAddress),
-    [verified, selectedAddress],
+    () => verified.find((s) => stripScheme(s.address) === selectedAddress && (!selectedChannel || s.channel === selectedChannel)),
+    [verified, selectedAddress, selectedChannel],
   );
   const isDomain = selectedSender?.kind === "domain";
+  const channel = selectedSender?.channel || "email";
 
   // The actual From string handed to send_message.
   const computedFrom = useMemo(() => {
@@ -988,6 +1005,101 @@ function ComposeView({
   }, [selectedAddress, localPart, isDomain]);
 
   const noVerifiedSenders = verified.length === 0;
+  const recipients = useMemo(() => parseRecipientList(to), [to]);
+  const approvedWhatsAppTemplates = useMemo(
+    () => templates.filter((t) =>
+      t.channel === "whatsapp" &&
+      t.provider_template_id &&
+      (t.provider_status || "").toLowerCase() === "approved"
+    ),
+    [templates],
+  );
+  const selectedTemplate = useMemo(
+    () => approvedWhatsAppTemplates.find((t) => String(t.id) === templateID) || null,
+    [approvedWhatsAppTemplates, templateID],
+  );
+  const selectedTemplateVars = useMemo(
+    () => selectedTemplate ? templateVarKeys(selectedTemplate) : [],
+    [selectedTemplate],
+  );
+  const whatsAppFreeformAllowed = channel === "whatsapp" && waSession.state === "active";
+  const whatsAppRequiresTemplate = channel === "whatsapp" && (
+    waSession.state === "closed" ||
+    waSession.state === "error" ||
+    (recipients.length > 0 && waSession.state === "idle")
+  );
+  const whatsAppChecking = channel === "whatsapp" && waSession.state === "checking";
+
+  useEffect(() => {
+    if (channel !== "whatsapp") return;
+    if (templateID && approvedWhatsAppTemplates.some((t) => String(t.id) === templateID)) return;
+    setTemplateID(approvedWhatsAppTemplates[0] ? String(approvedWhatsAppTemplates[0].id) : "");
+  }, [channel, approvedWhatsAppTemplates, templateID]);
+
+  useEffect(() => {
+    if (!selectedTemplate) {
+      setTemplateVars({});
+      return;
+    }
+    const keys = templateVarKeys(selectedTemplate);
+    setTemplateVars((prev) => {
+      const next: Record<string, string> = {};
+      for (const key of keys) next[key] = prev[key] || "";
+      return next;
+    });
+  }, [selectedTemplate]);
+
+  useEffect(() => {
+    if (channel !== "whatsapp") {
+      setWaSession({ state: "idle", checkedRecipients: [] });
+      return;
+    }
+    const cleanFrom = stripScheme(computedFrom);
+    if (!cleanFrom || recipients.length === 0) {
+      setWaSession({ state: "idle", checkedRecipients: [] });
+      return;
+    }
+
+    const localActive = whatsAppRecipientsInSession(inbox, recipients, cleanFrom);
+    if (localActive.allActive) {
+      setWaSession({ state: "active", checkedRecipients: recipients });
+      return;
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      setWaSession({ state: "checking", checkedRecipients: recipients });
+      try {
+        const since = new Date(Date.now() - whatsappSessionWindowMs).toISOString();
+        const checks = await Promise.all(recipients.map(async (recipient) => {
+          const r = await api<{ messages: MessageRow[] }>("GET", "/messages", {
+            direction: "in",
+            channel: "whatsapp",
+            address: recipient,
+            since,
+            limit: "20",
+          });
+          return whatsAppRecipientsInSession(r.messages || [], [recipient], cleanFrom).allActive;
+        }));
+        if (cancelled) return;
+        setWaSession({
+          state: checks.every(Boolean) ? "active" : "closed",
+          checkedRecipients: recipients,
+        });
+      } catch (e) {
+        if (cancelled) return;
+        setWaSession({
+          state: "error",
+          checkedRecipients: recipients,
+          error: parseSendersError((e as Error).message),
+        });
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [api, channel, computedFrom, inbox, recipients]);
 
   const send = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -998,14 +1110,38 @@ function ComposeView({
     setBusy(true);
     setErr("");
     try {
-      const recipients = to.split(",").map((s) => s.trim()).filter(Boolean);
-      const channel = selectedSender?.channel || "email";
+      if (recipients.length === 0) {
+        setErr("Enter at least one recipient.");
+        setBusy(false);
+        return;
+      }
       const args: Record<string, unknown> = {
         channel,
         from: computedFrom,
         to: recipients,
-        body,
       };
+      if (channel === "whatsapp" && !whatsAppFreeformAllowed) {
+        if (!selectedTemplate) {
+          setErr("Pick an approved WhatsApp template. Free-form WhatsApp messages require an inbound message in the last 24 hours.");
+          setBusy(false);
+          return;
+        }
+        const missing = selectedTemplateVars.filter((key) => !templateVars[key]?.trim());
+        if (missing.length > 0) {
+          setErr(`Fill template variable${missing.length === 1 ? "" : "s"} ${missing.map((k) => `{{${k}}}`).join(", ")}.`);
+          setBusy(false);
+          return;
+        }
+        args.template_id = selectedTemplate.id;
+        args.vars = templateVars;
+      } else {
+        if (!body.trim()) {
+          setErr("Enter a body.");
+          setBusy(false);
+          return;
+        }
+        args.body = body;
+      }
       // Email-only fields — included only when relevant so the
       // server's "irrelevant fields warned + dropped" pathway
       // doesn't fire on every SMS send.
@@ -1015,7 +1151,7 @@ function ComposeView({
         if (references.length > 0) args.references = references;
       }
       await api("POST", "/tools/call", {}, { tool: "send_message", args });
-      setTo(""); setSubject(""); setBody(""); setInReplyTo(""); setReferences([]);
+      setTo(""); setSubject(""); setBody(""); setInReplyTo(""); setReferences([]); setTemplateVars({});
       onSent();
     } catch (e) {
       setErr((e as Error).message);
@@ -1042,10 +1178,12 @@ function ComposeView({
           <div className="flex gap-2 items-stretch">
             <select
               className={inputCls + " flex-1"}
-              value={selectedAddress}
+              value={selectedSender ? senderOptionValue(selectedSender) : senderOptionValue({ channel: selectedChannel || "email", address: selectedAddress })}
               onChange={(e) => {
-                setSelectedAddress(e.target.value);
-                const next = verified.find((s) => stripScheme(s.address) === e.target.value);
+                const parsed = parseSenderOptionValue(e.target.value);
+                setSelectedAddress(parsed.address);
+                setSelectedChannel(parsed.channel);
+                const next = verified.find((s) => stripScheme(s.address) === parsed.address && s.channel === parsed.channel);
                 if (next?.kind === "domain" && !localPart) setLocalPart("noreply");
               }}
               required
@@ -1057,15 +1195,15 @@ function ComposeView({
                 return (
                   <optgroup key={ch} label={groupLabel}>
                     {inCh.map((s) => (
-                      <option key={s.address} value={stripScheme(s.address)}>
+                      <option key={`${s.channel}:${s.address}`} value={senderOptionValue(s)}>
                         {s.kind === "domain" ? `@${stripScheme(s.address)} (any local-part)` : stripScheme(s.address)}
                       </option>
                     ))}
                   </optgroup>
                 );
               })}
-              {selectedAddress && !verified.some((s) => stripScheme(s.address) === selectedAddress) && (
-                <option value={selectedAddress}>{selectedAddress}</option>
+              {selectedAddress && !selectedSender && (
+                <option value={senderOptionValue({ channel: selectedChannel || "email", address: selectedAddress })}>{selectedAddress}</option>
               )}
             </select>
             {isDomain && (
@@ -1104,14 +1242,43 @@ function ComposeView({
           disabled={noVerifiedSenders}
         />
       </Field>
-      {(selectedSender?.channel || "email") === "email" && (
+      {channel === "whatsapp" && (
+        <WhatsAppComposeHint
+          session={waSession}
+          freeformAllowed={whatsAppFreeformAllowed}
+          requiresTemplate={whatsAppRequiresTemplate}
+          checking={whatsAppChecking}
+          recipients={recipients}
+        />
+      )}
+      {channel === "email" && (
         <Field label="Subject">
           <input className={inputCls} value={subject} onChange={(e) => setSubject(e.target.value)} disabled={noVerifiedSenders} />
         </Field>
       )}
-      <Field label="Body">
-        <textarea className={inputCls + " font-mono text-sm"} rows={10} value={body} onChange={(e) => setBody(e.target.value)} required disabled={noVerifiedSenders} />
-      </Field>
+      {channel === "whatsapp" && !whatsAppFreeformAllowed ? (
+        <WhatsAppTemplateComposer
+          templates={approvedWhatsAppTemplates}
+          selectedTemplate={selectedTemplate}
+          templateID={templateID}
+          vars={templateVars}
+          onTemplateID={setTemplateID}
+          onVars={setTemplateVars}
+          onGotoTemplates={gotoTemplates}
+          disabled={noVerifiedSenders || whatsAppChecking || recipients.length === 0}
+        />
+      ) : (
+        <Field label="Body">
+          <textarea
+            className={inputCls + " font-mono text-sm"}
+            rows={10}
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            required={channel !== "whatsapp" || whatsAppFreeformAllowed}
+            disabled={noVerifiedSenders || whatsAppChecking}
+          />
+        </Field>
+      )}
 
       {quota && quota.sandboxed && (
         <p className="text-xs text-yellow-400/80">
@@ -1121,12 +1288,189 @@ function ComposeView({
       {err && <div className="text-red-500 text-sm">{err}</div>}
 
       <div className="flex justify-end gap-2 pt-2">
-        <button type="submit" disabled={busy || noVerifiedSenders} className="px-4 py-1.5 bg-accent text-white rounded disabled:opacity-50">
+        <button type="submit" disabled={busy || noVerifiedSenders || whatsAppChecking} className="px-4 py-1.5 bg-accent text-white rounded disabled:opacity-50">
           {busy ? "Sending…" : "Send"}
         </button>
       </div>
     </form>
   );
+}
+
+const whatsappSessionWindowMs = 24 * 60 * 60 * 1000;
+
+type WhatsAppSessionState =
+  | { state: "idle" | "checking" | "active" | "closed"; checkedRecipients: string[] }
+  | { state: "error"; checkedRecipients: string[]; error: string };
+
+function WhatsAppComposeHint({
+  session, freeformAllowed, requiresTemplate, checking, recipients,
+}: {
+  session: WhatsAppSessionState;
+  freeformAllowed: boolean;
+  requiresTemplate: boolean;
+  checking: boolean;
+  recipients: string[];
+}) {
+  if (recipients.length === 0) {
+    return (
+      <div className="rounded border border-border bg-surface-2 p-3 text-xs text-text-dim">
+        Enter a recipient to check whether the WhatsApp 24-hour reply window is open.
+      </div>
+    );
+  }
+  if (checking) {
+    return (
+      <div className="rounded border border-border bg-surface-2 p-3 text-xs text-text-dim">
+        Checking the WhatsApp 24-hour window…
+      </div>
+    );
+  }
+  if (freeformAllowed) {
+    return (
+      <div className="rounded border border-green-500/30 bg-green-500/10 p-3 text-xs text-green-300">
+        Recent inbound WhatsApp message found. Free-form reply is allowed for this recipient.
+      </div>
+    );
+  }
+  if (requiresTemplate) {
+    return (
+      <div className="rounded border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-yellow-300">
+        No recent inbound WhatsApp message was found for every recipient. Use an approved template to send outside the 24-hour window.
+        {session.state === "error" && <div className="mt-1 text-yellow-200/80">{session.error}</div>}
+      </div>
+    );
+  }
+  return null;
+}
+
+function WhatsAppTemplateComposer({
+  templates, selectedTemplate, templateID, vars, onTemplateID, onVars, onGotoTemplates, disabled,
+}: {
+  templates: TemplateRow[];
+  selectedTemplate: TemplateRow | null;
+  templateID: string;
+  vars: Record<string, string>;
+  onTemplateID: (id: string) => void;
+  onVars: (vars: Record<string, string>) => void;
+  onGotoTemplates: () => void;
+  disabled: boolean;
+}) {
+  const keys = selectedTemplate ? templateVarKeys(selectedTemplate) : [];
+  const preview = selectedTemplate ? renderTemplatePreview(selectedTemplate.body_text || "", vars) : "";
+
+  if (templates.length === 0) {
+    return (
+      <div className="rounded border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm text-yellow-300">
+        No approved WhatsApp templates are available.{" "}
+        <button type="button" className="underline" onClick={onGotoTemplates}>Import or refresh templates</button>
+        .
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <Field label="Template">
+        <select
+          className={inputCls}
+          value={templateID}
+          onChange={(e) => onTemplateID(e.target.value)}
+          required
+          disabled={disabled}
+        >
+          {templates.map((t) => (
+            <option key={t.id} value={String(t.id)}>
+              {t.name}
+            </option>
+          ))}
+        </select>
+      </Field>
+      {keys.length > 0 && (
+        <div className="grid gap-2 sm:grid-cols-2">
+          {keys.map((key) => (
+            <Field key={key} label={`{{${key}}}`} hint={templateVarHint(selectedTemplate, key)}>
+              <input
+                className={inputCls}
+                value={vars[key] || ""}
+                onChange={(e) => onVars({ ...vars, [key]: e.target.value })}
+                required
+                disabled={disabled}
+              />
+            </Field>
+          ))}
+        </div>
+      )}
+      {preview && (
+        <div className="rounded border border-border bg-surface-2 p-3 text-sm whitespace-pre-wrap break-words">
+          {preview}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function parseRecipientList(value: string): string[] {
+  return uniqueStrings(value.split(",").map((s) => stripScheme(s.trim())).filter(Boolean));
+}
+
+function senderOptionValue(sender: { channel?: string; address?: string }): string {
+  return `${sender.channel || ""}|${stripScheme(sender.address || "")}`;
+}
+
+function parseSenderOptionValue(value: string): { channel: string; address: string } {
+  const i = value.indexOf("|");
+  if (i < 0) return { channel: "", address: stripScheme(value) };
+  return { channel: value.slice(0, i), address: stripScheme(value.slice(i + 1)) };
+}
+
+function whatsAppRecipientsInSession(messages: MessageRow[], recipients: string[], from: string): { allActive: boolean } {
+  const sender = stripScheme(from);
+  const active = new Set<string>();
+  for (const message of messages) {
+    if (message.channel !== "whatsapp" || message.direction !== "in") continue;
+    if (!isWithinWhatsAppWindow(message.received_at || message.created_at || message.last_event_at)) continue;
+    const inboundFrom = stripScheme(message.from);
+    if (!recipients.includes(inboundFrom)) continue;
+    const inboundTo = (message.to || []).map(stripScheme);
+    if (inboundTo.includes(sender) || stripScheme(message.matched_recipient || "") === sender) {
+      active.add(inboundFrom);
+    }
+  }
+  return { allActive: recipients.every((recipient) => active.has(recipient)) };
+}
+
+function isWithinWhatsAppWindow(value?: string): boolean {
+  if (!value) return false;
+  const t = new Date(value).getTime();
+  return Number.isFinite(t) && Date.now() - t < whatsappSessionWindowMs;
+}
+
+function templateVarKeys(template: TemplateRow): string[] {
+  const keys = new Set<string>();
+  if (template.vars_schema && typeof template.vars_schema === "object") {
+    Object.keys(template.vars_schema).forEach((key) => keys.add(key));
+  }
+  for (const source of [template.subject || "", template.body_text || "", template.body_html || ""]) {
+    const re = /\{\{\s*([^{}\s]+)\s*\}\}/g;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(source))) keys.add(match[1]);
+  }
+  return Array.from(keys).sort((a, b) => {
+    const na = Number(a);
+    const nb = Number(b);
+    if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+    return a.localeCompare(b);
+  });
+}
+
+function templateVarHint(template: TemplateRow | null, key: string): string | undefined {
+  const raw = template?.vars_schema?.[key];
+  if (typeof raw === "string" && raw.trim()) return raw;
+  return undefined;
+}
+
+function renderTemplatePreview(body: string, vars: Record<string, string>): string {
+  return body.replace(/\{\{\s*([^{}\s]+)\s*\}\}/g, (_, key: string) => vars[key]?.trim() || `{{${key}}}`);
 }
 
 function SendersView({

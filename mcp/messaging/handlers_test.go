@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -2297,6 +2298,64 @@ func newPhoneStub(reply *sdk.ExecuteResult) *stubPlatform {
 		}
 	}
 	return p
+}
+
+func TestSendMessageWhatsAppFreeformRequiresRecentInbound(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "whatsapp",
+		"from":    "+15551112222",
+		"to":      "+15553334444",
+		"body":    "hello",
+	})
+	if err == nil || !strings.Contains(err.Error(), "last 24 hours") {
+		t.Fatalf("expected 24h-window error, got %v", err)
+	}
+	if len(plat.executeCalls) != 0 {
+		t.Fatalf("provider should not be called outside 24h session, got %+v", plat.executeCalls)
+	}
+}
+
+func TestSendMessageWhatsAppFreeformAllowedAfterInbound(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO messages
+			(project_id, channel, direction, from_addr, to_addrs, status, body_text, received_at, created_at)
+		 VALUES ('test-proj', 'whatsapp', 'in', '+15553334444', '["+15551112222"]', 'received', 'hi', ?, ?)`,
+		now, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "whatsapp",
+		"from":    "+15551112222",
+		"to":      "+15553334444",
+		"body":    "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sendCall *executeCall
+	for i := range plat.executeCalls {
+		if plat.executeCalls[i].Tool == "send_whatsapp" {
+			sendCall = &plat.executeCalls[i]
+			break
+		}
+	}
+	if sendCall == nil {
+		t.Fatal("send_whatsapp was not called")
+	}
+	if sendCall.Input["Body"] != "hello" {
+		t.Errorf("Body=%v", sendCall.Input["Body"])
+	}
 }
 
 func TestTemplatesSyncProvider_UpsertsTwilioContent(t *testing.T) {

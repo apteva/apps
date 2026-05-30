@@ -54,7 +54,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.22
+version: 0.13.23
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -1033,6 +1033,11 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	allowedBCC, _ := filterSuppressed(ctx.AppDB(), pid, channel, bcc)
 	if len(allowedTo) == 0 {
 		return nil, fmt.Errorf("all 'to' recipients are suppressed: %v", suppressedTo)
+	}
+	if channel == channelWhatsApp && contentSid == "" {
+		if missing := whatsAppRecipientsOutsideSession(ctx.AppDB(), pid, from, allowedTo, time.Now().UTC()); len(missing) > 0 {
+			return nil, fmt.Errorf("whatsapp free-form send requires an inbound message from each recipient within the last 24 hours; use an approved template for: %s", strings.Join(missing, ", "))
+		}
 	}
 
 	// Persist as pending first so a provider error still leaves a row.
@@ -5164,6 +5169,40 @@ func dbFindByIdempotencyKey(db *sql.DB, pid, key string) (*Message, error) {
 	return dbMessageGet(db, pid, id)
 }
 
+func whatsAppRecipientsOutsideSession(db *sql.DB, pid, from string, recipients []string, now time.Time) []string {
+	if len(recipients) == 0 {
+		return nil
+	}
+	since := now.Add(-24 * time.Hour).Format(time.RFC3339)
+	missing := []string{}
+	for _, recipient := range recipients {
+		recipient = strings.TrimSpace(stripScheme(recipient))
+		if recipient == "" {
+			continue
+		}
+		q := `SELECT id FROM messages
+		      WHERE project_id = ?
+		        AND channel = 'whatsapp'
+		        AND direction = 'in'
+		        AND from_addr = ?
+		        AND datetime(COALESCE(NULLIF(received_at,''), created_at)) >= datetime(?)
+		        AND (to_addrs LIKE ? OR matched_recipient = ?)
+		      ORDER BY created_at DESC
+		      LIMIT 1`
+		likeFrom := `%"` + from + `"%`
+		var id int64
+		err := db.QueryRow(q, pid, recipient, since, likeFrom, from).Scan(&id)
+		if err == sql.ErrNoRows {
+			missing = append(missing, recipient)
+			continue
+		}
+		if err != nil {
+			missing = append(missing, recipient)
+		}
+	}
+	return missing
+}
+
 type messageListOpts struct {
 	Direction, Channel, Status, Since, Address string
 	Limit                                      int
@@ -5185,7 +5224,7 @@ func dbMessageList(db *sql.DB, pid string, opts messageListOpts) ([]*Message, er
 		args = append(args, opts.Status)
 	}
 	if opts.Since != "" {
-		where = append(where, "created_at >= ?")
+		where = append(where, "datetime(created_at) >= datetime(?)")
 		args = append(args, opts.Since)
 	}
 	if opts.Address != "" {
