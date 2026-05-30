@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.28
+version: 0.13.29
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES; SMS and push are reserved channel namespaces. Tracks
@@ -31,6 +31,11 @@ requires:
     - platform.connections.execute
     - platform.connections.read_credentials
     - platform.apps.call
+  # Messaging routes inbound messages to whichever installed app the
+  # operator configured in inbound_routes. Targets are data, not a
+  # fixed install-time dependency, so use the official-app dynamic
+  # call gate.
+  dynamic_app_calls: true
   integrations:
     - role: email_provider
       kind: integration
