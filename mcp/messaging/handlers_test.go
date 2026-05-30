@@ -3385,6 +3385,59 @@ func TestTwilioStatusWebhook_ReadPromotesWhatsAppToOpened(t *testing.T) {
 	}
 }
 
+func TestTwilioStatusWebhook_VerifiesAppProxyPublicURL(t *testing.T) {
+	plat := newPhoneStub(nil)
+	plat.whoAmIOverride = &sdk.InstallIdentity{
+		AppName:   "messaging",
+		ProjectID: "test-proj",
+		PublicURL: "https://public.example.com",
+		Bindings: map[string]any{"email_provider": float64(1), "phone_provider": float64(2)},
+	}
+	ctx := newTestCtx(t, plat, tk.WithConfig(map[string]string{
+		"twilio_auth_token": "secret",
+	}))
+	app := &App{}
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO messages (project_id, channel, direction, from_addr, to_addrs, status, provider_message_id)
+		 VALUES ('test-proj', 'whatsapp', 'out', '+15551112222', '["+15553334444"]', 'sent', 'MMproxy1')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgID, _ := res.LastInsertId()
+	form := url.Values{
+		"MessageSid":    []string{"MMproxy1"},
+		"MessageStatus": []string{"read"},
+		"From":          []string{"whatsapp:+15551112222"},
+		"To":            []string{"whatsapp:+15553334444"},
+	}
+	publicURL := "https://public.example.com/api/apps/messaging/webhooks/twilio-status?api_key=dev-93"
+	keys := []string{"From", "MessageSid", "MessageStatus", "To"}
+	var b strings.Builder
+	b.WriteString(publicURL)
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteString(form.Get(k))
+	}
+	mac := hmac.New(sha1.New, []byte("secret"))
+	mac.Write([]byte(b.String()))
+	sig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+
+	r := httptest.NewRequest("POST", "/webhooks/twilio-status?api_key=dev-93", strings.NewReader(form.Encode()))
+	r.Host = "127.0.0.1:12345"
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("X-Twilio-Signature", sig)
+	w := httptest.NewRecorder()
+	app.handleTwilioStatusWebhook(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	m, _ := dbMessageGet(ctx.AppDB(), "test-proj", msgID)
+	if m.Status != "opened" {
+		t.Fatalf("status=%q want opened", m.Status)
+	}
+}
+
 func TestSESInbound_PersistsVerdicts(t *testing.T) {
 	plat := &stubPlatform{}
 	ctx := newTestCtx(t, plat)

@@ -54,7 +54,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.23
+version: 0.13.24
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -3352,6 +3352,15 @@ func verifyTwilioSignature(fullURL string, form url.Values, authToken, expected 
 // from request headers + X-Forwarded-* fields the platform proxy adds.
 // Twilio signs the *external* URL, not the per-pod forwarded form.
 func reconstructPublicURL(r *http.Request) string {
+	if globalCtx != nil {
+		if id, err := globalCtx.PlatformAPI().WhoAmI(); err == nil && id != nil && strings.TrimSpace(id.PublicURL) != "" {
+			path := r.URL.RequestURI()
+			if !strings.HasPrefix(path, "/api/apps/") {
+				path = "/api/apps/messaging" + path
+			}
+			return strings.TrimRight(strings.TrimSpace(id.PublicURL), "/") + path
+		}
+	}
 	scheme := r.Header.Get("X-Forwarded-Proto")
 	if scheme == "" {
 		if r.TLS != nil {
