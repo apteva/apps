@@ -17,13 +17,14 @@ view.
 ## Host requirements
 
 Per-platform, probed at runtime by `sims_capabilities`. Boot/build
-availability is reported separately from live streaming/input, because
-iOS can boot and stream with Xcode alone while clicks need idb.
+availability is reported separately from live streaming/input. iOS can
+boot and stream with Xcode alone, while idb improves live view and
+enables clicks.
 
 | Platform | Host | Tools on PATH |
 |---|---|---|
 | Android | Linux (KVM recommended) or macOS | `adb`, `emulator`, `avdmanager`, `aapt`, `gradle` (or a repo `./gradlew`), a JDK 17 |
-| iOS | **macOS only** | `xcrun`, `xcodebuild`, `simctl`; optional `idb` (`pipx install fb-idb`) + `idb_companion` (`brew install idb-companion`) for input |
+| iOS | **macOS only** | `xcrun`, `xcodebuild`, `simctl`; optional `idb` (`pipx install fb-idb`) + `idb_companion` (`brew install idb-companion`) for faster raw-frame live view and input |
 
 The Linux production host can run the Android backend; iOS requires
 running apteva on a Mac. A Mac runner pool is future work — v0.1 runs
@@ -75,10 +76,10 @@ repos_dev_stop → CallAppResult("simulator","sims_shutdown",…)
 The live screen is streamed over a WebSocket:
 
 - **Android**: `adb exec-out screenrecord --output-format=h264 -`
-- **iOS**: native `xcrun simctl io <udid> screenshot` PNG frames
+- **iOS**: `idb video-stream --format rbga` raw BGRA frames converted to JPEG; falls back to native `xcrun simctl io <udid> screenshot --type=jpeg`
 
 `stream.go` reassembles Android H.264 access units (`annexb.go`) and
-ships one per WebSocket binary message. iOS sends complete PNG frames.
+ships one per WebSocket binary message. iOS sends complete JPEG frames.
 The browser (`ui/components/DeviceFrame.tsx`) draws to canvas and
 forwards pointer + keyboard as JSON control messages. Input also has
 discrete tool form (`sims_input`) for headless agent flows.
