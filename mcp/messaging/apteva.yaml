@@ -2,13 +2,13 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.26
+version: 0.13.27
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES; SMS and push are reserved channel namespaces. Tracks
   delivery state, maintains a per-channel suppression list from
-  bounces and complaints, and routes inbound mail to other apps'
-  HTTP routes via a small pattern table.
+  bounces and complaints, and routes inbound mail/SMS/WhatsApp to
+  other app tools via a small pattern table.
 
   The shape is channel-agnostic: addresses are URIs (mailto:, tel:,
   apteva://contact/N) and a single `send_message` tool dispatches

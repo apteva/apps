@@ -1832,6 +1832,9 @@ function renderTemplatePreview(body: string, vars: Record<string, string>): stri
 
 // ─── Settings tab ─────────────────────────────────────────────────
 
+const CRM_INBOUND_TARGET_ROUTE = "messaging_inbound_receive";
+const CRM_INBOUND_LEGACY_TARGET_ROUTE = "/inbound";
+
 function SettingsTab({ messagingTool, api, lists, attrDefs, onAddField }: {
   messagingTool: <T,>(tool: string, args?: Record<string, unknown>) => Promise<T>;
   api: <T,>(method: string, path: string, body?: any, params?: Record<string, string>) => Promise<T>;
@@ -1854,11 +1857,38 @@ function SettingsTab({ messagingTool, api, lists, attrDefs, onAddField }: {
     }
   }, [messagingTool]);
 
-  useEffect(() => { loadRoutes(); }, [loadRoutes]);
+  const ensureRoute = useCallback(async (channel: "email" | "sms" | "whatsapp") => {
+    await messagingTool("inbound_route_set", {
+      pattern: "*",
+      channel,
+      target_app: "crm",
+      target_route: CRM_INBOUND_TARGET_ROUTE,
+      priority: 0,
+    });
+  }, [messagingTool]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setBusy(true);
+    setError(null);
+    Promise.all([
+      ensureRoute("email"),
+      ensureRoute("sms"),
+      ensureRoute("whatsapp"),
+    ])
+      .catch((e) => { if (!cancelled) setError((e as Error).message); })
+      .finally(async () => {
+        if (!cancelled) {
+          setBusy(false);
+          await loadRoutes();
+        }
+      });
+    return () => { cancelled = true; };
+  }, [ensureRoute, loadRoutes]);
 
   // CRM-pointing routes — what we wire up.
   const crmRoutes = useMemo(
-    () => (routes || []).filter((r) => r.target_app === "crm" && r.target_route === "/inbound"),
+    () => (routes || []).filter((r) => r.target_app === "crm" && (r.target_route === CRM_INBOUND_TARGET_ROUTE || r.target_route === CRM_INBOUND_LEGACY_TARGET_ROUTE)),
     [routes],
   );
   const hasEmail = crmRoutes.some((r) => r.channel === "email");
@@ -1869,13 +1899,7 @@ function SettingsTab({ messagingTool, api, lists, attrDefs, onAddField }: {
     setBusy(true);
     setError(null);
     try {
-      await messagingTool("inbound_route_set", {
-        pattern: "*",
-        channel,
-        target_app: "crm",
-        target_route: "/inbound",
-        priority: 0,
-      });
+      await ensureRoute(channel);
       await loadRoutes();
     } catch (e) {
       setError((e as Error).message);
@@ -1892,7 +1916,7 @@ function SettingsTab({ messagingTool, api, lists, attrDefs, onAddField }: {
     <div className="p-6 max-w-2xl space-y-6">
       <header>
         <h1 className="text-xl text-text font-semibold">Settings</h1>
-        <p className="text-text-muted text-sm">Wire CRM into the messaging app so inbound mail/SMS/WhatsApp lands on the right contact's timeline automatically.</p>
+        <p className="text-text-muted text-sm">CRM keeps Messaging routes in place so inbound mail/SMS/WhatsApp lands on the right contact's timeline automatically.</p>
       </header>
 
       <section>
@@ -1911,7 +1935,7 @@ function SettingsTab({ messagingTool, api, lists, attrDefs, onAddField }: {
             <RouteRow label="SMS"      wired={hasSMS}       onWire={() => wire("sms")} busy={busy} />
             <RouteRow label="WhatsApp" wired={hasWhatsApp}  onWire={() => wire("whatsapp")} busy={busy} />
             <p className="text-text-dim text-xs pt-2">
-              Wire-up creates a low-priority <span className="font-mono">*</span> catch-all route in messaging. To
+              CRM creates low-priority <span className="font-mono">*</span> catch-all routes in messaging. To
               constrain by recipient pattern, edit the route from the messaging panel.
             </p>
           </div>
@@ -1970,7 +1994,7 @@ function RouteRow({ label, wired, onWire, busy }: { label: string; wired: boolea
         onClick={onWire}
         disabled={busy || wired}
         className="ml-auto text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
-      >{wired ? "Wired" : "Wire up"}</button>
+      >{wired ? "Wired" : "Repair"}</button>
     </div>
   );
 }

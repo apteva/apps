@@ -180,3 +180,40 @@ func TestInbound_ReopensClosedConversation(t *testing.T) {
 		t.Errorf("conversation status=%q after inbound reply, want open (auto-reopen)", got.Status)
 	}
 }
+
+func TestMessagingInboundReceiveTool_AttachesInbound(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+
+	out, err := app.toolMessagingInboundReceive(ctx, map[string]any{
+		"message_id": int64(4201),
+		"channel":    "whatsapp",
+		"from":       "+15551230000",
+		"to":         []any{"+15559990000"},
+		"body_text":  "hello from messaging",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(map[string]any)
+	contactID := res["contact_id"].(int64)
+	if contactID == 0 {
+		t.Fatalf("no contact_id in output: %#v", res)
+	}
+
+	var kind, body string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT kind, body FROM contact_activities
+		 WHERE project_id = ? AND contact_id = ?
+		 ORDER BY id DESC LIMIT 1`,
+		"test-proj", contactID,
+	).Scan(&kind, &body); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "whatsapp_received" {
+		t.Fatalf("activity kind=%q, want whatsapp_received", kind)
+	}
+	if body != "hello from messaging" {
+		t.Fatalf("activity body=%q", body)
+	}
+}

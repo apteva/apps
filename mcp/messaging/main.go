@@ -14,8 +14,8 @@
 //   - Inbound SNS webhooks land at /webhooks/ses-inbound, parse the
 //     embedded MIME (SES "Content" action; S3-action fetch is v0.2),
 //     persist a `direction='in'` row, look up `inbound_routes` by
-//     recipient URI, and POST a normalized JSON to the target app's
-//     HTTP route via ctx.PlatformAPI().CallApp.
+//     recipient URI, and dispatch a normalized JSON payload to the
+//     target app via ctx.PlatformAPI().CallApp.
 package main
 
 import (
@@ -54,7 +54,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.26
+version: 0.13.27
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -3428,10 +3428,12 @@ func errString(e error) string {
 	return e.Error()
 }
 
+const crmInboundReceiveTool = "messaging_inbound_receive"
+
 // dispatchInbound looks up the matching inbound_route for each
-// recipient on the message and POSTs the normalised JSON to the
-// target app's HTTP route. First match wins per message; ties go to
-// priority DESC, then longest-pattern.
+// recipient on the message and calls the target app tool with the
+// normalised JSON. First match wins per message; ties go to priority
+// DESC, then longest-pattern.
 func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 	if m == nil {
 		return errors.New("nil message")
@@ -3494,7 +3496,12 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 		"received_at":       m.ReceivedAt,
 	}
 
-	_, callErr := ctx.PlatformAPI().CallApp(winner.route.TargetApp, normaliseRoutePath(winner.route.TargetRoute), payload)
+	targetTool := inboundRouteTargetTool(winner.route.TargetApp, winner.route.TargetRoute)
+	callCtx := ctx
+	if strings.TrimSpace(pid) != "" {
+		callCtx = ctx.WithProject(pid)
+	}
+	_, callErr := callCtx.PlatformAPI().CallApp(winner.route.TargetApp, targetTool, payload)
 	status := "ok"
 	errMsg := ""
 	if callErr != nil {
@@ -3514,6 +3521,17 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 		return callErr
 	}
 	return nil
+}
+
+func inboundRouteTargetTool(appName, route string) string {
+	route = strings.TrimSpace(route)
+	if strings.EqualFold(strings.TrimSpace(appName), "crm") {
+		switch route {
+		case "", "/", "/inbound", "inbound", crmInboundReceiveTool:
+			return crmInboundReceiveTool
+		}
+	}
+	return normaliseRoutePath(route)
 }
 
 // patternMatches checks whether `addr` (a canonical URI) matches

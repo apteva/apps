@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.5
+version: 0.8.6
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -89,6 +89,8 @@ provides:
       description: List templates from the bound Messaging app, especially approved WhatsApp templates.
     - name: messaging_whatsapp_session_check
       description: Check whether a WhatsApp contact is inside the 24-hour free-form reply window.
+    - name: messaging_inbound_receive
+      description: Receive an inbound message dispatched by Messaging and attach it to CRM contact activity.
     - name: contacts_list_messageable
       description: List contacts reachable on a channel.
     - name: contacts_list_conversations
@@ -603,6 +605,29 @@ func (a *App) MCPTools() []sdk.Tool {
 				"from":       map[string]any{"type": "string"},
 			}, nil),
 			Handler: a.toolMessagingWhatsAppSessionCheck,
+		},
+		{
+			Name:        "messaging_inbound_receive",
+			Description: "Receive an inbound message dispatched by Messaging and attach it to the CRM contact timeline. Internal plumbing; agents normally should not call this directly.",
+			InputSchema: schemaObject(map[string]any{
+				"message_id":        map[string]any{"type": "integer"},
+				"channel":           map[string]any{"type": "string"},
+				"from":              map[string]any{"type": "string"},
+				"to":                map[string]any{"type": "array"},
+				"cc":                map[string]any{"type": "array"},
+				"subject":           map[string]any{"type": "string"},
+				"body_text":         map[string]any{"type": "string"},
+				"body_html":         map[string]any{"type": "string"},
+				"message_id_header": map[string]any{"type": "string"},
+				"in_reply_to":       map[string]any{"type": "string"},
+				"references":        map[string]any{"type": "array"},
+				"headers":           map[string]any{"type": "object"},
+				"received_at":       map[string]any{"type": "string"},
+				"matched_recipient": map[string]any{"type": "string"},
+				"matched_pattern":   map[string]any{"type": "string"},
+				"to_subaddress":     map[string]any{"type": "string"},
+			}, []string{"channel", "from"}),
+			Handler: a.toolMessagingInboundReceive,
 		},
 		{
 			Name:        "contacts_list_messageable",

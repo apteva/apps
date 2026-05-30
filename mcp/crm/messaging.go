@@ -2,8 +2,9 @@
 //
 // CRM is the agent's single interface for talking to people. This
 // file wires it to the optional messaging app: outbound via
-// contacts_send_message / contacts_reply, inbound via POST /inbound,
-// and conversation threading on top.
+// contacts_send_message / contacts_reply, inbound via
+// messaging_inbound_receive (plus legacy POST /inbound), and
+// conversation threading on top.
 //
 // The messaging dependency is soft: every entry point gates on
 // ctx.IntegrationFor("messaging") and returns a clear error when it
@@ -501,6 +502,29 @@ func callMessagingTool(ctx *sdk.AppCtx, tool string, args map[string]any, out an
 	return ctx.PlatformAPI().CallAppResult("messaging", tool, args, out)
 }
 
+const crmMessagingInboundTool = "messaging_inbound_receive"
+
+func ensureMessagingInboundRoutes(ctx *sdk.AppCtx, pid string) error {
+	if messagingBound(ctx) == nil {
+		return nil
+	}
+	for _, channel := range []string{channelEmail, channelSMS, channelWhatsApp} {
+		var out map[string]any
+		err := callMessagingTool(ctx, "inbound_route_set", map[string]any{
+			"_project_id":  pid,
+			"channel":      channel,
+			"pattern":      "*",
+			"target_app":   "crm",
+			"target_route": crmMessagingInboundTool,
+			"priority":     0,
+		}, &out)
+		if err != nil {
+			return fmt.Errorf("%s route: %w", channel, err)
+		}
+	}
+	return nil
+}
+
 // suppressionCheck calls messaging.suppression_check. Returns
 // (suppressed, reason). Older messaging versions without this tool
 // are treated as not-suppressed — messaging itself will still pre-flight
@@ -726,6 +750,18 @@ func anyString(v any) string {
 	return fmt.Sprint(v)
 }
 
+func emitCRMEvent(ctx *sdk.AppCtx, pid, topic string, payload map[string]any) {
+	if ctx == nil {
+		return
+	}
+	if strings.TrimSpace(pid) == "" {
+		ctx.Logger().Warn("crm emit without project", "topic", topic)
+		ctx.Emit(topic, payload)
+		return
+	}
+	ctx.EmitWithProject(topic, pid, payload)
+}
+
 // ─── Tool: contacts_send_message ──────────────────────────────────
 
 func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -743,6 +779,9 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
+	}
+	if err := ensureMessagingInboundRoutes(ctx, pid); err != nil {
+		ctx.Logger().Warn("crm messaging inbound route auto-wire failed", "project_id", pid, "err", err)
 	}
 	cid := int64Arg(args, "id")
 	if cid == 0 {
@@ -1405,14 +1444,84 @@ func (a *App) handleInbound(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "channel and from required")
 		return
 	}
+	out, err := ingestInbound(globalCtx, pid, body)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, out)
+}
+
+func (a *App) toolMessagingInboundReceive(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	body := inboundPayload{
+		MessageID:        int64Arg(args, "message_id"),
+		Channel:          strArg(args, "channel"),
+		From:             strArg(args, "from"),
+		To:               stringSliceArg(args, "to"),
+		CC:               stringSliceArg(args, "cc"),
+		Subject:          strArg(args, "subject"),
+		BodyText:         strArg(args, "body_text"),
+		BodyHTML:         strArg(args, "body_html"),
+		MessageIDHeader:  strArg(args, "message_id_header"),
+		InReplyTo:        strArg(args, "in_reply_to"),
+		References:       stringSliceArg(args, "references"),
+		ReceivedAt:       strArg(args, "received_at"),
+		MatchedRecipient: strArg(args, "matched_recipient"),
+		MatchedPattern:   strArg(args, "matched_pattern"),
+		ToSubaddress:     strArg(args, "to_subaddress"),
+	}
+	if headers, ok := args["headers"].(map[string]any); ok {
+		body.Headers = headers
+	} else {
+		body.Headers = map[string]any{}
+	}
+	if body.Channel == "" || body.From == "" {
+		return nil, errors.New("channel and from required")
+	}
+	return ingestInbound(ctx, pid, body)
+}
+
+func stringSliceArg(args map[string]any, key string) []string {
+	switch v := args[key].(type) {
+	case []string:
+		return append([]string{}, v...)
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			s := strings.TrimSpace(anyString(item))
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return nil
+		}
+		return []string{strings.TrimSpace(v)}
+	default:
+		return nil
+	}
+}
+
+func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string]any, error) {
+	if ctx == nil {
+		return nil, errors.New("crm context not initialized")
+	}
+	if body.Channel == "" || body.From == "" {
+		return nil, errors.New("channel and from required")
+	}
 	body.From = canonicalAddress(body.Channel, body.From)
 
-	db := globalCtx.AppDB()
+	db := ctx.AppDB()
 
 	contact, fuzzyCandidates, err := matchInboundContact(db, pid, body.Channel, body.From)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, "match: "+err.Error())
-		return
+		return nil, fmt.Errorf("match: %w", err)
 	}
 	stubCreated := false
 	if contact == nil {
@@ -1422,8 +1531,7 @@ func (a *App) handleInbound(w http.ResponseWriter, r *http.Request) {
 		}
 		contact, _, err = dbUpsertByChannel(db, pid, contactChannelKindFor(body.Channel), body.From, defaults, "messaging:inbound")
 		if err != nil {
-			httpErr(w, http.StatusInternalServerError, "upsert: "+err.Error())
-			return
+			return nil, fmt.Errorf("upsert: %w", err)
 		}
 		stubCreated = true
 		if len(fuzzyCandidates) > 0 {
@@ -1449,7 +1557,7 @@ func (a *App) handleInbound(w http.ResponseWriter, r *http.Request) {
 	automated, autoReason := isAutomatedSender(body.Channel, body.From, body.Headers)
 	if automated {
 		if err := dbAddTag(db, pid, contact.ID, tagAutomated); err != nil {
-			globalCtx.Logger().Warn("auto-tag automated sender", "contact_id", contact.ID, "err", err)
+			ctx.Logger().Warn("auto-tag automated sender", "contact_id", contact.ID, "err", err)
 		}
 	}
 
@@ -1459,16 +1567,15 @@ func (a *App) handleInbound(w http.ResponseWriter, r *http.Request) {
 	routeRecipients := append([]string{body.MatchedRecipient}, body.To...)
 	routed, err := applyRoutingRules(db, pid, contact.ID, routeRecipients, body.From)
 	if err != nil {
-		globalCtx.Logger().Warn("routing rules", "contact_id", contact.ID, "err", err)
+		ctx.Logger().Warn("routing rules", "contact_id", contact.ID, "err", err)
 	}
 	for _, lid := range routed.Lists {
-		globalCtx.Emit("list.member.added", map[string]any{"list_id": lid, "contact_id": contact.ID})
+		emitCRMEvent(ctx, pid, "list.member.added", map[string]any{"list_id": lid, "contact_id": contact.ID})
 	}
 
 	convoID, err := resolveInboundConversation(db, pid, contact.ID, body)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, "convo: "+err.Error())
-		return
+		return nil, fmt.Errorf("convo: %w", err)
 	}
 
 	// Auto-reopen: a reply on a pending/closed thread puts the ball back
@@ -1476,8 +1583,7 @@ func (a *App) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// just created above). Mirrors Front/Intercom; fixes the HubSpot gap.
 	reopened, err := dbConversationReopenIfClosed(db, pid, convoID)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, "reopen: "+err.Error())
-		return
+		return nil, fmt.Errorf("reopen: %w", err)
 	}
 
 	occurred := body.ReceivedAt
@@ -1512,12 +1618,10 @@ func (a *App) handleInbound(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, errDuplicateMessagingID) {
 		// Idempotent re-delivery — already logged. Return ok so messaging
 		// stops retrying.
-		httpJSON(w, map[string]any{"ok": true, "deduped": true})
-		return
+		return map[string]any{"ok": true, "deduped": true}, nil
 	}
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, "log: "+err.Error())
-		return
+		return nil, fmt.Errorf("log: %w", err)
 	}
 
 	// List auto-attach. If messaging's matched_pattern matches a list's
@@ -1529,27 +1633,27 @@ func (a *App) handleInbound(w http.ResponseWriter, r *http.Request) {
 		if l, _ := dbListByInboundPattern(db, pid, body.MatchedPattern); l != nil {
 			listID = l.ID
 			if err := dbListAddContact(db, pid, l.ID, contact.ID, "messaging:inbound"); err != nil {
-				globalCtx.Logger().Warn("inbound list auto-attach failed", "list_id", l.ID, "contact_id", contact.ID, "err", err)
+				ctx.Logger().Warn("inbound list auto-attach failed", "list_id", l.ID, "contact_id", contact.ID, "err", err)
 			} else {
-				globalCtx.Emit("list.member.added", map[string]any{"list_id": l.ID, "contact_id": contact.ID})
+				emitCRMEvent(ctx, pid, "list.member.added", map[string]any{"list_id": l.ID, "contact_id": contact.ID})
 			}
 		}
 	}
 
 	if stubCreated {
-		globalCtx.Emit("contact.added", map[string]any{
+		emitCRMEvent(ctx, pid, "contact.added", map[string]any{
 			"id": contact.ID, "display_name": contact.DisplayName,
 		})
 	}
 	if reopened {
-		globalCtx.Emit("conversation.status.changed", map[string]any{
+		emitCRMEvent(ctx, pid, "conversation.status.changed", map[string]any{
 			"conversation_id": convoID,
 			"contact_id":      contact.ID,
 			"status":          "open",
 			"reason":          "inbound_reply",
 		})
 	}
-	globalCtx.Emit("contact.activity.added", map[string]any{
+	emitCRMEvent(ctx, pid, "contact.activity.added", map[string]any{
 		"contact_id": contact.ID, "kind": act.Kind,
 	})
 
@@ -1563,7 +1667,7 @@ func (a *App) handleInbound(w http.ResponseWriter, r *http.Request) {
 	if listID != 0 {
 		out["list_id"] = listID
 	}
-	httpJSON(w, out)
+	return out, nil
 }
 
 func resolveInboundConversation(db *sql.DB, pid string, contactID int64, p inboundPayload) (int64, error) {

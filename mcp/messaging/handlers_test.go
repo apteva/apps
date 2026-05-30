@@ -123,6 +123,39 @@ func (s *stubPlatform) CallAppResult(app, tool string, input map[string]any, out
 	return json.Unmarshal(raw, out)
 }
 
+func TestDispatchInbound_CRMLegacyRouteCallsInboundToolWithProject(t *testing.T) {
+	plat := &stubPlatform{callAppReply: json.RawMessage(`{"ok":true}`)}
+	ctx := newTestCtx(t, plat)
+	if _, err := dbInboundRouteUpsert(ctx.AppDB(), "test-proj", channelWhatsApp, "*", "crm", "/inbound", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &Message{
+		ID:         991,
+		ProjectID:  "test-proj",
+		Channel:    channelWhatsApp,
+		Direction:  "in",
+		From:       "+15551230000",
+		To:         []string{"+15559990000"},
+		BodyText:   "hello",
+		Headers:    json.RawMessage(`{}`),
+		ReceivedAt: "2026-05-30T09:00:00Z",
+	}
+	if err := dispatchInbound(ctx, "test-proj", msg); err != nil {
+		t.Fatal(err)
+	}
+	if len(plat.callAppCalls) != 1 {
+		t.Fatalf("expected 1 CallApp, got %d", len(plat.callAppCalls))
+	}
+	call := plat.callAppCalls[0]
+	if call.App != "crm" || call.Tool != crmInboundReceiveTool {
+		t.Fatalf("call=%+v, want crm.%s", call, crmInboundReceiveTool)
+	}
+	if call.Input["_project_id"] != "test-proj" {
+		t.Fatalf("_project_id=%v, want test-proj", call.Input["_project_id"])
+	}
+}
+
 // Unused PlatformClient methods — return zero values; tests that hit
 // them would panic, which is the intended signal.
 func (s *stubPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
