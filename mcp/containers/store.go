@@ -230,26 +230,45 @@ func listWorkloads(db *sql.DB, status string) ([]*Workload, error) {
 		args = append(args, status)
 	}
 	q += ` ORDER BY created_at DESC`
+	log.Printf("[containers] db list workloads begin status=%q", status)
 	rows, err := db.Query(q, args...)
 	if err != nil {
+		log.Printf("[containers] db list workloads query error status=%q err=%q", status, err.Error())
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*Workload
+	var ids []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			log.Printf("[containers] db list workloads scan error status=%q err=%q", status, err.Error())
 			return nil, err
 		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		log.Printf("[containers] db list workloads rows error status=%q err=%q", status, err.Error())
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		log.Printf("[containers] db list workloads close error status=%q err=%q", status, err.Error())
+		return nil, err
+	}
+	log.Printf("[containers] db list workloads ids=%d status=%q", len(ids), status)
+	out := make([]*Workload, 0, len(ids))
+	for _, id := range ids {
 		w, err := getWorkload(db, id)
 		if err != nil {
+			log.Printf("[containers] db list workloads hydrate error workload_id=%s err=%q", id, err.Error())
 			return nil, err
 		}
 		if w != nil {
 			out = append(out, w)
 		}
 	}
-	return out, rows.Err()
+	log.Printf("[containers] db list workloads done count=%d status=%q", len(out), status)
+	return out, nil
 }
 
 func hydrateWorkload(db *sql.DB, w *Workload) error {
