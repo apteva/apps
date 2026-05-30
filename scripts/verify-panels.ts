@@ -96,14 +96,21 @@ async function checkPanel(file: string, vendor: Set<string>): Promise<string[]> 
       }
     }
   }
-  // jsx-runtime: bundler writes these names; we just confirm the
-  // panel doesn't import non-existent ones.
+  // jsx-runtime: panels run against the dashboard import map, which
+  // exposes the production runtime only. Dev-runtime output imports
+  // jsxDEV and crashes at panel mount time.
   const jsxRe = /import\s*\{([^}]+)\}\s*from\s*"react\/jsx(-dev)?-runtime"/g;
   while ((m = jsxRe.exec(src))) {
+    if (m[2]) {
+      errors.push(
+        `${file}: imports react/jsx-dev-runtime. Rebuild with process.env.NODE_ENV defined as "production".`,
+      );
+      continue;
+    }
     for (const name of parseImportNames("{" + m[1] + "}")) {
-      if (!["jsx", "jsxs", "jsxDEV", "Fragment"].includes(name)) {
+      if (!["jsx", "jsxs", "Fragment"].includes(name)) {
         errors.push(
-          `${file}: jsx-runtime import "${name}" — only jsx/jsxs/jsxDEV/Fragment are valid.`,
+          `${file}: jsx-runtime import "${name}" — only jsx/jsxs/Fragment are valid.`,
         );
       }
     }
