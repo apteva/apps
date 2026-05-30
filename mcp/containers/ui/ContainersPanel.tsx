@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 
 interface NativePanelProps {
   projectId: string;
@@ -15,6 +15,8 @@ interface Workload {
   public_url: string;
   last_error: string;
   created_at: string;
+  updated_at?: string;
+  resources?: { memory_mb?: number; cpu?: number };
   ports?: Array<{ container_port: number; host_port: number; bind_addr: string; protocol: string }>;
   volumes?: Array<{ name: string; docker_volume_name: string; mount_path: string }>;
 }
@@ -28,83 +30,66 @@ interface Blueprint {
 const API = "/api/apps/containers/api";
 
 const TEST_IMAGES = [
-  {
-    slug: "nginx",
-    label: "Nginx",
-    image: "nginx:alpine",
-    containerPort: "80",
-    healthPath: "/",
-    memoryMB: "256",
-    cpu: "0.5",
-  },
-  {
-    slug: "whoami",
-    label: "Whoami",
-    image: "traefik/whoami:v1.10",
-    containerPort: "80",
-    healthPath: "/",
-    memoryMB: "128",
-    cpu: "0.25",
-  },
-  {
-    slug: "httpd",
-    label: "Apache",
-    image: "httpd:alpine",
-    containerPort: "80",
-    healthPath: "/",
-    memoryMB: "256",
-    cpu: "0.5",
-  },
-  {
-    slug: "adminer",
-    label: "Adminer",
-    image: "adminer:latest",
-    containerPort: "8080",
-    healthPath: "/",
-    memoryMB: "256",
-    cpu: "0.5",
-  },
+  { slug: "nginx", label: "Nginx", image: "nginx:alpine", containerPort: "80", healthPath: "/", memoryMB: "256", cpu: "0.5" },
+  { slug: "whoami", label: "Whoami", image: "traefik/whoami:v1.10", containerPort: "80", healthPath: "/", memoryMB: "128", cpu: "0.25" },
+  { slug: "httpd", label: "Apache", image: "httpd:alpine", containerPort: "80", healthPath: "/", memoryMB: "256", cpu: "0.5" },
+  { slug: "adminer", label: "Adminer", image: "adminer:latest", containerPort: "8080", healthPath: "/", memoryMB: "256", cpu: "0.5" },
 ] as const;
-
-const inputCls =
-  "bg-surface-2 text-text border border-border rounded px-3 py-2 text-sm " +
-  "placeholder:text-text-dim focus:outline-none focus:ring-1 focus:ring-accent";
 
 function imageName(image: string): string {
   const withoutTag = image.split("@")[0].split(":")[0] || "container";
   const base = withoutTag.split("/").pop() || "container";
-  const clean = base.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
-  return clean || "container";
+  return base.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "") || "container";
 }
 
 function autoName(image: string): string {
-  const suffix = Math.floor(Date.now() / 1000).toString(36);
-  return `test-${imageName(image)}-${suffix}`;
+  return `test-${imageName(image)}-${Math.floor(Date.now() / 1000).toString(36)}`;
 }
 
-function statusClass(status: string): string {
-  if (status === "running") return "text-green";
-  if (status === "creating") return "text-blue";
-  if (status === "unhealthy" || status === "error") return "text-red";
-  if (status === "stopped") return "text-yellow";
-  return "text-text-dim";
+function statusColor(status: string): string {
+  switch (status) {
+    case "running":
+      return "var(--success, #22c55e)";
+    case "creating":
+      return "var(--accent, #38bdf8)";
+    case "stopped":
+      return "var(--warn, #f59e0b)";
+    case "unhealthy":
+    case "error":
+      return "var(--error, #ef4444)";
+    default:
+      return "var(--text-dim, #7a7a7a)";
+  }
+}
+
+function fmtDate(s: string): string {
+  if (!s) return "";
+  const d = new Date(s);
+  if (!Number.isFinite(d.getTime())) return s;
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function portLabel(w: Workload): string {
+  const p = w.ports?.[0];
+  if (!p) return "No ports";
+  return `${p.bind_addr}:${p.host_port} -> ${p.container_port}/${p.protocol}`;
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(`${API}${path}`, {
+  const res = await fetch(`${API}${path}`, {
     credentials: "same-origin",
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
   });
-  if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
-  return (await r.json()) as T;
+  if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+  return (await res.json()) as T;
 }
 
 export default function ContainersPanel(_props: NativePanelProps) {
   const [workloads, setWorkloads] = useState<Workload[]>([]);
   const [blueprints, setBlueprints] = useState<Blueprint[]>([]);
-  const [err, setErr] = useState("");
-  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+  const [status, setStatus] = useState("Loading containers...");
   const [busy, setBusy] = useState("");
   const [logs, setLogs] = useState<{ name: string; body: string } | null>(null);
   const [form, setForm] = useState({
@@ -117,35 +102,41 @@ export default function ContainersPanel(_props: NativePanelProps) {
     cpu: "0.5",
   });
 
+  const runningCount = useMemo(() => workloads.filter((w) => w.status === "running").length, [workloads]);
+
   const load = useCallback(async () => {
     try {
       const [w, b] = await Promise.all([
-        api<{ workloads: Workload[] }>("/workloads"),
+        api<{ workloads: Workload[]; count?: number }>("/workloads"),
         api<{ blueprints: Blueprint[] }>("/blueprints"),
       ]);
-      setWorkloads(w.workloads || []);
+      const rows = w.workloads || [];
+      setWorkloads(rows);
       setBlueprints(b.blueprints || []);
-      setErr("");
+      setError("");
+      setStatus(`${rows.length} tracked, ${rows.filter((row) => row.status === "running").length} running`);
     } catch (e) {
-      setErr((e as Error).message);
+      setError((e as Error).message);
+      setStatus("Load failed");
     }
   }, []);
 
   useEffect(() => {
     load();
-    const t = window.setInterval(load, 10000);
-    return () => window.clearInterval(t);
+    const timer = window.setInterval(load, 5000);
+    return () => window.clearInterval(timer);
   }, [load]);
 
-  const runSpec = useCallback(async (nextForm: typeof form) => {
+  const runSpec = useCallback(async (next: typeof form) => {
     setBusy("run");
-    setNotice("Pulling the image and starting the container. First run can take a minute.");
+    setError("");
+    setStatus("Starting container...");
     try {
-      const name = nextForm.name.trim() || autoName(nextForm.image);
-      const ports = nextForm.containerPort
+      const name = next.name.trim() || autoName(next.image);
+      const ports = next.containerPort
         ? [{
-            container_port: Number(nextForm.containerPort),
-            host_port: nextForm.hostPort ? Number(nextForm.hostPort) : 0,
+            container_port: Number(next.containerPort),
+            host_port: next.hostPort ? Number(next.hostPort) : 0,
             bind_addr: "127.0.0.1",
             protocol: "tcp",
           }]
@@ -154,31 +145,67 @@ export default function ContainersPanel(_props: NativePanelProps) {
         method: "POST",
         body: JSON.stringify({
           name,
-          image: nextForm.image,
+          image: next.image.trim(),
           ports,
-          health_path: nextForm.healthPath || "/",
+          health_path: next.healthPath || "/",
           resources: {
-            memory_mb: Number(nextForm.memoryMB || 0),
-            cpu: Number(nextForm.cpu || 0),
+            memory_mb: Number(next.memoryMB || 0),
+            cpu: Number(next.cpu || 0),
           },
         }),
       });
-      setNotice(`Queued ${name}. Workload status will update in the list.`);
+      setStatus(`Queued ${name}. Refreshing list...`);
       setForm((f) => ({ ...f, name: autoName(f.image) }));
       await load();
     } catch (e) {
-      setErr((e as Error).message);
-      setNotice("");
+      setError((e as Error).message);
+      setStatus("Start failed");
     } finally {
       setBusy("");
     }
   }, [load]);
 
-  const run = useCallback(async () => {
-    await runSpec(form);
-  }, [form, runSpec]);
+  const action = useCallback(async (id: string, act: "start" | "stop" | "restart" | "health") => {
+    setBusy(`${act}:${id}`);
+    setError("");
+    try {
+      await api(`/workloads/${encodeURIComponent(id)}/${act}`, { method: "POST" });
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  }, [load]);
 
-  const fillTestImage = useCallback((preset: typeof TEST_IMAGES[number]) => {
+  const destroy = useCallback(async (id: string, name: string) => {
+    if (!confirm(`Destroy ${name}? Docker volumes are preserved.`)) return;
+    setBusy(`destroy:${id}`);
+    setError("");
+    try {
+      await api(`/workloads/${encodeURIComponent(id)}`, { method: "DELETE" });
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  }, [load]);
+
+  const showLogs = useCallback(async (w: Workload) => {
+    setBusy(`logs:${w.id}`);
+    setError("");
+    try {
+      const res = await api<{ logs: string }>(`/workloads/${encodeURIComponent(w.id)}/logs?tail=300`);
+      setLogs({ name: w.name, body: res.logs || "" });
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  }, []);
+
+  const fillTestImage = (preset: typeof TEST_IMAGES[number]) => {
     setForm({
       name: autoName(preset.image),
       image: preset.image,
@@ -188,178 +215,209 @@ export default function ContainersPanel(_props: NativePanelProps) {
       memoryMB: preset.memoryMB,
       cpu: preset.cpu,
     });
-  }, []);
-
-  const runTestImage = useCallback(async (preset: typeof TEST_IMAGES[number]) => {
-    await runSpec({
-      name: autoName(preset.image),
-      image: preset.image,
-      containerPort: preset.containerPort,
-      hostPort: "",
-      healthPath: preset.healthPath,
-      memoryMB: preset.memoryMB,
-      cpu: preset.cpu,
-    });
-  }, [runSpec]);
-
-  const action = useCallback(async (id: string, act: "start" | "stop" | "restart" | "health") => {
-    setBusy(`${act}:${id}`);
-    try {
-      await api(`/workloads/${encodeURIComponent(id)}/${act}`, { method: "POST" });
-      await load();
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setBusy("");
-    }
-  }, [load]);
-
-  const destroy = useCallback(async (id: string, name: string) => {
-    if (!confirm(`Destroy ${name}? Docker volumes are preserved.`)) return;
-    setBusy(`destroy:${id}`);
-    try {
-      await api(`/workloads/${encodeURIComponent(id)}`, { method: "DELETE" });
-      await load();
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setBusy("");
-    }
-  }, [load]);
-
-  const showLogs = useCallback(async (w: Workload) => {
-    setBusy(`logs:${w.id}`);
-    try {
-      const res = await api<{ logs: string }>(`/workloads/${encodeURIComponent(w.id)}/logs?tail=300`);
-      setLogs({ name: w.name, body: res.logs || "" });
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setBusy("");
-    }
-  }, []);
+  };
 
   return (
-    <div className="h-full min-h-0 flex flex-col">
-      <div className="px-6 pt-6 pb-3 border-b border-border flex items-center justify-between">
+    <div style={styles.root}>
+      <header style={styles.header}>
         <div>
-          <h1 className="text-lg font-semibold">Containers</h1>
-          <p className="text-xs text-text-dim mt-1">Local Docker workloads. Remote hosts, routes, backups, and blueprints come next.</p>
+          <h1 style={styles.title}>Containers</h1>
+          <div style={styles.subtitle}>Local Docker workloads</div>
         </div>
-        <button className="btn btn-sm" onClick={load} disabled={!!busy}>Refresh</button>
-      </div>
+        <div style={styles.headerRight}>
+          <span style={styles.statusText}>{status}</span>
+          <button type="button" style={styles.button} onClick={load} disabled={!!busy}>Refresh</button>
+        </div>
+      </header>
 
-      {err && <div className="mx-6 mt-4 rounded border border-red/40 bg-red/10 text-red px-3 py-2 text-sm">{err}</div>}
-      {notice && <div className="mx-6 mt-4 rounded border border-border bg-surface-2 text-text px-3 py-2 text-sm">{notice}</div>}
+      {error && <div style={styles.error}>{error}</div>}
 
-      <div className="min-h-0 flex-1 overflow-auto p-6 grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
-        <section className="border border-border rounded bg-surface overflow-hidden">
-          <div className="px-4 py-3 border-b border-border flex justify-between">
-            <h2 className="text-sm font-semibold">Workloads</h2>
-            <span className="text-xs text-text-dim">{workloads.length} total</span>
+      <main style={styles.main}>
+        <section style={styles.workloads}>
+          <div style={styles.sectionHeader}>
+            <div>
+              <h2 style={styles.sectionTitle}>Workloads</h2>
+              <div style={styles.muted}>{workloads.length} tracked containers, {runningCount} running</div>
+            </div>
           </div>
-          <div className="divide-y divide-border">
-            {workloads.length === 0 && <div className="p-6 text-sm text-text-dim">No workloads yet.</div>}
-            {workloads.map((w) => (
-              <div key={w.id} className="p-4 space-y-3">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <div className="font-medium">{w.name}</div>
-                    <div className="text-xs text-text-dim font-mono mt-1">{w.image}</div>
-                  </div>
-                  <div className="text-right">
-                    <div className={`text-xs uppercase font-semibold ${statusClass(w.status)}`}>{w.status}</div>
-                    <div className="text-xs text-text-dim mt-1">{w.health_status}</div>
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-2 text-xs">
-                  {w.public_url && <a className="text-accent underline" href={w.public_url} target="_blank" rel="noreferrer">{w.public_url}</a>}
-                  {w.ports?.map((p) => (
-                    <span key={`${p.container_port}-${p.host_port}`} className="px-2 py-1 rounded bg-surface-2 border border-border">
-                      {p.bind_addr}:{p.host_port} -> {p.container_port}/{p.protocol}
-                    </span>
-                  ))}
-                </div>
-                {w.last_error && <div className="text-xs text-red">{w.last_error}</div>}
-                <div className="flex flex-wrap gap-2">
-                  <button className="btn btn-xs" disabled={!!busy} onClick={() => action(w.id, "start")}>Start</button>
-                  <button className="btn btn-xs" disabled={!!busy} onClick={() => action(w.id, "stop")}>Stop</button>
-                  <button className="btn btn-xs" disabled={!!busy} onClick={() => action(w.id, "restart")}>Restart</button>
-                  <button className="btn btn-xs" disabled={!!busy} onClick={() => action(w.id, "health")}>Health</button>
-                  <button className="btn btn-xs" disabled={!!busy} onClick={() => showLogs(w)}>Logs</button>
-                  <button className="btn btn-xs text-red" disabled={!!busy} onClick={() => destroy(w.id, w.name)}>Destroy</button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
 
-        <section className="space-y-4">
-          <div className="border border-border rounded bg-surface p-4 space-y-3">
-            <h2 className="text-sm font-semibold">Quick Tests</h2>
-            <div className="grid gap-2">
-              {TEST_IMAGES.map((preset) => (
-                <div key={preset.slug} className="rounded border border-border/60 p-3 space-y-2">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="text-sm font-medium">{preset.label}</div>
-                      <div className="text-xs text-text-dim font-mono mt-1">{preset.image}</div>
+          {workloads.length === 0 ? (
+            <div style={styles.empty}>No containers are tracked yet. Run nginx or whoami from the quick tests.</div>
+          ) : (
+            <div style={styles.list}>
+              {workloads.map((w) => (
+                <article key={w.id} style={styles.row}>
+                  <div style={styles.rowTop}>
+                    <div style={styles.rowMain}>
+                      <div style={styles.nameLine}>
+                        <span style={styles.workloadName}>{w.name}</span>
+                        <span style={{ ...styles.pill, color: statusColor(w.status), borderColor: statusColor(w.status) }}>{w.status}</span>
+                        <span style={styles.pill}>{w.health_status || "unknown"}</span>
+                      </div>
+                      <div style={styles.image}>{w.image}</div>
                     </div>
-                    <div className="text-xs text-text-dim shrink-0">{preset.containerPort}/tcp</div>
+                    <div style={styles.actions}>
+                      {w.public_url && <a style={styles.primaryLink} href={w.public_url} target="_blank" rel="noreferrer">Open</a>}
+                      <button type="button" style={styles.button} disabled={!!busy} onClick={() => action(w.id, "restart")}>Restart</button>
+                      <button type="button" style={styles.button} disabled={!!busy} onClick={() => showLogs(w)}>Logs</button>
+                    </div>
                   </div>
-                  <div className="flex gap-2">
-                    <button className="btn btn-xs" onClick={() => fillTestImage(preset)} disabled={!!busy}>Fill</button>
-                    <button className="btn btn-xs btn-primary" onClick={() => runTestImage(preset)} disabled={!!busy}>Run</button>
+
+                  <div style={styles.metaGrid}>
+                    <Meta label="URL" value={w.public_url || "-"} />
+                    <Meta label="Port" value={portLabel(w)} />
+                    <Meta label="Created" value={fmtDate(w.created_at)} />
+                    <Meta label="Resources" value={`${w.resources?.memory_mb || 0} MB / ${w.resources?.cpu || 0} CPU`} />
                   </div>
-                </div>
+
+                  {w.last_error && <div style={styles.errorSmall}>{w.last_error}</div>}
+
+                  <div style={styles.secondaryActions}>
+                    <button type="button" style={styles.linkButton} disabled={!!busy} onClick={() => action(w.id, "start")}>Start</button>
+                    <button type="button" style={styles.linkButton} disabled={!!busy} onClick={() => action(w.id, "stop")}>Stop</button>
+                    <button type="button" style={styles.linkButton} disabled={!!busy} onClick={() => action(w.id, "health")}>Health check</button>
+                    <button type="button" style={{ ...styles.linkButton, color: "var(--error, #ef4444)" }} disabled={!!busy} onClick={() => destroy(w.id, w.name)}>Destroy</button>
+                  </div>
+                </article>
               ))}
             </div>
-          </div>
-
-          <div className="border border-border rounded bg-surface p-4 space-y-3">
-            <h2 className="text-sm font-semibold">Run Image</h2>
-            <input className={inputCls} placeholder="name, e.g. demo-nginx" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-            <input className={inputCls} placeholder="image" value={form.image} onChange={(e) => setForm({ ...form, image: e.target.value })} />
-            <div className="grid grid-cols-2 gap-2">
-              <input className={inputCls} placeholder="container port" value={form.containerPort} onChange={(e) => setForm({ ...form, containerPort: e.target.value })} />
-              <input className={inputCls} placeholder="host port auto" value={form.hostPort} onChange={(e) => setForm({ ...form, hostPort: e.target.value })} />
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              <input className={inputCls} placeholder="/health" value={form.healthPath} onChange={(e) => setForm({ ...form, healthPath: e.target.value })} />
-              <input className={inputCls} placeholder="MB" value={form.memoryMB} onChange={(e) => setForm({ ...form, memoryMB: e.target.value })} />
-              <input className={inputCls} placeholder="CPU" value={form.cpu} onChange={(e) => setForm({ ...form, cpu: e.target.value })} />
-            </div>
-            <button className="btn btn-primary w-full" onClick={run} disabled={busy === "run" || !form.image}>
-              {busy === "run" ? "Starting container..." : "Run container"}
-            </button>
-          </div>
-
-          <div className="border border-border rounded bg-surface p-4">
-            <h2 className="text-sm font-semibold mb-3">Blueprints</h2>
-            <div className="space-y-2">
-              {blueprints.map((b) => (
-                <div key={b.slug} className="rounded border border-border/60 p-3">
-                  <div className="text-sm font-medium">{b.name}</div>
-                  <div className="text-xs text-text-dim mt-1">{b.description}</div>
-                </div>
-              ))}
-            </div>
-          </div>
+          )}
         </section>
 
-      </div>
+        <aside style={styles.side}>
+          <section style={styles.card}>
+            <h2 style={styles.sectionTitle}>Quick Tests</h2>
+            <div style={styles.quickGrid}>
+              {TEST_IMAGES.map((preset) => (
+                <div key={preset.slug} style={styles.quickCard}>
+                  <div>
+                    <div style={styles.quickTitle}>{preset.label}</div>
+                    <div style={styles.image}>{preset.image}</div>
+                    <div style={styles.muted}>{preset.containerPort}/tcp</div>
+                  </div>
+                  <div style={styles.quickActions}>
+                    <button type="button" style={styles.button} disabled={!!busy} onClick={() => fillTestImage(preset)}>Fill</button>
+                    <button type="button" style={styles.primaryButton} disabled={!!busy} onClick={() => runSpec({
+                      name: autoName(preset.image),
+                      image: preset.image,
+                      containerPort: preset.containerPort,
+                      hostPort: "",
+                      healthPath: preset.healthPath,
+                      memoryMB: preset.memoryMB,
+                      cpu: preset.cpu,
+                    })}>Run</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section style={styles.card}>
+            <h2 style={styles.sectionTitle}>Run Image</h2>
+            <div style={styles.form}>
+              <input style={styles.input} placeholder="name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+              <input style={styles.input} placeholder="image, e.g. nginx:alpine" value={form.image} onChange={(e) => setForm({ ...form, image: e.target.value })} />
+              <div style={styles.twoCols}>
+                <input style={styles.input} placeholder="container port" value={form.containerPort} onChange={(e) => setForm({ ...form, containerPort: e.target.value })} />
+                <input style={styles.input} placeholder="host port auto" value={form.hostPort} onChange={(e) => setForm({ ...form, hostPort: e.target.value })} />
+              </div>
+              <div style={styles.threeCols}>
+                <input style={styles.input} placeholder="/health" value={form.healthPath} onChange={(e) => setForm({ ...form, healthPath: e.target.value })} />
+                <input style={styles.input} placeholder="MB" value={form.memoryMB} onChange={(e) => setForm({ ...form, memoryMB: e.target.value })} />
+                <input style={styles.input} placeholder="CPU" value={form.cpu} onChange={(e) => setForm({ ...form, cpu: e.target.value })} />
+              </div>
+              <button type="button" style={styles.primaryButtonWide} onClick={() => runSpec(form)} disabled={busy === "run" || !form.image.trim()}>
+                {busy === "run" ? "Starting..." : "Run container"}
+              </button>
+            </div>
+          </section>
+
+          <section style={styles.card}>
+            <h2 style={styles.sectionTitle}>Blueprints</h2>
+            <div style={styles.blueprints}>
+              {blueprints.map((b) => (
+                <div key={b.slug} style={styles.blueprint}>
+                  <div style={styles.quickTitle}>{b.name}</div>
+                  <div style={styles.muted}>{b.description}</div>
+                </div>
+              ))}
+            </div>
+          </section>
+        </aside>
+      </main>
 
       {logs && (
-        <div className="fixed inset-0 bg-black/50 flex items-end justify-center p-6" onClick={() => setLogs(null)}>
-          <div className="bg-surface border border-border rounded max-h-[70vh] w-full max-w-5xl flex flex-col" onClick={(e) => e.stopPropagation()}>
-            <div className="px-4 py-3 border-b border-border flex justify-between">
-              <div className="font-medium">Logs: {logs.name}</div>
-              <button className="btn btn-xs" onClick={() => setLogs(null)}>Close</button>
+        <div style={styles.modalBackdrop} onClick={() => setLogs(null)}>
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <div style={styles.sectionTitle}>Logs: {logs.name}</div>
+              <button type="button" style={styles.button} onClick={() => setLogs(null)}>Close</button>
             </div>
-            <pre className="p-4 overflow-auto text-xs font-mono whitespace-pre-wrap">{logs.body || "(no logs)"}</pre>
+            <pre style={styles.pre}>{logs.body || "(no logs)"}</pre>
           </div>
         </div>
       )}
     </div>
   );
 }
+
+function Meta({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={styles.metaItem}>
+      <div style={styles.metaLabel}>{label}</div>
+      <div style={styles.metaValue}>{value}</div>
+    </div>
+  );
+}
+
+const styles: Record<string, CSSProperties> = {
+  root: { height: "100%", minHeight: 0, display: "flex", flexDirection: "column", color: "var(--text, #e5e7eb)", background: "var(--bg, #0b0b0c)" },
+  header: { flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, padding: "18px 24px", borderBottom: "1px solid var(--border, #2a2a2d)" },
+  title: { margin: 0, fontSize: 18, fontWeight: 650 },
+  subtitle: { marginTop: 4, fontSize: 12, color: "var(--text-dim, #8a8a8f)" },
+  headerRight: { display: "flex", alignItems: "center", gap: 10 },
+  statusText: { fontSize: 12, color: "var(--text-muted, #a1a1aa)" },
+  main: { flex: 1, minHeight: 0, overflow: "auto", padding: 20, display: "grid", gridTemplateColumns: "minmax(520px, 1fr) 380px", gap: 16, alignItems: "start" },
+  workloads: { minWidth: 0, border: "1px solid var(--border, #2a2a2d)", borderRadius: 8, background: "var(--bg-card, #111114)", overflow: "hidden" },
+  side: { display: "flex", flexDirection: "column", gap: 16, minWidth: 0 },
+  sectionHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", borderBottom: "1px solid var(--border, #2a2a2d)" },
+  sectionTitle: { margin: 0, fontSize: 14, fontWeight: 650 },
+  muted: { fontSize: 12, color: "var(--text-dim, #8a8a8f)", lineHeight: 1.45 },
+  error: { margin: "12px 20px 0", padding: "10px 12px", border: "1px solid rgba(239,68,68,.35)", borderRadius: 6, background: "rgba(239,68,68,.10)", color: "var(--error, #ef4444)", fontSize: 13, whiteSpace: "pre-wrap" },
+  errorSmall: { padding: "8px 10px", borderRadius: 6, background: "rgba(239,68,68,.10)", color: "var(--error, #ef4444)", fontSize: 12 },
+  empty: { padding: 24, color: "var(--text-muted, #a1a1aa)", fontSize: 14 },
+  list: { display: "flex", flexDirection: "column" },
+  row: { padding: 16, borderTop: "1px solid var(--border, #2a2a2d)", display: "flex", flexDirection: "column", gap: 12 },
+  rowTop: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 },
+  rowMain: { minWidth: 0 },
+  nameLine: { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 },
+  workloadName: { fontSize: 15, fontWeight: 650 },
+  image: { marginTop: 4, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: 12, color: "var(--text-muted, #a1a1aa)", overflowWrap: "anywhere" },
+  pill: { display: "inline-flex", alignItems: "center", minHeight: 20, padding: "2px 7px", borderRadius: 999, border: "1px solid var(--border, #2a2a2d)", color: "var(--text-muted, #a1a1aa)", fontSize: 11, textTransform: "uppercase" },
+  actions: { display: "flex", alignItems: "center", gap: 8, flexShrink: 0 },
+  secondaryActions: { display: "flex", flexWrap: "wrap", gap: 12 },
+  metaGrid: { display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8 },
+  metaItem: { minWidth: 0, padding: "8px 10px", border: "1px solid var(--border, #2a2a2d)", borderRadius: 6, background: "var(--bg, #0b0b0c)" },
+  metaLabel: { fontSize: 10, textTransform: "uppercase", color: "var(--text-dim, #8a8a8f)", marginBottom: 4 },
+  metaValue: { fontSize: 12, color: "var(--text, #e5e7eb)", overflowWrap: "anywhere" },
+  card: { border: "1px solid var(--border, #2a2a2d)", borderRadius: 8, background: "var(--bg-card, #111114)", padding: 14 },
+  quickGrid: { marginTop: 12, display: "grid", gap: 10 },
+  quickCard: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: 10, border: "1px solid var(--border, #2a2a2d)", borderRadius: 6, background: "var(--bg, #0b0b0c)" },
+  quickTitle: { fontSize: 13, fontWeight: 650 },
+  quickActions: { display: "flex", gap: 8, flexShrink: 0 },
+  form: { marginTop: 12, display: "flex", flexDirection: "column", gap: 10 },
+  twoCols: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 },
+  threeCols: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 },
+  input: { width: "100%", boxSizing: "border-box", border: "1px solid var(--border, #2a2a2d)", borderRadius: 6, background: "var(--bg-input, #17171a)", color: "var(--text, #e5e7eb)", padding: "8px 10px", fontSize: 13, outline: "none" },
+  button: { border: "1px solid var(--border, #2a2a2d)", borderRadius: 6, background: "transparent", color: "var(--text-muted, #a1a1aa)", padding: "6px 10px", fontSize: 12, cursor: "pointer" },
+  primaryButton: { border: "1px solid var(--accent, #38bdf8)", borderRadius: 6, background: "var(--accent, #38bdf8)", color: "var(--bg, #0b0b0c)", padding: "6px 10px", fontSize: 12, fontWeight: 650, cursor: "pointer" },
+  primaryButtonWide: { border: "1px solid var(--accent, #38bdf8)", borderRadius: 6, background: "var(--accent, #38bdf8)", color: "var(--bg, #0b0b0c)", padding: "9px 10px", fontSize: 13, fontWeight: 650, cursor: "pointer", width: "100%" },
+  primaryLink: { border: "1px solid var(--accent, #38bdf8)", borderRadius: 6, color: "var(--accent, #38bdf8)", textDecoration: "none", padding: "6px 10px", fontSize: 12 },
+  linkButton: { border: 0, background: "transparent", color: "var(--text-muted, #a1a1aa)", padding: 0, fontSize: 12, cursor: "pointer" },
+  blueprints: { marginTop: 12, display: "grid", gap: 8 },
+  blueprint: { padding: 10, border: "1px solid var(--border, #2a2a2d)", borderRadius: 6 },
+  modalBackdrop: { position: "fixed", inset: 0, background: "rgba(0,0,0,.62)", display: "flex", alignItems: "flex-end", justifyContent: "center", padding: 24, zIndex: 80 },
+  modal: { width: "min(100%, 980px)", maxHeight: "76vh", display: "flex", flexDirection: "column", border: "1px solid var(--border, #2a2a2d)", borderRadius: 8, background: "var(--bg-card, #111114)", overflow: "hidden" },
+  modalHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", borderBottom: "1px solid var(--border, #2a2a2d)" },
+  pre: { margin: 0, padding: 14, overflow: "auto", whiteSpace: "pre-wrap", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: 12, color: "var(--text, #e5e7eb)" },
+};
