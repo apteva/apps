@@ -14,11 +14,15 @@ package main
 //   GET  /api/sims/<id>/screenshot  → PNG bytes
 //   POST /api/sims/<id>/stream-url  → mint a stream URL
 //   GET  /api/sims/<id>/logs?lines= → device logs
+//   POST /api/run                   → multipart source archive build/install/launch
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -79,6 +83,116 @@ func (a *App) handleSimsBootHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, sim)
+}
+
+func (a *App) handleRunHTTP(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxSourceArchiveBytes+(10<<20))
+	if err := r.ParseMultipartForm(maxSourceArchiveBytes); err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("parse multipart upload: %w", err))
+		return
+	}
+	framework := strings.TrimSpace(r.FormValue("framework"))
+	if framework != "android" && framework != "ios" {
+		writeErr(w, http.StatusBadRequest, errBadPlatform)
+		return
+	}
+	if err := capabilityCheckFor(a.appCtx, framework); err != nil {
+		writeErr(w, http.StatusConflict, err)
+		return
+	}
+	if err := streamingCapabilityCheckFor(a.appCtx, framework); err != nil {
+		writeErr(w, http.StatusConflict, err)
+		return
+	}
+	proj, err := resolveProjectFromRequest(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	file, header, err := r.FormFile("source")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("source archive required: %w", err))
+		return
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, maxSourceArchiveBytes+1))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("read source archive: %w", err))
+		return
+	}
+	if len(raw) > maxSourceArchiveBytes {
+		writeErr(w, http.StatusRequestEntityTooLarge, fmt.Errorf("source archive exceeds %d bytes", maxSourceArchiveBytes))
+		return
+	}
+
+	sim, err := a.ensureBootedSim(a.appCtx, framework)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("boot: %w", err))
+		return
+	}
+	run, err := dbInsertSimRun(a.appCtx.AppDB(), SimRun{
+		SimID: sim.ID, ProjectID: proj, SourceApp: "panel",
+		SourceRef: header.Filename, Framework: framework, Status: "building",
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	srcDir := filepath.Join(os.TempDir(), "apteva-sim-upload-"+randHex(8))
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		a.failRun(a.appCtx, run.ID, "extract: "+err.Error())
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer os.RemoveAll(srcDir)
+	buildRoot, _, err := extractSourceUpload(raw, header.Filename, srcDir)
+	if err != nil {
+		a.failRun(a.appCtx, run.ID, "extract: "+err.Error())
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+
+	br, err := a.runBuildFromSourceDir(a.appCtx, buildRoot, buildParams{
+		Framework: framework,
+		Module:    r.FormValue("android_module"),
+		Scheme:    r.FormValue("ios_scheme"),
+		BuildCmd:  r.FormValue("build_cmd"),
+		SimUDID:   sim.ID,
+		SimRunID:  run.ID,
+	})
+	if err != nil {
+		a.failRun(a.appCtx, run.ID, "build: "+err.Error())
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	_ = dbUpdateSimRun(a.appCtx.AppDB(), run.ID, map[string]any{
+		"status":        "installing",
+		"bundle_id":     br.BundleID,
+		"artifact_path": br.ArtifactPath,
+		"log_path":      fmt.Sprintf("%d.log", run.ID),
+	})
+	if err := a.installAndLaunch(sim, br); err != nil {
+		a.failRun(a.appCtx, run.ID, "install/launch: "+err.Error())
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	_ = dbUpdateSimRun(a.appCtx.AppDB(), run.ID, map[string]any{"status": "running"})
+	stream, err := dbMintStreamToken(a.appCtx.AppDB(), sim.ID, time.Hour)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sim_id":        sim.ID,
+		"sim_run_id":    run.ID,
+		"platform":      sim.Platform,
+		"bundle_id":     br.BundleID,
+		"artifact_path": br.ArtifactPath,
+		"stream_url":    a.streamURL(a.appCtx, sim.ID, stream.WSToken),
+		"status":        "running",
+	})
 }
 
 func (a *App) handleSimItem(w http.ResponseWriter, r *http.Request) {

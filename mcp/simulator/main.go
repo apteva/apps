@@ -42,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: simulator
 display_name: Apteva Simulator
-version: 0.1.13
+version: 0.1.14
 description: |
   iOS and Android simulators on demand. Boot a device, build a repo's
   source into an artifact, install + launch on a headless emulator or
@@ -58,6 +58,36 @@ requires:
     - db.write.app
     - platform.apps.call
   binaries:
+    - name: adb
+      executables: [adb]
+      required: false
+      hint: "Required for Android boot, install, live view, and input. Install Android Platform Tools with sdkmanager platform-tools or brew install --cask android-platform-tools."
+      sources: {}
+    - name: android-emulator
+      executables: [emulator]
+      required: false
+      hint: "Required for Android boot. Install with sdkmanager emulator."
+      sources: {}
+    - name: android-command-line-tools
+      executables: [avdmanager]
+      required: false
+      hint: "Required for Android AVD creation. Install Android Command-line Tools with sdkmanager cmdline-tools;latest."
+      sources: {}
+    - name: android-build-tools
+      executables: [aapt]
+      required: false
+      hint: "Required to read APK package ids after build. Install Android Build Tools with sdkmanager build-tools;35.0.0 and add build-tools to PATH."
+      sources: {}
+    - name: java
+      executables: [java]
+      required: false
+      hint: "Required for Android Gradle builds. Install a JDK 17 or newer."
+      sources: {}
+    - name: gradle
+      executables: [gradle]
+      required: false
+      hint: "Optional when the Android repo includes ./gradlew; otherwise required for Android builds."
+      sources: {}
     - name: idb
       version: "1.1.7"
       executables: [idb]
@@ -201,6 +231,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/stream/", Handler: a.handleStream, NoAuth: true},
 		// Standalone-panel read/action endpoints. See handlers.go.
 		{Pattern: "/api/capabilities", Handler: a.handleCapabilities},
+		{Pattern: "/api/run", Handler: a.handleRunHTTP},
 		{Pattern: "/api/sims", Handler: a.handleSimsList},
 		{Pattern: "/api/sims/boot", Handler: a.handleSimsBootHTTP},
 		{Pattern: "/api/sims/", Handler: a.handleSimItem},

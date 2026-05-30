@@ -51,7 +51,14 @@ func (a *App) runBuild(ctx *sdk.AppCtx, p buildParams) (*buildResult, error) {
 	if _, err := extractSourceTarGz(p.SourceTGZB64, srcDir); err != nil {
 		return nil, err
 	}
+	buildRoot, err := sourceBuildRoot(srcDir)
+	if err != nil {
+		return nil, err
+	}
+	return a.runBuildFromSourceDir(ctx, buildRoot, p)
+}
 
+func (a *App) runBuildFromSourceDir(ctx *sdk.AppCtx, srcDir string, p buildParams) (*buildResult, error) {
 	logPath := filepath.Join(a.simLogsDir, fmt.Sprintf("%d.log", p.SimRunID))
 	logW, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {

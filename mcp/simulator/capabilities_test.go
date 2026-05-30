@@ -12,7 +12,7 @@ import (
 // machine running the test, so we don't assert on it — just shape.
 func TestProbeCapabilities_Shape(t *testing.T) {
 	caps := probeCapabilities(nil)
-	for _, name := range []string{"adb", "emulator", "gradle", "java"} {
+	for _, name := range []string{"adb", "emulator", "avdmanager", "aapt", "gradle", "java"} {
 		if _, ok := caps.Android.Tools[name]; !ok {
 			t.Errorf("android probe missing tool entry %q", name)
 		}

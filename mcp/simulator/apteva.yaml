@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: simulator
 display_name: Apteva Simulator
-version: 0.1.13
+version: 0.1.14
 description: |
   iOS and Android simulators on demand. Boot a device, build a repo's
   source into a .apk or .app, install + launch on a headless emulator
@@ -11,9 +11,8 @@ description: |
   iOS or Android repo on repos_dev_start; usable standalone for any
   flow that produces a mobile artifact (CI, manual sideload).
 
-  v0.1.13 keeps iOS display on the reliable native simctl PNG stream while
-  using idb only for input, avoiding black screens when idb video-stream
-  produces no frames.
+  v0.1.14 adds a standalone panel run flow for Android and iOS source
+  archives: upload .zip/.tar.gz, build, install, launch, then open live view.
 
   Per-platform capability gating — Android works on Linux/macOS hosts
   with the Android SDK; iOS boot/view requires macOS with Xcode.
@@ -31,6 +30,36 @@ requires:
     - db.write.app
     - platform.apps.call
   binaries:
+    - name: adb
+      executables: [adb]
+      required: false
+      hint: "Required for Android boot, install, live view, and input. Install Android Platform Tools with sdkmanager `platform-tools` or `brew install --cask android-platform-tools`."
+      sources: {}
+    - name: android-emulator
+      executables: [emulator]
+      required: false
+      hint: "Required for Android boot. Install with sdkmanager `emulator`."
+      sources: {}
+    - name: android-command-line-tools
+      executables: [avdmanager]
+      required: false
+      hint: "Required for Android AVD creation. Install Android Command-line Tools with sdkmanager `cmdline-tools;latest`."
+      sources: {}
+    - name: android-build-tools
+      executables: [aapt]
+      required: false
+      hint: "Required to read APK package ids after build. Install Android Build Tools with sdkmanager `build-tools;35.0.0` and add build-tools to PATH."
+      sources: {}
+    - name: java
+      executables: [java]
+      required: false
+      hint: "Required for Android Gradle builds. Install a JDK 17 or newer."
+      sources: {}
+    - name: gradle
+      executables: [gradle]
+      required: false
+      hint: "Optional when the Android repo includes ./gradlew; otherwise required for Android builds."
+      sources: {}
     - name: idb
       version: "1.1.7"
       executables: [idb]

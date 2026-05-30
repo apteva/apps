@@ -9,16 +9,21 @@ Called by the **Code** app on `repos_dev_start` when it detects an
 iOS/Android repo; also usable standalone (Simulator panel) for any flow
 that produces a mobile artifact.
 
+The standalone panel can now run source archives directly: pick
+Android or iOS, upload a `.zip`, `.tar.gz`, or `.tgz`, then the sidecar
+boots a device if needed, builds, installs, launches, and opens live
+view.
+
 ## Host requirements
 
 Per-platform, probed at runtime by `sims_capabilities`. Boot/build
 availability is reported separately from live streaming/input, because
-iOS can boot with Xcode alone while live view needs idb.
+iOS can boot and stream with Xcode alone while clicks need idb.
 
 | Platform | Host | Tools on PATH |
 |---|---|---|
-| Android | Linux (KVM recommended) or macOS | `adb`, `emulator`, `avdmanager`, `gradle` (or a repo `./gradlew`), `aapt`, a JDK 17 |
-| iOS | **macOS only** | `xcrun`, `xcodebuild`, `simctl`, `idb` (`pipx install fb-idb`), `idb_companion` (`brew install idb-companion`) |
+| Android | Linux (KVM recommended) or macOS | `adb`, `emulator`, `avdmanager`, `aapt`, `gradle` (or a repo `./gradlew`), a JDK 17 |
+| iOS | **macOS only** | `xcrun`, `xcodebuild`, `simctl`; optional `idb` (`pipx install fb-idb`) + `idb_companion` (`brew install idb-companion`) for input |
 
 The Linux production host can run the Android backend; iOS requires
 running apteva on a Mac. A Mac runner pool is future work — v0.1 runs
@@ -67,16 +72,16 @@ repos_dev_stop → CallAppResult("simulator","sims_shutdown",…)
 
 ## Streaming
 
-The live screen is a raw H.264 elementary stream:
+The live screen is streamed over a WebSocket:
 
 - **Android**: `adb exec-out screenrecord --output-format=h264 -`
-- **iOS**: `idb video-stream --format h264 -`
+- **iOS**: native `xcrun simctl io <udid> screenshot` PNG frames
 
-`stream.go` reassembles H.264 access units (`annexb.go`) and ships one
-per WebSocket binary message. The browser (`ui/components/DeviceFrame.tsx`)
-decodes with WebCodecs `VideoDecoder` → canvas, and forwards pointer +
-keyboard as JSON control messages. Input also has discrete tool form
-(`sims_input`) for headless agent flows.
+`stream.go` reassembles Android H.264 access units (`annexb.go`) and
+ships one per WebSocket binary message. iOS sends complete PNG frames.
+The browser (`ui/components/DeviceFrame.tsx`) draws to canvas and
+forwards pointer + keyboard as JSON control messages. Input also has
+discrete tool form (`sims_input`) for headless agent flows.
 
 `screenrecord` has a 180s hard cap per invocation — when it elapses the
 stream ends and the panel reconnects (tokens last an hour). Seamless

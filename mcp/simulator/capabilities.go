@@ -84,15 +84,22 @@ func probeAndroid(ctx *sdk.AppCtx) PlatformCapability {
 	}{
 		{"adb", "--version", "Install Android Platform Tools (sdkmanager 'platform-tools' or `brew install --cask android-platform-tools`)."},
 		{"emulator", "-version", "Install the Android Emulator (sdkmanager 'emulator')."},
-		{"gradle", "--version", "Install Gradle 8+ (`brew install gradle` / `sdk install gradle 8.7`)."},
+		{"avdmanager", "", "Install Android Command-line Tools (sdkmanager 'cmdline-tools;latest')."},
+		{"aapt", "version", "Install Android Build Tools and add build-tools/<version> to PATH (sdkmanager 'build-tools;35.0.0')."},
+		{"gradle", "--version", "Optional when a repo has ./gradlew; otherwise install Gradle 8+ (`brew install gradle` / `sdk install gradle 8.7`)."},
 		{"java", "-version", "Install a JDK 17 (`brew install openjdk@17` / `apt install openjdk-17-jdk`)."},
 	}
 	for _, p := range probes {
 		tp := lookupAndVersion(p.name, p.versionArg)
 		out.Tools[p.name] = tp
-		if !tp.Found {
+		if !tp.Found && p.name != "gradle" {
 			out.Reasons = append(out.Reasons, p.name+" not found on PATH. "+p.hint)
 		}
+	}
+	if !out.Tools["gradle"].Found {
+		tp := out.Tools["gradle"]
+		tp.Note = "Optional when the uploaded Android repo includes ./gradlew; builds without a wrapper need system gradle."
+		out.Tools["gradle"] = tp
 	}
 
 	// android backend works wherever the four binaries above exist — no
