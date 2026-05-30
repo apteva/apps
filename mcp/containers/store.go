@@ -228,6 +228,9 @@ func listWorkloads(db *sql.DB, status string) ([]*Workload, error) {
 	if status != "" {
 		q += ` WHERE status=?`
 		args = append(args, status)
+	} else {
+		q += ` WHERE status != ?`
+		args = append(args, StatusDestroyed)
 	}
 	q += ` ORDER BY created_at DESC`
 	log.Printf("[containers] db list workloads begin status=%q", status)
@@ -303,7 +306,9 @@ func deleteWorkloadRows(db *sql.DB, id string) error {
 	for _, q := range []string{
 		`DELETE FROM containers_ports WHERE workload_id=?`,
 		`DELETE FROM containers_volumes WHERE workload_id=?`,
-		`UPDATE containers_workloads SET status='destroyed', desired_status='stopped', updated_at=? WHERE id=?`,
+		`UPDATE containers_workloads
+		 SET status='destroyed', desired_status='stopped', health_status='destroyed', last_error='', updated_at=?
+		 WHERE id=?`,
 	} {
 		if strings.Contains(q, "updated_at=?") {
 			if _, err := db.Exec(q, nowUTC(), id); err != nil {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"os"
 	"testing"
 
@@ -18,6 +19,23 @@ func TestManifestValid(t *testing.T) {
 	if m.Name != "containers" {
 		t.Fatalf("name=%q", m.Name)
 	}
+}
+
+func testDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	raw, err := os.ReadFile("migrations/001_init.sql")
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	if _, err := db.Exec(string(raw)); err != nil {
+		t.Fatalf("apply migration: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
 
 func TestManifestFileValid(t *testing.T) {
@@ -70,5 +88,47 @@ func TestNormalizeRunSpecRejectsUnsafeInputs(t *testing.T) {
 		if _, err := normalizeRunSpec(spec); err == nil {
 			t.Fatalf("expected error for %+v", spec)
 		}
+	}
+}
+
+func TestListWorkloadsHidesDestroyedByDefault(t *testing.T) {
+	db := testDB(t)
+	running := &Workload{
+		ID: "wrk_running", Name: "running", Kind: "container", Image: "nginx:alpine",
+		Status: StatusRunning, DesiredStatus: StatusRunning, ContainerName: "containers-running",
+		NetworkName: "containers-running", HealthStatus: "healthy", HealthPath: "/",
+		ConfigJSON: `{}`, EnvJSON: `{}`, ResourcesJSON: `{}`, RestartPolicy: "unless-stopped",
+	}
+	destroyed := &Workload{
+		ID: "wrk_destroyed", Name: "destroyed", Kind: "container", Image: "nginx:alpine",
+		Status: StatusRunning, DesiredStatus: StatusRunning, ContainerName: "containers-destroyed",
+		NetworkName: "containers-destroyed", HealthStatus: "healthy", HealthPath: "/",
+		ConfigJSON: `{}`, EnvJSON: `{}`, ResourcesJSON: `{}`, RestartPolicy: "unless-stopped",
+	}
+	if err := insertWorkload(db, running, nil, nil); err != nil {
+		t.Fatalf("insert running: %v", err)
+	}
+	if err := insertWorkload(db, destroyed, nil, nil); err != nil {
+		t.Fatalf("insert destroyed: %v", err)
+	}
+	if err := deleteWorkloadRows(db, destroyed.ID); err != nil {
+		t.Fatalf("destroy workload: %v", err)
+	}
+	rows, err := listWorkloads(db, "")
+	if err != nil {
+		t.Fatalf("list workloads: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != running.ID {
+		t.Fatalf("default list = %+v, want only %s", rows, running.ID)
+	}
+	destroyedRows, err := listWorkloads(db, StatusDestroyed)
+	if err != nil {
+		t.Fatalf("list destroyed: %v", err)
+	}
+	if len(destroyedRows) != 1 || destroyedRows[0].ID != destroyed.ID {
+		t.Fatalf("destroyed list = %+v, want only %s", destroyedRows, destroyed.ID)
+	}
+	if destroyedRows[0].HealthStatus != StatusDestroyed || destroyedRows[0].LastError != "" {
+		t.Fatalf("destroyed state not cleaned up: %+v", destroyedRows[0])
 	}
 }

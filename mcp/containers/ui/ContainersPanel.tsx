@@ -111,7 +111,7 @@ export default function ContainersPanel(_props: NativePanelProps) {
         api<{ workloads: Workload[]; count?: number }>("/workloads"),
         api<{ blueprints: Blueprint[] }>("/blueprints"),
       ]);
-      const rows = w.workloads || [];
+      const rows = (w.workloads || []).filter((row) => row.status !== "destroyed");
       setWorkloads(rows);
       setBlueprints(b.blueprints || []);
       setError("");
