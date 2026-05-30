@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
 	"strings"
 	"time"
 )
@@ -106,7 +108,8 @@ func getBlueprint(db *sql.DB, slug string) (*Blueprint, error) {
 
 func insertWorkload(db *sql.DB, w *Workload, ports []PortSpec, volumes []VolumeSpec) error {
 	now := nowUTC()
-	_, err := db.Exec(`
+	log.Printf("[containers] db insert workload begin workload_id=%s name=%q image=%q", w.ID, w.Name, w.Image)
+	_, err := execDB(db, "insert workload", `
 		INSERT INTO containers_workloads (
 			id, name, blueprint_slug, host_id, instance_id, kind, image, status,
 			desired_status, container_id, container_name, network_name, public_url,
@@ -118,21 +121,43 @@ func insertWorkload(db *sql.DB, w *Workload, ports []PortSpec, volumes []VolumeS
 		w.HealthStatus, w.HealthPath, w.HealthURL, w.ConfigJSON, w.EnvJSON,
 		w.ResourcesJSON, w.RestartPolicy, w.LastError, now, now)
 	if err != nil {
+		log.Printf("[containers] db insert workload error workload_id=%s err=%q", w.ID, err.Error())
 		return err
 	}
+	log.Printf("[containers] db insert workload ok workload_id=%s", w.ID)
 	for _, p := range ports {
-		if _, err := db.Exec(`INSERT INTO containers_ports (workload_id, protocol, container_port, host_port, bind_addr) VALUES (?, ?, ?, ?, ?)`,
+		log.Printf("[containers] db insert port begin workload_id=%s host_port=%d container_port=%d protocol=%s",
+			w.ID, p.HostPort, p.ContainerPort, p.Protocol)
+		if _, err := execDB(db, "insert port", `INSERT INTO containers_ports (workload_id, protocol, container_port, host_port, bind_addr) VALUES (?, ?, ?, ?, ?)`,
 			w.ID, p.Protocol, p.ContainerPort, p.HostPort, p.BindAddr); err != nil {
+			log.Printf("[containers] db insert port error workload_id=%s err=%q", w.ID, err.Error())
 			return err
 		}
 	}
 	for _, v := range volumes {
-		if _, err := db.Exec(`INSERT INTO containers_volumes (workload_id, name, docker_volume_name, mount_path) VALUES (?, ?, ?, ?)`,
+		log.Printf("[containers] db insert volume begin workload_id=%s volume=%q mount=%q", w.ID, v.DockerVolumeName, v.MountPath)
+		if _, err := execDB(db, "insert volume", `INSERT INTO containers_volumes (workload_id, name, docker_volume_name, mount_path) VALUES (?, ?, ?, ?)`,
 			w.ID, v.Name, v.DockerVolumeName, v.MountPath); err != nil {
+			log.Printf("[containers] db insert volume error workload_id=%s err=%q", w.ID, err.Error())
 			return err
 		}
 	}
+	log.Printf("[containers] db record created event begin workload_id=%s", w.ID)
 	return recordEvent(db, w.ID, "created", "tool", map[string]any{"image": w.Image})
+}
+
+func execDB(db *sql.DB, label, query string, args ...any) (sql.Result, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	res, err := db.ExecContext(ctx, query, args...)
+	if err != nil {
+		log.Printf("[containers] db exec error label=%q duration=%s err=%q ctx_err=%v",
+			label, time.Since(start).Round(time.Millisecond), err.Error(), ctx.Err())
+		return nil, err
+	}
+	log.Printf("[containers] db exec ok label=%q duration=%s", label, time.Since(start).Round(time.Millisecond))
+	return res, nil
 }
 
 func updateWorkload(db *sql.DB, id string, fields map[string]any) error {
@@ -275,7 +300,7 @@ func deleteWorkloadRows(db *sql.DB, id string) error {
 }
 
 func recordEvent(db *sql.DB, workloadID, kind, actor string, payload map[string]any) error {
-	_, err := db.Exec(`INSERT INTO containers_events (workload_id, kind, actor, payload_json) VALUES (?, ?, ?, ?)`,
+	_, err := execDB(db, "insert event", `INSERT INTO containers_events (workload_id, kind, actor, payload_json) VALUES (?, ?, ?, ?)`,
 		workloadID, kind, actor, encodeJSON(payload))
 	return err
 }
