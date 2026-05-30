@@ -360,7 +360,7 @@ export default function ContainersPanel(_props: NativePanelProps) {
       )}
 
       {pendingDestroy && (
-        <div style={styles.modalBackdrop} onClick={() => !busy && setPendingDestroy(null)}>
+        <div style={styles.confirmBackdrop} onClick={() => !busy && setPendingDestroy(null)}>
           <div style={styles.confirmModal} onClick={(e) => e.stopPropagation()}>
             <div style={styles.modalHeader}>
               <div style={styles.sectionTitle}>Destroy container</div>
@@ -439,6 +439,7 @@ const styles: Record<string, CSSProperties> = {
   blueprints: { marginTop: 12, display: "grid", gap: 8 },
   blueprint: { padding: 10, border: "1px solid var(--border, #2a2a2d)", borderRadius: 6 },
   modalBackdrop: { position: "fixed", inset: 0, background: "rgba(0,0,0,.62)", display: "flex", alignItems: "flex-end", justifyContent: "center", padding: 24, zIndex: 80 },
+  confirmBackdrop: { position: "fixed", inset: 0, background: "rgba(0,0,0,.62)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, zIndex: 80 },
   modal: { width: "min(100%, 980px)", maxHeight: "76vh", display: "flex", flexDirection: "column", border: "1px solid var(--border, #2a2a2d)", borderRadius: 8, background: "var(--bg-card, #111114)", overflow: "hidden" },
   confirmModal: { width: "min(100%, 420px)", display: "flex", flexDirection: "column", border: "1px solid var(--border, #2a2a2d)", borderRadius: 8, background: "var(--bg-card, #111114)", overflow: "hidden", boxShadow: "0 20px 70px rgba(0,0,0,.42)" },
   modalHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", borderBottom: "1px solid var(--border, #2a2a2d)" },
