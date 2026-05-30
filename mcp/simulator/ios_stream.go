@@ -13,11 +13,15 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os/exec"
 )
 
 func startIOSVideoStream(ctx context.Context, udid string) (*exec.Cmd, io.Reader, error) {
+	if _, err := exec.LookPath("idb"); err != nil {
+		return nil, nil, fmt.Errorf("idb CLI not found on PATH; install with `pipx install fb-idb` or `python3 -m pip install fb-idb`")
+	}
 	cmd := exec.CommandContext(ctx, "idb", "video-stream",
 		"--udid", udid,
 		"--format", "h264",

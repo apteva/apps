@@ -29,7 +29,7 @@ func TestProbeCapabilities_Shape(t *testing.T) {
 		}
 		return
 	}
-	for _, name := range []string{"xcrun", "xcodebuild", "simctl", "idb_companion"} {
+	for _, name := range []string{"xcrun", "xcodebuild", "simctl", "idb", "idb_companion"} {
 		if _, ok := caps.IOS.Tools[name]; !ok {
 			t.Errorf("ios probe missing tool entry %q", name)
 		}

@@ -18,7 +18,7 @@ no half-working states.
 | Platform | Host | Tools on PATH |
 |---|---|---|
 | Android | Linux (KVM recommended) or macOS | `adb`, `emulator`, `avdmanager`, `gradle` (or a repo `./gradlew`), `aapt`, a JDK 17 |
-| iOS | **macOS only** | `xcrun`, `xcodebuild`, `simctl`, `idb_companion` (`brew install idb-companion`) |
+| iOS | **macOS only** | `xcrun`, `xcodebuild`, `simctl`, `idb` (`pipx install fb-idb`), `idb_companion` (`brew install idb-companion`) |
 
 The Linux production host can run the Android backend; iOS requires
 running apteva on a Mac. A Mac runner pool is future work — v0.1 runs

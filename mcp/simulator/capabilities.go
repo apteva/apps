@@ -31,12 +31,12 @@ type Capabilities struct {
 
 // PlatformCapability is the per-backend probe result.
 //
-//   Available: true → sims_boot for this platform should work
-//   Reasons:   one human-readable line per missing dependency. Empty
-//              when Available is true. Always present so panels can
-//              render it unconditionally.
-//   Tools:     map of tool-name → resolved info (path + version).
-//              Missing tools show up as {Found: false}.
+//	Available: true → sims_boot for this platform should work
+//	Reasons:   one human-readable line per missing dependency. Empty
+//	           when Available is true. Always present so panels can
+//	           render it unconditionally.
+//	Tools:     map of tool-name → resolved info (path + version).
+//	           Missing tools show up as {Found: false}.
 type PlatformCapability struct {
 	Available bool                 `json:"available"`
 	Reasons   []string             `json:"reasons"`
@@ -125,6 +125,7 @@ func probeIOS(ctx *sdk.AppCtx) PlatformCapability {
 		{"xcrun", "--version", "Install Xcode + Command Line Tools (`xcode-select --install`)."},
 		{"xcodebuild", "-version", "Install Xcode from the Mac App Store, then run `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`."},
 		{"simctl", "", "Bundled with Xcode CLI tools. If xcrun is present, this should be too."},
+		{"idb", "--help", "Install the idb CLI (`pipx install fb-idb` or `python3 -m pip install fb-idb`)."},
 	}
 	for _, p := range probes {
 		var tp ToolProbe
