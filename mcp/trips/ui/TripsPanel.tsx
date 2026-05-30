@@ -387,6 +387,10 @@ function hasDateRange(start?: string, end?: string): boolean {
   return Boolean(start && end);
 }
 
+function isTripIdea(trip: Trip): boolean {
+  return trip.status === "idea" || !hasDateRange(trip.start_at, trip.end_at);
+}
+
 function tripDateLabel(trip: Trip): string {
   if (!hasDateRange(trip.start_at, trip.end_at)) return "Dates not set";
   return `${fmtDate(trip.start_at)} – ${fmtDate(trip.end_at)}`;
@@ -720,8 +724,10 @@ function TripCard({ trip, onOpen }: { trip: Trip; onOpen: () => void }) {
     : days.tone === "future" ? "bg-accent/20 text-accent"
     : "bg-bg-hover text-text-muted";
 
+  const idea = isTripIdea(trip);
   const planned = trip.total_planned ?? 0;
   const actual = trip.total_actual ?? 0;
+  const estimate = planned > 0 ? planned : (trip.total_budget ?? 0);
   // Bar fill = actual / planned, clamped to 100%. Over-budget swaps
   // green for red and overflows visually (still capped to 100% width
   // so cards stay comparable).
@@ -729,7 +735,7 @@ function TripCard({ trip, onOpen }: { trip: Trip; onOpen: () => void }) {
   const pct = target > 0 ? Math.min(100, (actual / target) * 100) : 0;
   const over = planned > 0 && actual > planned;
   const barColor = over ? "bg-error" : actual === 0 ? "bg-bg-hover" : "bg-success";
-  const hasAnyMoney = planned > 0 || actual > 0;
+  const hasAnyMoney = planned > 0 || actual > 0 || (trip.total_budget ?? 0) > 0;
 
   return (
     <button
@@ -747,7 +753,22 @@ function TripCard({ trip, onOpen }: { trip: Trip; onOpen: () => void }) {
           {tripShortDateLabel(trip)}
         </p>
 
-        {hasAnyMoney && (
+        {hasAnyMoney && idea && (
+          <div className="mt-3">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-text-muted">Estimate</span>
+              <span className="tabular-nums text-text">{fmtMoney(estimate, trip.home_currency)}</span>
+            </div>
+            {actual > 0 && (
+              <div className="mt-1 flex items-center justify-between text-xs">
+                <span className="text-text-muted">Spent</span>
+                <span className="tabular-nums text-text-dim">{fmtMoney(actual, trip.home_currency)}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {hasAnyMoney && !idea && (
           <div className="mt-3">
             <div className="flex items-center justify-between text-xs">
               <span className="text-text-muted">Actual</span>
@@ -1004,19 +1025,25 @@ function FlightHeatmap({ routeDates }: { routeDates: TravelPriceRouteDate[] }) {
 // per currency.
 function OverallBudgetBar({ trips }: { trips: Trip[] }) {
   const totals = useMemo(() => {
-    const byCcy: Record<string, { planned: number; actual: number; count: number }> = {};
+    const byCcy: Record<string, { planned: number; actual: number; ideaEstimate: number; count: number; ideaCount: number }> = {};
     for (const t of trips) {
       if (t.status === "cancelled") continue;
       const ccy = t.home_currency || "EUR";
-      const row = byCcy[ccy] ?? { planned: 0, actual: 0, count: 0 };
-      row.planned += t.total_planned ?? 0;
-      row.actual += t.total_actual ?? 0;
+      const row = byCcy[ccy] ?? { planned: 0, actual: 0, ideaEstimate: 0, count: 0, ideaCount: 0 };
+      if (isTripIdea(t)) {
+        row.ideaEstimate += (t.total_planned ?? 0) || (t.total_budget ?? 0);
+        row.actual += t.total_actual ?? 0;
+        row.ideaCount += 1;
+      } else {
+        row.planned += t.total_planned ?? 0;
+        row.actual += t.total_actual ?? 0;
+      }
       row.count += 1;
       byCcy[ccy] = row;
     }
     return Object.entries(byCcy)
-      .filter(([, r]) => r.planned > 0 || r.actual > 0)
-      .sort(([, a], [, b]) => b.planned - a.planned);
+      .filter(([, r]) => r.planned > 0 || r.actual > 0 || r.ideaEstimate > 0)
+      .sort(([, a], [, b]) => (b.planned + b.ideaEstimate) - (a.planned + a.ideaEstimate));
   }, [trips]);
 
   if (totals.length === 0) return null;
@@ -1027,6 +1054,7 @@ function OverallBudgetBar({ trips }: { trips: Trip[] }) {
       </div>
       <div className="flex flex-col gap-3 sm:flex-row sm:gap-6">
         {totals.map(([ccy, r]) => {
+          const hasScheduledBudget = r.planned > 0 || r.actual > 0;
           const target = r.planned > 0 ? r.planned : r.actual;
           const pct = target > 0 ? Math.min(100, (r.actual / target) * 100) : 0;
           const over = r.planned > 0 && r.actual > r.planned;
@@ -1034,15 +1062,23 @@ function OverallBudgetBar({ trips }: { trips: Trip[] }) {
           return (
             <div key={ccy} className="flex-1 min-w-0">
               <div className="flex items-baseline justify-between">
-                <span className="text-xs text-text-muted">{ccy}</span>
+                <span className="text-xs text-text-muted">{hasScheduledBudget ? ccy : `${ccy} estimate`}</span>
                 <span className={`text-sm tabular-nums ${over ? "text-error" : "text-text"}`}>
-                  {fmtMoney(r.actual, ccy)}
-                  {r.planned > 0 && <span className="text-text-dim"> / {fmtMoney(r.planned, ccy)}</span>}
+                  {hasScheduledBudget ? fmtMoney(r.actual, ccy) : fmtMoney(r.ideaEstimate, ccy)}
+                  {hasScheduledBudget && r.planned > 0 && <span className="text-text-dim"> / {fmtMoney(r.planned, ccy)}</span>}
                 </span>
               </div>
-              <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-bg-hover">
-                <div className={`h-full ${barColor}`} style={{ width: `${pct}%` }} />
-              </div>
+              {hasScheduledBudget && r.planned > 0 && (
+                <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-bg-hover">
+                  <div className={`h-full ${barColor}`} style={{ width: `${pct}%` }} />
+                </div>
+              )}
+              {hasScheduledBudget && r.ideaEstimate > 0 && (
+                <div className="mt-1 flex items-center justify-between text-xs text-text-muted">
+                  <span>Idea estimate{r.ideaCount > 1 ? "s" : ""}</span>
+                  <span className="tabular-nums text-text">{fmtMoney(r.ideaEstimate, ccy)}</span>
+                </div>
+              )}
             </div>
           );
         })}
