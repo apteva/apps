@@ -55,6 +55,7 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
   const [sims, setSims] = useState<Sim[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
+  const [screenshotUrl, setScreenshotUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -94,6 +95,7 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
   const boot = async (platform: string) => {
     setBusy(true);
     setError("");
+    setScreenshotUrl(null);
     try {
       const payload =
         platform === "ios"
@@ -130,6 +132,7 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
       if (selected === id) {
         setSelected(null);
         setStreamUrl(null);
+        setScreenshotUrl(null);
       }
       await loadSims();
     } catch (e) {
@@ -142,6 +145,7 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
   const openStream = useCallback(async (id: string) => {
     setSelected(id);
     setStreamUrl(null);
+    setScreenshotUrl(null);
     const sim = sims.find((s) => s.id === id);
     if (sim && sim.status !== "booted") {
       setError("");
@@ -165,13 +169,21 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
     }
   }, [caps, sims, withParams]);
 
+  const showScreenshot = (id: string) => {
+    setStreamUrl(null);
+    setError("");
+    setScreenshotUrl(`${API}/sims/${encodeURIComponent(id)}/screenshot?${withParams({ t: String(Date.now()) })}`);
+  };
+
   const selectedSim = sims.find((s) => s.id === selected) ?? null;
+  const selectedCaps = selectedSim?.platform === "ios" ? caps?.ios : caps?.android;
+  const canStreamSelected = selectedCaps?.streaming_available !== false;
 
   useEffect(() => {
-    if (selectedSim?.status === "booted" && !streamUrl && !busy) {
+    if (selectedSim?.status === "booted" && canStreamSelected && !streamUrl && !busy) {
       void openStream(selectedSim.id);
     }
-  }, [selectedSim?.id, selectedSim?.status, streamUrl, busy, openStream]);
+  }, [selectedSim?.id, selectedSim?.status, canStreamSelected, streamUrl, busy, openStream]);
 
   return (
     <div className="h-full flex flex-col bg-bg text-text">
@@ -262,6 +274,26 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
 
               {selectedSim.status === "booted" && streamUrl ? (
                 <DeviceFrame streamUrl={streamUrl} platform={selectedSim.platform} />
+              ) : selectedSim.status === "booted" && !canStreamSelected ? (
+                <div className="flex flex-col items-center gap-3">
+                  <div className="max-w-md text-center text-xs text-text-muted">
+                    Live view needs idb. The simulator is booted; install idb to stream and send input, or use a screenshot here.
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => showScreenshot(selectedSim.id)}
+                    className="px-3 py-1.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+                  >
+                    Refresh screenshot
+                  </button>
+                  {screenshotUrl && (
+                    <img
+                      src={screenshotUrl}
+                      alt="Simulator screenshot"
+                      className="max-w-[360px] max-h-[70vh] rounded-lg border border-border bg-black object-contain"
+                    />
+                  )}
+                </div>
               ) : selectedSim.status === "booted" ? (
                 <button
                   type="button"

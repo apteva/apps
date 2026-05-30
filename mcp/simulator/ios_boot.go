@@ -36,6 +36,14 @@ func bootIOSSim(ctx *sdk.AppCtx, sup *simSupervisor, udid, deviceType, runtimeID
 	state, _ := simctlDeviceState(udid)
 	if state == "Booted" {
 		if row, err := dbGetSim(ctx.AppDB(), udid); err == nil && row != nil {
+			if row.Status != "booted" {
+				_ = dbUpdateSim(ctx.AppDB(), udid, map[string]any{
+					"status": "booted",
+					"error":  "",
+				})
+				row.Status = "booted"
+				row.Error = ""
+			}
 			return row, nil
 		}
 		// State says booted but no DB row — fall through to upsert
