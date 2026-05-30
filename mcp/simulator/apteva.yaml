@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: simulator
 display_name: Apteva Simulator
-version: 0.1.12
+version: 0.1.13
 description: |
   iOS and Android simulators on demand. Boot a device, build a repo's
   source into a .apk or .app, install + launch on a headless emulator
@@ -11,8 +11,9 @@ description: |
   iOS or Android repo on repos_dev_start; usable standalone for any
   flow that produces a mobile artifact (CI, manual sideload).
 
-  v0.1.12 normalizes H.264 stream metadata to a browser-supported
-  WebCodecs AVC codec string.
+  v0.1.13 keeps iOS display on the reliable native simctl PNG stream while
+  using idb only for input, avoiding black screens when idb video-stream
+  produces no frames.
 
   Per-platform capability gating — Android works on Linux/macOS hosts
   with the Android SDK; iOS boot/view requires macOS with Xcode.
