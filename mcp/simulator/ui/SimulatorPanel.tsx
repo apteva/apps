@@ -62,6 +62,7 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
   const [iosScheme, setIosScheme] = useState("");
   const [buildCmd, setBuildCmd] = useState("");
   const [runStatus, setRunStatus] = useState("");
+  const [showSettings, setShowSettings] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -159,6 +160,7 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
       setSelected(j.sim_id);
       setStreamUrl(j.stream_url);
       setRunStatus(`Running ${j.bundle_id}`);
+      setShowSettings(false);
       await loadSims();
     } catch (e) {
       setRunStatus("");
@@ -243,6 +245,17 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
       <header className="px-4 py-3 border-b border-border flex items-center gap-3">
         <h1 className="text-sm font-semibold">Simulator</h1>
         <span className="flex-1" />
+        <button
+          type="button"
+          onClick={() => setShowSettings((v) => !v)}
+          className={`px-2.5 py-1 text-xs border rounded ${
+            showSettings
+              ? "border-accent bg-accent text-bg"
+              : "border-border text-text-muted hover:bg-bg-input/50"
+          }`}
+        >
+          Settings
+        </button>
         <BootButton
           label="Boot Android"
           enabled={!!caps?.android.available && !busy}
@@ -256,76 +269,6 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
           onClick={() => boot("ios")}
         />
       </header>
-
-      <form
-        className="px-4 py-3 border-b border-border flex flex-wrap items-end gap-3"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void runArchive();
-        }}
-      >
-        <div className="flex rounded border border-border overflow-hidden">
-          {(["android", "ios"] as const).map((p) => (
-            <button
-              key={p}
-              type="button"
-              onClick={() => setRunFramework(p)}
-              className={`px-3 py-1.5 text-xs capitalize ${
-                runFramework === p ? "bg-accent text-bg" : "text-text-muted hover:bg-bg-input/50"
-              }`}
-            >
-              {p}
-            </button>
-          ))}
-        </div>
-        <label className="flex flex-col gap-1 text-[11px] text-text-muted">
-          Source archive
-          <input
-            type="file"
-            accept=".zip,.tgz,.tar.gz,application/zip,application/gzip"
-            onChange={(e) => setSourceFile(e.currentTarget.files?.[0] ?? null)}
-            className="text-xs text-text file:mr-2 file:px-2 file:py-1 file:border file:border-border file:bg-bg-input file:text-text file:rounded"
-          />
-        </label>
-        {runFramework === "android" ? (
-          <label className="flex flex-col gap-1 text-[11px] text-text-muted">
-            Module
-            <input
-              value={androidModule}
-              onChange={(e) => setAndroidModule(e.target.value)}
-              placeholder="app"
-              className="w-28 px-2 py-1.5 text-xs bg-bg-input border border-border rounded text-text"
-            />
-          </label>
-        ) : (
-          <label className="flex flex-col gap-1 text-[11px] text-text-muted">
-            Scheme
-            <input
-              value={iosScheme}
-              onChange={(e) => setIosScheme(e.target.value)}
-              placeholder="auto"
-              className="w-32 px-2 py-1.5 text-xs bg-bg-input border border-border rounded text-text"
-            />
-          </label>
-        )}
-        <label className="flex flex-col gap-1 text-[11px] text-text-muted min-w-56 flex-1">
-          Build command
-          <input
-            value={buildCmd}
-            onChange={(e) => setBuildCmd(e.target.value)}
-            placeholder={runFramework === "android" ? "./gradlew :app:assembleDebug" : "xcodebuild ..."}
-            className="w-full px-2 py-1.5 text-xs bg-bg-input border border-border rounded text-text"
-          />
-        </label>
-        <button
-          type="submit"
-          disabled={busy || !sourceFile}
-          className="px-3 py-1.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          {busy && runStatus ? "Running…" : "Run"}
-        </button>
-        {runStatus && <span className="text-xs text-text-muted truncate max-w-xs">{runStatus}</span>}
-      </form>
 
       {error && (
         <div className="px-4 py-2 text-xs text-red border-b border-border bg-red/10">{error}</div>
@@ -436,6 +379,91 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
             </div>
           )}
         </main>
+
+        {showSettings && (
+          <aside className="w-[360px] max-w-[42vw] border-l border-border bg-bg overflow-y-auto">
+            <form
+              className="p-4 flex flex-col gap-4"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void runArchive();
+              }}
+            >
+              <div className="flex items-center gap-2">
+                <h2 className="text-xs font-semibold">Run from source</h2>
+                <span className="flex-1" />
+                <button
+                  type="button"
+                  onClick={() => setShowSettings(false)}
+                  className="px-2 py-0.5 text-xs border border-border text-text-muted rounded hover:bg-bg-input/50"
+                >
+                  Close
+                </button>
+              </div>
+              <div className="flex rounded border border-border overflow-hidden self-start">
+                {(["android", "ios"] as const).map((p) => (
+                  <button
+                    key={p}
+                    type="button"
+                    onClick={() => setRunFramework(p)}
+                    className={`px-3 py-1.5 text-xs capitalize ${
+                      runFramework === p ? "bg-accent text-bg" : "text-text-muted hover:bg-bg-input/50"
+                    }`}
+                  >
+                    {p}
+                  </button>
+                ))}
+              </div>
+              <label className="flex flex-col gap-1 text-[11px] text-text-muted">
+                Source archive
+                <input
+                  type="file"
+                  accept=".zip,.tgz,.tar.gz,application/zip,application/gzip"
+                  onChange={(e) => setSourceFile(e.currentTarget.files?.[0] ?? null)}
+                  className="text-xs text-text file:mr-2 file:px-2 file:py-1 file:border file:border-border file:bg-bg-input file:text-text file:rounded"
+                />
+              </label>
+              {runFramework === "android" ? (
+                <label className="flex flex-col gap-1 text-[11px] text-text-muted">
+                  Module
+                  <input
+                    value={androidModule}
+                    onChange={(e) => setAndroidModule(e.target.value)}
+                    placeholder="app"
+                    className="w-full px-2 py-1.5 text-xs bg-bg-input border border-border rounded text-text"
+                  />
+                </label>
+              ) : (
+                <label className="flex flex-col gap-1 text-[11px] text-text-muted">
+                  Scheme
+                  <input
+                    value={iosScheme}
+                    onChange={(e) => setIosScheme(e.target.value)}
+                    placeholder="auto"
+                    className="w-full px-2 py-1.5 text-xs bg-bg-input border border-border rounded text-text"
+                  />
+                </label>
+              )}
+              <label className="flex flex-col gap-1 text-[11px] text-text-muted">
+                Build command
+                <input
+                  value={buildCmd}
+                  onChange={(e) => setBuildCmd(e.target.value)}
+                  placeholder={runFramework === "android" ? "./gradlew :app:assembleDebug" : "xcodebuild ..."}
+                  className="w-full px-2 py-1.5 text-xs bg-bg-input border border-border rounded text-text"
+                />
+              </label>
+              <button
+                type="submit"
+                disabled={busy || !sourceFile}
+                className="px-3 py-1.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {busy && runStatus ? "Running…" : "Run"}
+              </button>
+              {runStatus && <span className="text-xs text-text-muted truncate">{runStatus}</span>}
+            </form>
+          </aside>
+        )}
       </div>
     </div>
   );

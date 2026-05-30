@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: simulator
 display_name: Apteva Simulator
-version: 0.1.14
+version: 0.1.15
 description: |
   iOS and Android simulators on demand. Boot a device, build a repo's
   source into a .apk or .app, install + launch on a headless emulator
@@ -11,8 +11,8 @@ description: |
   iOS or Android repo on repos_dev_start; usable standalone for any
   flow that produces a mobile artifact (CI, manual sideload).
 
-  v0.1.14 adds a standalone panel run flow for Android and iOS source
-  archives: upload .zip/.tar.gz, build, install, launch, then open live view.
+  v0.1.15 moves source archive run controls into a settings drawer so the
+  main Simulator panel stays focused on devices and live view.
 
   Per-platform capability gating — Android works on Linux/macOS hosts
   with the Android SDK; iOS boot/view requires macOS with Xcode.
