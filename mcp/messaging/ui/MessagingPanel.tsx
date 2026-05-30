@@ -578,17 +578,8 @@ function MessageDetail({ m, events, onReply, onClose }: { m: MessageRow; events:
       {m.message_id_header && <DL label="Message-ID" value={<code className="text-xs">{m.message_id_header}</code>} />}
       {m.in_reply_to && <DL label="In-Reply-To" value={<code className="text-xs">{m.in_reply_to}</code>} />}
 
-      {m.body_text && (
-        <details className="mt-4" open>
-          <summary className="cursor-pointer text-text-dim text-xs uppercase tracking-wide mb-1">Body</summary>
-          <pre className="whitespace-pre-wrap break-words text-text bg-surface-2 p-3 rounded border border-border">{m.body_text}</pre>
-        </details>
-      )}
-      {m.body_html && (
-        <details className="mt-3">
-          <summary className="cursor-pointer text-text-dim text-xs uppercase tracking-wide mb-1">HTML body</summary>
-          <pre className="whitespace-pre-wrap break-all text-text bg-surface-2 p-3 rounded border border-border text-xs">{m.body_html}</pre>
-        </details>
+      {(m.body_text || m.body_html) && (
+        <EmailBodyViewer bodyText={m.body_text || ""} bodyHTML={m.body_html || ""} />
       )}
       {events.length > 0 && (
         <div className="mt-4">
@@ -609,6 +600,203 @@ function MessageDetail({ m, events, onReply, onClose }: { m: MessageRow; events:
       )}
     </div>
   );
+}
+
+function EmailBodyViewer({ bodyText, bodyHTML }: { bodyText: string; bodyHTML: string }) {
+  const [mode, setMode] = useState<"rendered" | "text" | "source">(bodyHTML ? "rendered" : "text");
+  const [loadRemoteImages, setLoadRemoteImages] = useState(false);
+  const srcDoc = useMemo(
+    () => safeEmailHTMLDocument(bodyHTML, { loadRemoteImages }),
+    [bodyHTML, loadRemoteImages],
+  );
+
+  const hasHTML = bodyHTML.trim() !== "";
+  const hasText = bodyText.trim() !== "";
+
+  useEffect(() => {
+    if (!hasHTML && mode !== "text") setMode("text");
+  }, [hasHTML, mode]);
+
+  return (
+    <section className="mt-4">
+      <div className="flex items-center justify-between gap-3 mb-2">
+        <div className="text-text-dim text-xs uppercase tracking-wide">Body</div>
+        <div className="flex items-center gap-2 flex-wrap justify-end">
+          {hasHTML && (
+            <label className="flex items-center gap-1 text-xs text-text-dim">
+              <input
+                type="checkbox"
+                checked={loadRemoteImages}
+                onChange={(e) => setLoadRemoteImages(e.target.checked)}
+              />
+              images
+            </label>
+          )}
+          <div className="inline-flex rounded border border-border overflow-hidden text-xs">
+            {hasHTML && (
+              <button
+                type="button"
+                className={bodyModeButtonClass(mode === "rendered")}
+                onClick={() => setMode("rendered")}
+              >
+                Rendered
+              </button>
+            )}
+            {hasText && (
+              <button
+                type="button"
+                className={bodyModeButtonClass(mode === "text")}
+                onClick={() => setMode("text")}
+              >
+                Text
+              </button>
+            )}
+            {hasHTML && (
+              <button
+                type="button"
+                className={bodyModeButtonClass(mode === "source")}
+                onClick={() => setMode("source")}
+              >
+                Source
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {mode === "rendered" && hasHTML && (
+        <iframe
+          title="Rendered email body"
+          sandbox=""
+          referrerPolicy="no-referrer"
+          className="w-full h-[34rem] bg-white rounded border border-border"
+          srcDoc={srcDoc}
+        />
+      )}
+      {mode === "text" && (
+        <pre className="whitespace-pre-wrap break-words text-text bg-surface-2 p-3 rounded border border-border">
+          {bodyText || "(no text body)"}
+        </pre>
+      )}
+      {mode === "source" && hasHTML && (
+        <pre className="whitespace-pre-wrap break-all text-text bg-surface-2 p-3 rounded border border-border text-xs">
+          {bodyHTML}
+        </pre>
+      )}
+    </section>
+  );
+}
+
+function bodyModeButtonClass(active: boolean): string {
+  return active
+    ? "px-2 py-1 bg-surface-2 text-text"
+    : "px-2 py-1 text-text-dim hover:text-text hover:bg-surface-2";
+}
+
+function safeEmailHTMLDocument(rawHTML: string, opts: { loadRemoteImages: boolean }): string {
+  if (!rawHTML.trim()) return "";
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(rawHTML, "text/html");
+
+    doc.querySelectorAll("script, iframe, object, embed, applet, form, input, button, textarea, select, meta, base, link").forEach((el) => el.remove());
+    doc.querySelectorAll("style").forEach((el) => {
+      el.textContent = stripUnsafeCSS(el.textContent || "", opts.loadRemoteImages);
+    });
+
+    doc.querySelectorAll<HTMLElement>("*").forEach((el) => {
+      for (const attr of Array.from(el.attributes)) {
+        const name = attr.name.toLowerCase();
+        const value = attr.value.trim();
+        if (name.startsWith("on")) {
+          el.removeAttribute(attr.name);
+          continue;
+        }
+        if (name === "style") {
+          el.setAttribute(attr.name, stripUnsafeCSS(value, opts.loadRemoteImages));
+          continue;
+        }
+        if (["href", "src", "xlink:href", "action", "formaction", "poster", "background"].includes(name)) {
+          if (!isSafeURL(value)) {
+            el.removeAttribute(attr.name);
+            continue;
+          }
+          if (!opts.loadRemoteImages && isRemoteURL(value) && ["src", "poster", "background"].includes(name)) {
+            el.removeAttribute(attr.name);
+            continue;
+          }
+        }
+        if (["srcset", "imagesrcset"].includes(name) && (!opts.loadRemoteImages || containsUnsafeSrcSet(value))) {
+          el.removeAttribute(attr.name);
+        }
+      }
+
+      if (el.tagName.toLowerCase() === "a") {
+        el.setAttribute("target", "_blank");
+        el.setAttribute("rel", "noopener noreferrer nofollow");
+      }
+    });
+
+    const body = doc.body ? doc.body.innerHTML : rawHTML;
+    return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; padding: 0; background: #fff; color: #111; }
+  body { padding: 16px; overflow-wrap: anywhere; }
+  img, table { max-width: 100% !important; }
+  pre { white-space: pre-wrap; }
+</style>
+</head>
+<body>${body}</body>
+</html>`;
+  } catch {
+    return `<!doctype html><html><body><pre>${escapeHTML(rawHTML)}</pre></body></html>`;
+  }
+}
+
+function stripUnsafeCSS(value: string, loadRemoteImages: boolean): string {
+  let css = value
+    .replace(/@import[^;]+;/gi, "")
+    .replace(/expression\s*\([^)]*\)/gi, "")
+    .replace(/url\s*\(\s*(['"]?)\s*javascript:[^)]+\)/gi, "")
+    .replace(/url\s*\(\s*(['"]?)\s*data:text\/html[^)]+\)/gi, "");
+  if (!loadRemoteImages) {
+    css = css.replace(/url\s*\(\s*(['"]?)\s*https?:[^)]+\)/gi, "");
+  }
+  return css;
+}
+
+function isSafeURL(value: string): boolean {
+  if (!value || value.startsWith("#")) return true;
+  try {
+    const parsed = new URL(value, "https://email.local");
+    return ["http:", "https:", "mailto:", "tel:", "cid:"].includes(parsed.protocol);
+  } catch {
+    return false;
+  }
+}
+
+function isRemoteURL(value: string): boolean {
+  try {
+    const parsed = new URL(value, "https://email.local");
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function containsUnsafeSrcSet(value: string): boolean {
+  return value.split(",").some((part) => !isSafeURL(part.trim().split(/\s+/)[0] || ""));
+}
+
+function escapeHTML(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 const messagingLiveTopics = new Set([
