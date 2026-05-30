@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: simulator
 display_name: Apteva Simulator
-version: 0.1.8
+version: 0.1.9
 description: |
   iOS and Android simulators on demand. Boot a device, build a repo's
   source into a .apk or .app, install + launch on a headless emulator
@@ -11,8 +11,8 @@ description: |
   iOS or Android repo on repos_dev_start; usable standalone for any
   flow that produces a mobile artifact (CI, manual sideload).
 
-  v0.1.8 fixes iOS screenshot streaming on simctl versions that write a
-  literal "-" file instead of sending screenshots to stdout.
+  v0.1.9 keeps browser stream WebSockets on the current dashboard origin
+  so local panels do not connect through a stale public tunnel URL.
 
   Per-platform capability gating — Android works on Linux/macOS hosts
   with the Android SDK; iOS boot/view requires macOS with Xcode.

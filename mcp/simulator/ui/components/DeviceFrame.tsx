@@ -125,7 +125,7 @@ export function DeviceFrame({
     };
 
     let sawKeyframe = false;
-    const ws = new WebSocket(streamUrl);
+    const ws = new WebSocket(resolveStreamUrl(streamUrl));
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
 
@@ -270,6 +270,18 @@ export function DeviceFrame({
       </div>
     </div>
   );
+}
+
+function resolveStreamUrl(streamUrl: string): string {
+  try {
+    const u = new URL(streamUrl, window.location.href);
+    if (!u.pathname.includes("/api/apps/simulator/stream/")) return streamUrl;
+    u.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    u.host = window.location.host;
+    return u.toString();
+  } catch {
+    return streamUrl;
+  }
 }
 
 function DeviceKeyButton({ label, onClick, disabled }: { label: string; onClick: () => void; disabled?: boolean }) {
