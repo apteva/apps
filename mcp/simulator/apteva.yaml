@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: simulator
 display_name: Apteva Simulator
-version: 0.1.6
+version: 0.1.7
 description: |
   iOS and Android simulators on demand. Boot a device, build a repo's
   source into a .apk or .app, install + launch on a headless emulator
@@ -11,13 +11,13 @@ description: |
   iOS or Android repo on repos_dev_start; usable standalone for any
   flow that produces a mobile artifact (CI, manual sideload).
 
-  v0.1.6 makes already-booted iOS devices update stored state and adds
-  a screenshot fallback when live streaming is unavailable.
+  v0.1.7 streams iOS over native simctl screenshots when idb is not
+  installed; idb is now only needed for high-FPS iOS streaming and input.
 
   Per-platform capability gating — Android works on Linux/macOS hosts
-  with the Android SDK; iOS requires macOS with Xcode and
-  idb_companion. sims_capabilities reports availability with hints
-  when something's missing.
+  with the Android SDK; iOS boot/view requires macOS with Xcode.
+  sims_capabilities reports availability with hints when something's
+  missing.
 
 author: Apteva
 tags: [mobile, simulator, emulator, ios, android, dev]

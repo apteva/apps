@@ -14,11 +14,15 @@ import (
 )
 
 func iosScreenshot(udid string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return iosScreenshotWithContext(ctx, udid)
+}
+
+func iosScreenshotWithContext(ctx context.Context, udid string) ([]byte, error) {
 	if udid == "" {
 		return nil, errors.New("ios udid required")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	out, err := exec.CommandContext(ctx, "xcrun", "simctl", "io", udid, "screenshot", "-").Output()
 	if err != nil {
 		return nil, fmt.Errorf("simctl screenshot: %w", err)

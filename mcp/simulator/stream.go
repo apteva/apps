@@ -3,13 +3,13 @@ package main
 // Live screen streaming over WebSocket. The panel's DeviceFrame
 // component opens stream_url; this handler validates the short-lived
 // token, upgrades to WebSocket, spawns the platform stream source
-// (android screenrecord / ios idb video-stream), reassembles H.264
-// access units, and pushes one binary message per AU. Inbound text
-// messages are input events routed to the platform input backend.
+// (android screenrecord / ios idb video-stream / ios simctl
+// screenshot loop), and pushes one binary message per frame. Inbound
+// text messages are input events routed to the platform input backend.
 //
 // Protocol (must match ui/components/DeviceFrame.tsx):
-//   server→client text:   {"type":"meta","platform","width","height","codec":"h264"}
-//   server→client binary:  one H.264 access unit (Annex-B) per message
+//   server→client text:   {"type":"meta","platform","width","height","codec":"h264|png"}
+//   server→client binary:  one H.264 access unit or one PNG frame per message
 //   client→server text:    {"type":"input","kind":"tap|swipe|key|text", ...}
 //
 // On-demand: the stream source is only spawned while a client is
@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -101,27 +102,27 @@ func (a *App) runStreamSession(sim *Sim, conn *websocket.Conn) {
 		return conn.WriteMessage(websocket.BinaryMessage, b)
 	}
 
-	// meta frame first so the client can size the canvas + configure
-	// its decoder. Dimensions are best-effort; the decoder also reads
-	// them from the in-band SPS, so 0s here are non-fatal.
-	w, h := deviceDimensions(sim)
-	_ = writeJSON(map[string]any{
-		"type": "meta", "platform": sim.Platform,
-		"width": w, "height": h, "codec": "h264",
-	})
-
-	// Spawn the platform stream source. Its stdout is a raw H.264
-	// Annex-B stream we frame into access units.
-	cmd, stdout, err := startStreamSource(ctx, sim)
+	// Spawn the platform stream source. H.264 sources expose stdout;
+	// screenshot sources push complete image frames directly.
+	source, err := startStreamSource(ctx, sim)
 	if err != nil {
 		_ = writeJSON(map[string]any{"type": "error", "message": err.Error()})
 		return
 	}
 	defer func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
+		if source.Cmd != nil && source.Cmd.Process != nil {
+			_ = source.Cmd.Process.Kill()
 		}
 	}()
+
+	// Meta frame first so the client can size the canvas + choose the
+	// decode path. Dimensions are best-effort; for H.264 the decoder
+	// also reads real dimensions from the in-band SPS.
+	w, h := deviceDimensions(sim)
+	_ = writeJSON(map[string]any{
+		"type": "meta", "platform": sim.Platform,
+		"width": w, "height": h, "codec": source.Codec,
+	})
 
 	// Reader goroutine: inbound input events. Also detects client
 	// close, which cancels the context and tears down the source.
@@ -139,17 +140,28 @@ func (a *App) runStreamSession(sim *Sim, conn *websocket.Conn) {
 		}
 	}()
 
-	// Writer: frame the source's stdout into access units and ship
-	// each as one binary message.
+	if source.FrameLoop != nil {
+		source.FrameLoop(ctx, func(frame []byte) error {
+			if err := writeBinary(frame); err != nil {
+				cancel()
+				return err
+			}
+			return nil
+		})
+		return
+	}
+
+	// Writer: frame raw H.264 stdout into access units and ship each as
+	// one binary message.
 	framer := newAnnexBFramer(func(au []byte, _ bool) {
 		if err := writeBinary(au); err != nil {
 			cancel()
 		}
 	})
-	_ = framer.feed(bufio.NewReaderSize(stdout, 1<<20))
-	// feed returns on EOF (source exited) or write failure. For
-	// android screenrecord's time-limit exits we could loop+respawn
-	// here; v0.1 ends the session and the client reconnects.
+	_ = framer.feed(bufio.NewReaderSize(source.Stdout, 1<<20))
+	// feed returns on EOF (source exited) or write failure. For android
+	// screenrecord's time-limit exits we could loop+respawn here; v0.1
+	// ends the session and the client reconnects.
 }
 
 // handleInputMessage parses an inbound control message and routes it
@@ -181,16 +193,27 @@ func (a *App) handleInputMessage(sim *Sim, data []byte) {
 	}
 }
 
-// startStreamSource spawns the platform-specific H.264 source and
-// returns the running command + its stdout pipe.
-func startStreamSource(ctx context.Context, sim *Sim) (*exec.Cmd, interface{ Read([]byte) (int, error) }, error) {
+type streamSource struct {
+	Cmd       *exec.Cmd
+	Stdout    io.Reader
+	Codec     string
+	FrameLoop func(context.Context, func([]byte) error)
+}
+
+// startStreamSource spawns or constructs the platform-specific source.
+// H.264 sources return Cmd+Stdout; screenshot sources return FrameLoop.
+func startStreamSource(ctx context.Context, sim *Sim) (*streamSource, error) {
 	switch sim.Platform {
 	case "android":
-		return startAndroidScreenStream(ctx, sim.Serial)
+		cmd, stdout, err := startAndroidScreenStream(ctx, sim.Serial)
+		if err != nil {
+			return nil, err
+		}
+		return &streamSource{Cmd: cmd, Stdout: stdout, Codec: "h264"}, nil
 	case "ios":
 		return startIOSVideoStream(ctx, sim.ID)
 	}
-	return nil, nil, errUnknownPlatform(sim.Platform)
+	return nil, errUnknownPlatform(sim.Platform)
 }
 
 // deviceDimensions returns best-effort pixel dimensions for the canvas

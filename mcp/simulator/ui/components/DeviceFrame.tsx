@@ -3,21 +3,16 @@
 // Protocol (must match simulator/stream.go):
 //   WS URL:  stream_url from sims_run (wss://…/api/apps/simulator/stream/<sim_id>?t=<token>)
 //   server→client:
-//     • first text frame: {"type":"meta","platform","width","height","codec":"h264"}
-//     • binary frames: H.264 Annex-B (00 00 00 01 start codes). SPS/PPS
-//       are sent inline ahead of each keyframe, so the decoder can be
-//       configured from in-band parameter sets.
+//     • first text frame: {"type":"meta","platform","width","height","codec":"h264"|"png"}
+//     • binary frames: H.264 Annex-B access units, or complete PNG images
 //   client→server (text JSON):
 //     • {"type":"input","kind":"tap","x":0.42,"y":0.31}      (x/y normalized 0..1)
 //     • {"type":"input","kind":"swipe","x":..,"y":..,"x2":..,"y2":..,"ms":300}
 //     • {"type":"input","kind":"key","key":"BACK"|"HOME"|"ENTER"|…}
 //     • {"type":"input","kind":"text","text":"hello"}
 //
-// Decode path: WebCodecs VideoDecoder (Chrome 94+/Edge/Safari 16.4+).
-// Raw Annex-B is fed directly; the decoder reads in-band SPS/PPS. When
-// WebCodecs is unavailable we render a clear "unsupported" notice
-// rather than a blank canvas — there's no MJPEG fallback in this
-// embedded view (use the standalone Simulator panel's screenshot mode).
+// Decode path: H.264 uses WebCodecs VideoDecoder. PNG screenshot
+// streams use createImageBitmap and do not need WebCodecs.
 
 import { useEffect, useRef, useState } from "react";
 
@@ -46,15 +41,10 @@ export function DeviceFrame({
   const dragStart = useRef<{ x: number; y: number; t: number } | null>(null);
 
   useEffect(() => {
-    const hasWebCodecs = typeof (globalThis as { VideoDecoder?: unknown }).VideoDecoder !== "undefined";
-    if (!hasWebCodecs) {
-      setStatus("unsupported");
-      return;
-    }
-
     let closed = false;
     let decoder: VideoDecoder | null = null;
     let configured = false;
+    let streamCodec = "h264";
 
     const canvas = canvasRef.current;
     const ctx2d = canvas?.getContext("2d") ?? null;
@@ -73,8 +63,35 @@ export function DeviceFrame({
       frame.close();
     };
 
+    const drawImageFrame = async (data: Uint8Array) => {
+      if (!canvas || !ctx2d) return;
+      try {
+        const blob = new Blob([data], { type: streamCodec === "jpeg" ? "image/jpeg" : "image/png" });
+        const bitmap = await createImageBitmap(blob);
+        if (closed) {
+          bitmap.close();
+          return;
+        }
+        if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+          canvas.width = bitmap.width;
+          canvas.height = bitmap.height;
+          dims.current = { w: bitmap.width, h: bitmap.height };
+        }
+        ctx2d.drawImage(bitmap, 0, 0);
+        bitmap.close();
+      } catch (e) {
+        setErrMsg("image decode: " + String(e));
+        setStatus("error");
+      }
+    };
+
     const ensureDecoder = (codec: string) => {
       if (decoder) return;
+      const hasWebCodecs = typeof (globalThis as { VideoDecoder?: unknown }).VideoDecoder !== "undefined";
+      if (!hasWebCodecs) {
+        setStatus("unsupported");
+        return;
+      }
       decoder = new VideoDecoder({
         output: drawFrame,
         error: (e) => {
@@ -128,7 +145,10 @@ export function DeviceFrame({
           const msg = JSON.parse(ev.data) as MetaMsg;
           if (msg.type === "meta") {
             dims.current = { w: msg.width, h: msg.height };
-            ensureDecoder(msg.codec);
+            streamCodec = msg.codec || "h264";
+            if (streamCodec === "h264") {
+              ensureDecoder(streamCodec);
+            }
           }
         } catch {
           /* ignore non-JSON text */
@@ -136,6 +156,10 @@ export function DeviceFrame({
         return;
       }
       const data = new Uint8Array(ev.data as ArrayBuffer);
+      if (streamCodec === "png" || streamCodec === "jpeg") {
+        void drawImageFrame(data);
+        return;
+      }
       if (!decoder) ensureDecoder("avc1.42E01E");
       if (!decoder || !configured) return;
       const key = isKeyframe(data);

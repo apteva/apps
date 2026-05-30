@@ -1,26 +1,34 @@
 package main
 
-// iOS screen streaming via idb's video-stream, the simulator analog of
-// android's screenrecord:
+// iOS screen streaming. Prefer idb's H.264 video-stream when the idb
+// CLI exists because it gives high frame rate streaming:
 //
 //   idb video-stream --udid <udid> --format h264 --fps 30 --compression-quality 0.7 -
 //
 // idb_companion must be running for the udid; `idb` auto-spawns a
-// companion for booted simulators, so a bare `idb video-stream` works
-// once idb_companion is installed (the capability probe enforces that).
-// Output is an H.264 Annex-B stream on stdout, framed identically to
-// the android path.
+// companion for booted simulators. When idb is absent we fall back to
+// Xcode's native `xcrun simctl io <udid> screenshot -` in a low-FPS
+// loop. That path is pure Go + Xcode tools, needs no Python packages,
+// and is good enough to see the device state.
 
 import (
 	"context"
-	"fmt"
-	"io"
 	"os/exec"
+	"time"
 )
 
-func startIOSVideoStream(ctx context.Context, udid string) (*exec.Cmd, io.Reader, error) {
+func startIOSVideoStream(ctx context.Context, udid string) (*streamSource, error) {
 	if _, err := exec.LookPath("idb"); err != nil {
-		return nil, nil, fmt.Errorf("idb CLI not found on PATH; install with `pipx install fb-idb` or `python3 -m pip install fb-idb`")
+		return &streamSource{
+			Codec:     "png",
+			FrameLoop: iosScreenshotStreamLoop(udid, 750*time.Millisecond),
+		}, nil
+	}
+	if _, err := exec.LookPath("idb_companion"); err != nil {
+		return &streamSource{
+			Codec:     "png",
+			FrameLoop: iosScreenshotStreamLoop(udid, 750*time.Millisecond),
+		}, nil
 	}
 	cmd := exec.CommandContext(ctx, "idb", "video-stream",
 		"--udid", udid,
@@ -31,10 +39,31 @@ func startIOSVideoStream(ctx context.Context, udid string) (*exec.Cmd, io.Reader
 	)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return cmd, stdout, nil
+	return &streamSource{Cmd: cmd, Stdout: stdout, Codec: "h264"}, nil
+}
+
+func iosScreenshotStreamLoop(udid string, interval time.Duration) func(context.Context, func([]byte) error) {
+	return func(ctx context.Context, write func([]byte) error) {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			png, err := iosScreenshotWithContext(ctx, udid)
+			if err == nil {
+				if err := write(png); err != nil {
+					return
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}
 }

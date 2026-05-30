@@ -149,13 +149,14 @@ func probeIOS(ctx *sdk.AppCtx) PlatformCapability {
 	out.Available = len(out.Reasons) == 0
 	out.StreamingAvailable = out.Available
 
+	// iOS live view has a native fallback: a low-FPS screenshot stream
+	// over `xcrun simctl io screenshot`. idb remains optional for the
+	// high-FPS H.264 stream and for input injection.
 	idb := lookupAndVersion("idb", "--help")
 	out.Tools["idb"] = idb
 	if !idb.Found {
-		out.StreamingAvailable = false
 		out.StreamingReasons = append(out.StreamingReasons,
-			"idb not found. Install the idb CLI with `pipx install fb-idb` or `python3 -m pip install fb-idb` "+
-				"(required for iOS live view and input).")
+			"idb not found; using native simctl screenshot streaming. Install idb only for high-FPS iOS live view and input.")
 	}
 
 	// idb_companion path can be overridden in install config. Empty =
@@ -167,10 +168,8 @@ func probeIOS(ctx *sdk.AppCtx) PlatformCapability {
 	tp := probeIDBCompanion(idbPath)
 	out.Tools["idb_companion"] = tp
 	if !tp.Found {
-		out.StreamingAvailable = false
 		out.StreamingReasons = append(out.StreamingReasons,
-			"idb_companion not found. Install via `brew install idb-companion` "+
-				"(required for iOS input + streaming).")
+			"idb_companion not found; using native simctl screenshot streaming. Install via `brew install idb-companion` for high-FPS iOS live view and input.")
 	}
 
 	return out
