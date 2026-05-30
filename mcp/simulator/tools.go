@@ -165,20 +165,12 @@ func (a *App) handleSimsBoot(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	deviceType := strArg(args, "device_type")
 	switch platform {
 	case "android":
-		if image == "" {
-			image = ctx.Config().Get("android_image")
-		}
-		if deviceType == "" {
-			deviceType = ctx.Config().Get("android_device_type")
-		}
+		image = valueOrConfigDefault(ctx, image, "android_image")
+		deviceType = valueOrConfigDefault(ctx, deviceType, "android_device_type")
 		return a.bootAndroid(ctx, image, deviceType)
 	case "ios":
-		if image == "" {
-			image = ctx.Config().Get("ios_runtime")
-		}
-		if deviceType == "" {
-			deviceType = ctx.Config().Get("ios_device_type")
-		}
+		image = valueOrConfigDefault(ctx, image, "ios_runtime")
+		deviceType = valueOrConfigDefault(ctx, deviceType, "ios_device_type")
 		return a.bootIOS(ctx, image, deviceType)
 	}
 	return nil, fmt.Errorf("platform %q invalid", platform)
@@ -215,7 +207,7 @@ func (a *App) bootAndroid(ctx *sdk.AppCtx, image, deviceType string) (*Sim, erro
 		// Idempotent — sims_boot on a live sim just returns it.
 		return existing, nil
 	}
-	extraArgs := splitArgs(ctx.Config().Get("emulator_extra_args"))
+	extraArgs := splitArgs(configOrDefault(ctx, "emulator_extra_args"))
 	return bootAndroidSim(ctx, a.sup, avd, deviceType, image, extraArgs)
 }
 

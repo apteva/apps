@@ -43,6 +43,10 @@ interface Sim {
 }
 
 const API = "/api/apps/simulator/api";
+const DEFAULT_ANDROID_IMAGE = "system-images;android-34;google_apis;x86_64";
+const DEFAULT_ANDROID_DEVICE_TYPE = "pixel_6";
+const DEFAULT_IOS_RUNTIME = "";
+const DEFAULT_IOS_DEVICE_TYPE = "iPhone-15-Pro";
 
 export default function SimulatorPanel({ projectId }: NativePanelProps) {
   const [caps, setCaps] = useState<Capabilities | null>(null);
@@ -88,11 +92,19 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
     setBusy(true);
     setError("");
     try {
+      const payload =
+        platform === "ios"
+          ? { platform, image: DEFAULT_IOS_RUNTIME, device_type: DEFAULT_IOS_DEVICE_TYPE }
+          : {
+              platform,
+              image: DEFAULT_ANDROID_IMAGE,
+              device_type: DEFAULT_ANDROID_DEVICE_TYPE,
+            };
       const r = await fetch(`${API}/sims/boot?${withParams()}`, {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ platform }),
+        body: JSON.stringify(payload),
       });
       if (!r.ok) throw new Error((await r.json()).error ?? r.statusText);
       const sim: Sim = await r.json();

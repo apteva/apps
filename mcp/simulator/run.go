@@ -20,13 +20,13 @@ import (
 // buildParams carries everything a build needs, platform-agnostic at
 // the call site; the dispatcher branches on Framework.
 type buildParams struct {
-	Framework     string // "android" | "ios"
-	SourceTGZB64  string
-	Module        string // android module (":app:" default when empty)
-	Scheme        string // ios scheme (first scheme when empty)
-	BuildCmd      string // shell override; wins over module/scheme
-	SimUDID       string // ios needs a booted sim's udid as the build destination
-	SimRunID      int64  // for log-file naming
+	Framework    string // "android" | "ios"
+	SourceTGZB64 string
+	Module       string // android module (":app:" default when empty)
+	Scheme       string // ios scheme (first scheme when empty)
+	BuildCmd     string // shell override; wins over module/scheme
+	SimUDID      string // ios needs a booted sim's udid as the build destination
+	SimRunID     int64  // for log-file naming
 }
 
 // buildResult is the platform-agnostic result the orchestration layer
@@ -122,9 +122,9 @@ func (a *App) ensureBootedSim(ctx *sdk.AppCtx, framework string) (*Sim, error) {
 	// Nothing live — boot a fresh one with config defaults.
 	switch framework {
 	case "android":
-		return a.bootAndroid(ctx, ctx.Config().Get("android_image"), ctx.Config().Get("android_device_type"))
+		return a.bootAndroid(ctx, configOrDefault(ctx, "android_image"), configOrDefault(ctx, "android_device_type"))
 	case "ios":
-		return a.bootIOS(ctx, ctx.Config().Get("ios_runtime"), ctx.Config().Get("ios_device_type"))
+		return a.bootIOS(ctx, configOrDefault(ctx, "ios_runtime"), configOrDefault(ctx, "ios_device_type"))
 	}
 	return nil, fmt.Errorf("unknown framework %q", framework)
 }

@@ -190,10 +190,7 @@ func resolveProjectFromRequest(r *http.Request) (string, error) {
 }
 
 func orConfig(ctx *sdk.AppCtx, val, key string) string {
-	if strings.TrimSpace(val) != "" {
-		return val
-	}
-	return ctx.Config().Get(key)
+	return valueOrConfigDefault(ctx, val, key)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
