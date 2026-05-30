@@ -597,6 +597,33 @@ func TestInboundRoute_SetIdempotent(t *testing.T) {
 	}
 }
 
+func TestInboundRoute_SetCatchAllForAllChannels(t *testing.T) {
+	ctx := newTestCtx(t, nil)
+	app := &App{}
+	for _, channel := range []string{channelEmail, channelSMS, channelWhatsApp} {
+		out, err := app.toolInboundRouteSet(ctx, map[string]any{
+			"channel":      channel,
+			"pattern":      "*",
+			"target_app":   "crm",
+			"target_route": crmInboundReceiveTool,
+			"priority":     0,
+		})
+		if err != nil {
+			t.Fatalf("%s catch-all route: %v", channel, err)
+		}
+		route := out.(map[string]any)["route"].(*InboundRoute)
+		if route.Pattern != "*" {
+			t.Fatalf("%s pattern=%q, want *", channel, route.Pattern)
+		}
+	}
+	if ok, _ := patternMatches(channelEmail, "*", "support@acme.com"); !ok {
+		t.Fatal("email catch-all did not match")
+	}
+	if ok, _ := patternMatches(channelWhatsApp, "*", "+15551234567"); !ok {
+		t.Fatal("whatsapp catch-all did not match")
+	}
+}
+
 // ─── suppression ──────────────────────────────────────────────────
 
 func TestSuppression_AddRemove(t *testing.T) {

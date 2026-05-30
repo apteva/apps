@@ -54,7 +54,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.27
+version: 0.13.28
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -1684,9 +1684,11 @@ func (a *App) toolInboundRouteSet(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if !validChannel(channel) {
 		return nil, fmt.Errorf("channel: unsupported value %q", channel)
 	}
-	probe := strings.ReplaceAll(pattern, "*", "x")
-	if _, err := normaliseAddress(channel, probe); err != nil {
-		return nil, fmt.Errorf("pattern: %w", err)
+	if strings.TrimSpace(pattern) != "*" {
+		probe := strings.ReplaceAll(pattern, "*", "x")
+		if _, err := normaliseAddress(channel, probe); err != nil {
+			return nil, fmt.Errorf("pattern: %w", err)
+		}
 	}
 	pattern = strings.ToLower(strings.TrimSpace(stripScheme(pattern)))
 	targetApp := strArg(args, "target_app")
@@ -3552,6 +3554,9 @@ func inboundRouteTargetTool(appName, route string) string {
 func patternMatches(channel, pattern, addr string) (bool, string) {
 	pattern = strings.ToLower(strings.TrimSpace(pattern))
 	addr = strings.ToLower(strings.TrimSpace(addr))
+	if pattern == "*" {
+		return true, ""
+	}
 	if pattern == addr {
 		return true, ""
 	}
