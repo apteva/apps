@@ -178,6 +178,13 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
   const selectedSim = sims.find((s) => s.id === selected) ?? null;
   const selectedCaps = selectedSim?.platform === "ios" ? caps?.ios : caps?.android;
   const canStreamSelected = selectedCaps?.streaming_available !== false;
+  const canInputSelected =
+    selectedSim?.platform !== "ios" ||
+    (!!selectedCaps?.tools?.idb?.found && !!selectedCaps?.tools?.idb_companion?.found);
+  const inputUnavailableReason =
+    selectedSim?.platform === "ios"
+      ? "iOS clicks need idb and idb_companion. The current native simctl stream is view-only."
+      : "Input is unavailable for this device.";
 
   useEffect(() => {
     if (selectedSim?.status === "booted" && canStreamSelected && !streamUrl && !busy) {
@@ -273,7 +280,12 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
               </div>
 
               {selectedSim.status === "booted" && streamUrl ? (
-                <DeviceFrame streamUrl={streamUrl} platform={selectedSim.platform} />
+                <DeviceFrame
+                  streamUrl={streamUrl}
+                  platform={selectedSim.platform}
+                  inputAvailable={canInputSelected}
+                  inputUnavailableReason={inputUnavailableReason}
+                />
               ) : selectedSim.status === "booted" && !canStreamSelected ? (
                 <div className="flex flex-col items-center gap-3">
                   <div className="max-w-md text-center text-xs text-text-muted">

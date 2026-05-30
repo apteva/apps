@@ -29,14 +29,19 @@ type InputKind = "tap" | "swipe" | "key" | "text";
 export function DeviceFrame({
   streamUrl,
   platform,
+  inputAvailable = true,
+  inputUnavailableReason = "Input is unavailable for this device.",
 }: {
   streamUrl: string;
   platform?: string;
+  inputAvailable?: boolean;
+  inputUnavailableReason?: string;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const [status, setStatus] = useState<"connecting" | "live" | "error" | "unsupported" | "closed">("connecting");
   const [errMsg, setErrMsg] = useState("");
+  const [inputNotice, setInputNotice] = useState("");
   const dims = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
   const dragStart = useRef<{ x: number; y: number; t: number } | null>(null);
 
@@ -196,8 +201,13 @@ export function DeviceFrame({
   }, [streamUrl]);
 
   const sendInput = (payload: Record<string, unknown>) => {
+    if (!inputAvailable) {
+      setInputNotice(inputUnavailableReason);
+      return;
+    }
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
+      setInputNotice("");
       ws.send(JSON.stringify({ type: "input", ...payload }));
     }
   };
@@ -213,6 +223,10 @@ export function DeviceFrame({
   };
 
   const onPointerDown = (e: React.PointerEvent) => {
+    if (!inputAvailable) {
+      setInputNotice(inputUnavailableReason);
+      return;
+    }
     const { x, y } = normXY(e);
     dragStart.current = { x, y, t: Date.now() };
   };
@@ -250,7 +264,8 @@ export function DeviceFrame({
           onPointerDown={onPointerDown}
           onPointerUp={onPointerUp}
           onKeyDown={onKeyDown}
-          className="block w-full touch-none outline-none cursor-pointer"
+          title={inputAvailable ? "" : inputUnavailableReason}
+          className={`block w-full touch-none outline-none ${inputAvailable ? "cursor-pointer" : "cursor-not-allowed"}`}
           style={{ aspectRatio: dims.current.w && dims.current.h ? `${dims.current.w}/${dims.current.h}` : "9/19.5" }}
         />
         {status !== "live" && (
@@ -263,10 +278,18 @@ export function DeviceFrame({
           </div>
         )}
       </div>
+      {!inputAvailable && (
+        <div className="max-w-[360px] text-center text-[11px] text-text-muted">
+          View-only. Install idb + idb_companion for iOS clicks and keyboard input.
+        </div>
+      )}
+      {inputNotice && (
+        <div className="max-w-[360px] text-center text-[11px] text-accent">{inputNotice}</div>
+      )}
       <div className="flex gap-2">
-        <DeviceKeyButton label="Back" onClick={() => sendInput({ kind: "key", key: "BACK" })} disabled={platform === "ios"} />
-        <DeviceKeyButton label="Home" onClick={() => sendInput({ kind: "key", key: "HOME" })} />
-        <DeviceKeyButton label="Recents" onClick={() => sendInput({ kind: "key", key: "APP_SWITCH" })} disabled={platform === "ios"} />
+        <DeviceKeyButton label="Back" onClick={() => sendInput({ kind: "key", key: "BACK" })} disabled={platform === "ios" || !inputAvailable} />
+        <DeviceKeyButton label="Home" onClick={() => sendInput({ kind: "key", key: "HOME" })} disabled={!inputAvailable} />
+        <DeviceKeyButton label="Recents" onClick={() => sendInput({ kind: "key", key: "APP_SWITCH" })} disabled={platform === "ios" || !inputAvailable} />
       </div>
     </div>
   );
