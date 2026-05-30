@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: containers
 display_name: Containers
-version: 0.1.5
+version: 0.1.6
 description: |
   Generic Docker workload runtime for Apteva. Runs container images on
   the local host, manages isolated networks, Docker volumes, ports,

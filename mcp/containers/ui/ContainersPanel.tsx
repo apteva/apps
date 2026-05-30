@@ -253,7 +253,7 @@ export default function ContainersPanel(_props: NativePanelProps) {
       {notice && <div className="mx-6 mt-4 rounded border border-border bg-surface-2 text-text px-3 py-2 text-sm">{notice}</div>}
 
       <div className="p-6 grid gap-5 lg:grid-cols-[360px_1fr] overflow-auto">
-        <section className="space-y-4">
+        <section className="space-y-4 order-2 lg:order-1">
           <div className="border border-border rounded bg-surface p-4 space-y-3">
             <h2 className="text-sm font-semibold">Quick Tests</h2>
             <div className="grid gap-2">
@@ -306,7 +306,7 @@ export default function ContainersPanel(_props: NativePanelProps) {
           </div>
         </section>
 
-        <section className="border border-border rounded bg-surface overflow-hidden">
+        <section className="border border-border rounded bg-surface overflow-hidden order-1 lg:order-2">
           <div className="px-4 py-3 border-b border-border flex justify-between">
             <h2 className="text-sm font-semibold">Workloads</h2>
             <span className="text-xs text-text-dim">{workloads.length} total</span>
