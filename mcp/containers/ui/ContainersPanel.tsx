@@ -163,7 +163,7 @@ export default function ContainersPanel(_props: NativePanelProps) {
           },
         }),
       });
-      setNotice(`Started ${name}.`);
+      setNotice(`Queued ${name}. Workload status will update in the list.`);
       setForm((f) => ({ ...f, name: autoName(f.image) }));
       await load();
     } catch (e) {

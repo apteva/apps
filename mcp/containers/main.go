@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -19,7 +21,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: containers
 display_name: Containers
-version: 0.1.2
+version: 0.1.3
 description: Generic Docker workload runtime for Apteva. Runs container images on the local host, manages volumes, ports, health checks, logs, and lifecycle actions.
 author: Apteva
 scopes: [global]
@@ -101,6 +103,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := seedBlueprints(ctx.AppDB()); err != nil {
 		return err
 	}
+	if n, err := markInterruptedWorkloads(ctx.AppDB()); err != nil {
+		return err
+	} else if n > 0 {
+		ctx.Logger().Warn("marked interrupted creating workloads", "count", n)
+	}
 	probeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	err := a.backend.Probe(probeCtx)
 	cancel()
@@ -155,21 +162,62 @@ func (a *App) MCPTools() []sdk.Tool {
 func main() { sdk.Run(&App{}) }
 
 func (a *App) createWorkload(ctx context.Context, db *sql.DB, in RunSpec) (*Workload, error) {
-	spec, err := a.expandBlueprint(db, in)
+	w, spec, err := a.prepareWorkload(db, in)
 	if err != nil {
 		return nil, err
 	}
-	spec, err = normalizeRunSpec(spec)
+	log.Printf("[containers] mcp create start workload_id=%s name=%q image=%q ports=%s volumes=%s",
+		w.ID, spec.Name, spec.Image, describePorts(spec.Ports), describeVolumes(spec.Volumes))
+	if err := a.startWorkloadRuntime(ctx, db, w.ID, spec, w.ContainerName, w.NetworkName); err != nil {
+		log.Printf("[containers] mcp create failed workload_id=%s err=%q", w.ID, err.Error())
+		return nil, err
+	}
+	log.Printf("[containers] mcp create done workload_id=%s", w.ID)
+	return getWorkload(db, w.ID)
+}
+
+func (a *App) queueWorkload(db *sql.DB, in RunSpec) (*Workload, error) {
+	w, spec, err := a.prepareWorkload(db, in)
 	if err != nil {
 		return nil, err
+	}
+	log.Printf("[containers] queued workload_id=%s name=%q image=%q container=%q network=%q ports=%s volumes=%s env_keys=%s",
+		w.ID, spec.Name, spec.Image, w.ContainerName, w.NetworkName, describePorts(spec.Ports), describeVolumes(spec.Volumes), describeEnvKeys(spec.Env))
+	go func(id, containerName, networkName string, spec RunSpec) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if err := a.startWorkloadRuntime(ctx, db, id, spec, containerName, networkName); err != nil {
+			log.Printf("[containers] async start failed workload_id=%s err=%q", id, err.Error())
+		} else {
+			log.Printf("[containers] async start done workload_id=%s", id)
+		}
+	}(w.ID, w.ContainerName, w.NetworkName, spec)
+	return getWorkload(db, w.ID)
+}
+
+func (a *App) prepareWorkload(db *sql.DB, in RunSpec) (*Workload, RunSpec, error) {
+	log.Printf("[containers] prepare begin name=%q image=%q blueprint=%q ports=%s volumes=%s env_keys=%s",
+		in.Name, in.Image, in.BlueprintSlug, describePorts(in.Ports), describeVolumes(in.Volumes), describeEnvKeys(in.Env))
+	spec, err := a.expandBlueprint(db, in)
+	if err != nil {
+		log.Printf("[containers] prepare expand failed name=%q err=%q", in.Name, err.Error())
+		return nil, spec, err
+	}
+	spec, err = normalizeRunSpec(spec)
+	if err != nil {
+		log.Printf("[containers] prepare normalize failed name=%q image=%q err=%q", in.Name, in.Image, err.Error())
+		return nil, spec, err
 	}
 	for i := range spec.Ports {
 		if spec.Ports[i].HostPort == 0 {
 			p, err := freePort()
 			if err != nil {
-				return nil, err
+				log.Printf("[containers] prepare free_port failed name=%q err=%q", spec.Name, err.Error())
+				return nil, spec, err
 			}
 			spec.Ports[i].HostPort = p
+			log.Printf("[containers] allocated host port workload_name=%q container_port=%d host_port=%d",
+				spec.Name, spec.Ports[i].ContainerPort, p)
 		}
 	}
 	id := newWorkloadID()
@@ -192,27 +240,47 @@ func (a *App) createWorkload(ctx context.Context, db *sql.DB, in RunSpec) (*Work
 		w.PublicURL = fmt.Sprintf("http://%s:%d", p.BindAddr, p.HostPort)
 	}
 	if err := insertWorkload(db, w, spec.Ports, spec.Volumes); err != nil {
-		return nil, err
+		log.Printf("[containers] insert workload failed name=%q image=%q err=%q", spec.Name, spec.Image, err.Error())
+		return nil, spec, err
 	}
-	if err := a.backend.CreateNetwork(ctx, networkName); err != nil {
+	log.Printf("[containers] prepared workload_id=%s name=%q image=%q status=%s health_url=%q public_url=%q",
+		w.ID, w.Name, w.Image, w.Status, w.HealthURL, w.PublicURL)
+	return w, spec, nil
+}
+
+func (a *App) startWorkloadRuntime(ctx context.Context, db *sql.DB, id string, spec RunSpec, containerName, networkName string) error {
+	start := time.Now()
+	log.Printf("[containers] runtime start workload_id=%s name=%q image=%q container=%q network=%q ports=%s volumes=%s",
+		id, spec.Name, spec.Image, containerName, networkName, describePorts(spec.Ports), describeVolumes(spec.Volumes))
+	fail := func(err error) error {
+		log.Printf("[containers] runtime error workload_id=%s duration=%s err=%q",
+			id, time.Since(start).Round(time.Millisecond), err.Error())
 		_ = updateWorkload(db, id, map[string]any{"status": StatusError, "last_error": err.Error(), "updated_at": nowUTC()})
-		return nil, err
+		_ = recordEvent(db, id, "error", "runtime", map[string]any{"error": err.Error()})
+		return err
+	}
+	log.Printf("[containers] runtime create_network workload_id=%s network=%q", id, networkName)
+	if err := a.backend.CreateNetwork(ctx, networkName); err != nil {
+		return fail(err)
 	}
 	for _, v := range spec.Volumes {
+		log.Printf("[containers] runtime create_volume workload_id=%s volume=%q mount=%q", id, v.DockerVolumeName, v.MountPath)
 		if err := a.backend.CreateVolume(ctx, v.DockerVolumeName); err != nil {
-			_ = updateWorkload(db, id, map[string]any{"status": StatusError, "last_error": err.Error(), "updated_at": nowUTC()})
-			return nil, err
+			return fail(err)
 		}
 	}
+	log.Printf("[containers] runtime docker_run workload_id=%s container=%q image=%q", id, containerName, spec.Image)
 	cid, err := a.backend.Run(ctx, spec, containerName, networkName)
 	if err != nil {
-		_ = updateWorkload(db, id, map[string]any{"status": StatusError, "last_error": err.Error(), "updated_at": nowUTC()})
-		return nil, err
+		return fail(err)
 	}
+	log.Printf("[containers] runtime docker_run ok workload_id=%s container_id=%s", id, cid)
 	_ = updateWorkload(db, id, map[string]any{"status": StatusRunning, "container_id": cid, "last_error": "", "updated_at": nowUTC()})
 	_ = recordEvent(db, id, "started", "tool", map[string]any{"container_id": cid})
+	log.Printf("[containers] runtime probe workload_id=%s", id)
 	_ = a.probeWorkload(ctx, db, id)
-	return getWorkload(db, id)
+	log.Printf("[containers] runtime done workload_id=%s duration=%s", id, time.Since(start).Round(time.Millisecond))
+	return nil
 }
 
 func (a *App) expandBlueprint(db *sql.DB, in RunSpec) (RunSpec, error) {
@@ -401,6 +469,22 @@ func updateHostProbe(db *sql.DB, ok bool, errMsg string) error {
 	return err
 }
 
+func markInterruptedWorkloads(db *sql.DB) (int64, error) {
+	res, err := db.Exec(`
+		UPDATE containers_workloads
+		SET status='error',
+			desired_status='stopped',
+			health_status='error',
+			last_error='interrupted while starting; destroy and run again',
+			updated_at=?
+		WHERE status='creating'`, nowUTC())
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // Tools.
 
 func (a *App) toolRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -516,9 +600,9 @@ func (a *App) handleWorkloads(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		cctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
-		defer cancel()
-		res, err := a.createWorkload(cctx, globalCtx.AppDB(), spec)
+		log.Printf("[containers] http POST /api/workloads name=%q image=%q blueprint=%q ports=%s volumes=%s env_keys=%s",
+			spec.Name, spec.Image, spec.BlueprintSlug, describePorts(spec.Ports), describeVolumes(spec.Volumes), describeEnvKeys(spec.Env))
+		res, err := a.queueWorkload(globalCtx.AppDB(), spec)
 		writeResult(w, map[string]any{"workload": res}, err)
 	default:
 		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
@@ -628,6 +712,40 @@ func queryInt(r *http.Request, key string, def int) int {
 		}
 	}
 	return def
+}
+
+func describePorts(ports []PortSpec) string {
+	if len(ports) == 0 {
+		return "[]"
+	}
+	parts := make([]string, 0, len(ports))
+	for _, p := range ports {
+		parts = append(parts, fmt.Sprintf("%s:%d->%d/%s", p.BindAddr, p.HostPort, p.ContainerPort, p.Protocol))
+	}
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+func describeVolumes(volumes []VolumeSpec) string {
+	if len(volumes) == 0 {
+		return "[]"
+	}
+	parts := make([]string, 0, len(volumes))
+	for _, v := range volumes {
+		parts = append(parts, fmt.Sprintf("%s:%s", v.Name, v.MountPath))
+	}
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+func describeEnvKeys(env map[string]string) string {
+	if len(env) == 0 {
+		return "[]"
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return "[" + strings.Join(keys, ",") + "]"
 }
 
 func schemaObject(props map[string]any, required []string) map[string]any {

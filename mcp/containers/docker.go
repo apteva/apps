@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type DockerBackend interface {
@@ -166,6 +168,8 @@ func (d LocalDocker) Inspect(ctx context.Context, containerName string) (*Contai
 }
 
 func docker(ctx context.Context, args ...string) (string, error) {
+	start := time.Now()
+	log.Printf("[containers] docker start args=%s", redactDockerArgs(args))
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
@@ -175,9 +179,32 @@ func docker(ctx context.Context, args ...string) (string, error) {
 		if msg == "" {
 			msg = err.Error()
 		}
+		log.Printf("[containers] docker error args=%s duration=%s err=%q stderr=%q ctx_err=%v",
+			redactDockerArgs(args), time.Since(start).Round(time.Millisecond), err.Error(), msg, ctx.Err())
 		return out.String(), fmt.Errorf("docker %s: %s", strings.Join(args, " "), msg)
 	}
+	log.Printf("[containers] docker ok args=%s duration=%s stdout_bytes=%d",
+		redactDockerArgs(args), time.Since(start).Round(time.Millisecond), out.Len())
 	return out.String(), nil
+}
+
+func redactDockerArgs(args []string) string {
+	out := append([]string(nil), args...)
+	for i := 0; i < len(out); i++ {
+		switch out[i] {
+		case "-e", "--env":
+			if i+1 < len(out) {
+				key := strings.SplitN(out[i+1], "=", 2)[0]
+				out[i+1] = key + "=<redacted>"
+			}
+		default:
+			if strings.HasPrefix(out[i], "--env=") {
+				key := strings.SplitN(strings.TrimPrefix(out[i], "--env="), "=", 2)[0]
+				out[i] = "--env=" + key + "=<redacted>"
+			}
+		}
+	}
+	return strings.Join(out, " ")
 }
 
 func freePort() (int, error) {
