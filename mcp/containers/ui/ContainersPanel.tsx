@@ -92,6 +92,7 @@ export default function ContainersPanel(_props: NativePanelProps) {
   const [status, setStatus] = useState("Loading containers...");
   const [busy, setBusy] = useState("");
   const [logs, setLogs] = useState<{ name: string; body: string } | null>(null);
+  const [pendingDestroy, setPendingDestroy] = useState<{ id: string; name: string } | null>(null);
   const [form, setForm] = useState({
     name: "test-nginx",
     image: "nginx:alpine",
@@ -178,12 +179,12 @@ export default function ContainersPanel(_props: NativePanelProps) {
     }
   }, [load]);
 
-  const destroy = useCallback(async (id: string, name: string) => {
-    if (!confirm(`Destroy ${name}? Docker volumes are preserved.`)) return;
+  const destroy = useCallback(async (id: string) => {
     setBusy(`destroy:${id}`);
     setError("");
     try {
       await api(`/workloads/${encodeURIComponent(id)}`, { method: "DELETE" });
+      setPendingDestroy(null);
       await load();
     } catch (e) {
       setError((e as Error).message);
@@ -276,7 +277,7 @@ export default function ContainersPanel(_props: NativePanelProps) {
                     <button type="button" style={styles.linkButton} disabled={!!busy} onClick={() => action(w.id, "start")}>Start</button>
                     <button type="button" style={styles.linkButton} disabled={!!busy} onClick={() => action(w.id, "stop")}>Stop</button>
                     <button type="button" style={styles.linkButton} disabled={!!busy} onClick={() => action(w.id, "health")}>Health check</button>
-                    <button type="button" style={{ ...styles.linkButton, color: "var(--error, #ef4444)" }} disabled={!!busy} onClick={() => destroy(w.id, w.name)}>Destroy</button>
+                    <button type="button" style={{ ...styles.linkButton, color: "var(--error, #ef4444)" }} disabled={!!busy} onClick={() => setPendingDestroy({ id: w.id, name: w.name })}>Destroy</button>
                   </div>
                 </article>
               ))}
@@ -357,6 +358,27 @@ export default function ContainersPanel(_props: NativePanelProps) {
           </div>
         </div>
       )}
+
+      {pendingDestroy && (
+        <div style={styles.modalBackdrop} onClick={() => !busy && setPendingDestroy(null)}>
+          <div style={styles.confirmModal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <div style={styles.sectionTitle}>Destroy container</div>
+              <button type="button" style={styles.button} disabled={!!busy} onClick={() => setPendingDestroy(null)}>Close</button>
+            </div>
+            <div style={styles.modalBody}>
+              <div style={styles.confirmName}>{pendingDestroy.name}</div>
+              <div style={styles.muted}>This removes the Docker container and its network. Docker volumes are preserved.</div>
+            </div>
+            <div style={styles.modalFooter}>
+              <button type="button" style={styles.button} disabled={!!busy} onClick={() => setPendingDestroy(null)}>Cancel</button>
+              <button type="button" style={styles.dangerButton} disabled={!!busy} onClick={() => destroy(pendingDestroy.id)}>
+                {busy === `destroy:${pendingDestroy.id}` ? "Destroying..." : "Destroy"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -418,6 +440,11 @@ const styles: Record<string, CSSProperties> = {
   blueprint: { padding: 10, border: "1px solid var(--border, #2a2a2d)", borderRadius: 6 },
   modalBackdrop: { position: "fixed", inset: 0, background: "rgba(0,0,0,.62)", display: "flex", alignItems: "flex-end", justifyContent: "center", padding: 24, zIndex: 80 },
   modal: { width: "min(100%, 980px)", maxHeight: "76vh", display: "flex", flexDirection: "column", border: "1px solid var(--border, #2a2a2d)", borderRadius: 8, background: "var(--bg-card, #111114)", overflow: "hidden" },
+  confirmModal: { width: "min(100%, 420px)", display: "flex", flexDirection: "column", border: "1px solid var(--border, #2a2a2d)", borderRadius: 8, background: "var(--bg-card, #111114)", overflow: "hidden", boxShadow: "0 20px 70px rgba(0,0,0,.42)" },
   modalHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", borderBottom: "1px solid var(--border, #2a2a2d)" },
+  modalBody: { padding: 14, display: "flex", flexDirection: "column", gap: 8 },
+  modalFooter: { display: "flex", justifyContent: "flex-end", gap: 8, padding: 14, borderTop: "1px solid var(--border, #2a2a2d)" },
+  confirmName: { fontSize: 15, fontWeight: 650, overflowWrap: "anywhere" },
+  dangerButton: { border: "1px solid var(--error, #ef4444)", borderRadius: 6, background: "var(--error, #ef4444)", color: "white", padding: "6px 10px", fontSize: 12, fontWeight: 650, cursor: "pointer" },
   pre: { margin: 0, padding: 14, overflow: "auto", whiteSpace: "pre-wrap", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: 12, color: "var(--text, #e5e7eb)" },
 };
