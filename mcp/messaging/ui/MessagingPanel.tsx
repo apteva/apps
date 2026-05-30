@@ -941,7 +941,10 @@ function ComposeView({
   const [templateID, setTemplateID] = useState("");
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
 
-  // Default selection: first verified email, otherwise first verified domain.
+  // Default selection: prefer email/domain for the original email-first
+  // workflow, but phone-only installs must still initialise state. Without
+  // this, the browser visually shows the first <option> while React keeps an
+  // empty selectedAddress, so submit fails with "Pick a sender."
   useEffect(() => {
     if (selectedAddress) return;
     const firstEmail = verified.find((s) => s.kind === "email");
@@ -955,6 +958,15 @@ function ComposeView({
       setSelectedAddress(stripScheme(firstDomain.address));
       setSelectedChannel(firstDomain.channel);
       setLocalPart("noreply");
+      return;
+    }
+    const firstPhone = verified.find((s) => s.channel === "whatsapp") ||
+      verified.find((s) => s.channel === "sms") ||
+      verified[0];
+    if (firstPhone) {
+      setSelectedAddress(stripScheme(firstPhone.address));
+      setSelectedChannel(firstPhone.channel);
+      setLocalPart("");
     }
   }, [verified, selectedAddress]);
 
@@ -1188,7 +1200,7 @@ function ComposeView({
               }}
               required
             >
-              {(["email", "sms", "whatsapp"] as const).map((ch) => {
+              {(["email", "whatsapp", "sms"] as const).map((ch) => {
                 const inCh = verified.filter((s) => s.channel === ch);
                 if (inCh.length === 0) return null;
                 const groupLabel = ch === "email" ? "Email (SES)" : ch === "sms" ? "SMS (Twilio)" : "WhatsApp (Twilio)";
