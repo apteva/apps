@@ -92,6 +92,7 @@ export function DeviceFrame({
 
     const ensureDecoder = (codec: string) => {
       if (decoder) return;
+      const decoderCodec = normalizeVideoCodec(codec);
       const hasWebCodecs = typeof (globalThis as { VideoDecoder?: unknown }).VideoDecoder !== "undefined";
       if (!hasWebCodecs) {
         setStatus("unsupported");
@@ -106,7 +107,7 @@ export function DeviceFrame({
       });
       try {
         decoder.configure({
-          codec: codec || "avc1.42E01E",
+          codec: decoderCodec,
           optimizeForLatency: true,
         });
         configured = true;
@@ -151,7 +152,7 @@ export function DeviceFrame({
           if (msg.type === "meta") {
             dims.current = { w: msg.width, h: msg.height };
             streamCodec = msg.codec || "h264";
-            if (streamCodec === "h264") {
+            if (streamCodec === "h264" || streamCodec.startsWith("avc1.")) {
               ensureDecoder(streamCodec);
             }
           }
@@ -293,6 +294,11 @@ export function DeviceFrame({
       </div>
     </div>
   );
+}
+
+function normalizeVideoCodec(codec: string): string {
+  if (!codec || codec === "h264") return "avc1.42E01E";
+  return codec;
 }
 
 function resolveStreamUrl(streamUrl: string): string {
