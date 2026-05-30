@@ -1,14 +1,14 @@
 package main
 
 // iOS Simulator screenshot via `xcrun simctl io <udid> screenshot`.
-// The command writes a PNG either to a path argument or to stdout when
-// the path is "-". Stdout streaming keeps us out of /tmp tempfile
-// territory.
+// Some simctl versions document "-" as stdout but actually create a
+// literal file named "-". Use an explicit temp path and read it back.
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"time"
 )
@@ -23,12 +23,24 @@ func iosScreenshotWithContext(ctx context.Context, udid string) ([]byte, error) 
 	if udid == "" {
 		return nil, errors.New("ios udid required")
 	}
-	out, err := exec.CommandContext(ctx, "xcrun", "simctl", "io", udid, "screenshot", "-").Output()
+	f, err := os.CreateTemp("", "apteva-ios-screenshot-*.png")
 	if err != nil {
-		return nil, fmt.Errorf("simctl screenshot: %w", err)
+		return nil, fmt.Errorf("create screenshot temp file: %w", err)
 	}
-	if len(out) < 8 || !(out[0] == 0x89 && out[1] == 'P' && out[2] == 'N' && out[3] == 'G') {
-		return nil, fmt.Errorf("simctl screenshot did not return PNG (got %d bytes)", len(out))
+	path := f.Name()
+	_ = f.Close()
+	defer os.Remove(path)
+
+	out, err := exec.CommandContext(ctx, "xcrun", "simctl", "io", udid, "screenshot", path).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("simctl screenshot: %w (output: %s)", err, string(out))
 	}
-	return out, nil
+	png, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read screenshot: %w", err)
+	}
+	if len(png) < 8 || !(png[0] == 0x89 && png[1] == 'P' && png[2] == 'N' && png[3] == 'G') {
+		return nil, fmt.Errorf("simctl screenshot did not write PNG (got %d bytes)", len(png))
+	}
+	return png, nil
 }
