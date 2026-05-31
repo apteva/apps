@@ -160,6 +160,7 @@ interface InboundRoute {
 }
 interface SuppressionRow {
   channel: string;
+  kind?: string;
   address: string;
   reason: string;
   source: string;
@@ -813,6 +814,7 @@ const messagingLiveTopics = new Set([
   "message.clicked",
   "message.failed",
   "message.rejected",
+  "message.suppressed",
   "message.delivery_delayed",
   "message.rendering_failed",
   "message.subscription_changed",
@@ -2568,19 +2570,20 @@ function RoutesView({ rows, api, reload, notify, confirmAction }: { rows: Inboun
 }
 
 function SuppressionsView({ rows, api, reload, notify, confirmAction }: { rows: SuppressionRow[]; api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>; reload: () => void; notify: Notify; confirmAction: ConfirmFn }) {
-  const remove = async (addr: string) => {
+  const remove = async (row: SuppressionRow) => {
+    const kind = row.kind || "address";
     confirmAction({
       title: "Remove suppression",
       confirmLabel: "Remove",
       message: (
         <>
-          <div>Remove <code>{stripScheme(addr)}</code> from suppressions?</div>
-          <div className="mt-2 text-text-dim">Messaging will allow future sends to this address again.</div>
+          <div>Remove <code>{stripScheme(row.address)}</code> from suppressions?</div>
+          <div className="mt-2 text-text-dim">Messaging will allow future {kind === "domain" ? "email to and from this domain" : "communication with this address"} again.</div>
         </>
       ),
       onConfirm: async () => {
         try {
-          await api("POST", "/tools/call", {}, { tool: "suppression_remove", args: { address: addr } });
+          await api("POST", "/tools/call", {}, { tool: "suppression_remove", args: { address: row.address, channel: row.channel, kind } });
           reload();
         } catch (e) {
           notify("error", `Remove failed: ${(e as Error).message}`);
@@ -2596,6 +2599,7 @@ function SuppressionsView({ rows, api, reload, notify, confirmAction }: { rows: 
       <thead className="text-xs text-text-dim">
         <tr className="border-b border-border">
           <th className="text-left px-4 py-2">Address</th>
+          <th className="text-left px-4 py-2">Kind</th>
           <th className="text-left px-4 py-2">Reason</th>
           <th className="text-left px-4 py-2">Source</th>
           <th className="text-left px-4 py-2">Last seen</th>
@@ -2604,13 +2608,14 @@ function SuppressionsView({ rows, api, reload, notify, confirmAction }: { rows: 
       </thead>
       <tbody>
         {rows.map((s) => (
-          <tr key={s.address} className="border-b border-border">
+          <tr key={`${s.channel}:${s.kind || "address"}:${s.address}`} className="border-b border-border">
             <td className="px-4 py-2">{stripScheme(s.address)}</td>
+            <td className="px-4 py-2 text-text-dim">{s.kind || "address"}</td>
             <td className="px-4 py-2"><StatusPill status={s.reason} /></td>
             <td className="px-4 py-2 text-text-dim">{s.source}</td>
             <td className="px-4 py-2 text-text-dim">{shortTime(s.last_seen)}</td>
             <td className="px-4 py-2 text-right">
-              <button type="button" className="text-text-dim hover:text-red-500 text-xs" onClick={() => remove(s.address)}>Remove</button>
+              <button type="button" className="text-text-dim hover:text-red-500 text-xs" onClick={() => remove(s)}>Remove</button>
             </td>
           </tr>
         ))}
@@ -2775,6 +2780,7 @@ function statusPillClass(status: string): string {
     case "failed":
     case "target_failed":
     case "rejected":
+    case "suppressed":
     case "rendering_failed":
     case "deleted":
       return "bg-red-500/20 text-red-400 border-red-500/30";

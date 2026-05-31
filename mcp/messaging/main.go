@@ -54,7 +54,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.29
+version: 0.13.30
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -133,10 +133,10 @@ provides:
     - { name: template_get,           description: "Fetch a template." }
     - { name: template_list,          description: "List templates." }
     - { name: template_delete,        description: "Delete a template." }
-    - { name: suppression_list,       description: "List suppressed addresses." }
-    - { name: suppression_add,        description: "Suppress a recipient." }
-    - { name: suppression_remove,     description: "Remove an address from suppression." }
-    - { name: suppression_check,      description: "Single-row suppression lookup; returns {suppressed, reason?, source?, suppressed_at?}." }
+    - { name: suppression_list,       description: "List suppressed exact addresses and domains." }
+    - { name: suppression_add,        description: "Suppress an address or email domain for outbound and inbound." }
+    - { name: suppression_remove,     description: "Remove an address or email domain from suppression." }
+    - { name: suppression_check,      description: "Suppression lookup for an address; checks exact address plus email domain." }
     - { name: senders_list,           description: "List sending identities. Returns canonical URI rows." }
     - { name: senders_get,            description: "Get one identity's verification + DKIM state." }
     - { name: senders_delete,         description: "Remove a sending identity from the provider." }
@@ -433,7 +433,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "suppression_list",
-			Description: "List suppressed addresses. Args: channel?, limit?.",
+			Description: "List suppressed exact addresses and domains. Args: channel?, limit?.",
 			InputSchema: schemaObject(map[string]any{
 				"channel": map[string]any{"type": "string"},
 				"limit":   map[string]any{"type": "integer"},
@@ -442,26 +442,30 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "suppression_add",
-			Description: "Manually suppress an address. Args: address, channel? (auto-detected from address shape if omitted), reason.",
+			Description: "Suppress an exact address or email domain. Suppressions are bidirectional: outbound sends are blocked and inbound messages are persisted but not dispatched. Args: address, channel? (auto-detected), kind? (address|domain; inferred for bare domains), reason?, source?, force? (required for common email domains).",
 			InputSchema: schemaObject(map[string]any{
 				"address": map[string]any{"type": "string"},
 				"channel": map[string]any{"type": "string"},
+				"kind":    map[string]any{"type": "string"},
 				"reason":  map[string]any{"type": "string"},
-			}, []string{"address", "reason"}),
+				"source":  map[string]any{"type": "string"},
+				"force":   map[string]any{"type": "boolean"},
+			}, []string{"address"}),
 			Handler: a.toolSuppressionAdd,
 		},
 		{
 			Name:        "suppression_remove",
-			Description: "Remove an address from suppression. Args: address, channel? (auto-detected if omitted).",
+			Description: "Remove an address or domain from suppression. Args: address, channel? (auto-detected), kind? (address|domain; inferred for bare domains).",
 			InputSchema: schemaObject(map[string]any{
 				"address": map[string]any{"type": "string"},
 				"channel": map[string]any{"type": "string"},
+				"kind":    map[string]any{"type": "string"},
 			}, []string{"address"}),
 			Handler: a.toolSuppressionRemove,
 		},
 		{
 			Name:        "suppression_check",
-			Description: "Cheap single-row suppression lookup. Returns {suppressed (bool), reason, source, channel, address (canonical), suppressed_at}. Args: address, channel? (auto-detected if omitted).",
+			Description: "Cheap suppression lookup for an address. Checks exact address and, for email, its domain. Returns {suppressed, kind, reason, source, channel, address, matched, suppressed_at}. Args: address, channel? (auto-detected if omitted).",
 			InputSchema: schemaObject(map[string]any{
 				"address": map[string]any{"type": "string"},
 				"channel": map[string]any{"type": "string"},
@@ -847,6 +851,7 @@ type InboundRoute struct {
 type Suppression struct {
 	ProjectID string `json:"project_id,omitempty"`
 	Channel   string `json:"channel"`
+	Kind      string `json:"kind"`
 	Address   string `json:"address"`
 	Reason    string `json:"reason"`
 	Source    string `json:"source"`
@@ -2277,29 +2282,25 @@ func (a *App) toolSuppressionAdd(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	addrRaw := strArg(args, "address")
-	if addrRaw == "" {
-		return nil, errors.New("address required")
-	}
-	channel := strArg(args, "channel")
-	if channel == "" {
-		channel = guessChannelFromAddress(addrRaw)
-	}
-	if !validChannel(channel) {
-		return nil, errors.New("channel: required for suppression_add (one of email, sms, whatsapp)")
-	}
-	addr, err := normaliseAddress(channel, addrRaw)
+	channel, kind, value, err := normaliseSuppressionTarget(strArg(args, "channel"), strArg(args, "kind"), strArg(args, "address"))
 	if err != nil {
 		return nil, err
+	}
+	if kind == "domain" && isCommonSuppressionDomain(value) && !boolArg(args, "force", false) {
+		return nil, fmt.Errorf("domain %q is a common mailbox provider; pass force=true to suppress it", value)
 	}
 	reason := strArg(args, "reason")
 	if reason == "" {
 		reason = "manual"
 	}
-	if err := dbSuppressionUpsert(ctx.AppDB(), pid, channel, addr, reason, "manual"); err != nil {
+	source := strArg(args, "source")
+	if source == "" {
+		source = "manual"
+	}
+	if err := dbSuppressionUpsertKind(ctx.AppDB(), pid, channel, kind, value, reason, source); err != nil {
 		return nil, err
 	}
-	return map[string]any{"ok": true, "address": addr, "channel": channel, "reason": reason}, nil
+	return map[string]any{"ok": true, "address": value, "channel": channel, "kind": kind, "reason": reason}, nil
 }
 
 // toolSuppressionCheck answers "is this one address suppressed?"
@@ -2326,29 +2327,26 @@ func (a *App) toolSuppressionCheck(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if err != nil {
 		return nil, err
 	}
-	row := ctx.AppDB().QueryRow(
-		`SELECT reason, source, COALESCE(first_seen,'')
-		 FROM suppressions WHERE project_id = ? AND channel = ? AND address = ?`,
-		pid, channel, addr,
-	)
-	var reason, source, firstSeen string
-	if err := row.Scan(&reason, &source, &firstSeen); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return map[string]any{
-				"suppressed": false,
-				"channel":    channel,
-				"address":    addr,
-			}, nil
-		}
+	match, err := dbSuppressionMatch(ctx.AppDB(), pid, channel, addr)
+	if err != nil {
 		return nil, err
+	}
+	if match == nil {
+		return map[string]any{
+			"suppressed": false,
+			"channel":    channel,
+			"address":    addr,
+		}, nil
 	}
 	return map[string]any{
 		"suppressed":    true,
-		"reason":        reason,
-		"source":        source,
+		"reason":        match.Reason,
+		"source":        match.Source,
 		"channel":       channel,
 		"address":       addr,
-		"suppressed_at": firstSeen,
+		"kind":          match.Kind,
+		"matched":       match.Address,
+		"suppressed_at": match.FirstSeen,
 	}, nil
 }
 
@@ -2357,26 +2355,99 @@ func (a *App) toolSuppressionRemove(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err != nil {
 		return nil, err
 	}
-	addrRaw := strArg(args, "address")
-	channel := strArg(args, "channel")
-	if channel == "" {
-		channel = guessChannelFromAddress(addrRaw)
-	}
-	if !validChannel(channel) {
-		return nil, errors.New("channel: required for suppression_remove (one of email, sms, whatsapp)")
-	}
-	addr, err := normaliseAddress(channel, addrRaw)
+	channel, kind, value, err := normaliseSuppressionTarget(strArg(args, "channel"), strArg(args, "kind"), strArg(args, "address"))
 	if err != nil {
 		return nil, err
 	}
 	_, err = ctx.AppDB().Exec(
-		`DELETE FROM suppressions WHERE project_id = ? AND channel = ? AND address = ?`,
-		pid, channel, addr,
+		`DELETE FROM suppressions WHERE project_id = ? AND channel = ? AND kind = ? AND address = ?`,
+		pid, channel, kind, value,
 	)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"removed": true, "address": addr, "channel": channel}, nil
+	return map[string]any{"removed": true, "address": value, "channel": channel, "kind": kind}, nil
+}
+
+func normaliseSuppressionTarget(channel, kind, raw string) (string, string, string, error) {
+	raw = strings.TrimSpace(stripScheme(raw))
+	if raw == "" {
+		return "", "", "", errors.New("address required")
+	}
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	if kind == "" {
+		if !strings.Contains(raw, "@") && !looksLikeE164(raw) && looksLikeDomain(raw) {
+			kind = "domain"
+		} else {
+			kind = "address"
+		}
+	}
+	switch kind {
+	case "address":
+		if channel == "" {
+			channel = guessChannelFromAddress(raw)
+		}
+		if !validChannel(channel) {
+			return "", "", "", errors.New("channel: required for address suppression (one of email, sms, whatsapp)")
+		}
+		addr, err := normaliseAddress(channel, raw)
+		if err != nil {
+			return "", "", "", err
+		}
+		return channel, kind, addr, nil
+	case "domain":
+		if channel == "" {
+			channel = channelEmail
+		}
+		if channel != channelEmail {
+			return "", "", "", errors.New("domain suppression is only supported for email")
+		}
+		d, err := normaliseSuppressionDomain(raw)
+		if err != nil {
+			return "", "", "", err
+		}
+		return channel, kind, d, nil
+	default:
+		return "", "", "", fmt.Errorf("kind: unsupported value %q (address|domain)", kind)
+	}
+}
+
+func normaliseSuppressionDomain(raw string) (string, error) {
+	raw = strings.ToLower(strings.TrimSpace(stripScheme(strings.TrimPrefix(raw, "@"))))
+	if !looksLikeDomain(raw) {
+		return "", fmt.Errorf("invalid domain %q", raw)
+	}
+	return raw, nil
+}
+
+func looksLikeDomain(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(s, "@")))
+	if strings.IndexByte(s, '.') < 0 || strings.ContainsAny(s, " /\\\t\r\n") {
+		return false
+	}
+	if strings.Contains(s, "@") || strings.HasPrefix(s, ".") || strings.HasSuffix(s, ".") {
+		return false
+	}
+	return true
+}
+
+func emailDomain(addr string) string {
+	i := strings.LastIndexByte(addr, '@')
+	if i < 0 || i == len(addr)-1 {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(addr[i+1:]))
+}
+
+func isCommonSuppressionDomain(domain string) bool {
+	switch strings.ToLower(strings.TrimSpace(domain)) {
+	case "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com",
+		"icloud.com", "me.com", "mac.com", "yahoo.com", "ymail.com", "aol.com",
+		"proton.me", "protonmail.com", "pm.me", "fastmail.com":
+		return true
+	}
+	return false
 }
 
 // guessChannelFromAddress returns the most likely channel for a
@@ -3440,6 +3511,32 @@ const crmInboundReceiveTool = "messaging_inbound_receive"
 func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 	if m == nil {
 		return errors.New("nil message")
+	}
+	sender := canonicalAddrForChannel(m.Channel, m.From)
+	if sender != "" {
+		match, err := dbSuppressionMatch(ctx.AppDB(), pid, m.Channel, sender)
+		if err != nil {
+			return err
+		}
+		if match != nil {
+			now := time.Now().UTC().Format(time.RFC3339)
+			reason := fmt.Sprintf("suppressed by %s %s", match.Kind, match.Address)
+			_, _ = ctx.AppDB().Exec(
+				`UPDATE messages
+				 SET route_status='suppressed', route_error = ?, route_attempts = route_attempts + 1, last_event_at = ?
+				 WHERE id = ?`,
+				reason, now, m.ID,
+			)
+			emitMessagingEvent(ctx, pid, "message.suppressed", map[string]any{
+				"id":      m.ID,
+				"channel": m.Channel,
+				"from":    sender,
+				"kind":    match.Kind,
+				"matched": match.Address,
+				"reason":  match.Reason,
+			})
+			return nil
+		}
 	}
 	routes, err := dbInboundRouteList(ctx.AppDB(), pid)
 	if err != nil {
@@ -5998,14 +6095,19 @@ func dbInboundRouteDelete(db *sql.DB, pid string, id int64) error {
 }
 
 func dbSuppressionUpsert(db *sql.DB, pid, channel, addr, reason, source string) error {
+	return dbSuppressionUpsertKind(db, pid, channel, "address", addr, reason, source)
+}
+
+func dbSuppressionUpsertKind(db *sql.DB, pid, channel, kind, addr, reason, source string) error {
 	_, err := db.Exec(
-		`INSERT INTO suppressions (project_id, channel, address, reason, source, first_seen, last_seen)
-		 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		`INSERT INTO suppressions (project_id, channel, kind, address, reason, source, first_seen, last_seen)
+		 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		 ON CONFLICT(project_id, channel, address) DO UPDATE SET
+		   kind = excluded.kind,
 		   reason = excluded.reason,
 		   source = CASE WHEN suppressions.source = 'manual' THEN 'manual' ELSE excluded.source END,
 		   last_seen = CURRENT_TIMESTAMP`,
-		pid, channel, addr, reason, source,
+		pid, channel, kind, addr, reason, source,
 	)
 	return err
 }
@@ -6019,7 +6121,7 @@ func dbSuppressionList(db *sql.DB, pid, channel string, limit int) ([]Suppressio
 	}
 	args = append(args, limit)
 	rows, err := db.Query(
-		`SELECT project_id, channel, address, reason, source,
+		`SELECT project_id, channel, COALESCE(kind,'address'), address, reason, source,
 		        COALESCE(first_seen,''), COALESCE(last_seen,'')
 		 FROM suppressions WHERE `+strings.Join(where, " AND ")+
 			` ORDER BY last_seen DESC LIMIT ?`, args...)
@@ -6030,11 +6132,46 @@ func dbSuppressionList(db *sql.DB, pid, channel string, limit int) ([]Suppressio
 	out := []Suppression{}
 	for rows.Next() {
 		s := Suppression{}
-		if err := rows.Scan(&s.ProjectID, &s.Channel, &s.Address, &s.Reason, &s.Source, &s.FirstSeen, &s.LastSeen); err == nil {
+		if err := rows.Scan(&s.ProjectID, &s.Channel, &s.Kind, &s.Address, &s.Reason, &s.Source, &s.FirstSeen, &s.LastSeen); err == nil {
 			out = append(out, s)
 		}
 	}
 	return out, nil
+}
+
+func dbSuppressionMatch(db *sql.DB, pid, channel, addr string) (*Suppression, error) {
+	candidates := []struct {
+		kind  string
+		value string
+	}{
+		{kind: "address", value: strings.ToLower(addr)},
+	}
+	if channel == channelEmail {
+		if d := emailDomain(addr); d != "" {
+			candidates = append(candidates, struct {
+				kind  string
+				value string
+			}{kind: "domain", value: d})
+		}
+	}
+	for _, c := range candidates {
+		row := db.QueryRow(
+			`SELECT project_id, channel, COALESCE(kind,'address'), address, reason, source,
+			        COALESCE(first_seen,''), COALESCE(last_seen,'')
+			 FROM suppressions
+			 WHERE project_id = ? AND channel = ? AND kind = ? AND address = ?`,
+			pid, channel, c.kind, c.value,
+		)
+		s := &Suppression{}
+		if err := row.Scan(&s.ProjectID, &s.Channel, &s.Kind, &s.Address, &s.Reason, &s.Source, &s.FirstSeen, &s.LastSeen); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return nil, err
+		}
+		return s, nil
+	}
+	return nil, nil
 }
 
 func filterSuppressed(db *sql.DB, pid, channel string, addrs []string) (allowed, suppressed []string) {
@@ -6042,22 +6179,29 @@ func filterSuppressed(db *sql.DB, pid, channel string, addrs []string) (allowed,
 		return addrs, nil
 	}
 	rows, err := db.Query(
-		`SELECT address FROM suppressions WHERE project_id = ? AND channel = ?`,
+		`SELECT COALESCE(kind,'address'), address FROM suppressions WHERE project_id = ? AND channel = ?`,
 		pid, channel,
 	)
 	if err != nil {
 		return addrs, nil
 	}
 	defer rows.Close()
-	suppr := map[string]bool{}
+	addresses := map[string]bool{}
+	domains := map[string]bool{}
 	for rows.Next() {
-		var a string
-		if err := rows.Scan(&a); err == nil {
-			suppr[strings.ToLower(a)] = true
+		var kind, a string
+		if err := rows.Scan(&kind, &a); err == nil {
+			switch kind {
+			case "domain":
+				domains[strings.ToLower(a)] = true
+			default:
+				addresses[strings.ToLower(a)] = true
+			}
 		}
 	}
 	for _, a := range addrs {
-		if suppr[strings.ToLower(a)] {
+		lower := strings.ToLower(a)
+		if addresses[lower] || (channel == channelEmail && domains[emailDomain(lower)]) {
 			suppressed = append(suppressed, a)
 		} else {
 			allowed = append(allowed, a)

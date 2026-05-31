@@ -156,6 +156,87 @@ func TestDispatchInbound_CRMLegacyRouteCallsInboundToolWithProject(t *testing.T)
 	}
 }
 
+func TestDispatchInbound_SuppressedSenderSkipsRoute(t *testing.T) {
+	plat := &stubPlatform{callAppReply: json.RawMessage(`{"ok":true}`)}
+	ctx := newTestCtx(t, plat)
+	if _, err := dbInboundRouteUpsert(ctx.AppDB(), "test-proj", channelEmail, "*", "crm", "/inbound", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbSuppressionUpsertKind(ctx.AppDB(), "test-proj", channelEmail, "domain", "spammer.test", "crm-spam", "manual"); err != nil {
+		t.Fatal(err)
+	}
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO messages
+			(project_id, channel, direction, from_addr, to_addrs, status, route_status)
+		 VALUES ('test-proj', 'email', 'in', 'pitch@spammer.test', '["support@our.test"]', 'received', 'pending')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+	msg, err := dbMessageGet(ctx.AppDB(), "test-proj", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatchInbound(ctx, "test-proj", msg); err != nil {
+		t.Fatal(err)
+	}
+	if len(plat.callAppCalls) != 0 {
+		t.Fatalf("suppressed inbound should not dispatch, got %d CallApp calls", len(plat.callAppCalls))
+	}
+	got, _ := dbMessageGet(ctx.AppDB(), "test-proj", id)
+	if got.RouteStatus != "suppressed" {
+		t.Fatalf("route_status=%q, want suppressed", got.RouteStatus)
+	}
+	if got.RouteAttempts != 1 {
+		t.Fatalf("route_attempts=%d, want 1", got.RouteAttempts)
+	}
+}
+
+func TestSuppression_DomainBlocksOutboundAndRequiresForceForCommonDomains(t *testing.T) {
+	ctx := newTestCtx(t, nil)
+	app := &App{}
+
+	if _, err := app.toolSuppressionAdd(ctx, map[string]any{
+		"address": "gmail.com",
+		"kind":    "domain",
+		"reason":  "test",
+	}); err == nil {
+		t.Fatal("expected common-domain suppression to require force=true")
+	}
+	out, err := app.toolSuppressionAdd(ctx, map[string]any{
+		"address": "spammer.test",
+		"kind":    "domain",
+		"reason":  "crm-spam",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := out.(map[string]any)
+	if row["kind"] != "domain" || row["address"] != "spammer.test" {
+		t.Fatalf("unexpected suppression row: %v", row)
+	}
+	allowed, suppressed := filterSuppressed(ctx.AppDB(), "test-proj", channelEmail, []string{
+		"lead@spammer.test",
+		"friend@example.com",
+	})
+	if len(allowed) != 1 || allowed[0] != "friend@example.com" {
+		t.Fatalf("allowed=%v", allowed)
+	}
+	if len(suppressed) != 1 || suppressed[0] != "lead@spammer.test" {
+		t.Fatalf("suppressed=%v", suppressed)
+	}
+
+	check, err := app.toolSuppressionCheck(ctx, map[string]any{"address": "other@spammer.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := check.(map[string]any)
+	if checked["suppressed"] != true || checked["kind"] != "domain" || checked["matched"] != "spammer.test" {
+		t.Fatalf("unexpected suppression check: %v", checked)
+	}
+}
+
 // Unused PlatformClient methods — return zero values; tests that hit
 // them would panic, which is the intended signal.
 func (s *stubPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
