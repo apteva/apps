@@ -82,6 +82,18 @@ function mcpErrorText(data: any): string | null {
   return data.content?.find((c: any) => c.type === "text")?.text || "Request returned an error";
 }
 
+function campaignStatusClass(status: string): string {
+  if (status === "ACTIVE") return "bg-accent/10 text-accent";
+  if (status === "PAUSED") return "bg-yellow/15 text-yellow";
+  return "bg-border text-text-muted";
+}
+
+function platformInitial(platform: string): string {
+  if (platform === "meta") return "M";
+  if (platform === "google") return "G";
+  return platform.slice(0, 1).toUpperCase();
+}
+
 async function apiJSON(path: string, init?: RequestInit): Promise<any> {
   const res = await fetch(appURL(path), {
     credentials: "same-origin",
@@ -304,66 +316,96 @@ export default function AdsPanel(props: NativePanelProps) {
   };
 
   return (
-    <div style={{ padding: 24, fontFamily: "system-ui, sans-serif" }}>
-      <header style={{ display: "flex", alignItems: "center", marginBottom: 24 }}>
-        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 600 }}>Ads</h1>
+    <div className="h-full flex flex-col text-text">
+      <header className="flex items-center justify-between gap-4 border-b border-border px-4 py-3">
+        <div className="min-w-0">
+          <h1 className="text-lg font-semibold text-text">Ads</h1>
+          <p className="text-xs text-text-muted truncate">
+            {accounts.length} connected account{accounts.length === 1 ? "" : "s"}
+            {selected ? ` · ${selected.display_name}` : ""}
+          </p>
+        </div>
         <button
+          type="button"
           onClick={handleAddAccount}
-          style={{ marginLeft: "auto", padding: "8px 14px", borderRadius: 6, border: "1px solid #333", background: "#000", color: "#fff", cursor: "pointer" }}
+          className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg whitespace-nowrap"
         >
-          + Add Account
+          + Add account
         </button>
       </header>
 
       {error && (
-        <div style={{ padding: 12, marginBottom: 16, background: "#fee", border: "1px solid #f99", borderRadius: 6 }}>
-          {error}
-          <button onClick={() => setError(null)} style={{ float: "right", background: "transparent", border: 0, cursor: "pointer" }}>×</button>
+        <div className="mx-4 mt-4 rounded border border-red/40 bg-red/10 px-3 py-2 text-sm text-red flex items-center gap-3">
+          <span className="flex-1 min-w-0">{error}</span>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            className="text-red/80 hover:text-red px-1"
+          >×</button>
         </div>
       )}
 
       {addOpen && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.32)", display: "grid", placeItems: "center", zIndex: 20 }}>
-          <div style={{ width: 440, maxWidth: "calc(100vw - 32px)", background: "#fff", border: "1px solid #ddd", borderRadius: 8, boxShadow: "0 12px 40px rgba(0,0,0,.18)" }}>
-            <div style={{ padding: 16, borderBottom: "1px solid #eee", display: "flex", alignItems: "center" }}>
-              <h3 style={{ margin: 0, fontSize: 16 }}>Add ad account</h3>
-              <button onClick={() => setAddOpen(false)} style={{ marginLeft: "auto", border: 0, background: "transparent", fontSize: 20, cursor: "pointer" }}>×</button>
+        <div className="fixed inset-0 bg-black/40 grid place-items-center z-20 p-4">
+          <div className="w-full max-w-lg bg-bg-card border border-border rounded shadow-xl">
+            <div className="px-4 py-3 border-b border-border flex items-center gap-3">
+              <div className="min-w-0">
+                <h3 className="text-sm font-medium text-text">Add ad account</h3>
+                <p className="text-xs text-text-muted">Choose an available ads integration.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAddOpen(false)}
+                className="ml-auto text-text-muted hover:text-text text-lg leading-none px-1"
+              >×</button>
             </div>
-            <div style={{ padding: 16 }}>
+            <div className="p-4">
               {platforms.length === 0 ? (
-                <p style={{ color: "#666", margin: 0 }}>Checking ad integrations…</p>
+                <p className="text-sm text-text-muted">Checking ad integrations…</p>
               ) : (
-                <div style={{ display: "grid", gap: 8 }}>
+                <div className="grid gap-2">
                   {platforms.map(p => (
                     <button
+                      type="button"
                       key={p.platform}
                       disabled={!p.can_add || startingPlatform === p.platform}
                       onClick={() => handleStartPlatform(p)}
-                      style={{
-                        textAlign: "left",
-                        padding: 12,
-                        borderRadius: 6,
-                        border: "1px solid " + (p.can_add ? "#bbb" : "#e0e0e0"),
-                        background: p.can_add ? "#fff" : "#f7f7f7",
-                        color: p.can_add ? "#111" : "#777",
-                        cursor: p.can_add ? "pointer" : "not-allowed",
-                      }}
+                      className={`w-full text-left border rounded px-3 py-2 transition ${
+                        p.can_add
+                          ? "border-border hover:bg-bg-input"
+                          : "border-border bg-bg-input/40 opacity-70 cursor-not-allowed"
+                      }`}
                     >
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <span style={{ fontWeight: 600 }}>{p.display_name}</span>
-                        {p.active_account && <span style={{ fontSize: 11, color: "#066", background: "#dff", padding: "2px 6px", borderRadius: 999 }}>already added</span>}
-                        {p.available && !p.supported && <span style={{ fontSize: 11, color: "#875", background: "#fff4d8", padding: "2px 6px", borderRadius: 999 }}>not wired</span>}
-                      </div>
-                      <div style={{ marginTop: 4, fontSize: 12, color: p.can_add ? "#666" : "#888" }}>
-                        {p.can_add
-                          ? `${p.connection_count || 1} active integration connection${(p.connection_count || 1) === 1 ? "" : "s"} found. Pick an ad account after OAuth/reuse.`
-                          : p.unavailable_reason}
+                      <div className="flex items-center gap-3">
+                        <span className="w-7 h-7 rounded bg-bg-input border border-border flex items-center justify-center text-xs font-medium text-text-muted shrink-0">
+                          {platformInitial(p.platform)}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="font-medium text-sm text-text truncate">{p.display_name}</span>
+                            {p.active_account && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent shrink-0">added</span>
+                            )}
+                            {p.available && !p.supported && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow/15 text-yellow shrink-0">not wired</span>
+                            )}
+                          </div>
+                          <div className="mt-0.5 text-xs text-text-muted">
+                            {p.can_add
+                              ? `${p.connection_count || 1} active connection${(p.connection_count || 1) === 1 ? "" : "s"} found.`
+                              : p.unavailable_reason}
+                          </div>
+                        </div>
                       </div>
                     </button>
                   ))}
                 </div>
               )}
-              <button onClick={handleForceOAuth} style={{ marginTop: 12, border: 0, background: "transparent", color: "#555", textDecoration: "underline", cursor: "pointer", padding: 0 }}>
+              <button
+                type="button"
+                onClick={handleForceOAuth}
+                className="mt-3 text-xs text-accent hover:underline"
+              >
                 Refresh available integrations
               </button>
             </div>
@@ -372,116 +414,161 @@ export default function AdsPanel(props: NativePanelProps) {
       )}
 
       {pendingPicker && (
-        <div style={{ padding: 16, marginBottom: 16, border: "1px solid #ccc", borderRadius: 6, background: "#fafafa" }}>
-          <h3 style={{ marginTop: 0 }}>Pick an ad account</h3>
+        <section className="mx-4 mt-4 border border-border rounded bg-bg-input/30">
+          <header className="px-3 py-2 border-b border-border">
+            <h3 className="text-sm font-medium text-text">Pick an ad account</h3>
+            <p className="text-xs text-text-muted">Select the upstream account to manage from this project.</p>
+          </header>
           {pendingPicker.pages.length === 0 ? (
-            <p style={{ color: "#666" }}>No ad accounts found on this connection.</p>
+            <p className="px-3 py-4 text-sm text-text-muted">No ad accounts found on this connection.</p>
           ) : (
-            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            <ul className="divide-y divide-border">
               {pendingPicker.pages.map(p => (
-                <li key={p.id} style={{ padding: 10, borderBottom: "1px solid #eee", display: "flex", alignItems: "center" }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 500 }}>{p.name || p.id}</div>
-                    <div style={{ fontSize: 12, color: "#666" }}>
+                <li key={p.id} className="px-3 py-2 flex items-center gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-text truncate">{p.name || p.id}</div>
+                    <div className="text-xs text-text-muted truncate">
                       {p.id} · {p.currency} · {p.timezone}
                     </div>
                   </div>
-                  <button onClick={() => handleFinalize(p)} style={{ padding: "6px 12px", borderRadius: 4, border: "1px solid #333", cursor: "pointer" }}>
+                  <button
+                    type="button"
+                    onClick={() => handleFinalize(p)}
+                    className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg shrink-0"
+                  >
                     Use this account
                   </button>
                 </li>
               ))}
             </ul>
           )}
-        </div>
+        </section>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 24 }}>
-        <aside>
-          <h3 style={{ marginTop: 0, fontSize: 14, textTransform: "uppercase", color: "#666" }}>Connected accounts</h3>
-          {accounts.length === 0 ? (
-            <p style={{ color: "#999", fontSize: 14 }}>No accounts connected yet. Click "Add Account" to start.</p>
-          ) : (
-            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-              {accounts.map(a => (
-                <li
-                  key={a.id}
-                  onClick={() => handleSelect(a)}
-                  style={{
-                    padding: 10,
-                    borderRadius: 6,
-                    cursor: "pointer",
-                    background: selected?.id === a.id ? "#eef" : "transparent",
-                    border: "1px solid " + (selected?.id === a.id ? "#99c" : "transparent"),
-                    marginBottom: 4,
-                  }}
-                >
-                  <div style={{ fontWeight: 500 }}>{a.display_name}</div>
-                  <div style={{ fontSize: 12, color: "#666" }}>
-                    {a.platform} · {a.native_account_id} · {a.currency}
-                  </div>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleDisconnect(a); }}
-                    style={{ marginTop: 4, fontSize: 11, background: "transparent", border: 0, color: "#c33", cursor: "pointer", padding: 0 }}
-                  >
-                    Disconnect
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
+      <div className="flex-1 min-h-0 flex">
+        <aside className="w-80 max-w-[40%] shrink-0 border-r border-border flex flex-col">
+          <div className="px-3 py-2 border-b border-border">
+            <h2 className="text-xs uppercase tracking-wide text-text-dim">Connected accounts</h2>
+          </div>
+          <div className="flex-1 overflow-auto">
+            {accounts.length === 0 ? (
+              <div className="py-12 px-4 text-center text-sm text-text-muted">
+                No ad accounts connected.
+              </div>
+            ) : (
+              <ul className="divide-y divide-border">
+                {accounts.map(a => (
+                  <li key={a.id}>
+                    <button
+                      type="button"
+                      onClick={() => handleSelect(a)}
+                      className={`w-full text-left px-3 py-2 hover:bg-bg-input/60 ${
+                        selected?.id === a.id ? "bg-accent/10" : ""
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <span className="w-7 h-7 rounded bg-bg-input border border-border flex items-center justify-center text-xs font-medium text-text-muted shrink-0">
+                          {platformInitial(a.platform)}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-medium text-text truncate">{a.display_name}</div>
+                          <div className="text-xs text-text-muted truncate">
+                            {a.platform} · {a.native_account_id} · {a.currency || "—"}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); handleDisconnect(a); }}
+                            className="mt-1 text-[11px] text-red hover:underline"
+                          >
+                            Disconnect
+                          </button>
+                        </div>
+                      </div>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </aside>
 
-        <main>
+        <main className="flex-1 min-w-0 flex flex-col">
           {!selected ? (
-            <p style={{ color: "#999" }}>Select an ad account on the left to see its campaigns.</p>
+            <div className="flex-1 grid place-items-center p-6">
+              <div className="text-center">
+                <h2 className="text-sm font-medium text-text">Select an ad account</h2>
+                <p className="text-sm text-text-muted mt-1">Campaigns appear here after you choose an account.</p>
+              </div>
+            </div>
           ) : (
             <>
-              <h3 style={{ marginTop: 0 }}>{selected.display_name} · Campaigns</h3>
-              {loading && <p>Loading…</p>}
-              {!loading && campaigns.length === 0 && (
-                <p style={{ color: "#999" }}>No campaigns on this account yet. Ask an agent to create one via campaign_create.</p>
-              )}
-              {!loading && campaigns.length > 0 && (
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
-                  <thead>
-                    <tr style={{ borderBottom: "1px solid #ddd", textAlign: "left" }}>
-                      <th style={{ padding: 8 }}>Name</th>
-                      <th style={{ padding: 8 }}>Objective</th>
-                      <th style={{ padding: 8 }}>Status</th>
-                      <th style={{ padding: 8 }}>Daily budget</th>
-                      <th style={{ padding: 8 }}></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {campaigns.map(c => (
-                      <tr key={c.id} style={{ borderBottom: "1px solid #eee" }}>
-                        <td style={{ padding: 8 }}>{c.name}</td>
-                        <td style={{ padding: 8, color: "#666" }}>{c.objective}</td>
-                        <td style={{ padding: 8 }}>
-                          <span style={{
-                            padding: "2px 8px",
-                            borderRadius: 12,
-                            fontSize: 12,
-                            background: c.status === "ACTIVE" ? "#cfc" : "#eee",
-                            color: c.status === "ACTIVE" ? "#060" : "#666",
-                          }}>
-                            {c.status}
-                          </span>
-                        </td>
-                        <td style={{ padding: 8, color: "#666" }}>
-                          {c.daily_budget ? `$${(Number(c.daily_budget) / 100).toFixed(2)}` : "—"}
-                        </td>
-                        <td style={{ padding: 8, textAlign: "right" }}>
-                          <button onClick={() => handleStatusToggle(c)} style={{ padding: "4px 10px", borderRadius: 4, border: "1px solid #ccc", cursor: "pointer" }}>
-                            {c.status === "ACTIVE" ? "Pause" : "Resume"}
-                          </button>
-                        </td>
+              <header className="px-4 py-3 border-b border-border flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <h2 className="text-sm font-medium text-text truncate">{selected.display_name}</h2>
+                  <p className="text-xs text-text-muted truncate">
+                    {selected.platform} · {selected.native_account_id} · {selected.currency || "—"}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => refreshCampaigns(selected)}
+                  disabled={loading}
+                  className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input disabled:opacity-50 shrink-0"
+                >
+                  Refresh
+                </button>
+              </header>
+              <div className="flex-1 overflow-auto">
+                {loading && (
+                  <div className="p-4 text-sm text-text-muted">Loading campaigns…</div>
+                )}
+                {!loading && campaigns.length === 0 && (
+                  <div className="py-12 px-6 text-center text-sm text-text-muted">
+                    No campaigns on this account yet.
+                  </div>
+                )}
+                {!loading && campaigns.length > 0 && (
+                  <table className="w-full text-sm">
+                    <thead className="text-text-dim text-xs uppercase tracking-wide bg-bg-input/50">
+                      <tr>
+                        <th className="text-left px-4 py-2 font-normal">Name</th>
+                        <th className="text-left px-4 py-2 font-normal w-36">Objective</th>
+                        <th className="text-left px-4 py-2 font-normal w-28">Status</th>
+                        <th className="text-left px-4 py-2 font-normal w-32">Daily budget</th>
+                        <th className="text-right px-4 py-2 font-normal w-28">Actions</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
+                    </thead>
+                    <tbody>
+                      {campaigns.map(c => (
+                        <tr key={c.id} className="border-t border-border hover:bg-bg-input/30">
+                          <td className="px-4 py-2">
+                            <div className="text-text font-medium truncate max-w-lg" title={c.name}>{c.name}</div>
+                            <div className="text-xs text-text-dim font-mono truncate max-w-lg">{c.id}</div>
+                          </td>
+                          <td className="px-4 py-2 text-text-muted">{c.objective || "—"}</td>
+                          <td className="px-4 py-2">
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${campaignStatusClass(c.status)}`}>
+                              {c.status || c.effective_status || "—"}
+                            </span>
+                          </td>
+                          <td className="px-4 py-2 text-text-muted">
+                            {c.daily_budget ? `$${(Number(c.daily_budget) / 100).toFixed(2)}` : "—"}
+                          </td>
+                          <td className="px-4 py-2 text-right">
+                            <button
+                              type="button"
+                              onClick={() => handleStatusToggle(c)}
+                              className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
+                            >
+                              {c.status === "ACTIVE" ? "Pause" : "Resume"}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
             </>
           )}
         </main>
