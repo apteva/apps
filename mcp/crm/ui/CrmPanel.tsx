@@ -139,14 +139,14 @@ interface Conversation {
   channel: string;
   subject?: string;
   root_message_id?: string;
-  status?: string;   // open | pending | closed
+  status?: string;   // open | pending | closed | spam
   priority?: string; // low | normal | high | urgent
   started_at: string;
   last_activity_at: string;
 }
 
-type ConvoStatus = "open" | "pending" | "closed";
-const CONVO_STATUSES: ConvoStatus[] = ["open", "pending", "closed"];
+type ConvoStatus = "open" | "pending" | "closed" | "spam";
+const CONVO_STATUSES: ConvoStatus[] = ["open", "pending", "closed", "spam"];
 type ConvoPriority = "low" | "normal" | "high" | "urgent";
 const CONVO_PRIORITIES: ConvoPriority[] = ["low", "normal", "high", "urgent"];
 
@@ -155,6 +155,7 @@ const STATUS_STYLES: Record<string, string> = {
   open: "bg-accent/10 text-accent",
   pending: "bg-yellow/15 text-yellow",
   closed: "bg-border text-text-muted",
+  spam: "bg-red/15 text-red",
 };
 const PRIORITY_DOT: Record<string, string> = {
   low: "bg-text-dim",
@@ -891,7 +892,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const [convoBusy, setConvoBusy] = useState(false);
   const [showClosed, setShowClosed] = useState(false);
   const setConversationStatus = useCallback(
-    async (conversationId: string, patch: { status?: string; priority?: string }) => {
+    async (conversationId: string, patch: { status?: string; priority?: string; spam_scope?: string; force?: boolean }) => {
       if (!selectedId) return;
       setConvoBusy(true);
       try {
@@ -1400,7 +1401,7 @@ function ActivityGroup({
 }: {
   group: Group;
   onReply: (a: Activity) => void;
-  onSetStatus: (conversationId: string, patch: { status?: string; priority?: string }) => void;
+  onSetStatus: (conversationId: string, patch: { status?: string; priority?: string; spam_scope?: string; force?: boolean }) => void;
   busy: boolean;
 }) {
   if (group.kind === "loose") {
@@ -1431,8 +1432,7 @@ function ActivityGroup({
 }
 
 // ConversationStatusControl renders the status pill and, on the same
-// row, the quick state actions. open → [Pending][Close]; pending →
-// [Reopen][Close]; closed → [Reopen]. Priority is a tiny inline select.
+// row, the quick state actions. Priority is a tiny inline select.
 function ConversationStatusControl({
   group,
   onSetStatus,
@@ -1459,14 +1459,20 @@ function ConversationStatusControl({
           <option key={p} value={p}>{p}</option>
         ))}
       </select>
-      {group.status !== "pending" && group.status !== "closed" && (
+      {group.status !== "pending" && group.status !== "closed" && group.status !== "spam" && (
         <button type="button" disabled={busy} className={btn} onClick={() => onSetStatus(cid, { status: "pending" })}>Pending</button>
       )}
       {group.status !== "open" && (
         <button type="button" disabled={busy} className={btn} onClick={() => onSetStatus(cid, { status: "open" })}>Reopen</button>
       )}
-      {group.status !== "closed" && (
+      {group.status !== "closed" && group.status !== "spam" && (
         <button type="button" disabled={busy} className={btn} onClick={() => onSetStatus(cid, { status: "closed" })}>Close</button>
+      )}
+      {group.status !== "spam" && (
+        <button type="button" disabled={busy} className={btn} onClick={() => onSetStatus(cid, { status: "spam", spam_scope: "sender" })}>Spam</button>
+      )}
+      {group.channel === "email" && (
+        <button type="button" disabled={busy} className={btn} onClick={() => onSetStatus(cid, { status: "spam", spam_scope: "domain" })}>Block domain</button>
       )}
     </span>
   );
@@ -2195,6 +2201,7 @@ function InboxTab({ api, lists, onOpenContact }: {
           <option value="open">Open</option>
           <option value="pending">Pending</option>
           <option value="closed">Closed</option>
+          <option value="spam">Spam</option>
           <option value="all">All</option>
         </select>
           <select value={channelFilter} onChange={(e) => setChannelFilter(e.target.value)} className={inp}>

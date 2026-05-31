@@ -39,7 +39,7 @@ type Conversation struct {
 	Channel         string `json:"channel"`
 	Subject         string `json:"subject,omitempty"`
 	RootMessageID   string `json:"root_message_id,omitempty"`
-	Status          string `json:"status"`   // open | pending | closed
+	Status          string `json:"status"`   // open | pending | closed | spam
 	Priority        string `json:"priority"` // low | normal | high | urgent
 	StatusChangedAt string `json:"status_changed_at,omitempty"`
 	StartedAt       string `json:"started_at"`
@@ -48,7 +48,7 @@ type Conversation struct {
 
 // Conversation status + priority vocabularies. Kept small and explicit —
 // see migrations/005 for why we don't carry snooze / on-hold / solved.
-var convoStatuses = map[string]bool{"open": true, "pending": true, "closed": true}
+var convoStatuses = map[string]bool{"open": true, "pending": true, "closed": true, "spam": true}
 var convoPriorities = map[string]bool{"low": true, "normal": true, "high": true, "urgent": true}
 
 // convoColumns is the canonical SELECT list for a Conversation row.
@@ -237,20 +237,61 @@ func dbConversationSetStatus(db *sql.DB, pid string, id int64, status, priority 
 
 // dbConversationReopenIfClosed flips a non-open conversation back to
 // 'open' — called when a new inbound arrives on an existing thread. The
-// contact replied, so the ball is back in our court. No-op (0 rows) on a
-// conversation that's already open, so it's always safe to call. Returns
-// true when it actually reopened something.
+// contact replied, so the ball is back in our court. Spam conversations
+// stay spam: inbound spam should not make the thread actionable again.
+// No-op (0 rows) on a conversation that's already open, so it's always
+// safe to call. Returns true when it actually reopened something.
 func dbConversationReopenIfClosed(db *sql.DB, pid string, id int64) (bool, error) {
 	res, err := db.Exec(
 		`UPDATE contact_conversations
 		 SET status = 'open', status_changed_at = ?
-		 WHERE project_id = ? AND id = ? AND COALESCE(status,'open') <> 'open'`,
+		 WHERE project_id = ? AND id = ?
+		   AND COALESCE(status,'open') NOT IN ('open', 'spam')`,
 		time.Now().UTC().Format(time.RFC3339), pid, id,
 	)
 	if err != nil {
 		return false, err
 	}
 	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+func dbContactMarkSpam(db *sql.DB, pid string, contactID int64) error {
+	if _, err := db.Exec(
+		`UPDATE contacts
+		 SET status = 'spam', updated_at = CURRENT_TIMESTAMP
+		 WHERE project_id = ? AND id = ?`,
+		pid, contactID,
+	); err != nil {
+		return err
+	}
+	return dbAddTag(db, pid, contactID, "spam")
+}
+
+func dbContactIsSpam(db *sql.DB, pid string, contactID int64) (bool, error) {
+	var status string
+	if err := db.QueryRow(
+		`SELECT COALESCE(status,'active')
+		 FROM contacts
+		 WHERE project_id = ? AND id = ? AND deleted_at IS NULL`,
+		pid, contactID,
+	).Scan(&status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	if strings.EqualFold(status, "spam") {
+		return true, nil
+	}
+	var n int
+	if err := db.QueryRow(
+		`SELECT COUNT(1) FROM contact_tags
+		 WHERE project_id = ? AND contact_id = ? AND LOWER(tag_name) = 'spam'`,
+		pid, contactID,
+	).Scan(&n); err != nil {
+		return false, err
+	}
 	return n > 0, nil
 }
 
@@ -540,6 +581,112 @@ func suppressionCheck(ctx *sdk.AppCtx, channel, address string) (bool, string) {
 		return false, ""
 	}
 	return out.Suppressed, out.Reason
+}
+
+type spamSuppressionResult struct {
+	Attempted bool   `json:"attempted"`
+	Kind      string `json:"kind,omitempty"`
+	Address   string `json:"address,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+func conversationSpamTarget(db *sql.DB, pid string, convo *Conversation, scope string) (kind, address string, err error) {
+	if convo == nil {
+		return "", "", errors.New("conversation not found")
+	}
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	if scope == "" {
+		scope = "sender"
+	}
+	if scope != "sender" && scope != "domain" {
+		return "", "", fmt.Errorf("invalid spam_scope %q (sender|domain)", scope)
+	}
+	addr := ""
+	row := db.QueryRow(
+		`SELECT address
+		 FROM conversation_participants
+		 WHERE project_id = ? AND conversation_id = ? AND role = 'from'
+		 ORDER BY CASE WHEN contact_id = ? THEN 0 ELSE 1 END, id DESC
+		 LIMIT 1`,
+		pid, convo.ID, convo.ContactID,
+	)
+	if err := row.Scan(&addr); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", "", err
+	}
+	if strings.TrimSpace(addr) == "" {
+		contact, err := dbGetByID(db, pid, convo.ContactID)
+		if err != nil {
+			return "", "", err
+		}
+		if contact != nil {
+			switch convo.Channel {
+			case channelEmail:
+				addr = contact.PrimaryEmail
+			case channelSMS, channelWhatsApp:
+				addr = contact.PrimaryPhone
+			}
+		}
+	}
+	addr = canonicalParticipantAddress(convo.Channel, addr)
+	if scope == "domain" {
+		if convo.Channel != channelEmail {
+			return "", "", errors.New("spam_scope=domain is only supported for email conversations")
+		}
+		domain := domainOf(addr)
+		if domain == "" {
+			return "", "", errors.New("email sender domain not found")
+		}
+		return "domain", domain, nil
+	}
+	if addr == "" {
+		return "", "", nil
+	}
+	return "address", addr, nil
+}
+
+func applyConversationSpam(ctx *sdk.AppCtx, pid string, convo *Conversation, scope string, force bool) spamSuppressionResult {
+	res := spamSuppressionResult{}
+	if ctx == nil || convo == nil {
+		return res
+	}
+	db := ctx.AppDB()
+	if err := dbContactMarkSpam(db, pid, convo.ContactID); err != nil {
+		res.Error = "mark contact spam: " + err.Error()
+		return res
+	}
+	_, _ = logMessageActivity(db, logMessageActivityInput{
+		ProjectID:      pid,
+		ContactID:      convo.ContactID,
+		Kind:           ActivityKindSystem,
+		Body:           "marked conversation as spam",
+		Source:         "crm",
+		ConversationID: convo.ID,
+	})
+	kind, address, err := conversationSpamTarget(db, pid, convo, scope)
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	if address == "" || messagingBound(ctx) == nil {
+		return res
+	}
+	res.Attempted = true
+	res.Kind = kind
+	res.Address = address
+	var out map[string]any
+	err = callMessagingTool(ctx, "suppression_add", map[string]any{
+		"_project_id": pid,
+		"channel":     convo.Channel,
+		"address":     address,
+		"kind":        kind,
+		"reason":      "crm-spam",
+		"source":      "crm",
+		"force":       force,
+	}, &out)
+	if err != nil {
+		res.Error = err.Error()
+	}
+	return res
 }
 
 func (a *App) toolMessagingSendersList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1171,7 +1318,7 @@ func (a *App) toolListConversations(ctx *sdk.AppCtx, args map[string]any) (any, 
 	channel := strings.ToLower(strArg(args, "channel"))
 	status := strings.ToLower(strings.TrimSpace(strArg(args, "status")))
 	if status != "" && !convoStatuses[status] {
-		return nil, fmt.Errorf("invalid status %q (open|pending|closed)", status)
+		return nil, fmt.Errorf("invalid status %q (open|pending|closed|spam)", status)
 	}
 	limit := intArg(args, "limit", 50)
 	out, err := dbConversationsList(ctx.AppDB(), pid, cid, channel, status, limit)
@@ -1194,7 +1341,7 @@ func (a *App) toolSetConversationStatus(ctx *sdk.AppCtx, args map[string]any) (a
 	}
 	status := strings.ToLower(strings.TrimSpace(strArg(args, "status")))
 	if status != "" && !convoStatuses[status] {
-		return nil, fmt.Errorf("invalid status %q (open|pending|closed)", status)
+		return nil, fmt.Errorf("invalid status %q (open|pending|closed|spam)", status)
 	}
 	priority := strings.ToLower(strings.TrimSpace(strArg(args, "priority")))
 	if priority != "" && !convoPriorities[priority] {
@@ -1227,13 +1374,21 @@ func (a *App) toolSetConversationStatus(ctx *sdk.AppCtx, args map[string]any) (a
 	if err != nil {
 		return nil, err
 	}
+	var suppression spamSuppressionResult
+	if status == "spam" {
+		suppression = applyConversationSpam(ctx, pid, updated, strArg(args, "spam_scope"), boolArg(args, "force", false))
+	}
 	ctx.Emit("conversation.status.changed", map[string]any{
 		"conversation_id": convoID,
 		"contact_id":      updated.ContactID,
 		"status":          updated.Status,
 		"priority":        updated.Priority,
 	})
-	return map[string]any{"conversation": updated}, nil
+	out := map[string]any{"conversation": updated}
+	if suppression.Attempted || suppression.Error != "" {
+		out["suppression"] = suppression
+	}
+	return out, nil
 }
 
 func (a *App) toolGetConversation(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1903,12 +2058,23 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 		return nil, fmt.Errorf("convo: %w", err)
 	}
 
-	// Auto-reopen: a reply on a pending/closed thread puts the ball back
-	// in our court. No-op when the conversation is already open (or was
-	// just created above). Mirrors Front/Intercom; fixes the HubSpot gap.
-	reopened, err := dbConversationReopenIfClosed(db, pid, convoID)
+	reopened := false
+	contactSpam, err := dbContactIsSpam(db, pid, contact.ID)
 	if err != nil {
-		return nil, fmt.Errorf("reopen: %w", err)
+		return nil, fmt.Errorf("spam contact check: %w", err)
+	}
+	if contactSpam {
+		if _, err := dbConversationSetStatus(db, pid, convoID, "spam", ""); err != nil {
+			return nil, fmt.Errorf("mark spam conversation: %w", err)
+		}
+	} else {
+		// Auto-reopen: a reply on a pending/closed thread puts the ball back
+		// in our court. No-op when the conversation is already open (or was
+		// just created above). Spam conversations are intentionally excluded.
+		reopened, err = dbConversationReopenIfClosed(db, pid, convoID)
+		if err != nil {
+			return nil, fmt.Errorf("reopen: %w", err)
+		}
 	}
 
 	occurred := body.ReceivedAt
@@ -1993,6 +2159,13 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 			"contact_id":      contact.ID,
 			"status":          "open",
 			"reason":          "inbound_reply",
+		})
+	} else if contactSpam {
+		emitCRMEvent(ctx, pid, "conversation.status.changed", map[string]any{
+			"conversation_id": convoID,
+			"contact_id":      contact.ID,
+			"status":          "spam",
+			"reason":          "spam_contact_inbound",
 		})
 	}
 	emitCRMEvent(ctx, pid, "contact.activity.added", map[string]any{

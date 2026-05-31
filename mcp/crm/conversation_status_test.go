@@ -12,7 +12,41 @@ import (
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
 )
+
+type crmCallAppCall struct {
+	AppName string
+	Tool    string
+	Input   map[string]any
+}
+
+type crmRecordingPlatform struct {
+	tk.BasePlatformClient
+	calls []crmCallAppCall
+}
+
+func (p *crmRecordingPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
+	return &sdk.InstallIdentity{
+		AppName:   "crm",
+		InstallID: 99,
+		ProjectID: "test-proj",
+		Bindings:  map[string]any{"messaging": float64(42)},
+	}, nil
+}
+
+func (p *crmRecordingPlatform) GetInstance(id int64) (*sdk.PlatformInstance, error) {
+	return &sdk.PlatformInstance{ID: id, Name: "messaging", Status: "running", ProjectID: "test-proj"}, nil
+}
+
+func (p *crmRecordingPlatform) CallAppResult(appName, tool string, input map[string]any, out any) error {
+	p.calls = append(p.calls, crmCallAppCall{AppName: appName, Tool: tool, Input: input})
+	if out != nil {
+		b, _ := json.Marshal(map[string]any{"ok": true})
+		_ = json.Unmarshal(b, out)
+	}
+	return nil
+}
 
 // mkConversation inserts a conversation directly (the normal creators
 // need a send/inbound round-trip; here we just want a row to mutate).
@@ -131,6 +165,81 @@ func TestSetConversationStatus_FilterByStatus(t *testing.T) {
 	}
 }
 
+func TestSetConversationStatus_MarkSpamSuppressesSender(t *testing.T) {
+	pf := &crmRecordingPlatform{}
+	ctx := newTestCtx(t, tk.WithPlatform(pf))
+	app := &App{}
+	c := mustCreate(t, ctx, map[string]any{
+		"first_name":    "Spammy",
+		"primary_email": "fallback@bad.test",
+	})
+	convoID := mkConversation(t, ctx, "test-proj", c.ID, "email")
+	if err := dbConversationParticipantsAdd(ctx.AppDB(), "test-proj", convoID, "email", []conversationParticipant{
+		{Role: "from", Address: "Spammer <spammer@bad.test>", ContactID: c.ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := app.toolSetConversationStatus(ctx, map[string]any{
+		"conversation_id": convoID,
+		"status":          "spam",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv := out.(map[string]any)["conversation"].(*Conversation)
+	if conv.Status != "spam" {
+		t.Fatalf("conversation status=%q, want spam", conv.Status)
+	}
+	got, err := dbGetByID(ctx.AppDB(), "test-proj", c.ID)
+	if err != nil || got == nil {
+		t.Fatalf("get contact: %v", err)
+	}
+	if got.Status != "spam" {
+		t.Fatalf("contact status=%q, want spam", got.Status)
+	}
+	if !contactHasTag(t, ctx, c.ID, "spam") {
+		t.Fatalf("contact missing spam tag")
+	}
+	if len(pf.calls) != 1 {
+		t.Fatalf("suppression calls=%d, want 1", len(pf.calls))
+	}
+	call := pf.calls[0]
+	if call.AppName != "messaging" || call.Tool != "suppression_add" {
+		t.Fatalf("call=%s/%s, want messaging/suppression_add", call.AppName, call.Tool)
+	}
+	if call.Input["kind"] != "address" || call.Input["address"] != "spammer@bad.test" || call.Input["source"] != "crm" {
+		t.Fatalf("suppression input=%#v", call.Input)
+	}
+}
+
+func TestSetConversationStatus_MarkSpamSuppressesDomain(t *testing.T) {
+	pf := &crmRecordingPlatform{}
+	ctx := newTestCtx(t, tk.WithPlatform(pf))
+	app := &App{}
+	c := mustCreate(t, ctx, map[string]any{"primary_email": "person@example.test"})
+	convoID := mkConversation(t, ctx, "test-proj", c.ID, "email")
+	if err := dbConversationParticipantsAdd(ctx.AppDB(), "test-proj", convoID, "email", []conversationParticipant{
+		{Role: "from", Address: "person@example.test", ContactID: c.ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := app.toolSetConversationStatus(ctx, map[string]any{
+		"conversation_id": convoID,
+		"status":          "spam",
+		"spam_scope":      "domain",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.calls) != 1 {
+		t.Fatalf("suppression calls=%d, want 1", len(pf.calls))
+	}
+	if pf.calls[0].Input["kind"] != "domain" || pf.calls[0].Input["address"] != "example.test" {
+		t.Fatalf("suppression input=%#v", pf.calls[0].Input)
+	}
+}
+
 // TestInbound_ReopensClosedConversation drives two inbound messages
 // through handleInbound: the first establishes a contact + conversation,
 // then we close it, and the second (same sender) must auto-reopen it.
@@ -178,6 +287,46 @@ func TestInbound_ReopensClosedConversation(t *testing.T) {
 	}
 	if got.Status != "open" {
 		t.Errorf("conversation status=%q after inbound reply, want open (auto-reopen)", got.Status)
+	}
+}
+
+func TestInbound_FromSpamContactStaysSpam(t *testing.T) {
+	ctx := newTestCtx(t)
+	globalCtx = ctx // handleInbound reads getAppCtx() == globalCtx
+	app := &App{}
+	created, err := app.toolUpsertByChannel(ctx, map[string]any{
+		"kind":  "email",
+		"value": "spammer@bad.test",
+		"defaults": map[string]any{
+			"first_name": "Spammer",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := created.(map[string]any)["contact"].(*Contact)
+	if err := dbContactMarkSpam(ctx.AppDB(), "test-proj", c.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := `{"channel":"email","from":"spammer@bad.test","to":["inbox@example.com"],"subject":"buy now","body_text":"no thanks"}`
+	r := httptest.NewRequest("POST", "/inbound?project_id=test-proj", bytes.NewBufferString(payload))
+	w := httptest.NewRecorder()
+	app.handleInbound(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("inbound status=%d body=%s", w.Code, w.Body.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	convoID := int64(out["conversation_id"].(float64))
+	got, err := dbConversationGet(ctx.AppDB(), "test-proj", convoID)
+	if err != nil || got == nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if got.Status != "spam" {
+		t.Fatalf("conversation status=%q, want spam", got.Status)
 	}
 }
 

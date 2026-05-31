@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.7
+version: 0.8.8
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -98,7 +98,7 @@ provides:
     - name: contacts_get_conversation
       description: Fetch one conversation with its full activity chain.
     - name: contacts_set_conversation_status
-      description: Set a conversation's status (open/pending/closed) and/or priority.
+      description: Set a conversation's status (open/pending/closed/spam) and/or priority.
     - name: conversations_inbox
       description: Cross-contact triage queue of conversations; supports status/channel/from/to/list/tag filters.
     - name: routing_rules_create
@@ -641,7 +641,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_list_conversations",
-			Description: "List a contact's recent conversations, newest first. Each carries status (open|pending|closed) + priority (low|normal|high|urgent). Args: id, channel?, status? (filter), limit? (default 50).",
+			Description: "List a contact's recent conversations, newest first. Each carries status (open|pending|closed|spam) + priority (low|normal|high|urgent). Args: id, channel?, status? (filter), limit? (default 50).",
 			InputSchema: schemaObject(map[string]any{
 				"id":      map[string]any{"type": "integer"},
 				"channel": map[string]any{"type": "string"},
@@ -661,12 +661,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_set_conversation_status",
-			Description: "Set a conversation's workflow status and/or priority. status: open (needs us) | pending (waiting on the contact) | closed (resolved). priority: low | normal | high | urgent. Either may be omitted to leave unchanged. An inbound reply auto-reopens a pending/closed thread, so use 'pending' when you've replied and are waiting, 'closed' when done. Args: conversation_id (req), id? (contact-id safety check), status?, priority?.",
+			Description: "Set a conversation's workflow status and/or priority. status: open (needs us) | pending (waiting on the contact) | closed (resolved) | spam (mark contact spam and best-effort add Messaging suppression). priority: low | normal | high | urgent. Either may be omitted to leave unchanged. Inbound replies auto-reopen pending/closed threads but never spam threads. Args: conversation_id (req), id? (contact-id safety check), status?, priority?, spam_scope? (sender|domain; default sender), force? (allow common-domain suppression).",
 			InputSchema: schemaObject(map[string]any{
 				"id":              map[string]any{"type": "integer"},
 				"conversation_id": map[string]any{"type": "integer"},
 				"status":          map[string]any{"type": "string"},
 				"priority":        map[string]any{"type": "string"},
+				"spam_scope":      map[string]any{"type": "string"},
+				"force":           map[string]any{"type": "boolean"},
 			}, []string{"conversation_id"}),
 			Handler: a.toolSetConversationStatus,
 		},
