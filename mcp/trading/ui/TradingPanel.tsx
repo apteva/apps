@@ -4,7 +4,7 @@
 //
 // Talks to /api/apps/trading/* through the platform proxy.
 //
-// Tabs: Portfolios | Trade | Positions | Brokers | Journal.
+// Tabs: Portfolios | Trade | Positions | Agents | Brokers | Journal.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -72,6 +72,48 @@ function useAppEvents<T = unknown>(
       if (es) es.close();
     };
   }, [app, projectId]);
+}
+
+// ─── Dashboard telemetry subscription ─────────────────────────────
+
+interface TelemetryEvent {
+  id: string;
+  instance_id: number;
+  thread_id: string;
+  type: string;
+  time: string;
+  data: Record<string, any>;
+}
+
+function useTelemetryEvents(
+  projectId: string | undefined | null,
+  onEvent: (ev: TelemetryEvent) => void,
+) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+  useEffect(() => {
+    if (!projectId) return;
+    const handler = (ev: TelemetryEvent) => handlerRef.current(ev);
+    const bridge = (window as unknown as {
+      __aptevaTelemetryBus?: {
+        subscribe(instanceId: number | null, fn: (ev: TelemetryEvent) => void): () => void;
+      };
+    }).__aptevaTelemetryBus;
+    if (bridge) return bridge.subscribe(null, handler);
+
+    let es: EventSource | null = null;
+    let cancelled = false;
+    const url = `/api/telemetry/stream?all=1&project_id=${encodeURIComponent(projectId)}`;
+    es = new EventSource(url, { withCredentials: true });
+    es.onmessage = (e) => {
+      if (cancelled) return;
+      try { handler(JSON.parse(e.data) as TelemetryEvent); } catch {}
+    };
+    return () => {
+      cancelled = true;
+      if (es) es.close();
+    };
+  }, [projectId]);
 }
 
 // ─── Types ─────────────────────────────────────────────────────────
@@ -164,6 +206,39 @@ interface Mark {
   volume_24h?: number;
   marked_at: string;
 }
+interface Agent {
+  id: number;
+  name: string;
+  status: string;
+  mode?: string;
+  project_id?: string;
+}
+interface AgentLiveState {
+  agent_id: number;
+  state: "idle" | "thinking" | "tool" | "error" | "thread" | "event";
+  label: string;
+  detail?: string;
+  tool?: string;
+  symbol?: string;
+  portfolio_id?: number;
+  thread_id?: string;
+  last_summary?: string;
+  last_event_at?: string;
+  trading_event_at?: string;
+}
+interface AgentActivity {
+  id: string;
+  agent_id: number;
+  kind: "thinking" | "market" | "portfolio" | "risk" | "order" | "journal" | "alert" | "thread" | "error" | "event";
+  summary: string;
+  detail?: string;
+  tool?: string;
+  symbol?: string;
+  portfolio_id?: number;
+  thread_id?: string;
+  time: string;
+  status?: "running" | "success" | "error" | "info";
+}
 interface Bar {
   t: number;
   o?: number; h?: number; l?: number; c?: number; v?: number;
@@ -210,6 +285,10 @@ function relTime(iso: string | undefined): string {
   if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ago`;
   return `${Math.floor(seconds / 86_400)}d ago`;
 }
+function durationLabel(ms: unknown): string {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) return "";
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+}
 function inferAssetClass(symbol: string): string {
   const s = symbol.toUpperCase().trim();
   if (s.startsWith("POLY:")) return "polymarket";
@@ -229,6 +308,124 @@ function classBadgeClass(c: string): string {
   }
 }
 
+const TRADING_TOOLS = new Set([
+  "portfolio_create", "brokers_list", "portfolio_list", "portfolio_get",
+  "account_summary", "positions_list", "orders_list", "order_place",
+  "order_cancel", "market_quote", "market_history", "market_source",
+  "watchlist_add", "watchlist_remove", "alert_create", "journal_write",
+  "journal_read", "portfolio_pause",
+]);
+
+function compactText(value: unknown, fallback = ""): string {
+  if (value == null) return fallback;
+  const text = String(value).replace(/\s+/g, " ").trim();
+  return text || fallback;
+}
+
+function parsePayload(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed || !["{", "["].includes(trimmed[0])) return value;
+  try { return JSON.parse(trimmed); } catch { return value; }
+}
+
+function objectPayload(value: unknown): Record<string, any> {
+  const parsed = parsePayload(value);
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, any> : {};
+}
+
+function toolBaseName(name: unknown): string {
+  const raw = compactText(name);
+  if (!raw) return "";
+  const parts = raw.split(/__|[./:]/).filter(Boolean);
+  return parts[parts.length - 1] || raw;
+}
+
+function toolArgs(data: Record<string, any>): Record<string, any> {
+  return objectPayload(data.args ?? data.arguments ?? data.input ?? data.params);
+}
+
+function toolResult(data: Record<string, any>): Record<string, any> {
+  return objectPayload(data.result ?? data.output ?? data.message);
+}
+
+function extractSymbol(payload: Record<string, any>): string | undefined {
+  const direct = payload.symbol ?? payload.ticker ?? payload.market_symbol;
+  if (typeof direct === "string" && direct.trim()) return direct.trim().toUpperCase();
+  const nested = payload.order || payload.quote || payload.position || payload.market;
+  if (nested && typeof nested === "object") return extractSymbol(nested as Record<string, any>);
+  return undefined;
+}
+
+function extractPortfolioID(payload: Record<string, any>): number | undefined {
+  const raw = payload.portfolio_id ?? payload.portfolioId ?? payload.id;
+  const n = typeof raw === "number" ? raw : Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function portfolioHasSymbol(portfolio: Portfolio | null, symbol?: string): boolean {
+  if (!portfolio || !symbol) return false;
+  const wanted = symbol.toUpperCase();
+  return (portfolio.watchlist || []).some((s) => s.toUpperCase() === wanted);
+}
+
+function activityKindForTool(tool: string): AgentActivity["kind"] {
+  if (tool.startsWith("market_")) return "market";
+  if (tool.includes("position") || tool === "account_summary") return "risk";
+  if (tool.includes("order")) return "order";
+  if (tool.includes("journal")) return "journal";
+  if (tool.includes("alert")) return "alert";
+  return "portfolio";
+}
+
+function labelForTool(tool: string): string {
+  switch (tool) {
+    case "market_quote": return "checking price";
+    case "market_history": return "reading chart";
+    case "portfolio_get": return "reviewing portfolio";
+    case "account_summary": return "checking account";
+    case "positions_list": return "checking exposure";
+    case "orders_list": return "reviewing orders";
+    case "order_place": return "placing order";
+    case "order_cancel": return "cancelling order";
+    case "journal_write": return "writing journal";
+    case "alert_create": return "setting alert";
+    case "portfolio_pause": return "pausing portfolio";
+    default: return tool.replace(/_/g, " ");
+  }
+}
+
+function eventRelevantToPortfolio(
+  portfolio: Portfolio | null,
+  portfolioID?: number,
+  symbol?: string,
+): boolean {
+  if (!portfolio) return true;
+  if (portfolioID != null) return portfolioID === portfolio.id;
+  return portfolioHasSymbol(portfolio, symbol);
+}
+
+function summarizeTradingTool(tool: string, args: Record<string, any>, result?: Record<string, any>): string {
+  const symbol = extractSymbol(args);
+  const portfolioID = extractPortfolioID(args);
+  const target = symbol || (portfolioID ? `portfolio #${portfolioID}` : "");
+  if (tool === "order_place") {
+    const side = compactText(args.side).toUpperCase();
+    const qty = compactText(args.qty);
+    const rejected = result?.status === "rejected" || result?.code || result?.detail;
+    const order = [side, qty, symbol].filter(Boolean).join(" ");
+    return rejected ? `Order rejected: ${compactText(result?.code || result?.detail, order || "order")}` : `Placed ${order || "order"}`;
+  }
+  if (tool === "market_quote" && symbol) return `Checked ${symbol} price`;
+  if (tool === "market_history" && symbol) return `Reviewed ${symbol} chart`;
+  if (tool === "positions_list") return "Reviewed open exposure";
+  if (tool === "account_summary") return "Checked account risk";
+  if (tool === "portfolio_get") return "Reviewed portfolio state";
+  if (tool === "journal_write") return "Wrote portfolio journal note";
+  if (tool === "alert_create") return `Created alert${target ? ` for ${target}` : ""}`;
+  return `${labelForTool(tool)}${target ? ` · ${target}` : ""}`;
+}
+
 // ─── Icons (SVG, theme-aware via currentColor) ─────────────────────
 
 const Icon = {
@@ -238,6 +435,7 @@ const Icon = {
   Play:  () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>,
   Refresh: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>,
   ExternalLink: () => <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>,
+  Trash: () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/></svg>,
 };
 
 // ─── Chart components (hand-rolled SVG, no chart-lib dep) ─────────
@@ -683,7 +881,7 @@ function pnlClass(n: number | undefined): string {
 
 // ─── Main ──────────────────────────────────────────────────────────
 
-type TabId = "portfolios" | "trade" | "positions" | "brokers" | "journal";
+type TabId = "portfolios" | "trade" | "positions" | "agents" | "brokers" | "journal";
 
 export default function TradingPanel({ projectId, installId }: NativePanelProps) {
   const [tab, setTab] = useState<TabId>("portfolios");
@@ -768,7 +966,7 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
       </header>
 
       <nav className="flex border-b border-border px-3 text-xs">
-        {(["portfolios","trade","positions","brokers","journal"] as TabId[]).map((id) => {
+        {(["portfolios","trade","positions","agents","brokers","journal"] as TabId[]).map((id) => {
           const active = id === tab;
           return (
             <button
@@ -798,6 +996,9 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
         )}
         {tab === "positions" && (
           <PositionsTab portfolio={selected} api={api} setError={setError} />
+        )}
+        {tab === "agents" && (
+          <AgentsTab portfolio={selected} api={api} projectId={projectId} setError={setError} />
         )}
         {tab === "brokers" && (
           <BrokersTab api={api} setError={setError} />
@@ -1643,6 +1844,345 @@ function PositionsTab({ portfolio, api, setError }: {
       </div>
     </Section>
   );
+}
+
+// ─── Agents tab ───────────────────────────────────────────────────
+
+function AgentsTab({ portfolio, api, projectId, setError }: {
+  portfolio: Portfolio | null;
+  api: <T>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
+  projectId: string;
+  setError: (e: string | null) => void;
+}) {
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [states, setStates] = useState<Record<number, AgentLiveState>>({});
+  const [activities, setActivities] = useState<AgentActivity[]>([]);
+  const [quotes, setQuotes] = useState<Record<string, Mark>>({});
+  const seenRef = useRef<Set<string>>(new Set());
+  const seenOrderRef = useRef<string[]>([]);
+  const statesRef = useRef<Record<number, AgentLiveState>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    const params = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    fetch(`/api/agents${params}`, { credentials: "same-origin" })
+      .then((r) => r.ok ? r.json() : Promise.reject(new Error(`${r.status}: ${r.statusText}`)))
+      .then((rows: Agent[]) => { if (!cancelled) setAgents(rows || []); })
+      .catch((e) => { if (!cancelled) setError((e as Error).message); });
+    return () => { cancelled = true; };
+  }, [projectId, setError]);
+
+  useEffect(() => {
+    if (!portfolio) return;
+    setActivities((prev) => prev.filter((a) =>
+      eventRelevantToPortfolio(portfolio, a.portfolio_id, a.symbol),
+    ));
+  }, [portfolio?.id]);
+
+  const upsertState = useCallback((agentID: number, patch: Partial<AgentLiveState>) => {
+    setStates((prev) => {
+      const { agent_id: _ignored, ...safePatch } = patch;
+      const current = prev[agentID] || {
+        agent_id: agentID,
+        state: "idle" as const,
+        label: "Waiting",
+      };
+      const next = {
+        ...prev,
+        [agentID]: {
+          ...current,
+          ...safePatch,
+          agent_id: agentID,
+        },
+      };
+      statesRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const addActivity = useCallback((activity: AgentActivity) => {
+    setActivities((prev) => {
+      if (prev.some((a) => a.id === activity.id)) return prev;
+      return [activity, ...prev].slice(0, 80);
+    });
+  }, []);
+
+  useTelemetryEvents(projectId, (ev) => {
+    const dedupeKey = ev.id || `${ev.instance_id}:${ev.thread_id}:${ev.type}:${ev.time}`;
+    if (seenRef.current.has(dedupeKey)) return;
+    seenRef.current.add(dedupeKey);
+    seenOrderRef.current.push(dedupeKey);
+    if (seenOrderRef.current.length > 800) {
+      const old = seenOrderRef.current.shift();
+      if (old) seenRef.current.delete(old);
+    }
+    const agentID = ev.instance_id;
+    if (!agentID) return;
+
+    const data = ev.data || {};
+    const nowPatch: Partial<AgentLiveState> = {
+      last_event_at: ev.time,
+      thread_id: ev.thread_id || "main",
+    };
+
+    if (ev.type === "llm.start") {
+      upsertState(agentID, { ...nowPatch, state: "thinking", label: "Thinking" });
+      return;
+    }
+    if (ev.type === "llm.done") {
+      const summary = compactText(data.message || data.summary);
+      const prev = statesRef.current[agentID];
+      upsertState(agentID, {
+        ...nowPatch,
+        state: "idle",
+        label: "Waiting",
+        detail: summary || prev?.detail,
+        last_summary: summary || prev?.last_summary,
+      });
+      if (summary && eventRelevantToPortfolio(portfolio, prev?.portfolio_id, prev?.symbol) && prev?.trading_event_at) {
+        addActivity({
+          id: `thought:${dedupeKey}`,
+          agent_id: agentID,
+          kind: "thinking",
+          summary: summary.slice(0, 180),
+          symbol: prev.symbol,
+          portfolio_id: prev.portfolio_id,
+          thread_id: ev.thread_id || "main",
+          time: ev.time,
+          status: "success",
+        });
+      }
+      return;
+    }
+    if (ev.type === "llm.error" || ev.type.includes("error")) {
+      const msg = compactText(data.error || data.message || ev.type, ev.type);
+      upsertState(agentID, { ...nowPatch, state: "error", label: "Error", detail: msg });
+      addActivity({
+        id: `error:${dedupeKey}`,
+        agent_id: agentID,
+        kind: "error",
+        summary: msg,
+        thread_id: ev.thread_id || "main",
+        time: ev.time,
+        status: "error",
+      });
+      return;
+    }
+    if (ev.type === "thread.spawn" || ev.type === "thread.done") {
+      const summary = ev.type === "thread.spawn"
+        ? `Spawned ${compactText(data.name || ev.thread_id, "worker thread")}`
+        : `Finished ${ev.thread_id || "thread"}`;
+      upsertState(agentID, { ...nowPatch, state: "thread", label: summary, detail: compactText(data.directive) });
+      addActivity({
+        id: `thread:${dedupeKey}`,
+        agent_id: agentID,
+        kind: "thread",
+        summary,
+        detail: compactText(data.directive),
+        thread_id: ev.thread_id || "main",
+        time: ev.time,
+        status: ev.type === "thread.done" ? "success" : "info",
+      });
+      return;
+    }
+    if (ev.type !== "tool.call" && ev.type !== "tool.result") return;
+
+    const tool = toolBaseName(data.name || data.tool);
+    if (!TRADING_TOOLS.has(tool)) return;
+    const args = toolArgs(data);
+    const result = ev.type === "tool.result" ? toolResult(data) : undefined;
+    const symbol = extractSymbol(args) || extractSymbol(result || {});
+    const portfolioID = extractPortfolioID(args) || extractPortfolioID(result || {});
+    if (!eventRelevantToPortfolio(portfolio, portfolioID, symbol)) return;
+
+    const summary = summarizeTradingTool(tool, args, result);
+    const status = ev.type === "tool.call" ? "running" : (data.is_error || result?.status === "rejected" ? "error" : "success");
+    upsertState(agentID, {
+      ...nowPatch,
+      state: status === "error" ? "error" : "tool",
+      label: ev.type === "tool.call" ? labelForTool(tool) : summary,
+      detail: tool,
+      tool,
+      symbol,
+      portfolio_id: portfolioID,
+      trading_event_at: ev.time,
+    });
+    addActivity({
+      id: `tool:${data.id || dedupeKey}:${ev.type}`,
+      agent_id: agentID,
+      kind: activityKindForTool(tool),
+      summary,
+      detail: ev.type === "tool.call" ? "running" : durationLabel(data.duration_ms),
+      tool,
+      symbol,
+      portfolio_id: portfolioID,
+      thread_id: ev.thread_id || "main",
+      time: ev.time,
+      status,
+    });
+  });
+
+  const loadQuotes = useCallback(async () => {
+    if (!portfolio || !portfolio.watchlist || portfolio.watchlist.length === 0) {
+      setQuotes({});
+      return;
+    }
+    const rows = await Promise.all(portfolio.watchlist.map(async (sym) => {
+      try {
+        const q = await api<Mark>("GET", `/quotes/${encodeURIComponent(sym)}`);
+        return [sym, q] as const;
+      } catch { return null; }
+    }));
+    const next: Record<string, Mark> = {};
+    for (const row of rows) if (row) next[row[0]] = row[1];
+    setQuotes(next);
+  }, [portfolio?.id, portfolio?.watchlist?.join(","), api]);
+
+  useEffect(() => {
+    loadQuotes().catch(() => undefined);
+    const id = window.setInterval(() => { loadQuotes().catch(() => undefined); }, 10000);
+    return () => window.clearInterval(id);
+  }, [loadQuotes]);
+
+  useAppEvents("trading", projectId, (ev) => {
+    if (ev.topic === "tick" || ev.topic === "watchlist.changed") loadQuotes().catch(() => undefined);
+  });
+
+  if (!portfolio) return <EmptyState title="Pick a portfolio" hint="No portfolio selected." />;
+
+  const agentName = (id: number) => agents.find((a) => a.id === id)?.name || `Agent #${id}`;
+  const activeAgentIds = new Set([
+    ...Object.keys(states).map(Number),
+    ...activities.map((a) => a.agent_id),
+  ]);
+  const rows = agents
+    .filter((a) => activeAgentIds.has(a.id) || a.status === "running")
+    .map((a) => ({ agent: a, state: states[a.id] }))
+    .sort((a, b) => {
+      const at = Date.parse(a.state?.last_event_at || "") || 0;
+      const bt = Date.parse(b.state?.last_event_at || "") || 0;
+      return bt - at || Number(b.agent.status === "running") - Number(a.agent.status === "running");
+    });
+  const liveBySymbol = (symbol: string) =>
+    rows.filter((r) => r.state?.symbol?.toUpperCase() === symbol.toUpperCase());
+
+  return (
+    <>
+      <Section title={`Live watchlist · ${portfolio.name}`}>
+        {(!portfolio.watchlist || portfolio.watchlist.length === 0) ? (
+          <EmptyState title="No symbols tracked" hint="Watchlist is empty." />
+        ) : (
+          <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
+            {portfolio.watchlist.map((sym) => {
+              const q = quotes[sym];
+              const cls = q?.asset_class || inferAssetClass(sym);
+              const price = q?.price ?? q?.yes_price;
+              const focused = liveBySymbol(sym);
+              return (
+                <div key={sym} className="p-3 bg-bg-card border border-border rounded">
+                  <div className="flex items-center gap-2">
+                    <strong className="text-sm truncate">{sym}</strong>
+                    <span className={`text-xs px-2 py-0.5 rounded-full border font-semibold ${classBadgeClass(cls)}`}>{cls}</span>
+                  </div>
+                  <div className="mt-2 flex items-baseline gap-2">
+                    <span className="text-lg font-semibold tabular-nums">{price != null ? formatPrice(price, cls) : "—"}</span>
+                    {q?.change_pct_24h != null && (
+                      <span className={`text-xs tabular-nums ${pnlClass(q.change_pct_24h)}`}>{formatPct(q.change_pct_24h, 1)}</span>
+                    )}
+                  </div>
+                  <div className="mt-2 flex gap-1 flex-wrap min-h-5">
+                    {focused.length === 0 ? (
+                      <span className="text-xs text-text-dim">No agent focused</span>
+                    ) : focused.slice(0, 3).map((r) => (
+                      <span key={r.agent.id} className="text-xs px-2 py-0.5 rounded-full bg-accent/10 text-accent border border-accent/30">
+                        {r.agent.name}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Section>
+
+      <Section title="Agents working this portfolio">
+        {rows.length === 0 ? (
+          <EmptyState title="No live agent telemetry yet" hint="Waiting for project telemetry." />
+        ) : (
+          <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}>
+            {rows.map(({ agent, state }) => (
+              <AgentLiveCard key={agent.id} agent={agent} state={state} />
+            ))}
+          </div>
+        )}
+      </Section>
+
+      <Section title="Trading activity">
+        {activities.length === 0 ? (
+          <EmptyState title="No trading activity yet" hint="Waiting for trading activity." />
+        ) : (
+          <div className="border border-border rounded bg-bg-card overflow-hidden">
+            {activities.map((a) => (
+              <div key={a.id} className="px-3 py-2 border-t first:border-t-0 border-border flex items-start gap-3">
+                <span className={`mt-1 w-2 h-2 rounded-full shrink-0 ${activityDotClass(a)}`} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-xs font-semibold text-text truncate">{agentName(a.agent_id)}</span>
+                    <span className="text-xs uppercase tracking-wide text-text-dim">{a.kind}</span>
+                    {a.symbol && <span className="text-xs px-1.5 py-0.5 rounded bg-bg-input text-text-muted">{a.symbol}</span>}
+                    <span className="ml-auto text-xs text-text-dim shrink-0">{relTime(a.time)}</span>
+                  </div>
+                  <div className="text-sm text-text truncate mt-0.5">{a.summary}</div>
+                  {a.tool && (
+                    <div className="text-xs text-text-dim mt-0.5">
+                      {a.tool}{a.thread_id ? ` · ${a.thread_id}` : ""}{a.detail ? ` · ${a.detail}` : ""}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
+    </>
+  );
+}
+
+function AgentLiveCard({ agent, state }: { agent: Agent; state?: AgentLiveState }) {
+  const live = state && Date.now() - (Date.parse(state.last_event_at || "") || 0) < 30_000;
+  const statusText = state?.label || (agent.status === "running" ? "Waiting" : agent.status);
+  return (
+    <div className="p-3 bg-bg-card border border-border rounded">
+      <div className="flex items-center gap-2 mb-2">
+        <span className={`w-2 h-2 rounded-full ${state?.state === "error" ? "bg-red" : live ? "bg-green animate-pulse" : agent.status === "running" ? "bg-amber" : "bg-text-dim"}`} />
+        <strong className="text-sm truncate">{agent.name}</strong>
+        <span className="ml-auto text-xs text-text-dim">{state?.last_event_at ? relTime(state.last_event_at) : agent.status}</span>
+      </div>
+      <div className="text-sm text-text">{statusText}</div>
+      <div className="mt-1 flex gap-1 flex-wrap">
+        {state?.symbol && <span className="text-xs px-2 py-0.5 rounded bg-bg-input text-text-muted">{state.symbol}</span>}
+        {state?.tool && <span className="text-xs px-2 py-0.5 rounded bg-accent/10 text-accent border border-accent/30">{state.tool}</span>}
+        {state?.thread_id && <span className="text-xs px-2 py-0.5 rounded bg-bg-input text-text-dim">{state.thread_id}</span>}
+      </div>
+      {state?.last_summary && (
+        <div className="mt-2 text-xs text-text-muted overflow-hidden" style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>
+          "{state.last_summary.slice(0, 180)}"
+        </div>
+      )}
+      {!state && (
+        <div className="mt-2 text-xs text-text-dim">Waiting for telemetry.</div>
+      )}
+    </div>
+  );
+}
+
+function activityDotClass(a: AgentActivity): string {
+  if (a.status === "error") return "bg-red";
+  if (a.status === "running") return "bg-amber animate-pulse";
+  if (a.kind === "order") return "bg-green";
+  if (a.kind === "market") return "bg-accent";
+  return "bg-text-dim";
 }
 
 // ─── Brokers tab ──────────────────────────────────────────────────
