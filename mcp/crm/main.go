@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.8
+version: 0.8.9
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -66,7 +66,7 @@ provides:
     - name: contacts_create
       description: Create a contact with channels, tags, and attributes.
     - name: contacts_update
-      description: Partial-patch a contact.
+      description: Partial-patch a contact, including channel replacement.
     - name: contacts_upsert_by_channel
       description: Find-or-create by email or phone.
     - name: contacts_merge
@@ -456,7 +456,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_update",
-			Description: "Partial-patch a contact. Args: id, patch (any subset of contact fields), source.",
+			Description: "Partial-patch a contact. Args: id, patch (any subset of contact fields; channels [{kind,value,label,is_primary}] replaces the channel list), source.",
 			InputSchema: schemaObject(map[string]any{
 				"id":     map[string]any{"type": "integer"},
 				"patch":  map[string]any{"type": "object"},
@@ -1582,41 +1582,9 @@ func dbCreate(db *sql.DB, pid string, args map[string]any) (*Contact, error) {
 	c.UpdatedAt = now
 
 	// Channels.
-	channels, _ := args["channels"].([]any)
-	for _, ch := range channels {
-		m, ok := ch.(map[string]any)
-		if !ok {
-			continue
-		}
-		kind, _ := m["kind"].(string)
-		value, _ := m["value"].(string)
-		if kind == "" || value == "" {
-			continue
-		}
-		label, _ := m["label"].(string)
-		isPrimary := false
-		if v, ok := m["is_primary"].(bool); ok {
-			isPrimary = v
-		}
-		if _, err := tx.Exec(
-			`INSERT OR IGNORE INTO contact_channels
-				(project_id, contact_id, kind, value, label, is_primary, source)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			pid, c.ID, kind, normaliseChannel(kind, value), label, boolToInt(isPrimary), c.Source); err != nil {
+	if rawChannels, ok := args["channels"]; ok {
+		if err := applyChannelsPatchTx(tx, pid, c.ID, rawChannels, c.Source); err != nil {
 			return nil, err
-		}
-		// Mirror the primary email/phone onto the contact row for fast index seeks.
-		if isPrimary {
-			switch kind {
-			case "email":
-				tx.Exec(`UPDATE contacts SET primary_email = ? WHERE id = ?`,
-					normaliseChannel(kind, value), c.ID)
-				c.PrimaryEmail = normaliseChannel(kind, value)
-			case "phone":
-				tx.Exec(`UPDATE contacts SET primary_phone = ? WHERE id = ?`,
-					normaliseChannel(kind, value), c.ID)
-				c.PrimaryPhone = normaliseChannel(kind, value)
-			}
 		}
 	}
 
@@ -1645,7 +1613,11 @@ func dbCreate(db *sql.DB, pid string, args map[string]any) (*Contact, error) {
 			return c, fmt.Errorf("contact created (id=%d) but attribute write failed: %w", c.ID, err)
 		}
 	}
-	return c, nil
+	fresh, err := dbGetByID(db, pid, c.ID)
+	if err != nil || fresh == nil {
+		return c, err
+	}
+	return fresh, nil
 }
 
 func dbGetByID(db *sql.DB, pid string, id int64) (*Contact, error) {
@@ -1725,7 +1697,13 @@ func dbGetByPrimary(db *sql.DB, pid, kind, value string) (*Contact, error) {
 			return nil, err
 		}
 	}
-	return dbGetByID(db, pid, id)
+	c, err := dbGetByID(db, pid, id)
+	if err != nil || c == nil {
+		return c, err
+	}
+	_ = loadChannels(db, c)
+	_ = loadTags(db, c)
+	return c, nil
 }
 
 // buildSearchWhere assembles the WHERE clauses + args shared by
@@ -1939,7 +1917,7 @@ func dbUpdate(db *sql.DB, pid string, id int64, patch map[string]any, source str
 	// patch.attributes a silent no-op — backfill scripts thought they
 	// were succeeding. Now we either route the key (attributes →
 	// dbSetAttribute) or error.
-	known := map[string]bool{"attributes": true}
+	known := map[string]bool{"attributes": true, "channels": true}
 	for k := range allowed {
 		known[k] = true
 	}
@@ -1982,7 +1960,125 @@ func dbUpdate(db *sql.DB, pid string, id int64, patch map[string]any, source str
 			return nil, err
 		}
 	}
+	if rawChannels, ok := patch["channels"]; ok {
+		if err := applyChannelsPatch(db, pid, id, rawChannels, source); err != nil {
+			return nil, err
+		}
+	}
 	return dbGetByID(db, pid, id)
+}
+
+func applyChannelsPatch(db *sql.DB, pid string, contactID int64, raw any, source string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := applyChannelsPatchTx(tx, pid, contactID, raw, source); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func applyChannelsPatchTx(tx *sql.Tx, pid string, contactID int64, raw any, source string) error {
+	arr, ok := raw.([]any)
+	if !ok {
+		return fmt.Errorf("channels: expected array of {kind,value,label,is_primary}, got %T", raw)
+	}
+	type chInput struct {
+		Kind      string
+		Value     string
+		Label     string
+		IsPrimary bool
+	}
+	channels := make([]chInput, 0, len(arr))
+	seenKind := map[string]bool{}
+	kindHasPrimary := map[string]bool{}
+	for i, item := range arr {
+		m, ok := item.(map[string]any)
+		if !ok {
+			return fmt.Errorf("channels[%d]: expected object, got %T", i, item)
+		}
+		kind := strings.ToLower(strings.TrimSpace(anyString(m["kind"])))
+		value := normaliseChannel(kind, anyString(m["value"]))
+		if kind == "" || value == "" {
+			return fmt.Errorf("channels[%d]: kind and value required", i)
+		}
+		ch := chInput{
+			Kind:      kind,
+			Value:     value,
+			Label:     strings.TrimSpace(anyString(m["label"])),
+			IsPrimary: boolFromAny(m["is_primary"]),
+		}
+		if ch.IsPrimary {
+			kindHasPrimary[kind] = true
+		}
+		seenKind[kind] = true
+		channels = append(channels, ch)
+	}
+	for i := range channels {
+		if !kindHasPrimary[channels[i].Kind] {
+			channels[i].IsPrimary = true
+			kindHasPrimary[channels[i].Kind] = true
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM contact_channels WHERE project_id = ? AND contact_id = ?`, pid, contactID); err != nil {
+		return err
+	}
+	var primaryEmail, primaryPhone string
+	for _, ch := range channels {
+		if _, err := tx.Exec(
+			`INSERT INTO contact_channels
+				(project_id, contact_id, kind, value, label, is_primary, source)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			pid, contactID, ch.Kind, ch.Value, nullStr(ch.Label), boolToInt(ch.IsPrimary), source,
+		); err != nil {
+			return err
+		}
+		if ch.IsPrimary {
+			switch ch.Kind {
+			case "email":
+				if primaryEmail == "" {
+					primaryEmail = ch.Value
+				}
+			case "phone":
+				if primaryPhone == "" {
+					primaryPhone = ch.Value
+				}
+			}
+		}
+	}
+	var emailArg, phoneArg any
+	if seenKind["email"] && primaryEmail != "" {
+		emailArg = primaryEmail
+	}
+	if seenKind["phone"] && primaryPhone != "" {
+		phoneArg = primaryPhone
+	}
+	_, err := tx.Exec(
+		`UPDATE contacts
+		 SET primary_email = ?, primary_phone = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND project_id = ?`,
+		emailArg, phoneArg, contactID, pid,
+	)
+	return err
+}
+
+func boolFromAny(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		switch strings.ToLower(strings.TrimSpace(x)) {
+		case "true", "1", "yes", "y":
+			return true
+		}
+	case float64:
+		return x != 0
+	case int:
+		return x != 0
+	}
+	return false
 }
 
 // applyAttributesPatch iterates an array of {key, value, source?}

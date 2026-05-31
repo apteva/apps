@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.8.8
+version: 0.8.9
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -45,7 +45,7 @@ provides:
     - name: contacts_create
       description: Create a contact with channels, tags, and attributes.
     - name: contacts_update
-      description: Partial-patch a contact.
+      description: Partial-patch a contact, including channel replacement.
     - name: contacts_upsert_by_channel
       description: Find-or-create by email or phone. Returns was_created.
     - name: contacts_merge

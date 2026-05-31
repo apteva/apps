@@ -149,6 +149,7 @@ type ConvoStatus = "open" | "pending" | "closed" | "spam";
 const CONVO_STATUSES: ConvoStatus[] = ["open", "pending", "closed", "spam"];
 type ConvoPriority = "low" | "normal" | "high" | "urgent";
 const CONVO_PRIORITIES: ConvoPriority[] = ["low", "normal", "high", "urgent"];
+const CHANNEL_KINDS = ["email", "phone", "linkedin", "twitter", "github", "website", "other_url"];
 
 // Tailwind tokens only (no arbitrary values) — see panel-theme memory.
 const STATUS_STYLES: Record<string, string> = {
@@ -801,11 +802,11 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   };
 
   const handleNewContact = async (firstName: string, email: string, phone: string) => {
-    // First channel listed becomes is_primary; we prefer email when both
-    // are given, matching the channel-precedence used by the send tool.
+    // Primary is per channel kind so one contact can have both a
+    // primary email and a primary phone.
     const channels: Channel[] = [];
     if (email) channels.push({ kind: "email", value: email, is_primary: true });
-    if (phone) channels.push({ kind: "phone", value: phone, is_primary: channels.length === 0 });
+    if (phone) channels.push({ kind: "phone", value: phone, is_primary: true });
     try {
       const r = await api<{ contact: Contact }>("POST", "/contacts", {
         first_name: firstName,
@@ -946,6 +947,13 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const updateField = <K extends keyof Contact>(key: K, v: string) => {
     setEdits((prev) => ({ ...prev, [key]: v }));
   };
+  const channelDraft = useMemo(
+    () => ((edits.channels as Channel[] | undefined) || detail?.channels || []).map((ch) => ({ ...ch })),
+    [detail?.channels, edits.channels],
+  );
+  const updateChannels = useCallback((channels: Channel[]) => {
+    setEdits((prev) => ({ ...prev, channels }));
+  }, []);
 
   // Group activities by conversation. Within a conversation, order
   // chronologically (oldest first) so the agent reads the thread top-
@@ -1110,21 +1118,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
                     </div>
                   </section>
 
-                  {detail.channels && detail.channels.length > 0 && (
-                    <section>
-                      <h2 className="text-xs uppercase tracking-wide text-text-dim mb-2">Channels</h2>
-                      <ul className="space-y-1">
-                        {detail.channels.map((ch, i) => (
-                          <li key={i} className="text-sm flex items-center gap-2">
-                            <span className="text-[10px] uppercase text-text-dim w-12">{ch.kind}</span>
-                            <span className="text-text">{ch.value}</span>
-                            {ch.label && <span className="text-[10px] px-1 rounded bg-border text-text-muted">{ch.label}</span>}
-                            {ch.is_primary && <span className="text-[10px] px-1 rounded bg-accent/15 text-accent">primary</span>}
-                          </li>
-                        ))}
-                      </ul>
-                    </section>
-                  )}
+                  <ChannelEditor channels={channelDraft} onChange={updateChannels} />
 
                   {detail.tags && detail.tags.length > 0 && (
                     <section>
@@ -1334,6 +1328,94 @@ function ContactField({ label, value, onChange }: { label: string; value: string
         className="bg-bg-input border border-border rounded px-2 py-1"
       />
     </>
+  );
+}
+
+function ChannelEditor({ channels, onChange }: { channels: Channel[]; onChange: (channels: Channel[]) => void }) {
+  const [kind, setKind] = useState("email");
+  const [value, setValue] = useState("");
+  const [label, setLabel] = useState("");
+  const inputCls = "bg-bg-input border border-border rounded px-2 py-1 text-xs";
+  const setAt = (idx: number, patch: Partial<Channel>) => {
+    onChange(channels.map((ch, i) => {
+      if (i !== idx) return ch;
+      const nextKind = patch.kind || ch.kind;
+      const next = { ...ch, ...patch, kind: nextKind };
+      return next;
+    }));
+  };
+  const setPrimary = (idx: number) => {
+    const target = channels[idx];
+    onChange(channels.map((ch, i) => (
+      ch.kind === target.kind ? { ...ch, is_primary: i === idx } : ch
+    )));
+  };
+  const add = () => {
+    const v = value.trim();
+    if (!v) return;
+    const existingPrimary = channels.some((ch) => ch.kind === kind && ch.is_primary);
+    onChange([...channels, { kind, value: v, label: label.trim(), is_primary: !existingPrimary }]);
+    setValue("");
+    setLabel("");
+  };
+  return (
+    <section>
+      <h2 className="text-xs uppercase tracking-wide text-text-dim mb-2">Channels</h2>
+      <div className="space-y-2">
+        {channels.length === 0 && <p className="text-sm text-text-muted">No channels yet.</p>}
+        {channels.map((ch, i) => (
+          <div key={`${ch.kind}-${i}`} className="grid grid-cols-[110px_1fr_120px_76px_32px] gap-2 items-center">
+            <select
+              value={ch.kind}
+              onChange={(e) => setAt(i, { kind: e.target.value, is_primary: !channels.some((x, xi) => xi !== i && x.kind === e.target.value && x.is_primary) })}
+              className={inputCls}
+            >
+              {CHANNEL_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
+            </select>
+            <input
+              value={ch.value}
+              onChange={(e) => setAt(i, { value: e.target.value })}
+              placeholder={ch.kind === "phone" ? "+15551230000" : ch.kind === "email" ? "name@example.com" : "value"}
+              className={inputCls}
+            />
+            <input
+              value={ch.label || ""}
+              onChange={(e) => setAt(i, { label: e.target.value })}
+              placeholder="label"
+              className={inputCls}
+            />
+            <label className="flex items-center gap-1 text-xs text-text-muted">
+              <input type="checkbox" checked={!!ch.is_primary} onChange={() => setPrimary(i)} />
+              primary
+            </label>
+            <button
+              type="button"
+              onClick={() => onChange(channels.filter((_, xi) => xi !== i))}
+              className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
+              title="Remove channel"
+            >x</button>
+          </div>
+        ))}
+        <div className="grid grid-cols-[110px_1fr_120px_76px] gap-2 items-center">
+          <select value={kind} onChange={(e) => setKind(e.target.value)} className={inputCls}>
+            {CHANNEL_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
+          </select>
+          <input
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder={kind === "phone" ? "+15551230000" : kind === "email" ? "name@example.com" : "value"}
+            className={inputCls}
+          />
+          <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="label" className={inputCls} />
+          <button
+            type="button"
+            onClick={add}
+            disabled={!value.trim()}
+            className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+          >Add</button>
+        </div>
+      </div>
+    </section>
   );
 }
 

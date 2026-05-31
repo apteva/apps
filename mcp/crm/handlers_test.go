@@ -81,6 +81,67 @@ func TestUpsertByChannel_CreatesThenReuses(t *testing.T) {
 	}
 }
 
+func TestCreate_PrimaryEmailAndPhoneBothMirror(t *testing.T) {
+	ctx := newTestCtx(t)
+	c := mustCreate(t, ctx, map[string]any{
+		"first_name": "Alice",
+		"channels": []any{
+			map[string]any{"kind": "email", "value": "ALICE@example.com", "is_primary": true},
+			map[string]any{"kind": "phone", "value": "+1 555 123 0000", "is_primary": true},
+		},
+	})
+	if c.PrimaryEmail != "alice@example.com" {
+		t.Fatalf("primary_email=%q, want alice@example.com", c.PrimaryEmail)
+	}
+	if c.PrimaryPhone != "+15551230000" {
+		t.Fatalf("primary_phone=%q, want +15551230000", c.PrimaryPhone)
+	}
+}
+
+func TestUpdate_ReplacesChannelsAndMirrorsPrimary(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	c := mustCreate(t, ctx, map[string]any{
+		"first_name": "Alice",
+		"channels":   []any{map[string]any{"kind": "email", "value": "alice@example.com", "is_primary": true}},
+	})
+
+	out, err := app.toolUpdate(ctx, map[string]any{
+		"id": c.ID,
+		"patch": map[string]any{"channels": []any{
+			map[string]any{"kind": "email", "value": "alice@example.com", "label": "work", "is_primary": true},
+			map[string]any{"kind": "phone", "value": "+1 555 123 0000", "label": "mobile", "is_primary": true},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)["contact"].(*Contact)
+	if got.PrimaryPhone != "+15551230000" {
+		t.Fatalf("primary_phone=%q, want +15551230000", got.PrimaryPhone)
+	}
+	if len(got.Channels) != 2 {
+		t.Fatalf("channels=%d, want 2: %#v", len(got.Channels), got.Channels)
+	}
+
+	out, err = app.toolUpdate(ctx, map[string]any{
+		"id": c.ID,
+		"patch": map[string]any{"channels": []any{
+			map[string]any{"kind": "email", "value": "alice@example.com", "is_primary": true},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = out.(map[string]any)["contact"].(*Contact)
+	if got.PrimaryPhone != "" {
+		t.Fatalf("primary_phone=%q, want cleared", got.PrimaryPhone)
+	}
+	if len(got.Channels) != 1 || got.Channels[0].Kind != "email" {
+		t.Fatalf("channels after replace: %#v", got.Channels)
+	}
+}
+
 // ─── Project-scope safety ───────────────────────────────────────────
 
 func TestCreate_RejectsWithoutProjectID_GlobalScope(t *testing.T) {
@@ -114,7 +175,7 @@ func TestSearch_FreeTextMatchesNameAndEmail(t *testing.T) {
 	})
 	mustCreate(t, ctx, map[string]any{
 		"first_name": "Charlie", "last_name": "Parker",
-		"company":    "Acme",
+		"company": "Acme",
 	})
 
 	cases := []struct {
@@ -205,7 +266,7 @@ func TestUpdate_PatchAttributesWritesValues(t *testing.T) {
 	if _, err := app.toolUpdate(ctx, map[string]any{
 		"id": c.ID,
 		"patch": map[string]any{
-			"job_title":  "Director",
+			"job_title": "Director",
 			"attributes": []any{
 				map[string]any{"key": "tier", "value": "gold"},
 				map[string]any{"key": "lifecycle", "value": "customer"},
@@ -365,11 +426,11 @@ func TestMerge_AbsorbsLoserChannels(t *testing.T) {
 
 	loser := mustCreate(t, ctx, map[string]any{
 		"first_name": "Alice",
-		"channels": []any{map[string]any{"kind": "email", "value": "alice@home.com", "is_primary": true}},
+		"channels":   []any{map[string]any{"kind": "email", "value": "alice@home.com", "is_primary": true}},
 	})
 	winner := mustCreate(t, ctx, map[string]any{
 		"first_name": "Alice",
-		"channels": []any{map[string]any{"kind": "email", "value": "alice@work.com", "is_primary": true}},
+		"channels":   []any{map[string]any{"kind": "email", "value": "alice@work.com", "is_primary": true}},
 	})
 
 	_, err := app.toolMerge(ctx, map[string]any{
