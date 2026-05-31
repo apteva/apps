@@ -1,4 +1,4 @@
-// Channels app v0.1.
+// Channels app v0.2.
 //
 // This is the standalone version of the platform chat channel: it owns
 // chat persistence, REST/SSE delivery, and the agent-facing MCP tools.
@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,12 +26,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: channels
 display_name: Channels
-version: 0.1.0
+version: 0.2.0
 description: |
-  Agent-facing channel router with a standalone dashboard chat channel.
+  Agent-facing channel router with standalone dashboard chat and ntfy-compatible notification channels.
   Agents reply through respond(channel="chat", ...); the app stores chat
-  history, streams updates to the dashboard, and forwards user messages to
-  the owning agent.
+  history, streams updates to the dashboard, exposes private ntfy topics,
+  and forwards inbound user messages to the owning agent.
 author: Apteva
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/channels/icon.svg
 scopes: [project, global]
@@ -44,7 +45,7 @@ provides:
     - prefix: /
   mcp_tools:
     - name: respond
-      description: Send a user-visible reply to an active channel. V1 supports channel="chat".
+      description: Send a user-visible reply to a channel. Supports channel="chat" and ntfy channel ids from list_channels.
     - name: status
       description: Send a status line to a channel. V1 writes chat status lines as system messages.
     - name: list_channels
@@ -52,6 +53,8 @@ provides:
   publishes:
     - name: chat.message
       description: Emitted whenever a chat message is inserted.
+    - name: ntfy.message
+      description: Emitted whenever an ntfy topic message is inserted.
 runtime:
   kind: source
   source:
@@ -106,6 +109,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/unread-summary", Handler: a.handleUnreadSummary},
 		{Pattern: "/seen", Handler: a.handleSeen},
 		{Pattern: "/presence", Handler: a.handlePresence},
+		{Pattern: "/ntfy", Handler: a.handleNtfyRoot, NoAuth: true},
+		{Pattern: "/ntfy/", Handler: a.handleNtfy, NoAuth: true},
 	}
 }
 
@@ -119,8 +124,12 @@ func (a *App) MCPTools() []sdk.Tool {
 				"type":     "object",
 				"required": []string{"channel", "text"},
 				"properties": map[string]any{
-					"channel":   map[string]any{"type": "string", "description": `Target channel. V1 supports "chat".`},
+					"channel":   map[string]any{"type": "string", "description": `Target channel. Use "chat" or an ntfy channel id from list_channels, e.g. "ntfy:<topic>".`},
 					"text":      map[string]any{"type": "string", "description": "Message to deliver to the user."},
+					"title":     map[string]any{"type": "string", "description": "Optional ntfy notification title."},
+					"priority":  map[string]any{"description": "Optional ntfy priority: min, low, default, high, urgent, or 1-5."},
+					"tags":      map[string]any{"type": "array", "description": "Optional ntfy tags.", "items": map[string]any{"type": "string"}},
+					"click":     map[string]any{"type": "string", "description": "Optional ntfy click URL."},
 					"agent_id":  map[string]any{"type": "integer", "description": "Optional fallback when caller metadata is unavailable."},
 					"thread_id": map[string]any{"type": "string", "description": "Optional source thread id."},
 					"components": map[string]any{
@@ -422,13 +431,190 @@ func (a *App) handlePresence(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok", "thread_id": chat.ThreadID})
 }
 
+func (a *App) handleNtfyRoot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		http.Error(w, "POST or PUT", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Topic    string   `json:"topic"`
+		Message  string   `json:"message"`
+		Title    string   `json:"title"`
+		Priority string   `json:"priority"`
+		Tags     []string `json:"tags"`
+		Click    string   `json:"click"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	a.publishInboundNtfy(w, body.Topic, body.Message, ntfyMeta{
+		Title:    body.Title,
+		Priority: body.Priority,
+		Tags:     cleanTags(body.Tags),
+		Click:    body.Click,
+	})
+}
+
+func (a *App) handleNtfy(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/ntfy/")
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		http.Error(w, "topic required", http.StatusBadRequest)
+		return
+	}
+	topic := parts[0]
+	if !validTopic(topic) {
+		http.Error(w, "invalid topic", http.StatusBadRequest)
+		return
+	}
+	suffix := ""
+	if len(parts) > 1 {
+		suffix = parts[1]
+	}
+	switch r.Method {
+	case http.MethodGet:
+		switch suffix {
+		case "json", "sse", "raw":
+			a.streamNtfy(w, r, topic, suffix)
+		case "":
+			chat, err := a.store.GetNtfyByTopic(topic)
+			if err != nil {
+				http.Error(w, "topic not found", http.StatusNotFound)
+				return
+			}
+			writeJSON(w, map[string]any{
+				"topic":          topic,
+				"channel_id":     "ntfy:" + topic,
+				"subscribe_json": "/ntfy/" + topic + "/json",
+				"subscribe_sse":  "/ntfy/" + topic + "/sse",
+				"agent_id":       chat.AgentID,
+				"project_id":     chat.ProjectID,
+			})
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	case http.MethodPost, http.MethodPut:
+		if suffix != "" {
+			http.Error(w, "publish to /ntfy/{topic}", http.StatusNotFound)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		a.publishInboundNtfy(w, topic, string(body), ntfyMeta{
+			Title:    headerAny(r, "Title", "X-Title"),
+			Priority: headerAny(r, "Priority", "X-Priority", "X-Ntfy-Priority"),
+			Tags:     splitTags(headerAny(r, "Tags", "Tag", "X-Tags")),
+			Click:    headerAny(r, "Click", "X-Click"),
+		})
+	default:
+		http.Error(w, "GET, POST or PUT", http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *App) publishInboundNtfy(w http.ResponseWriter, topic, message string, meta ntfyMeta) {
+	topic = strings.TrimSpace(topic)
+	message = strings.TrimSpace(message)
+	if !validTopic(topic) {
+		http.Error(w, "invalid topic", http.StatusBadRequest)
+		return
+	}
+	if message == "" {
+		http.Error(w, "message required", http.StatusBadRequest)
+		return
+	}
+	chat, err := a.store.GetNtfyByTopic(topic)
+	if err != nil {
+		http.Error(w, "topic not found", http.StatusNotFound)
+		return
+	}
+	m, err := a.store.Append(chat.ID, "user", message, nil, "", "final", ntfyComponents(meta))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	a.publish(*m)
+	if globalCtx != nil && globalCtx.PlatformAPI() != nil {
+		ev := fmt.Sprintf("[ntfy:%s] %s", topic, message)
+		if meta.Title != "" {
+			ev = fmt.Sprintf("[ntfy:%s] %s\n%s", topic, meta.Title, message)
+		}
+		if err := globalCtx.PlatformAPI().SendEvent(chat.AgentID, ev); err != nil {
+			notice := fmt.Sprintf("(could not reach agent; ntfy message is saved. err: %v)", err)
+			if sm, sErr := a.store.Append(chat.ID, "system", notice, nil, "", "final", nil); sErr == nil {
+				a.publish(*sm)
+			}
+		}
+	}
+	w.Header().Set("X-Ntfy-Message-Id", strconv.FormatInt(m.ID, 10))
+	writeJSON(w, ntfyEventFromMessage(topic, *m))
+}
+
+func (a *App) streamNtfy(w http.ResponseWriter, r *http.Request, topic, format string) {
+	chat, err := a.store.GetNtfyByTopic(topic)
+	if err != nil {
+		http.Error(w, "topic not found", http.StatusNotFound)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	switch format {
+	case "json":
+		w.Header().Set("Content-Type", "application/x-ndjson")
+	case "sse":
+		w.Header().Set("Content-Type", "text/event-stream")
+	case "raw":
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	writeNtfyEvent(w, format, ntfyEvent{Event: "open", Topic: topic})
+	since := queryInt64(r, "since")
+	backfill, err := a.store.ListMessages(chat.ID, since, 1000)
+	if err == nil {
+		for _, m := range backfill {
+			writeNtfyEvent(w, format, ntfyEventFromMessage(topic, m))
+			if m.ID > since {
+				since = m.ID
+			}
+		}
+	}
+	flusher.Flush()
+
+	ch, cancel := a.hub.subscribe(chat.ID)
+	defer cancel()
+	ping := time.NewTicker(15 * time.Second)
+	defer ping.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ping.C:
+			writeNtfyEvent(w, format, ntfyEvent{Event: "keepalive", Topic: topic, Time: time.Now().Unix()})
+			flusher.Flush()
+		case m, ok := <-ch:
+			if !ok {
+				return
+			}
+			if m.ID <= since {
+				continue
+			}
+			writeNtfyEvent(w, format, ntfyEventFromMessage(topic, m))
+			since = m.ID
+			flusher.Flush()
+		}
+	}
+}
+
 // --- MCP handlers ----------------------------------------------------------
 
 func (a *App) toolRespond(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
 	channel := normalizeChannel(strArg(args, "channel"))
-	if channel != "chat" {
-		return nil, fmt.Errorf("channel %q is not available in channels v1; use channel=\"chat\"", channel)
-	}
 	text := strArg(args, "text")
 	if strings.TrimSpace(text) == "" {
 		return nil, errors.New("text required")
@@ -436,6 +622,24 @@ func (a *App) toolRespond(ctx context.Context, app *sdk.AppCtx, args map[string]
 	agentID := callerAgentID(ctx, args)
 	if agentID == 0 {
 		return nil, errors.New("agent_id required because caller metadata is unavailable")
+	}
+	if topic := ntfyTopicFromChannel(channel); topic != "" {
+		chat, err := a.store.GetNtfyByTopic(topic)
+		if err != nil {
+			return nil, fmt.Errorf("ntfy channel %q not found", channel)
+		}
+		if chat.AgentID != agentID {
+			return nil, fmt.Errorf("ntfy channel %q is not available for agent %d", channel, agentID)
+		}
+		m, err := a.store.Append(chat.ID, "agent", text, nil, strArg(args, "thread_id"), "final", ntfyComponents(ntfyMetaFromArgs(args)))
+		if err != nil {
+			return nil, err
+		}
+		a.publish(*m)
+		return map[string]any{"status": "published", "channel": "ntfy", "channel_id": "ntfy:" + topic, "topic": topic, "message_id": m.ID}, nil
+	}
+	if channel != "chat" {
+		return nil, fmt.Errorf("channel %q is not available; use channel=\"chat\" or an ntfy channel id from list_channels", channel)
 	}
 	projectID := app.CurrentProject()
 	projectID = a.projectForAgent(agentID, projectID)
@@ -489,19 +693,40 @@ func (a *App) toolListChannels(ctx context.Context, app *sdk.AppCtx, args map[st
 	if agentID == 0 {
 		return map[string]any{"channels": []any{}}, nil
 	}
+	projectID := a.projectForAgent(agentID, app.CurrentProject())
+	ntfy, err := a.store.EnsureDefaultNtfy(agentID, projectID, "")
+	if err != nil {
+		return nil, err
+	}
 	chatID := defaultChatID(agentID)
 	active := a.hub.hasSubscribers(chatID)
+	ntfyActive := a.hub.hasSubscribers(ntfy.ID)
 	channels := []map[string]any{
 		{
 			"id":           "chat",
+			"type":         "chat",
 			"label":        "Dashboard chat",
 			"active":       active,
 			"capabilities": []string{"text", "status", "components"},
+		},
+		{
+			"id":             "ntfy:" + ntfy.ThreadID,
+			"type":           "ntfy",
+			"label":          ntfy.Title,
+			"active":         ntfyActive,
+			"topic":          ntfy.ThreadID,
+			"subscribe_path": "/ntfy/" + ntfy.ThreadID,
+			"stream_json":    "/ntfy/" + ntfy.ThreadID + "/json",
+			"stream_sse":     "/ntfy/" + ntfy.ThreadID + "/sse",
+			"capabilities":   []string{"text", "title", "priority", "tags", "click"},
 		},
 	}
 	var activeIDs []string
 	if active {
 		activeIDs = append(activeIDs, "chat")
+	}
+	if ntfyActive {
+		activeIDs = append(activeIDs, "ntfy:"+ntfy.ThreadID)
 	}
 	return map[string]any{
 		"channels":        channels,
@@ -511,6 +736,25 @@ func (a *App) toolListChannels(ctx context.Context, app *sdk.AppCtx, args map[st
 }
 
 // --- helpers ---------------------------------------------------------------
+
+type ntfyMeta struct {
+	Title    string   `json:"title,omitempty"`
+	Priority string   `json:"priority,omitempty"`
+	Tags     []string `json:"tags,omitempty"`
+	Click    string   `json:"click,omitempty"`
+}
+
+type ntfyEvent struct {
+	ID       string   `json:"id,omitempty"`
+	Time     int64    `json:"time,omitempty"`
+	Event    string   `json:"event"`
+	Topic    string   `json:"topic"`
+	Message  string   `json:"message,omitempty"`
+	Title    string   `json:"title,omitempty"`
+	Priority string   `json:"priority,omitempty"`
+	Tags     []string `json:"tags,omitempty"`
+	Click    string   `json:"click,omitempty"`
+}
 
 func (a *App) authorizeChat(w http.ResponseWriter, r *http.Request) (string, *Chat, bool) {
 	chatID := r.URL.Query().Get("chat_id")
@@ -540,7 +784,11 @@ func (a *App) projectForAgent(agentID int64, fallback string) string {
 func (a *App) publish(m Message) {
 	a.hub.publish(m)
 	if globalCtx != nil {
-		globalCtx.Emit("chat.message", m)
+		eventName := "chat.message"
+		if chat, err := a.store.GetChat(m.ChatID); err == nil && chat.Channel == "ntfy" {
+			eventName = "ntfy.message"
+		}
+		globalCtx.Emit(eventName, m)
 	}
 }
 
@@ -560,6 +808,124 @@ func normalizeChannel(channel string) string {
 		return "chat"
 	}
 	return channel
+}
+
+func ntfyTopicFromChannel(channel string) string {
+	channel = strings.TrimSpace(channel)
+	if strings.HasPrefix(channel, "ntfy:") {
+		topic := strings.TrimPrefix(channel, "ntfy:")
+		if validTopic(topic) {
+			return topic
+		}
+	}
+	return ""
+}
+
+func randomTopic(agentID int64) string {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("agent-%d-%d", agentID, time.Now().UnixNano())
+	}
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	out := make([]byte, len(b))
+	for i, v := range b {
+		out[i] = alphabet[int(v)%len(alphabet)]
+	}
+	return fmt.Sprintf("agent-%d-%s", agentID, string(out))
+}
+
+func validTopic(topic string) bool {
+	if len(topic) < 3 || len(topic) > 128 {
+		return false
+	}
+	for _, r := range topic {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '_' || r == '-' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func ntfyMetaFromArgs(args map[string]any) ntfyMeta {
+	return ntfyMeta{
+		Title:    strArg(args, "title"),
+		Priority: priorityString(args["priority"]),
+		Tags:     tagsFromAny(args["tags"]),
+		Click:    strArg(args, "click"),
+	}
+}
+
+func ntfyComponents(meta ntfyMeta) []ChatComponent {
+	meta.Title = strings.TrimSpace(meta.Title)
+	meta.Priority = priorityString(meta.Priority)
+	meta.Tags = cleanTags(meta.Tags)
+	meta.Click = strings.TrimSpace(meta.Click)
+	if meta.Title == "" && meta.Priority == "" && len(meta.Tags) == 0 && meta.Click == "" {
+		return nil
+	}
+	return []ChatComponent{{App: "channels", Name: "ntfy", Props: map[string]any{
+		"title":    meta.Title,
+		"priority": meta.Priority,
+		"tags":     meta.Tags,
+		"click":    meta.Click,
+	}}}
+}
+
+func ntfyMetaFromMessage(m Message) ntfyMeta {
+	for _, c := range m.Components {
+		if c.App != "channels" || c.Name != "ntfy" {
+			continue
+		}
+		return ntfyMeta{
+			Title:    stringFromProp(c.Props, "title"),
+			Priority: stringFromProp(c.Props, "priority"),
+			Tags:     tagsFromAny(c.Props["tags"]),
+			Click:    stringFromProp(c.Props, "click"),
+		}
+	}
+	return ntfyMeta{}
+}
+
+func ntfyEventFromMessage(topic string, m Message) ntfyEvent {
+	meta := ntfyMetaFromMessage(m)
+	return ntfyEvent{
+		ID:       strconv.FormatInt(m.ID, 10),
+		Time:     m.CreatedAt.Unix(),
+		Event:    "message",
+		Topic:    topic,
+		Message:  m.Content,
+		Title:    meta.Title,
+		Priority: meta.Priority,
+		Tags:     meta.Tags,
+		Click:    meta.Click,
+	}
+}
+
+func writeNtfyEvent(w io.Writer, format string, ev ntfyEvent) {
+	if ev.Time == 0 && ev.Event != "open" {
+		ev.Time = time.Now().Unix()
+	}
+	switch format {
+	case "raw":
+		if ev.Event == "message" {
+			_, _ = io.WriteString(w, ev.Message+"\n")
+		}
+	case "sse":
+		body, _ := json.Marshal(ev)
+		_, _ = io.WriteString(w, "event: "+ev.Event+"\n")
+		_, _ = io.WriteString(w, "data: ")
+		_, _ = w.Write(body)
+		_, _ = io.WriteString(w, "\n\n")
+	default:
+		body, _ := json.Marshal(ev)
+		_, _ = w.Write(body)
+		_, _ = io.WriteString(w, "\n")
+	}
 }
 
 func componentsFromArgs(raw any) []ChatComponent {
@@ -647,6 +1013,97 @@ func queryInt64(r *http.Request, keys ...string) int64 {
 func strArg(args map[string]any, key string) string {
 	if s, ok := args[key].(string); ok {
 		return strings.TrimSpace(s)
+	}
+	return ""
+}
+
+func headerAny(r *http.Request, keys ...string) string {
+	for _, key := range keys {
+		if v := strings.TrimSpace(r.Header.Get(key)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func stringFromProp(props map[string]any, key string) string {
+	if props == nil {
+		return ""
+	}
+	if s, ok := props[key].(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return ""
+}
+
+func splitTags(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	return cleanTags(strings.Split(raw, ","))
+}
+
+func tagsFromAny(v any) []string {
+	switch x := v.(type) {
+	case []string:
+		return cleanTags(x)
+	case []any:
+		out := make([]string, 0, len(x))
+		for _, item := range x {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return cleanTags(out)
+	case string:
+		return splitTags(x)
+	default:
+		return nil
+	}
+}
+
+func cleanTags(tags []string) []string {
+	out := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag != "" {
+			out = append(out, tag)
+		}
+	}
+	return out
+}
+
+func priorityString(v any) string {
+	switch x := v.(type) {
+	case string:
+		x = strings.TrimSpace(strings.ToLower(x))
+		switch x {
+		case "min", "1":
+			return "1"
+		case "low", "2":
+			return "2"
+		case "default", "", "3":
+			return ""
+		case "high", "4":
+			return "4"
+		case "urgent", "max", "5":
+			return "5"
+		default:
+			return x
+		}
+	case float64:
+		n := int(x)
+		if n >= 1 && n <= 5 {
+			return strconv.Itoa(n)
+		}
+	case int:
+		if x >= 1 && x <= 5 {
+			return strconv.Itoa(x)
+		}
+	case int64:
+		if x >= 1 && x <= 5 {
+			return strconv.FormatInt(x, 10)
+		}
 	}
 	return ""
 }

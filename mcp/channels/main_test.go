@@ -2,7 +2,12 @@ package main
 
 import (
 	"database/sql"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -15,12 +20,19 @@ func testDB(t *testing.T) *sql.DB {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	sqlBytes, err := os.ReadFile("migrations/001_init.sql")
+	files, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
-		t.Fatalf("read migration: %v", err)
+		t.Fatalf("list migrations: %v", err)
 	}
-	if _, err := db.Exec(string(sqlBytes)); err != nil {
-		t.Fatalf("run migration: %v", err)
+	sort.Strings(files)
+	for _, file := range files {
+		sqlBytes, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", file, err)
+		}
+		if _, err := db.Exec(string(sqlBytes)); err != nil {
+			t.Fatalf("run migration %s: %v", file, err)
+		}
 	}
 	return db
 }
@@ -80,5 +92,53 @@ func TestStoreChatMessageLifecycle(t *testing.T) {
 	}
 	if seen != agentMsg.ID {
 		t.Fatalf("seen = %d, want clamp to %d", seen, agentMsg.ID)
+	}
+}
+
+func TestStoreDefaultNtfyLifecycle(t *testing.T) {
+	st := newStore(testDB(t))
+	ch, err := st.EnsureDefaultNtfy(42, "proj-1", "agent-42-test")
+	if err != nil {
+		t.Fatalf("EnsureDefaultNtfy: %v", err)
+	}
+	if ch.Channel != "ntfy" || ch.ThreadID != "agent-42-test" {
+		t.Fatalf("ntfy channel = %+v", ch)
+	}
+	byTopic, err := st.GetNtfyByTopic("agent-42-test")
+	if err != nil {
+		t.Fatalf("GetNtfyByTopic: %v", err)
+	}
+	if byTopic.ID != ch.ID {
+		t.Fatalf("topic lookup id = %q, want %q", byTopic.ID, ch.ID)
+	}
+}
+
+func TestNtfyPublishHTTP(t *testing.T) {
+	st := newStore(testDB(t))
+	ch, err := st.EnsureDefaultNtfy(42, "proj-1", "agent-42-test")
+	if err != nil {
+		t.Fatalf("EnsureDefaultNtfy: %v", err)
+	}
+	app := &App{store: st, hub: newHub()}
+	req := httptest.NewRequest(http.MethodPost, "/ntfy/agent-42-test", strings.NewReader("hello phone"))
+	req.Header.Set("Title", "Test")
+	req.Header.Set("Tags", "white_check_mark,agent")
+	rec := httptest.NewRecorder()
+
+	app.handleNtfy(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	rows, err := st.ListMessages(ch.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Content != "hello phone" || rows[0].Role != "user" {
+		t.Fatalf("rows = %+v", rows)
+	}
+	meta := ntfyMetaFromMessage(rows[0])
+	if meta.Title != "Test" || len(meta.Tags) != 2 {
+		t.Fatalf("meta = %+v", meta)
 	}
 }

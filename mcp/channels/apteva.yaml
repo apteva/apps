@@ -2,12 +2,12 @@ schema: apteva-app/v1
 
 name: channels
 display_name: Channels
-version: 0.1.0
+version: 0.2.0
 description: |
-  Agent-facing channel router with a standalone dashboard chat channel.
+  Agent-facing channel router with standalone dashboard chat and ntfy-compatible notification channels.
   Agents reply through respond(channel="chat", ...); the app stores chat
-  history, streams updates to the dashboard, and forwards user messages to
-  the owning agent.
+  history, streams updates to the dashboard, exposes private ntfy topics,
+  and forwards inbound user messages to the owning agent.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/channels
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/channels/icon.svg
@@ -27,7 +27,7 @@ provides:
     - prefix: /
   mcp_tools:
     - name: respond
-      description: Send a user-visible reply to an active channel. V1 supports channel="chat".
+      description: Send a user-visible reply to a channel. Supports channel="chat" and ntfy channel ids from list_channels.
     - name: status
       description: Send a status line to a channel. V1 writes chat status lines as system messages.
     - name: list_channels
@@ -35,6 +35,8 @@ provides:
   publishes:
     - name: chat.message
       description: Emitted whenever a chat message is inserted.
+    - name: ntfy.message
+      description: Emitted whenever an ntfy topic message is inserted.
 
 runtime:
   kind: source

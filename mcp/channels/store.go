@@ -66,6 +66,10 @@ func defaultChatID(agentID int64) string {
 	return fmt.Sprintf("default-%d", agentID)
 }
 
+func defaultNtfyID(agentID int64) string {
+	return fmt.Sprintf("ntfy-default-%d", agentID)
+}
+
 func (s *store) EnsureDefaultChat(agentID int64, projectID string) (*Chat, error) {
 	chatID := defaultChatID(agentID)
 	_, err := s.db.Exec(
@@ -82,12 +86,51 @@ func (s *store) EnsureDefaultChat(agentID int64, projectID string) (*Chat, error
 	return s.GetChat(chatID)
 }
 
+func (s *store) EnsureDefaultNtfy(agentID int64, projectID string, topic string) (*Chat, error) {
+	chatID := defaultNtfyID(agentID)
+	if topic == "" {
+		if existing, err := s.GetChat(chatID); err == nil {
+			return existing, nil
+		}
+		topic = randomTopic(agentID)
+	}
+	_, err := s.db.Exec(
+		`INSERT OR IGNORE INTO channels_chats (id, agent_id, project_id, title, channel, thread_id)
+		 VALUES (?, ?, ?, 'Ntfy', 'ntfy', ?)`,
+		chatID, agentID, projectID, topic,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("ensure default ntfy: %w", err)
+	}
+	if projectID != "" {
+		_, _ = s.db.Exec(`UPDATE channels_chats SET project_id = ? WHERE id = ? AND project_id = ''`, projectID, chatID)
+	}
+	return s.GetChat(chatID)
+}
+
 func (s *store) GetChat(id string) (*Chat, error) {
 	var c Chat
 	err := s.db.QueryRow(
 		`SELECT id, agent_id, project_id, title, channel, thread_id, created_at, updated_at
 		 FROM channels_chats WHERE id = ?`,
 		id,
+	).Scan(&c.ID, &c.AgentID, &c.ProjectID, &c.Title, &c.Channel, &c.ThreadID, &c.CreatedAt, &c.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	c.InstanceID = c.AgentID
+	return &c, nil
+}
+
+func (s *store) GetNtfyByTopic(topic string) (*Chat, error) {
+	var c Chat
+	err := s.db.QueryRow(
+		`SELECT id, agent_id, project_id, title, channel, thread_id, created_at, updated_at
+		 FROM channels_chats WHERE channel = 'ntfy' AND thread_id = ?`,
+		topic,
 	).Scan(&c.ID, &c.AgentID, &c.ProjectID, &c.Title, &c.Channel, &c.ThreadID, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
