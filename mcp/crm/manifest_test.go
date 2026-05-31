@@ -20,8 +20,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Errorf("manifest.DB.Migrations missing")
 	}
-	if len(m.Provides.Publishes) != 15 {
-		t.Errorf("expected 15 published event declarations, got %d", len(m.Provides.Publishes))
+	if len(m.Provides.Publishes) != 16 {
+		t.Errorf("expected 16 published event declarations, got %d", len(m.Provides.Publishes))
 	}
 	// Surfaces the embedded scopes — should accept project + global.
 	gotScopes := map[string]bool{}
@@ -52,6 +52,7 @@ func TestEmbeddedManifest_PublishesCRMEvents(t *testing.T) {
 		"contact.merged",
 		"contact.activity.added",
 		"conversation.status.changed",
+		"conversation.message.received",
 		"list.created",
 		"list.updated",
 		"list.archived",

@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.13
+version: 0.8.14
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -185,6 +185,18 @@ provides:
         status: string
         priority: string
         reason: string
+    - name: conversation.message.received
+      description: A Messaging inbound message was attached to a CRM conversation; use this for agent wakeups on external replies.
+      payload:
+        contact_id: integer
+        conversation_id: integer
+        activity_id: integer
+        kind: string
+        channel: string
+        source: string
+        thread_state: string
+        thread_created: boolean
+        messaging_id: integer
     - name: list.created
       description: A contact list was created.
       payload:

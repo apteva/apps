@@ -383,4 +383,18 @@ func TestMessagingInboundReceiveTool_AttachesInbound(t *testing.T) {
 	if payload["conversation_id"].(int64) != res["conversation_id"].(int64) {
 		t.Fatalf("event conversation_id=%#v, want %#v", payload["conversation_id"], res["conversation_id"])
 	}
+	messageEvents := rec.EventsByTopic("conversation.message.received")
+	if len(messageEvents) != 1 {
+		t.Fatalf("conversation.message.received events=%d, want 1", len(messageEvents))
+	}
+	msgPayload := messageEvents[0].Data.(map[string]any)
+	if msgPayload["source"] != "messaging" || msgPayload["kind"] != "whatsapp_received" || msgPayload["channel"] != "whatsapp" {
+		t.Fatalf("message event payload=%#v", msgPayload)
+	}
+	if msgPayload["thread_state"] != "new" || msgPayload["thread_created"] != true {
+		t.Fatalf("thread state payload=%#v", msgPayload)
+	}
+	if msgPayload["conversation_id"].(int64) != res["conversation_id"].(int64) {
+		t.Fatalf("message event conversation_id=%#v, want %#v", msgPayload["conversation_id"], res["conversation_id"])
+	}
 }

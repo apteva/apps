@@ -2057,7 +2057,7 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 		emitCRMEvent(ctx, pid, "list.member.added", map[string]any{"list_id": lid, "contact_id": contact.ID})
 	}
 
-	convoID, err := resolveInboundConversation(db, pid, contact.ID, body)
+	convoID, threadCreated, err := resolveInboundConversation(db, pid, contact.ID, body)
 	if err != nil {
 		return nil, fmt.Errorf("convo: %w", err)
 	}
@@ -2179,6 +2179,21 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 		"kind":            act.Kind,
 		"source":          act.Source,
 	})
+	threadState := "existing"
+	if threadCreated {
+		threadState = "new"
+	}
+	emitCRMEvent(ctx, pid, "conversation.message.received", map[string]any{
+		"contact_id":      contact.ID,
+		"conversation_id": convoID,
+		"activity_id":     act.ID,
+		"kind":            act.Kind,
+		"channel":         body.Channel,
+		"source":          act.Source,
+		"thread_state":    threadState,
+		"thread_created":  threadCreated,
+		"messaging_id":    body.MessageID,
+	})
 
 	out := map[string]any{
 		"ok":              true,
@@ -2193,18 +2208,18 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 	return out, nil
 }
 
-func resolveInboundConversation(db *sql.DB, pid string, contactID int64, p inboundPayload) (int64, error) {
+func resolveInboundConversation(db *sql.DB, pid string, contactID int64, p inboundPayload) (int64, bool, error) {
 	if p.Channel == channelSMS || p.Channel == channelWhatsApp {
 		existing, err := dbConversationForChannel(db, pid, contactID, p.Channel)
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		if existing != nil {
-			return existing.ID, nil
+			return existing.ID, false, nil
 		}
 		tx, err := db.Begin()
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		now := p.ReceivedAt
 		if now == "" {
@@ -2213,32 +2228,32 @@ func resolveInboundConversation(db *sql.DB, pid string, contactID int64, p inbou
 		id, err := dbConversationCreate(tx, pid, contactID, p.Channel, "", "", now)
 		if err != nil {
 			tx.Rollback()
-			return 0, err
+			return 0, false, err
 		}
 		if err := tx.Commit(); err != nil {
-			return 0, err
+			return 0, false, err
 		}
-		return id, nil
+		return id, true, nil
 	}
 
 	// email — chain match by In-Reply-To then References.
 	if p.InReplyTo != "" {
 		if id, err := dbConversationByActivityMsgID(db, pid, contactID, p.InReplyTo); err == nil && id != 0 {
-			return id, nil
+			return id, false, nil
 		}
 		if c, err := dbConversationByRootMsgID(db, pid, p.InReplyTo); err == nil && c != nil {
-			return c.ID, nil
+			return c.ID, false, nil
 		}
 	}
 	for _, ref := range p.References {
 		if c, err := dbConversationByRootMsgID(db, pid, ref); err == nil && c != nil {
-			return c.ID, nil
+			return c.ID, false, nil
 		}
 	}
 
 	tx, err := db.Begin()
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	now := p.ReceivedAt
 	if now == "" {
@@ -2247,12 +2262,12 @@ func resolveInboundConversation(db *sql.DB, pid string, contactID int64, p inbou
 	id, err := dbConversationCreate(tx, pid, contactID, channelEmail, p.Subject, p.MessageIDHeader, now)
 	if err != nil {
 		tx.Rollback()
-		return 0, err
+		return 0, false, err
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	return id, nil
+	return id, true, nil
 }
 
 // matchInboundContact returns the contact matched on exact address
