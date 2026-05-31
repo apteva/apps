@@ -805,79 +805,98 @@ function CalendarView({
         </label>
       </div>
 
-      <div className="flex items-end gap-1 overflow-x-auto py-1">
-        {monthDays.map((day) => {
-          const key = dateKey(day);
-          const count = buckets.get(key)?.length || 0;
-          return (
-            <button
-              key={key}
-              type="button"
-              onClick={() => onSelectedDayChange(key)}
-              className={`h-8 min-w-7 rounded border text-[10px] ${heatClass(count)} ${
-                selectedDay === key ? "ring-1 ring-accent" : ""
-              }`}
-              title={`${formatShortDate(day)}: ${count} task${count === 1 ? "" : "s"}`}
-            >
-              {day.getDate()}
-            </button>
-          );
-        })}
+      <div className="rounded border border-border bg-bg-input/30 p-2">
+        <div className="mb-1 flex items-center justify-between gap-3 text-[10px] uppercase text-text-dim">
+          <span>Month load</span>
+          <span>{calendarTodos.length} scheduled</span>
+        </div>
+        <div
+          className="grid gap-1"
+          style={{ gridTemplateColumns: `repeat(${monthDays.length}, minmax(0, 1fr))` }}
+        >
+          {monthDays.map((day) => {
+            const key = dateKey(day);
+            const count = buckets.get(key)?.length || 0;
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => onSelectedDayChange(key)}
+                className={`h-7 rounded-sm border text-[10px] font-medium ${heatClass(count)} ${
+                  selectedDay === key ? "ring-1 ring-accent ring-offset-1 ring-offset-bg" : ""
+                }`}
+                title={`${formatShortDate(day)}: ${count} task${count === 1 ? "" : "s"}`}
+              >
+                {count > 0 ? count : ""}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
-      <div className="grid grid-cols-7 border-t border-l border-border">
-        {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((label) => (
-          <div key={label} className="border-r border-b border-border px-2 py-1 text-[10px] uppercase text-text-dim">
-            {label}
-          </div>
-        ))}
-        {gridDays.map((day) => {
-          const key = dateKey(day);
-          const items = buckets.get(key) || [];
-          const inMonth = day.getMonth() === month.getMonth();
-          const uniqueLists = new Set(items.map((t) => t.list_id).filter(Boolean)).size;
-          return (
-            <button
-              key={key}
-              type="button"
-              onClick={() => onSelectedDayChange(key)}
-              className={`min-h-[8rem] border-r border-b border-border p-2 text-left align-top hover:bg-bg-card/60 ${
-                selectedDay === key ? "bg-bg-card" : ""
-              } ${inMonth ? "" : "opacity-45"}`}
-            >
-              <div className="flex items-start justify-between gap-2">
-                <span className="text-xs text-text">{day.getDate()}</span>
-                {items.length > 0 && (
-                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${heatBadgeClass(items.length)}`}>
-                    {items.length}
-                  </span>
+      <div className="overflow-hidden rounded border border-border">
+        <div
+          className="grid bg-bg-input/40"
+          style={{ gridTemplateColumns: "repeat(7, minmax(0, 1fr))" }}
+        >
+          {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((label) => (
+            <div key={label} className="border-r border-b border-border px-2 py-1.5 text-[10px] uppercase text-text-dim last:border-r-0">
+              {label}
+            </div>
+          ))}
+        </div>
+        <div
+          className="grid"
+          style={{ gridTemplateColumns: "repeat(7, minmax(0, 1fr))" }}
+        >
+          {gridDays.map((day) => {
+            const key = dateKey(day);
+            const items = buckets.get(key) || [];
+            const inMonth = day.getMonth() === month.getMonth();
+            const uniqueLists = new Set(items.map((t) => t.list_id).filter(Boolean)).size;
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => onSelectedDayChange(key)}
+                className={`min-h-[7.5rem] border-r border-b border-border p-2 text-left align-top hover:bg-bg-card/60 ${
+                  selectedDay === key ? "bg-bg-card" : ""
+                } ${inMonth ? "" : "bg-bg-input/20 opacity-45"}`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <span className="text-xs font-medium text-text">{day.getDate()}</span>
+                  {items.length > 0 && (
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${heatBadgeClass(items.length)}`}>
+                      {items.length}
+                    </span>
+                  )}
+                </div>
+                {uniqueLists > 1 && (
+                  <div className="mt-1 text-[10px] text-text-dim">{uniqueLists} lists</div>
                 )}
-              </div>
-              {uniqueLists > 1 && (
-                <div className="mt-1 text-[10px] text-text-dim">{uniqueLists} lists</div>
-              )}
-              <div className="mt-2 flex flex-col gap-1">
-                {items.slice(0, 4).map((todo) => {
-                  const list = todo.list_id ? listByID.get(todo.list_id) : undefined;
-                  return (
-                    <div key={todo.id} className="flex items-center gap-1 min-w-0 text-[11px] text-text-muted">
-                      <span
-                        className="h-1.5 w-1.5 rounded-full shrink-0"
-                        style={{ background: list?.color || "#6b7280" }}
-                      />
-                      <span className={todo.status === "done" ? "truncate line-through" : "truncate"}>
-                        {todo.title}
-                      </span>
-                    </div>
-                  );
-                })}
-                {items.length > 4 && (
-                  <div className="text-[10px] text-text-dim">+{items.length - 4} more</div>
-                )}
-              </div>
-            </button>
-          );
-        })}
+                <div className="mt-2 flex flex-col gap-1">
+                  {items.slice(0, 3).map((todo) => {
+                    const list = todo.list_id ? listByID.get(todo.list_id) : undefined;
+                    return (
+                      <div key={todo.id} className="flex items-center gap-1 min-w-0 text-[11px] text-text-muted">
+                        <span
+                          className="h-1.5 w-1.5 rounded-full shrink-0"
+                          style={{ background: list?.color || "#6b7280" }}
+                        />
+                        <span className={todo.status === "done" ? "truncate line-through" : "truncate"}>
+                          {todo.title}
+                        </span>
+                      </div>
+                    );
+                  })}
+                  {items.length > 3 && (
+                    <div className="text-[10px] text-text-dim">+{items.length - 3} more</div>
+                  )}
+                </div>
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       <div className="border border-border rounded bg-bg-card/30">
