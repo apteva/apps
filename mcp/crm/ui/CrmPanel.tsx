@@ -389,6 +389,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const [confirmDialog, setConfirmDialog] = useState<ConfirmState | null>(null);
   const [logActivityOpen, setLogActivityOpen] = useState(false);
   const [newContactOpen, setNewContactOpen] = useState(false);
+  const [addChannelOpen, setAddChannelOpen] = useState(false);
   const [attrDefs, setAttrDefs] = useState<AttributeDef[]>([]);
   const [defineFieldOpen, setDefineFieldOpen] = useState(false);
   // Structured filters on the contacts list. filtersRef mirrors the
@@ -947,13 +948,36 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const updateField = <K extends keyof Contact>(key: K, v: string) => {
     setEdits((prev) => ({ ...prev, [key]: v }));
   };
-  const channelDraft = useMemo(
-    () => ((edits.channels as Channel[] | undefined) || detail?.channels || []).map((ch) => ({ ...ch })),
-    [detail?.channels, edits.channels],
-  );
-  const updateChannels = useCallback((channels: Channel[]) => {
-    setEdits((prev) => ({ ...prev, channels }));
-  }, []);
+  const saveChannels = useCallback(async (channels: Channel[]) => {
+    if (!detail) return false;
+    try {
+      const r = await api<{ contact: Contact }>("PATCH", `/contacts/${detail.id}`, { channels, source: "human" });
+      setDetail(r.contact);
+      setEdits((prev) => {
+        const next = { ...prev };
+        delete next.channels;
+        return next;
+      });
+      await loadList(query.trim());
+      return true;
+    } catch (e) {
+      setErrorToast("Channel update failed: " + (e as Error).message);
+      return false;
+    }
+  }, [api, detail, loadList, query]);
+  const handleAddChannel = useCallback(async (channel: Channel) => {
+    if (!detail) return;
+    const current = detail.channels || [];
+    const hasPrimary = current.some((ch) => ch.kind === channel.kind && ch.is_primary);
+    const nextChannel = { ...channel, is_primary: channel.is_primary || !hasPrimary };
+    if (await saveChannels([...current, nextChannel])) {
+      setAddChannelOpen(false);
+    }
+  }, [detail, saveChannels]);
+  const handleRemoveChannel = useCallback(async (idx: number) => {
+    if (!detail) return;
+    await saveChannels((detail.channels || []).filter((_, i) => i !== idx));
+  }, [detail, saveChannels]);
 
   // Group activities by conversation. Within a conversation, order
   // chronologically (oldest first) so the agent reads the thread top-
@@ -1118,7 +1142,11 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
                     </div>
                   </section>
 
-                  <ChannelEditor channels={channelDraft} onChange={updateChannels} />
+                  <ChannelsList
+                    channels={detail.channels || []}
+                    onAdd={() => setAddChannelOpen(true)}
+                    onRemove={handleRemoveChannel}
+                  />
 
                   {detail.tags && detail.tags.length > 0 && (
                     <section>
@@ -1256,6 +1284,12 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
           onSubmit={handleNewContact}
         />
       )}
+      {addChannelOpen && (
+        <AddChannelModal
+          onCancel={() => setAddChannelOpen(false)}
+          onSubmit={handleAddChannel}
+        />
+      )}
 
       {logActivityOpen && detail && (
         <LogActivityModal
@@ -1331,91 +1365,122 @@ function ContactField({ label, value, onChange }: { label: string; value: string
   );
 }
 
-function ChannelEditor({ channels, onChange }: { channels: Channel[]; onChange: (channels: Channel[]) => void }) {
+function ChannelsList({ channels, onAdd, onRemove }: {
+  channels: Channel[];
+  onAdd: () => void;
+  onRemove: (idx: number) => void | Promise<void>;
+}) {
+  return (
+    <section>
+      <div className="flex items-center gap-2 mb-2">
+        <h2 className="text-xs uppercase tracking-wide text-text-dim flex-1">Channels</h2>
+        <button
+          type="button"
+          onClick={onAdd}
+          className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+        >Add channel</button>
+      </div>
+      {channels.length > 0 ? (
+        <ul className="space-y-1">
+          {channels.map((ch, i) => (
+            <li key={`${ch.kind}-${ch.value}-${i}`} className="text-sm flex items-center gap-2">
+              <span className="text-[10px] uppercase text-text-dim w-16">{ch.kind}</span>
+              <span className="text-text flex-1 truncate">{ch.value}</span>
+              {ch.label && <span className="text-[10px] px-1 rounded bg-border text-text-muted">{ch.label}</span>}
+              {ch.is_primary && <span className="text-[10px] px-1 rounded bg-accent/15 text-accent">primary</span>}
+              <button
+                type="button"
+                onClick={() => onRemove(i)}
+                className="text-[11px] px-1.5 py-0.5 border border-border rounded hover:bg-bg-input"
+                title="Remove channel"
+              >Remove</button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-sm text-text-muted">No channels yet.</p>
+      )}
+    </section>
+  );
+}
+
+function AddChannelModal({ onCancel, onSubmit }: {
+  onCancel: () => void;
+  onSubmit: (channel: Channel) => void | Promise<void>;
+}) {
   const [kind, setKind] = useState("email");
   const [value, setValue] = useState("");
   const [label, setLabel] = useState("");
-  const inputCls = "bg-bg-input border border-border rounded px-2 py-1 text-xs";
-  const setAt = (idx: number, patch: Partial<Channel>) => {
-    onChange(channels.map((ch, i) => {
-      if (i !== idx) return ch;
-      const nextKind = patch.kind || ch.kind;
-      const next = { ...ch, ...patch, kind: nextKind };
-      return next;
-    }));
-  };
-  const setPrimary = (idx: number) => {
-    const target = channels[idx];
-    onChange(channels.map((ch, i) => (
-      ch.kind === target.kind ? { ...ch, is_primary: i === idx } : ch
-    )));
-  };
-  const add = () => {
-    const v = value.trim();
-    if (!v) return;
-    const existingPrimary = channels.some((ch) => ch.kind === kind && ch.is_primary);
-    onChange([...channels, { kind, value: v, label: label.trim(), is_primary: !existingPrimary }]);
-    setValue("");
-    setLabel("");
+  const [isPrimary, setIsPrimary] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const canSubmit = value.trim().length > 0;
+  const submit = async () => {
+    if (!canSubmit) return;
+    setBusy(true);
+    try {
+      await onSubmit({
+        kind,
+        value: value.trim(),
+        label: label.trim(),
+        is_primary: isPrimary,
+      });
+    } finally {
+      setBusy(false);
+    }
   };
   return (
-    <section>
-      <h2 className="text-xs uppercase tracking-wide text-text-dim mb-2">Channels</h2>
-      <div className="space-y-2">
-        {channels.length === 0 && <p className="text-sm text-text-muted">No channels yet.</p>}
-        {channels.map((ch, i) => (
-          <div key={`${ch.kind}-${i}`} className="grid grid-cols-[110px_1fr_120px_76px_32px] gap-2 items-center">
-            <select
-              value={ch.kind}
-              onChange={(e) => setAt(i, { kind: e.target.value, is_primary: !channels.some((x, xi) => xi !== i && x.kind === e.target.value && x.is_primary) })}
-              className={inputCls}
-            >
-              {CHANNEL_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
-            </select>
-            <input
-              value={ch.value}
-              onChange={(e) => setAt(i, { value: e.target.value })}
-              placeholder={ch.kind === "phone" ? "+15551230000" : ch.kind === "email" ? "name@example.com" : "value"}
-              className={inputCls}
-            />
-            <input
-              value={ch.label || ""}
-              onChange={(e) => setAt(i, { label: e.target.value })}
-              placeholder="label"
-              className={inputCls}
-            />
-            <label className="flex items-center gap-1 text-xs text-text-muted">
-              <input type="checkbox" checked={!!ch.is_primary} onChange={() => setPrimary(i)} />
-              primary
-            </label>
-            <button
-              type="button"
-              onClick={() => onChange(channels.filter((_, xi) => xi !== i))}
-              className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
-              title="Remove channel"
-            >x</button>
-          </div>
-        ))}
-        <div className="grid grid-cols-[110px_1fr_120px_76px] gap-2 items-center">
-          <select value={kind} onChange={(e) => setKind(e.target.value)} className={inputCls}>
-            {CHANNEL_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
-          </select>
-          <input
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder={kind === "phone" ? "+15551230000" : kind === "email" ? "name@example.com" : "value"}
-            className={inputCls}
-          />
-          <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="label" className={inputCls} />
+    <ModalShell
+      title="Add channel"
+      onCancel={onCancel}
+      footer={
+        <>
           <button
             type="button"
-            onClick={add}
-            disabled={!value.trim()}
-            className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
-          >Add</button>
-        </div>
+            onClick={submit}
+            disabled={busy || !canSubmit}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+          >{busy ? "Adding…" : "Add"}</button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input disabled:opacity-50"
+          >Cancel</button>
+        </>
+      }
+    >
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-20">Kind</label>
+        <select value={kind} onChange={(e) => setKind(e.target.value)} className="flex-1 bg-bg-input border border-border rounded px-2 py-1">
+          {CHANNEL_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
+        </select>
       </div>
-    </section>
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-20">Value</label>
+        <input
+          type={kind === "phone" ? "tel" : kind === "email" ? "email" : "text"}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={kind === "phone" ? "+15551230000" : kind === "email" ? "name@example.com" : "value"}
+          autoFocus
+          className="flex-1 bg-bg-input border border-border rounded px-2 py-1"
+        />
+      </div>
+      <div className="flex items-center gap-2">
+        <label className="text-text-muted w-20">Label</label>
+        <input
+          type="text"
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          placeholder="work, mobile, personal"
+          className="flex-1 bg-bg-input border border-border rounded px-2 py-1"
+        />
+      </div>
+      <label className="flex items-center gap-2 text-sm text-text">
+        <input type="checkbox" checked={isPrimary} onChange={(e) => setIsPrimary(e.target.checked)} />
+        Primary for this channel kind
+      </label>
+    </ModalShell>
   );
 }
 
