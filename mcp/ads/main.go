@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.0
+version: 0.1.1
 scopes: [project, global]
 requires:
   permissions:
@@ -89,9 +89,9 @@ type platformDef struct {
 	// Account discovery. ListAccountsTool returns the ad accounts the
 	// authorising user can manage. We surface them via
 	// account_list_pending_pages and let the user/agent pick one.
-	ListAccountsTool        string
-	AccountListIDField      string // path within each account row
-	AccountListNameField    string
+	ListAccountsTool         string
+	AccountListIDField       string // path within each account row
+	AccountListNameField     string
 	AccountListCurrencyField string
 	AccountListTimezoneField string
 
@@ -122,9 +122,9 @@ type platformDef struct {
 	CreativeUploadVideoTool string
 
 	// Audience tools.
-	AudienceListTool             string
-	AudienceCreateCustomTool     string
-	AudienceCreateLookalikeTool  string
+	AudienceListTool            string
+	AudienceCreateCustomTool    string
+	AudienceCreateLookalikeTool string
 
 	// Field name on each integration tool that carries the ad-account
 	// id. Meta uses "adAccountId" (act_*); Google uses "customer_id".
@@ -194,20 +194,39 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func main() { sdk.Run(&App{}) }
 
+func projectScope(ctx *sdk.AppCtx, argSets ...map[string]any) string {
+	if pid := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); pid != "" {
+		return pid
+	}
+	for _, args := range argSets {
+		if pid := strings.TrimSpace(stringArgAny(args, "_project_id", "project_id")); pid != "" {
+			return pid
+		}
+	}
+	return ""
+}
+
 // ─── HTTP routes ────────────────────────────────────────────────────
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Pattern: "/accounts", Handler: a.handleAccountsAPI},
+		{Pattern: "/accounts/start", Handler: a.handleAccountsStart},
 		// OAuth-completion landing page; the platform 302s here with
 		// ?conn_id=<id>&status=ok and ?pending=<pending_account_id>.
 		{Pattern: "/accounts/oauth_done", Handler: a.handleOAuthDone},
+		{Pattern: "/accounts/finalize", Handler: a.handleAccountsFinalize},
+		{Pattern: "/accounts/", Handler: a.handleAccountsItem},
+		{Pattern: "/platforms", Handler: a.handlePlatforms},
 	}
 }
 
 // handleOAuthDone is the landing page the platform 302s the user back
 // to after OAuth completes. Query params: ?conn_id=<id>&status=ok&pending=<pid>.
-// We update the matching pending_accounts row and redirect the browser
-// into the dashboard's ads panel where the picker appears.
+// We update the matching pending_accounts row and render a tiny page that
+// notifies the already-open panel popup via postMessage. This mirrors the
+// Social app flow and avoids relying on a full dashboard redirect inside
+// the popup.
 func (a *App) handleOAuthDone(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	connStr := q.Get("conn_id")
@@ -229,14 +248,30 @@ func (a *App) handleOAuthDone(w http.ResponseWriter, r *http.Request) {
 	}
 	if status != "ok" {
 		_, _ = globalCtx.AppDB().Exec(`UPDATE pending_accounts SET status='expired' WHERE id=?`, pendingID)
-		http.Redirect(w, r, "/admin/apps/ads/?oauth=failed", http.StatusFound)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<!doctype html><html><body style="font-family:system-ui;background:#111;color:#eee;display:grid;place-items:center;height:100vh;margin:0">
+<div style="text-align:center"><div style="font-size:20px">Authorization failed</div>
+<div style="opacity:.7;margin-top:8px">You can close this window and try again.</div></div>
+<script>try { if (window.opener) { window.opener.postMessage({type:"ads.oauth_failed"}, "*"); } } catch(e){}</script>
+</body></html>`)
 		return
 	}
 	_, _ = globalCtx.AppDB().Exec(
 		`UPDATE pending_accounts SET connection_id=?, status='ready' WHERE id=?`,
 		connID, pendingID,
 	)
-	http.Redirect(w, r, fmt.Sprintf("/admin/apps/ads/?pending=%d", pendingID), http.StatusFound)
+	globalCtx.Emit("account.oauth_ready", map[string]any{
+		"pending_account_id": pendingID,
+		"connection_id":      connID,
+	})
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!doctype html><html><body style="font-family:system-ui;background:#111;color:#eee;display:grid;place-items:center;height:100vh;margin:0">
+<div style="text-align:center"><div style="font-size:20px">Authorization complete</div>
+<div style="opacity:.7;margin-top:8px">You can close this window.</div></div>
+<script>
+try { if (window.opener) { window.opener.postMessage({type:"ads.oauth_ready",pending_account_id:%d,connection_id:%d}, "*"); window.close(); } } catch(e){}
+setTimeout(function(){ window.location.href = "/admin/apps/ads/?pending=%d" }, 1500);
+</script></body></html>`, pendingID, connID, pendingID)
 }
 
 // ─── MCP tools ──────────────────────────────────────────────────────
@@ -413,10 +448,10 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "adset_update",
 			Description: "Update an ad set. Args: ad_account_id, adset_id, plus any updatable field.",
 			InputSchema: schemaObject(map[string]any{
-				"ad_account_id":    map[string]any{"type": "integer"},
-				"adset_id":         map[string]any{"type": "string"},
-				"name":             map[string]any{"type": "string"},
-				"status":           map[string]any{"type": "string", "enum": []string{"PAUSED", "ACTIVE"}},
+				"ad_account_id":         map[string]any{"type": "integer"},
+				"adset_id":              map[string]any{"type": "string"},
+				"name":                  map[string]any{"type": "string"},
+				"status":                map[string]any{"type": "string", "enum": []string{"PAUSED", "ACTIVE"}},
 				"daily_budget_cents":    map[string]any{"type": "integer"},
 				"lifetime_budget_cents": map[string]any{"type": "integer"},
 				"bid_amount_cents":      map[string]any{"type": "integer"},
@@ -558,7 +593,7 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if !ok {
 		return mcpError(fmt.Sprintf("unsupported platform %q — available: %s", plat, strings.Join(platformKeys(), ", "))), nil
 	}
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectScope(ctx, args)
 	forceNew, _ := args["force_new"].(bool)
 
 	// Reuse path (mirrors social): the access token from any active
@@ -777,7 +812,7 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	currency = toString(walkPath(matched, def.AccountListCurrencyField))
 	timezone = toString(walkPath(matched, def.AccountListTimezoneField))
 
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectScope(ctx, args)
 	insertRes, err := ctx.AppDB().Exec(
 		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name, currency, timezone_name, status)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`,
@@ -828,7 +863,7 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 }
 
 func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectScope(ctx, args)
 	platformFilter, _ := args["platform"].(string)
 	statusFilter, _ := args["status"].(string)
 
@@ -853,7 +888,7 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id, connID                                                   int64
+			id, connID                                                  int64
 			platform, native, name, currency, timezone, status, created string
 		)
 		if err := rows.Scan(&id, &platform, &connID, &native, &name, &currency, &timezone, &status, &created); err != nil {
@@ -879,7 +914,7 @@ func (a *App) toolAccountDisconnect(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if id <= 0 {
 		return nil, errors.New("id required")
 	}
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectScope(ctx, args)
 	var connID int64
 	if err := ctx.AppDB().QueryRow(
 		`SELECT connection_id FROM ad_accounts WHERE id=? AND project_id=?`,
@@ -903,6 +938,199 @@ func (a *App) toolAccountDisconnect(ctx *sdk.AppCtx, args map[string]any) (any, 
 	return map[string]any{"deleted": id}, nil
 }
 
+// ─── HTTP handlers (panel) ────────────────────────────────────────────
+
+func projectArgsFromRequest(r *http.Request) map[string]any {
+	args := map[string]any{}
+	q := r.URL.Query()
+	if v := strings.TrimSpace(q.Get("project_id")); v != "" {
+		args["project_id"] = v
+	}
+	if v := strings.TrimSpace(q.Get("_project_id")); v != "" {
+		args["_project_id"] = v
+	}
+	return args
+}
+
+func (a *App) handleAccountsAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	args := projectArgsFromRequest(r)
+	if v := strings.TrimSpace(r.URL.Query().Get("platform")); v != "" {
+		args["platform"] = v
+	}
+	if v := strings.TrimSpace(r.URL.Query().Get("status")); v != "" {
+		args["status"] = v
+	}
+	out, err := a.toolAccountList(globalCtx, args)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (a *App) handleAccountsStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Platform string `json:"platform"`
+		ReturnTo string `json:"return_to"`
+		ForceNew bool   `json:"force_new"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	args := projectArgsFromRequest(r)
+	args["platform"] = body.Platform
+	args["return_to"] = body.ReturnTo
+	args["force_new"] = body.ForceNew
+	out, err := a.toolAccountAdd(globalCtx, args)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (a *App) handleAccountsFinalize(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		PendingAccountID int64  `json:"pending_account_id"`
+		PageID           string `json:"page_id"`
+		Name             string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	args := projectArgsFromRequest(r)
+	args["pending_account_id"] = body.PendingAccountID
+	args["page_id"] = body.PageID
+	args["name"] = body.Name
+	out, err := a.toolAccountFinalize(globalCtx, args)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/accounts/")
+	if rest == "" {
+		http.Error(w, "id required", http.StatusBadRequest)
+		return
+	}
+	parts := strings.Split(rest, "/")
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "pages" && r.Method == http.MethodGet {
+		args := projectArgsFromRequest(r)
+		args["pending_account_id"] = id
+		out, err := a.toolAccountListPendingPages(globalCtx, args)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, out)
+		return
+	}
+	if len(parts) == 1 && r.Method == http.MethodDelete {
+		args := projectArgsFromRequest(r)
+		args["id"] = id
+		out, err := a.toolAccountDisconnect(globalCtx, args)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, out)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+type adsPlatformOption struct {
+	Platform        string
+	DisplayName     string
+	IntegrationSlug string
+	Supported       bool
+	Unavailable     string
+}
+
+var adsPlatformOptions = []adsPlatformOption{
+	{Platform: "meta", DisplayName: "Meta Ads (Facebook + Instagram)", IntegrationSlug: "facebook-ads", Supported: true},
+	{Platform: "google", DisplayName: "Google Ads", IntegrationSlug: "google-ads", Supported: false, Unavailable: "Google Ads connection detected, but the Ads control plane is not wired for Google campaigns yet."},
+}
+
+func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	pid := projectScope(globalCtx, projectArgsFromRequest(r))
+	out := make([]map[string]any, 0, len(adsPlatformOptions))
+	for _, opt := range adsPlatformOptions {
+		connectionCount := 0
+		activeConnectionID := int64(0)
+		if conns, err := globalCtx.PlatformAPI().ListConnections(sdk.ConnectionFilter{
+			ProjectID: pid,
+			AppSlug:   opt.IntegrationSlug,
+		}); err == nil {
+			for _, c := range conns {
+				if c.Status != "active" {
+					continue
+				}
+				connectionCount++
+				if activeConnectionID == 0 {
+					activeConnectionID = c.ID
+				}
+			}
+		}
+
+		activeAccount := false
+		if opt.Supported {
+			var n int
+			_ = globalCtx.AppDB().QueryRow(
+				`SELECT COUNT(*) FROM ad_accounts WHERE project_id=? AND platform=? AND status='active'`,
+				pid, opt.Platform,
+			).Scan(&n)
+			activeAccount = n > 0
+		}
+		available := activeAccount || connectionCount > 0
+		canAdd := opt.Supported && available
+		unavailable := opt.Unavailable
+		if !available {
+			unavailable = "No active " + opt.DisplayName + " connection found. Connect the integration first, then return here."
+		}
+		out = append(out, map[string]any{
+			"platform":             opt.Platform,
+			"display_name":         opt.DisplayName,
+			"integration_slug":     opt.IntegrationSlug,
+			"supported":            opt.Supported,
+			"available":            available,
+			"can_add":              canAdd,
+			"requires_picker":      opt.Supported,
+			"connection_count":     connectionCount,
+			"active_connection_id": activeConnectionID,
+			"active_account":       activeAccount,
+			"unavailable_reason":   unavailable,
+		})
+	}
+	writeJSON(w, map[string]any{"platforms": out})
+}
+
 // ─── Resolution helpers ────────────────────────────────────────────
 
 type adAccount struct {
@@ -913,7 +1141,7 @@ type adAccount struct {
 }
 
 func (a *App) resolveAdAccount(ctx *sdk.AppCtx, args map[string]any) (*adAccount, *platformDef, map[string]any) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+	pid := projectScope(ctx, args)
 	id := int64(intArg(args, "ad_account_id", 0))
 	if id <= 0 {
 		return nil, nil, mcpError("ad_account_id required")
@@ -970,12 +1198,12 @@ func mergeOptions(base map[string]any, args map[string]any) map[string]any {
 // metaCampaignObjective maps our unified objective enum to Meta's
 // OUTCOME_* enum. Future platforms get their own table.
 var metaCampaignObjective = map[string]string{
-	"sales":          "OUTCOME_SALES",
-	"leads":          "OUTCOME_LEADS",
-	"traffic":        "OUTCOME_TRAFFIC",
-	"engagement":     "OUTCOME_ENGAGEMENT",
-	"awareness":      "OUTCOME_AWARENESS",
-	"app_promotion":  "OUTCOME_APP_PROMOTION",
+	"sales":         "OUTCOME_SALES",
+	"leads":         "OUTCOME_LEADS",
+	"traffic":       "OUTCOME_TRAFFIC",
+	"engagement":    "OUTCOME_ENGAGEMENT",
+	"awareness":     "OUTCOME_AWARENESS",
+	"app_promotion": "OUTCOME_APP_PROMOTION",
 }
 
 var metaBidStrategy = map[string]string{
@@ -1118,23 +1346,23 @@ func (a *App) toolCampaignDelete(ctx *sdk.AppCtx, args map[string]any) (any, err
 // ─── Ad set tools ───────────────────────────────────────────────────
 
 var metaOptimizationGoal = map[string]string{
-	"link_clicks":          "LINK_CLICKS",
-	"conversions":          "OFFSITE_CONVERSIONS",
-	"leads":                "LEAD_GENERATION",
-	"reach":                "REACH",
-	"impressions":          "IMPRESSIONS",
-	"page_likes":           "PAGE_LIKES",
-	"post_engagement":      "POST_ENGAGEMENT",
-	"thruplay":             "THRUPLAY",
-	"app_installs":         "APP_INSTALLS",
-	"value":                "VALUE",
-	"landing_page_views":   "LANDING_PAGE_VIEWS",
+	"link_clicks":        "LINK_CLICKS",
+	"conversions":        "OFFSITE_CONVERSIONS",
+	"leads":              "LEAD_GENERATION",
+	"reach":              "REACH",
+	"impressions":        "IMPRESSIONS",
+	"page_likes":         "PAGE_LIKES",
+	"post_engagement":    "POST_ENGAGEMENT",
+	"thruplay":           "THRUPLAY",
+	"app_installs":       "APP_INSTALLS",
+	"value":              "VALUE",
+	"landing_page_views": "LANDING_PAGE_VIEWS",
 }
 
 var metaBillingEvent = map[string]string{
-	"impressions":  "IMPRESSIONS",
-	"link_clicks":  "LINK_CLICKS",
-	"thruplay":     "THRUPLAY",
+	"impressions": "IMPRESSIONS",
+	"link_clicks": "LINK_CLICKS",
+	"thruplay":    "THRUPLAY",
 }
 
 func (a *App) toolAdSetCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1533,6 +1761,11 @@ func mcpError(msg string) map[string]any {
 	}
 }
 
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
 func schemaObject(props map[string]any, required []string) map[string]any {
 	s := map[string]any{"type": "object", "properties": props}
 	if len(required) > 0 {
@@ -1559,6 +1792,22 @@ func intArg(m map[string]any, key string, def int) int {
 		}
 	}
 	return def
+}
+
+func stringArgAny(m map[string]any, keys ...string) string {
+	for _, key := range keys {
+		switch v := m[key].(type) {
+		case string:
+			if s := strings.TrimSpace(v); s != "" {
+				return s
+			}
+		case fmt.Stringer:
+			if s := strings.TrimSpace(v.String()); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 func nullable(s string) any {
