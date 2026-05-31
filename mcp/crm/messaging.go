@@ -982,6 +982,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		SourceDetail: map[string]any{
 			"messaging_id":        msgID,
 			"provider_message_id": providerMsgID,
+			"from":                from,
 			"to":                  addr.Address,
 			"test":                isTest,
 		},
@@ -990,6 +991,12 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	})
 	if err != nil {
 		return nil, err
+	}
+	if convoIDForLog != 0 {
+		_ = dbConversationParticipantsAdd(ctx.AppDB(), pid, convoIDForLog, addr.Channel, []conversationParticipant{
+			{Role: "from", Address: from},
+			{Role: "to", Address: addr.Address, ContactID: cid},
+		})
 	}
 	ctx.Emit("contact.activity.added", map[string]any{
 		"contact_id": cid, "kind": kind,
@@ -1259,6 +1266,312 @@ func (a *App) toolGetConversation(ctx *sdk.AppCtx, args map[string]any) (any, er
 	}, nil
 }
 
+// ─── Conversation participants + Inbox filters ────────────────────
+
+type conversationParticipant struct {
+	Role      string
+	Address   string
+	ContactID int64
+}
+
+func dbConversationParticipantsAdd(db *sql.DB, pid string, conversationID int64, channel string, parts []conversationParticipant) error {
+	if conversationID == 0 || len(parts) == 0 {
+		return nil
+	}
+	stmt, err := db.Prepare(
+		`INSERT OR IGNORE INTO conversation_participants
+			(project_id, conversation_id, contact_id, role, channel, address, domain)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, p := range parts {
+		role := strings.ToLower(strings.TrimSpace(p.Role))
+		if role != "from" && role != "to" && role != "cc" && role != "bcc" {
+			continue
+		}
+		addr := canonicalParticipantAddress(channel, p.Address)
+		if addr == "" {
+			continue
+		}
+		var cid any
+		if p.ContactID != 0 {
+			cid = p.ContactID
+		}
+		domain := ""
+		if channel == channelEmail {
+			domain = domainOf(addr)
+		}
+		if _, err := stmt.Exec(pid, conversationID, cid, role, channel, addr, domain); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func canonicalParticipantAddress(channel, addr string) string {
+	if channel == channelEmail {
+		return canonicalAddress(channelEmail, addr)
+	}
+	if channel == channelSMS || channel == channelWhatsApp {
+		return normaliseChannel("phone", addr)
+	}
+	return strings.ToLower(strings.TrimSpace(addr))
+}
+
+type inboxFilter struct {
+	Field string
+	Op    string
+	Value any
+}
+
+func inboxFiltersFromArgs(args map[string]any) ([]inboxFilter, error) {
+	var out []inboxFilter
+	if raw, ok := args["filters"]; ok {
+		items, ok := raw.([]any)
+		if !ok {
+			return nil, errors.New("filters must be an array")
+		}
+		for _, item := range items {
+			m, ok := item.(map[string]any)
+			if !ok {
+				return nil, errors.New("filters entries must be objects")
+			}
+			out = append(out, inboxFilter{
+				Field: strings.ToLower(strings.TrimSpace(strFromAny(m["field"]))),
+				Op:    strings.ToLower(strings.TrimSpace(strFromAny(m["op"]))),
+				Value: m["value"],
+			})
+		}
+	}
+	for _, f := range []struct {
+		arg   string
+		field string
+	}{
+		{"channel", "channel"},
+		{"from", "from"},
+		{"to", "to"},
+		{"cc", "cc"},
+		{"bcc", "bcc"},
+		{"tag", "tag"},
+		{"priority", "priority"},
+	} {
+		if v := strings.TrimSpace(strArg(args, f.arg)); v != "" {
+			out = append(out, inboxFilter{Field: f.field, Op: "is", Value: v})
+		}
+	}
+	if id := int64Arg(args, "list_id"); id != 0 {
+		out = append(out, inboxFilter{Field: "list", Op: "is", Value: id})
+	}
+	if id := int64Arg(args, "contact_id"); id != 0 {
+		out = append(out, inboxFilter{Field: "contact", Op: "is", Value: id})
+	}
+	return out, nil
+}
+
+func buildInboxFilterWhere(filters []inboxFilter) ([]string, []any, error) {
+	where := []string{}
+	args := []any{}
+	for _, f := range filters {
+		if f.Field == "" {
+			continue
+		}
+		op := f.Op
+		if op == "" {
+			op = "is"
+		}
+		clause, vals, err := buildInboxFilterClause(f.Field, op, f.Value)
+		if err != nil {
+			return nil, nil, err
+		}
+		if clause != "" {
+			where = append(where, clause)
+			args = append(args, vals...)
+		}
+	}
+	return where, args, nil
+}
+
+func buildInboxFilterClause(field, op string, value any) (string, []any, error) {
+	switch field {
+	case "channel":
+		return scalarInboxClause("cc.channel", op, value)
+	case "priority":
+		return scalarInboxClause("COALESCE(cc.priority,'normal')", op, value)
+	case "contact":
+		id := int64FromAny(value)
+		if id != 0 {
+			return "cc.contact_id = ?", []any{id}, nil
+		}
+		addr := strings.ToLower(strings.TrimSpace(strFromAny(value)))
+		if addr == "" {
+			return "", nil, errors.New("contact filter requires id or email")
+		}
+		return `(LOWER(c.primary_email) = ? OR EXISTS (
+				SELECT 1 FROM contact_channels ch
+				WHERE ch.project_id = cc.project_id AND ch.contact_id = cc.contact_id
+				  AND ch.kind = 'email' AND LOWER(ch.value) = ?
+			))`, []any{addr, addr}, nil
+	case "list", "list_id":
+		id := int64FromAny(value)
+		if id == 0 {
+			return "", nil, errors.New("list filter requires id")
+		}
+		return `EXISTS (
+			SELECT 1 FROM contact_list_members lm
+			WHERE lm.project_id = cc.project_id AND lm.contact_id = cc.contact_id AND lm.list_id = ?
+		)`, []any{id}, nil
+	case "tag":
+		tag := strings.TrimSpace(strFromAny(value))
+		if tag == "" {
+			return "", nil, errors.New("tag filter requires value")
+		}
+		return `EXISTS (
+			SELECT 1 FROM contact_tags t
+			WHERE t.project_id = cc.project_id AND t.contact_id = cc.contact_id AND t.tag_name = ?
+		)`, []any{tag}, nil
+	case "from", "to", "cc", "bcc":
+		return participantInboxClause(field, op, value)
+	}
+	return "", nil, fmt.Errorf("unsupported inbox filter field %q", field)
+}
+
+func scalarInboxClause(col, op string, value any) (string, []any, error) {
+	v := strings.ToLower(strings.TrimSpace(strFromAny(value)))
+	if v == "" {
+		return "", nil, errors.New("filter value required")
+	}
+	switch op {
+	case "is", "eq":
+		return col + " = ?", []any{v}, nil
+	case "is_not", "neq":
+		return col + " <> ?", []any{v}, nil
+	case "in":
+		vals := stringValuesFromAny(value)
+		if len(vals) == 0 {
+			return "", nil, errors.New("in op requires values")
+		}
+		ph := strings.TrimRight(strings.Repeat("?,", len(vals)), ",")
+		args := make([]any, 0, len(vals))
+		for _, s := range vals {
+			args = append(args, strings.ToLower(strings.TrimSpace(s)))
+		}
+		return col + " IN (" + ph + ")", args, nil
+	}
+	return "", nil, fmt.Errorf("unsupported op %q for %s", op, col)
+}
+
+func participantInboxClause(role, op string, value any) (string, []any, error) {
+	if op == "in" {
+		vals := stringValuesFromAny(value)
+		if len(vals) == 0 {
+			return "", nil, errors.New("in op requires values")
+		}
+		args := []any{role}
+		for _, v := range vals {
+			args = append(args, participantAddressCandidates(v)...)
+		}
+		ph := strings.TrimRight(strings.Repeat("?,", len(args)-1), ",")
+		return `EXISTS (
+			SELECT 1 FROM conversation_participants p
+			WHERE p.project_id = cc.project_id AND p.conversation_id = cc.id
+			  AND p.role = ? AND p.address IN (` + ph + `)
+		)`, args, nil
+	}
+	raw := strings.TrimSpace(strFromAny(value))
+	if raw == "" {
+		return "", nil, errors.New("participant filter requires value")
+	}
+	switch op {
+	case "is", "eq":
+		vals := participantAddressCandidates(raw)
+		ph := strings.TrimRight(strings.Repeat("?,", len(vals)), ",")
+		args := append([]any{role}, vals...)
+		return `EXISTS (
+			SELECT 1 FROM conversation_participants p
+			WHERE p.project_id = cc.project_id AND p.conversation_id = cc.id
+			  AND p.role = ? AND p.address IN (` + ph + `)
+		)`, args, nil
+	case "is_not", "neq":
+		vals := participantAddressCandidates(raw)
+		ph := strings.TrimRight(strings.Repeat("?,", len(vals)), ",")
+		args := append([]any{role}, vals...)
+		return `NOT EXISTS (
+			SELECT 1 FROM conversation_participants p
+			WHERE p.project_id = cc.project_id AND p.conversation_id = cc.id
+			  AND p.role = ? AND p.address IN (` + ph + `)
+		)`, args, nil
+	case "contains":
+		return `EXISTS (
+			SELECT 1 FROM conversation_participants p
+			WHERE p.project_id = cc.project_id AND p.conversation_id = cc.id
+			  AND p.role = ? AND p.address LIKE ?
+		)`, []any{role, "%" + strings.ToLower(raw) + "%"}, nil
+	case "domain":
+		d := strings.TrimPrefix(strings.ToLower(raw), "@")
+		return `EXISTS (
+			SELECT 1 FROM conversation_participants p
+			WHERE p.project_id = cc.project_id AND p.conversation_id = cc.id
+			  AND p.role = ? AND p.domain = ?
+		)`, []any{role, d}, nil
+	}
+	return "", nil, fmt.Errorf("unsupported participant op %q", op)
+}
+
+func participantAddressCandidates(raw string) []any {
+	seen := map[string]bool{}
+	out := []any{}
+	for _, v := range []string{
+		canonicalParticipantAddress(channelEmail, raw),
+		canonicalParticipantAddress(channelSMS, raw),
+		strings.ToLower(strings.TrimSpace(raw)),
+	} {
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
+}
+
+func strFromAny(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return x
+	case fmt.Stringer:
+		return x.String()
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
+func stringValuesFromAny(v any) []string {
+	switch x := v.(type) {
+	case []any:
+		out := make([]string, 0, len(x))
+		for _, item := range x {
+			if s := strings.TrimSpace(strFromAny(item)); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []string:
+		return x
+	case string:
+		if strings.TrimSpace(x) == "" {
+			return nil
+		}
+		return []string{x}
+	default:
+		return nil
+	}
+}
+
 // ─── Inbox (cross-contact triage queue) ───────────────────────────
 
 type inboxRow struct {
@@ -1279,7 +1592,7 @@ type inboxRow struct {
 // triage queue. status="" defaults to 'open'; status="all" returns every
 // status. Each row carries the contact summary, a last-message snippet,
 // and whether the contact is tagged automated.
-func dbInboxConversations(db *sql.DB, pid, status string, limit int) ([]*inboxRow, error) {
+func dbInboxConversations(db *sql.DB, pid, status string, limit int, filters []inboxFilter) ([]*inboxRow, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -1294,6 +1607,14 @@ func dbInboxConversations(db *sql.DB, pid, status string, limit int) ([]*inboxRo
 		where += " AND COALESCE(cc.status,'open') = ?"
 		args = append(args, strings.ToLower(strings.TrimSpace(status)))
 	}
+	filterWhere, filterArgs, err := buildInboxFilterWhere(filters)
+	if err != nil {
+		return nil, err
+	}
+	for _, clause := range filterWhere {
+		where += " AND " + clause
+	}
+	args = append(args, filterArgs...)
 	args = append(args, limit)
 	rows, err := db.Query(
 		`SELECT cc.id, cc.contact_id, COALESCE(c.display_name,''), COALESCE(c.primary_email,''),
@@ -1339,7 +1660,11 @@ func (a *App) toolInbox(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	status := strArg(args, "status")
 	limit := intArg(args, "limit", 50)
-	items, err := dbInboxConversations(ctx.AppDB(), pid, status, limit)
+	filters, err := inboxFiltersFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	items, err := dbInboxConversations(ctx.AppDB(), pid, status, limit, filters)
 	if err != nil {
 		return nil, err
 	}
@@ -1623,6 +1948,23 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 	if err != nil {
 		return nil, fmt.Errorf("log: %w", err)
 	}
+	parts := []conversationParticipant{{Role: "from", Address: body.From, ContactID: contact.ID}}
+	seenTo := map[string]bool{}
+	for _, to := range body.To {
+		key := canonicalParticipantAddress(body.Channel, to)
+		if key == "" || seenTo[key] {
+			continue
+		}
+		seenTo[key] = true
+		parts = append(parts, conversationParticipant{Role: "to", Address: to})
+	}
+	if mr := canonicalParticipantAddress(body.Channel, body.MatchedRecipient); mr != "" && !seenTo[mr] {
+		parts = append(parts, conversationParticipant{Role: "to", Address: body.MatchedRecipient})
+	}
+	for _, cc := range body.CC {
+		parts = append(parts, conversationParticipant{Role: "cc", Address: cc})
+	}
+	_ = dbConversationParticipantsAdd(db, pid, convoID, body.Channel, parts)
 
 	// List auto-attach. If messaging's matched_pattern matches a list's
 	// inbound_route_pattern, add this contact to that list. Idempotent
@@ -2101,6 +2443,25 @@ func (a *App) handleHTTPListConversations(w http.ResponseWriter, r *http.Request
 	}
 	if l := r.URL.Query().Get("limit"); l != "" {
 		args["limit"] = l
+	}
+	for _, k := range []string{"channel", "from", "to", "cc", "bcc", "tag", "priority"} {
+		if v := r.URL.Query().Get(k); v != "" {
+			args[k] = v
+		}
+	}
+	if v := r.URL.Query().Get("list_id"); v != "" {
+		args["list_id"] = v
+	}
+	if v := r.URL.Query().Get("contact_id"); v != "" {
+		args["contact_id"] = v
+	}
+	if raw := r.URL.Query().Get("filters"); raw != "" {
+		var filters []any
+		if err := json.Unmarshal([]byte(raw), &filters); err != nil {
+			httpErr(w, http.StatusBadRequest, "filters must be a JSON array: "+err.Error())
+			return
+		}
+		args["filters"] = filters
 	}
 	if pid, _ := resolveProjectFromRequest(r); pid != "" {
 		args["_project_id"] = pid

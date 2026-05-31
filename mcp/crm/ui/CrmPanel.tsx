@@ -1208,6 +1208,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
         ) : tab === "inbox" ? (
           <InboxTab
             api={api}
+            lists={lists}
             onOpenContact={(id) => { setTab("contacts"); selectContact(String(id)); }}
           />
         ) : tab === "lists" ? (
@@ -2123,38 +2124,113 @@ interface InboxItem {
   automated?: boolean;
 }
 
-function InboxTab({ api, onOpenContact }: {
+function inboxAddressOp(value: string): string {
+  const v = value.trim();
+  if (v.startsWith("@")) return "domain";
+  if (!v.includes("@") && v.includes(".")) return "domain";
+  return "is";
+}
+
+function stripDomainPrefix(value: string): string {
+  return value.trim().replace(/^@+/, "");
+}
+
+function InboxTab({ api, lists, onOpenContact }: {
   api: <T,>(method: string, path: string, body?: any, params?: Record<string, string>) => Promise<T>;
+  lists: List[];
   onOpenContact: (contactId: number) => void;
 }) {
   const [items, setItems] = useState<InboxItem[] | null>(null);
   const [statusFilter, setStatusFilter] = useState("open");
+  const [channelFilter, setChannelFilter] = useState("");
+  const [fromFilter, setFromFilter] = useState("");
+  const [toFilter, setToFilter] = useState("");
+  const [listFilter, setListFilter] = useState("");
+  const [tagFilter, setTagFilter] = useState("");
   const [err, setErr] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setErr(null);
     try {
-      const r = await api<{ inbox?: InboxItem[] }>("GET", "/inbox", undefined, { status: statusFilter });
+      const filters: { field: string; op: string; value: string | number }[] = [];
+      if (channelFilter) filters.push({ field: "channel", op: "is", value: channelFilter });
+      const from = fromFilter.trim();
+      if (from) filters.push({ field: "from", op: inboxAddressOp(from), value: stripDomainPrefix(from) });
+      const to = toFilter.trim();
+      if (to) filters.push({ field: "to", op: inboxAddressOp(to), value: stripDomainPrefix(to) });
+      if (listFilter) filters.push({ field: "list", op: "is", value: Number(listFilter) });
+      const tag = tagFilter.trim();
+      if (tag) filters.push({ field: "tag", op: "is", value: tag });
+      const params: Record<string, string> = { status: statusFilter };
+      if (filters.length) params.filters = JSON.stringify(filters);
+      const r = await api<{ inbox?: InboxItem[] }>("GET", "/inbox", undefined, params);
       setItems(r.inbox || []);
     } catch (e) { setErr((e as Error).message); setItems([]); }
-  }, [api, statusFilter]);
+  }, [api, statusFilter, channelFilter, fromFilter, toFilter, listFilter, tagFilter]);
   useEffect(() => { load(); }, [load]);
+
+  const clearFilters = () => {
+    setChannelFilter("");
+    setFromFilter("");
+    setToFilter("");
+    setListFilter("");
+    setTagFilter("");
+  };
+  const hasFilters = channelFilter || fromFilter.trim() || toFilter.trim() || listFilter || tagFilter.trim();
+  const inp = "bg-bg-input border border-border rounded px-2 py-1 text-xs";
 
   return (
     <div className="h-full flex flex-col">
-      <div className="p-3 border-b border-border flex items-center gap-2">
-        <h2 className="text-sm text-text font-medium flex-1">Inbox</h2>
+      <div className="p-3 border-b border-border space-y-2">
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm text-text font-medium flex-1">Inbox</h2>
+          <button type="button" onClick={load} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Refresh</button>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
-          className="bg-bg-input border border-border rounded px-2 py-1 text-xs"
+          className={inp}
         >
           <option value="open">Open</option>
           <option value="pending">Pending</option>
           <option value="closed">Closed</option>
           <option value="all">All</option>
         </select>
-        <button type="button" onClick={load} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Refresh</button>
+          <select value={channelFilter} onChange={(e) => setChannelFilter(e.target.value)} className={inp}>
+            <option value="">Any channel</option>
+            <option value="email">Email</option>
+            <option value="sms">SMS</option>
+            <option value="whatsapp">WhatsApp</option>
+          </select>
+          <input
+            value={fromFilter}
+            onChange={(e) => setFromFilter(e.target.value)}
+            placeholder="from email or @domain"
+            className={`${inp} w-40`}
+          />
+          <input
+            value={toFilter}
+            onChange={(e) => setToFilter(e.target.value)}
+            placeholder="to / received at"
+            className={`${inp} w-40`}
+          />
+          <select value={listFilter} onChange={(e) => setListFilter(e.target.value)} className={inp}>
+            <option value="">Any list</option>
+            {lists.filter((l) => !l.archived_at).map((l) => (
+              <option key={String(l.id)} value={String(l.id)}>{l.name}</option>
+            ))}
+          </select>
+          <input
+            value={tagFilter}
+            onChange={(e) => setTagFilter(e.target.value)}
+            placeholder="tag"
+            className={`${inp} w-28`}
+          />
+          {hasFilters && (
+            <button type="button" onClick={clearFilters} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Clear</button>
+          )}
+        </div>
       </div>
       <div className="flex-1 overflow-auto">
         {err && <div className="p-4 text-red text-xs">Error: {err}</div>}

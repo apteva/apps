@@ -119,7 +119,7 @@ func TestInboxConversations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	open, err := dbInboxConversations(db, "test-proj", "open", 50)
+	open, err := dbInboxConversations(db, "test-proj", "open", 50, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,11 +130,87 @@ func TestInboxConversations(t *testing.T) {
 		t.Errorf("inbox row should carry contact name, got %q", open[0].ContactName)
 	}
 
-	all, err := dbInboxConversations(db, "test-proj", "all", 50)
+	all, err := dbInboxConversations(db, "test-proj", "all", 50, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(all) != 2 {
 		t.Fatalf("inbox(all) should return both, got %d", len(all))
+	}
+}
+
+func TestInboxConversations_Filters(t *testing.T) {
+	ctx := newTestCtx(t)
+	db := ctx.AppDB()
+	app := &App{}
+
+	acme := mustCreate(t, ctx, map[string]any{
+		"display_name": "Acme Buyer",
+		"channels":     []any{map[string]any{"kind": "email", "value": "buyer@acme.com", "is_primary": true}},
+	})
+	beta := mustCreate(t, ctx, map[string]any{
+		"display_name": "Beta Lead",
+		"channels":     []any{map[string]any{"kind": "email", "value": "lead@beta.com", "is_primary": true}},
+	})
+	sms := mustCreate(t, ctx, map[string]any{
+		"display_name": "SMS Lead",
+		"channels":     []any{map[string]any{"kind": "phone", "value": "+15551230000", "is_primary": true}},
+	})
+
+	acmeConv := mkConversation(t, ctx, "test-proj", acme.ID, "email")
+	betaConv := mkConversation(t, ctx, "test-proj", beta.ID, "email")
+	smsConv := mkConversation(t, ctx, "test-proj", sms.ID, "sms")
+
+	if err := dbConversationParticipantsAdd(db, "test-proj", acmeConv, "email", []conversationParticipant{
+		{Role: "from", Address: "buyer@acme.com", ContactID: acme.ID},
+		{Role: "to", Address: "support@our.test"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbConversationParticipantsAdd(db, "test-proj", betaConv, "email", []conversationParticipant{
+		{Role: "from", Address: "lead@beta.com", ContactID: beta.ID},
+		{Role: "to", Address: "sales@our.test"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbConversationParticipantsAdd(db, "test-proj", smsConv, "sms", []conversationParticipant{
+		{Role: "from", Address: "+15551230000", ContactID: sms.ID},
+		{Role: "to", Address: "+15559990000"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	listOut, err := app.toolListsCreate(ctx, map[string]any{"name": "VIP"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listID := listOut.(map[string]any)["list"].(*List).ID
+	if err := dbListAddContact(db, "test-proj", listID, acme.ID, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbAddTag(db, "test-proj", beta.ID, "prospect"); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		args map[string]any
+		want int64
+	}{
+		{"from domain", map[string]any{"status": "all", "filters": []any{map[string]any{"field": "from", "op": "domain", "value": "acme.com"}}}, acmeConv},
+		{"received at", map[string]any{"status": "all", "to": "sales@our.test"}, betaConv},
+		{"channel", map[string]any{"status": "all", "channel": "sms"}, smsConv},
+		{"list", map[string]any{"status": "all", "list_id": listID}, acmeConv},
+		{"tag", map[string]any{"status": "all", "tag": "prospect"}, betaConv},
+	}
+	for _, tc := range cases {
+		out, err := app.toolInbox(ctx, tc.args)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		rows := out.(map[string]any)["inbox"].([]*inboxRow)
+		if len(rows) != 1 || rows[0].ID != tc.want {
+			t.Fatalf("%s: got %v rows, want conversation %d", tc.name, len(rows), tc.want)
+		}
 	}
 }

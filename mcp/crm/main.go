@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.6
+version: 0.8.7
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -100,7 +100,7 @@ provides:
     - name: contacts_set_conversation_status
       description: Set a conversation's status (open/pending/closed) and/or priority.
     - name: conversations_inbox
-      description: Cross-contact triage queue of conversations (open by default).
+      description: Cross-contact triage queue of conversations; supports status/channel/from/to/list/tag filters.
     - name: routing_rules_create
       description: Create an inbound routing rule (recipient/sender -> add_to_list/add_tag).
     - name: routing_rules_list
@@ -672,10 +672,17 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "conversations_inbox",
-			Description: "Cross-contact triage queue: conversations across all contacts, newest activity first, with contact summary + last-message snippet + automated/priority flags. Args: status? (open [default] | pending | closed | all), limit? (default 50).",
+			Description: "Cross-contact triage queue: conversations across all contacts, newest activity first, with contact summary + last-message snippet + automated/priority flags. Args: status? (open [default] | pending | closed | all), limit? (default 50), filters? array of {field, op, value}. Filter fields: channel, from, to, cc, bcc, contact, list, tag, priority. Ops: is, is_not, contains, domain, in.",
 			InputSchema: schemaObject(map[string]any{
-				"status": map[string]any{"type": "string"},
-				"limit":  map[string]any{"type": "integer"},
+				"status":   map[string]any{"type": "string"},
+				"limit":    map[string]any{"type": "integer"},
+				"filters":  map[string]any{"type": "array"},
+				"channel":  map[string]any{"type": "string"},
+				"from":     map[string]any{"type": "string"},
+				"to":       map[string]any{"type": "string"},
+				"list_id":  map[string]any{"type": "integer"},
+				"tag":      map[string]any{"type": "string"},
+				"priority": map[string]any{"type": "string"},
 			}, nil),
 			Handler: a.toolInbox,
 		},
