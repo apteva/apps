@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.8.12
+version: 0.8.13
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -157,7 +157,9 @@ provides:
       payload:
         contact_id: integer
         activity_id: integer
+        conversation_id: integer
         kind: string
+        source: string
     - name: conversation.status.changed
       description: A conversation's workflow status or priority changed, including inbound auto-reopen and spam handling.
       payload:

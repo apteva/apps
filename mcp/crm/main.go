@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.12
+version: 0.8.13
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -174,7 +174,9 @@ provides:
       payload:
         contact_id: integer
         activity_id: integer
+        conversation_id: integer
         kind: string
+        source: string
     - name: conversation.status.changed
       description: A conversation's workflow status or priority changed, including inbound auto-reopen and spam handling.
       payload:
@@ -1378,9 +1380,11 @@ func (a *App) toolLogActivity(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	if ctx != nil {
 		ctx.Emit("contact.activity.added", map[string]any{
-			"contact_id":  cid,
-			"activity_id": act.ID,
-			"kind":        kind,
+			"contact_id":      cid,
+			"activity_id":     act.ID,
+			"conversation_id": act.ConversationID,
+			"kind":            kind,
+			"source":          act.Source,
 		})
 	}
 	return map[string]any{"activity": act}, nil

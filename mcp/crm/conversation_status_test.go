@@ -331,7 +331,8 @@ func TestInbound_FromSpamContactStaysSpam(t *testing.T) {
 }
 
 func TestMessagingInboundReceiveTool_AttachesInbound(t *testing.T) {
-	ctx := newTestCtx(t)
+	rec := tk.NewEmitRecorder()
+	ctx := newTestCtx(t, tk.WithEmitter(rec))
 	app := &App{}
 
 	out, err := app.toolMessagingInboundReceive(ctx, map[string]any{
@@ -364,5 +365,22 @@ func TestMessagingInboundReceiveTool_AttachesInbound(t *testing.T) {
 	}
 	if body != "hello from messaging" {
 		t.Fatalf("activity body=%q", body)
+	}
+	events := rec.EventsByTopic("contact.activity.added")
+	if len(events) != 1 {
+		t.Fatalf("contact.activity.added events=%d, want 1", len(events))
+	}
+	payload := events[0].Data.(map[string]any)
+	if payload["source"] != "messaging" {
+		t.Fatalf("event source=%#v, want messaging", payload["source"])
+	}
+	if payload["kind"] != "whatsapp_received" {
+		t.Fatalf("event kind=%#v, want whatsapp_received", payload["kind"])
+	}
+	if payload["activity_id"] == nil || payload["conversation_id"] == nil {
+		t.Fatalf("event missing activity/conversation ids: %#v", payload)
+	}
+	if payload["conversation_id"].(int64) != res["conversation_id"].(int64) {
+		t.Fatalf("event conversation_id=%#v, want %#v", payload["conversation_id"], res["conversation_id"])
 	}
 }

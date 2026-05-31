@@ -1146,9 +1146,11 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		})
 	}
 	ctx.Emit("contact.activity.added", map[string]any{
-		"contact_id":  cid,
-		"activity_id": act.ID,
-		"kind":        kind,
+		"contact_id":      cid,
+		"activity_id":     act.ID,
+		"conversation_id": act.ConversationID,
+		"kind":            kind,
+		"source":          act.Source,
 	})
 
 	return map[string]any{
@@ -2171,9 +2173,11 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 		})
 	}
 	emitCRMEvent(ctx, pid, "contact.activity.added", map[string]any{
-		"contact_id":  contact.ID,
-		"activity_id": act.ID,
-		"kind":        act.Kind,
+		"contact_id":      contact.ID,
+		"activity_id":     act.ID,
+		"conversation_id": act.ConversationID,
+		"kind":            act.Kind,
+		"source":          act.Source,
 	})
 
 	out := map[string]any{
