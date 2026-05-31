@@ -26,6 +26,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -36,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: domains
 display_name: Domains
-version: 0.4.0
+version: 0.4.1
 description: |
   DNS + domain inventory and registrar workflows. Other apps call
   this for record CRUD instead of talking to registrars directly.
@@ -307,6 +308,9 @@ type DomainAvailability struct {
 	Available    bool            `json:"available"`
 	Provider     string          `json:"provider"`
 	ConnectionID int64           `json:"connection_id,omitempty"`
+	Source       string          `json:"source,omitempty"`
+	Confidence   string          `json:"confidence,omitempty"`
+	Warning      string          `json:"warning,omitempty"`
 	Price        string          `json:"price,omitempty"`
 	Currency     string          `json:"currency,omitempty"`
 	Premium      bool            `json:"premium,omitempty"`
@@ -639,11 +643,19 @@ func (a *App) toolDomainAvailabilityCheck(ctx *sdk.AppCtx, args map[string]any) 
 	}
 	reg, _, err := a.registrarFor(ctx, int64(intArg(args, "connection_id", 0)))
 	if err != nil {
-		return nil, err
+		avail, ferr := publicRDAPAvailability(domain, err)
+		if ferr != nil {
+			return nil, err
+		}
+		return map[string]any{"availability": avail}, nil
 	}
 	avail, err := reg.CheckAvailability(ctx, domain)
 	if err != nil {
-		return nil, err
+		avail, ferr := publicRDAPAvailability(domain, err)
+		if ferr != nil {
+			return nil, err
+		}
+		return map[string]any{"availability": avail}, nil
 	}
 	return map[string]any{"availability": avail}, nil
 }
@@ -1649,6 +1661,48 @@ func yesNo(v bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+var rdapLookupBaseURL = "https://rdap.org/domain/"
+
+func publicRDAPAvailability(domain string, primaryErr error) (*DomainAvailability, error) {
+	client := &http.Client{Timeout: 6 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, rdapLookupBaseURL+domain, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/rdap+json, application/json")
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("availability check failed: %w; RDAP fallback failed: %w", primaryErr, err)
+	}
+	defer res.Body.Close()
+	warning := fmt.Sprintf("Registrar availability check failed (%s). Used public RDAP fallback; availability is best-effort and final registration is still performed by Porkbun.", primaryErr)
+	switch res.StatusCode {
+	case http.StatusOK:
+		var raw json.RawMessage
+		_ = json.NewDecoder(res.Body).Decode(&raw)
+		return &DomainAvailability{
+			Domain:     domain,
+			Available:  false,
+			Provider:   "rdap",
+			Source:     "rdap",
+			Confidence: "high",
+			Warning:    warning,
+			Raw:        raw,
+		}, nil
+	case http.StatusNotFound:
+		return &DomainAvailability{
+			Domain:     domain,
+			Available:  true,
+			Provider:   "rdap",
+			Source:     "rdap",
+			Confidence: "best_effort",
+			Warning:    warning,
+		}, nil
+	default:
+		return nil, fmt.Errorf("availability check failed: %w; RDAP fallback returned HTTP %d", primaryErr, res.StatusCode)
+	}
 }
 
 func filterRecords(in []DNSRecord, keep func(DNSRecord) bool) []DNSRecord {

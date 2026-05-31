@@ -53,6 +53,9 @@ interface DomainAvailability {
   available: boolean;
   provider: string;
   connection_id?: number;
+  source?: string;
+  confidence?: string;
+  warning?: string;
   price?: string;
   currency?: string;
   premium?: boolean;
@@ -63,6 +66,7 @@ function providerLabel(slug: string): string {
   if (slug === "porkbun") return "Porkbun";
   if (slug === "namecheap") return "Namecheap";
   if (slug === "ionos") return "IONOS";
+  if (slug === "rdap") return "Public RDAP";
   return slug;
 }
 
@@ -366,7 +370,8 @@ function RegisterDomainPane({
   const register = async () => {
     if (!availability?.available) return;
     const price = availability.price ? ` for ${availability.price} ${availability.currency || "USD"}` : "";
-    const ok = confirm(`Register ${availability.domain} for ${years} year${years === 1 ? "" : "s"}${price}? This spends real money at ${providerLabel(availability.provider)}.`);
+    const fallback = availability.source === "rdap";
+    const ok = confirm(`Register ${availability.domain} for ${years} year${years === 1 ? "" : "s"}${price}? This spends real money at Porkbun.${fallback ? "\n\nAvailability came from public RDAP fallback, so this will skip the Porkbun pre-check and let Porkbun's register endpoint make the final decision." : ""}`);
     if (!ok) return;
     setBusy(true);
     setErr("");
@@ -378,6 +383,7 @@ function RegisterDomainPane({
         whois_privacy: whoisPrivacy,
         coupon: coupon.trim(),
         notes: notes.trim(),
+        skip_availability_check: fallback,
       });
       setName("");
       setCoupon("");
@@ -436,6 +442,7 @@ function RegisterDomainPane({
                 <div className="text-xs text-text-dim mt-1">
                   {providerLabel(availability.provider)}
                   {availability.connection_id ? ` - connection ${availability.connection_id}` : ""}
+                  {availability.confidence ? ` - ${availability.confidence}` : ""}
                 </div>
               </div>
               <span className={availability.available ? "text-green text-sm" : "text-red text-sm"}>
@@ -448,6 +455,12 @@ function RegisterDomainPane({
                 <span className="text-text-dim">Registration price </span>
                 <span className="font-mono">{availability.price} {availability.currency || "USD"}</span>
                 {availability.premium && <span className="ml-2 text-yellow-400">premium</span>}
+              </div>
+            )}
+
+            {availability.warning && (
+              <div className="text-xs text-yellow-300 border border-yellow-500/30 bg-yellow-500/10 rounded p-2">
+                {availability.warning}
               </div>
             )}
 

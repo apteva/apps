@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -351,6 +353,67 @@ func TestDomainAvailabilityCheck_Porkbun(t *testing.T) {
 	}
 	if len(plat.calls) != 1 || plat.calls[0].Tool != "check_availability" {
 		t.Fatalf("wrong provider calls: %+v", plat.calls)
+	}
+}
+
+func TestDomainAvailabilityCheck_FallsBackToRDAPOnRateLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/fresh-example.com" {
+			t.Fatalf("unexpected RDAP path %q", r.URL.Path)
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	oldBase := rdapLookupBaseURL
+	rdapLookupBaseURL = srv.URL + "/"
+	defer func() { rdapLookupBaseURL = oldBase }()
+
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"check_availability": {Success: false, Status: 429, Data: json.RawMessage(`{"status":"ERROR","code":"RATE_LIMIT_EXCEEDED"}`)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolDomainAvailabilityCheck(ctx, map[string]any{"domain": "fresh-example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)["availability"].(*DomainAvailability)
+	if got.Provider != "rdap" || got.Source != "rdap" || !got.Available || got.Confidence != "best_effort" {
+		t.Fatalf("RDAP fallback not normalized: %+v", got)
+	}
+	if !strings.Contains(got.Warning, "Registrar availability check failed") {
+		t.Fatalf("expected warning, got %+v", got)
+	}
+}
+
+func TestDomainAvailabilityCheck_RDAPRegisteredMeansUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rdap+json")
+		_, _ = w.Write([]byte(`{"objectClassName":"domain","ldhName":"taken-example.com"}`))
+	}))
+	defer srv.Close()
+	oldBase := rdapLookupBaseURL
+	rdapLookupBaseURL = srv.URL + "/"
+	defer func() { rdapLookupBaseURL = oldBase }()
+
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"check_availability": {Success: false, Status: 429, Data: json.RawMessage(`{"status":"ERROR","code":"RATE_LIMIT_EXCEEDED"}`)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolDomainAvailabilityCheck(ctx, map[string]any{"domain": "taken-example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)["availability"].(*DomainAvailability)
+	if got.Provider != "rdap" || got.Available || got.Confidence != "high" {
+		t.Fatalf("RDAP registered result not normalized: %+v", got)
 	}
 }
 
