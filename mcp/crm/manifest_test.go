@@ -20,6 +20,9 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Errorf("manifest.DB.Migrations missing")
 	}
+	if len(m.Provides.Publishes) != 15 {
+		t.Errorf("expected 15 published event declarations, got %d", len(m.Provides.Publishes))
+	}
 	// Surfaces the embedded scopes — should accept project + global.
 	gotScopes := map[string]bool{}
 	for _, s := range m.Scopes {
@@ -28,6 +31,39 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	for _, want := range []string{"project", "global"} {
 		if !gotScopes[want] {
 			t.Errorf("manifest missing scope %q", want)
+		}
+	}
+}
+
+func TestEmbeddedManifest_PublishesCRMEvents(t *testing.T) {
+	app := &App{}
+	m := app.Manifest()
+	got := map[string]bool{}
+	for _, ev := range m.Provides.Publishes {
+		got[ev.Name] = true
+		if ev.Description == "" {
+			t.Errorf("event %q missing description", ev.Name)
+		}
+	}
+	for _, want := range []string{
+		"contact.added",
+		"contact.updated",
+		"contact.deleted",
+		"contact.merged",
+		"contact.activity.added",
+		"conversation.status.changed",
+		"list.created",
+		"list.updated",
+		"list.archived",
+		"list.member.added",
+		"list.member.removed",
+		"segment.created",
+		"segment.updated",
+		"segment.archived",
+		"segment.materialised",
+	} {
+		if !got[want] {
+			t.Errorf("manifest missing published event %q", want)
 		}
 	}
 }

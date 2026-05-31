@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.11
+version: 0.8.12
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -146,6 +146,86 @@ provides:
       label: Contacts
       icon: contacts
       entry: /ui/CrmPanel.mjs
+  publishes:
+    - name: contact.added
+      description: A contact was created or first materialised from inbound messaging.
+      payload:
+        id: integer
+        display_name: string
+    - name: contact.updated
+      description: A contact's core fields, channels, attributes, tags, or list-driven metadata changed.
+      payload:
+        id: integer
+        display_name: string
+        first_name: string
+        last_name: string
+        archived: boolean
+    - name: contact.deleted
+      description: A contact was archived/soft-deleted.
+      payload:
+        id: integer
+    - name: contact.merged
+      description: Two contacts were merged; the loser row is marked merged and data moved to the winner.
+      payload:
+        winner_id: integer
+        loser_id: integer
+    - name: contact.activity.added
+      description: An activity row was appended to a contact timeline.
+      payload:
+        contact_id: integer
+        activity_id: integer
+        kind: string
+    - name: conversation.status.changed
+      description: A conversation's workflow status or priority changed, including inbound auto-reopen and spam handling.
+      payload:
+        conversation_id: integer
+        contact_id: integer
+        status: string
+        priority: string
+        reason: string
+    - name: list.created
+      description: A contact list was created.
+      payload:
+        id: integer
+        slug: string
+        name: string
+    - name: list.updated
+      description: A contact list's metadata changed.
+      payload:
+        id: integer
+    - name: list.archived
+      description: A contact list was archived.
+      payload:
+        id: integer
+    - name: list.member.added
+      description: A contact was added to a list.
+      payload:
+        list_id: integer
+        contact_id: integer
+    - name: list.member.removed
+      description: A contact was removed from a list.
+      payload:
+        list_id: integer
+        contact_id: integer
+    - name: segment.created
+      description: A saved segment was created.
+      payload:
+        id: integer
+        name: string
+        kind: string
+    - name: segment.updated
+      description: A saved segment's metadata or definition changed.
+      payload:
+        id: integer
+    - name: segment.archived
+      description: A saved segment was archived.
+      payload:
+        id: integer
+    - name: segment.materialised
+      description: A dynamic segment was frozen into a static membership snapshot.
+      payload:
+        id: integer
+        count: integer
 runtime:
   kind: source
   source:
@@ -1298,7 +1378,9 @@ func (a *App) toolLogActivity(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	if ctx != nil {
 		ctx.Emit("contact.activity.added", map[string]any{
-			"contact_id": cid, "kind": kind,
+			"contact_id":  cid,
+			"activity_id": act.ID,
+			"kind":        kind,
 		})
 	}
 	return map[string]any{"activity": act}, nil
