@@ -48,9 +48,21 @@ interface Connection {
   status: string;
 }
 
+interface DomainAvailability {
+  domain: string;
+  available: boolean;
+  provider: string;
+  connection_id?: number;
+  price?: string;
+  currency?: string;
+  premium?: boolean;
+  raw?: unknown;
+}
+
 function providerLabel(slug: string): string {
   if (slug === "porkbun") return "Porkbun";
   if (slug === "namecheap") return "Namecheap";
+  if (slug === "ionos") return "IONOS";
   return slug;
 }
 
@@ -70,6 +82,7 @@ export default function DomainsPanel({ projectId, installId }: NativePanelProps)
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [selected, setSelected] = useState<Domain | null>(null);
+  const [view, setView] = useState<"inventory" | "register">("inventory");
 
   const withParams = useCallback((extra: Record<string, string>) => {
     return new URLSearchParams({
@@ -135,7 +148,21 @@ export default function DomainsPanel({ projectId, installId }: NativePanelProps)
   return (
     <div className="h-full flex flex-col">
       <div className="px-6 pt-6 pb-3 flex items-center justify-between border-b border-border">
-        <h1 className="text-lg font-semibold">Domains</h1>
+        <div className="flex items-center gap-4">
+          <h1 className="text-lg font-semibold">Domains</h1>
+          <div className="flex rounded border border-border overflow-hidden text-xs">
+            <button
+              type="button"
+              className={`px-3 py-1 ${view === "inventory" ? "bg-surface-2 text-text" : "text-text-dim hover:text-text"}`}
+              onClick={() => setView("inventory")}
+            >Inventory</button>
+            <button
+              type="button"
+              className={`px-3 py-1 border-l border-border ${view === "register" ? "bg-surface-2 text-text" : "text-text-dim hover:text-text"}`}
+              onClick={() => setView("register")}
+            >Register</button>
+          </div>
+        </div>
         <div className="flex items-center gap-2 text-xs text-text-dim">
           {busy && <span>loading…</span>}
           <button
@@ -152,37 +179,51 @@ export default function DomainsPanel({ projectId, installId }: NativePanelProps)
         </div>
       )}
 
-      <AddDomainForm
-        connections={connections}
-        onAdded={(d) => { reload(); if (d) setSelected(d); }}
-        callTool={callTool}
-      />
-
-      <div className="flex-1 min-h-0 flex">
-        <div className="w-72 overflow-auto">
-          <DomainList
-            rows={domains}
-            onSelect={setSelected}
-            onRemoved={() => { reload(); setSelected(null); }}
+      {view === "inventory" ? (
+        <>
+          <AddDomainForm
+            connections={connections}
+            onAdded={(d) => { reload(); if (d) setSelected(d); }}
             callTool={callTool}
-            selectedId={selected?.id}
           />
-        </div>
-        <div className="flex-1 min-w-0 border-l border-border">
-          {selected ? (
-            <RecordsPane
-              domain={selected}
-              onClose={() => setSelected(null)}
-              api={api}
-              callTool={callTool}
-            />
-          ) : (
-            <div className="p-6 text-text-dim text-sm">
-              Select a domain to view its DNS records.
+
+          <div className="flex-1 min-h-0 flex">
+            <div className="w-72 overflow-auto">
+              <DomainList
+                rows={domains}
+                onSelect={setSelected}
+                onRemoved={() => { reload(); setSelected(null); }}
+                callTool={callTool}
+                selectedId={selected?.id}
+              />
             </div>
-          )}
-        </div>
-      </div>
+            <div className="flex-1 min-w-0 border-l border-border">
+              {selected ? (
+                <RecordsPane
+                  domain={selected}
+                  onClose={() => setSelected(null)}
+                  api={api}
+                  callTool={callTool}
+                />
+              ) : (
+                <div className="p-6 text-text-dim text-sm">
+                  Select a domain to view its DNS records.
+                </div>
+              )}
+            </div>
+          </div>
+        </>
+      ) : (
+        <RegisterDomainPane
+          connections={connections.filter((c) => c.app_slug === "porkbun")}
+          callTool={callTool}
+          onRegistered={(d) => {
+            reload();
+            if (d) setSelected(d);
+            setView("inventory");
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -276,6 +317,198 @@ function AddDomainForm({
       </button>
       {err && <div className="text-xs text-red-400 w-full">{err}</div>}
     </form>
+  );
+}
+
+// ─── Register domain form ────────────────────────────────────────
+
+function RegisterDomainPane({
+  connections, callTool, onRegistered,
+}: {
+  connections: Connection[];
+  callTool: (tool: string, args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  onRegistered: (domain?: Domain) => void;
+}) {
+  const [name, setName] = useState("");
+  const [pick, setPick] = useState<ConnectionChoice>("default");
+  const [years, setYears] = useState(1);
+  const [autoRenew, setAutoRenew] = useState(true);
+  const [whoisPrivacy, setWhoisPrivacy] = useState(true);
+  const [coupon, setCoupon] = useState("");
+  const [notes, setNotes] = useState("");
+  const [availability, setAvailability] = useState<DomainAvailability | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const argsForProvider = (): Record<string, unknown> => {
+    const args: Record<string, unknown> = { domain: name.trim() };
+    if (pick !== "default" && pick !== "other") {
+      args.connection_id = parseInt(pick, 10);
+    }
+    return args;
+  };
+
+  const check = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    setBusy(true);
+    setErr("");
+    setAvailability(null);
+    try {
+      const result = await callTool("domain_availability_check", argsForProvider());
+      setAvailability(result.availability as DomainAvailability);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const register = async () => {
+    if (!availability?.available) return;
+    const price = availability.price ? ` for ${availability.price} ${availability.currency || "USD"}` : "";
+    const ok = confirm(`Register ${availability.domain} for ${years} year${years === 1 ? "" : "s"}${price}? This spends real money at ${providerLabel(availability.provider)}.`);
+    if (!ok) return;
+    setBusy(true);
+    setErr("");
+    try {
+      const result = await callTool("domain_register", {
+        ...argsForProvider(),
+        years,
+        auto_renew: autoRenew,
+        whois_privacy: whoisPrivacy,
+        coupon: coupon.trim(),
+        notes: notes.trim(),
+      });
+      setName("");
+      setCoupon("");
+      setNotes("");
+      setAvailability(null);
+      onRegistered(result.domain as Domain | undefined);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex-1 min-h-0 overflow-auto">
+      <form onSubmit={check} className="p-4 border-b border-border flex gap-2 items-end flex-wrap">
+        <Field label="Domain">
+          <input
+            className={inputCls + " w-72"}
+            value={name}
+            onChange={(e) => { setName(e.target.value); setAvailability(null); }}
+            placeholder="acme.com"
+            required
+          />
+        </Field>
+        <Field label="Registrar connection">
+          <select
+            className={inputCls + " w-64"}
+            value={pick}
+            onChange={(e) => { setPick(e.target.value as ConnectionChoice); setAvailability(null); }}
+          >
+            <option value="default">Default Porkbun binding</option>
+            {connections.map((c) => (
+              <option key={c.id} value={String(c.id)}>
+                {providerLabel(c.app_slug)} - {c.name || `connection ${c.id}`}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <button
+          type="submit"
+          disabled={busy || !name.trim()}
+          className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50"
+        >
+          {busy ? "Checking..." : "Check availability"}
+        </button>
+        {err && <div className="text-xs text-red-400 w-full">{err}</div>}
+      </form>
+
+      {availability && (
+        <div className="p-5 max-w-3xl">
+          <div className="rounded border border-border bg-surface-2/40 p-4 space-y-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="font-medium">{availability.domain}</div>
+                <div className="text-xs text-text-dim mt-1">
+                  {providerLabel(availability.provider)}
+                  {availability.connection_id ? ` - connection ${availability.connection_id}` : ""}
+                </div>
+              </div>
+              <span className={availability.available ? "text-green text-sm" : "text-red text-sm"}>
+                {availability.available ? "Available" : "Unavailable"}
+              </span>
+            </div>
+
+            {availability.price && (
+              <div className="text-sm">
+                <span className="text-text-dim">Registration price </span>
+                <span className="font-mono">{availability.price} {availability.currency || "USD"}</span>
+                {availability.premium && <span className="ml-2 text-yellow-400">premium</span>}
+              </div>
+            )}
+
+            {availability.available && (
+              <div className="flex gap-3 items-end flex-wrap">
+                <Field label="Years">
+                  <input
+                    type="number"
+                    min={1}
+                    max={10}
+                    className={inputCls + " w-24"}
+                    value={years}
+                    onChange={(e) => setYears(Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1)))}
+                  />
+                </Field>
+                <Field label="Coupon">
+                  <input
+                    className={inputCls + " w-36"}
+                    value={coupon}
+                    onChange={(e) => setCoupon(e.target.value)}
+                    placeholder="optional"
+                  />
+                </Field>
+                <Field label="Notes">
+                  <input
+                    className={inputCls + " w-56"}
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                    placeholder="optional"
+                  />
+                </Field>
+                <label className="flex items-center gap-2 text-xs text-text-dim py-2">
+                  <input
+                    type="checkbox"
+                    checked={autoRenew}
+                    onChange={(e) => setAutoRenew(e.target.checked)}
+                  />
+                  auto-renew
+                </label>
+                <label className="flex items-center gap-2 text-xs text-text-dim py-2">
+                  <input
+                    type="checkbox"
+                    checked={whoisPrivacy}
+                    onChange={(e) => setWhoisPrivacy(e.target.checked)}
+                  />
+                  WHOIS privacy
+                </label>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={register}
+                  className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50"
+                >
+                  {busy ? "Registering..." : "Register domain"}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -19,6 +19,9 @@ type stubPlatform struct {
 	calls            []executeCall
 	replyByTool      map[string]*sdk.ExecuteResult
 	bindingsOverride map[string]any
+	// connSlug overrides the app_slug GetConnection reports. Empty
+	// keeps the legacy default ("porkbun") the existing tests rely on.
+	connSlug string
 }
 
 type executeCall struct {
@@ -43,14 +46,18 @@ func (s *stubPlatform) CallApp(string, string, map[string]any) (json.RawMessage,
 }
 func (s *stubPlatform) CallAppResult(string, string, map[string]any, any) error { return nil }
 func (s *stubPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
-	return &sdk.PlatformConnection{ID: id, AppSlug: "porkbun", Status: "active"}, nil
+	slug := "porkbun"
+	if s.connSlug != "" {
+		slug = s.connSlug
+	}
+	return &sdk.PlatformConnection{ID: id, AppSlug: slug, Status: "active"}, nil
 }
 func (s *stubPlatform) ListConnections(sdk.ConnectionFilter) ([]sdk.PlatformConnection, error) {
 	return nil, nil
 }
 func (s *stubPlatform) GetInstance(int64) (*sdk.PlatformInstance, error) { return nil, nil }
-func (s *stubPlatform) SendEvent(int64, string) error                   { return nil }
-func (s *stubPlatform) SendToChannel(string, string, string) error      { return nil }
+func (s *stubPlatform) SendEvent(int64, string) error                    { return nil }
+func (s *stubPlatform) SendToChannel(string, string, string) error       { return nil }
 func (s *stubPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
 	bindings := map[string]any{"dns_provider": float64(1)}
 	if s.bindingsOverride != nil {
@@ -303,6 +310,127 @@ func TestDomainRecordsList_FallsBackToRoleBindingForUnknownDomain(t *testing.T) 
 		if c.Tool == "list_dns_records" && c.ConnID != 1 {
 			t.Errorf("expected fall-back to role binding (1), got connID %d", c.ConnID)
 		}
+	}
+}
+
+// ─── Registrar tools ──────────────────────────────────────────────
+
+const porkbunAvailableJSON = `{
+	"status": "SUCCESS",
+	"response": {
+		"avail": "yes",
+		"type": "registration",
+		"price": "11.06"
+	}
+}`
+
+const porkbunUnavailableJSON = `{
+	"status": "SUCCESS",
+	"response": {
+		"avail": "no",
+		"type": "taken"
+	}
+}`
+
+func TestDomainAvailabilityCheck_Porkbun(t *testing.T) {
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"check_availability": {Success: true, Status: 200, Data: json.RawMessage(porkbunAvailableJSON)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolDomainAvailabilityCheck(ctx, map[string]any{"domain": "FreshExample.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)["availability"].(*DomainAvailability)
+	if got.Domain != "freshexample.com" || !got.Available || got.Price != "11.06" || got.Provider != "porkbun" {
+		t.Fatalf("availability not normalized: %+v", got)
+	}
+	if len(plat.calls) != 1 || plat.calls[0].Tool != "check_availability" {
+		t.Fatalf("wrong provider calls: %+v", plat.calls)
+	}
+}
+
+func TestDomainRegister_ChecksAvailabilityThenRegistersAndAddsInventory(t *testing.T) {
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"check_availability": {Success: true, Status: 200, Data: json.RawMessage(porkbunAvailableJSON)},
+			"register_domain":    {Success: true, Status: 200, Data: json.RawMessage(`{"status":"SUCCESS","order_id":"ord_123"}`)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolDomainRegister(ctx, map[string]any{
+		"domain":        "fresh-example.com",
+		"years":         2,
+		"auto_renew":    false,
+		"whois_privacy": true,
+		"notes":         "new product",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(map[string]any)
+	if !res["registered"].(bool) {
+		t.Fatalf("registered=false: %+v", res)
+	}
+	d := res["domain"].(*Domain)
+	if d.Name != "fresh-example.com" || d.RegistrarSlug != "porkbun" || d.DNSProviderSlug != "porkbun" || d.ConnectionID != 1 {
+		t.Fatalf("domain row not populated from registrar: %+v", d)
+	}
+	if len(plat.calls) != 2 || plat.calls[0].Tool != "check_availability" || plat.calls[1].Tool != "register_domain" {
+		t.Fatalf("wrong provider call order: %+v", plat.calls)
+	}
+	if plat.calls[1].Input["years"] != 2 || plat.calls[1].Input["renewAuto"] != "no" || plat.calls[1].Input["whoisPrivacy"] != "yes" {
+		t.Fatalf("registration payload wrong: %+v", plat.calls[1].Input)
+	}
+	listed, _ := app.toolDomainList(ctx, map[string]any{})
+	if listed.(map[string]any)["count"].(int) != 1 {
+		t.Fatalf("registered domain not added to inventory: %+v", listed)
+	}
+}
+
+func TestDomainRegister_RejectsUnavailableDomain(t *testing.T) {
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"check_availability": {Success: true, Status: 200, Data: json.RawMessage(porkbunUnavailableJSON)},
+			"register_domain":    {Success: true, Status: 200, Data: json.RawMessage(`{"status":"SUCCESS"}`)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	_, err := app.toolDomainRegister(ctx, map[string]any{"domain": "taken-example.com"})
+	if err == nil || !strings.Contains(err.Error(), "not available") {
+		t.Fatalf("expected unavailable error, got %v", err)
+	}
+	for _, c := range plat.calls {
+		if c.Tool == "register_domain" {
+			t.Fatalf("register_domain should not be called for unavailable domain: %+v", plat.calls)
+		}
+	}
+}
+
+func TestDomainPricingGet_PorkbunTLD(t *testing.T) {
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"get_pricing": {Success: true, Status: 200, Data: json.RawMessage(`{"status":"SUCCESS","pricing":{"com":{"registration":"11.06","renewal":"11.06"}}}`)},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolDomainPricingGet(ctx, map[string]any{"tld": ".com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pricing := out.(map[string]any)["pricing"].(map[string]any)
+	if pricing["registration"] != "11.06" {
+		t.Fatalf("wrong pricing entry: %+v", pricing)
 	}
 }
 

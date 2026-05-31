@@ -2,18 +2,22 @@ schema: apteva-app/v1
 
 name: domains
 display_name: Domains
-version: 0.2.4
+version: 0.4.0
 description: |
-  DNS + domain inventory for Apteva projects. Other apps that need
-  to write DNS records (messaging for SES MX/DKIM, storage for CDN
-  CNAMEs, future certs app for ACME challenges) call this app
-  instead of speaking each registrar's API directly.
+  DNS + domain inventory and registrar workflows for Apteva projects.
+  Other apps that need to write DNS records (messaging for SES
+  MX/DKIM, storage for CDN CNAMEs, future certs app for ACME
+  challenges) call this app instead of speaking each registrar's API
+  directly.
 
-  v0.1 supports Porkbun end-to-end. Namecheap is declared as a
-  compatible provider but its XML response shape isn't parseable
-  by the platform runner today — works for tools that don't need
-  to read response data; record CRUD will need the runner's XML
-  support to land first.
+  Porkbun and IONOS are supported end-to-end for record CRUD. IONOS
+  is zone-id oriented (the provider resolves a domain to its zone id
+  via list_zones before each op) and its create endpoint takes a
+  top-level JSON array, carried through the integration runner via
+  body_root_param. Namecheap DNS uses XML read-modify-write semantics.
+  Registrar purchase flows are Porkbun-only in v0.4; Namecheap
+  registration needs contact-profile support before it should be
+  exposed here.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/domains
@@ -32,7 +36,7 @@ requires:
   integrations:
     - role: dns_provider
       kind: integration
-      compatible_slugs: [porkbun, namecheap]
+      compatible_slugs: [porkbun, namecheap, ionos]
       capabilities:
         - dns.list_records
         - dns.create_record
@@ -44,8 +48,22 @@ requires:
         dns.edit_records_by_type: edit_dns_records_by_type
         dns.delete_records_by_type: delete_dns_records_by_type
       required: true
-      label: "DNS provider (Porkbun, Namecheap)"
-      hint: "Connect a Porkbun or Namecheap account; the domains app uses that connection's API to read and write DNS records on the domains it manages."
+      label: "DNS provider (Porkbun, Namecheap, IONOS)"
+      hint: "Connect a Porkbun, Namecheap, or IONOS account; the domains app uses that connection's API to read and write DNS records on the domains it manages."
+    - role: registrar_provider
+      kind: integration
+      compatible_slugs: [porkbun]
+      capabilities:
+        - domains.check_availability
+        - domains.register
+        - domains.pricing
+      tools:
+        domains.check_availability: check_availability
+        domains.register:            register_domain
+        domains.pricing:             get_pricing
+      required: false
+      label: "Registrar provider (Porkbun)"
+      hint: "Connect a Porkbun account to check availability and register new domains. If unset, registrar tools fall back to the DNS provider when it is Porkbun."
 
 provides:
   http_routes:
@@ -56,6 +74,10 @@ provides:
     - { name: domain_remove,         description: "Soft-delete a domain from this app's inventory. Doesn't touch the actual registration. Args: name." }
     - { name: domain_list,           description: "List domains registered with this app for the current project." }
     - { name: domain_get,            description: "Fetch one domain's local record. Args: name." }
+    # registrar operations
+    - { name: domain_availability_check, description: "Check if a domain is available for registration through the registrar provider. Safe/read-only. Args: domain, connection_id?." }
+    - { name: domain_pricing_get,    description: "Fetch registrar pricing, optionally for one TLD. Args: tld?, connection_id?." }
+    - { name: domain_register,       description: "Register a new domain through the registrar provider. This spends real money. Args: domain, years?, auto_renew?, whois_privacy?, coupon?, connection_id?, notes?, skip_availability_check?." }
     # DNS record CRUD via the bound provider
     - { name: domain_records_list,   description: "List DNS records on a domain via the bound dns_provider. Args: domain, type? (filter by record type)." }
     - { name: domain_records_set,    description: "Upsert a DNS record. Composes list-then-create-or-edit since most providers' upsert is two-step. Args: domain, name (subdomain or @ for apex), type (A|AAAA|CNAME|MX|TXT|...), value, ttl?." }
