@@ -113,6 +113,24 @@ func TestStoreDefaultNtfyLifecycle(t *testing.T) {
 	}
 }
 
+func TestProjectNtfyCanBeCreatedWithoutAgent(t *testing.T) {
+	st := newStore(testDB(t))
+	ch, err := st.UpsertNtfyChannel(0, "proj-1", "Marco Phone", "marco-phone")
+	if err != nil {
+		t.Fatalf("UpsertNtfyChannel: %v", err)
+	}
+	if ch.AgentID != 0 || ch.Title != "Marco Phone" || ch.ThreadID != "marco-phone" {
+		t.Fatalf("project ntfy channel = %+v", ch)
+	}
+	rows, err := st.ListChannelsForAgent(42, "proj-1")
+	if err != nil {
+		t.Fatalf("ListChannelsForAgent: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != ch.ID {
+		t.Fatalf("rows = %+v, want project channel", rows)
+	}
+}
+
 func TestNtfyPublishHTTP(t *testing.T) {
 	st := newStore(testDB(t))
 	ch, err := st.EnsureDefaultNtfy(42, "proj-1", "agent-42-test")
@@ -140,6 +158,23 @@ func TestNtfyPublishHTTP(t *testing.T) {
 	meta := ntfyMetaFromMessage(rows[0])
 	if meta.Title != "Test" || len(meta.Tags) != 2 {
 		t.Fatalf("meta = %+v", meta)
+	}
+}
+
+func TestChannelsCreateNtfyWithoutAgent(t *testing.T) {
+	st := newStore(testDB(t))
+	app := &App{store: st, hub: newHub()}
+	req := httptest.NewRequest(http.MethodPost, "/channels?project_id=proj-1", strings.NewReader(`{"type":"ntfy","name":"Marco Phone","topic":"marco-phone"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	app.handleChannels(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"agent_id":0`) || !strings.Contains(rec.Body.String(), `"id":"ntfy:marco-phone"`) {
+		t.Fatalf("response = %s", rec.Body.String())
 	}
 }
 

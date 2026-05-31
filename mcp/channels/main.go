@@ -26,7 +26,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: channels
 display_name: Channels
-version: 0.3.1
+version: 0.3.2
 description: |
   Agent-facing channel router with standalone dashboard chat, project channel management, and ntfy-compatible notifications.
   Agents reply through respond(channel="chat", ...); the app stores chat
@@ -251,10 +251,6 @@ func (a *App) handleChannels(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			if _, err := a.store.EnsureDefaultNtfy(agentID, projectID, ""); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
 		}
 		chats, err := a.store.ListChats(agentID, projectID)
 		if err != nil {
@@ -267,6 +263,7 @@ func (a *App) handleChannels(w http.ResponseWriter, r *http.Request) {
 			AgentID    int64  `json:"agent_id"`
 			InstanceID int64  `json:"instance_id"`
 			ProjectID  string `json:"project_id"`
+			Name       string `json:"name"`
 			Type       string `json:"type"`
 			Topic      string `json:"topic"`
 			Regenerate bool   `json:"regenerate"`
@@ -274,10 +271,6 @@ func (a *App) handleChannels(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		if body.AgentID == 0 {
 			body.AgentID = body.InstanceID
-		}
-		if body.AgentID == 0 {
-			http.Error(w, "agent_id required", http.StatusBadRequest)
-			return
 		}
 		if body.Type == "" {
 			body.Type = "ntfy"
@@ -290,19 +283,15 @@ func (a *App) handleChannels(w http.ResponseWriter, r *http.Request) {
 		if projectID == "" {
 			projectID = projectFromRequest(r)
 		}
-		projectID = a.projectForAgent(body.AgentID, projectID)
+		if body.AgentID > 0 {
+			projectID = a.projectForAgent(body.AgentID, projectID)
+		}
 		topic := strings.TrimSpace(body.Topic)
 		if topic != "" && !validTopic(topic) {
 			http.Error(w, "invalid topic", http.StatusBadRequest)
 			return
 		}
-		var ch *Chat
-		var err error
-		if body.Regenerate || topic != "" {
-			ch, err = a.store.SetNtfyTopic(body.AgentID, projectID, topic)
-		} else {
-			ch, err = a.store.EnsureDefaultNtfy(body.AgentID, projectID, "")
-		}
+		ch, err := a.store.UpsertNtfyChannel(body.AgentID, projectID, body.Name, topic)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -612,7 +601,7 @@ func (a *App) publishInboundNtfy(w http.ResponseWriter, topic, message string, m
 		return
 	}
 	a.publish(*m)
-	if globalCtx != nil && globalCtx.PlatformAPI() != nil {
+	if chat.AgentID > 0 && globalCtx != nil && globalCtx.PlatformAPI() != nil {
 		ev := fmt.Sprintf("[ntfy:%s] %s", topic, message)
 		if meta.Title != "" {
 			ev = fmt.Sprintf("[ntfy:%s] %s\n%s", topic, meta.Title, message)
@@ -707,7 +696,11 @@ func (a *App) toolRespond(ctx context.Context, app *sdk.AppCtx, args map[string]
 		if err != nil {
 			return nil, fmt.Errorf("ntfy channel %q not found", channel)
 		}
-		if chat.AgentID != agentID {
+		projectID := a.projectForAgent(agentID, app.CurrentProject())
+		if chat.ProjectID != "" && projectID != "" && chat.ProjectID != projectID {
+			return nil, fmt.Errorf("ntfy channel %q is not available in this project", channel)
+		}
+		if chat.AgentID != 0 && chat.AgentID != agentID {
 			return nil, fmt.Errorf("ntfy channel %q is not available for agent %d", channel, agentID)
 		}
 		m, err := a.store.Append(chat.ID, "agent", text, nil, strArg(args, "thread_id"), "final", ntfyComponents(ntfyMetaFromArgs(args)))
@@ -773,39 +766,43 @@ func (a *App) toolListChannels(ctx context.Context, app *sdk.AppCtx, args map[st
 		return map[string]any{"channels": []any{}}, nil
 	}
 	projectID := a.projectForAgent(agentID, app.CurrentProject())
-	ntfy, err := a.store.EnsureDefaultNtfy(agentID, projectID, "")
+	if _, err := a.store.EnsureDefaultChat(agentID, projectID); err != nil {
+		return nil, err
+	}
+	rows, err := a.store.ListChannelsForAgent(agentID, projectID)
 	if err != nil {
 		return nil, err
 	}
-	chatID := defaultChatID(agentID)
-	active := a.hub.hasSubscribers(chatID)
-	ntfyActive := a.hub.hasSubscribers(ntfy.ID)
 	channels := []map[string]any{
 		{
 			"id":           "chat",
 			"type":         "chat",
 			"label":        "Dashboard chat",
-			"active":       active,
+			"active":       a.hub.hasSubscribers(defaultChatID(agentID)),
 			"capabilities": []string{"text", "status", "components"},
 		},
-		{
-			"id":             "ntfy:" + ntfy.ThreadID,
-			"type":           "ntfy",
-			"label":          ntfy.Title,
-			"active":         ntfyActive,
-			"topic":          ntfy.ThreadID,
-			"subscribe_path": "/ntfy/" + ntfy.ThreadID,
-			"stream_json":    "/ntfy/" + ntfy.ThreadID + "/json",
-			"stream_sse":     "/ntfy/" + ntfy.ThreadID + "/sse",
-			"capabilities":   []string{"text", "title", "priority", "tags", "click"},
-		},
+	}
+	seen := map[string]bool{"chat": true}
+	for _, row := range rows {
+		if row.Channel == "chat" {
+			continue
+		}
+		summary := a.channelSummary(row)
+		id, _ := summary["id"].(string)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		channels = append(channels, summary)
 	}
 	var activeIDs []string
-	if active {
+	if a.hub.hasSubscribers(defaultChatID(agentID)) {
 		activeIDs = append(activeIDs, "chat")
 	}
-	if ntfyActive {
-		activeIDs = append(activeIDs, "ntfy:"+ntfy.ThreadID)
+	for _, row := range rows {
+		if row.Channel == "ntfy" && a.hub.hasSubscribers(row.ID) {
+			activeIDs = append(activeIDs, "ntfy:"+row.ThreadID)
+		}
 	}
 	return map[string]any{
 		"channels":        channels,
@@ -936,14 +933,20 @@ func ntfyTopicFromChannel(channel string) string {
 func randomTopic(agentID int64) string {
 	var b [12]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("agent-%d-%d", agentID, time.Now().UnixNano())
+		if agentID > 0 {
+			return fmt.Sprintf("agent-%d-%d", agentID, time.Now().UnixNano())
+		}
+		return fmt.Sprintf("channel-%d", time.Now().UnixNano())
 	}
 	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
 	out := make([]byte, len(b))
 	for i, v := range b {
 		out[i] = alphabet[int(v)%len(alphabet)]
 	}
-	return fmt.Sprintf("agent-%d-%s", agentID, string(out))
+	if agentID > 0 {
+		return fmt.Sprintf("agent-%d-%s", agentID, string(out))
+	}
+	return "channel-" + string(out)
 }
 
 func validTopic(topic string) bool {

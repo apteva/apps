@@ -162,6 +162,51 @@ func (s *store) SetNtfyTopic(agentID int64, projectID string, topic string) (*Ch
 	return s.GetChat(chatID)
 }
 
+func (s *store) UpsertNtfyChannel(agentID int64, projectID, title, topic string) (*Chat, error) {
+	topic = strings.TrimSpace(topic)
+	if topic == "" {
+		topic = randomTopic(agentID)
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = "ntfy"
+	}
+	chatID := "ntfy-" + topic
+	if existing, err := s.GetNtfyByTopic(topic); err == nil {
+		chatID = existing.ID
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO channels_chats (id, agent_id, project_id, title, channel, thread_id)
+		 VALUES (?, ?, ?, ?, 'ntfy', ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   agent_id = excluded.agent_id,
+		   project_id = excluded.project_id,
+		   title = excluded.title,
+		   thread_id = excluded.thread_id,
+		   updated_at = CURRENT_TIMESTAMP`,
+		chatID, agentID, projectID, title, topic,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("upsert ntfy channel: %w", err)
+	}
+	return s.GetChat(chatID)
+}
+
+func (s *store) ListChannelsForAgent(agentID int64, projectID string) ([]Chat, error) {
+	rows, err := s.db.Query(
+		`SELECT id, agent_id, project_id, title, channel, thread_id, created_at, updated_at
+		 FROM channels_chats
+		 WHERE project_id = ? AND (agent_id = 0 OR agent_id = ?)
+		 ORDER BY channel ASC, updated_at DESC`,
+		projectID, agentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanChats(rows)
+}
+
 func (s *store) ListChats(agentID int64, projectID string) ([]Chat, error) {
 	var (
 		rows *sql.Rows
@@ -184,6 +229,10 @@ func (s *store) ListChats(agentID int64, projectID string) ([]Chat, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanChats(rows)
+}
+
+func scanChats(rows *sql.Rows) ([]Chat, error) {
 	var out []Chat
 	for rows.Next() {
 		var c Chat

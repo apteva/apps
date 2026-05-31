@@ -32,7 +32,9 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
   const [selectedId, setSelectedId] = useState("");
   const [status, setStatus] = useState("Loading");
   const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("ntfy");
   const [agentId, setAgentId] = useState("");
+  const [inbound, setInbound] = useState(false);
   const [topic, setTopic] = useState("");
   const [testTitle, setTestTitle] = useState("Apteva");
   const [testMessage, setTestMessage] = useState("Test notification from Channels");
@@ -65,17 +67,14 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
   );
 
   const createNtfy = useCallback(async (regenerate = false) => {
-    if (!agentId.trim()) {
-      setStatus("Default agent required");
-      return;
-    }
     const res = await fetch(appURL("/channels"), {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        agent_id: Number(agentId),
+        agent_id: inbound && agentId.trim() ? Number(agentId) : 0,
         project_id: projectId,
+        name: name.trim() || "ntfy",
         type: "ntfy",
         topic: regenerate ? "" : topic.trim(),
         regenerate,
@@ -91,7 +90,7 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
     setStatus(regenerate ? "Topic regenerated" : "Channel saved");
     await load();
     setSelectedId(ch.id);
-  }, [agentId, appURL, load, projectId, topic]);
+  }, [agentId, appURL, inbound, load, name, projectId, topic]);
 
   const testNtfy = useCallback(async () => {
     if (!selected || selected.type !== "ntfy" || !selected.topic) {
@@ -168,8 +167,12 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
           <section className="min-h-0 rounded-lg border border-border bg-surface">
             {creating ? (
               <CreateChannel
+                name={name}
+                setName={setName}
                 agentId={agentId}
                 setAgentId={setAgentId}
+                inbound={inbound}
+                setInbound={setInbound}
                 topic={topic}
                 setTopic={setTopic}
                 onCancel={() => setCreating(false)}
@@ -198,16 +201,24 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
 }
 
 function CreateChannel({
+  name,
+  setName,
   agentId,
   setAgentId,
+  inbound,
+  setInbound,
   topic,
   setTopic,
   onCancel,
   onSave,
   onGenerate,
 }: {
+  name: string;
+  setName: (v: string) => void;
   agentId: string;
   setAgentId: (v: string) => void;
+  inbound: boolean;
+  setInbound: (v: boolean) => void;
   topic: string;
   setTopic: (v: string) => void;
   onCancel: () => void;
@@ -222,19 +233,39 @@ function CreateChannel({
       </div>
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="block text-sm">
+          <span className="mb-1 block text-text-dim">Name</span>
+          <input
+            className="h-9 w-full rounded-md border border-border bg-bg px-3 text-sm outline-none focus:border-accent"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Marco Phone"
+          />
+        </label>
+        <label className="block text-sm">
           <span className="mb-1 block text-text-dim">Type</span>
           <select className="h-9 w-full rounded-md border border-border bg-bg px-3 text-sm outline-none">
             <option>ntfy</option>
           </select>
         </label>
+      </div>
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={inbound}
+          onChange={(e) => setInbound(e.target.checked)}
+        />
+        <span>Route inbound messages to an agent</span>
+      </label>
+      <div className="grid gap-3 sm:grid-cols-2">
         <label className="block text-sm">
-          <span className="mb-1 block text-text-dim">Default Agent</span>
+          <span className="mb-1 block text-text-dim">Inbound Agent</span>
           <input
             className="h-9 w-full rounded-md border border-border bg-bg px-3 text-sm outline-none focus:border-accent"
             value={agentId}
             onChange={(e) => setAgentId(e.target.value)}
-            placeholder="Agent id"
+            placeholder={inbound ? "Agent id" : "Optional"}
             inputMode="numeric"
+            disabled={!inbound}
           />
         </label>
       </div>
@@ -248,7 +279,7 @@ function CreateChannel({
         />
       </label>
       <div className="flex flex-wrap gap-2">
-        <button className="h-9 rounded-md bg-accent px-3 text-sm font-medium text-accent-contrast" onClick={onSave}>Save</button>
+        <button className="h-9 rounded-md bg-accent px-3 text-sm font-medium text-accent-contrast" onClick={onSave}>Create</button>
         <button className="h-9 rounded-md border border-border px-3 text-sm" onClick={onGenerate}>Generate Topic</button>
       </div>
     </div>
@@ -285,7 +316,7 @@ function ChannelDetail({
       </div>
 
       <div className="grid gap-3 md:grid-cols-2">
-        <ReadOnly label="Default Agent" value={String(channel.agent_id || "")} />
+        <ReadOnly label="Inbound Agent" value={channel.agent_id ? String(channel.agent_id) : "None"} />
         <ReadOnly label="Project" value={channel.project_id || ""} />
         {channel.type === "ntfy" && <ReadOnly label="Subscribe URL" value={subscribeURL} />}
         {channel.type === "ntfy" && <ReadOnly label="JSON Stream" value={streamURL} />}
