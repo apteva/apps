@@ -139,6 +139,7 @@ interface WorkSummary {
 
 type View = "inbox" | "today" | "upcoming" | "overdue" | "all" | "done";
 type PanelMode = "tasks" | "calendar";
+type CalendarTab = "heatmap" | "month" | "day";
 
 const VIEWS: { key: View; label: string }[] = [
   { key: "inbox",    label: "Inbox" },
@@ -155,6 +156,8 @@ const PRIORITY_TONE: Record<number, string> = {
   3: "text-info",
   4: "text-text-dim",
 };
+
+const SOFT_BORDER = "rgba(148, 163, 184, 0.16)";
 
 export default function TodoPanel({ projectId }: NativePanelProps) {
   const [view, setView] = useState<View>("today");
@@ -173,6 +176,7 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
   const [calendarGroup, setCalendarGroup] = useState<number | "all">("all");
   const [calendarList, setCalendarList] = useState<number | "all">("all");
   const [calendarIncludeDone, setCalendarIncludeDone] = useState(false);
+  const [calendarTab, setCalendarTab] = useState<CalendarTab>("heatmap");
   const [quick, setQuick] = useState("");
   const [statusMsg, setStatusMsg] = useState("");
   const [editing, setEditing] = useState<Todo | null>(null);
@@ -557,11 +561,13 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
               groupFilter={calendarGroup}
               listFilter={calendarList}
               includeDone={calendarIncludeDone}
+              activeTab={calendarTab}
               onMonthChange={(next) => {
                 setCalendarMonth(dateKey(startOfMonth(next)));
                 setCalendarSelectedDay(dateKey(next));
               }}
               onSelectedDayChange={setCalendarSelectedDay}
+              onActiveTabChange={setCalendarTab}
               onGroupFilterChange={(next) => {
                 setCalendarGroup(next);
                 setCalendarList("all");
@@ -669,8 +675,10 @@ function CalendarView({
   groupFilter,
   listFilter,
   includeDone,
+  activeTab,
   onMonthChange,
   onSelectedDayChange,
+  onActiveTabChange,
   onGroupFilterChange,
   onListFilterChange,
   onIncludeDoneChange,
@@ -685,8 +693,10 @@ function CalendarView({
   groupFilter: number | "all";
   listFilter: number | "all";
   includeDone: boolean;
+  activeTab: CalendarTab;
   onMonthChange: (month: Date) => void;
   onSelectedDayChange: (day: string) => void;
+  onActiveTabChange: (tab: CalendarTab) => void;
   onGroupFilterChange: (group: number | "all") => void;
   onListFilterChange: (list: number | "all") => void;
   onIncludeDoneChange: (include: boolean) => void;
@@ -739,11 +749,21 @@ function CalendarView({
   const selectedTodos = buckets.get(selectedDay) || [];
   const selectedListGroups = groupTodosByList(selectedTodos, listByID);
   const monthLabel = month.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  const hotDays = monthDays
+    .map((day) => ({ day, key: dateKey(day), count: buckets.get(dateKey(day))?.length || 0 }))
+    .filter((day) => day.count > 0)
+    .sort((a, b) => b.count - a.count || a.day.getTime() - b.day.getTime())
+    .slice(0, 8);
 
   const changeMonth = (delta: number) => {
     const next = new Date(month);
     next.setMonth(next.getMonth() + delta);
     onMonthChange(next);
+  };
+
+  const pickDay = (key: string) => {
+    onSelectedDayChange(key);
+    onActiveTabChange("day");
   };
 
   return (
@@ -805,42 +825,95 @@ function CalendarView({
         </label>
       </div>
 
-      <div className="rounded border border-border bg-bg-input/30 p-2">
-        <div className="mb-1 flex items-center justify-between gap-3 text-[10px] uppercase text-text-dim">
-          <span>Month load</span>
-          <span>{calendarTodos.length} scheduled</span>
-        </div>
-        <div
-          className="grid gap-1"
-          style={{ gridTemplateColumns: `repeat(${monthDays.length}, minmax(0, 1fr))` }}
-        >
-          {monthDays.map((day) => {
-            const key = dateKey(day);
-            const count = buckets.get(key)?.length || 0;
-            return (
-              <button
-                key={key}
-                type="button"
-                onClick={() => onSelectedDayChange(key)}
-                className={`h-7 rounded-sm border text-[10px] font-medium ${heatClass(count)} ${
-                  selectedDay === key ? "ring-1 ring-accent ring-offset-1 ring-offset-bg" : ""
-                }`}
-                title={`${formatShortDate(day)}: ${count} task${count === 1 ? "" : "s"}`}
-              >
-                {count > 0 ? count : ""}
-              </button>
-            );
-          })}
-        </div>
+      <div className="flex items-center gap-1 border-b border-border">
+        {[
+          { key: "heatmap" as const, label: "Heatmap" },
+          { key: "month" as const, label: "Month" },
+          { key: "day" as const, label: "Day" },
+        ].map((tab) => (
+          <button
+            key={tab.key}
+            type="button"
+            onClick={() => onActiveTabChange(tab.key)}
+            className={`px-3 py-2 text-sm border-b-2 ${
+              activeTab === tab.key
+                ? "border-accent text-text"
+                : "border-transparent text-text-muted hover:text-text"
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
 
-      <div className="overflow-hidden rounded border border-border">
+      {activeTab === "heatmap" && (
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_18rem]">
+          <div className="rounded bg-bg-input/30 p-3" style={{ border: `1px solid ${SOFT_BORDER}` }}>
+            <div className="mb-2 flex items-center justify-between gap-3 text-[10px] uppercase text-text-dim">
+              <span>Month load</span>
+              <span>{calendarTodos.length} scheduled</span>
+            </div>
+            <div
+              className="grid gap-1"
+              style={{ gridTemplateColumns: `repeat(${monthDays.length}, minmax(0, 1fr))` }}
+            >
+              {monthDays.map((day) => {
+                const key = dateKey(day);
+                const count = buckets.get(key)?.length || 0;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => pickDay(key)}
+                    className={`h-10 rounded-sm text-[10px] font-medium ${heatClass(count)} ${
+                      selectedDay === key ? "ring-1 ring-accent" : ""
+                    }`}
+                    title={`${formatShortDate(day)}: ${count} task${count === 1 ? "" : "s"}`}
+                  >
+                    <span className="block text-[9px] text-text-dim">{day.getDate()}</span>
+                    {count > 0 ? count : ""}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div className="rounded bg-bg-input/20 p-3" style={{ border: `1px solid ${SOFT_BORDER}` }}>
+            <div className="mb-2 text-[10px] uppercase text-text-dim">Hot days</div>
+            {hotDays.length === 0 ? (
+              <div className="py-6 text-center text-sm text-text-muted">No scheduled tasks.</div>
+            ) : (
+              <div className="flex flex-col gap-1.5">
+                {hotDays.map((day) => (
+                  <button
+                    key={day.key}
+                    type="button"
+                    onClick={() => pickDay(day.key)}
+                    className="flex items-center justify-between rounded px-2 py-1.5 text-left hover:bg-bg-card"
+                  >
+                    <span className="text-sm text-text">{formatShortDate(day.day)}</span>
+                    <span className={`rounded px-2 py-0.5 text-xs ${heatBadgeClass(day.count)}`}>
+                      {day.count} {heatLabel(day.count)}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {activeTab === "month" && (
+        <div className="overflow-hidden rounded" style={{ border: `1px solid ${SOFT_BORDER}` }}>
         <div
           className="grid bg-bg-input/40"
           style={{ gridTemplateColumns: "repeat(7, minmax(0, 1fr))" }}
         >
           {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((label) => (
-            <div key={label} className="border-r border-b border-border px-2 py-1.5 text-[10px] uppercase text-text-dim last:border-r-0">
+            <div
+              key={label}
+              className="px-2 py-1.5 text-[10px] uppercase text-text-dim"
+              style={{ borderRight: `1px solid ${SOFT_BORDER}`, borderBottom: `1px solid ${SOFT_BORDER}` }}
+            >
               {label}
             </div>
           ))}
@@ -858,10 +931,11 @@ function CalendarView({
               <button
                 key={key}
                 type="button"
-                onClick={() => onSelectedDayChange(key)}
-                className={`min-h-[7.5rem] border-r border-b border-border p-2 text-left align-top hover:bg-bg-card/60 ${
+                onClick={() => pickDay(key)}
+                className={`min-h-[7.5rem] p-2 text-left align-top hover:bg-bg-card/60 ${
                   selectedDay === key ? "bg-bg-card" : ""
                 } ${inMonth ? "" : "bg-bg-input/20 opacity-45"}`}
+                style={{ borderRight: `1px solid ${SOFT_BORDER}`, borderBottom: `1px solid ${SOFT_BORDER}` }}
               >
                 <div className="flex items-start justify-between gap-2">
                   <span className="text-xs font-medium text-text">{day.getDate()}</span>
@@ -898,9 +972,11 @@ function CalendarView({
           })}
         </div>
       </div>
+      )}
 
-      <div className="border border-border rounded bg-bg-card/30">
-        <div className="flex items-center justify-between border-b border-border px-3 py-2">
+      {activeTab === "day" && (
+      <div className="rounded bg-bg-card/30" style={{ border: `1px solid ${SOFT_BORDER}` }}>
+        <div className="flex items-center justify-between px-3 py-2" style={{ borderBottom: `1px solid ${SOFT_BORDER}` }}>
           <div>
             <div className="text-sm font-medium text-text">{formatLongDate(parseDateKey(selectedDay))}</div>
             <div className="text-xs text-text-dim">{selectedTodos.length} task{selectedTodos.length === 1 ? "" : "s"}</div>
@@ -912,9 +988,13 @@ function CalendarView({
         {selectedTodos.length === 0 ? (
           <div className="px-3 py-6 text-center text-sm text-text-muted">No scheduled tasks.</div>
         ) : (
-          <div className="flex flex-col divide-y divide-border/60">
+          <div className="flex flex-col">
             {selectedListGroups.map(({ list, todos: dayTodos }) => (
-              <div key={list?.id ?? "inbox"} className="px-3 py-2">
+              <div
+                key={list?.id ?? "inbox"}
+                className="px-3 py-2"
+                style={{ borderBottom: `1px solid ${SOFT_BORDER}` }}
+              >
                 <div className="mb-1 flex items-center gap-2 text-xs uppercase text-text-dim">
                   <span
                     className="h-2 w-2 rounded-full"
@@ -946,6 +1026,7 @@ function CalendarView({
           </div>
         )}
       </div>
+      )}
     </section>
   );
 }
