@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Channels">
+  <rect width="256" height="256" rx="54" fill="#101820"/>
+  <path d="M72 72h112c17.7 0 32 14.3 32 32v38c0 17.7-14.3 32-32 32h-43l-40 32v-32H72c-17.7 0-32-14.3-32-32v-38c0-17.7 14.3-32 32-32z" fill="#00A7B5"/>
+  <path d="M75 116h106M75 146h72" fill="none" stroke="#FFFFFF" stroke-width="16" stroke-linecap="round"/>
+  <circle cx="180" cy="76" r="28" fill="#F7C948"/>
+  <path d="M171 77l7 7 14-17" fill="none" stroke="#101820" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
