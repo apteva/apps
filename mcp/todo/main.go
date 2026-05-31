@@ -6,12 +6,12 @@
 // MCP tools (quick-add, list, snooze, complete).
 //
 // Organisation:
-//   * project_id (column on every table) is the apteva project scope;
+//   - project_id (column on every table) is the apteva project scope;
 //     it never changes for a given install and is set from
 //     APTEVA_PROJECT_ID at runtime.
-//   * lists are the user-facing buckets ("Home", "Work"…). One todo
+//   - lists are the user-facing buckets ("Home", "Work"…). One todo
 //     belongs to at most one list (list_id, nullable → inbox).
-//   * tags are an orthogonal many-to-many concept for cross-cutting
+//   - tags are an orthogonal many-to-many concept for cross-cutting
 //     context (#errand, #waiting…); use them when categorisation
 //     spans lists.
 //
@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: todo
 display_name: Todo
-version: 0.4.1
+version: 0.4.2
 description: Personal todo list — human-first, agent-helpful.
 author: Apteva
 scopes: [project, global]
@@ -74,6 +74,91 @@ provides:
       label: Todo
       icon: check-square
       entry: /ui/TodoPanel.mjs
+  publishes:
+    - name: todo.created
+      description: A todo was created.
+      payload:
+        id: integer
+        title: string
+        status: string
+        list_id: integer|null
+        due_at: string|null
+        priority: integer
+        tags: array<string>
+    - name: todo.updated
+      description: A todo's fields changed.
+      payload:
+        id: integer
+        title: string
+        status: string
+        list_id: integer|null
+        due_at: string|null
+        priority: integer
+        tags: array<string>
+    - name: todo.completed
+      description: A todo was completed; recurring todos may roll forward and remain open.
+      payload:
+        id: integer
+        title: string
+        status: string
+        due_at: string|null
+    - name: todo.uncompleted
+      description: A completed todo was re-opened.
+      payload:
+        id: integer
+        title: string
+        status: string
+    - name: todo.snoozed
+      description: A todo's due/snooze time was pushed out.
+      payload:
+        id: integer
+        title: string
+        due_at: string|null
+        snoozed_until: string|null
+    - name: todo.deleted
+      description: A todo was deleted.
+      payload:
+        id: integer
+        title: string
+    - name: todo.list.created
+      description: A todo list was created.
+      payload:
+        id: integer
+        name: string
+        color: string
+    - name: todo.list.updated
+      description: A todo list was updated.
+      payload:
+        id: integer
+        name: string
+        archived: boolean
+        group_id: integer|null
+    - name: todo.list.deleted
+      description: A todo list was deleted; member todos moved to inbox.
+      payload:
+        id: integer
+        name: string
+    - name: todo.list_group.created
+      description: A todo list group was created.
+      payload:
+        id: integer
+        name: string
+        color: string
+    - name: todo.list_group.updated
+      description: A todo list group was updated.
+      payload:
+        id: integer
+        name: string
+        archived: boolean
+    - name: todo.list_group.deleted
+      description: A todo list group was deleted; member lists became ungrouped.
+      payload:
+        id: integer
+        name: string
+    - name: todo.tags.changed
+      description: Todo tag usage changed.
+      payload:
+        todo_id: integer
 runtime:
   kind: source
   source:
@@ -299,11 +384,115 @@ type Todo struct {
 
 // ─── DB helpers ──────────────────────────────────────────────────
 
-func projectScope() string {
-	if pid := os.Getenv("APTEVA_PROJECT_ID"); pid != "" {
+func projectScope(ctxs ...*sdk.AppCtx) string {
+	if len(ctxs) > 0 && ctxs[0] != nil {
+		if pid := strings.TrimSpace(ctxs[0].CurrentProject()); pid != "" {
+			return pid
+		}
+	}
+	if pid := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); pid != "" {
 		return pid
 	}
 	return "default"
+}
+
+func emitTodo(ctx *sdk.AppCtx, topic string, t *Todo) {
+	if ctx == nil || t == nil {
+		return
+	}
+	ctx.Emit(topic, map[string]any{
+		"id":            t.ID,
+		"title":         t.Title,
+		"status":        t.Status,
+		"list_id":       nullableInt(t.ListID),
+		"due_at":        nullableString(t.DueAt),
+		"snoozed_until": nullableString(t.SnoozedUntil),
+		"priority":      t.Priority,
+		"tags":          t.Tags,
+		"source":        t.Source,
+		"completed_at":  nullableString(t.CompletedAt),
+	})
+}
+
+func emitTodoID(ctx *sdk.AppCtx, topic string, id int64, title string) {
+	if ctx == nil {
+		return
+	}
+	payload := map[string]any{"id": id}
+	if title != "" {
+		payload["title"] = title
+	}
+	ctx.Emit(topic, payload)
+}
+
+func emitTagsChanged(ctx *sdk.AppCtx, todoID int64) {
+	if ctx == nil {
+		return
+	}
+	ctx.Emit("todo.tags.changed", map[string]any{"todo_id": todoID})
+}
+
+func emitList(ctx *sdk.AppCtx, topic string, l *List) {
+	if ctx == nil || l == nil {
+		return
+	}
+	ctx.Emit(topic, map[string]any{
+		"id":         l.ID,
+		"name":       l.Name,
+		"color":      l.Color,
+		"archived":   l.Archived,
+		"group_id":   nullableInt(l.GroupID),
+		"sort_order": l.SortOrder,
+	})
+}
+
+func emitListID(ctx *sdk.AppCtx, topic string, id int64, name string) {
+	if ctx == nil {
+		return
+	}
+	payload := map[string]any{"id": id}
+	if name != "" {
+		payload["name"] = name
+	}
+	ctx.Emit(topic, payload)
+}
+
+func emitListGroup(ctx *sdk.AppCtx, topic string, g *ListGroup) {
+	if ctx == nil || g == nil {
+		return
+	}
+	ctx.Emit(topic, map[string]any{
+		"id":         g.ID,
+		"name":       g.Name,
+		"color":      g.Color,
+		"archived":   g.Archived,
+		"sort_order": g.SortOrder,
+	})
+}
+
+func emitListGroupID(ctx *sdk.AppCtx, topic string, id int64, name string) {
+	if ctx == nil {
+		return
+	}
+	payload := map[string]any{"id": id}
+	if name != "" {
+		payload["name"] = name
+	}
+	ctx.Emit(topic, payload)
+}
+
+func nullableInt(v *int64) any {
+	if v == nil {
+		return nil
+	}
+	return *v
+}
+
+func nullableString(v string) any {
+	if v == "" {
+		return nil
+	}
+	return v
 }
 
 const listCols = `id, project_id, group_id, name, color, archived, sort_order, created_at`
@@ -570,12 +759,16 @@ func insertTodo(db *sql.DB, pid string, t *Todo) (*Todo, error) {
 
 // listTodos resolves a view shorthand into a SQL query. Snoozed
 // todos hide from today/upcoming/overdue until snoozed_until passes.
+// The all view is intentionally unbounded by default so the panel can
+// act as the general work ledger; callers can still pass limit > 0.
 func listTodos(db *sql.DB, pid, view string, listID *int64, tag string, limit int) ([]Todo, error) {
-	if limit <= 0 {
-		limit = 200
-	}
 	if view == "" {
 		view = "today"
+	}
+	applyLimit := limit > 0
+	if limit <= 0 && view != "all" {
+		limit = 200
+		applyLimit = true
 	}
 
 	now := time.Now().UTC()
@@ -626,9 +819,11 @@ func listTodos(db *sql.DB, pid, view string, listID *int64, tag string, limit in
 	q += ` ORDER BY priority ASC,
 	               CASE WHEN due_at IS NULL OR due_at = '' THEN 1 ELSE 0 END,
 	               due_at ASC,
-	               id DESC
-	         LIMIT ?`
-	args = append(args, limit)
+	               id DESC`
+	if applyLimit {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
 
 	rows, err := db.Query(q, args...)
 	if err != nil {
@@ -794,9 +989,10 @@ func rollRecurring(rrule, currentDue string) string {
 
 func (a *App) handleLists(w http.ResponseWriter, r *http.Request) {
 	ctx := mustCtx(r)
+	pid := projectScope(ctx)
 	switch r.Method {
 	case http.MethodGet:
-		out, err := listLists(ctx.AppDB(), projectScope())
+		out, err := listLists(ctx.AppDB(), pid)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -809,11 +1005,12 @@ func (a *App) handleLists(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "name required", 400)
 			return
 		}
-		l, err := insertList(ctx.AppDB(), projectScope(), body.Name, body.Color)
+		l, err := insertList(ctx.AppDB(), pid, body.Name, body.Color)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
+		emitList(ctx, "todo.list.created", l)
 		writeJSON(w, l)
 	default:
 		http.Error(w, "GET or POST", 405)
@@ -823,7 +1020,7 @@ func (a *App) handleLists(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleListsItem(w http.ResponseWriter, r *http.Request) {
 	ctx := mustCtx(r)
 	id := pathSuffixInt(r.URL.Path, "/lists/")
-	pid := projectScope()
+	pid := projectScope(ctx)
 	switch r.Method {
 	case http.MethodPut:
 		var fields map[string]any
@@ -871,8 +1068,10 @@ func (a *App) handleListsItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		l, _ := getList(ctx.AppDB(), pid, id)
+		emitList(ctx, "todo.list.updated", l)
 		writeJSON(w, l)
 	case http.MethodDelete:
+		prev, _ := getList(ctx.AppDB(), pid, id)
 		// Detach todos first, then drop the row.
 		tx, err := ctx.AppDB().Begin()
 		if err != nil {
@@ -894,7 +1093,15 @@ func (a *App) handleListsItem(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		tx.Commit()
+		if err := tx.Commit(); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		if prev != nil {
+			emitListID(ctx, "todo.list.deleted", prev.ID, prev.Name)
+		} else {
+			emitListID(ctx, "todo.list.deleted", id, "")
+		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		http.Error(w, "PUT or DELETE", 405)
@@ -903,7 +1110,7 @@ func (a *App) handleListsItem(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleTodos(w http.ResponseWriter, r *http.Request) {
 	ctx := mustCtx(r)
-	pid := projectScope()
+	pid := projectScope(ctx)
 	switch r.Method {
 	case http.MethodGet:
 		view := r.URL.Query().Get("view")
@@ -953,6 +1160,10 @@ func (a *App) handleTodos(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), 500)
 			return
 		}
+		emitTodo(ctx, "todo.created", out)
+		if len(out.Tags) > 0 {
+			emitTagsChanged(ctx, out.ID)
+		}
 		writeJSON(w, out)
 	default:
 		http.Error(w, "GET or POST", 405)
@@ -962,7 +1173,7 @@ func (a *App) handleTodos(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleTodosItem(w http.ResponseWriter, r *http.Request) {
 	ctx := mustCtx(r)
 	id := pathSuffixInt(r.URL.Path, "/todos/")
-	pid := projectScope()
+	pid := projectScope(ctx)
 	rest := strings.TrimPrefix(r.URL.Path, fmt.Sprintf("/todos/%d", id))
 	rest = strings.TrimPrefix(rest, "/")
 	switch {
@@ -972,6 +1183,7 @@ func (a *App) handleTodosItem(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), 500)
 			return
 		}
+		emitTodo(ctx, "todo.completed", out)
 		writeJSON(w, out)
 	case rest == "uncomplete" && r.Method == http.MethodPost:
 		if err := updateTodoFields(ctx.AppDB(), pid, id, map[string]any{"status": "open"}); err != nil {
@@ -979,6 +1191,7 @@ func (a *App) handleTodosItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		out, _ := getTodo(ctx.AppDB(), pid, id)
+		emitTodo(ctx, "todo.uncompleted", out)
 		writeJSON(w, out)
 	case rest == "snooze" && r.Method == http.MethodPost:
 		var body struct{ Until, For string }
@@ -995,6 +1208,7 @@ func (a *App) handleTodosItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		out, _ := getTodo(ctx.AppDB(), pid, id)
+		emitTodo(ctx, "todo.snoozed", out)
 		writeJSON(w, out)
 	case rest == "" && r.Method == http.MethodGet:
 		out, err := getTodo(ctx.AppDB(), pid, id)
@@ -1011,13 +1225,26 @@ func (a *App) handleTodosItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		out, _ := getTodo(ctx.AppDB(), pid, id)
+		emitTodo(ctx, "todo.updated", out)
+		if _, ok := fields["tags"]; ok {
+			emitTagsChanged(ctx, id)
+		}
 		writeJSON(w, out)
 	case rest == "" && r.Method == http.MethodDelete:
+		prev, _ := getTodo(ctx.AppDB(), pid, id)
 		if _, err := ctx.AppDB().Exec(
 			`DELETE FROM todos WHERE id = ? AND project_id = ?`, id, pid,
 		); err != nil {
 			http.Error(w, err.Error(), 500)
 			return
+		}
+		if prev != nil {
+			emitTodoID(ctx, "todo.deleted", prev.ID, prev.Title)
+			if len(prev.Tags) > 0 {
+				emitTagsChanged(ctx, prev.ID)
+			}
+		} else {
+			emitTodoID(ctx, "todo.deleted", id, "")
 		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
@@ -1031,15 +1258,22 @@ func (a *App) handleQuickAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := mustCtx(r)
+	pid := projectScope(ctx)
 	var body struct {
 		Text   string `json:"text"`
 		Source string `json:"source"`
 	}
 	json.NewDecoder(r.Body).Decode(&body)
-	out, err := quickAdd(ctx.AppDB(), projectScope(), body.Text, body.Source)
+	out, err := quickAdd(ctx.AppDB(), pid, body.Text, body.Source, func(l *List) {
+		emitList(ctx, "todo.list.created", l)
+	})
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
+	}
+	emitTodo(ctx, "todo.created", out)
+	if len(out.Tags) > 0 {
+		emitTagsChanged(ctx, out.ID)
 	}
 	writeJSON(w, out)
 }
@@ -1050,7 +1284,7 @@ func (a *App) handleTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := mustCtx(r)
-	out, err := listTagsWithCounts(ctx.AppDB(), projectScope())
+	out, err := listTagsWithCounts(ctx.AppDB(), projectScope(ctx))
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -1109,17 +1343,18 @@ func listTagsWithCounts(db *sql.DB, pid string) ([]map[string]any, error) {
 // ─── Quick-add NL parser ─────────────────────────────────────────
 //
 // Recognised tokens (anywhere in the line, removed before storing):
-//   p1 p2 p3 p4         priority (1=highest)
-//   today               today end-of-day (RFC3339 UTC)
-//   tomorrow            +1 day at 09:00
-//   mon..sun            next occurrence of that weekday at 09:00
-//   next week           +7 days at 09:00
-//   #list-name          list (created if missing); first match wins
-//   @tag                tag (lowercased); repeat for multiple
+//
+//	p1 p2 p3 p4         priority (1=highest)
+//	today               today end-of-day (RFC3339 UTC)
+//	tomorrow            +1 day at 09:00
+//	mon..sun            next occurrence of that weekday at 09:00
+//	next week           +7 days at 09:00
+//	#list-name          list (created if missing); first match wins
+//	@tag                tag (lowercased); repeat for multiple
 //
 // The remaining text becomes the title. Trim is aggressive — multiple
 // spaces collapse to one.
-func quickAdd(db *sql.DB, pid, text, source string) (*Todo, error) {
+func quickAdd(db *sql.DB, pid, text, source string, onListCreated func(*List)) (*Todo, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil, errors.New("text required")
@@ -1158,6 +1393,9 @@ func quickAdd(db *sql.DB, pid, text, source string) (*Todo, error) {
 				l, err = insertList(db, pid, name, "")
 				if err != nil {
 					return nil, err
+				}
+				if onListCreated != nil {
+					onListCreated(l)
 				}
 			}
 			id := l.ID
@@ -1305,7 +1543,17 @@ func parseFlexible(s string) (time.Time, error) {
 func (a *App) toolQuickAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	text, _ := args["text"].(string)
 	source, _ := args["source"].(string)
-	return quickAdd(ctx.AppDB(), projectScope(), text, source)
+	out, err := quickAdd(ctx.AppDB(), projectScope(ctx), text, source, func(l *List) {
+		emitList(ctx, "todo.list.created", l)
+	})
+	if err != nil {
+		return nil, err
+	}
+	emitTodo(ctx, "todo.created", out)
+	if len(out.Tags) > 0 {
+		emitTagsChanged(ctx, out.ID)
+	}
+	return out, nil
 }
 
 func (a *App) toolTodosCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1331,7 +1579,15 @@ func (a *App) toolTodosCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 		t.Tags = names
 	}
-	return insertTodo(ctx.AppDB(), projectScope(), t)
+	out, err := insertTodo(ctx.AppDB(), projectScope(ctx), t)
+	if err != nil {
+		return nil, err
+	}
+	emitTodo(ctx, "todo.created", out)
+	if len(out.Tags) > 0 {
+		emitTagsChanged(ctx, out.ID)
+	}
+	return out, nil
 }
 
 func (a *App) toolTodosList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1342,7 +1598,7 @@ func (a *App) toolTodosList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if v := toInt64(args["list_id"]); v != 0 {
 		ref = &v
 	}
-	return listTodos(ctx.AppDB(), projectScope(), view, ref, tag, limit)
+	return listTodos(ctx.AppDB(), projectScope(ctx), view, ref, tag, limit)
 }
 
 func (a *App) toolTodosGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1350,7 +1606,7 @@ func (a *App) toolTodosGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	return getTodo(ctx.AppDB(), projectScope(), id)
+	return getTodo(ctx.AppDB(), projectScope(ctx), id)
 }
 
 func (a *App) toolTodosUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1358,10 +1614,19 @@ func (a *App) toolTodosUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	if err := updateTodoFields(ctx.AppDB(), projectScope(), id, args); err != nil {
+	pid := projectScope(ctx)
+	if err := updateTodoFields(ctx.AppDB(), pid, id, args); err != nil {
 		return nil, err
 	}
-	return getTodo(ctx.AppDB(), projectScope(), id)
+	out, err := getTodo(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	emitTodo(ctx, "todo.updated", out)
+	if _, ok := args["tags"]; ok {
+		emitTagsChanged(ctx, id)
+	}
+	return out, nil
 }
 
 func (a *App) toolTodosComplete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1369,7 +1634,12 @@ func (a *App) toolTodosComplete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	return completeTodo(ctx.AppDB(), projectScope(), id)
+	out, err := completeTodo(ctx.AppDB(), projectScope(ctx), id)
+	if err != nil {
+		return nil, err
+	}
+	emitTodo(ctx, "todo.completed", out)
+	return out, nil
 }
 
 func (a *App) toolTodosUncomplete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1377,10 +1647,16 @@ func (a *App) toolTodosUncomplete(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	if err := updateTodoFields(ctx.AppDB(), projectScope(), id, map[string]any{"status": "open"}); err != nil {
+	pid := projectScope(ctx)
+	if err := updateTodoFields(ctx.AppDB(), pid, id, map[string]any{"status": "open"}); err != nil {
 		return nil, err
 	}
-	return getTodo(ctx.AppDB(), projectScope(), id)
+	out, err := getTodo(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	emitTodo(ctx, "todo.uncompleted", out)
+	return out, nil
 }
 
 func (a *App) toolTodosSnooze(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1392,12 +1668,18 @@ func (a *App) toolTodosSnooze(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	if err := updateTodoFields(ctx.AppDB(), projectScope(), id, map[string]any{
+	pid := projectScope(ctx)
+	if err := updateTodoFields(ctx.AppDB(), pid, id, map[string]any{
 		"snoozed_until": until, "due_at": until,
 	}); err != nil {
 		return nil, err
 	}
-	return getTodo(ctx.AppDB(), projectScope(), id)
+	out, err := getTodo(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	emitTodo(ctx, "todo.snoozed", out)
+	return out, nil
 }
 
 func (a *App) toolTodosDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1405,16 +1687,26 @@ func (a *App) toolTodosDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
+	pid := projectScope(ctx)
+	prev, _ := getTodo(ctx.AppDB(), pid, id)
 	if _, err := ctx.AppDB().Exec(
-		`DELETE FROM todos WHERE id = ? AND project_id = ?`, id, projectScope(),
+		`DELETE FROM todos WHERE id = ? AND project_id = ?`, id, pid,
 	); err != nil {
 		return nil, err
+	}
+	if prev != nil {
+		emitTodoID(ctx, "todo.deleted", prev.ID, prev.Title)
+		if len(prev.Tags) > 0 {
+			emitTagsChanged(ctx, prev.ID)
+		}
+	} else {
+		emitTodoID(ctx, "todo.deleted", id, "")
 	}
 	return map[string]any{"status": "deleted", "id": id}, nil
 }
 
 func (a *App) toolListsList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
-	return listLists(ctx.AppDB(), projectScope())
+	return listLists(ctx.AppDB(), projectScope(ctx))
 }
 
 func (a *App) toolListsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1422,7 +1714,12 @@ func (a *App) toolListsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if name == "" {
 		return nil, errors.New("name required")
 	}
-	return insertList(ctx.AppDB(), projectScope(), name, strArg(args, "color", ""))
+	out, err := insertList(ctx.AppDB(), projectScope(ctx), name, strArg(args, "color", ""))
+	if err != nil {
+		return nil, err
+	}
+	emitList(ctx, "todo.list.created", out)
+	return out, nil
 }
 
 func (a *App) toolListsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1430,7 +1727,7 @@ func (a *App) toolListsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	pid := projectScope()
+	pid := projectScope(ctx)
 	cols, qa := []string{}, []any{}
 	if v, ok := args["name"]; ok {
 		cols = append(cols, "name = ?")
@@ -1468,14 +1765,19 @@ func (a *App) toolListsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			return nil, err
 		}
 	}
-	return getList(ctx.AppDB(), pid, id)
+	out, err := getList(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	emitList(ctx, "todo.list.updated", out)
+	return out, nil
 }
 
 // ─── List Group HTTP + tool handlers ─────────────────────────────
 
 func (a *App) handleListGroups(w http.ResponseWriter, r *http.Request) {
 	ctx := mustCtx(r)
-	pid := projectScope()
+	pid := projectScope(ctx)
 	switch r.Method {
 	case http.MethodGet:
 		out, err := listGroups(ctx.AppDB(), pid)
@@ -1496,6 +1798,7 @@ func (a *App) handleListGroups(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), 500)
 			return
 		}
+		emitListGroup(ctx, "todo.list_group.created", g)
 		writeJSON(w, g)
 	default:
 		http.Error(w, "GET or POST", 405)
@@ -1505,7 +1808,7 @@ func (a *App) handleListGroups(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleListGroupsItem(w http.ResponseWriter, r *http.Request) {
 	ctx := mustCtx(r)
 	id := pathSuffixInt(r.URL.Path, "/list_groups/")
-	pid := projectScope()
+	pid := projectScope(ctx)
 	switch r.Method {
 	case http.MethodPut:
 		var fields map[string]any
@@ -1540,14 +1843,21 @@ func (a *App) handleListGroupsItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		g, _ := getListGroup(ctx.AppDB(), pid, id)
+		emitListGroup(ctx, "todo.list_group.updated", g)
 		writeJSON(w, g)
 	case http.MethodDelete:
+		prev, _ := getListGroup(ctx.AppDB(), pid, id)
 		// ON DELETE SET NULL on lists.group_id handles ungrouping.
 		if _, err := ctx.AppDB().Exec(
 			`DELETE FROM list_groups WHERE id = ? AND project_id = ?`, id, pid,
 		); err != nil {
 			http.Error(w, err.Error(), 500)
 			return
+		}
+		if prev != nil {
+			emitListGroupID(ctx, "todo.list_group.deleted", prev.ID, prev.Name)
+		} else {
+			emitListGroupID(ctx, "todo.list_group.deleted", id, "")
 		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
@@ -1556,7 +1866,7 @@ func (a *App) handleListGroupsItem(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) toolListGroupsList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
-	return listGroups(ctx.AppDB(), projectScope())
+	return listGroups(ctx.AppDB(), projectScope(ctx))
 }
 
 func (a *App) toolListGroupsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1564,7 +1874,12 @@ func (a *App) toolListGroupsCreate(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if name == "" {
 		return nil, errors.New("name required")
 	}
-	return insertListGroup(ctx.AppDB(), projectScope(), name, strArg(args, "color", ""))
+	out, err := insertListGroup(ctx.AppDB(), projectScope(ctx), name, strArg(args, "color", ""))
+	if err != nil {
+		return nil, err
+	}
+	emitListGroup(ctx, "todo.list_group.created", out)
+	return out, nil
 }
 
 func (a *App) toolListGroupsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1572,7 +1887,7 @@ func (a *App) toolListGroupsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	pid := projectScope()
+	pid := projectScope(ctx)
 	cols, qa := []string{}, []any{}
 	if v, ok := args["name"]; ok {
 		cols = append(cols, "name = ?")
@@ -1598,7 +1913,12 @@ func (a *App) toolListGroupsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, e
 			return nil, err
 		}
 	}
-	return getListGroup(ctx.AppDB(), pid, id)
+	out, err := getListGroup(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	emitListGroup(ctx, "todo.list_group.updated", out)
+	return out, nil
 }
 
 func (a *App) toolListGroupsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1606,11 +1926,17 @@ func (a *App) toolListGroupsDelete(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	pid := projectScope()
+	pid := projectScope(ctx)
+	prev, _ := getListGroup(ctx.AppDB(), pid, id)
 	if _, err := ctx.AppDB().Exec(
 		`DELETE FROM list_groups WHERE id = ? AND project_id = ?`, id, pid,
 	); err != nil {
 		return nil, err
+	}
+	if prev != nil {
+		emitListGroupID(ctx, "todo.list_group.deleted", prev.ID, prev.Name)
+	} else {
+		emitListGroupID(ctx, "todo.list_group.deleted", id, "")
 	}
 	return map[string]any{"status": "deleted", "id": id}, nil
 }
@@ -1620,7 +1946,8 @@ func (a *App) toolListsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	pid := projectScope()
+	pid := projectScope(ctx)
+	prev, _ := getList(ctx.AppDB(), pid, id)
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return nil, err
@@ -1638,11 +1965,16 @@ func (a *App) toolListsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	if prev != nil {
+		emitListID(ctx, "todo.list.deleted", prev.ID, prev.Name)
+	} else {
+		emitListID(ctx, "todo.list.deleted", id, "")
+	}
 	return map[string]any{"status": "deleted", "id": id}, nil
 }
 
 func (a *App) toolTagsList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
-	out, err := listTagsWithCounts(ctx.AppDB(), projectScope())
+	out, err := listTagsWithCounts(ctx.AppDB(), projectScope(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -1744,11 +2076,11 @@ func main() {
 
 type wrapApp struct{ app *App }
 
-func (w *wrapApp) Manifest() sdk.Manifest             { return w.app.Manifest() }
-func (w *wrapApp) OnMount(ctx *sdk.AppCtx) error      { globalCtx = ctx; return w.app.OnMount(ctx) }
-func (w *wrapApp) OnUnmount(c *sdk.AppCtx) error      { return w.app.OnUnmount(c) }
-func (w *wrapApp) HTTPRoutes() []sdk.Route            { return w.app.HTTPRoutes() }
-func (w *wrapApp) MCPTools() []sdk.Tool               { return w.app.MCPTools() }
-func (w *wrapApp) Channels() []sdk.ChannelFactory     { return w.app.Channels() }
-func (w *wrapApp) Workers() []sdk.Worker              { return w.app.Workers() }
-func (w *wrapApp) EventHandlers() []sdk.EventHandler  { return w.app.EventHandlers() }
+func (w *wrapApp) Manifest() sdk.Manifest            { return w.app.Manifest() }
+func (w *wrapApp) OnMount(ctx *sdk.AppCtx) error     { globalCtx = ctx; return w.app.OnMount(ctx) }
+func (w *wrapApp) OnUnmount(c *sdk.AppCtx) error     { return w.app.OnUnmount(c) }
+func (w *wrapApp) HTTPRoutes() []sdk.Route           { return w.app.HTTPRoutes() }
+func (w *wrapApp) MCPTools() []sdk.Tool              { return w.app.MCPTools() }
+func (w *wrapApp) Channels() []sdk.ChannelFactory    { return w.app.Channels() }
+func (w *wrapApp) Workers() []sdk.Worker             { return w.app.Workers() }
+func (w *wrapApp) EventHandlers() []sdk.EventHandler { return w.app.EventHandlers() }

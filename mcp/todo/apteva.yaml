@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: todo
 display_name: Todo
-version: 0.4.1
+version: 0.4.2
 description: |
   Personal todo list — human-first counterpart to the agent mission
   board (`tasks`). Inbox / Today / Upcoming views, lists (the
@@ -52,6 +52,91 @@ provides:
       label: Todo
       icon: check-square
       entry: /ui/TodoPanel.mjs
+  publishes:
+    - name: todo.created
+      description: A todo was created.
+      payload:
+        id: integer
+        title: string
+        status: string
+        list_id: integer|null
+        due_at: string|null
+        priority: integer
+        tags: array<string>
+    - name: todo.updated
+      description: A todo's fields changed.
+      payload:
+        id: integer
+        title: string
+        status: string
+        list_id: integer|null
+        due_at: string|null
+        priority: integer
+        tags: array<string>
+    - name: todo.completed
+      description: A todo was completed; recurring todos may roll forward and remain open.
+      payload:
+        id: integer
+        title: string
+        status: string
+        due_at: string|null
+    - name: todo.uncompleted
+      description: A completed todo was re-opened.
+      payload:
+        id: integer
+        title: string
+        status: string
+    - name: todo.snoozed
+      description: A todo's due/snooze time was pushed out.
+      payload:
+        id: integer
+        title: string
+        due_at: string|null
+        snoozed_until: string|null
+    - name: todo.deleted
+      description: A todo was deleted.
+      payload:
+        id: integer
+        title: string
+    - name: todo.list.created
+      description: A todo list was created.
+      payload:
+        id: integer
+        name: string
+        color: string
+    - name: todo.list.updated
+      description: A todo list was updated.
+      payload:
+        id: integer
+        name: string
+        archived: boolean
+        group_id: integer|null
+    - name: todo.list.deleted
+      description: A todo list was deleted; member todos moved to inbox.
+      payload:
+        id: integer
+        name: string
+    - name: todo.list_group.created
+      description: A todo list group was created.
+      payload:
+        id: integer
+        name: string
+        color: string
+    - name: todo.list_group.updated
+      description: A todo list group was updated.
+      payload:
+        id: integer
+        name: string
+        archived: boolean
+    - name: todo.list_group.deleted
+      description: A todo list group was deleted; member lists became ungrouped.
+      payload:
+        id: integer
+        name: string
+    - name: todo.tags.changed
+      description: Todo tag usage changed.
+      payload:
+        todo_id: integer
 
 runtime:
   kind: source

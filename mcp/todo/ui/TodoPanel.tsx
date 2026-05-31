@@ -22,7 +22,7 @@
 // For a structured form (specific time, recurrence, free-form notes)
 // hit the "+" button beside quick-add to open a full create dialog.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const API = "/api/apps/todo";
 
@@ -30,6 +30,69 @@ interface NativePanelProps {
   appName: string;
   installId: number;
   projectId: string;
+}
+
+interface AppEventEnvelope<T = unknown> {
+  seq: number;
+  topic: string;
+  data?: T;
+}
+
+function useAppEvents<T = unknown>(
+  app: string,
+  projectId: string,
+  onEvent: (ev: AppEventEnvelope<T>) => void,
+) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+
+  useEffect(() => {
+    if (!app || !projectId) return;
+    const handler = (ev: AppEventEnvelope<T>) => handlerRef.current(ev);
+    const shared = (window as typeof window & {
+      __aptevaAppEvents?: {
+        subscribe: (
+          app: string,
+          projectId: string,
+          fn: (ev: AppEventEnvelope<T>) => void,
+        ) => () => void;
+      };
+    }).__aptevaAppEvents;
+    if (shared) return shared.subscribe(app, projectId, handler);
+
+    let since = 0;
+    let es: EventSource | null = null;
+    let stopped = false;
+    let retry: number | null = null;
+    const connect = () => {
+      if (stopped) return;
+      const url =
+        `/api/app-events/${encodeURIComponent(app)}` +
+        `?project_id=${encodeURIComponent(projectId)}` +
+        (since > 0 ? `&since=${since}` : "");
+      es = new EventSource(url, { withCredentials: true });
+      es.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data) as AppEventEnvelope<T>;
+          if (ev.seq <= since) return;
+          since = ev.seq;
+          handler(ev);
+        } catch {}
+      };
+      es.onerror = () => {
+        if (es && es.readyState === EventSource.CLOSED) {
+          if (retry) window.clearTimeout(retry);
+          retry = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+    connect();
+    return () => {
+      stopped = true;
+      if (retry) window.clearTimeout(retry);
+      if (es) es.close();
+    };
+  }, [app, projectId]);
 }
 
 interface Todo {
@@ -68,6 +131,12 @@ interface Tag {
   count: number;
 }
 
+interface WorkSummary {
+  overdue: number;
+  today: number;
+  future: number;
+}
+
 type View = "inbox" | "today" | "upcoming" | "overdue" | "all" | "done";
 
 const VIEWS: { key: View; label: string }[] = [
@@ -86,7 +155,7 @@ const PRIORITY_TONE: Record<number, string> = {
   4: "text-text-dim",
 };
 
-export default function TodoPanel({}: NativePanelProps) {
+export default function TodoPanel({ projectId }: NativePanelProps) {
   const [view, setView] = useState<View>("today");
   const [pickedList, setPickedList] = useState<number | null>(null);
   const [pickedTag, setPickedTag] = useState<string | null>(null);
@@ -94,6 +163,7 @@ export default function TodoPanel({}: NativePanelProps) {
   const [lists, setLists] = useState<List[]>([]);
   const [groups, setGroups] = useState<ListGroup[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
+  const [summary, setSummary] = useState<WorkSummary>({ overdue: 0, today: 0, future: 0 });
   const [quick, setQuick] = useState("");
   const [statusMsg, setStatusMsg] = useState("");
   const [editing, setEditing] = useState<Todo | null>(null);
@@ -143,12 +213,41 @@ export default function TodoPanel({}: NativePanelProps) {
     } catch {}
   }, []);
 
+  const loadSummary = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/todos?view=all`, { credentials: "same-origin" });
+      if (!res.ok) return;
+      const data: Todo[] = await res.json();
+      setSummary(summarizeWork(data || []));
+    } catch {}
+  }, []);
+
   useEffect(() => { loadTodos(); }, [loadTodos]);
-  useEffect(() => { loadLists(); loadGroups(); loadTags(); }, [loadLists, loadGroups, loadTags]);
+  useEffect(() => { loadLists(); loadGroups(); loadTags(); loadSummary(); }, [loadLists, loadGroups, loadTags, loadSummary]);
 
   const refreshAll = useCallback(() => {
-    loadTodos(); loadLists(); loadGroups(); loadTags();
-  }, [loadTodos, loadLists, loadGroups, loadTags]);
+    loadTodos(); loadLists(); loadGroups(); loadTags(); loadSummary();
+  }, [loadTodos, loadLists, loadGroups, loadTags, loadSummary]);
+
+  useAppEvents("todo", projectId, (ev) => {
+    switch (ev.topic) {
+      case "todo.created":
+      case "todo.updated":
+      case "todo.completed":
+      case "todo.uncompleted":
+      case "todo.snoozed":
+      case "todo.deleted":
+      case "todo.list.created":
+      case "todo.list.updated":
+      case "todo.list.deleted":
+      case "todo.list_group.created":
+      case "todo.list_group.updated":
+      case "todo.list_group.deleted":
+      case "todo.tags.changed":
+        refreshAll();
+        break;
+    }
+  });
 
   const submitQuick = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -378,7 +477,7 @@ export default function TodoPanel({}: NativePanelProps) {
       </aside>
 
       <main className="flex-1 flex flex-col min-w-0">
-        <header className="flex items-center gap-3 border-b border-border px-4 py-2">
+        <header className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
           <div className="text-text font-medium">{headerLabel}</div>
           {pickedTag && (
             <button
@@ -389,6 +488,11 @@ export default function TodoPanel({}: NativePanelProps) {
               clear ×
             </button>
           )}
+          <SummaryPills
+            summary={summary}
+            activeView={view}
+            onSelect={(next) => { setView(next); setPickedList(null); }}
+          />
           <span className="ml-auto text-text-dim text-xs">{statusMsg}</span>
         </header>
 
@@ -447,6 +551,55 @@ export default function TodoPanel({}: NativePanelProps) {
           }}
         />
       )}
+    </div>
+  );
+}
+
+function summarizeWork(todos: Todo[]): WorkSummary {
+  const now = new Date();
+  const tomorrow = new Date(now);
+  tomorrow.setHours(24, 0, 0, 0);
+  const out: WorkSummary = { overdue: 0, today: 0, future: 0 };
+  for (const t of todos) {
+    if (t.status !== "open" || !t.due_at) continue;
+    const due = new Date(t.due_at);
+    if (Number.isNaN(due.getTime())) continue;
+    if (due < now) out.overdue++;
+    else if (due < tomorrow) out.today++;
+    else out.future++;
+  }
+  return out;
+}
+
+function SummaryPills({
+  summary, activeView, onSelect,
+}: {
+  summary: WorkSummary;
+  activeView: View;
+  onSelect: (view: View) => void;
+}) {
+  const items: { key: View; label: string; value: number; tone: string }[] = [
+    { key: "overdue", label: "Overdue", value: summary.overdue, tone: "text-error border-error/40 bg-error/10" },
+    { key: "today", label: "Today", value: summary.today, tone: "text-warn border-warn/40 bg-warn/10" },
+    { key: "upcoming", label: "Future", value: summary.future, tone: "text-info border-info/40 bg-info/10" },
+  ];
+  return (
+    <div className="flex shrink-0 items-center gap-1.5 min-w-0">
+      {items.map((item) => (
+        <button
+          key={item.key}
+          type="button"
+          onClick={() => onSelect(item.key)}
+          className={`h-6 px-2 rounded border text-xs font-medium whitespace-nowrap ${
+            activeView === item.key
+              ? item.tone
+              : "border-border text-text-muted hover:text-text hover:bg-bg-card"
+          }`}
+          title={`${item.label}: ${item.value}`}
+        >
+          {item.label} {item.value}
+        </button>
+      ))}
     </div>
   );
 }
