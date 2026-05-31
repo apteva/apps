@@ -1,36 +1,9 @@
-// CommunityPanel — the project.page panel for the community app.
-//
-// Layout (3-pane):
-//   ┌─ left ─────┐ ┌─ middle ──────┐ ┌─ right ───────────────┐
-//   │ community  │ │ threads list  │ │ posts in selected     │
-//   │ switcher   │ │ (ordered by   │ │ thread, oldest-first  │
-//   │ ──────     │ │ pinned, then  │ │                       │
-//   │ spaces     │ │ last_post)    │ │ [compose] at bottom   │
-//   │  · home    │ │               │ │                       │
-//   │  · intros  │ │               │ │                       │
-//   │ ──────     │ │               │ │                       │
-//   │ dms (later)│ │               │ │                       │
-//   └────────────┘ └───────────────┘ └───────────────────────┘
-//
-// Live updates: every mutation in the sidecar emits a typed event on
-// the platform bus; this panel subscribes via useAppEvents and refetches
-// the slice that changed. No polling.
-//
-// 0.1 surface: list communities → pick one → list spaces → list threads
-// → list posts → react / reply. DMs panel lands in 0.1.1 (the data + bus
-// events are already there, just needs a second sidebar tab).
-//
-// Theme: Tailwind tokens via className only (bg-bg, text-text-muted,
-// border-border, etc). No inline style colors, no arbitrary Tailwind.
+// CommunityPanel — project.page operator surface for the community app.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { FormEvent, ReactNode } from "react";
 
 const API = "/api/apps/community";
-
-// ─── Inline app-events SSE hook ─────────────────────────────────────
-// Lifted from the standard cross-app pattern. Multiplexed through
-// window.__aptevaAppEvents when the dashboard hosts the panel; falls
-// back to opening its own EventSource when the panel runs standalone.
 
 interface AppEventEnvelope<T = unknown> {
   topic: string;
@@ -41,6 +14,7 @@ interface AppEventEnvelope<T = unknown> {
   time: string;
   data: T;
 }
+
 function useAppEvents<T = unknown>(
   app: string,
   projectId: string | undefined | null,
@@ -60,9 +34,8 @@ function useAppEvents<T = unknown>(
         ): () => void;
       };
     }).__aptevaAppEvents;
-    if (bridge) {
-      return bridge.subscribe(app, projectId, handler);
-    }
+    if (bridge) return bridge.subscribe(app, projectId, handler);
+
     let lastSeq = 0;
     let es: EventSource | null = null;
     let cancelled = false;
@@ -98,8 +71,6 @@ function useAppEvents<T = unknown>(
   }, [app, projectId]);
 }
 
-// ─── Types ──────────────────────────────────────────────────────────
-
 interface NativePanelProps {
   appName: string;
   installId: number;
@@ -113,6 +84,15 @@ interface Community {
   description: string;
   created_at: string;
   archived_at?: string;
+}
+
+interface Member {
+  id: string;
+  community_id: string;
+  handle: string;
+  display_name: string;
+  bio: string;
+  status: string;
 }
 
 interface Space {
@@ -182,12 +162,61 @@ interface Post {
   reactions?: ReactionSummary[];
 }
 
-// ─── helpers ────────────────────────────────────────────────────────
+type DialogKind =
+  | "community"
+  | "member"
+  | "space"
+  | "course"
+  | "thread"
+  | "section"
+  | "lesson"
+  | "edit_lesson"
+  | "video";
 
 async function getJSON<T>(path: string): Promise<T> {
-  const res = await fetch(`${API}${path}`, { credentials: "include" });
-  if (!res.ok) throw new Error(`${path}: ${res.status}`);
+  const res = await fetch(`${API}${path}`, {
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`${path}: ${res.status}: ${await res.text()}`);
   return res.json() as Promise<T>;
+}
+
+function mcpErrorText(v: unknown): string {
+  if (!v || typeof v !== "object") return "";
+  const obj = v as Record<string, unknown>;
+  if (typeof obj.error === "string") return obj.error;
+  const err = obj.error;
+  if (err && typeof err === "object" && typeof (err as Record<string, unknown>).message === "string") {
+    return String((err as Record<string, unknown>).message);
+  }
+  return "";
+}
+
+async function callTool<T>(
+  tool: string,
+  args: Record<string, unknown>,
+  projectId: string,
+): Promise<T> {
+  const res = await fetch(`${API}/mcp`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: tool, arguments: { ...args, _project_id: projectId } },
+    }),
+  });
+  if (!res.ok) throw new Error(`${tool}: ${res.status}: ${await res.text()}`);
+  const j = await res.json();
+  if (j.error) throw new Error(j.error.message || tool);
+  const text = j.result?.content?.[0]?.text;
+  const parsed = text ? JSON.parse(text) : j.result;
+  const err = mcpErrorText(parsed);
+  if (err) throw new Error(err);
+  return parsed as T;
 }
 
 function formatDuration(seconds: number): string {
@@ -199,104 +228,142 @@ function formatDuration(seconds: number): string {
   return `${s}s`;
 }
 
-// ─── Panel ──────────────────────────────────────────────────────────
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 63);
+}
+
+function buttonClass(tone: "primary" | "secondary" | "ghost" = "secondary") {
+  if (tone === "primary") return "px-2.5 py-1.5 rounded bg-accent text-bg text-sm font-medium disabled:opacity-50";
+  if (tone === "ghost") return "px-2 py-1 rounded text-text-muted hover:bg-bg-secondary text-sm disabled:opacity-50";
+  return "px-2.5 py-1.5 rounded border border-border text-sm text-text hover:bg-bg-secondary disabled:opacity-50";
+}
 
 export default function CommunityPanel({ projectId }: NativePanelProps) {
   const [communities, setCommunities] = useState<Community[]>([]);
   const [communityId, setCommunityId] = useState<string | null>(null);
+  const [members, setMembers] = useState<Member[]>([]);
+  const [memberId, setMemberId] = useState<string>("");
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [spaceId, setSpaceId] = useState<string | null>(null);
   const [threads, setThreads] = useState<Thread[]>([]);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [posts, setPosts] = useState<Post[]>([]);
-  // Course state: parallel to threads/posts but for kind=course spaces.
   const [sections, setSections] = useState<Section[]>([]);
   const [lessons, setLessons] = useState<Lesson[]>([]);
   const [lessonId, setLessonId] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [newLessonSectionId, setNewLessonSectionId] = useState("");
+  const [dialog, setDialog] = useState<DialogKind | null>(null);
+  const [status, setStatus] = useState("Loading");
+  const [postBody, setPostBody] = useState("");
 
-  // Load communities once on mount.
-  useEffect(() => {
-    getJSON<{ communities: Community[] }>("/communities")
-      .then((d) => {
-        setCommunities(d.communities);
-        if (d.communities.length > 0 && !communityId) {
-          setCommunityId(d.communities[0].id);
-        }
-      })
-      .catch((e) => setLoadError(String(e)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  const fail = useCallback((prefix: string, err: unknown) => {
+    setStatus(`${prefix}: ${(err as Error).message || String(err)}`);
   }, []);
 
-  // Load spaces whenever the selected community changes.
-  const refreshSpaces = useCallback((cid: string) => {
-    getJSON<{ spaces: Space[] }>(
+  const refreshCommunities = useCallback(async () => {
+    const d = await getJSON<{ communities: Community[] }>("/communities");
+    setCommunities(d.communities || []);
+    setCommunityId((prev) =>
+      prev && d.communities.some((c) => c.id === prev) ? prev : d.communities[0]?.id ?? null,
+    );
+    setStatus(`${d.communities.length} communities`);
+    return d.communities || [];
+  }, []);
+
+  const refreshMembers = useCallback(async (cid: string) => {
+    const d = await getJSON<{ members: Member[] }>(
+      `/members?community_id=${encodeURIComponent(cid)}&status=active`,
+    );
+    setMembers(d.members || []);
+    setMemberId((prev) =>
+      prev && d.members.some((m) => m.id === prev) ? prev : d.members[0]?.id ?? "",
+    );
+    return d.members || [];
+  }, []);
+
+  const refreshSpaces = useCallback(async (cid: string) => {
+    const d = await getJSON<{ spaces: Space[] }>(
       `/spaces?community_id=${encodeURIComponent(cid)}`,
-    )
-      .then((d) => {
-        setSpaces(d.spaces);
-        if (d.spaces.length > 0) {
-          setSpaceId((prev) =>
-            prev && d.spaces.some((s) => s.id === prev) ? prev : d.spaces[0].id,
-          );
-        } else {
-          setSpaceId(null);
-        }
-      })
-      .catch((e) => setLoadError(String(e)));
+    );
+    setSpaces(d.spaces || []);
+    setSpaceId((prev) =>
+      prev && d.spaces.some((s) => s.id === prev) ? prev : d.spaces[0]?.id ?? null,
+    );
+    return d.spaces || [];
   }, []);
-  useEffect(() => {
-    if (!communityId) return;
-    refreshSpaces(communityId);
-  }, [communityId, refreshSpaces]);
 
+  const refreshThreads = useCallback(async (sid: string) => {
+    const d = await getJSON<{ threads: Thread[] }>(
+      `/threads?space_id=${encodeURIComponent(sid)}`,
+    );
+    setThreads(d.threads || []);
+    setThreadId((prev) =>
+      prev && d.threads.some((t) => t.id === prev) ? prev : d.threads[0]?.id ?? null,
+    );
+    return d.threads || [];
+  }, []);
+
+  const refreshCourse = useCallback(async (sid: string) => {
+    const [s, l] = await Promise.all([
+      getJSON<{ sections: Section[] }>(`/sections?space_id=${encodeURIComponent(sid)}`),
+      getJSON<{ lessons: Lesson[] }>(
+        `/lessons?space_id=${encodeURIComponent(sid)}&include_drafts=true`,
+      ),
+    ]);
+    setSections(s.sections || []);
+    setLessons(l.lessons || []);
+    setLessonId((prev) =>
+      prev && l.lessons.some((x) => x.id === prev) ? prev : l.lessons[0]?.id ?? null,
+    );
+    return l.lessons || [];
+  }, []);
+
+  const refreshPosts = useCallback(async (tid: string) => {
+    const d = await getJSON<{ posts: Post[] }>(`/posts?thread_id=${encodeURIComponent(tid)}`);
+    setPosts(d.posts || []);
+    return d.posts || [];
+  }, []);
+
+  useEffect(() => {
+    refreshCommunities().catch((e) => fail("Load communities", e));
+  }, [refreshCommunities, fail]);
+
+  useEffect(() => {
+    if (!communityId) {
+      setMembers([]);
+      setSpaces([]);
+      setSpaceId(null);
+      return;
+    }
+    Promise.all([refreshMembers(communityId), refreshSpaces(communityId)]).catch((e) =>
+      fail("Load community", e),
+    );
+  }, [communityId, refreshMembers, refreshSpaces, fail]);
+
+  const activeCommunity = useMemo(
+    () => communities.find((c) => c.id === communityId) ?? null,
+    [communities, communityId],
+  );
   const activeSpace = useMemo(
     () => spaces.find((s) => s.id === spaceId) ?? null,
     [spaces, spaceId],
   );
   const isCourseSpace = activeSpace?.kind === "course";
 
-  // Load threads when the space changes (only when it's not a course).
-  const refreshThreads = useCallback((sid: string) => {
-    getJSON<{ threads: Thread[] }>(
-      `/threads?space_id=${encodeURIComponent(sid)}`,
-    )
-      .then((d) => {
-        setThreads(d.threads);
-        setThreadId((prev) =>
-          prev && d.threads.some((t) => t.id === prev) ? prev : d.threads[0]?.id ?? null,
-        );
-      })
-      .catch((e) => setLoadError(String(e)));
-  }, []);
   useEffect(() => {
     if (!spaceId || isCourseSpace) {
       setThreads([]);
       setThreadId(null);
       return;
     }
-    refreshThreads(spaceId);
-  }, [spaceId, isCourseSpace, refreshThreads]);
+    refreshThreads(spaceId).catch((e) => fail("Load threads", e));
+  }, [spaceId, isCourseSpace, refreshThreads, fail]);
 
-  // Load course content when the selected space is a course.
-  const refreshCourse = useCallback((sid: string) => {
-    Promise.all([
-      getJSON<{ sections: Section[] }>(
-        `/sections?space_id=${encodeURIComponent(sid)}`,
-      ),
-      getJSON<{ lessons: Lesson[] }>(
-        `/lessons?space_id=${encodeURIComponent(sid)}&include_drafts=true`,
-      ),
-    ])
-      .then(([s, l]) => {
-        setSections(s.sections);
-        setLessons(l.lessons);
-        setLessonId((prev) =>
-          prev && l.lessons.some((x) => x.id === prev) ? prev : l.lessons[0]?.id ?? null,
-        );
-      })
-      .catch((e) => setLoadError(String(e)));
-  }, []);
   useEffect(() => {
     if (!spaceId || !isCourseSpace) {
       setSections([]);
@@ -304,89 +371,56 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
       setLessonId(null);
       return;
     }
-    refreshCourse(spaceId);
-  }, [spaceId, isCourseSpace, refreshCourse]);
+    refreshCourse(spaceId).catch((e) => fail("Load course", e));
+  }, [spaceId, isCourseSpace, refreshCourse, fail]);
 
-  // Load posts when the thread changes.
-  const refreshPosts = useCallback((tid: string) => {
-    getJSON<{ posts: Post[] }>(
-      `/posts?thread_id=${encodeURIComponent(tid)}`,
-    )
-      .then((d) => setPosts(d.posts))
-      .catch((e) => setLoadError(String(e)));
-  }, []);
   useEffect(() => {
     if (!threadId) {
       setPosts([]);
       return;
     }
-    refreshPosts(threadId);
-  }, [threadId, refreshPosts]);
+    refreshPosts(threadId).catch((e) => fail("Load posts", e));
+  }, [threadId, refreshPosts, fail]);
 
-  // Live event subscription. Filter on community_id at the payload
-  // level, then route by topic to the slice that needs to refresh.
   useAppEvents<{ community_id?: string; space_id?: string; thread_id?: string }>(
     "community",
     projectId,
     (ev) => {
       const t = ev.topic;
       const d = ev.data ?? {};
-      if (t === "community.community.created") {
-        // New community in this project — refetch the list.
-        getJSON<{ communities: Community[] }>("/communities")
-          .then((res) => setCommunities(res.communities))
-          .catch(() => {});
+      if (t === "community.community.created" || t === "community.community.updated") {
+        refreshCommunities().catch(() => {});
         return;
       }
-      if (!communityId || (d.community_id && d.community_id !== communityId)) {
+      if (!communityId || (d.community_id && d.community_id !== communityId)) return;
+      if (t.startsWith("community.member.")) {
+        refreshMembers(communityId).catch(() => {});
+      }
+      if (t === "community.space.created" || t === "community.space.updated" || t === "community.space.member_added") {
+        refreshSpaces(communityId).catch(() => {});
         return;
       }
-      if (t === "community.space.created" || t === "community.space.member_added") {
-        refreshSpaces(communityId);
+      if (spaceId && t === "community.thread.created") {
+        if (!d.space_id || d.space_id === spaceId) refreshThreads(spaceId).catch(() => {});
         return;
       }
-      if (spaceId && (t === "community.thread.created")) {
-        if (!d.space_id || d.space_id === spaceId) refreshThreads(spaceId);
+      if (threadId && d.thread_id === threadId && t.startsWith("community.post.")) {
+        refreshPosts(threadId).catch(() => {});
         return;
       }
-      if (
-        threadId &&
-        d.thread_id === threadId &&
-        (t === "community.post.created" ||
-          t === "community.post.edited" ||
-          t === "community.post.reacted" ||
-          t === "community.post.removed")
-      ) {
-        refreshPosts(threadId);
-        return;
-      }
-      // A new post anywhere in the current space bumps last_post_at →
-      // refresh the threads list so ordering stays correct.
-      if (t === "community.post.created" && spaceId) {
-        refreshThreads(spaceId);
-      }
-      // Course events: anything that mutates sections or lessons in
-      // the current course refreshes the outline.
+      if (t === "community.post.created" && spaceId) refreshThreads(spaceId).catch(() => {});
       if (
         spaceId &&
         isCourseSpace &&
-        (t === "community.section.created" ||
-          t === "community.sections.reordered" ||
-          t === "community.lesson.created" ||
-          t === "community.lesson.updated" ||
-          t === "community.lesson.published" ||
-          t === "community.lesson.unpublished" ||
-          t === "community.lesson.video_attached")
+        (t.startsWith("community.section.") ||
+          t.startsWith("community.sections.") ||
+          t.startsWith("community.lesson."))
       ) {
-        refreshCourse(spaceId);
+        refreshCourse(spaceId).catch(() => {});
       }
     },
   );
 
-  const activeCommunity = useMemo(
-    () => communities.find((c) => c.id === communityId) ?? null,
-    [communities, communityId],
-  );
   const activeThread = useMemo(
     () => threads.find((t) => t.id === threadId) ?? null,
     [threads, threadId],
@@ -397,56 +431,131 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
   );
   const lessonsBySection = useMemo(() => {
     const m: Record<string, Lesson[]> = {};
-    for (const l of lessons) {
-      (m[l.section_id] ??= []).push(l);
-    }
+    for (const l of lessons) (m[l.section_id] ??= []).push(l);
     for (const arr of Object.values(m)) arr.sort((a, b) => a.position - b.position);
     return m;
   }, [lessons]);
 
+  const runTool = useCallback(
+    async <T,>(label: string, tool: string, args: Record<string, unknown>): Promise<T> => {
+      setStatus(`${label}...`);
+      try {
+        const out = await callTool<T>(tool, args, projectId);
+        setStatus(`${label} saved`);
+        return out;
+      } catch (e) {
+        fail(label, e);
+        throw e;
+      }
+    },
+    [projectId, fail],
+  );
+
+  const sendPost = async () => {
+    if (!threadId || !memberId || !postBody.trim()) return;
+    await runTool("Post", "posts_create", {
+      thread_id: threadId,
+      author_id: memberId,
+      body: postBody.trim(),
+    });
+    setPostBody("");
+    await refreshPosts(threadId);
+    if (spaceId) await refreshThreads(spaceId);
+  };
+
   return (
-    <div className="flex h-full w-full bg-bg text-text">
-      {/* Left rail */}
-      <aside className="w-60 shrink-0 border-r border-border flex flex-col">
-        <div className="p-3 border-b border-border">
-          <label className="text-text-muted text-xs uppercase tracking-wide">
-            Community
-          </label>
+    <div className="relative flex h-full w-full bg-bg text-text">
+      <aside className="w-72 shrink-0 border-r border-border flex flex-col min-h-0">
+        <div className="p-3 border-b border-border space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-text-muted text-xs uppercase tracking-wide">Community</div>
+            <button className={buttonClass("ghost")} onClick={() => setDialog("community")}>
+              + Community
+            </button>
+          </div>
           <select
-            className="w-full mt-1 bg-bg-secondary border border-border rounded px-2 py-1"
+            className="w-full bg-bg-secondary border border-border rounded px-2 py-1.5 text-sm"
             value={communityId ?? ""}
             onChange={(e) => setCommunityId(e.target.value || null)}
           >
-            {communities.length === 0 ? (
-              <option value="">— no communities yet —</option>
-            ) : null}
+            {communities.length === 0 ? <option value="">No communities</option> : null}
             {communities.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name}
               </option>
             ))}
           </select>
+          {activeCommunity?.description ? (
+            <div className="text-xs text-text-muted line-clamp-3">{activeCommunity.description}</div>
+          ) : null}
         </div>
-        <div className="p-3">
-          <div className="text-text-muted text-xs uppercase tracking-wide mb-2">
-            Spaces
+
+        <div className="p-3 border-b border-border space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-text-muted text-xs uppercase tracking-wide">Members</div>
+            <button
+              className={buttonClass("ghost")}
+              disabled={!communityId}
+              onClick={() => setDialog("member")}
+            >
+              + Member
+            </button>
+          </div>
+          <select
+            className="w-full bg-bg-secondary border border-border rounded px-2 py-1.5 text-sm"
+            value={memberId}
+            onChange={(e) => setMemberId(e.target.value)}
+            disabled={members.length === 0}
+          >
+            {members.length === 0 ? <option value="">No members</option> : null}
+            {members.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.display_name || m.handle}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="p-3 flex-1 overflow-auto min-h-0">
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <div className="text-text-muted text-xs uppercase tracking-wide">Spaces</div>
+            <div className="flex gap-1">
+              <button
+                className={buttonClass("ghost")}
+                disabled={!communityId}
+                onClick={() => setDialog("space")}
+              >
+                + Space
+              </button>
+              <button
+                className={buttonClass("ghost")}
+                disabled={!communityId}
+                onClick={() => setDialog("course")}
+              >
+                + Course
+              </button>
+            </div>
           </div>
           {spaces.length === 0 ? (
-            <div className="text-text-muted text-sm">No spaces yet.</div>
+            <EmptyState label={communityId ? "No spaces yet." : "Create or pick a community."} />
           ) : (
-            <ul className="space-y-0.5">
+            <ul className="space-y-1">
               {spaces.map((s) => (
                 <li key={s.id}>
                   <button
                     onClick={() => setSpaceId(s.id)}
                     className={
-                      "w-full text-left px-2 py-1 rounded " +
+                      "w-full text-left px-2.5 py-2 rounded border " +
                       (s.id === spaceId
-                        ? "bg-bg-secondary text-text"
-                        : "text-text-muted hover:bg-bg-secondary")
+                        ? "bg-bg-secondary border-border text-text"
+                        : "border-transparent text-text-muted hover:bg-bg-secondary")
                     }
                   >
-                    <span className="text-text-muted">#</span> {s.name}
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-text-muted">{s.kind === "course" ? "course" : "#"}</span>
+                      <span className="truncate text-sm">{s.name}</span>
+                    </div>
+                    <div className="text-xs text-text-muted">{s.visibility}</div>
                   </button>
                 </li>
               ))}
@@ -455,77 +564,82 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
         </div>
       </aside>
 
-      {/* Middle pane: threads OR course outline */}
-      <section className="w-80 shrink-0 border-r border-border flex flex-col">
-        <header className="p-3 border-b border-border flex items-center justify-between">
-          <div className="font-medium">
-            {activeSpace?.name ?? (isCourseSpace ? "Lessons" : "Threads")}
+      <section className="w-96 shrink-0 border-r border-border flex flex-col min-h-0">
+        <header className="p-3 border-b border-border flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="font-medium truncate">{activeSpace?.name ?? "No space selected"}</div>
+            <div className="text-xs text-text-muted">
+              {activeSpace ? `${activeSpace.kind} · ${activeSpace.visibility}` : "Spaces and courses live here."}
+            </div>
           </div>
+          {isCourseSpace ? (
+            <button className={buttonClass("primary")} onClick={() => setDialog("section")}>
+              + Section
+            </button>
+          ) : (
+            <button
+              className={buttonClass("primary")}
+              disabled={!spaceId || !memberId}
+              onClick={() => setDialog("thread")}
+            >
+              + Thread
+            </button>
+          )}
         </header>
-        <div className="flex-1 overflow-auto">
+        <div className="flex-1 overflow-auto min-h-0">
           {isCourseSpace ? (
             sections.length === 0 ? (
-              <div className="p-4 text-text-muted text-sm">
-                No sections yet.
-              </div>
+              <EmptyState label="No sections yet. Add a section to start the course outline." />
             ) : (
               <ul>
                 {sections.map((s) => (
                   <li key={s.id} className="border-b border-border">
-                    <div className="px-3 py-2 text-xs uppercase tracking-wide text-text-muted">
-                      {s.title}
+                    <div className="px-3 py-2 flex items-center justify-between gap-2">
+                      <div className="text-xs uppercase tracking-wide text-text-muted truncate">{s.title}</div>
+                      <button
+                        className={buttonClass("ghost")}
+                        onClick={() => {
+                          setNewLessonSectionId(s.id);
+                          setDialog("lesson");
+                        }}
+                      >
+                        + Lesson
+                      </button>
                     </div>
-                    <ul>
-                      {(lessonsBySection[s.id] ?? []).map((l) => {
-                        const status = l.progress?.status ?? "not_started";
-                        return (
-                          <li key={l.id}>
-                            <button
-                              onClick={() => setLessonId(l.id)}
+                    <ul className="pb-1">
+                      {(lessonsBySection[s.id] ?? []).length === 0 ? (
+                        <li className="px-3 py-2 text-xs text-text-muted">No lessons in this section.</li>
+                      ) : null}
+                      {(lessonsBySection[s.id] ?? []).map((l) => (
+                        <li key={l.id}>
+                          <button
+                            onClick={() => setLessonId(l.id)}
+                            className={
+                              "w-full text-left px-3 py-2 flex items-center gap-2 " +
+                              (l.id === lessonId ? "bg-bg-secondary" : "hover:bg-bg-secondary")
+                            }
+                          >
+                            <span
                               className={
-                                "w-full text-left px-3 py-2 flex items-center gap-2 " +
-                                (l.id === lessonId
-                                  ? "bg-bg-secondary"
-                                  : "hover:bg-bg-secondary")
+                                "inline-block w-2 h-2 rounded-full shrink-0 " +
+                                (l.published_at ? "bg-success" : "bg-text-dim")
                               }
-                            >
-                              <span
-                                className={
-                                  "inline-block w-2 h-2 rounded-full shrink-0 border " +
-                                  (status === "complete"
-                                    ? "bg-text border-text"
-                                    : status === "in_progress"
-                                    ? "bg-text-muted border-text-muted"
-                                    : "border-border")
-                                }
-                                aria-label={status}
-                              />
-                              <span className="text-sm truncate flex-1">
-                                {l.title}
-                                {!l.published_at ? (
-                                  <span className="text-text-muted">
-                                    {" "}(draft)
-                                  </span>
-                                ) : null}
-                              </span>
-                              {l.video_duration_seconds ? (
-                                <span className="text-xs text-text-muted shrink-0">
-                                  {formatDuration(l.video_duration_seconds)}
-                                </span>
-                              ) : null}
-                            </button>
-                          </li>
-                        );
-                      })}
+                            />
+                            <span className="text-sm truncate flex-1">{l.title}</span>
+                            {!l.published_at ? <span className="text-xs text-text-muted">draft</span> : null}
+                            {l.video_duration_seconds ? (
+                              <span className="text-xs text-text-muted">{formatDuration(l.video_duration_seconds)}</span>
+                            ) : null}
+                          </button>
+                        </li>
+                      ))}
                     </ul>
                   </li>
                 ))}
               </ul>
             )
           ) : threads.length === 0 ? (
-            <div className="p-4 text-text-muted text-sm">
-              {spaceId ? "No threads yet." : "Pick a space."}
-            </div>
+            <EmptyState label={spaceId ? "No threads yet." : "Pick a space."} />
           ) : (
             <ul>
               {threads.map((t) => (
@@ -534,18 +648,15 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
                     onClick={() => setThreadId(t.id)}
                     className={
                       "w-full text-left px-3 py-2 border-b border-border " +
-                      (t.id === threadId
-                        ? "bg-bg-secondary"
-                        : "hover:bg-bg-secondary")
+                      (t.id === threadId ? "bg-bg-secondary" : "hover:bg-bg-secondary")
                     }
                   >
                     <div className="text-sm font-medium truncate">
-                      {t.pinned ? "★ " : ""}
+                      {t.pinned ? "Pinned · " : ""}
                       {t.title || "(untitled thread)"}
                     </div>
                     <div className="text-xs text-text-muted">
-                      {t.post_count} posts ·{" "}
-                      {new Date(t.last_post_at).toLocaleString()}
+                      {t.post_count} posts · {new Date(t.last_post_at).toLocaleString()}
                     </div>
                   </button>
                 </li>
@@ -555,72 +666,70 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
         </div>
       </section>
 
-      {/* Right pane: thread posts OR lesson body */}
-      <main className="flex-1 flex flex-col min-w-0">
-        <header className="p-3 border-b border-border">
-          <div className="font-medium truncate">
-            {isCourseSpace
-              ? activeLesson?.title || "Select a lesson"
-              : activeThread?.title || "Select a thread"}
+      <main className="flex-1 flex flex-col min-w-0 min-h-0">
+        <header className="p-3 border-b border-border flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="font-medium truncate">
+              {isCourseSpace
+                ? activeLesson?.title || "Select a lesson"
+                : activeThread?.title || "Select a thread"}
+            </div>
+            <div className="text-xs text-text-muted truncate">
+              {activeCommunity?.name ?? "No community"} {activeSpace ? `/ ${activeSpace.name}` : ""}
+            </div>
           </div>
-          {activeCommunity ? (
-            <div className="text-text-muted text-xs">
-              {activeCommunity.name}
+          {isCourseSpace && activeLesson ? (
+            <div className="flex gap-2">
+              <button className={buttonClass()} onClick={() => setDialog("video")}>
+                Attach video
+              </button>
+              <button className={buttonClass("primary")} onClick={() => setDialog("edit_lesson")}>
+                Edit lesson
+              </button>
             </div>
           ) : null}
         </header>
-        <div className="flex-1 overflow-auto p-3 space-y-3">
+        <div className="flex-1 overflow-auto p-4 space-y-3 min-h-0">
           {isCourseSpace ? (
             !activeLesson ? (
-              <div className="text-text-muted text-sm">
-                {lessons.length > 0 ? "Pick a lesson." : "No lessons in this course yet."}
-              </div>
+              <EmptyState label={lessons.length > 0 ? "Pick a lesson." : "No lessons in this course yet."} />
             ) : (
               <>
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <span className="px-2 py-1 rounded border border-border text-text-muted">
+                    {activeLesson.published_at ? "Published" : "Draft"}
+                  </span>
+                  {activeLesson.video_storage_key ? (
+                    <span className="px-2 py-1 rounded border border-border text-text-muted">
+                      Video {activeLesson.video_duration_seconds ? formatDuration(activeLesson.video_duration_seconds) : "attached"}
+                    </span>
+                  ) : null}
+                </div>
                 {activeLesson.video_storage_key ? (
                   <div className="border border-border rounded bg-bg-secondary p-3">
-                    <div className="text-xs uppercase tracking-wide text-text-muted mb-2">
-                      Video
-                    </div>
-                    <div className="text-sm text-text-muted">
-                      storage_key: <code>{activeLesson.video_storage_key}</code>
-                      {activeLesson.video_duration_seconds ? (
-                        <> · {formatDuration(activeLesson.video_duration_seconds)}</>
-                      ) : null}
+                    <div className="text-xs uppercase tracking-wide text-text-muted mb-2">Video</div>
+                    <div className="text-sm text-text-muted break-all">
+                      {activeLesson.video_storage_key}
+                      {activeLesson.video_duration_seconds ? ` · ${formatDuration(activeLesson.video_duration_seconds)}` : ""}
                     </div>
                   </div>
                 ) : null}
-                <article className="border border-border rounded p-3 bg-bg-secondary">
-                  <div className="whitespace-pre-wrap text-sm">
-                    {activeLesson.body || "(empty)"}
+                <article className="border border-border rounded p-4 bg-bg-secondary">
+                  <div className="whitespace-pre-wrap text-sm leading-relaxed">
+                    {activeLesson.body || "(empty lesson body)"}
                   </div>
                 </article>
-                {activeLesson.progress ? (
-                  <div className="text-xs text-text-muted">
-                    progress: {activeLesson.progress.status}
-                    {activeLesson.progress.completed_at
-                      ? ` · completed ${new Date(activeLesson.progress.completed_at).toLocaleString()}`
-                      : null}
-                  </div>
-                ) : null}
               </>
             )
           ) : threadId === null ? (
-            <div className="text-text-muted text-sm">
-              {threads.length > 0
-                ? "Pick a thread to read it."
-                : "No threads in this space yet."}
-            </div>
+            <EmptyState label={threads.length > 0 ? "Pick a thread to read it." : "No threads in this space yet."} />
           ) : posts.length === 0 ? (
-            <div className="text-text-muted text-sm">No posts yet.</div>
+            <EmptyState label="No posts yet." />
           ) : (
             posts.map((p) => (
-              <article
-                key={p.id}
-                className="border border-border rounded p-3 bg-bg-secondary"
-              >
+              <article key={p.id} className="border border-border rounded p-3 bg-bg-secondary">
                 <header className="text-xs text-text-muted mb-1">
-                  {p.author_id} · {new Date(p.created_at).toLocaleString()}
+                  {memberLabel(members, p.author_id)} · {new Date(p.created_at).toLocaleString()}
                   {p.edited_at ? " · edited" : ""}
                   {p.removed_at ? " · removed" : ""}
                 </header>
@@ -628,10 +737,7 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
                 {p.reactions && p.reactions.length > 0 ? (
                   <div className="flex gap-1 mt-2">
                     {p.reactions.map((r) => (
-                      <span
-                        key={r.emoji}
-                        className="text-xs px-1.5 py-0.5 rounded border border-border text-text-muted"
-                      >
+                      <span key={r.emoji} className="text-xs px-1.5 py-0.5 rounded border border-border text-text-muted">
                         {r.emoji} {r.count}
                       </span>
                     ))}
@@ -641,12 +747,372 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
             ))
           )}
         </div>
+        {!isCourseSpace && activeThread ? (
+          <div className="border-t border-border p-3 flex items-end gap-2">
+            <textarea
+              value={postBody}
+              onChange={(e) => setPostBody(e.target.value)}
+              placeholder={memberId ? "Write a reply" : "Create a member before posting"}
+              className="flex-1 min-h-[76px] bg-bg-secondary border border-border rounded px-3 py-2 text-sm resize-y"
+              disabled={!memberId}
+            />
+            <button
+              className={buttonClass("primary")}
+              disabled={!memberId || !postBody.trim()}
+              onClick={() => sendPost().catch(() => {})}
+            >
+              Send
+            </button>
+          </div>
+        ) : null}
       </main>
-      {loadError ? (
-        <div className="absolute bottom-2 right-2 text-xs px-2 py-1 rounded border border-border bg-bg text-text-muted">
-          {loadError}
-        </div>
+
+      <div className="absolute bottom-2 right-2 text-xs px-2 py-1 rounded border border-border bg-bg text-text-muted max-w-[520px] truncate">
+        {status}
+      </div>
+
+      {dialog ? (
+        <CommunityDialog
+          kind={dialog}
+          community={activeCommunity}
+          space={activeSpace}
+          sections={sections}
+          lesson={activeLesson}
+          initialSectionId={newLessonSectionId}
+          memberId={memberId}
+          projectId={projectId}
+          onClose={() => setDialog(null)}
+          onCreated={async (target) => {
+            setDialog(null);
+            if (target.communityId) setCommunityId(target.communityId);
+            if (target.memberId) setMemberId(target.memberId);
+            if (target.spaceId) setSpaceId(target.spaceId);
+            if (target.threadId) setThreadId(target.threadId);
+            if (target.lessonId) setLessonId(target.lessonId);
+            if (communityId) {
+              await Promise.all([refreshMembers(communityId), refreshSpaces(communityId)]);
+            } else {
+              await refreshCommunities();
+            }
+            if (target.spaceId || (spaceId && isCourseSpace)) await refreshCourse(target.spaceId || spaceId!);
+            if (spaceId && !isCourseSpace) await refreshThreads(spaceId);
+            if (target.communityId) setCommunityId(target.communityId);
+            if (target.memberId) setMemberId(target.memberId);
+            if (target.spaceId) setSpaceId(target.spaceId);
+            if (target.threadId) setThreadId(target.threadId);
+            if (target.lessonId) setLessonId(target.lessonId);
+          }}
+          runTool={runTool}
+        />
       ) : null}
     </div>
+  );
+}
+
+function memberLabel(members: Member[], id: string): string {
+  const m = members.find((x) => x.id === id);
+  return m ? m.display_name || m.handle : id;
+}
+
+function EmptyState({ label }: { label: string }) {
+  return <div className="p-4 text-text-muted text-sm">{label}</div>;
+}
+
+function DialogShell({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="absolute inset-0 bg-black/40 flex items-center justify-center p-4 z-20">
+      <div className="w-full max-w-xl bg-bg border border-border rounded shadow-xl">
+        <header className="px-4 py-3 border-b border-border flex items-center justify-between">
+          <div className="font-medium">{title}</div>
+          <button className={buttonClass("ghost")} onClick={onClose}>
+            Close
+          </button>
+        </header>
+        <div className="p-4">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <label className="block space-y-1">
+      <span className="text-xs uppercase tracking-wide text-text-muted">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+const inputClass = "w-full bg-bg-secondary border border-border rounded px-3 py-2 text-sm";
+
+function CommunityDialog({
+  kind,
+  community,
+  space,
+  sections,
+  lesson,
+  initialSectionId,
+  memberId,
+  projectId,
+  runTool,
+  onClose,
+  onCreated,
+}: {
+  kind: DialogKind;
+  community: Community | null;
+  space: Space | null;
+  sections: Section[];
+  lesson: Lesson | null;
+  initialSectionId: string;
+  memberId: string;
+  projectId: string;
+  runTool: <T,>(label: string, tool: string, args: Record<string, unknown>) => Promise<T>;
+  onClose: () => void;
+  onCreated: (target: { communityId?: string; memberId?: string; spaceId?: string; threadId?: string; lessonId?: string }) => Promise<void>;
+}) {
+  const [name, setName] = useState(kind === "edit_lesson" ? lesson?.title || "" : "");
+  const [slug, setSlug] = useState("");
+  const [description, setDescription] = useState("");
+  const [visibility, setVisibility] = useState<"members" | "public">("members");
+  const [spaceKind, setSpaceKind] = useState<Space["kind"]>("feed");
+  const [sectionId, setSectionId] = useState(initialSectionId || sections[0]?.id || "");
+  const [body, setBody] = useState(kind === "edit_lesson" ? lesson?.body || "" : "");
+  const [published, setPublished] = useState(Boolean(lesson?.published_at));
+  const [storageKey, setStorageKey] = useState("");
+  const [duration, setDuration] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const title =
+    kind === "community"
+      ? "New community"
+      : kind === "member"
+      ? "New member"
+      : kind === "course"
+      ? "New course"
+      : kind === "space"
+      ? "New space"
+      : kind === "section"
+      ? "New section"
+      : kind === "lesson"
+      ? "New lesson"
+      : kind === "edit_lesson"
+      ? "Edit lesson"
+      : kind === "video"
+      ? "Attach lesson video"
+      : "New thread";
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      if (kind === "community") {
+        const out = await runTool<Community>("Create community", "communities_create", {
+          slug: slug || slugify(name),
+          name,
+          description,
+          _project_id: projectId,
+        });
+        await onCreated({ communityId: out.id });
+      } else if (kind === "member") {
+        const out = await runTool<Member>("Create member", "members_create", {
+          community_id: community?.id,
+          handle: slug || slugify(name).replace(/-/g, "_"),
+          display_name: name,
+          bio: description,
+        });
+        await onCreated({ memberId: out.id });
+      } else if (kind === "space" || kind === "course") {
+        const tool = kind === "course" ? "courses_create" : "spaces_create";
+        const out = await runTool<Space>(kind === "course" ? "Create course" : "Create space", tool, {
+          community_id: community?.id,
+          slug: slug || slugify(name),
+          name,
+          kind: kind === "course" ? undefined : spaceKind,
+          visibility,
+        });
+        await onCreated({ spaceId: out.id });
+      } else if (kind === "section") {
+        await runTool<Section>("Create section", "sections_create", {
+          space_id: space?.id,
+          title: name,
+        });
+        await onCreated({ spaceId: space?.id });
+      } else if (kind === "lesson") {
+        const out = await runTool<Lesson>("Create lesson", "lessons_create", {
+          section_id: sectionId,
+          title: name,
+          body,
+        });
+        if (published) {
+          await runTool<Lesson>("Publish lesson", "lessons_publish", {
+            id: out.id,
+            published: true,
+          });
+        }
+        await onCreated({ spaceId: space?.id, lessonId: out.id });
+      } else if (kind === "edit_lesson" && lesson) {
+        await runTool<Lesson>("Update lesson", "lessons_update", {
+          id: lesson.id,
+          title: name,
+          body,
+        });
+        if (published !== Boolean(lesson.published_at)) {
+          await runTool<Lesson>("Update publish state", "lessons_publish", {
+            id: lesson.id,
+            published,
+          });
+        }
+        await onCreated({ spaceId: space?.id, lessonId: lesson.id });
+      } else if (kind === "video" && lesson) {
+        const args: Record<string, unknown> = { id: lesson.id, storage_key: storageKey };
+        if (duration.trim()) args.duration_seconds = Number(duration);
+        await runTool<Lesson>("Attach video", "lessons_attach_video", args);
+        await onCreated({ spaceId: space?.id, lessonId: lesson.id });
+      } else if (kind === "thread") {
+        const out = await runTool<{ thread: Thread }>("Create thread", "threads_create", {
+          space_id: space?.id,
+          author_id: memberId,
+          title: name,
+          body,
+        });
+        await onCreated({ spaceId: space?.id, threadId: out.thread?.id });
+      }
+    } catch (err) {
+      setError((err as Error).message || String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const needsSlug = kind === "community" || kind === "member" || kind === "space" || kind === "course";
+  const canSubmit =
+    kind === "video"
+      ? Boolean(storageKey.trim())
+      : kind === "lesson"
+      ? Boolean(name.trim() && sectionId)
+      : kind === "edit_lesson"
+      ? Boolean(name.trim())
+      : kind === "thread"
+      ? Boolean(memberId && (name.trim() || body.trim()))
+      : Boolean(name.trim());
+
+  return (
+    <DialogShell title={title} onClose={onClose}>
+      <form onSubmit={submit} className="space-y-4">
+        {kind === "space" ? (
+          <Field label="Type">
+            <select className={inputClass} value={spaceKind} onChange={(e) => setSpaceKind(e.target.value as Space["kind"])}>
+              <option value="feed">Feed</option>
+              <option value="forum">Forum</option>
+              <option value="chat">Chat</option>
+            </select>
+          </Field>
+        ) : null}
+
+        {kind !== "video" ? (
+          <Field label={kind === "member" ? "Display name" : kind === "section" ? "Section title" : kind === "thread" ? "Thread title" : "Name"}>
+            <input
+              className={inputClass}
+              value={name}
+              onChange={(e) => {
+                setName(e.target.value);
+                if (needsSlug && !slug) setSlug(slugify(e.target.value));
+              }}
+              autoFocus
+            />
+          </Field>
+        ) : null}
+
+        {needsSlug ? (
+          <Field label={kind === "member" ? "Handle" : "Slug"}>
+            <input className={inputClass} value={slug} onChange={(e) => setSlug(e.target.value)} />
+          </Field>
+        ) : null}
+
+        {kind === "space" || kind === "course" ? (
+          <Field label="Visibility">
+            <select className={inputClass} value={visibility} onChange={(e) => setVisibility(e.target.value as "members" | "public")}>
+              <option value="members">Members</option>
+              <option value="public">Public</option>
+            </select>
+          </Field>
+        ) : null}
+
+        {kind === "lesson" ? (
+          <Field label="Section">
+            <select className={inputClass} value={sectionId} onChange={(e) => setSectionId(e.target.value)}>
+              {sections.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.title}
+                </option>
+              ))}
+            </select>
+          </Field>
+        ) : null}
+
+        {kind === "community" || kind === "member" ? (
+          <Field label={kind === "community" ? "Description" : "Bio"}>
+            <textarea className={`${inputClass} min-h-[92px]`} value={description} onChange={(e) => setDescription(e.target.value)} />
+          </Field>
+        ) : null}
+
+        {kind === "lesson" || kind === "edit_lesson" || kind === "thread" ? (
+          <Field label={kind === "thread" ? "First post" : "Lesson body"}>
+            <textarea className={`${inputClass} min-h-[180px]`} value={body} onChange={(e) => setBody(e.target.value)} />
+          </Field>
+        ) : null}
+
+        {kind === "lesson" || kind === "edit_lesson" ? (
+          <label className="flex items-center gap-2 text-sm text-text-muted">
+            <input type="checkbox" checked={published} onChange={(e) => setPublished(e.target.checked)} />
+            Published
+          </label>
+        ) : null}
+
+        {kind === "video" ? (
+          <>
+            <Field label="Storage key">
+              <input className={inputClass} value={storageKey} onChange={(e) => setStorageKey(e.target.value)} autoFocus />
+            </Field>
+            <Field label="Duration seconds">
+              <input className={inputClass} type="number" min="0" value={duration} onChange={(e) => setDuration(e.target.value)} />
+            </Field>
+          </>
+        ) : null}
+
+        {kind === "thread" && !memberId ? (
+          <div className="text-sm text-warn">Create or select a member before opening a thread.</div>
+        ) : null}
+        {kind === "lesson" && sections.length === 0 ? (
+          <div className="text-sm text-warn">Create a section before adding lessons.</div>
+        ) : null}
+        {error ? <div className="text-sm text-warn">{error}</div> : null}
+
+        <div className="flex justify-end gap-2">
+          <button type="button" className={buttonClass()} onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className={buttonClass("primary")} disabled={busy || !canSubmit}>
+            {busy ? "Saving..." : "Save"}
+          </button>
+        </div>
+      </form>
+    </DialogShell>
   );
 }
